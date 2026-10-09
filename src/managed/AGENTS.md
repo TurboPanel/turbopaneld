@@ -21,7 +21,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `materialize.ts` | Write `config/` verbatim; optional engine self-signed TLS + `orgTlsMaterial` → `tls/server.*` + `tls/proxysql/`; ownership normalization via throwaway container (scoped to `config/`+`tls/`; backups live outside this tree entirely since v6); a second throwaway run then verifies config/TLS readability AS the engine user with subdir-shaped mounts, failing the apply loudly instead of letting the engine crash-loop on an untraversable dir. Standby replication passwords are **not** written under `auth/`. |
 | `tls.ts` | Engine self-signed cert generation; org-CA materialization for engine leaf + ProxySQL; standby passfile materialization |
 | `networks.ts` | Ensure the organization's managed Docker network by the name the command payload carries (`ensureManagedIngressNetwork(name, run)` — no daemon-side default) **and** attach ProxySQL to consumer `tpn_*` compose-bridge subnets |
-| `firewall.ts` | Best-effort idempotent `iptables` scoping for a **public** private listener: `TP-MANAGED-PUB` off `DOCKER-USER`, per-cluster `TP-MGD-<id>` chain matching the pre-DNAT publish via `conntrack --ctorigdst/--ctorigdstport`, ACCEPT known peers then DROP; no-op without a public IPv4 listener or known peers; never blocks apply/destroy. **Slated to fold into the managed host firewall** (`src/firewall/`, `server.firewall.reconcile` — Road row `fw-fold-existing`): the same scoping becomes a `published` rule the panel derives, rendered by one renderer with IPv6 parity |
+| `firewall.ts` | Best-effort idempotent `iptables` scoping for a **public** private listener: `TP-MANAGED-PUB` off `DOCKER-USER`, per-cluster `TP-MGD-<id>` chain matching the pre-DNAT publish via `conntrack --ctorigdst/--ctorigdstport`, ACCEPT known peers then DROP. Apply **removes** that chain (idempotent if absent) when the listener is cleared or not public — a single-member cluster only publishes while a remote app is bound, so leaving a DROP would block a later cluster that reuses the address/port. Destroy still tears the chain down. No new rules without a public IPv4 listener or known peers; never blocks apply/destroy. **Slated to fold into the managed host firewall** (`src/firewall/`, `server.firewall.reconcile` — Road row `fw-fold-existing`): the same scoping becomes a `published` rule the panel derives, rendered by one renderer with IPv6 parity |
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
@@ -291,21 +291,28 @@ ProxySQL to enforce. Canonical policy:
    resolution (`containers.ts`) still keys off `Service` / `State`, never
    `Name`.
 2. **Native port, never remapped; published only via private listener.**
-   Normalized engine compose never emits arbitrary `ports:`. Multi-member
-   clusters may publish **one** engine port bound exclusively to the member's
-   datacenter, fabric (`tp0` relay), **or public** address at the
-   instance-allocated `private_port` — that private listener is the single
-   cross-host path for both streaming replication and remote ProxySQL
-   backends. Loopback and `0.0.0.0` binds are rejected. Single-member
-   clusters still publish nothing; client traffic enters only via the shared
-   ProxySQL client listeners.
+   Normalized engine compose never emits arbitrary `ports:`. A cluster may
+   publish **one** engine port bound exclusively to the member's datacenter,
+   fabric (`tp0` relay), **or public** address at the instance-allocated
+   `private_port` — that private listener is the single cross-host path for
+   both streaming replication and remote ProxySQL backends (including a
+   single-member engine whose bound app lives on another host). Loopback and
+   `0.0.0.0` binds are rejected. A cluster with no remote peer and no remote
+   consumer still publishes nothing; client traffic enters only via the
+   shared ProxySQL client listeners. The consumer host's reconcile still
+   ships `clusters[].users` for that remote backend — a missing private port
+   fails the whole cluster (no frontend login), which is why apply must
+   allocate the port first.
    A **public** bind (`privateListener.transport === 'public'`) is mandatorily
    **Organization CA** TLS-only: `assertPublicPrivateListenerTls` (exported from
    `compose.ts`, run first in `apply.ts` and again during compose normalization)
    refuses the listener unless `orgTlsMaterial` is present, so `tls/server.crt` +
    `ca.crt` (Organization CA material) always land before the publish exists. `firewall.ts` then scopes that
    publish to the known peer address(es) — still never `0.0.0.0`, and never a
-   broad fallback when no stable peer address is known.
+   broad fallback when no stable peer address is known. When apply later
+   clears the listener (or it is no longer public), the same path removes the
+   per-cluster `TP-MGD-<id>` chain so a leftover DROP cannot block a later
+   cluster that reuses that address/port.
 3. **Always join the organization's managed network.** Every managed engine
    container joins `payload.managedNetwork` whether or not frontend exposure is
    enabled, so ProxySQL can reach it and so multi-member replication paths stay
