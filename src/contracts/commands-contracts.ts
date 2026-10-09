@@ -7474,37 +7474,64 @@ export function parseManagedLifecyclePayload(
   const role = parseManagedLifecycleRole(value.role);
   if (role !== undefined) payload.role = role;
   if (parseManagedLifecycleDemoted(value.demoted)) payload.demoted = true;
-  if (value.captureSwitchoverGtid === true) {
-    payload.captureSwitchoverGtid = true;
-  } else if (value.captureSwitchoverGtid !== undefined) {
-    throw new TypeError("Invalid managed.lifecycle payload");
-  }
-  if (value.reactivateAfterSwitchoverAbort === true) {
-    payload.reactivateAfterSwitchoverAbort = true;
-  } else if (value.reactivateAfterSwitchoverAbort !== undefined) {
-    throw new TypeError("Invalid managed.lifecycle payload");
-  }
-  if (value.switchoverAbortPromoteSafe === true) {
-    payload.switchoverAbortPromoteSafe = true;
-  } else if (value.switchoverAbortPromoteSafe !== undefined) {
-    throw new TypeError("Invalid managed.lifecycle payload");
-  }
-  if (value.switchoverTargetPromoteCompleted === true) {
-    payload.switchoverTargetPromoteCompleted = true;
-  } else if (value.switchoverTargetPromoteCompleted !== undefined) {
-    throw new TypeError("Invalid managed.lifecycle payload");
-  }
-  if (value.switchoverTargetPromoteError !== undefined) {
-    if (
-      typeof value.switchoverTargetPromoteError !== "string" ||
-      value.switchoverTargetPromoteError.length === 0 ||
-      value.switchoverTargetPromoteError.length > 4096
-    ) {
-      throw new TypeError("Invalid managed.lifecycle payload");
-    }
-    payload.switchoverTargetPromoteError = value.switchoverTargetPromoteError;
-  }
+  applyManagedLifecycleSwitchoverPayloadFields(payload, value);
   return payload;
+}
+
+function parseManagedLifecycleStrictOptionalTrue(
+  value: unknown,
+): true | undefined {
+  if (value === undefined) return undefined;
+  if (value === true) return true;
+  throw new TypeError("Invalid managed.lifecycle payload");
+}
+
+function parseManagedLifecycleSwitchoverTargetPromoteError(
+  value: unknown,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 4096
+  ) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
+}
+
+function applyManagedLifecycleSwitchoverPayloadFields(
+  payload: ManagedLifecyclePayload,
+  value: Record<string, unknown>,
+): void {
+  if (parseManagedLifecycleStrictOptionalTrue(value.captureSwitchoverGtid)) {
+    payload.captureSwitchoverGtid = true;
+  }
+  if (
+    parseManagedLifecycleStrictOptionalTrue(
+      value.reactivateAfterSwitchoverAbort,
+    )
+  ) {
+    payload.reactivateAfterSwitchoverAbort = true;
+  }
+  if (
+    parseManagedLifecycleStrictOptionalTrue(value.switchoverAbortPromoteSafe)
+  ) {
+    payload.switchoverAbortPromoteSafe = true;
+  }
+  if (
+    parseManagedLifecycleStrictOptionalTrue(
+      value.switchoverTargetPromoteCompleted,
+    )
+  ) {
+    payload.switchoverTargetPromoteCompleted = true;
+  }
+  const targetError = parseManagedLifecycleSwitchoverTargetPromoteError(
+    value.switchoverTargetPromoteError,
+  );
+  if (targetError !== undefined) {
+    payload.switchoverTargetPromoteError = targetError;
+  }
 }
 
 function parseManagedLifecycleRole(

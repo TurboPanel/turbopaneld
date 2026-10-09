@@ -13,7 +13,10 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { clearManagedDemotedMarker } from "./demoted-marker.ts";
-import { parseSwitchoverPromoteFailureCode } from "./engines/switchover-promote-error.ts";
+import {
+  parseSwitchoverPromoteFailureCode,
+  switchoverCaughtErrorDetail,
+} from "./engines/switchover-promote-error.ts";
 import {
   type LocalEngineContextDeps,
   resolveLocalReplicationEngine,
@@ -26,11 +29,6 @@ type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 export type ManagedPromoteHandlerDeps = LocalEngineContextDeps & {
   decryptSecrets?: DecryptSecretsFn;
 };
-
-function promoteFailureMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
-}
 
 export async function handleManagedPromote(
   payload: ManagedPromotePayload,
@@ -78,7 +76,7 @@ export async function handleManagedPromote(
   } catch (error) {
     if (switchoverPromote) {
       const code = parseSwitchoverPromoteFailureCode(
-        promoteFailureMessage(error),
+        switchoverCaughtErrorDetail(error),
       );
       if (code === "promote_started") {
         await writeSwitchoverPromoteLocalMarker(

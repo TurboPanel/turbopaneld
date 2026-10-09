@@ -16,6 +16,16 @@ export function switchoverPromoteErrorMessage(
   return `${PREFIX}${code}: ${detail}`;
 }
 
+export function switchoverCaughtErrorDetail(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error) ?? "unknown error";
+  } catch {
+    return "unknown error";
+  }
+}
+
 export function parseSwitchoverPromoteFailureCode(
   error: string | undefined,
 ): SwitchoverPromoteFailureCode | null {

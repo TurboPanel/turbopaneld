@@ -15,7 +15,10 @@ import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
-import { switchoverPromoteErrorMessage } from "./switchover-promote-error.ts";
+import {
+  switchoverCaughtErrorDetail,
+  switchoverPromoteErrorMessage,
+} from "./switchover-promote-error.ts";
 import {
   filterGtidSetForSwitchoverWait,
   quiesceAndReadPrimaryGtid,
@@ -666,9 +669,11 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       throw new Error("mariadb promote did not become writable within 60s");
     } catch (error) {
       if (promoteStarted) {
-        const detail = error instanceof Error ? error.message : String(error);
         throw new Error(
-          switchoverPromoteErrorMessage("promote_started", detail),
+          switchoverPromoteErrorMessage(
+            "promote_started",
+            switchoverCaughtErrorDetail(error),
+          ),
         );
       }
       throw error;
