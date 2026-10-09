@@ -363,9 +363,19 @@ export function showReplicaStatusSql(): string {
   return "SHOW SLAVE STATUS;";
 }
 
+/** Seconds between IO-thread reconnect attempts (engine default is 60). */
+export const MARIADB_REPLICA_CONNECT_RETRY_SECONDS = 10;
+
+export function startReplicaSql(): string {
+  return "START SLAVE;";
+}
+
 /**
  * MariaDB 11 GTID: MASTER_USE_GTID=slave_pos with gtid_slave_pos rather than
  * MySQL SOURCE_AUTO_POSITION.
+ *
+ * There is no MASTER_RETRY_COUNT on CHANGE MASTER in MariaDB 11 (syntax
+ * error). The IO thread retries indefinitely at MASTER_CONNECT_RETRY.
  */
 export function changeReplicationSourceSql(spec: {
   host: string;
@@ -382,8 +392,9 @@ export function changeReplicationSourceSql(spec: {
     "  MASTER_USE_GTID = slave_pos,",
     "  MASTER_SSL = 1,",
     "  MASTER_SSL_CA = '/etc/mysql/tls/ca.crt',",
-    "  MASTER_SSL_VERIFY_SERVER_CERT = 1;",
-    "START SLAVE;",
+    "  MASTER_SSL_VERIFY_SERVER_CERT = 1,",
+    `  MASTER_CONNECT_RETRY = ${MARIADB_REPLICA_CONNECT_RETRY_SECONDS};`,
+    startReplicaSql(),
   ].join("\n");
 }
 

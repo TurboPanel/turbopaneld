@@ -627,6 +627,83 @@ test("mariadb readHealth parses standby slave status", async () => {
   assertEquals(health.lagSeconds, 7);
 });
 
+const CONNECTION_LOST_VERTICAL = `
+               Slave_IO_Running: No
+              Slave_SQL_Running: Yes
+                 Master_Host: 203.0.113.10
+                 Master_Port: 3306
+                Last_IO_Errno: 2003
+                Last_IO_Error: Can't connect to server on '203.0.113.10'
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+`;
+
+test("mariadb readHealth restarts slave IO after a connection error when the primary is reachable", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mariadb readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  let statusReads = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv[0] === "mariadb-admin" && argv.includes("--host")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "mysqld is alive",
+        stderr: "",
+      });
+    }
+    if (argv.includes("-E")) {
+      statusReads += 1;
+      return Promise.resolve({
+        success: true,
+        stdout: statusReads === 1 ? CONNECTION_LOST_VERTICAL : HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "streaming");
+  assertEquals(calls.some((c) => c.input === "START SLAVE;"), true);
+});
+
+const APPLIER_ERROR_VERTICAL = `
+               Slave_IO_Running: Yes
+              Slave_SQL_Running: No
+                 Master_Host: 203.0.113.10
+                 Master_Port: 3306
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 1062
+               Last_SQL_Error: Duplicate entry '1' for key 'PRIMARY'
+          Seconds_Behind_Master: NULL
+`;
+
+test("mariadb readHealth does not restart through an SQL applier error", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mariadb readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv.includes("-E")) {
+      return Promise.resolve({
+        success: true,
+        stdout: APPLIER_ERROR_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "reconnecting");
+  assertEquals(calls.some((c) => c.input === "START SLAVE;"), false);
+  assertEquals(calls.some((c) => c.argv[0] === "mariadb-admin"), false);
+});
+
 test("mariadb readHealth returns unknown when status query fails", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.readHealth) {

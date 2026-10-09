@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -76,9 +76,22 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
     username: "tp_repl",
     password: "s3cret",
   });
-  assertEquals(change.includes("CHANGE MASTER TO"), true);
-  assertEquals(change.includes("MASTER_USE_GTID = slave_pos"), true);
-  assertEquals(change.includes("START SLAVE"), true);
+  for (
+    const expected of [
+      "CHANGE MASTER TO",
+      "  MASTER_HOST = '203.0.113.10',",
+      "  MASTER_PORT = 3306,",
+      "  MASTER_USER = 'tp_repl',",
+      "  MASTER_USE_GTID = slave_pos,",
+      "  MASTER_SSL = 1,",
+      "  MASTER_SSL_CA = '/etc/mysql/tls/ca.crt',",
+      "  MASTER_SSL_VERIFY_SERVER_CERT = 1,",
+      "  MASTER_CONNECT_RETRY = 10;",
+      "START SLAVE;",
+    ]
+  ) {
+    assertStringIncludes(change, expected);
+  }
   assertEquals(change.includes("SOURCE_AUTO_POSITION"), false);
   const follow = followReplicationSourceSql({
     host: "10.100.0.4",

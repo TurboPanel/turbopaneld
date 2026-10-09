@@ -44,8 +44,14 @@ import {
   replicaFreshnessSql,
   resetReplicaGtidStateSql,
   showReplicaStatusSql,
+  startReplicaSql,
   versionSql,
 } from "./mysql-sql.ts";
+import {
+  healStoppedReplicaIo,
+  replicaPrimaryLooksReachable,
+  replicaPrimaryPingArgv,
+} from "./replica-io-restart.ts";
 import {
   DOWN_ENGINE_CENSUS,
   type ManagedEngineCensus,
@@ -656,9 +662,29 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       return { state: "primary", observedAt };
     }
     try {
-      const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+      let verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
       if (!verbose.trim()) {
         return { state: "unknown", observedAt };
+      }
+      const restarted = await healStoppedReplicaIo({
+        verbose,
+        startSql: startReplicaSql(),
+        logComponent: "managed-mysql",
+        runSql: (sql) => runMysql(ctx, sql),
+        pingPrimary: async (host, port) =>
+          replicaPrimaryLooksReachable(
+            await ctx.exec(
+              replicaPrimaryPingArgv(
+                "mysqladmin",
+                host,
+                port,
+                ctx.rootUsername,
+              ),
+            ),
+          ),
+      });
+      if (restarted) {
+        verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
       }
       const parsed = parseShowReplicaStatus(verbose);
       // Freshness is best effort: a failed read leaves the fields out

@@ -685,6 +685,83 @@ test("mysql readHealth parses standby replica status", async () => {
   assertEquals(health.lagSeconds, 3);
 });
 
+const CONNECTION_LOST_VERTICAL = `
+             Replica_IO_Running: No
+            Replica_SQL_Running: Yes
+                 Source_Host: 203.0.113.10
+                 Source_Port: 3306
+                Last_IO_Errno: 2003
+                Last_IO_Error: Can't connect to server on '203.0.113.10'
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+`;
+
+const APPLIER_ERROR_VERTICAL = `
+             Replica_IO_Running: Yes
+            Replica_SQL_Running: No
+                 Source_Host: 203.0.113.10
+                 Source_Port: 3306
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 1062
+               Last_SQL_Error: Duplicate entry '1' for key 'PRIMARY'
+          Seconds_Behind_Source: NULL
+`;
+
+test("mysql readHealth restarts replica IO after a connection error when the primary is reachable", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mysql readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  let statusReads = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv[0] === "mysqladmin" && argv.includes("--host")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "mysqld is alive",
+        stderr: "",
+      });
+    }
+    if (argv.includes("-E")) {
+      statusReads += 1;
+      return Promise.resolve({
+        success: true,
+        stdout: statusReads === 1 ? CONNECTION_LOST_VERTICAL : HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "streaming");
+  assertEquals(calls.some((c) => c.input === "START REPLICA;"), true);
+});
+
+test("mysql readHealth does not restart through an SQL applier error", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mysql readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv.includes("-E")) {
+      return Promise.resolve({
+        success: true,
+        stdout: APPLIER_ERROR_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "reconnecting");
+  assertEquals(calls.some((c) => c.input === "START REPLICA;"), false);
+  assertEquals(calls.some((c) => c.argv[0] === "mysqladmin"), false);
+});
+
 test("mysql readHealth returns unknown when replica status is empty", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.readHealth) {
