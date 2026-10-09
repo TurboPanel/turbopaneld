@@ -22,6 +22,7 @@ import { guardHostingCaddySites } from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
 import { DemotedMemberGuard } from "../managed/demoted-guard.ts";
+import { ManagedEngineExitGuard } from "../managed/engine-exit-guard.ts";
 import {
   classifyHostBootRecord,
   type HostBootKind,
@@ -68,6 +69,7 @@ export type SentinelLike = {
 // Global for shutdown cleanup: P1-2 fix boot-hold local retry timer.
 let bootHoldRetry: { stop(): void } | undefined;
 let demotedMemberGuard: { stop(): void } | undefined;
+let engineExitGuard: { stop(): void } | undefined;
 
 export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
@@ -265,12 +267,19 @@ export async function applyManagedBootHoldAtStart(
   // Stored globally for shutdown cleanup (below).
   bootHoldRetry = retry;
   demotedMemberGuard?.stop();
+  engineExitGuard?.stop();
   const demotedGuard = new DemotedMemberGuard({
     layout,
     run: runDocker,
   });
   demotedGuard.start();
   demotedMemberGuard = demotedGuard;
+  const exitGuard = new ManagedEngineExitGuard({
+    layout,
+    run: runDocker,
+  });
+  exitGuard.start();
+  engineExitGuard = exitGuard;
   // Only persist the record after every hold is applied.
   if (holdSucceeded) {
     await persist(layout);
@@ -281,8 +290,10 @@ export async function applyManagedBootHoldAtStart(
 export function stopManagedRuntimeGuardsForTests(): void {
   bootHoldRetry?.stop();
   demotedMemberGuard?.stop();
+  engineExitGuard?.stop();
   bootHoldRetry = undefined;
   demotedMemberGuard = undefined;
+  engineExitGuard = undefined;
 }
 
 async function markCleanShutdown(): Promise<void> {
