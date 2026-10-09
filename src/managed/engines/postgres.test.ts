@@ -411,8 +411,11 @@ test("backup dump/restore argv always target the stable platform admin regardles
   assertEquals(restoreArgv[2].includes("appdb"), false);
   assertStringIncludes(
     restoreArgv[2],
-    "pg_restore --no-owner --clean --if-exists -f -",
+    "pg_restore --no-owner --clean --if-exists -f - | sed -E",
   );
+  assertStringIncludes(restoreArgv[2], "lock_timeout|statement_timeout");
+  assertStringIncludes(restoreArgv[2], "set -o pipefail");
+  assertStringIncludes(restoreArgv[2], "set +e");
   assertStringIncludes(restoreArgv[7], "CREATE SCHEMA %I AUTHORIZATION %I");
 });
 

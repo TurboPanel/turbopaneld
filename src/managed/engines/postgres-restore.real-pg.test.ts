@@ -231,6 +231,11 @@ for (const series of SERIES) {
            DROP TABLE reports.totals;
            CREATE PUBLICATION only_after_backup FOR TABLE public.made_later;`,
         );
+        await sql(
+          "postgres",
+          "ALTER DATABASE appdb SET tp.post_backup_only = 'kept';",
+          "postgres",
+        );
 
         const restoreArgv = backup.restoreArgv(ctx, { database: "appdb" });
         const restored = await docker(
@@ -366,8 +371,8 @@ for (const series of SERIES) {
           await sql("postgres", "SELECT count(*) FROM late_rw.after_restore;"),
           "1",
         );
-        // pg_restore --clean only drops objects named in the dump; a
-        // publication created solely after the backup is not in the archive.
+        // pg_restore --clean --if-exists: drops/recreates only objects in the
+        // archive; post-backup database-global objects absent from the dump stay.
         assertEquals(
           await sql(
             "postgres",
@@ -375,6 +380,30 @@ for (const series of SERIES) {
           ),
           "1",
           "publications not in the dump are left in place by --clean",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT current_setting('tp.post_backup_only', true);",
+          ),
+          "kept",
+          "database settings not in the dump are left in place by --clean",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_event_trigger WHERE evtname = 'tp_restore_et';",
+          ),
+          "1",
+          "event triggers from the backup are restored by replay",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_publication_tables WHERE pubname = 'only_after_backup';",
+          ),
+          "0",
+          "a post-backup publication survives but its table was removed by schema reset",
         );
 
         // A dump that fails halfway rolls everything back: data stays.
@@ -399,6 +428,147 @@ for (const series of SERIES) {
             "SELECT to_regclass('public.owner_can_still_create') IS NOT NULL;",
           ),
           "t",
+        );
+      } finally {
+        await docker(["rm", "-f", name]);
+      }
+    },
+  });
+
+  test({
+    name:
+      `real Postgres ${series}: restore fails within 35s under lock contention and rolls back`,
+    ignore: !dockerUp,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: async () => {
+      const name = `tp-restore-lock-pg${series}-${
+        crypto.randomUUID().slice(0, 8)
+      }`;
+      const started = await docker([
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        name,
+        "-e",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
+        `postgres:${series}`,
+      ]);
+      try {
+        if (!started.success || !(await waitReady(name, 60))) {
+          if (REQUIRE) {
+            throw new Error(
+              `postgres:${series} did not start: ${started.stderr}`,
+            );
+          }
+          console.warn(`skipping real Postgres ${series}: container not ready`);
+          return;
+        }
+        const sql = async (sqlText: string, database = "appdb") => {
+          const run = await docker([
+            "exec",
+            "-i",
+            name,
+            "psql",
+            "-X",
+            "-q",
+            "-t",
+            "-A",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "postgres",
+            "-d",
+            database,
+          ], sqlText);
+          assertEquals(run.success, true, run.stderr);
+          return run.stdout.trim();
+        };
+        const ctx: ManagedEngineContext = {
+          containerId: name,
+          composeServiceName: "postgres",
+          rootUsername: "postgres",
+          defaultDatabase: "postgres",
+          exec: (argv, input) => docker(["exec", "-i", name, ...argv], input),
+        };
+        const backup = postgresManagedEngineRuntime.backup;
+        if (!backup) throw new TypeError("expected postgres backup support");
+
+        await sql(createDatabaseSql("appdb"), "postgres");
+        await sql(
+          `CREATE TABLE public.orders (id serial PRIMARY KEY, note text);
+           INSERT INTO public.orders (note) VALUES ('held');`,
+        );
+        const dump = await docker([
+          "exec",
+          "-u",
+          "postgres",
+          name,
+          ...backup.dumpArgv(ctx, { database: "appdb" }),
+        ]);
+        assertEquals(dump.success, true, dump.stderr);
+        await sql(
+          `INSERT INTO public.orders (note) VALUES ('after-backup');
+           CREATE TABLE public.extra (id int);`,
+        );
+
+        const locker = new Deno.Command("docker", {
+          args: [
+            "exec",
+            "-i",
+            name,
+            "psql",
+            "-X",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "postgres",
+            "-d",
+            "appdb",
+            "-c",
+            "BEGIN; LOCK TABLE public.orders IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(60);",
+          ],
+          stdin: "null",
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn();
+        await delay(500);
+
+        const restoreArgv = backup.restoreArgv(ctx, { database: "appdb" });
+        const startedAt = Date.now();
+        const failed = await docker(
+          ["exec", "-i", "-u", "0", name, ...restoreArgv],
+          dump.bytes,
+        );
+        const elapsedMs = Date.now() - startedAt;
+        try {
+          locker.kill("SIGTERM");
+        } catch {
+          /* already exited */
+        }
+        await locker.status.catch(() => undefined);
+
+        assertEquals(failed.success, false, failed.stderr);
+        const restoreErr = `${failed.stderr}\n${failed.stdout}`;
+        assertStringIncludes(restoreErr, "database is unchanged");
+        assertStringIncludes(restoreErr, "lock timeout");
+        if (elapsedMs >= 35_000) {
+          throw new Error(
+            `restore waited ${elapsedMs}ms; expected lock_timeout near 30s`,
+          );
+        }
+        assertEquals(
+          await sql("SELECT count(*) FROM public.orders;"),
+          "2",
+          "failed restore must leave rows from before the attempt",
+        );
+        assertEquals(
+          await sql(
+            "SELECT to_regclass('public.extra') IS NOT NULL;",
+          ),
+          "t",
+          "failed restore must not drop post-backup objects",
         );
       } finally {
         await docker(["rm", "-f", name]);

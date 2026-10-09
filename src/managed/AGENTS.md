@@ -396,6 +396,16 @@ ProxySQL to enforce. Canonical policy:
      the data untouched. Rows, tables and schemas made after the backup are
      gone. Roles, the database itself and its connect rights are not touched.
      Restored objects are owned by the platform admin (`--no-owner`), as before.
+     **`pg_restore --clean --if-exists` inside the transaction** drops and
+     recreates only objects **named in the archive** (tables, schemas, extensions
+     in dumped schemas, publications, event triggers, large objects, …). Anything
+     database-global created **only after the backup** and absent from the dump
+     is **not** removed by `--clean` (for example a publication or event trigger
+     that did not exist at backup time). Schema reset (`restoreResetSql`) still
+     removes post-backup user schemas and their contents before replay. The
+     replay strips `SET lock_timeout` / `SET statement_timeout` lines from
+     `pg_restore` output so the transaction's `SET LOCAL lock_timeout = '30s'`
+     stays in effect for the whole restore.
      MySQL/MariaDB dumps already drop and recreate the dumped tables.
    - **`.part` cleanup on failure.** Partial artifacts must never look complete.
    - **Prune by retention, one directory at a time.** After create, keep the

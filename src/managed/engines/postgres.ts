@@ -32,6 +32,7 @@ import {
   listManagedSlotsSql,
   type ManagedDatabasePrivilege,
   managedSlotRetentionSql,
+  PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -82,13 +83,16 @@ function assertSafeDatabaseIdentifier(database: string): string {
  */
 const POSTGRES_RESTORE_SCRIPT = [
   "set -eu",
+  "set -o pipefail",
+  "set +e",
   "out=$({",
   String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
-  "  if pg_restore --no-owner --clean --if-exists -f -; then",
+  `  if pg_restore --no-owner --clean --if-exists -f - | sed -E '${PG_RESTORE_TIMEOUT_SET_LINE_SED}d'; then`,
   String
     .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
   "  fi",
   '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
+  "set -e",
   'case "$out" in',
   "  *tp_restore_committed*) ;;",
   "  *) echo 'restore was not committed; the database is unchanged' >&2; exit 1 ;;",

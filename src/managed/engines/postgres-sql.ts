@@ -127,6 +127,25 @@ export function releaseRoleObjectsSql(
  * makes a busy application connection fail the restore cleanly instead of
  * waiting forever on a table lock.
  */
+/**
+ * `pg_restore -f -` replays session `SET lock_timeout` / `SET statement_timeout`
+ * (usually `= 0`) that override an earlier `SET LOCAL lock_timeout` in the same
+ * transaction. Strip only those directives before `psql` sees them.
+ */
+const PG_RESTORE_TIMEOUT_SET_LINE_RE =
+  /^\s*SET\s+(?:lock_timeout|statement_timeout)\s*=/i;
+
+export function stripPgRestoreTimeoutSetLines(sql: string): string {
+  return sql
+    .split("\n")
+    .filter((line) => !PG_RESTORE_TIMEOUT_SET_LINE_RE.test(line))
+    .join("\n");
+}
+
+/** GNU `sed -E` delete pattern; kept in sync with {@link stripPgRestoreTimeoutSetLines}. */
+export const PG_RESTORE_TIMEOUT_SET_LINE_SED =
+  "/^[[:space:]]*SET[[:space:]]+(lock_timeout|statement_timeout)[[:space:]]*=/I";
+
 export function restoreResetSql(): string {
   return [
     "SET LOCAL lock_timeout = '30s';",

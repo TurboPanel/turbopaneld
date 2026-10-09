@@ -35,6 +35,7 @@ import {
   revokeUnlistedDatabasesSql,
   rewritePrimaryConninfo,
   standbyReplicationStatusSql,
+  stripPgRestoreTimeoutSetLines,
   strongestPrivilege,
 } from "./postgres-sql.ts";
 
@@ -469,6 +470,24 @@ test("restoreReadWriteLoginSchemasSql recreates schemas for read-write logins on
   assertStringIncludes(sql, "'TEMPORARY'");
   assertStringIncludes(sql, "'CREATE'");
   assertStringIncludes(sql, "NOT rol.rolsuper");
+});
+
+test("stripPgRestoreTimeoutSetLines removes only lock_timeout and statement_timeout SET lines", () => {
+  const input = [
+    "SET lock_timeout = 0;",
+    "SET statement_timeout = 0;",
+    "SET LOCAL lock_timeout = '30s';",
+    "SET client_encoding = 'UTF8';",
+    "SET standard_conforming_strings = on;",
+    "CREATE TABLE t (id int);",
+    "  SET lock_timeout = 0  ",
+  ].join("\n");
+  const out = stripPgRestoreTimeoutSetLines(input);
+  assertEquals(out.includes("SET LOCAL lock_timeout = '30s';"), true);
+  assertEquals(out.includes("SET lock_timeout = 0"), false);
+  assertEquals(out.includes("statement_timeout = 0"), false);
+  assertEquals(out.includes("client_encoding"), true);
+  assertEquals(out.includes("CREATE TABLE"), true);
 });
 
 test("restoreResetSql drops every user schema and recreates only public with its owner and privileges", () => {
