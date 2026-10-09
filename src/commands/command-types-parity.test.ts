@@ -2178,8 +2178,34 @@ test("managed.lifecycle fixture round-trips and rejects invalid action", () => {
     parseManagedLifecyclePayload({ managedId: "m1", action: "stop" }),
     { managedId: "m1", action: "stop" },
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: true,
+    }),
+    { managedId: "m1", action: "stop", demoted: true },
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: false,
+    }),
+    { managedId: "m1", action: "stop" },
+  );
   assertThrows(
     () => parseManagedLifecyclePayload({ managedId: "m1", action: "pause" }),
+    TypeError,
+    "Invalid managed.lifecycle payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "stop",
+        demoted: "yes",
+      }),
     TypeError,
     "Invalid managed.lifecycle payload",
   );

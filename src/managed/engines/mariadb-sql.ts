@@ -236,6 +236,28 @@ export function ensureSocketAdminSql(osUser: string = "mysql"): string {
 }
 
 /**
+ * Session-only: keep replica-local statements out of the binary log so they
+ * cannot mint a replica-UUID GTID the primary never executed.
+ */
+export function withoutSessionBinlogSql(sql: string): string {
+  return [
+    "SET SESSION sql_log_bin = 0;",
+    sql.trim(),
+    "SET SESSION sql_log_bin = 1;",
+  ].join("\n");
+}
+
+/** Clears entrypoint-init GTID state on a freshly initdb'd standby. */
+export function resetReplicaGtidStateSql(): string {
+  return "RESET MASTER;";
+}
+
+/** Replica-local flush — must not be binary-logged. */
+export function flushPrivilegesLocalSql(): string {
+  return withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+}
+
+/**
  * Standby seed window: the platform my.cnf boots standbys with
  * `read_only=ON`, which blocks the seed IMPORT for non-SUPER users;
  * `configureStandby` disables it for the seed and re-enforces it once

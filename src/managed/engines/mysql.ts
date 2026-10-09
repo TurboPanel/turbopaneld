@@ -31,6 +31,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
   followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
@@ -41,6 +42,7 @@ import {
   quoteIdentifier,
   quoteLiteral,
   replicaFreshnessSql,
+  resetReplicaGtidStateSql,
   showReplicaStatusSql,
   startReplicaSql,
   versionSql,
@@ -449,6 +451,15 @@ export function resolveMysqlPrimaryConnectHost(primary: {
  * removes it on every exit, dump|import fails if either side fails.
  */
 export function buildMysqlStandbySeedScript(withRootPassword = false): string {
+  // The image entrypoint logs init SQL under the standby's own server UUID.
+  // mysqldump `--set-gtid-purged=ON` *adds* the primary set (`GTID_PURGED='+'`)
+  // and leaves those replica GTIDs in `gtid_executed` — they are errant on
+  // failover. `RESET BINARY LOGS AND GTIDS` (MySQL 8.4+; `RESET MASTER` is
+  // gone) empties them before the import. `SET SESSION sql_log_bin=0` keeps
+  // the import itself out of the binlog.
+  const resetGtid = resetReplicaGtidStateSql().replaceAll(";", "");
+  const SQL_LOG_BIN_OFF = String
+    .raw`  { printf 'SET SESSION sql_log_bin=0;\n'; `;
   return [
     "set -e",
     "tmp=$(mktemp)",
@@ -457,18 +468,21 @@ export function buildMysqlStandbySeedScript(withRootPassword = false): string {
     "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
     'chmod 600 "$tmp"',
     ...standbySeedStdinLines(withRootPassword),
+    `mysql $rootopt --protocol=socket -u root -e "${resetGtid}"`,
     // Prefer pipefail when available (bash/busybox ash); fifo path otherwise.
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
-    '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    "--triggers --events --set-gtid-purged=ON --all-databases " +
+    SQL_LOG_BIN_OFF +
+    'mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
+    "--triggers --events --set-gtid-purged=ON --all-databases; } " +
     "| mysql $rootopt --protocol=socket -u root",
     "else",
     '  fifo="$tmp.fifo"',
     '  mkfifo "$fifo"',
     '  trap \'rm -f "$tmp" "$fifo"\' EXIT INT TERM HUP',
-    '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    '--triggers --events --set-gtid-purged=ON --all-databases >"$fifo" &',
+    SQL_LOG_BIN_OFF +
+    'mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
+    '--triggers --events --set-gtid-purged=ON --all-databases; } >"$fifo" &',
     "  dump_pid=$!",
     "  set +e",
     '  mysql $rootopt --protocol=socket -u root <"$fifo"',
@@ -581,7 +595,7 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     // The seed imported the primary's grant tables (mysql.*) — the running
     // server's in-memory grants do not reload on their own, and monitor /
     // client logins from other hosts stay denied until they do.
-    await runMysql(ctx, "FLUSH PRIVILEGES;");
+    await runMysql(ctx, flushPrivilegesLocalSql());
 
     await runMysql(
       ctx,

@@ -13,6 +13,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
   followReplicationSourceSql,
   grantDatabaseSql,
   grantReplicationSql,
@@ -23,8 +24,10 @@ import {
   quoteAccount,
   quoteIdentifier,
   quoteLiteral,
+  resetReplicaGtidStateSql,
   showReplicaStatusSql,
   versionSql,
+  withoutSessionBinlogSql,
 } from "./mariadb-sql.ts";
 import { mariadbManagedEngineRuntime } from "./mariadb.ts";
 
@@ -210,4 +213,18 @@ test("mariadb dialect never references super_read_only (MySQL-only variable)", (
   ) {
     assertEquals(sql.includes("super_read_only"), false);
   }
+});
+
+test("replica-local SQL is wrapped so it cannot mint a replica GTID", () => {
+  const wrapped = withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+  const off = wrapped.indexOf("SET SESSION sql_log_bin = 0;");
+  const flush = wrapped.indexOf("FLUSH PRIVILEGES;");
+  const on = wrapped.lastIndexOf("SET SESSION sql_log_bin = 1;");
+  assertEquals(off !== -1 && flush !== -1 && on !== -1, true);
+  assertEquals(off < flush && flush < on, true);
+  const local = flushPrivilegesLocalSql();
+  assertEquals(local.includes("SET SESSION sql_log_bin = 0;"), true);
+  assertEquals(local.includes("FLUSH PRIVILEGES;"), true);
+  assertEquals(local.includes("SET SESSION sql_log_bin = 1;"), true);
+  assertEquals(resetReplicaGtidStateSql(), "RESET MASTER;");
 });
