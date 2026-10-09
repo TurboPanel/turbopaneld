@@ -60,6 +60,21 @@ type RunDockerFn = (
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 
+async function decryptHaReconcileSecret(
+  ciphertext: string,
+  decryptSecrets: DecryptSecretsFn | undefined,
+  emptyError: string,
+): Promise<string> {
+  if (!decryptSecrets) {
+    throw new Error("managed.ha.reconcile requires decryptSecrets");
+  }
+  const [plain] = await decryptSecrets([ciphertext]);
+  if (typeof plain !== "string" || plain.length === 0) {
+    throw new Error(emptyError);
+  }
+  return plain;
+}
+
 export type ManagedHaReconcileHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
   runDocker?: RunDockerFn;
@@ -98,18 +113,14 @@ async function resolveOrchestratorHttpAuth(
   decryptSecrets?: DecryptSecretsFn,
 ): Promise<OrchestratorApiCredentials> {
   if (payload.orchestratorApiUser) {
-    if (!decryptSecrets) {
-      throw new Error("managed.ha.reconcile requires decryptSecrets");
-    }
-    const [plain] = await decryptSecrets([
+    const password = await decryptHaReconcileSecret(
       payload.orchestratorApiUser.password,
-    ]);
-    if (typeof plain !== "string" || plain.length === 0) {
-      throw new Error("failed to decrypt managed HA orchestrator API password");
-    }
+      decryptSecrets,
+      "failed to decrypt managed HA orchestrator API password",
+    );
     return {
       user: payload.orchestratorApiUser.username,
-      password: plain,
+      password,
     };
   }
   return await loadOrchestratorApiCredentials(layout);
@@ -121,14 +132,11 @@ async function resolveOrchestratorRaftAuthToken(
   decryptSecrets?: DecryptSecretsFn,
 ): Promise<string | null> {
   if (payload.orchestratorRaftToken) {
-    if (!decryptSecrets) {
-      throw new Error("managed.ha.reconcile requires decryptSecrets");
-    }
-    const [plain] = await decryptSecrets([payload.orchestratorRaftToken]);
-    if (typeof plain !== "string" || plain.length === 0) {
-      throw new Error("failed to decrypt managed HA orchestrator raft token");
-    }
-    return plain;
+    return await decryptHaReconcileSecret(
+      payload.orchestratorRaftToken,
+      decryptSecrets,
+      "failed to decrypt managed HA orchestrator raft token",
+    );
   }
   return await loadOrchestratorRaftToken(layout);
 }
@@ -170,16 +178,14 @@ async function resolveOrchestratorTopologyCredentials(
   decryptSecrets?: DecryptSecretsFn,
 ): Promise<{ topologyUser: string; topologyPassword: string }> {
   if (payload.topologyUser) {
-    if (!decryptSecrets) {
-      throw new Error("managed.ha.reconcile requires decryptSecrets");
-    }
-    const [plain] = await decryptSecrets([payload.topologyUser.password]);
-    if (typeof plain !== "string" || plain.length === 0) {
-      throw new Error("failed to decrypt managed HA topology password");
-    }
+    const topologyPassword = await decryptHaReconcileSecret(
+      payload.topologyUser.password,
+      decryptSecrets,
+      "failed to decrypt managed HA topology password",
+    );
     return {
       topologyUser: payload.topologyUser.username,
-      topologyPassword: plain,
+      topologyPassword,
     };
   }
   const cluster = payload.clusters.find((entry) =>
@@ -188,17 +194,31 @@ async function resolveOrchestratorTopologyCredentials(
   if (!cluster) {
     return { topologyUser: "tp_repl", topologyPassword: "" };
   }
+  const topologyPassword = await decryptHaReconcileSecret(
+    cluster.replicationPasswordEnvelope,
+    decryptSecrets,
+    "failed to decrypt managed HA replication password",
+  );
+  return {
+    topologyUser: cluster.replicationUsername,
+    topologyPassword,
+  };
+}
+
+async function materializeOrchestratorOrgTls(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<void> {
+  if (!payload.orgTlsMaterial) return;
   if (!decryptSecrets) {
     throw new Error("managed.ha.reconcile requires decryptSecrets");
   }
-  const [plain] = await decryptSecrets([cluster.replicationPasswordEnvelope]);
-  if (typeof plain !== "string" || plain.length === 0) {
-    throw new Error("failed to decrypt managed HA replication password");
-  }
-  return {
-    topologyUser: cluster.replicationUsername,
-    topologyPassword: plain,
-  };
+  await materializeProxySqlTlsMaterial(
+    orchestratorTlsDir(layout),
+    payload.orgTlsMaterial,
+    decryptSecrets,
+  );
 }
 
 /**
@@ -294,16 +314,7 @@ async function reconcileOrchestratorPresentState(
     await runHostPrep();
   }
 
-  if (payload.orgTlsMaterial) {
-    if (!deps?.decryptSecrets) {
-      throw new Error("managed.ha.reconcile requires decryptSecrets");
-    }
-    await materializeProxySqlTlsMaterial(
-      orchestratorTlsDir(layout),
-      payload.orgTlsMaterial,
-      deps.decryptSecrets,
-    );
-  }
+  await materializeOrchestratorOrgTls(payload, layout, deps?.decryptSecrets);
 
   const mysqlClusters = payload.clusters.filter((cluster) =>
     orchestratorMonitorsEngine(cluster.engine)
