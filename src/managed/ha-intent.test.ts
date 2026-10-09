@@ -19,6 +19,7 @@ import {
   MANAGED_COMMAND_INTENT_KINDS,
   MANAGED_INTENT_GRACE_MS,
   MANAGED_INTENT_MAX_RUNNING_MS,
+  MANAGED_INTENT_SETTLED_TTL_MS,
   MANAGED_INTENT_TTL_MS,
   managedCommandIntent,
   managedIntentPath,
@@ -755,6 +756,59 @@ test("managed.ha.failover recover flips the local target member to primary", asy
   });
 });
 
+test("managed.ha.failover repoint does not flip the local replica to primary", async () => {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("../commands/command-router.ts");
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: MEMBER_ID,
+      engine: "postgres",
+      role: "replica",
+      containerName: "svc-3",
+      replicaPeerCount: 2,
+      updatedAt: new Date().toISOString(),
+    });
+    setManagedCommandHooksLayoutForTests(layout);
+    setCommandRouterHandlersForTests({
+      handleManagedHaFailover: () =>
+        Promise.resolve({ summary: "repointed", phase: "repoint" }),
+    });
+    try {
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-repoint",
+          commandId: "cmd-repoint",
+          commandType: "managed.ha.failover",
+          payload: {
+            managedId: MANAGED_ID,
+            sourceMemberId: "00000000-0000-4000-8000-0000000000a9",
+            targetMemberId: "00000000-0000-4000-8000-0000000000aa",
+            phase: "repoint",
+            targetHost: "10.100.0.4",
+            targetPort: 45001,
+          },
+          at: new Date().toISOString(),
+        },
+        new MockWebSocket() as unknown as WebSocket,
+        { decryptSecrets: (c) => Promise.resolve(c) },
+      );
+      assertEquals(
+        (await readManagedHaMember(layout, MANAGED_ID))?.role,
+        "replica",
+      );
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
 test("a running command's marker suppresses for its whole duration (TTL starts at the end, 6 h ceiling)", async () => {
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
@@ -840,5 +894,77 @@ test("1+1 cluster: the promoted replica is watched at once (old primary counted 
       (await readManagedHaMember(layout, MANAGED_ID))?.replicaPeerCount,
       1,
     );
+  });
+});
+
+test("managed.ha.failover repoint carries no intent but drain and recover do", () => {
+  const base = {
+    managedId: MANAGED_ID,
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+  };
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "repoint" }),
+    null,
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", {
+      ...base,
+      phase: "repoint",
+      ensureSlots: ["tp_member_2"],
+    }),
+    null,
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "recover" }),
+    { managedId: MANAGED_ID, kind: "failover" },
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "drain" }),
+    { managedId: MANAGED_ID, kind: "failover" },
+  );
+});
+
+test("a successful promote or failover stops suppressing the probe after a minute, other outcomes keep the long window", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    for (const kind of ["promote", "failover"] as const) {
+      resetManagedIntentsForTests();
+      const before = Date.now();
+      const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, kind);
+      await endManagedIntent(dirs.stateDir, token, true);
+      const ended = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+      assert(ended?.untilMs !== null && ended?.untilMs !== undefined);
+      assert(ended.untilMs >= before + MANAGED_INTENT_SETTLED_TTL_MS);
+      assert(
+        ended.untilMs < before + MANAGED_INTENT_TTL_MS,
+        `${kind}: the marker must be well under the long window`,
+      );
+      // A promoted primary that dies two minutes later is a real failure.
+      assert(
+        !isManagedIntentActive(
+          ended,
+          before + 2 * MANAGED_INTENT_SETTLED_TTL_MS + 1_000,
+        ),
+      );
+    }
+    for (
+      const [kind, succeeded] of [
+        ["promote", false],
+        ["failover", false],
+        ["apply", true],
+        ["restart", true],
+      ] as const
+    ) {
+      resetManagedIntentsForTests();
+      const before = Date.now();
+      const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, kind);
+      await endManagedIntent(dirs.stateDir, token, succeeded);
+      const ended = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+      assert(ended?.untilMs !== null && ended?.untilMs !== undefined);
+      assert(
+        ended.untilMs >= before + MANAGED_INTENT_TTL_MS,
+        `${kind} (succeeded=${succeeded}) keeps the long window`,
+      );
+    }
   });
 });

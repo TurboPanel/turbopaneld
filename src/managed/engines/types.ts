@@ -134,6 +134,14 @@ export type ManagedEngineReplicationRuntime = {
     },
   ): Promise<void>;
   /**
+   * Create each missing physical replication slot on a primary (Postgres).
+   * MySQL / MariaDB have no slots — a documented no-op.
+   */
+  ensureSlots(
+    ctx: ManagedEngineContext,
+    slots: readonly string[],
+  ): Promise<void>;
+  /**
    * Seed an empty data volume from the primary via basebackup and mark it
    * as a standby. Must run **before** `compose up`. Returns `needs_resync`
    * when the volume is already initialized but is not a standby.
@@ -195,6 +203,24 @@ export type ManagedEngineReplicationRuntime = {
     desired: readonly string[],
   ): Promise<void>;
   promote(ctx: ManagedEngineContext): Promise<void>;
+  /** True when this member is a replica (in recovery / replica status present). */
+  isStandby(ctx: ManagedEngineContext): Promise<boolean>;
+  /**
+   * Point an already-seeded standby at a new primary after switchover or
+   * automatic failover. Must not re-seed or wipe the data volume. Postgres
+   * rewrites `primary_conninfo` in place; MySQL / MariaDB change only the
+   * source host and port so existing replica credentials stay.
+   */
+  followPrimary(
+    ctx: ManagedEngineContext,
+    spec: {
+      primary: {
+        host: string;
+        hostaddr?: string;
+        port: number;
+      };
+    },
+  ): Promise<void>;
   readHealth(
     ctx: ManagedEngineContext,
     role: "primary" | "standby",
@@ -267,6 +293,11 @@ export type ManagedSlotRetention = {
 export type ManagedReplicationObservedHealth = {
   state: string;
   lagBytes?: number;
+  /**
+   * Apply delay while streaming. Postgres: 0 when replay has caught the
+   * primary's last reported WAL end (idle primary, replica fully caught up);
+   * `pg_last_xact_replay_timestamp` only when still behind.
+   */
   lagSeconds?: number;
   observedAt: string;
   /** Standby only: `pg_last_wal_receive_lsn()` (absent when NULL). */

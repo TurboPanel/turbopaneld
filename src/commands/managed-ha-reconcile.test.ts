@@ -35,6 +35,7 @@ const test = Deno.test.bind(Deno);
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVICE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const MANAGED_ID = "00000000-0000-4000-8000-000000000001";
+const STALE_MANAGED_ID = "00000000-0000-4000-8000-000000000002";
 const MEMBER_ID = "00000000-0000-4000-8000-0000000000a1";
 
 function applyLayoutEnv(fixture: TempLayoutFixture): void {
@@ -64,7 +65,7 @@ function presentPayload(
     desired: "present",
     raft: {
       nodeId: "00000000-0000-4000-8000-0000000000ab",
-      advertiseAddress: "203.0.113.10",
+      advertiseAddress: "10.100.0.10",
       httpPort: 33001,
       raftPort: 33002,
       peers: [],
@@ -163,6 +164,120 @@ function decryptSecretsEcho(
   );
 }
 
+function fakeRunWithInspect(
+  inspect: (args: string[]) => DockerCliResult,
+): (args: string[]) => Promise<DockerCliResult> {
+  const base = fakeRunWithRunningOrchestrator();
+  return (args) => {
+    if (args[0] === "inspect") return Promise.resolve(inspect(args));
+    return base(args);
+  };
+}
+
+async function reconcileWithTwoMembers(
+  inspect: (args: string[]) => DockerCliResult,
+): Promise<{ apiCalls: string[]; compose: string; registered: string[] }> {
+  let result:
+    | { apiCalls: string[]; compose: string; registered: string[] }
+    | undefined;
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedOrchestratorHostPrep(layout);
+    applyLayoutEnv(fixture);
+    const apiCalls: string[] = [];
+    const [cluster] = presentPayload().clusters;
+    try {
+      const out = await handleManagedHaReconcile(
+        presentPayload({
+          clusters: [{
+            ...cluster,
+            members: [
+              {
+                ...cluster.members[0]!,
+                host: "10.100.0.5",
+                port: 45001,
+                containerName: "db-up",
+              },
+              {
+                ...cluster.members[0]!,
+                memberId: "00000000-0000-4000-8000-0000000000a2",
+                host: "db-down",
+                port: 3306,
+                containerName: "db-down",
+              },
+            ],
+          }],
+        }),
+        new Date().toISOString(),
+        {
+          runDocker: fakeRunWithInspect(inspect),
+          ensureDocker: () => Promise.resolve(),
+          decryptSecrets: decryptSecretsEcho,
+          orchestratorApi: {
+            fetch: (url) => {
+              apiCalls.push(url);
+              return Promise.resolve(new Response("", { status: 200 }));
+            },
+          },
+        },
+      );
+      result = {
+        apiCalls,
+        compose: await Deno.readTextFile(orchestratorComposePath(layout)),
+        registered: out.registeredClusters,
+      };
+    } finally {
+      clearLayoutEnv();
+    }
+  });
+  return result!;
+}
+
+test({
+  name:
+    "handleManagedHaReconcile skips a member whose container has no published port and still registers the rest",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    const out = await reconcileWithTwoMembers(() => ({
+      success: true,
+      stdout: "{}",
+      stderr: "",
+      code: 0,
+    }));
+    assertEquals(
+      out.apiCalls.some((url) =>
+        url.includes("/api/discover/10.100.0.5/45001")
+      ),
+      true,
+    );
+    assertEquals(out.apiCalls.some((url) => url.includes("db-down")), false);
+    assertEquals(out.compose.includes("db-up:10.100.0.5"), true);
+    assertEquals(out.registered.length, 1);
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile skips a member when docker inspect fails and keeps the stack",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    const out = await reconcileWithTwoMembers(() => ({
+      success: false,
+      stdout: "",
+      stderr: "No such object: db-down",
+      code: 1,
+    }));
+    assertEquals(
+      out.apiCalls.some((url) =>
+        url.includes("/api/discover/10.100.0.5/45001")
+      ),
+      true,
+    );
+    assertEquals(out.compose.includes("services:"), true);
+    assertEquals(out.registered.length, 1);
+  },
+});
+
 test({
   name: "handleManagedHaReconcile tears down when desired is absent",
   permissions: { env: true, read: true, write: true, run: false },
@@ -189,6 +304,8 @@ test({
           },
         );
         assertEquals(result.registeredClusters, []);
+        assertEquals(result.failedClusters, []);
+        assertEquals(result.partial, false);
         assertEquals(result.restarted, false);
         assertEquals(result.containers, []);
         assertEquals(dockerArgs.some((args) => args.includes("down")), true);
@@ -240,11 +357,120 @@ test({
           },
         );
         assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.failedClusters, []);
+        assertEquals(result.partial, false);
         assertEquals(apiCalls.some((url) => url.includes("pg-1")), false);
         assertEquals(
           apiCalls.some((url) => url.includes("/api/discover/db-1/3306")),
           true,
         );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile registers a later cluster when an earlier discover fails",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const [healthy] = presentPayload().clusters;
+      const stale = {
+        ...healthy,
+        managedId: STALE_MANAGED_ID,
+        clusterAlias: STALE_MANAGED_ID,
+        members: healthy.members.map((member) => ({
+          ...member,
+          host: "db-stale",
+        })),
+      };
+      try {
+        const registrationError = "x".repeat(1_000);
+        const shortRegistrationError = `…${"x".repeat(299)}`;
+        const result = await handleManagedHaReconcile(
+          presentPayload({ clusters: [stale, healthy] }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                if (url.includes("db-stale")) {
+                  return Promise.reject(new Error(registrationError));
+                }
+                return Promise.resolve(new Response("", { status: 200 }));
+              },
+            },
+          },
+        );
+        assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.partial, true);
+        assertEquals(result.failedClusters, [{
+          managedId: STALE_MANAGED_ID,
+          error: shortRegistrationError,
+        }]);
+        assertEquals(
+          result.summary,
+          `managed HA partially reconciled for server ${SERVER_ID}; failed clusters: ${STALE_MANAGED_ID}: ${shortRegistrationError}`,
+        );
+        assertEquals(
+          result.failedClusters?.[0]?.error.length,
+          300,
+        );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile fails the command when every monitored cluster fails to register",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const [first] = presentPayload().clusters;
+      const second = {
+        ...first,
+        managedId: STALE_MANAGED_ID,
+        clusterAlias: STALE_MANAGED_ID,
+        members: first.members.map((member) => ({
+          ...member,
+          host: "db-stale",
+        })),
+      };
+      try {
+        const err = await assertRejects(
+          () =>
+            handleManagedHaReconcile(
+              presentPayload({ clusters: [first, second] }),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRunWithRunningOrchestrator(),
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: decryptSecretsEcho,
+                orchestratorApi: {
+                  fetch: () =>
+                    Promise.resolve(new Response("", { status: 500 })),
+                },
+              },
+            ),
+          Error,
+        );
+        assertEquals(err.message.includes(MANAGED_ID), true);
+        assertEquals(err.message.includes(STALE_MANAGED_ID), true);
+        assertEquals(err.message.includes("HTTP 500"), true);
       } finally {
         clearLayoutEnv();
       }
@@ -280,6 +506,8 @@ test({
         );
         assertEquals(result.restarted, true);
         assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.failedClusters, []);
+        assertEquals(result.partial, false);
         assertEquals(result.containers?.length, 1);
         assertEquals(
           apiCalls.some((url) => url.includes("/api/discover/db-1/3306")),
@@ -298,6 +526,149 @@ test({
         assertEquals(conf.RaftAuthToken, "raft-token-value");
         assertEquals(conf.MySQLTopologyUser, "tp_repl");
         assertEquals(conf.MySQLTopologyPassword, "repl-plaintext");
+        assertEquals(conf.MySQLTopologyUseMutualTLS, true);
+        assertEquals("MySQLTopologyUseSSL" in conf, false);
+        const compose = await Deno.readTextFile(
+          orchestratorComposePath(layout),
+        );
+        assertEquals(compose.includes("127.0.0.1:33001:33001"), true);
+        assertEquals(compose.includes("10.100.0.10:33001:33001"), true);
+        assertEquals(compose.includes("restart: always"), true);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile registers the listener address, not the container name",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const apiCalls: string[] = [];
+      const [cluster] = presentPayload().clusters;
+      try {
+        await handleManagedHaReconcile(
+          presentPayload({
+            clusters: [{
+              ...cluster,
+              members: [{
+                ...cluster.members[0]!,
+                host: "10.100.0.5",
+                port: 45001,
+                containerName: "db-1",
+              }],
+            }],
+          }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                apiCalls.push(url);
+                return Promise.resolve(new Response("", { status: 200 }));
+              },
+            },
+          },
+        );
+        assertEquals(
+          apiCalls.some((url) =>
+            url.includes("/api/discover/10.100.0.5/45001")
+          ),
+          true,
+        );
+        assertEquals(
+          apiCalls.some((url) =>
+            url.includes("/api/register-candidate/10.100.0.5/45001/prefer")
+          ),
+          true,
+        );
+        assertEquals(
+          apiCalls.some((url) => url.includes("/api/discover/db-1/")),
+          false,
+        );
+        const compose = await Deno.readTextFile(
+          orchestratorComposePath(layout),
+        );
+        assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile rewrites a container-name host to the published listener",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const apiCalls: string[] = [];
+      const [cluster] = presentPayload().clusters;
+      const ports = JSON.stringify({
+        "3306/tcp": [{ HostIp: "10.100.0.5", HostPort: "45001" }],
+      });
+      try {
+        await handleManagedHaReconcile(
+          presentPayload({
+            clusters: [{
+              ...cluster,
+              members: [{
+                ...cluster.members[0]!,
+                host: "db-1",
+                port: 3306,
+                containerName: "db-1",
+              }],
+            }],
+          }),
+          new Date().toISOString(),
+          {
+            runDocker: (args) => {
+              if (args[0] === "inspect") {
+                return Promise.resolve({
+                  success: true,
+                  stdout: ports,
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return fakeRunWithRunningOrchestrator()(args);
+            },
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                apiCalls.push(url);
+                return Promise.resolve(new Response("", { status: 200 }));
+              },
+            },
+          },
+        );
+        assertEquals(
+          apiCalls.some((url) =>
+            url.includes("/api/discover/10.100.0.5/45001")
+          ),
+          true,
+        );
+        assertEquals(
+          apiCalls.some((url) => url.includes("/api/discover/db-1/")),
+          false,
+        );
+        const compose = await Deno.readTextFile(
+          orchestratorComposePath(layout),
+        );
+        assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
       } finally {
         clearLayoutEnv();
       }

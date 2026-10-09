@@ -2,12 +2,14 @@
  * Managed engine apply: materialize → compose up → databases/credentials.
  */
 
-import type {
-  EnvironmentDeployContainer,
-  ManagedApplyCredential,
-  ManagedApplyDatabaseOp,
-  ManagedApplyPayload,
-  ManagedApplyResult,
+import {
+  type EnvironmentDeployContainer,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+  type ManagedApplyCredential,
+  type ManagedApplyDatabaseOp,
+  type ManagedApplyPayload,
+  type ManagedApplyResult,
 } from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureManagedIngressNetwork } from "./networks.ts";
@@ -45,6 +47,7 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import { maybeClearDemotedMarkerAfterApply } from "./demoted-marker.ts";
 import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
@@ -192,24 +195,34 @@ export function buildEngineExec(
   };
 }
 
+function isClientSourceHostLiteral(address: string): boolean {
+  return isValidIpv4Literal(address) || isValidIpv6Literal(address);
+}
+
 /**
- * Cross-host addresses whose ProxySQL dials this engine's private listener:
- * peer members plus bound consumer servers. MySQL/MariaDB scope account
- * hosts with these; Postgres admission lives in pg_hba (control-plane
- * config). Container-name peers ride the managed docker network pattern —
- * only address literals need per-host accounts.
+ * Cross-host addresses whose ProxySQL dials this engine's private listener.
+ * Every member host IP (peers + this host's private listener) plus bound
+ * consumer servers. MySQL/MariaDB scope monitor/client/root accounts with
+ * these; Postgres admission lives in pg_hba (control-plane config).
+ * Container-name peers ride the managed docker network pattern — only
+ * address literals need per-host accounts. Own-host is required: this
+ * server's ProxySQL reaches replicas via the published listener, so the
+ * engine sees the host address, not a docker-network source.
  */
 export function resolveClientSourceHosts(
   payload: ManagedApplyPayload,
 ): string[] {
   const hosts = new Set<string>();
-  for (
-    const address of [
-      ...(payload.replication?.peerAddresses ?? []),
-      ...(payload.ingressSourceAddresses ?? []),
-    ]
-  ) {
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(address) || address.includes(":")) {
+  const candidates = [
+    payload.privateListener?.address,
+    payload.replication?.primary?.hostaddr,
+    payload.replication?.primary?.host,
+    ...(payload.replication?.peerAddresses ?? []),
+    ...(payload.peers ?? []).map((peer) => peer.address),
+    ...(payload.ingressSourceAddresses ?? []),
+  ];
+  for (const address of candidates) {
+    if (address !== undefined && isClientSourceHostLiteral(address)) {
       hosts.add(address);
     }
   }
@@ -803,7 +816,18 @@ export async function handleManagedApply(
     ) {
       throw new ManagedDestroyedError(payload.managedId);
     }
-    return await applyManagedEngine(payload, daemonReceivedAt, layout, deps);
+    const result = await applyManagedEngine(
+      payload,
+      daemonReceivedAt,
+      layout,
+      deps,
+    );
+    await maybeClearDemotedMarkerAfterApply(
+      layout,
+      payload,
+      result.member?.status,
+    );
+    return result;
   });
 }
 

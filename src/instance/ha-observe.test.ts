@@ -4,8 +4,10 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   orchestratorApiCnfPath,
+  orchestratorComposePath,
   orchestratorConfigDir,
 } from "../managed/engine-paths.ts";
+import { reviveStoppedOrchestratorContainer } from "../managed/orchestrator.ts";
 import type { OrchestratorProblem } from "../managed/orchestrator-api.ts";
 import { type ManagedHaEventMessage, ManagedHaObserver } from "./ha-observe.ts";
 
@@ -257,4 +259,187 @@ test("ManagedHaObserver skips absent stack, invalid aliases, and duplicate keys"
   await observer.poll();
   assertEquals(sent.length, 1);
   assertEquals(sent[0]?.managedId, MANAGED_ID);
+});
+
+function deadPrimaryResponse(): Response {
+  return problemResponse([{
+    clusterAlias: MANAGED_ID,
+    key: { hostname: "db-1", port: 5432 },
+    problems: ["DeadPrimary"],
+  }]);
+}
+
+test("ManagedHaObserver starts a killed Orchestrator container once", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(orchestratorComposePath(layout), "services: {}\n");
+    const calls: string[][] = [];
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      reviveStack: () =>
+        reviveStoppedOrchestratorContainer(layout, (args) => {
+          calls.push(args);
+          if (args.includes("ps")) {
+            return Promise.resolve({
+              success: true,
+              stdout: JSON.stringify([{
+                ID: "orch-cid",
+                Name: "orch",
+                Service: "orchestrator",
+                State: "exited",
+              }]),
+              stderr: "",
+              code: 0,
+            });
+          }
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
+        }),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => Promise.resolve(deadPrimaryResponse()),
+      },
+    });
+    await observer.poll();
+    await observer.poll();
+    assertEquals(calls.filter((args) => args.includes("start")).length, 1);
+    assertEquals(sent.length, 1);
+  });
+});
+
+test("ManagedHaObserver does not start a running Orchestrator container", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(orchestratorComposePath(layout), "services: {}\n");
+    const calls: string[][] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      send: () => {},
+      isStackPresent: () => Promise.resolve(true),
+      reviveStack: () =>
+        reviveStoppedOrchestratorContainer(layout, (args) => {
+          calls.push(args);
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify([{
+              ID: "orch-cid",
+              Name: "orch",
+              Service: "orchestrator",
+              State: "running",
+            }]),
+            stderr: "",
+            code: 0,
+          });
+        }),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => Promise.resolve(deadPrimaryResponse()),
+      },
+    });
+    await observer.poll();
+    assertEquals(calls.some((args) => args.includes("start")), false);
+  });
+});
+
+test("ManagedHaObserver does not start after compose down (absent container)", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(orchestratorComposePath(layout), "services: {}\n");
+    const calls: string[][] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      send: () => {},
+      isStackPresent: () => Promise.resolve(true),
+      reviveStack: () =>
+        reviveStoppedOrchestratorContainer(layout, (args) => {
+          calls.push(args);
+          return Promise.resolve({
+            success: true,
+            stdout: "[]",
+            stderr: "",
+            code: 0,
+          });
+        }),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => Promise.resolve(deadPrimaryResponse()),
+      },
+    });
+    await observer.poll();
+    assertEquals(calls.some((args) => args.includes("start")), false);
+  });
+});
+
+test("ManagedHaObserver respects the orchestrator revive cooldown", async () => {
+  const clock = createFakeClock({ now: 1_000_000 });
+  const calls: string[] = [];
+  const observer = new ManagedHaObserver({
+    nowMs: () => clock.now(),
+    send: () => {},
+    isStackPresent: () => Promise.resolve(true),
+    reviveStack: () => {
+      calls.push("revive");
+      return Promise.resolve("started");
+    },
+    api: {
+      credentials: { user: "admin", password: "x" },
+      fetch: () => Promise.resolve(deadPrimaryResponse()),
+    },
+  });
+  await observer.poll();
+  await observer.poll();
+  assertEquals(calls.length, 1);
+  await clock.advance(60_000);
+  await observer.poll();
+  assertEquals(calls.length, 2);
+});
+
+test("ManagedHaObserver continues the API poll when revive fails", async () => {
+  const decoder = new TextDecoder();
+  const warnings: string[] = [];
+  const originalWrite = Deno.stderr.writeSync;
+  Deno.stderr.writeSync = (buf) => {
+    warnings.push(decoder.decode(buf));
+    return buf.byteLength;
+  };
+  const sent: ManagedHaEventMessage[] = [];
+  let fetched = 0;
+  try {
+    const observer = new ManagedHaObserver({
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      reviveStack: () => Promise.reject(new Error("compose start failed")),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => {
+          fetched += 1;
+          return Promise.resolve(deadPrimaryResponse());
+        },
+      },
+    });
+    await observer.poll();
+    assertEquals(fetched, 1);
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.managedId, MANAGED_ID);
+    assertEquals(
+      warnings.some((line) => line.includes("self-heal failed")),
+      true,
+    );
+  } finally {
+    Deno.stderr.writeSync = originalWrite;
+  }
 });

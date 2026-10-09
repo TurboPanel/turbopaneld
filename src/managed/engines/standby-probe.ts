@@ -2,6 +2,10 @@
  * Read-only probes of a managed engine's data volume, run in a throwaway
  * container of the engine image. Shared by `bootstrapStandby` (before
  * `compose up`) and the lifecycle start guard (before `compose start`).
+ *
+ * Also holds mysql-family standby helpers: real-server readiness (the
+ * image entrypoint's temporary init server answers a unix-socket ping)
+ * and seed-failure classification for `configureStandby`.
  */
 
 import { helperLabelArgs } from "../../deploy/labels.ts";
@@ -135,4 +139,124 @@ export async function execStandbySeed(
     `${defaultsBody}${SEED_ROOT_DEFAULTS_MARK}\n` +
       `[client]\nuser=${ctx.rootUsername}\npassword=${ctx.socketPassword}\n`,
   );
+}
+
+export const MYSQL_FAMILY_READY_POLL_MS = 1_000;
+export const MYSQL_FAMILY_READY_TIMEOUT_MS = 120_000;
+
+/**
+ * Native SQL port inside the engine container. Platform `my.cnf` (instance-
+ * owned, mounted verbatim) does not set skip-networking; the real server
+ * listens on this port, including on loopback. The image entrypoint's
+ * temporary init server runs with networking disabled, so a TCP ping to
+ * 127.0.0.1:3306 is refused until that process is gone and the real server
+ * is up. If a future config bound only a non-loopback address or enabled
+ * skip-networking, this probe would never succeed and readiness would need
+ * a different proof (`@@skip_networking = 0` over the socket plus the
+ * entrypoint's init-complete marker).
+ */
+export const MYSQL_FAMILY_NATIVE_PORT = 3306;
+
+export type MysqlFamilyReadyPingKind = "socket" | "tcp";
+
+export type MysqlFamilyReadyPing = (
+  kind: MysqlFamilyReadyPingKind,
+) => Promise<{ success: boolean; stdout: string; stderr: string }>;
+
+function pingErrorText(
+  result: { stdout: string; stderr: string },
+  fallback: string,
+): string {
+  return result.stderr.trim() || result.stdout.trim() || fallback;
+}
+
+/**
+ * Socket ping, then TCP ping to 127.0.0.1:{@link MYSQL_FAMILY_NATIVE_PORT},
+ * then socket ping again. Admin `ping` exit 0 counts as alive even when the
+ * reply is access-denied; connection refused is not ready. The trailing
+ * socket ping catches a stop/start between the first two probes.
+ */
+export async function waitMysqlFamilyRealServer(options: {
+  ping: MysqlFamilyReadyPing;
+  label: string;
+  timeoutMs?: number;
+  pollMs?: number;
+  fallbackError: string;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? MYSQL_FAMILY_READY_TIMEOUT_MS;
+  const pollMs = options.pollMs ?? MYSQL_FAMILY_READY_POLL_MS;
+  const sleep = options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  let lastError = options.fallbackError;
+
+  // One probe round; true when socket, TCP, socket pings all succeed in order.
+  const pingOk = async (kind: MysqlFamilyReadyPingKind): Promise<boolean> => {
+    const result = await options.ping(kind);
+    if (!result.success) lastError = pingErrorText(result, lastError);
+    return result.success;
+  };
+  const probeOnce = async (): Promise<boolean> =>
+    await pingOk("socket") && await pingOk("tcp") && await pingOk("socket");
+  const poll = async (): Promise<boolean> => {
+    if (now() >= deadline) return false;
+    if (await probeOnce()) return true;
+    await sleep(pollMs);
+    return poll();
+  };
+  if (await poll()) return;
+
+  throw new Error(
+    `${options.label} not ready within ${timeoutMs}ms: ${
+      sanitizeForLog(lastError)
+    }`,
+  );
+}
+
+// Client-style `ERROR 1133 (28000) at line 11:` / `ERROR 2013 (HY000):`; a bare
+// number elsewhere in the output (a row count, a port) must not match.
+const TRANSIENT_SEED_ERROR = /\bERROR (?:1133|2002|2013)\b/;
+
+/** Empty exec output, or the server went away / grant tables vanished mid-init. */
+export function isTransientStandbySeedFailure(result: {
+  success: boolean;
+  stdout: string;
+  stderr: string;
+}): boolean {
+  if (result.success) return false;
+  if (result.stderr.trim().length === 0 && result.stdout.trim().length === 0) {
+    return true;
+  }
+  return TRANSIENT_SEED_ERROR.test(`${result.stderr}\n${result.stdout}`);
+}
+
+export function formatStandbySeedFailure(result: {
+  stdout: string;
+  stderr: string;
+}): string {
+  const stderr = result.stderr.trim();
+  const stdout = result.stdout.trim();
+  if (stderr.length === 0 && stdout.length === 0) {
+    return "the seed command produced no output (the database container may have restarted during the seed)";
+  }
+  return sanitizeForLog(stderr || stdout);
+}
+
+/**
+ * Run {@link execStandbySeed}; on a transient empty/1133/2002/2013 failure,
+ * wait for the real server and retry the seed once.
+ */
+export async function execStandbySeedWithInitRetry(
+  ctx: ManagedEngineContext,
+  buildScript: (withRootPassword: boolean) => string,
+  defaultsBody: string,
+  waitRealServer: () => Promise<void>,
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  const first = await execStandbySeed(ctx, buildScript, defaultsBody);
+  if (first.success || !isTransientStandbySeedFailure(first)) return first;
+  await waitRealServer();
+  return await execStandbySeed(ctx, buildScript, defaultsBody);
 }

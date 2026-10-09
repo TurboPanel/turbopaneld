@@ -1918,6 +1918,11 @@ export type ManagedLifecyclePayload = {
    * (defaults to primary).
    */
   role?: "primary" | "replica";
+  /**
+   * True on a fence stop of a replaced primary. Absent on ordinary operator
+   * stops and on older control planes; older daemons ignore it.
+   */
+  demoted?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -2198,11 +2203,18 @@ export type ManagedHaReconcilePayload = {
 export type ManagedHaReconcileResult = {
   summary: string;
   registeredClusters: string[];
+  failedClusters?: ManagedHaRegistrationFailure[];
+  partial?: boolean;
   restarted: boolean;
   containers?: EnvironmentDeployContainer[];
 };
 
-export type ManagedHaFailoverPhase = "drain" | "recover";
+export type ManagedHaRegistrationFailure = {
+  managedId: string;
+  error: string;
+};
+
+export type ManagedHaFailoverPhase = "drain" | "recover" | "repoint";
 
 /** Must stay in sync with the instance canonical `managed.ha.failover` shape. */
 export type ManagedHaFailoverPayload = {
@@ -2215,6 +2227,17 @@ export type ManagedHaFailoverPayload = {
   sourcePort?: number;
   targetHost?: string;
   targetPort?: number;
+  /**
+   * Dial IP when `targetHost` is the leaf SAN (Postgres `hostaddr`).
+   * Omitted when `targetHost` is already the address to dial.
+   */
+  targetHostaddr?: string;
+  /**
+   * When non-empty, this `repoint` runs on the **new primary** and creates
+   * each missing physical slot (Postgres). MySQL/MariaDB ignore the list.
+   * Follow mode still uses `targetHost` / `targetPort` on remaining replicas.
+   */
+  ensureSlots?: string[];
 };
 
 export type ManagedHaFailoverResult = {
@@ -6173,8 +6196,8 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  *
  * **Tested series only.** The control-plane catalog marks a series
  * `tested: true` once it is validated end-to-end, and only those series are
- * creatable: PostgreSQL 18, MySQL 9.7, MariaDB 12.3. The catalog still *knows*
- * about older series (17/16/15, 8.4, 11.8/11.4/10.11) so an already-persisted
+ * creatable: PostgreSQL 18, MySQL 9.7 and 8.4, MariaDB 12.3 and 11.8. The catalog still *knows*
+ * about older series (17/16/15, 11.4/10.11) so an already-persisted
  * image can be named in the UI, but they must never reach Docker — do not add
  * one back here without flipping `tested` in the control-plane catalog and the
  * UI mirror in the same change.
@@ -6193,10 +6216,14 @@ const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
   mysql: [
     "docker.io/library/mysql:9.7",
     "docker.io/library/mysql:9.7-oraclelinux9",
+    "docker.io/library/mysql:8.4",
+    "docker.io/library/mysql:8.4-oraclelinux9",
   ],
   mariadb: [
     "docker.io/library/mariadb:12.3",
     "docker.io/library/mariadb:12.3-ubi",
+    "docker.io/library/mariadb:11.8",
+    "docker.io/library/mariadb:11.8-ubi",
   ],
 };
 
@@ -7402,13 +7429,29 @@ export function parseManagedLifecyclePayload(
     }
     payload.engine = value.engine;
   }
-  if (value.role !== undefined) {
-    if (value.role !== "primary" && value.role !== "replica") {
-      throw new TypeError("Invalid managed.lifecycle payload");
-    }
-    payload.role = value.role;
-  }
+  const role = parseManagedLifecycleRole(value.role);
+  if (role !== undefined) payload.role = role;
+  if (parseManagedLifecycleDemoted(value.demoted)) payload.demoted = true;
   return payload;
+}
+
+function parseManagedLifecycleRole(
+  value: unknown,
+): ManagedLifecyclePayload["role"] {
+  if (value === undefined) return undefined;
+  if (value !== "primary" && value !== "replica") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
+}
+
+/** `true` only when the fence marked the stop as a replaced primary's. */
+function parseManagedLifecycleDemoted(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
 }
 
 /** Must stay in sync with the instance canonical `managed.destroy` validator. */
@@ -8586,10 +8629,11 @@ export function parseManagedIngressReconcileResult(
 }
 
 const HA_PROMOTION_RULES = new Set(["prefer", "must_not"]);
-const HA_FAILOVER_PHASES = new Set(["drain", "recover"]);
+const HA_FAILOVER_PHASES = new Set(["drain", "recover", "repoint"]);
 const MAX_HA_CLUSTERS = 64;
 const MAX_HA_MEMBERS = 32;
 const MAX_HA_PEERS = 32;
+const MAX_HA_REGISTRATION_ERROR_LENGTH = 300;
 
 function parseManagedHaIdentity(
   value: unknown,
@@ -8773,6 +8817,27 @@ export function parseManagedHaReconcilePayload(
   return payload;
 }
 
+function parseManagedHaRegistrationFailures(
+  value: unknown,
+): ManagedHaRegistrationFailure[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_HA_CLUSTERS ||
+    !value.every((entry) =>
+      isRecord(entry) &&
+      typeof entry.managedId === "string" &&
+      SAFE_BACKUP_ID_RE.test(entry.managedId) &&
+      typeof entry.error === "string" &&
+      entry.error.length > 0 &&
+      entry.error.length <= MAX_HA_REGISTRATION_ERROR_LENGTH
+    )
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  return value as ManagedHaRegistrationFailure[];
+}
+
 /** Must stay in sync with the instance canonical `managed.ha.reconcile` result parser. */
 export function parseManagedHaReconcileResult(
   value: unknown,
@@ -8786,7 +8851,19 @@ export function parseManagedHaReconcileResult(
     !value.registeredClusters.every((entry) =>
       typeof entry === "string" && SAFE_BACKUP_ID_RE.test(entry)
     ) ||
+    (value.partial !== undefined && typeof value.partial !== "boolean") ||
     typeof value.restarted !== "boolean"
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  const failedClusters = parseManagedHaRegistrationFailures(
+    value.failedClusters,
+  );
+  const failedClusterCount = failedClusters?.length ?? 0;
+  if (
+    (value.partial === true &&
+      (failedClusterCount === 0 || value.registeredClusters.length === 0)) ||
+    (value.partial !== true && failedClusterCount > 0)
   ) {
     throw new TypeError("Invalid managed.ha.reconcile result");
   }
@@ -8795,6 +8872,8 @@ export function parseManagedHaReconcileResult(
     registeredClusters: value.registeredClusters as string[],
     restarted: value.restarted,
   };
+  if (failedClusters !== undefined) result.failedClusters = failedClusters;
+  if (value.partial !== undefined) result.partial = value.partial;
   if (value.containers !== undefined) {
     if (!Array.isArray(value.containers)) {
       throw new TypeError("Invalid managed.ha.reconcile result containers");
@@ -8857,6 +8936,26 @@ function parseOptionalManagedHaPort(value: unknown): number | undefined {
   return value;
 }
 
+const HA_FAILOVER_SLOT_RE = /^[a-z0-9_]{1,63}$/;
+const MAX_HA_FAILOVER_ENSURE_SLOTS = 32;
+
+function parseManagedHaFailoverEnsureSlots(
+  value: unknown,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HA_FAILOVER_ENSURE_SLOTS) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  const slots: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !HA_FAILOVER_SLOT_RE.test(entry)) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    slots.push(entry);
+  }
+  return slots;
+}
+
 /** Must stay in sync with the instance canonical `managed.ha.failover` validator. */
 export function parseManagedHaFailoverPayload(
   value: unknown,
@@ -8881,6 +8980,10 @@ export function parseManagedHaFailoverPayload(
   if (targetHost !== undefined) payload.targetHost = targetHost;
   const targetPort = parseOptionalManagedHaPort(value.targetPort);
   if (targetPort !== undefined) payload.targetPort = targetPort;
+  const targetHostaddr = parseOptionalManagedHaHost(value.targetHostaddr);
+  if (targetHostaddr !== undefined) payload.targetHostaddr = targetHostaddr;
+  const ensureSlots = parseManagedHaFailoverEnsureSlots(value.ensureSlots);
+  if (ensureSlots !== undefined) payload.ensureSlots = ensureSlots;
   return payload;
 }
 

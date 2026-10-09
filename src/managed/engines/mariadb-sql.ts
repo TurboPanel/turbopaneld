@@ -5,6 +5,11 @@
  * (`MASTER_USE_GTID=slave_pos` / `gtid_slave_pos` vs `SOURCE_AUTO_POSITION=1`).
  */
 
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -137,9 +142,81 @@ export function grantRootSql(
   username: string,
   host: string = MANAGED_DOCKER_NETWORK_HOST,
 ): string {
-  return `GRANT ALL PRIVILEGES ON *.* TO ${
-    accountAt(username, host)
-  } WITH GRANT OPTION;`;
+  const account = accountAt(username, host);
+  return [
+    `GRANT ALL PRIVILEGES ON *.* TO ${account} WITH GRANT OPTION;`,
+    // MariaDB has no super_read_only. GRANT ALL includes READ_ONLY ADMIN
+    // (the 10.11+ privilege that writes through @@read_only=ON; SUPER
+    // does not). Network / ProxySQL-reachable accounts must never hold it;
+    // unix_socket admins keep it via ensureSocketAdminSql.
+    `REVOKE READ_ONLY ADMIN ON *.* FROM ${account};`,
+  ].join("\n");
+}
+
+export function revokeReadOnlyAdminSql(username: string, host: string): string {
+  return `REVOKE READ_ONLY ADMIN ON *.* FROM ${accountAt(username, host)};`;
+}
+
+/** Non-localhost accounts: the dump copies the primary's grant tables. */
+export function listNonLocalAccountsSql(): string {
+  return "SELECT User, Host FROM mysql.global_priv WHERE Host <> 'localhost' AND User <> '';";
+}
+
+export function parseGlobalPrivAccountRows(
+  tsv: string,
+): Array<{ username: string; host: string }> {
+  const rows: Array<{ username: string; host: string }> = [];
+  for (const line of tsv.split("\n")) {
+    if (line.length === 0) continue;
+    const tab = line.indexOf("\t");
+    if (tab <= 0) continue;
+    const username = line.slice(0, tab);
+    const host = line.slice(tab + 1).replaceAll("\r", "");
+    if (host.length === 0 || host === "localhost") continue;
+    rows.push({ username, host });
+  }
+  return rows;
+}
+
+function isSafeAccountName(value: string): boolean {
+  return value.length > 0 &&
+    value.length <= ACCOUNT_MAX_LENGTH &&
+    IDENTIFIER_RE.test(value);
+}
+
+/**
+ * Replica-side strip after a seed dump. Skips names the identifier quoter
+ * would reject (system accounts with a dot) so a hostile Host cannot break
+ * configureStandby.
+ */
+export function revokeReadOnlyAdminFromNetworkAccountsSql(
+  accounts: readonly { username: string; host: string }[],
+): string {
+  const lines: string[] = [];
+  for (const account of accounts) {
+    if (account.host === "localhost" || !isSafeAccountName(account.username)) {
+      continue;
+    }
+    lines.push(revokeReadOnlyAdminSql(account.username, account.host));
+  }
+  if (lines.length === 0) return "";
+  lines.push("FLUSH PRIVILEGES;");
+  return lines.join("\n");
+}
+
+/**
+ * Post-seed replica guard: socket admins keep ALL; strip READ_ONLY ADMIN from
+ * every non-localhost account copied in the dump. Wrapped so none of it is
+ * binary-logged (replica-only GTIDs).
+ */
+export function reassertReplicaPrivilegeGuardSql(
+  accounts: readonly { username: string; host: string }[],
+): string {
+  const revokeSql = revokeReadOnlyAdminFromNetworkAccountsSql(accounts);
+  const inner = revokeSql.length === 0
+    ? ensureSocketAdminSql()
+    : `${ensureSocketAdminSql()}\n${revokeSql}`;
+  return withoutSessionBinlogSql(inner);
 }
 
 /**
@@ -231,12 +308,36 @@ export function ensureSocketAdminSql(osUser: string = "mysql"): string {
 }
 
 /**
+ * Session-only: keep replica-local statements out of the binary log so they
+ * cannot mint a replica-UUID GTID the primary never executed.
+ */
+export function withoutSessionBinlogSql(sql: string): string {
+  return [
+    "SET SESSION sql_log_bin = 0;",
+    sql.trim(),
+    "SET SESSION sql_log_bin = 1;",
+  ].join("\n");
+}
+
+/** Clears entrypoint-init GTID state on a freshly initdb'd standby. */
+export function resetReplicaGtidStateSql(): string {
+  return "RESET MASTER;";
+}
+
+/** Replica-local flush — must not be binary-logged. */
+export function flushPrivilegesLocalSql(): string {
+  return withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+}
+
+/**
  * Standby seed window: the platform my.cnf boots standbys with
- * `read_only=ON`, which blocks the seed IMPORT for non-SUPER users;
- * `configureStandby` disables it for the seed and re-enforces it once
- * replication is configured. **MariaDB has no `super_read_only`** (that is
- * MySQL-only; MDEV-18441) — referencing it in my.cnf kills mariadbd at
- * startup ("unknown variable") and in SQL it errors.
+ * `read_only=ON`, which blocks the seed IMPORT for accounts without
+ * READ_ONLY ADMIN; `configureStandby` disables it for the seed and
+ * re-enforces it once replication is configured. **MariaDB has no
+ * `super_read_only`** (that is MySQL-only; MDEV-18441) — referencing it in
+ * my.cnf kills mariadbd at startup ("unknown variable") and in SQL it
+ * errors. The unix_socket platform admin keeps READ_ONLY ADMIN so this
+ * SET GLOBAL still works; network root does not.
  */
 export function disableReadOnlySql(): string {
   return "SET GLOBAL read_only = OFF;";
@@ -284,6 +385,29 @@ export function changeReplicationSourceSql(spec: {
     "  MASTER_SSL_VERIFY_SERVER_CERT = 1;",
     "START SLAVE;",
   ].join("\n");
+}
+
+/**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and GTID stay as seeded.
+ */
+export const MARIADB_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP SLAVE",
+  change: "CHANGE MASTER TO",
+  hostKey: "MASTER_HOST",
+  portKey: "MASTER_PORT",
+  start: "START SLAVE",
+};
+
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return renderFollowSourceSql(
+    MARIADB_FOLLOW_SOURCE_DIALECT,
+    spec,
+    quoteLiteral,
+  );
 }
 
 /**

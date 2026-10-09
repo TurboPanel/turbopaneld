@@ -65,10 +65,44 @@ for (
     await assertRejects(() =>
       engine.dropUsers!(ctx, ["user_a", "user_b", "user_c"])
     );
-    assertEquals(inputs.length, 2);
-    assertEquals(inputs[0]!.includes("user_a"), true);
-    assertEquals(inputs[1]!.includes("user_b"), true);
+    // The host lookup before each drop is a query with no stdin script.
+    const scripts = inputs.filter((input) => input.length > 0);
+    assertEquals(scripts.length, 2);
+    assertEquals(scripts[0]!.includes("user_a"), true);
+    assertEquals(scripts[1]!.includes("user_b"), true);
     assertEquals(maxInFlight(), 1);
+  });
+}
+
+for (
+  const [name, engine] of engines.filter(([engineName]) =>
+    engineName !== "postgres"
+  )
+) {
+  test(`${name} dropUsers also drops the account for every member address it exists for`, async () => {
+    const scripts: string[] = [];
+    const ctx: ManagedEngineContext = {
+      containerId: "c1",
+      composeServiceName: "svc",
+      rootUsername: "root",
+      defaultDatabase: "appdb",
+      exec: (argv, input) => {
+        if (input !== undefined) scripts.push(input);
+        const lookup = argv.some((arg) => arg.includes("FROM mysql.user"));
+        return Promise.resolve({
+          success: true,
+          stdout: lookup ? "10.100.0.3\n10.100.0.5\nlocalhost\n" : "",
+          stderr: "",
+        });
+      },
+    };
+    const dropped = await engine.dropUsers!(ctx, ["tp_monitor_x"]);
+    assertEquals(dropped, ["tp_monitor_x"]);
+    const drop = scripts.join("\n");
+    assertEquals(drop.includes("`tp_monitor_x`@'10.100.0.3'"), true);
+    assertEquals(drop.includes("`tp_monitor_x`@'10.100.0.5'"), true);
+    assertEquals(drop.includes("`tp_monitor_x`@'localhost'"), true);
+    assertEquals(drop.includes("172.16.0.0/255.240.0.0"), true);
   });
 }
 

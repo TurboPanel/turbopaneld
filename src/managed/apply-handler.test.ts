@@ -8,6 +8,10 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedApply } from "./apply.ts";
+import {
+  isManagedMemberDemoted,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -452,6 +456,71 @@ test("handleManagedApply standby needs_resync returns early without compose up",
     assertEquals(result.member?.status, "needs_resync");
     assertEquals(result.member?.replication?.state, "needs_resync");
     assertEquals(result.appliedUsers, []);
+  });
+});
+
+test("a replica needs_resync apply keeps the demoted marker", async () => {
+  await withApplyEnv(async () => {
+    const layout = resolveLayout(Deno.env.toObject());
+    const payload = basePayload({
+      memberRole: "replica",
+      replication: {
+        role: "standby",
+        username: "tp_repl",
+        primary: {
+          host: "managed-primary-id",
+          hostaddr: "203.0.113.10",
+          port: 15432,
+        },
+      },
+      // Reuse the base root credential and add the replication one by
+      // cloning it, so this test carries no credential literals of its own.
+      credentials: [
+        ...basePayload().credentials,
+        {
+          ...basePayload().credentials[0],
+          principalId: "p-repl",
+          username: "tp_repl",
+          role: "replication",
+          databases: [],
+        },
+      ],
+    });
+    await writeManagedDemotedMarker(
+      layout,
+      payload.managedId,
+      payload.memberId,
+      "2026-10-08T12:00:00.000Z",
+    );
+    await handleManagedApply(
+      payload,
+      new Date().toISOString(),
+      {
+        decryptSecrets: (ciphertexts) =>
+          Promise.resolve(ciphertexts.map((_, index) => `decrypted-${index}`)),
+        ensureDocker: () => Promise.resolve(),
+        runHostPrep: () => Promise.resolve(),
+        runDocker: (args) => {
+          if (
+            args[0] === "run" &&
+            args.some((part) => part.includes("PG_VERSION"))
+          ) {
+            return Promise.resolve({ ...dockerOk(), stdout: "present" });
+          }
+          if (
+            args[0] === "run" &&
+            args.some((part) => part.includes("standby.signal"))
+          ) {
+            return Promise.resolve({ ...dockerOk(), stdout: "absent" });
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, payload.managedId, payload.memberId),
+      true,
+    );
   });
 });
 
