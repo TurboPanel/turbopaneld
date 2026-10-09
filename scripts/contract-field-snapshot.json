@@ -141,30 +141,7 @@
     "daemon": "src/contracts/commands-contracts.ts",
     "fields": [
       { "name": "hostLevelApproved", "required": false, "type": "boolean" },
-      {
-        "name": "remoteBuildSourcesApproved",
-        "required": false,
-        "type": "boolean"
-      }
-    ]
-  },
-  "ManagedLifecyclePayload": {
-    "instance": "src/contracts/commands/schemas.ts",
-    "daemon": "src/contracts/commands-contracts.ts",
-    "fields": [
-      {
-        "name": "action",
-        "required": true,
-        "type": "'restart' | 'start' | 'stop'"
-      },
-      { "name": "demoted", "required": false, "type": "boolean" },
-      { "name": "managedId", "required": true, "type": "string" },
-      { "name": "memberId", "required": false, "type": "string" },
-      {
-        "name": "role",
-        "required": false,
-        "type": "'primary' | 'replica'"
-      }
+      { "name": "remoteBuildSourcesApproved", "required": false, "type": "boolean" }
     ]
   },
   "BackupPolicyWireEntry": {
