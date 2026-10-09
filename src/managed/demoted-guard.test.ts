@@ -46,12 +46,32 @@ function memberRecord(managedId = MANAGED_ID) {
   };
 }
 
-function docker(psStdout = RUNNING_PS) {
+type DockerFakeOptions = {
+  psStdout?: string;
+  /** Simulated `SELECT NOT pg_is_in_recovery()` row; default still writable. */
+  writablePrimary?: boolean;
+  stopFails?: boolean;
+  psFails?: boolean;
+};
+
+function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
+  const opts: DockerFakeOptions = typeof psStdoutOrOpts === "string"
+    ? { psStdout: psStdoutOrOpts }
+    : psStdoutOrOpts;
   const calls: string[][] = [];
-  let stdout = psStdout;
+  let stdout = opts.psStdout ?? RUNNING_PS;
+  const writablePrimary = opts.writablePrimary ?? true;
   const run = (args: string[]): Promise<DockerCliResult> => {
     calls.push(args);
     if (args[0] === "compose" && args.includes("ps")) {
+      if (opts.psFails) {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "ps failed",
+        });
+      }
       return Promise.resolve({
         success: true,
         code: 0,
@@ -61,6 +81,14 @@ function docker(psStdout = RUNNING_PS) {
     }
     if (args[0] === "compose" && args.at(-1) === "stop") {
       stdout = "[]";
+      if (opts.stopFails) {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "stop failed",
+        });
+      }
     }
     if (args[0] === "exec") {
       // CI runners have a real Docker binary so ensureDocker() succeeds and the
@@ -68,7 +96,7 @@ function docker(psStdout = RUNNING_PS) {
       return Promise.resolve({
         success: true,
         code: 0,
-        stdout: "t\n",
+        stdout: writablePrimary ? "t\n" : "f\n",
         stderr: "",
       });
     }
@@ -187,6 +215,70 @@ test("a member under the lifecycle lock is skipped until the lock is free", asyn
     });
     await guard.tick();
     assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), true);
+  });
+});
+
+test("a read-only demoted member is not stopped again", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker({ writablePrimary: false });
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+  });
+});
+
+test("start and stop wire the interval without throwing", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker("[]");
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([]),
+      intervalMs: 60_000,
+    });
+    guard.start();
+    guard.stop();
+    await guard.tick();
+  });
+});
+
+test("a compose stop failure is logged and does not throw", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker({ stopFails: true });
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.filter((args) => args.at(-1) === "stop").length,
+      1,
+    );
   });
 });
 

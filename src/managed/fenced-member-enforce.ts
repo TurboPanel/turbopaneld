@@ -3,6 +3,7 @@
  */
 
 import type { ManagedEngineCode } from "../contracts/commands-contracts.ts";
+import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { persistDemotedVolumeFence } from "./demoted-fence-volume.ts";
@@ -13,6 +14,17 @@ import {
 } from "./local-engine-context.ts";
 import { managedComposeProject } from "./engine-paths.ts";
 import { collectManagedContainers } from "./containers.ts";
+
+/** Injected `run` is always a test seam — skip host Docker bootstrap. */
+function replicationEngineDeps(run: RunDockerFn) {
+  if (run === defaultRunDocker) {
+    return { runDocker: run };
+  }
+  return {
+    runDocker: run,
+    ensureDocker: async () => {},
+  };
+}
 
 export async function enforceFencedMemberIfRunning(
   layout: LayoutPaths,
@@ -51,7 +63,7 @@ export async function enforceFencedMemberIfRunning(
       managedId,
       engine,
       "demoted fence",
-      { runDocker: run },
+      replicationEngineDeps(run),
     );
     await resolved.replication?.enforceFencedFormerPrimaryReadOnly?.(ctx);
   } catch (err) {
@@ -78,7 +90,7 @@ export async function isFencedMemberStillWritable(
       managedId,
       engine,
       "demoted fence",
-      { runDocker: run },
+      replicationEngineDeps(run),
     );
     const probe = resolved.replication?.isWritableFormerPrimary;
     if (!probe) return true;
