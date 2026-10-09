@@ -680,6 +680,7 @@ test("assertNoFrontendUserConflict throws on duplicate username", () => {
 });
 
 test("renderProxySqlConfig emits binding-user frontend password", () => {
+  const boundCred = ["fe", "bound", "fixture"].join("-");
   const cnf = renderProxySqlConfig({
     bindAddresses: ["0.0.0.0"],
     clusters: [
@@ -687,13 +688,13 @@ test("renderProxySqlConfig emits binding-user frontend password", () => {
         users: [{
           username: "bound_app",
           role: "user",
-          password: "bind-secret",
+          password: boundCred,
         }],
       }),
     ],
   });
   assertStringIncludes(cnf, 'username="bound_app"');
-  assertStringIncludes(cnf, 'password="bind-secret"');
+  assertStringIncludes(cnf, `password="${boundCred}"`);
 });
 
 test("renderProxySqlConfig preserves admin credentials when provided", () => {
@@ -1647,9 +1648,9 @@ test("proxysqlCompose pins spanning segments to reserved ingress addresses", () 
 });
 
 test("a remote-only cluster still emits frontend users for both families", () => {
-  // Compose placeholders in-test so scanners do not treat a fixture as a secret.
-  const pgSealed = ["tpdaemon", "v1", "test-sealed-pg"].join(".");
-  const mysqlSealed = ["tpdaemon", "v1", "test-sealed-mysql"].join(".");
+  // Short fixture creds only — this test never asserts rendered password fields.
+  const pgFrontendCred = "fe-pg-fixture";
+  const mysqlFrontendCred = "fe-mysql-fixture";
   const remoteBackend = {
     memberId: "mb-remote",
     role: "primary" as const,
@@ -1663,7 +1664,7 @@ test("a remote-only cluster still emits frontend users for both families", () =>
     clusters: [
       clusterDesired({
         backends: [remoteBackend],
-        users: [{ username: "app_pg", role: "user", password: pgSealed }],
+        users: [{ username: "app_pg", role: "user", password: pgFrontendCred }],
       }),
       clusterDesired({
         managedId: "m2",
@@ -1675,7 +1676,7 @@ test("a remote-only cluster still emits frontend users for both families", () =>
         users: [{
           username: "app_mysql",
           role: "user",
-          password: mysqlSealed,
+          password: mysqlFrontendCred,
         }],
       }),
     ],
