@@ -608,6 +608,63 @@ test("mysql configureStandby empty seed failure is not reported as unknown", asy
   assertEquals(err.message.includes("unknown"), false);
 });
 
+test("mysql quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_executed", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.quiesceFormerPrimaryForSwitchover) {
+    throw new TypeError("expected mysql quiesceFormerPrimaryForSwitchover");
+  }
+  let enforcedReadOnly = false;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("read_only") || sql.includes("super_read_only")) {
+      enforcedReadOnly = true;
+    }
+    if (sql.includes("gtid_executed")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "uuid:1-42\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const gtid = await replication.quiesceFormerPrimaryForSwitchover(
+    buildContext(exec),
+  );
+  assertEquals(enforcedReadOnly, true);
+  assertEquals(gtid, "uuid:1-42");
+});
+
+test("mysql promote runs WAIT_FOR_EXECUTED_GTID_SET when a GTID proof is required", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mysql promote");
+  }
+  let sawWait = false;
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("WAIT_FOR_EXECUTED_GTID_SET")) {
+      sawWait = true;
+      return Promise.resolve({ success: true, stdout: "0\n", stderr: "" });
+    }
+    if (sql.includes("RESET") || sql.includes("SOURCE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "0\t0\n" : "1\t1\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec), {
+    requiredExecutedGtidSet: "uuid:1-50",
+    gtidWaitTimeoutSeconds: 30,
+  });
+  assertEquals(sawWait, true);
+});
+
 test("mysql promote clears read-only and returns when writable", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.promote) {

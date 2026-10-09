@@ -19,6 +19,16 @@ import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
+import {
+  switchoverCaughtErrorDetail,
+  switchoverPromoteErrorMessage,
+} from "./switchover-promote-error.ts";
+import {
+  filterGtidSetForSwitchoverWait,
+  quiesceAndReadPrimaryGtid,
+  SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+  waitForRequiredGtidSet,
+} from "./switchover-gtid.ts";
 import { parseSqlBool } from "./sql-bool.ts";
 import {
   changeReplicationSourceSql,
@@ -40,7 +50,9 @@ import {
   isWritableSql,
   listNonLocalAccountsSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  masterGtidWaitSql,
   parseGlobalPrivAccountRows,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
@@ -596,23 +608,86 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     }
   },
 
-  async promote(ctx) {
-    await runMariadb(ctx, promoteSql());
-    // Socket admin must keep ALL (including READ_ONLY ADMIN) so a later
-    // demote/seed can still SET GLOBAL read_only. Network accounts keep
-    // the GRANT ALL minus READ_ONLY ADMIN from the primary apply — do not
-    // give them the bypass back.
-    await runMariadb(ctx, ensureSocketAdminSql());
-    const deadline = Date.now() + 60_000;
-    const writable = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const out = await runMariadbQuery(ctx, isWritableSql());
-      if (parseSqlBool(out) === false) return true;
-      await sleep(500);
-      return writable();
-    };
-    if (await writable()) return;
-    throw new Error("mariadb promote did not become writable within 60s");
+  async quiesceFormerPrimaryForSwitchover(ctx) {
+    return await quiesceAndReadPrimaryGtid(
+      () => runMariadb(ctx, enforceReadOnlySql()),
+      () => runMariadbQuery(ctx, primaryFinalGtidSetSql()),
+      () => runMariadb(ctx, disableReadOnlySql()),
+    );
+  },
+
+  runAdminScalarQuery(ctx, sql) {
+    return runMariadbQuery(ctx, sql);
+  },
+
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    if (verbose.trim().length > 0) {
+      throw new Error(
+        "switchover: former primary is a standby; cannot reactivate after abort",
+      );
+    }
+    const out = await runMariadbQuery(ctx, isWritableSql());
+    if (parseSqlBool(out) !== true) {
+      throw new Error(
+        "switchover: former primary is not read_only; promotion may have started",
+      );
+    }
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runMariadb(ctx, disableReadOnlySql());
+  },
+
+  async promote(ctx, options) {
+    let promoteStarted = false;
+    try {
+      if (options?.requiredExecutedGtidSet) {
+        const received = await runMariadbQuery(
+          ctx,
+          "SELECT @@GLOBAL.gtid_slave_pos;",
+        );
+        const waitSet = filterGtidSetForSwitchoverWait(
+          options.requiredExecutedGtidSet,
+          received,
+        );
+        await waitForRequiredGtidSet(
+          (sql) => runMariadbQuery(ctx, sql),
+          masterGtidWaitSql,
+          waitSet,
+          options.gtidWaitTimeoutSeconds ??
+            SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+          "mariadb",
+        );
+      }
+      promoteStarted = true;
+      await runMariadb(ctx, promoteSql());
+      // Socket admin must keep ALL (including READ_ONLY ADMIN) so a later
+      // demote/seed can still SET GLOBAL read_only. Network accounts keep
+      // the GRANT ALL minus READ_ONLY ADMIN from the primary apply — do not
+      // give them the bypass back.
+      await runMariadb(ctx, ensureSocketAdminSql());
+      const deadline = Date.now() + 60_000;
+      const writable = async (): Promise<boolean> => {
+        if (Date.now() >= deadline) return false;
+        const out = await runMariadbQuery(ctx, isWritableSql());
+        if (parseSqlBool(out) === false) return true;
+        await sleep(500);
+        return writable();
+      };
+      if (await writable()) return;
+      throw new Error("mariadb promote did not become writable within 60s");
+    } catch (error) {
+      if (promoteStarted) {
+        throw new Error(
+          switchoverPromoteErrorMessage(
+            "promote_started",
+            switchoverCaughtErrorDetail(error),
+          ),
+        );
+      }
+      throw error;
+    }
   },
 
   async isStandby(ctx) {

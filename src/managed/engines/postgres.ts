@@ -621,7 +621,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     return "seeded";
   },
 
-  async promote(ctx) {
+  async promote(ctx, _options?) {
     await runPsql(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
     const leftRecovery = async (): Promise<boolean> => {

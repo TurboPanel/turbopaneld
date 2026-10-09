@@ -65,6 +65,54 @@ test("managed.ha.failover recover falls back to promote when Orchestrator throws
   );
 });
 
+test("managed.ha.failover recover requires GTID when gtidWaitTimeoutSeconds is set on mysql", async () => {
+  await assertRejects(
+    () =>
+      handleManagedHaFailover(
+        {
+          ...RECOVER_PAYLOAD,
+          engine: "mysql",
+          gtidWaitTimeoutSeconds: 60,
+        },
+        "2026-08-19T12:00:00.000Z",
+        {
+          haPresent: () => Promise.resolve(true),
+          recover: () => Promise.resolve(),
+        },
+      ),
+    Error,
+    "requires requiredExecutedGtidSet",
+  );
+});
+
+test("managed.ha.failover recover proves GTID before Orchestrator when required", async () => {
+  let proveCalled = false;
+  let recoverCalled = false;
+  await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mariadb",
+      requiredExecutedGtidSet: "0-1-9",
+      gtidWaitTimeoutSeconds: 45,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      proveGtid: () => {
+        proveCalled = true;
+        return Promise.resolve();
+      },
+      recover: () => {
+        recoverCalled = true;
+        return Promise.resolve();
+      },
+      promote: promoteStub([]),
+    },
+  );
+  assertEquals(proveCalled, true);
+  assertEquals(recoverCalled, true);
+});
+
 test("managed.ha.failover recover does not promote when Orchestrator succeeds", async () => {
   const promoteCalls: unknown[] = [];
   const result = await handleManagedHaFailover(
@@ -78,6 +126,27 @@ test("managed.ha.failover recover does not promote when Orchestrator succeeds", 
   );
   assertEquals(promoteCalls.length, 0);
   assertEquals(result.summary.includes("designated replica"), true);
+});
+
+test("managed.ha.failover recover promote fallback forwards switchover GTID fields", async () => {
+  const promoteCalls: ManagedPromotePayload[] = [];
+  await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mariadb",
+      requiredExecutedGtidSet: "0-1-9",
+      gtidWaitTimeoutSeconds: 99,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(false),
+      proveGtid: () => Promise.resolve(),
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(promoteCalls[0]?.requiredExecutedGtidSet, "0-1-9");
+  assertEquals(promoteCalls[0]?.gtidWaitTimeoutSeconds, 99);
 });
 
 test("managed.ha.failover recover falls back to promote when the HA stack is absent", async () => {
@@ -171,6 +240,50 @@ test("managed.ha.failover recover probes host prep when haPresent is omitted", a
   );
   assertEquals(promoteCalls.length, 1);
   assertEquals(result.summary.includes("without Orchestrator"), true);
+});
+
+test("managed.ha.failover undrain uses injected helper when source endpoint is present", async () => {
+  let undrainHost = "";
+  let undrainPort = 0;
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      phase: "undrain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      undrain: (host, port) => {
+        undrainHost = host;
+        undrainPort = port;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(undrainHost, RECOVER_PAYLOAD.sourceHost);
+  assertEquals(undrainPort, RECOVER_PAYLOAD.sourcePort);
+  assertEquals(result.phase, "undrain");
+  assertEquals(result.summary.includes("restored writer routing"), true);
+});
+
+test("managed.ha.failover undrain skips helper when source endpoint is absent", async () => {
+  let undrainCalled = false;
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      phase: "undrain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      undrain: () => {
+        undrainCalled = true;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(undrainCalled, false);
+  assertEquals(result.phase, "undrain");
 });
 
 test("managed.ha.failover drain skips drain helper when source endpoint is absent", async () => {

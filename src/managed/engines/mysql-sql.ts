@@ -316,6 +316,20 @@ export function promoteSql(): string {
   ].join("\n");
 }
 
+/** Executed GTID set on a quiesced MySQL primary (what replicas must apply). */
+export function primaryFinalGtidSetSql(): string {
+  return "SELECT @@GLOBAL.gtid_executed AS gtid_set;";
+}
+
+export function waitForExecutedGtidSetSql(
+  gtidSet: string,
+  timeoutSeconds: number,
+): string {
+  return `SELECT WAIT_FOR_EXECUTED_GTID_SET(${
+    quoteLiteral(gtidSet)
+  }, ${timeoutSeconds});`;
+}
+
 export function isWritableSql(): string {
   return "SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;";
 }

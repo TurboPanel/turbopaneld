@@ -355,6 +355,20 @@ export function promoteSql(): string {
   ].join("\n");
 }
 
+/** Final GTID position on a quiesced MariaDB primary (includes replicated work). */
+export function primaryFinalGtidSetSql(): string {
+  return "SELECT @@GLOBAL.gtid_current_pos AS gtid_set;";
+}
+
+export function masterGtidWaitSql(
+  gtidSet: string,
+  timeoutSeconds: number,
+): string {
+  return `SELECT MASTER_GTID_WAIT(${
+    quoteLiteral(gtidSet)
+  }, ${timeoutSeconds});`;
+}
+
 export function isWritableSql(): string {
   return "SELECT @@GLOBAL.read_only;";
 }

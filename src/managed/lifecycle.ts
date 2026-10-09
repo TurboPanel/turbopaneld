@@ -29,7 +29,14 @@ import {
   SAFE_MANAGED_ID_RE,
 } from "./engine-paths.ts";
 import { readManagedComposeDataTarget } from "./compose.ts";
-import { writeManagedDemotedMarker } from "./demoted-marker.ts";
+import {
+  clearManagedDemotedMarker,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
+import {
+  captureSwitchoverGtidBeforeStop,
+  reactivatePrimaryAfterSwitchoverAbort,
+} from "./lifecycle-switchover.ts";
 import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
@@ -45,6 +52,8 @@ export type ManagedLifecycleHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  /** Test seam — defaults to real docker setup. */
+  ensureDocker?: () => Promise<void>;
 };
 
 function statusFromContainers(
@@ -156,6 +165,17 @@ export async function handleManagedLifecycle(
   const refused = await refuseNonStandbyReplicaStart(payload, layout, run);
   if (refused) return refused;
 
+  const engineDeps = {
+    runDocker: run,
+    ...(deps?.ensureDocker ? { ensureDocker: deps.ensureDocker } : {}),
+  };
+  const switchoverPrimaryExecutedGtidSet =
+    await captureSwitchoverGtidBeforeStop(
+      payload,
+      run,
+      engineDeps,
+    );
+
   if (payload.action === "stop" && payload.demoted === true) {
     await writeManagedDemotedMarker(
       layout,
@@ -166,8 +186,6 @@ export async function handleManagedLifecycle(
   }
 
   const project = managedComposeProject(payload.managedId);
-  // Project-scoped only — no `-f`, so compose does not interpolate the
-  // removed TURBOPANEL_MANAGED_ROOT_PASSWORD env-file variable.
   const result = await run([
     "compose",
     "-p",
@@ -180,6 +198,12 @@ export async function handleManagedLifecycle(
         sanitizeForLog(result.stderr || "compose failed")
       }`,
     );
+  }
+
+  await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
+
+  if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
+    await clearManagedDemotedMarker(layout, payload.managedId);
   }
 
   if (payload.memberId) {
@@ -195,6 +219,9 @@ export async function handleManagedLifecycle(
       status,
       summary: `managed ${payload.action} observed status=${status}`,
       ...(collected.member !== undefined ? { member: collected.member } : {}),
+      ...(switchoverPrimaryExecutedGtidSet
+        ? { switchoverPrimaryExecutedGtidSet }
+        : {}),
     };
   }
 
@@ -208,5 +235,8 @@ export async function handleManagedLifecycle(
   return {
     status,
     summary: `managed ${payload.action} observed status=${status}`,
+    ...(switchoverPrimaryExecutedGtidSet
+      ? { switchoverPrimaryExecutedGtidSet }
+      : {}),
   };
 }

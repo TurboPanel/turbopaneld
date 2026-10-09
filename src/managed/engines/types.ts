@@ -214,7 +214,36 @@ export type ManagedEngineReplicationRuntime = {
     ctx: ManagedEngineContext,
     desired: readonly string[],
   ): Promise<void>;
-  promote(ctx: ManagedEngineContext): Promise<void>;
+  /** Single-statement admin query (`-N -B`) for switchover GTID proof. */
+  runAdminScalarQuery?(
+    ctx: ManagedEngineContext,
+    sql: string,
+  ): Promise<string>;
+  promote(
+    ctx: ManagedEngineContext,
+    options?: {
+      requiredExecutedGtidSet?: string;
+      gtidWaitTimeoutSeconds?: number;
+    },
+  ): Promise<void>;
+  /**
+   * Planned switchover: make the old primary read-only and return its final
+   * GTID position for the promotion target to prove before promote.
+   */
+  quiesceFormerPrimaryForSwitchover?(
+    ctx: ManagedEngineContext,
+  ): Promise<string>;
+  /**
+   * Refuse reactivation when this member is no longer quiesced (promotion may
+   * have started locally or the data directory was mutated).
+   */
+  assertFormerPrimarySafeToReactivateAfterSwitchoverAbort?(
+    ctx: ManagedEngineContext,
+  ): Promise<void>;
+  /** Undo a switchover abort on the old primary after it is started again. */
+  reactivateFormerPrimaryAfterSwitchoverAbort?(
+    ctx: ManagedEngineContext,
+  ): Promise<void>;
   /** True when this member is a replica (in recovery / replica status present). */
   isStandby(ctx: ManagedEngineContext): Promise<boolean>;
   /**

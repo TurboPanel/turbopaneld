@@ -43,6 +43,7 @@ function composeYaml(image: string, target: string): string {
 
 const POSTGRES_COMPOSE = composeYaml("postgres:18", "/var/lib/postgresql");
 const MYSQL_COMPOSE = composeYaml("mysql:8.4", "/var/lib/mysql");
+const MARIADB_COMPOSE = composeYaml("mariadb:11", "/var/lib/mysql");
 
 type Recorder = {
   calls: string[][];
@@ -282,6 +283,103 @@ for (const engine of ["mysql", "mariadb"] as const) {
     assertEquals(composeCalled(calls, "start"), true);
   });
 }
+
+test("lifecycle stop with captureSwitchoverGtid returns switchoverPrimaryExecutedGtidSet", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const managedId = `managed_lifecycle_gtid_${crypto.randomUUID()}`;
+      const root = managedDir(
+        { stateDir: fixture.dirs.stateDir } as Parameters<typeof managedDir>[0],
+        managedId,
+      );
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, MARIADB_COMPOSE);
+      const running = JSON.stringify([
+        {
+          ID: "maria1",
+          Name: `${MEMBER_ID}-1`,
+          Service: "db",
+          State: "running",
+        },
+      ]);
+      const result = await handleManagedLifecycle(
+        {
+          managedId,
+          action: "stop",
+          memberId: MEMBER_ID,
+          engine: "mariadb",
+          role: "primary",
+          captureSwitchoverGtid: true,
+        },
+        new Date().toISOString(),
+        {
+          ensureDocker: () => Promise.resolve(),
+          runDocker: (args) => {
+            if (args[0] === "compose" && args.includes("ps")) {
+              return Promise.resolve({
+                success: true,
+                stdout: running,
+                stderr: "",
+                code: 0,
+              });
+            }
+            if (args[0] === "compose") {
+              return Promise.resolve({
+                success: true,
+                stdout: "",
+                stderr: "",
+                code: 0,
+              });
+            }
+            if (args[0] === "exec") {
+              const sql = args[args.indexOf("-e") + 1] ?? "";
+              if (sql.includes("gtid_current_pos")) {
+                return Promise.resolve({
+                  success: true,
+                  stdout: "0-1-77\n",
+                  stderr: "",
+                  code: 0,
+                });
+              }
+              return Promise.resolve({
+                success: true,
+                stdout: "",
+                stderr: "",
+                code: 0,
+              });
+            }
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+        },
+      );
+      assertEquals(result.switchoverPrimaryExecutedGtidSet, "0-1-77");
+      const parsed = parseManagedLifecycleResult(result);
+      assertEquals(parsed.switchoverPrimaryExecutedGtidSet, "0-1-77");
+      const quiesced = await Deno.readTextFile(
+        `${root}/switchover-quiesced.json`,
+      );
+      assertEquals(
+        JSON.parse(quiesced).primaryExecutedGtidSet,
+        "0-1-77",
+      );
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
 
 test("lifecycle start of a replica fails closed without the compose file", async () => {
   await assertRejects(

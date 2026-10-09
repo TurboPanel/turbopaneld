@@ -15,13 +15,17 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { parseManagedHaFailoverPayload } from "../contracts/commands-contracts.ts";
 import { handleManagedPromote } from "../managed/promote.ts";
+import { proveSwitchoverGtidBeforePromote } from "../managed/switchover-gtid-proof.ts";
 import {
   ensureLocalPrimarySlots,
   followLocalStandby,
   type FollowPrimaryDeps,
 } from "../managed/follow-primary.ts";
 import { applyProxySqlAdminStatements } from "../managed/proxysql-admin.ts";
-import { buildProxySqlDrainStatements } from "../managed/proxysql.ts";
+import {
+  buildProxySqlDrainStatements,
+  buildProxySqlUndrainStatements,
+} from "../managed/proxysql.ts";
 import {
   hostPrepPresent,
   loadOrchestratorApiCredentials,
@@ -45,6 +49,11 @@ export type ManagedHaFailoverHandlerDeps = {
     hostname: string,
     port: number,
   ) => Promise<void>;
+  undrain?: (
+    hostname: string,
+    port: number,
+  ) => Promise<void>;
+  proveGtid?: typeof proveSwitchoverGtidBeforePromote;
   recover?: typeof recoverToCandidate;
   promote?: typeof handleManagedPromote;
   follow?: typeof followLocalStandby;
@@ -55,6 +64,25 @@ export type ManagedHaFailoverHandlerDeps = {
   /** Test seam for translating a local member's Docker name (inspect). */
   runDocker?: RunDockerFn;
 };
+
+async function undrainWriterOnLocalProxySql(
+  hostname: string,
+  port: number,
+): Promise<void> {
+  const layout = resolveLayout();
+  const descriptor = await readSystemComponentDescriptor(
+    layout,
+    SYSTEM_MANAGED_INGRESS_COMPONENT,
+  );
+  if (!descriptor) return;
+  await applyProxySqlAdminStatements(
+    buildProxySqlUndrainStatements(hostname, port),
+    {
+      layout,
+      containerName: descriptor.containerName,
+    },
+  );
+}
 
 async function drainWriterOnLocalProxySql(
   hostname: string,
@@ -107,6 +135,12 @@ async function promoteWithoutOrchestrator(
       memberId: payload.targetMemberId,
       demoteMemberId: payload.sourceMemberId,
       ...(payload.engine ? { engine: payload.engine } : {}),
+      ...(payload.requiredExecutedGtidSet
+        ? { requiredExecutedGtidSet: payload.requiredExecutedGtidSet }
+        : {}),
+      ...(payload.gtidWaitTimeoutSeconds !== undefined
+        ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+        : {}),
     },
     daemonReceivedAt,
     { decryptSecrets: deps?.decryptSecrets },
@@ -216,6 +250,54 @@ async function handleDrainPhase(
   };
 }
 
+async function handleUndrainPhase(
+  payload: ManagedHaFailoverPayload,
+  daemonReceivedAt: string,
+  deps: ManagedHaFailoverHandlerDeps | undefined,
+): Promise<ManagedHaFailoverResult> {
+  if (payload.sourceHost && payload.sourcePort !== undefined) {
+    const undrain = deps?.undrain ?? undrainWriterOnLocalProxySql;
+    await undrain(payload.sourceHost, payload.sourcePort);
+  }
+  logInfo(
+    "commands",
+    `managed.ha.failover undrain completed managedId=${payload.managedId} received=${daemonReceivedAt}`,
+  );
+  return {
+    summary: `restored writer routing for managed ${payload.managedId}`,
+    phase: "undrain",
+  };
+}
+
+async function proveSwitchoverGtidIfRequired(
+  payload: ManagedHaFailoverPayload,
+  deps: ManagedHaFailoverHandlerDeps | undefined,
+): Promise<void> {
+  const mysqlFamily = payload.engine === "mysql" ||
+    payload.engine === "mariadb";
+  if (
+    mysqlFamily &&
+    !payload.requiredExecutedGtidSet &&
+    payload.gtidWaitTimeoutSeconds !== undefined
+  ) {
+    throw new Error(
+      "managed.ha.failover recover requires requiredExecutedGtidSet when gtidWaitTimeoutSeconds is set for MySQL-family engines",
+    );
+  }
+  if (!payload.requiredExecutedGtidSet) return;
+  const prove = deps?.proveGtid ?? proveSwitchoverGtidBeforePromote;
+  await prove(
+    {
+      managedId: payload.managedId,
+      ...(payload.engine ? { engine: payload.engine } : {}),
+      requiredExecutedGtidSet: payload.requiredExecutedGtidSet,
+      ...(payload.gtidWaitTimeoutSeconds !== undefined
+        ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+        : {}),
+    },
+  );
+}
+
 async function recoverWithOrchestrator(
   payload: ManagedHaFailoverPayload,
   endpoints: OrchestratorRecoverTarget,
@@ -277,9 +359,14 @@ export async function handleManagedHaFailover(
   if (payload.phase === "drain") {
     return await handleDrainPhase(payload, daemonReceivedAt, deps);
   }
+  if (payload.phase === "undrain") {
+    return await handleUndrainPhase(payload, daemonReceivedAt, deps);
+  }
   if (payload.phase === "repoint") {
     return await handleRepointPhase(payload, daemonReceivedAt, deps);
   }
+
+  await proveSwitchoverGtidIfRequired(payload, deps);
 
   const haPresent = deps?.haPresent
     ? await deps.haPresent()

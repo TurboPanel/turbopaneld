@@ -6,9 +6,32 @@
  */
 import { assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedPromote } from "./promote.ts";
+import { readSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
 
 const test = Deno.test.bind(Deno);
+
+async function withPromoteLayoutEnv<T>(
+  fn: () => Promise<T> | T,
+): Promise<T> {
+  return await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      return await fn();
+    } finally {
+      for (const [key, old] of Object.entries(prior)) {
+        if (old === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, old);
+      }
+    }
+  });
+}
 
 const RUNNING_PS = JSON.stringify([
   {
@@ -77,6 +100,100 @@ test("handleManagedPromote promotes standby and reports primary health", async (
   assertEquals(result.demoted, true);
   assertEquals(result.demotedMemberId, "00000000-0000-4000-8000-000000000003");
   assertEquals(result.replication?.state, "streaming");
+});
+
+test("handleManagedPromote blocks promotion when GTID wait times out", async () => {
+  const mysqlPs = JSON.stringify([
+    {
+      ID: "mysql123",
+      Name: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+      Service: "mysql",
+      State: "running",
+    },
+  ]);
+  let sawPromoteSql = false;
+  await assertRejects(
+    () =>
+      handleManagedPromote(
+        {
+          managedId: "managed_promote_mysql",
+          memberId: "00000000-0000-4000-8000-000000000004",
+          engine: "mysql",
+          requiredExecutedGtidSet: "uuid:1-50",
+          gtidWaitTimeoutSeconds: 3,
+        },
+        new Date().toISOString(),
+        {
+          ensureDocker: () => Promise.resolve(),
+          runDocker: (args) => {
+            if (args[0] === "compose" && args.includes("ps")) {
+              return Promise.resolve(dockerOk(mysqlPs));
+            }
+            if (args[0] === "exec" && args.includes("mysql")) {
+              const sql = args[args.indexOf("-e") + 1] ?? "";
+              if (sql.includes("WAIT_FOR_EXECUTED_GTID_SET")) {
+                return Promise.resolve(dockerOk("1\n"));
+              }
+              if (sql.includes("STOP REPLICA")) {
+                sawPromoteSql = true;
+              }
+              return Promise.resolve(dockerOk("0\t0\n"));
+            }
+            return Promise.resolve(dockerOk());
+          },
+        },
+      ),
+    Error,
+    "switchover_promote:gtid_wait_timeout",
+  );
+  assertEquals(sawPromoteSql, false);
+});
+
+test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_mysql";
+    const mysqlPs = JSON.stringify([
+      {
+        ID: "mysql123",
+        Name: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+        Service: "mysql",
+        State: "running",
+      },
+    ]);
+    let sawGtidWait = false;
+    const result = await handleManagedPromote(
+      {
+        managedId,
+        memberId: "00000000-0000-4000-8000-000000000004",
+        engine: "mysql",
+        requiredExecutedGtidSet: "uuid:1-50",
+        gtidWaitTimeoutSeconds: 60,
+      },
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: (args) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerOk(mysqlPs));
+          }
+          if (args[0] === "exec" && args.includes("mysql")) {
+            const sql = args[args.indexOf("-e") + 1] ?? "";
+            if (sql.includes("WAIT_FOR_EXECUTED_GTID_SET")) {
+              sawGtidWait = true;
+              return Promise.resolve(dockerOk("0\n"));
+            }
+            return Promise.resolve(dockerOk("0\t0\n"));
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(sawGtidWait, true);
+    assertEquals(result.role, "primary");
+    const layout = resolveLayout(Deno.env.toObject());
+    const marker = await readSwitchoverPromoteLocalMarker(layout, managedId);
+    assertEquals(marker?.phase, "completed");
+  });
 });
 
 test("handleManagedPromote mysql path promotes via socket exec", async () => {

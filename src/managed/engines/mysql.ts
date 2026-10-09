@@ -20,6 +20,17 @@ import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
+import {
+  switchoverCaughtErrorDetail,
+  switchoverPromoteErrorMessage,
+} from "./switchover-promote-error.ts";
+import { replicationGtidReceivedSql } from "./switchover-gtid-sql.ts";
+import {
+  filterGtidSetForSwitchoverWait,
+  quiesceAndReadPrimaryGtid,
+  SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+  waitForRequiredGtidSet,
+} from "./switchover-gtid.ts";
 import { parseSqlBool } from "./sql-bool.ts";
 import {
   authSocketPluginPresentSql,
@@ -42,6 +53,7 @@ import {
   installAuthSocketPluginSql,
   isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
@@ -50,6 +62,7 @@ import {
   showReplicaStatusSql,
   startReplicaSql,
   versionSql,
+  waitForExecutedGtidSetSql,
 } from "./mysql-sql.ts";
 import {
   healStoppedReplicaIo,
@@ -627,24 +640,91 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     }
   },
 
-  async promote(ctx) {
-    await runMysql(ctx, promoteSql());
-    const deadline = Date.now() + 60_000;
-    const writable = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const out = await runMysqlQuery(ctx, isWritableSql());
-      const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (
-        parseSqlBool(readOnly ?? "") === false &&
-        parseSqlBool(superReadOnly ?? "") === false
-      ) {
-        return true;
+  async quiesceFormerPrimaryForSwitchover(ctx) {
+    return await quiesceAndReadPrimaryGtid(
+      () => runMysql(ctx, enforceReadOnlySql()),
+      () => runMysqlQuery(ctx, primaryFinalGtidSetSql()),
+      () => runMysql(ctx, disableReadOnlySql()),
+    );
+  },
+
+  runAdminScalarQuery(ctx, sql) {
+    return runMysqlQuery(ctx, sql);
+  },
+
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+    if (verbose.trim().length > 0) {
+      throw new Error(
+        "switchover: former primary is a standby; cannot reactivate after abort",
+      );
+    }
+    const out = await runMysqlQuery(ctx, isWritableSql());
+    const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+    if (
+      parseSqlBool(readOnly ?? "") !== true ||
+      parseSqlBool(superReadOnly ?? "") !== true
+    ) {
+      throw new Error(
+        "switchover: former primary is not read_only; promotion may have started",
+      );
+    }
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runMysql(ctx, disableReadOnlySql());
+  },
+
+  async promote(ctx, options) {
+    let promoteStarted = false;
+    try {
+      if (options?.requiredExecutedGtidSet) {
+        const received = await runMysqlQuery(
+          ctx,
+          replicationGtidReceivedSql("mysql"),
+        );
+        const waitSet = filterGtidSetForSwitchoverWait(
+          options.requiredExecutedGtidSet,
+          received,
+        );
+        await waitForRequiredGtidSet(
+          (sql) => runMysqlQuery(ctx, sql),
+          waitForExecutedGtidSetSql,
+          waitSet,
+          options.gtidWaitTimeoutSeconds ??
+            SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+          "mysql",
+        );
       }
-      await sleep(500);
-      return writable();
-    };
-    if (await writable()) return;
-    throw new Error("mysql promote did not become writable within 60s");
+      promoteStarted = true;
+      await runMysql(ctx, promoteSql());
+      const deadline = Date.now() + 60_000;
+      const writable = async (): Promise<boolean> => {
+        if (Date.now() >= deadline) return false;
+        const out = await runMysqlQuery(ctx, isWritableSql());
+        const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+        if (
+          parseSqlBool(readOnly ?? "") === false &&
+          parseSqlBool(superReadOnly ?? "") === false
+        ) {
+          return true;
+        }
+        await sleep(500);
+        return writable();
+      };
+      if (await writable()) return;
+      throw new Error("mysql promote did not become writable within 60s");
+    } catch (error) {
+      if (promoteStarted) {
+        throw new Error(
+          switchoverPromoteErrorMessage(
+            "promote_started",
+            switchoverCaughtErrorDetail(error),
+          ),
+        );
+      }
+      throw error;
+    }
   },
 
   async isStandby(ctx) {
