@@ -14,7 +14,12 @@
  * assuming it is the connection identity.
  */
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { getManagedEngineRuntime } from "./index.ts";
 import {
@@ -395,8 +400,23 @@ test("backup dump/restore argv always target the stable platform admin regardles
   const restoreArgv = engine.backup.restoreArgv(ctx, { database: "appdb" });
 
   assertEquals(dumpArgv, ["pg_dump", "-Fc", "-U", "postgres", "-d", "appdb"]);
-  assertEquals(restoreArgv.includes("-U"), true);
-  assertEquals(restoreArgv[restoreArgv.indexOf("-U") + 1], "postgres");
+  // The restore runs as one script; the admin and database travel as
+  // positional arguments, never inside the script text.
+  assertEquals(restoreArgv.slice(0, 2), ["sh", "-c"]);
+  assertEquals(restoreArgv.slice(3, 6), ["tp-restore", "postgres", "appdb"]);
+  assertStringIncludes(
+    restoreArgv[2],
+    'psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2"',
+  );
+  assertEquals(restoreArgv[2].includes("appdb"), false);
+  assertStringIncludes(
+    restoreArgv[2],
+    "pg_restore --no-owner --clean --if-exists -f - | sed -E",
+  );
+  assertStringIncludes(restoreArgv[2], "lock_timeout|statement_timeout");
+  assertStringIncludes(restoreArgv[2], "set -o pipefail");
+  assertStringIncludes(restoreArgv[2], "set +e");
+  assertStringIncludes(restoreArgv[7], "CREATE SCHEMA %I AUTHORIZATION %I");
 });
 
 function standbyReplicationSpec() {
@@ -729,6 +749,50 @@ test("postgres promote leaves recovery on first writable check", async () => {
   assertEquals(recoveryChecks >= 2, true);
 });
 
+test("postgres followPrimary rewrites primary_conninfo toward the new primary", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected postgres followPrimary");
+  }
+  const inputs: string[] = [];
+  const exec: ManagedEngineExec = (_argv, input) => {
+    inputs.push(input ?? "");
+    if (input?.includes("current_setting")) {
+      return Promise.resolve({
+        success: true,
+        stdout:
+          "user=tp_repl password=s3cret host=10.100.0.5 port=45001 sslmode=verify-full\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.followPrimary(buildContext(exec), {
+    primary: { host: "10.100.0.4", port: 45001 },
+  });
+  const apply = inputs.find((sql) => sql.includes("ALTER SYSTEM"));
+  if (!apply) throw new TypeError("expected ALTER SYSTEM primary_conninfo");
+  assertEquals(apply.includes("host=10.100.0.4"), true);
+  assertEquals(apply.includes("10.100.0.5"), false);
+});
+
+test("postgres followPrimary throws when primary_conninfo is empty", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected postgres followPrimary");
+  }
+  const exec: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  await assertRejects(
+    () =>
+      replication.followPrimary(buildContext(exec), {
+        primary: { host: "10.100.0.4", port: 45001 },
+      }),
+    Error,
+    "empty primary_conninfo",
+  );
+});
+
 test("postgres readHealth reports primary replication rows", async () => {
   const replication = postgresManagedEngineRuntime.replication;
   if (!replication?.readHealth) {
@@ -812,6 +876,78 @@ test("postgres applyCredentials throws when psql fails", async () => {
     Error,
     "psql failed",
   );
+});
+
+const STREAM_CLOSED = "spawn failed: Writable stream is closed";
+
+test("postgres applyCredentials does not retry a closed stdin on non-idempotent SQL", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: STREAM_CLOSED,
+    });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+  assertEquals(calls, 1);
+});
+
+test("postgres applyCredentials does not retry a SQL error", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: 'ERROR:  syntax error at or near "FOO"',
+    });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+  assertEquals(calls, 1);
+});
+
+test("postgres ensureSlots retries idempotent slot SQL once after a closed stdin", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    if (calls === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: STREAM_CLOSED,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await postgresManagedEngineRuntime.replication!.ensureSlots!(
+    buildContext(exec),
+    ["tp_member_abcd"],
+  );
+  assertEquals(calls, 2);
 });
 
 test("postgres waitReady retries until pg_isready succeeds", async () => {
@@ -1440,4 +1576,41 @@ test("postgres pruneOrphanSlots drops every managed slot not listed and keeps th
     ).length,
     1,
   );
+});
+
+test("postgres ensureSlots creates each missing physical slot", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected postgres ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), [
+    "tp_member_2",
+    "tp_member_3",
+  ]);
+  const sql = calls.map((c) => c.input ?? "").join("\n");
+  assertEquals(sql.includes("pg_create_physical_replication_slot"), true);
+  assertEquals(sql.includes("tp_member_2"), true);
+  assertEquals(sql.includes("tp_member_3"), true);
+});
+
+test("postgres isStandby follows pg_is_in_recovery", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected postgres isStandby");
+  }
+  const standby: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_is_in_recovery")) {
+      return Promise.resolve({ success: true, stdout: "t\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const primary: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("pg_is_in_recovery")) {
+      return Promise.resolve({ success: true, stdout: "f\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  assertEquals(await replication.isStandby(buildContext(standby)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
 });

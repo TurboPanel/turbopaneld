@@ -463,6 +463,21 @@ test("parseManagedLifecyclePayload and parseManagedDestroyPayload reject optiona
     TypeError,
     "Invalid managed.lifecycle payload",
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: true,
+    }).demoted,
+    true,
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+    }).demoted,
+    undefined,
+  );
   assertThrows(
     () => parseManagedDestroyPayload(null),
     TypeError,
@@ -1002,6 +1017,53 @@ test("parseManagedHaFailoverPayload rejects missing fields and optional host/por
         targetMemberId: REPLICA_ID,
         phase: "recover",
         targetPort: 0,
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+});
+
+test("parseManagedHaFailoverPayload accepts ensureSlots and rejects bad entries", () => {
+  const parsed = parseManagedHaFailoverPayload({
+    managedId: MANAGED_ID,
+    sourceMemberId: MEMBER_ID,
+    targetMemberId: REPLICA_ID,
+    phase: "repoint",
+    ensureSlots: ["tp_member_2", "tp_member_3"],
+  });
+  assertEquals(parsed.ensureSlots, ["tp_member_2", "tp_member_3"]);
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: ["tp-member-2"],
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: Array.from({ length: 33 }, (_, i) => `tp_member_${i}`),
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: "tp_member_2",
       }),
     TypeError,
     "Invalid managed.ha.failover payload",

@@ -6,6 +6,11 @@
  * escapes — {@link quoteLiteral} must escape `\` as well as `'`.
  */
 
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -246,9 +251,36 @@ export function ensureSocketAdminSql(osUser: string = "mysql"): string {
   ].join("\n");
 }
 
+/**
+ * Session-only: keep replica-local statements out of the binary log so they
+ * cannot mint a replica-UUID GTID the primary never executed.
+ */
+export function withoutSessionBinlogSql(sql: string): string {
+  return [
+    "SET SESSION sql_log_bin = 0;",
+    sql.trim(),
+    "SET SESSION sql_log_bin = 1;",
+  ].join("\n");
+}
+
+/**
+ * MySQL 8.4+ replacement for `RESET MASTER`. Clears entrypoint-init GTIDs on
+ * a freshly initdb'd standby before the dump's `SET GTID_PURGED`.
+ */
+export function resetReplicaGtidStateSql(): string {
+  return "RESET BINARY LOGS AND GTIDS;";
+}
+
+/** Replica-local flush — must not be binary-logged. */
+export function flushPrivilegesLocalSql(): string {
+  return withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+}
+
 /** MySQL 8+/9 `INSTALL PLUGIN` — no `IF NOT EXISTS` (that is MariaDB-only). */
 export function installAuthSocketPluginSql(): string {
-  return "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';";
+  return withoutSessionBinlogSql(
+    "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';",
+  );
 }
 
 export function authSocketPluginPresentSql(): string {
@@ -353,6 +385,22 @@ export function showReplicaStatusSql(): string {
   return "SHOW REPLICA STATUS;";
 }
 
+/** Seconds between IO-thread reconnect attempts (engine default is 60). */
+export const MYSQL_REPLICA_CONNECT_RETRY_SECONDS = 10;
+
+/**
+ * How many reconnects to attempt. MySQL 8.4 / 9.7 default SOURCE_RETRY_COUNT
+ * is 10 (~10 minutes at the 60 s default connect retry) and then leave the
+ * IO thread stopped. At {@link MYSQL_REPLICA_CONNECT_RETRY_SECONDS}, seven
+ * days is `(7 * 86400) / 10` attempts.
+ */
+export const MYSQL_REPLICA_RETRY_COUNT = (7 * 86400) /
+  MYSQL_REPLICA_CONNECT_RETRY_SECONDS;
+
+export function startReplicaSql(): string {
+  return "START REPLICA;";
+}
+
 export function changeReplicationSourceSql(spec: {
   host: string;
   port: number;
@@ -368,9 +416,30 @@ export function changeReplicationSourceSql(spec: {
     "  SOURCE_AUTO_POSITION = 1,",
     "  SOURCE_SSL = 1,",
     "  SOURCE_SSL_CA = '/etc/mysql/tls/ca.crt',",
-    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1;",
-    "START REPLICA;",
+    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1,",
+    `  SOURCE_CONNECT_RETRY = ${MYSQL_REPLICA_CONNECT_RETRY_SECONDS},`,
+    `  SOURCE_RETRY_COUNT = ${MYSQL_REPLICA_RETRY_COUNT};`,
+    startReplicaSql(),
   ].join("\n");
+}
+
+/**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and auto-position stay as seeded.
+ */
+export const MYSQL_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP REPLICA",
+  change: "CHANGE REPLICATION SOURCE TO",
+  hostKey: "SOURCE_HOST",
+  portKey: "SOURCE_PORT",
+  start: "START REPLICA",
+};
+
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return renderFollowSourceSql(MYSQL_FOLLOW_SOURCE_DIALECT, spec, quoteLiteral);
 }
 
 /**

@@ -3,6 +3,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { topologyPlaintext } from "../../testing/managed-topology-fixtures.ts";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import {
   buildMariadbStandbySeedScript,
@@ -111,9 +112,12 @@ const STANDBY_MARKER = ".turbopanel-standby";
 test("mariadb waitReady succeeds on first mariadb-admin ping", async () => {
   const { exec, calls } = recordingExec();
   await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(calls.length, 1);
-  assertEquals(calls[0]!.argv.includes("mariadb-admin"), true);
-  assertEquals(calls[0]!.argv.includes("ping"), true);
+  assertEquals(calls.length, 3);
+  assertEquals(calls[0]!.argv.includes("--protocol=socket"), true);
+  assertEquals(calls[1]!.argv.includes("--protocol=tcp"), true);
+  assertEquals(calls[1]!.argv.includes("127.0.0.1"), true);
+  assertEquals(calls[1]!.argv.includes("3306"), true);
+  assertEquals(calls[2]!.argv.includes("--protocol=socket"), true);
 });
 
 test("mariadb waitReady retries ping via defaults-extra-file after 1045", async () => {
@@ -140,9 +144,11 @@ test("mariadb waitReady retries ping via defaults-extra-file after 1045", async 
     ...buildContext(exec),
     socketPassword: "root-pass",
   });
-  assertEquals(calls.length, 2);
+  assertEquals(calls.length, 4);
   assertEquals(calls[1]!.argv[0], "sh");
   assertEquals(calls[1]!.input?.includes("password=root-pass"), true);
+  assertEquals(calls[2]!.argv.includes("--protocol=tcp"), true);
+  assertEquals(calls[3]!.argv.includes("--protocol=socket"), true);
 });
 
 test("mariadb applyCredentials creates root and app users via socket", async () => {
@@ -176,6 +182,13 @@ test("mariadb applyCredentials creates root and app users via socket", async () 
   assertEquals(
     /ALTER USER `root`@'localhost' IDENTIFIED BY/.test(rootSql),
     false,
+  );
+  assertEquals(rootSql.includes("REVOKE READ_ONLY ADMIN"), true);
+  assertEquals(
+    rootSql.includes(
+      "GRANT ALL PRIVILEGES ON *.* TO `root`@'localhost' WITH GRANT OPTION",
+    ),
+    true,
   );
 });
 
@@ -397,6 +410,20 @@ test("mariadb configureStandby seeds replication and writes marker", async () =>
   assertEquals(calls.some((c) => c.argv[0] === "sh"), true);
   assertEquals(calls.some((c) => c.input?.includes("203.0.113.60")), true);
   assertEquals(
+    calls.some((c) =>
+      c.input?.includes("IDENTIFIED VIA unix_socket") &&
+      c.input.includes("GRANT ALL PRIVILEGES")
+    ),
+    true,
+  );
+  assertEquals(
+    calls.some((c) =>
+      c.argv.includes("-e") &&
+      (c.argv.at(-1) ?? "").includes("mysql.global_priv")
+    ),
+    true,
+  );
+  assertEquals(
     calls.some((c) => c.argv.some((part) => part.includes("touch"))),
     true,
   );
@@ -407,11 +434,13 @@ test("mariadb configureStandby throws when seed script fails", async () => {
   if (!replication?.configureStandby) {
     throw new TypeError("expected mariadb configureStandby");
   }
+  let seeds = 0;
   const exec: ManagedEngineExec = (argv) => {
     if (argv[0] === "test" && argv.includes("-f")) {
       return Promise.resolve({ success: false, stdout: "", stderr: "" });
     }
-    if (argv[0] === "sh") {
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
       return Promise.resolve({
         success: false,
         stdout: "",
@@ -420,7 +449,7 @@ test("mariadb configureStandby throws when seed script fails", async () => {
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
-  await assertRejects(
+  const err = await assertRejects(
     () =>
       replication.configureStandby!(
         buildContext(exec),
@@ -429,6 +458,90 @@ test("mariadb configureStandby throws when seed script fails", async () => {
     Error,
     "configureStandby seed failed",
   );
+  assertEquals(seeds, 1);
+  assertEquals(err.message.includes("unknown"), false);
+  assertEquals(err.message.includes("seed boom"), true);
+});
+
+test("mariadb configureStandby retries the seed once after empty output", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  let seeds = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
+      if (seeds === 1) {
+        return Promise.resolve({ success: false, stdout: "", stderr: "" });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(seeds, 2);
+});
+
+test("mariadb configureStandby retries the seed once after error 1133", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  let seeds = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      seeds++;
+      if (seeds === 1) {
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr:
+            "ERROR 1133 (28000) at line 11: Can't find any matching row in the user table",
+        });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(seeds, 2);
+});
+
+test("mariadb configureStandby empty seed failure is not reported as unknown", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const err = await assertRejects(
+    () =>
+      replication.configureStandby!(
+        buildContext(exec),
+        standbyReplicationSpec(),
+      ),
+    Error,
+    "the seed command produced no output",
+  );
+  assertEquals(err.message.includes("unknown"), false);
 });
 
 test("mariadb promote clears read-only and returns when writable", async () => {
@@ -437,7 +550,12 @@ test("mariadb promote clears read-only and returns when writable", async () => {
     throw new TypeError("expected mariadb promote");
   }
   let writableChecks = 0;
+  let socketReassert = 0;
   const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("IDENTIFIED VIA unix_socket")) {
+      socketReassert++;
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
     if (input?.includes("RESET SLAVE")) {
       return Promise.resolve({ success: true, stdout: "", stderr: "" });
     }
@@ -451,6 +569,43 @@ test("mariadb promote clears read-only and returns when writable", async () => {
   };
   await replication.promote(buildContext(exec));
   assertEquals(writableChecks >= 2, true);
+  assertEquals(socketReassert, 1);
+});
+
+test("mariadb promote returns when read_only prints OFF", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mariadb promote");
+  }
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET SLAVE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "OFF\n" : "ON\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+  assertEquals(writableChecks >= 2, true);
+});
+
+test("mariadb followPrimary changes master host without reseeding", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.followPrimary) {
+    throw new TypeError("expected mariadb followPrimary");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.followPrimary(buildContext(exec), {
+    primary: { host: "10.100.0.4", port: 45001 },
+  });
+  const sql = calls.map((c) => c.input ?? "").join("\n");
+  assertEquals(sql.includes("STOP SLAVE"), true);
+  assertEquals(sql.includes("MASTER_HOST = '10.100.0.4'"), true);
+  assertEquals(sql.includes("MASTER_PASSWORD"), false);
 });
 
 test("mariadb readHealth parses standby slave status", async () => {
@@ -473,6 +628,83 @@ test("mariadb readHealth parses standby slave status", async () => {
   assertEquals(health.lagSeconds, 7);
 });
 
+const CONNECTION_LOST_VERTICAL = `
+               Slave_IO_Running: No
+              Slave_SQL_Running: Yes
+                 Master_Host: 203.0.113.10
+                 Master_Port: 3306
+                Last_IO_Errno: 2003
+                Last_IO_Error: Can't connect to server on '203.0.113.10'
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+`;
+
+test("mariadb readHealth restarts slave IO after a connection error when the primary is reachable", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mariadb readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  let statusReads = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv[0] === "mariadb-admin" && argv.includes("--host")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "mysqld is alive",
+        stderr: "",
+      });
+    }
+    if (argv.includes("-E")) {
+      statusReads += 1;
+      return Promise.resolve({
+        success: true,
+        stdout: statusReads === 1 ? CONNECTION_LOST_VERTICAL : HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "streaming");
+  assertEquals(calls.some((c) => c.input === "START SLAVE;"), true);
+});
+
+const APPLIER_ERROR_VERTICAL = `
+               Slave_IO_Running: Yes
+              Slave_SQL_Running: No
+                 Master_Host: 203.0.113.10
+                 Master_Port: 3306
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 1062
+               Last_SQL_Error: Duplicate entry '1' for key 'PRIMARY'
+          Seconds_Behind_Master: NULL
+`;
+
+test("mariadb readHealth does not restart through an SQL applier error", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mariadb readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv.includes("-E")) {
+      return Promise.resolve({
+        success: true,
+        stdout: APPLIER_ERROR_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "reconnecting");
+  assertEquals(calls.some((c) => c.input === "START SLAVE;"), false);
+  assertEquals(calls.some((c) => c.argv[0] === "mariadb-admin"), false);
+});
+
 test("mariadb readHealth returns unknown when status query fails", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.readHealth) {
@@ -489,11 +721,11 @@ test("mariadb readHealth returns unknown when status query fails", async () => {
 });
 
 test("mariadb waitReady retries until mariadb-admin ping succeeds", async () => {
-  let attempts = 0;
+  let socketAttempts = 0;
   const exec: ManagedEngineExec = (argv) => {
-    if (argv.includes("mariadb-admin")) {
-      attempts++;
-      if (attempts === 1) {
+    if (argv.includes("mariadb-admin") && argv.includes("--protocol=socket")) {
+      socketAttempts++;
+      if (socketAttempts === 1) {
         return Promise.resolve({
           success: false,
           stdout: "",
@@ -504,7 +736,26 @@ test("mariadb waitReady retries until mariadb-admin ping succeeds", async () => 
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(attempts, 2);
+  assertEquals(socketAttempts, 3);
+});
+
+test("mariadb waitReady keeps polling when TCP ping is refused", async () => {
+  let tcpAttempts = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv.includes("--protocol=tcp")) {
+      tcpAttempts++;
+      if (tcpAttempts === 1) {
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "Can't connect to server on '127.0.0.1' (111)",
+        });
+      }
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
+  assertEquals(tcpAttempts, 2);
 });
 
 test("mariadb waitReady throws after the readiness deadline", async () => {
@@ -574,6 +825,45 @@ test("mariadb promote throws when the instance stays read-only", async () => {
   }
 });
 
+test("mariadb promote throws when read_only stays ON", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mariadb promote");
+  }
+  const originalDateNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls++;
+    if (nowCalls === 1) return 0;
+    if (nowCalls <= 5) return 1_000;
+    return 70_000;
+  };
+  globalThis.setTimeout = ((handler: () => void) => {
+    queueMicrotask(handler);
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("RESET SLAVE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      return Promise.resolve({ success: true, stdout: "ON\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  try {
+    await assertRejects(
+      () => replication.promote!(buildContext(exec)),
+      Error,
+      "mariadb promote did not become writable within 60s",
+    );
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("mariadb configureStandby throws when marker write fails", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.configureStandby) {
@@ -619,10 +909,17 @@ test("mariadb applyDatabases drops databases and ensures ProxySQL monitor", asyn
   assertEquals(calls.some((c) => c.input?.includes("DROP DATABASE")), true);
 
   await mariadbManagedEngineRuntime.ensureProxySqlMonitor!(
-    buildContext(exec),
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.3", "10.100.0.5"],
+    },
     { user: "tp_monitor", password: "mon-pass" },
   );
-  assertEquals(calls.some((c) => c.input?.includes("tp_monitor")), true);
+  const monitorSql =
+    calls.find((c) => c.input?.includes("tp_monitor"))?.input ?? "";
+  assertEquals(monitorSql.includes("'10.100.0.3'"), true);
+  assertEquals(monitorSql.includes("'10.100.0.5'"), true);
+  assertEquals(monitorSql.includes("172.16.0.0/255.240.0.0"), true);
 });
 
 test("mariadb readVersion returns undefined when version query fails", async () => {
@@ -684,7 +981,7 @@ function deniedThenOk(): { exec: ManagedEngineExec; calls: RecordedExec[] } {
 test("mariadb waitReady does not use defaults-extra-file without a socket password", async () => {
   const { exec, calls } = deniedThenOk();
   await mariadbManagedEngineRuntime.waitReady(buildContext(exec));
-  assertEquals(calls.length, 2);
+  assertEquals(calls.length, 4);
   assertEquals(calls.every((c) => c.argv.includes("mariadb-admin")), true);
   assertEquals(calls.some((c) => c.argv[0] === "sh"), false);
 });
@@ -1010,4 +1307,63 @@ test("mariadb configureStandby does not retry a denied seed without a root passw
     replication.configureStandby!(buildContext(exec), standbyReplicationSpec())
   );
   assertEquals(seeds, 1);
+});
+
+test("mariadb ensureSlots is a no-op", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.ensureSlots) {
+    throw new TypeError("expected mariadb ensureSlots");
+  }
+  const { exec, calls } = recordingExec();
+  await replication.ensureSlots(buildContext(exec), ["tp_member_2"]);
+  assertEquals(calls.length, 0);
+});
+
+test("mariadb isStandby is true when SHOW SLAVE STATUS is non-empty", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.isStandby) {
+    throw new TypeError("expected mariadb isStandby");
+  }
+  const replica: ManagedEngineExec = () =>
+    Promise.resolve({
+      success: true,
+      stdout: HEALTHY_VERTICAL,
+      stderr: "",
+    });
+  const primary: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "\n", stderr: "" });
+  assertEquals(await replication.isStandby(buildContext(replica)), true);
+  assertEquals(await replication.isStandby(buildContext(primary)), false);
+});
+
+test("mariadb ensureOrchestratorTopology uses the MariaDB grant dialect", async () => {
+  const { exec, calls } = recordingExec();
+  await mariadbManagedEngineRuntime.ensureOrchestratorTopology!(
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.7"],
+    },
+    { user: "tp_topology_abcd12345678", password: topologyPlaintext() },
+  );
+  const accountSql =
+    calls.find((c) => c.input?.includes("CREATE USER IF NOT EXISTS"))?.input ??
+      "";
+  assertEquals(accountSql.includes("'10.100.0.7'"), true);
+  assertEquals(accountSql.includes("172.16.0.0/255.240.0.0"), true);
+  // MariaDB keeps `REQUIRE` on `GRANT`; only the password re-assert is an
+  // `ALTER USER`, never the TLS binding.
+  assertEquals(accountSql.includes("GRANT USAGE ON *.*"), true);
+  assertEquals(/ALTER USER [^\n]*REQUIRE SSL/.test(accountSql), false);
+  assertEquals(accountSql.includes("sql_log_bin"), false);
+  // MariaDB has no `mysql.slave_master_info`.
+  assertEquals(
+    calls.some((c) =>
+      c.input?.includes("GRANT SELECT ON mysql.gtid_slave_pos")
+    ),
+    true,
+  );
+  assertEquals(
+    calls.some((c) => c.input?.includes("slave_master_info")),
+    false,
+  );
 });

@@ -52,6 +52,121 @@ test("resolveClientSourceHosts is empty when no address lists are present", () =
   );
 });
 
+test("resolveClientSourceHosts includes this host and every member IP on any role", () => {
+  const replicaPeer = {
+    memberId: "00000000-0000-4000-8000-0000000000a2",
+    role: "replica" as const,
+    readEligible: true,
+    address: "10.100.0.3",
+    transport: "datacenter" as const,
+    port: 45001,
+  };
+  const namedPeer = {
+    memberId: "00000000-0000-4000-8000-0000000000a3",
+    role: "replica" as const,
+    readEligible: true,
+    address: "01936b3e-aaaa-bbbb-cccc-123456789abc-3",
+    transport: "local" as const,
+    port: 3306,
+  };
+  const primary = resolveClientSourceHosts({
+    memberRole: "primary",
+    privateListener: { address: "10.100.0.5", port: 45001 },
+    replication: {
+      role: "primary",
+      username: "tp_repl",
+      peerAddresses: ["10.100.0.3", "10.100.0.4"],
+    },
+    peers: [replicaPeer, namedPeer],
+    ingressSourceAddresses: ["10.100.0.90"],
+  } as ManagedApplyPayload);
+  assertEquals(primary, [
+    "10.100.0.3",
+    "10.100.0.4",
+    "10.100.0.5",
+    "10.100.0.90",
+  ]);
+
+  const replica = resolveClientSourceHosts({
+    memberRole: "replica",
+    privateListener: { address: "10.100.0.3", port: 45001 },
+    replication: {
+      role: "standby",
+      username: "tp_repl",
+      peerAddresses: ["10.100.0.4", "10.100.0.5"],
+    },
+    peers: [
+      { ...replicaPeer, role: "primary", address: "10.100.0.5" },
+      {
+        ...replicaPeer,
+        memberId: "00000000-0000-4000-8000-0000000000a4",
+        address: "10.100.0.4",
+      },
+    ],
+  } as ManagedApplyPayload);
+  assertEquals(replica, ["10.100.0.3", "10.100.0.4", "10.100.0.5"]);
+
+  const replicaViaPrimaryHostaddr = resolveClientSourceHosts({
+    memberRole: "replica",
+    privateListener: { address: "10.100.0.3", port: 45001 },
+    replication: {
+      role: "standby",
+      username: "tp_repl",
+      primary: { host: "mysql-primary", hostaddr: "10.100.0.5", port: 45001 },
+    },
+    peers: [namedPeer],
+  } as ManagedApplyPayload);
+  assertEquals(replicaViaPrimaryHostaddr, ["10.100.0.3", "10.100.0.5"]);
+});
+
+test("resolveClientSourceHosts picks up a new member IP after the peer list changes", () => {
+  const before = resolveClientSourceHosts({
+    privateListener: { address: "10.100.0.5", port: 45001 },
+    replication: {
+      role: "primary",
+      username: "tp_repl",
+      peerAddresses: ["10.100.0.3"],
+    },
+    peers: [{
+      memberId: "00000000-0000-4000-8000-0000000000a2",
+      role: "replica",
+      readEligible: true,
+      address: "10.100.0.3",
+      transport: "datacenter",
+      port: 45001,
+    }],
+  } as ManagedApplyPayload);
+  assertEquals(before, ["10.100.0.3", "10.100.0.5"]);
+
+  const after = resolveClientSourceHosts({
+    privateListener: { address: "10.100.0.5", port: 45001 },
+    replication: {
+      role: "primary",
+      username: "tp_repl",
+      peerAddresses: ["10.100.0.3", "10.100.0.4"],
+    },
+    peers: [
+      {
+        memberId: "00000000-0000-4000-8000-0000000000a2",
+        role: "replica",
+        readEligible: true,
+        address: "10.100.0.3",
+        transport: "datacenter",
+        port: 45001,
+      },
+      {
+        memberId: "00000000-0000-4000-8000-0000000000a3",
+        role: "replica",
+        readEligible: true,
+        address: "10.100.0.4",
+        transport: "datacenter",
+        port: 45001,
+      },
+    ],
+  } as ManagedApplyPayload);
+  assertEquals(after, ["10.100.0.3", "10.100.0.4", "10.100.0.5"]);
+});
+
 test("proxysqlProject names the shared managed ingress compose project", () => {
   // The shared ProxySQL project is the managed-ingress system component's
   // allocated serviceId, round-tripped verbatim — never a readable literal.

@@ -1,15 +1,18 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
+  applyFollowedPrimaryConninfoSql,
   connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  currentPrimaryConninfoSql,
   databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
   ensureProxySqlMonitorRoleSql,
+  formatConninfoValue,
   grantDatabaseSql,
   isInRecoverySql,
   listDatabasesForRoleReleaseSql,
@@ -26,9 +29,13 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreReadWriteLoginSchemasSql,
+  restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
+  rewritePrimaryConninfo,
   standbyReplicationStatusSql,
+  stripPgRestoreTimeoutSetLines,
   strongestPrivilege,
 } from "./postgres-sql.ts";
 
@@ -324,6 +331,40 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
   assertEquals(promoteSql().includes("pg_promote"), true);
 });
 
+test("standbyReplicationStatusSql reports 0 lagSeconds when replay has caught the primary", () => {
+  const sql = standbyReplicationStatusSql();
+  const collapsed = sql.replaceAll(/\s+/g, " ");
+  // Caught-up: replay LSN is at or past the primary's last reported WAL end.
+  assertEquals(
+    collapsed.includes(
+      "r.latest_end_lsn IS NOT NULL AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL AND pg_catalog.pg_wal_lsn_diff( r.latest_end_lsn, pg_catalog.pg_last_wal_replay_lsn() ) <= 0",
+    ),
+    true,
+  );
+  // No reported end yet (fresh receiver): never claim zero lag from the
+  // receive position alone.
+  assertEquals(
+    collapsed.includes(
+      "COALESCE(r.latest_end_lsn, pg_catalog.pg_last_wal_receive_lsn())",
+    ),
+    false,
+  );
+  assertEquals(collapsed.includes("THEN 0"), true);
+  // Replay-timestamp clock is only the behind branch, never the sole lag.
+  assertEquals(
+    collapsed.includes(
+      "GREATEST(EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())), 0)",
+    ),
+    true,
+  );
+  assertEquals(
+    collapsed.includes(
+      "WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())) ELSE NULL",
+    ),
+    false,
+  );
+});
+
 test("reload verify SQL treats both restart-required texts as pending, not errors", () => {
   const reload = reloadVerifySql();
   const pending = "(error = 'setting could not be applied' " +
@@ -421,4 +462,84 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
   assertEquals(sql.includes("safe_wal_size"), true);
   assertEquals(sql.includes("pg_current_wal_lsn()"), true);
   assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
+});
+
+test("restoreReadWriteLoginSchemasSql recreates schemas for read-write logins only", () => {
+  const sql = restoreReadWriteLoginSchemasSql();
+  assertStringIncludes(sql, "CREATE SCHEMA %I AUTHORIZATION %I");
+  assertStringIncludes(sql, "'TEMPORARY'");
+  assertStringIncludes(sql, "'CREATE'");
+  assertStringIncludes(sql, "NOT rol.rolsuper");
+});
+
+test("stripPgRestoreTimeoutSetLines removes only lock_timeout and statement_timeout SET lines", () => {
+  const input = [
+    "SET lock_timeout = 0;",
+    "SET statement_timeout = 0;",
+    "SET LOCAL lock_timeout = '30s';",
+    "SET client_encoding = 'UTF8';",
+    "SET standard_conforming_strings = on;",
+    "CREATE TABLE t (id int);",
+    "  SET lock_timeout = 0  ",
+  ].join("\n");
+  const out = stripPgRestoreTimeoutSetLines(input);
+  assertEquals(out.includes("SET LOCAL lock_timeout = '30s';"), true);
+  assertEquals(out.includes("SET lock_timeout = 0"), false);
+  assertEquals(out.includes("statement_timeout = 0"), false);
+  assertEquals(out.includes("client_encoding"), true);
+  assertEquals(out.includes("CREATE TABLE"), true);
+});
+
+test("restoreResetSql drops every user schema and recreates only public with its owner and privileges", () => {
+  const sql = restoreResetSql();
+  assertStringIncludes(sql, "SET LOCAL lock_timeout");
+  assertStringIncludes(sql, "DROP SCHEMA %I CASCADE");
+  // System schemas are never touched.
+  assertStringIncludes(sql, "n.nspname !~ '^pg_'");
+  assertStringIncludes(sql, "n.nspname <> 'information_schema'");
+  // Only `public` is recreated: the dump creates every other schema itself.
+  assertStringIncludes(sql, "IF s.name = 'public' THEN");
+  assertStringIncludes(sql, "ALTER SCHEMA %I OWNER TO %s");
+  assertStringIncludes(sql, "aclexplode");
+});
+
+test("rewritePrimaryConninfo updates host port and hostaddr without dropping password", () => {
+  const current =
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+  const next = rewritePrimaryConninfo(current, {
+    host: "10.100.0.4",
+    hostaddr: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(next.includes("host=10.100.0.4"), true);
+  assertEquals(next.includes("hostaddr=10.100.0.4"), true);
+  assertEquals(next.includes("port=45001"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
+  assertEquals(next.includes("10.100.0.5"), false);
+  const sql = applyFollowedPrimaryConninfoSql(next);
+  assertEquals(sql.includes("ALTER SYSTEM SET primary_conninfo"), true);
+  assertEquals(sql.includes("pg_reload_conf"), true);
+  assertEquals(sql.includes("walreceiver"), true);
+  assertEquals(currentPrimaryConninfoSql().includes("primary_conninfo"), true);
+});
+
+test("rewritePrimaryConninfo drops hostaddr when the new dial is a container name", () => {
+  const current =
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+  const next = rewritePrimaryConninfo(current, {
+    host: "svc-1",
+    port: 5432,
+  });
+  assertEquals(next.includes("host=svc-1"), true);
+  assertEquals(next.includes("hostaddr"), false);
+  assertEquals(next.includes("port=5432"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
+});
+
+test("formatConninfoValue quotes empty values and any whitespace", () => {
+  assertEquals(formatConninfoValue(""), "''");
+  assertEquals(formatConninfoValue("plain"), "plain");
+  assertEquals(formatConninfoValue("has space"), "'has space'");
+  assertEquals(formatConninfoValue("has\ttab"), "'has\ttab'");
+  assertEquals(formatConninfoValue("has\nnl"), "'has\nnl'");
 });

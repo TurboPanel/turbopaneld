@@ -10,6 +10,10 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedApply } from "./apply.ts";
 import { handleManagedDestroy } from "./destroy.ts";
 import {
+  isManagedMemberDemoted,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
+import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
   writeManagedDestroyedMarker,
@@ -113,6 +117,36 @@ test("apply right after destroy is refused and rebuilds nothing", async () => {
     assertEquals(
       await isManagedMemberDestroyed(stateDir, MANAGED_ID, MEMBER_A),
       true,
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_A),
+      false,
+    );
+  });
+});
+
+test("destroy clears a demoted marker", async () => {
+  await withEnv(async () => {
+    const layout = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(layout, MANAGED_ID), { recursive: true });
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_A,
+      new Date().toISOString(),
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_A),
+      true,
+    );
+    await handleManagedDestroy(
+      { managedId: MANAGED_ID, removeVolumes: false, memberId: MEMBER_A },
+      new Date().toISOString(),
+      { runDocker: quietDocker },
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_A),
+      false,
     );
   });
 });

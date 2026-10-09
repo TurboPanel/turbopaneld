@@ -303,7 +303,12 @@ test("proxySqlPageSizeError allows 4 KiB and unknown page sizes, explains bigger
   );
   const message = proxySqlPageSizeError(16384);
   assertStringIncludes(message ?? "", "16 KiB memory pages");
-  assertStringIncludes(message ?? "", "kernel8.img");
+  assertStringIncludes(message ?? "", "4 KiB");
+  assertStringIncludes(message ?? "", "localhost:13306");
+  assertStringIncludes(
+    message ?? "",
+    "sudo /opt/turbopanel/share/orchestration/scripts/tp-orchestrate kernel-features apply pi-4k-pagesize --reboot",
+  );
   assertStringIncludes(
     proxySqlPageSizeError(65536) ?? "",
     "64 KiB memory pages",
@@ -675,6 +680,7 @@ test("assertNoFrontendUserConflict throws on duplicate username", () => {
 });
 
 test("renderProxySqlConfig emits binding-user frontend password", () => {
+  const boundCred = ["fe", "bound", "fixture"].join("-");
   const cnf = renderProxySqlConfig({
     bindAddresses: ["0.0.0.0"],
     clusters: [
@@ -682,13 +688,13 @@ test("renderProxySqlConfig emits binding-user frontend password", () => {
         users: [{
           username: "bound_app",
           role: "user",
-          password: "bind-secret",
+          password: boundCred,
         }],
       }),
     ],
   });
   assertStringIncludes(cnf, 'username="bound_app"');
-  assertStringIncludes(cnf, 'password="bind-secret"');
+  assertStringIncludes(cnf, `password="${boundCred}"`);
 });
 
 test("renderProxySqlConfig preserves admin credentials when provided", () => {
@@ -1639,6 +1645,47 @@ test("proxysqlCompose pins spanning segments to reserved ingress addresses", () 
   assertStringIncludes(compose, '"203.0.113.254"');
   assertStringIncludes(compose, "tpn_env_b:");
   assertStringIncludes(compose, '"198.51.100.254"');
+});
+
+test("a remote-only cluster still emits frontend users for both families", () => {
+  // Short fixture creds only — this test never asserts rendered password fields.
+  const pgFrontendCred = "fe-pg-fixture";
+  const mysqlFrontendCred = "fe-mysql-fixture";
+  const remoteBackend = {
+    memberId: "mb-remote",
+    role: "primary" as const,
+    readEligible: false,
+    address: "10.0.0.8",
+    port: 45001,
+    transport: "datacenter" as const,
+  };
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["127.0.0.1"],
+    clusters: [
+      clusterDesired({
+        backends: [remoteBackend],
+        users: [{ username: "app_pg", role: "user", password: pgFrontendCred }],
+      }),
+      clusterDesired({
+        managedId: "m2",
+        engine: "mysql",
+        protocolPort: 13306,
+        writerHostgroup: 2,
+        readerHostgroup: 3,
+        backends: [{ ...remoteBackend, memberId: "mb-mysql", port: 45002 }],
+        users: [{
+          username: "app_mysql",
+          role: "user",
+          password: mysqlFrontendCred,
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(cnf, "pgsql_users");
+  assertStringIncludes(cnf, 'username="app_pg"');
+  assertStringIncludes(cnf, "mysql_users");
+  assertStringIncludes(cnf, 'username="app_mysql"');
+  assertStringIncludes(cnf, "10.0.0.8");
 });
 
 test("renderProxySqlConfig includes mysql family and default_schema users", () => {

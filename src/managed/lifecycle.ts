@@ -29,6 +29,7 @@ import {
   SAFE_MANAGED_ID_RE,
 } from "./engine-paths.ts";
 import { readManagedComposeDataTarget } from "./compose.ts";
+import { writeManagedDemotedMarker } from "./demoted-marker.ts";
 import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
@@ -154,6 +155,15 @@ export async function handleManagedLifecycle(
 
   const refused = await refuseNonStandbyReplicaStart(payload, layout, run);
   if (refused) return refused;
+
+  if (payload.action === "stop" && payload.demoted === true) {
+    await writeManagedDemotedMarker(
+      layout,
+      payload.managedId,
+      payload.memberId ?? "",
+      new Date().toISOString(),
+    );
+  }
 
   const project = managedComposeProject(payload.managedId);
   // Project-scoped only — no `-f`, so compose does not interpolate the

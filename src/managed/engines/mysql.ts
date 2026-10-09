@@ -6,15 +6,21 @@
  * backup credential-free — never `-p` on argv and never `-e MYSQL_PWD`.
  */
 
+import { dropUserOnEveryHost } from "./account-hosts.ts";
+import {
+  ensureOrchestratorTopologyAccountSql,
+  grantOrchestratorReplicationTableSql,
+} from "./orchestrator-topology-sql.ts";
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
-import { sanitizeForLog } from "../../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
+import { parseSqlBool } from "./sql-bool.ts";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -29,16 +35,27 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
   installAuthSocketPluginSql,
   isWritableSql,
+  MANAGED_DOCKER_NETWORK_HOST,
   promoteSql,
   quoteIdentifier,
+  quoteLiteral,
   replicaFreshnessSql,
+  resetReplicaGtidStateSql,
   showReplicaStatusSql,
+  startReplicaSql,
   versionSql,
 } from "./mysql-sql.ts";
+import {
+  healStoppedReplicaIo,
+  replicaPrimaryLooksReachable,
+  replicaPrimaryPingArgv,
+} from "./replica-io-restart.ts";
 import {
   DOWN_ENGINE_CENSUS,
   type ManagedEngineCensus,
@@ -54,11 +71,14 @@ import type {
   ManagedReplicationObservedHealth,
 } from "./types.ts";
 import {
-  execStandbySeed,
+  execStandbySeedWithInitRetry,
+  formatStandbySeedFailure,
+  MYSQL_FAMILY_NATIVE_PORT,
   mysqlFamilyDataRoot,
   probeMysqlFamilyStandbyData,
   standbySeedStdinLines,
   volumeMountArgs,
+  waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
 /** Marker written into the data volume once configureStandby finishes. */
@@ -109,8 +129,6 @@ const mysqlBackupRuntime: ManagedEngineBackupRuntime = {
   },
 };
 
-const READY_POLL_MS = 1_000;
-const READY_TIMEOUT_MS = 120_000;
 const MYSQL_SQL_STDIN_MARK = "__TP_SQL__";
 
 function sleep(ms: number): Promise<void> {
@@ -195,6 +213,37 @@ async function execMysql(
   const password = ctx.socketPassword;
   if (!password || !deniedNoPassword) return first;
   return await execMysqlWithDefaults(ctx, argv, input, password);
+}
+
+function waitMysqlRealServer(ctx: ManagedEngineContext): Promise<void> {
+  return waitMysqlFamilyRealServer({
+    label: "managed mysql",
+    fallbackError: "mysqladmin ping did not succeed",
+    ping: (kind) => {
+      if (kind === "tcp") {
+        // Raw exec: ping exit 0 (including access-denied) means the real
+        // listener is up. Do not treat 1045 as "not ready" here.
+        return ctx.exec([
+          "mysqladmin",
+          "ping",
+          "--protocol=tcp",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(MYSQL_FAMILY_NATIVE_PORT),
+          "-u",
+          ctx.rootUsername,
+        ]);
+      }
+      return execMysql(ctx, [
+        "mysqladmin",
+        "ping",
+        "--protocol=socket",
+        "-u",
+        ctx.rootUsername,
+      ]);
+    },
+  });
 }
 
 async function runMysql(
@@ -406,6 +455,15 @@ export function resolveMysqlPrimaryConnectHost(primary: {
  * removes it on every exit, dump|import fails if either side fails.
  */
 export function buildMysqlStandbySeedScript(withRootPassword = false): string {
+  // The image entrypoint logs init SQL under the standby's own server UUID.
+  // mysqldump `--set-gtid-purged=ON` *adds* the primary set (`GTID_PURGED='+'`)
+  // and leaves those replica GTIDs in `gtid_executed` — they are errant on
+  // failover. `RESET BINARY LOGS AND GTIDS` (MySQL 8.4+; `RESET MASTER` is
+  // gone) empties them before the import. `SET SESSION sql_log_bin=0` keeps
+  // the import itself out of the binlog.
+  const resetGtid = resetReplicaGtidStateSql().replaceAll(";", "");
+  const SQL_LOG_BIN_OFF = String
+    .raw`  { printf 'SET SESSION sql_log_bin=0;\n'; `;
   return [
     "set -e",
     "tmp=$(mktemp)",
@@ -414,18 +472,21 @@ export function buildMysqlStandbySeedScript(withRootPassword = false): string {
     "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
     'chmod 600 "$tmp"',
     ...standbySeedStdinLines(withRootPassword),
+    `mysql $rootopt --protocol=socket -u root -e "${resetGtid}"`,
     // Prefer pipefail when available (bash/busybox ash); fifo path otherwise.
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
-    '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    "--triggers --events --set-gtid-purged=ON --all-databases " +
+    SQL_LOG_BIN_OFF +
+    'mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
+    "--triggers --events --set-gtid-purged=ON --all-databases; } " +
     "| mysql $rootopt --protocol=socket -u root",
     "else",
     '  fifo="$tmp.fifo"',
     '  mkfifo "$fifo"',
     '  trap \'rm -f "$tmp" "$fifo"\' EXIT INT TERM HUP',
-    '  mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
-    '--triggers --events --set-gtid-purged=ON --all-databases >"$fifo" &',
+    SQL_LOG_BIN_OFF +
+    'mysqldump --defaults-extra-file="$tmp" --single-transaction --routines ' +
+    '--triggers --events --set-gtid-purged=ON --all-databases; } >"$fifo" &',
     "  dump_pid=$!",
     "  set +e",
     '  mysql $rootopt --protocol=socket -u root <"$fifo"',
@@ -447,6 +508,9 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       ensureReplicationAccountSql(username, password, peerAddresses ?? []),
     );
   },
+
+  // MySQL has no physical slots — failover still sends ensureSlots.
+  ensureSlots: () => Promise.resolve(),
 
   probeStandbyData: (ctx) => probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER),
 
@@ -520,23 +584,22 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     await ensureAuthSocketPlugin(ctx);
 
     // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
-    const seed = await execStandbySeed(
+    const seed = await execStandbySeedWithInitRetry(
       ctx,
       buildMysqlStandbySeedScript,
       defaultsBody,
+      () => waitMysqlRealServer(ctx),
     );
     if (!seed.success) {
       throw new Error(
-        `mysql configureStandby seed failed: ${
-          sanitizeForLog(seed.stderr || seed.stdout || "unknown")
-        }`,
+        `mysql configureStandby seed failed: ${formatStandbySeedFailure(seed)}`,
       );
     }
 
     // The seed imported the primary's grant tables (mysql.*) — the running
     // server's in-memory grants do not reload on their own, and monitor /
     // client logins from other hosts stay denied until they do.
-    await runMysql(ctx, "FLUSH PRIVILEGES;");
+    await runMysql(ctx, flushPrivilegesLocalSql());
 
     await runMysql(
       ctx,
@@ -571,12 +634,30 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       if (Date.now() >= deadline) return false;
       const out = await runMysqlQuery(ctx, isWritableSql());
       const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (readOnly === "0" && superReadOnly === "0") return true;
+      if (
+        parseSqlBool(readOnly ?? "") === false &&
+        parseSqlBool(superReadOnly ?? "") === false
+      ) {
+        return true;
+      }
       await sleep(500);
       return writable();
     };
     if (await writable()) return;
     throw new Error("mysql promote did not become writable within 60s");
+  },
+
+  async isStandby(ctx) {
+    const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+    return verbose.trim().length > 0;
+  },
+
+  async followPrimary(ctx, spec) {
+    const host = resolveMysqlPrimaryConnectHost(spec.primary);
+    await runMysql(
+      ctx,
+      followReplicationSourceSql({ host, port: spec.primary.port }),
+    );
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {
@@ -585,9 +666,29 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       return { state: "primary", observedAt };
     }
     try {
-      const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+      let verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
       if (!verbose.trim()) {
         return { state: "unknown", observedAt };
+      }
+      const restarted = await healStoppedReplicaIo({
+        verbose,
+        startSql: startReplicaSql(),
+        logComponent: "managed-mysql",
+        runSql: (sql) => runMysql(ctx, sql),
+        pingPrimary: async (host, port) =>
+          replicaPrimaryLooksReachable(
+            await ctx.exec(
+              replicaPrimaryPingArgv(
+                "mysqladmin",
+                host,
+                port,
+                ctx.rootUsername,
+              ),
+            ),
+          ),
+      });
+      if (restarted) {
+        verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
       }
       const parsed = parseShowReplicaStatus(verbose);
       // Freshness is best effort: a failed read leaves the fields out
@@ -612,28 +713,7 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   defaultDatabase: "appdb",
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
-    let lastError = "mysqladmin ping did not succeed";
-    const ready = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const result = await execMysql(ctx, [
-        "mysqladmin",
-        "ping",
-        "--protocol=socket",
-        "-u",
-        ctx.rootUsername,
-      ]);
-      if (result.success) return true;
-      lastError = result.stderr || result.stdout || lastError;
-      await sleep(READY_POLL_MS);
-      return ready();
-    };
-    if (await ready()) return;
-    throw new Error(
-      `managed mysql not ready within ${READY_TIMEOUT_MS}ms: ${
-        sanitizeForLog(lastError)
-      }`,
-    );
+    await waitMysqlRealServer(ctx);
   },
 
   async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {
@@ -693,6 +773,37 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     );
   },
 
+  async ensureOrchestratorTopology(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void> {
+    const hosts = ctx.clientSourceHosts ?? [];
+    await runMysql(
+      ctx,
+      ensureOrchestratorTopologyAccountSql(
+        credentials.user,
+        credentials.password,
+        hosts,
+        "mysql",
+      ),
+    );
+    // Advisory: a table-level grant fails outright on a release that does not
+    // ship `mysql.slave_master_info`, and Orchestrator only warns without it.
+    try {
+      await runMysql(
+        ctx,
+        grantOrchestratorReplicationTableSql(credentials.user, hosts, "mysql"),
+      );
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managed.apply skipped the Orchestrator replication-table grant: ${
+          sanitizeForLog(err instanceof Error ? err.message : String(err))
+        }`,
+      );
+    }
+  },
+
   async applyDatabases(
     ctx: ManagedEngineContext,
     ops: ManagedApplyDatabaseOp[],
@@ -716,7 +827,14 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
-      await runMysql(ctx, dropAccountSql(username));
+      await dropUserOnEveryHost({
+        username,
+        fixedHosts: [MANAGED_DOCKER_NETWORK_HOST, "localhost"],
+        quoteLiteral,
+        query: (sql) => runMysqlQuery(ctx, sql),
+        run: (sql) => runMysql(ctx, sql),
+        dropAccountSql,
+      });
       dropped.push(username);
     });
     return dropped;
@@ -726,5 +844,11 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   replication: mysqlReplicationRuntime,
 };
 
-/** Exported so tests can assert the binlog-retention hazard note is backed. */
+/**
+ * Exported so tests can assert the binlog-retention hazard note is backed.
+ * The platform `my.cnf` is rendered by the control plane; the bound is the
+ * 7-day time expiry. MySQL 8.4 / 9.7 have no total-size option, so a busy
+ * primary can still fill the volume inside those 7 days. Never add a
+ * purge-by-size that could drop binlogs a replica still needs.
+ */
 export const BINLOG_EXPIRE_LOGS_SECONDS = 7 * 24 * 60 * 60;

@@ -2,6 +2,8 @@
  * Postgres managed-engine runtime: readiness, credentials, databases.
  *
  * SQL is built by `postgres-sql.ts` and fed to `psql` via stdin (never `-c`).
+ * `runPsql` retries once when docker exec closes stdin before the write
+ * finishes and the process produced no SQL error.
  */
 
 import { helperLabelArgs } from "../../deploy/labels.ts";
@@ -12,11 +14,13 @@ import type {
 import { logInfo, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
+  applyFollowedPrimaryConninfoSql,
   connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  currentPrimaryConninfoSql,
   databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
@@ -30,6 +34,7 @@ import {
   listManagedSlotsSql,
   type ManagedDatabasePrivilege,
   managedSlotRetentionSql,
+  PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -38,8 +43,11 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreReadWriteLoginSchemasSql,
+  restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
+  rewritePrimaryConninfo,
   standbyReplicationStatusSql,
   strongestPrivilege,
 } from "./postgres-sql.ts";
@@ -59,6 +67,7 @@ import type {
   ManagedReplicationObservedHealth,
   ManagedSlotRetention,
 } from "./types.ts";
+import { execSqlWithStdinRetry } from "./sql-stdin.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
 
 /**
@@ -71,6 +80,28 @@ function assertSafeDatabaseIdentifier(database: string): string {
   return database;
 }
 
+/**
+ * `$1` root user, `$2` database, `$3` reset SQL. The sentinel line is printed
+ * by the server only after `COMMIT` succeeded.
+ */
+const POSTGRES_RESTORE_SCRIPT = [
+  "set -eu",
+  "set -o pipefail",
+  "set +e",
+  "out=$({",
+  String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
+  `  if pg_restore --no-owner --clean --if-exists -f - | sed -E '${PG_RESTORE_TIMEOUT_SET_LINE_SED}d'; then`,
+  String
+    .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
+  "  fi",
+  '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
+  "set -e",
+  'case "$out" in',
+  "  *tp_restore_committed*) ;;",
+  "  *) echo 'restore was not committed; the database is unchanged' >&2; exit 1 ;;",
+  "esac",
+].join("\n");
+
 const postgresBackupRuntime: ManagedEngineBackupRuntime = {
   artifactExtension: "dump",
 
@@ -79,17 +110,30 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
     return ["pg_dump", "-Fc", "-U", ctx.rootUsername, "-d", db];
   },
 
+  /**
+   * Returns the database to exactly the backup's state, all or nothing.
+   *
+   * One transaction: empty every user schema (`restoreResetSql`), replay the
+   * dump as plain SQL (`pg_restore --clean --if-exists` drops database-global
+   * objects the dump recreates), then recreate per-login read-write schemas
+   * (`restoreReadWriteLoginSchemasSql`). `COMMIT` is only sent when
+   * `pg_restore` succeeded,
+   * so a bad or truncated dump, or a failing statement, rolls back and the
+   * customer keeps their data. The final line proves the commit happened;
+   * without it the command fails. `pg_restore` reads the dump from stdin.
+   * Positional args keep every value out of the script text.
+   */
   restoreArgv(ctx: ManagedEngineContext, { database }): string[] {
     const db = assertSafeDatabaseIdentifier(database);
     return [
-      "pg_restore",
-      "--clean",
-      "--if-exists",
-      "--no-owner",
-      "-U",
+      "sh",
+      "-c",
+      POSTGRES_RESTORE_SCRIPT,
+      "tp-restore",
       ctx.rootUsername,
-      "-d",
       db,
+      restoreResetSql(),
+      restoreReadWriteLoginSchemasSql(),
     ];
   },
 };
@@ -120,22 +164,43 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function psqlArgv(
+  ctx: ManagedEngineContext,
+  database: string,
+  output?: "tuples" | "rows",
+): string[] {
+  const argv = [
+    "psql",
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-U",
+    ctx.rootUsername,
+    "-d",
+    database,
+  ];
+  if (output === "tuples") {
+    argv.push("-t", "-A");
+  } else if (output === "rows") {
+    argv.push("-t", "-A", "-F", "\t");
+  }
+  return argv;
+}
+
+type RunPsqlOptions = {
+  idempotent?: boolean;
+};
+
 async function runPsql(
   ctx: ManagedEngineContext,
   sql: string,
   database: string = ctx.defaultDatabase,
+  options: RunPsqlOptions = {},
 ): Promise<void> {
-  const result = await ctx.exec(
-    [
-      "psql",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-U",
-      ctx.rootUsername,
-      "-d",
-      database,
-    ],
+  const result = await execSqlWithStdinRetry(
+    ctx.exec,
+    psqlArgv(ctx, database),
     sql,
+    { idempotent: options.idempotent },
   );
   if (!result.success) {
     throw new Error(
@@ -309,21 +374,11 @@ async function parsePsqlRows(
   ctx: ManagedEngineContext,
   sql: string,
 ): Promise<string[][]> {
-  const result = await ctx.exec(
-    [
-      "psql",
-      "-v",
-      "ON_ERROR_STOP=1",
-      "-U",
-      ctx.rootUsername,
-      "-d",
-      ctx.defaultDatabase,
-      "-t",
-      "-A",
-      "-F",
-      "\t",
-    ],
+  const result = await execSqlWithStdinRetry(
+    ctx.exec,
+    psqlArgv(ctx, ctx.defaultDatabase, "rows"),
     sql,
+    { idempotent: true },
   );
   if (!result.success) {
     throw new Error(
@@ -426,11 +481,23 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     });
     await forEachSequential(
       desired,
-      (slot) => runPsql(ctx, createPhysicalSlotSql(slot)),
+      (slot) =>
+        runPsql(ctx, createPhysicalSlotSql(slot), ctx.defaultDatabase, {
+          idempotent: true,
+        }),
     );
 
     await pruneOrphanSlots(ctx, desired);
   },
+
+  ensureSlots: (ctx, slots) =>
+    forEachSequential(
+      slots,
+      (slot) =>
+        runPsql(ctx, createPhysicalSlotSql(slot), ctx.defaultDatabase, {
+          idempotent: true,
+        }),
+    ),
 
   pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
 
@@ -567,6 +634,22 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     };
     if (await leftRecovery()) return;
     throw new Error("pg_promote did not leave recovery within 60s");
+  },
+
+  async isStandby(ctx) {
+    const rows = await parsePsqlRows(ctx, isInRecoverySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    return value === "t" || value === "true";
+  },
+
+  async followPrimary(ctx, spec) {
+    const rows = await parsePsqlRows(ctx, currentPrimaryConninfoSql());
+    const current = rows[0]?.[0]?.trim() ?? "";
+    if (!current) {
+      throw new Error("postgres followPrimary: empty primary_conninfo");
+    }
+    const next = rewritePrimaryConninfo(current, spec.primary);
+    await runPsql(ctx, applyFollowedPrimaryConninfoSql(next));
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {
@@ -810,19 +893,11 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   },
 
   async readVersion(ctx: ManagedEngineContext): Promise<string | undefined> {
-    const result = await ctx.exec(
-      [
-        "psql",
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-U",
-        ctx.rootUsername,
-        "-d",
-        ctx.defaultDatabase,
-        "-t",
-        "-A",
-      ],
+    const result = await execSqlWithStdinRetry(
+      ctx.exec,
+      [...psqlArgv(ctx, ctx.defaultDatabase, "tuples")],
       "SHOW server_version;",
+      { idempotent: true },
     );
     if (!result.success) return undefined;
     const version = result.stdout.trim();

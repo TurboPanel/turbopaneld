@@ -2,12 +2,14 @@
  * Managed engine apply: materialize → compose up → databases/credentials.
  */
 
-import type {
-  EnvironmentDeployContainer,
-  ManagedApplyCredential,
-  ManagedApplyDatabaseOp,
-  ManagedApplyPayload,
-  ManagedApplyResult,
+import {
+  type EnvironmentDeployContainer,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+  type ManagedApplyCredential,
+  type ManagedApplyDatabaseOp,
+  type ManagedApplyPayload,
+  type ManagedApplyResult,
 } from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureManagedIngressNetwork } from "./networks.ts";
@@ -45,6 +47,7 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import { maybeClearDemotedMarkerAfterApply } from "./demoted-marker.ts";
 import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
@@ -192,24 +195,34 @@ export function buildEngineExec(
   };
 }
 
+function isClientSourceHostLiteral(address: string): boolean {
+  return isValidIpv4Literal(address) || isValidIpv6Literal(address);
+}
+
 /**
- * Cross-host addresses whose ProxySQL dials this engine's private listener:
- * peer members plus bound consumer servers. MySQL/MariaDB scope account
- * hosts with these; Postgres admission lives in pg_hba (control-plane
- * config). Container-name peers ride the managed docker network pattern —
- * only address literals need per-host accounts.
+ * Cross-host addresses whose ProxySQL dials this engine's private listener.
+ * Every member host IP (peers + this host's private listener) plus bound
+ * consumer servers. MySQL/MariaDB scope monitor/client/root accounts with
+ * these; Postgres admission lives in pg_hba (control-plane config).
+ * Container-name peers ride the managed docker network pattern — only
+ * address literals need per-host accounts. Own-host is required: this
+ * server's ProxySQL reaches replicas via the published listener, so the
+ * engine sees the host address, not a docker-network source.
  */
 export function resolveClientSourceHosts(
   payload: ManagedApplyPayload,
 ): string[] {
   const hosts = new Set<string>();
-  for (
-    const address of [
-      ...(payload.replication?.peerAddresses ?? []),
-      ...(payload.ingressSourceAddresses ?? []),
-    ]
-  ) {
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(address) || address.includes(":")) {
+  const candidates = [
+    payload.privateListener?.address,
+    payload.replication?.primary?.hostaddr,
+    payload.replication?.primary?.host,
+    ...(payload.replication?.peerAddresses ?? []),
+    ...(payload.peers ?? []).map((peer) => peer.address),
+    ...(payload.ingressSourceAddresses ?? []),
+  ];
+  for (const address of candidates) {
+    if (address !== undefined && isClientSourceHostLiteral(address)) {
       hosts.add(address);
     }
   }
@@ -233,6 +246,8 @@ async function requireDecryptedCredentials(
     rootCredential: ManagedApplyCredential;
     /** Per-fronting-server ProxySQL monitor roles (decrypted), when shipped. */
     monitorUsers?: Array<{ user: string; password: string }>;
+    /** Organization Orchestrator topology role (decrypted), when shipped. */
+    topologyUser?: { user: string; password: string };
   }
 > {
   if (!deps?.decryptSecrets) {
@@ -278,7 +293,20 @@ async function requireDecryptedCredentials(
     }
   }
 
-  return { decrypted, redact, rootCredential, monitorUsers };
+  let topologyUser: { user: string; password: string } | undefined;
+  if (payload.topologyUser) {
+    const [plain] = await deps.decryptSecrets([payload.topologyUser.password]);
+    const username = payload.topologyUser.username;
+    if (typeof plain !== "string" || plain.length === 0) {
+      throw new Error(
+        `failed to decrypt topology credential for ${username}`,
+      );
+    }
+    decrypted.plaintexts.push(plain);
+    topologyUser = { user: username, password: plain };
+  }
+
+  return { decrypted, redact, rootCredential, monitorUsers, topologyUser };
 }
 
 async function cleanupManagedEnvFile(
@@ -544,6 +572,7 @@ export async function applyManagedEngineState(
     runHostPrep?: () => Promise<void>;
     /** Decrypted per-fronting-server monitor roles from payload.monitorUsers. */
     monitorUsers?: Array<{ user: string; password: string }>;
+    topologyUser?: { user: string; password: string };
   },
 ): Promise<
   {
@@ -581,6 +610,7 @@ export async function applyManagedEngineState(
   const appliedUsers = await engine.applyCredentials(ctx, credentials);
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
   await ensureProxySqlMonitorRoles(ctx, engine, deps);
+  await ensureOrchestratorTopologyRole(ctx, engine, deps);
   appliedDatabases.push(
     ...await applyDatabaseOps(
       ctx,
@@ -622,12 +652,27 @@ async function configureStandbyIfSupported(
  * engine with its own identity. Standbys inherit the roles via WAL replay.
  * Legacy fallback: host-seeded monitor.cnf (older control planes).
  */
+async function ensureOrchestratorTopologyRole(
+  ctx: ManagedEngineContext,
+  engine: ReturnType<typeof getManagedEngineRuntime>,
+  deps?: {
+    topologyUser?: { user: string; password: string };
+  },
+): Promise<void> {
+  if (!engine.ensureOrchestratorTopology) return;
+  const topologyUser = deps?.topologyUser;
+  if (!topologyUser) return;
+  await engine.ensureOrchestratorTopology(ctx, topologyUser);
+  logInfo("managed", "managed.apply ensured Orchestrator topology role");
+}
+
 async function ensureProxySqlMonitorRoles(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   deps?: {
     runHostPrep?: () => Promise<void>;
     monitorUsers?: Array<{ user: string; password: string }>;
+    topologyUser?: { user: string; password: string };
   },
 ): Promise<void> {
   if (!engine.ensureProxySqlMonitor) return;
@@ -803,7 +848,18 @@ export async function handleManagedApply(
     ) {
       throw new ManagedDestroyedError(payload.managedId);
     }
-    return await applyManagedEngine(payload, daemonReceivedAt, layout, deps);
+    const result = await applyManagedEngine(
+      payload,
+      daemonReceivedAt,
+      layout,
+      deps,
+    );
+    await maybeClearDemotedMarkerAfterApply(
+      layout,
+      payload,
+      result.member?.status,
+    );
+    return result;
   });
 }
 
@@ -845,7 +901,7 @@ async function applyManagedEngine(
     run,
   );
 
-  const { decrypted, redact, rootCredential, monitorUsers } =
+  const { decrypted, redact, rootCredential, monitorUsers, topologyUser } =
     await requireDecryptedCredentials(payload, deps);
   // Same deny-set for the bounded WS error text and the streamed transcript.
   logSink.addSecrets(decrypted.plaintexts);
@@ -923,7 +979,8 @@ async function applyManagedEngine(
     engineGroup: engine.containerGroup,
   });
 
-  // Scope the public listener once the publish exists; never blocks apply.
+  // Scope a public listener once the publish exists; drop the legacy chain
+  // when the listener is gone. Never blocks apply.
   await reconcileManagedPublicFirewallBestEffort(payload);
 
   const engineContainers = await collectManagedContainers(project, redact, run);
@@ -950,7 +1007,7 @@ async function applyManagedEngine(
       engine,
       payload,
       decrypted.credentials,
-      { runHostPrep, monitorUsers },
+      { runHostPrep, monitorUsers, topologyUser },
     );
 
     const member = await collectMemberHealth(

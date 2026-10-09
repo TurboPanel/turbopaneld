@@ -1864,6 +1864,13 @@ export type ManagedApplyPayload = {
    */
   monitorUsers?: Array<{ username: string; password: string }>;
   /**
+   * The organization's single Orchestrator topology account (username +
+   * `tpdaemon.…` sealed password). MySQL/MariaDB primary payloads only: the
+   * engine creates it once and standbys inherit it through the binlog, and
+   * Orchestrator never dials a Postgres member.
+   */
+  topologyUser?: { username: string; password: string };
+  /**
    * Operator-forced standby re-seed: bootstrap skips its probes, clears the
    * data directory, and seeds fresh from the primary. Standby payloads only.
    */
@@ -1918,6 +1925,11 @@ export type ManagedLifecyclePayload = {
    * (defaults to primary).
    */
   role?: "primary" | "replica";
+  /**
+   * True on a fence stop of a replaced primary. Absent on ordinary operator
+   * stops and on older control planes; older daemons ignore it.
+   */
+  demoted?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -2180,12 +2192,38 @@ export type ManagedHaReconcilePayload = {
   managedNetwork: string;
   desired: ManagedHaReconcileDesired;
   raft: ManagedHaRaftConfig | null;
+  /**
+   * MySQL and MariaDB clusters. Orchestrator speaks the MySQL protocol and
+   * does not manage Postgres HA, so a Postgres cluster from an older control
+   * plane is dropped by the handler before anything is resolved or
+   * registered (`orchestratorMonitorsEngine`).
+   */
   clusters: ManagedHaCluster[];
   identity: {
     serviceId: string;
     composeServiceName: string;
     containerName: string;
   };
+  /**
+   * The organization's single Orchestrator topology account (username +
+   * `tpdaemon.…` sealed password) — the same account `managed.apply` creates
+   * on every MySQL/MariaDB member of every HA cluster in the organization.
+   * Absent on teardown payloads and from control planes older than the
+   * per-organization account, where the first MySQL-family cluster's
+   * replication credential is used instead.
+   */
+  topologyUser?: { username: string; password: string };
+  /**
+   * Organization-wide Orchestrator HTTP basic auth (`HTTPAuthUser` /
+   * `HTTPAuthPassword`). Same derived value on every Raft peer so followers can
+   * proxy to the leader. Sealed to the target daemon; absent on teardown.
+   */
+  orchestratorApiUser?: { username: string; password: string };
+  /**
+   * Organization-wide Orchestrator `RaftAuthToken`, sealed to the target
+   * daemon. Absent on teardown.
+   */
+  orchestratorRaftToken?: string;
   /**
    * Organization CA leaf + Organization CA trust bundle. `caCertPem` is the
    * concatenated active+retired Organization CA PEMs of the server-owner
@@ -2198,11 +2236,18 @@ export type ManagedHaReconcilePayload = {
 export type ManagedHaReconcileResult = {
   summary: string;
   registeredClusters: string[];
+  failedClusters?: ManagedHaRegistrationFailure[];
+  partial?: boolean;
   restarted: boolean;
   containers?: EnvironmentDeployContainer[];
 };
 
-export type ManagedHaFailoverPhase = "drain" | "recover";
+export type ManagedHaRegistrationFailure = {
+  managedId: string;
+  error: string;
+};
+
+export type ManagedHaFailoverPhase = "drain" | "recover" | "repoint";
 
 /** Must stay in sync with the instance canonical `managed.ha.failover` shape. */
 export type ManagedHaFailoverPayload = {
@@ -2215,6 +2260,17 @@ export type ManagedHaFailoverPayload = {
   sourcePort?: number;
   targetHost?: string;
   targetPort?: number;
+  /**
+   * Dial IP when `targetHost` is the leaf SAN (Postgres `hostaddr`).
+   * Omitted when `targetHost` is already the address to dial.
+   */
+  targetHostaddr?: string;
+  /**
+   * When non-empty, this `repoint` runs on the **new primary** and creates
+   * each missing physical slot (Postgres). MySQL/MariaDB ignore the list.
+   * Follow mode still uses `targetHost` / `targetPort` on remaining replicas.
+   */
+  ensureSlots?: string[];
 };
 
 export type ManagedHaFailoverResult = {
@@ -6173,8 +6229,8 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  *
  * **Tested series only.** The control-plane catalog marks a series
  * `tested: true` once it is validated end-to-end, and only those series are
- * creatable: PostgreSQL 18, MySQL 9.7, MariaDB 12.3. The catalog still *knows*
- * about older series (17/16/15, 8.4, 11.8/11.4/10.11) so an already-persisted
+ * creatable: PostgreSQL 18, MySQL 9.7 and 8.4, MariaDB 12.3 and 11.8. The catalog still *knows*
+ * about older series (17/16/15, 11.4/10.11) so an already-persisted
  * image can be named in the UI, but they must never reach Docker — do not add
  * one back here without flipping `tested` in the control-plane catalog and the
  * UI mirror in the same change.
@@ -6193,10 +6249,14 @@ const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
   mysql: [
     "docker.io/library/mysql:9.7",
     "docker.io/library/mysql:9.7-oraclelinux9",
+    "docker.io/library/mysql:8.4",
+    "docker.io/library/mysql:8.4-oraclelinux9",
   ],
   mariadb: [
     "docker.io/library/mariadb:12.3",
     "docker.io/library/mariadb:12.3-ubi",
+    "docker.io/library/mariadb:11.8",
+    "docker.io/library/mariadb:11.8-ubi",
   ],
 };
 
@@ -6772,9 +6832,10 @@ function parseManagedApplyCredentials(
 }
 
 /** One `{ username, tpdaemon-envelope password }` monitor credential. */
-function parseManagedMonitorCredential(
+/** Username plus a daemon-bound (`tpdaemon.…`) sealed password. */
+function parseManagedSealedCredential(
   value: unknown,
-  label: string,
+  message: string,
 ): { username: string; password: string } {
   if (
     !isRecord(value) ||
@@ -6783,9 +6844,19 @@ function parseManagedMonitorCredential(
     typeof value.password !== "string" ||
     !value.password.startsWith(DAEMON_ENVELOPE_PREFIX)
   ) {
-    throw new TypeError(`Invalid ${label} monitor credential`);
+    throw new TypeError(message);
   }
   return { username: value.username, password: value.password };
+}
+
+function parseManagedMonitorCredential(
+  value: unknown,
+  label: string,
+): { username: string; password: string } {
+  return parseManagedSealedCredential(
+    value,
+    `Invalid ${label} monitor credential`,
+  );
 }
 
 function parseManagedApplyMonitorUsers(
@@ -6798,6 +6869,14 @@ function parseManagedApplyMonitorUsers(
   return value.map((entry) =>
     parseManagedMonitorCredential(entry, "managed.apply")
   );
+}
+
+function parseManagedTopologyUser(
+  value: unknown,
+  label: string,
+): { username: string; password: string } | undefined {
+  if (value === undefined) return undefined;
+  return parseManagedSealedCredential(value, `Invalid ${label} topologyUser`);
 }
 
 function parseManagedApplyDatabases(
@@ -7268,13 +7347,25 @@ function parseManagedApplyIngressSourceAddresses(
   return value as string[];
 }
 
-/** Must stay in sync with the instance canonical `managed.apply` validator. */
-export function parseManagedApplyPayload(
-  value: unknown,
-): ManagedApplyPayload {
-  if (!isRecord(value)) {
-    throw new TypeError("Invalid managed.apply payload");
-  }
+const MANAGED_APPLY_PAYLOAD_ERROR = "Invalid managed.apply payload";
+
+function assertManagedApplyPayloadShape(
+  value: Record<string, unknown>,
+): asserts value is Record<string, unknown> & {
+  managedId: string;
+  environmentId: string;
+  engine: ManagedEngineCode;
+  projectName: string;
+  containerName: string;
+  managedNetwork: string;
+  image: string;
+  containerPort: number;
+  composeYaml: string;
+  memberId: string;
+  memberRole: string;
+  memberOrdinal: number;
+  readEligible: boolean;
+} {
   if (
     typeof value.managedId !== "string" ||
     value.managedId.length === 0 ||
@@ -7302,15 +7393,25 @@ export function parseManagedApplyPayload(
     value.memberOrdinal < 1 ||
     typeof value.readEligible !== "boolean"
   ) {
-    throw new TypeError("Invalid managed.apply payload");
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
   }
 
   // Mirrors the instance settings parser's image allowlist so a
   // forged/replayed command payload cannot smuggle an unsupported or EOL
   // image past this last daemon-side check before Docker runs it.
   if (!isManagedImageAllowed(value.engine, value.image)) {
-    throw new TypeError("Invalid managed.apply payload");
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
   }
+}
+
+/** Must stay in sync with the instance canonical `managed.apply` validator. */
+export function parseManagedApplyPayload(
+  value: unknown,
+): ManagedApplyPayload {
+  if (!isRecord(value)) {
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
+  }
+  assertManagedApplyPayloadShape(value);
 
   const resources = parseManagedApplyResources(value.resources);
   const dockerOptions = parseManagedDockerOptions(
@@ -7319,6 +7420,9 @@ export function parseManagedApplyPayload(
   );
   const databases = parseManagedApplyDatabases(value.databases);
   const monitorUsers = parseManagedApplyMonitorUsers(value.monitorUsers);
+  const topologyUser = value.topologyUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(value.topologyUser, "managed.apply");
   const forceResync = parseManagedApplyForceResync(value.forceResync);
   const ingressSourceAddresses = parseManagedApplyIngressSourceAddresses(
     value.ingressSourceAddresses,
@@ -7357,6 +7461,7 @@ export function parseManagedApplyPayload(
     ...(replication === undefined ? {} : { replication }),
     credentials: parseManagedApplyCredentials(value.credentials),
     ...(monitorUsers === undefined ? {} : { monitorUsers }),
+    ...(topologyUser === undefined ? {} : { topologyUser }),
     ...(forceResync ? { forceResync: true } : {}),
     ...(ingressSourceAddresses === undefined ? {} : { ingressSourceAddresses }),
     ...(databases === undefined ? {} : { databases }),
@@ -7402,13 +7507,29 @@ export function parseManagedLifecyclePayload(
     }
     payload.engine = value.engine;
   }
-  if (value.role !== undefined) {
-    if (value.role !== "primary" && value.role !== "replica") {
-      throw new TypeError("Invalid managed.lifecycle payload");
-    }
-    payload.role = value.role;
-  }
+  const role = parseManagedLifecycleRole(value.role);
+  if (role !== undefined) payload.role = role;
+  if (parseManagedLifecycleDemoted(value.demoted)) payload.demoted = true;
   return payload;
+}
+
+function parseManagedLifecycleRole(
+  value: unknown,
+): ManagedLifecyclePayload["role"] {
+  if (value === undefined) return undefined;
+  if (value !== "primary" && value !== "replica") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
+}
+
+/** `true` only when the fence marked the stop as a replaced primary's. */
+function parseManagedLifecycleDemoted(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
 }
 
 /** Must stay in sync with the instance canonical `managed.destroy` validator. */
@@ -8586,10 +8707,11 @@ export function parseManagedIngressReconcileResult(
 }
 
 const HA_PROMOTION_RULES = new Set(["prefer", "must_not"]);
-const HA_FAILOVER_PHASES = new Set(["drain", "recover"]);
+const HA_FAILOVER_PHASES = new Set(["drain", "recover", "repoint"]);
 const MAX_HA_CLUSTERS = 64;
 const MAX_HA_MEMBERS = 32;
 const MAX_HA_PEERS = 32;
+const MAX_HA_REGISTRATION_ERROR_LENGTH = 300;
 
 function parseManagedHaIdentity(
   value: unknown,
@@ -8756,6 +8878,9 @@ export function parseManagedHaReconcilePayload(
     ? null
     : parseManagedHaRaftConfig(value.raft);
   const orgTlsMaterial = parseManagedApplyOrgTlsMaterial(value.orgTlsMaterial);
+  const topologyUser = value.topologyUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(value.topologyUser, "managed.ha.reconcile");
   const payload: ManagedHaReconcilePayload = {
     serverId: value.serverId,
     managedNetwork: parseManagedNetworkName(
@@ -8767,10 +8892,52 @@ export function parseManagedHaReconcilePayload(
     clusters: value.clusters.map(parseManagedHaCluster),
     identity: parseManagedHaIdentity(value.identity),
   };
+  if (topologyUser !== undefined) {
+    payload.topologyUser = topologyUser;
+  }
+  const orchestratorApiUser = value.orchestratorApiUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(
+      value.orchestratorApiUser,
+      "managed.ha.reconcile orchestratorApiUser",
+    );
+  if (orchestratorApiUser !== undefined) {
+    payload.orchestratorApiUser = orchestratorApiUser;
+  }
+  if (value.orchestratorRaftToken !== undefined) {
+    if (
+      typeof value.orchestratorRaftToken !== "string" ||
+      !value.orchestratorRaftToken.startsWith("tpdaemon.")
+    ) {
+      throw new TypeError("Invalid managed.ha.reconcile orchestratorRaftToken");
+    }
+    payload.orchestratorRaftToken = value.orchestratorRaftToken;
+  }
   if (orgTlsMaterial !== undefined) {
     payload.orgTlsMaterial = orgTlsMaterial;
   }
   return payload;
+}
+
+function parseManagedHaRegistrationFailures(
+  value: unknown,
+): ManagedHaRegistrationFailure[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_HA_CLUSTERS ||
+    !value.every((entry) =>
+      isRecord(entry) &&
+      typeof entry.managedId === "string" &&
+      SAFE_BACKUP_ID_RE.test(entry.managedId) &&
+      typeof entry.error === "string" &&
+      entry.error.length > 0 &&
+      entry.error.length <= MAX_HA_REGISTRATION_ERROR_LENGTH
+    )
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  return value as ManagedHaRegistrationFailure[];
 }
 
 /** Must stay in sync with the instance canonical `managed.ha.reconcile` result parser. */
@@ -8786,7 +8953,19 @@ export function parseManagedHaReconcileResult(
     !value.registeredClusters.every((entry) =>
       typeof entry === "string" && SAFE_BACKUP_ID_RE.test(entry)
     ) ||
+    (value.partial !== undefined && typeof value.partial !== "boolean") ||
     typeof value.restarted !== "boolean"
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  const failedClusters = parseManagedHaRegistrationFailures(
+    value.failedClusters,
+  );
+  const failedClusterCount = failedClusters?.length ?? 0;
+  if (
+    (value.partial === true &&
+      (failedClusterCount === 0 || value.registeredClusters.length === 0)) ||
+    (value.partial !== true && failedClusterCount > 0)
   ) {
     throw new TypeError("Invalid managed.ha.reconcile result");
   }
@@ -8795,6 +8974,8 @@ export function parseManagedHaReconcileResult(
     registeredClusters: value.registeredClusters as string[],
     restarted: value.restarted,
   };
+  if (failedClusters !== undefined) result.failedClusters = failedClusters;
+  if (value.partial !== undefined) result.partial = value.partial;
   if (value.containers !== undefined) {
     if (!Array.isArray(value.containers)) {
       throw new TypeError("Invalid managed.ha.reconcile result containers");
@@ -8857,6 +9038,26 @@ function parseOptionalManagedHaPort(value: unknown): number | undefined {
   return value;
 }
 
+const HA_FAILOVER_SLOT_RE = /^[a-z0-9_]{1,63}$/;
+const MAX_HA_FAILOVER_ENSURE_SLOTS = 32;
+
+function parseManagedHaFailoverEnsureSlots(
+  value: unknown,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HA_FAILOVER_ENSURE_SLOTS) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  const slots: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !HA_FAILOVER_SLOT_RE.test(entry)) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    slots.push(entry);
+  }
+  return slots;
+}
+
 /** Must stay in sync with the instance canonical `managed.ha.failover` validator. */
 export function parseManagedHaFailoverPayload(
   value: unknown,
@@ -8881,6 +9082,10 @@ export function parseManagedHaFailoverPayload(
   if (targetHost !== undefined) payload.targetHost = targetHost;
   const targetPort = parseOptionalManagedHaPort(value.targetPort);
   if (targetPort !== undefined) payload.targetPort = targetPort;
+  const targetHostaddr = parseOptionalManagedHaHost(value.targetHostaddr);
+  if (targetHostaddr !== undefined) payload.targetHostaddr = targetHostaddr;
+  const ensureSlots = parseManagedHaFailoverEnsureSlots(value.ensureSlots);
+  if (ensureSlots !== undefined) payload.ensureSlots = ensureSlots;
   return payload;
 }
 

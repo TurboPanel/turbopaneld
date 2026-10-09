@@ -2,6 +2,8 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
   ManagedTargetBusyError,
   managedTargetLockPath,
+  tryWithManagedLifecycleLock,
+  withManagedLifecycleLock,
   withManagedTargetLock,
 } from "./target-lock.ts";
 
@@ -66,6 +68,26 @@ test("withManagedTargetLock locks per engine, and releases even when fn throws",
         () => Promise.resolve("free again"),
       ),
       "free again",
+    );
+  });
+});
+
+test("tryWithManagedLifecycleLock skips when the lock is held", async () => {
+  await withRunDir(async (layout) => {
+    let skipped = false;
+    await withManagedLifecycleLock(layout, "engine-1", async () => {
+      skipped = await tryWithManagedLifecycleLock(layout, "engine-1", () => {
+        throw new Error("must not run");
+      });
+    });
+    assertEquals(skipped, false);
+    assertEquals(
+      await tryWithManagedLifecycleLock(
+        layout,
+        "engine-1",
+        () => Promise.resolve(),
+      ),
+      true,
     );
   });
 });
