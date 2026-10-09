@@ -71,6 +71,10 @@
     - role: docker
       tasks_from: converge-builder
     - role: docker-gate
+    # Orchestrator host prep is normally lazy on managed.ha.reconcile; backfill
+    # host-prep.ok on hosts that already have root-only libexec wait-ready.
+    - role: orchestrator
+      tasks_from: backfill-host-prep-marker.yml
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh

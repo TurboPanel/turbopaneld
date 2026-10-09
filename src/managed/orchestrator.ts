@@ -43,10 +43,10 @@ import {
   orchestratorConfigDir,
   orchestratorConfPath,
   orchestratorDataDir,
+  orchestratorHostPrepMarkerPath,
   orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
-  orchestratorWaitReadyScriptPath,
 } from "./engine-paths.ts";
 import {
   type EnvironmentDeployContainer,
@@ -876,10 +876,14 @@ async function orchestratorHostPrepRegularFile(
   }
 }
 
-/** True when Ansible installed the root-only wait-ready script the oneshot unit needs. */
+/**
+ * True when Ansible finished Orchestrator host prep. The readiness script lives
+ * under root-only `libexec/` (the systemd unit runs it as root); the daemon
+ * checks `host-prep.ok` in the group-readable config dir instead.
+ */
 export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
   return await orchestratorHostPrepRegularFile(
-    orchestratorWaitReadyScriptPath(layout),
+    orchestratorHostPrepMarkerPath(layout),
   );
 }
 

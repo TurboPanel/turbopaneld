@@ -9,7 +9,6 @@ import {
   readSystemComponentDescriptor,
   SYSTEM_MANAGED_HA_COMPONENT,
 } from "../deploy/system-component.ts";
-import { dirname } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   orchestratorApiCnfPath,
@@ -18,7 +17,6 @@ import {
   orchestratorConfPath,
   orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
-  orchestratorWaitReadyScriptPath,
 } from "../managed/engine-paths.ts";
 import { parseProxySqlClientCnf } from "../managed/proxysql-admin.ts";
 import {
@@ -133,9 +131,6 @@ async function seedOrchestratorHostPrep(
   layout: ReturnType<typeof resolveLayout>,
 ): Promise<void> {
   await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
-  const waitReady = orchestratorWaitReadyScriptPath(layout);
-  await Deno.mkdir(dirname(waitReady), { recursive: true });
-  await Deno.writeTextFile(waitReady, "#!/bin/sh\nexit 0\n");
   await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
 }
 
@@ -763,7 +758,7 @@ test({
 
 test({
   name:
-    "handleManagedHaReconcile runs host prep when wait-ready script is missing",
+    "handleManagedHaReconcile runs host prep when host-prep marker is missing",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -879,8 +874,7 @@ test({
 });
 
 test({
-  name:
-    "handleManagedHaReconcile skips host prep when wait-ready script exists",
+  name: "handleManagedHaReconcile skips host prep when host-prep marker exists",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
