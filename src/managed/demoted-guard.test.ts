@@ -62,6 +62,16 @@ function docker(psStdout = RUNNING_PS) {
     if (args[0] === "compose" && args.at(-1) === "stop") {
       stdout = "[]";
     }
+    if (args[0] === "exec") {
+      // CI runners have a real Docker binary so ensureDocker() succeeds and the
+      // guard runs the writable probe; tab-separated psql rows, not empty stdout.
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "t\n",
+        stderr: "",
+      });
+    }
     return Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
   };
   return { run, calls };
