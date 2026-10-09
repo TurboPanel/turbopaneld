@@ -32,6 +32,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `pg-dead-primary.ts` / `../instance/pg-dead-primary-observe.ts` | Postgres dead-primary probe on the primary's **own** host (Orchestrator cannot see Postgres). See **Postgres dead-primary detection** below |
 | `host-boot.ts` / `boot-hold.ts` / `../instance/boot-hold-reporter.ts` | Boot hold after a power cut: see **Boot hold after an unclean host restart** below |
 | `ha-intent.ts` / `ha-member.ts` / `ha-command-hooks.ts` | Probe inputs kept by `command-router.ts`: operator-intent markers around every engine-touching managed verb, and the per-host member record (`managed/<id>/ha-member.json`) |
+| `demoted-marker.ts` / `demoted-guard.ts` | After a fence `managed.lifecycle` stop with `demoted: true`, a durable `<stateDir>/managed/<id>/demoted.json` (0600). A 5 s guard stops that member if its engine is running (`compose -p <id> stop`, intent marker first). Cleared on replica `managed.apply`, `managed.promote`, and `managed.destroy`. |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
@@ -40,8 +41,8 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `engines/` | Per-engine runtime registry (`postgres`, `mysql`, `mariadb`); optional `dropUsers` / `backup` / `replication` (+ optional `configureStandby` for SQL-configured standbys) |
 | `engines/sql-stdin.ts` | Shared stdin SQL exec: retry once when docker exec closes stdin (`Writable stream is closed` / EPIPE) with no SQL output, only for batches marked `idempotent` (reads, `CREATE IF NOT EXISTS`, slot ensure); never retry promote or other non-idempotent SQL; never retry a SQL `ERROR` |
 | `engines/postgres.ts` + `postgres-sql.ts` | Postgres runtime + pure SQL builders. `runPsql` pipes SQL on stdin and uses `execSqlWithStdinRetry` so a one-shot closed-stream spawn does not mark a healthy replica `failed`. `dropUsers` first releases the role in **every** connectable non-template database (`REASSIGN OWNED BY <role> TO <platform admin>` then `DROP OWNED BY <role>`, skipped when the role is already gone) and only then `DROP ROLE` — a role that holds any database privilege or owns objects otherwise cannot be dropped, and a failed drop left the cluster `failed` with a zombie login. Ownership is reassigned, never dropped, so the data survives. `applyCredentials` then reconciles database access on every apply (older clusters are corrected at their next apply): `CONNECT` is revoked from PUBLIC on every connectable database (`pg_monitor` gets `CONNECT` on `postgres`, so every ProxySQL monitor login keeps its health checks whether or not an apply names it); each SQL user loses databases it is not listed for and gets its strongest level on the listed ones (`owner`: owns; `read-write`: CONNECT/TEMPORARY, exactly SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES on tables (REFERENCES so a migration can add a foreign key to another login's table) and USAGE/SELECT/UPDATE on sequences (never `ALL`: it carries TRIGGER, which would let a read-write login run code as whoever writes the table; no privilege is revoked by name, so it is the same on Postgres 15 to 18), USAGE on schemas, CREATE only in its own schema (schema CREATE elsewhere, `public` included, is the owner login only); `read-only`: CONNECT, SELECT on tables and sequences, USAGE on schemas, and `default_transaction_read_only` per database); inside each listed database existing objects are granted and default privileges are set for what the platform admin, the exposed root login and every owner/read-write login create later. Postgres only lets an object's owner alter or drop it, so read-write reads and writes everyone's tables but alters or drops only its own (a table a read-write login made can be altered by the platform admin or after `REASSIGN OWNED`, not by the owner login). Read-only means no change to any table, sequence or schema; it is not "no writes of any kind" (a read-only login can still make its own large objects, take advisory locks and override its own session default), because the privileges are the wall, not the session default. Database, schema, table and sequence ACL writes are guarded by a comparison with what the login already holds, so a repeated apply does not rewrite them (default-privilege statements and the per-login read-only session setting are still written each apply). `postgres-grants.real-pg.test.ts` runs the real `applyCredentials` against throwaway Postgres containers (16 and 18 by default; runs when Docker answers and `CI` or `TURBOPANEL_REAL_POSTGRES=1` is set, `TURBOPANEL_REQUIRE_REAL_POSTGRES=1` makes a missing container a failure) |
-| `engines/mysql.ts` + `mysql-sql.ts` | MySQL runtime + pure SQL builders (GTID, auth_socket platform admin keeps `backup.ts` credential-free). Binlog retention is time-based (`BINLOG_EXPIRE_LOGS_SECONDS`, 7 days); total binlog size is not capped. Root apply creates the password account on the managed Docker network only and re-asserts `root@localhost` `auth_socket`; it never `IDENTIFIED BY` on localhost. When socket auth is missing, waitReady/apply retry via a short-lived 0600 defaults-extra-file (never `-p` / `MYSQL_PWD`). A standby boots `super_read_only`, so its initdb `INSTALL PLUGIN auth_socket` fails (1290); `configureStandby` installs the plugin inside the writable seed window, **before** the dump imports the primary's `auth_socket` grant tables — otherwise the post-seed `FLUSH PRIVILEGES` locks every socket admin out ("Plugin 'auth_socket' is not loaded") and replication is never configured |
-| `engines/mariadb.ts` + `mariadb-sql.ts` | MariaDB runtime + **own** dialect (not a MySQL alias; `MASTER_USE_GTID=slave_pos`, `mariadb-dump --gtid`). Root apply creates the password account on the managed Docker network only and re-asserts `root@localhost` `unix_socket`; it never `IDENTIFIED BY` on localhost. When socket auth is missing, waitReady/apply retry via a short-lived 0600 defaults-extra-file (never `-p` / `MYSQL_PWD`) |
+| `engines/mysql.ts` + `mysql-sql.ts` | MySQL runtime + pure SQL builders (GTID, auth_socket platform admin keeps `backup.ts` credential-free). Binlog retention is time-based (`BINLOG_EXPIRE_LOGS_SECONDS`, 7 days); total binlog size is not capped. Root apply creates the password account on the managed Docker network only and re-asserts `root@localhost` `auth_socket`; it never `IDENTIFIED BY` on localhost. When socket auth is missing, waitReady/apply retry via a short-lived 0600 defaults-extra-file (never `-p` / `MYSQL_PWD`). A standby boots `super_read_only`, so its initdb `INSTALL PLUGIN auth_socket` fails (1290); `configureStandby` installs the plugin inside the writable seed window, **before** the dump imports the primary's `auth_socket` grant tables — otherwise the post-seed `FLUSH PRIVILEGES` locks every socket admin out ("Plugin 'auth_socket' is not loaded") and replication is never configured. **Errant GTIDs:** the image entrypoint binary-logs init SQL under the standby's own server UUID; `mysqldump --set-gtid-purged=ON` *adds* the primary set and leaves those replica transactions in `gtid_executed`. `configureStandby` issues `RESET BINARY LOGS AND GTIDS` immediately before the dump import (MySQL 8.4+; `RESET MASTER` is gone) and wraps replica-local `INSTALL PLUGIN` / post-seed `FLUSH PRIVILEGES` in `SET SESSION sql_log_bin=0` so failover/rejoin does not see a replica-only GTID |
+| `engines/mariadb.ts` + `mariadb-sql.ts` | MariaDB runtime + **own** dialect (not a MySQL alias; `MASTER_USE_GTID=slave_pos`, `mariadb-dump --gtid`). Root apply creates the password account on the managed Docker network only and re-asserts `root@localhost` `unix_socket`; it never `IDENTIFIED BY` on localhost. When socket auth is missing, waitReady/apply retry via a short-lived 0600 defaults-extra-file (never `-p` / `MYSQL_PWD`). **Errant GTIDs:** same entrypoint-init hazard; the seed script already `RESET MASTER` with `sql_log_bin=0` around the import. Post-seed `FLUSH PRIVILEGES` is also wrapped in `SET SESSION sql_log_bin=0` — without that wrap it is the one extra replica-domain GTID after an otherwise clean seed |
 
 `waitReady` for the SQL engines that seed after compose up must prove the **real** server, not the image entrypoint's temporary init server (unix socket only, networking off). Socket ping succeeding is not enough: require a TCP ping to `127.0.0.1:3306` inside the container, then a second socket ping so a stop/start between probes is caught. `configureStandby` waits for that same proof and retries the seed once when the first attempt produced no output or errors 1133/2002/2013.
 
@@ -497,9 +498,12 @@ there is no raft-leader check on that path.
     whole duration (a major-upgrade apply or a restore that keeps the engine
     down for an hour stays suppressed) up to a 6 h ceiling, at which it stops
     suppressing with a WARN; when the command ends it becomes transient and
-    suppresses 10 min + 30 s from THEN; only the command that owns the
-    current marker refreshes it (concurrent commands: the last to finish
-    never overwrites a newer marker);
+    suppresses 10 min + 30 s from THEN (a **successful** `promote` or
+    `failover` only 1 min + 30 s: those report success once the new primary is
+    writable, so a primary killed minutes after a switchover is a real
+    failure, not something to wave off for another ten); only the command
+    that owns the current marker refreshes it (concurrent commands: the last
+    to finish never overwrites a newer marker);
   - a `stop` is **held** only after it succeeded; `destroy` is held from the
     start (a failed destroy never re-arms the probe);
   - a transient marker never replaces a held one; only a **successful**
@@ -544,7 +548,8 @@ stale primary can accept writes again within seconds of boot.
   every primary in `ha-member.json` with at least one peer gets a HELD `stop`
   intent marker (so the dead-primary probe reads the stop as intended), a
   `managed/<id>/boot-hold.json`, and `docker compose -p <id> stop`. Standalone
-  databases and replicas are never held.
+  databases and replicas are never held unless they carry a demoted marker
+  (a replaced primary counts as replaced on boot and is never released).
 - **Report** (`instance/boot-hold-reporter.ts`, every 60 s while a hold exists
   and the socket is attached): `managed-ha-event` with `detector: 'boot-hold'`
   and `evidence { reason, heldAt, engineStopped }`. It is never a failover
@@ -552,10 +557,28 @@ stale primary can accept writes again within seconds of boot.
   `managed.lifecycle start`; a successful start (or restart/apply/promote)
   releases the held marker, and the hold file goes with it
   (`listActiveBootHolds`). A primary the control plane replaced is left
-  stopped (`needs_resync`).
+  stopped (`needs_resync`). A demoted marker is the same as replaced: local
+  release must not start that engine.
 - **No answer possible**: a control plane without `managed-ha-boot-hold-v1`
   gets nothing; the daemon releases the hold itself and starts the engine (the
-  behaviour before this feature). A control plane that is merely unreachable
-  leaves the hold on: that fails closed on purpose.
+  behaviour before this feature) unless a demoted marker is present. A control
+  plane that is merely unreachable leaves the hold on: that fails closed on
+  purpose.
 - Tests: `host-boot.test.ts`, `boot-hold.test.ts`,
   `../instance/boot-hold-reporter.test.ts`, `../entry/run.test.ts`.
+
+## Demoted member fence
+
+After failover or switchover the old primary is stopped and must stay stopped
+until it is re-added as a replica. The control plane sends `demoted: true` on
+that fence `managed.lifecycle` stop. This daemon writes
+`<stateDir>/managed/<managedId>/demoted.json` (member id + timestamp, 0600,
+atomic) and a 5 s guard (`demoted-guard.ts`, started from `runDaemon`) stops
+the compose project if the engine is running. It writes a held operator-intent
+marker first so the dead-primary probe never treats the stop as a crash. It
+takes `tryWithManagedLifecycleLock` so a replica apply that clears the marker
+inside the same lock is not stopped mid-run. `listManagedHaMembers` already
+skips destroyed members. The marker is cleared on a successful replica apply
+(`status: ready`), on `managed.promote`, and on `managed.destroy`. The guard
+never starts anything and never deletes data.
+Tests: `demoted-marker.test.ts`, `demoted-guard.test.ts`, `lifecycle.test.ts`.

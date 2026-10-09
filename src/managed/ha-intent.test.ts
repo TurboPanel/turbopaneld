@@ -19,6 +19,7 @@ import {
   MANAGED_COMMAND_INTENT_KINDS,
   MANAGED_INTENT_GRACE_MS,
   MANAGED_INTENT_MAX_RUNNING_MS,
+  MANAGED_INTENT_SETTLED_TTL_MS,
   MANAGED_INTENT_TTL_MS,
   managedCommandIntent,
   managedIntentPath,
@@ -922,4 +923,48 @@ test("managed.ha.failover repoint carries no intent but drain and recover do", (
     managedCommandIntent("managed.ha.failover", { ...base, phase: "drain" }),
     { managedId: MANAGED_ID, kind: "failover" },
   );
+});
+
+test("a successful promote or failover stops suppressing the probe after a minute, other outcomes keep the long window", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    for (const kind of ["promote", "failover"] as const) {
+      resetManagedIntentsForTests();
+      const before = Date.now();
+      const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, kind);
+      await endManagedIntent(dirs.stateDir, token, true);
+      const ended = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+      assert(ended?.untilMs !== null && ended?.untilMs !== undefined);
+      assert(ended.untilMs >= before + MANAGED_INTENT_SETTLED_TTL_MS);
+      assert(
+        ended.untilMs < before + MANAGED_INTENT_TTL_MS,
+        `${kind}: the marker must be well under the long window`,
+      );
+      // A promoted primary that dies two minutes later is a real failure.
+      assert(
+        !isManagedIntentActive(
+          ended,
+          before + 2 * MANAGED_INTENT_SETTLED_TTL_MS + 1_000,
+        ),
+      );
+    }
+    for (
+      const [kind, succeeded] of [
+        ["promote", false],
+        ["failover", false],
+        ["apply", true],
+        ["restart", true],
+      ] as const
+    ) {
+      resetManagedIntentsForTests();
+      const before = Date.now();
+      const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, kind);
+      await endManagedIntent(dirs.stateDir, token, succeeded);
+      const ended = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+      assert(ended?.untilMs !== null && ended?.untilMs !== undefined);
+      assert(
+        ended.untilMs >= before + MANAGED_INTENT_TTL_MS,
+        `${kind} (succeeded=${succeeded}) keeps the long window`,
+      );
+    }
+  });
 });

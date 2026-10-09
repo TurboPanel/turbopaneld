@@ -84,6 +84,9 @@ test("buildMysqlStandbySeedScript registers trap before writing credentials", ()
   assertEquals(trapIdx < catIdx, true);
   assertEquals(script.includes("pipefail"), true);
   assertEquals(script.includes("mysqldump --defaults-extra-file="), true);
+  // Entrypoint init GTIDs must be cleared before the dump's GTID_PURGED.
+  assertEquals(script.includes("RESET BINARY LOGS AND GTIDS"), true);
+  assertEquals(script.includes("SET SESSION sql_log_bin=0;"), true);
 });
 
 type RecordedExec = { argv: string[]; input?: string };

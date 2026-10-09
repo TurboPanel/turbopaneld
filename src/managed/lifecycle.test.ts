@@ -1,10 +1,12 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import {
   type ManagedLifecyclePayload,
   parseManagedLifecycleResult,
 } from "../contracts/commands-contracts.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
+import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
+import { isManagedMemberDemoted } from "./demoted-marker.ts";
 import { handleManagedLifecycle } from "./lifecycle.ts";
 import { managedDir } from "./engine-paths.ts";
 
@@ -186,6 +188,63 @@ for (const role of ["primary", undefined] as const) {
     assertEquals(result.status, "ready");
   });
 }
+
+test("lifecycle stop with demoted writes a marker; an ordinary stop does not", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const demotedId = `managed_lifecycle_demoted_${crypto.randomUUID()}`;
+      const ordinaryId = `managed_lifecycle_ordinary_${crypto.randomUUID()}`;
+      for (const id of [demotedId, ordinaryId]) {
+        const root = managedDir(layout, id);
+        await Deno.mkdir(root, { recursive: true });
+        await Deno.writeTextFile(
+          `${root}/docker-compose.yml`,
+          POSTGRES_COMPOSE,
+        );
+      }
+      const demotedDocker = fakeDocker(new Set());
+      await handleManagedLifecycle(
+        {
+          managedId: demotedId,
+          action: "stop",
+          memberId: MEMBER_ID,
+          demoted: true,
+        },
+        new Date().toISOString(),
+        { runDocker: demotedDocker.run },
+      );
+      assertEquals(composeCalled(demotedDocker.calls, "stop"), true);
+      assert(await isManagedMemberDemoted(layout, demotedId, MEMBER_ID));
+
+      const ordinaryDocker = fakeDocker(new Set());
+      await handleManagedLifecycle(
+        {
+          managedId: ordinaryId,
+          action: "stop",
+          memberId: MEMBER_ID,
+        },
+        new Date().toISOString(),
+        { runDocker: ordinaryDocker.run },
+      );
+      assertEquals(composeCalled(ordinaryDocker.calls, "stop"), true);
+      assertEquals(
+        await isManagedMemberDemoted(layout, ordinaryId, MEMBER_ID),
+        false,
+      );
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
 
 test("lifecycle stop on a replica never probes", async () => {
   const { calls } = await runLifecycle(
