@@ -77,6 +77,9 @@
     enabled: true
     state: started
 
+- name: Backfill daemon-readable host prep marker when needed
+  ansible.builtin.import_tasks: backfill-host-prep-marker.yml
+
 - name: Mark Orchestrator host prep complete for the daemon
   ansible.builtin.file:
     path: "{{ orchestrator_config_dir }}/host-prep.ok"

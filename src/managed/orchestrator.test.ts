@@ -382,17 +382,17 @@ test("loadOrchestratorRaftToken reads raft token password", async () => {
   }
 });
 
-test("hostPrepPresent requires the root-only wait-ready script", async () => {
+test("hostPrepPresent reads the daemon-visible host-prep marker, not libexec wait-ready", async () => {
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
     assertEquals(await hostPrepPresent(layout), false);
     await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
-    await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
-    assertEquals(await hostPrepPresent(layout), false);
     const waitReady = orchestratorWaitReadyScriptPath(layout);
     await Deno.mkdir(dirname(waitReady), { recursive: true });
     await Deno.writeTextFile(waitReady, "#!/bin/sh\nexit 0\n");
+    assertEquals(await hostPrepPresent(layout), false);
+    await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
     assertEquals(await hostPrepPresent(layout), true);
   } finally {
     await fixture.cleanup();

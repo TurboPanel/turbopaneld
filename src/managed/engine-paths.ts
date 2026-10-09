@@ -97,7 +97,7 @@ export function orchestratorRaftCnfPath(layout: LayoutPaths): string {
   return join(orchestratorConfigDir(layout), "raft.cnf");
 }
 
-/** Ansible-installed readiness script; host prep is complete when this exists. */
+/** Root-only readiness script installed by Ansible for the stack systemd unit. */
 export function orchestratorWaitReadyScriptPath(layout: LayoutPaths): string {
   return join(layout.home, "libexec", "orchestrator-wait-ready.sh");
 }

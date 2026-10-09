@@ -1,0 +1,37 @@
+---
+# Backfill host-prep.ok when libexec wait-ready was installed before the
+# daemon-readable marker existed. Idempotent; no-op on fresh hosts.
+
+- name: Stat orchestrator config directory
+  ansible.builtin.stat:
+    path: "{{ orchestrator_config_dir }}"
+    follow: false
+  register: orchestrator_config_dir_stat
+
+- name: Stat daemon host-prep marker
+  ansible.builtin.stat:
+    path: "{{ orchestrator_config_dir }}/host-prep.ok"
+    follow: false
+  register: orchestrator_host_prep_marker
+  when: orchestrator_config_dir_stat.stat.isdir | default(false)
+
+- name: Stat root-only libexec wait-ready script
+  ansible.builtin.stat:
+    path: "{{ orchestrator_wait_ready_script }}"
+    follow: false
+  register: orchestrator_libexec_wait_ready
+  when: orchestrator_config_dir_stat.stat.isdir | default(false)
+
+- name: Backfill daemon-readable host prep marker for legacy installs
+  ansible.builtin.file:
+    path: "{{ orchestrator_config_dir }}/host-prep.ok"
+    follow: false
+    state: touch
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  when:
+    - orchestrator_config_dir_stat.stat.isdir | default(false)
+    - not orchestrator_host_prep_marker.stat.exists | default(true)
+    - orchestrator_libexec_wait_ready.stat.exists | default(false)
+    - orchestrator_libexec_wait_ready.stat.isreg | default(false)

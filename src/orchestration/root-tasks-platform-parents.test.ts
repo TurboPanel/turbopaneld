@@ -1,4 +1,4 @@
-import { assert } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { join, relative } from "@std/path";
 import { parse } from "yaml";
 import { DAEMON_ROOT } from "./assets.ts";
@@ -225,4 +225,17 @@ test("root-run readiness scripts live in a root-only directory, not the daemon-w
       `${role} libexec dir must be root:root 0750`,
     );
   }
+});
+
+test("orchestrator host-prep marker is daemon-readable in the config dir", async () => {
+  const tasks = await tasksOfRole("orchestrator");
+  const marker = tasks.find((t) =>
+    String(t.name).includes("Mark Orchestrator host prep complete")
+  );
+  const file = marker?.["ansible.builtin.file"] as Record<string, unknown>;
+  assert(file, "orchestrator role must touch host-prep.ok");
+  assertEquals(file.path, "{{ orchestrator_config_dir }}/host-prep.ok");
+  assertEquals(file.owner, "{{ turbopanel_user }}");
+  assertEquals(file.group, "{{ turbopanel_group }}");
+  assertEquals(file.mode, "0640");
 });
