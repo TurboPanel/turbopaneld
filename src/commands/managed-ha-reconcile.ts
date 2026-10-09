@@ -133,6 +133,38 @@ async function resolveOrchestratorRaftAuthToken(
   return await loadOrchestratorRaftToken(layout);
 }
 
+async function materializeOrchestratorSecretsIfPresent(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<{
+  httpAuth: OrchestratorApiCredentials;
+  raftAuthToken: string | null;
+}> {
+  const httpAuth = await resolveOrchestratorHttpAuth(
+    payload,
+    layout,
+    decryptSecrets,
+  );
+  const raftAuthToken = await resolveOrchestratorRaftAuthToken(
+    payload,
+    layout,
+    decryptSecrets,
+  );
+  if (payload.orchestratorApiUser && payload.orchestratorRaftToken) {
+    if (raftAuthToken === null) {
+      throw new Error(
+        "managed HA orchestrator raft token missing after decrypt",
+      );
+    }
+    await materializeOrchestratorHostCredentials(layout, {
+      httpAuth,
+      raftToken: raftAuthToken,
+    });
+  }
+  return { httpAuth, raftAuthToken };
+}
+
 async function resolveOrchestratorTopologyCredentials(
   payload: ManagedHaReconcilePayload,
   decryptSecrets?: DecryptSecretsFn,
@@ -271,27 +303,12 @@ export async function handleManagedHaReconcile(
   await ensureDocker();
   await ensureManagedIngressNetwork(payload.managedNetwork, run);
 
-  const httpAuth = await resolveOrchestratorHttpAuth(
-    payload,
-    layout,
-    deps?.decryptSecrets,
-  );
-  const raftAuthToken = await resolveOrchestratorRaftAuthToken(
-    payload,
-    layout,
-    deps?.decryptSecrets,
-  );
-  if (payload.orchestratorApiUser && payload.orchestratorRaftToken) {
-    if (raftAuthToken === null) {
-      throw new Error(
-        "managed HA orchestrator raft token missing after decrypt",
-      );
-    }
-    await materializeOrchestratorHostCredentials(layout, {
-      httpAuth,
-      raftToken: raftAuthToken,
-    });
-  }
+  const { httpAuth, raftAuthToken } =
+    await materializeOrchestratorSecretsIfPresent(
+      payload,
+      layout,
+      deps?.decryptSecrets,
+    );
 
   if (!(await hostPrepPresent(layout))) {
     await runHostPrep();
