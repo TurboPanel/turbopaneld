@@ -839,5 +839,11 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   replication: mysqlReplicationRuntime,
 };
 
-/** Exported so tests can assert the binlog-retention hazard note is backed. */
+/**
+ * Exported so tests can assert the binlog-retention hazard note is backed.
+ * The platform `my.cnf` is rendered by the control plane; the bound is the
+ * 7-day time expiry. MySQL 8.4 / 9.7 have no total-size option, so a busy
+ * primary can still fill the volume inside those 7 days. Never add a
+ * purge-by-size that could drop binlogs a replica still needs.
+ */
 export const BINLOG_EXPIRE_LOGS_SECONDS = 7 * 24 * 60 * 60;

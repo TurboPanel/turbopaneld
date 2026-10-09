@@ -182,6 +182,13 @@ test("mariadb applyCredentials creates root and app users via socket", async () 
     /ALTER USER `root`@'localhost' IDENTIFIED BY/.test(rootSql),
     false,
   );
+  assertEquals(rootSql.includes("REVOKE READ_ONLY ADMIN"), true);
+  assertEquals(
+    rootSql.includes(
+      "GRANT ALL PRIVILEGES ON *.* TO `root`@'localhost' WITH GRANT OPTION",
+    ),
+    true,
+  );
 });
 
 test("mariadb dropUsers skips the platform root username", async () => {
@@ -402,6 +409,20 @@ test("mariadb configureStandby seeds replication and writes marker", async () =>
   assertEquals(calls.some((c) => c.argv[0] === "sh"), true);
   assertEquals(calls.some((c) => c.input?.includes("203.0.113.60")), true);
   assertEquals(
+    calls.some((c) =>
+      c.input?.includes("IDENTIFIED VIA unix_socket") &&
+      c.input.includes("GRANT ALL PRIVILEGES")
+    ),
+    true,
+  );
+  assertEquals(
+    calls.some((c) =>
+      c.argv.includes("-e") &&
+      (c.argv.at(-1) ?? "").includes("mysql.global_priv")
+    ),
+    true,
+  );
+  assertEquals(
     calls.some((c) => c.argv.some((part) => part.includes("touch"))),
     true,
   );
@@ -579,7 +600,12 @@ test("mariadb promote clears read-only and returns when writable", async () => {
     throw new TypeError("expected mariadb promote");
   }
   let writableChecks = 0;
+  let socketReassert = 0;
   const exec: ManagedEngineExec = (argv, input) => {
+    if (input?.includes("IDENTIFIED VIA unix_socket")) {
+      socketReassert++;
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
     if (input?.includes("RESET SLAVE")) {
       return Promise.resolve({ success: true, stdout: "", stderr: "" });
     }
@@ -593,6 +619,7 @@ test("mariadb promote clears read-only and returns when writable", async () => {
   };
   await replication.promote(buildContext(exec));
   assertEquals(writableChecks >= 2, true);
+  assertEquals(socketReassert, 1);
 });
 
 test("mariadb promote returns when read_only prints OFF", async () => {

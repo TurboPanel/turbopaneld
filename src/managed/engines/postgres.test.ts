@@ -14,7 +14,12 @@
  * assuming it is the connection identity.
  */
 
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { getManagedEngineRuntime } from "./index.ts";
 import {
@@ -395,8 +400,23 @@ test("backup dump/restore argv always target the stable platform admin regardles
   const restoreArgv = engine.backup.restoreArgv(ctx, { database: "appdb" });
 
   assertEquals(dumpArgv, ["pg_dump", "-Fc", "-U", "postgres", "-d", "appdb"]);
-  assertEquals(restoreArgv.includes("-U"), true);
-  assertEquals(restoreArgv[restoreArgv.indexOf("-U") + 1], "postgres");
+  // The restore runs as one script; the admin and database travel as
+  // positional arguments, never inside the script text.
+  assertEquals(restoreArgv.slice(0, 2), ["sh", "-c"]);
+  assertEquals(restoreArgv.slice(3, 6), ["tp-restore", "postgres", "appdb"]);
+  assertStringIncludes(
+    restoreArgv[2],
+    'psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2"',
+  );
+  assertEquals(restoreArgv[2].includes("appdb"), false);
+  assertStringIncludes(
+    restoreArgv[2],
+    "pg_restore --no-owner --clean --if-exists -f - | sed -E",
+  );
+  assertStringIncludes(restoreArgv[2], "lock_timeout|statement_timeout");
+  assertStringIncludes(restoreArgv[2], "set -o pipefail");
+  assertStringIncludes(restoreArgv[2], "set +e");
+  assertStringIncludes(restoreArgv[7], "CREATE SCHEMA %I AUTHORIZATION %I");
 });
 
 function standbyReplicationSpec() {
@@ -856,6 +876,78 @@ test("postgres applyCredentials throws when psql fails", async () => {
     Error,
     "psql failed",
   );
+});
+
+const STREAM_CLOSED = "spawn failed: Writable stream is closed";
+
+test("postgres applyCredentials does not retry a closed stdin on non-idempotent SQL", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: STREAM_CLOSED,
+    });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+  assertEquals(calls, 1);
+});
+
+test("postgres applyCredentials does not retry a SQL error", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: 'ERROR:  syntax error at or near "FOO"',
+    });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+  assertEquals(calls, 1);
+});
+
+test("postgres ensureSlots retries idempotent slot SQL once after a closed stdin", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    if (calls === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: STREAM_CLOSED,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await postgresManagedEngineRuntime.replication!.ensureSlots!(
+    buildContext(exec),
+    ["tp_member_abcd"],
+  );
+  assertEquals(calls, 2);
 });
 
 test("postgres waitReady retries until pg_isready succeeds", async () => {
