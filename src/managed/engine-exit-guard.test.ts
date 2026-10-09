@@ -45,7 +45,7 @@ function memberRecord() {
 
 function docker(psStdout = EXITED_PS) {
   const calls: string[][] = [];
-  let stdout = psStdout;
+  const stdout = psStdout;
   const run = (args: string[]): Promise<DockerCliResult> => {
     calls.push(args);
     if (args[0] === "compose" && args.includes("ps")) {
