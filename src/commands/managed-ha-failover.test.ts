@@ -80,6 +80,26 @@ test("managed.ha.failover recover does not promote when Orchestrator succeeds", 
   assertEquals(result.summary.includes("designated replica"), true);
 });
 
+test("managed.ha.failover recover promote fallback forwards switchover GTID fields", async () => {
+  const promoteCalls: ManagedPromotePayload[] = [];
+  await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mariadb",
+      requiredExecutedGtidSet: "0-1-9",
+      gtidWaitTimeoutSeconds: 99,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(false),
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(promoteCalls[0]?.requiredExecutedGtidSet, "0-1-9");
+  assertEquals(promoteCalls[0]?.gtidWaitTimeoutSeconds, 99);
+});
+
 test("managed.ha.failover recover falls back to promote when the HA stack is absent", async () => {
   const promoteCalls: unknown[] = [];
   let recoverCalled = false;

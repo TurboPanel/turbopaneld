@@ -52,6 +52,8 @@ export type ManagedLifecycleHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  /** Test seam — defaults to real docker setup. */
+  ensureDocker?: () => Promise<void>;
 };
 
 function statusFromContainers(
@@ -163,10 +165,15 @@ export async function handleManagedLifecycle(
   const refused = await refuseNonStandbyReplicaStart(payload, layout, run);
   if (refused) return refused;
 
+  const engineDeps = {
+    runDocker: run,
+    ...(deps?.ensureDocker ? { ensureDocker: deps.ensureDocker } : {}),
+  };
   const switchoverPrimaryExecutedGtidSet =
     await captureSwitchoverGtidBeforeStop(
       payload,
       run,
+      engineDeps,
     );
 
   if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
@@ -197,7 +204,7 @@ export async function handleManagedLifecycle(
     );
   }
 
-  await reactivatePrimaryAfterSwitchoverAbort(payload, run);
+  await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
 
   if (payload.memberId) {
     const engine = getManagedEngineRuntime(payload.engine ?? "postgres");

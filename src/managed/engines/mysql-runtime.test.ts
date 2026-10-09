@@ -607,6 +607,33 @@ test("mysql configureStandby empty seed failure is not reported as unknown", asy
   assertEquals(err.message.includes("unknown"), false);
 });
 
+test("mysql quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_executed", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.quiesceFormerPrimaryForSwitchover) {
+    throw new TypeError("expected mysql quiesceFormerPrimaryForSwitchover");
+  }
+  let enforcedReadOnly = false;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("read_only") || sql.includes("super_read_only")) {
+      enforcedReadOnly = true;
+    }
+    if (sql.includes("gtid_executed")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "uuid:1-42\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const gtid = await replication.quiesceFormerPrimaryForSwitchover(
+    buildContext(exec),
+  );
+  assertEquals(enforcedReadOnly, true);
+  assertEquals(gtid, "uuid:1-42");
+});
+
 test("mysql promote runs WAIT_FOR_EXECUTED_GTID_SET when a GTID proof is required", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.promote) {

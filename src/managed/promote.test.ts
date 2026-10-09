@@ -79,6 +79,47 @@ test("handleManagedPromote promotes standby and reports primary health", async (
   assertEquals(result.replication?.state, "streaming");
 });
 
+test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", async () => {
+  const mysqlPs = JSON.stringify([
+    {
+      ID: "mysql123",
+      Name: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+      Service: "mysql",
+      State: "running",
+    },
+  ]);
+  let sawGtidWait = false;
+  const result = await handleManagedPromote(
+    {
+      managedId: "managed_promote_mysql",
+      memberId: "00000000-0000-4000-8000-000000000004",
+      engine: "mysql",
+      requiredExecutedGtidSet: "uuid:1-50",
+      gtidWaitTimeoutSeconds: 60,
+    },
+    new Date().toISOString(),
+    {
+      ensureDocker: () => Promise.resolve(),
+      runDocker: (args) => {
+        if (args[0] === "compose" && args.includes("ps")) {
+          return Promise.resolve(dockerOk(mysqlPs));
+        }
+        if (args[0] === "exec" && args.includes("mysql")) {
+          const sql = args[args.indexOf("-e") + 1] ?? "";
+          if (sql.includes("WAIT_FOR_EXECUTED_GTID_SET")) {
+            sawGtidWait = true;
+            return Promise.resolve(dockerOk("0\n"));
+          }
+          return Promise.resolve(dockerOk("0\t0\n"));
+        }
+        return Promise.resolve(dockerOk());
+      },
+    },
+  );
+  assertEquals(sawGtidWait, true);
+  assertEquals(result.role, "primary");
+});
+
 test("handleManagedPromote mysql path promotes via socket exec", async () => {
   const mysqlPs = JSON.stringify([
     {

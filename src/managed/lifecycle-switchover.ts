@@ -4,12 +4,16 @@
  */
 
 import type { ManagedLifecyclePayload } from "../contracts/commands-contracts.ts";
-import { resolveLocalReplicationEngine } from "./local-engine-context.ts";
+import {
+  type LocalEngineContextDeps,
+  resolveLocalReplicationEngine,
+} from "./local-engine-context.ts";
 import type { RunDockerFn } from "../deploy/docker-cli.ts";
 
 export async function captureSwitchoverGtidBeforeStop(
   payload: ManagedLifecyclePayload,
   run: RunDockerFn,
+  engineDeps?: LocalEngineContextDeps,
 ): Promise<string | undefined> {
   if (payload.action !== "stop" || payload.captureSwitchoverGtid !== true) {
     return undefined;
@@ -18,7 +22,7 @@ export async function captureSwitchoverGtidBeforeStop(
     payload.managedId,
     payload.engine,
     "managed.lifecycle",
-    { runDocker: run },
+    { runDocker: run, ...engineDeps },
   );
   const quiesce = engine.replication?.quiesceFormerPrimaryForSwitchover;
   if (!quiesce) {
@@ -32,6 +36,7 @@ export async function captureSwitchoverGtidBeforeStop(
 export async function reactivatePrimaryAfterSwitchoverAbort(
   payload: ManagedLifecyclePayload,
   run: RunDockerFn,
+  engineDeps?: LocalEngineContextDeps,
 ): Promise<void> {
   if (
     payload.action !== "start" ||
@@ -43,7 +48,7 @@ export async function reactivatePrimaryAfterSwitchoverAbort(
     payload.managedId,
     payload.engine,
     "managed.lifecycle",
-    { runDocker: run },
+    { runDocker: run, ...engineDeps },
   );
   await engine.waitReady(ctx);
   await engine.replication?.reactivateFormerPrimaryAfterSwitchoverAbort?.(ctx);
