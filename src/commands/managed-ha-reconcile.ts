@@ -3,7 +3,7 @@
  *
  * Empty desired tears the stack down. Present desired writes compose +
  * `Recover: false` config, then registers clusters with the organization's
- * topology account + org CA.
+ * topology account, org-wide HTTP/Raft credentials, and org CA.
  */
 
 import type {
