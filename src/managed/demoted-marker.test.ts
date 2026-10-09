@@ -4,6 +4,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   clearManagedDemotedMarker,
   isManagedMemberDemoted,
+  listDemotedFenceTargets,
   maybeClearDemotedMarkerAfterApply,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
@@ -98,5 +99,20 @@ test("a replica apply that is ready clears the marker; other outcomes keep it", 
       await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_ID),
       false,
     );
+  });
+});
+
+test("listDemotedFenceTargets includes a marker without ha-member.json", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const targets = await listDemotedFenceTargets(layout);
+    assertEquals(targets.length, 1);
+    assertEquals(targets[0]?.managedId, MANAGED_ID);
   });
 });

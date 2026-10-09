@@ -1086,4 +1086,21 @@ export function isInRecoverySql(): string {
   return "SELECT pg_catalog.pg_is_in_recovery();";
 }
 
+/** True when this instance is a writable primary (not standby recovery). */
+export function isWritablePrimarySql(): string {
+  return "SELECT NOT pg_catalog.pg_is_in_recovery();";
+}
+
+/**
+ * Best-effort quiesce for a fenced former primary still running. Does not
+ * replace `standby.signal` on disk (written before stop); superusers can still
+ * write until the engine is stopped.
+ */
+export function enforceFencedFormerPrimarySql(): string {
+  return [
+    "ALTER SYSTEM SET default_transaction_read_only = on;",
+    "SELECT pg_catalog.pg_reload_conf();",
+  ].join("\n");
+}
+
 export { MANAGED_SLOT_PREFIX };

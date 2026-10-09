@@ -648,6 +648,17 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  async isWritableFormerPrimary(ctx) {
+    const out = await runMysqlQuery(ctx, isWritableSql());
+    const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+    return parseSqlBool(readOnly ?? "") === false ||
+      parseSqlBool(superReadOnly ?? "") === false;
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runMysql(ctx, enforceReadOnlySql());
+  },
+
   runAdminScalarQuery(ctx, sql) {
     return runMysqlQuery(ctx, sql);
   },

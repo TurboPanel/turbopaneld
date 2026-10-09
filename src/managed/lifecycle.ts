@@ -31,6 +31,7 @@ import {
 import { readManagedComposeDataTarget } from "./compose.ts";
 import {
   clearManagedDemotedMarker,
+  isManagedMemberDemoted,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
 import {
@@ -41,6 +42,11 @@ import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
 } from "./needs-resync.ts";
+import { persistDemotedVolumeFence } from "./demoted-fence-volume.ts";
+import {
+  enforceFencedMemberIfRunning,
+  isFencedMemberStillWritable,
+} from "./fenced-member-enforce.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (
@@ -111,6 +117,42 @@ async function readReplicaComposeTarget(
  * stop the project and report needs_resync instead of starting it. Returns
  * `undefined` when start/restart may proceed.
  */
+/**
+ * A demoted (fenced) member must never be started writable. Refuse panel-driven
+ * start/restart; switchover-abort reactivation is the only exception.
+ */
+async function refuseDemotedMemberStart(
+  payload: ManagedLifecyclePayload,
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<ManagedLifecycleResult | undefined> {
+  if (payload.action === "stop") return undefined;
+  if (payload.reactivateAfterSwitchoverAbort === true) return undefined;
+  if (
+    !(await isManagedMemberDemoted(
+      layout,
+      payload.managedId,
+      payload.memberId,
+    ))
+  ) {
+    return undefined;
+  }
+
+  const redact = (text: string) => sanitizeForLog(text);
+  const engine = payload.engine ?? "postgres";
+  await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
+  await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
+  await stopManagedProjectForResync(payload.managedId, redact, run);
+  return {
+    status: "needs_resync",
+    summary:
+      `managed ${payload.action} refused: member is fenced (needs resync)`,
+    ...(payload.memberId
+      ? { member: buildNeedsResyncMember(payload.memberId) }
+      : {}),
+  };
+}
+
 async function refuseNonStandbyReplicaStart(
   payload: ManagedLifecyclePayload,
   layout: LayoutPaths,
@@ -162,6 +204,9 @@ export async function handleManagedLifecycle(
     };
   }
 
+  const demotedRefused = await refuseDemotedMemberStart(payload, layout, run);
+  if (demotedRefused) return demotedRefused;
+
   const refused = await refuseNonStandbyReplicaStart(payload, layout, run);
   if (refused) return refused;
 
@@ -177,12 +222,16 @@ export async function handleManagedLifecycle(
     );
 
   if (payload.action === "stop" && payload.demoted === true) {
+    const demotedAt = new Date().toISOString();
     await writeManagedDemotedMarker(
       layout,
       payload.managedId,
       payload.memberId ?? "",
-      new Date().toISOString(),
+      demotedAt,
     );
+    const engine = payload.engine ?? "postgres";
+    await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
+    await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
   }
 
   const project = managedComposeProject(payload.managedId);
@@ -198,6 +247,41 @@ export async function handleManagedLifecycle(
         sanitizeForLog(result.stderr || "compose failed")
       }`,
     );
+  }
+
+  if (
+    (payload.action === "start" || payload.action === "restart") &&
+    payload.reactivateAfterSwitchoverAbort !== true &&
+    (await isManagedMemberDemoted(
+      layout,
+      payload.managedId,
+      payload.memberId,
+    ))
+  ) {
+    const engine = payload.engine ?? "postgres";
+    await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
+    if (
+      await isFencedMemberStillWritable(
+        layout,
+        payload.managedId,
+        engine,
+        run,
+      )
+    ) {
+      await stopManagedProjectForResync(
+        payload.managedId,
+        (text) => sanitizeForLog(text),
+        run,
+      );
+      return {
+        status: "needs_resync",
+        summary:
+          `managed ${payload.action} refused: fenced member stayed writable`,
+        ...(payload.memberId
+          ? { member: buildNeedsResyncMember(payload.memberId) }
+          : {}),
+      };
+    }
   }
 
   await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);

@@ -9,9 +9,11 @@
  */
 
 import { join } from "@std/path";
+import type { ManagedEngineCode } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { managedDir, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
+import { listManagedHaMembers } from "./ha-member.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
 
 const MARKER_FILE = "demoted.json";
@@ -100,6 +102,54 @@ export async function isManagedMemberDemoted(
 }
 
 /** Drop the marker after a replica apply that actually brought the member up. */
+/** Every local cluster that currently carries a demoted marker file. */
+export async function listDemotedManagedIds(
+  layout: LayoutPaths,
+): Promise<string[]> {
+  const root = join(layout.stateDir, "managed");
+  const ids: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(root)) {
+      if (!entry.isDirectory || !SAFE_MANAGED_ID_RE.test(entry.name)) continue;
+      if (await isManagedMemberDemoted(layout, entry.name)) {
+        ids.push(entry.name);
+      }
+    }
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return ids;
+    throw err;
+  }
+  return ids;
+}
+
+/**
+ * Members to fence: HA records plus any demoted marker without a member record
+ * (e.g. before the next apply refreshes `ha-member.json`).
+ */
+export async function listDemotedFenceTargets(
+  layout: LayoutPaths,
+): Promise<
+  Array<{ managedId: string; memberId?: string; engine?: ManagedEngineCode }>
+> {
+  const byId = new Map<
+    string,
+    { managedId: string; memberId?: string; engine?: ManagedEngineCode }
+  >();
+  for (const member of await listManagedHaMembers(layout)) {
+    if (
+      await isManagedMemberDemoted(layout, member.managedId, member.memberId)
+    ) {
+      byId.set(member.managedId, member);
+    }
+  }
+  for (const managedId of await listDemotedManagedIds(layout)) {
+    if (!byId.has(managedId)) {
+      byId.set(managedId, { managedId });
+    }
+  }
+  return [...byId.values()];
+}
+
 export async function maybeClearDemotedMarkerAfterApply(
   layout: LayoutPaths,
   payload: { managedId: string; memberRole: "primary" | "replica" },

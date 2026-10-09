@@ -6,7 +6,10 @@ import {
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
-import { isManagedMemberDemoted } from "./demoted-marker.ts";
+import {
+  isManagedMemberDemoted,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
 import { handleManagedLifecycle } from "./lifecycle.ts";
 import { managedDir } from "./engine-paths.ts";
 
@@ -187,6 +190,61 @@ for (const role of ["primary", undefined] as const) {
     assertEquals(probeCalled(calls), false);
     assertEquals(composeCalled(calls, "start"), true);
     assertEquals(result.status, "ready");
+  });
+}
+
+for (const action of ["start", "restart"] as const) {
+  test(`lifecycle ${action} refuses a demoted primary without compose ${action}`, async () => {
+    await withTempLayout(async (fixture) => {
+      const prior: Record<string, string | undefined> = {};
+      for (const [key, value] of Object.entries(fixture.env)) {
+        prior[key] = Deno.env.get(key);
+        Deno.env.set(key, value);
+      }
+      try {
+        const managedId =
+          `managed_lifecycle_demoted_start_${crypto.randomUUID()}`;
+        const root = managedDir(
+          { stateDir: fixture.dirs.stateDir } as Parameters<
+            typeof managedDir
+          >[0],
+          managedId,
+        );
+        await Deno.mkdir(root, { recursive: true });
+        await Deno.writeTextFile(
+          `${root}/docker-compose.yml`,
+          POSTGRES_COMPOSE,
+        );
+        await writeManagedDemotedMarker(
+          { stateDir: fixture.dirs.stateDir } as Parameters<
+            typeof writeManagedDemotedMarker
+          >[0],
+          managedId,
+          MEMBER_ID,
+          "2026-10-08T12:00:00.000Z",
+        );
+        const docker = fakeDocker(new Set([PG_DATA]));
+        const result = await handleManagedLifecycle(
+          {
+            managedId,
+            action,
+            memberId: MEMBER_ID,
+            engine: "postgres",
+            role: "primary",
+          },
+          new Date().toISOString(),
+          { runDocker: docker.run },
+        );
+        assertEquals(composeCalled(docker.calls, action), false);
+        assertEquals(composeCalled(docker.calls, "stop"), true);
+        assertEquals(result.status, "needs_resync");
+      } finally {
+        for (const [key, value] of Object.entries(prior)) {
+          if (value === undefined) Deno.env.delete(key);
+          else Deno.env.set(key, value);
+        }
+      }
+    });
   });
 }
 

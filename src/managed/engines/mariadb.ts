@@ -616,6 +616,17 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  async isWritableFormerPrimary(ctx) {
+    const out = await runMariadbQuery(ctx, isWritableSql());
+    const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+    return parseSqlBool(readOnly ?? "") === false ||
+      parseSqlBool(superReadOnly ?? "") === false;
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runMariadb(ctx, enforceReadOnlySql());
+  },
+
   runAdminScalarQuery(ctx, sql) {
     return runMariadbQuery(ctx, sql);
   },

@@ -25,10 +25,12 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
   ensureReadWriteLoginSchemaSql,
   grantDatabaseSql,
   isInRecoverySql,
+  isWritablePrimarySql,
   listDatabasesForRoleReleaseSql,
   listLostPhysicalSlotsSql,
   listManagedSlotsSql,
@@ -619,6 +621,16 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       );
     }
     return "seeded";
+  },
+
+  async isWritableFormerPrimary(ctx) {
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    return value === "t" || value === "true";
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runPsql(ctx, enforceFencedFormerPrimarySql());
   },
 
   async promote(ctx, _options?) {

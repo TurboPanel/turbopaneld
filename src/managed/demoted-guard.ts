@@ -9,13 +9,17 @@ import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { collectManagedContainers } from "./containers.ts";
-import { isManagedMemberDemoted } from "./demoted-marker.ts";
+import {
+  isManagedMemberDemoted,
+  listDemotedFenceTargets,
+} from "./demoted-marker.ts";
+import {
+  enforceFencedMemberIfRunning,
+  isFencedMemberStillWritable,
+} from "./fenced-member-enforce.ts";
 import { managedComposeProject } from "./engine-paths.ts";
 import { recordManagedIntent } from "./ha-intent.ts";
-import {
-  listManagedHaMembers,
-  type ManagedHaMemberRecord,
-} from "./ha-member.ts";
+import type { ManagedHaMemberRecord } from "./ha-member.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
 
 export const DEMOTED_GUARD_INTERVAL_MS = 5_000;
@@ -67,14 +71,25 @@ export class DemotedMemberGuard {
   readonly #warned = new Set<string>();
   readonly #layout: LayoutPaths;
   readonly #run: DockerRunFn;
-  readonly #listMembers: () => Promise<ManagedHaMemberRecord[]>;
+  readonly #listTargets: () => Promise<ManagedHaMemberRecord[]>;
   readonly #intervalMs: number;
 
   constructor(deps: DemotedMemberGuardDeps) {
     this.#layout = deps.layout;
     this.#run = deps.run;
-    this.#listMembers = deps.listMembers ??
-      (() => listManagedHaMembers(deps.layout));
+    this.#listTargets = deps.listMembers ??
+      (async () => {
+        const targets = await listDemotedFenceTargets(deps.layout);
+        return targets.map((target) => ({
+          managedId: target.managedId,
+          memberId: target.memberId ?? "",
+          engine: target.engine ?? "postgres",
+          role: "primary" as const,
+          containerName: "",
+          replicaPeerCount: 0,
+          updatedAt: "",
+        }));
+      });
     this.#intervalMs = deps.intervalMs ?? DEMOTED_GUARD_INTERVAL_MS;
   }
 
@@ -97,7 +112,7 @@ export class DemotedMemberGuard {
     if (this.#ticking) return;
     this.#ticking = true;
     try {
-      const members = await this.#listMembers();
+      const members = await this.#listTargets();
       await forEachSequential(members, (member) => this.#fenceOne(member));
     } catch (err) {
       logWarn(
@@ -141,6 +156,22 @@ export class DemotedMemberGuard {
       return;
     }
     if (!(await engineIsRunning(this.#run, member.managedId))) {
+      this.#warned.delete(member.managedId);
+      return;
+    }
+    await enforceFencedMemberIfRunning(
+      this.#layout,
+      member.managedId,
+      member.engine,
+      this.#run,
+    );
+    const stillWritable = await isFencedMemberStillWritable(
+      this.#layout,
+      member.managedId,
+      member.engine,
+      this.#run,
+    );
+    if (!stillWritable) {
       this.#warned.delete(member.managedId);
       return;
     }
