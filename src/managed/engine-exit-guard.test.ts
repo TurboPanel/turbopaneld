@@ -179,6 +179,98 @@ test("a demoted member is not started", async () => {
   });
 });
 
+test("a replica whose data is not a standby is not started", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    const root = `${layout.stateDir}/managed/${MANAGED_ID}`;
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18-alpine",
+        "    volumes:",
+        "      - pgdata:/var/lib/postgresql",
+        "volumes:",
+        "  pgdata:",
+        "    name: pgdata",
+      ].join("\n"),
+    );
+    await saveManagedHaMember(layout, {
+      ...memberRecord(),
+      role: "replica",
+    });
+    const pgData = "/var/lib/postgresql/data/PG_VERSION";
+    const calls: string[][] = [];
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      if (args[0] === "run") {
+        const script = args.at(-1) ?? "";
+        const path = script.split(" ")[2] ?? "";
+        const stdout = path === pgData ? "present\n" : "absent\n";
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout,
+          stderr: "",
+        });
+      }
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: EXITED_PS,
+          stderr: "",
+        });
+      }
+      return Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
+    };
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run,
+      listMembers: () =>
+        Promise.resolve([{ ...memberRecord(), role: "replica" }]),
+    });
+    await guard.tick();
+    assertEquals(
+      calls.some((args) => args[0] === "compose" && args.at(-1) === "start"),
+      false,
+    );
+    assertEquals(calls.some((args) => args[0] === "run"), true);
+  });
+});
+
+test("compose start failure is logged without throwing", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    let startAttempted = false;
+    const failingRun = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "compose" && args.at(-1) === "start") {
+        startAttempted = true;
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "start refused",
+        });
+      }
+      return fake.run(args);
+    };
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: failingRun,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(startAttempted, true);
+  });
+});
+
 test("a held operator stop is not started", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
