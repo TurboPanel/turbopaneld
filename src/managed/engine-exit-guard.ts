@@ -16,6 +16,7 @@ import { collectManagedContainers } from "./containers.ts";
 import { isManagedMemberDemoted } from "./demoted-marker.ts";
 import { managedComposeProject, managedDir } from "./engine-paths.ts";
 import {
+  type IntentLookup,
   isHeldIntent,
   isIntentLookupActive,
   isRunningIntent,
@@ -57,6 +58,39 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return false;
     throw err;
+  }
+}
+
+/** Held stop/destroy, unreadable marker, or an in-flight command. */
+function intentBlocksEngineStart(lookup: IntentLookup, nowMs: number): boolean {
+  if (lookup.status === "unreadable") return true;
+  if (lookup.status !== "found") return false;
+  if (
+    isHeldIntent(lookup) &&
+    (lookup.intent.kind === "stop" || lookup.intent.kind === "destroy")
+  ) {
+    return true;
+  }
+  return isRunningIntent(lookup) && isIntentLookupActive(lookup, nowMs);
+}
+
+async function composeStartStoppedEngine(
+  run: DockerRunFn,
+  project: string,
+  managedId: string,
+  member: ManagedHaMemberRecord,
+): Promise<void> {
+  logInfo(
+    "managed",
+    `engine exit guard: starting stopped engine managedId=${managedId} member=${member.memberId} role=${member.role}`,
+  );
+  const result = await run(["compose", "-p", project, "start"]);
+  if (!result.success) {
+    logWarn(
+      "managed",
+      `engine exit guard: compose start failed managedId=${managedId}:`,
+      sanitizeForLog(result.stderr || result.stdout),
+    );
   }
 }
 
@@ -137,18 +171,7 @@ export class ManagedEngineExitGuard {
 
     const now = this.#nowMs();
     const lookup = await lookupManagedIntent(this.#layout.stateDir, managedId);
-    if (lookup.status === "unreadable") return;
-    if (lookup.status === "found") {
-      if (
-        isHeldIntent(lookup) &&
-        (lookup.intent.kind === "stop" || lookup.intent.kind === "destroy")
-      ) {
-        return;
-      }
-      if (isRunningIntent(lookup) && isIntentLookupActive(lookup, now)) {
-        return;
-      }
-    }
+    if (intentBlocksEngineStart(lookup, now)) return;
 
     const project = managedComposeProject(managedId);
     const containers = await collectManagedContainers(
@@ -194,22 +217,6 @@ export class ManagedEngineExitGuard {
     if (now - last < this.#minStartGapMs) return;
 
     this.#lastStartAttempt.set(managedId, now);
-    logInfo(
-      "managed",
-      `engine exit guard: starting stopped engine managedId=${managedId} member=${memberId} role=${member.role}`,
-    );
-    const result = await this.#run([
-      "compose",
-      "-p",
-      project,
-      "start",
-    ]);
-    if (!result.success) {
-      logWarn(
-        "managed",
-        `engine exit guard: compose start failed managedId=${managedId}:`,
-        sanitizeForLog(result.stderr || result.stdout),
-      );
-    }
+    await composeStartStoppedEngine(this.#run, project, managedId, member);
   }
 }
