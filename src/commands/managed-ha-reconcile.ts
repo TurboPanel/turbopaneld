@@ -37,7 +37,8 @@ import {
   inspectOrchestratorContainer,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
-  materializeOrchestratorHostCredentials,
+  materializeOrchestratorApiCredentials,
+  materializeOrchestratorRaftCredentials,
   ORCHESTRATOR_TLS_CA_PATH,
   type OrchestratorApiCredentials,
   orchestratorTopologyAliases,
@@ -163,16 +164,16 @@ async function materializeOrchestratorSecretsIfPresent(
     layout,
     decryptSecrets,
   );
-  if (payload.orchestratorApiUser && payload.orchestratorRaftToken) {
+  if (payload.orchestratorApiUser) {
+    await materializeOrchestratorApiCredentials(layout, httpAuth);
+  }
+  if (payload.orchestratorRaftToken) {
     if (raftAuthToken === null) {
       throw new Error(
         "managed HA orchestrator raft token missing after decrypt",
       );
     }
-    await materializeOrchestratorHostCredentials(layout, {
-      httpAuth,
-      raftToken: raftAuthToken,
-    });
+    await materializeOrchestratorRaftCredentials(layout, raftAuthToken);
   }
   return { httpAuth, raftAuthToken };
 }
@@ -192,9 +193,10 @@ async function resolveOrchestratorTopologyCredentials(
       topologyPassword,
     };
   }
-  const cluster = payload.clusters.find((entry) =>
-    orchestratorMonitorsEngine(entry.engine)
-  );
+  const mysqlClusters = payload.clusters
+    .filter((entry) => orchestratorMonitorsEngine(entry.engine))
+    .toSorted((left, right) => left.managedId.localeCompare(right.managedId));
+  const cluster = mysqlClusters[0];
   if (!cluster) {
     return { topologyUser: "tp_repl", topologyPassword: "" };
   }

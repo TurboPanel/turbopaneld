@@ -43,7 +43,6 @@ import {
   orchestratorConfigDir,
   orchestratorConfPath,
   orchestratorDataDir,
-  orchestratorHostPrepMarkerPath,
   orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
@@ -55,7 +54,11 @@ import {
   isValidIpv6Literal,
   type ManagedHaRaftConfig,
 } from "../contracts/commands-contracts.ts";
-import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
+import {
+  formatMysqlClientCnf,
+  parseProxySqlClientCnf,
+  writeMysqlClientCnfAtomic,
+} from "./proxysql-admin.ts";
 
 /**
  * Percona's maintained Orchestrator distribution — public on Docker Hub and
@@ -105,8 +108,28 @@ export type OrchestratorApiCredentials = {
   password: string;
 };
 
-function formatOrchestratorClientCnf(user: string, password: string): string {
-  return `[client]\nuser=${user}\npassword=${password}\n`;
+/** Write org-wide Orchestrator HTTP credentials for loopback clients and compose. */
+export async function materializeOrchestratorApiCredentials(
+  layout: LayoutPaths,
+  httpAuth: OrchestratorApiCredentials,
+): Promise<void> {
+  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await writeMysqlClientCnfAtomic(
+    orchestratorApiCnfPath(layout),
+    formatMysqlClientCnf(httpAuth.user, httpAuth.password),
+  );
+}
+
+/** Write org-wide Orchestrator Raft token for loopback clients and compose. */
+export async function materializeOrchestratorRaftCredentials(
+  layout: LayoutPaths,
+  raftToken: string,
+): Promise<void> {
+  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await writeMysqlClientCnfAtomic(
+    orchestratorRaftCnfPath(layout),
+    formatMysqlClientCnf("raft", raftToken),
+  );
 }
 
 /** Write org-wide Orchestrator HTTP + Raft secrets for loopback clients and compose. */
@@ -117,17 +140,8 @@ export async function materializeOrchestratorHostCredentials(
     raftToken: string;
   },
 ): Promise<void> {
-  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
-  await Deno.writeTextFile(
-    orchestratorApiCnfPath(layout),
-    formatOrchestratorClientCnf(input.httpAuth.user, input.httpAuth.password),
-    { mode: 0o600 },
-  );
-  await Deno.writeTextFile(
-    orchestratorRaftCnfPath(layout),
-    formatOrchestratorClientCnf("raft", input.raftToken),
-    { mode: 0o600 },
-  );
+  await materializeOrchestratorApiCredentials(layout, input.httpAuth);
+  await materializeOrchestratorRaftCredentials(layout, input.raftToken);
 }
 
 export async function loadOrchestratorApiCredentials(
@@ -850,22 +864,23 @@ export async function restartOrchestratorStack(
   }
 }
 
-export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
-  for (
-    const path of [
-      orchestratorWaitReadyScriptPath(layout),
-      orchestratorHostPrepMarkerPath(layout),
-    ]
-  ) {
-    try {
-      await Deno.stat(path);
-      return true;
-    } catch (err) {
-      if (err instanceof Deno.errors.NotFound) continue;
-      throw err;
-    }
+async function orchestratorHostPrepRegularFile(
+  path: string,
+): Promise<boolean> {
+  try {
+    const info = await Deno.stat(path);
+    return info.isFile;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
   }
-  return false;
+}
+
+/** True when Ansible installed the root-only wait-ready script the oneshot unit needs. */
+export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
+  return await orchestratorHostPrepRegularFile(
+    orchestratorWaitReadyScriptPath(layout),
+  );
 }
 
 /** True once `managed.ha.reconcile` has written the daemon-owned compose file. */

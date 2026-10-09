@@ -9,6 +9,7 @@ import {
   readSystemComponentDescriptor,
   SYSTEM_MANAGED_HA_COMPONENT,
 } from "../deploy/system-component.ts";
+import { dirname } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   orchestratorApiCnfPath,
@@ -17,7 +18,9 @@ import {
   orchestratorConfPath,
   orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
+  orchestratorWaitReadyScriptPath,
 } from "../managed/engine-paths.ts";
+import { parseProxySqlClientCnf } from "../managed/proxysql-admin.ts";
 import {
   mysqlOrchestratorClientCnf,
   orchestratorApiPlainEnvelope,
@@ -53,13 +56,15 @@ const STALE_MANAGED_ID = "00000000-0000-4000-8000-000000000002";
 const MEMBER_ID = "00000000-0000-4000-8000-0000000000a1";
 
 function applyLayoutEnv(fixture: TempLayoutFixture): void {
-  Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
-  Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+  for (const [key, value] of Object.entries(fixture.env)) {
+    Deno.env.set(key, value);
+  }
 }
 
-function clearLayoutEnv(): void {
-  Deno.env.delete("TURBOPANEL_STATE_DIR");
-  Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+function clearLayoutEnv(fixture: TempLayoutFixture): void {
+  for (const key of Object.keys(fixture.env)) {
+    Deno.env.delete(key);
+  }
 }
 
 function baseIdentity() {
@@ -128,6 +133,9 @@ async function seedOrchestratorHostPrep(
   layout: ReturnType<typeof resolveLayout>,
 ): Promise<void> {
   await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  const waitReady = orchestratorWaitReadyScriptPath(layout);
+  await Deno.mkdir(dirname(waitReady), { recursive: true });
+  await Deno.writeTextFile(waitReady, "#!/bin/sh\nexit 0\n");
   await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
 }
 
@@ -265,7 +273,7 @@ async function reconcileWithTwoMembers(
         registered: out.registeredClusters,
       };
     } finally {
-      clearLayoutEnv();
+      clearLayoutEnv(fixture);
     }
   });
   return result!;
@@ -348,7 +356,7 @@ test({
         assertEquals(result.containers, []);
         assertEquals(dockerArgs.some((args) => args.includes("down")), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -403,7 +411,7 @@ test({
           true,
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -463,7 +471,7 @@ test({
           300,
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -510,7 +518,7 @@ test({
         assertEquals(err.message.includes(STALE_MANAGED_ID), true);
         assertEquals(err.message.includes("HTTP 500"), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -575,7 +583,7 @@ test({
         assertEquals(compose.includes("10.100.0.10:33001:33001"), true);
         assertEquals(compose.includes("restart: always"), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -639,7 +647,7 @@ test({
         );
         assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -710,7 +718,7 @@ test({
         );
         assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -747,7 +755,7 @@ test({
         );
         assertEquals(second.restarted, false);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -778,7 +786,7 @@ test({
         );
         assertEquals(hostPrepCalls, 1);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -823,7 +831,7 @@ test({
         assertEquals(events.includes("host-prep"), true);
         assertEquals(events.indexOf("host-prep") > 0, true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -864,7 +872,7 @@ test({
         assertEquals(hostPrepCalls, 0);
         assertEquals(dockerArgs.some((args) => args.includes("down")), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -896,7 +904,7 @@ test({
         );
         assertEquals(hostPrepCalls, 0);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -927,7 +935,7 @@ test({
         assertEquals(descriptor?.serviceId, SERVICE_ID);
         assertEquals(descriptor?.containerName, `${SERVICE_ID}-ha`);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -962,7 +970,7 @@ test({
         );
         assertEquals(result.containers, undefined);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -999,7 +1007,7 @@ test({
           "managed.ha.reconcile requires decryptSecrets",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1029,7 +1037,7 @@ test({
           "failed to decrypt managed HA topology password",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1062,7 +1070,7 @@ test({
           "failed to decrypt managed HA replication password",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1090,7 +1098,7 @@ test({
           "managed.ha.reconcile requires decryptSecrets",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1125,7 +1133,7 @@ test({
           "orchestrator compose up failed",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1160,7 +1168,7 @@ test({
         );
         assertEquals(result.registeredClusters, [MANAGED_ID]);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1172,10 +1180,12 @@ test({
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
-      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
       applyLayoutEnv(fixture);
       const privatePem =
         "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+      const tlsKeyEnvelope = "tpdaemon.v1.server.KEYID.ciphertext";
       try {
         const result = await handleManagedHaReconcile(
           presentPayload({
@@ -1183,7 +1193,7 @@ test({
             orgTlsMaterial: {
               certificatePem:
                 "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
-              privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+              privateKeyEnvelope: tlsKeyEnvelope,
               caCertPem:
                 "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
             },
@@ -1192,8 +1202,12 @@ test({
           {
             runDocker: fakeRunWithRunningOrchestrator(),
             ensureDocker: () => Promise.resolve(),
-            decryptSecrets: (ciphertexts) =>
-              Promise.resolve(ciphertexts.map(() => privatePem)),
+            decryptSecrets: async (ciphertexts) => {
+              const echoed = await decryptSecretsEcho(ciphertexts);
+              return ciphertexts.map((c, index) =>
+                c === tlsKeyEnvelope ? privatePem : echoed[index]!
+              );
+            },
             orchestratorApi: {
               fetch: () => Promise.resolve(new Response("", { status: 200 })),
             },
@@ -1201,7 +1215,115 @@ test({
         );
         assertEquals(result.restarted, true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile rewrites api.cnf when only orchestratorApiUser is in the payload",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedLegacyOrchestratorApiCnf(layout);
+      applyLayoutEnv(fixture);
+      const payload = presentPayload();
+      delete payload.orchestratorRaftToken;
+      try {
+        await handleManagedHaReconcile(payload, new Date().toISOString(), {
+          runDocker: fakeRunWithRunningOrchestrator(),
+          ensureDocker: () => Promise.resolve(),
+          decryptSecrets: decryptSecretsEcho,
+          orchestratorApi: {
+            fetch: () => Promise.resolve(new Response("", { status: 200 })),
+          },
+        });
+        const apiCreds = parseProxySqlClientCnf(
+          await Deno.readTextFile(orchestratorApiCnfPath(layout)),
+          "api.cnf",
+        );
+        assertEquals(apiCreds.user, orchestratorApiUsername());
+        assertEquals(apiCreds.password, orchestratorApiPlaintext());
+        const raftCreds = parseProxySqlClientCnf(
+          await Deno.readTextFile(orchestratorRaftCnfPath(layout)),
+          "raft.cnf",
+        );
+        assertEquals(raftCreds.password, "raft-auth-plain");
+      } finally {
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile legacy topology login picks the lowest managedId MySQL cluster",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const clusterA = {
+        managedId: "00000000-0000-4000-8000-000000000099",
+        clusterAlias: "cluster-a",
+        engine: "mysql" as const,
+        members: [{
+          memberId: MEMBER_ID,
+          role: "primary" as const,
+          replicaClass: null,
+          host: "db-a",
+          port: 3306,
+          promotionRule: "prefer" as const,
+        }],
+        replicationUsername: "tp_repl_a",
+        replicationPasswordEnvelope: "tpdaemon.v1.repl-a",
+      };
+      const clusterB = {
+        managedId: "00000000-0000-4000-8000-000000000001",
+        clusterAlias: "cluster-b",
+        engine: "mysql" as const,
+        members: [{
+          memberId: "00000000-0000-4000-8000-0000000000b2",
+          role: "primary" as const,
+          replicaClass: null,
+          host: "db-b",
+          port: 3306,
+          promotionRule: "prefer" as const,
+        }],
+        replicationUsername: "tp_repl_b",
+        replicationPasswordEnvelope: "tpdaemon.v1.repl-b",
+      };
+      try {
+        await handleManagedHaReconcile(
+          presentPayload({
+            topologyUser: undefined,
+            clusters: [clusterA, clusterB],
+          }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: (ciphertexts) =>
+              Promise.resolve(
+                ciphertexts.map((c) => c.replace(/^tpdaemon\.v1\./, "")),
+              ),
+            orchestratorApi: {
+              fetch: () => Promise.resolve(new Response("", { status: 200 })),
+            },
+          },
+        );
+        const conf = JSON.parse(
+          await Deno.readTextFile(orchestratorConfPath(layout)),
+        ) as Record<string, unknown>;
+        assertEquals(conf.MySQLTopologyUser, "tp_repl_b");
+        assertEquals(conf.MySQLTopologyPassword, "repl-b");
+      } finally {
+        clearLayoutEnv(fixture);
       }
     });
   },
