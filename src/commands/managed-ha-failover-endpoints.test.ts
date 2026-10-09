@@ -129,3 +129,78 @@ test("managed.ha.failover drain skips helper when sourcePort is omitted", async 
   assertEquals(drainCalled, false);
   assertEquals(result.phase, "drain");
 });
+
+test("managed.ha.failover recover translates a local member's Docker name to its published private listener", async () => {
+  const recovered: unknown[] = [];
+  const inspected: string[][] = [];
+  await handleManagedHaFailover(
+    {
+      ...BASE,
+      sourceHost: "00000000-0000-4000-8000-0000000000a1-1",
+      sourcePort: 45001,
+      targetHost: "203.0.113.20",
+      targetPort: 45002,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      recover: (target) => {
+        recovered.push(target);
+        return Promise.resolve();
+      },
+      runDocker: (args) => {
+        inspected.push(args);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: JSON.stringify({
+            "3306/tcp": [{ HostIp: "172.20.4.10", HostPort: "45001" }],
+          }),
+          stderr: "",
+        });
+      },
+    },
+  );
+  assertEquals(recovered, [{
+    sourceHost: "172.20.4.10",
+    sourcePort: 45001,
+    targetHost: "203.0.113.20",
+    targetPort: 45002,
+  }]);
+  // Only the Docker name is inspected; the IP literal is already the key.
+  assertEquals(inspected.length, 1);
+});
+
+test("managed.ha.failover recover keeps the endpoint as given when the name cannot be inspected", async () => {
+  const recovered: unknown[] = [];
+  await handleManagedHaFailover(
+    {
+      ...BASE,
+      sourceHost: "00000000-0000-4000-8000-0000000000a1-1",
+      sourcePort: 45001,
+      targetHost: "203.0.113.20",
+      targetPort: 45002,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      recover: (target) => {
+        recovered.push(target);
+        return Promise.resolve();
+      },
+      runDocker: () =>
+        Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "no such",
+        }),
+    },
+  );
+  assertEquals(recovered, [{
+    sourceHost: "00000000-0000-4000-8000-0000000000a1-1",
+    sourcePort: 45001,
+    targetHost: "203.0.113.20",
+    targetPort: 45002,
+  }]);
+});

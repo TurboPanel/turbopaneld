@@ -72,7 +72,7 @@ export const MANAGED_HA_RAFT_PORT = 33002;
 /** Topology CA inside the Orchestrator container (`./tls` bind). */
 export const ORCHESTRATOR_TLS_CA_PATH = "/etc/orchestrator/tls/ca.pem";
 
-type RunDockerFn = (
+export type RunDockerFn = (
   args: string[],
   options?: RunDockerOptions,
 ) => Promise<DockerCliResult>;
@@ -291,6 +291,62 @@ function unwrapPublishedHost(host: string | undefined): string {
   return raw;
 }
 
+/**
+ * The address Orchestrator knows a LOCAL member by, given the Docker name and
+ * private-listener port the control plane sends for a recover. Members are
+ * registered by `<published private IP>:<port>` (see
+ * {@link resolveOrchestratorRegisterHost}), so a name would never match its
+ * instance key. Finds the published binding whose host port equals `port`.
+ */
+export function pickPublishedDialByHostPort(
+  portsJson: string,
+  hostPort: number,
+): { host: string; port: number } | null {
+  let ports: Record<
+    string,
+    Array<{ HostIp?: string; HostPort?: string }> | null
+  >;
+  try {
+    const parsed: unknown = JSON.parse(portsJson);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    ports = parsed as typeof ports;
+  } catch {
+    return null;
+  }
+  for (const bound of Object.values(ports)) {
+    for (const binding of bound ?? []) {
+      const host = unwrapPublishedHost(binding.HostIp);
+      if (Number(binding.HostPort) !== hostPort) continue;
+      if (UNREACHABLE_PUBLISH_IPS.has(host)) continue;
+      if (!isOrchestratorRegisterHost(host)) continue;
+      return { host, port: hostPort };
+    }
+  }
+  return null;
+}
+
+/**
+ * Map a recover endpoint to the key Orchestrator registered it under. An IP
+ * literal (remote member) is already that key; a Docker name (member on this
+ * host) is translated through its published private listener. Falls back to
+ * the endpoint as given when the container cannot be inspected.
+ */
+export async function resolveOrchestratorRecoverEndpoint(
+  endpoint: { host: string; port: number },
+  run: RunDockerFn = defaultRunDocker,
+): Promise<{ host: string; port: number }> {
+  if (isOrchestratorRegisterHost(endpoint.host)) return endpoint;
+  const inspect = await run([
+    "inspect",
+    "--format",
+    "{{json .NetworkSettings.Ports}}",
+    endpoint.host,
+  ]);
+  if (!inspect.success) return endpoint;
+  return pickPublishedDialByHostPort(inspect.stdout.trim(), endpoint.port) ??
+    endpoint;
+}
+
 export async function resolveOrchestratorRegisterHost(
   member: { host: string; port: number; containerName?: string },
   run: RunDockerFn,
@@ -487,6 +543,132 @@ export type InspectOrchestratorDeps = {
   runDocker?: RunDockerFn;
 };
 
+const ORCHESTRATOR_LIVE_STATES = new Set(["running", "restarting"]);
+const ORCHESTRATOR_STACK_BUSY_MS = 5 * 60_000;
+const orchestratorStackBusyUntil = new Map<string, Map<symbol, number>>();
+const stoppedOrchestratorObservations = new Map<string, number>();
+
+export type OrchestratorReviveOutcome =
+  | "absent"
+  | "busy"
+  | "running"
+  | "stopped"
+  | "started";
+
+function beginOrchestratorStackMutation(layout: LayoutPaths): () => void {
+  const composePath = orchestratorComposePath(layout);
+  const token = Symbol();
+  const active = orchestratorStackBusyUntil.get(composePath) ?? new Map();
+  active.set(token, Date.now() + ORCHESTRATOR_STACK_BUSY_MS);
+  orchestratorStackBusyUntil.set(composePath, active);
+  stoppedOrchestratorObservations.delete(composePath);
+  return () => {
+    active.delete(token);
+    if (active.size === 0) orchestratorStackBusyUntil.delete(composePath);
+  };
+}
+
+async function withOrchestratorStackMutation<T>(
+  layout: LayoutPaths,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const endStackMutation = beginOrchestratorStackMutation(layout);
+  try {
+    return await mutate();
+  } finally {
+    endStackMutation();
+  }
+}
+
+function isOrchestratorStackBusy(composePath: string): boolean {
+  const active = orchestratorStackBusyUntil.get(composePath);
+  if (!active) return false;
+  const now = Date.now();
+  for (const [token, busyUntil] of active) {
+    if (busyUntil <= now) active.delete(token);
+  }
+  if (active.size > 0) return true;
+  orchestratorStackBusyUntil.delete(composePath);
+  return false;
+}
+
+function clearStoppedOrchestratorObservation(composePath: string): void {
+  stoppedOrchestratorObservations.delete(composePath);
+}
+
+/**
+ * Start a stopped Orchestrator container without recreating a torn-down stack.
+ *
+ * A stack mutation suppresses revival, and a stopped container must remain
+ * stopped for two observer polls. That keeps the exited window during an
+ * intentional teardown or recreate from racing with `compose start`.
+ */
+export async function reviveStoppedOrchestratorContainer(
+  layout: LayoutPaths,
+  run: RunDockerFn = defaultRunDocker,
+): Promise<OrchestratorReviveOutcome> {
+  const composePath = orchestratorComposePath(layout);
+  if (isOrchestratorStackBusy(composePath)) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "busy";
+  }
+  if (!(await pathExists(composePath))) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "absent";
+  }
+
+  let ps: DockerCliResult;
+  try {
+    ps = await run([
+      "compose",
+      "-f",
+      composePath,
+      "ps",
+      "-a",
+      "--format",
+      "json",
+    ]);
+  } catch (err) {
+    clearStoppedOrchestratorObservation(composePath);
+    throw err;
+  }
+  if (!ps.success) {
+    clearStoppedOrchestratorObservation(composePath);
+    throw new Error(ps.stderr || "docker compose ps failed");
+  }
+
+  let stopped = false;
+  for (const entry of parseComposePsEntries(ps.stdout)) {
+    const row = readComposePsContainer(entry, "turbopanel");
+    if (row === null) continue;
+    if (ORCHESTRATOR_LIVE_STATES.has(row.status.toLowerCase())) {
+      clearStoppedOrchestratorObservation(composePath);
+      return "running";
+    }
+    stopped = true;
+  }
+  if (!stopped) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "absent";
+  }
+
+  const observations = (stoppedOrchestratorObservations.get(composePath) ?? 0) +
+    1;
+  stoppedOrchestratorObservations.set(composePath, observations);
+  if (observations < 2) return "stopped";
+  if (isOrchestratorStackBusy(composePath)) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "busy";
+  }
+  clearStoppedOrchestratorObservation(composePath);
+
+  const start = await run(["compose", "-f", composePath, "start"]);
+  if (!start.success) {
+    throw new Error(start.stderr || "orchestrator compose start failed");
+  }
+  return "started";
+}
+
 export async function inspectOrchestratorContainer(
   layout: LayoutPaths,
   descriptor: SystemComponentDescriptor,
@@ -603,7 +785,10 @@ export async function ensureOrchestratorStack(
     "--remove-orphans",
   ];
   if (networkRenamed) upArgs.push("--force-recreate");
-  const up = await run(upArgs);
+  const up = await withOrchestratorStackMutation(
+    layout,
+    () => run(upArgs),
+  );
   if (!up.success) {
     throw new Error(up.stderr || "orchestrator compose up failed");
   }
@@ -628,13 +813,17 @@ export async function stopOrchestratorStack(
 ): Promise<void> {
   const composePath = orchestratorComposePath(layout);
   if (!(await pathExists(composePath))) return;
-  const down = await run([
-    "compose",
-    "-f",
-    composePath,
-    "down",
-    "--remove-orphans",
-  ]);
+  const down = await withOrchestratorStackMutation(
+    layout,
+    () =>
+      run([
+        "compose",
+        "-f",
+        composePath,
+        "down",
+        "--remove-orphans",
+      ]),
+  );
   if (!down.success) {
     throw new Error(down.stderr || "orchestrator compose down failed");
   }
@@ -646,12 +835,16 @@ export async function restartOrchestratorStack(
 ): Promise<void> {
   const composePath = orchestratorComposePath(layout);
   if (!(await pathExists(composePath))) return;
-  const restart = await run([
-    "compose",
-    "-f",
-    composePath,
-    "restart",
-  ]);
+  const restart = await withOrchestratorStackMutation(
+    layout,
+    () =>
+      run([
+        "compose",
+        "-f",
+        composePath,
+        "restart",
+      ]),
+  );
   if (!restart.success) {
     throw new Error(restart.stderr || "orchestrator compose restart failed");
   }

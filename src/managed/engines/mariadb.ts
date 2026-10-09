@@ -38,10 +38,13 @@ import {
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
+  listNonLocalAccountsSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  parseGlobalPrivAccountRows,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
+  reassertReplicaPrivilegeGuardSql,
   resetReplicaGtidStateSql,
   showReplicaStatusSql,
   versionSql,
@@ -453,6 +456,16 @@ export function buildMariadbStandbySeedScript(
   ].join("\n");
 }
 
+async function reassertReplicaPrivilegeGuard(
+  ctx: ManagedEngineContext,
+): Promise<void> {
+  const tsv = await runMariadbQuery(ctx, listNonLocalAccountsSql());
+  await runMariadb(
+    ctx,
+    reassertReplicaPrivilegeGuardSql(parseGlobalPrivAccountRows(tsv)),
+  );
+}
+
 const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
   // desiredSlots is accepted by the shared contract (Postgres physical slots)
   // but ignored here — MariaDB has no physical slots.
@@ -549,6 +562,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     // server's in-memory grants do not reload on their own, and monitor /
     // client logins from other hosts stay denied until they do.
     await runMariadb(ctx, flushPrivilegesLocalSql());
+    await reassertReplicaPrivilegeGuard(ctx);
 
     await runMariadb(
       ctx,
@@ -578,6 +592,11 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
 
   async promote(ctx) {
     await runMariadb(ctx, promoteSql());
+    // Socket admin must keep ALL (including READ_ONLY ADMIN) so a later
+    // demote/seed can still SET GLOBAL read_only. Network accounts keep
+    // the GRANT ALL minus READ_ONLY ADMIN from the primary apply — do not
+    // give them the bypass back.
+    await runMariadb(ctx, ensureSocketAdminSql());
     const deadline = Date.now() + 60_000;
     const writable = async (): Promise<boolean> => {
       if (Date.now() >= deadline) return false;

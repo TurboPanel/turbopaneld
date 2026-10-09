@@ -2236,8 +2236,15 @@ export type ManagedHaReconcilePayload = {
 export type ManagedHaReconcileResult = {
   summary: string;
   registeredClusters: string[];
+  failedClusters?: ManagedHaRegistrationFailure[];
+  partial?: boolean;
   restarted: boolean;
   containers?: EnvironmentDeployContainer[];
+};
+
+export type ManagedHaRegistrationFailure = {
+  managedId: string;
+  error: string;
 };
 
 export type ManagedHaFailoverPhase = "drain" | "recover" | "repoint";
@@ -8704,6 +8711,7 @@ const HA_FAILOVER_PHASES = new Set(["drain", "recover", "repoint"]);
 const MAX_HA_CLUSTERS = 64;
 const MAX_HA_MEMBERS = 32;
 const MAX_HA_PEERS = 32;
+const MAX_HA_REGISTRATION_ERROR_LENGTH = 300;
 
 function parseManagedHaIdentity(
   value: unknown,
@@ -8911,6 +8919,27 @@ export function parseManagedHaReconcilePayload(
   return payload;
 }
 
+function parseManagedHaRegistrationFailures(
+  value: unknown,
+): ManagedHaRegistrationFailure[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_HA_CLUSTERS ||
+    !value.every((entry) =>
+      isRecord(entry) &&
+      typeof entry.managedId === "string" &&
+      SAFE_BACKUP_ID_RE.test(entry.managedId) &&
+      typeof entry.error === "string" &&
+      entry.error.length > 0 &&
+      entry.error.length <= MAX_HA_REGISTRATION_ERROR_LENGTH
+    )
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  return value as ManagedHaRegistrationFailure[];
+}
+
 /** Must stay in sync with the instance canonical `managed.ha.reconcile` result parser. */
 export function parseManagedHaReconcileResult(
   value: unknown,
@@ -8924,7 +8953,19 @@ export function parseManagedHaReconcileResult(
     !value.registeredClusters.every((entry) =>
       typeof entry === "string" && SAFE_BACKUP_ID_RE.test(entry)
     ) ||
+    (value.partial !== undefined && typeof value.partial !== "boolean") ||
     typeof value.restarted !== "boolean"
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  const failedClusters = parseManagedHaRegistrationFailures(
+    value.failedClusters,
+  );
+  const failedClusterCount = failedClusters?.length ?? 0;
+  if (
+    (value.partial === true &&
+      (failedClusterCount === 0 || value.registeredClusters.length === 0)) ||
+    (value.partial !== true && failedClusterCount > 0)
   ) {
     throw new TypeError("Invalid managed.ha.reconcile result");
   }
@@ -8933,6 +8974,8 @@ export function parseManagedHaReconcileResult(
     registeredClusters: value.registeredClusters as string[],
     restarted: value.restarted,
   };
+  if (failedClusters !== undefined) result.failedClusters = failedClusters;
+  if (value.partial !== undefined) result.partial = value.partial;
   if (value.containers !== undefined) {
     if (!Array.isArray(value.containers)) {
       throw new TypeError("Invalid managed.ha.reconcile result containers");

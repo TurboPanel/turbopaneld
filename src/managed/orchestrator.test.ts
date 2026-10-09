@@ -34,6 +34,7 @@ import {
   renderOrchestratorConf,
   resolveOrchestratorRegisterHost,
   restartOrchestratorStack,
+  reviveStoppedOrchestratorContainer,
   stopOrchestratorStack,
 } from "./orchestrator.ts";
 import {
@@ -667,6 +668,89 @@ test("stopOrchestratorStack runs compose down when compose exists", async () => 
   }
 });
 
+test("revive does not start the stack while compose down is in flight", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const downStarted = Promise.withResolvers<void>();
+    const finishDown = Promise.withResolvers<void>();
+    const commands: string[][] = [];
+    const stopping = stopOrchestratorStack(layout, async (args) => {
+      commands.push([...args]);
+      downStarted.resolve();
+      await finishDown.promise;
+      return { success: true, stdout: "", stderr: "", code: 0 };
+    });
+    await downStarted.promise;
+
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, (args) => {
+        commands.push([...args]);
+        return Promise.resolve({
+          success: true,
+          stdout: composePsStdout("exited"),
+          stderr: "",
+          code: 0,
+        });
+      }),
+      "busy",
+    );
+    assertEquals(commands.some((args) => args.includes("start")), false);
+    assertEquals(commands.some((args) => args.includes("ps")), false);
+
+    finishDown.resolve();
+    await stopping;
+  });
+});
+
+test("revive stays suppressed during stack restart and apply", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const restartStarted = Promise.withResolvers<void>();
+    const finishRestart = Promise.withResolvers<void>();
+    const restarting = restartOrchestratorStack(layout, async () => {
+      restartStarted.resolve();
+      await finishRestart.promise;
+      return { success: true, stdout: "", stderr: "", code: 0 };
+    });
+    await restartStarted.promise;
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(
+        layout,
+        () => Promise.reject(new TypeError("docker must not run")),
+      ),
+      "busy",
+    );
+    finishRestart.resolve();
+    await restarting;
+
+    const applyStarted = Promise.withResolvers<void>();
+    const finishApply = Promise.withResolvers<void>();
+    const applying = ensureOrchestratorStack(
+      layout,
+      HA_DESCRIPTOR,
+      BASE_RAFT,
+      MANAGED_NETWORK,
+      sampleConf(),
+      async (args) => {
+        if (args.includes("up")) {
+          applyStarted.resolve();
+          await finishApply.promise;
+        }
+        return { success: true, stdout: "", stderr: "", code: 0 };
+      },
+      NO_WAIT,
+    );
+    await applyStarted.promise;
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(
+        layout,
+        () => Promise.reject(new TypeError("docker must not run")),
+      ),
+      "busy",
+    );
+    finishApply.resolve();
+    await applying;
+  });
+});
+
 test("restartOrchestratorStack throws when compose restart fails", async () => {
   const fixture = await createTempLayout();
   try {
@@ -785,6 +869,182 @@ test("ensureOrchestratorStack fails with the container's last log line when it c
   } finally {
     await fixture.cleanup();
   }
+});
+
+function composePsStdout(
+  state: string,
+  format: "array" | "ndjson" = "array",
+): string {
+  const row = {
+    ID: "orch-cid",
+    Name: HA_DESCRIPTOR.containerName,
+    Service: HA_DESCRIPTOR.composeServiceName,
+    State: state,
+  };
+  if (format === "ndjson") return `${JSON.stringify(row)}\n`;
+  return JSON.stringify([row]);
+}
+
+function trackingRun(
+  psStdout: string,
+  options: { start?: DockerCliResult } = {},
+): { run: (args: string[]) => Promise<DockerCliResult>; started: string[][] } {
+  const started: string[][] = [];
+  return {
+    started,
+    run: (args) => {
+      if (args.includes("ps")) {
+        return Promise.resolve({
+          success: true,
+          stdout: psStdout,
+          stderr: "",
+          code: 0,
+        });
+      }
+      if (args.includes("start")) {
+        started.push([...args]);
+        return Promise.resolve(
+          options.start ?? { success: true, stdout: "", stderr: "", code: 0 },
+        );
+      }
+      return fakeRunSuccess()(args);
+    },
+  };
+}
+
+async function withOrchestratorComposeFile(
+  fn: (layout: ReturnType<typeof resolveLayout>) => Promise<void>,
+): Promise<void> {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(orchestratorComposePath(layout), "services: {}\n");
+    await fn(layout);
+  } finally {
+    await fixture.cleanup();
+  }
+}
+
+test("reviveStoppedOrchestratorContainer is absent when compose is missing", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const outcome = await reviveStoppedOrchestratorContainer(
+      layout,
+      () => Promise.reject(new TypeError("docker must not run")),
+    );
+    assertEquals(outcome, "absent");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("reviveStoppedOrchestratorContainer starts after two exited observations", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const { run, started } = trackingRun(composePsStdout("exited"));
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, run),
+      "stopped",
+    );
+    assertEquals(started.length, 0);
+    const outcome = await reviveStoppedOrchestratorContainer(layout, run);
+    assertEquals(outcome, "started");
+    assertEquals(started.length, 1);
+    assertEquals(started[0]?.includes("start"), true);
+  });
+});
+
+test("reviveStoppedOrchestratorContainer does not start a running container", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const { run, started } = trackingRun(composePsStdout("running"));
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, run),
+      "running",
+    );
+    assertEquals(started.length, 0);
+  });
+});
+
+test("reviveStoppedOrchestratorContainer treats restarting as running", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const { run, started } = trackingRun(composePsStdout("restarting"));
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, run),
+      "running",
+    );
+    assertEquals(started.length, 0);
+  });
+});
+
+test("reviveStoppedOrchestratorContainer requires consecutive stopped observations", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const stopped = trackingRun(composePsStdout("exited"));
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, stopped.run),
+      "stopped",
+    );
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(
+        layout,
+        trackingRun(composePsStdout("running")).run,
+      ),
+      "running",
+    );
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, stopped.run),
+      "stopped",
+    );
+    assertEquals(stopped.started.length, 0);
+  });
+});
+
+test("reviveStoppedOrchestratorContainer is absent after compose down (no container)", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const { run, started } = trackingRun("[]");
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, run),
+      "absent",
+    );
+    assertEquals(started.length, 0);
+  });
+});
+
+test("reviveStoppedOrchestratorContainer parses NDJSON ps output", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const { run, started } = trackingRun(composePsStdout("dead", "ndjson"));
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, run),
+      "stopped",
+    );
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, run),
+      "started",
+    );
+    assertEquals(started.length, 1);
+  });
+});
+
+test("reviveStoppedOrchestratorContainer throws stderr when compose start fails", async () => {
+  await withOrchestratorComposeFile(async (layout) => {
+    const { run } = trackingRun(composePsStdout("created"), {
+      start: {
+        success: false,
+        stdout: "",
+        stderr: "permission denied",
+        code: 1,
+      },
+    });
+    assertEquals(
+      await reviveStoppedOrchestratorContainer(layout, run),
+      "stopped",
+    );
+    await assertRejects(
+      () => reviveStoppedOrchestratorContainer(layout, run),
+      Error,
+      "permission denied",
+    );
+  });
 });
 
 test("isPrivateAdvertiseAddress accepts only private network addresses", () => {

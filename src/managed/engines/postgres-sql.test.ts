@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   applyFollowedPrimaryConninfoSql,
   connectionCensusSql,
@@ -29,10 +29,13 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreReadWriteLoginSchemasSql,
+  restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
   rewritePrimaryConninfo,
   standbyReplicationStatusSql,
+  stripPgRestoreTimeoutSetLines,
   strongestPrivilege,
 } from "./postgres-sql.ts";
 
@@ -459,6 +462,45 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
   assertEquals(sql.includes("safe_wal_size"), true);
   assertEquals(sql.includes("pg_current_wal_lsn()"), true);
   assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
+});
+
+test("restoreReadWriteLoginSchemasSql recreates schemas for read-write logins only", () => {
+  const sql = restoreReadWriteLoginSchemasSql();
+  assertStringIncludes(sql, "CREATE SCHEMA %I AUTHORIZATION %I");
+  assertStringIncludes(sql, "'TEMPORARY'");
+  assertStringIncludes(sql, "'CREATE'");
+  assertStringIncludes(sql, "NOT rol.rolsuper");
+});
+
+test("stripPgRestoreTimeoutSetLines removes only lock_timeout and statement_timeout SET lines", () => {
+  const input = [
+    "SET lock_timeout = 0;",
+    "SET statement_timeout = 0;",
+    "SET LOCAL lock_timeout = '30s';",
+    "SET client_encoding = 'UTF8';",
+    "SET standard_conforming_strings = on;",
+    "CREATE TABLE t (id int);",
+    "  SET lock_timeout = 0  ",
+  ].join("\n");
+  const out = stripPgRestoreTimeoutSetLines(input);
+  assertEquals(out.includes("SET LOCAL lock_timeout = '30s';"), true);
+  assertEquals(out.includes("SET lock_timeout = 0"), false);
+  assertEquals(out.includes("statement_timeout = 0"), false);
+  assertEquals(out.includes("client_encoding"), true);
+  assertEquals(out.includes("CREATE TABLE"), true);
+});
+
+test("restoreResetSql drops every user schema and recreates only public with its owner and privileges", () => {
+  const sql = restoreResetSql();
+  assertStringIncludes(sql, "SET LOCAL lock_timeout");
+  assertStringIncludes(sql, "DROP SCHEMA %I CASCADE");
+  // System schemas are never touched.
+  assertStringIncludes(sql, "n.nspname !~ '^pg_'");
+  assertStringIncludes(sql, "n.nspname <> 'information_schema'");
+  // Only `public` is recreated: the dump creates every other schema itself.
+  assertStringIncludes(sql, "IF s.name = 'public' THEN");
+  assertStringIncludes(sql, "ALTER SCHEMA %I OWNER TO %s");
+  assertStringIncludes(sql, "aclexplode");
 });
 
 test("rewritePrimaryConninfo updates host port and hostaddr without dropping password", () => {
