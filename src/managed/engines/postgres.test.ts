@@ -858,6 +858,78 @@ test("postgres applyCredentials throws when psql fails", async () => {
   );
 });
 
+const STREAM_CLOSED = "spawn failed: Writable stream is closed";
+
+test("postgres applyCredentials does not retry a closed stdin on non-idempotent SQL", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: STREAM_CLOSED,
+    });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+  assertEquals(calls, 1);
+});
+
+test("postgres applyCredentials does not retry a SQL error", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: 'ERROR:  syntax error at or near "FOO"',
+    });
+  };
+  await assertRejects(
+    () =>
+      postgresManagedEngineRuntime.applyCredentials(buildContext(exec), [{
+        principalId: "p-app",
+        username: "app_user",
+        role: "user",
+        databases: ["appdb"],
+        password: "app-pass",
+      }]),
+    Error,
+    "psql failed",
+  );
+  assertEquals(calls, 1);
+});
+
+test("postgres ensureSlots retries idempotent slot SQL once after a closed stdin", async () => {
+  let calls = 0;
+  const exec: ManagedEngineExec = () => {
+    calls++;
+    if (calls === 1) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: STREAM_CLOSED,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await postgresManagedEngineRuntime.replication!.ensureSlots!(
+    buildContext(exec),
+    ["tp_member_abcd"],
+  );
+  assertEquals(calls, 2);
+});
+
 test("postgres waitReady retries until pg_isready succeeds", async () => {
   let attempts = 0;
   const exec: ManagedEngineExec = (argv) => {
