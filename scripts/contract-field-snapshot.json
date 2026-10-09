@@ -141,7 +141,11 @@
     "daemon": "src/contracts/commands-contracts.ts",
     "fields": [
       { "name": "hostLevelApproved", "required": false, "type": "boolean" },
-      { "name": "remoteBuildSourcesApproved", "required": false, "type": "boolean" }
+      {
+        "name": "remoteBuildSourcesApproved",
+        "required": false,
+        "type": "boolean"
+      }
     ]
   },
   "BackupPolicyWireEntry": {
