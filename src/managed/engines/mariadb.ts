@@ -6,12 +6,16 @@
  */
 
 import { dropUserOnEveryHost } from "./account-hosts.ts";
+import {
+  ensureOrchestratorTopologyAccountSql,
+  grantOrchestratorReplicationTableSql,
+} from "./orchestrator-topology-sql.ts";
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
-import { sanitizeForLog } from "../../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
@@ -733,6 +737,41 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
         ctx.clientSourceHosts ?? [],
       ),
     );
+  },
+
+  async ensureOrchestratorTopology(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void> {
+    const hosts = ctx.clientSourceHosts ?? [];
+    await runMariadb(
+      ctx,
+      ensureOrchestratorTopologyAccountSql(
+        credentials.user,
+        credentials.password,
+        hosts,
+        "mariadb",
+      ),
+    );
+    // Advisory: a table-level grant fails outright on a release that does not
+    // ship `mysql.gtid_slave_pos`, and Orchestrator only warns without it.
+    try {
+      await runMariadb(
+        ctx,
+        grantOrchestratorReplicationTableSql(
+          credentials.user,
+          hosts,
+          "mariadb",
+        ),
+      );
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managed.apply skipped the Orchestrator replication-table grant: ${
+          sanitizeForLog(err instanceof Error ? err.message : String(err))
+        }`,
+      );
+    }
   },
 
   async applyDatabases(

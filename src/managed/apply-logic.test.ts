@@ -8,6 +8,7 @@ import type {
   ManagedApplyPayload,
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { topologyPlaintext } from "../testing/managed-topology-fixtures.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   applyManagedEngineState,
@@ -550,6 +551,40 @@ test("primary applyManagedEngineState applies payload monitorUsers without host 
     },
   );
   assertEquals(calls, ["ensure:tp_monitor_aaa", "ensure:tp_monitor_bbb"]);
+});
+
+test("primary applyManagedEngineState applies payload topologyUser on MySQL", async () => {
+  const calls: string[] = [];
+  const payload = {
+    engine: "mysql",
+  } as unknown as ManagedApplyPayload;
+  const engine = {
+    rootUsername: "root",
+    waitReady: () => Promise.resolve(),
+    applyCredentials: () => Promise.resolve(["root"]),
+    ensureOrchestratorTopology: (
+      _ctx: unknown,
+      creds: { user: string },
+    ) => {
+      calls.push(`topology:${creds.user}`);
+      return Promise.resolve();
+    },
+    readVersion: () => Promise.resolve("8.4.0"),
+  };
+
+  await applyManagedEngineState(
+    {} as never,
+    engine as never,
+    payload,
+    [],
+    {
+      topologyUser: {
+        user: "tp_topology_abcd12345678",
+        password: topologyPlaintext(),
+      },
+    },
+  );
+  assertEquals(calls, ["topology:tp_topology_abcd12345678"]);
 });
 
 test("standby applyManagedEngineState runs configureStandby when replication credential exists", async () => {

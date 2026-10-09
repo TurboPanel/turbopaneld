@@ -17,10 +17,12 @@ import type {
   ProxySqlRuntimeServerRow,
 } from "./proxysql.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { join } from "@std/path";
 import {
   proxysqlAdminCnfPath,
   proxysqlMonitorCnfPath,
 } from "./engine-paths.ts";
+import { quoteLiteral } from "./engines/mysql-sql.ts";
 
 export type ProxySqlAdminCredentials = {
   user: string;
@@ -52,6 +54,72 @@ function redactCredentials(text: string, password: string): string {
   return sanitizeForLog(text.replaceAll(password, "***"));
 }
 
+/** Render a mysql-client-style `[client]` defaults file with quoted secrets. */
+export function formatMysqlClientCnf(user: string, password: string): string {
+  return `[client]\nuser=${quoteLiteral(user)}\npassword=${
+    quoteLiteral(password)
+  }\n`;
+}
+
+function parseMysqlClientOptionValue(raw: string): string {
+  const trimmed = raw.trim();
+  if (
+    trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")
+  ) {
+    const inner = trimmed.slice(1, -1);
+    let out = "";
+    for (let i = 0; i < inner.length; i++) {
+      const ch = inner[i]!;
+      if (ch === "\\" && i + 1 < inner.length) {
+        const next = inner[i + 1]!;
+        if (next === "'" || next === "\\") {
+          out += next;
+          i++;
+          continue;
+        }
+      }
+      out += ch;
+    }
+    return out;
+  }
+  return trimmed;
+}
+
+/**
+ * Atomically write a host `[client]` defaults file (mode 0600).
+ * Refuses a Docker bind-mount directory scar at the target path.
+ */
+export async function writeMysqlClientCnfAtomic(
+  path: string,
+  contents: string,
+): Promise<void> {
+  const dir = join(path, "..");
+  await Deno.mkdir(dir, { recursive: true });
+  try {
+    const existing = await Deno.lstat(path);
+    if (existing.isSymlink) {
+      throw new TypeError(
+        `mysql client defaults path is a symlink: ${path}`,
+      );
+    }
+    if (existing.isDirectory) {
+      throw new TypeError(
+        `mysql client defaults path is a directory (Docker bind-mount scar): ${path}`,
+      );
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  const tmpPath = join(dir, `.${crypto.randomUUID()}.tmp`);
+  await Deno.writeTextFile(tmpPath, contents, { mode: 0o600 });
+  try {
+    await Deno.rename(tmpPath, path);
+  } catch (err) {
+    await Deno.remove(tmpPath).catch(() => {});
+    throw err;
+  }
+}
+
 /**
  * Parse a mysql-client-style `[client]` defaults file.
  */
@@ -75,7 +143,7 @@ export function parseProxySqlClientCnf(
     const separator = line.indexOf("=");
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim().toLowerCase();
-    const value = line.slice(separator + 1).trim();
+    const value = parseMysqlClientOptionValue(line.slice(separator + 1));
     if (key === "user") user = value;
     if (key === "password") password = value;
   }

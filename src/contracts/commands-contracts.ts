@@ -1864,6 +1864,13 @@ export type ManagedApplyPayload = {
    */
   monitorUsers?: Array<{ username: string; password: string }>;
   /**
+   * The organization's single Orchestrator topology account (username +
+   * `tpdaemon.…` sealed password). MySQL/MariaDB primary payloads only: the
+   * engine creates it once and standbys inherit it through the binlog, and
+   * Orchestrator never dials a Postgres member.
+   */
+  topologyUser?: { username: string; password: string };
+  /**
    * Operator-forced standby re-seed: bootstrap skips its probes, clears the
    * data directory, and seeds fresh from the primary. Standby payloads only.
    */
@@ -2185,12 +2192,38 @@ export type ManagedHaReconcilePayload = {
   managedNetwork: string;
   desired: ManagedHaReconcileDesired;
   raft: ManagedHaRaftConfig | null;
+  /**
+   * MySQL and MariaDB clusters. Orchestrator speaks the MySQL protocol and
+   * does not manage Postgres HA, so a Postgres cluster from an older control
+   * plane is dropped by the handler before anything is resolved or
+   * registered (`orchestratorMonitorsEngine`).
+   */
   clusters: ManagedHaCluster[];
   identity: {
     serviceId: string;
     composeServiceName: string;
     containerName: string;
   };
+  /**
+   * The organization's single Orchestrator topology account (username +
+   * `tpdaemon.…` sealed password) — the same account `managed.apply` creates
+   * on every MySQL/MariaDB member of every HA cluster in the organization.
+   * Absent on teardown payloads and from control planes older than the
+   * per-organization account, where the first MySQL-family cluster's
+   * replication credential is used instead.
+   */
+  topologyUser?: { username: string; password: string };
+  /**
+   * Organization-wide Orchestrator HTTP basic auth (`HTTPAuthUser` /
+   * `HTTPAuthPassword`). Same derived value on every Raft peer so followers can
+   * proxy to the leader. Sealed to the target daemon; absent on teardown.
+   */
+  orchestratorApiUser?: { username: string; password: string };
+  /**
+   * Organization-wide Orchestrator `RaftAuthToken`, sealed to the target
+   * daemon. Absent on teardown.
+   */
+  orchestratorRaftToken?: string;
   /**
    * Organization CA leaf + Organization CA trust bundle. `caCertPem` is the
    * concatenated active+retired Organization CA PEMs of the server-owner
@@ -6799,9 +6832,10 @@ function parseManagedApplyCredentials(
 }
 
 /** One `{ username, tpdaemon-envelope password }` monitor credential. */
-function parseManagedMonitorCredential(
+/** Username plus a daemon-bound (`tpdaemon.…`) sealed password. */
+function parseManagedSealedCredential(
   value: unknown,
-  label: string,
+  message: string,
 ): { username: string; password: string } {
   if (
     !isRecord(value) ||
@@ -6810,9 +6844,19 @@ function parseManagedMonitorCredential(
     typeof value.password !== "string" ||
     !value.password.startsWith(DAEMON_ENVELOPE_PREFIX)
   ) {
-    throw new TypeError(`Invalid ${label} monitor credential`);
+    throw new TypeError(message);
   }
   return { username: value.username, password: value.password };
+}
+
+function parseManagedMonitorCredential(
+  value: unknown,
+  label: string,
+): { username: string; password: string } {
+  return parseManagedSealedCredential(
+    value,
+    `Invalid ${label} monitor credential`,
+  );
 }
 
 function parseManagedApplyMonitorUsers(
@@ -6825,6 +6869,14 @@ function parseManagedApplyMonitorUsers(
   return value.map((entry) =>
     parseManagedMonitorCredential(entry, "managed.apply")
   );
+}
+
+function parseManagedTopologyUser(
+  value: unknown,
+  label: string,
+): { username: string; password: string } | undefined {
+  if (value === undefined) return undefined;
+  return parseManagedSealedCredential(value, `Invalid ${label} topologyUser`);
 }
 
 function parseManagedApplyDatabases(
@@ -7295,13 +7347,25 @@ function parseManagedApplyIngressSourceAddresses(
   return value as string[];
 }
 
-/** Must stay in sync with the instance canonical `managed.apply` validator. */
-export function parseManagedApplyPayload(
-  value: unknown,
-): ManagedApplyPayload {
-  if (!isRecord(value)) {
-    throw new TypeError("Invalid managed.apply payload");
-  }
+const MANAGED_APPLY_PAYLOAD_ERROR = "Invalid managed.apply payload";
+
+function assertManagedApplyPayloadShape(
+  value: Record<string, unknown>,
+): asserts value is Record<string, unknown> & {
+  managedId: string;
+  environmentId: string;
+  engine: ManagedEngineCode;
+  projectName: string;
+  containerName: string;
+  managedNetwork: string;
+  image: string;
+  containerPort: number;
+  composeYaml: string;
+  memberId: string;
+  memberRole: string;
+  memberOrdinal: number;
+  readEligible: boolean;
+} {
   if (
     typeof value.managedId !== "string" ||
     value.managedId.length === 0 ||
@@ -7329,15 +7393,25 @@ export function parseManagedApplyPayload(
     value.memberOrdinal < 1 ||
     typeof value.readEligible !== "boolean"
   ) {
-    throw new TypeError("Invalid managed.apply payload");
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
   }
 
   // Mirrors the instance settings parser's image allowlist so a
   // forged/replayed command payload cannot smuggle an unsupported or EOL
   // image past this last daemon-side check before Docker runs it.
   if (!isManagedImageAllowed(value.engine, value.image)) {
-    throw new TypeError("Invalid managed.apply payload");
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
   }
+}
+
+/** Must stay in sync with the instance canonical `managed.apply` validator. */
+export function parseManagedApplyPayload(
+  value: unknown,
+): ManagedApplyPayload {
+  if (!isRecord(value)) {
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
+  }
+  assertManagedApplyPayloadShape(value);
 
   const resources = parseManagedApplyResources(value.resources);
   const dockerOptions = parseManagedDockerOptions(
@@ -7346,6 +7420,9 @@ export function parseManagedApplyPayload(
   );
   const databases = parseManagedApplyDatabases(value.databases);
   const monitorUsers = parseManagedApplyMonitorUsers(value.monitorUsers);
+  const topologyUser = value.topologyUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(value.topologyUser, "managed.apply");
   const forceResync = parseManagedApplyForceResync(value.forceResync);
   const ingressSourceAddresses = parseManagedApplyIngressSourceAddresses(
     value.ingressSourceAddresses,
@@ -7384,6 +7461,7 @@ export function parseManagedApplyPayload(
     ...(replication === undefined ? {} : { replication }),
     credentials: parseManagedApplyCredentials(value.credentials),
     ...(monitorUsers === undefined ? {} : { monitorUsers }),
+    ...(topologyUser === undefined ? {} : { topologyUser }),
     ...(forceResync ? { forceResync: true } : {}),
     ...(ingressSourceAddresses === undefined ? {} : { ingressSourceAddresses }),
     ...(databases === undefined ? {} : { databases }),
@@ -8800,6 +8878,9 @@ export function parseManagedHaReconcilePayload(
     ? null
     : parseManagedHaRaftConfig(value.raft);
   const orgTlsMaterial = parseManagedApplyOrgTlsMaterial(value.orgTlsMaterial);
+  const topologyUser = value.topologyUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(value.topologyUser, "managed.ha.reconcile");
   const payload: ManagedHaReconcilePayload = {
     serverId: value.serverId,
     managedNetwork: parseManagedNetworkName(
@@ -8811,6 +8892,27 @@ export function parseManagedHaReconcilePayload(
     clusters: value.clusters.map(parseManagedHaCluster),
     identity: parseManagedHaIdentity(value.identity),
   };
+  if (topologyUser !== undefined) {
+    payload.topologyUser = topologyUser;
+  }
+  const orchestratorApiUser = value.orchestratorApiUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(
+      value.orchestratorApiUser,
+      "managed.ha.reconcile orchestratorApiUser",
+    );
+  if (orchestratorApiUser !== undefined) {
+    payload.orchestratorApiUser = orchestratorApiUser;
+  }
+  if (value.orchestratorRaftToken !== undefined) {
+    if (
+      typeof value.orchestratorRaftToken !== "string" ||
+      !value.orchestratorRaftToken.startsWith("tpdaemon.")
+    ) {
+      throw new TypeError("Invalid managed.ha.reconcile orchestratorRaftToken");
+    }
+    payload.orchestratorRaftToken = value.orchestratorRaftToken;
+  }
   if (orgTlsMaterial !== undefined) {
     payload.orgTlsMaterial = orgTlsMaterial;
   }

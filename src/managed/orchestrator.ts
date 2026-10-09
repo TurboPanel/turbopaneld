@@ -46,6 +46,7 @@ import {
   orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
+  orchestratorWaitReadyScriptPath,
 } from "./engine-paths.ts";
 import {
   type EnvironmentDeployContainer,
@@ -53,7 +54,11 @@ import {
   isValidIpv6Literal,
   type ManagedHaRaftConfig,
 } from "../contracts/commands-contracts.ts";
-import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
+import {
+  formatMysqlClientCnf,
+  parseProxySqlClientCnf,
+  writeMysqlClientCnfAtomic,
+} from "./proxysql-admin.ts";
 
 /**
  * Percona's maintained Orchestrator distribution — public on Docker Hub and
@@ -102,6 +107,42 @@ export type OrchestratorApiCredentials = {
   user: string;
   password: string;
 };
+
+/** Write org-wide Orchestrator HTTP credentials for loopback clients and compose. */
+export async function materializeOrchestratorApiCredentials(
+  layout: LayoutPaths,
+  httpAuth: OrchestratorApiCredentials,
+): Promise<void> {
+  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await writeMysqlClientCnfAtomic(
+    orchestratorApiCnfPath(layout),
+    formatMysqlClientCnf(httpAuth.user, httpAuth.password),
+  );
+}
+
+/** Write org-wide Orchestrator Raft token for loopback clients and compose. */
+export async function materializeOrchestratorRaftCredentials(
+  layout: LayoutPaths,
+  raftToken: string,
+): Promise<void> {
+  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await writeMysqlClientCnfAtomic(
+    orchestratorRaftCnfPath(layout),
+    formatMysqlClientCnf("raft", raftToken),
+  );
+}
+
+/** Write org-wide Orchestrator HTTP + Raft secrets for loopback clients and compose. */
+export async function materializeOrchestratorHostCredentials(
+  layout: LayoutPaths,
+  input: {
+    httpAuth: OrchestratorApiCredentials;
+    raftToken: string;
+  },
+): Promise<void> {
+  await materializeOrchestratorApiCredentials(layout, input.httpAuth);
+  await materializeOrchestratorRaftCredentials(layout, input.raftToken);
+}
 
 export async function loadOrchestratorApiCredentials(
   layout: LayoutPaths,
@@ -823,14 +864,23 @@ export async function restartOrchestratorStack(
   }
 }
 
-export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
+async function orchestratorHostPrepRegularFile(
+  path: string,
+): Promise<boolean> {
   try {
-    await Deno.stat(orchestratorApiCnfPath(layout));
-    return true;
+    const info = await Deno.stat(path);
+    return info.isFile;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return false;
     throw err;
   }
+}
+
+/** True when Ansible installed the root-only wait-ready script the oneshot unit needs. */
+export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
+  return await orchestratorHostPrepRegularFile(
+    orchestratorWaitReadyScriptPath(layout),
+  );
 }
 
 /** True once `managed.ha.reconcile` has written the daemon-owned compose file. */

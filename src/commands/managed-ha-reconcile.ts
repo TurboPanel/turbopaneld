@@ -2,7 +2,8 @@
  * `managed.ha.reconcile` — whole-server Orchestrator desired state.
  *
  * Empty desired tears the stack down. Present desired writes compose +
- * `Recover: false` config, then registers clusters with `tp_repl` + org CA.
+ * `Recover: false` config, then registers clusters with the organization's
+ * topology account, org-wide HTTP/Raft credentials, and org CA.
  */
 
 import type {
@@ -36,7 +37,10 @@ import {
   inspectOrchestratorContainer,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
+  materializeOrchestratorApiCredentials,
+  materializeOrchestratorRaftCredentials,
   ORCHESTRATOR_TLS_CA_PATH,
+  type OrchestratorApiCredentials,
   orchestratorTopologyAliases,
   renderOrchestratorConf,
   resolveOrchestratorRegisterHost,
@@ -58,6 +62,21 @@ type RunDockerFn = (
 ) => Promise<DockerCliResult>;
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
+
+async function decryptHaReconcileSecret(
+  ciphertext: string,
+  decryptSecrets: DecryptSecretsFn | undefined,
+  emptyError: string,
+): Promise<string> {
+  if (!decryptSecrets) {
+    throw new Error("managed.ha.reconcile requires decryptSecrets");
+  }
+  const [plain] = await decryptSecrets([ciphertext]);
+  if (typeof plain !== "string" || plain.length === 0) {
+    throw new Error(emptyError);
+  }
+  return plain;
+}
 
 export type ManagedHaReconcileHandlerDeps = {
   decryptSecrets?: DecryptSecretsFn;
@@ -93,18 +112,119 @@ async function persistIdentity(
   return descriptor;
 }
 
-async function decryptTopologyPassword(
-  cluster: ManagedHaCluster,
+async function resolveOrchestratorHttpAuth(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
   decryptSecrets?: DecryptSecretsFn,
-): Promise<string> {
+): Promise<OrchestratorApiCredentials> {
+  if (payload.orchestratorApiUser) {
+    const password = await decryptHaReconcileSecret(
+      payload.orchestratorApiUser.password,
+      decryptSecrets,
+      "failed to decrypt managed HA orchestrator API password",
+    );
+    return {
+      user: payload.orchestratorApiUser.username,
+      password,
+    };
+  }
+  return await loadOrchestratorApiCredentials(layout);
+}
+
+async function resolveOrchestratorRaftAuthToken(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<string | null> {
+  if (payload.orchestratorRaftToken) {
+    return await decryptHaReconcileSecret(
+      payload.orchestratorRaftToken,
+      decryptSecrets,
+      "failed to decrypt managed HA orchestrator raft token",
+    );
+  }
+  return await loadOrchestratorRaftToken(layout);
+}
+
+async function materializeOrchestratorSecretsIfPresent(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<{
+  httpAuth: OrchestratorApiCredentials;
+  raftAuthToken: string | null;
+}> {
+  const httpAuth = await resolveOrchestratorHttpAuth(
+    payload,
+    layout,
+    decryptSecrets,
+  );
+  const raftAuthToken = await resolveOrchestratorRaftAuthToken(
+    payload,
+    layout,
+    decryptSecrets,
+  );
+  if (payload.orchestratorApiUser) {
+    await materializeOrchestratorApiCredentials(layout, httpAuth);
+  }
+  if (payload.orchestratorRaftToken) {
+    if (raftAuthToken === null) {
+      throw new Error(
+        "managed HA orchestrator raft token missing after decrypt",
+      );
+    }
+    await materializeOrchestratorRaftCredentials(layout, raftAuthToken);
+  }
+  return { httpAuth, raftAuthToken };
+}
+
+async function resolveOrchestratorTopologyCredentials(
+  payload: ManagedHaReconcilePayload,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<{ topologyUser: string; topologyPassword: string }> {
+  if (payload.topologyUser) {
+    const topologyPassword = await decryptHaReconcileSecret(
+      payload.topologyUser.password,
+      decryptSecrets,
+      "failed to decrypt managed HA topology password",
+    );
+    return {
+      topologyUser: payload.topologyUser.username,
+      topologyPassword,
+    };
+  }
+  const mysqlClusters = payload.clusters
+    .filter((entry) => orchestratorMonitorsEngine(entry.engine))
+    .toSorted((left, right) => left.managedId.localeCompare(right.managedId));
+  const cluster = mysqlClusters[0];
+  if (!cluster) {
+    return { topologyUser: "tp_repl", topologyPassword: "" };
+  }
+  const topologyPassword = await decryptHaReconcileSecret(
+    cluster.replicationPasswordEnvelope,
+    decryptSecrets,
+    "failed to decrypt managed HA replication password",
+  );
+  return {
+    topologyUser: cluster.replicationUsername,
+    topologyPassword,
+  };
+}
+
+async function materializeOrchestratorOrgTls(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<void> {
+  if (!payload.orgTlsMaterial) return;
   if (!decryptSecrets) {
     throw new Error("managed.ha.reconcile requires decryptSecrets");
   }
-  const [plain] = await decryptSecrets([cluster.replicationPasswordEnvelope]);
-  if (typeof plain !== "string" || plain.length === 0) {
-    throw new Error("failed to decrypt managed HA replication password");
-  }
-  return plain;
+  await materializeProxySqlTlsMaterial(
+    orchestratorTlsDir(layout),
+    payload.orgTlsMaterial,
+    decryptSecrets,
+  );
 }
 
 /**
@@ -218,62 +338,47 @@ async function resolveClustersForOrchestrator(
   return resolved;
 }
 
-export async function handleManagedHaReconcile(
-  rawPayload: unknown,
+async function reconcileOrchestratorPresentState(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
   daemonReceivedAt: string,
-  deps?: ManagedHaReconcileHandlerDeps,
+  deps: ManagedHaReconcileHandlerDeps | undefined,
 ): Promise<ManagedHaReconcileResult> {
-  const payload = parseManagedHaReconcilePayload(rawPayload);
-  const layout = resolveLayout(Deno.env.toObject());
   const run = deps?.runDocker ?? defaultRunDocker;
   const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   const runHostPrep = deps?.runHostPrep ?? runOrchestratorSetup;
 
-  await persistIdentity(layout, payload);
-
-  // Teardown must never trigger lazy host prep: that playbook ends by starting
-  // `turbopanel-orchestrator-stack.service`, so a partially prepared host would
-  // start the stack on its way to stopping it.
-  if (payload.desired === "absent" || payload.raft === null) {
-    await ensureDocker();
-    await stopOrchestratorStack(layout, run);
-    logInfo(
-      "commands",
-      `managed.ha.reconcile teardown completed serverId=${payload.serverId} received=${daemonReceivedAt}`,
-    );
-    return emptyHaResult(payload.serverId);
-  }
-
-  // And the managed network must exist before host prep can start that unit:
-  // the unit runs `docker compose up -d` whenever compose already exists, which
-  // fails against a pruned external network unless the daemon recreates it
-  // first.
   await ensureDocker();
   await ensureManagedIngressNetwork(payload.managedNetwork, run);
+
+  const { httpAuth, raftAuthToken } =
+    await materializeOrchestratorSecretsIfPresent(
+      payload,
+      layout,
+      deps?.decryptSecrets,
+    );
 
   if (!(await hostPrepPresent(layout))) {
     await runHostPrep();
   }
 
-  if (payload.orgTlsMaterial) {
-    if (!deps?.decryptSecrets) {
-      throw new Error("managed.ha.reconcile requires decryptSecrets");
-    }
-    await materializeProxySqlTlsMaterial(
-      orchestratorTlsDir(layout),
-      payload.orgTlsMaterial,
-      deps.decryptSecrets,
+  await materializeOrchestratorOrgTls(payload, layout, deps?.decryptSecrets);
+
+  const mysqlClusters = payload.clusters.filter((cluster) =>
+    orchestratorMonitorsEngine(cluster.engine)
+  );
+  if (mysqlClusters.length < payload.clusters.length) {
+    logInfo(
+      "commands",
+      `managed.ha.reconcile ignored ${
+        payload.clusters.length - mysqlClusters.length
+      } Postgres cluster(s) in payload serverId=${payload.serverId}`,
     );
   }
-
-  const httpAuth = await loadOrchestratorApiCredentials(layout);
-  const raftAuthToken = await loadOrchestratorRaftToken(layout);
-  const topologyUser = payload.clusters[0]?.replicationUsername ?? "tp_repl";
-  const topologyPassword = payload.clusters[0]
-    ? await decryptTopologyPassword(payload.clusters[0], deps?.decryptSecrets)
-    : "";
+  const { topologyUser, topologyPassword } =
+    await resolveOrchestratorTopologyCredentials(payload, deps?.decryptSecrets);
   const conf = renderOrchestratorConf({
-    raft: payload.raft,
+    raft: payload.raft!,
     httpAuth,
     topologyUser,
     topologyPassword,
@@ -290,7 +395,7 @@ export async function handleManagedHaReconcile(
   }
 
   const clusters = await resolveClustersForOrchestrator(
-    payload.clusters,
+    mysqlClusters,
     run,
   );
   const topologyAliases = orchestratorTopologyAliases(
@@ -299,7 +404,7 @@ export async function handleManagedHaReconcile(
   const restarted = await ensureOrchestratorStack(
     layout,
     descriptor,
-    payload.raft,
+    payload.raft!,
     payload.managedNetwork,
     conf,
     run,
@@ -310,20 +415,9 @@ export async function handleManagedHaReconcile(
     ...deps?.orchestratorApi,
     credentials: httpAuth,
   };
-  const monitored = clusters.filter((cluster) =>
-    orchestratorMonitorsEngine(cluster.engine)
-  );
-  if (monitored.length < payload.clusters.length) {
-    logInfo(
-      "commands",
-      `managed.ha.reconcile skipped ${
-        payload.clusters.length - monitored.length
-      } cluster(s) Orchestrator cannot monitor serverId=${payload.serverId}`,
-    );
-  }
-  const registrations = monitored.length === 0
+  const registrations = clusters.length === 0
     ? { registeredClusters: [], failedClusters: [] }
-    : await registerClusters(monitored, api);
+    : await registerClusters(clusters, api);
   const { registeredClusters, failedClusters } = registrations;
   const partial = failedClusters.length > 0;
 
@@ -350,4 +444,37 @@ export async function handleManagedHaReconcile(
     restarted,
     ...(containers ? { containers } : {}),
   };
+}
+
+export async function handleManagedHaReconcile(
+  rawPayload: unknown,
+  daemonReceivedAt: string,
+  deps?: ManagedHaReconcileHandlerDeps,
+): Promise<ManagedHaReconcileResult> {
+  const payload = parseManagedHaReconcilePayload(rawPayload);
+  const layout = resolveLayout(Deno.env.toObject());
+  const run = deps?.runDocker ?? defaultRunDocker;
+  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
+
+  await persistIdentity(layout, payload);
+
+  // Teardown must never trigger lazy host prep: that playbook ends by starting
+  // `turbopanel-orchestrator-stack.service`, so a partially prepared host would
+  // start the stack on its way to stopping it.
+  if (payload.desired === "absent" || payload.raft === null) {
+    await ensureDocker();
+    await stopOrchestratorStack(layout, run);
+    logInfo(
+      "commands",
+      `managed.ha.reconcile teardown completed serverId=${payload.serverId} received=${daemonReceivedAt}`,
+    );
+    return emptyHaResult(payload.serverId);
+  }
+
+  return await reconcileOrchestratorPresentState(
+    payload,
+    layout,
+    daemonReceivedAt,
+    deps,
+  );
 }

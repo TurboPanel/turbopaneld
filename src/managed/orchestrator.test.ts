@@ -1,5 +1,6 @@
 import { parse as parseYaml } from "yaml";
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   LABEL_ROLE,
@@ -12,6 +13,7 @@ import {
   type SystemComponentDescriptor,
 } from "../deploy/system-component.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { dirname } from "@std/path";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import {
   ensureOrchestratorStack,
@@ -23,6 +25,7 @@ import {
   loadOrchestratorRaftToken,
   MANAGED_HA_HTTP_PORT,
   MANAGED_HA_RAFT_PORT,
+  materializeOrchestratorApiCredentials,
   ORCHESTRATOR_IMAGE,
   ORCHESTRATOR_TLS_CA_PATH,
   orchestratorCompose,
@@ -42,7 +45,9 @@ import {
   orchestratorComposePath,
   orchestratorConfigDir,
   orchestratorConfPath,
+  orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
+  orchestratorWaitReadyScriptPath,
 } from "./engine-paths.ts";
 
 /**
@@ -377,17 +382,49 @@ test("loadOrchestratorRaftToken reads raft token password", async () => {
   }
 });
 
-test("hostPrepPresent reflects api.cnf presence", async () => {
+test("hostPrepPresent requires the root-only wait-ready script", async () => {
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
     assertEquals(await hostPrepPresent(layout), false);
     await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
-    await Deno.writeTextFile(
-      orchestratorApiCnfPath(layout),
-      "[client]\nuser=admin\npassword=x\n",
-    );
+    await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
+    assertEquals(await hostPrepPresent(layout), false);
+    const waitReady = orchestratorWaitReadyScriptPath(layout);
+    await Deno.mkdir(dirname(waitReady), { recursive: true });
+    await Deno.writeTextFile(waitReady, "#!/bin/sh\nexit 0\n");
     assertEquals(await hostPrepPresent(layout), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("materializeOrchestratorApiCredentials quotes secrets and refuses symlink targets", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const secret = ["orch", "pass", "#frag", "space tail"].join(" ");
+    await materializeOrchestratorApiCredentials(layout, {
+      user: "orch-admin",
+      password: secret,
+    });
+    const creds = await loadOrchestratorApiCredentials(layout);
+    assertEquals(creds.password, secret);
+    const outside = join(fixture.dirs.stateDir, "outside-secret");
+    await Deno.writeTextFile(outside, "leaked");
+    const apiPath = orchestratorApiCnfPath(layout);
+    await Deno.remove(apiPath);
+    await Deno.symlink(outside, apiPath);
+    await assertRejects(
+      () =>
+        materializeOrchestratorApiCredentials(layout, {
+          user: "orch-admin",
+          password: "next-secret",
+        }),
+      TypeError,
+      "symlink",
+    );
+    assertEquals(await Deno.readTextFile(outside), "leaked");
   } finally {
     await fixture.cleanup();
   }

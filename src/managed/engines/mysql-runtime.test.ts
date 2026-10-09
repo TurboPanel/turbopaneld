@@ -3,6 +3,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { topologyPlaintext } from "../../testing/managed-topology-fixtures.ts";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import {
   BINLOG_EXPIRE_LOGS_SECONDS,
@@ -982,6 +983,55 @@ test("mysql applyDatabases drops databases and ensures ProxySQL monitor", async 
   assertEquals(monitorSql.includes("'10.100.0.3'"), true);
   assertEquals(monitorSql.includes("'10.100.0.5'"), true);
   assertEquals(monitorSql.includes("172.16.0.0/255.240.0.0"), true);
+});
+
+test("mysql ensureOrchestratorTopology scopes the account like the monitor account", async () => {
+  const { exec, calls } = recordingExec();
+  await mysqlManagedEngineRuntime.ensureOrchestratorTopology!(
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.3", "10.100.0.5"],
+    },
+    { user: "tp_topology_abcd12345678", password: topologyPlaintext() },
+  );
+  const accountSql =
+    calls.find((c) => c.input?.includes("CREATE USER IF NOT EXISTS"))?.input ??
+      "";
+  assertEquals(accountSql.includes("'10.100.0.3'"), true);
+  assertEquals(accountSql.includes("'10.100.0.5'"), true);
+  assertEquals(accountSql.includes("172.16.0.0/255.240.0.0"), true);
+  assertEquals(accountSql.includes("REQUIRE SSL"), true);
+  // Binlogging stays on: a read-only standby cannot mint the account itself
+  // and receives it from the primary through replication.
+  assertEquals(accountSql.includes("sql_log_bin"), false);
+  assertEquals(
+    calls.some((c) =>
+      c.input?.includes("GRANT SELECT ON mysql.slave_master_info")
+    ),
+    true,
+  );
+});
+
+test("mysql ensureOrchestratorTopology survives a refused replication-table grant", async () => {
+  const calls: string[] = [];
+  const exec: ManagedEngineExec = (_argv, input) => {
+    calls.push(input ?? "");
+    // What a release without that table answers; the account itself is in.
+    const refused = input?.includes("slave_master_info") ?? false;
+    return Promise.resolve({
+      success: !refused,
+      stdout: "",
+      stderr: refused ? "ERROR 1146 (42S02): Table doesn't exist" : "",
+    });
+  };
+  await mysqlManagedEngineRuntime.ensureOrchestratorTopology!(
+    buildContext(exec),
+    { user: "tp_topology_abcd12345678", password: topologyPlaintext() },
+  );
+  assertEquals(
+    calls.some((input) => input.includes("CREATE USER IF NOT EXISTS")),
+    true,
+  );
 });
 
 test("mysql readVersion returns undefined when version query fails", async () => {
