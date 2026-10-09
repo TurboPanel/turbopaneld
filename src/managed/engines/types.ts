@@ -221,6 +221,13 @@ export type ManagedEngineReplicationRuntime = {
   quiesceFormerPrimaryForSwitchover?(
     ctx: ManagedEngineContext,
   ): Promise<string>;
+  /**
+   * Refuse reactivation when this member is no longer quiesced (promotion may
+   * have started locally or the data directory was mutated).
+   */
+  assertFormerPrimarySafeToReactivateAfterSwitchoverAbort?(
+    ctx: ManagedEngineContext,
+  ): Promise<void>;
   /** Undo a switchover abort on the old primary after it is started again. */
   reactivateFormerPrimaryAfterSwitchoverAbort?(
     ctx: ManagedEngineContext,

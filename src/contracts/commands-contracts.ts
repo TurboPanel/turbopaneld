@@ -1933,6 +1933,19 @@ export type ManagedLifecyclePayload = {
    * start the engine, and make it writable again.
    */
   reactivateAfterSwitchoverAbort?: boolean;
+  /**
+   * Required with `reactivateAfterSwitchoverAbort` on MySQL-family engines
+   * after a GTID capture fence: the control plane verified the promotion
+   * target never started or finished promoting.
+   */
+  switchoverAbortPromoteSafe?: boolean;
+  /** Set when promotion on the switchover target completed successfully. */
+  switchoverTargetPromoteCompleted?: boolean;
+  /**
+   * Machine-readable promotion failure from the target (`switchover_promote:*`)
+   * when aborting a planned switchover.
+   */
+  switchoverTargetPromoteError?: string;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -1981,7 +1994,7 @@ export type ManagedPromotePayload = {
    * set. The target must apply it before promotion.
    */
   requiredExecutedGtidSet?: string;
-  /** Seconds for `MASTER_GTID_WAIT` / `WAIT_FOR_EXECUTED_GTID_SET` (default 120). */
+  /** Seconds for `MASTER_GTID_WAIT` / `WAIT_FOR_EXECUTED_GTID_SET` (default 90). */
   gtidWaitTimeoutSeconds?: number;
 };
 
@@ -7470,6 +7483,26 @@ export function parseManagedLifecyclePayload(
     payload.reactivateAfterSwitchoverAbort = true;
   } else if (value.reactivateAfterSwitchoverAbort !== undefined) {
     throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  if (value.switchoverAbortPromoteSafe === true) {
+    payload.switchoverAbortPromoteSafe = true;
+  } else if (value.switchoverAbortPromoteSafe !== undefined) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  if (value.switchoverTargetPromoteCompleted === true) {
+    payload.switchoverTargetPromoteCompleted = true;
+  } else if (value.switchoverTargetPromoteCompleted !== undefined) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  if (value.switchoverTargetPromoteError !== undefined) {
+    if (
+      typeof value.switchoverTargetPromoteError !== "string" ||
+      value.switchoverTargetPromoteError.length === 0 ||
+      value.switchoverTargetPromoteError.length > 4096
+    ) {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    payload.switchoverTargetPromoteError = value.switchoverTargetPromoteError;
   }
   return payload;
 }

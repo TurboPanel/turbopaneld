@@ -13,11 +13,13 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { clearManagedDemotedMarker } from "./demoted-marker.ts";
+import { parseSwitchoverPromoteFailureCode } from "./engines/switchover-promote-error.ts";
 import {
   type LocalEngineContextDeps,
   resolveLocalReplicationEngine,
 } from "./local-engine-context.ts";
 import { proveSwitchoverGtidBeforePromote } from "./switchover-gtid-proof.ts";
+import { writeSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 
@@ -25,11 +27,17 @@ export type ManagedPromoteHandlerDeps = LocalEngineContextDeps & {
   decryptSecrets?: DecryptSecretsFn;
 };
 
+function promoteFailureMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
 export async function handleManagedPromote(
   payload: ManagedPromotePayload,
   _daemonReceivedAt: string,
   deps?: ManagedPromoteHandlerDeps,
 ): Promise<ManagedPromoteResult> {
+  const layout = resolveLayout(Deno.env.toObject());
   const { engine, ctx } = await resolveLocalReplicationEngine(
     payload.managedId,
     payload.engine,
@@ -45,29 +53,53 @@ export async function handleManagedPromote(
         : {}),
     }
     : undefined;
-  if (payload.requiredExecutedGtidSet !== undefined) {
-    await proveSwitchoverGtidBeforePromote(
-      {
-        managedId: payload.managedId,
-        engine: payload.engine,
-        requiredExecutedGtidSet: payload.requiredExecutedGtidSet,
-        ...(payload.gtidWaitTimeoutSeconds !== undefined
-          ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
-          : {}),
-      },
-      deps,
-    );
-    await engine.replication!.promote(ctx, {
-      ...promoteOptions,
-      requiredExecutedGtidSet: undefined,
-    });
-  } else {
-    await engine.replication!.promote(ctx, promoteOptions);
+  const requiredGtidSet = payload.requiredExecutedGtidSet;
+  const switchoverPromote = requiredGtidSet !== undefined;
+  try {
+    if (switchoverPromote) {
+      await proveSwitchoverGtidBeforePromote(
+        {
+          managedId: payload.managedId,
+          engine: payload.engine,
+          requiredExecutedGtidSet: requiredGtidSet,
+          ...(payload.gtidWaitTimeoutSeconds !== undefined
+            ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+            : {}),
+        },
+        deps,
+      );
+      await engine.replication!.promote(ctx, {
+        ...promoteOptions,
+        requiredExecutedGtidSet: undefined,
+      });
+    } else {
+      await engine.replication!.promote(ctx, promoteOptions);
+    }
+  } catch (error) {
+    if (switchoverPromote) {
+      const code = parseSwitchoverPromoteFailureCode(
+        promoteFailureMessage(error),
+      );
+      if (code === "promote_started") {
+        await writeSwitchoverPromoteLocalMarker(
+          layout,
+          payload.managedId,
+          "started",
+          new Date().toISOString(),
+        );
+      }
+    }
+    throw error;
   }
-  await clearManagedDemotedMarker(
-    resolveLayout(Deno.env.toObject()),
-    payload.managedId,
-  );
+  if (switchoverPromote) {
+    await writeSwitchoverPromoteLocalMarker(
+      layout,
+      payload.managedId,
+      "completed",
+      new Date().toISOString(),
+    );
+  }
+  await clearManagedDemotedMarker(layout, payload.managedId);
   const health = await engine.replication!.readHealth(ctx, "primary");
 
   return {

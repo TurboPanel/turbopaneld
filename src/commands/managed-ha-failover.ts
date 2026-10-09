@@ -273,6 +273,17 @@ async function proveSwitchoverGtidIfRequired(
   payload: ManagedHaFailoverPayload,
   deps: ManagedHaFailoverHandlerDeps | undefined,
 ): Promise<void> {
+  const mysqlFamily = payload.engine === "mysql" ||
+    payload.engine === "mariadb";
+  if (
+    mysqlFamily &&
+    !payload.requiredExecutedGtidSet &&
+    payload.gtidWaitTimeoutSeconds !== undefined
+  ) {
+    throw new Error(
+      "managed.ha.failover recover requires requiredExecutedGtidSet when gtidWaitTimeoutSeconds is set for MySQL-family engines",
+    );
+  }
   if (!payload.requiredExecutedGtidSet) return;
   const prove = deps?.proveGtid ?? proveSwitchoverGtidBeforePromote;
   await prove(
@@ -294,7 +305,6 @@ async function recoverWithOrchestrator(
   deps: ManagedHaFailoverHandlerDeps | undefined,
 ): Promise<ManagedHaFailoverResult> {
   try {
-    await proveSwitchoverGtidIfRequired(payload, deps);
     const recover = deps?.recover ?? recoverToCandidate;
     // A member on this host arrives as its Docker name, but Orchestrator
     // registered it by its published private listener.
@@ -355,6 +365,8 @@ export async function handleManagedHaFailover(
   if (payload.phase === "repoint") {
     return await handleRepointPhase(payload, daemonReceivedAt, deps);
   }
+
+  await proveSwitchoverGtidIfRequired(payload, deps);
 
   const haPresent = deps?.haPresent
     ? await deps.haPresent()

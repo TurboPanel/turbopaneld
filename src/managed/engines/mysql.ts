@@ -639,6 +639,25 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     return runMysqlQuery(ctx, sql);
   },
 
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+    if (verbose.trim().length > 0) {
+      throw new Error(
+        "switchover: former primary is a standby; cannot reactivate after abort",
+      );
+    }
+    const out = await runMysqlQuery(ctx, isWritableSql());
+    const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+    if (
+      parseSqlBool(readOnly ?? "") !== true ||
+      parseSqlBool(superReadOnly ?? "") !== true
+    ) {
+      throw new Error(
+        "switchover: former primary is not read_only; promotion may have started",
+      );
+    }
+  },
+
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
     await runMysql(ctx, disableReadOnlySql());
   },

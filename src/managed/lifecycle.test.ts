@@ -365,6 +365,13 @@ test("lifecycle stop with captureSwitchoverGtid returns switchoverPrimaryExecute
       assertEquals(result.switchoverPrimaryExecutedGtidSet, "0-1-77");
       const parsed = parseManagedLifecycleResult(result);
       assertEquals(parsed.switchoverPrimaryExecutedGtidSet, "0-1-77");
+      const quiesced = await Deno.readTextFile(
+        `${root}/switchover-quiesced.json`,
+      );
+      assertEquals(
+        JSON.parse(quiesced).primaryExecutedGtidSet,
+        "0-1-77",
+      );
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) Deno.env.delete(key);

@@ -494,6 +494,15 @@ test("parseManagedLifecyclePayload and parseManagedDestroyPayload reject optiona
     }).reactivateAfterSwitchoverAbort,
     true,
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "start",
+      switchoverAbortPromoteSafe: true,
+      switchoverTargetPromoteCompleted: true,
+    }).switchoverAbortPromoteSafe,
+    true,
+  );
   assertThrows(
     () =>
       parseManagedLifecyclePayload({

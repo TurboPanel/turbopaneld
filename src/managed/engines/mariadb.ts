@@ -607,6 +607,21 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     return runMariadbQuery(ctx, sql);
   },
 
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    if (verbose.trim().length > 0) {
+      throw new Error(
+        "switchover: former primary is a standby; cannot reactivate after abort",
+      );
+    }
+    const out = await runMariadbQuery(ctx, isWritableSql());
+    if (parseSqlBool(out) !== true) {
+      throw new Error(
+        "switchover: former primary is not read_only; promotion may have started",
+      );
+    }
+  },
+
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
     await runMariadb(ctx, disableReadOnlySql());
   },

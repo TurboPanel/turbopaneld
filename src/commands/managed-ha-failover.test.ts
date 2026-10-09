@@ -65,6 +65,26 @@ test("managed.ha.failover recover falls back to promote when Orchestrator throws
   );
 });
 
+test("managed.ha.failover recover requires GTID when gtidWaitTimeoutSeconds is set on mysql", async () => {
+  await assertRejects(
+    () =>
+      handleManagedHaFailover(
+        {
+          ...RECOVER_PAYLOAD,
+          engine: "mysql",
+          gtidWaitTimeoutSeconds: 60,
+        },
+        "2026-08-19T12:00:00.000Z",
+        {
+          haPresent: () => Promise.resolve(true),
+          recover: () => Promise.resolve(),
+        },
+      ),
+    Error,
+    "requires requiredExecutedGtidSet",
+  );
+});
+
 test("managed.ha.failover recover proves GTID before Orchestrator when required", async () => {
   let proveCalled = false;
   let recoverCalled = false;
@@ -120,6 +140,7 @@ test("managed.ha.failover recover promote fallback forwards switchover GTID fiel
     "2026-08-19T12:00:00.000Z",
     {
       haPresent: () => Promise.resolve(false),
+      proveGtid: () => Promise.resolve(),
       promote: promoteStub(promoteCalls),
     },
   );

@@ -176,10 +176,6 @@ export async function handleManagedLifecycle(
       engineDeps,
     );
 
-  if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
-    await clearManagedDemotedMarker(layout, payload.managedId);
-  }
-
   if (payload.action === "stop" && payload.demoted === true) {
     await writeManagedDemotedMarker(
       layout,
@@ -205,6 +201,10 @@ export async function handleManagedLifecycle(
   }
 
   await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
+
+  if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
+    await clearManagedDemotedMarker(layout, payload.managedId);
+  }
 
   if (payload.memberId) {
     const engine = getManagedEngineRuntime(payload.engine ?? "postgres");

@@ -9,6 +9,18 @@ import {
   resolveLocalReplicationEngine,
 } from "./local-engine-context.ts";
 import type { RunDockerFn } from "../deploy/docker-cli.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { assertSwitchoverAbortReactivateAllowed } from "./switchover-abort-guard.ts";
+import {
+  clearSwitchoverQuiescedMarker,
+  writeSwitchoverQuiescedMarker,
+} from "./switchover-state-marker.ts";
+
+function isMysqlFamilySwitchoverEngine(
+  engine: string | undefined,
+): boolean {
+  return engine === "mysql" || engine === "mariadb";
+}
 
 export async function captureSwitchoverGtidBeforeStop(
   payload: ManagedLifecyclePayload,
@@ -30,7 +42,13 @@ export async function captureSwitchoverGtidBeforeStop(
       "managed.lifecycle captureSwitchoverGtid is not supported for this engine",
     );
   }
-  return await quiesce(ctx);
+  const gtidSet = await quiesce(ctx);
+  const layout = resolveLayout(Deno.env.toObject());
+  await writeSwitchoverQuiescedMarker(layout, payload.managedId, {
+    primaryExecutedGtidSet: gtidSet,
+    quiescedAt: new Date().toISOString(),
+  });
+  return gtidSet;
 }
 
 export async function reactivatePrimaryAfterSwitchoverAbort(
@@ -44,6 +62,10 @@ export async function reactivatePrimaryAfterSwitchoverAbort(
   ) {
     return;
   }
+  const layout = resolveLayout(Deno.env.toObject());
+  if (isMysqlFamilySwitchoverEngine(payload.engine)) {
+    await assertSwitchoverAbortReactivateAllowed(layout, payload);
+  }
   const { engine, ctx } = await resolveLocalReplicationEngine(
     payload.managedId,
     payload.engine,
@@ -51,5 +73,10 @@ export async function reactivatePrimaryAfterSwitchoverAbort(
     { runDocker: run, ...engineDeps },
   );
   await engine.waitReady(ctx);
+  await engine.replication
+    ?.assertFormerPrimarySafeToReactivateAfterSwitchoverAbort?.(ctx);
   await engine.replication?.reactivateFormerPrimaryAfterSwitchoverAbort?.(ctx);
+  if (isMysqlFamilySwitchoverEngine(payload.engine)) {
+    await clearSwitchoverQuiescedMarker(layout, payload.managedId);
+  }
 }
