@@ -33,6 +33,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
   followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
@@ -41,6 +42,7 @@ import {
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
+  resetReplicaGtidStateSql,
   showReplicaStatusSql,
   versionSql,
 } from "./mariadb-sql.ts";
@@ -423,7 +425,9 @@ export function buildMariadbStandbySeedScript(
     "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
     'chmod 600 "$tmp"',
     ...standbySeedStdinLines(withRootPassword),
-    'mariadb $rootopt --protocol=socket -u root -e "RESET MASTER"',
+    `mariadb $rootopt --protocol=socket -u root -e "${
+      resetReplicaGtidStateSql().replaceAll(";", "")
+    }"`,
     "if (set -o pipefail) 2>/dev/null; then",
     "  set -o pipefail",
     SQL_LOG_BIN_OFF +
@@ -544,7 +548,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     // The seed imported the primary's grant tables (mysql.*) — the running
     // server's in-memory grants do not reload on their own, and monitor /
     // client logins from other hosts stay denied until they do.
-    await runMariadb(ctx, "FLUSH PRIVILEGES;");
+    await runMariadb(ctx, flushPrivilegesLocalSql());
 
     await runMariadb(
       ctx,

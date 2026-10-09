@@ -14,6 +14,7 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
   followReplicationSourceSql,
   grantDatabaseSql,
   grantReplicationSql,
@@ -25,9 +26,11 @@ import {
   quoteAccount,
   quoteIdentifier,
   quoteLiteral,
+  resetReplicaGtidStateSql,
   showReplicaStatusSql,
   standbyReplicationStatusSql,
   versionSql,
+  withoutSessionBinlogSql,
 } from "./mysql-sql.ts";
 import { mysqlManagedEngineRuntime } from "./mysql.ts";
 
@@ -136,6 +139,31 @@ test("installAuthSocketPluginSql is MySQL INSTALL PLUGIN without IF NOT EXISTS",
     authSocketPluginPresentSql().includes("INFORMATION_SCHEMA.PLUGINS"),
     true,
   );
+});
+
+function assertWrappedInSessionBinlogOff(sql: string, inner: string): void {
+  const off = sql.indexOf("SET SESSION sql_log_bin = 0;");
+  const body = sql.indexOf(inner);
+  const on = sql.lastIndexOf("SET SESSION sql_log_bin = 1;");
+  assertEquals(off !== -1 && body !== -1 && on !== -1, true);
+  assertEquals(off < body && body < on, true);
+}
+
+test("replica-local SQL is wrapped so it cannot mint a replica GTID", () => {
+  assertWrappedInSessionBinlogOff(
+    withoutSessionBinlogSql("FLUSH PRIVILEGES;"),
+    "FLUSH PRIVILEGES;",
+  );
+  assertWrappedInSessionBinlogOff(
+    flushPrivilegesLocalSql(),
+    "FLUSH PRIVILEGES;",
+  );
+  assertWrappedInSessionBinlogOff(
+    installAuthSocketPluginSql(),
+    "INSTALL PLUGIN auth_socket",
+  );
+  assertEquals(resetReplicaGtidStateSql(), "RESET BINARY LOGS AND GTIDS;");
+  assertEquals(resetReplicaGtidStateSql().includes("RESET MASTER"), false);
 });
 
 test("databases use utf8mb4", () => {

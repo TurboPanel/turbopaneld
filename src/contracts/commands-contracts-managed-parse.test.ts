@@ -463,6 +463,21 @@ test("parseManagedLifecyclePayload and parseManagedDestroyPayload reject optiona
     TypeError,
     "Invalid managed.lifecycle payload",
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: true,
+    }).demoted,
+    true,
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+    }).demoted,
+    undefined,
+  );
   assertThrows(
     () => parseManagedDestroyPayload(null),
     TypeError,

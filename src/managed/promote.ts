@@ -11,6 +11,8 @@ import type {
   ManagedPromotePayload,
   ManagedPromoteResult,
 } from "../contracts/commands-contracts.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { clearManagedDemotedMarker } from "./demoted-marker.ts";
 import {
   type LocalEngineContextDeps,
   resolveLocalReplicationEngine,
@@ -35,6 +37,10 @@ export async function handleManagedPromote(
   );
 
   await engine.replication!.promote(ctx);
+  await clearManagedDemotedMarker(
+    resolveLayout(Deno.env.toObject()),
+    payload.managedId,
+  );
   const health = await engine.replication!.readHealth(ctx, "primary");
 
   return {

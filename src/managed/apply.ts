@@ -47,6 +47,7 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import { maybeClearDemotedMarkerAfterApply } from "./demoted-marker.ts";
 import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
@@ -847,7 +848,18 @@ export async function handleManagedApply(
     ) {
       throw new ManagedDestroyedError(payload.managedId);
     }
-    return await applyManagedEngine(payload, daemonReceivedAt, layout, deps);
+    const result = await applyManagedEngine(
+      payload,
+      daemonReceivedAt,
+      layout,
+      deps,
+    );
+    await maybeClearDemotedMarkerAfterApply(
+      layout,
+      payload,
+      result.member?.status,
+    );
+    return result;
   });
 }
 
