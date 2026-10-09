@@ -34,6 +34,7 @@ import {
   listManagedSlotsSql,
   type ManagedDatabasePrivilege,
   managedSlotRetentionSql,
+  PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -42,6 +43,8 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreReadWriteLoginSchemasSql,
+  restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
   rewritePrimaryConninfo,
@@ -77,6 +80,28 @@ function assertSafeDatabaseIdentifier(database: string): string {
   return database;
 }
 
+/**
+ * `$1` root user, `$2` database, `$3` reset SQL. The sentinel line is printed
+ * by the server only after `COMMIT` succeeded.
+ */
+const POSTGRES_RESTORE_SCRIPT = [
+  "set -eu",
+  "set -o pipefail",
+  "set +e",
+  "out=$({",
+  String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
+  `  if pg_restore --no-owner --clean --if-exists -f - | sed -E '${PG_RESTORE_TIMEOUT_SET_LINE_SED}d'; then`,
+  String
+    .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
+  "  fi",
+  '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
+  "set -e",
+  'case "$out" in',
+  "  *tp_restore_committed*) ;;",
+  "  *) echo 'restore was not committed; the database is unchanged' >&2; exit 1 ;;",
+  "esac",
+].join("\n");
+
 const postgresBackupRuntime: ManagedEngineBackupRuntime = {
   artifactExtension: "dump",
 
@@ -85,17 +110,30 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
     return ["pg_dump", "-Fc", "-U", ctx.rootUsername, "-d", db];
   },
 
+  /**
+   * Returns the database to exactly the backup's state, all or nothing.
+   *
+   * One transaction: empty every user schema (`restoreResetSql`), replay the
+   * dump as plain SQL (`pg_restore --clean --if-exists` drops database-global
+   * objects the dump recreates), then recreate per-login read-write schemas
+   * (`restoreReadWriteLoginSchemasSql`). `COMMIT` is only sent when
+   * `pg_restore` succeeded,
+   * so a bad or truncated dump, or a failing statement, rolls back and the
+   * customer keeps their data. The final line proves the commit happened;
+   * without it the command fails. `pg_restore` reads the dump from stdin.
+   * Positional args keep every value out of the script text.
+   */
   restoreArgv(ctx: ManagedEngineContext, { database }): string[] {
     const db = assertSafeDatabaseIdentifier(database);
     return [
-      "pg_restore",
-      "--clean",
-      "--if-exists",
-      "--no-owner",
-      "-U",
+      "sh",
+      "-c",
+      POSTGRES_RESTORE_SCRIPT,
+      "tp-restore",
       ctx.rootUsername,
-      "-d",
       db,
+      restoreResetSql(),
+      restoreReadWriteLoginSchemasSql(),
     ];
   },
 };

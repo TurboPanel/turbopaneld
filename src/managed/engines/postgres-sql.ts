@@ -114,6 +114,116 @@ export function releaseRoleObjectsSql(
 }
 
 /**
+ * Empties every user schema in the connected database so a restore returns it
+ * to exactly the backup's state (rows, tables and schemas created after the
+ * backup are gone). Every schema is dropped. `public` is the only one the dump
+ * does not create itself, so it is recreated with the same owner and the same
+ * privileges; the dump brings back the others with their own privileges. The
+ * roles bound to the database keep their access. Role-level settings, the database itself (owner, connect rights) and
+ * the cluster's roles are not touched.
+ *
+ * Meant to run inside the same transaction as the restore, after
+ * `BEGIN;`: a failed restore then rolls everything back. `lock_timeout`
+ * makes a busy application connection fail the restore cleanly instead of
+ * waiting forever on a table lock.
+ */
+/**
+ * `pg_restore -f -` replays session `SET lock_timeout` / `SET statement_timeout`
+ * (usually `= 0`) that override an earlier `SET LOCAL lock_timeout` in the same
+ * transaction. Strip only those directives before `psql` sees them.
+ */
+const PG_RESTORE_TIMEOUT_SET_LINE_RE =
+  /^\s*SET\s+(?:lock_timeout|statement_timeout)\s*=/i;
+
+export function stripPgRestoreTimeoutSetLines(sql: string): string {
+  return sql
+    .split("\n")
+    .filter((line) => !PG_RESTORE_TIMEOUT_SET_LINE_RE.test(line))
+    .join("\n");
+}
+
+/** GNU `sed -E` delete pattern; kept in sync with {@link stripPgRestoreTimeoutSetLines}. */
+export const PG_RESTORE_TIMEOUT_SET_LINE_SED =
+  "/^[[:space:]]*SET[[:space:]]+(lock_timeout|statement_timeout)[[:space:]]*=/I";
+
+export function restoreResetSql(): string {
+  return [
+    "SET LOCAL lock_timeout = '30s';",
+    "DO $tp_reset$",
+    "DECLARE",
+    "  s record;",
+    "  a record;",
+    "BEGIN",
+    "  FOR s IN",
+    "    SELECT n.nspname AS name,",
+    "           n.nspowner::pg_catalog.regrole::pg_catalog.text AS owner,",
+    "           n.nspacl AS acl",
+    "      FROM pg_catalog.pg_namespace n",
+    "     WHERE n.nspname !~ '^pg_'",
+    "       AND n.nspname <> 'information_schema'",
+    "  LOOP",
+    "    EXECUTE pg_catalog.format('DROP SCHEMA %I CASCADE', s.name);",
+    "    IF s.name = 'public' THEN",
+    "      EXECUTE pg_catalog.format('CREATE SCHEMA %I', s.name);",
+    "      EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %s', s.name, s.owner);",
+    "      IF s.acl IS NOT NULL THEN",
+    "        FOR a IN",
+    "          SELECT e.grantee, e.privilege_type, e.is_grantable",
+    "            FROM pg_catalog.aclexplode(s.acl) e",
+    "           WHERE e.grantee <> (SELECT n2.nspowner FROM pg_catalog.pg_namespace n2 WHERE n2.nspname = s.name)",
+    "        LOOP",
+    "          EXECUTE pg_catalog.format(",
+    "            'GRANT %s ON SCHEMA %I TO %s%s',",
+    "            a.privilege_type, s.name,",
+    "            CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::pg_catalog.regrole::pg_catalog.text END,",
+    "            CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END",
+    "          );",
+    "        END LOOP;",
+    "      END IF;",
+    "    END IF;",
+    "  END LOOP;",
+    "END",
+    "$tp_reset$;",
+  ].join("\n");
+}
+
+/**
+ * Recreate per-login schemas for every read-write platform login on the
+ * connected database. The schema reset drops them; the dump does not contain
+ * logins created after the backup. Idempotent — run after `pg_restore` in the
+ * same transaction, before `COMMIT`.
+ */
+export function restoreReadWriteLoginSchemasSql(): string {
+  return [
+    "DO $tp_rw_schemas$",
+    "DECLARE r record;",
+    "BEGIN",
+    "  FOR r IN",
+    "    SELECT rol.rolname",
+    "      FROM pg_catalog.pg_roles rol",
+    "     WHERE rol.rolcanlogin",
+    "       AND NOT rol.rolsuper",
+    "       AND pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'CONNECT')",
+    "       AND pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'TEMPORARY')",
+    "       AND NOT pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'CREATE')",
+    "  LOOP",
+    "    IF NOT EXISTS (",
+    "      SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = r.rolname",
+    "    ) THEN",
+    "      EXECUTE pg_catalog.format(",
+    "        'CREATE SCHEMA %I AUTHORIZATION %I', r.rolname, r.rolname",
+    "      );",
+    "    END IF;",
+    "  END LOOP;",
+    "END",
+    "$tp_rw_schemas$;",
+  ].join("\n");
+}
+
+/**
  * CREATE DATABASE must not run inside a DO/function block (Postgres error
  * "CREATE DATABASE cannot be executed from a function"). Callers check
  * existence first via {@link databaseExistsSql}, then run this top-level.
