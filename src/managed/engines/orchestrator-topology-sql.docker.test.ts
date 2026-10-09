@@ -1,6 +1,6 @@
 /**
  * Applies Orchestrator topology SQL against real MySQL/MariaDB images when Docker
- * is available (local dev and CI runners with dockerd).
+ * is available (local dev and CI runners with a reachable dockerd).
  */
 
 import { assertEquals } from "@std/assert";
