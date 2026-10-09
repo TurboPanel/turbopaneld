@@ -225,7 +225,12 @@ test("a replica whose data is not a standby is not started", async () => {
           stderr: "",
         });
       }
-      return Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
     };
     const guard = new ManagedEngineExitGuard({
       layout,
