@@ -2,7 +2,8 @@
  * `managed.ha.reconcile` — whole-server Orchestrator desired state.
  *
  * Empty desired tears the stack down. Present desired writes compose +
- * `Recover: false` config, then registers clusters with `tp_repl` + org CA.
+ * `Recover: false` config, then registers clusters with the organization's
+ * topology account + org CA.
  */
 
 import type {
@@ -89,10 +90,29 @@ async function persistIdentity(
   return descriptor;
 }
 
-async function decryptTopologyPassword(
-  cluster: ManagedHaCluster,
+async function resolveOrchestratorTopologyCredentials(
+  payload: ManagedHaReconcilePayload,
   decryptSecrets?: DecryptSecretsFn,
-): Promise<string> {
+): Promise<{ topologyUser: string; topologyPassword: string }> {
+  if (payload.topologyUser) {
+    if (!decryptSecrets) {
+      throw new Error("managed.ha.reconcile requires decryptSecrets");
+    }
+    const [plain] = await decryptSecrets([payload.topologyUser.password]);
+    if (typeof plain !== "string" || plain.length === 0) {
+      throw new Error("failed to decrypt managed HA topology password");
+    }
+    return {
+      topologyUser: payload.topologyUser.username,
+      topologyPassword: plain,
+    };
+  }
+  const cluster = payload.clusters.find((entry) =>
+    orchestratorMonitorsEngine(entry.engine)
+  );
+  if (!cluster) {
+    return { topologyUser: "tp_repl", topologyPassword: "" };
+  }
   if (!decryptSecrets) {
     throw new Error("managed.ha.reconcile requires decryptSecrets");
   }
@@ -100,7 +120,10 @@ async function decryptTopologyPassword(
   if (typeof plain !== "string" || plain.length === 0) {
     throw new Error("failed to decrypt managed HA replication password");
   }
-  return plain;
+  return {
+    topologyUser: cluster.replicationUsername,
+    topologyPassword: plain,
+  };
 }
 
 /**
@@ -222,10 +245,19 @@ export async function handleManagedHaReconcile(
 
   const httpAuth = await loadOrchestratorApiCredentials(layout);
   const raftAuthToken = await loadOrchestratorRaftToken(layout);
-  const topologyUser = payload.clusters[0]?.replicationUsername ?? "tp_repl";
-  const topologyPassword = payload.clusters[0]
-    ? await decryptTopologyPassword(payload.clusters[0], deps?.decryptSecrets)
-    : "";
+  const mysqlClusters = payload.clusters.filter((cluster) =>
+    orchestratorMonitorsEngine(cluster.engine)
+  );
+  if (mysqlClusters.length < payload.clusters.length) {
+    logInfo(
+      "commands",
+      `managed.ha.reconcile ignored ${
+        payload.clusters.length - mysqlClusters.length
+      } Postgres cluster(s) in payload serverId=${payload.serverId}`,
+    );
+  }
+  const { topologyUser, topologyPassword } =
+    await resolveOrchestratorTopologyCredentials(payload, deps?.decryptSecrets);
   const conf = renderOrchestratorConf({
     raft: payload.raft,
     httpAuth,
@@ -244,7 +276,7 @@ export async function handleManagedHaReconcile(
   }
 
   const clusters = await resolveClustersForOrchestrator(
-    payload.clusters,
+    mysqlClusters,
     run,
   );
   const topologyAliases = orchestratorTopologyAliases(
@@ -264,20 +296,9 @@ export async function handleManagedHaReconcile(
     ...deps?.orchestratorApi,
     credentials: httpAuth,
   };
-  const monitored = clusters.filter((cluster) =>
-    orchestratorMonitorsEngine(cluster.engine)
-  );
-  if (monitored.length < payload.clusters.length) {
-    logInfo(
-      "commands",
-      `managed.ha.reconcile skipped ${
-        payload.clusters.length - monitored.length
-      } cluster(s) Orchestrator cannot monitor serverId=${payload.serverId}`,
-    );
-  }
-  const registeredClusters = monitored.length === 0
+  const registeredClusters = clusters.length === 0
     ? []
-    : await registerClusters(monitored, api);
+    : await registerClusters(clusters, api);
 
   let containers: EnvironmentDeployContainer[] | undefined;
   const observed = await inspectOrchestratorContainer(layout, descriptor, {

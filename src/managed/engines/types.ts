@@ -79,6 +79,18 @@ export type ManagedEngineRuntime = {
     ctx: ManagedEngineContext,
     credentials: { user: string; password: string },
   ): Promise<void>;
+  /**
+   * Optional: the organization's single Orchestrator topology account
+   * (`managed.apply` `topologyUser`). MySQL-family only — Orchestrator speaks
+   * the MySQL protocol and never dials a Postgres member, so Postgres leaves
+   * this unimplemented. Primary/writable members only: a standby boots
+   * `read_only=ON, super_read_only=ON` and receives the account through the
+   * binlog instead.
+   */
+  ensureOrchestratorTopology?(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void>;
   applyDatabases(
     ctx: ManagedEngineContext,
     ops: ManagedApplyDatabaseOp[],

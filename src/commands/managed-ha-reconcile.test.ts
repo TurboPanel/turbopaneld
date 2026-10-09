@@ -18,6 +18,14 @@ import {
   orchestratorRaftCnfPath,
 } from "../managed/engine-paths.ts";
 import {
+  mysqlOrchestratorClientCnf,
+  replicationPlainEnvelope,
+  replicationPlaintext,
+  topologyPlainEnvelope,
+  topologyPlaintext,
+  topologyUsername,
+} from "../testing/managed-topology-fixtures.ts";
+import {
   type TempLayoutFixture,
   withTempLayout,
 } from "../testing/temp-layout.ts";
@@ -82,8 +90,12 @@ function presentPayload(
         promotionRule: "prefer",
       }],
       replicationUsername: "tp_repl",
-      replicationPasswordEnvelope: "tpdaemon.v1.repl-pass",
+      replicationPasswordEnvelope: replicationPlainEnvelope(),
     }],
+    topologyUser: {
+      username: topologyUsername(),
+      password: topologyPlainEnvelope(),
+    },
     identity: baseIdentity(),
     ...overrides,
   };
@@ -107,12 +119,12 @@ async function seedOrchestratorHostPrep(
   await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
   await Deno.writeTextFile(
     orchestratorApiCnfPath(layout),
-    "[client]\nuser=orch-admin\npassword=orch-secret\n",
+    mysqlOrchestratorClientCnf("orch-admin", "orch-admin-plain"),
   );
   if (options.raftToken) {
     await Deno.writeTextFile(
       orchestratorRaftCnfPath(layout),
-      "[client]\nuser=raft\npassword=raft-token-value\n",
+      mysqlOrchestratorClientCnf("raft", "raft-auth-plain"),
     );
   }
 }
@@ -155,11 +167,12 @@ function decryptSecretsEcho(
   ciphertexts: string[],
 ): Promise<(string | null)[]> {
   return Promise.resolve(
-    ciphertexts.map((c) =>
-      c === "tpdaemon.v1.repl-pass"
-        ? "repl-plaintext"
-        : c.replace(/^tpdaemon\./, "")
-    ),
+    ciphertexts.map((c) => {
+      if (c === replicationPlainEnvelope()) return replicationPlaintext();
+      const prefix = "tpdaemon.v1.";
+      if (c.startsWith(prefix)) return c.slice(prefix.length);
+      return c.replace(/^tpdaemon\./, "");
+    }),
   );
 }
 
@@ -409,9 +422,9 @@ test({
           await Deno.readTextFile(orchestratorConfPath(layout)),
         ) as Record<string, unknown>;
         assertEquals(conf.Recover, false);
-        assertEquals(conf.RaftAuthToken, "raft-token-value");
-        assertEquals(conf.MySQLTopologyUser, "tp_repl");
-        assertEquals(conf.MySQLTopologyPassword, "repl-plaintext");
+        assertEquals(conf.RaftAuthToken, "raft-auth-plain");
+        assertEquals(conf.MySQLTopologyUser, "tp_topology_111111111111");
+        assertEquals(conf.MySQLTopologyPassword, topologyPlaintext());
         assertEquals(conf.MySQLTopologyUseMutualTLS, true);
         assertEquals("MySQLTopologyUseSSL" in conf, false);
         const compose = await Deno.readTextFile(
@@ -850,8 +863,7 @@ test({
 });
 
 test({
-  name:
-    "handleManagedHaReconcile rejects an empty decrypted replication password",
+  name: "handleManagedHaReconcile rejects an empty decrypted topology password",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -862,6 +874,36 @@ test({
           () =>
             handleManagedHaReconcile(
               presentPayload(),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRunWithRunningOrchestrator(),
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: () => Promise.resolve([""]),
+              },
+            ),
+          Error,
+          "failed to decrypt managed HA topology password",
+        );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile rejects an empty decrypted replication password without topologyUser",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      applyLayoutEnv(fixture);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedHaReconcile(
+              presentPayload({ topologyUser: undefined }),
               new Date().toISOString(),
               {
                 runDocker: fakeRunWithRunningOrchestrator(),

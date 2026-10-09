@@ -463,7 +463,7 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
 
 test("rewritePrimaryConninfo updates host port and hostaddr without dropping password", () => {
   const current =
-    "user=tp_repl password=s3cret host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
   const next = rewritePrimaryConninfo(current, {
     host: "10.100.0.4",
     hostaddr: "10.100.0.4",
@@ -472,7 +472,7 @@ test("rewritePrimaryConninfo updates host port and hostaddr without dropping pas
   assertEquals(next.includes("host=10.100.0.4"), true);
   assertEquals(next.includes("hostaddr=10.100.0.4"), true);
   assertEquals(next.includes("port=45001"), true);
-  assertEquals(next.includes("password=s3cret"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
   assertEquals(next.includes("10.100.0.5"), false);
   const sql = applyFollowedPrimaryConninfoSql(next);
   assertEquals(sql.includes("ALTER SYSTEM SET primary_conninfo"), true);
@@ -483,7 +483,7 @@ test("rewritePrimaryConninfo updates host port and hostaddr without dropping pas
 
 test("rewritePrimaryConninfo drops hostaddr when the new dial is a container name", () => {
   const current =
-    "user=tp_repl password=s3cret host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
   const next = rewritePrimaryConninfo(current, {
     host: "svc-1",
     port: 5432,
@@ -491,7 +491,7 @@ test("rewritePrimaryConninfo drops hostaddr when the new dial is a container nam
   assertEquals(next.includes("host=svc-1"), true);
   assertEquals(next.includes("hostaddr"), false);
   assertEquals(next.includes("port=5432"), true);
-  assertEquals(next.includes("password=s3cret"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
 });
 
 test("formatConninfoValue quotes empty values and any whitespace", () => {

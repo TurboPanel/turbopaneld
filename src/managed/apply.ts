@@ -245,6 +245,8 @@ async function requireDecryptedCredentials(
     rootCredential: ManagedApplyCredential;
     /** Per-fronting-server ProxySQL monitor roles (decrypted), when shipped. */
     monitorUsers?: Array<{ user: string; password: string }>;
+    /** Organization Orchestrator topology role (decrypted), when shipped. */
+    topologyUser?: { user: string; password: string };
   }
 > {
   if (!deps?.decryptSecrets) {
@@ -290,7 +292,20 @@ async function requireDecryptedCredentials(
     }
   }
 
-  return { decrypted, redact, rootCredential, monitorUsers };
+  let topologyUser: { user: string; password: string } | undefined;
+  if (payload.topologyUser) {
+    const [plain] = await deps.decryptSecrets([payload.topologyUser.password]);
+    const username = payload.topologyUser.username;
+    if (typeof plain !== "string" || plain.length === 0) {
+      throw new Error(
+        `failed to decrypt topology credential for ${username}`,
+      );
+    }
+    decrypted.plaintexts.push(plain);
+    topologyUser = { user: username, password: plain };
+  }
+
+  return { decrypted, redact, rootCredential, monitorUsers, topologyUser };
 }
 
 async function cleanupManagedEnvFile(
@@ -556,6 +571,7 @@ export async function applyManagedEngineState(
     runHostPrep?: () => Promise<void>;
     /** Decrypted per-fronting-server monitor roles from payload.monitorUsers. */
     monitorUsers?: Array<{ user: string; password: string }>;
+    topologyUser?: { user: string; password: string };
   },
 ): Promise<
   {
@@ -593,6 +609,7 @@ export async function applyManagedEngineState(
   const appliedUsers = await engine.applyCredentials(ctx, credentials);
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
   await ensureProxySqlMonitorRoles(ctx, engine, deps);
+  await ensureOrchestratorTopologyRole(ctx, engine, deps);
   appliedDatabases.push(
     ...await applyDatabaseOps(
       ctx,
@@ -634,12 +651,27 @@ async function configureStandbyIfSupported(
  * engine with its own identity. Standbys inherit the roles via WAL replay.
  * Legacy fallback: host-seeded monitor.cnf (older control planes).
  */
+async function ensureOrchestratorTopologyRole(
+  ctx: ManagedEngineContext,
+  engine: ReturnType<typeof getManagedEngineRuntime>,
+  deps?: {
+    topologyUser?: { user: string; password: string };
+  },
+): Promise<void> {
+  if (!engine.ensureOrchestratorTopology) return;
+  const topologyUser = deps?.topologyUser;
+  if (!topologyUser) return;
+  await engine.ensureOrchestratorTopology(ctx, topologyUser);
+  logInfo("managed", "managed.apply ensured Orchestrator topology role");
+}
+
 async function ensureProxySqlMonitorRoles(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   deps?: {
     runHostPrep?: () => Promise<void>;
     monitorUsers?: Array<{ user: string; password: string }>;
+    topologyUser?: { user: string; password: string };
   },
 ): Promise<void> {
   if (!engine.ensureProxySqlMonitor) return;
@@ -857,7 +889,7 @@ async function applyManagedEngine(
     run,
   );
 
-  const { decrypted, redact, rootCredential, monitorUsers } =
+  const { decrypted, redact, rootCredential, monitorUsers, topologyUser } =
     await requireDecryptedCredentials(payload, deps);
   // Same deny-set for the bounded WS error text and the streamed transcript.
   logSink.addSecrets(decrypted.plaintexts);
@@ -962,7 +994,7 @@ async function applyManagedEngine(
       engine,
       payload,
       decrypted.credentials,
-      { runHostPrep, monitorUsers },
+      { runHostPrep, monitorUsers, topologyUser },
     );
 
     const member = await collectMemberHealth(

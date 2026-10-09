@@ -80,3 +80,12 @@ export {
   createFakeProxySqlAdmin,
   type FakeProxySqlAdmin,
 } from "./fake-proxysql-admin.ts";
+
+export {
+  mysqlOrchestratorClientCnf,
+  replicationPlainEnvelope,
+  replicationPlaintext,
+  topologyPlainEnvelope,
+  topologyPlaintext,
+  topologyUsername,
+} from "./managed-topology-fixtures.ts";

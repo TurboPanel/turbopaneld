@@ -3,6 +3,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { topologyPlaintext } from "../../testing/managed-topology-fixtures.ts";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import {
   buildMariadbStandbySeedScript,
@@ -1229,4 +1230,36 @@ test("mariadb isStandby is true when SHOW SLAVE STATUS is non-empty", async () =
     Promise.resolve({ success: true, stdout: "\n", stderr: "" });
   assertEquals(await replication.isStandby(buildContext(replica)), true);
   assertEquals(await replication.isStandby(buildContext(primary)), false);
+});
+
+test("mariadb ensureOrchestratorTopology uses the MariaDB grant dialect", async () => {
+  const { exec, calls } = recordingExec();
+  await mariadbManagedEngineRuntime.ensureOrchestratorTopology!(
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.7"],
+    },
+    { user: "tp_topology_abcd12345678", password: topologyPlaintext() },
+  );
+  const accountSql =
+    calls.find((c) => c.input?.includes("CREATE USER IF NOT EXISTS"))?.input ??
+      "";
+  assertEquals(accountSql.includes("'10.100.0.7'"), true);
+  assertEquals(accountSql.includes("172.16.0.0/255.240.0.0"), true);
+  // MariaDB keeps `REQUIRE` on `GRANT`; only the password re-assert is an
+  // `ALTER USER`, never the TLS binding.
+  assertEquals(accountSql.includes("GRANT USAGE ON *.*"), true);
+  assertEquals(/ALTER USER [^\n]*REQUIRE SSL/.test(accountSql), false);
+  assertEquals(accountSql.includes("sql_log_bin"), false);
+  // MariaDB has no `mysql.slave_master_info`.
+  assertEquals(
+    calls.some((c) =>
+      c.input?.includes("GRANT SELECT ON mysql.gtid_slave_pos")
+    ),
+    true,
+  );
+  assertEquals(
+    calls.some((c) => c.input?.includes("slave_master_info")),
+    false,
+  );
 });
