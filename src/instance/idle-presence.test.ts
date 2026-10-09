@@ -85,7 +85,7 @@ const FULL_HOST: HostHelloIdentity = {
         threads: { total: 4 },
       },
     ],
-    memory: { totalBytes: 16_384 * 1024 * 1024 },
+    memory: { totalBytes: 16_384 * 1024 * 1024, pageSizeBytes: 16384 },
     swap: { totalBytes: 0 },
   },
 };

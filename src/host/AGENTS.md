@@ -5,6 +5,12 @@ machine-key / runtime inventory probes attached on hello and refreshed by
 change-detected heartbeats.
 
 - **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
+- **Host resources** — `src/host/host-inventory.ts` (`readHostResources`,
+  process-cached). Static capacity for hello: CPU sockets, GPUs, memory /
+  swap `totalBytes`, and optional `memory.pageSizeBytes` (positive integer
+  bytes from `getconf PAGESIZE`, Linux only; omitted on other OS or when
+  unreadable / non-positive). Spawn is behind `HostInventoryIo.getconfPagesize`
+  so tests never need a live host.
 - **Kernel features** — `src/host/kernel-features.ts` is the typed registry mirroring `orchestration/scripts/tp-kernel-features` (`pi-4k-pagesize`); the daemon never calls the helper. Commands printed to a person use the absolute path `/opt/turbopanel/share/orchestration/scripts/tp-orchestrate` (`tp-orchestrate` is not on PATH). The installer reboots only on a first install: it records whether `server.id` existed and when the run began, and a reboot needs fresh enrolment files (`server.id`, `server-key-id`, the saved server key). `undo` only removes a line this tool added (marker in `/var/lib/turbopanel-kernel`).
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
