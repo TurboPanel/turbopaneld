@@ -1,19 +1,29 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import {
   assertBoundedSwitchoverGtidSet,
+  filterGtidSetForSwitchoverWait,
   gtidWaitTimedOutMessage,
   parseGtidWaitScalar,
   quiesceAndReadPrimaryGtid,
   waitForRequiredGtidSet,
 } from "./switchover-gtid.ts";
+import { switchoverPromoteErrorMessage } from "./switchover-promote-error.ts";
 import { masterGtidWaitSql } from "./mariadb-sql.ts";
 
 const test = Deno.test.bind(Deno);
 
-test("parseGtidWaitScalar reads MASTER_GTID_WAIT result codes", () => {
+test("parseGtidWaitScalar reads GTID wait result codes", () => {
   assertEquals(parseGtidWaitScalar("0"), "0");
   assertEquals(parseGtidWaitScalar("1\n"), "1");
+  assertEquals(parseGtidWaitScalar("-1"), "-1");
   assertEquals(parseGtidWaitScalar("NULL"), null);
+});
+
+test("filterGtidSetForSwitchoverWait drops errant domains the target never received", () => {
+  assertEquals(
+    filterGtidSetForSwitchoverWait("0-1-50,2-2-1", "0-1-49"),
+    "0-1-50",
+  );
 });
 
 test("waitForRequiredGtidSet succeeds on zero", async () => {
@@ -25,35 +35,66 @@ test("waitForRequiredGtidSet succeeds on zero", async () => {
     masterGtidWaitSql,
     "0-1-10",
     30,
+    "mariadb",
   );
 });
 
-test("waitForRequiredGtidSet throws on timeout", async () => {
+test("waitForRequiredGtidSet throws gtid_wait_timeout on MariaDB -1", async () => {
   let message = "";
   try {
     await waitForRequiredGtidSet(
-      () => Promise.resolve("1"),
+      () => Promise.resolve("-1"),
       masterGtidWaitSql,
       "0-1-10",
       5,
+      "mariadb",
     );
   } catch (error) {
     message = error instanceof Error ? error.message : "";
   }
-  assertEquals(message, gtidWaitTimedOutMessage(5));
+  assertEquals(
+    message,
+    switchoverPromoteErrorMessage(
+      "gtid_wait_timeout",
+      gtidWaitTimedOutMessage(5),
+    ),
+  );
 });
 
-test("quiesceAndReadPrimaryGtid enforces read-only then returns bounded GTID", async () => {
-  let enforced = false;
-  const gtid = await quiesceAndReadPrimaryGtid(
-    () => {
-      enforced = true;
-      return Promise.resolve();
-    },
-    () => Promise.resolve("0-1-99"),
+test("waitForRequiredGtidSet throws gtid_wait_timeout on MySQL 1", async () => {
+  await assertRejects(
+    () =>
+      waitForRequiredGtidSet(
+        () => Promise.resolve("1"),
+        masterGtidWaitSql,
+        "0-1-10",
+        5,
+        "mysql",
+      ),
+    Error,
+    switchoverPromoteErrorMessage(
+      "gtid_wait_timeout",
+      gtidWaitTimedOutMessage(5),
+    ),
   );
-  assertEquals(enforced, true);
-  assertEquals(gtid, "0-1-99");
+});
+
+test("quiesceAndReadPrimaryGtid restores writable when GTID read fails", async () => {
+  let restored = false;
+  await assertRejects(
+    () =>
+      quiesceAndReadPrimaryGtid(
+        () => Promise.resolve(),
+        () => Promise.resolve(""),
+        () => {
+          restored = true;
+          return Promise.resolve();
+        },
+      ),
+    Error,
+    "could not read primary GTID position",
+  );
+  assertEquals(restored, true);
 });
 
 test("assertBoundedSwitchoverGtidSet rejects empty input", () => {
@@ -66,7 +107,7 @@ test("assertBoundedSwitchoverGtidSet rejects empty input", () => {
   assertEquals(threw, true);
 });
 
-test("waitForRequiredGtidSet throws when the wait returns an unexpected code", async () => {
+test("waitForRequiredGtidSet throws gtid_wait_error on NULL", async () => {
   await assertRejects(
     () =>
       waitForRequiredGtidSet(
@@ -74,20 +115,12 @@ test("waitForRequiredGtidSet throws when the wait returns an unexpected code", a
         masterGtidWaitSql,
         "0-1-10",
         10,
+        "mariadb",
       ),
     Error,
-    "switchover gtid wait failed",
-  );
-});
-
-test("quiesceAndReadPrimaryGtid fails when GTID read is empty", async () => {
-  await assertRejects(
-    () =>
-      quiesceAndReadPrimaryGtid(
-        () => Promise.resolve(),
-        () => Promise.resolve(""),
-      ),
-    Error,
-    "could not read primary GTID position",
+    switchoverPromoteErrorMessage(
+      "gtid_wait_error",
+      "switchover GTID wait failed",
+    ),
   );
 });

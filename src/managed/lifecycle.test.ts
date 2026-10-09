@@ -338,7 +338,7 @@ test("lifecycle stop with captureSwitchoverGtid returns switchoverPrimaryExecute
             }
             if (args[0] === "exec") {
               const sql = args[args.indexOf("-e") + 1] ?? "";
-              if (sql.includes("gtid_binlog_pos")) {
+              if (sql.includes("gtid_current_pos")) {
                 return Promise.resolve({
                   success: true,
                   stdout: "0-1-77\n",

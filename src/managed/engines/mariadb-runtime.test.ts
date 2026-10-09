@@ -552,7 +552,7 @@ test("mariadb promote runs MASTER_GTID_WAIT before promotion when a GTID proof i
   assertEquals(sawWait, true);
 });
 
-test("mariadb quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_binlog_pos", async () => {
+test("mariadb quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_current_pos", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.quiesceFormerPrimaryForSwitchover) {
     throw new TypeError("expected mariadb quiesceFormerPrimaryForSwitchover");
@@ -561,7 +561,7 @@ test("mariadb quiesceFormerPrimaryForSwitchover enforces read_only and returns g
   const exec: ManagedEngineExec = (argv, input) => {
     const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
     if (sql.includes("read_only")) enforcedReadOnly = true;
-    if (sql.includes("gtid_binlog_pos")) {
+    if (sql.includes("gtid_current_pos")) {
       return Promise.resolve({ success: true, stdout: "0-9-42\n", stderr: "" });
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });

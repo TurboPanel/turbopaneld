@@ -189,8 +189,8 @@ test("account, privilege, and census SQL builders cover MariaDB hosts", () => {
   );
 });
 
-test("switchover SQL uses MASTER_GTID_WAIT and gtid_binlog_pos", () => {
-  assertEquals(primaryFinalGtidSetSql().includes("gtid_binlog_pos"), true);
+test("switchover SQL uses MASTER_GTID_WAIT and gtid_current_pos", () => {
+  assertEquals(primaryFinalGtidSetSql().includes("gtid_current_pos"), true);
   assertEquals(
     masterGtidWaitSql("0-1-5", 120).includes("MASTER_GTID_WAIT"),
     true,

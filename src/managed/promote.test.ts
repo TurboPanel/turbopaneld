@@ -79,6 +79,53 @@ test("handleManagedPromote promotes standby and reports primary health", async (
   assertEquals(result.replication?.state, "streaming");
 });
 
+test("handleManagedPromote blocks promotion when GTID wait times out", async () => {
+  const mysqlPs = JSON.stringify([
+    {
+      ID: "mysql123",
+      Name: "01936b3e-aaaa-bbbb-cccc-123456789abc-1",
+      Service: "mysql",
+      State: "running",
+    },
+  ]);
+  let sawPromoteSql = false;
+  await assertRejects(
+    () =>
+      handleManagedPromote(
+        {
+          managedId: "managed_promote_mysql",
+          memberId: "00000000-0000-4000-8000-000000000004",
+          engine: "mysql",
+          requiredExecutedGtidSet: "uuid:1-50",
+          gtidWaitTimeoutSeconds: 3,
+        },
+        new Date().toISOString(),
+        {
+          ensureDocker: () => Promise.resolve(),
+          runDocker: (args) => {
+            if (args[0] === "compose" && args.includes("ps")) {
+              return Promise.resolve(dockerOk(mysqlPs));
+            }
+            if (args[0] === "exec" && args.includes("mysql")) {
+              const sql = args[args.indexOf("-e") + 1] ?? "";
+              if (sql.includes("WAIT_FOR_EXECUTED_GTID_SET")) {
+                return Promise.resolve(dockerOk("1\n"));
+              }
+              if (sql.includes("STOP REPLICA")) {
+                sawPromoteSql = true;
+              }
+              return Promise.resolve(dockerOk("0\t0\n"));
+            }
+            return Promise.resolve(dockerOk());
+          },
+        },
+      ),
+    Error,
+    "switchover_promote:gtid_wait_timeout",
+  );
+  assertEquals(sawPromoteSql, false);
+});
+
 test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", async () => {
   const mysqlPs = JSON.stringify([
     {

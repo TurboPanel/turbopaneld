@@ -17,6 +17,7 @@ import {
   type LocalEngineContextDeps,
   resolveLocalReplicationEngine,
 } from "./local-engine-context.ts";
+import { proveSwitchoverGtidBeforePromote } from "./switchover-gtid-proof.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 
@@ -44,7 +45,25 @@ export async function handleManagedPromote(
         : {}),
     }
     : undefined;
-  await engine.replication!.promote(ctx, promoteOptions);
+  if (payload.requiredExecutedGtidSet !== undefined) {
+    await proveSwitchoverGtidBeforePromote(
+      {
+        managedId: payload.managedId,
+        engine: payload.engine,
+        requiredExecutedGtidSet: payload.requiredExecutedGtidSet,
+        ...(payload.gtidWaitTimeoutSeconds !== undefined
+          ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+          : {}),
+      },
+      deps,
+    );
+    await engine.replication!.promote(ctx, {
+      ...promoteOptions,
+      requiredExecutedGtidSet: undefined,
+    });
+  } else {
+    await engine.replication!.promote(ctx, promoteOptions);
+  }
   await clearManagedDemotedMarker(
     resolveLayout(Deno.env.toObject()),
     payload.managedId,

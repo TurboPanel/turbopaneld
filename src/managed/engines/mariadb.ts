@@ -15,7 +15,9 @@ import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
+import { switchoverPromoteErrorMessage } from "./switchover-promote-error.ts";
 import {
+  filterGtidSetForSwitchoverWait,
   quiesceAndReadPrimaryGtid,
   SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
   waitForRequiredGtidSet,
@@ -583,7 +585,12 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     return await quiesceAndReadPrimaryGtid(
       () => runMariadb(ctx, enforceReadOnlySql()),
       () => runMariadbQuery(ctx, primaryFinalGtidSetSql()),
+      () => runMariadb(ctx, disableReadOnlySql()),
     );
+  },
+
+  runAdminScalarQuery(ctx, sql) {
+    return runMariadbQuery(ctx, sql);
   },
 
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
@@ -591,25 +598,47 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
   },
 
   async promote(ctx, options) {
-    if (options?.requiredExecutedGtidSet) {
-      await waitForRequiredGtidSet(
-        (sql) => runMariadbQuery(ctx, sql),
-        masterGtidWaitSql,
-        options.requiredExecutedGtidSet,
-        options.gtidWaitTimeoutSeconds ?? SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
-      );
+    let promoteStarted = false;
+    try {
+      if (options?.requiredExecutedGtidSet) {
+        const received = await runMariadbQuery(
+          ctx,
+          "SELECT @@GLOBAL.gtid_slave_pos;",
+        );
+        const waitSet = filterGtidSetForSwitchoverWait(
+          options.requiredExecutedGtidSet,
+          received,
+        );
+        await waitForRequiredGtidSet(
+          (sql) => runMariadbQuery(ctx, sql),
+          masterGtidWaitSql,
+          waitSet,
+          options.gtidWaitTimeoutSeconds ??
+            SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+          "mariadb",
+        );
+      }
+      promoteStarted = true;
+      await runMariadb(ctx, promoteSql());
+      const deadline = Date.now() + 60_000;
+      const writable = async (): Promise<boolean> => {
+        if (Date.now() >= deadline) return false;
+        const out = await runMariadbQuery(ctx, isWritableSql());
+        if (parseSqlBool(out) === false) return true;
+        await sleep(500);
+        return writable();
+      };
+      if (await writable()) return;
+      throw new Error("mariadb promote did not become writable within 60s");
+    } catch (error) {
+      if (promoteStarted) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          switchoverPromoteErrorMessage("promote_started", detail),
+        );
+      }
+      throw error;
     }
-    await runMariadb(ctx, promoteSql());
-    const deadline = Date.now() + 60_000;
-    const writable = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const out = await runMariadbQuery(ctx, isWritableSql());
-      if (parseSqlBool(out) === false) return true;
-      await sleep(500);
-      return writable();
-    };
-    if (await writable()) return;
-    throw new Error("mariadb promote did not become writable within 60s");
   },
 
   async isStandby(ctx) {

@@ -16,7 +16,10 @@ import { sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { grantDatabasePrivileges } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
+import { switchoverPromoteErrorMessage } from "./switchover-promote-error.ts";
+import { replicationGtidReceivedSql } from "./switchover-gtid-sql.ts";
 import {
+  filterGtidSetForSwitchoverWait,
   quiesceAndReadPrimaryGtid,
   SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
   waitForRequiredGtidSet,
@@ -628,7 +631,12 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     return await quiesceAndReadPrimaryGtid(
       () => runMysql(ctx, enforceReadOnlySql()),
       () => runMysqlQuery(ctx, primaryFinalGtidSetSql()),
+      () => runMysql(ctx, disableReadOnlySql()),
     );
+  },
+
+  runAdminScalarQuery(ctx, sql) {
+    return runMysqlQuery(ctx, sql);
   },
 
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
@@ -636,31 +644,53 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
   },
 
   async promote(ctx, options) {
-    if (options?.requiredExecutedGtidSet) {
-      await waitForRequiredGtidSet(
-        (sql) => runMysqlQuery(ctx, sql),
-        waitForExecutedGtidSetSql,
-        options.requiredExecutedGtidSet,
-        options.gtidWaitTimeoutSeconds ?? SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
-      );
-    }
-    await runMysql(ctx, promoteSql());
-    const deadline = Date.now() + 60_000;
-    const writable = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const out = await runMysqlQuery(ctx, isWritableSql());
-      const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (
-        parseSqlBool(readOnly ?? "") === false &&
-        parseSqlBool(superReadOnly ?? "") === false
-      ) {
-        return true;
+    let promoteStarted = false;
+    try {
+      if (options?.requiredExecutedGtidSet) {
+        const received = await runMysqlQuery(
+          ctx,
+          replicationGtidReceivedSql("mysql"),
+        );
+        const waitSet = filterGtidSetForSwitchoverWait(
+          options.requiredExecutedGtidSet,
+          received,
+        );
+        await waitForRequiredGtidSet(
+          (sql) => runMysqlQuery(ctx, sql),
+          waitForExecutedGtidSetSql,
+          waitSet,
+          options.gtidWaitTimeoutSeconds ??
+            SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+          "mysql",
+        );
       }
-      await sleep(500);
-      return writable();
-    };
-    if (await writable()) return;
-    throw new Error("mysql promote did not become writable within 60s");
+      promoteStarted = true;
+      await runMysql(ctx, promoteSql());
+      const deadline = Date.now() + 60_000;
+      const writable = async (): Promise<boolean> => {
+        if (Date.now() >= deadline) return false;
+        const out = await runMysqlQuery(ctx, isWritableSql());
+        const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+        if (
+          parseSqlBool(readOnly ?? "") === false &&
+          parseSqlBool(superReadOnly ?? "") === false
+        ) {
+          return true;
+        }
+        await sleep(500);
+        return writable();
+      };
+      if (await writable()) return;
+      throw new Error("mysql promote did not become writable within 60s");
+    } catch (error) {
+      if (promoteStarted) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          switchoverPromoteErrorMessage("promote_started", detail),
+        );
+      }
+      throw error;
+    }
   },
 
   async isStandby(ctx) {

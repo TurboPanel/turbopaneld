@@ -65,6 +65,34 @@ test("managed.ha.failover recover falls back to promote when Orchestrator throws
   );
 });
 
+test("managed.ha.failover recover proves GTID before Orchestrator when required", async () => {
+  let proveCalled = false;
+  let recoverCalled = false;
+  await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mariadb",
+      requiredExecutedGtidSet: "0-1-9",
+      gtidWaitTimeoutSeconds: 45,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      proveGtid: () => {
+        proveCalled = true;
+        return Promise.resolve();
+      },
+      recover: () => {
+        recoverCalled = true;
+        return Promise.resolve();
+      },
+      promote: promoteStub([]),
+    },
+  );
+  assertEquals(proveCalled, true);
+  assertEquals(recoverCalled, true);
+});
+
 test("managed.ha.failover recover does not promote when Orchestrator succeeds", async () => {
   const promoteCalls: unknown[] = [];
   const result = await handleManagedHaFailover(

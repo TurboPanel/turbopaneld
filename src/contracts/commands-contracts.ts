@@ -2226,7 +2226,11 @@ export type ManagedHaReconcileResult = {
   containers?: EnvironmentDeployContainer[];
 };
 
-export type ManagedHaFailoverPhase = "drain" | "recover" | "repoint";
+export type ManagedHaFailoverPhase =
+  | "drain"
+  | "undrain"
+  | "recover"
+  | "repoint";
 
 /** Must stay in sync with the instance canonical `managed.ha.failover` shape. */
 export type ManagedHaFailoverPayload = {
@@ -8687,7 +8691,12 @@ export function parseManagedIngressReconcileResult(
 }
 
 const HA_PROMOTION_RULES = new Set(["prefer", "must_not"]);
-const HA_FAILOVER_PHASES = new Set(["drain", "recover", "repoint"]);
+const HA_FAILOVER_PHASES = new Set([
+  "drain",
+  "undrain",
+  "recover",
+  "repoint",
+]);
 const MAX_HA_CLUSTERS = 64;
 const MAX_HA_MEMBERS = 32;
 const MAX_HA_PEERS = 32;

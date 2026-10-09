@@ -202,6 +202,11 @@ export type ManagedEngineReplicationRuntime = {
     ctx: ManagedEngineContext,
     desired: readonly string[],
   ): Promise<void>;
+  /** Single-statement admin query (`-N -B`) for switchover GTID proof. */
+  runAdminScalarQuery?(
+    ctx: ManagedEngineContext,
+    sql: string,
+  ): Promise<string>;
   promote(
     ctx: ManagedEngineContext,
     options?: {

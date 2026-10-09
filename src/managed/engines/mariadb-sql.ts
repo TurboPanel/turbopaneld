@@ -281,9 +281,9 @@ export function promoteSql(): string {
   ].join("\n");
 }
 
-/** Final binlog GTID position on a quiesced MariaDB primary. */
+/** Final GTID position on a quiesced MariaDB primary (includes replicated work). */
 export function primaryFinalGtidSetSql(): string {
-  return "SELECT @@GLOBAL.gtid_binlog_pos AS gtid_set;";
+  return "SELECT @@GLOBAL.gtid_current_pos AS gtid_set;";
 }
 
 export function masterGtidWaitSql(

@@ -898,6 +898,22 @@ export function buildProxySqlDrainStatements(
   ];
 }
 
+/** Restore a drained backend to the writer pool on this host's ProxySQL. */
+export function buildProxySqlUndrainStatements(
+  hostname: string,
+  port: number,
+): string[] {
+  const host = escapeSqlString(hostname);
+  return [
+    `UPDATE mysql_servers SET status='ONLINE' WHERE hostname='${host}' AND port=${port}`,
+    `UPDATE pgsql_servers SET status='ONLINE' WHERE hostname='${host}' AND port=${port}`,
+    "LOAD MYSQL SERVERS TO RUNTIME",
+    "LOAD PGSQL SERVERS TO RUNTIME",
+    "SAVE MYSQL SERVERS TO DISK",
+    "SAVE PGSQL SERVERS TO DISK",
+  ];
+}
+
 function protocolFamilyForPort(
   port: number,
 ): ProxySqlProtocolFamily | null {
