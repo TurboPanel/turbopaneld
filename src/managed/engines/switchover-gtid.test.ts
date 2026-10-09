@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   assertBoundedSwitchoverGtidSet,
   gtidWaitTimedOutMessage,
@@ -64,4 +64,30 @@ test("assertBoundedSwitchoverGtidSet rejects empty input", () => {
     threw = true;
   }
   assertEquals(threw, true);
+});
+
+test("waitForRequiredGtidSet throws when the wait returns an unexpected code", async () => {
+  await assertRejects(
+    () =>
+      waitForRequiredGtidSet(
+        () => Promise.resolve("NULL"),
+        masterGtidWaitSql,
+        "0-1-10",
+        10,
+      ),
+    Error,
+    "switchover gtid wait failed",
+  );
+});
+
+test("quiesceAndReadPrimaryGtid fails when GTID read is empty", async () => {
+  await assertRejects(
+    () =>
+      quiesceAndReadPrimaryGtid(
+        () => Promise.resolve(),
+        () => Promise.resolve(""),
+      ),
+    Error,
+    "could not read primary GTID position",
+  );
 });

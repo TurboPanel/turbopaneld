@@ -522,6 +522,57 @@ test("mariadb configureStandby empty seed failure is not reported as unknown", a
   assertEquals(err.message.includes("unknown"), false);
 });
 
+test("mariadb promote runs MASTER_GTID_WAIT before promotion when a GTID proof is required", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mariadb promote");
+  }
+  let sawWait = false;
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("MASTER_GTID_WAIT")) {
+      sawWait = true;
+      return Promise.resolve({ success: true, stdout: "0\n", stderr: "" });
+    }
+    if (sql.includes("RESET SLAVE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "0\n" : "1\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec), {
+    requiredExecutedGtidSet: "0-1-100",
+    gtidWaitTimeoutSeconds: 45,
+  });
+  assertEquals(sawWait, true);
+});
+
+test("mariadb quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_binlog_pos", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.quiesceFormerPrimaryForSwitchover) {
+    throw new TypeError("expected mariadb quiesceFormerPrimaryForSwitchover");
+  }
+  let enforcedReadOnly = false;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("read_only")) enforcedReadOnly = true;
+    if (sql.includes("gtid_binlog_pos")) {
+      return Promise.resolve({ success: true, stdout: "0-9-42\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const gtid = await replication.quiesceFormerPrimaryForSwitchover(
+    buildContext(exec),
+  );
+  assertEquals(enforcedReadOnly, true);
+  assertEquals(gtid, "0-9-42");
+});
+
 test("mariadb promote clears read-only and returns when writable", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.promote) {
