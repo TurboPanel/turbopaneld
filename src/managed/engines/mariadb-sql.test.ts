@@ -19,12 +19,17 @@ import {
   grantReplicationSql,
   grantRootSql,
   isWritableSql,
+  listNonLocalAccountsSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  parseGlobalPrivAccountRows,
   promoteSql,
   quoteAccount,
   quoteIdentifier,
   quoteLiteral,
+  reassertReplicaPrivilegeGuardSql,
   resetReplicaGtidStateSql,
+  revokeReadOnlyAdminFromNetworkAccountsSql,
+  revokeReadOnlyAdminSql,
   showReplicaStatusSql,
   versionSql,
   withoutSessionBinlogSql,
@@ -143,7 +148,14 @@ test("account, privilege, and census SQL builders cover MariaDB hosts", () => {
     grantDatabaseSql("appdb", "app", "read-only").includes("SELECT, SHOW VIEW"),
     true,
   );
-  assertEquals(grantRootSql("root").includes("*.*"), true);
+  const rootGrant = grantRootSql("root");
+  assertEquals(rootGrant.includes("*.*"), true);
+  assertEquals(rootGrant.includes("GRANT ALL PRIVILEGES"), true);
+  assertEquals(rootGrant.includes("REVOKE READ_ONLY ADMIN"), true);
+  assertEquals(
+    rootGrant.includes("`root`@'localhost'"),
+    false,
+  );
 
   const dropped = dropAccountSql("app");
   assertEquals(dropped.includes("`app`@'localhost'"), true);
@@ -187,6 +199,61 @@ test("account, privilege, and census SQL builders cover MariaDB hosts", () => {
   );
 });
 
+test("network root grant revokes READ_ONLY ADMIN; socket admin keeps ALL", () => {
+  const network = grantRootSql("root_abc123xyz", "203.0.113.9");
+  assertEquals(network.includes("GRANT ALL PRIVILEGES ON *.*"), true);
+  assertEquals(
+    network.includes(
+      "REVOKE READ_ONLY ADMIN ON *.* FROM `root_abc123xyz`@'203.0.113.9'",
+    ),
+    true,
+  );
+  const socket = ensureSocketAdminSql();
+  assertEquals(
+    socket.includes(
+      "GRANT ALL PRIVILEGES ON *.* TO `root`@'localhost' WITH GRANT OPTION",
+    ),
+    true,
+  );
+  assertEquals(socket.includes("REVOKE READ_ONLY ADMIN"), false);
+});
+
+test("replica strip revokes READ_ONLY ADMIN from non-localhost accounts only", () => {
+  const rows = parseGlobalPrivAccountRows(
+    "root_abc\t172.16.0.0/255.240.0.0\nroot_abc\tlocalhost\nmysql.sys\t%\napp_user\t203.0.113.9\n",
+  );
+  assertEquals(rows, [
+    { username: "root_abc", host: "172.16.0.0/255.240.0.0" },
+    { username: "mysql.sys", host: "%" },
+    { username: "app_user", host: "203.0.113.9" },
+  ]);
+  const sql = revokeReadOnlyAdminFromNetworkAccountsSql(rows);
+  assertEquals(
+    sql.includes(
+      "REVOKE READ_ONLY ADMIN ON *.* FROM `root_abc`@'172.16.0.0/255.240.0.0'",
+    ),
+    true,
+  );
+  assertEquals(sql.includes("`app_user`@'203.0.113.9'"), true);
+  assertEquals(sql.includes("mysql.sys"), false);
+  assertEquals(sql.includes("localhost"), false);
+  assertEquals(sql.includes("FLUSH PRIVILEGES"), true);
+  assertEquals(
+    revokeReadOnlyAdminFromNetworkAccountsSql([]),
+    "",
+  );
+  assertEquals(
+    revokeReadOnlyAdminSql("root_abc", MANAGED_DOCKER_NETWORK_HOST).includes(
+      MANAGED_DOCKER_NETWORK_HOST,
+    ),
+    true,
+  );
+  assertEquals(
+    listNonLocalAccountsSql().includes("Host <> 'localhost'"),
+    true,
+  );
+});
+
 test("mariadb dialect never references super_read_only (MySQL-only variable)", () => {
   // An unknown variable in my.cnf kills mariadbd at startup; in SQL it
   // errors. MariaDB has no super_read_only (MDEV-18441).
@@ -214,4 +281,25 @@ test("replica-local SQL is wrapped so it cannot mint a replica GTID", () => {
   assertEquals(local.includes("FLUSH PRIVILEGES;"), true);
   assertEquals(local.includes("SET SESSION sql_log_bin = 1;"), true);
   assertEquals(resetReplicaGtidStateSql(), "RESET MASTER;");
+  const guardRows = [{ username: "root_abc", host: "203.0.113.9" }];
+  const guard = reassertReplicaPrivilegeGuardSql(guardRows);
+  const guardOff = guard.indexOf("SET SESSION sql_log_bin = 0;");
+  const socketGrant = guard.indexOf("IDENTIFIED VIA unix_socket");
+  const revoke = guard.indexOf("REVOKE READ_ONLY ADMIN");
+  const guardFlush = guard.lastIndexOf("FLUSH PRIVILEGES;");
+  const guardOn = guard.lastIndexOf("SET SESSION sql_log_bin = 1;");
+  assertEquals(
+    guardOff !== -1 && socketGrant !== -1 && revoke !== -1 &&
+      guardFlush !== -1 && guardOn !== -1,
+    true,
+  );
+  assertEquals(
+    guardOff < socketGrant && socketGrant < revoke && revoke < guardFlush &&
+      guardFlush < guardOn,
+    true,
+  );
+  const guardOnlySocket = reassertReplicaPrivilegeGuardSql([]);
+  assertEquals(guardOnlySocket.includes("SET SESSION sql_log_bin = 0;"), true);
+  assertEquals(guardOnlySocket.includes("unix_socket"), true);
+  assertEquals(guardOnlySocket.includes("REVOKE READ_ONLY ADMIN"), false);
 });

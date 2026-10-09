@@ -25,6 +25,8 @@ import { buildProxySqlDrainStatements } from "../managed/proxysql.ts";
 import {
   hostPrepPresent,
   loadOrchestratorApiCredentials,
+  resolveOrchestratorRecoverEndpoint,
+  type RunDockerFn,
 } from "../managed/orchestrator.ts";
 import {
   type OrchestratorRecoverTarget,
@@ -50,6 +52,8 @@ export type ManagedHaFailoverHandlerDeps = {
   /** Test seam — defaults to {@link hostPrepPresent}. */
   haPresent?: () => Promise<boolean>;
   followDeps?: FollowPrimaryDeps;
+  /** Test seam for translating a local member's Docker name (inspect). */
+  runDocker?: RunDockerFn;
 };
 
 async function drainWriterOnLocalProxySql(
@@ -220,10 +224,26 @@ async function recoverWithOrchestrator(
 ): Promise<ManagedHaFailoverResult> {
   try {
     const recover = deps?.recover ?? recoverToCandidate;
+    // A member on this host arrives as its Docker name, but Orchestrator
+    // registered it by its published private listener.
+    const source = await resolveOrchestratorRecoverEndpoint(
+      { host: endpoints.sourceHost, port: endpoints.sourcePort },
+      deps?.runDocker,
+    );
+    const target = await resolveOrchestratorRecoverEndpoint(
+      { host: endpoints.targetHost, port: endpoints.targetPort },
+      deps?.runDocker,
+    );
+    const resolved: OrchestratorRecoverTarget = {
+      sourceHost: source.host,
+      sourcePort: source.port,
+      targetHost: target.host,
+      targetPort: target.port,
+    };
     const credentials = deps?.recover
       ? undefined
       : await loadOrchestratorApiCredentials(resolveLayout());
-    await recover(endpoints, credentials ? { credentials } : {});
+    await recover(resolved, credentials ? { credentials } : {});
     logInfo(
       "commands",
       `managed.ha.failover recover completed managedId=${payload.managedId} received=${daemonReceivedAt}`,
