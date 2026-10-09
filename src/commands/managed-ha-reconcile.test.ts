@@ -35,6 +35,7 @@ const test = Deno.test.bind(Deno);
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVICE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const MANAGED_ID = "00000000-0000-4000-8000-000000000001";
+const STALE_MANAGED_ID = "00000000-0000-4000-8000-000000000002";
 const MEMBER_ID = "00000000-0000-4000-8000-0000000000a1";
 
 function applyLayoutEnv(fixture: TempLayoutFixture): void {
@@ -303,6 +304,8 @@ test({
           },
         );
         assertEquals(result.registeredClusters, []);
+        assertEquals(result.failedClusters, []);
+        assertEquals(result.partial, false);
         assertEquals(result.restarted, false);
         assertEquals(result.containers, []);
         assertEquals(dockerArgs.some((args) => args.includes("down")), true);
@@ -354,11 +357,120 @@ test({
           },
         );
         assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.failedClusters, []);
+        assertEquals(result.partial, false);
         assertEquals(apiCalls.some((url) => url.includes("pg-1")), false);
         assertEquals(
           apiCalls.some((url) => url.includes("/api/discover/db-1/3306")),
           true,
         );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile registers a later cluster when an earlier discover fails",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const [healthy] = presentPayload().clusters;
+      const stale = {
+        ...healthy,
+        managedId: STALE_MANAGED_ID,
+        clusterAlias: STALE_MANAGED_ID,
+        members: healthy.members.map((member) => ({
+          ...member,
+          host: "db-stale",
+        })),
+      };
+      try {
+        const registrationError = "x".repeat(1_000);
+        const shortRegistrationError = `…${"x".repeat(299)}`;
+        const result = await handleManagedHaReconcile(
+          presentPayload({ clusters: [stale, healthy] }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                if (url.includes("db-stale")) {
+                  return Promise.reject(new Error(registrationError));
+                }
+                return Promise.resolve(new Response("", { status: 200 }));
+              },
+            },
+          },
+        );
+        assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.partial, true);
+        assertEquals(result.failedClusters, [{
+          managedId: STALE_MANAGED_ID,
+          error: shortRegistrationError,
+        }]);
+        assertEquals(
+          result.summary,
+          `managed HA partially reconciled for server ${SERVER_ID}; failed clusters: ${STALE_MANAGED_ID}: ${shortRegistrationError}`,
+        );
+        assertEquals(
+          result.failedClusters?.[0]?.error.length,
+          300,
+        );
+      } finally {
+        clearLayoutEnv();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile fails the command when every monitored cluster fails to register",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const [first] = presentPayload().clusters;
+      const second = {
+        ...first,
+        managedId: STALE_MANAGED_ID,
+        clusterAlias: STALE_MANAGED_ID,
+        members: first.members.map((member) => ({
+          ...member,
+          host: "db-stale",
+        })),
+      };
+      try {
+        const err = await assertRejects(
+          () =>
+            handleManagedHaReconcile(
+              presentPayload({ clusters: [first, second] }),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRunWithRunningOrchestrator(),
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: decryptSecretsEcho,
+                orchestratorApi: {
+                  fetch: () =>
+                    Promise.resolve(new Response("", { status: 500 })),
+                },
+              },
+            ),
+          Error,
+        );
+        assertEquals(err.message.includes(MANAGED_ID), true);
+        assertEquals(err.message.includes(STALE_MANAGED_ID), true);
+        assertEquals(err.message.includes("HTTP 500"), true);
       } finally {
         clearLayoutEnv();
       }
@@ -394,6 +506,8 @@ test({
         );
         assertEquals(result.restarted, true);
         assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.failedClusters, []);
+        assertEquals(result.partial, false);
         assertEquals(result.containers?.length, 1);
         assertEquals(
           apiCalls.some((url) => url.includes("/api/discover/db-1/3306")),
