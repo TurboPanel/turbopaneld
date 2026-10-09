@@ -272,6 +272,9 @@ test("runtime defaultDatabase is a non-system application schema", () => {
 test("standby seed window and census SQL stay credential-free", () => {
   assertEquals(disableReadOnlySql().includes("super_read_only = OFF"), true);
   assertEquals(enforceReadOnlySql().includes("super_read_only = ON"), true);
+  assertEquals(promoteSql().includes("super_read_only = OFF"), true);
+  assertEquals(grantRootSql("root").includes("REVOKE"), false);
+  assertEquals(grantRootSql("root").includes("READ_ONLY ADMIN"), false);
   assertEquals(
     connectionCensusSql(),
     "SHOW GLOBAL STATUS LIKE 'Threads_connected'; SELECT @@max_connections;",
