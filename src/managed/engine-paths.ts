@@ -97,6 +97,16 @@ export function orchestratorRaftCnfPath(layout: LayoutPaths): string {
   return join(orchestratorConfigDir(layout), "raft.cnf");
 }
 
+/** Ansible-installed readiness script; host prep is complete when this exists. */
+export function orchestratorWaitReadyScriptPath(layout: LayoutPaths): string {
+  return join(layout.home, "libexec", "orchestrator-wait-ready.sh");
+}
+
+/** Written by the `orchestrator` Ansible role after dirs + unit install. */
+export function orchestratorHostPrepMarkerPath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "host-prep.ok");
+}
+
 export function orchestratorTlsDir(layout: LayoutPaths): string {
   return join(orchestratorConfigDir(layout), "tls");
 }

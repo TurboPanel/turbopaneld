@@ -43,9 +43,11 @@ import {
   orchestratorConfigDir,
   orchestratorConfPath,
   orchestratorDataDir,
+  orchestratorHostPrepMarkerPath,
   orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
+  orchestratorWaitReadyScriptPath,
 } from "./engine-paths.ts";
 import {
   type EnvironmentDeployContainer,
@@ -102,6 +104,31 @@ export type OrchestratorApiCredentials = {
   user: string;
   password: string;
 };
+
+function formatOrchestratorClientCnf(user: string, password: string): string {
+  return `[client]\nuser=${user}\npassword=${password}\n`;
+}
+
+/** Write org-wide Orchestrator HTTP + Raft secrets for loopback clients and compose. */
+export async function materializeOrchestratorHostCredentials(
+  layout: LayoutPaths,
+  input: {
+    httpAuth: OrchestratorApiCredentials;
+    raftToken: string;
+  },
+): Promise<void> {
+  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await Deno.writeTextFile(
+    orchestratorApiCnfPath(layout),
+    formatOrchestratorClientCnf(input.httpAuth.user, input.httpAuth.password),
+    { mode: 0o600 },
+  );
+  await Deno.writeTextFile(
+    orchestratorRaftCnfPath(layout),
+    formatOrchestratorClientCnf("raft", input.raftToken),
+    { mode: 0o600 },
+  );
+}
 
 export async function loadOrchestratorApiCredentials(
   layout: LayoutPaths,
@@ -631,13 +658,21 @@ export async function restartOrchestratorStack(
 }
 
 export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
-  try {
-    await Deno.stat(orchestratorApiCnfPath(layout));
-    return true;
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return false;
-    throw err;
+  for (
+    const path of [
+      orchestratorWaitReadyScriptPath(layout),
+      orchestratorHostPrepMarkerPath(layout),
+    ]
+  ) {
+    try {
+      await Deno.stat(path);
+      return true;
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) continue;
+      throw err;
+    }
   }
+  return false;
 }
 
 /** True once `managed.ha.reconcile` has written the daemon-owned compose file. */

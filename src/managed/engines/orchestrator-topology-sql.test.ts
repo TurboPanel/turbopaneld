@@ -96,6 +96,10 @@ test("ensureOrchestratorTopologyAccountSql uses MariaDB REQUIRE SSL on GRANT", (
   );
   assertStringIncludes(
     sql,
+    "GRANT SUPER, PROCESS, REPLICATION CLIENT, RELOAD, REPLICA MONITOR ON *.*",
+  );
+  assertStringIncludes(
+    sql,
     `GRANT USAGE ON *.* TO \`${USERNAME}\`@'172.16.0.0/255.240.0.0' REQUIRE SSL;`,
   );
   // MariaDB keeps `REQUIRE` on `GRANT`; only the password re-assert is an

@@ -78,16 +78,23 @@ function bindRequireSsl(
 /**
  * The smallest privilege set Orchestrator's topology discovery and recovery
  * checks work with: `PROCESS` and `REPLICATION CLIENT` read
- * `SHOW PROCESSLIST` and `SHOW REPLICA STATUS`, `RELOAD` is the `FLUSH`
+ * `SHOW PROCESSLIST` and replica status; MariaDB 10.5.9+ also needs
+ * `REPLICA MONITOR` (`SLAVE MONITOR`) for `SHOW REPLICA STATUS`. `RELOAD` is the `FLUSH`
  * during a recovery, `SUPER` sets `read_only` on a demoted primary, and
  * `SELECT` on the meta schema carries the cluster hints. No `SELECT` on
  * `mysql.*` or on `performance_schema`: the replica status Orchestrator reads
  * comes from `SHOW REPLICA STATUS` under `REPLICATION CLIENT`, and a wider
  * grant would hand it the credential tables.
  */
-function grantOrchestratorTopologyPrivileges(account: string): string[] {
+function grantOrchestratorTopologyPrivileges(
+  account: string,
+  dialect: OrchestratorTopologySqlDialect,
+): string[] {
+  const globalPrivs = dialect === "mariadb"
+    ? "SUPER, PROCESS, REPLICATION CLIENT, RELOAD, REPLICA MONITOR"
+    : "SUPER, PROCESS, REPLICATION CLIENT, RELOAD";
   return [
-    `GRANT SUPER, PROCESS, REPLICATION CLIENT, RELOAD ON *.* TO ${account};`,
+    `GRANT ${globalPrivs} ON *.* TO ${account};`,
     `GRANT SELECT ON ${
       quoteIdentifier(ORCHESTRATOR_META_SCHEMA)
     }.* TO ${account};`,
@@ -112,7 +119,7 @@ export function ensureOrchestratorTopologyAccountSql(
     const account = accountAt(username, host);
     lines.push(
       createOrAlterAccountSql(username, password, host),
-      ...grantOrchestratorTopologyPrivileges(account),
+      ...grantOrchestratorTopologyPrivileges(account, dialect),
       bindRequireSsl(account, dialect),
     );
   }

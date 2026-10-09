@@ -15,10 +15,16 @@ import {
   orchestratorComposePath,
   orchestratorConfigDir,
   orchestratorConfPath,
+  orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
 } from "../managed/engine-paths.ts";
 import {
   mysqlOrchestratorClientCnf,
+  orchestratorApiPlainEnvelope,
+  orchestratorApiPlaintext,
+  orchestratorApiUsername,
+  orchestratorRaftPlainEnvelope,
+  orchestratorRaftPlaintext,
   replicationPlainEnvelope,
   replicationPlaintext,
   topologyPlainEnvelope,
@@ -96,6 +102,11 @@ function presentPayload(
       username: topologyUsername(),
       password: topologyPlainEnvelope(),
     },
+    orchestratorApiUser: {
+      username: orchestratorApiUsername(),
+      password: orchestratorApiPlainEnvelope(),
+    },
+    orchestratorRaftToken: orchestratorRaftPlainEnvelope(),
     identity: baseIdentity(),
     ...overrides,
   };
@@ -114,19 +125,33 @@ function teardownPayload(): ManagedHaReconcilePayload {
 
 async function seedOrchestratorHostPrep(
   layout: ReturnType<typeof resolveLayout>,
-  options: { raftToken?: boolean } = {},
 ): Promise<void> {
   await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
+}
+
+/** Legacy on-disk API creds for tests that exercise topology/replication decrypt only. */
+async function seedLegacyOrchestratorApiCnf(
+  layout: ReturnType<typeof resolveLayout>,
+): Promise<void> {
+  await seedOrchestratorHostPrep(layout);
   await Deno.writeTextFile(
     orchestratorApiCnfPath(layout),
     mysqlOrchestratorClientCnf("orch-admin", "orch-admin-plain"),
   );
-  if (options.raftToken) {
-    await Deno.writeTextFile(
-      orchestratorRaftCnfPath(layout),
-      mysqlOrchestratorClientCnf("raft", "raft-auth-plain"),
-    );
-  }
+  await Deno.writeTextFile(
+    orchestratorRaftCnfPath(layout),
+    mysqlOrchestratorClientCnf("raft", "raft-auth-plain"),
+  );
+}
+
+function presentPayloadWithoutOrgOrchestratorSecrets(
+  overrides: Partial<ManagedHaReconcilePayload> = {},
+): ManagedHaReconcilePayload {
+  const payload = presentPayload(overrides);
+  delete payload.orchestratorApiUser;
+  delete payload.orchestratorRaftToken;
+  return payload;
 }
 
 function fakeRunSuccess(): (args: string[]) => Promise<DockerCliResult> {
@@ -333,7 +358,7 @@ test({
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env);
-      await seedOrchestratorHostPrep(layout, { raftToken: true });
+      await seedOrchestratorHostPrep(layout);
       applyLayoutEnv(fixture);
       const apiCalls: string[] = [];
       const [mysql] = presentPayload().clusters;
@@ -386,7 +411,7 @@ test({
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env);
-      await seedOrchestratorHostPrep(layout, { raftToken: true });
+      await seedOrchestratorHostPrep(layout);
       applyLayoutEnv(fixture);
       const apiCalls: string[] = [];
       try {
@@ -422,7 +447,9 @@ test({
           await Deno.readTextFile(orchestratorConfPath(layout)),
         ) as Record<string, unknown>;
         assertEquals(conf.Recover, false);
-        assertEquals(conf.RaftAuthToken, "raft-auth-plain");
+        assertEquals(conf.RaftAuthToken, orchestratorRaftPlaintext());
+        assertEquals(conf.HTTPAuthUser, orchestratorApiUsername());
+        assertEquals(conf.HTTPAuthPassword, orchestratorApiPlaintext());
         assertEquals(conf.MySQLTopologyUser, "tp_topology_111111111111");
         assertEquals(conf.MySQLTopologyPassword, topologyPlaintext());
         assertEquals(conf.MySQLTopologyUseMutualTLS, true);
@@ -613,7 +640,8 @@ test({
 });
 
 test({
-  name: "handleManagedHaReconcile runs host prep when api.cnf is missing",
+  name:
+    "handleManagedHaReconcile runs host prep when wait-ready script is missing",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -693,8 +721,8 @@ test({
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env);
-      // Partially prepared host: compose exists but api.cnf does not, so the
-      // old ordering would have started the stack on its way to stopping it.
+      // Partially prepared host: compose exists but host prep is incomplete, so
+      // the old ordering would have started the stack on its way to stopping it.
       await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
       await Deno.writeTextFile(
         orchestratorComposePath(layout),
@@ -729,7 +757,8 @@ test({
 });
 
 test({
-  name: "handleManagedHaReconcile skips host prep when api.cnf exists",
+  name:
+    "handleManagedHaReconcile skips host prep when wait-ready script exists",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -867,13 +896,14 @@ test({
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
-      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      const layout = resolveLayout(fixture.env);
+      await seedLegacyOrchestratorApiCnf(layout);
       applyLayoutEnv(fixture);
       try {
         await assertRejects(
           () =>
             handleManagedHaReconcile(
-              presentPayload(),
+              presentPayloadWithoutOrgOrchestratorSecrets(),
               new Date().toISOString(),
               {
                 runDocker: fakeRunWithRunningOrchestrator(),
@@ -897,13 +927,16 @@ test({
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
-      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      const layout = resolveLayout(fixture.env);
+      await seedLegacyOrchestratorApiCnf(layout);
       applyLayoutEnv(fixture);
       try {
         await assertRejects(
           () =>
             handleManagedHaReconcile(
-              presentPayload({ topologyUser: undefined }),
+              presentPayloadWithoutOrgOrchestratorSecrets({
+                topologyUser: undefined,
+              }),
               new Date().toISOString(),
               {
                 runDocker: fakeRunWithRunningOrchestrator(),

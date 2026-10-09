@@ -2214,6 +2214,17 @@ export type ManagedHaReconcilePayload = {
    */
   topologyUser?: { username: string; password: string };
   /**
+   * Organization-wide Orchestrator HTTP basic auth (`HTTPAuthUser` /
+   * `HTTPAuthPassword`). Same derived value on every Raft peer so followers can
+   * proxy to the leader. Sealed to the target daemon; absent on teardown.
+   */
+  orchestratorApiUser?: { username: string; password: string };
+  /**
+   * Organization-wide Orchestrator `RaftAuthToken`, sealed to the target
+   * daemon. Absent on teardown.
+   */
+  orchestratorRaftToken?: string;
+  /**
    * Organization CA leaf + Organization CA trust bundle. `caCertPem` is the
    * concatenated active+retired Organization CA PEMs of the server-owner
    * organization — not the Platform CA / `instance-ca.pem`. Multi-PEM is
@@ -8875,6 +8886,24 @@ export function parseManagedHaReconcilePayload(
   };
   if (topologyUser !== undefined) {
     payload.topologyUser = topologyUser;
+  }
+  const orchestratorApiUser = value.orchestratorApiUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(
+      value.orchestratorApiUser,
+      "managed.ha.reconcile orchestratorApiUser",
+    );
+  if (orchestratorApiUser !== undefined) {
+    payload.orchestratorApiUser = orchestratorApiUser;
+  }
+  if (value.orchestratorRaftToken !== undefined) {
+    if (
+      typeof value.orchestratorRaftToken !== "string" ||
+      !value.orchestratorRaftToken.startsWith("tpdaemon.")
+    ) {
+      throw new TypeError("Invalid managed.ha.reconcile orchestratorRaftToken");
+    }
+    payload.orchestratorRaftToken = value.orchestratorRaftToken;
   }
   if (orgTlsMaterial !== undefined) {
     payload.orgTlsMaterial = orgTlsMaterial;

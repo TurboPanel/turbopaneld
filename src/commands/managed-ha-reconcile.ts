@@ -36,7 +36,9 @@ import {
   inspectOrchestratorContainer,
   loadOrchestratorApiCredentials,
   loadOrchestratorRaftToken,
+  materializeOrchestratorHostCredentials,
   ORCHESTRATOR_TLS_CA_PATH,
+  type OrchestratorApiCredentials,
   orchestratorTopologyAliases,
   renderOrchestratorConf,
   resolveOrchestratorRegisterHost,
@@ -88,6 +90,47 @@ async function persistIdentity(
   };
   await writeSystemComponentDescriptor(layout, descriptor);
   return descriptor;
+}
+
+async function resolveOrchestratorHttpAuth(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<OrchestratorApiCredentials> {
+  if (payload.orchestratorApiUser) {
+    if (!decryptSecrets) {
+      throw new Error("managed.ha.reconcile requires decryptSecrets");
+    }
+    const [plain] = await decryptSecrets([
+      payload.orchestratorApiUser.password,
+    ]);
+    if (typeof plain !== "string" || plain.length === 0) {
+      throw new Error("failed to decrypt managed HA orchestrator API password");
+    }
+    return {
+      user: payload.orchestratorApiUser.username,
+      password: plain,
+    };
+  }
+  return await loadOrchestratorApiCredentials(layout);
+}
+
+async function resolveOrchestratorRaftAuthToken(
+  payload: ManagedHaReconcilePayload,
+  layout: LayoutPaths,
+  decryptSecrets?: DecryptSecretsFn,
+): Promise<string | null> {
+  if (payload.orchestratorRaftToken) {
+    if (!decryptSecrets) {
+      throw new Error("managed.ha.reconcile requires decryptSecrets");
+    }
+    const [plain] = await decryptSecrets([payload.orchestratorRaftToken]);
+    if (typeof plain !== "string" || plain.length === 0) {
+      throw new Error("failed to decrypt managed HA orchestrator raft token");
+    }
+    return plain;
+  }
+  return await loadOrchestratorRaftToken(layout);
 }
 
 async function resolveOrchestratorTopologyCredentials(
@@ -228,6 +271,28 @@ export async function handleManagedHaReconcile(
   await ensureDocker();
   await ensureManagedIngressNetwork(payload.managedNetwork, run);
 
+  const httpAuth = await resolveOrchestratorHttpAuth(
+    payload,
+    layout,
+    deps?.decryptSecrets,
+  );
+  const raftAuthToken = await resolveOrchestratorRaftAuthToken(
+    payload,
+    layout,
+    deps?.decryptSecrets,
+  );
+  if (payload.orchestratorApiUser && payload.orchestratorRaftToken) {
+    if (raftAuthToken === null) {
+      throw new Error(
+        "managed HA orchestrator raft token missing after decrypt",
+      );
+    }
+    await materializeOrchestratorHostCredentials(layout, {
+      httpAuth,
+      raftToken: raftAuthToken,
+    });
+  }
+
   if (!(await hostPrepPresent(layout))) {
     await runHostPrep();
   }
@@ -243,8 +308,6 @@ export async function handleManagedHaReconcile(
     );
   }
 
-  const httpAuth = await loadOrchestratorApiCredentials(layout);
-  const raftAuthToken = await loadOrchestratorRaftToken(layout);
   const mysqlClusters = payload.clusters.filter((cluster) =>
     orchestratorMonitorsEngine(cluster.engine)
   );

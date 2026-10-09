@@ -41,6 +41,7 @@ import {
   orchestratorComposePath,
   orchestratorConfigDir,
   orchestratorConfPath,
+  orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
 } from "./engine-paths.ts";
 
@@ -376,16 +377,13 @@ test("loadOrchestratorRaftToken reads raft token password", async () => {
   }
 });
 
-test("hostPrepPresent reflects api.cnf presence", async () => {
+test("hostPrepPresent reflects host-prep marker presence", async () => {
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
     assertEquals(await hostPrepPresent(layout), false);
     await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
-    await Deno.writeTextFile(
-      orchestratorApiCnfPath(layout),
-      "[client]\nuser=admin\npassword=x\n",
-    );
+    await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
     assertEquals(await hostPrepPresent(layout), true);
   } finally {
     await fixture.cleanup();

@@ -19,6 +19,26 @@ export function topologyPlainEnvelope(): string {
   return `${TPD_PREFIX}${topologyPlaintext()}`;
 }
 
+export function orchestratorApiUsername(): string {
+  return ["tp_orchapi", "111111111111"].join("_");
+}
+
+export function orchestratorApiPlaintext(): string {
+  return ["orchapi", "plain", "fixture"].join("-");
+}
+
+export function orchestratorApiPlainEnvelope(): string {
+  return `${TPD_PREFIX}${orchestratorApiPlaintext()}`;
+}
+
+export function orchestratorRaftPlaintext(): string {
+  return ["orchraft", "plain", "fixture"].join("-");
+}
+
+export function orchestratorRaftPlainEnvelope(): string {
+  return `${TPD_PREFIX}${orchestratorRaftPlaintext()}`;
+}
+
 export function replicationPlaintext(): string {
   return ["repl", "plain", "fixture"].join("-");
 }
