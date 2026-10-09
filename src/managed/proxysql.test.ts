@@ -14,6 +14,8 @@ import {
   assertManagedIngressPortsBindable,
   assertNoFrontendUserConflict,
   buildProxySqlAdminStatements,
+  buildProxySqlDrainStatements,
+  buildProxySqlUndrainStatements,
   DEFAULT_PROXYSQL_LISTENER_PORTS,
   ensureProxySqlIngress,
   extractStaticProxySqlConfigSection,
@@ -2117,4 +2119,26 @@ test("ensureProxySqlIngress recreates a running container that has no published 
 test("ensureProxySqlIngress does not recreate when there is no container yet", async () => {
   const calls = await runEnsureWithContainer(null);
   assertEquals(upCall(calls).includes("--force-recreate"), false);
+});
+
+test("buildProxySqlDrainStatements and buildProxySqlUndrainStatements toggle backend status", () => {
+  const host = "203.0.113.9";
+  const port = 3306;
+  const drain = buildProxySqlDrainStatements(host, port);
+  assertEquals(
+    drain[0],
+    `UPDATE mysql_servers SET status='OFFLINE_SOFT' WHERE hostname='${host}' AND port=${port}`,
+  );
+  assertEquals(drain[1]?.includes("pgsql_servers"), true);
+  const undrain = buildProxySqlUndrainStatements(host, port);
+  assertEquals(
+    undrain[0],
+    `UPDATE mysql_servers SET status='ONLINE' WHERE hostname='${host}' AND port=${port}`,
+  );
+  assertEquals(undrain.at(-1), "SAVE PGSQL SERVERS TO DISK");
+  const escaped = buildProxySqlUndrainStatements("db''host", 15432);
+  assertEquals(
+    escaped[0]?.includes("hostname='db''''host'"),
+    true,
+  );
 });

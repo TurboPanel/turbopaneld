@@ -3090,6 +3090,15 @@ test("managed.ha.failover round-trips drain and recover hosts", () => {
   });
   assertEquals(drain.phase, "drain");
   assertEquals(drain.sourceHost, "db-1");
+  const undrain = parseManagedHaFailoverPayload({
+    managedId: "00000000-0000-4000-8000-000000000001",
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+    phase: "undrain",
+    sourceHost: "db-1",
+    sourcePort: 5432,
+  });
+  assertEquals(undrain.phase, "undrain");
   const recover = parseManagedHaFailoverPayload({
     managedId: "00000000-0000-4000-8000-000000000001",
     sourceMemberId: "00000000-0000-4000-8000-000000000002",

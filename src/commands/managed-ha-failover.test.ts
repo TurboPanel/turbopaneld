@@ -221,6 +221,50 @@ test("managed.ha.failover recover probes host prep when haPresent is omitted", a
   assertEquals(result.summary.includes("without Orchestrator"), true);
 });
 
+test("managed.ha.failover undrain uses injected helper when source endpoint is present", async () => {
+  let undrainHost = "";
+  let undrainPort = 0;
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      phase: "undrain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      undrain: (host, port) => {
+        undrainHost = host;
+        undrainPort = port;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(undrainHost, RECOVER_PAYLOAD.sourceHost);
+  assertEquals(undrainPort, RECOVER_PAYLOAD.sourcePort);
+  assertEquals(result.phase, "undrain");
+  assertEquals(result.summary.includes("restored writer routing"), true);
+});
+
+test("managed.ha.failover undrain skips helper when source endpoint is absent", async () => {
+  let undrainCalled = false;
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      phase: "undrain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      undrain: () => {
+        undrainCalled = true;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(undrainCalled, false);
+  assertEquals(result.phase, "undrain");
+});
+
 test("managed.ha.failover drain skips drain helper when source endpoint is absent", async () => {
   let drainCalled = false;
   const result = await handleManagedHaFailover(
