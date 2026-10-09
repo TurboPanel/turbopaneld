@@ -4,8 +4,11 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { ManagedEngineExitGuard } from "./engine-exit-guard.ts";
 import { writeManagedDemotedMarker } from "./demoted-marker.ts";
+import { writeManagedDestroyedMarker } from "./destroyed-marker.ts";
 import {
   beginManagedIntent,
+  endManagedIntent,
+  HOST_WIDE_INTENT_ID,
   recordManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
@@ -421,6 +424,100 @@ test("a held operator stop is not started", async () => {
     await recordManagedIntent(layout.stateDir, MANAGED_ID, "stop", {
       mode: "held",
     });
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ),
+      false,
+    );
+  });
+});
+
+test("a destroyed member is not started", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDestroyedMarker(
+      layout.stateDir,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ),
+      false,
+    );
+  });
+});
+
+test("a transient lifecycle stop blocks compose start", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const token = await beginManagedIntent(layout.stateDir, MANAGED_ID, "stop");
+    await endManagedIntent(layout.stateDir, token, false);
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ),
+      false,
+    );
+  });
+});
+
+test("host-wide storage.restore blocks compose start", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await beginManagedIntent(layout.stateDir, HOST_WIDE_INTENT_ID, "restore");
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ),
+      false,
+    );
+  });
+});
+
+test("host-wide server.reboot blocks compose start", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await beginManagedIntent(layout.stateDir, HOST_WIDE_INTENT_ID, "restart");
     const fake = docker();
     const guard = new ManagedEngineExitGuard({
       layout,

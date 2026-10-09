@@ -13,13 +13,14 @@ import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { collectManagedContainers } from "./containers.ts";
+import { isManagedMemberDestroyed } from "./destroyed-marker.ts";
 import { isManagedMemberDemoted } from "./demoted-marker.ts";
 import { managedComposeProject, managedDir } from "./engine-paths.ts";
 import {
+  HOST_WIDE_INTENT_ID,
   type IntentLookup,
   isHeldIntent,
   isIntentLookupActive,
-  isRunningIntent,
   lookupManagedIntent,
 } from "./ha-intent.ts";
 import {
@@ -61,8 +62,11 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-/** Held stop/destroy, unreadable marker, or an in-flight command. */
-function intentBlocksEngineStart(lookup: IntentLookup, nowMs: number): boolean {
+/** Held stop/destroy, unreadable marker, or any active operator intent. */
+function intentLookupBlocksEngineStart(
+  lookup: IntentLookup,
+  nowMs: number,
+): boolean {
   if (lookup.status === "unreadable") return true;
   if (lookup.status !== "found") return false;
   if (
@@ -71,7 +75,20 @@ function intentBlocksEngineStart(lookup: IntentLookup, nowMs: number): boolean {
   ) {
     return true;
   }
-  return isRunningIntent(lookup) && isIntentLookupActive(lookup, nowMs);
+  return isIntentLookupActive(lookup, nowMs);
+}
+
+async function intentBlocksEngineStart(
+  stateDir: string,
+  managedId: string,
+  nowMs: number,
+): Promise<boolean> {
+  const [cluster, host] = await Promise.all([
+    lookupManagedIntent(stateDir, managedId),
+    lookupManagedIntent(stateDir, HOST_WIDE_INTENT_ID),
+  ]);
+  return intentLookupBlocksEngineStart(cluster, nowMs) ||
+    intentLookupBlocksEngineStart(host, nowMs);
 }
 
 async function composeStartStoppedEngine(
@@ -169,9 +186,21 @@ export class ManagedEngineExitGuard {
       return;
     }
 
+    if (
+      await isManagedMemberDestroyed(
+        this.#layout.stateDir,
+        managedId,
+        member.memberId,
+      )
+    ) {
+      this.#loggedSkip.delete(managedId);
+      return;
+    }
+
     const now = this.#nowMs();
-    const lookup = await lookupManagedIntent(this.#layout.stateDir, managedId);
-    if (intentBlocksEngineStart(lookup, now)) return;
+    if (await intentBlocksEngineStart(this.#layout.stateDir, managedId, now)) {
+      return;
+    }
 
     const project = managedComposeProject(managedId);
     const containers = await collectManagedContainers(
