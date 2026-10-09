@@ -673,6 +673,41 @@ test("an inactive slice systemd keeps without a unit file is not reported as lef
   assertEquals(running.stdout.trim(), "present", running.stderr);
 });
 
+test("the unit scan skips a stopped slice with no unit file but keeps a running one", async () => {
+  const body = [
+    "TP_SYSTEMD_DIRS=$TP_TMP/none",
+    ': > "$TP_TMP/inv.units"',
+    "tp_scan_systemctl_units",
+    'cat "$TP_TMP/inv.units"',
+  ].join("\n");
+  const stubFor = (state: string) =>
+    stubBin(
+      "systemctl",
+      [
+        'case "$*" in',
+        "  *LoadState*) echo loaded ;;",
+        "  *FragmentPath*) echo ;;",
+        `  *ActiveState*) echo ${state} ;;`,
+        '  *list-units*) echo "turbopanel.slice loaded ${state} dead TurboPanel" ;;',
+        "esac",
+      ].join("\n"),
+    );
+  const fns = [
+    "tp_scan_systemctl_units",
+    "tp_note_unit",
+    "tp_unit_present",
+    "tp_list_has_word",
+  ];
+  const gone = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("inactive")}:${BASE_PATH}`,
+  });
+  assertEquals(gone.stdout.trim(), "", gone.stderr);
+  const running = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("active")}:${BASE_PATH}`,
+  });
+  assertStringIncludes(running.stdout, "turbopanel.slice", running.stderr);
+});
+
 test("containers are not carried into the final check once Docker Engine was purged", async () => {
   const stub = await stubBin("docker", "exit 1");
   const run = (gone: string, left = "false") =>
