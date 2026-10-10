@@ -125,6 +125,15 @@ const PG_SIGNAL = "/var/lib/postgresql/data/standby.signal";
 const MYSQL_DATA = "/var/lib/mysql/mysql";
 const MYSQL_MARKER = "/var/lib/mysql/.turbopanel-standby";
 
+const DEMOTED_REFUSE_COMPOSE: Record<
+  "postgres" | "mysql" | "mariadb",
+  string
+> = {
+  postgres: POSTGRES_COMPOSE,
+  mysql: MYSQL_COMPOSE,
+  mariadb: MARIADB_COMPOSE,
+};
+
 for (const action of ["start", "restart"] as const) {
   test(`lifecycle ${action} refuses a postgres replica whose data has no standby.signal`, async () => {
     const { result, calls } = await runLifecycle(
@@ -214,11 +223,7 @@ async function assertDemotedPrimaryLifecycleRefused(
         managedId,
       );
       await Deno.mkdir(root, { recursive: true });
-      const compose = engine === "postgres"
-        ? POSTGRES_COMPOSE
-        : engine === "mysql"
-        ? MYSQL_COMPOSE
-        : MARIADB_COMPOSE;
+      const compose = DEMOTED_REFUSE_COMPOSE[engine];
       const present = engine === "postgres"
         ? new Set([PG_DATA])
         : new Set([MYSQL_DATA]);

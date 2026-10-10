@@ -219,6 +219,54 @@ test("reactivatePrimaryAfterSwitchoverAbort clears read_only on mariadb", async 
   });
 });
 
+type SwitchoverAbortDockerFlags = {
+  onRemovedStandbySignal: () => void;
+  reactivateBatch: boolean;
+};
+
+function postgresSwitchoverAbortDocker(
+  flags: SwitchoverAbortDockerFlags,
+): (
+  args: string[],
+  options?: { input?: string },
+) => Promise<DockerCliResult> {
+  return (args, options) => {
+    if (args[0] === "compose" && args.includes("ps")) {
+      return Promise.resolve(
+        dockerOk(
+          JSON.stringify([
+            {
+              ID: "pg1",
+              Name: "pg-1",
+              Service: "postgres",
+              State: "running",
+            },
+          ]),
+        ),
+      );
+    }
+    if (args[0] === "run") {
+      const script = args.at(-1) ?? "";
+      if (script.includes("rm -f") && script.includes("standby.signal")) {
+        flags.onRemovedStandbySignal();
+      }
+      return Promise.resolve(dockerOk("present\n"));
+    }
+    if (args[0] === "exec") {
+      const batch = String(options?.input ?? "");
+      if (batch.includes("pg_promote")) {
+        flags.reactivateBatch = true;
+        return Promise.resolve(dockerOk(""));
+      }
+      if (batch.includes("pg_is_in_recovery") || batch.includes("NOT pg")) {
+        return Promise.resolve(dockerOk(flags.reactivateBatch ? "t\n" : "f\n"));
+      }
+      return Promise.resolve(dockerOk(""));
+    }
+    return Promise.resolve(dockerOk());
+  };
+}
+
 const POSTGRES_COMPOSE = [
   "services:",
   "  db:",
@@ -233,7 +281,12 @@ const POSTGRES_COMPOSE = [
 
 test("reactivatePrimaryAfterSwitchoverAbort clears postgres standby.signal and promotes", async () => {
   let removedSignal = false;
-  let reactivateBatch = false;
+  const flags: SwitchoverAbortDockerFlags = {
+    onRemovedStandbySignal: () => {
+      removedSignal = true;
+    },
+    reactivateBatch: false,
+  };
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {
@@ -256,49 +309,11 @@ test("reactivatePrimaryAfterSwitchoverAbort clears postgres standby.signal and p
           engine: "postgres",
           switchoverAbortPromoteSafe: true,
         },
-        (args, options) => {
-          if (args[0] === "compose" && args.includes("ps")) {
-            return Promise.resolve(
-              dockerOk(
-                JSON.stringify([
-                  {
-                    ID: "pg1",
-                    Name: "pg-1",
-                    Service: "postgres",
-                    State: "running",
-                  },
-                ]),
-              ),
-            );
-          }
-          if (args[0] === "run") {
-            const script = args.at(-1) ?? "";
-            if (script.includes("rm -f") && script.includes("standby.signal")) {
-              removedSignal = true;
-            }
-            return Promise.resolve(dockerOk("present\n"));
-          }
-          if (args[0] === "exec") {
-            const batch = String(options?.input ?? "");
-            if (batch.includes("pg_promote")) {
-              reactivateBatch = true;
-              return Promise.resolve(dockerOk(""));
-            }
-            if (
-              batch.includes("pg_is_in_recovery") || batch.includes("NOT pg")
-            ) {
-              return Promise.resolve(
-                dockerOk(reactivateBatch ? "t\n" : "f\n"),
-              );
-            }
-            return Promise.resolve(dockerOk(""));
-          }
-          return Promise.resolve(dockerOk());
-        },
+        postgresSwitchoverAbortDocker(flags),
         { ensureDocker: () => Promise.resolve() },
       );
       assertEquals(removedSignal, true);
-      assertEquals(reactivateBatch, true);
+      assertEquals(flags.reactivateBatch, true);
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) Deno.env.delete(key);
