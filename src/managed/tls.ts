@@ -47,22 +47,26 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 /**
- * Unlink then create so re-apply can rewrite files owned by root after
- * ownership normalization (same pattern as config materialize).
- * Deno.writeTextFile alone fails with Permission denied on root:engine 0640.
+ * Write a sibling temp file, then rename it over the target, so a reader (a
+ * container starting up, ProxySQL `RELOAD TLS`) sees the old file or the new
+ * one, never a missing or half-written one. The rename replaces files owned
+ * by root after ownership normalization (same as unlink then create): only
+ * the directory has to be the daemon's.
  */
 async function rewriteTlsFile(
   path: string,
   contents: string,
   mode: number,
 ): Promise<void> {
+  const tmp = `${path}.tmp-${crypto.randomUUID()}`;
   try {
-    await Deno.remove(path);
+    await Deno.writeTextFile(tmp, contents, { mode, createNew: true });
+    await Deno.chmod(tmp, mode);
+    await Deno.rename(tmp, path);
   } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
+    await Deno.remove(tmp).catch(() => {});
+    throw err;
   }
-  await Deno.writeTextFile(path, contents);
-  await Deno.chmod(path, mode);
 }
 
 async function opensslPresent(): Promise<boolean> {

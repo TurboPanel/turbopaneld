@@ -7,6 +7,7 @@
  * recoveries.
  */
 
+import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
   assertValidBindAddress,
@@ -506,12 +507,38 @@ function httpPublishPorts(raft: ManagedHaRaftConfig): string[] {
  * <path> …` resolves the project without `-p`, which is what lets the Ansible
  * stack unit stop templating a project name it cannot know at converge time.
  */
+/** Compose label carrying {@link orchestratorFilesDigest}. */
+export const ORCHESTRATOR_FILES_DIGEST_LABEL = "tp.managed.config-digest";
+
+/**
+ * Digest of the files Orchestrator reads once at start: its conf and the
+ * Organization CA bundle it trusts through `SSL_CERT_FILE`. Both reach the
+ * container as bind mounts, which compose does not compare, so the digest is
+ * stamped on the service as a label: a changed conf or bundle changes the
+ * compose file, and compose recreates the container. Because the label is
+ * compared with the running container, a reconcile that failed after writing
+ * the files still recreates on the next try. The conf's secrets are long
+ * derived values, so a truncated SHA-256 of them gives nothing away.
+ */
+export async function orchestratorFilesDigest(
+  conf: string,
+  caPem: string | null,
+): Promise<string> {
+  const bytes = new TextEncoder().encode(`${conf}\n--ca--\n${caPem ?? ""}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(
+    digest.subarray(0, 16),
+    (b) => b.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 export function orchestratorCompose(
   identity: SystemComponentDescriptor,
   raft: ManagedHaRaftConfig,
   managedNetwork: string,
   daemonGid?: number | null,
   topologyAliases: readonly OrchestratorTopologyAlias[] = [],
+  filesDigest?: string,
 ): string {
   const project = orchestratorProject(identity.serviceId);
   assertSafeComposeProjectName(project);
@@ -565,6 +592,13 @@ export function orchestratorCompose(
     `      ${LABEL_SYSTEM_COMPONENT}: ${
       quoteYamlScalar(SYSTEM_MANAGED_HA_COMPONENT)
     }`,
+    ...(filesDigest
+      ? [
+        `      ${ORCHESTRATOR_FILES_DIGEST_LABEL}: ${
+          quoteYamlScalar(filesDigest)
+        }`,
+      ]
+      : []),
     "    volumes:",
     "      - orchestrator-data:/var/lib/orchestrator",
     // Quote the WHOLE mount string: a quoted source path immediately
@@ -848,12 +882,19 @@ export async function ensureOrchestratorStack(
   // container must join to read it (`tp` on a host; the dev user's group in
   // the Vagrant overlay). Read off the file so no `--allow-sys` is needed.
   const daemonGid = options.daemonGid ?? (await Deno.stat(confPath)).gid;
+  // The trust bundle was written just before this (or is absent without
+  // Organization CA material); its digest goes on the compose file with the
+  // conf's, so compose recreates the container when either one changes.
+  const caPem = await readPreviousConfig(
+    join(orchestratorTlsDir(layout), "ca.pem"),
+  );
   const composeYaml = orchestratorCompose(
     descriptor,
     raft,
     managedNetwork,
     daemonGid,
     options.topologyAliases ?? [],
+    await orchestratorFilesDigest(conf, caPem),
   );
   const restarted = previousCompose !== composeYaml || previousConf !== conf ||
     networkRenamed;
