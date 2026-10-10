@@ -53,8 +53,22 @@ async function forceStopComposeProjectContainers(
   run: DockerRunFn,
   project: string,
 ): Promise<void> {
-  const ids = await listComposeProjectContainerIds(run, project);
-  if (ids === null || ids.length === 0) return;
+  let ids = await listComposeProjectContainerIds(run, project);
+  if (ids === null) {
+    logWarn(
+      "managed",
+      `demoted member guard: docker ps failed; retrying container listing project=${project}`,
+    );
+    ids = await listComposeProjectContainerIds(run, project);
+  }
+  if (ids === null) {
+    logError(
+      "managed",
+      `demoted member guard: cannot list compose project containers project=${project}`,
+    );
+    return;
+  }
+  if (ids.length === 0) return;
   const stopped = await run(["stop", ...ids]);
   if (stopped.success) return;
   await run(["kill", ...ids]);
@@ -118,19 +132,24 @@ async function stopWritableDemotedEngine(
     );
     warned.add(member.managedId);
   }
-  await stopDemotedEngine(run, member.managedId);
-  const stillWritableAfterStop = await isFencedMemberStillWritable(
-    layout,
-    member.managedId,
-    member.engine,
-    run,
-  );
-  if (stillWritableAfterStop) {
-    logError(
-      "managed",
-      `demoted member guard: engine still writable after stop managedId=${member.managedId} member=${member.memberId}`,
+  const maxStopPasses = 3;
+  for (let pass = 0; pass < maxStopPasses; pass++) {
+    await stopDemotedEngine(run, member.managedId);
+    const stillWritableAfterStop = await isFencedMemberStillWritable(
+      layout,
+      member.managedId,
+      member.engine,
+      run,
     );
+    if (!stillWritableAfterStop) {
+      warned.delete(member.managedId);
+      return;
+    }
   }
+  logError(
+    "managed",
+    `demoted member guard: engine still writable after stop managedId=${member.managedId} member=${member.memberId}`,
+  );
 }
 
 async function stopDemotedEngine(

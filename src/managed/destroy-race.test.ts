@@ -128,12 +128,28 @@ test("apply right after destroy is refused and rebuilds nothing", async () => {
 test("destroy clears a demoted marker", async () => {
   await withEnv(async () => {
     const layout = resolveLayout(Deno.env.toObject());
-    await Deno.mkdir(managedDir(layout, MANAGED_ID), { recursive: true });
+    const root = managedDir(layout, MANAGED_ID);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - destroy_fence:/var/lib/postgresql",
+        "volumes:",
+        "  destroy_fence:",
+        "    name: destroy_fence",
+        "",
+      ].join("\n"),
+    );
     await writeManagedDemotedMarker(
       layout,
       MANAGED_ID,
       MEMBER_A,
       new Date().toISOString(),
+      "postgres",
     );
     assertEquals(
       await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_A),

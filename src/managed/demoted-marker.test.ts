@@ -5,10 +5,12 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   clearManagedDemotedMarker,
+  clearManagedDemotionArtifacts,
   isManagedMemberDemoted,
   listDemotedFenceTargets,
   maybeClearDemotedMarkerAfterApply,
   readManagedDemotedMarker,
+  resolveDemotedEngineForClear,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
 import { MYSQL_FAMILY_DEMOTED_FENCE_CNF_REL } from "./demoted-fence-volume.ts";
@@ -337,7 +339,7 @@ test("readManagedDemotedMarker returns parsed engine metadata", async () => {
   });
 });
 
-test("listDemotedFenceTargets skips orphan markers when the engine cannot be resolved", async () => {
+test("listDemotedFenceTargets includes orphan markers with a postgres engine fallback", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);
     await writeManagedDemotedMarker(
@@ -346,7 +348,87 @@ test("listDemotedFenceTargets skips orphan markers when the engine cannot be res
       MEMBER_ID,
       "2026-10-08T12:00:00.000Z",
     );
-    assertEquals(await listDemotedFenceTargets(layout), []);
+    const targets = await listDemotedFenceTargets(layout);
+    assertEquals(targets.length, 1);
+    assertEquals(targets[0]?.engine, "postgres");
+  });
+});
+
+test("resolveDemotedEngineForClear reads engine from the demoted marker", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "mysql",
+    );
+    assertEquals(
+      await resolveDemotedEngineForClear(layout, MANAGED_ID),
+      "mysql",
+    );
+  });
+});
+
+test("clearManagedDemotionArtifacts keeps the marker when volume fence removal fails", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    const managedId = `managed_clear_fail_${crypto.randomUUID()}`;
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - fence_data:/var/lib/postgresql",
+        "volumes:",
+        "  fence_data:",
+        "    name: fence_data",
+        "",
+      ].join("\n"),
+    );
+    await writeManagedDemotedMarker(
+      layout,
+      managedId,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "postgres",
+    );
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "run") {
+        const script = args.at(-1) ?? "";
+        if (script.includes("rm -f")) {
+          return Promise.reject(new Error("volume fence remove failed"));
+        }
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "present\n",
+          stderr: "",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    let threw = false;
+    try {
+      await clearManagedDemotionArtifacts(layout, managedId, {
+        engine: "postgres",
+        run,
+      });
+    } catch {
+      threw = true;
+    }
+    assert(threw);
+    assert(await isManagedMemberDemoted(layout, managedId, MEMBER_ID));
   });
 });
 

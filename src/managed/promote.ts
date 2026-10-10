@@ -12,8 +12,7 @@ import type {
   ManagedPromoteResult,
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
-import { clearManagedDemotedMarker } from "./demoted-marker.ts";
-import { clearDemotedVolumeFence } from "./demoted-fence-volume.ts";
+import { clearManagedDemotionArtifacts } from "./demoted-marker.ts";
 import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import {
   parseSwitchoverPromoteFailureCode,
@@ -110,15 +109,10 @@ export async function handleManagedPromote(
     );
   }
   const run = deps?.runDocker ?? defaultRunDocker;
-  if (payload.engine) {
-    await clearDemotedVolumeFence(
-      layout,
-      payload.managedId,
-      payload.engine,
-      (args) => run(args),
-    );
-  }
-  await clearManagedDemotedMarker(layout, payload.managedId);
+  await clearManagedDemotionArtifacts(layout, payload.managedId, {
+    engine: payload.engine,
+    run: (args) => run(args),
+  });
   const health = await engine.replication!.readHealth(ctx, "primary");
 
   return {

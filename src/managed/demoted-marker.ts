@@ -24,10 +24,16 @@ import { readManagedComposeDataTarget } from "./compose.ts";
 import {
   listManagedHaMembers,
   type ManagedHaMemberRecord,
+  readManagedHaMember,
 } from "./ha-member.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
 
 const MARKER_FILE = "demoted.json";
+
+/** Wire-legal promote payloads may omit `engine`; postgres is the promote default. */
+const DEMOTED_ENGINE_FALLBACK: ManagedEngineCode = "postgres";
+
+type RunDockerFn = (args: string[]) => Promise<DockerCliResult>;
 
 export type ManagedDemotedMarker = {
   memberId: string;
@@ -195,6 +201,8 @@ async function resolveDemotedEngine(
   marker: ManagedDemotedMarker | null,
 ): Promise<ManagedEngineCode | undefined> {
   if (marker?.engine) return marker.engine;
+  const member = await readManagedHaMember(layout, managedId);
+  if (member?.engine) return member.engine;
   try {
     const composeYaml = await Deno.readTextFile(
       managedComposePath(layout, managedId),
@@ -205,6 +213,48 @@ async function resolveDemotedEngine(
   } catch {
     return undefined;
   }
+}
+
+/** Resolve engine for clearing demotion artefacts (marker → ha-member → compose → default). */
+export async function resolveDemotedEngineForClear(
+  layout: LayoutPaths,
+  managedId: string,
+  engine?: ManagedEngineCode,
+): Promise<ManagedEngineCode> {
+  if (engine) return engine;
+  const marker = await readManagedDemotedMarker(layout, managedId);
+  const resolved = await resolveDemotedEngine(layout, managedId, marker);
+  return resolved ?? DEMOTED_ENGINE_FALLBACK;
+}
+
+export type ClearManagedDemotionArtifactsOptions = {
+  engine?: ManagedEngineCode;
+  run: RunDockerFn;
+  /** Clear on-disk volume fence only; keep `demoted.json` until a later success. */
+  volumeFenceOnly?: boolean;
+};
+
+/**
+ * Drop durable demotion artefacts in a safe order: volume fence first, marker
+ * last. Any volume-fence failure leaves the marker in place.
+ */
+export async function clearManagedDemotionArtifacts(
+  layout: LayoutPaths,
+  managedId: string,
+  options: ClearManagedDemotionArtifactsOptions,
+): Promise<void> {
+  const marker = await readManagedDemotedMarker(layout, managedId);
+  if (!marker && !options.volumeFenceOnly) {
+    return;
+  }
+  const engine = await resolveDemotedEngineForClear(
+    layout,
+    managedId,
+    options.engine ?? marker?.engine,
+  );
+  await clearDemotedVolumeFence(layout, managedId, engine, options.run);
+  if (options.volumeFenceOnly) return;
+  await clearManagedDemotedMarker(layout, managedId);
 }
 
 type DemotedFenceTarget = {
@@ -220,14 +270,8 @@ async function addOrphanDemotedFenceTarget(
 ): Promise<void> {
   if (byId.has(managedId)) return;
   const marker = await readManagedDemotedMarker(layout, managedId);
-  const engine = await resolveDemotedEngine(layout, managedId, marker);
-  if (!engine) {
-    logWarn(
-      "managed",
-      `demoted fence: skipping orphan marker without engine managedId=${managedId}`,
-    );
-    return;
-  }
+  const engine = await resolveDemotedEngine(layout, managedId, marker) ??
+    DEMOTED_ENGINE_FALLBACK;
   byId.set(managedId, {
     managedId,
     ...(marker?.memberId.length ? { memberId: marker.memberId } : {}),
@@ -266,13 +310,12 @@ export async function maybeClearDemotedMarkerAfterApply(
 ): Promise<void> {
   if (payload.memberRole !== "replica") return;
   if (memberStatus !== "ready") return;
-  if (run && payload.engine) {
-    await clearDemotedVolumeFence(
-      layout,
-      payload.managedId,
-      payload.engine,
-      run,
-    );
+  if (!run) {
+    await clearManagedDemotedMarker(layout, payload.managedId);
+    return;
   }
-  await clearManagedDemotedMarker(layout, payload.managedId);
+  await clearManagedDemotionArtifacts(layout, payload.managedId, {
+    engine: payload.engine,
+    run,
+  });
 }

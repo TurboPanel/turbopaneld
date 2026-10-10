@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { managedDir } from "./engine-paths.ts";
@@ -7,6 +7,10 @@ import {
   reactivatePrimaryAfterSwitchoverAbort,
 } from "./lifecycle-switchover.ts";
 import { readSwitchoverQuiescedMarker } from "./switchover-state-marker.ts";
+import {
+  isManagedMemberDemoted,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
 import { switchoverPromoteErrorMessage } from "./engines/switchover-promote-error.ts";
 
 const test = Deno.test.bind(Deno);
@@ -278,6 +282,58 @@ const POSTGRES_COMPOSE = [
   "    name: sw_data",
   "",
 ].join("\n");
+
+test("reactivatePrimaryAfterSwitchoverAbort clears volume fence but keeps demoted marker", async () => {
+  let removedSignal = false;
+  const flags: SwitchoverAbortDockerFlags = {
+    onRemovedStandbySignal: () => {
+      removedSignal = true;
+    },
+    reactivateBatch: false,
+  };
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const managedId = `managed_switchover_marker_${crypto.randomUUID()}`;
+      const memberId = "00000000-0000-4000-8000-0000000000a1";
+      const layout = {
+        stateDir: fixture.dirs.stateDir,
+      } as Parameters<typeof managedDir>[0];
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await writeManagedDemotedMarker(
+        layout,
+        managedId,
+        memberId,
+        "2026-10-08T12:00:00.000Z",
+        "postgres",
+      );
+      await reactivatePrimaryAfterSwitchoverAbort(
+        {
+          managedId,
+          action: "start",
+          reactivateAfterSwitchoverAbort: true,
+          engine: "postgres",
+          switchoverAbortPromoteSafe: true,
+        },
+        postgresSwitchoverAbortDocker(flags),
+        { ensureDocker: () => Promise.resolve() },
+      );
+      assertEquals(removedSignal, true);
+      assert(await isManagedMemberDemoted(layout, managedId, memberId));
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
 
 test("reactivatePrimaryAfterSwitchoverAbort clears postgres standby.signal and promotes", async () => {
   let removedSignal = false;

@@ -300,6 +300,91 @@ test("start and stop wire the interval without throwing", async () => {
   });
 });
 
+test("docker ps -aq listing failure is retried before force stop", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    let psAqCalls = 0;
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "ps" && args.includes("-aq")) {
+        psAqCalls++;
+        if (psAqCalls === 1) {
+          return Promise.resolve({
+            success: false,
+            code: 1,
+            stdout: "",
+            stderr: "ps failed",
+          });
+        }
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "abc123def456\n",
+          stderr: "",
+        });
+      }
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: RUNNING_PS,
+          stderr: "",
+        });
+      }
+      if (args[0] === "compose" && args.at(-1) === "stop") {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "stop failed",
+        });
+      }
+      if (args[0] === "stop" || args[0] === "kill") {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      }
+      if (args[0] === "exec") {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "t\n",
+          stderr: "",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    const calls: string[][] = [];
+    const trackedRun = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      return run(args);
+    };
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: trackedRun,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(psAqCalls >= 2, true);
+    assert(calls.some((args) => args[0] === "stop" && args.length > 1));
+  });
+});
+
 test("compose stop failure escalates to docker stop then kill and retries on the next tick", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
@@ -318,19 +403,19 @@ test("compose stop failure escalates to docker stop then kill and retries on the
       listMembers: () => Promise.resolve([memberRecord()]),
     });
     await guard.tick();
-    assertEquals(
-      fake.calls.filter((args) =>
-        args[0] === "compose" && args.at(-1) === "stop"
-      ).length,
-      1,
-    );
-    assert(fake.calls.some((args) => args[0] === "stop" && args.length > 1));
+    const composeStopsAfterFirstTick = fake.calls.filter((args) =>
+      args[0] === "compose" && args.at(-1) === "stop"
+    ).length;
+    assert(composeStopsAfterFirstTick >= 1);
+    assert(fake.calls.some((args) =>
+      args[0] === "stop" && args.length > 1
+    ));
     assert(fake.calls.some((args) => args[0] === "kill"));
     await guard.tick();
     assert(
       fake.calls.filter((args) =>
         args[0] === "compose" && args.at(-1) === "stop"
-      ).length >= 2,
+      ).length > composeStopsAfterFirstTick,
     );
   });
 });

@@ -30,7 +30,7 @@ import {
 } from "./engine-paths.ts";
 import { readManagedComposeDataTarget } from "./compose.ts";
 import {
-  clearManagedDemotedMarker,
+  clearManagedDemotionArtifacts,
   isManagedMemberDemoted,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
@@ -42,10 +42,7 @@ import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
 } from "./needs-resync.ts";
-import {
-  clearDemotedVolumeFence,
-  persistDemotedVolumeFence,
-} from "./demoted-fence-volume.ts";
+import { persistDemotedVolumeFence } from "./demoted-fence-volume.ts";
 import {
   enforceFencedMemberIfRunning,
   isFencedMemberStillWritable,
@@ -196,6 +193,7 @@ async function recordDemotedFenceOnLifecycleStop(
   if (payload.action !== "stop" || payload.demoted !== true) return;
   const demotedAt = new Date().toISOString();
   const engine = payload.engine ?? "postgres";
+  await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
   await writeManagedDemotedMarker(
     layout,
     payload.managedId,
@@ -203,7 +201,6 @@ async function recordDemotedFenceOnLifecycleStop(
     demotedAt,
     engine,
   );
-  await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
   await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
 }
 
@@ -333,9 +330,10 @@ async function finalizeManagedLifecycle(
   await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
 
   if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
-    const engine = payload.engine ?? "postgres";
-    await clearDemotedVolumeFence(layout, payload.managedId, engine, run);
-    await clearManagedDemotedMarker(layout, payload.managedId);
+    await clearManagedDemotionArtifacts(layout, payload.managedId, {
+      engine: payload.engine,
+      run,
+    });
   }
 
   return await observeManagedLifecycleOutcome(

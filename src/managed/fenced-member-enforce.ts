@@ -32,15 +32,7 @@ export async function enforceFencedMemberIfRunning(
   engine: ManagedEngineCode,
   run: RunDockerFn,
 ): Promise<void> {
-  try {
-    await persistDemotedVolumeFence(layout, managedId, engine, run);
-  } catch (err) {
-    logWarn(
-      "managed",
-      `demoted fence: volume persist failed managedId=${managedId}:`,
-      sanitizeForLog(err),
-    );
-  }
+  await persistDemotedVolumeFence(layout, managedId, engine, run);
 
   const project = managedComposeProject(managedId);
   const containers = await collectManagedContainers(
@@ -94,6 +86,9 @@ export async function isFencedMemberStillWritable(
   if (observed?.length === 0) {
     return false;
   }
+  if (observed === undefined) {
+    return true;
+  }
 
   try {
     const { engine: resolved, ctx } = await resolveLocalReplicationEngine(
@@ -105,7 +100,12 @@ export async function isFencedMemberStillWritable(
     const probe = resolved.replication?.isWritableFormerPrimary;
     if (!probe) return true;
     return await probe(ctx);
-  } catch {
+  } catch (err) {
+    logWarn(
+      "managed",
+      `demoted fence: writable probe failed managedId=${managedId}:`,
+      sanitizeForLog(err),
+    );
     return true;
   }
 }

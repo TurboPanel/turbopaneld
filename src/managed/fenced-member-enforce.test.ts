@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
@@ -147,29 +147,33 @@ test("isFencedMemberStillWritable fails open when compose ps cannot be collected
   });
 });
 
-test("enforceFencedMemberIfRunning continues when the volume fence cannot be read", async () => {
+test("enforceFencedMemberIfRunning propagates volume fence persist failures", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);
-    let execCalls = 0;
+    await seedCompose(layout);
     const run = (args: string[]): Promise<DockerCliResult> => {
-      if (args[0] === "compose" && args.includes("ps")) {
+      if (args[0] === "run") {
         return Promise.resolve({
-          success: true,
-          code: 0,
-          stdout: RUNNING_PS,
-          stderr: "",
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "touch failed",
         });
       }
-      if (args[0] === "exec") execCalls++;
       return Promise.resolve({
         success: true,
         code: 0,
-        stdout: "f\n",
+        stdout: RUNNING_PS,
         stderr: "",
       });
     };
-    await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
-    assertEquals(execCalls > 0, true);
+    let threw = false;
+    try {
+      await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
+    } catch {
+      threw = true;
+    }
+    assert(threw);
   });
 });
 
