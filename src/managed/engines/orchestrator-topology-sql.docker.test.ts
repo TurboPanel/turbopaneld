@@ -98,6 +98,28 @@ function rootClientArgs(engine: EngineImage): string[] {
   ];
 }
 
+function isTransientSqlConnectionError(message: string): boolean {
+  return /Can't connect|ERROR 2002|ERROR 2003/i.test(message);
+}
+
+async function waitForEngineTcpReady(
+  containerName: string,
+  engine: EngineImage,
+): Promise<void> {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const ping = await runDocker([
+      "exec",
+      containerName,
+      ...rootClientArgs(engine),
+      "-e",
+      "SELECT 1",
+    ]);
+    if (ping.success) return;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`${engine.image} did not accept connections within 60s`);
+}
+
 async function withEngineContainer(
   engine: EngineImage,
   fn: (containerName: string) => Promise<void>,
@@ -119,24 +141,7 @@ async function withEngineContainer(
     throw new Error(`docker run failed: ${run.stderr || run.stdout}`);
   }
   try {
-    let ready = false;
-    for (let attempt = 0; attempt < 60; attempt++) {
-      const ping = await runDocker([
-        "exec",
-        containerName,
-        ...rootClientArgs(engine),
-        "-e",
-        "SELECT 1",
-      ]);
-      if (ping.success) {
-        ready = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    if (!ready) {
-      throw new Error(`${engine.image} did not accept connections within 60s`);
-    }
+    await waitForEngineTcpReady(containerName, engine);
     await fn(containerName);
   } finally {
     await runDocker(["rm", "-f", containerName]);
@@ -159,7 +164,7 @@ async function execSqlAsRoot(
     ]);
     if (result.success) return;
     last = result.stderr || result.stdout;
-    if (!/Can't connect|ERROR 2002|ERROR 2003/i.test(last)) {
+    if (!isTransientSqlConnectionError(last)) {
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));

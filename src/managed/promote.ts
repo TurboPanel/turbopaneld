@@ -32,6 +32,41 @@ export type ManagedPromoteHandlerDeps = LocalEngineContextDeps & {
   decryptSecrets?: DecryptSecretsFn;
 };
 
+function switchoverGtidProofInput(
+  payload: ManagedPromotePayload,
+): {
+  managedId: string;
+  engine: ManagedPromotePayload["engine"];
+  requiredExecutedGtidSet: string;
+  gtidWaitTimeoutSeconds?: number;
+} {
+  const input = {
+    managedId: payload.managedId,
+    engine: payload.engine,
+    requiredExecutedGtidSet: payload.requiredExecutedGtidSet!,
+  };
+  return payload.gtidWaitTimeoutSeconds === undefined
+    ? input
+    : { ...input, gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds };
+}
+
+async function recordSwitchoverPromoteStartedOnFailure(
+  layout: ReturnType<typeof resolveLayout>,
+  payload: ManagedPromotePayload,
+  error: unknown,
+): Promise<void> {
+  const code = parseSwitchoverPromoteFailureCode(
+    switchoverCaughtErrorDetail(error),
+  );
+  if (code !== "promote_started") return;
+  await writeSwitchoverPromoteLocalMarker(
+    layout,
+    payload.managedId,
+    "started",
+    new Date().toISOString(),
+  );
+}
+
 export async function handleManagedPromote(
   payload: ManagedPromotePayload,
   _daemonReceivedAt: string,
@@ -45,49 +80,24 @@ export async function handleManagedPromote(
     deps,
   );
 
-  const promoteOptions = payload.requiredExecutedGtidSet !== undefined
-    ? {
-      requiredExecutedGtidSet: payload.requiredExecutedGtidSet,
-      ...(payload.gtidWaitTimeoutSeconds !== undefined
-        ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
-        : {}),
-    }
-    : undefined;
-  const requiredGtidSet = payload.requiredExecutedGtidSet;
-  const switchoverPromote = requiredGtidSet !== undefined;
+  const switchoverPromote = payload.requiredExecutedGtidSet !== undefined;
   try {
     if (switchoverPromote) {
       await proveSwitchoverGtidBeforePromote(
-        {
-          managedId: payload.managedId,
-          engine: payload.engine,
-          requiredExecutedGtidSet: requiredGtidSet,
-          ...(payload.gtidWaitTimeoutSeconds !== undefined
-            ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
-            : {}),
-        },
+        switchoverGtidProofInput(payload),
         deps,
       );
       await engine.replication!.promote(ctx, {
-        ...promoteOptions,
-        requiredExecutedGtidSet: undefined,
+        ...(payload.gtidWaitTimeoutSeconds !== undefined
+          ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+          : {}),
       });
     } else {
-      await engine.replication!.promote(ctx, promoteOptions);
+      await engine.replication!.promote(ctx, undefined);
     }
   } catch (error) {
     if (switchoverPromote) {
-      const code = parseSwitchoverPromoteFailureCode(
-        switchoverCaughtErrorDetail(error),
-      );
-      if (code === "promote_started") {
-        await writeSwitchoverPromoteLocalMarker(
-          layout,
-          payload.managedId,
-          "started",
-          new Date().toISOString(),
-        );
-      }
+      await recordSwitchoverPromoteStartedOnFailure(layout, payload, error);
     }
     throw error;
   }
