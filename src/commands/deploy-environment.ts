@@ -849,8 +849,11 @@ async function deployReleaseBindings(
 ): Promise<Map<string, SiteRelease>> {
   const bindings = new Map<string, SiteRelease>();
   const entries = (payload.sourceMaterial ?? []).filter(
-    (entry): entry is typeof entry & { principal: NonNullable<typeof entry.principal> } =>
-      entry.principal !== undefined,
+    (
+      entry,
+    ): entry is typeof entry & {
+      principal: NonNullable<typeof entry.principal>;
+    } => entry.principal !== undefined,
   );
   const resolved = await Promise.all(
     entries.map(async (entry) => ({
@@ -896,7 +899,11 @@ async function deployManagedDirectoryBindings(
 ): Promise<Map<string, SiteManagedDirectory>> {
   const bindings = new Map<string, SiteManagedDirectory>();
   const sites = (payload.sites ?? []).filter(
-    (site): site is typeof site & { principal: NonNullable<typeof site.principal> } =>
+    (
+      site,
+    ): site is typeof site & {
+      principal: NonNullable<typeof site.principal>;
+    } =>
       site.sourceKind === "managed-directory" &&
       !releaseBindings.has(site.composeServiceName) &&
       site.principal !== undefined,
