@@ -282,6 +282,48 @@ test("a compose stop failure is logged and does not throw", async () => {
   });
 });
 
+test("the guard discovers demoted clusters from markers without an injected member list", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker();
+    const guard = new DemotedMemberGuard({ layout, run: fake.run });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), true);
+  });
+});
+
+test("compose ps failure does not stop a demoted member", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker({ psFails: true });
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+  });
+});
+
 test("a stopped demoted member is left alone", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();

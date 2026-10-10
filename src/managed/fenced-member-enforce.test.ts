@@ -95,6 +95,53 @@ test("isFencedMemberStillWritable follows the postgres probe", async () => {
   });
 });
 
+test("isFencedMemberStillWritable fails open when the engine cannot be reached", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    assertEquals(
+      await isFencedMemberStillWritable(
+        layout,
+        MANAGED_ID,
+        "postgres",
+        () =>
+          Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: "[]",
+            stderr: "",
+          }),
+      ),
+      true,
+    );
+  });
+});
+
+test("enforceFencedMemberIfRunning continues when the volume fence cannot be read", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    let execCalls = 0;
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: RUNNING_PS,
+          stderr: "",
+        });
+      }
+      if (args[0] === "exec") execCalls++;
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "f\n",
+        stderr: "",
+      });
+    };
+    await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
+    assertEquals(execCalls > 0, true);
+  });
+});
+
 test("enforceFencedMemberIfRunning is a no-op when the engine is down", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);

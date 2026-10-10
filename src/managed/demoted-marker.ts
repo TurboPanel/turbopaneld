@@ -13,7 +13,10 @@ import type { ManagedEngineCode } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { managedDir, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
-import { listManagedHaMembers } from "./ha-member.ts";
+import {
+  listManagedHaMembers,
+  type ManagedHaMemberRecord,
+} from "./ha-member.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
 
 const MARKER_FILE = "demoted.json";
@@ -97,7 +100,13 @@ export async function isManagedMemberDemoted(
   }
   const marker = parseMarker(text);
   if (!marker) return true;
-  if (memberId === undefined || marker.memberId.length === 0) return true;
+  if (
+    memberId === undefined ||
+    memberId.length === 0 ||
+    marker.memberId.length === 0
+  ) {
+    return true;
+  }
   return marker.memberId === memberId;
 }
 
@@ -126,6 +135,25 @@ export async function listDemotedManagedIds(
  * Members to fence: HA records plus any demoted marker without a member record
  * (e.g. before the next apply refreshes `ha-member.json`).
  */
+async function listDemotedHaMembers(
+  layout: LayoutPaths,
+  members: ManagedHaMemberRecord[],
+): Promise<ManagedHaMemberRecord[]> {
+  const demotedFlags = await Promise.all(
+    members.map(async (member) => ({
+      member,
+      demoted: await isManagedMemberDemoted(
+        layout,
+        member.managedId,
+        member.memberId,
+      ),
+    })),
+  );
+  return demotedFlags
+    .filter((row) => row.demoted)
+    .map((row) => row.member);
+}
+
 export async function listDemotedFenceTargets(
   layout: LayoutPaths,
 ): Promise<
@@ -135,12 +163,13 @@ export async function listDemotedFenceTargets(
     string,
     { managedId: string; memberId?: string; engine?: ManagedEngineCode }
   >();
-  for (const member of await listManagedHaMembers(layout)) {
-    if (
-      await isManagedMemberDemoted(layout, member.managedId, member.memberId)
-    ) {
-      byId.set(member.managedId, member);
-    }
+  for (
+    const member of await listDemotedHaMembers(
+      layout,
+      await listManagedHaMembers(layout),
+    )
+  ) {
+    byId.set(member.managedId, member);
   }
   for (const managedId of await listDemotedManagedIds(layout)) {
     if (!byId.has(managedId)) {

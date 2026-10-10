@@ -53,6 +53,37 @@ test("persistDemotedVolumeFence plants postgres standby.signal on the data volum
   });
 });
 
+test("persistDemotedVolumeFence skips planting when standby.signal already exists", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    const managedId = `managed_fence_present_${crypto.randomUUID()}`;
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(`${root}/docker-compose.yml`, COMPOSE);
+    const touched: string[] = [];
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "run") {
+        const script = args.at(-1) ?? "";
+        if (script.startsWith("touch ")) touched.push(script);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "present\n",
+          stderr: "",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    await persistDemotedVolumeFence(layout, managedId, "postgres", run);
+    assertEquals(touched.length, 0);
+  });
+});
+
 test("persistDemotedVolumeFence is a no-op for mysql", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);

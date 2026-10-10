@@ -10,7 +10,10 @@ import {
   isManagedMemberDemoted,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
-import { handleManagedLifecycle } from "./lifecycle.ts";
+import {
+  handleManagedLifecycle,
+  refuseWritableFencedAfterComposeStart,
+} from "./lifecycle.ts";
 import { managedDir } from "./engine-paths.ts";
 
 /**
@@ -247,6 +250,61 @@ for (const action of ["start", "restart"] as const) {
     });
   });
 }
+
+test("refuseWritableFencedAfterComposeStart stops a demoted member that stayed writable", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const managedId =
+        `managed_lifecycle_writable_fence_${crypto.randomUUID()}`;
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await writeManagedDemotedMarker(
+        layout,
+        managedId,
+        MEMBER_ID,
+        "2026-10-08T12:00:00.000Z",
+      );
+      const docker = fakeDocker(new Set([PG_DATA]));
+      const run = (args: string[]): Promise<DockerCliResult> => {
+        if (args[0] === "exec") {
+          return Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: "t\n",
+            stderr: "",
+          });
+        }
+        return docker.run(args);
+      };
+      const refused = await refuseWritableFencedAfterComposeStart(
+        {
+          managedId,
+          action: "restart",
+          memberId: MEMBER_ID,
+          engine: "postgres",
+          role: "primary",
+        },
+        layout,
+        run,
+      );
+      assertEquals(refused?.status, "needs_resync");
+      assert(refused?.summary?.includes("stayed writable"));
+      assertEquals(composeCalled(docker.calls, "stop"), true);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
 
 test("lifecycle stop with demoted writes a marker; an ordinary stop does not", async () => {
   await withTempLayout(async (fixture) => {

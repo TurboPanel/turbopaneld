@@ -18,6 +18,7 @@ import {
   isFencedMemberStillWritable,
 } from "./fenced-member-enforce.ts";
 import { managedComposeProject } from "./engine-paths.ts";
+import { isManagedMemberDestroyed } from "./destroyed-marker.ts";
 import { recordManagedIntent } from "./ha-intent.ts";
 import type { ManagedHaMemberRecord } from "./ha-member.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
@@ -126,11 +127,21 @@ export class DemotedMemberGuard {
   }
 
   async #fenceOne(member: ManagedHaMemberRecord): Promise<void> {
+    const memberId = member.memberId.length > 0 ? member.memberId : undefined;
+    if (
+      await isManagedMemberDestroyed(
+        this.#layout.stateDir,
+        member.managedId,
+        memberId,
+      )
+    ) {
+      return;
+    }
     if (
       !(await isManagedMemberDemoted(
         this.#layout,
         member.managedId,
-        member.memberId,
+        memberId,
       ))
     ) {
       this.#warned.delete(member.managedId);
@@ -145,11 +156,12 @@ export class DemotedMemberGuard {
   }
 
   async #checkAndStop(member: ManagedHaMemberRecord): Promise<void> {
+    const memberId = member.memberId.length > 0 ? member.memberId : undefined;
     if (
       !(await isManagedMemberDemoted(
         this.#layout,
         member.managedId,
-        member.memberId,
+        memberId,
       ))
     ) {
       this.#warned.delete(member.managedId);

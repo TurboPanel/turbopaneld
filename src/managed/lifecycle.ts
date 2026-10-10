@@ -185,6 +185,109 @@ async function refuseNonStandbyReplicaStart(
   };
 }
 
+async function recordDemotedFenceOnLifecycleStop(
+  payload: ManagedLifecyclePayload,
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<void> {
+  if (payload.action !== "stop" || payload.demoted !== true) return;
+  const demotedAt = new Date().toISOString();
+  await writeManagedDemotedMarker(
+    layout,
+    payload.managedId,
+    payload.memberId ?? "",
+    demotedAt,
+  );
+  const engine = payload.engine ?? "postgres";
+  await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
+  await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
+}
+
+/** Post-compose safety net when a fenced member was started outside refuseDemotedMemberStart. */
+export async function refuseWritableFencedAfterComposeStart(
+  payload: ManagedLifecyclePayload,
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<ManagedLifecycleResult | undefined> {
+  if (payload.action !== "start" && payload.action !== "restart") {
+    return undefined;
+  }
+  if (payload.reactivateAfterSwitchoverAbort === true) return undefined;
+  if (
+    !(await isManagedMemberDemoted(
+      layout,
+      payload.managedId,
+      payload.memberId,
+    ))
+  ) {
+    return undefined;
+  }
+  const engine = payload.engine ?? "postgres";
+  await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
+  if (
+    !(await isFencedMemberStillWritable(
+      layout,
+      payload.managedId,
+      engine,
+      run,
+    ))
+  ) {
+    return undefined;
+  }
+  await stopManagedProjectForResync(
+    payload.managedId,
+    (text) => sanitizeForLog(text),
+    run,
+  );
+  return {
+    status: "needs_resync",
+    summary: `managed ${payload.action} refused: fenced member stayed writable`,
+    ...(payload.memberId
+      ? { member: buildNeedsResyncMember(payload.memberId) }
+      : {}),
+  };
+}
+
+async function observeManagedLifecycleOutcome(
+  payload: ManagedLifecyclePayload,
+  project: string,
+  run: RunDockerFn,
+  switchoverPrimaryExecutedGtidSet: string | undefined,
+): Promise<ManagedLifecycleResult> {
+  const withGtid = switchoverPrimaryExecutedGtidSet
+    ? { switchoverPrimaryExecutedGtidSet }
+    : {};
+
+  if (payload.memberId) {
+    const engine = getManagedEngineRuntime(payload.engine ?? "postgres");
+    const collected = await collectManagedMemberHealth(project, engine, {
+      memberId: payload.memberId,
+      role: payload.role ?? "primary",
+      redact: (text) => sanitizeForLog(text),
+    }, run);
+    const containers = collected.containers ?? [];
+    const status = statusFromContainers(containers);
+    return {
+      status,
+      summary: `managed ${payload.action} observed status=${status}`,
+      ...(collected.member !== undefined ? { member: collected.member } : {}),
+      ...withGtid,
+    };
+  }
+
+  const containers = (await collectManagedContainers(
+    project,
+    (text) => sanitizeForLog(text),
+    run,
+  )) ?? [];
+  const status = statusFromContainers(containers);
+  return {
+    status,
+    summary: `managed ${payload.action} observed status=${status}`,
+    ...withGtid,
+  };
+}
+
 export async function handleManagedLifecycle(
   payload: ManagedLifecyclePayload,
   _daemonReceivedAt: string,
@@ -221,18 +324,7 @@ export async function handleManagedLifecycle(
       engineDeps,
     );
 
-  if (payload.action === "stop" && payload.demoted === true) {
-    const demotedAt = new Date().toISOString();
-    await writeManagedDemotedMarker(
-      layout,
-      payload.managedId,
-      payload.memberId ?? "",
-      demotedAt,
-    );
-    const engine = payload.engine ?? "postgres";
-    await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
-    await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
-  }
+  await recordDemotedFenceOnLifecycleStop(payload, layout, run);
 
   const project = managedComposeProject(payload.managedId);
   const result = await run([
@@ -249,40 +341,12 @@ export async function handleManagedLifecycle(
     );
   }
 
-  if (
-    (payload.action === "start" || payload.action === "restart") &&
-    payload.reactivateAfterSwitchoverAbort !== true &&
-    (await isManagedMemberDemoted(
-      layout,
-      payload.managedId,
-      payload.memberId,
-    ))
-  ) {
-    const engine = payload.engine ?? "postgres";
-    await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
-    if (
-      await isFencedMemberStillWritable(
-        layout,
-        payload.managedId,
-        engine,
-        run,
-      )
-    ) {
-      await stopManagedProjectForResync(
-        payload.managedId,
-        (text) => sanitizeForLog(text),
-        run,
-      );
-      return {
-        status: "needs_resync",
-        summary:
-          `managed ${payload.action} refused: fenced member stayed writable`,
-        ...(payload.memberId
-          ? { member: buildNeedsResyncMember(payload.memberId) }
-          : {}),
-      };
-    }
-  }
+  const writableFenced = await refuseWritableFencedAfterComposeStart(
+    payload,
+    layout,
+    run,
+  );
+  if (writableFenced) return writableFenced;
 
   await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
 
@@ -290,37 +354,10 @@ export async function handleManagedLifecycle(
     await clearManagedDemotedMarker(layout, payload.managedId);
   }
 
-  if (payload.memberId) {
-    const engine = getManagedEngineRuntime(payload.engine ?? "postgres");
-    const collected = await collectManagedMemberHealth(project, engine, {
-      memberId: payload.memberId,
-      role: payload.role ?? "primary",
-      redact: (text) => sanitizeForLog(text),
-    }, run);
-    const containers = collected.containers ?? [];
-    const status = statusFromContainers(containers);
-    return {
-      status,
-      summary: `managed ${payload.action} observed status=${status}`,
-      ...(collected.member !== undefined ? { member: collected.member } : {}),
-      ...(switchoverPrimaryExecutedGtidSet
-        ? { switchoverPrimaryExecutedGtidSet }
-        : {}),
-    };
-  }
-
-  const containers = (await collectManagedContainers(
+  return await observeManagedLifecycleOutcome(
+    payload,
     project,
-    (text) => sanitizeForLog(text),
     run,
-  )) ??
-    [];
-  const status = statusFromContainers(containers);
-  return {
-    status,
-    summary: `managed ${payload.action} observed status=${status}`,
-    ...(switchoverPrimaryExecutedGtidSet
-      ? { switchoverPrimaryExecutedGtidSet }
-      : {}),
-  };
+    switchoverPrimaryExecutedGtidSet,
+  );
 }
