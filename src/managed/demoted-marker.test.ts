@@ -8,9 +8,11 @@ import {
   clearManagedDemotionArtifacts,
   isManagedMemberDemoted,
   listDemotedFenceTargets,
+  markDemotedFenceUnsafe,
   maybeClearDemotedMarkerAfterApply,
   readManagedDemotedMarker,
   resolveDemotedEngineForClear,
+  resolveDemotedMarkerMemberId,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
 import { MYSQL_FAMILY_DEMOTED_FENCE_CNF_REL } from "./demoted-fence-volume.ts";
@@ -63,7 +65,51 @@ test("write and clear a demoted marker", async () => {
   });
 });
 
-test("an empty memberId does not match a demoted marker", async () => {
+test("a cluster-wide demoted marker matches any member id on the host", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      "",
+      "2026-10-08T12:00:00.000Z",
+    );
+    assert(await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_ID));
+    assert(await isManagedMemberDemoted(layout, MANAGED_ID, OTHER_MEMBER));
+    assertEquals(await isManagedMemberDemoted(layout, MANAGED_ID, ""), false);
+    assert(await isManagedMemberDemoted(layout, MANAGED_ID));
+  });
+});
+
+test("resolveDemotedMarkerMemberId prefers the payload then ha-member.json", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await Deno.mkdir(managedDir(layout, MANAGED_ID), { recursive: true });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: MEMBER_ID,
+      engine: "postgres",
+      role: "primary",
+      containerName: "db-1",
+      replicaPeerCount: 1,
+      updatedAt: "2026-10-08T12:00:00.000Z",
+    });
+    assertEquals(
+      await resolveDemotedMarkerMemberId(layout, MANAGED_ID, OTHER_MEMBER),
+      OTHER_MEMBER,
+    );
+    assertEquals(
+      await resolveDemotedMarkerMemberId(layout, MANAGED_ID),
+      MEMBER_ID,
+    );
+    assertEquals(
+      await resolveDemotedMarkerMemberId(layout, MANAGED_ID, ""),
+      MEMBER_ID,
+    );
+  });
+});
+
+test("markDemotedFenceUnsafe records an operator-visible alert on the marker", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);
     await writeManagedDemotedMarker(
@@ -72,8 +118,29 @@ test("an empty memberId does not match a demoted marker", async () => {
       MEMBER_ID,
       "2026-10-08T12:00:00.000Z",
     );
+    await markDemotedFenceUnsafe(layout, MANAGED_ID, "still writable");
+    const marker = await readManagedDemotedMarker(layout, MANAGED_ID);
+    assert(marker?.unsafe === true);
+    assertEquals(marker?.unsafeReason, "still writable");
+    assert(marker?.unsafeAt !== undefined);
+  });
+});
+
+test("a member-specific demoted marker does not match a different member", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    assert(await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_ID));
+    assertEquals(
+      await isManagedMemberDemoted(layout, MANAGED_ID, OTHER_MEMBER),
+      false,
+    );
     assertEquals(await isManagedMemberDemoted(layout, MANAGED_ID, ""), false);
-    assert(await isManagedMemberDemoted(layout, MANAGED_ID));
   });
 });
 

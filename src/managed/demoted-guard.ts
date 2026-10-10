@@ -8,10 +8,15 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { logError, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { collectManagedContainers } from "./containers.ts";
 import {
+  collectManagedContainers,
+  collectRunningContainersByComposeProjectLabel,
+} from "./containers.ts";
+import {
+  clearDemotedFenceAlerts,
   isManagedMemberDemoted,
   listDemotedFenceTargets,
+  markDemotedFenceUnsafe,
 } from "./demoted-marker.ts";
 import {
   enforceFencedMemberIfRunning,
@@ -49,6 +54,34 @@ async function listComposeProjectContainerIds(
   return parseComposeProjectContainerIds(listed.stdout);
 }
 
+async function fallbackComposeProjectContainerIds(
+  run: DockerRunFn,
+  project: string,
+): Promise<string[]> {
+  const byLabel = await collectRunningContainersByComposeProjectLabel(
+    project,
+    run,
+  );
+  if (byLabel && byLabel.length > 0) {
+    return byLabel.map((row) => row.containerId);
+  }
+  const composeListed = await run(["compose", "-p", project, "ps", "-q"]);
+  if (composeListed.success) {
+    return parseComposeProjectContainerIds(composeListed.stdout);
+  }
+  return [];
+}
+
+async function dockerStopThenKill(
+  run: DockerRunFn,
+  ids: string[],
+): Promise<void> {
+  if (ids.length === 0) return;
+  const stopped = await run(["stop", ...ids]);
+  if (stopped.success) return;
+  await run(["kill", ...ids]);
+}
+
 async function forceStopComposeProjectContainers(
   run: DockerRunFn,
   project: string,
@@ -62,16 +95,13 @@ async function forceStopComposeProjectContainers(
     ids = await listComposeProjectContainerIds(run, project);
   }
   if (ids === null) {
-    logError(
+    logWarn(
       "managed",
-      `demoted member guard: cannot list compose project containers project=${project}`,
+      `demoted member guard: docker ps -aq failed; falling back to label/compose listing project=${project}`,
     );
-    return;
+    ids = await fallbackComposeProjectContainerIds(run, project);
   }
-  if (ids.length === 0) return;
-  const stopped = await run(["stop", ...ids]);
-  if (stopped.success) return;
-  await run(["kill", ...ids]);
+  await dockerStopThenKill(run, ids);
 }
 
 export type DockerRunFn = (args: string[]) => Promise<DockerCliResult>;
@@ -100,11 +130,20 @@ async function engineRunningState(
     : "stopped";
 }
 
+async function killRunningProjectContainers(
+  run: DockerRunFn,
+  project: string,
+): Promise<void> {
+  const ids = await fallbackComposeProjectContainerIds(run, project);
+  await dockerStopThenKill(run, ids);
+}
+
 async function stopWritableDemotedEngine(
   layout: LayoutPaths,
   member: ManagedHaMemberRecord,
   run: DockerRunFn,
   warned: Set<string>,
+  unsafeLogged: Set<string>,
 ): Promise<void> {
   await enforceFencedMemberIfRunning(
     layout,
@@ -120,6 +159,8 @@ async function stopWritableDemotedEngine(
   );
   if (!stillWritable) {
     warned.delete(member.managedId);
+    unsafeLogged.delete(member.managedId);
+    await clearDemotedFenceAlerts(layout, member.managedId);
     return;
   }
   await recordManagedIntent(layout.stateDir, member.managedId, "stop", {
@@ -132,24 +173,65 @@ async function stopWritableDemotedEngine(
     );
     warned.add(member.managedId);
   }
-  const maxStopPasses = 3;
-  for (let pass = 0; pass < maxStopPasses; pass++) {
-    await stopDemotedEngine(run, member.managedId);
-    const stillWritableAfterStop = await isFencedMemberStillWritable(
+  await stopDemotedEngine(run, member.managedId);
+  if (
+    !(await isFencedMemberStillWritable(
       layout,
       member.managedId,
       member.engine,
       run,
-    );
-    if (!stillWritableAfterStop) {
-      warned.delete(member.managedId);
-      return;
-    }
+    ))
+  ) {
+    warned.delete(member.managedId);
+    unsafeLogged.delete(member.managedId);
+    await clearDemotedFenceAlerts(layout, member.managedId);
+    return;
   }
-  logError(
-    "managed",
-    `demoted member guard: engine still writable after stop managedId=${member.managedId} member=${member.memberId}`,
-  );
+  await stopDemotedEngine(run, member.managedId);
+  if (
+    !(await isFencedMemberStillWritable(
+      layout,
+      member.managedId,
+      member.engine,
+      run,
+    ))
+  ) {
+    warned.delete(member.managedId);
+    unsafeLogged.delete(member.managedId);
+    await clearDemotedFenceAlerts(layout, member.managedId);
+    return;
+  }
+  await stopDemotedEngine(run, member.managedId);
+  if (
+    !(await isFencedMemberStillWritable(
+      layout,
+      member.managedId,
+      member.engine,
+      run,
+    ))
+  ) {
+    warned.delete(member.managedId);
+    unsafeLogged.delete(member.managedId);
+    await clearDemotedFenceAlerts(layout, member.managedId);
+    return;
+  }
+  const project = managedComposeProject(member.managedId);
+  await killRunningProjectContainers(run, project);
+  const reason =
+    "demoted primary remained writable after compose stop and docker kill";
+  await markDemotedFenceUnsafe(layout, member.managedId, reason);
+  if (!unsafeLogged.has(member.managedId)) {
+    logError(
+      "managed",
+      `demoted member guard: ${reason} managedId=${member.managedId} member=${member.memberId}`,
+    );
+    unsafeLogged.add(member.managedId);
+  } else {
+    logError(
+      "managed",
+      `demoted member guard: still writable; retrying stop managedId=${member.managedId} member=${member.memberId}`,
+    );
+  }
 }
 
 async function stopDemotedEngine(
@@ -172,6 +254,7 @@ export class DemotedMemberGuard {
   #timer: ReturnType<typeof setInterval> | undefined;
   #ticking = false;
   readonly #warned = new Set<string>();
+  readonly #unsafeLogged = new Set<string>();
   readonly #layout: LayoutPaths;
   readonly #run: DockerRunFn;
   readonly #listTargets: () => Promise<ManagedHaMemberRecord[]>;
@@ -282,6 +365,8 @@ export class DemotedMemberGuard {
       );
       if (!stillWritable) {
         this.#warned.delete(member.managedId);
+        this.#unsafeLogged.delete(member.managedId);
+        await clearDemotedFenceAlerts(this.#layout, member.managedId);
         return;
       }
     }
@@ -296,6 +381,7 @@ export class DemotedMemberGuard {
       member,
       this.#run,
       this.#warned,
+      this.#unsafeLogged,
     );
   }
 }

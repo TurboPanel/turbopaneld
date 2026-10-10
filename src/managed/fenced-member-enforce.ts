@@ -4,7 +4,8 @@
 
 import type { ManagedEngineCode } from "../contracts/commands-contracts.ts";
 import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
-import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { logError, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { recordDemotedEnforceReadOnlyFailure } from "./demoted-marker.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { persistDemotedVolumeFence } from "./demoted-fence-volume.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
@@ -59,7 +60,8 @@ export async function enforceFencedMemberIfRunning(
     );
     await resolved.replication?.enforceFencedFormerPrimaryReadOnly?.(ctx);
   } catch (err) {
-    logWarn(
+    await recordDemotedEnforceReadOnlyFailure(layout, managedId, err);
+    logError(
       "managed",
       `demoted fence: read-only enforce failed managedId=${managedId}:`,
       sanitizeForLog(err),

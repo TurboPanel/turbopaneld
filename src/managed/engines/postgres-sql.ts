@@ -1094,16 +1094,24 @@ export function isWritablePrimarySql(): string {
 /**
  * Best-effort quiesce for a fenced former primary still running. Does not
  * replace `standby.signal` on disk (written before stop); the guard stops the
- * engine when writes remain possible (including superuser sessions).
+ * container when writes remain possible.
+ *
+ * `ALTER SYSTEM` + `default_transaction_read_only` blocks new read-write
+ * transactions for normal roles; a superuser can still `SET TRANSACTION READ
+ * WRITE` or `SET default_transaction_read_only = off` in-session — container
+ * stop is the real fence.
  */
 export function enforceFencedFormerPrimarySql(): string {
   return [
+    "ALTER SYSTEM SET default_transaction_read_only = on;",
+    "SELECT pg_catalog.pg_reload_conf();",
     "SELECT pg_catalog.pg_terminate_backend(pid)",
     "  FROM pg_catalog.pg_stat_activity",
     "  WHERE pid <> pg_catalog.pg_backend_pid()",
-    "    AND datname IS NOT NULL;",
-    "ALTER SYSTEM SET default_transaction_read_only = on;",
-    "SELECT pg_catalog.pg_reload_conf();",
+    "    AND backend_type = 'client backend'",
+    "    AND pid NOT IN (",
+    "      SELECT active_pid FROM pg_catalog.pg_replication_slots",
+    "      WHERE active_pid IS NOT NULL);",
     "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;",
   ].join("\n");
 }

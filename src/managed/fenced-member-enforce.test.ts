@@ -4,6 +4,10 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { managedDir } from "./engine-paths.ts";
 import {
+  readManagedDemotedMarker,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
+import {
   enforceFencedMemberIfRunning,
   isFencedMemberStillWritable,
 } from "./fenced-member-enforce.ts";
@@ -217,6 +221,52 @@ test("enforceFencedMemberIfRunning runs SQL enforce when compose ps fails (fail 
     };
     await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
     assertEquals(execCalls > 0, true);
+  });
+});
+
+test("enforceFencedMemberIfRunning records enforce failures on the demoted marker", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await seedCompose(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      "00000000-0000-4000-8000-0000000000a1",
+      "2026-10-08T12:00:00.000Z",
+    );
+    let execCalls = 0;
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: RUNNING_PS,
+          stderr: "",
+        });
+      }
+      if (args[0] === "exec") {
+        execCalls++;
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "enforce failed",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
+    assertEquals(execCalls, 1);
+    const marker = await readManagedDemotedMarker(layout, MANAGED_ID);
+    assert(marker?.enforceReadOnlyFailedAt !== undefined);
+    assert(marker?.enforceReadOnlyLastError?.includes("enforce failed"));
+    await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
+    assertEquals(execCalls, 2);
   });
 });
 

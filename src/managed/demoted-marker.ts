@@ -39,6 +39,13 @@ export type ManagedDemotedMarker = {
   memberId: string;
   demotedAt: string;
   engine?: ManagedEngineCode;
+  /** Writable demoted engine could not be stopped; surfaced to operators. */
+  unsafe?: boolean;
+  unsafeAt?: string;
+  unsafeReason?: string;
+  /** Last read-only SQL enforce failure while the engine container was up. */
+  enforceReadOnlyFailedAt?: string;
+  enforceReadOnlyLastError?: string;
 };
 
 export function managedDemotedMarkerPath(
@@ -88,6 +95,14 @@ export async function clearManagedDemotedMarker(
   }
 }
 
+function optionalMarkerString(
+  value: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const field = value[key];
+  return typeof field === "string" && field.length > 0 ? field : undefined;
+}
+
 function parseMarker(text: string): ManagedDemotedMarker | null {
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
@@ -97,16 +112,115 @@ function parseMarker(text: string): ManagedDemotedMarker | null {
       return null;
     }
     const engine = value.engine;
+    const unsafeAt = optionalMarkerString(value, "unsafeAt");
+    const unsafeReason = optionalMarkerString(value, "unsafeReason");
+    const enforceReadOnlyFailedAt = optionalMarkerString(
+      value,
+      "enforceReadOnlyFailedAt",
+    );
+    const enforceReadOnlyLastError = optionalMarkerString(
+      value,
+      "enforceReadOnlyLastError",
+    );
     return {
       memberId: value.memberId,
       demotedAt: value.demotedAt,
       ...(engine === "postgres" || engine === "mysql" || engine === "mariadb"
         ? { engine }
         : {}),
+      ...(value.unsafe === true ? { unsafe: true } : {}),
+      ...(unsafeAt ? { unsafeAt } : {}),
+      ...(unsafeReason ? { unsafeReason } : {}),
+      ...(enforceReadOnlyFailedAt ? { enforceReadOnlyFailedAt } : {}),
+      ...(enforceReadOnlyLastError ? { enforceReadOnlyLastError } : {}),
     };
   } catch {
     return null;
   }
+}
+
+async function patchManagedDemotedMarker(
+  layout: LayoutPaths,
+  managedId: string,
+  patch: Partial<
+    Pick<
+      ManagedDemotedMarker,
+      | "unsafe"
+      | "unsafeAt"
+      | "unsafeReason"
+      | "enforceReadOnlyFailedAt"
+      | "enforceReadOnlyLastError"
+    >
+  >,
+): Promise<void> {
+  const existing = await readManagedDemotedMarker(layout, managedId);
+  if (!existing) return;
+  const marker: ManagedDemotedMarker = { ...existing, ...patch };
+  await writeFileAtomic(
+    managedDemotedMarkerPath(layout, managedId),
+    `${JSON.stringify(marker)}\n`,
+  );
+}
+
+/** Member id stored on fence stop: payload when present, else local ha-member. */
+export async function resolveDemotedMarkerMemberId(
+  layout: LayoutPaths,
+  managedId: string,
+  payloadMemberId?: string,
+): Promise<string> {
+  if (payloadMemberId && payloadMemberId.length > 0) {
+    return payloadMemberId;
+  }
+  const member = await readManagedHaMember(layout, managedId);
+  return member?.memberId ?? "";
+}
+
+/** Record that a demoted engine stayed writable after stop attempts. */
+export async function markDemotedFenceUnsafe(
+  layout: LayoutPaths,
+  managedId: string,
+  reason: string,
+): Promise<void> {
+  const unsafeAt = new Date().toISOString();
+  await patchManagedDemotedMarker(layout, managedId, {
+    unsafe: true,
+    unsafeAt,
+    unsafeReason: reason,
+  });
+}
+
+/** Clear operator-visible fence alerts when the engine is no longer writable. */
+export async function clearDemotedFenceAlerts(
+  layout: LayoutPaths,
+  managedId: string,
+): Promise<void> {
+  const existing = await readManagedDemotedMarker(layout, managedId);
+  if (!existing) return;
+  const {
+    unsafe: _unsafe,
+    unsafeAt: _unsafeAt,
+    unsafeReason: _unsafeReason,
+    enforceReadOnlyFailedAt: _enforceAt,
+    enforceReadOnlyLastError: _enforceErr,
+    ...base
+  } = existing;
+  await writeFileAtomic(
+    managedDemotedMarkerPath(layout, managedId),
+    `${JSON.stringify(base)}\n`,
+  );
+}
+
+/** Persist a failed read-only enforce attempt for status reporting. */
+export async function recordDemotedEnforceReadOnlyFailure(
+  layout: LayoutPaths,
+  managedId: string,
+  err: unknown,
+): Promise<void> {
+  const message = err instanceof Error ? err.message : String(err);
+  await patchManagedDemotedMarker(layout, managedId, {
+    enforceReadOnlyFailedAt: new Date().toISOString(),
+    enforceReadOnlyLastError: message.slice(0, 500),
+  });
 }
 
 export async function readManagedDemotedMarker(
@@ -126,7 +240,8 @@ export async function readManagedDemotedMarker(
 /**
  * True when this cluster has a live demoted marker on this host. Fails closed:
  * a marker that cannot be read or parsed counts as demoted. When `memberId` is
- * given and the marker names a different member, it does not match.
+ * given and the marker names a different member, it does not match. A marker
+ * whose `memberId` is empty fences the whole managed cluster on this host.
  */
 export async function isManagedMemberDemoted(
   layout: LayoutPaths,
@@ -142,8 +257,8 @@ export async function isManagedMemberDemoted(
   const marker = parseMarker(text);
   if (!marker) return true;
   if (memberId === undefined) return true;
+  if (marker.memberId.length === 0) return memberId.length > 0;
   if (memberId.length === 0) return false;
-  if (marker.memberId.length === 0) return false;
   return marker.memberId === memberId;
 }
 

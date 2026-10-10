@@ -4,7 +4,10 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { writeManagedDestroyedMarker } from "./destroyed-marker.ts";
 import { DemotedMemberGuard } from "./demoted-guard.ts";
-import { writeManagedDemotedMarker } from "./demoted-marker.ts";
+import {
+  readManagedDemotedMarker,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
 import {
   lookupManagedIntent,
   resetManagedIntentsForTests,
@@ -533,6 +536,115 @@ test("guard tick stops a hand-started demoted mysql primary", () =>
   assertGuardStopsHandStartedDemotedPrimary("mysql"));
 test("guard tick stops a hand-started demoted mariadb primary", () =>
   assertGuardStopsHandStartedDemotedPrimary("mariadb"));
+
+test("docker ps -aq listing failure still attempts docker stop via label fallback", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    let psAqCalls = 0;
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "ps" && args.includes("-aq")) {
+        psAqCalls++;
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "ps failed",
+        });
+      }
+      if (args[0] === "ps" && args.includes("-q")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "abc123def456\n",
+          stderr: "",
+        });
+      }
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: RUNNING_PS,
+          stderr: "",
+        });
+      }
+      if (args[0] === "compose" && args.at(-1) === "stop") {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "stop failed",
+        });
+      }
+      if (args[0] === "stop" || args[0] === "kill") {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      }
+      if (args[0] === "exec") {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "t\n",
+          stderr: "",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    const calls: string[][] = [];
+    const trackedRun = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      return run(args);
+    };
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: trackedRun,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assert(psAqCalls >= 2);
+    assert(calls.some((args) => args[0] === "stop" && args.length > 1));
+  });
+});
+
+test("a writable demoted primary records unsafe on the marker after stop passes", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    const fake = docker({ writablePrimary: true, stopFails: true });
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    const marker = await readManagedDemotedMarker(layout, MANAGED_ID);
+    assert(marker?.unsafe === true);
+    assert(marker?.unsafeReason?.includes("writable"));
+  });
+});
 
 test("a stopped demoted member is left alone", async () => {
   await withTempLayout(async ({ env }) => {

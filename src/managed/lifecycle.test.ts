@@ -8,8 +8,10 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   isManagedMemberDemoted,
+  readManagedDemotedMarker,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
+import { saveManagedHaMember } from "./ha-member.ts";
 import {
   handleManagedLifecycle,
   refuseWritableFencedAfterComposeStart,
@@ -377,6 +379,53 @@ test("lifecycle stop with demoted writes a marker; an ordinary stop does not", a
         await isManagedMemberDemoted(layout, ordinaryId, MEMBER_ID),
         false,
       );
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("demoted fence stop without memberId stores ha-member.json member id", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const managedId =
+        `managed_lifecycle_demoted_resolve_${crypto.randomUUID()}`;
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await saveManagedHaMember(layout, {
+        managedId,
+        memberId: MEMBER_ID,
+        engine: "postgres",
+        role: "primary",
+        containerName: `${MEMBER_ID}-1`,
+        replicaPeerCount: 1,
+        updatedAt: "2026-10-08T12:00:00.000Z",
+      });
+      const docker = fakeDocker(new Set());
+      await handleManagedLifecycle(
+        {
+          managedId,
+          action: "stop",
+          demoted: true,
+          engine: "postgres",
+          role: "primary",
+        },
+        new Date().toISOString(),
+        { runDocker: docker.run },
+      );
+      const marker = await readManagedDemotedMarker(layout, managedId);
+      assertEquals(marker?.memberId, MEMBER_ID);
+      assert(await isManagedMemberDemoted(layout, managedId, MEMBER_ID));
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) Deno.env.delete(key);

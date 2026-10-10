@@ -32,6 +32,7 @@ import { readManagedComposeDataTarget } from "./compose.ts";
 import {
   clearManagedDemotionArtifacts,
   isManagedMemberDemoted,
+  resolveDemotedMarkerMemberId,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
 import {
@@ -194,10 +195,15 @@ async function recordDemotedFenceOnLifecycleStop(
   const demotedAt = new Date().toISOString();
   const engine = payload.engine ?? "postgres";
   await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
+  const memberId = await resolveDemotedMarkerMemberId(
+    layout,
+    payload.managedId,
+    payload.memberId,
+  );
   await writeManagedDemotedMarker(
     layout,
     payload.managedId,
-    payload.memberId ?? "",
+    memberId,
     demotedAt,
     engine,
   );
