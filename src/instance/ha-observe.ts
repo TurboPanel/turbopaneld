@@ -123,6 +123,8 @@ export class ManagedHaObserver {
   /** Incident key -> when its event last reached the control plane. */
   readonly #incidentLastDelivered = new Map<string, number>();
   #pollGeneration = 0;
+  /** Newest poll that finished after reading every source. */
+  #newestCompleteGeneration = 0;
   #lastReviveAttemptMs: number | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
 
@@ -284,6 +286,19 @@ export class ManagedHaObserver {
     });
   }
 
+  /**
+   * Send this poll's events unless a newer poll already finished with every
+   * source read: that one saw a fresher state (healthy, or dead and sent).
+   */
+  #finishPoll(state: HaPollState): void {
+    if (this.#newestCompleteGeneration > state.generation) return;
+    if (state.complete) this.#newestCompleteGeneration = state.generation;
+    for (const candidate of state.pending.values()) {
+      this.#emitDeadPrimary(candidate);
+    }
+    this.#clearRecoveredIncidents(state);
+  }
+
   /** Read one source; a failure is logged and marks the poll incomplete. */
   async #pollSource(
     state: HaPollState,
@@ -332,10 +347,7 @@ export class ManagedHaObserver {
         "replication-analysis",
         () => this.#pollReplicationAnalysis(state, layout, api),
       );
-      for (const candidate of state.pending.values()) {
-        this.#emitDeadPrimary(candidate);
-      }
-      this.#clearRecoveredIncidents(state);
+      this.#finishPoll(state);
     } catch (err) {
       logWarn("managed", "managed-ha observe failed:", sanitizeForLog(err));
     }

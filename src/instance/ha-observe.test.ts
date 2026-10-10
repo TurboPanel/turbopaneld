@@ -1480,6 +1480,41 @@ test("ManagedHaObserver ignores a recovery seen by an older overlapping poll", a
   });
 });
 
+test("ManagedHaObserver drops a dead row from a poll overtaken by a newer healthy one", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    const gates: Array<(rows: unknown[]) => void> = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerByContainer({ "mysql-primary-1": H01_DIAL }),
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: API_CREDS,
+        fetch: splitFetch({
+          analysis: () =>
+            new Promise((resolve) => {
+              gates.push((rows) => resolve(analysisResponse(rows)));
+            }),
+        }),
+      },
+    });
+    const older = observer.poll();
+    const newer = observer.poll();
+    await waitForGates(gates, 2);
+    gates[1]?.([]);
+    await newer;
+    gates[0]?.([replicationRow(H01_DIAL)]);
+    await older;
+    assertEquals(sent.length, 0);
+  });
+});
+
 test("ManagedHaObserver reports only the dead cluster when two share a host", async () => {
   const otherId = "00000000-0000-4000-8000-0000000000bb";
   const otherDial = { hostname: H01_DIAL.hostname, port: 45002 };
