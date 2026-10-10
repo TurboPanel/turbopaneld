@@ -102,8 +102,7 @@ const POSTGRES_RESTORE_SCRIPT = [
   '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
   "rc=$?",
   "set -e",
-  String.raw`last=$(printf '%s
-' "$out" | tail -n 1)`,
+  String.raw`last=$(printf '%s\n' "$out" | tail -n 1)`,
   'if [ "$rc" -ne 0 ] || [ "$last" != tp_restore_committed ]; then',
   "  echo 'restore was not committed; the database is unchanged' >&2",
   "  exit 1",
