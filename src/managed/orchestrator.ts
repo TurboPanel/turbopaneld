@@ -276,17 +276,24 @@ export function pickPublishedEngineDial(
   portsJson: string,
   containerPort: number,
 ): { host: string; port: number } | null {
-  let ports: Record<
-    string,
-    Array<{ HostIp?: string; HostPort?: string }> | null
-  >;
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(portsJson);
-    if (typeof parsed !== "object" || parsed === null) return null;
-    ports = parsed as typeof ports;
+    parsed = JSON.parse(portsJson);
   } catch {
     return null;
   }
+  return pickEngineDialFromPorts(parsed, containerPort);
+}
+
+function pickEngineDialFromPorts(
+  parsed: unknown,
+  containerPort: number,
+): { host: string; port: number } | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const ports = parsed as Record<
+    string,
+    Array<{ HostIp?: string; HostPort?: string }> | null
+  >;
   const bound = ports[`${containerPort}/tcp`] ?? [];
   for (const binding of bound) {
     const host = unwrapPublishedHost(binding.HostIp);
@@ -387,6 +394,68 @@ export async function resolveOrchestratorRegisterHost(
   if (!dial) {
     throw new Error(
       `orchestrator needs a host-published port for ${name}:${member.port}`,
+    );
+  }
+  return dial;
+}
+
+const LIVE_AND_CONFIGURED_PORTS_FORMAT =
+  '{"live":{{json .NetworkSettings.Ports}},"configured":{{json .HostConfig.PortBindings}}}';
+
+/**
+ * The private listener a member was registered under, read from the live
+ * published ports or, when the container has stopped, from its configured
+ * port bindings. Docker empties `.NetworkSettings.Ports` once a container
+ * exits, and a dead primary is exactly the one the HA observer must name.
+ */
+export function pickLiveOrConfiguredEngineDial(
+  inspectJson: string,
+  containerPort: number,
+): { host: string; port: number } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inspectJson);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { live, configured } = parsed as {
+    live?: unknown;
+    configured?: unknown;
+  };
+  return pickEngineDialFromPorts(live, containerPort) ??
+    pickEngineDialFromPorts(configured, containerPort);
+}
+
+/**
+ * Like {@link resolveOrchestratorRegisterHost}, but also answers for a stopped
+ * or killed container (see {@link pickLiveOrConfiguredEngineDial}). Throws when
+ * the container cannot be inspected or has no private published listener.
+ */
+export async function resolveOrchestratorMemberDial(
+  member: { containerName: string; port: number },
+  run: RunDockerFn,
+): Promise<{ host: string; port: number }> {
+  const inspect = await run([
+    "inspect",
+    "--format",
+    LIVE_AND_CONFIGURED_PORTS_FORMAT,
+    member.containerName,
+  ]);
+  if (!inspect.success) {
+    throw new Error(
+      `orchestrator could not inspect ${member.containerName} for its listener: ${
+        inspect.stderr || "docker inspect failed"
+      }`,
+    );
+  }
+  const dial = pickLiveOrConfiguredEngineDial(
+    inspect.stdout.trim(),
+    member.port,
+  );
+  if (!dial) {
+    throw new Error(
+      `orchestrator needs a host-published port for ${member.containerName}:${member.port}`,
     );
   }
   return dial;

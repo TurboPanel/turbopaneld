@@ -9,7 +9,13 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedPromote } from "./promote.ts";
+import { managedDir } from "./engine-paths.ts";
 import { readSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
+import { tryWithManagedLifecycleLock } from "./target-lock.ts";
+import {
+  isManagedMemberDemoted,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -66,40 +72,66 @@ test("handleManagedPromote rejects when no containers are running", async () => 
 });
 
 test("handleManagedPromote promotes standby and reports primary health", async () => {
-  const result = await handleManagedPromote(
-    {
-      managedId: "managed_promote_1",
-      memberId: "00000000-0000-4000-8000-000000000002",
-      demoteMemberId: "00000000-0000-4000-8000-000000000003",
-      engine: "postgres",
-    },
-    new Date().toISOString(),
-    {
-      ensureDocker: () => Promise.resolve(),
-      runDocker: (args, options) => {
-        if (args[0] === "compose" && args.includes("ps")) {
-          return Promise.resolve(dockerOk(RUNNING_PS));
-        }
-        if (args[0] === "exec" && args.includes("psql")) {
-          const sql = options?.input ?? "";
-          if (sql.includes("pg_stat_replication")) {
-            return Promise.resolve(dockerOk("streaming\t0\n"));
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_1";
+    const layout = resolveLayout(Deno.env.toObject());
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  postgres:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - promote_data:/var/lib/postgresql",
+        "volumes:",
+        "  promote_data:",
+        "    name: promote_data",
+        "",
+      ].join("\n"),
+    );
+    const result = await handleManagedPromote(
+      {
+        managedId,
+        memberId: "00000000-0000-4000-8000-000000000002",
+        demoteMemberId: "00000000-0000-4000-8000-000000000003",
+        engine: "postgres",
+      },
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: (args, options) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerOk(RUNNING_PS));
           }
-          if (sql.includes("pg_is_in_recovery")) {
-            return Promise.resolve(dockerOk("f\n"));
+          if (args[0] === "run") {
+            return Promise.resolve(dockerOk("absent\n"));
+          }
+          if (args[0] === "exec" && args.includes("psql")) {
+            const sql = options?.input ?? "";
+            if (sql.includes("pg_stat_replication")) {
+              return Promise.resolve(dockerOk("streaming\t0\n"));
+            }
+            if (sql.includes("pg_is_in_recovery")) {
+              return Promise.resolve(dockerOk("f\n"));
+            }
+            return Promise.resolve(dockerOk());
           }
           return Promise.resolve(dockerOk());
-        }
-        return Promise.resolve(dockerOk());
+        },
       },
-    },
-  );
+    );
 
-  assertEquals(result.status, "ready");
-  assertEquals(result.role, "primary");
-  assertEquals(result.demoted, true);
-  assertEquals(result.demotedMemberId, "00000000-0000-4000-8000-000000000003");
-  assertEquals(result.replication?.state, "streaming");
+    assertEquals(result.status, "ready");
+    assertEquals(result.role, "primary");
+    assertEquals(result.demoted, true);
+    assertEquals(
+      result.demotedMemberId,
+      "00000000-0000-4000-8000-000000000003",
+    );
+    assertEquals(result.replication?.state, "streaming");
+  });
 });
 
 test("handleManagedPromote blocks promotion when GTID wait times out", async () => {
@@ -289,3 +321,137 @@ test("handleManagedPromote rejects when compose ps collection fails", async () =
     "no running containers",
   );
 });
+
+test("handleManagedPromote clears demotion artefacts when engine is omitted on the payload", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_no_engine";
+    const memberId = "00000000-0000-4000-8000-000000000002";
+    const layout = resolveLayout(Deno.env.toObject());
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  postgres:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - promote_no_engine:/var/lib/postgresql",
+        "volumes:",
+        "  promote_no_engine:",
+        "    name: promote_no_engine",
+        "",
+      ].join("\n"),
+    );
+    await writeManagedDemotedMarker(
+      layout,
+      managedId,
+      memberId,
+      "2026-10-08T12:00:00.000Z",
+      "postgres",
+    );
+    await handleManagedPromote(
+      {
+        managedId,
+        memberId,
+        demoteMemberId: "00000000-0000-4000-8000-000000000003",
+      },
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: (args, options) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerOk(RUNNING_PS));
+          }
+          if (args[0] === "run") {
+            return Promise.resolve(dockerOk("absent\n"));
+          }
+          if (args[0] === "exec" && args.includes("psql")) {
+            const sql = options?.input ?? "";
+            if (sql.includes("pg_stat_replication")) {
+              return Promise.resolve(dockerOk("streaming\t0\n"));
+            }
+            if (sql.includes("pg_is_in_recovery")) {
+              return Promise.resolve(dockerOk("f\n"));
+            }
+            return Promise.resolve(dockerOk());
+          }
+          return Promise.resolve(dockerOk());
+        },
+      },
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, managedId),
+      false,
+    );
+  });
+});
+
+for (const marked of [true, false]) {
+  test(
+    `handleManagedPromote ${
+      marked ? "holds" : "does not take"
+    } the lifecycle lock for a ${marked ? "demoted" : "plain"} member`,
+    async () => {
+      await withPromoteLayoutEnv(async () => {
+        const managedId = `managed_promote_lock_${crypto.randomUUID()}`;
+        const memberId = "00000000-0000-4000-8000-000000000002";
+        const layout = resolveLayout(Deno.env.toObject());
+        const root = managedDir(layout, managedId);
+        await Deno.mkdir(root, { recursive: true });
+        await Deno.writeTextFile(
+          `${root}/docker-compose.yml`,
+          [
+            "services:",
+            "  postgres:",
+            "    image: postgres:18",
+            "    volumes:",
+            "      - promote_lock:/var/lib/postgresql",
+            "volumes:",
+            "  promote_lock:",
+            "    name: promote_lock",
+            "",
+          ].join("\n"),
+        );
+        if (marked) {
+          await writeManagedDemotedMarker(
+            layout,
+            managedId,
+            memberId,
+            "2026-10-08T12:00:00.000Z",
+            "postgres",
+          );
+        }
+        let guardGotLock: boolean | undefined;
+        await handleManagedPromote(
+          { managedId, memberId, engine: "postgres" },
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: async (args, options) => {
+              if (args[0] === "compose" && args.includes("ps")) {
+                return dockerOk(RUNNING_PS);
+              }
+              if (args[0] === "run") return dockerOk("absent\n");
+              const sql = options?.input ?? "";
+              if (sql.includes("pg_promote")) {
+                guardGotLock = await tryWithManagedLifecycleLock(
+                  layout,
+                  managedId,
+                  () => Promise.resolve(),
+                );
+              }
+              if (sql.includes("pg_stat_replication")) {
+                return dockerOk("streaming\t0\n");
+              }
+              if (sql.includes("pg_is_in_recovery")) return dockerOk("f\n");
+              return dockerOk();
+            },
+          },
+        );
+        assertEquals(guardGotLock, !marked);
+        assertEquals(await isManagedMemberDemoted(layout, managedId), false);
+      });
+    },
+  );
+}

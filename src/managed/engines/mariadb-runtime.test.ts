@@ -1418,3 +1418,63 @@ test("mariadb ensureOrchestratorTopology uses the MariaDB grant dialect", async 
     false,
   );
 });
+
+function mariadbFenceExec(
+  readOnly: string,
+  slaveStatus: string,
+): ManagedEngineExec {
+  return (argv, input) => {
+    const sql = `${argv.join(" ")} ${input ?? ""}`;
+    if (sql.includes("SHOW SLAVE STATUS")) {
+      return Promise.resolve({
+        success: true,
+        stdout: slaveStatus,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: readOnly, stderr: "" });
+  };
+}
+
+for (
+  const [label, readOnly, slaveStatus, writable] of [
+    ["read_only off", "0\n", "", true],
+    [
+      "read_only on, no replica config (root keeps READ ONLY ADMIN)",
+      "1\n",
+      "",
+      true,
+    ],
+    [
+      "read_only on and configured as a replica",
+      "1\n",
+      "Slave_IO_State: x\n",
+      false,
+    ],
+  ] as const
+) {
+  test(`mariadb isWritableFormerPrimary: ${label}`, async () => {
+    const replication = mariadbManagedEngineRuntime.replication;
+    if (!replication?.isWritableFormerPrimary) {
+      throw new TypeError("expected mariadb isWritableFormerPrimary");
+    }
+    assertEquals(
+      await replication.isWritableFormerPrimary(
+        buildContext(mariadbFenceExec(readOnly, slaveStatus)),
+      ),
+      writable,
+    );
+  });
+}
+
+test("mariadb isWritableFormerPrimary fails when the engine cannot answer", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.isWritableFormerPrimary) {
+    throw new TypeError("expected mariadb isWritableFormerPrimary");
+  }
+  const down: ManagedEngineExec = () =>
+    Promise.resolve({ success: false, stdout: "", stderr: "no socket" });
+  await assertRejects(() =>
+    replication.isWritableFormerPrimary!(buildContext(down))
+  );
+});

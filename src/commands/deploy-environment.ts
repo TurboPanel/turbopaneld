@@ -72,6 +72,7 @@ import {
   ensureHostingCaddyRuntime,
   ensureHostingIngress,
   ensureServiceIngress,
+  resetHostingCaddyRuntimeEnsuredForDeploy,
   rewriteHostingCaddySites,
   serviceIngressComposePath,
   serviceIngressProject,
@@ -2276,6 +2277,7 @@ async function deployEnvironmentHolding(
 ): Promise<EnvironmentDeployResult> {
   assertSafeDeploymentIdentifiers(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
+  resetHostingCaddyRuntimeEnsuredForDeploy();
   const runtime = resolveEnvironmentDeployRuntime(deps);
 
   const files = resolveDeployComposeFiles(parsedPayload);

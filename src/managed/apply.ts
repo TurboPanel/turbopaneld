@@ -47,7 +47,10 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
-import { maybeClearDemotedMarkerAfterApply } from "./demoted-marker.ts";
+import {
+  isManagedMemberDemoted,
+  maybeClearDemotedMarkerAfterApply,
+} from "./demoted-marker.ts";
 import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
@@ -738,6 +741,20 @@ function buildManagedApplyResult(
 }
 
 /**
+ * A demoted former primary carries the fence's own standby.signal, so its
+ * diverged data would probe as a standby. Only a forced re-seed (fresh
+ * basebackup) may bring it back as a replica.
+ */
+async function isUnforcedDemotedStandbyApply(
+  layout: LayoutPaths,
+  payload: ManagedApplyPayload,
+): Promise<boolean> {
+  if (payload.replication?.role !== "standby") return false;
+  if (payload.forceResync === true) return false;
+  return await isManagedMemberDemoted(layout, payload.managedId);
+}
+
+/**
  * Volume already has data that is not a standby. Stop any running project so
  * we never promote it as a writable primary, and return needs_resync without
  * compose up or engine SQL mutation.
@@ -854,10 +871,12 @@ export async function handleManagedApply(
       layout,
       deps,
     );
+    const runDocker = deps?.runDocker ?? defaultRunDocker;
     await maybeClearDemotedMarkerAfterApply(
       layout,
       payload,
       result.member?.status,
+      (args) => runDocker(args),
     );
     return result;
   });
@@ -905,6 +924,10 @@ async function applyManagedEngine(
     await requireDecryptedCredentials(payload, deps);
   // Same deny-set for the bounded WS error text and the streamed transcript.
   logSink.addSecrets(decrypted.plaintexts);
+
+  if (await isUnforcedDemotedStandbyApply(layout, payload)) {
+    return await returnStandbyNeedsResync(payload, redact, run);
+  }
 
   // Standby bootstrap must run before compose up (empty volume → avoid dual primary).
   if (

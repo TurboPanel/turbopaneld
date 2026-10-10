@@ -28,11 +28,11 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` / `follow-primary.ts` | Engine command handlers (wired from `command-router.ts`); `applyManagedEngineState` order on a primary is: database **creates**, credentials (grants reference those databases), `dropUsers`, ProxySQL monitor roles, database **drops** last (after users are gone, so a deleted owner is released first) — an apply that fails early therefore never leaves a referenced database uncreated and the next retry heals; apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing. **`managed.destroy` always `compose -p <managedId> down`** — the compose project is the bare `managed` row UUID — even if the state dir is missing, then `docker ps -aq --filter label=com.docker.compose.project=…` and `docker rm -f` leftovers; compose down failure is **not** success while labeled containers remain. No `-f` (same interpolation rule as lifecycle). With `removeVolumes`, also `docker volume rm -f managed_<id>_data` best-effort by exact name — compose down -v only removes project-labeled volumes and misses pre-pin bare-name orphans. **Destroy vs apply:** destroy writes `<stateDir>/managed-intent/<id>.destroyed.json` (`destroyed-marker.ts`, names the member, 24 h life) BEFORE removing anything, then takes the per-id `withManagedLifecycleLock` (`<runDir>/managed-locks/<id>.lifecycle.lock`, blocking, shared with apply); apply takes the same lock and refuses (`ManagedDestroyedError`) a member whose marker is live. Destroy re-checks for re-created containers/state dir before reporting success; `listManagedHaMembers` skips destroyed members. |
 | `orchestrator.ts` / `orchestrator-api.ts` | Per-org Orchestrator compose (project = the `managed-ha` `serviceId`, written into the compose file's own `name:` key so the stack unit needs no `-p`) + HTTP `:33001` on loopback **and** the Raft advertise address (followers proxy to `HTTPAdvertise`) + Raft `:33002` on advertise only; `restart: always`; topology TLS uses `MySQLTopologyUseMutualTLS` plus Organization CA (`SSL_CERT_FILE` for trust roots); members are registered by private-listener host (not the Docker name), with `extra_hosts` mapping the name onto that address; `Recover: false` |
 | `../commands/managed-ha-reconcile.ts` / `managed-ha-failover.ts` | `managed.ha.reconcile` (whole-server HA stack) + `managed.ha.failover` (`drain` / `recover` / `repoint`). Designated Orchestrator recover-to; on HTTP/API failure **or** absent stack, falls back to `managed.promote` so fencing is not stranded. `Recover: false` stays — TurboPanel picks the candidate. `recover` translates a member on this host from its Docker name to its published private listener (`resolveOrchestratorRecoverEndpoint`), because Orchestrator knows members by `<private IP>:<port>`. A cluster that fails to register no longer aborts the others on the host; a mixed result succeeds as `partial` and reports each failed cluster id plus its bounded error, while zero registrations fail the command. After promotion, `repoint` first runs on the **new primary** with `ensureSlots` (Postgres creates missing `tp_member_*` physical slots; MySQL/MariaDB no-op) then on every other healthy replica so `primary_conninfo` / source host follow (`follow-primary.ts`). Follow refuses a non-standby and polls `readHealth` until `streaming`. `Future:` fail-closed HA lease when Raft is unreachable. |
-| `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` when `configDir/orchestrator/docker-compose.yml` exists; before that poll, revive a stopped container only after two consecutive stopped observations and never while an in-process stop/restart/apply marks the stack busy; completed checks are cooled down for 60 s; emit unsolicited `managed-ha-event` carrying the dead instance's `instanceHost`/`instancePort` (feature `managed-ha-instance-v1`; the control plane fences only if they match the current primary) |
+| `../instance/ha-observe.ts` | Poll local Orchestrator `/api/problems` and `/api/replication-analysis` (`DeadMaster` / `DeadPrimary` on the master row — Percona 3.2.x does not put those names on `/api/problems`) when `configDir/orchestrator/docker-compose.yml` exists; resolve `managedId` from the cluster alias when it is the managed UUID, else from the local primary's published private listener (`ha-orchestrator-managed-id.ts`); before that poll, revive a stopped container only after two consecutive stopped observations and never while an in-process stop/restart/apply marks the stack busy; completed checks are cooled down for 60 s; emit unsolicited `managed-ha-event` carrying the dead instance's `instanceHost`/`instancePort` (feature `managed-ha-instance-v1`; the control plane fences only if they match the current primary). The event always carries the local primary's full listener, never a partial key: a partial or empty Orchestrator key needs a UUID alias and every given field must equal that primary's listener. The listener is read from live ports **or** the configured port bindings (`resolveOrchestratorMemberDial`), because Docker empties `.NetworkSettings.Ports` once a container is killed. The two sources are read independently (one failing never hides the other; each read times out after 10 s); rows for one incident in one poll send one event; the 15 min re-send hold starts only when `send` returns true (an event dropped for lack of a connection is retried next poll) and is lifted only by the newest poll that read every source and saw the cluster healthy. A daemon restart mid-incident sends the event once more (the control plane matches it to the current primary) |
 | `pg-dead-primary.ts` / `../instance/pg-dead-primary-observe.ts` | Postgres dead-primary probe on the primary's **own** host (Orchestrator cannot see Postgres). See **Postgres dead-primary detection** below |
 | `host-boot.ts` / `boot-hold.ts` / `../instance/boot-hold-reporter.ts` | Boot hold after a power cut: see **Boot hold after an unclean host restart** below |
 | `ha-intent.ts` / `ha-member.ts` / `ha-command-hooks.ts` | Probe inputs kept by `command-router.ts`: operator-intent markers around every engine-touching managed verb, and the per-host member record (`managed/<id>/ha-member.json`) |
-| `demoted-marker.ts` / `demoted-guard.ts` | After a fence `managed.lifecycle` stop with `demoted: true`, a durable `<stateDir>/managed/<id>/demoted.json` (0600). A 5 s guard stops that member if its engine is running (`compose -p <id> stop`, intent marker first). Cleared on replica `managed.apply`, `managed.promote`, and `managed.destroy`. |
+| `demoted-marker.ts` / `demoted-fence-volume.ts` / `fenced-member-enforce.ts` / `demoted-guard.ts` | After a fence `managed.lifecycle` stop with `demoted: true`: durable `<stateDir>/managed/<id>/demoted.json` (0600, written first) plus an on-disk fence (Postgres `standby.signal` on the data volume; MySQL / MariaDB a read-only block in the mounted `config/my.cnf`) that survives reboot / hand `docker start`. `managed.lifecycle` start/restart refuses while the marker is present; the 5 s guard stops a writable engine (`compose -p <id> stop`, intent marker first, kill + `unsafe` flag if it stays writable). Cleared only through `clearManagedDemotionArtifacts` (fence first, marker last) on replica `managed.apply`, `managed.promote`, switchover abort and `managed.destroy`. See **Demoted member fence**. |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
@@ -418,7 +418,13 @@ ProxySQL to enforce. Canonical policy:
      removes post-backup user schemas and their contents before replay. The
      replay strips `SET lock_timeout` / `SET statement_timeout` lines from
      `pg_restore` output so the transaction's `SET LOCAL lock_timeout = '30s'`
-     stays in effect for the whole restore.
+     stays in effect for the whole restore. That `sed` step must stay plain
+     POSIX (no GNU-only flags such as `/I`): the default image
+     `postgres:18-alpine` ships BusyBox `sed`, which rejects them, and every
+     restore then rolled back. `postgres-restore.real-pg.test.ts` runs on
+     `16`, `18` and `18-alpine` by default for that reason. The session sets
+     `client_min_messages = warning` first, so the reset's "drop cascades to"
+     notices never crowd the real error out of a failed restore's message.
      MySQL/MariaDB dumps already drop and recreate the dumped tables.
    - **`.part` cleanup on failure.** Partial artifacts must never look complete.
    - **Prune by retention, one directory at a time.** After create, keep the
@@ -605,15 +611,51 @@ stale primary can accept writes again within seconds of boot.
 ## Demoted member fence
 
 After failover or switchover the old primary is stopped and must stay stopped
-until it is re-added as a replica. The control plane sends `demoted: true` on
-that fence `managed.lifecycle` stop. This daemon writes
-`<stateDir>/managed/<managedId>/demoted.json` (member id + timestamp, 0600,
-atomic) and a 5 s guard (`demoted-guard.ts`, started from `runDaemon`) stops
-the compose project if the engine is running. It writes a held operator-intent
-marker first so the dead-primary probe never treats the stop as a crash. It
-takes `tryWithManagedLifecycleLock` so a replica apply that clears the marker
-inside the same lock is not stopped mid-run. `listManagedHaMembers` already
-skips destroyed members. The marker is cleared on a successful replica apply
-(`status: ready`), on `managed.promote`, and on `managed.destroy`. The guard
-never starts anything and never deletes data.
-Tests: `demoted-marker.test.ts`, `demoted-guard.test.ts`, `lifecycle.test.ts`.
+(or read-only) until it is re-added as a replica. The control plane sends
+`demoted: true` on that fence `managed.lifecycle` stop. In order, so a crash
+between steps is always safe:
+
+1. **Marker** `<stateDir>/managed/<managedId>/demoted.json` (member id +
+   timestamp + engine, 0600, atomic). It drives everything below. It fences
+   the whole cluster on this host whatever member id it or the request names
+   (empty, equal or different): there is one data volume per cluster per host.
+2. **On-disk fence** (`demoted-fence-volume.ts`), verified after writing:
+   Postgres `standby.signal` on the data volume; MySQL / MariaDB a delimited
+   `# BEGIN/END turbopanel demoted fence` block (`read_only=1`, plus
+   `super_read_only=1` on MySQL) appended to the mounted `config/my.cnf`
+   (the file the engine reads as `/etc/mysql/conf.d/zz-turbopanel.cnf`). The
+   file is root-owned after apply, so a root helper container reads it and
+   replaces it atomically (copy keeps owner/mode, then rename). A hand
+   `docker start` re-resolves the bind mount and comes up read-only.
+3. Best-effort SQL read-only (`fenced-member-enforce.ts`), then
+   `compose stop`. A failing step never skips a later one or the stop; the
+   command then fails with "demoted fence is incomplete".
+
+The 5 s guard (`demoted-guard.ts`, from `runDaemon`, under
+`tryWithManagedLifecycleLock`) re-plants the on-disk fence each tick, then
+probes: a standby / read-only engine is left running; a writable one (or one
+it cannot probe) gets SQL read-only, a held stop intent, and up to three
+stop passes (`compose stop`, then `docker stop`/`kill` by id; when every
+listing fails, `compose kill` and stop/kill by container name). Still
+writable: an error log every tick, `compose kill` + kill by id and name, and
+`unsafe` on the marker (marker only; not on the wire yet). Bookkeeping
+failures (plant, intent, marker patches) are logged and never skip a stop.
+MariaDB `read_only` does not bind READ ONLY ADMIN (root), so a running fenced
+MariaDB counts as writable unless it is configured as a replica with
+`read_only` on (a re-seed in progress). Postgres SQL read-only cannot bind a
+superuser either; the container stop is the real fence.
+
+`managed.lifecycle` start/restart refuses while the marker is present (except
+switchover-abort reactivation). A standby `managed.apply` for a marked member
+returns `needs_resync` unless it carries `forceResync` (the fence's own
+`standby.signal` would otherwise make diverged data look like a standby). Clearing goes through ONE helper,
+`clearManagedDemotionArtifacts`: on-disk fence removed and verified gone
+first, marker removed last, any failure throws and keeps the marker. Callers:
+replica `managed.apply` that reached `ready` (inside apply's lock),
+`managed.promote` (takes the lifecycle lock when a marker exists, and Postgres
+promote resets the fence's `default_transaction_read_only`), switchover-abort
+reactivation (takes the lifecycle lock), and `managed.destroy`. The guard never
+starts anything and never deletes data.
+Tests: `demoted-marker.test.ts`, `demoted-fence-volume.test.ts`,
+`fenced-member-enforce.test.ts`, `demoted-guard.test.ts`, `lifecycle.test.ts`,
+`promote.test.ts`.

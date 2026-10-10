@@ -329,9 +329,18 @@ export function setIngressHostCommandForTest(
   fn?: IngressHostCommandFn,
 ): () => void {
   const previous = hostCommandOverride;
+  const previousBeforeValidate = ensureBeforeValidateOverride;
   hostCommandOverride = fn;
+  if (
+    fn !== undefined &&
+    ensureBeforeValidateOverride === undefined &&
+    ensureHostingCaddyRuntimeOverride === undefined
+  ) {
+    ensureBeforeValidateOverride = () => Promise.resolve();
+  }
   return () => {
     hostCommandOverride = previous;
+    ensureBeforeValidateOverride = previousBeforeValidate;
   };
 }
 
@@ -961,11 +970,65 @@ async function installAndStartCaddy(
   return true;
 }
 
+let ensureHostingCaddyRuntimeOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+let ensureBeforeValidateOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+/** Coalesces full runtime ensures with {@link ensureDeployIngress} in one deploy. */
+let hostingCaddyRuntimeEnsuredThisDeploy = false;
+
+/** Reset at the start of each `environment.deploy` (tests may call directly). */
+export function resetHostingCaddyRuntimeEnsuredForDeploy(): void {
+  hostingCaddyRuntimeEnsuredThisDeploy = false;
+}
+
+function markHostingCaddyRuntimeEnsuredForDeploy(): void {
+  hostingCaddyRuntimeEnsuredThisDeploy = true;
+}
+
+/**
+ * True when `caddy validate` as {@link HOSTING_CADDY_USER} is required for this
+ * candidate set (tenant HTTP routes or non-reserved snippets already on disk).
+ */
+export function hostingCaddyValidateNeedsEdgeRuntime(
+  siteContent: string,
+  otherSnippetNames: readonly string[],
+  siteFile: string,
+): boolean {
+  if (siteContent.trim().length > 0) return true;
+  return otherSnippetNames
+    .filter((name) => name !== siteFile)
+    .some((name) => !isDaemonReservedHostingSite(name));
+}
+
+/**
+ * Test-only: observe or stub {@link ensureHostingCaddyRuntime}. Returns a
+ * restore function.
+ */
+export function setEnsureHostingCaddyRuntimeForTest(
+  fn?: (layout: LayoutPaths) => Promise<void>,
+): () => void {
+  const previous = ensureHostingCaddyRuntimeOverride;
+  ensureHostingCaddyRuntimeOverride = fn;
+  return () => {
+    ensureHostingCaddyRuntimeOverride = previous;
+  };
+}
+
 /** Ensure hosting Caddy binary, Caddyfile, sites dir, and systemd unit. */
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
   deps?: EnsureHostingCaddyDeps,
 ): Promise<void> {
+  if (ensureHostingCaddyRuntimeOverride) {
+    await ensureHostingCaddyRuntimeOverride(layout);
+    markHostingCaddyRuntimeEnsuredForDeploy();
+    return;
+  }
   await ensureHostingCaddy(layout, deps);
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
@@ -1001,6 +1064,7 @@ export async function ensureHostingCaddyRuntime(
     await Deno.remove(unitSource).catch(() => {});
     throw new Error("hosting Caddy could not be installed or started");
   }
+  markHostingCaddyRuntimeEnsuredForDeploy();
 }
 
 /** Optional test seams for {@link ensureHostingIngress}. */
@@ -2288,6 +2352,18 @@ async function quarantineHostingSnippets(
  * other environments' files fail on their own, without the new one), that file
  * is set aside and the new snippet is judged again.
  */
+async function ensureHostingCaddyRuntimeBeforeValidate(
+  layout: LayoutPaths,
+): Promise<void> {
+  if (hostingCaddyRuntimeEnsuredThisDeploy) return;
+  if (ensureBeforeValidateOverride && !ensureHostingCaddyRuntimeOverride) {
+    await ensureBeforeValidateOverride(layout);
+    markHostingCaddyRuntimeEnsuredForDeploy();
+    return;
+  }
+  await ensureHostingCaddyRuntime(layout);
+}
+
 async function validateHostingCaddyCandidate(
   layout: LayoutPaths,
   hostingDir: string,
@@ -2301,6 +2377,11 @@ async function validateHostingCaddyCandidate(
     const others = (await liveSnippetNames(sitesDir)).filter((name) =>
       name !== siteFile
     );
+    if (
+      hostingCaddyValidateNeedsEdgeRuntime(contents, others, siteFile)
+    ) {
+      await ensureHostingCaddyRuntimeBeforeValidate(layout);
+    }
     await Promise.all(
       others.map((name) =>
         Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
@@ -2377,6 +2458,9 @@ async function guardHostingCaddySitesLocked(
     throw err;
   }
   if (names.length === 0) return [];
+  const substantive = names.filter((name) => !isDaemonReservedHostingSite(name));
+  if (substantive.length === 0) return [];
+  await ensureHostingCaddyRuntimeBeforeValidate(layout);
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
     await Promise.all(
