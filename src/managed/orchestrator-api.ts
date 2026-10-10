@@ -19,6 +19,8 @@ export type OrchestratorApiDeps = {
   fetch?: OrchestratorHttpFn;
   baseUrl?: string;
   credentials?: OrchestratorApiCredentials;
+  /** Abort the request after this many milliseconds (default: no limit). */
+  timeoutMs?: number;
 };
 
 function basicAuthHeader(creds: OrchestratorApiCredentials): string {
@@ -40,7 +42,11 @@ async function orchestratorGet(
   if (deps.credentials) {
     headers.Authorization = basicAuthHeader(deps.credentials);
   }
-  const response = await fetchFn(`${base}${path}`, { headers });
+  const init: RequestInit = { headers };
+  if (deps.timeoutMs !== undefined) {
+    init.signal = AbortSignal.timeout(deps.timeoutMs);
+  }
+  const response = await fetchFn(`${base}${path}`, init);
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new Error(
@@ -150,16 +156,27 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
+function parseOrchestratorPort(value: unknown): number | undefined {
+  const asNum = optionalNumber(value);
+  if (asNum !== undefined) return asNum;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const port = Number(trimmed);
+  return port >= 1 && port <= 65_535 ? port : undefined;
+}
+
 function parseProblemKey(
   value: unknown,
 ): OrchestratorProblem["key"] | undefined {
   const keyRecord = asRecord(value);
   if (!keyRecord) return undefined;
-  return {
-    hostname: optionalString(keyRecord.Hostname) ??
-      optionalString(keyRecord.hostname),
-    port: optionalNumber(keyRecord.Port) ?? optionalNumber(keyRecord.port),
-  };
+  const hostname = optionalString(keyRecord.Hostname) ??
+    optionalString(keyRecord.hostname);
+  const port = parseOrchestratorPort(keyRecord.Port) ??
+    parseOrchestratorPort(keyRecord.port);
+  if (hostname === undefined && port === undefined) return undefined;
+  return { hostname, port };
 }
 
 function parseProblemNames(value: unknown): string[] | undefined {
@@ -198,4 +215,58 @@ export async function listOrchestratorProblems(
 ): Promise<OrchestratorProblem[]> {
   const value = await orchestratorGet("/api/problems", deps);
   return parseOrchestratorProblems(value);
+}
+
+export type OrchestratorReplicationAnalysis = {
+  clusterAlias?: string;
+  key?: { hostname?: string; port?: number };
+  analysis?: string;
+  isMaster?: boolean;
+};
+
+function parseReplicationAnalysisEntry(
+  entry: unknown,
+): OrchestratorReplicationAnalysis | null {
+  const record = asRecord(entry);
+  if (!record) return null;
+  const parsed: OrchestratorReplicationAnalysis = {};
+  const clusterDetails = asRecord(
+    record.ClusterDetails ?? record.clusterDetails,
+  );
+  const clusterAlias = clusterDetails
+    ? optionalString(clusterDetails.ClusterAlias) ??
+      optionalString(clusterDetails.clusterAlias)
+    : undefined;
+  if (clusterAlias !== undefined) parsed.clusterAlias = clusterAlias;
+  const key = parseProblemKey(
+    record.AnalyzedInstanceKey ?? record.analyzedInstanceKey,
+  );
+  if (key) parsed.key = key;
+  const analysis = optionalString(record.Analysis) ??
+    optionalString(record.analysis);
+  if (analysis !== undefined) parsed.analysis = analysis;
+  const isMaster = record.IsMaster ?? record.isMaster;
+  if (typeof isMaster === "boolean") parsed.isMaster = isMaster;
+  return parsed;
+}
+
+export function parseOrchestratorReplicationAnalysis(
+  value: unknown,
+): OrchestratorReplicationAnalysis[] {
+  const envelope = asRecord(value);
+  const entries = envelope?.Details ?? envelope?.details ?? value;
+  if (!Array.isArray(entries)) return [];
+  const analysis: OrchestratorReplicationAnalysis[] = [];
+  for (const entry of entries) {
+    const parsed = parseReplicationAnalysisEntry(entry);
+    if (parsed) analysis.push(parsed);
+  }
+  return analysis;
+}
+
+export async function listOrchestratorReplicationAnalysis(
+  deps: OrchestratorApiDeps = {},
+): Promise<OrchestratorReplicationAnalysis[]> {
+  const value = await orchestratorGet("/api/replication-analysis", deps);
+  return parseOrchestratorReplicationAnalysis(value);
 }

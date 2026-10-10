@@ -31,10 +31,12 @@ import {
   orchestratorCompose,
   orchestratorStackPresent,
   orchestratorTopologyAliases,
+  pickLiveOrConfiguredEngineDial,
   pickPublishedEngineDial,
   readCurrentOrchestratorManagedNetwork,
   readManagedNetworkFromCompose,
   renderOrchestratorConf,
+  resolveOrchestratorMemberDial,
   resolveOrchestratorRegisterHost,
   restartOrchestratorStack,
   reviveStoppedOrchestratorContainer,
@@ -221,6 +223,109 @@ test("resolveOrchestratorRegisterHost inspects a container-name host", async () 
   );
   assertEquals(dial, { host: "10.100.0.5", port: 45001 });
   assertEquals(commands[0]?.[0], "inspect");
+});
+
+test("pickLiveOrConfiguredEngineDial reads a killed container's configured bindings", () => {
+  // Docker 29 output for this format before and after `docker kill`.
+  const running =
+    '{"live":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}';
+  const killed =
+    '{"live":{},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}';
+  const expected = { host: "10.100.0.5", port: 45001 };
+  assertEquals(pickLiveOrConfiguredEngineDial(running, 3306), expected);
+  assertEquals(pickLiveOrConfiguredEngineDial(killed, 3306), expected);
+});
+
+test("pickLiveOrConfiguredEngineDial refuses bindings Orchestrator cannot know", () => {
+  for (
+    const json of [
+      '{"live":{},"configured":{}}',
+      '{"live":null,"configured":null}',
+      '{"live":{},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":""}]}}',
+      '{"live":{},"configured":{"3306/tcp":[{"HostIp":"0.0.0.0","HostPort":"45001"}]}}',
+      '{"live":{},"configured":{"5432/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}',
+      "null",
+      "not-json",
+    ]
+  ) {
+    assertEquals(pickLiveOrConfiguredEngineDial(json, 3306), null, json);
+  }
+});
+
+test("resolveOrchestratorMemberDial inspects live and configured ports", async () => {
+  const commands: string[][] = [];
+  const dial = await resolveOrchestratorMemberDial(
+    { containerName: "db-1", port: 3306 },
+    (args) => {
+      commands.push([...args]);
+      return Promise.resolve({
+        success: true,
+        stdout:
+          '{"live":{},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}\n',
+        stderr: "",
+        code: 0,
+      });
+    },
+  );
+  assertEquals(dial, { host: "10.100.0.5", port: 45001 });
+  assertEquals(commands[0]?.[0], "inspect");
+  assertEquals(commands[0]?.at(-1), "db-1");
+  assertEquals(
+    commands[0]?.[2]?.includes(".HostConfig.PortBindings"),
+    true,
+  );
+  assertEquals(
+    commands[0]?.[2]?.includes(".NetworkSettings.Ports"),
+    true,
+  );
+});
+
+test("resolveOrchestratorMemberDial throws when inspect fails or nothing is published", async () => {
+  await assertRejects(
+    () =>
+      resolveOrchestratorMemberDial(
+        { containerName: "db-1", port: 3306 },
+        () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "No such object",
+            code: 1,
+          }),
+      ),
+    Error,
+    "No such object",
+  );
+  await assertRejects(
+    () =>
+      resolveOrchestratorMemberDial(
+        { containerName: "db-1", port: 3306 },
+        () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "",
+            code: 1,
+          }),
+      ),
+    Error,
+    "docker inspect failed",
+  );
+  await assertRejects(
+    () =>
+      resolveOrchestratorMemberDial(
+        { containerName: "db-1", port: 3306 },
+        () =>
+          Promise.resolve({
+            success: true,
+            stdout: '{"live":{},"configured":{}}',
+            stderr: "",
+            code: 0,
+          }),
+      ),
+    Error,
+    "needs a host-published port",
+  );
 });
 
 test("resolveOrchestratorRegisterHost keeps an IP host without inspect", async () => {
