@@ -68,6 +68,49 @@ test("isDeadPrimaryProblem matches known dead-primary names", () => {
   assertEquals(isDeadPrimaryProblem("LaggingReplica"), false);
 });
 
+/** Percona Orchestrator 3.2.6 codes for a primary that is itself down. */
+const DEAD_PRIMARY_CODES = [
+  "DeadMaster",
+  "DeadMasterAndReplicas",
+  "DeadMasterAndSomeReplicas",
+  "DeadMasterWithoutReplicas",
+  "DeadPrimary",
+  "UnreachableMaster",
+  "UnreachablePrimary",
+];
+
+/** Codes where the primary is reachable, or the row is not the primary's. */
+const NOT_DEAD_PRIMARY_CODES = [
+  "NoProblem",
+  "",
+  "deadmaster",
+  "DeadMasterX",
+  "MasterSingleReplicaNotReplicating",
+  "MasterSingleReplicaDead",
+  "AllMasterReplicasNotReplicating",
+  "AllMasterReplicasNotReplicatingOrDead",
+  "MasterWithoutReplicas",
+  "UnreachableMasterWithLaggingReplicas",
+  "DeadIntermediateMaster",
+  "DeadIntermediateMasterAndReplicas",
+  "UnreachableIntermediateMaster",
+  "DeadCoMaster",
+  "DeadCoMasterAndSomeReplicas",
+  "DeadMasterAndSlaves",
+];
+
+test("isDeadPrimaryProblem accepts every dead-primary code Orchestrator 3.2.6 reports", () => {
+  for (const code of DEAD_PRIMARY_CODES) {
+    assertEquals(isDeadPrimaryProblem(code), true, code);
+  }
+});
+
+test("isDeadPrimaryProblem refuses healthy, replica-side and unknown codes", () => {
+  for (const code of NOT_DEAD_PRIMARY_CODES) {
+    assertEquals(isDeadPrimaryProblem(code), false, code);
+  }
+});
+
 test("parseOrchestratorProblems accepts string Port values", () => {
   assertEquals(
     parseOrchestratorProblems([{
