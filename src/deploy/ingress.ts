@@ -329,9 +329,18 @@ export function setIngressHostCommandForTest(
   fn?: IngressHostCommandFn,
 ): () => void {
   const previous = hostCommandOverride;
+  const previousBeforeValidate = ensureBeforeValidateOverride;
   hostCommandOverride = fn;
+  if (
+    fn !== undefined &&
+    ensureBeforeValidateOverride === undefined &&
+    ensureHostingCaddyRuntimeOverride === undefined
+  ) {
+    ensureBeforeValidateOverride = () => Promise.resolve();
+  }
   return () => {
     hostCommandOverride = previous;
+    ensureBeforeValidateOverride = previousBeforeValidate;
   };
 }
 
@@ -961,11 +970,37 @@ async function installAndStartCaddy(
   return true;
 }
 
+let ensureHostingCaddyRuntimeOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+let ensureBeforeValidateOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+/**
+ * Test-only: observe or stub {@link ensureHostingCaddyRuntime}. Returns a
+ * restore function.
+ */
+export function setEnsureHostingCaddyRuntimeForTest(
+  fn?: (layout: LayoutPaths) => Promise<void>,
+): () => void {
+  const previous = ensureHostingCaddyRuntimeOverride;
+  ensureHostingCaddyRuntimeOverride = fn;
+  return () => {
+    ensureHostingCaddyRuntimeOverride = previous;
+  };
+}
+
 /** Ensure hosting Caddy binary, Caddyfile, sites dir, and systemd unit. */
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
   deps?: EnsureHostingCaddyDeps,
 ): Promise<void> {
+  if (ensureHostingCaddyRuntimeOverride) {
+    await ensureHostingCaddyRuntimeOverride(layout);
+    return;
+  }
   await ensureHostingCaddy(layout, deps);
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
@@ -2288,6 +2323,16 @@ async function quarantineHostingSnippets(
  * other environments' files fail on their own, without the new one), that file
  * is set aside and the new snippet is judged again.
  */
+async function ensureHostingCaddyRuntimeBeforeValidate(
+  layout: LayoutPaths,
+): Promise<void> {
+  if (ensureBeforeValidateOverride && !ensureHostingCaddyRuntimeOverride) {
+    await ensureBeforeValidateOverride(layout);
+    return;
+  }
+  await ensureHostingCaddyRuntime(layout);
+}
+
 async function validateHostingCaddyCandidate(
   layout: LayoutPaths,
   hostingDir: string,
@@ -2296,6 +2341,7 @@ async function validateHostingCaddyCandidate(
   contents: string,
   grantRead: (hostingDir: string) => Promise<void>,
 ): Promise<void> {
+  await ensureHostingCaddyRuntimeBeforeValidate(layout);
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
     const others = (await liveSnippetNames(sitesDir)).filter((name) =>
@@ -2377,6 +2423,7 @@ async function guardHostingCaddySitesLocked(
     throw err;
   }
   if (names.length === 0) return [];
+  await ensureHostingCaddyRuntimeBeforeValidate(layout);
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
     await Promise.all(
