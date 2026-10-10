@@ -171,7 +171,8 @@ export async function waitForOrchestratorRaftLeader(
     ...deps,
     timeoutMs: deps.timeoutMs ?? 5_000,
   };
-  while (true) {
+  // One poll per call (no loop): wait, then poll again until the deadline.
+  const poll = async (): Promise<boolean> => {
     let ready: boolean | null = false;
     try {
       ready = orchestratorRaftReady(
@@ -187,7 +188,9 @@ export async function waitForOrchestratorRaftLeader(
     if (ready !== false) return true;
     if (now() >= deadline) return false;
     await sleep(intervalMs);
-  }
+    return await poll();
+  };
+  return await poll();
 }
 
 export type OrchestratorRecoverTarget = {
