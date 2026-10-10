@@ -7,6 +7,7 @@
  */
 
 import type { LayoutPaths } from "../paths/layout.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   resolveOrchestratorRegisterHost,
   type RunDockerFn,
@@ -38,10 +39,12 @@ export async function resolveManagedIdForOrchestratorInstance(
   if (fromAlias) return fromAlias;
 
   const members = await listManagedHaMembers(layout);
-  for (const record of members) {
-    if (record.role !== "primary") continue;
+  let matched: string | null = null;
+  await forEachSequential(members, async (record) => {
+    if (matched !== null) return;
+    if (record.role !== "primary") return;
     const containerPort = ENGINE_CONTAINER_PORT[record.engine];
-    if (containerPort === undefined) continue;
+    if (containerPort === undefined) return;
     let dial: { host: string; port: number };
     try {
       dial = await resolveOrchestratorRegisterHost(
@@ -53,11 +56,11 @@ export async function resolveManagedIdForOrchestratorInstance(
         run,
       );
     } catch {
-      continue;
+      return;
     }
     if (dial.host === key.hostname && dial.port === key.port) {
-      return record.managedId;
+      matched = record.managedId;
     }
-  }
-  return null;
+  });
+  return matched;
 }

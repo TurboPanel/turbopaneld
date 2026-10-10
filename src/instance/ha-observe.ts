@@ -6,6 +6,7 @@
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   loadOrchestratorApiCredentials,
@@ -179,22 +180,22 @@ export class ManagedHaObserver {
   ): Promise<void> {
     const layout = this.#resolveLayout();
     const entries = await listOrchestratorReplicationAnalysis(api);
-    for (const entry of entries) {
-      if (entry.isMaster !== true) continue;
+    await forEachSequential(entries, async (entry) => {
+      if (entry.isMaster !== true) return;
       const analysis = entry.analysis;
-      if (!analysis || !isDeadPrimaryProblem(analysis)) continue;
+      if (!analysis || !isDeadPrimaryProblem(analysis)) return;
       const hostname = entry.key?.hostname;
       const port = entry.key?.port;
-      if (!hostname || port === undefined) continue;
+      if (!hostname || port === undefined) return;
       const managedId = await resolveManagedIdForOrchestratorInstance(
         layout,
         { hostname, port },
         entry.clusterAlias,
         this.#runDocker,
       );
-      if (!managedId) continue;
+      if (!managedId) return;
       this.#emitDeadPrimary(managedId, { hostname, port });
-    }
+    });
   }
 
   async poll(): Promise<void> {
