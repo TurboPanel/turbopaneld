@@ -83,7 +83,8 @@ function assertSafeDatabaseIdentifier(database: string): string {
 /**
  * `$1` root user, `$2` database, `$3` reset SQL, `$4` per-login schema SQL.
  * The sentinel line is printed by the server only after `COMMIT` succeeded;
- * success needs both that line on stdout and psql's exit status.
+ * success needs psql's exit status 0 and that line as the last line of stdout
+ * (dump replay prints other rows, such as `setval` results, before it).
  * `client_min_messages = warning` keeps the reset's "drop cascades to ..."
  * notices out of stderr, so a failure reports the real error line.
  */
@@ -99,11 +100,14 @@ const POSTGRES_RESTORE_SCRIPT = [
     .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
   "  fi",
   '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
+  "rc=$?",
   "set -e",
-  'case "$out" in',
-  "  *tp_restore_committed*) ;;",
-  "  *) echo 'restore was not committed; the database is unchanged' >&2; exit 1 ;;",
-  "esac",
+  String.raw`last=$(printf '%s
+' "$out" | tail -n 1)`,
+  'if [ "$rc" -ne 0 ] || [ "$last" != tp_restore_committed ]; then',
+  "  echo 'restore was not committed; the database is unchanged' >&2",
+  "  exit 1",
+  "fi",
 ].join("\n");
 
 const postgresBackupRuntime: ManagedEngineBackupRuntime = {
