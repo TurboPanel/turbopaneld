@@ -13,6 +13,7 @@ import type { ManagedEngineCode } from "../contracts/commands-contracts.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { clearDemotedVolumeFence } from "./demoted-fence-volume.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { describeUnknown } from "../util/describe-unknown.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
@@ -216,7 +217,7 @@ export async function recordDemotedEnforceReadOnlyFailure(
   managedId: string,
   err: unknown,
 ): Promise<void> {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = describeUnknown(err);
   await patchManagedDemotedMarker(layout, managedId, {
     enforceReadOnlyFailedAt: new Date().toISOString(),
     enforceReadOnlyLastError: message.slice(0, 500),
