@@ -647,15 +647,12 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
     await runPsql(ctx, reactivateFormerPrimaryAfterSwitchoverAbortSql());
     const deadline = Date.now() + 60_000;
-    const writable = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
+    while (Date.now() < deadline) {
       const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
       const value = rows[0]?.[0]?.toLowerCase();
-      if (value === "t" || value === "true") return true;
+      if (value === "t" || value === "true") return;
       await sleep(500);
-      return writable();
-    };
-    if (await writable()) return;
+    }
     throw new Error(
       "switchover: former primary did not become writable after reactivation",
     );

@@ -51,6 +51,41 @@ async function engineRunningState(
     : "stopped";
 }
 
+async function stopWritableDemotedEngine(
+  layout: LayoutPaths,
+  member: ManagedHaMemberRecord,
+  run: DockerRunFn,
+  warned: Set<string>,
+): Promise<void> {
+  await enforceFencedMemberIfRunning(
+    layout,
+    member.managedId,
+    member.engine,
+    run,
+  );
+  const stillWritable = await isFencedMemberStillWritable(
+    layout,
+    member.managedId,
+    member.engine,
+    run,
+  );
+  if (!stillWritable) {
+    warned.delete(member.managedId);
+    return;
+  }
+  await recordManagedIntent(layout.stateDir, member.managedId, "stop", {
+    mode: "held",
+  });
+  if (!warned.has(member.managedId)) {
+    logWarn(
+      "managed",
+      `demoted member is running; stopping it managedId=${member.managedId} member=${member.memberId}`,
+    );
+    warned.add(member.managedId);
+  }
+  await stopDemotedEngine(run, member.managedId);
+}
+
 async function stopDemotedEngine(
   run: DockerRunFn,
   managedId: string,
@@ -185,32 +220,11 @@ export class DemotedMemberGuard {
         `demoted member guard: compose ps failed; treating engine as possibly running managedId=${member.managedId}`,
       );
     }
-    await enforceFencedMemberIfRunning(
+    await stopWritableDemotedEngine(
       this.#layout,
-      member.managedId,
-      member.engine,
+      member,
       this.#run,
+      this.#warned,
     );
-    const stillWritable = await isFencedMemberStillWritable(
-      this.#layout,
-      member.managedId,
-      member.engine,
-      this.#run,
-    );
-    if (!stillWritable) {
-      this.#warned.delete(member.managedId);
-      return;
-    }
-    await recordManagedIntent(this.#layout.stateDir, member.managedId, "stop", {
-      mode: "held",
-    });
-    if (!this.#warned.has(member.managedId)) {
-      logWarn(
-        "managed",
-        `demoted member is running; stopping it managedId=${member.managedId} member=${member.memberId}`,
-      );
-      this.#warned.add(member.managedId);
-    }
-    await stopDemotedEngine(this.#run, member.managedId);
   }
 }

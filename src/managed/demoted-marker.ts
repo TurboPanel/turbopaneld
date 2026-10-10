@@ -14,6 +14,7 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { clearDemotedVolumeFence } from "./demoted-fence-volume.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import {
   managedComposePath,
   managedDir,
@@ -206,15 +207,38 @@ async function resolveDemotedEngine(
   }
 }
 
+type DemotedFenceTarget = {
+  managedId: string;
+  memberId?: string;
+  engine?: ManagedEngineCode;
+};
+
+async function addOrphanDemotedFenceTarget(
+  layout: LayoutPaths,
+  byId: Map<string, DemotedFenceTarget>,
+  managedId: string,
+): Promise<void> {
+  if (byId.has(managedId)) return;
+  const marker = await readManagedDemotedMarker(layout, managedId);
+  const engine = await resolveDemotedEngine(layout, managedId, marker);
+  if (!engine) {
+    logWarn(
+      "managed",
+      `demoted fence: skipping orphan marker without engine managedId=${managedId}`,
+    );
+    return;
+  }
+  byId.set(managedId, {
+    managedId,
+    ...(marker?.memberId.length ? { memberId: marker.memberId } : {}),
+    engine,
+  });
+}
+
 export async function listDemotedFenceTargets(
   layout: LayoutPaths,
-): Promise<
-  Array<{ managedId: string; memberId?: string; engine?: ManagedEngineCode }>
-> {
-  const byId = new Map<
-    string,
-    { managedId: string; memberId?: string; engine?: ManagedEngineCode }
-  >();
+): Promise<DemotedFenceTarget[]> {
+  const byId = new Map<string, DemotedFenceTarget>();
   for (
     const member of await listDemotedHaMembers(
       layout,
@@ -223,23 +247,10 @@ export async function listDemotedFenceTargets(
   ) {
     byId.set(member.managedId, member);
   }
-  for (const managedId of await listDemotedManagedIds(layout)) {
-    if (byId.has(managedId)) continue;
-    const marker = await readManagedDemotedMarker(layout, managedId);
-    const engine = await resolveDemotedEngine(layout, managedId, marker);
-    if (!engine) {
-      logWarn(
-        "managed",
-        `demoted fence: skipping orphan marker without engine managedId=${managedId}`,
-      );
-      continue;
-    }
-    byId.set(managedId, {
-      managedId,
-      ...(marker?.memberId.length ? { memberId: marker.memberId } : {}),
-      engine,
-    });
-  }
+  await forEachSequential(
+    await listDemotedManagedIds(layout),
+    (managedId) => addOrphanDemotedFenceTarget(layout, byId, managedId),
+  );
   return [...byId.values()];
 }
 
