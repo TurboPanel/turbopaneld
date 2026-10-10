@@ -20,8 +20,9 @@ import {
   listOrchestratorProblems,
   listOrchestratorReplicationAnalysis,
   type OrchestratorApiDeps,
+  type OrchestratorReplicationAnalysis,
 } from "../managed/orchestrator-api.ts";
-import { resolveManagedIdForOrchestratorInstance } from "../managed/ha-orchestrator-managed-id.ts";
+import { resolveOrchestratorDeadPrimaryEmit } from "../managed/ha-orchestrator-managed-id.ts";
 import {
   runDocker as defaultRunDocker,
   type RunDockerFn,
@@ -29,6 +30,8 @@ import {
 
 const HA_OBSERVE_MS = 15_000;
 const HA_REVIVE_COOLDOWN_MS = 60_000;
+/** Matches the control-plane automatic-failover cooldown for re-triggers. */
+const HA_INCIDENT_REEMIT_MS = 15 * 60_000;
 const MANAGED_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -63,6 +66,14 @@ export type ManagedHaObserverOptions = {
   runDocker?: RunDockerFn;
 };
 
+function isReplicationAnalysisMasterRow(
+  entry: OrchestratorReplicationAnalysis,
+): boolean {
+  if (entry.isMaster === false) return false;
+  const analysis = entry.analysis;
+  return analysis !== undefined && isDeadPrimaryProblem(analysis);
+}
+
 export class ManagedHaObserver {
   readonly #intervalMs: number;
   readonly #now: () => string;
@@ -73,7 +84,9 @@ export class ManagedHaObserver {
   readonly #nowMs: () => number;
   readonly #layout: LayoutPaths | undefined;
   readonly #runDocker: RunDockerFn;
-  readonly #emitted = new Set<string>();
+  readonly #incidentLastEmit = new Map<string, number>();
+  readonly #emittedThisPoll = new Set<string>();
+  #deadIncidentsThisPoll = new Set<string>();
   #lastReviveAttemptMs: number | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
 
@@ -139,12 +152,18 @@ export class ManagedHaObserver {
 
   #emitDeadPrimary(
     managedId: string,
+    incidentKey: string,
     key: { hostname?: string; port?: number },
   ): void {
+    if (this.#emittedThisPoll.has(incidentKey)) return;
+    const now = this.#nowMs();
+    const lastEmit = this.#incidentLastEmit.get(incidentKey);
+    if (lastEmit !== undefined && now - lastEmit < HA_INCIDENT_REEMIT_MS) {
+      return;
+    }
+    this.#emittedThisPoll.add(incidentKey);
+    this.#incidentLastEmit.set(incidentKey, now);
     const { hostname, port } = key;
-    const dedupe = `${managedId}:${hostname ?? ""}:${port ?? ""}`;
-    if (this.#emitted.has(dedupe)) return;
-    this.#emitted.add(dedupe);
     const instance = hostname && port !== undefined
       ? { instanceHost: hostname, instancePort: port }
       : {};
@@ -162,51 +181,87 @@ export class ManagedHaObserver {
     );
   }
 
-  async #pollProblems(
-    api: OrchestratorApiDeps & { credentials: OrchestratorApiCredentials },
-  ): Promise<void> {
-    const problems = await listOrchestratorProblems(api);
-    for (const problem of problems) {
-      const alias = problem.clusterAlias;
-      if (!alias || !MANAGED_ID_RE.test(alias)) continue;
-      const names = problem.problems ?? [];
-      if (!names.some((name) => isDeadPrimaryProblem(name))) continue;
-      this.#emitDeadPrimary(alias, problem.key ?? {});
+  #clearRecoveredIncidents(): void {
+    for (const key of this.#incidentLastEmit.keys()) {
+      if (!this.#deadIncidentsThisPoll.has(key)) {
+        this.#incidentLastEmit.delete(key);
+      }
     }
   }
 
-  async #pollReplicationAnalysis(
+  async #tryEmitOrchestratorDeadPrimary(
+    layout: LayoutPaths,
+    analyzedKey: { hostname?: string; port?: number },
+    clusterAlias?: string,
+  ): Promise<void> {
+    const ctx = await resolveOrchestratorDeadPrimaryEmit(
+      layout,
+      analyzedKey,
+      clusterAlias,
+      this.#runDocker,
+      this.#nowMs(),
+    );
+    if (!ctx) return;
+    this.#deadIncidentsThisPoll.add(ctx.incidentKey);
+    this.#emitDeadPrimary(ctx.managedId, ctx.incidentKey, ctx.emitKey);
+  }
+
+  async #pollProblems(
+    layout: LayoutPaths,
     api: OrchestratorApiDeps & { credentials: OrchestratorApiCredentials },
   ): Promise<void> {
-    const layout = this.#resolveLayout();
+    const problems = await listOrchestratorProblems(api);
+    await forEachSequential(problems, async (problem) => {
+      const alias = problem.clusterAlias;
+      if (!alias || !MANAGED_ID_RE.test(alias)) return;
+      const names = problem.problems ?? [];
+      if (!names.some((name) => isDeadPrimaryProblem(name))) return;
+      await this.#tryEmitOrchestratorDeadPrimary(
+        layout,
+        problem.key ?? {},
+        alias,
+      );
+    });
+  }
+
+  async #pollReplicationAnalysis(
+    layout: LayoutPaths,
+    api: OrchestratorApiDeps & { credentials: OrchestratorApiCredentials },
+  ): Promise<void> {
     const entries = await listOrchestratorReplicationAnalysis(api);
     await forEachSequential(entries, async (entry) => {
-      if (entry.isMaster !== true) return;
-      const analysis = entry.analysis;
-      if (!analysis || !isDeadPrimaryProblem(analysis)) return;
+      if (!isReplicationAnalysisMasterRow(entry)) return;
       const hostname = entry.key?.hostname;
       const port = entry.key?.port;
-      if (!hostname || port === undefined) return;
-      const managedId = await resolveManagedIdForOrchestratorInstance(
+      await this.#tryEmitOrchestratorDeadPrimary(
         layout,
         { hostname, port },
         entry.clusterAlias,
-        this.#runDocker,
       );
-      if (!managedId) return;
-      this.#emitDeadPrimary(managedId, { hostname, port });
     });
   }
 
   async poll(): Promise<void> {
+    this.#emittedThisPoll.clear();
+    this.#deadIncidentsThisPoll = new Set();
+    const layout = this.#resolveLayout();
     try {
       if (!(await this.#isStackPresent())) return;
       await this.#maybeReviveStack();
       const credentials = this.#api?.credentials ??
-        await loadOrchestratorApiCredentials(this.#resolveLayout());
+        await loadOrchestratorApiCredentials(layout);
       const api = { ...this.#api, credentials };
-      await this.#pollProblems(api);
-      await this.#pollReplicationAnalysis(api);
+      await this.#pollProblems(layout, api);
+      try {
+        await this.#pollReplicationAnalysis(layout, api);
+      } catch (err) {
+        logWarn(
+          "managed",
+          "orchestrator replication-analysis poll failed:",
+          sanitizeForLog(err),
+        );
+      }
+      this.#clearRecoveredIncidents();
     } catch (err) {
       logWarn("managed", "managed-ha observe failed:", sanitizeForLog(err));
     }

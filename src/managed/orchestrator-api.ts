@@ -150,16 +150,27 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
+function parseOrchestratorPort(value: unknown): number | undefined {
+  const asNum = optionalNumber(value);
+  if (asNum !== undefined) return asNum;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const port = Number(trimmed);
+  return port >= 1 && port <= 65_535 ? port : undefined;
+}
+
 function parseProblemKey(
   value: unknown,
 ): OrchestratorProblem["key"] | undefined {
   const keyRecord = asRecord(value);
   if (!keyRecord) return undefined;
-  return {
-    hostname: optionalString(keyRecord.Hostname) ??
-      optionalString(keyRecord.hostname),
-    port: optionalNumber(keyRecord.Port) ?? optionalNumber(keyRecord.port),
-  };
+  const hostname = optionalString(keyRecord.Hostname) ??
+    optionalString(keyRecord.hostname);
+  const port = parseOrchestratorPort(keyRecord.Port) ??
+    parseOrchestratorPort(keyRecord.port);
+  if (hostname === undefined && port === undefined) return undefined;
+  return { hostname, port };
 }
 
 function parseProblemNames(value: unknown): string[] | undefined {

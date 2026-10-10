@@ -20,6 +20,8 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+const MANAGED_ID = "00000000-0000-4000-8000-0000000000aa";
+
 test("parseOrchestratorProblems returns empty for non-arrays", () => {
   assertEquals(parseOrchestratorProblems(null), []);
   assertEquals(parseOrchestratorProblems({}), []);
@@ -64,6 +66,36 @@ test("isDeadPrimaryProblem matches known dead-primary names", () => {
   assertEquals(isDeadPrimaryProblem("DeadMaster"), true);
   assertEquals(isDeadPrimaryProblem("UnreachablePrimary"), true);
   assertEquals(isDeadPrimaryProblem("LaggingReplica"), false);
+});
+
+test("parseOrchestratorProblems accepts string Port values", () => {
+  assertEquals(
+    parseOrchestratorProblems([{
+      ClusterAlias: MANAGED_ID,
+      Key: { Hostname: "db-1", Port: "45001" },
+      Problems: ["DeadPrimary"],
+    }]),
+    [{
+      clusterAlias: MANAGED_ID,
+      key: { hostname: "db-1", port: 45001 },
+      problems: ["DeadPrimary"],
+    }],
+  );
+});
+
+test("parseOrchestratorReplicationAnalysis reads string Port values", () => {
+  assertEquals(
+    parseOrchestratorReplicationAnalysis({
+      Details: [{
+        AnalyzedInstanceKey: { Hostname: "172.20.4.10", Port: "45001" },
+        Analysis: "DeadMaster",
+      }],
+    }),
+    [{
+      key: { hostname: "172.20.4.10", port: 45001 },
+      analysis: "DeadMaster",
+    }],
+  );
 });
 
 test("parseOrchestratorReplicationAnalysis reads the Details envelope", () => {

@@ -66,3 +66,51 @@ test("resolveManagedIdForOrchestratorInstance maps a local primary dial", async 
     assertEquals(managedId, MANAGED_ID);
   });
 });
+
+test("resolveOrchestratorDeadPrimaryEmit refuses UUID alias when the key is not the local primary dial", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    const now = new Date().toISOString();
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: "00000000-0000-4000-8000-000000000001",
+      engine: "mysql",
+      role: "primary",
+      containerName: "mysql-primary-1",
+      replicaPeerCount: 1,
+      peerCount: 1,
+      updatedAt: now,
+    });
+    const { resolveOrchestratorDeadPrimaryEmit } = await import(
+      "./ha-orchestrator-managed-id.ts"
+    );
+    const ctx = await resolveOrchestratorDeadPrimaryEmit(
+      layout,
+      { hostname: "10.0.0.9", port: 9999 },
+      MANAGED_ID,
+      (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify({
+              "3306/tcp": [{ HostIp: "172.20.4.10", HostPort: "45001" }],
+            }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
+      },
+      Date.now(),
+    );
+    assertEquals(ctx, null);
+  });
+});

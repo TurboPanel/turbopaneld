@@ -20,73 +20,131 @@ import { type ManagedHaEventMessage, ManagedHaObserver } from "./ha-observe.ts";
 const test = Deno.test.bind(Deno);
 
 const MANAGED_ID = "00000000-0000-4000-8000-0000000000aa";
+const MEMBER_ID = "00000000-0000-4000-8000-000000000001";
+const DEFAULT_DIAL = { hostname: "172.20.4.10", port: 5432 };
+
+async function seedMysqlPrimary(
+  layout: ReturnType<typeof resolveLayout>,
+  managedId = MANAGED_ID,
+): Promise<void> {
+  const { saveManagedHaMember } = await import("../managed/ha-member.ts");
+  await Deno.mkdir(`${layout.stateDir}/managed/${managedId}`, {
+    recursive: true,
+  });
+  await saveManagedHaMember(layout, {
+    managedId,
+    memberId: MEMBER_ID,
+    engine: "mysql",
+    role: "primary",
+    containerName: "mysql-primary-1",
+    replicaPeerCount: 1,
+    peerCount: 1,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function runDockerForDial(dial: { hostname: string; port: number }) {
+  return (args: string[]) => {
+    if (args[0] === "inspect") {
+      return Promise.resolve({
+        success: true,
+        stdout: JSON.stringify({
+          "3306/tcp": [{
+            HostIp: dial.hostname,
+            HostPort: String(dial.port),
+          }],
+        }),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: "",
+      code: 1,
+    });
+  };
+}
 
 function problemResponse(problems: OrchestratorProblem[]): Response {
   return new Response(JSON.stringify(problems), { status: 200 });
 }
 
 test("ManagedHaObserver.attach schedules poll and detach clears the timer", async () => {
-  const sent: ManagedHaEventMessage[] = [];
-  const clock = createFakeClock();
-  const observer = new ManagedHaObserver({
-    intervalMs: 20,
-    now: () => new Date(clock.now()).toISOString(),
-    send: (message) => {
-      sent.push(message);
-    },
-    isStackPresent: () => Promise.resolve(true),
-    api: {
-      credentials: { user: "admin", password: "x" },
-      fetch: () =>
-        Promise.resolve(
-          problemResponse([{
-            clusterAlias: MANAGED_ID,
-            key: { hostname: "db-1", port: 5432 },
-            problems: ["DeadPrimary"],
-          }]),
-        ),
-    },
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    const clock = createFakeClock();
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
+      intervalMs: 20,
+      now: () => new Date(clock.now()).toISOString(),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              key: DEFAULT_DIAL,
+              problems: ["DeadPrimary"],
+            }]),
+          ),
+      },
+    });
+
+    observer.attach();
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    await flushMicrotasks();
+    observer.detach();
+    const afterDetach = sent.length;
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    await flushMicrotasks();
+
+    assertEquals(afterDetach >= 1, true);
+    assertEquals(sent.length, afterDetach);
+    assertEquals(sent[0]?.type, "managed-ha-event");
+    assertEquals(sent[0]?.managedId, MANAGED_ID);
+    assertEquals(sent[0]?.instanceHost, DEFAULT_DIAL.hostname);
+    assertEquals(sent[0]?.instancePort, DEFAULT_DIAL.port);
   });
-
-  observer.attach();
-  await new Promise((resolve) => setTimeout(resolve, 45));
-  await flushMicrotasks();
-  observer.detach();
-  const afterDetach = sent.length;
-  await new Promise((resolve) => setTimeout(resolve, 45));
-  await flushMicrotasks();
-
-  assertEquals(afterDetach >= 1, true);
-  assertEquals(sent.length, afterDetach);
-  assertEquals(sent[0]?.type, "managed-ha-event");
-  assertEquals(sent[0]?.managedId, MANAGED_ID);
-  assertEquals(sent[0]?.instanceHost, "db-1");
-  assertEquals(sent[0]?.instancePort, 5432);
 });
 
 test("ManagedHaObserver sends no instance when Orchestrator's key is incomplete", async () => {
-  const sent: ManagedHaEventMessage[] = [];
-  const observer = new ManagedHaObserver({
-    send: (message) => {
-      sent.push(message);
-    },
-    isStackPresent: () => Promise.resolve(true),
-    api: {
-      credentials: { user: "admin", password: "x" },
-      fetch: () =>
-        Promise.resolve(
-          problemResponse([{
-            clusterAlias: MANAGED_ID,
-            key: { hostname: "db-1" },
-            problems: ["DeadPrimary"],
-          }]),
-        ),
-    },
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              key: { hostname: DEFAULT_DIAL.hostname },
+              problems: ["DeadPrimary"],
+            }]),
+          ),
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals("instanceHost" in sent[0], false);
+    assertEquals("instancePort" in sent[0], false);
   });
-  await observer.poll();
-  assertEquals(sent.length, 1);
-  assertEquals("instanceHost" in sent[0], false);
-  assertEquals("instancePort" in sent[0], false);
 });
 
 test("ManagedHaObserver emits from replication-analysis DeadMaster via ha-member dial", async () => {
@@ -211,27 +269,33 @@ test("ManagedHaObserver swallows poll failures without throwing", async () => {
 });
 
 test("ManagedHaObserver uses injected now() for the emitted at timestamp", async () => {
-  const sent: ManagedHaEventMessage[] = [];
-  const observer = new ManagedHaObserver({
-    now: () => "2026-08-25T12:00:00.000Z",
-    send: (message) => {
-      sent.push(message);
-    },
-    isStackPresent: () => Promise.resolve(true),
-    api: {
-      credentials: { user: "admin", password: "x" },
-      fetch: () =>
-        Promise.resolve(
-          problemResponse([{
-            clusterAlias: MANAGED_ID,
-            problems: ["UnreachablePrimary"],
-          }]),
-        ),
-    },
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
+      now: () => "2026-08-25T12:00:00.000Z",
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              problems: ["UnreachablePrimary"],
+            }]),
+          ),
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.at, "2026-08-25T12:00:00.000Z");
   });
-  await observer.poll();
-  assertEquals(sent.length, 1);
-  assertEquals(sent[0]?.at, "2026-08-25T12:00:00.000Z");
 });
 
 test("ManagedHaObserver loads Orchestrator credentials when api omits them", async () => {
@@ -258,6 +322,7 @@ test("ManagedHaObserver loads Orchestrator credentials when api omits them", asy
 test("ManagedHaObserver loads Orchestrator credentials from the layout when api omits them", async () => {
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
     await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
     await Deno.writeTextFile(
       orchestratorApiCnfPath(layout),
@@ -266,6 +331,7 @@ test("ManagedHaObserver loads Orchestrator credentials from the layout when api 
     const sent: ManagedHaEventMessage[] = [];
     const observer = new ManagedHaObserver({
       layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
       send: (message) => {
         sent.push(message);
       },
@@ -287,60 +353,66 @@ test("ManagedHaObserver loads Orchestrator credentials from the layout when api 
 });
 
 test("ManagedHaObserver skips absent stack, invalid aliases, and duplicate keys", async () => {
-  const sent: ManagedHaEventMessage[] = [];
-  const absent = new ManagedHaObserver({
-    send: (message) => {
-      sent.push(message);
-    },
-    isStackPresent: () => Promise.resolve(false),
-    api: {
-      credentials: { user: "admin", password: "x" },
-      fetch: () => {
-        throw new TypeError("orchestrator must not be queried");
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    const absent = new ManagedHaObserver({
+      send: (message) => {
+        sent.push(message);
       },
-    },
-  });
-  await absent.poll();
-  assertEquals(sent.length, 0);
+      isStackPresent: () => Promise.resolve(false),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => {
+          throw new TypeError("orchestrator must not be queried");
+        },
+      },
+    });
+    await absent.poll();
+    assertEquals(sent.length, 0);
 
-  const observer = new ManagedHaObserver({
-    send: (message) => {
-      sent.push(message);
-    },
-    isStackPresent: () => Promise.resolve(true),
-    api: {
-      credentials: { user: "admin", password: "x" },
-      fetch: () =>
-        Promise.resolve(
-          problemResponse([
-            {
-              clusterAlias: "not-a-uuid",
-              key: { hostname: "db-1", port: 5432 },
-              problems: ["DeadPrimary"],
-            },
-            {
-              clusterAlias: "",
-              problems: ["DeadPrimary"],
-            },
-            {
-              clusterAlias: MANAGED_ID,
-              key: { hostname: "db-1", port: 5432 },
-              problems: ["DeadPrimary"],
-            },
-          ]),
-        ),
-    },
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            problemResponse([
+              {
+                clusterAlias: "not-a-uuid",
+                key: DEFAULT_DIAL,
+                problems: ["DeadPrimary"],
+              },
+              {
+                clusterAlias: "",
+                problems: ["DeadPrimary"],
+              },
+              {
+                clusterAlias: MANAGED_ID,
+                key: DEFAULT_DIAL,
+                problems: ["DeadPrimary"],
+              },
+            ]),
+          ),
+      },
+    });
+    await observer.poll();
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.managedId, MANAGED_ID);
   });
-  await observer.poll();
-  await observer.poll();
-  assertEquals(sent.length, 1);
-  assertEquals(sent[0]?.managedId, MANAGED_ID);
 });
 
 function deadPrimaryResponse(): Response {
   return problemResponse([{
     clusterAlias: MANAGED_ID,
-    key: { hostname: "db-1", port: 5432 },
+    key: DEFAULT_DIAL,
     problems: ["DeadPrimary"],
   }]);
 }
@@ -348,12 +420,14 @@ function deadPrimaryResponse(): Response {
 test("ManagedHaObserver starts a killed Orchestrator container once", async () => {
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
     await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
     await Deno.writeTextFile(orchestratorComposePath(layout), "services: {}\n");
     const calls: string[][] = [];
     const sent: ManagedHaEventMessage[] = [];
     const observer = new ManagedHaObserver({
       layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
       send: (message) => {
         sent.push(message);
       },
@@ -396,11 +470,13 @@ test("ManagedHaObserver starts a killed Orchestrator container once", async () =
 test("ManagedHaObserver does not start a running Orchestrator container", async () => {
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
     await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
     await Deno.writeTextFile(orchestratorComposePath(layout), "services: {}\n");
     const calls: string[][] = [];
     const observer = new ManagedHaObserver({
       layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
       send: () => {},
       isStackPresent: () => Promise.resolve(true),
       reviveStack: () =>
@@ -483,39 +559,267 @@ test("ManagedHaObserver respects the orchestrator revive cooldown", async () => 
 });
 
 test("ManagedHaObserver continues the API poll when revive fails", async () => {
-  const decoder = new TextDecoder();
-  const warnings: string[] = [];
-  const originalWrite = Deno.stderr.writeSync;
-  Deno.stderr.writeSync = (buf) => {
-    warnings.push(decoder.decode(buf));
-    return buf.byteLength;
-  };
-  const sent: ManagedHaEventMessage[] = [];
-  let fetched = 0;
-  try {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const decoder = new TextDecoder();
+    const warnings: string[] = [];
+    const originalWrite = Deno.stderr.writeSync;
+    Deno.stderr.writeSync = (buf) => {
+      warnings.push(decoder.decode(buf));
+      return buf.byteLength;
+    };
+    const sent: ManagedHaEventMessage[] = [];
+    let fetched = 0;
+    try {
+      const observer = new ManagedHaObserver({
+        layout,
+        runDocker: runDockerForDial(DEFAULT_DIAL),
+        send: (message) => {
+          sent.push(message);
+        },
+        isStackPresent: () => Promise.resolve(true),
+        reviveStack: () => Promise.reject(new Error("compose start failed")),
+        api: {
+          credentials: { user: "admin", password: "x" },
+          fetch: () => {
+            fetched += 1;
+            return Promise.resolve(deadPrimaryResponse());
+          },
+        },
+      });
+      await observer.poll();
+      assertEquals(fetched, 2);
+      assertEquals(sent.length, 1);
+      assertEquals(sent[0]?.managedId, MANAGED_ID);
+      assertEquals(
+        warnings.some((line) => line.includes("self-heal failed")),
+        true,
+      );
+    } finally {
+      Deno.stderr.writeSync = originalWrite;
+    }
+  });
+});
+
+test("ManagedHaObserver ignores stale DeadMaster after managed.destroy", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const { writeManagedDestroyedMarker } = await import(
+      "../managed/destroyed-marker.ts"
+    );
+    await writeManagedDestroyedMarker(
+      layout.stateDir,
+      MANAGED_ID,
+      MEMBER_ID,
+      new Date().toISOString(),
+    );
+    const sent: ManagedHaEventMessage[] = [];
+    const dial = { hostname: "172.20.4.10", port: 45001 };
     const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(dial),
       send: (message) => {
         sent.push(message);
       },
       isStackPresent: () => Promise.resolve(true),
-      reviveStack: () => Promise.reject(new Error("compose start failed")),
       api: {
         credentials: { user: "admin", password: "x" },
-        fetch: () => {
-          fetched += 1;
-          return Promise.resolve(deadPrimaryResponse());
+        fetch: (url) => {
+          if (url.includes("/api/replication-analysis")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  Details: [{
+                    AnalyzedInstanceKey: {
+                      Hostname: dial.hostname,
+                      Port: dial.port,
+                    },
+                    ClusterDetails: { ClusterAlias: MANAGED_ID },
+                    Analysis: "DeadMaster",
+                  }],
+                }),
+                { status: 200 },
+              ),
+            );
+          }
+          return Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              problems: ["DeadPrimary"],
+            }]),
+          );
         },
       },
     });
     await observer.poll();
-    assertEquals(fetched, 2);
+    assertEquals(sent.length, 0);
+  });
+});
+
+test("ManagedHaObserver dedupes problems and replication-analysis for one incident", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const dial = { hostname: "172.20.4.10", port: 45001 };
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(dial),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: (url) => {
+          if (url.includes("/api/replication-analysis")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  Details: [{
+                    AnalyzedInstanceKey: {
+                      Hostname: dial.hostname,
+                      Port: dial.port,
+                    },
+                    ClusterDetails: { ClusterAlias: MANAGED_ID },
+                    IsMaster: true,
+                    Analysis: "DeadMaster",
+                  }],
+                }),
+                { status: 200 },
+              ),
+            );
+          }
+          return Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              problems: ["DeadPrimary"],
+            }]),
+          );
+        },
+      },
+    });
+    await observer.poll();
     assertEquals(sent.length, 1);
     assertEquals(sent[0]?.managedId, MANAGED_ID);
-    assertEquals(
-      warnings.some((line) => line.includes("self-heal failed")),
-      true,
+  });
+});
+
+test("ManagedHaObserver ignores healthy primary and replica replication rows", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const dial = { hostname: "172.20.4.10", port: 45001 };
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(dial),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                Details: [
+                  {
+                    AnalyzedInstanceKey: {
+                      Hostname: dial.hostname,
+                      Port: dial.port,
+                    },
+                    ClusterDetails: { ClusterAlias: MANAGED_ID },
+                    IsMaster: true,
+                    Analysis: "Healthy",
+                  },
+                  {
+                    AnalyzedInstanceKey: {
+                      Hostname: "172.20.4.20",
+                      Port: 45002,
+                    },
+                    ClusterDetails: { ClusterAlias: MANAGED_ID },
+                    IsMaster: false,
+                    Analysis: "DeadMaster",
+                  },
+                ],
+              }),
+              { status: 200 },
+            ),
+          ),
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 0);
+  });
+});
+
+test("ManagedHaObserver emits DeadMaster when IsMaster is omitted", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const dial = { hostname: "172.20.4.10", port: 45001 };
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(dial),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            new Response(
+              JSON.stringify({
+                Details: [{
+                  AnalyzedInstanceKey: {
+                    Hostname: dial.hostname,
+                    Port: dial.port,
+                  },
+                  ClusterDetails: { ClusterAlias: MANAGED_ID },
+                  Analysis: "DeadMaster",
+                }],
+              }),
+              { status: 200 },
+            ),
+          ),
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+  });
+});
+
+test("ManagedHaObserver emits nothing during planned switchover", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const { writeSwitchoverQuiescedMarker } = await import(
+      "../managed/switchover-state-marker.ts"
     );
-  } finally {
-    Deno.stderr.writeSync = originalWrite;
-  }
+    await writeSwitchoverQuiescedMarker(layout, MANAGED_ID, {
+      primaryExecutedGtidSet: "0-1-1",
+      quiescedAt: new Date().toISOString(),
+    });
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => Promise.resolve(deadPrimaryResponse()),
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 0);
+  });
 });
