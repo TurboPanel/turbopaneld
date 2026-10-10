@@ -165,14 +165,19 @@ async function mysqlCnfTarget(
   managedId: string,
   run: RunDockerFn,
 ): Promise<MysqlCnfTarget | null> {
-  const configDir = managedConfigDir(layout, managedId);
+  // The cluster's own bind-mounted config dir, not the daemon config root.
+  const cnfDir = managedConfigDir(layout, managedId);
   try {
-    await Deno.stat(join(configDir, MYSQL_FAMILY_CNF_FILE));
+    await Deno.stat(join(cnfDir, MYSQL_FAMILY_CNF_FILE));
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return null;
     throw err;
   }
-  return { configDir, image: await readComposeImage(layout, managedId), run };
+  return {
+    configDir: cnfDir,
+    image: await readComposeImage(layout, managedId),
+    run,
+  };
 }
 
 async function plantPostgresStandbySignal(
