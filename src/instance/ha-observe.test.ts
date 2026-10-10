@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import {
   engineInspectPortsJson,
   ORCHESTRATOR_DEAD_MASTER_AND_REPLICAS_CAPTURE,
+  ORCHESTRATOR_DEAD_MASTER_CAPTURE,
 } from "../testing/managed-topology-fixtures.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { createFakeClock, flushMicrotasks } from "../testing/fake-clock.ts";
@@ -1700,5 +1701,154 @@ test("ManagedHaObserver bounds each Orchestrator read with a timeout", async () 
       signals.every((signal) => signal instanceof AbortSignal),
       true,
     );
+  });
+});
+
+const KILLED_AT = "2026-10-10T18:46:27.360814882Z";
+const KILLED_AT_MS = Date.parse(KILLED_AT);
+const LB_DIAL = { hostname: "172.20.4.10", port: 45001 };
+
+/** docker inspect for a killed primary: no live ports, a stop time. */
+function runDockerForKilledPrimary(state: string) {
+  return (args: string[]) => {
+    if (args[0] !== "inspect") {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "",
+        code: 1,
+      });
+    }
+    const stdout = args[2]?.includes(".State.")
+      ? state
+      : engineInspectPortsJson({
+        "3306/tcp": [{
+          HostIp: LB_DIAL.hostname,
+          HostPort: String(LB_DIAL.port),
+        }],
+      }, { stopped: true });
+    return Promise.resolve({ success: true, stdout, stderr: "", code: 0 });
+  };
+}
+
+function deadMasterCaptureFetch(url: string): Promise<Response> {
+  if (url.includes("/api/replication-analysis")) {
+    return Promise.resolve(
+      new Response(ORCHESTRATOR_DEAD_MASTER_CAPTURE, { status: 200 }),
+    );
+  }
+  return Promise.resolve(new Response("[]", { status: 200 }));
+}
+
+test("ManagedHaObserver sends the primary's stop time as evidence for the captured DeadMaster row", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    const nowMs = KILLED_AT_MS + 21_000;
+    const observer = new ManagedHaObserver({
+      layout,
+      nowMs: () => nowMs,
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      isStackPresent: () => Promise.resolve(true),
+      reviveStack: () => Promise.resolve("absent"),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: deadMasterCaptureFetch,
+      },
+      runDocker: runDockerForKilledPrimary(
+        JSON.stringify({ running: false, finishedAt: KILLED_AT }),
+      ),
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.managedId, MANAGED_ID);
+    assertEquals(sent[0]?.instanceHost, LB_DIAL.hostname);
+    assertEquals(sent[0]?.instancePort, LB_DIAL.port);
+    assertEquals(sent[0]?.evidence, {
+      spanMs: 21_000,
+      primaryStoppedAt: new Date(KILLED_AT_MS).toISOString(),
+    });
+  });
+});
+
+test("ManagedHaObserver sends no evidence when the primary's stop time is unknown", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const states = [
+      JSON.stringify({ running: true, finishedAt: KILLED_AT }),
+      JSON.stringify({ running: false, finishedAt: "0001-01-01T00:00:00Z" }),
+      "not json",
+    ];
+    const results = await Promise.all(states.map(async (state) => {
+      const sent: ManagedHaEventMessage[] = [];
+      const observer = new ManagedHaObserver({
+        layout,
+        nowMs: () => KILLED_AT_MS + 21_000,
+        send: (message) => {
+          sent.push(message);
+          return true;
+        },
+        isStackPresent: () => Promise.resolve(true),
+        reviveStack: () => Promise.resolve("absent"),
+        api: {
+          credentials: { user: "admin", password: "x" },
+          fetch: deadMasterCaptureFetch,
+        },
+        runDocker: runDockerForKilledPrimary(state),
+      });
+      await observer.poll();
+      return sent.map((message) => message.evidence);
+    }));
+    assertEquals(results, [[undefined], [undefined], [undefined]]);
+  });
+});
+
+test("ManagedHaObserver holds the captured DeadMaster row while an apply marker is active", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const { recordManagedIntent, resetManagedIntentsForTests } = await import(
+      "../managed/ha-intent.ts"
+    );
+    // The apply ended 35 s before the kill, as on the LB pair.
+    const appliedAtMs = KILLED_AT_MS - 35_000;
+    await recordManagedIntent(layout.stateDir, MANAGED_ID, "apply", {
+      nowMs: appliedAtMs,
+    });
+    try {
+      let nowMs = KILLED_AT_MS + 21_000;
+      const sent: ManagedHaEventMessage[] = [];
+      const observer = new ManagedHaObserver({
+        layout,
+        nowMs: () => nowMs,
+        send: (message) => {
+          sent.push(message);
+          return true;
+        },
+        isStackPresent: () => Promise.resolve(true),
+        reviveStack: () => Promise.resolve("absent"),
+        api: {
+          credentials: { user: "admin", password: "x" },
+          fetch: deadMasterCaptureFetch,
+        },
+        runDocker: runDockerForKilledPrimary(
+          JSON.stringify({ running: false, finishedAt: KILLED_AT }),
+        ),
+      });
+      await observer.poll();
+      assertEquals(sent.length, 0);
+      // 10 min marker + 30 s grace after the apply.
+      nowMs = appliedAtMs + 630_001;
+      await observer.poll();
+      assertEquals(sent.length, 1);
+      assertEquals(sent[0]?.evidence?.spanMs, nowMs - KILLED_AT_MS);
+    } finally {
+      resetManagedIntentsForTests();
+    }
   });
 });
