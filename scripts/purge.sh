@@ -1245,6 +1245,39 @@ tp_print_docker_data_root_line() {
   esac
 }
 
+# Managed engine / ingress containers and compose projects use a lowercase UUID
+# (8-4-4-4-12 hex), optionally with a TurboPanel suffix (-ha, -in, or -<n>).
+tp_is_turbopanel_container_name() {
+  _itcn=$1
+  [ -n "$_itcn" ] || return 1
+  printf '%s\n' "$_itcn" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(-ha|-in|-[0-9]+)?$'
+}
+
+tp_is_turbopanel_compose_project() {
+  _itcp=$1
+  [ -n "$_itcp" ] || return 1
+  case $_itcp in
+    turbopanel-system) return 0 ;;
+  esac
+  printf '%s\n' "$_itcp" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+tp_docker_container_name_is_turbopanel() {
+  _dtcn=$1
+  [ -n "$_dtcn" ] || return 1
+  case $_dtcn in
+    turbopanel*|tpn_*) return 0 ;;
+  esac
+  if tp_is_turbopanel_container_name "$_dtcn"; then
+    return 0
+  fi
+  # shellcheck disable=SC2086
+  if tp_list_has_word "$_dtcn" $TP_LEGACY_CONTAINER_NAMES; then
+    return 0
+  fi
+  return 1
+}
+
 tp_docker_consider_row() {
   _dcr_name=$1
   _dcr_role=$2
@@ -1258,23 +1291,15 @@ tp_docker_consider_row() {
   if [ "$_dcr_role" != - ] || [ "$_dcr_component" != - ] || [ "$_dcr_service" != - ]; then
     _dcr_match=true
   fi
-  case $_dcr_name in
-    turbopanel*|tpn_*) _dcr_match=true ;;
-  esac
-  # Managed orchestrator HA containers use a service-id name ending in -ha.
-  case $_dcr_name in
-    *-ha) _dcr_match=true ;;
-  esac
+  if tp_docker_container_name_is_turbopanel "$_dcr_name"; then
+    _dcr_match=true
+  fi
   case $_dcr_component in
     managed-ha|managed-ingress) _dcr_match=true ;;
   esac
-  # shellcheck disable=SC2086
-  if tp_list_has_word "$_dcr_name" $TP_LEGACY_CONTAINER_NAMES; then
+  if tp_is_turbopanel_compose_project "$_dcr_project"; then
     _dcr_match=true
   fi
-  case $_dcr_project in
-    turbopanel*) _dcr_match=true ;;
-  esac
   if tp_path_under_dirs "$_dcr_work" || tp_path_under_dirs "$_dcr_config"; then
     _dcr_match=true
   fi
@@ -1339,9 +1364,9 @@ tp_docker_collect() {
     case $_dc_net in
       turbopanel*|tpn_*) _dc_take=true ;;
     esac
-    case $_dc_project in
-      turbopanel*) _dc_take=true ;;
-    esac
+    if tp_is_turbopanel_compose_project "$_dc_project"; then
+      _dc_take=true
+    fi
     if [ "$_dc_take" = true ]; then
       tp_file_add "$TP_TMP/work.networks" "$_dc_net"
     fi
@@ -2178,7 +2203,9 @@ tp_docker_build_removal_list() {
     while IFS= read -r _dbr_inv; do
       [ -n "$_dbr_inv" ] || continue
       _dbr_inv=$(tp_docker_inventory_container_name "$_dbr_inv")
-      tp_file_add "$TP_TMP/docker.rm" "$_dbr_inv"
+      if tp_docker_container_name_is_turbopanel "$_dbr_inv"; then
+        tp_file_add "$TP_TMP/docker.rm" "$_dbr_inv"
+      fi
     done < "$TP_TMP/before.containers"
   fi
   return 0
@@ -3185,11 +3212,8 @@ tp_purge_docker_engine() {
   if tp_docker_engine_gone; then
     TP_DOCKER_ENGINE_GONE=true
     tp_purge_docker_network_state
-  elif tp_docker_engine_packages_remain; then
-    tp_print_warn "Docker Engine is still installed; its bridges and firewall rules were left"
   else
-    TP_DOCKER_ENGINE_GONE=true
-    tp_purge_docker_network_state
+    tp_print_warn "Docker Engine is still installed; its bridges and firewall rules were left"
   fi
 }
 
@@ -3212,6 +3236,7 @@ tp_docker_engine_packages_remain() {
 # Dry runs change nothing, so they never count as gone.
 tp_docker_engine_gone() {
   [ "$DRY_RUN" = true ] && return 1
+  tp_has_tool docker && return 1
   tp_has_tool dockerd && return 1
   tp_has_tool dockerd-rootless.sh && return 1
   [ -x /snap/bin/docker.dockerd ] && return 1
@@ -3220,7 +3245,7 @@ tp_docker_engine_gone() {
     return 1
   fi
   if tp_has_tool dpkg-query; then
-    for _deg in docker-ce docker.io docker-ce-rootless-extras moby-engine moby-cli; do
+    for _deg in docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io docker-ce-rootless-extras moby-engine moby-cli; do
       if tp_pkg_installed "$_deg"; then
         return 1
       fi
