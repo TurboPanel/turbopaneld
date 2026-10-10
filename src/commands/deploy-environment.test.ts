@@ -32,6 +32,10 @@ import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
 } from "../contracts/commands-contracts.ts";
+import {
+  setEnsureHostingCaddyRuntimeForTest,
+  setIngressHostCommandForTest,
+} from "../deploy/ingress.ts";
 import "../testing/stub-hosting-caddy-host.ts";
 
 /**
@@ -1840,6 +1844,177 @@ test("hostNativeComposeServiceNames covers both host-native lanes", () => {
     "legacy",
     "web",
   ]);
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy ensures the hosting Caddy edge runtime before validating site HTTP on a mixed lane",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withReclaimEnv(async ({ stateDir }) => {
+      const ingressEvents: string[] = [];
+      const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+        ingressEvents.push("ensure-edge-runtime");
+        return Promise.resolve();
+      });
+      const restoreHost = setIngressHostCommandForTest((_command, args) => {
+        if (args.includes("validate")) {
+          ingressEvents.push("caddy-validate");
+        }
+        return Promise.resolve({ success: true, stderr: "" });
+      });
+      try {
+        const runDocker = (args: string[]): Promise<DockerCliResult> => {
+          if (args.includes("config") && args.includes("--format")) {
+            return Promise.resolve({
+              success: true,
+              stdout: fakeConfigJson({ api: { image: "nginx:alpine" } }),
+              stderr: "",
+              code: 0,
+            });
+          }
+          if (args.includes("ps")) {
+            return Promise.resolve({
+              success: true,
+              stdout: "[]",
+              stderr: "",
+              code: 0,
+            });
+          }
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
+        };
+
+        await handleEnvironmentDeploy(
+          mixedLanePayload(),
+          new Date().toISOString(),
+          {
+            ...hermeticDeployDeps,
+            runDocker,
+            runPrivileged: captureSudo().runPrivileged,
+            nativeAppIo: {
+              run: () =>
+                Promise.resolve({ success: true, stdout: "", stderr: "" }),
+              runPlaybook: () => Promise.resolve(),
+              probe: () => Promise.resolve(true),
+              sleep: () => Promise.resolve(),
+              systemdUnitDir: join(stateDir, "systemd"),
+            },
+          },
+        );
+
+        const validateIdx = ingressEvents.indexOf("caddy-validate");
+        const ensureIdx = ingressEvents.indexOf("ensure-edge-runtime");
+        assertEquals(validateIdx >= 0, true);
+        assertEquals(ensureIdx >= 0, true);
+        assertEquals(ensureIdx < validateIdx, true);
+        assertEquals(
+          ingressEvents.filter((e) => e === "ensure-edge-runtime").length,
+          1,
+        );
+      } finally {
+        restoreHost();
+        restoreEnsure();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy does not ensure hosting Caddy edge for tcp-only container hostings",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withReclaimEnv(async ({ stateDir }) => {
+      const ingressEvents: string[] = [];
+      const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+        ingressEvents.push("ensure-edge-runtime");
+        return Promise.resolve();
+      });
+      const restoreHost = setIngressHostCommandForTest(() =>
+        Promise.resolve({ success: true, stderr: "" })
+      );
+      try {
+        const serviceId = "00000000-0000-4000-8000-0000000000f1";
+        const runDocker = (args: string[]): Promise<DockerCliResult> => {
+          if (args.includes("config") && args.includes("--format")) {
+            return Promise.resolve({
+              success: true,
+              stdout: fakeConfigJson({ db: { image: "postgres:16" } }),
+              stderr: "",
+              code: 0,
+            });
+          }
+          if (args.includes("ps")) {
+            return Promise.resolve({
+              success: true,
+              stdout: "[]",
+              stderr: "",
+              code: 0,
+            });
+          }
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
+        };
+
+        await handleEnvironmentDeploy(
+          {
+            environmentId: "env-tcp-only",
+            projectId: "proj-tcp",
+            organizationId: "org-1",
+            projectName: "tp-tcp-only",
+            composeFiles: [{
+              filename: RUNTIME_COMPOSE_FILENAME,
+              role: "runtime",
+              source: "inline",
+              content: "services:\n  db:\n    image: postgres:16\n",
+            }],
+            hostings: [{
+              hostingId: "h-tcp",
+              serviceId: "s-tcp",
+              composeServiceName: "db",
+              hostnames: [],
+              protocol: "tcp",
+              ports: [{ published: 15433, target: 5432 }],
+            }],
+            hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+            ingressServices: [{
+              serviceId,
+              composeServiceName: "db",
+              containerName: `${serviceId}-in`,
+            }],
+          },
+          new Date().toISOString(),
+          {
+            ...hermeticDeployDeps,
+            runDocker,
+            runPrivileged: captureSudo().runPrivileged,
+            nativeAppIo: {
+              run: () =>
+                Promise.resolve({ success: true, stdout: "", stderr: "" }),
+              runPlaybook: () => Promise.resolve(),
+              probe: () => Promise.resolve(true),
+              sleep: () => Promise.resolve(),
+              systemdUnitDir: join(stateDir, "systemd"),
+            },
+          },
+        );
+
+        assertEquals(ingressEvents.includes("ensure-edge-runtime"), false);
+      } finally {
+        restoreHost();
+        restoreEnsure();
+      }
+    });
+  },
 });
 
 test({
