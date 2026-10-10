@@ -848,18 +848,27 @@ async function deployReleaseBindings(
   runFn: RunFn,
 ): Promise<Map<string, SiteRelease>> {
   const bindings = new Map<string, SiteRelease>();
-  for (const entry of payload.sourceMaterial ?? []) {
-    const principal = entry.principal;
-    if (!principal) continue;
-    bindings.set(entry.composeServiceName, {
+  const entries = (payload.sourceMaterial ?? []).filter(
+    (entry): entry is typeof entry & { principal: NonNullable<typeof entry.principal> } =>
+      entry.principal !== undefined,
+  );
+  const resolved = await Promise.all(
+    entries.map(async (entry) => ({
+      composeServiceName: entry.composeServiceName,
       serviceId: await effectiveReleaseServiceId(
         payload,
         entry.composeServiceName,
         layout,
-        principal,
+        entry.principal,
         runFn,
       ),
-      username: principal.username,
+      username: entry.principal.username,
+    })),
+  );
+  for (const row of resolved) {
+    bindings.set(row.composeServiceName, {
+      serviceId: row.serviceId,
+      username: row.username,
     });
   }
   return bindings;
@@ -886,22 +895,29 @@ async function deployManagedDirectoryBindings(
   runFn: RunFn,
 ): Promise<Map<string, SiteManagedDirectory>> {
   const bindings = new Map<string, SiteManagedDirectory>();
-  for (const site of payload.sites ?? []) {
-    if (site.sourceKind !== "managed-directory") continue;
-    if (releaseBindings.has(site.composeServiceName)) continue;
-    // The wire parser already refuses a managed directory with no principal;
-    // this keeps the type honest rather than re-reporting it.
-    const principal = site.principal;
-    if (!principal) continue;
-    bindings.set(site.composeServiceName, {
+  const sites = (payload.sites ?? []).filter(
+    (site): site is typeof site & { principal: NonNullable<typeof site.principal> } =>
+      site.sourceKind === "managed-directory" &&
+      !releaseBindings.has(site.composeServiceName) &&
+      site.principal !== undefined,
+  );
+  const resolved = await Promise.all(
+    sites.map(async (site) => ({
+      composeServiceName: site.composeServiceName,
       serviceId: await effectiveReleaseServiceId(
         payload,
         site.composeServiceName,
         layout,
-        principal,
+        site.principal,
         runFn,
       ),
-      username: principal.username,
+      username: site.principal.username,
+    })),
+  );
+  for (const row of resolved) {
+    bindings.set(row.composeServiceName, {
+      serviceId: row.serviceId,
+      username: row.username,
     });
   }
   return bindings;
