@@ -138,7 +138,66 @@ export type OrchestratorDeadPrimaryEmitContext = {
    * coordinate-less key: the control plane fences only on a full match.
    */
   emitKey: OrchestratorInstanceKey;
+  /**
+   * Wall-clock ms Docker recorded when the local primary's engine container
+   * stopped (`.State.FinishedAt`). Absent while it still runs or when that
+   * cannot be read: the control plane then has no failure start to check a
+   * replica's last streaming read against, and keeps its gate closed.
+   */
+  primaryStoppedAtMs?: number;
 };
+
+const CONTAINER_STOP_FORMAT =
+  '{"running":{{json .State.Running}},"finishedAt":{{json .State.FinishedAt}}}';
+
+/**
+ * When a stopped container stopped, from {@link CONTAINER_STOP_FORMAT}
+ * output. Null for a running container, Docker's zero time (never stopped),
+ * a time after `nowMs`, or anything that does not parse.
+ */
+export function parseContainerStoppedAtMs(
+  inspectJson: string,
+  nowMs: number,
+): number | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inspectJson);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { running, finishedAt } = parsed as {
+    running?: unknown;
+    finishedAt?: unknown;
+  };
+  if (running !== false || typeof finishedAt !== "string") return null;
+  const ms = Date.parse(finishedAt);
+  // Docker writes 0001-01-01T00:00:00Z for a container that never stopped.
+  if (!Number.isFinite(ms) || ms <= 0 || ms > nowMs) return null;
+  return ms;
+}
+
+async function readPrimaryStoppedAtMs(
+  layout: LayoutPaths,
+  managedId: string,
+  run: RunDockerFn,
+  nowMs: number,
+): Promise<number | null> {
+  const record = await readManagedHaMember(layout, managedId);
+  if (!record) return null;
+  try {
+    const inspect = await run([
+      "inspect",
+      "--format",
+      CONTAINER_STOP_FORMAT,
+      record.containerName,
+    ]);
+    if (!inspect.success) return null;
+    return parseContainerStoppedAtMs(inspect.stdout.trim(), nowMs);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Resolve a dead-primary Orchestrator row to a local cluster and listener proof.
@@ -182,10 +241,17 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   if (!dial) return null;
   if (!orchestratorKeysMatch(analyzedKey, dial)) return null;
 
+  const stoppedAtMs = await readPrimaryStoppedAtMs(
+    layout,
+    managedId,
+    run,
+    nowMs,
+  );
   return {
     managedId,
     incidentKey: `${managedId}:${orchestratorIncidentPrimaryKey(dial)}`,
     emitKey: { hostname: dial.hostname, port: dial.port },
+    ...(stoppedAtMs === null ? {} : { primaryStoppedAtMs: stoppedAtMs }),
   };
 }
 

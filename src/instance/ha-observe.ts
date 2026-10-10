@@ -49,6 +49,12 @@ export type ManagedHaEventMessage = {
   /** Orchestrator's key for the dead instance; both or neither. */
   instanceHost?: string;
   instancePort?: number;
+  /**
+   * `spanMs`: how long ago the local primary's engine container stopped, so
+   * the control plane can tell whether a replica was still streaming when
+   * the primary died. Absent while that time is unknown.
+   */
+  evidence?: { spanMs: number; primaryStoppedAt: string };
   at: string;
 };
 
@@ -83,6 +89,25 @@ function isReplicationAnalysisMasterRow(
   if (entry.isMaster === false) return false;
   const analysis = entry.analysis;
   return analysis !== undefined && isDeadPrimaryProblem(analysis);
+}
+
+/**
+ * Evidence for the event: time since the primary's engine container stopped.
+ * Anchored on Docker's own stop time, not on when this poll first saw the
+ * row: Orchestrator and the 15 s poll add up to ~20 s of delay, and a later
+ * anchor would make a replica that streamed until the kill look stale.
+ */
+export function deadPrimaryEvidence(
+  primaryStoppedAtMs: number | undefined,
+  nowMs: number,
+): ManagedHaEventMessage["evidence"] {
+  if (primaryStoppedAtMs === undefined) return undefined;
+  const spanMs = nowMs - primaryStoppedAtMs;
+  if (!Number.isFinite(spanMs) || spanMs < 0) return undefined;
+  return {
+    spanMs: Math.round(spanMs),
+    primaryStoppedAt: new Date(primaryStoppedAtMs).toISOString(),
+  };
 }
 
 type ObserverApi = OrchestratorApiDeps & {
@@ -201,11 +226,13 @@ export class ManagedHaObserver {
       return;
     }
     const instance = `${emitKey.hostname}:${emitKey.port}`;
+    const evidence = deadPrimaryEvidence(candidate.primaryStoppedAtMs, now);
     const delivered = this.#send({
       type: "managed-ha-event",
       managedId,
       instanceHost: emitKey.hostname,
       instancePort: emitKey.port,
+      ...(evidence ? { evidence } : {}),
       at: this.#now(),
     });
     if (!delivered) {
@@ -218,7 +245,9 @@ export class ManagedHaObserver {
     this.#incidentLastDelivered.set(incidentKey, now);
     logInfo(
       "managed",
-      `managed-ha-event emitted managedId=${managedId} instance=${instance}`,
+      `managed-ha-event emitted managedId=${managedId} instance=${instance} spanMs=${
+        evidence?.spanMs ?? "unknown"
+      }`,
     );
   }
 
