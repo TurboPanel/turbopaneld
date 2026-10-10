@@ -155,6 +155,20 @@ test("resolveReleaseServiceId falls back to ingress serviceId", () => {
   assertEquals(resolveReleaseServiceId(payload, "api"), "svc-ingress");
 });
 
+test("resolveReleaseServiceId uses nativeAppServices serviceId before compose key", () => {
+  const payload = basePayload({
+    hostings: [],
+    ingressServices: [],
+    nativeAppServices: [{
+      composeServiceName: "app",
+      serviceId: "svc-env-a",
+      listenPort: 18080,
+      framework: "auto",
+    }],
+  });
+  assertEquals(resolveReleaseServiceId(payload, "app"), "svc-env-a");
+});
+
 test("resolveReleaseServiceId uses compose service name when unmatched", () => {
   const payload = basePayload({ hostings: [], ingressServices: [] });
   assertEquals(resolveReleaseServiceId(payload, "worker"), "worker");
@@ -966,6 +980,186 @@ test("a standalone build with a start command that needs package scripts warns, 
           )
         ),
         true,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("shared principal keeps separate release trees per nativeAppServices serviceId", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const principal = {
+        principalId: "pr-1",
+        username: "appuser",
+        uid: 2000,
+        gid: 2001,
+      };
+      const serviceA = "svc-env-production";
+      const serviceB = "svc-env-staging";
+      const pathsA = resolveReleasePaths(layout, {
+        username: principal.username,
+        serviceId: serviceA,
+        releaseId: "rel-a",
+      });
+      const pathsB = resolveReleasePaths(layout, {
+        username: principal.username,
+        serviceId: serviceB,
+        releaseId: "rel-b",
+      });
+
+      const sharedPromote = (
+        marker: string,
+        serviceId: string,
+        releaseId: string,
+        composeServiceName: string,
+      ) => async (params: {
+        paths: ReturnType<typeof resolveReleasePaths>;
+      }) => {
+        await Deno.writeTextFile(
+          join(params.paths.releaseDir, "branch.txt"),
+          marker,
+        );
+        await writeReleaseManifest(params.paths.releaseDir, {
+          version: 1,
+          serviceId,
+          composeServiceName,
+          releaseId,
+          sourceId: "src-1",
+          commitSha: "commit",
+          ref: "main",
+          promotedAt: "2026-01-01T00:00:00.000Z",
+          standaloneOutput: false,
+          staticExport: false,
+        });
+        await swapCurrentSymlink(params.paths);
+        return params.paths.releaseDir;
+      };
+
+      const baseDeps = () => ({
+        logSink: fakeLogSink().sink,
+        decryptSecrets: undefined as DecryptSecretsFn | undefined,
+        now: () => "2026-01-01T00:00:00.000Z",
+        ensureReleaseTreeFn: async (
+          treePaths: Parameters<typeof mkdirReleaseTree>[0],
+        ) => {
+          await mkdirReleaseTree(treePaths);
+        },
+        checkoutReleaseFn: async (params: { scratchDir: string }) => {
+          const workingDir = join(params.scratchDir, "source");
+          await Deno.mkdir(workingDir, { recursive: true });
+          return { workingDir, commitSha: "commit" };
+        },
+        runReleaseBuildFn: () => Promise.resolve(),
+        prepareNativeAppBuildOutputFn: () =>
+          Promise.resolve({
+            standaloneOutput: false,
+            staticExport: false,
+            outputDirectory: undefined,
+          }),
+        pruneReleasesFn: () => Promise.resolve([]),
+      });
+
+      await applySourceReleases(
+        layout,
+        basePayload({
+          environmentId: "env-production",
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "app",
+              releaseId: "rel-a",
+              principal,
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "app",
+            serviceId: serviceA,
+            listenPort: 18080,
+            framework: "auto",
+          }],
+        }),
+        {
+          ...baseDeps(),
+          promoteReleaseFn: sharedPromote("main", serviceA, "rel-a", "app"),
+        },
+      );
+
+      await applySourceReleases(
+        layout,
+        basePayload({
+          environmentId: "env-staging",
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "app",
+              releaseId: "rel-b",
+              principal,
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "app",
+            serviceId: serviceB,
+            listenPort: 18081,
+            framework: "auto",
+          }],
+        }),
+        {
+          ...baseDeps(),
+          promoteReleaseFn: sharedPromote("branch-a", serviceB, "rel-b", "app"),
+        },
+      );
+
+      assertEquals(
+        await Deno.readTextFile(join(pathsA.releaseDir, "branch.txt")),
+        "main",
+      );
+      assertEquals(
+        await Deno.readTextFile(join(pathsB.releaseDir, "branch.txt")),
+        "branch-a",
+      );
+
+      await applySourceReleases(
+        layout,
+        basePayload({
+          environmentId: "env-staging",
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "app",
+              releaseId: "rel-b2",
+              principal,
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "app",
+            serviceId: serviceB,
+            listenPort: 18081,
+            framework: "auto",
+          }],
+        }),
+        {
+          ...baseDeps(),
+          promoteReleaseFn: sharedPromote(
+            "branch-b",
+            serviceB,
+            "rel-b2",
+            "app",
+          ),
+        },
+      );
+
+      assertEquals(
+        await Deno.readTextFile(join(pathsA.releaseDir, "branch.txt")),
+        "main",
+      );
+      const pathsB2 = resolveReleasePaths(layout, {
+        username: principal.username,
+        serviceId: serviceB,
+        releaseId: "rel-b2",
+      });
+      assertEquals(
+        await Deno.readTextFile(join(pathsB2.releaseDir, "branch.txt")),
+        "branch-b",
       );
     } finally {
       await fixture.cleanup();

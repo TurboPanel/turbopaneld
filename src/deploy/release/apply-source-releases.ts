@@ -177,13 +177,15 @@ export type AppliedRelease = {
 };
 
 /**
- * Compose service name → TurboPanel service UUID, from the rows that carry it
- * (`hostings[]`, then `ingressServices[]`).
+ * Compose service name → release-tree directory segment, from the rows that
+ * carry it (`hostings[]`, then `ingressServices[]`, then `nativeAppServices[]`).
  *
- * A Git-backed service need not publish a hosting (a worker does not), so when
- * neither names it the compose service key is used as the directory segment.
- * It is unique within an environment and charset-safe, which is all the path
- * needs — nothing downstream parses this segment as a UUID.
+ * A Git-backed worker with no hosting and no native row still falls back to the
+ * compose service key — unique within one environment, but not across several
+ * environments of one project on a shared principal. Host-native `node`
+ * services always ride `nativeAppServices[]`, whose `serviceId` is the
+ * environment's TurboPanel service UUID, so each environment gets its own
+ * `sites/<serviceId>/` tree and systemd unit even when the compose key matches.
  */
 export function resolveReleaseServiceId(
   payload: EnvironmentDeployPayload,
@@ -201,6 +203,11 @@ export function resolveReleaseServiceId(
       ingress.composeServiceName === composeServiceName && ingress.serviceId
     ) {
       return ingress.serviceId;
+    }
+  }
+  for (const app of payload.nativeAppServices ?? []) {
+    if (app.composeServiceName === composeServiceName && app.serviceId) {
+      return app.serviceId;
     }
   }
   return composeServiceName;
