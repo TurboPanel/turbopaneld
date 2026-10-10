@@ -284,7 +284,9 @@ test("reactivatePrimaryAfterSwitchoverAbort clears postgres standby.signal and p
               reactivateBatch = true;
               return Promise.resolve(dockerOk(""));
             }
-            if (batch.includes("pg_is_in_recovery") || batch.includes("NOT pg")) {
+            if (
+              batch.includes("pg_is_in_recovery") || batch.includes("NOT pg")
+            ) {
               return Promise.resolve(
                 dockerOk(reactivateBatch ? "t\n" : "f\n"),
               );

@@ -92,7 +92,8 @@ function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
     }
     if (args[0] === "exec") {
       const joined = args.join(" ");
-      const mysqlFamily = joined.includes("mysql") || joined.includes("mariadb");
+      const mysqlFamily = joined.includes("mysql") ||
+        joined.includes("mariadb");
       const stdout = mysqlFamily
         ? (writablePrimary ? "0\t0\n" : "1\t1\n")
         : (writablePrimary ? "t\n" : "f\n");
