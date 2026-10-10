@@ -4,7 +4,10 @@
  *
  * Drain is fail-closed for automatic failover (control plane still decides).
  * Recover talks to local Orchestrator; when the HA stack is absent **or**
- * designated recover fails, it falls back to `managed.promote`.
+ * designated recover fails, it falls back to `managed.promote`. Orchestrator
+ * can answer OK without promoting anyone, so after its recover the engine on
+ * the target is checked (not a replica, not read-only) and promoted here when
+ * it is not; the phase fails when the target still is not a writable primary.
  * Repoint runs on every other healthy replica so `primary_conninfo` /
  * replication source follows the new primary (without a full Resync).
  */
@@ -15,6 +18,10 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { parseManagedHaFailoverPayload } from "../contracts/commands-contracts.ts";
 import { handleManagedPromote } from "../managed/promote.ts";
+import {
+  checkLocalMemberPromoted,
+  type PromotionCheck,
+} from "../managed/promotion-check.ts";
 import { proveSwitchoverGtidBeforePromote } from "../managed/switchover-gtid-proof.ts";
 import {
   ensureLocalPrimarySlots,
@@ -56,6 +63,8 @@ export type ManagedHaFailoverHandlerDeps = {
   proveGtid?: typeof proveSwitchoverGtidBeforePromote;
   recover?: typeof recoverToCandidate;
   promote?: typeof handleManagedPromote;
+  /** Test seam — defaults to {@link checkLocalMemberPromoted}. */
+  checkPromoted?: typeof checkLocalMemberPromoted;
   follow?: typeof followLocalStandby;
   ensurePrimarySlots?: typeof ensureLocalPrimarySlots;
   /** Test seam — defaults to {@link hostPrepPresent}. */
@@ -122,11 +131,19 @@ function recoverFailureMessage(error: unknown): string {
   }
 }
 
+type PromoteFallbackReason = "absent" | "recover-failed" | "not-promoted";
+
+const PROMOTE_FALLBACK_SUFFIX: Record<PromoteFallbackReason, string> = {
+  absent: "without Orchestrator",
+  "recover-failed": "after Orchestrator recover failure",
+  "not-promoted": "after Orchestrator recover left the target unpromoted",
+};
+
 async function promoteWithoutOrchestrator(
   payload: ManagedHaFailoverPayload,
   daemonReceivedAt: string,
   deps: ManagedHaFailoverHandlerDeps | undefined,
-  reason: "absent" | "recover-failed",
+  reason: PromoteFallbackReason,
 ): Promise<ManagedHaFailoverResult> {
   const promote = deps?.promote ?? handleManagedPromote;
   await promote(
@@ -145,9 +162,7 @@ async function promoteWithoutOrchestrator(
     daemonReceivedAt,
     { decryptSecrets: deps?.decryptSecrets },
   );
-  const suffix = reason === "recover-failed"
-    ? "after Orchestrator recover failure"
-    : "without Orchestrator";
+  const suffix = PROMOTE_FALLBACK_SUFFIX[reason];
   logInfo(
     "commands",
     `managed.ha.failover recover fell back to promote managedId=${payload.managedId} ${suffix} received=${daemonReceivedAt}`,
@@ -298,6 +313,67 @@ async function proveSwitchoverGtidIfRequired(
   );
 }
 
+async function checkTargetPromoted(
+  payload: ManagedHaFailoverPayload,
+  deps: ManagedHaFailoverHandlerDeps | undefined,
+): Promise<PromotionCheck> {
+  const check = deps?.checkPromoted ?? checkLocalMemberPromoted;
+  try {
+    return await check(
+      {
+        managedId: payload.managedId,
+        ...(payload.engine ? { engine: payload.engine } : {}),
+      },
+      deps?.runDocker ? { runDocker: deps.runDocker } : undefined,
+    );
+  } catch (error) {
+    return {
+      promoted: false,
+      reason: `engine check failed: ${recoverFailureMessage(error)}`,
+    };
+  }
+}
+
+/**
+ * Orchestrator said OK; make sure the engine agrees. When the target is still
+ * a replica or read-only, run the same promote as the fallback paths, then
+ * check again and fail the phase if it still is not a writable primary.
+ */
+async function ensureTargetPromotedAfterRecover(
+  payload: ManagedHaFailoverPayload,
+  daemonReceivedAt: string,
+  deps: ManagedHaFailoverHandlerDeps | undefined,
+): Promise<ManagedHaFailoverResult> {
+  const first = await checkTargetPromoted(payload, deps);
+  if (first.promoted) {
+    logInfo(
+      "commands",
+      `managed.ha.failover recover completed managedId=${payload.managedId} received=${daemonReceivedAt}`,
+    );
+    return {
+      summary: `recovered managed ${payload.managedId} onto designated replica`,
+      phase: "recover",
+    };
+  }
+  logWarn(
+    "commands",
+    `managed.ha.failover recover did not promote the target; falling back to promote managedId=${payload.managedId}: ${first.reason}`,
+  );
+  const result = await promoteWithoutOrchestrator(
+    payload,
+    daemonReceivedAt,
+    deps,
+    "not-promoted",
+  );
+  const second = await checkTargetPromoted(payload, deps);
+  if (!second.promoted) {
+    throw new Error(
+      `managed.ha.failover recover: target is still not a writable primary after promote (${second.reason})`,
+    );
+  }
+  return result;
+}
+
 async function recoverWithOrchestrator(
   payload: ManagedHaFailoverPayload,
   endpoints: OrchestratorRecoverTarget,
@@ -326,14 +402,6 @@ async function recoverWithOrchestrator(
       ? undefined
       : await loadOrchestratorApiCredentials(resolveLayout());
     await recover(resolved, credentials ? { credentials } : {});
-    logInfo(
-      "commands",
-      `managed.ha.failover recover completed managedId=${payload.managedId} received=${daemonReceivedAt}`,
-    );
-    return {
-      summary: `recovered managed ${payload.managedId} onto designated replica`,
-      phase: "recover",
-    };
   } catch (error) {
     logWarn(
       "commands",
@@ -348,6 +416,11 @@ async function recoverWithOrchestrator(
       "recover-failed",
     );
   }
+  return await ensureTargetPromotedAfterRecover(
+    payload,
+    daemonReceivedAt,
+    deps,
+  );
 }
 
 export async function handleManagedHaFailover(

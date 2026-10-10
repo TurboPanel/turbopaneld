@@ -144,6 +144,7 @@ test("managed.ha.failover recover translates a local member's Docker name to its
     "2026-08-19T12:00:00.000Z",
     {
       haPresent: () => Promise.resolve(true),
+      checkPromoted: () => Promise.resolve({ promoted: true }),
       recover: (target) => {
         recovered.push(target);
         return Promise.resolve();
@@ -184,6 +185,7 @@ test("managed.ha.failover recover keeps the endpoint as given when the name cann
     "2026-08-19T12:00:00.000Z",
     {
       haPresent: () => Promise.resolve(true),
+      checkPromoted: () => Promise.resolve({ promoted: true }),
       recover: (target) => {
         recovered.push(target);
         return Promise.resolve();
