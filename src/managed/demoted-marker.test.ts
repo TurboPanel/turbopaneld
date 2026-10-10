@@ -1,13 +1,18 @@
 import { assert, assertEquals } from "@std/assert";
+import { join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
+import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   clearManagedDemotedMarker,
   isManagedMemberDemoted,
   listDemotedFenceTargets,
   maybeClearDemotedMarkerAfterApply,
+  readManagedDemotedMarker,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
+import { MYSQL_FAMILY_DEMOTED_FENCE_CNF_REL } from "./demoted-fence-volume.ts";
+import { managedDir } from "./engine-paths.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
 
 /**
@@ -56,7 +61,7 @@ test("write and clear a demoted marker", async () => {
   });
 });
 
-test("an empty memberId matches any demoted marker on the cluster", async () => {
+test("an empty memberId does not match a demoted marker", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);
     await writeManagedDemotedMarker(
@@ -65,7 +70,8 @@ test("an empty memberId matches any demoted marker on the cluster", async () => 
       MEMBER_ID,
       "2026-10-08T12:00:00.000Z",
     );
-    assert(await isManagedMemberDemoted(layout, MANAGED_ID, ""));
+    assertEquals(await isManagedMemberDemoted(layout, MANAGED_ID, ""), false);
+    assert(await isManagedMemberDemoted(layout, MANAGED_ID));
   });
 });
 
@@ -139,11 +145,29 @@ test("listDemotedFenceTargets merges ha-member records with orphan markers", asy
       MEMBER_ID,
       "2026-10-08T12:00:00.000Z",
     );
+    await Deno.mkdir(`${layout.stateDir}/managed/${otherId}`, {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      `${layout.stateDir}/managed/${otherId}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: mysql:8.4",
+        "    volumes:",
+        "      - orphan_data:/var/lib/mysql",
+        "volumes:",
+        "  orphan_data:",
+        "    name: orphan_data",
+        "",
+      ].join("\n"),
+    );
     await writeManagedDemotedMarker(
       layout,
       otherId,
       OTHER_MEMBER,
       "2026-10-08T12:00:00.000Z",
+      "mysql",
     );
     const targets = await listDemotedFenceTargets(layout);
     assertEquals(targets.length, 2);
@@ -153,7 +177,44 @@ test("listDemotedFenceTargets merges ha-member records with orphan markers", asy
   });
 });
 
-test("listDemotedFenceTargets includes a marker without ha-member.json", async () => {
+test("maybeClearDemotedMarkerAfterApply removes mysql volume fence artefacts", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    const managedId = `managed_marker_clear_${crypto.randomUUID()}`;
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(join(root, "config", "conf.d"), { recursive: true });
+    const cnfPath = join(root, "config", MYSQL_FAMILY_DEMOTED_FENCE_CNF_REL);
+    await Deno.writeTextFile(cnfPath, "read_only=1\n");
+    await writeManagedDemotedMarker(
+      layout,
+      managedId,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "mysql",
+    );
+    const run = (): Promise<DockerCliResult> =>
+      Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
+    await maybeClearDemotedMarkerAfterApply(
+      layout,
+      { managedId, memberRole: "replica", engine: "mysql" },
+      "ready",
+      run,
+    );
+    let missing = false;
+    try {
+      await Deno.stat(cnfPath);
+    } catch (err) {
+      missing = err instanceof Deno.errors.NotFound;
+    }
+    assert(missing);
+    assertEquals(
+      await isManagedMemberDemoted(layout, managedId, MEMBER_ID),
+      false,
+    );
+  });
+});
+
+test("readManagedDemotedMarker returns parsed engine metadata", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);
     await writeManagedDemotedMarker(
@@ -161,6 +222,55 @@ test("listDemotedFenceTargets includes a marker without ha-member.json", async (
       MANAGED_ID,
       MEMBER_ID,
       "2026-10-08T12:00:00.000Z",
+      "mariadb",
+    );
+    assertEquals(await readManagedDemotedMarker(layout, MANAGED_ID), {
+      memberId: MEMBER_ID,
+      demotedAt: "2026-10-08T12:00:00.000Z",
+      engine: "mariadb",
+    });
+  });
+});
+
+test("listDemotedFenceTargets skips orphan markers when the engine cannot be resolved", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    assertEquals(await listDemotedFenceTargets(layout), []);
+  });
+});
+
+test("listDemotedFenceTargets includes a marker without ha-member.json", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      `${layout.stateDir}/managed/${MANAGED_ID}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - orphan_pg:/var/lib/postgresql",
+        "volumes:",
+        "  orphan_pg:",
+        "    name: orphan_pg",
+        "",
+      ].join("\n"),
+    );
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "postgres",
     );
     const targets = await listDemotedFenceTargets(layout);
     assertEquals(targets.length, 1);

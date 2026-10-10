@@ -91,12 +91,15 @@ function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
       }
     }
     if (args[0] === "exec") {
-      // CI runners have a real Docker binary so ensureDocker() succeeds and the
-      // guard runs the writable probe; tab-separated psql rows, not empty stdout.
+      const joined = args.join(" ");
+      const mysqlFamily = joined.includes("mysql") || joined.includes("mariadb");
+      const stdout = mysqlFamily
+        ? (writablePrimary ? "0\t0\n" : "1\t1\n")
+        : (writablePrimary ? "t\n" : "f\n");
       return Promise.resolve({
         success: true,
         code: 0,
-        stdout: writablePrimary ? "t\n" : "f\n",
+        stdout,
         stderr: "",
       });
     }
@@ -289,11 +292,26 @@ test("the guard discovers demoted clusters from markers without an injected memb
     await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
       recursive: true,
     });
+    await Deno.writeTextFile(
+      `${layout.stateDir}/managed/${MANAGED_ID}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - guard_data:/var/lib/postgresql",
+        "volumes:",
+        "  guard_data:",
+        "    name: guard_data",
+        "",
+      ].join("\n"),
+    );
     await writeManagedDemotedMarker(
       layout,
       MANAGED_ID,
       MEMBER_ID,
       "2026-10-08T12:00:00.000Z",
+      "postgres",
     );
     const fake = docker();
     const guard = new DemotedMemberGuard({ layout, run: fake.run });
@@ -302,7 +320,7 @@ test("the guard discovers demoted clusters from markers without an injected memb
   });
 });
 
-test("compose ps failure does not stop a demoted member", async () => {
+test("compose ps failure still enforces a demoted member (fail closed)", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
     const layout = resolveLayout(env);
@@ -320,9 +338,61 @@ test("compose ps failure does not stop a demoted member", async () => {
       listMembers: () => Promise.resolve([memberRecord()]),
     });
     await guard.tick();
-    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), true);
   });
 });
+
+const MYSQL_COMPOSE = [
+  "services:",
+  "  db:",
+  "    image: mysql:8.4",
+  "    volumes:",
+  "      - guard_data:/var/lib/mysql",
+  "volumes:",
+  "  guard_data:",
+  "    name: guard_data",
+  "",
+].join("\n");
+
+for (const engine of ["mysql", "mariadb"] as const) {
+  test(`guard tick stops a hand-started demoted ${engine} primary`, async () => {
+    await withTempLayout(async ({ env }) => {
+      resetManagedIntentsForTests();
+      const layout = resolveLayout(env);
+      const managedId = `managed_guard_${engine}_${crypto.randomUUID()}`;
+      await Deno.mkdir(`${layout.stateDir}/managed/${managedId}`, {
+        recursive: true,
+      });
+      await Deno.writeTextFile(
+        `${layout.stateDir}/managed/${managedId}/docker-compose.yml`,
+        MYSQL_COMPOSE.replace(
+          "mysql:8.4",
+          engine === "mariadb" ? "mariadb:11" : "mysql:8.4",
+        ),
+      );
+      await saveManagedHaMember(layout, {
+        ...memberRecord(managedId),
+        engine,
+      });
+      await writeManagedDemotedMarker(
+        layout,
+        managedId,
+        MEMBER_ID,
+        "2026-10-08T12:00:00.000Z",
+        engine,
+      );
+      const fake = docker();
+      const guard = new DemotedMemberGuard({
+        layout,
+        run: fake.run,
+        listMembers: () =>
+          Promise.resolve([{ ...memberRecord(managedId), engine }]),
+      });
+      await guard.tick();
+      assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), true);
+    });
+  });
+}
 
 test("a stopped demoted member is left alone", async () => {
   await withTempLayout(async ({ env }) => {

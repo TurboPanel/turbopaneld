@@ -218,3 +218,90 @@ test("reactivatePrimaryAfterSwitchoverAbort clears read_only on mariadb", async 
     }
   });
 });
+
+const POSTGRES_COMPOSE = [
+  "services:",
+  "  db:",
+  "    image: postgres:18",
+  "    volumes:",
+  "      - sw_data:/var/lib/postgresql",
+  "volumes:",
+  "  sw_data:",
+  "    name: sw_data",
+  "",
+].join("\n");
+
+test("reactivatePrimaryAfterSwitchoverAbort clears postgres standby.signal and promotes", async () => {
+  let removedSignal = false;
+  let reactivateBatch = false;
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const managedId = `managed_switchover_pg_${crypto.randomUUID()}`;
+      const layout = {
+        stateDir: fixture.dirs.stateDir,
+      } as Parameters<typeof managedDir>[0];
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await reactivatePrimaryAfterSwitchoverAbort(
+        {
+          managedId,
+          action: "start",
+          reactivateAfterSwitchoverAbort: true,
+          engine: "postgres",
+          switchoverAbortPromoteSafe: true,
+        },
+        (args, options) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(
+              dockerOk(
+                JSON.stringify([
+                  {
+                    ID: "pg1",
+                    Name: "pg-1",
+                    Service: "postgres",
+                    State: "running",
+                  },
+                ]),
+              ),
+            );
+          }
+          if (args[0] === "run") {
+            const script = args.at(-1) ?? "";
+            if (script.includes("rm -f") && script.includes("standby.signal")) {
+              removedSignal = true;
+            }
+            return Promise.resolve(dockerOk("present\n"));
+          }
+          if (args[0] === "exec") {
+            const batch = String(options?.input ?? "");
+            if (batch.includes("pg_promote")) {
+              reactivateBatch = true;
+              return Promise.resolve(dockerOk(""));
+            }
+            if (batch.includes("pg_is_in_recovery") || batch.includes("NOT pg")) {
+              return Promise.resolve(
+                dockerOk(reactivateBatch ? "t\n" : "f\n"),
+              );
+            }
+            return Promise.resolve(dockerOk(""));
+          }
+          return Promise.resolve(dockerOk());
+        },
+        { ensureDocker: () => Promise.resolve() },
+      );
+      assertEquals(removedSignal, true);
+      assertEquals(reactivateBatch, true);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});

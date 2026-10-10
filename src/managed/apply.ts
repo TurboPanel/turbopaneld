@@ -854,10 +854,12 @@ export async function handleManagedApply(
       layout,
       deps,
     );
+    const runDocker = deps?.runDocker ?? defaultRunDocker;
     await maybeClearDemotedMarkerAfterApply(
       layout,
       payload,
       result.member?.status,
+      (args) => runDocker(args),
     );
     return result;
   });

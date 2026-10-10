@@ -34,17 +34,21 @@ export type DemotedMemberGuardDeps = {
   intervalMs?: number;
 };
 
-async function engineIsRunning(
+type EngineRunningState = "running" | "stopped" | "unknown";
+
+async function engineRunningState(
   run: DockerRunFn,
   managedId: string,
-): Promise<boolean> {
+): Promise<EngineRunningState> {
   const containers = await collectManagedContainers(
     managedComposeProject(managedId),
     (text) => sanitizeForLog(text),
     run,
   );
-  if (!containers) return false;
-  return containers.some((row) => row.status.toLowerCase() === "running");
+  if (!containers) return "unknown";
+  return containers.some((row) => row.status.toLowerCase() === "running")
+    ? "running"
+    : "stopped";
 }
 
 async function stopDemotedEngine(
@@ -81,15 +85,18 @@ export class DemotedMemberGuard {
     this.#listTargets = deps.listMembers ??
       (async () => {
         const targets = await listDemotedFenceTargets(deps.layout);
-        return targets.map((target) => ({
-          managedId: target.managedId,
-          memberId: target.memberId ?? "",
-          engine: target.engine ?? "postgres",
-          role: "primary" as const,
-          containerName: "",
-          replicaPeerCount: 0,
-          updatedAt: "",
-        }));
+        return targets.flatMap((target) => {
+          if (!target.engine) return [];
+          return [{
+            managedId: target.managedId,
+            memberId: target.memberId ?? "",
+            engine: target.engine,
+            role: "primary" as const,
+            containerName: "",
+            replicaPeerCount: 0,
+            updatedAt: "",
+          }];
+        });
       });
     this.#intervalMs = deps.intervalMs ?? DEMOTED_GUARD_INTERVAL_MS;
   }
@@ -167,9 +174,16 @@ export class DemotedMemberGuard {
       this.#warned.delete(member.managedId);
       return;
     }
-    if (!(await engineIsRunning(this.#run, member.managedId))) {
+    const running = await engineRunningState(this.#run, member.managedId);
+    if (running === "stopped") {
       this.#warned.delete(member.managedId);
       return;
+    }
+    if (running === "unknown") {
+      logWarn(
+        "managed",
+        `demoted member guard: compose ps failed; treating engine as possibly running managedId=${member.managedId}`,
+      );
     }
     await enforceFencedMemberIfRunning(
       this.#layout,

@@ -11,6 +11,7 @@ import {
 import type { RunDockerFn } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { assertSwitchoverAbortReactivateAllowed } from "./switchover-abort-guard.ts";
+import { clearDemotedVolumeFence } from "./demoted-fence-volume.ts";
 import {
   clearSwitchoverQuiescedMarker,
   writeSwitchoverQuiescedMarker,
@@ -65,6 +66,21 @@ export async function reactivatePrimaryAfterSwitchoverAbort(
   const layout = resolveLayout(Deno.env.toObject());
   if (isMysqlFamilySwitchoverEngine(payload.engine)) {
     await assertSwitchoverAbortReactivateAllowed(layout, payload);
+  }
+  const engineCode = payload.engine ?? "postgres";
+  try {
+    await clearDemotedVolumeFence(
+      layout,
+      payload.managedId,
+      engineCode,
+      run,
+    );
+  } catch (err) {
+    throw new Error(
+      `managed.lifecycle switchover abort: could not clear demoted volume fence (${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
   }
   const { engine, ctx } = await resolveLocalReplicationEngine(
     payload.managedId,

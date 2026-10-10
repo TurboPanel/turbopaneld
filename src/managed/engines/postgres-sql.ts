@@ -1103,4 +1103,13 @@ export function enforceFencedFormerPrimarySql(): string {
   ].join("\n");
 }
 
+/** Undo demoted-fence SQL and promote after a switchover abort reactivation. */
+export function reactivateFormerPrimaryAfterSwitchoverAbortSql(): string {
+  return [
+    "ALTER SYSTEM RESET default_transaction_read_only;",
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_promote(true, 60);",
+  ].join("\n");
+}
+
 export { MANAGED_SLOT_PREFIX };

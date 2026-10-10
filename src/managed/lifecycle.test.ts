@@ -196,59 +196,67 @@ for (const role of ["primary", undefined] as const) {
   });
 }
 
-for (const action of ["start", "restart"] as const) {
-  test(`lifecycle ${action} refuses a demoted primary without compose ${action}`, async () => {
-    await withTempLayout(async (fixture) => {
-      const prior: Record<string, string | undefined> = {};
-      for (const [key, value] of Object.entries(fixture.env)) {
-        prior[key] = Deno.env.get(key);
-        Deno.env.set(key, value);
-      }
-      try {
-        const managedId =
-          `managed_lifecycle_demoted_start_${crypto.randomUUID()}`;
-        const root = managedDir(
-          { stateDir: fixture.dirs.stateDir } as Parameters<
-            typeof managedDir
-          >[0],
-          managedId,
-        );
-        await Deno.mkdir(root, { recursive: true });
-        await Deno.writeTextFile(
-          `${root}/docker-compose.yml`,
-          POSTGRES_COMPOSE,
-        );
-        await writeManagedDemotedMarker(
-          { stateDir: fixture.dirs.stateDir } as Parameters<
-            typeof writeManagedDemotedMarker
-          >[0],
-          managedId,
-          MEMBER_ID,
-          "2026-10-08T12:00:00.000Z",
-        );
-        const docker = fakeDocker(new Set([PG_DATA]));
-        const result = await handleManagedLifecycle(
-          {
-            managedId,
-            action,
-            memberId: MEMBER_ID,
-            engine: "postgres",
-            role: "primary",
-          },
-          new Date().toISOString(),
-          { runDocker: docker.run },
-        );
-        assertEquals(composeCalled(docker.calls, action), false);
-        assertEquals(composeCalled(docker.calls, "stop"), true);
-        assertEquals(result.status, "needs_resync");
-      } finally {
-        for (const [key, value] of Object.entries(prior)) {
-          if (value === undefined) Deno.env.delete(key);
-          else Deno.env.set(key, value);
+for (const engine of ["postgres", "mysql", "mariadb"] as const) {
+  for (const action of ["start", "restart"] as const) {
+    test(`lifecycle ${action} refuses a demoted ${engine} primary without compose ${action}`, async () => {
+      await withTempLayout(async (fixture) => {
+        const prior: Record<string, string | undefined> = {};
+        for (const [key, value] of Object.entries(fixture.env)) {
+          prior[key] = Deno.env.get(key);
+          Deno.env.set(key, value);
         }
-      }
+        try {
+          const managedId =
+            `managed_lifecycle_demoted_start_${crypto.randomUUID()}`;
+          const root = managedDir(
+            { stateDir: fixture.dirs.stateDir } as Parameters<
+              typeof managedDir
+            >[0],
+            managedId,
+          );
+          await Deno.mkdir(root, { recursive: true });
+          const compose = engine === "postgres"
+            ? POSTGRES_COMPOSE
+            : engine === "mysql"
+            ? MYSQL_COMPOSE
+            : MARIADB_COMPOSE;
+          const present = engine === "postgres"
+            ? new Set([PG_DATA])
+            : new Set([MYSQL_DATA]);
+          await Deno.writeTextFile(`${root}/docker-compose.yml`, compose);
+          await writeManagedDemotedMarker(
+            { stateDir: fixture.dirs.stateDir } as Parameters<
+              typeof writeManagedDemotedMarker
+            >[0],
+            managedId,
+            MEMBER_ID,
+            "2026-10-08T12:00:00.000Z",
+            engine,
+          );
+          const docker = fakeDocker(present);
+          const result = await handleManagedLifecycle(
+            {
+              managedId,
+              action,
+              memberId: MEMBER_ID,
+              engine,
+              role: "primary",
+            },
+            new Date().toISOString(),
+            { runDocker: docker.run },
+          );
+          assertEquals(composeCalled(docker.calls, action), false);
+          assertEquals(composeCalled(docker.calls, "stop"), true);
+          assertEquals(result.status, "needs_resync");
+        } finally {
+          for (const [key, value] of Object.entries(prior)) {
+            if (value === undefined) Deno.env.delete(key);
+            else Deno.env.set(key, value);
+          }
+        }
+      });
     });
-  });
+  }
 }
 
 test("refuseWritableFencedAfterComposeStart stops a demoted member that stayed writable", async () => {

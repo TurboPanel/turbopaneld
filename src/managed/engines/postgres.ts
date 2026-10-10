@@ -40,6 +40,7 @@ import {
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  reactivateFormerPrimaryAfterSwitchoverAbortSql,
   readOnlySessionDefaultSql,
   reconcileDatabaseObjectsSql,
   recreateLostPhysicalSlotSql,
@@ -631,6 +632,33 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
 
   async enforceFencedFormerPrimaryReadOnly(ctx) {
     await runPsql(ctx, enforceFencedFormerPrimarySql());
+  },
+
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    if (value === "t" || value === "true") {
+      throw new Error(
+        "switchover: former primary is already writable; promotion may have started",
+      );
+    }
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runPsql(ctx, reactivateFormerPrimaryAfterSwitchoverAbortSql());
+    const deadline = Date.now() + 60_000;
+    const writable = async (): Promise<boolean> => {
+      if (Date.now() >= deadline) return false;
+      const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+      const value = rows[0]?.[0]?.toLowerCase();
+      if (value === "t" || value === "true") return true;
+      await sleep(500);
+      return writable();
+    };
+    if (await writable()) return;
+    throw new Error(
+      "switchover: former primary did not become writable after reactivation",
+    );
   },
 
   async promote(ctx, _options?) {

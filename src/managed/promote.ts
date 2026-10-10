@@ -13,6 +13,8 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { clearManagedDemotedMarker } from "./demoted-marker.ts";
+import { clearDemotedVolumeFence } from "./demoted-fence-volume.ts";
+import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import {
   parseSwitchoverPromoteFailureCode,
   switchoverCaughtErrorDetail,
@@ -95,6 +97,15 @@ export async function handleManagedPromote(
       payload.managedId,
       "completed",
       new Date().toISOString(),
+    );
+  }
+  const run = deps?.runDocker ?? defaultRunDocker;
+  if (payload.engine) {
+    await clearDemotedVolumeFence(
+      layout,
+      payload.managedId,
+      payload.engine,
+      (args) => run(args),
     );
   }
   await clearManagedDemotedMarker(layout, payload.managedId);

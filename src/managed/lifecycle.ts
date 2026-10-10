@@ -42,7 +42,10 @@ import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
 } from "./needs-resync.ts";
-import { persistDemotedVolumeFence } from "./demoted-fence-volume.ts";
+import {
+  clearDemotedVolumeFence,
+  persistDemotedVolumeFence,
+} from "./demoted-fence-volume.ts";
 import {
   enforceFencedMemberIfRunning,
   isFencedMemberStillWritable,
@@ -192,13 +195,14 @@ async function recordDemotedFenceOnLifecycleStop(
 ): Promise<void> {
   if (payload.action !== "stop" || payload.demoted !== true) return;
   const demotedAt = new Date().toISOString();
+  const engine = payload.engine ?? "postgres";
   await writeManagedDemotedMarker(
     layout,
     payload.managedId,
     payload.memberId ?? "",
     demotedAt,
+    engine,
   );
-  const engine = payload.engine ?? "postgres";
   await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
   await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
 }
@@ -329,6 +333,8 @@ async function finalizeManagedLifecycle(
   await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
 
   if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
+    const engine = payload.engine ?? "postgres";
+    await clearDemotedVolumeFence(layout, payload.managedId, engine, run);
     await clearManagedDemotedMarker(layout, payload.managedId);
   }
 
