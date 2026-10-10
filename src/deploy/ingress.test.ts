@@ -27,10 +27,10 @@ import {
   ensureServiceIngress,
   formatCaddyPathMatcher,
   guardHostingCaddySites,
-  hostingCaddyValidateNeedsEdgeRuntime,
   HOSTING_CADDY_ADMIN_SOCKET,
   HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
+  hostingCaddyValidateNeedsEdgeRuntime,
   hostingIngressComposePath,
   hostingIngressDir,
   INGRESS_GATE_SOCKET_DIR,
@@ -1532,7 +1532,11 @@ test("hostingCaddyValidateNeedsEdgeRuntime ignores reserved snippets and empty c
     false,
   );
   assertEquals(
-    hostingCaddyValidateNeedsEdgeRuntime("app.example.com {\n}\n", [], "env.caddy"),
+    hostingCaddyValidateNeedsEdgeRuntime(
+      "app.example.com {\n}\n",
+      [],
+      "env.caddy",
+    ),
     true,
   );
   assertEquals(

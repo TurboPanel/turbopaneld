@@ -2458,7 +2458,9 @@ async function guardHostingCaddySitesLocked(
     throw err;
   }
   if (names.length === 0) return [];
-  const substantive = names.filter((name) => !isDaemonReservedHostingSite(name));
+  const substantive = names.filter((name) =>
+    !isDaemonReservedHostingSite(name)
+  );
   if (substantive.length === 0) return [];
   await ensureHostingCaddyRuntimeBeforeValidate(layout);
   const candidate = await openHostingCandidate(layout, hostingDir);
