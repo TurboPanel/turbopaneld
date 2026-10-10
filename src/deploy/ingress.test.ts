@@ -27,6 +27,7 @@ import {
   ensureServiceIngress,
   formatCaddyPathMatcher,
   guardHostingCaddySites,
+  hostingCaddyValidateNeedsEdgeRuntime,
   HOSTING_CADDY_ADMIN_SOCKET,
   HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
@@ -50,6 +51,7 @@ import {
   serviceIngressProject,
   serviceIngressUsesSocketProxy,
   serviceTraefikCompose,
+  setEnsureHostingCaddyRuntimeForTest,
   setIngressHostCommandForTest,
   siteSnippet,
   snippetSiteAddresses,
@@ -1515,6 +1517,97 @@ function hostingPayload(environmentId: string, hostname: string) {
 }
 
 const noGrant = () => Promise.resolve();
+
+test("hostingCaddyValidateNeedsEdgeRuntime ignores reserved snippets and empty content", () => {
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime("", [], "env.caddy"),
+    false,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime(
+      "",
+      [INSTANCE_ACME_HTTP01_SITE, "00-empty.caddy"],
+      "env.caddy",
+    ),
+    false,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime("app.example.com {\n}\n", [], "env.caddy"),
+    true,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime("", ["other-env.caddy"], "env.caddy"),
+    true,
+  );
+});
+
+test("rewriteHostingCaddySites skips edge runtime when nothing needs Caddy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let ensured = 0;
+  const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+    ensured += 1;
+    return Promise.resolve();
+  });
+  const restoreHost = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      {
+        ...hostingPayload("env-tcp", "unused.example.com"),
+        hostings: [{
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "db",
+          hostnames: [],
+          protocol: "tcp",
+          ports: [{ published: 5432, target: 5432 }],
+        }],
+      },
+      undefined,
+      noGrant,
+    );
+    assertEquals(ensured, 0);
+  } finally {
+    restoreHost();
+    restoreEnsure();
+    await cleanup();
+  }
+});
+
+test("guardHostingCaddySites ensures hosting Caddy edge before caddy validate", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const events: string[] = [];
+  const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+    events.push("ensure-edge-runtime");
+    return Promise.resolve();
+  });
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    if (args.includes("validate")) {
+      events.push("caddy-validate");
+    }
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "a.example.com {\n}\n",
+    );
+    await guardHostingCaddySites(layout, noGrant);
+    const ensureIdx = events.indexOf("ensure-edge-runtime");
+    const validateIdx = events.indexOf("caddy-validate");
+    assertEquals(ensureIdx >= 0, true);
+    assertEquals(validateIdx >= 0, true);
+    assertEquals(ensureIdx < validateIdx, true);
+  } finally {
+    restoreHost();
+    restoreEnsure();
+    await cleanup();
+  }
+});
 
 /**
  * What `caddy validate` says about the staged set, as far as these tests care:
