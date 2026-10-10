@@ -5,11 +5,13 @@ import {
   isDeadPrimaryProblem,
   listOrchestratorProblems,
   type OrchestratorHttpFn,
+  orchestratorRaftReady,
   parseOrchestratorProblems,
   parseOrchestratorReplicationAnalysis,
   recoverToCandidate,
   registerCandidate,
   setClusterAlias,
+  waitForOrchestratorRaftLeader,
 } from "./orchestrator-api.ts";
 
 /**
@@ -345,4 +347,136 @@ test("parseOrchestratorProblems skips malformed keys and non-array problem lists
     }]),
     [{ clusterAlias: "cluster-c" }],
   );
+});
+
+test("orchestratorRaftReady needs a leader whose HTTP URI is on the leader's host", () => {
+  assertEquals(orchestratorRaftReady({ State: "Leader" }), true);
+  assertEquals(
+    orchestratorRaftReady({
+      State: "Follower",
+      Leader: "10.10.3.60:33002",
+      LeaderURI: "http://10.10.3.60:33001",
+    }),
+    true,
+  );
+  // No leader known: every write answers HTTP 500 "Unauthorized".
+  assertEquals(
+    orchestratorRaftReady({
+      State: "Follower",
+      Leader: "",
+      LeaderURI: "http://10.10.3.60:33001",
+    }),
+    false,
+  );
+  assertEquals(
+    orchestratorRaftReady({ State: "Candidate", Leader: "" }),
+    false,
+  );
+  // LeaderURI restored from an older group's snapshot: proxied to a dead host.
+  assertEquals(
+    orchestratorRaftReady({
+      State: "Follower",
+      Leader: "10.10.3.60:33002",
+      LeaderURI: "http://172.20.4.10:33001",
+    }),
+    false,
+  );
+  assertEquals(
+    orchestratorRaftReady({
+      State: "Follower",
+      Leader: "[fd00::5]:33002",
+      LeaderURI: "http://[fd00::5]:33001",
+    }),
+    true,
+  );
+  assertEquals(orchestratorRaftReady(null), null);
+  assertEquals(orchestratorRaftReady("not raft"), null);
+  assertEquals(orchestratorRaftReady({ Code: "ERROR" }), null);
+});
+
+test("waitForOrchestratorRaftLeader polls until a leader is known", async () => {
+  const states = [
+    { State: "Candidate", Leader: "", LeaderURI: "" },
+    { State: "Follower", Leader: "", LeaderURI: "" },
+    {
+      State: "Follower",
+      Leader: "10.0.0.2:33002",
+      LeaderURI: "http://10.0.0.2:33001",
+    },
+  ];
+  const urls: string[] = [];
+  const signals: Array<AbortSignal | null | undefined> = [];
+  let sleeps = 0;
+  const ready = await waitForOrchestratorRaftLeader({
+    fetch: (url, init) => {
+      urls.push(url);
+      signals.push(init?.signal);
+      return Promise.resolve(Response.json(states.shift()));
+    },
+  }, { sleep: () => Promise.resolve(void sleeps++) });
+  assertEquals(ready, true);
+  assertEquals(urls.length, 3);
+  assertEquals(sleeps, 2);
+  assertEquals(
+    urls[0],
+    `http://127.0.0.1:${MANAGED_HA_HTTP_PORT}/api/raft-status`,
+  );
+  assertEquals(signals.every((signal) => signal instanceof AbortSignal), true);
+});
+
+test("waitForOrchestratorRaftLeader retries a refused connection", async () => {
+  let calls = 0;
+  const ready = await waitForOrchestratorRaftLeader({
+    fetch: () => {
+      calls++;
+      if (calls === 1) {
+        return Promise.reject(new TypeError("connection refused"));
+      }
+      return Promise.resolve(Response.json({ State: "Leader" }));
+    },
+  }, { sleep: () => Promise.resolve() });
+  assertEquals(ready, true);
+  assertEquals(calls, 2);
+});
+
+test("waitForOrchestratorRaftLeader goes on at once when Raft status is unknown", async () => {
+  let calls = 0;
+  const ready = await waitForOrchestratorRaftLeader({
+    fetch: () => {
+      calls++;
+      return Promise.resolve(new Response("", { status: 200 }));
+    },
+  }, { sleep: () => Promise.reject(new Error("must not sleep")) });
+  assertEquals(ready, true);
+  assertEquals(calls, 1);
+});
+
+test("waitForOrchestratorRaftLeader gives up at the deadline", async () => {
+  let clock = 0;
+  let calls = 0;
+  const ready = await waitForOrchestratorRaftLeader({
+    fetch: () => {
+      calls++;
+      return Promise.resolve(Response.json({ State: "Candidate", Leader: "" }));
+    },
+  }, {
+    timeoutMs: 3_000,
+    intervalMs: 1_000,
+    now: () => clock,
+    sleep: (ms) => Promise.resolve(void (clock += ms)),
+  });
+  assertEquals(ready, false);
+  assertEquals(calls, 4);
+});
+
+test("waitForOrchestratorRaftLeader goes on at once on an HTTP error answer", async () => {
+  let calls = 0;
+  const ready = await waitForOrchestratorRaftLeader({
+    fetch: () => {
+      calls++;
+      return Promise.resolve(new Response("", { status: 500 }));
+    },
+  }, { sleep: () => Promise.reject(new Error("must not sleep")) });
+  assertEquals(ready, true);
+  assertEquals(calls, 1);
 });

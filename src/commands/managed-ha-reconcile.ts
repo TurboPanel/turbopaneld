@@ -49,8 +49,10 @@ import {
 import {
   discoverInstance,
   type OrchestratorApiDeps,
+  type OrchestratorRaftWaitOptions,
   registerCandidate,
   setClusterAlias,
+  waitForOrchestratorRaftLeader,
 } from "../managed/orchestrator-api.ts";
 import { orchestratorTlsDir } from "../managed/engine-paths.ts";
 import { runOrchestratorSetup } from "../orchestration/ansible.ts";
@@ -84,6 +86,7 @@ export type ManagedHaReconcileHandlerDeps = {
   ensureDocker?: () => Promise<void>;
   runHostPrep?: () => Promise<void>;
   orchestratorApi?: OrchestratorApiDeps;
+  raftWait?: OrchestratorRaftWaitOptions;
 };
 
 function emptyHaResult(serverId: string): ManagedHaReconcileResult {
@@ -415,6 +418,15 @@ async function reconcileOrchestratorPresentState(
     ...deps?.orchestratorApi,
     credentials: httpAuth,
   };
+  if (
+    clusters.length > 0 &&
+    !(await waitForOrchestratorRaftLeader(api, deps?.raftWait))
+  ) {
+    logWarn(
+      "commands",
+      `managed.ha.reconcile: Orchestrator Raft has no reachable leader yet serverId=${payload.serverId}; registering anyway`,
+    );
+  }
   const registrations = clusters.length === 0
     ? { registeredClusters: [], failedClusters: [] }
     : await registerClusters(clusters, api);
