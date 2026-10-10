@@ -381,11 +381,11 @@ export type EnvironmentDeployDeps = {
 };
 
 /**
- * True when any container hosting routes HTTP hostnames through the shared
- * loopback Traefik. Empty hostnames and `tcp`/`udp`
- * hostings do not need the shared proxy — per-service Traefik covers raw ports.
+ * True when any HTTP hosting publishes at least one public hostname on the
+ * edge (hosting Caddy and/or shared loopback Traefik). `tcp`/`udp` hostings
+ * and empty hostname lists are ignored.
  */
-export function containerHostingsNeedSharedHttpIngress(
+export function hostingsNeedPublicHttpEdge(
   hostings: readonly EnvironmentDeployHosting[],
 ): boolean {
   for (const hosting of hostings) {
@@ -393,6 +393,17 @@ export function containerHostingsNeedSharedHttpIngress(
     if (hosting.hostnames.length > 0) return true;
   }
   return false;
+}
+
+/**
+ * True when any container hosting routes HTTP hostnames through the shared
+ * loopback Traefik. Empty hostnames and `tcp`/`udp`
+ * hostings do not need the shared proxy — per-service Traefik covers raw ports.
+ */
+export function containerHostingsNeedSharedHttpIngress(
+  hostings: readonly EnvironmentDeployHosting[],
+): boolean {
+  return hostingsNeedPublicHttpEdge(hostings);
 }
 
 /**
@@ -495,7 +506,9 @@ async function ensureDeployIngress(
       activeIngressServiceIds,
       { runDocker },
     );
-    await ensureHostingCaddyRuntime(layout);
+    if (hostingsNeedPublicHttpEdge(allHostings)) {
+      await ensureHostingCaddyRuntime(layout);
+    }
     return;
   }
   await ensureDockerFn();
@@ -543,6 +556,12 @@ async function ensureDeployIngress(
       { runDocker },
     );
   });
+
+  // Edge hostnames on host-native services (sites, native apps) still reach
+  // hosting Caddy even when no container hosting needs shared Traefik.
+  if (hostingsNeedPublicHttpEdge(allHostings)) {
+    await ensureHostingCaddyRuntime(layout);
+  }
 }
 
 /**
