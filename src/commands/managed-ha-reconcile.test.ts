@@ -3,6 +3,7 @@
  */
 
 import { assertEquals, assertRejects } from "@std/assert";
+import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   ORCHESTRATOR_COMPOSE_SERVICE_NAME,
@@ -17,6 +18,7 @@ import {
   orchestratorConfPath,
   orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
+  orchestratorTlsDir,
 } from "../managed/engine-paths.ts";
 import { parseProxySqlClientCnf } from "../managed/proxysql-admin.ts";
 import {
@@ -1161,6 +1163,108 @@ test({
           },
         );
         assertEquals(result.registeredClusters, [MANAGED_ID]);
+      } finally {
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+function orgTlsWithCa(caBody: string) {
+  return {
+    certificatePem:
+      "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+    privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+    caCertPem:
+      `-----BEGIN CERTIFICATE-----\n${caBody}\n-----END CERTIFICATE-----\n`,
+  };
+}
+
+function composeDigestLabel(yaml: string): string | undefined {
+  return yaml.match(/tp\.managed\.config-digest: "?([0-9a-f]+)"?/)?.[1];
+}
+
+function failingComposeUp(): (args: string[]) => Promise<DockerCliResult> {
+  const inner = fakeRunWithRunningOrchestrator();
+  return (args) => {
+    if (args.includes("up")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "compose up failed",
+        code: 1,
+      });
+    }
+    return inner(args);
+  };
+}
+
+test({
+  name:
+    "handleManagedHaReconcile puts the CA bundle on the compose file so a new bundle recreates Orchestrator",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const privatePem =
+        "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+      const run = async (
+        caBody: string,
+        runDocker = fakeRunWithRunningOrchestrator(),
+      ) => {
+        const result = await handleManagedHaReconcile(
+          presentPayload({
+            clusters: [],
+            orgTlsMaterial: orgTlsWithCa(caBody),
+          }),
+          new Date().toISOString(),
+          {
+            runDocker,
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: async (ciphertexts: string[]) => {
+              const echoed = await decryptSecretsEcho(ciphertexts);
+              return ciphertexts.map((c, index) =>
+                c === "tpdaemon.v1.server.KEYID.ciphertext"
+                  ? privatePem
+                  : echoed[index]!
+              );
+            },
+            orchestratorApi: {
+              fetch: () => Promise.resolve(new Response("", { status: 200 })),
+            },
+          },
+        );
+        return result.restarted;
+      };
+      const label = async () =>
+        composeDigestLabel(
+          await Deno.readTextFile(orchestratorComposePath(layout)),
+        );
+      try {
+        await run("GEN1");
+        const gen1 = await label();
+        // The same bundle written again: same compose file, no restart.
+        assertEquals(await run("GEN1"), false);
+        assertEquals(await label(), gen1);
+        // A rotated bundle with the same conf: the compose file changes, so
+        // compose recreates the process that read its trust roots at start.
+        assertEquals(await run("GEN2"), true);
+        const gen2 = await label();
+        assertEquals(gen2 === gen1, false);
+        assertEquals(
+          await Deno.readTextFile(join(orchestratorTlsDir(layout), "ca.pem")),
+          orgTlsWithCa("GEN2").caCertPem,
+        );
+        // A reconcile that fails at compose up has already written the new
+        // digest, so the next try's `compose up` still sees a container whose
+        // label is out of date and recreates it.
+        await assertRejects(() => run("GEN3", failingComposeUp()));
+        const gen3 = await label();
+        assertEquals(gen3 === gen2, false);
+        await run("GEN3");
+        assertEquals(await label(), gen3);
       } finally {
         clearLayoutEnv(fixture);
       }

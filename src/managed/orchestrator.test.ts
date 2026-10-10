@@ -29,6 +29,7 @@ import {
   ORCHESTRATOR_IMAGE,
   ORCHESTRATOR_TLS_CA_PATH,
   orchestratorCompose,
+  orchestratorFilesDigest,
   orchestratorStackPresent,
   orchestratorTopologyAliases,
   pickLiveOrConfiguredEngineDial,
@@ -746,6 +747,69 @@ test("ensureOrchestratorStack reports no restart when compose and conf are uncha
         NO_WAIT,
       ),
       false,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("orchestratorFilesDigest follows the conf and the CA bundle", async () => {
+  const conf = sampleConf();
+  const gen1 = await orchestratorFilesDigest(conf, "GEN1");
+  assertEquals(await orchestratorFilesDigest(conf, "GEN1"), gen1);
+  assertEquals(gen1 === await orchestratorFilesDigest(conf, "GEN2"), false);
+  assertEquals(gen1 === await orchestratorFilesDigest(conf, null), false);
+  assertEquals(
+    gen1 ===
+      await orchestratorFilesDigest(sampleConf({ raftAuthToken: "t" }), "GEN1"),
+    false,
+  );
+  assertEquals(/^[0-9a-f]{32}$/.test(gen1), true);
+});
+
+function composeDigestLabel(yaml: string): string | undefined {
+  return yaml.match(/tp\.managed\.config-digest: "?([0-9a-f]+)"?/)?.[1];
+}
+
+test("ensureOrchestratorStack stamps the conf and CA digest so compose recreates on a new bundle", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const conf = sampleConf();
+    const caPath = join(layout.configDir, "orchestrator", "tls", "ca.pem");
+    const apply = () =>
+      ensureOrchestratorStack(
+        layout,
+        HA_DESCRIPTOR,
+        BASE_RAFT,
+        MANAGED_NETWORK,
+        conf,
+        fakeRunSuccess(),
+        NO_WAIT,
+      );
+    const label = async () =>
+      composeDigestLabel(
+        await Deno.readTextFile(orchestratorComposePath(layout)),
+      );
+
+    await Deno.mkdir(join(layout.configDir, "orchestrator", "tls"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(caPath, "GEN1");
+    assertEquals(await apply(), true);
+    const first = await label();
+    assertEquals(first, await orchestratorFilesDigest(conf, "GEN1"));
+
+    // The same bundle again: nothing changes, nothing is recreated.
+    assertEquals(await apply(), false);
+    assertEquals(await label(), first);
+
+    // A rotated bundle with the same conf changes the compose file.
+    await Deno.writeTextFile(caPath, "GEN2\nGEN1");
+    assertEquals(await apply(), true);
+    assertEquals(
+      await label(),
+      await orchestratorFilesDigest(conf, "GEN2\nGEN1"),
     );
   } finally {
     await fixture.cleanup();
