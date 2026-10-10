@@ -114,17 +114,15 @@ async function mkdirReleaseTree(
     releaseDir: string;
   },
 ): Promise<void> {
-  for (
-    const dir of [
+  await Promise.all(
+    [
       paths.sitesDir,
       paths.siteDir,
       paths.releasesDir,
       paths.sharedDir,
       paths.releaseDir,
-    ]
-  ) {
-    await Deno.mkdir(dir, { recursive: true });
-  }
+    ].map((dir) => Deno.mkdir(dir, { recursive: true })),
+  );
 }
 
 test("resolveReleaseServiceId prefers sourceMaterial releaseServiceId", () => {
