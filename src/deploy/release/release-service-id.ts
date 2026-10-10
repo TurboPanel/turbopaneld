@@ -11,9 +11,10 @@
  * sources for one service.
  *
  * **Backward compatibility:** payloads without `releaseServiceId` (older control
- * planes) fall back to `nativeAppServices[].serviceId` when present, then the
- * compose service key. Older daemons ignore `releaseServiceId` and keep that
- * same fallback shape, so nothing breaks mid-rollout.
+ * planes) fall back to `nativeAppServices[].serviceId` when present, then
+ * matching `hostings[]` / `ingressServices[]` `serviceId`, then the compose
+ * service key. Older daemons ignore `releaseServiceId` and keep that same
+ * fallback shape, so nothing breaks mid-rollout.
  *
  * **Legacy directories:** a single-environment site may still live under
  * `sites/<composeServiceName>/`. {@link effectiveReleaseServiceId} keeps using
@@ -70,6 +71,16 @@ export function resolveReleaseServiceId(
     (app) => app.composeServiceName === composeServiceName && app.serviceId,
   );
   if (native?.serviceId) return native.serviceId;
+
+  const hosting = payload.hostings?.find(
+    (row) => row.composeServiceName === composeServiceName && row.serviceId,
+  );
+  if (hosting?.serviceId) return hosting.serviceId;
+
+  const ingress = payload.ingressServices?.find(
+    (row) => row.composeServiceName === composeServiceName && row.serviceId,
+  );
+  if (ingress?.serviceId) return ingress.serviceId;
 
   return composeServiceName;
 }

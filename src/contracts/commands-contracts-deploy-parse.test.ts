@@ -570,6 +570,38 @@ test("parseEnvironmentDeployPayload rejects duplicate nativeAppServices serviceI
   );
 });
 
+test("parseEnvironmentDeployPayload rejects duplicate sourceMaterial releaseServiceId", () => {
+  rejectDeploy(
+    {
+      sourceMaterial: [
+        {
+          sourceId: "src-a",
+          composeServiceName: "web",
+          releaseServiceId: "svc-dup-release",
+          provider: "git",
+          cloneUrl: "https://github.com/example/a.git",
+          ref: "main",
+          commitSha: "abc123def4567890123456789012345678901234",
+          releaseId: "rel-a",
+          build: { kind: "native" },
+        },
+        {
+          sourceId: "src-b",
+          composeServiceName: "api",
+          releaseServiceId: "svc-dup-release",
+          provider: "git",
+          cloneUrl: "https://github.com/example/b.git",
+          ref: "main",
+          commitSha: "def456abc7890123456789012345678901234ab",
+          releaseId: "rel-b",
+          build: { kind: "native" },
+        },
+      ],
+    },
+    "Duplicate sourceMaterial releaseServiceId svc-dup-release",
+  );
+});
+
 test("parseEnvironmentDeployPayload rejects nativeAppServices resource limits", () => {
   rejectDeploy(
     { nativeAppServices: [null] },

@@ -59,6 +59,20 @@ test("resolveReleaseServiceId falls back to compose key without releaseServiceId
   assertEquals(resolveReleaseServiceId(payload, "worker"), "worker");
 });
 
+test("resolveReleaseServiceId uses hosting serviceId when no release or native row", () => {
+  const payload = basePayload({
+    hostings: [{
+      hostingId: "host-1",
+      composeServiceName: "web",
+      serviceId: "svc-hosting-legacy",
+      hostnames: ["app.example.com"],
+    }],
+    nativeAppServices: [],
+    ingressServices: [],
+  });
+  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-hosting-legacy");
+});
+
 test("effectiveReleaseServiceId keeps legacy compose-key tree until canonical exists", async () => {
   await createTempLayout().then(async (fixture) => {
     const principalHomeRoot = join(fixture.dirs.stateDir, "principal-homes");

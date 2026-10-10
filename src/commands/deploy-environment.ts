@@ -119,6 +119,7 @@ import {
   applySourceReleases,
   resolveReleaseServiceId,
 } from "../deploy/release/apply-source-releases.ts";
+import { effectiveReleaseServiceId } from "../deploy/release/release-service-id.ts";
 import {
   applyNativeAppServices,
   type ApplyNativeAppsOpts,
@@ -737,7 +738,8 @@ function serviceIdsForManifest(
  * cannot say what code it is running once the control plane is unreachable.
  *
  * `serviceId` is resolved the same way the release engine resolves the release
- * directory segment ({@link resolveReleaseServiceId}), so the recorded identity
+ * directory segment ({@link effectiveReleaseServiceId} when the release engine
+ * ran, else {@link resolveReleaseServiceId}), so the recorded identity
  * addresses the tree that was actually published.
  *
  * **The commit comes from the release engine, not the payload, whenever the
@@ -835,20 +837,28 @@ function deployResultReleases(
  * Built from `sourceMaterial[]` on **every** deploy, not only when a release was
  * freshly promoted: a redeploy that does not touch the source still has to point
  * the document root at `current`, or the site would silently fall back to the
- * empty daemon-owned tree. `serviceId` resolves the same way the release engine
- * resolved it ({@link resolveReleaseServiceId}), so this addresses the tree that
- * was actually published. Entries with no principal are skipped for the same
- * reason the release engine skips them — there is no home to serve out of.
+ * empty daemon-owned tree. `serviceId` uses {@link effectiveReleaseServiceId}
+ * so legacy `sites/<compose>/` trees stay aligned with promote/bindings/vhosts.
+ * Entries with no principal are skipped for the same reason the release engine
+ * skips them — there is no home to serve out of.
  */
-function deployReleaseBindings(
+async function deployReleaseBindings(
   payload: EnvironmentDeployPayload,
-): Map<string, SiteRelease> {
+  layout: LayoutPaths,
+  runFn: RunFn,
+): Promise<Map<string, SiteRelease>> {
   const bindings = new Map<string, SiteRelease>();
   for (const entry of payload.sourceMaterial ?? []) {
     const principal = entry.principal;
     if (!principal) continue;
     bindings.set(entry.composeServiceName, {
-      serviceId: resolveReleaseServiceId(payload, entry.composeServiceName),
+      serviceId: await effectiveReleaseServiceId(
+        payload,
+        entry.composeServiceName,
+        layout,
+        principal,
+        runFn,
+      ),
       username: principal.username,
     });
   }
@@ -869,10 +879,12 @@ function deployReleaseBindings(
  * branch first for that reason; the entry is dropped here so the two never
  * disagree about which lane a site is on.
  */
-function deployManagedDirectoryBindings(
+async function deployManagedDirectoryBindings(
   payload: EnvironmentDeployPayload,
   releaseBindings: ReadonlyMap<string, SiteRelease>,
-): Map<string, SiteManagedDirectory> {
+  layout: LayoutPaths,
+  runFn: RunFn,
+): Promise<Map<string, SiteManagedDirectory>> {
   const bindings = new Map<string, SiteManagedDirectory>();
   for (const site of payload.sites ?? []) {
     if (site.sourceKind !== "managed-directory") continue;
@@ -882,7 +894,13 @@ function deployManagedDirectoryBindings(
     const principal = site.principal;
     if (!principal) continue;
     bindings.set(site.composeServiceName, {
-      serviceId: resolveReleaseServiceId(payload, site.composeServiceName),
+      serviceId: await effectiveReleaseServiceId(
+        payload,
+        site.composeServiceName,
+        layout,
+        principal,
+        runFn,
+      ),
       username: principal.username,
     });
   }
@@ -939,6 +957,21 @@ function releasePrincipalForService(
  * the operator is not asked to re-declare `serviceKind` to get a working
  * deploy.
  */
+/** Align wire `serviceId` with the release tree segment the engine just used. */
+function nativeAppsWithAppliedServiceIds(
+  apps: readonly EnvironmentDeployNativeAppService[],
+  applied: readonly AppliedRelease[],
+): EnvironmentDeployNativeAppService[] {
+  const byCompose = new Map(
+    applied.map((entry) => [entry.composeServiceName, entry.serviceId]),
+  );
+  return apps.map((app) => {
+    const releaseServiceId = byCompose.get(app.composeServiceName);
+    if (!releaseServiceId || releaseServiceId === app.serviceId) return app;
+    return { ...app, serviceId: releaseServiceId };
+  });
+}
+
 export function resolveHostNativeLanes(
   payload: EnvironmentDeployPayload,
   appliedReleases: readonly AppliedRelease[],
@@ -987,13 +1020,32 @@ export function resolveHostNativeLanes(
   return { sites, nativeAppServices };
 }
 
-/** `serviceId`s this payload still carries a `sourceMaterial[]` entry for. */
+/**
+ * `serviceId`s this payload still carries a `sourceMaterial[]` entry for.
+ *
+ * Uses the segments the release engine just applied when present, and keeps the
+ * legacy compose-key name as an alias while migration can still serve there.
+ */
 function currentReleaseServiceIds(
   payload: EnvironmentDeployPayload,
+  applied: readonly AppliedRelease[],
 ): Set<string> {
+  const appliedByCompose = new Map(
+    applied.map((entry) => [entry.composeServiceName, entry.serviceId]),
+  );
   const ids = new Set<string>();
   for (const entry of payload.sourceMaterial ?? []) {
-    ids.add(resolveReleaseServiceId(payload, entry.composeServiceName));
+    const canonical = resolveReleaseServiceId(
+      payload,
+      entry.composeServiceName,
+    );
+    const effective = appliedByCompose.get(entry.composeServiceName) ??
+      canonical;
+    ids.add(effective);
+    ids.add(canonical);
+    if (entry.composeServiceName !== canonical) {
+      ids.add(entry.composeServiceName);
+    }
   }
   return ids;
 }
@@ -1031,6 +1083,7 @@ async function previousReleaseTrees(
 async function reclaimRemovedServiceReleaseTrees(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
+  applied: readonly AppliedRelease[],
   deploymentDir: string,
   logSink: CommandOutputSink,
   runFn: RunFn,
@@ -1040,7 +1093,7 @@ async function reclaimRemovedServiceReleaseTrees(
   const removed = await reclaimRemovedReleaseTrees({
     layout,
     previous,
-    currentServiceIds: currentReleaseServiceIds(payload),
+    currentServiceIds: currentReleaseServiceIds(payload, applied),
     runFn,
     onOutput: (stream, line) => logSink.onLine(stream, line),
   });
@@ -1266,21 +1319,14 @@ async function applyDeployNativeApps(
   );
   // The live release's own runtime wins over the payload's: a rollback across a
   // Node/Deno switch restores the unit the old release needs.
-  const releaseServiceIdByCompose = new Map(
-    applied.map((entry) => [entry.composeServiceName, entry.serviceId]),
+  const appsForRelease = nativeAppsWithAppliedServiceIds(apps, applied).map(
+    (app) => {
+      const runtime = appliedByService.get(app.composeServiceName)?.runtime;
+      if (runtime === undefined) return app;
+      const { runtime: _runtime, ...rest } = app;
+      return runtime === "deno" ? { ...rest, runtime } : rest;
+    },
   );
-  const appsForRelease = apps.map((app) => {
-    const releaseServiceId = releaseServiceIdByCompose.get(
-      app.composeServiceName,
-    );
-    const next = releaseServiceId && releaseServiceId !== app.serviceId
-      ? { ...app, serviceId: releaseServiceId }
-      : app;
-    const runtime = appliedByService.get(app.composeServiceName)?.runtime;
-    if (runtime === undefined) return next;
-    const { runtime: _runtime, ...rest } = next;
-    return runtime === "deno" ? { ...rest, runtime } : rest;
-  });
   await applyNativeAppServices(
     layout,
     parsedPayload.environmentId,
@@ -2279,6 +2325,7 @@ async function deployEnvironmentHolding(
   await reclaimRemovedServiceReleaseTrees(
     layout,
     parsedPayload,
+    appliedReleases,
     deploymentDir,
     runtime.logSink,
     runtime.runPrivileged,
@@ -2304,10 +2351,20 @@ async function deployEnvironmentHolding(
     runtime.logSink.onLine("stderr", warning);
   }
 
-  const siteReleaseBindings = deployReleaseBindings(parsedPayload);
-  const siteManagedBindings = deployManagedDirectoryBindings(
+  const siteReleaseBindings = await deployReleaseBindings(
+    parsedPayload,
+    layout,
+    runtime.runPrivileged,
+  );
+  const siteManagedBindings = await deployManagedDirectoryBindings(
     parsedPayload,
     siteReleaseBindings,
+    layout,
+    runtime.runPrivileged,
+  );
+  const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
+    nativeAppServices,
+    appliedReleases,
   );
   await applyDeploySites(
     layout,
@@ -2343,7 +2400,7 @@ async function deployEnvironmentHolding(
   await applyDeployNativeApps(
     layout,
     parsedPayload,
-    nativeAppServices,
+    nativeAppServicesForHost,
     appliedReleases,
     runtime.logSink,
     runtime.decryptSecrets,
@@ -2366,7 +2423,7 @@ async function deployEnvironmentHolding(
     sites,
     siteReleaseBindings,
     siteManagedBindings,
-    nativeAppServices,
+    nativeAppServicesForHost,
     nativeAppBindingsFromPayload(parsedPayload),
   );
 

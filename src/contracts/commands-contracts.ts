@@ -5306,6 +5306,22 @@ function parseOptionalReleaseServiceId(value: unknown): string | undefined {
   return value;
 }
 
+function assertUniqueSourceReleaseServiceIds(
+  sources: readonly EnvironmentDeploySource[] | undefined,
+): void {
+  if (!sources) return;
+  const ownerById = new Map<string, string>();
+  for (const entry of sources) {
+    const id = entry.releaseServiceId;
+    if (!id) continue;
+    const prior = ownerById.get(id);
+    if (prior !== undefined && prior !== entry.composeServiceName) {
+      throw new TypeError(`Duplicate sourceMaterial releaseServiceId ${id}`);
+    }
+    ownerById.set(id, entry.composeServiceName);
+  }
+}
+
 /**
  * Same rule as `releaseId`: this becomes a directory segment under `releases/`,
  * so it must not be able to carry a separator or a dot segment.
@@ -5964,6 +5980,12 @@ export function parseEnvironmentDeployPayload(
     value.dockerExternalNetworks,
     "dockerExternalNetworks",
   );
+  const sourceMaterial = parseOptionalMaterialArray(
+    value.sourceMaterial,
+    "sourceMaterial",
+    parseDeploySourceEntry,
+  );
+  assertUniqueSourceReleaseServiceIds(sourceMaterial);
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -5979,11 +6001,7 @@ export function parseEnvironmentDeployPayload(
         parseSite,
       ),
       nativeAppServices: parseNativeAppServices(value.nativeAppServices),
-      sourceMaterial: parseOptionalMaterialArray(
-        value.sourceMaterial,
-        "sourceMaterial",
-        parseDeploySourceEntry,
-      ),
+      sourceMaterial,
       ingressServices: parseOptionalMaterialArray(
         value.ingressServices,
         "ingressServices",
