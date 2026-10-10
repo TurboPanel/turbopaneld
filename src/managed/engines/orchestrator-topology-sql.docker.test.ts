@@ -88,6 +88,16 @@ const ENGINES: EngineImage[] = [
 
 const ROOT_PASSWORD = ["root", "topology", "fixture"].join("-");
 
+function rootClientArgs(engine: EngineImage): string[] {
+  return [
+    engine.client,
+    "--protocol=tcp",
+    "-h127.0.0.1",
+    "-uroot",
+    `-p${ROOT_PASSWORD}`,
+  ];
+}
+
 async function withEngineContainer(
   engine: EngineImage,
   fn: (containerName: string) => Promise<void>,
@@ -109,18 +119,23 @@ async function withEngineContainer(
     throw new Error(`docker run failed: ${run.stderr || run.stdout}`);
   }
   try {
+    let ready = false;
     for (let attempt = 0; attempt < 60; attempt++) {
       const ping = await runDocker([
         "exec",
         containerName,
-        engine.client,
-        "-uroot",
-        `-p${ROOT_PASSWORD}`,
+        ...rootClientArgs(engine),
         "-e",
         "SELECT 1",
       ]);
-      if (ping.success) break;
+      if (ping.success) {
+        ready = true;
+        break;
+      }
       await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    if (!ready) {
+      throw new Error(`${engine.image} did not accept connections within 60s`);
     }
     await fn(containerName);
   } finally {
@@ -133,20 +148,23 @@ async function execSqlAsRoot(
   engine: EngineImage,
   sql: string,
 ): Promise<void> {
-  const result = await runDocker([
-    "exec",
-    containerName,
-    engine.client,
-    "-uroot",
-    `-p${ROOT_PASSWORD}`,
-    "-e",
-    sql,
-  ]);
-  if (!result.success) {
-    throw new Error(
-      `root SQL failed: ${result.stderr || result.stdout}`,
-    );
+  let last = "";
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const result = await runDocker([
+      "exec",
+      containerName,
+      ...rootClientArgs(engine),
+      "-e",
+      sql,
+    ]);
+    if (result.success) return;
+    last = result.stderr || result.stdout;
+    if (!/Can't connect|ERROR 2002|ERROR 2003/i.test(last)) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   }
+  throw new Error(`root SQL failed: ${last}`);
 }
 
 async function execSqlAsTopology(
