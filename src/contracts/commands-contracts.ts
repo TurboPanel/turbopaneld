@@ -1146,6 +1146,13 @@ export type EnvironmentDeploySource = {
   sourceId: string;
   composeServiceName: string;
   /**
+   * Release-tree directory segment for this sourced service: the environment's
+   * TurboPanel `service.id`. Hosting, native units, cron, and stop reclaim all
+   * use this value; older daemons ignore the field and fall back to the compose
+   * key when it is absent.
+   */
+  releaseServiceId?: string;
+  /**
    * Which control-plane provider resolved this entry. Informational only — the
    * daemon never branches on it; `cloneUrl`, `credential`, and `credentialKind`
    * are everything a checkout needs.
@@ -4547,9 +4554,9 @@ const NODE_PACKAGE_MANAGERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Same rule the release engine applies to a release directory name, restated
- * here so a `serviceId` can never smuggle a path separator into the unit's
- * `WorkingDirectory`.
+ * Environment TurboPanel **service** UUIDs on `nativeAppServices[].serviceId`
+ * (the release-tree segment), restated here so a value can never smuggle a
+ * path separator into the unit's `WorkingDirectory`.
  */
 const NATIVE_APP_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 
@@ -4813,6 +4820,27 @@ function parseNativeAppVariables(
     return variable;
   });
   return variables.length > 0 ? variables : undefined;
+}
+
+function parseNativeAppServices(
+  value: unknown,
+): EnvironmentDeployNativeAppService[] | undefined {
+  const parsed = parseOptionalMaterialArray(
+    value,
+    "nativeAppServices",
+    parseNativeAppService,
+  );
+  if (!parsed) return undefined;
+  const seen = new Set<string>();
+  for (const app of parsed) {
+    if (seen.has(app.serviceId)) {
+      throw new TypeError(
+        `Duplicate nativeAppServices serviceId ${app.serviceId}`,
+      );
+    }
+    seen.add(app.serviceId);
+  }
+  return parsed;
 }
 
 function parseNativeAppService(
@@ -5270,6 +5298,14 @@ function parseSourceCredentialUsername(value: unknown): string | undefined {
   return value;
 }
 
+function parseOptionalReleaseServiceId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_SERVICE_ID_RE.test(value)) {
+    throw new TypeError("Invalid sourceMaterial releaseServiceId");
+  }
+  return value;
+}
+
 /**
  * Same rule as `releaseId`: this becomes a directory segment under `releases/`,
  * so it must not be able to carry a separator or a dot segment.
@@ -5306,9 +5342,13 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
   if (!SOURCE_RELEASE_ID_RE.test(releaseId)) {
     throw new TypeError("Invalid sourceMaterial releaseId");
   }
+  const releaseServiceId = parseOptionalReleaseServiceId(
+    value.releaseServiceId,
+  );
   return definedFields({
     sourceId: parseNonEmptyString(value, "sourceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    ...(releaseServiceId === undefined ? {} : { releaseServiceId }),
     provider: value.provider as EnvironmentDeploySource["provider"],
     cloneUrl,
     ref: value.ref,
@@ -5938,11 +5978,7 @@ export function parseEnvironmentDeployPayload(
         "sites",
         parseSite,
       ),
-      nativeAppServices: parseOptionalMaterialArray(
-        value.nativeAppServices,
-        "nativeAppServices",
-        parseNativeAppService,
-      ),
+      nativeAppServices: parseNativeAppServices(value.nativeAppServices),
       sourceMaterial: parseOptionalMaterialArray(
         value.sourceMaterial,
         "sourceMaterial",

@@ -548,6 +548,28 @@ test("parseEnvironmentDeployPayload rejects sites engine cron and sourceKind", (
   );
 });
 
+test("parseEnvironmentDeployPayload rejects duplicate nativeAppServices serviceId", () => {
+  rejectDeploy(
+    {
+      nativeAppServices: [
+        {
+          composeServiceName: "a",
+          serviceId: "svc-dup",
+          listenPort: 18080,
+          framework: "node",
+        },
+        {
+          composeServiceName: "b",
+          serviceId: "svc-dup",
+          listenPort: 18081,
+          framework: "node",
+        },
+      ],
+    },
+    "Duplicate nativeAppServices serviceId svc-dup",
+  );
+});
+
 test("parseEnvironmentDeployPayload rejects nativeAppServices resource limits", () => {
   rejectDeploy(
     { nativeAppServices: [null] },

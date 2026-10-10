@@ -1266,10 +1266,19 @@ async function applyDeployNativeApps(
   );
   // The live release's own runtime wins over the payload's: a rollback across a
   // Node/Deno switch restores the unit the old release needs.
+  const releaseServiceIdByCompose = new Map(
+    applied.map((entry) => [entry.composeServiceName, entry.serviceId]),
+  );
   const appsForRelease = apps.map((app) => {
+    const releaseServiceId = releaseServiceIdByCompose.get(
+      app.composeServiceName,
+    );
+    const next = releaseServiceId && releaseServiceId !== app.serviceId
+      ? { ...app, serviceId: releaseServiceId }
+      : app;
     const runtime = appliedByService.get(app.composeServiceName)?.runtime;
-    if (runtime === undefined) return app;
-    const { runtime: _runtime, ...rest } = app;
+    if (runtime === undefined) return next;
+    const { runtime: _runtime, ...rest } = next;
     return runtime === "deno" ? { ...rest, runtime } : rest;
   });
   await applyNativeAppServices(

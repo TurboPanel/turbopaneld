@@ -127,7 +127,7 @@ async function mkdirReleaseTree(
   }
 }
 
-test("resolveReleaseServiceId prefers hosting serviceId", () => {
+test("resolveReleaseServiceId prefers sourceMaterial releaseServiceId", () => {
   const payload = basePayload({
     hostings: [{
       hostingId: "host-1",
@@ -135,30 +135,18 @@ test("resolveReleaseServiceId prefers hosting serviceId", () => {
       serviceId: "svc-hosting",
       hostnames: ["app.example.com"],
     }],
-    ingressServices: [{
-      composeServiceName: "web",
-      serviceId: "svc-ingress",
-      containerName: "svc-ingress-in",
-    }],
+    sourceMaterial: [
+      baseSource({
+        composeServiceName: "web",
+        releaseServiceId: "svc-canonical",
+      }),
+    ],
   });
-  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-hosting");
+  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-canonical");
 });
 
-test("resolveReleaseServiceId falls back to ingress serviceId", () => {
+test("resolveReleaseServiceId uses nativeAppServices when releaseServiceId absent", () => {
   const payload = basePayload({
-    ingressServices: [{
-      composeServiceName: "api",
-      serviceId: "svc-ingress",
-      containerName: "svc-ingress-in",
-    }],
-  });
-  assertEquals(resolveReleaseServiceId(payload, "api"), "svc-ingress");
-});
-
-test("resolveReleaseServiceId uses nativeAppServices serviceId before compose key", () => {
-  const payload = basePayload({
-    hostings: [],
-    ingressServices: [],
     nativeAppServices: [{
       composeServiceName: "app",
       serviceId: "svc-env-a",
@@ -250,6 +238,7 @@ test("applySourceReleases promotes native releases with injected checkout/build/
             baseSource({
               composeServiceName: "web",
               releaseId: "rel-new",
+              releaseServiceId: serviceId,
               principal: {
                 principalId: "pr-1",
                 username: "appuser",
@@ -539,6 +528,7 @@ test("applySourceReleases rolls back native releases without fetch or build", as
             baseSource({
               releaseId: "rel-new",
               rollbackToReleaseId: "rel-old",
+              releaseServiceId: serviceId,
               commitSha: "wire-placeholder",
               principal: {
                 principalId: "pr-1",
@@ -702,6 +692,7 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
               composeServiceName: "web",
               releaseId: "rel-new",
               rollbackToReleaseId: "rel-rail",
+              releaseServiceId: serviceId,
               build: { kind: "railpack" },
             }),
           ],
@@ -754,6 +745,7 @@ test("applySourceReleases builds railpack releases without a project principal",
             baseSource({
               composeServiceName: "api",
               releaseId: "rel-pack",
+              releaseServiceId: serviceId,
               build: { kind: "railpack" },
             }),
           ],
@@ -1071,6 +1063,7 @@ test("shared principal keeps separate release trees per nativeAppServices servic
             baseSource({
               composeServiceName: "app",
               releaseId: "rel-a",
+              releaseServiceId: serviceA,
               principal,
             }),
           ],
@@ -1095,6 +1088,7 @@ test("shared principal keeps separate release trees per nativeAppServices servic
             baseSource({
               composeServiceName: "app",
               releaseId: "rel-b",
+              releaseServiceId: serviceB,
               principal,
             }),
           ],
@@ -1128,6 +1122,7 @@ test("shared principal keeps separate release trees per nativeAppServices servic
             baseSource({
               composeServiceName: "app",
               releaseId: "rel-b2",
+              releaseServiceId: serviceB,
               principal,
             }),
           ],

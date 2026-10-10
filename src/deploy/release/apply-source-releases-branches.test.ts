@@ -181,21 +181,22 @@ function nativeDeps(sink: ReturnType<typeof fakeLogSink>["sink"]) {
   };
 }
 
-test("resolveReleaseServiceId skips a hosting with an empty serviceId", () => {
+test("resolveReleaseServiceId ignores hostings when releaseServiceId is absent", () => {
   const payload = basePayload({
     hostings: [{
       hostingId: "host-empty",
       composeServiceName: "web",
-      serviceId: "",
+      serviceId: "svc-hosting-only",
       hostnames: ["app.example.com"],
     }],
-    ingressServices: [{
+    nativeAppServices: [{
       composeServiceName: "web",
-      serviceId: "svc-ingress",
-      containerName: "svc-ingress-in",
+      serviceId: "svc-native",
+      listenPort: 18080,
+      framework: "auto",
     }],
   });
-  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-ingress");
+  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-native");
 });
 
 test("applySourceReleases fails a railpack rollback with no release record", async () => {
@@ -410,6 +411,7 @@ test("applySourceReleases rollback restores standaloneOutput and commit metadata
             baseSource({
               releaseId: "rel-new",
               rollbackToReleaseId: "rel-old",
+              releaseServiceId: serviceId,
               principal: PRINCIPAL,
             }),
           ],
@@ -853,6 +855,7 @@ test("applySourceReleases records pending before the promote (a kill mid-promote
           hostings,
           sourceMaterial: [baseSource({
             commitSha: "site-commit",
+            releaseServiceId: serviceId,
             principal: PRINCIPAL,
           })],
         });
@@ -1064,7 +1067,11 @@ test("applySourceReleases cuts over to a re-sent release this host already publi
             serviceId,
             hostnames: ["resent.example.com"],
           }],
-          sourceMaterial: [baseSource({ commitSha, principal: PRINCIPAL })],
+          sourceMaterial: [baseSource({
+            commitSha,
+            releaseServiceId: serviceId,
+            principal: PRINCIPAL,
+          })],
         });
       const calls: string[] = [];
       const deps = {
