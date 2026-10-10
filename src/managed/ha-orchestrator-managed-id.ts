@@ -63,7 +63,7 @@ export async function resolveLocalPrimaryOrchestratorDial(
   run: RunDockerFn,
 ): Promise<OrchestratorInstanceKey | null> {
   const record = await readManagedHaMember(layout, managedId);
-  if (!record || record.role !== "primary") return null;
+  if (record?.role !== "primary") return null;
   const containerPort = ENGINE_CONTAINER_PORT[record.engine];
   if (containerPort === undefined) return null;
   try {
@@ -112,7 +112,7 @@ export async function isOrchestratorHaEmitSuppressed(
   nowMs: number,
 ): Promise<boolean> {
   const record = await readManagedHaMember(layout, managedId);
-  if (!record || record.role !== "primary") return true;
+  if (record?.role !== "primary") return true;
   if (
     await isManagedMemberDestroyed(
       layout.stateDir,
