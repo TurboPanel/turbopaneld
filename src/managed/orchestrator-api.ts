@@ -141,7 +141,7 @@ export function orchestratorRaftReady(status: unknown): boolean | null {
 }
 
 export type OrchestratorRaftWaitOptions = {
-  /** Give up after this long (default 90 s). */
+  /** Give up after this long (default 45 s; a restarted node measured 25 s). */
   timeoutMs?: number;
   /** Pause between polls (default 1 s). */
   intervalMs?: number;
@@ -161,7 +161,7 @@ export async function waitForOrchestratorRaftLeader(
   deps: OrchestratorApiDeps = {},
   options: OrchestratorRaftWaitOptions = {},
 ): Promise<boolean> {
-  const timeoutMs = options.timeoutMs ?? 90_000;
+  const timeoutMs = options.timeoutMs ?? 45_000;
   const intervalMs = options.intervalMs ?? 1_000;
   const sleep = options.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
