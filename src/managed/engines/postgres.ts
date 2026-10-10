@@ -167,6 +167,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitUntilWritablePrimary(
+  ctx: ManagedEngineContext,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const poll = async (): Promise<void> => {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "switchover: former primary did not become writable after reactivation",
+      );
+    }
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    if (value === "t" || value === "true") return;
+    await sleep(500);
+    return poll();
+  };
+  await poll();
+}
+
 function psqlArgv(
   ctx: ManagedEngineContext,
   database: string,
@@ -646,16 +666,7 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
 
   async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
     await runPsql(ctx, reactivateFormerPrimaryAfterSwitchoverAbortSql());
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
-      const value = rows[0]?.[0]?.toLowerCase();
-      if (value === "t" || value === "true") return;
-      await sleep(500);
-    }
-    throw new Error(
-      "switchover: former primary did not become writable after reactivation",
-    );
+    await waitUntilWritablePrimary(ctx, 60_000);
   },
 
   async promote(ctx, _options?) {

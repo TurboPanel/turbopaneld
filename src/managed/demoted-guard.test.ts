@@ -355,45 +355,50 @@ const MYSQL_COMPOSE = [
   "",
 ].join("\n");
 
-for (const engine of ["mysql", "mariadb"] as const) {
-  test(`guard tick stops a hand-started demoted ${engine} primary`, async () => {
-    await withTempLayout(async ({ env }) => {
-      resetManagedIntentsForTests();
-      const layout = resolveLayout(env);
-      const managedId = `managed_guard_${engine}_${crypto.randomUUID()}`;
-      await Deno.mkdir(`${layout.stateDir}/managed/${managedId}`, {
-        recursive: true,
-      });
-      await Deno.writeTextFile(
-        `${layout.stateDir}/managed/${managedId}/docker-compose.yml`,
-        MYSQL_COMPOSE.replace(
-          "mysql:8.4",
-          engine === "mariadb" ? "mariadb:11" : "mysql:8.4",
-        ),
-      );
-      await saveManagedHaMember(layout, {
-        ...memberRecord(managedId),
-        engine,
-      });
-      await writeManagedDemotedMarker(
-        layout,
-        managedId,
-        MEMBER_ID,
-        "2026-10-08T12:00:00.000Z",
-        engine,
-      );
-      const fake = docker();
-      const guard = new DemotedMemberGuard({
-        layout,
-        run: fake.run,
-        listMembers: () =>
-          Promise.resolve([{ ...memberRecord(managedId), engine }]),
-      });
-      await guard.tick();
-      assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), true);
+async function assertGuardStopsHandStartedDemotedPrimary(
+  engine: "mysql" | "mariadb",
+): Promise<void> {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    const managedId = `managed_guard_${engine}_${crypto.randomUUID()}`;
+    await Deno.mkdir(`${layout.stateDir}/managed/${managedId}`, {
+      recursive: true,
     });
+    await Deno.writeTextFile(
+      `${layout.stateDir}/managed/${managedId}/docker-compose.yml`,
+      MYSQL_COMPOSE.replace(
+        "mysql:8.4",
+        engine === "mariadb" ? "mariadb:11" : "mysql:8.4",
+      ),
+    );
+    await saveManagedHaMember(layout, {
+      ...memberRecord(managedId),
+      engine,
+    });
+    await writeManagedDemotedMarker(
+      layout,
+      managedId,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      engine,
+    );
+    const fake = docker();
+    const guard = new DemotedMemberGuard({
+      layout,
+      run: fake.run,
+      listMembers: () =>
+        Promise.resolve([{ ...memberRecord(managedId), engine }]),
+    });
+    await guard.tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), true);
   });
 }
+
+test("guard tick stops a hand-started demoted mysql primary", () =>
+  assertGuardStopsHandStartedDemotedPrimary("mysql"));
+test("guard tick stops a hand-started demoted mariadb primary", () =>
+  assertGuardStopsHandStartedDemotedPrimary("mariadb"));
 
 test("a stopped demoted member is left alone", async () => {
   await withTempLayout(async ({ env }) => {
