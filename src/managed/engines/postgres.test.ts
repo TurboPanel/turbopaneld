@@ -413,7 +413,14 @@ test("backup dump/restore argv always target the stable platform admin regardles
     restoreArgv[2],
     "pg_restore --no-owner --clean --if-exists -f - | sed -E",
   );
-  assertStringIncludes(restoreArgv[2], "lock_timeout|statement_timeout");
+  assertStringIncludes(restoreArgv[2], "[Ll][Oo][Cc][Kk]_");
+  // BusyBox sed (Alpine image) has no `I` flag: the address must end in `/d`.
+  assertEquals(restoreArgv[2].includes("/Id'"), false);
+  assertStringIncludes(restoreArgv[2], "/d'; then");
+  assertStringIncludes(
+    restoreArgv[2],
+    String.raw`BEGIN;\nSET LOCAL client_min_messages = warning;\n`,
+  );
   assertStringIncludes(restoreArgv[2], "set -o pipefail");
   assertStringIncludes(restoreArgv[2], "set +e");
   assertStringIncludes(restoreArgv[7], "CREATE SCHEMA %I AUTHORIZATION %I");

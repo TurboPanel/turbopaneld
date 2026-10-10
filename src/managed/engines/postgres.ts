@@ -81,25 +81,32 @@ function assertSafeDatabaseIdentifier(database: string): string {
 }
 
 /**
- * `$1` root user, `$2` database, `$3` reset SQL. The sentinel line is printed
- * by the server only after `COMMIT` succeeded.
+ * `$1` root user, `$2` database, `$3` reset SQL, `$4` per-login schema SQL.
+ * The sentinel line is printed by the server only after `COMMIT` succeeded;
+ * success needs psql's exit status 0 and that line as the last line of stdout
+ * (dump replay prints other rows, such as `setval` results, before it).
+ * `client_min_messages = warning` keeps the reset's "drop cascades to ..."
+ * notices out of stderr, so a failure reports the real error line.
  */
 const POSTGRES_RESTORE_SCRIPT = [
   "set -eu",
   "set -o pipefail",
   "set +e",
   "out=$({",
-  String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
+  String
+    .raw`  printf 'BEGIN;\nSET LOCAL client_min_messages = warning;\n%s\n' "$3"`,
   `  if pg_restore --no-owner --clean --if-exists -f - | sed -E '${PG_RESTORE_TIMEOUT_SET_LINE_SED}d'; then`,
   String
     .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
   "  fi",
   '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
+  "rc=$?",
   "set -e",
-  'case "$out" in',
-  "  *tp_restore_committed*) ;;",
-  "  *) echo 'restore was not committed; the database is unchanged' >&2; exit 1 ;;",
-  "esac",
+  String.raw`last=$(printf '%s\n' "$out" | tail -n 1)`,
+  'if [ "$rc" -ne 0 ] || [ "$last" != tp_restore_committed ]; then',
+  "  echo 'restore was not committed; the database is unchanged' >&2",
+  "  exit 1",
+  "fi",
 ].join("\n");
 
 const postgresBackupRuntime: ManagedEngineBackupRuntime = {

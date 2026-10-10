@@ -142,9 +142,26 @@ export function stripPgRestoreTimeoutSetLines(sql: string): string {
     .join("\n");
 }
 
-/** GNU `sed -E` delete pattern; kept in sync with {@link stripPgRestoreTimeoutSetLines}. */
-export const PG_RESTORE_TIMEOUT_SET_LINE_SED =
-  "/^[[:space:]]*SET[[:space:]]+(lock_timeout|statement_timeout)[[:space:]]*=/I";
+/** `abc` -> `[Aa][Bb][Cc]`; letters only, other characters pass through. */
+function anyCase(word: string): string {
+  return word.replaceAll(
+    /[a-z]/gi,
+    (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`,
+  );
+}
+
+/**
+ * Plain POSIX `sed -E` address; kept in sync with
+ * {@link stripPgRestoreTimeoutSetLines}. It must not use the GNU-only `I`
+ * (ignore case) flag: the default Postgres image is Alpine, whose BusyBox
+ * `sed` rejects it ("unsupported command I") and so every restore failed.
+ * Bracket pairs such as `[Ss]` match either case instead.
+ */
+export const PG_RESTORE_TIMEOUT_SET_LINE_SED = `/^[[:space:]]*${
+  anyCase("SET")
+}[[:space:]]+(${anyCase("lock_timeout")}|${
+  anyCase("statement_timeout")
+})[[:space:]]*=/`;
 
 export function restoreResetSql(): string {
   return [

@@ -418,7 +418,13 @@ ProxySQL to enforce. Canonical policy:
      removes post-backup user schemas and their contents before replay. The
      replay strips `SET lock_timeout` / `SET statement_timeout` lines from
      `pg_restore` output so the transaction's `SET LOCAL lock_timeout = '30s'`
-     stays in effect for the whole restore.
+     stays in effect for the whole restore. That `sed` step must stay plain
+     POSIX (no GNU-only flags such as `/I`): the default image
+     `postgres:18-alpine` ships BusyBox `sed`, which rejects them, and every
+     restore then rolled back. `postgres-restore.real-pg.test.ts` runs on
+     `16`, `18` and `18-alpine` by default for that reason. The session sets
+     `client_min_messages = warning` first, so the reset's "drop cascades to"
+     notices never crowd the real error out of a failed restore's message.
      MySQL/MariaDB dumps already drop and recreate the dumped tables.
    - **`.part` cleanup on failure.** Partial artifacts must never look complete.
    - **Prune by retention, one directory at a time.** After create, keep the
