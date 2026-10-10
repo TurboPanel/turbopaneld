@@ -6,6 +6,7 @@ import {
   listOrchestratorProblems,
   type OrchestratorHttpFn,
   parseOrchestratorProblems,
+  parseOrchestratorReplicationAnalysis,
   recoverToCandidate,
   registerCandidate,
   setClusterAlias,
@@ -63,6 +64,26 @@ test("isDeadPrimaryProblem matches known dead-primary names", () => {
   assertEquals(isDeadPrimaryProblem("DeadMaster"), true);
   assertEquals(isDeadPrimaryProblem("UnreachablePrimary"), true);
   assertEquals(isDeadPrimaryProblem("LaggingReplica"), false);
+});
+
+test("parseOrchestratorReplicationAnalysis reads the Details envelope", () => {
+  assertEquals(
+    parseOrchestratorReplicationAnalysis({
+      Code: "OK",
+      Details: [{
+        AnalyzedInstanceKey: { Hostname: "172.20.4.10", Port: 45001 },
+        ClusterDetails: { ClusterAlias: "172.20.4.10:45001" },
+        IsMaster: true,
+        Analysis: "DeadMaster",
+      }],
+    }),
+    [{
+      clusterAlias: "172.20.4.10:45001",
+      key: { hostname: "172.20.4.10", port: 45001 },
+      isMaster: true,
+      analysis: "DeadMaster",
+    }],
+  );
 });
 
 function okFetch(_url: string): Promise<Response> {

@@ -89,6 +89,82 @@ test("ManagedHaObserver sends no instance when Orchestrator's key is incomplete"
   assertEquals("instancePort" in sent[0], false);
 });
 
+test("ManagedHaObserver emits from replication-analysis DeadMaster via ha-member dial", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    const now = new Date().toISOString();
+    const { saveManagedHaMember } = await import("../managed/ha-member.ts");
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: "00000000-0000-4000-8000-000000000001",
+      engine: "mysql",
+      role: "primary",
+      containerName: "mysql-primary-1",
+      replicaPeerCount: 1,
+      peerCount: 1,
+      updatedAt: now,
+    });
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: (url) => {
+          if (url.includes("/api/replication-analysis")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  Details: [{
+                    AnalyzedInstanceKey: {
+                      Hostname: "172.20.4.10",
+                      Port: 45001,
+                    },
+                    ClusterDetails: { ClusterAlias: "172.20.4.10:45001" },
+                    IsMaster: true,
+                    Analysis: "DeadMaster",
+                  }],
+                }),
+                { status: 200 },
+              ),
+            );
+          }
+          return Promise.resolve(new Response("[]", { status: 200 }));
+        },
+      },
+      runDocker: (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify({
+              "3306/tcp": [{ HostIp: "172.20.4.10", HostPort: "45001" }],
+            }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.managedId, MANAGED_ID);
+    assertEquals(sent[0]?.instanceHost, "172.20.4.10");
+    assertEquals(sent[0]?.instancePort, 45001);
+  });
+});
+
 test("ManagedHaObserver ignores non-dead-primary problems and missing problem names", async () => {
   const sent: ManagedHaEventMessage[] = [];
   const observer = new ManagedHaObserver({
@@ -432,7 +508,7 @@ test("ManagedHaObserver continues the API poll when revive fails", async () => {
       },
     });
     await observer.poll();
-    assertEquals(fetched, 1);
+    assertEquals(fetched, 2);
     assertEquals(sent.length, 1);
     assertEquals(sent[0]?.managedId, MANAGED_ID);
     assertEquals(

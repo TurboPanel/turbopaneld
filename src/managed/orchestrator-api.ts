@@ -199,3 +199,57 @@ export async function listOrchestratorProblems(
   const value = await orchestratorGet("/api/problems", deps);
   return parseOrchestratorProblems(value);
 }
+
+export type OrchestratorReplicationAnalysis = {
+  clusterAlias?: string;
+  key?: { hostname?: string; port?: number };
+  analysis?: string;
+  isMaster?: boolean;
+};
+
+function parseReplicationAnalysisEntry(
+  entry: unknown,
+): OrchestratorReplicationAnalysis | null {
+  const record = asRecord(entry);
+  if (!record) return null;
+  const parsed: OrchestratorReplicationAnalysis = {};
+  const clusterDetails = asRecord(
+    record.ClusterDetails ?? record.clusterDetails,
+  );
+  const clusterAlias = clusterDetails
+    ? optionalString(clusterDetails.ClusterAlias) ??
+      optionalString(clusterDetails.clusterAlias)
+    : undefined;
+  if (clusterAlias !== undefined) parsed.clusterAlias = clusterAlias;
+  const key = parseProblemKey(
+    record.AnalyzedInstanceKey ?? record.analyzedInstanceKey,
+  );
+  if (key) parsed.key = key;
+  const analysis = optionalString(record.Analysis) ??
+    optionalString(record.analysis);
+  if (analysis !== undefined) parsed.analysis = analysis;
+  const isMaster = record.IsMaster ?? record.isMaster;
+  if (typeof isMaster === "boolean") parsed.isMaster = isMaster;
+  return parsed;
+}
+
+export function parseOrchestratorReplicationAnalysis(
+  value: unknown,
+): OrchestratorReplicationAnalysis[] {
+  const envelope = asRecord(value);
+  const entries = envelope?.Details ?? envelope?.details ?? value;
+  if (!Array.isArray(entries)) return [];
+  const analysis: OrchestratorReplicationAnalysis[] = [];
+  for (const entry of entries) {
+    const parsed = parseReplicationAnalysisEntry(entry);
+    if (parsed) analysis.push(parsed);
+  }
+  return analysis;
+}
+
+export async function listOrchestratorReplicationAnalysis(
+  deps: OrchestratorApiDeps = {},
+): Promise<OrchestratorReplicationAnalysis[]> {
+  const value = await orchestratorGet("/api/replication-analysis", deps);
+  return parseOrchestratorReplicationAnalysis(value);
+}
