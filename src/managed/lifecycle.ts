@@ -16,6 +16,7 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
+import { describeUnknown } from "../util/describe-unknown.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
@@ -257,7 +258,7 @@ async function recordDemotedFenceOnLifecycleStop(
 function fenceIncompleteError(err: unknown): Error {
   return new Error(
     `managed.lifecycle stop: engine stopped but the demoted fence is incomplete (${
-      sanitizeForLog(err instanceof Error ? err.message : String(err))
+      sanitizeForLog(describeUnknown(err))
     })`,
   );
 }

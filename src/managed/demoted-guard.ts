@@ -151,9 +151,7 @@ async function forceStopComposeProjectContainers(
     );
     ids = await listComposeProjectContainerIds(target.run, project);
   }
-  if (ids === null) {
-    ids = await fallbackComposeProjectContainerIds(target.run, project);
-  }
+  ids ??= await fallbackComposeProjectContainerIds(target.run, project);
   if (ids === null) {
     await stopByNameWithoutListing(target);
     return;
