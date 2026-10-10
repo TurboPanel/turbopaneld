@@ -6,6 +6,7 @@ import {
   listOrchestratorProblems,
   type OrchestratorHttpFn,
   parseOrchestratorProblems,
+  parseOrchestratorReplicationAnalysis,
   recoverToCandidate,
   registerCandidate,
   setClusterAlias,
@@ -18,6 +19,8 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+const MANAGED_ID = "00000000-0000-4000-8000-0000000000aa";
 
 test("parseOrchestratorProblems returns empty for non-arrays", () => {
   assertEquals(parseOrchestratorProblems(null), []);
@@ -63,6 +66,56 @@ test("isDeadPrimaryProblem matches known dead-primary names", () => {
   assertEquals(isDeadPrimaryProblem("DeadMaster"), true);
   assertEquals(isDeadPrimaryProblem("UnreachablePrimary"), true);
   assertEquals(isDeadPrimaryProblem("LaggingReplica"), false);
+});
+
+test("parseOrchestratorProblems accepts string Port values", () => {
+  assertEquals(
+    parseOrchestratorProblems([{
+      ClusterAlias: MANAGED_ID,
+      Key: { Hostname: "db-1", Port: "45001" },
+      Problems: ["DeadPrimary"],
+    }]),
+    [{
+      clusterAlias: MANAGED_ID,
+      key: { hostname: "db-1", port: 45001 },
+      problems: ["DeadPrimary"],
+    }],
+  );
+});
+
+test("parseOrchestratorReplicationAnalysis reads string Port values", () => {
+  assertEquals(
+    parseOrchestratorReplicationAnalysis({
+      Details: [{
+        AnalyzedInstanceKey: { Hostname: "172.20.4.10", Port: "45001" },
+        Analysis: "DeadMaster",
+      }],
+    }),
+    [{
+      key: { hostname: "172.20.4.10", port: 45001 },
+      analysis: "DeadMaster",
+    }],
+  );
+});
+
+test("parseOrchestratorReplicationAnalysis reads the Details envelope", () => {
+  assertEquals(
+    parseOrchestratorReplicationAnalysis({
+      Code: "OK",
+      Details: [{
+        AnalyzedInstanceKey: { Hostname: "172.20.4.10", Port: 45001 },
+        ClusterDetails: { ClusterAlias: "172.20.4.10:45001" },
+        IsMaster: true,
+        Analysis: "DeadMaster",
+      }],
+    }),
+    [{
+      clusterAlias: "172.20.4.10:45001",
+      key: { hostname: "172.20.4.10", port: 45001 },
+      isMaster: true,
+      analysis: "DeadMaster",
+    }],
+  );
 });
 
 function okFetch(_url: string): Promise<Response> {
@@ -226,6 +279,18 @@ test("orchestrator GET sends basic auth and tolerates empty or non-JSON bodies",
     fetch: () => Promise.resolve(new Response("not-json", { status: 200 })),
   });
   assertEquals(plaintext, []);
+});
+
+test("orchestrator GET sets an abort signal only when timeoutMs is given", async () => {
+  const signals: Array<AbortSignal | null | undefined> = [];
+  const fetch = (_url: string, init?: RequestInit) => {
+    signals.push(init?.signal);
+    return Promise.resolve(new Response("[]", { status: 200 }));
+  };
+  await listOrchestratorProblems({ fetch });
+  await listOrchestratorProblems({ fetch, timeoutMs: 5_000 });
+  assertEquals(signals[0], undefined);
+  assertEquals(signals[1] instanceof AbortSignal, true);
 });
 
 test("parseOrchestratorProblems skips malformed keys and non-array problem lists", () => {

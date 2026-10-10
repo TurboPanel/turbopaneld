@@ -616,6 +616,24 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  /**
+   * MariaDB has no super_read_only: `read_only` does not bind accounts with
+   * READ ONLY ADMIN (root has it). So a fenced MariaDB counts as writable
+   * unless it is configured as a replica (a re-seed in progress) with
+   * `read_only` on; a hand-started old primary has no replica config and is
+   * stopped by the demoted guard.
+   */
+  async isWritableFormerPrimary(ctx) {
+    const readOnly = await runMariadbQuery(ctx, isWritableSql());
+    if (parseSqlBool(readOnly.trim()) !== true) return true;
+    const replica = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    return replica.trim().length === 0;
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runMariadb(ctx, enforceReadOnlySql());
+  },
+
   runAdminScalarQuery(ctx, sql) {
     return runMariadbQuery(ctx, sql);
   },

@@ -142,9 +142,26 @@ export function stripPgRestoreTimeoutSetLines(sql: string): string {
     .join("\n");
 }
 
-/** GNU `sed -E` delete pattern; kept in sync with {@link stripPgRestoreTimeoutSetLines}. */
-export const PG_RESTORE_TIMEOUT_SET_LINE_SED =
-  "/^[[:space:]]*SET[[:space:]]+(lock_timeout|statement_timeout)[[:space:]]*=/I";
+/** `abc` -> `[Aa][Bb][Cc]`; letters only, other characters pass through. */
+function anyCase(word: string): string {
+  return word.replaceAll(
+    /[a-z]/gi,
+    (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`,
+  );
+}
+
+/**
+ * Plain POSIX `sed -E` address; kept in sync with
+ * {@link stripPgRestoreTimeoutSetLines}. It must not use the GNU-only `I`
+ * (ignore case) flag: the default Postgres image is Alpine, whose BusyBox
+ * `sed` rejects it ("unsupported command I") and so every restore failed.
+ * Bracket pairs such as `[Ss]` match either case instead.
+ */
+export const PG_RESTORE_TIMEOUT_SET_LINE_SED = `/^[[:space:]]*${
+  anyCase("SET")
+}[[:space:]]+(${anyCase("lock_timeout")}|${
+  anyCase("statement_timeout")
+})[[:space:]]*=/`;
 
 export function restoreResetSql(): string {
   return [
@@ -980,6 +997,18 @@ export function promoteSql(): string {
   return "SELECT pg_catalog.pg_promote(true, 60);";
 }
 
+/**
+ * Undo the demoted fence's persisted `default_transaction_read_only` (an
+ * `ALTER SYSTEM` setting in `postgresql.auto.conf` on the data volume) once
+ * the member is a primary again. A no-op when it was never set.
+ */
+export function resetFencedReadOnlyDefaultSql(): string {
+  return [
+    "ALTER SYSTEM RESET default_transaction_read_only;",
+    "SELECT pg_catalog.pg_reload_conf();",
+  ].join("\n");
+}
+
 export function currentPrimaryConninfoSql(): string {
   return "SELECT pg_catalog.current_setting('primary_conninfo', true);";
 }
@@ -1084,6 +1113,54 @@ export function applyFollowedPrimaryConninfoSql(conninfo: string): string {
 
 export function isInRecoverySql(): string {
   return "SELECT pg_catalog.pg_is_in_recovery();";
+}
+
+/** True when this instance is a writable primary (not standby recovery). */
+export function isWritablePrimarySql(): string {
+  return "SELECT NOT pg_catalog.pg_is_in_recovery();";
+}
+
+/**
+ * Best-effort quiesce for a fenced former primary still running, as far as
+ * Postgres allows against superusers:
+ *
+ * 1. `ALTER SYSTEM SET default_transaction_read_only = on` + reload, so every
+ *    new session (superusers included) starts read-only;
+ * 2. then `pg_terminate_backend` every other client backend, so no session
+ *    opened before the reload keeps a read-write default (WAL senders are
+ *    not client backends and are never touched);
+ * 3. this session itself is set read-only.
+ *
+ * A superuser can still `SET default_transaction_read_only = off` or
+ * `SET TRANSACTION READ WRITE` in a new session, or `ALTER SYSTEM` it back:
+ * Postgres has no read-only mode a superuser cannot leave. Stopping the
+ * container (the guard does, right after this) is the real fence, and
+ * `standby.signal` on the volume keeps the next start in recovery. Each
+ * statement runs on its own (psql reads stdin, no single transaction), as
+ * `ALTER SYSTEM` refuses a transaction block.
+ */
+export function enforceFencedFormerPrimarySql(): string {
+  return [
+    "ALTER SYSTEM SET default_transaction_read_only = on;",
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_terminate_backend(pid)",
+    "  FROM pg_catalog.pg_stat_activity",
+    "  WHERE pid <> pg_catalog.pg_backend_pid()",
+    "    AND backend_type = 'client backend'",
+    "    AND pid NOT IN (",
+    "      SELECT active_pid FROM pg_catalog.pg_replication_slots",
+    "      WHERE active_pid IS NOT NULL);",
+    "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;",
+  ].join("\n");
+}
+
+/** Undo demoted-fence SQL and promote after a switchover abort reactivation. */
+export function reactivateFormerPrimaryAfterSwitchoverAbortSql(): string {
+  return [
+    "ALTER SYSTEM RESET default_transaction_read_only;",
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_promote(true, 60);",
+  ].join("\n");
 }
 
 export { MANAGED_SLOT_PREFIX };

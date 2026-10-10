@@ -606,3 +606,21 @@ export function readManagedComposeDataTarget(
     .filter((mount) => mount !== undefined);
   return { image: service.image, volumes };
 }
+
+/**
+ * Container name of the sole managed service as the persisted compose file
+ * creates it: `container_name` when set, else compose's `<project>-<service>-1`.
+ * The demoted-member guard stops by name when every container listing fails.
+ */
+export function readManagedComposeContainerName(
+  composeYaml: string,
+  project: string,
+): string {
+  const { composeServiceName, service } = resolveSoleManagedService(
+    parseCompose(composeYaml),
+  );
+  return typeof service.container_name === "string" &&
+      service.container_name.length > 0
+    ? service.container_name
+    : `${project}-${composeServiceName}-1`;
+}

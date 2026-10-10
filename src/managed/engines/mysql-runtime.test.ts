@@ -608,6 +608,39 @@ test("mysql configureStandby empty seed failure is not reported as unknown", asy
   assertEquals(err.message.includes("unknown"), false);
 });
 
+test("mysql enforceFencedFormerPrimaryReadOnly sets read_only", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.enforceFencedFormerPrimaryReadOnly) {
+    throw new TypeError("expected mysql enforceFencedFormerPrimaryReadOnly");
+  }
+  let enforced = false;
+  const exec: ManagedEngineExec = (_argv, input) => {
+    const sql = input ?? "";
+    if (sql.includes("read_only")) enforced = true;
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.enforceFencedFormerPrimaryReadOnly(buildContext(exec));
+  assertEquals(enforced, true);
+});
+
+test("mysql isWritableFormerPrimary is false after read_only is on", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.isWritableFormerPrimary) {
+    throw new TypeError("expected mysql isWritableFormerPrimary");
+  }
+  const exec: ManagedEngineExec = (_argv, input) => {
+    const sql = input ?? "";
+    if (sql.includes("@@GLOBAL.read_only")) {
+      return Promise.resolve({ success: true, stdout: "1\t1\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  assertEquals(
+    await replication.isWritableFormerPrimary(buildContext(exec)),
+    false,
+  );
+});
+
 test("mysql quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_executed", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.quiesceFormerPrimaryForSwitchover) {

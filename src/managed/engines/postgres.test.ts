@@ -413,7 +413,14 @@ test("backup dump/restore argv always target the stable platform admin regardles
     restoreArgv[2],
     "pg_restore --no-owner --clean --if-exists -f - | sed -E",
   );
-  assertStringIncludes(restoreArgv[2], "lock_timeout|statement_timeout");
+  assertStringIncludes(restoreArgv[2], "[Ll][Oo][Cc][Kk]_");
+  // BusyBox sed (Alpine image) has no `I` flag: the address must end in `/d`.
+  assertEquals(restoreArgv[2].includes("/Id'"), false);
+  assertStringIncludes(restoreArgv[2], "/d'; then");
+  assertStringIncludes(
+    restoreArgv[2],
+    String.raw`BEGIN;\nSET LOCAL client_min_messages = warning;\n`,
+  );
   assertStringIncludes(restoreArgv[2], "set -o pipefail");
   assertStringIncludes(restoreArgv[2], "set +e");
   assertStringIncludes(restoreArgv[7], "CREATE SCHEMA %I AUTHORIZATION %I");
@@ -747,6 +754,41 @@ test("postgres promote leaves recovery on first writable check", async () => {
   };
   await replication.promote(buildContext(exec));
   assertEquals(recoveryChecks >= 2, true);
+});
+
+test("postgres promote still succeeds when the read-only default reset fails", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected postgres promote");
+  }
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("ALTER SYSTEM RESET")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "denied" });
+    }
+    const stdout = input?.includes("pg_is_in_recovery") ? "f\n" : "";
+    return Promise.resolve({ success: true, stdout, stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+});
+
+test("postgres promote resets the demoted fence's read-only default after leaving recovery", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected postgres promote");
+  }
+  const inputs: string[] = [];
+  const exec: ManagedEngineExec = (_argv, input) => {
+    inputs.push(input ?? "");
+    const stdout = input?.includes("pg_is_in_recovery") ? "f\n" : "";
+    return Promise.resolve({ success: true, stdout, stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+  const reset = inputs.findIndex((sql) =>
+    sql.includes("ALTER SYSTEM RESET default_transaction_read_only") &&
+    sql.includes("pg_reload_conf")
+  );
+  const left = inputs.findIndex((sql) => sql.includes("pg_is_in_recovery"));
+  assertEquals(reset > left && left >= 0, true);
 });
 
 test("postgres followPrimary rewrites primary_conninfo toward the new primary", async () => {

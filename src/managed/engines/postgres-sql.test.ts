@@ -11,6 +11,7 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
   formatConninfoValue,
   grantDatabaseSql,
@@ -20,6 +21,7 @@ import {
   listManagedSlotsSql,
   MANAGED_SLOT_PREFIX,
   managedSlotRetentionSql,
+  PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -490,6 +492,34 @@ test("stripPgRestoreTimeoutSetLines removes only lock_timeout and statement_time
   assertEquals(out.includes("CREATE TABLE"), true);
 });
 
+test("PG_RESTORE_TIMEOUT_SET_LINE_SED avoids the GNU-only I flag and matches the same lines as stripPgRestoreTimeoutSetLines", async () => {
+  assertEquals(PG_RESTORE_TIMEOUT_SET_LINE_SED.endsWith("/"), true);
+  const input = [
+    "SET lock_timeout = 0;",
+    "set Statement_Timeout = 0;",
+    "  SET lock_timeout = 0  ",
+    "SET LOCAL lock_timeout = '30s';",
+    "SET client_encoding = 'UTF8';",
+    "CREATE TABLE t (id int);",
+    "",
+  ].join("\n");
+  const out = await new Deno.Command("sed", {
+    args: ["-E", `${PG_RESTORE_TIMEOUT_SET_LINE_SED}d`],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const writer = out.stdin.getWriter();
+  await writer.write(new TextEncoder().encode(input));
+  await writer.close();
+  const result = await out.output();
+  assertEquals(result.success, true, new TextDecoder().decode(result.stderr));
+  assertEquals(
+    new TextDecoder().decode(result.stdout),
+    stripPgRestoreTimeoutSetLines(input),
+  );
+});
+
 test("restoreResetSql drops every user schema and recreates only public with its owner and privileges", () => {
   const sql = restoreResetSql();
   assertStringIncludes(sql, "SET LOCAL lock_timeout");
@@ -534,6 +564,22 @@ test("rewritePrimaryConninfo drops hostaddr when the new dial is a container nam
   assertEquals(next.includes("hostaddr"), false);
   assertEquals(next.includes("port=5432"), true);
   assertEquals(next.includes("password=repl-plain-fixture"), true);
+});
+
+test("enforceFencedFormerPrimarySql terminates backends and sets cluster read-only", () => {
+  const sql = enforceFencedFormerPrimarySql();
+  assertStringIncludes(sql, "pg_terminate_backend");
+  assertStringIncludes(sql, "backend_type = 'client backend'");
+  assertStringIncludes(sql, "pg_replication_slots");
+  assertStringIncludes(
+    sql,
+    "ALTER SYSTEM SET default_transaction_read_only = on",
+  );
+  assertStringIncludes(sql, "pg_reload_conf");
+  assertStringIncludes(sql, "TRANSACTION READ ONLY");
+  const alterIdx = sql.indexOf("ALTER SYSTEM");
+  const terminateIdx = sql.indexOf("pg_terminate_backend");
+  assertEquals(alterIdx >= 0 && terminateIdx > alterIdx, true);
 });
 
 test("formatConninfoValue quotes empty values and any whitespace", () => {

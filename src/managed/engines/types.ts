@@ -234,6 +234,19 @@ export type ManagedEngineReplicationRuntime = {
     ctx: ManagedEngineContext,
   ): Promise<string>;
   /**
+   * True when the running engine still accepts writes as a former primary
+   * (not in recovery / not globally read-only).
+   */
+  isWritableFormerPrimary?(ctx: ManagedEngineContext): Promise<boolean>;
+  /**
+   * Best-effort quiesce for a fenced member whose container is already up.
+   * The durable fence is on-disk (`standby.signal` / volume markers) before
+   * stop; this covers the window until compose stop completes.
+   */
+  enforceFencedFormerPrimaryReadOnly?(
+    ctx: ManagedEngineContext,
+  ): Promise<void>;
+  /**
    * Refuse reactivation when this member is no longer quiesced (promotion may
    * have started locally or the data directory was mutated).
    */

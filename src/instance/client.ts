@@ -1524,8 +1524,9 @@ export class InstanceClient {
     if (this.#haObserver) return;
     this.#haObserver = new ManagedHaObserver({
       send: (message) => {
-        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
         this.#ws.send(JSON.stringify(message));
+        return true;
       },
     });
   }
