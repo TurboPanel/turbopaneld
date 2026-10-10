@@ -2,10 +2,19 @@
  * Organization-wide Orchestrator topology account SQL (MySQL + MariaDB).
  *
  * One login per organization, accepted by every MySQL and MariaDB member of
- * every HA cluster in it. Host scoping matches the ProxySQL monitor account:
- * `MANAGED_DOCKER_NETWORK_HOST` (172.16.0.0/12 — where the Orchestrator
- * container dials from) plus `clientSourceHosts`, which carries each member's
- * private-listener address.
+ * every HA cluster in it. Rows exist for `MANAGED_DOCKER_NETWORK_HOST`
+ * (172.16.0.0/12 — an Orchestrator container dialing a member on its own
+ * server), for `clientSourceHosts` (each member's private-listener address)
+ * **and for the private ranges 10.0.0.0/8 and 192.168.0.0/16**. The extra row is needed because discovery and
+ * recovery run on the organization's Raft **leader**, which can be any
+ * Orchestrator server of the organization — not only a member of this
+ * cluster — and its connection leaves that server from the server's own
+ * address on the route to the member (not its Raft advertise address). A
+ * cluster's apply cannot know that set, and it changes whenever leadership
+ * moves or an Orchestrator server joins, so a host list built from the members
+ * left the leader refused (`Error 1045 … @'<leader address>'`) and nothing
+ * registered. Every row stays bound to TLS (`REQUIRE SSL`) and to the
+ * derived per-organization password.
  *
  * **Binlogging is deliberately left on.** Orchestrator has to log in to every
  * member, and a standby boots `read_only=ON, super_read_only=ON`
@@ -53,6 +62,31 @@ const REPLICATION_TABLE: Record<OrchestratorTopologySqlDialect, string> = {
   mysql: "mysql.slave_master_info",
   mariadb: "mysql.gtid_slave_pos",
 };
+
+/**
+ * Private-network rows for the topology account: the Raft leader that
+ * discovers and recovers a cluster can be any Orchestrator server of the
+ * organization, and a member cannot list those addresses (see the module
+ * comment). Datacenter servers talk over private addresses, so the rows cover
+ * 10.0.0.0/8 and 192.168.0.0/16 (172.16.0.0/12 is the Docker-network row
+ * above) and never a public address. The login still needs TLS and the
+ * derived per-organization password.
+ */
+export const ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS: readonly string[] = [
+  "10.0.0.0/255.0.0.0",
+  "192.168.0.0/255.255.0.0",
+];
+
+/** Every host the topology account (and its grants) exists at. */
+function topologyAccountHosts(extraHosts: readonly string[]): string[] {
+  return [
+    ...new Set([
+      MANAGED_DOCKER_NETWORK_HOST,
+      ...extraHosts,
+      ...ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS,
+    ]),
+  ];
+}
 
 function accountAt(username: string, host: string): string {
   return `${quoteAccount(username)}@${quoteLiteral(host)}`;
@@ -103,7 +137,7 @@ function grantOrchestratorTopologyPrivileges(
 
 /**
  * Idempotent create/alter + grants for the organization's Orchestrator
- * topology account at every host the monitor account uses. Safe to re-run on
+ * topology account at every monitor-account host plus the private ranges. Safe to re-run on
  * every apply: `CREATE USER IF NOT EXISTS` then `ALTER USER … IDENTIFIED BY`
  * re-asserts the derived password without a drop.
  */
@@ -113,7 +147,7 @@ export function ensureOrchestratorTopologyAccountSql(
   extraHosts: readonly string[] = [],
   dialect: OrchestratorTopologySqlDialect = "mysql",
 ): string {
-  const hosts = [...new Set([MANAGED_DOCKER_NETWORK_HOST, ...extraHosts])];
+  const hosts = topologyAccountHosts(extraHosts);
   const lines: string[] = [];
   for (const host of hosts) {
     const account = accountAt(username, host);
@@ -138,7 +172,7 @@ export function grantOrchestratorReplicationTableSql(
   extraHosts: readonly string[] = [],
   dialect: OrchestratorTopologySqlDialect = "mysql",
 ): string {
-  const hosts = [...new Set([MANAGED_DOCKER_NETWORK_HOST, ...extraHosts])];
+  const hosts = topologyAccountHosts(extraHosts);
   return hosts
     .map((host) =>
       `GRANT SELECT ON ${REPLICATION_TABLE[dialect]} TO ${

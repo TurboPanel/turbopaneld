@@ -3,6 +3,7 @@ import { topologyPlaintext } from "../../testing/managed-topology-fixtures.ts";
 import {
   ensureOrchestratorTopologyAccountSql,
   grantOrchestratorReplicationTableSql,
+  ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS,
 } from "./orchestrator-topology-sql.ts";
 
 /**
@@ -31,6 +32,36 @@ test("ensureOrchestratorTopologyAccountSql scopes hosts like the monitor account
   );
   assertStringIncludes(sql, "GRANT SELECT ON `meta`.*");
   assertStringIncludes(sql, "FLUSH PRIVILEGES;");
+});
+
+test("ensureOrchestratorTopologyAccountSql admits a Raft leader outside the cluster", () => {
+  // Live: the leader 10.100.0.8 was not a member, so `@'10.100.0.8'` matched
+  // no row and Orchestrator registration failed with Error 1045.
+  for (const dialect of ["mysql", "mariadb"] as const) {
+    const sql = ensureOrchestratorTopologyAccountSql(
+      USERNAME,
+      TOPOLOGY_PLAIN,
+      ["10.100.0.3", "10.100.0.4", "10.100.0.5"],
+      dialect,
+    );
+    assertEquals(sql.includes(`@'%'`), false);
+    for (const range of ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS) {
+      const account = `\`${USERNAME}\`@'${range}'`;
+      assertStringIncludes(sql, `CREATE USER IF NOT EXISTS ${account}`);
+      assertStringIncludes(sql, `ON *.* TO ${account};`);
+      assertStringIncludes(sql, `ON \`meta\`.* TO ${account};`);
+      assertStringIncludes(
+        sql,
+        dialect === "mariadb"
+          ? `GRANT USAGE ON *.* TO ${account} REQUIRE SSL;`
+          : `ALTER USER ${account} REQUIRE SSL;`,
+      );
+      assertStringIncludes(
+        grantOrchestratorReplicationTableSql(USERNAME, [], dialect),
+        `TO ${account};`,
+      );
+    }
+  }
 });
 
 test("ensureOrchestratorTopologyAccountSql re-asserts the password without a drop", () => {
