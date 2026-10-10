@@ -1015,7 +1015,8 @@ test("shared principal keeps separate release trees per nativeAppServices servic
         serviceId: string,
         releaseId: string,
         composeServiceName: string,
-      ) => async (params: {
+      ) =>
+      async (params: {
         paths: ReturnType<typeof resolveReleasePaths>;
       }) => {
         await Deno.writeTextFile(
