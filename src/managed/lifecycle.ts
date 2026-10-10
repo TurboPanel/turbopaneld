@@ -204,6 +204,18 @@ async function recordDemotedFenceOnLifecycleStop(
 }
 
 /** Post-compose safety net when a fenced member was started outside refuseDemotedMemberStart. */
+function fencedWritableRefusalSummary(
+  payload: ManagedLifecyclePayload,
+): ManagedLifecycleResult {
+  return {
+    status: "needs_resync",
+    summary: `managed ${payload.action} refused: fenced member stayed writable`,
+    ...(payload.memberId
+      ? { member: buildNeedsResyncMember(payload.memberId) }
+      : {}),
+  };
+}
+
 export async function refuseWritableFencedAfterComposeStart(
   payload: ManagedLifecyclePayload,
   layout: LayoutPaths,
@@ -224,28 +236,19 @@ export async function refuseWritableFencedAfterComposeStart(
   }
   const engine = payload.engine ?? "postgres";
   await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
-  if (
-    !(await isFencedMemberStillWritable(
-      layout,
-      payload.managedId,
-      engine,
-      run,
-    ))
-  ) {
-    return undefined;
-  }
+  const stillWritable = await isFencedMemberStillWritable(
+    layout,
+    payload.managedId,
+    engine,
+    run,
+  );
+  if (!stillWritable) return undefined;
   await stopManagedProjectForResync(
     payload.managedId,
     (text) => sanitizeForLog(text),
     run,
   );
-  return {
-    status: "needs_resync",
-    summary: `managed ${payload.action} refused: fenced member stayed writable`,
-    ...(payload.memberId
-      ? { member: buildNeedsResyncMember(payload.memberId) }
-      : {}),
-  };
+  return fencedWritableRefusalSummary(payload);
 }
 
 async function observeManagedLifecycleOutcome(
@@ -288,6 +291,55 @@ async function observeManagedLifecycleOutcome(
   };
 }
 
+async function runManagedComposeLifecycleAction(
+  payload: ManagedLifecyclePayload,
+  project: string,
+  run: RunDockerFn,
+): Promise<void> {
+  const result = await run([
+    "compose",
+    "-p",
+    project,
+    payload.action,
+  ]);
+  if (!result.success) {
+    throw new Error(
+      `managed.lifecycle ${payload.action} failed: ${
+        sanitizeForLog(result.stderr || "compose failed")
+      }`,
+    );
+  }
+}
+
+async function finalizeManagedLifecycle(
+  payload: ManagedLifecyclePayload,
+  layout: LayoutPaths,
+  project: string,
+  run: RunDockerFn,
+  engineDeps: ManagedLifecycleHandlerDeps & { runDocker: RunDockerFn },
+  switchoverPrimaryExecutedGtidSet: string | undefined,
+): Promise<ManagedLifecycleResult> {
+  const writableFenced = await refuseWritableFencedAfterComposeStart(
+    payload,
+    layout,
+    run,
+  );
+  if (writableFenced) return writableFenced;
+
+  await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
+
+  if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
+    await clearManagedDemotedMarker(layout, payload.managedId);
+  }
+
+  return await observeManagedLifecycleOutcome(
+    payload,
+    project,
+    run,
+    switchoverPrimaryExecutedGtidSet,
+  );
+}
+
 export async function handleManagedLifecycle(
   payload: ManagedLifecyclePayload,
   _daemonReceivedAt: string,
@@ -327,37 +379,14 @@ export async function handleManagedLifecycle(
   await recordDemotedFenceOnLifecycleStop(payload, layout, run);
 
   const project = managedComposeProject(payload.managedId);
-  const result = await run([
-    "compose",
-    "-p",
-    project,
-    payload.action,
-  ]);
-  if (!result.success) {
-    throw new Error(
-      `managed.lifecycle ${payload.action} failed: ${
-        sanitizeForLog(result.stderr || "compose failed")
-      }`,
-    );
-  }
+  await runManagedComposeLifecycleAction(payload, project, run);
 
-  const writableFenced = await refuseWritableFencedAfterComposeStart(
+  return await finalizeManagedLifecycle(
     payload,
     layout,
-    run,
-  );
-  if (writableFenced) return writableFenced;
-
-  await reactivatePrimaryAfterSwitchoverAbort(payload, run, engineDeps);
-
-  if (payload.action === "start" && payload.reactivateAfterSwitchoverAbort) {
-    await clearManagedDemotedMarker(layout, payload.managedId);
-  }
-
-  return await observeManagedLifecycleOutcome(
-    payload,
     project,
     run,
+    engineDeps,
     switchoverPrimaryExecutedGtidSet,
   );
 }

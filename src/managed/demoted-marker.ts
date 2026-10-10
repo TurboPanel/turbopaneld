@@ -120,15 +120,16 @@ export async function listDemotedManagedIds(
   try {
     for await (const entry of Deno.readDir(root)) {
       if (!entry.isDirectory || !SAFE_MANAGED_ID_RE.test(entry.name)) continue;
-      if (await isManagedMemberDemoted(layout, entry.name)) {
-        ids.push(entry.name);
-      }
+      ids.push(entry.name);
     }
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return ids;
     throw err;
   }
-  return ids;
+  const demoted = await Promise.all(
+    ids.map((managedId) => isManagedMemberDemoted(layout, managedId)),
+  );
+  return ids.filter((_, index) => demoted[index]);
 }
 
 /**
@@ -139,19 +140,12 @@ async function listDemotedHaMembers(
   layout: LayoutPaths,
   members: ManagedHaMemberRecord[],
 ): Promise<ManagedHaMemberRecord[]> {
-  const demotedFlags = await Promise.all(
-    members.map(async (member) => ({
-      member,
-      demoted: await isManagedMemberDemoted(
-        layout,
-        member.managedId,
-        member.memberId,
-      ),
-    })),
+  const demoted = await Promise.all(
+    members.map((member) =>
+      isManagedMemberDemoted(layout, member.managedId, member.memberId)
+    ),
   );
-  return demotedFlags
-    .filter((row) => row.demoted)
-    .map((row) => row.member);
+  return members.filter((_, index) => demoted[index]);
 }
 
 export async function listDemotedFenceTargets(
