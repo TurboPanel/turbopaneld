@@ -151,10 +151,18 @@ test("isFencedMemberStillWritable fails open when compose ps cannot be collected
   });
 });
 
-test("enforceFencedMemberIfRunning propagates volume fence persist failures", async () => {
+test("enforceFencedMemberIfRunning records a fence plant failure and still enforces SQL", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);
     await seedCompose(layout);
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      "",
+      "2026-10-08T12:00:00.000Z",
+      "postgres",
+    );
+    let execCalls = 0;
     const run = (args: string[]): Promise<DockerCliResult> => {
       if (args[0] === "run") {
         return Promise.resolve({
@@ -164,6 +172,7 @@ test("enforceFencedMemberIfRunning propagates volume fence persist failures", as
           stderr: "touch failed",
         });
       }
+      if (args[0] === "exec") execCalls++;
       return Promise.resolve({
         success: true,
         code: 0,
@@ -171,13 +180,11 @@ test("enforceFencedMemberIfRunning propagates volume fence persist failures", as
         stderr: "",
       });
     };
-    let threw = false;
-    try {
-      await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
-    } catch {
-      threw = true;
-    }
-    assert(threw);
+    // Never throws: callers must always go on to stop the container.
+    await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
+    assert(execCalls > 0);
+    const marker = await readManagedDemotedMarker(layout, MANAGED_ID);
+    assert(marker?.enforceReadOnlyLastError?.includes("probe failed"));
   });
 });
 

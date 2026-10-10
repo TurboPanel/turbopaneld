@@ -749,6 +749,41 @@ test("postgres promote leaves recovery on first writable check", async () => {
   assertEquals(recoveryChecks >= 2, true);
 });
 
+test("postgres promote still succeeds when the read-only default reset fails", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected postgres promote");
+  }
+  const exec: ManagedEngineExec = (_argv, input) => {
+    if (input?.includes("ALTER SYSTEM RESET")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "denied" });
+    }
+    const stdout = input?.includes("pg_is_in_recovery") ? "f\n" : "";
+    return Promise.resolve({ success: true, stdout, stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+});
+
+test("postgres promote resets the demoted fence's read-only default after leaving recovery", async () => {
+  const replication = postgresManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected postgres promote");
+  }
+  const inputs: string[] = [];
+  const exec: ManagedEngineExec = (_argv, input) => {
+    inputs.push(input ?? "");
+    const stdout = input?.includes("pg_is_in_recovery") ? "f\n" : "";
+    return Promise.resolve({ success: true, stdout, stderr: "" });
+  };
+  await replication.promote(buildContext(exec));
+  const reset = inputs.findIndex((sql) =>
+    sql.includes("ALTER SYSTEM RESET default_transaction_read_only") &&
+    sql.includes("pg_reload_conf")
+  );
+  const left = inputs.findIndex((sql) => sql.includes("pg_is_in_recovery"));
+  assertEquals(reset > left && left >= 0, true);
+});
+
 test("postgres followPrimary rewrites primary_conninfo toward the new primary", async () => {
   const replication = postgresManagedEngineRuntime.replication;
   if (!replication?.followPrimary) {

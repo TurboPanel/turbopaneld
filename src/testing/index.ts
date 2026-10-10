@@ -89,3 +89,9 @@ export {
   topologyPlaintext,
   topologyUsername,
 } from "./managed-topology-fixtures.ts";
+
+export {
+  type FakeMysqlCnfDocker,
+  fakeMysqlCnfDocker,
+  type FakeMysqlCnfDockerOptions,
+} from "./fake-mysql-cnf-docker.ts";

@@ -17,6 +17,7 @@ import {
   refuseWritableFencedAfterComposeStart,
 } from "./lifecycle.ts";
 import { managedDir } from "./engine-paths.ts";
+import { tryWithManagedLifecycleLock } from "./target-lock.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test} so Sonar sees real tests.
@@ -67,6 +68,10 @@ function fakeDocker(present: Set<string>): Recorder {
     if (args[0] === "run") {
       const script = args.at(-1) ?? "";
       const path = script.split(" ")[2] ?? "";
+      // Fence helpers mutate the simulated volume: `touch 'p'` / `rm -f 'p'`.
+      const quoted = /'([^']+)'/.exec(script)?.[1];
+      if (quoted && script.startsWith("touch ")) present.add(quoted);
+      if (quoted && script.startsWith("rm -f ")) present.delete(quoted);
       stdout = present.has(path) ? "present\n" : "absent\n";
     } else if (args[0] === "compose" && args.includes("ps")) {
       stdout = RUNNING_PS;
@@ -362,7 +367,7 @@ test("lifecycle stop with demoted writes a marker; an ordinary stop does not", a
         { runDocker: demotedDocker.run },
       );
       assertEquals(composeCalled(demotedDocker.calls, "stop"), true);
-      assert(await isManagedMemberDemoted(layout, demotedId, MEMBER_ID));
+      assert(await isManagedMemberDemoted(layout, demotedId));
 
       const ordinaryDocker = fakeDocker(new Set());
       await handleManagedLifecycle(
@@ -376,7 +381,7 @@ test("lifecycle stop with demoted writes a marker; an ordinary stop does not", a
       );
       assertEquals(composeCalled(ordinaryDocker.calls, "stop"), true);
       assertEquals(
-        await isManagedMemberDemoted(layout, ordinaryId, MEMBER_ID),
+        await isManagedMemberDemoted(layout, ordinaryId),
         false,
       );
     } finally {
@@ -425,7 +430,7 @@ test("demoted fence stop without memberId stores ha-member.json member id", asyn
       );
       const marker = await readManagedDemotedMarker(layout, managedId);
       assertEquals(marker?.memberId, MEMBER_ID);
-      assert(await isManagedMemberDemoted(layout, managedId, MEMBER_ID));
+      assert(await isManagedMemberDemoted(layout, managedId));
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) Deno.env.delete(key);
@@ -585,4 +590,198 @@ test("lifecycle start of a replica fails closed without the compose file", async
     Error,
     "standby",
   );
+});
+
+async function withLifecycleEnv(
+  fn: (layout: ReturnType<typeof resolveLayout>) => Promise<void>,
+): Promise<void> {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      await fn(resolveLayout(fixture.env));
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+}
+
+async function seedLifecycleCluster(
+  layout: ReturnType<typeof resolveLayout>,
+  compose = POSTGRES_COMPOSE,
+): Promise<string> {
+  const managedId = `managed_lifecycle_fence_${crypto.randomUUID()}`;
+  const root = managedDir(layout, managedId);
+  await Deno.mkdir(root, { recursive: true });
+  await Deno.writeTextFile(`${root}/docker-compose.yml`, compose);
+  return managedId;
+}
+
+test("a demoted fence stop whose on-disk fence fails still stops the engine, keeps the marker and reports it", async () => {
+  await withLifecycleEnv(async (layout) => {
+    const managedId = await seedLifecycleCluster(layout);
+    const docker = fakeDocker(new Set());
+    const run = (args: string[]): Promise<DockerCliResult> =>
+      args[0] === "run"
+        ? Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "volume busy",
+        })
+        : docker.run(args);
+    await assertRejects(
+      () =>
+        handleManagedLifecycle(
+          {
+            managedId,
+            action: "stop",
+            memberId: MEMBER_ID,
+            engine: "postgres",
+            demoted: true,
+          },
+          new Date().toISOString(),
+          { runDocker: run },
+        ),
+      Error,
+      "demoted fence is incomplete",
+    );
+    assertEquals(composeCalled(docker.calls, "stop"), true);
+    assert(await isManagedMemberDemoted(layout, managedId));
+  });
+});
+
+test("a demoted fence stop whose marker cannot be written still stops the engine and fails", async () => {
+  await withLifecycleEnv(async (layout) => {
+    const managedId = await seedLifecycleCluster(layout);
+    // A directory where demoted.json belongs makes the atomic rename fail.
+    await Deno.mkdir(`${managedDir(layout, managedId)}/demoted.json/blocker`, {
+      recursive: true,
+    });
+    const docker = fakeDocker(new Set());
+    await assertRejects(
+      () =>
+        handleManagedLifecycle(
+          {
+            managedId,
+            action: "stop",
+            memberId: MEMBER_ID,
+            engine: "postgres",
+            demoted: true,
+          },
+          new Date().toISOString(),
+          { runDocker: docker.run },
+        ),
+      Error,
+      "demoted fence is incomplete",
+    );
+    assertEquals(composeCalled(docker.calls, "stop"), true);
+    // The standby.signal fence was still planted.
+    assert(
+      docker.calls.some((args) =>
+        args[0] === "run" && (args.at(-1) ?? "").startsWith("touch ")
+      ),
+    );
+  });
+});
+
+for (
+  const [markerId, requestId] of [
+    ["", MEMBER_ID],
+    ["", undefined],
+    [MEMBER_ID, ""],
+    [MEMBER_ID, "01936b3e-0000-0000-0000-000000000000"],
+    [MEMBER_ID, MEMBER_ID],
+  ] as const
+) {
+  test(`lifecycle start is refused for marker "${markerId}" and request "${requestId}"`, async () => {
+    await withLifecycleEnv(async (layout) => {
+      const managedId = await seedLifecycleCluster(layout);
+      await writeManagedDemotedMarker(
+        layout,
+        managedId,
+        markerId,
+        "2026-10-08T12:00:00.000Z",
+        "postgres",
+      );
+      const docker = fakeDocker(new Set());
+      const result = await handleManagedLifecycle(
+        {
+          managedId,
+          action: "start",
+          engine: "postgres",
+          ...(requestId === undefined ? {} : { memberId: requestId }),
+        },
+        new Date().toISOString(),
+        { runDocker: docker.run },
+      );
+      assertEquals(result.status, "needs_resync");
+      assertEquals(composeCalled(docker.calls, "start"), false);
+      assertEquals(composeCalled(docker.calls, "stop"), true);
+    });
+  });
+}
+
+test("an unfenced member starts normally", async () => {
+  await withLifecycleEnv(async (layout) => {
+    const managedId = await seedLifecycleCluster(layout);
+    const docker = fakeDocker(new Set());
+    const result = await handleManagedLifecycle(
+      { managedId, action: "start", memberId: MEMBER_ID, engine: "postgres" },
+      new Date().toISOString(),
+      { runDocker: docker.run },
+    );
+    assertEquals(composeCalled(docker.calls, "start"), true);
+    assertEquals(composeCalled(docker.calls, "stop"), false);
+    assertEquals(probeCalled(docker.calls), false);
+    assert(result.status !== "needs_resync");
+  });
+});
+
+test("switchover-abort reactivation holds the lifecycle lock the demoted guard takes", async () => {
+  await withLifecycleEnv(async (layout) => {
+    const managedId = await seedLifecycleCluster(layout, MARIADB_COMPOSE);
+    await writeManagedDemotedMarker(
+      layout,
+      managedId,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "mariadb",
+    );
+    const docker = fakeDocker(new Set());
+    let guardGotLock: boolean | undefined;
+    const run = async (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "compose" && args.at(-1) === "start") {
+        guardGotLock = await tryWithManagedLifecycleLock(
+          layout,
+          managedId,
+          () => Promise.resolve(),
+        );
+      }
+      return docker.run(args);
+    };
+    // Not confirmed safe: the daemon refuses after compose start, which is
+    // enough to observe the lock.
+    await assertRejects(() =>
+      handleManagedLifecycle(
+        {
+          managedId,
+          action: "start",
+          memberId: MEMBER_ID,
+          engine: "mariadb",
+          reactivateAfterSwitchoverAbort: true,
+        },
+        new Date().toISOString(),
+        { runDocker: run },
+      )
+    );
+    assertEquals(guardGotLock, false);
+    assert(await isManagedMemberDemoted(layout, managedId));
+  });
 });

@@ -119,7 +119,7 @@ test("apply right after destroy is refused and rebuilds nothing", async () => {
       true,
     );
     assertEquals(
-      await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_A),
+      await isManagedMemberDemoted(layout, MANAGED_ID),
       false,
     );
   });
@@ -152,7 +152,7 @@ test("destroy clears a demoted marker", async () => {
       "postgres",
     );
     assertEquals(
-      await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_A),
+      await isManagedMemberDemoted(layout, MANAGED_ID),
       true,
     );
     await handleManagedDestroy(
@@ -161,7 +161,7 @@ test("destroy clears a demoted marker", async () => {
       { runDocker: quietDocker },
     );
     assertEquals(
-      await isManagedMemberDemoted(layout, MANAGED_ID, MEMBER_A),
+      await isManagedMemberDemoted(layout, MANAGED_ID),
       false,
     );
   });

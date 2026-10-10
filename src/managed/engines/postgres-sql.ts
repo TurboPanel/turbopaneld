@@ -980,6 +980,18 @@ export function promoteSql(): string {
   return "SELECT pg_catalog.pg_promote(true, 60);";
 }
 
+/**
+ * Undo the demoted fence's persisted `default_transaction_read_only` (an
+ * `ALTER SYSTEM` setting in `postgresql.auto.conf` on the data volume) once
+ * the member is a primary again. A no-op when it was never set.
+ */
+export function resetFencedReadOnlyDefaultSql(): string {
+  return [
+    "ALTER SYSTEM RESET default_transaction_read_only;",
+    "SELECT pg_catalog.pg_reload_conf();",
+  ].join("\n");
+}
+
 export function currentPrimaryConninfoSql(): string {
   return "SELECT pg_catalog.current_setting('primary_conninfo', true);";
 }
@@ -1092,14 +1104,23 @@ export function isWritablePrimarySql(): string {
 }
 
 /**
- * Best-effort quiesce for a fenced former primary still running. Does not
- * replace `standby.signal` on disk (written before stop); the guard stops the
- * container when writes remain possible.
+ * Best-effort quiesce for a fenced former primary still running, as far as
+ * Postgres allows against superusers:
  *
- * `ALTER SYSTEM` + `default_transaction_read_only` blocks new read-write
- * transactions for normal roles; a superuser can still `SET TRANSACTION READ
- * WRITE` or `SET default_transaction_read_only = off` in-session — container
- * stop is the real fence.
+ * 1. `ALTER SYSTEM SET default_transaction_read_only = on` + reload, so every
+ *    new session (superusers included) starts read-only;
+ * 2. then `pg_terminate_backend` every other client backend, so no session
+ *    opened before the reload keeps a read-write default (WAL senders are
+ *    not client backends and are never touched);
+ * 3. this session itself is set read-only.
+ *
+ * A superuser can still `SET default_transaction_read_only = off` or
+ * `SET TRANSACTION READ WRITE` in a new session, or `ALTER SYSTEM` it back:
+ * Postgres has no read-only mode a superuser cannot leave. Stopping the
+ * container (the guard does, right after this) is the real fence, and
+ * `standby.signal` on the volume keeps the next start in recovery. Each
+ * statement runs on its own (psql reads stdin, no single transaction), as
+ * `ALTER SYSTEM` refuses a transaction block.
  */
 export function enforceFencedFormerPrimarySql(): string {
   return [

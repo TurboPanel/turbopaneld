@@ -27,31 +27,45 @@ function replicationEngineDeps(run: RunDockerFn) {
   };
 }
 
-export async function enforceFencedMemberIfRunning(
+async function recordEnforceFailureBestEffort(
+  layout: LayoutPaths,
+  managedId: string,
+  err: unknown,
+): Promise<void> {
+  try {
+    await recordDemotedEnforceReadOnlyFailure(layout, managedId, err);
+  } catch (recordErr) {
+    logError(
+      "managed",
+      `demoted fence: could not record enforce failure managedId=${managedId}:`,
+      sanitizeForLog(recordErr),
+    );
+  }
+}
+
+/**
+ * Best-effort SQL read-only on a fenced member whose container may be up.
+ * Never throws: a failure is logged at error level and recorded on the
+ * marker; the guard retries every tick while the engine stays writable, and
+ * stopping the container is the real fence.
+ */
+export async function enforceFencedReadOnlySql(
   layout: LayoutPaths,
   managedId: string,
   engine: ManagedEngineCode,
   run: RunDockerFn,
 ): Promise<void> {
-  await persistDemotedVolumeFence(layout, managedId, engine, run);
-
-  const project = managedComposeProject(managedId);
-  const containers = await collectManagedContainers(
-    project,
-    (text) => sanitizeForLog(text),
-    run,
-  );
-  const enginePossiblyRunning = containers === undefined ||
-    containers.some((row) => row.status.toLowerCase() === "running");
-  if (!enginePossiblyRunning) {
-    return;
-  }
-
   const runtime = getManagedEngineRuntime(engine);
-  const repl = runtime.replication;
-  if (!repl?.enforceFencedFormerPrimaryReadOnly) return;
-
+  if (!runtime.replication?.enforceFencedFormerPrimaryReadOnly) return;
   try {
+    const containers = await collectManagedContainers(
+      managedComposeProject(managedId),
+      (text) => sanitizeForLog(text),
+      run,
+    );
+    const enginePossiblyRunning = containers === undefined ||
+      containers.some((row) => row.status.toLowerCase() === "running");
+    if (!enginePossiblyRunning) return;
     const { engine: resolved, ctx } = await resolveLocalReplicationEngine(
       managedId,
       engine,
@@ -60,12 +74,46 @@ export async function enforceFencedMemberIfRunning(
     );
     await resolved.replication?.enforceFencedFormerPrimaryReadOnly?.(ctx);
   } catch (err) {
-    await recordDemotedEnforceReadOnlyFailure(layout, managedId, err);
     logError(
       "managed",
       `demoted fence: read-only enforce failed managedId=${managedId}:`,
       sanitizeForLog(err),
     );
+    await recordEnforceFailureBestEffort(layout, managedId, err);
+  }
+}
+
+/**
+ * Re-plant the on-disk fence, then enforce SQL read-only if the engine is up.
+ * Never throws (both failures are logged and recorded) so a caller always
+ * goes on to stop the container.
+ */
+export async function enforceFencedMemberIfRunning(
+  layout: LayoutPaths,
+  managedId: string,
+  engine: ManagedEngineCode,
+  run: RunDockerFn,
+): Promise<void> {
+  await persistDemotedVolumeFenceBestEffort(layout, managedId, engine, run);
+  await enforceFencedReadOnlySql(layout, managedId, engine, run);
+}
+
+/** Plant (or verify) the on-disk fence; failures are logged and recorded. */
+export async function persistDemotedVolumeFenceBestEffort(
+  layout: LayoutPaths,
+  managedId: string,
+  engine: ManagedEngineCode,
+  run: RunDockerFn,
+): Promise<void> {
+  try {
+    await persistDemotedVolumeFence(layout, managedId, engine, run);
+  } catch (err) {
+    logError(
+      "managed",
+      `demoted fence: on-disk fence plant failed managedId=${managedId}:`,
+      sanitizeForLog(err),
+    );
+    await recordEnforceFailureBestEffort(layout, managedId, err);
   }
 }
 

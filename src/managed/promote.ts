@@ -12,7 +12,11 @@ import type {
   ManagedPromoteResult,
 } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
-import { clearManagedDemotionArtifacts } from "./demoted-marker.ts";
+import {
+  clearManagedDemotionArtifacts,
+  isManagedMemberDemoted,
+} from "./demoted-marker.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
 import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import {
   parseSwitchoverPromoteFailureCode,
@@ -72,6 +76,23 @@ export async function handleManagedPromote(
   deps?: ManagedPromoteHandlerDeps,
 ): Promise<ManagedPromoteResult> {
   const layout = resolveLayout(Deno.env.toObject());
+  if (!(await isManagedMemberDemoted(layout, payload.managedId))) {
+    return await promoteManagedMember(payload, layout, deps);
+  }
+  // A marked member is writable between promote and the marker clear; hold
+  // the lock the demoted guard takes so it cannot stop the new primary.
+  return await withManagedLifecycleLock(
+    layout,
+    payload.managedId,
+    () => promoteManagedMember(payload, layout, deps),
+  );
+}
+
+async function promoteManagedMember(
+  payload: ManagedPromotePayload,
+  layout: ReturnType<typeof resolveLayout>,
+  deps: ManagedPromoteHandlerDeps | undefined,
+): Promise<ManagedPromoteResult> {
   const { engine, ctx } = await resolveLocalReplicationEngine(
     payload.managedId,
     payload.engine,

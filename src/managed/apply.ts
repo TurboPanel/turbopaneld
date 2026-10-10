@@ -47,7 +47,10 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
-import { maybeClearDemotedMarkerAfterApply } from "./demoted-marker.ts";
+import {
+  isManagedMemberDemoted,
+  maybeClearDemotedMarkerAfterApply,
+} from "./demoted-marker.ts";
 import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
@@ -921,6 +924,15 @@ async function applyManagedEngine(
       throw new Error(
         "managed.apply standby requires a replication credential",
       );
+    }
+    // A demoted former primary carries the fence's own standby.signal, so
+    // its diverged data would probe as a standby. Only a forced re-seed
+    // (fresh basebackup) may bring it back as a replica.
+    if (
+      payload.forceResync !== true &&
+      await isManagedMemberDemoted(layout, payload.managedId)
+    ) {
+      return await returnStandbyNeedsResync(payload, redact, run);
     }
     if (payload.forceResync === true) {
       // Never wipe a datadir under a live engine: the old process keeps

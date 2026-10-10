@@ -11,6 +11,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedPromote } from "./promote.ts";
 import { managedDir } from "./engine-paths.ts";
 import { readSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
+import { tryWithManagedLifecycleLock } from "./target-lock.ts";
 import {
   isManagedMemberDemoted,
   writeManagedDemotedMarker,
@@ -380,8 +381,77 @@ test("handleManagedPromote clears demotion artefacts when engine is omitted on t
       },
     );
     assertEquals(
-      await isManagedMemberDemoted(layout, managedId, memberId),
+      await isManagedMemberDemoted(layout, managedId),
       false,
     );
   });
 });
+
+for (const marked of [true, false]) {
+  test(
+    `handleManagedPromote ${
+      marked ? "holds" : "does not take"
+    } the lifecycle lock for a ${marked ? "demoted" : "plain"} member`,
+    async () => {
+      await withPromoteLayoutEnv(async () => {
+        const managedId = `managed_promote_lock_${crypto.randomUUID()}`;
+        const memberId = "00000000-0000-4000-8000-000000000002";
+        const layout = resolveLayout(Deno.env.toObject());
+        const root = managedDir(layout, managedId);
+        await Deno.mkdir(root, { recursive: true });
+        await Deno.writeTextFile(
+          `${root}/docker-compose.yml`,
+          [
+            "services:",
+            "  postgres:",
+            "    image: postgres:18",
+            "    volumes:",
+            "      - promote_lock:/var/lib/postgresql",
+            "volumes:",
+            "  promote_lock:",
+            "    name: promote_lock",
+            "",
+          ].join("\n"),
+        );
+        if (marked) {
+          await writeManagedDemotedMarker(
+            layout,
+            managedId,
+            memberId,
+            "2026-10-08T12:00:00.000Z",
+            "postgres",
+          );
+        }
+        let guardGotLock: boolean | undefined;
+        await handleManagedPromote(
+          { managedId, memberId, engine: "postgres" },
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runDocker: async (args, options) => {
+              if (args[0] === "compose" && args.includes("ps")) {
+                return dockerOk(RUNNING_PS);
+              }
+              if (args[0] === "run") return dockerOk("absent\n");
+              const sql = options?.input ?? "";
+              if (sql.includes("pg_promote")) {
+                guardGotLock = await tryWithManagedLifecycleLock(
+                  layout,
+                  managedId,
+                  () => Promise.resolve(),
+                );
+              }
+              if (sql.includes("pg_stat_replication")) {
+                return dockerOk("streaming\t0\n");
+              }
+              if (sql.includes("pg_is_in_recovery")) return dockerOk("f\n");
+              return dockerOk();
+            },
+          },
+        );
+        assertEquals(guardGotLock, !marked);
+        assertEquals(await isManagedMemberDemoted(layout, managedId), false);
+      });
+    },
+  );
+}

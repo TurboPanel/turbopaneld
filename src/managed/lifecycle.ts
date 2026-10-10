@@ -7,6 +7,7 @@
 
 import type {
   EnvironmentDeployContainer,
+  ManagedEngineCode,
   ManagedLifecyclePayload,
   ManagedLifecycleResult,
 } from "../contracts/commands-contracts.ts";
@@ -32,6 +33,7 @@ import { readManagedComposeDataTarget } from "./compose.ts";
 import {
   clearManagedDemotionArtifacts,
   isManagedMemberDemoted,
+  resolveDemotedEngineForClear,
   resolveDemotedMarkerMemberId,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
@@ -46,8 +48,10 @@ import {
 import { persistDemotedVolumeFence } from "./demoted-fence-volume.ts";
 import {
   enforceFencedMemberIfRunning,
+  enforceFencedReadOnlySql,
   isFencedMemberStillWritable,
 } from "./fenced-member-enforce.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (
@@ -130,18 +134,15 @@ async function refuseDemotedMemberStart(
   if (payload.action === "stop") return undefined;
   if (payload.reactivateAfterSwitchoverAbort === true) return undefined;
   if (
-    !(await isManagedMemberDemoted(
-      layout,
-      payload.managedId,
-      payload.memberId,
-    ))
+    !(await isManagedMemberDemoted(layout, payload.managedId))
   ) {
     return undefined;
   }
 
   const redact = (text: string) => sanitizeForLog(text);
-  const engine = payload.engine ?? "postgres";
-  await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
+  const engine = await resolveFenceEngine(layout, payload);
+  // Never throws: plant / SQL failures are logged and recorded, and the
+  // project is stopped either way.
   await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
   await stopManagedProjectForResync(payload.managedId, redact, run);
   return {
@@ -186,28 +187,79 @@ async function refuseNonStandbyReplicaStart(
   };
 }
 
+/**
+ * Engine for fence work: the payload, else marker / ha-member / compose.
+ * Never throws — an unreadable state file must not skip the stop that follows.
+ */
+async function resolveFenceEngine(
+  layout: LayoutPaths,
+  payload: ManagedLifecyclePayload,
+): Promise<ManagedEngineCode> {
+  try {
+    return await resolveDemotedEngineForClear(
+      layout,
+      payload.managedId,
+      payload.engine,
+    );
+  } catch {
+    return payload.engine ?? "postgres";
+  }
+}
+
+async function captureFenceStep(
+  errors: unknown[],
+  step: () => Promise<void>,
+): Promise<void> {
+  try {
+    await step();
+  } catch (err) {
+    errors.push(err);
+  }
+}
+
+/**
+ * Fence stop with `demoted: true`. Order is crash-safe: the marker first (it
+ * drives every later enforcement and clear), then the on-disk fence, then
+ * best-effort SQL read-only. A failing step never skips the others or the
+ * compose stop that follows; the first failure is returned so the caller
+ * stops the engine and then reports the fence as incomplete.
+ */
 async function recordDemotedFenceOnLifecycleStop(
   payload: ManagedLifecyclePayload,
   layout: LayoutPaths,
   run: RunDockerFn,
-): Promise<void> {
-  if (payload.action !== "stop" || payload.demoted !== true) return;
-  const demotedAt = new Date().toISOString();
-  const engine = payload.engine ?? "postgres";
-  await persistDemotedVolumeFence(layout, payload.managedId, engine, run);
-  const memberId = await resolveDemotedMarkerMemberId(
-    layout,
-    payload.managedId,
-    payload.memberId,
+): Promise<unknown> {
+  if (payload.action !== "stop" || payload.demoted !== true) return undefined;
+  const errors: unknown[] = [];
+  const engine = await resolveFenceEngine(layout, payload);
+  await captureFenceStep(errors, async () => {
+    const memberId = await resolveDemotedMarkerMemberId(
+      layout,
+      payload.managedId,
+      payload.memberId,
+    );
+    await writeManagedDemotedMarker(
+      layout,
+      payload.managedId,
+      memberId,
+      new Date().toISOString(),
+      engine,
+    );
+  });
+  await captureFenceStep(
+    errors,
+    () => persistDemotedVolumeFence(layout, payload.managedId, engine, run),
   );
-  await writeManagedDemotedMarker(
-    layout,
-    payload.managedId,
-    memberId,
-    demotedAt,
-    engine,
+  await enforceFencedReadOnlySql(layout, payload.managedId, engine, run);
+  return errors[0];
+}
+
+function fenceIncompleteError(err: unknown): Error {
+  return new Error(
+    `managed.lifecycle stop: engine stopped but the demoted fence is incomplete (${
+      sanitizeForLog(err instanceof Error ? err.message : String(err))
+    })`,
   );
-  await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
 }
 
 /** Post-compose safety net when a fenced member was started outside refuseDemotedMemberStart. */
@@ -233,15 +285,11 @@ export async function refuseWritableFencedAfterComposeStart(
   }
   if (payload.reactivateAfterSwitchoverAbort === true) return undefined;
   if (
-    !(await isManagedMemberDemoted(
-      layout,
-      payload.managedId,
-      payload.memberId,
-    ))
+    !(await isManagedMemberDemoted(layout, payload.managedId))
   ) {
     return undefined;
   }
-  const engine = payload.engine ?? "postgres";
+  const engine = await resolveFenceEngine(layout, payload);
   await enforceFencedMemberIfRunning(layout, payload.managedId, engine, run);
   const stillWritable = await isFencedMemberStillWritable(
     layout,
@@ -358,9 +406,25 @@ export async function handleManagedLifecycle(
   if (!SAFE_MANAGED_ID_RE.test(payload.managedId)) {
     throw new Error("managedId contains unsupported characters");
   }
-
-  const run = deps?.runDocker ?? defaultRunDocker;
   const layout = resolveLayout(Deno.env.toObject());
+  if (payload.reactivateAfterSwitchoverAbort !== true) {
+    return await runManagedLifecycle(payload, layout, deps);
+  }
+  // Reactivation makes a marked member writable before the marker is
+  // dropped; hold the lock the demoted guard takes so it cannot stop it.
+  return await withManagedLifecycleLock(
+    layout,
+    payload.managedId,
+    () => runManagedLifecycle(payload, layout, deps),
+  );
+}
+
+async function runManagedLifecycle(
+  payload: ManagedLifecyclePayload,
+  layout: LayoutPaths,
+  deps: ManagedLifecycleHandlerDeps | undefined,
+): Promise<ManagedLifecycleResult> {
+  const run = deps?.runDocker ?? defaultRunDocker;
   const root = managedDir(layout, payload.managedId);
   if (!(await pathExists(root))) {
     return {
@@ -386,10 +450,15 @@ export async function handleManagedLifecycle(
       engineDeps,
     );
 
-  await recordDemotedFenceOnLifecycleStop(payload, layout, run);
+  const fenceError = await recordDemotedFenceOnLifecycleStop(
+    payload,
+    layout,
+    run,
+  );
 
   const project = managedComposeProject(payload.managedId);
   await runManagedComposeLifecycleAction(payload, project, run);
+  if (fenceError !== undefined) throw fenceIncompleteError(fenceError);
 
   return await finalizeManagedLifecycle(
     payload,

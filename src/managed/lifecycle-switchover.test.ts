@@ -226,6 +226,7 @@ test("reactivatePrimaryAfterSwitchoverAbort clears read_only on mariadb", async 
 type SwitchoverAbortDockerFlags = {
   onRemovedStandbySignal: () => void;
   reactivateBatch: boolean;
+  signalRemoved?: boolean;
 };
 
 function postgresSwitchoverAbortDocker(
@@ -253,8 +254,11 @@ function postgresSwitchoverAbortDocker(
       const script = args.at(-1) ?? "";
       if (script.includes("rm -f") && script.includes("standby.signal")) {
         flags.onRemovedStandbySignal();
+        flags.signalRemoved = true;
       }
-      return Promise.resolve(dockerOk("present\n"));
+      return Promise.resolve(
+        dockerOk(flags.signalRemoved ? "absent\n" : "present\n"),
+      );
     }
     if (args[0] === "exec") {
       const batch = String(options?.input ?? "");
@@ -325,7 +329,7 @@ test("reactivatePrimaryAfterSwitchoverAbort clears volume fence but keeps demote
         { ensureDocker: () => Promise.resolve() },
       );
       assertEquals(removedSignal, true);
-      assert(await isManagedMemberDemoted(layout, managedId, memberId));
+      assert(await isManagedMemberDemoted(layout, managedId));
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) Deno.env.delete(key);

@@ -14,7 +14,6 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { clearDemotedVolumeFence } from "./demoted-fence-volume.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
-import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
   managedComposePath,
@@ -79,8 +78,12 @@ export async function writeManagedDemotedMarker(
   );
 }
 
-/** Remove the marker. Missing is success; other errors are logged, never thrown. */
-export async function clearManagedDemotedMarker(
+/**
+ * Remove the marker file. Missing is success; any other error is thrown so a
+ * caller never reports a cleared fence while `demoted.json` remains. Only
+ * {@link clearManagedDemotionArtifacts} calls this, after the volume fence.
+ */
+async function removeManagedDemotedMarkerFile(
   layout: LayoutPaths,
   managedId: string,
 ): Promise<void> {
@@ -88,11 +91,7 @@ export async function clearManagedDemotedMarker(
     await Deno.remove(managedDemotedMarkerPath(layout, managedId));
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return;
-    logWarn(
-      "managed",
-      `demoted marker remove failed managedId=${managedId}:`,
-      sanitizeForLog(err),
-    );
+    throw err;
   }
 }
 
@@ -154,6 +153,9 @@ async function patchManagedDemotedMarker(
     >
   >,
 ): Promise<void> {
+  // Callers that race a clear hold the lifecycle lock (guard tick) or run
+  // inside the fence command itself, so this read-modify-write never
+  // resurrects a marker a promote / apply / destroy just removed.
   const existing = await readManagedDemotedMarker(layout, managedId);
   if (!existing) return;
   const marker: ManagedDemotedMarker = { ...existing, ...patch };
@@ -190,19 +192,26 @@ export async function markDemotedFenceUnsafe(
   });
 }
 
-/** Clear operator-visible fence alerts when the engine is no longer writable. */
+/**
+ * Drop the `unsafe` flag once the engine is no longer writable. The last
+ * fence-plant / SQL-enforce failure stays recorded: a missing on-disk fence
+ * matters even while the engine is stopped.
+ */
 export async function clearDemotedFenceAlerts(
   layout: LayoutPaths,
   managedId: string,
 ): Promise<void> {
   const existing = await readManagedDemotedMarker(layout, managedId);
-  if (!existing) return;
+  if (
+    !existing ||
+    (!existing.unsafe && !existing.unsafeAt && !existing.unsafeReason)
+  ) {
+    return;
+  }
   const {
     unsafe: _unsafe,
     unsafeAt: _unsafeAt,
     unsafeReason: _unsafeReason,
-    enforceReadOnlyFailedAt: _enforceAt,
-    enforceReadOnlyLastError: _enforceErr,
     ...base
   } = existing;
   await writeFileAtomic(
@@ -211,7 +220,7 @@ export async function clearDemotedFenceAlerts(
   );
 }
 
-/** Persist a failed read-only enforce attempt for status reporting. */
+/** Persist the last failed fence plant / read-only enforce attempt. */
 export async function recordDemotedEnforceReadOnlyFailure(
   layout: LayoutPaths,
   managedId: string,
@@ -239,31 +248,25 @@ export async function readManagedDemotedMarker(
 }
 
 /**
- * True when this cluster has a live demoted marker on this host. Fails closed:
- * a marker that cannot be read or parsed counts as demoted. When `memberId` is
- * given and the marker names a different member, it does not match. A marker
- * whose `memberId` is empty fences the whole managed cluster on this host.
+ * True when this cluster has a demoted marker on this host. Fails closed: a
+ * marker that cannot be read or parsed counts as demoted. The marker fences
+ * the whole managed cluster on this host whatever member id it (or the
+ * caller) names — empty, equal or different: there is one data volume per
+ * cluster per host, and only a successful replica apply, promote, switchover
+ * abort or destroy removes the marker.
  */
 export async function isManagedMemberDemoted(
   layout: LayoutPaths,
   managedId: string,
-  memberId?: string,
 ): Promise<boolean> {
-  let text: string;
   try {
-    text = await Deno.readTextFile(managedDemotedMarkerPath(layout, managedId));
+    await Deno.readTextFile(managedDemotedMarkerPath(layout, managedId));
   } catch (err) {
     return !(err instanceof Deno.errors.NotFound);
   }
-  const marker = parseMarker(text);
-  if (!marker) return true;
-  if (memberId === undefined) return true;
-  if (marker.memberId.length === 0) return memberId.length > 0;
-  if (memberId.length === 0) return false;
-  return marker.memberId === memberId;
+  return true;
 }
 
-/** Drop the marker after a replica apply that actually brought the member up. */
 /** Every local cluster that currently carries a demoted marker file. */
 export async function listDemotedManagedIds(
   layout: LayoutPaths,
@@ -294,9 +297,7 @@ async function listDemotedHaMembers(
   members: ManagedHaMemberRecord[],
 ): Promise<ManagedHaMemberRecord[]> {
   const demoted = await Promise.all(
-    members.map((member) =>
-      isManagedMemberDemoted(layout, member.managedId, member.memberId)
-    ),
+    members.map((member) => isManagedMemberDemoted(layout, member.managedId)),
   );
   return members.filter((_, index) => demoted[index]);
 }
@@ -348,6 +349,8 @@ export type ClearManagedDemotionArtifactsOptions = {
   run: RunDockerFn;
   /** Clear on-disk volume fence only; keep `demoted.json` until a later success. */
   volumeFenceOnly?: boolean;
+  /** The member is now a Postgres replica: its standby.signal stays. */
+  keepStandbySignal?: boolean;
 };
 
 /**
@@ -359,18 +362,24 @@ export async function clearManagedDemotionArtifacts(
   managedId: string,
   options: ClearManagedDemotionArtifactsOptions,
 ): Promise<void> {
-  const marker = await readManagedDemotedMarker(layout, managedId);
-  if (!marker && !options.volumeFenceOnly) {
+  // Presence, not parse: a corrupt marker must still be clearable, or a
+  // healthy re-synced member would stay fenced forever.
+  if (
+    !options.volumeFenceOnly &&
+    !(await isManagedMemberDemoted(layout, managedId))
+  ) {
     return;
   }
   const engine = await resolveDemotedEngineForClear(
     layout,
     managedId,
-    options.engine ?? marker?.engine,
+    options.engine,
   );
-  await clearDemotedVolumeFence(layout, managedId, engine, options.run);
+  await clearDemotedVolumeFence(layout, managedId, engine, options.run, {
+    keepStandbySignal: options.keepStandbySignal,
+  });
   if (options.volumeFenceOnly) return;
-  await clearManagedDemotedMarker(layout, managedId);
+  await removeManagedDemotedMarkerFile(layout, managedId);
 }
 
 type DemotedFenceTarget = {
@@ -422,16 +431,13 @@ export async function maybeClearDemotedMarkerAfterApply(
     engine?: ManagedEngineCode;
   },
   memberStatus: string | undefined,
-  run?: (args: string[]) => Promise<DockerCliResult>,
+  run: (args: string[]) => Promise<DockerCliResult>,
 ): Promise<void> {
   if (payload.memberRole !== "replica") return;
   if (memberStatus !== "ready") return;
-  if (!run) {
-    await clearManagedDemotedMarker(layout, payload.managedId);
-    return;
-  }
   await clearManagedDemotionArtifacts(layout, payload.managedId, {
     engine: payload.engine,
     run,
+    keepStandbySignal: true,
   });
 }

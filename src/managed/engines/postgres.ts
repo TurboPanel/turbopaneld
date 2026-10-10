@@ -11,7 +11,7 @@ import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
-import { logInfo, sanitizeForLog } from "../../util/logger.ts";
+import { logError, logInfo, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
   applyFollowedPrimaryConninfoSql,
@@ -46,6 +46,7 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  resetFencedReadOnlyDefaultSql,
   restoreReadWriteLoginSchemasSql,
   restoreResetSql,
   revokePublicDatabaseAccessSql,
@@ -680,8 +681,21 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       await sleep(500);
       return leftRecovery();
     };
-    if (await leftRecovery()) return;
-    throw new Error("pg_promote did not leave recovery within 60s");
+    if (!(await leftRecovery())) {
+      throw new Error("pg_promote did not leave recovery within 60s");
+    }
+    // The engine is already a writable primary here: a failed reset must not
+    // report the promote as failed. A leftover read-only default fails
+    // writes loudly; it is never a second writable primary.
+    try {
+      await runPsql(ctx, resetFencedReadOnlyDefaultSql());
+    } catch (err) {
+      logError(
+        "managed",
+        "postgres promote: could not reset default_transaction_read_only:",
+        sanitizeForLog(err),
+      );
+    }
   },
 
   async isStandby(ctx) {

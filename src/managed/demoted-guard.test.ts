@@ -67,6 +67,12 @@ type DockerFakeOptions = {
   writablePrimary?: boolean;
   stopFails?: boolean;
   psFails?: boolean;
+  /** Every `docker ps` / `compose ps` listing fails. */
+  allListingsFail?: boolean;
+  /** Helper containers (fence plant / probe) fail. */
+  runFails?: boolean;
+  /** Writable answers for the first N probes, read-only after. */
+  writableProbes?: number;
 };
 
 function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
@@ -77,8 +83,15 @@ function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
   let stdout = opts.psStdout ?? RUNNING_PS;
   let composeStopSucceeded = false;
   const writablePrimary = opts.writablePrimary ?? true;
+  let probes = 0;
+  const fail = (stderr: string): Promise<DockerCliResult> =>
+    Promise.resolve({ success: false, code: 1, stdout: "", stderr });
   const run = (args: string[]): Promise<DockerCliResult> => {
     calls.push(args);
+    const listing = args[0] === "ps" ||
+      (args[0] === "compose" && args.includes("ps"));
+    if (opts.allListingsFail && listing) return fail("daemon busy");
+    if (opts.runFails && args[0] === "run") return fail("helper failed");
     if (args[0] === "compose" && args.includes("ps")) {
       if (opts.psFails) {
         return Promise.resolve({
@@ -133,7 +146,11 @@ function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
       const joined = args.join(" ");
       const mysqlFamily = joined.includes("mysql") ||
         joined.includes("mariadb");
-      const stillWritable = composeStopSucceeded ? false : writablePrimary;
+      probes++;
+      const probeWritable = opts.writableProbes === undefined
+        ? writablePrimary
+        : probes <= opts.writableProbes;
+      const stillWritable = composeStopSucceeded ? false : probeWritable;
       const stdout = mysqlFamily
         ? (stillWritable ? "0\t0\n" : "1\t1\n")
         : (stillWritable ? "t\n" : "f\n");
@@ -666,5 +683,208 @@ test("a stopped demoted member is left alone", async () => {
     });
     await guard.tick();
     assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+  });
+});
+
+async function demotedGuardFixture(
+  layout: ReturnType<typeof resolveLayout>,
+  markerMemberId = MEMBER_ID,
+  engine: "postgres" | "mysql" = "postgres",
+): Promise<void> {
+  await seedMember(layout);
+  if (engine === "mysql") {
+    await Deno.writeTextFile(
+      `${layout.stateDir}/managed/${MANAGED_ID}/docker-compose.yml`,
+      MYSQL_COMPOSE,
+    );
+  }
+  await writeManagedDemotedMarker(
+    layout,
+    MANAGED_ID,
+    markerMemberId,
+    "2026-10-08T12:00:00.000Z",
+    engine,
+  );
+}
+
+function guardFor(
+  layout: ReturnType<typeof resolveLayout>,
+  run: (args: string[]) => Promise<DockerCliResult>,
+  engine: "postgres" | "mysql" = "postgres",
+): DemotedMemberGuard {
+  return new DemotedMemberGuard({
+    layout,
+    run,
+    listMembers: () => Promise.resolve([{ ...memberRecord(), engine }]),
+  });
+}
+
+function countCalls(calls: string[][], match: (args: string[]) => boolean) {
+  return calls.filter(match).length;
+}
+
+const isComposeKill = (args: string[]) =>
+  args[0] === "compose" && args.at(-1) === "kill";
+
+test("every container listing failing still kills by project and stops by name", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout);
+    const fake = docker({ allListingsFail: true, stopFails: true });
+    await guardFor(layout, fake.run).tick();
+    assert(countCalls(fake.calls, isComposeKill) > 0);
+    const names = ["db-1", `${MANAGED_ID}-db-1`];
+    assert(
+      fake.calls.some((args) =>
+        args[0] === "stop" && names.every((name) => args.includes(name))
+      ),
+    );
+    assert(
+      fake.calls.some((args) =>
+        args[0] === "kill" && names.every((name) => args.includes(name))
+      ),
+    );
+  });
+});
+
+test("a failing on-disk fence plant never skips the stop", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout);
+    const fake = docker({ runFails: true });
+    await guardFor(layout, fake.run).tick();
+    assert(fake.calls.some((args) => args[0] === "run"));
+    assert(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "stop"
+      ),
+    );
+    const marker = await readManagedDemotedMarker(layout, MANAGED_ID);
+    assert(marker?.enforceReadOnlyLastError?.includes("helper failed"));
+  });
+});
+
+test("a writable demoted mysql primary is stopped even after SQL enforce made it read-only", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout, MEMBER_ID, "mysql");
+    // First probe writable; enforce then answers read-only from then on.
+    const fake = docker({ writableProbes: 1 });
+    await guardFor(layout, fake.run, "mysql").tick();
+    assert(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "stop"
+      ),
+    );
+  });
+});
+
+test("a read-only demoted mysql engine is left running", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout, MEMBER_ID, "mysql");
+    const fake = docker({ writablePrimary: false });
+    await guardFor(layout, fake.run, "mysql").tick();
+    assertEquals(fake.calls.some((args) => args.at(-1) === "stop"), false);
+  });
+});
+
+test("a marker with an empty member id fences a member record with a real id", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout, "");
+    const fake = docker();
+    // Discovery path: ha-member.json names MEMBER_ID, the marker names "".
+    await new DemotedMemberGuard({ layout, run: fake.run }).tick();
+    assert(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "stop"
+      ),
+    );
+  });
+});
+
+test("a demoted primary that stays writable escalates with kill on every tick", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout);
+    const fake = docker({ stopFails: true });
+    const guard = guardFor(layout, fake.run);
+    await guard.tick();
+    const afterFirst = countCalls(fake.calls, isComposeKill);
+    assert(afterFirst > 0);
+    assert(fake.calls.some((args) => args[0] === "kill"));
+    await guard.tick();
+    assert(countCalls(fake.calls, isComposeKill) > afterFirst);
+    assert((await readManagedDemotedMarker(layout, MANAGED_ID))?.unsafe);
+  });
+});
+
+test("an unwritable marker directory never skips the stop or the kill", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout);
+    const dir = `${layout.stateDir}/managed/${MANAGED_ID}`;
+    const fake = docker({ stopFails: true });
+    await Deno.chmod(dir, 0o555);
+    try {
+      await guardFor(layout, fake.run).tick();
+    } finally {
+      await Deno.chmod(dir, 0o755);
+    }
+    assert(
+      fake.calls.some((args) =>
+        args[0] === "compose" && args.at(-1) === "stop"
+      ),
+    );
+    assert(countCalls(fake.calls, isComposeKill) > 0);
+  });
+});
+
+test("a docker call that throws neither skips the kill nor the next member", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await demotedGuardFixture(layout);
+    await seedMember(layout, OTHER_ID);
+    await writeManagedDemotedMarker(
+      layout,
+      OTHER_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "postgres",
+    );
+    const fake = docker();
+    const calls: string[][] = [];
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      if (args[0] === "compose" && args.at(-1) === "stop") {
+        return Promise.reject(new Error("docker socket vanished"));
+      }
+      return fake.run(args);
+    };
+    await new DemotedMemberGuard({
+      layout,
+      run,
+      listMembers: () =>
+        Promise.resolve([memberRecord(), memberRecord(OTHER_ID)]),
+    }).tick();
+    assert(
+      calls.some((args) => isComposeKill(args) && args.includes(MANAGED_ID)),
+    );
+    // The shared fake now reports nothing running, but the second member was
+    // still checked after the first one's docker call threw.
+    assert(
+      calls.some((args) =>
+        args[0] === "compose" && args.includes("ps") && args.includes(OTHER_ID)
+      ),
+    );
   });
 });
