@@ -3,6 +3,7 @@ import { topologyPlaintext } from "../../testing/managed-topology-fixtures.ts";
 import {
   ensureOrchestratorTopologyAccountSql,
   grantOrchestratorReplicationTableSql,
+  ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS,
 } from "./orchestrator-topology-sql.ts";
 
 /**
@@ -43,20 +44,23 @@ test("ensureOrchestratorTopologyAccountSql admits a Raft leader outside the clus
       ["10.100.0.3", "10.100.0.4", "10.100.0.5"],
       dialect,
     );
-    const anyHost = `\`${USERNAME}\`@'%'`;
-    assertStringIncludes(sql, `CREATE USER IF NOT EXISTS ${anyHost}`);
-    assertStringIncludes(sql, `ON *.* TO ${anyHost};`);
-    assertStringIncludes(sql, `ON \`meta\`.* TO ${anyHost};`);
-    assertStringIncludes(
-      sql,
-      dialect === "mariadb"
-        ? `GRANT USAGE ON *.* TO ${anyHost} REQUIRE SSL;`
-        : `ALTER USER ${anyHost} REQUIRE SSL;`,
-    );
-    assertStringIncludes(
-      grantOrchestratorReplicationTableSql(USERNAME, [], dialect),
-      `TO ${anyHost};`,
-    );
+    assertEquals(sql.includes(`@'%'`), false);
+    for (const range of ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS) {
+      const account = `\`${USERNAME}\`@'${range}'`;
+      assertStringIncludes(sql, `CREATE USER IF NOT EXISTS ${account}`);
+      assertStringIncludes(sql, `ON *.* TO ${account};`);
+      assertStringIncludes(sql, `ON \`meta\`.* TO ${account};`);
+      assertStringIncludes(
+        sql,
+        dialect === "mariadb"
+          ? `GRANT USAGE ON *.* TO ${account} REQUIRE SSL;`
+          : `ALTER USER ${account} REQUIRE SSL;`,
+      );
+      assertStringIncludes(
+        grantOrchestratorReplicationTableSql(USERNAME, [], dialect),
+        `TO ${account};`,
+      );
+    }
   }
 });
 

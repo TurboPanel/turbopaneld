@@ -5,7 +5,7 @@
  * every HA cluster in it. Rows exist for `MANAGED_DOCKER_NETWORK_HOST`
  * (172.16.0.0/12 — an Orchestrator container dialing a member on its own
  * server), for `clientSourceHosts` (each member's private-listener address)
- * **and for any host (`%`)**. The extra row is needed because discovery and
+ * **and for the private ranges 10.0.0.0/8 and 192.168.0.0/16**. The extra row is needed because discovery and
  * recovery run on the organization's Raft **leader**, which can be any
  * Orchestrator server of the organization — not only a member of this
  * cluster — and its connection leaves that server from the server's own
@@ -64,11 +64,18 @@ const REPLICATION_TABLE: Record<OrchestratorTopologySqlDialect, string> = {
 };
 
 /**
- * Any-host row for the topology account: the Raft leader that discovers and
- * recovers a cluster can be any Orchestrator server of the organization, and
- * a member cannot list those addresses (see the module comment).
+ * Private-network rows for the topology account: the Raft leader that
+ * discovers and recovers a cluster can be any Orchestrator server of the
+ * organization, and a member cannot list those addresses (see the module
+ * comment). Datacenter servers talk over private addresses, so the rows cover
+ * 10.0.0.0/8 and 192.168.0.0/16 (172.16.0.0/12 is the Docker-network row
+ * above) and never a public address. The login still needs TLS and the
+ * derived per-organization password.
  */
-export const ORCHESTRATOR_TOPOLOGY_ANY_HOST = "%";
+export const ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS: readonly string[] = [
+  "10.0.0.0/255.0.0.0",
+  "192.168.0.0/255.255.0.0",
+];
 
 /** Every host the topology account (and its grants) exists at. */
 function topologyAccountHosts(extraHosts: readonly string[]): string[] {
@@ -76,7 +83,7 @@ function topologyAccountHosts(extraHosts: readonly string[]): string[] {
     ...new Set([
       MANAGED_DOCKER_NETWORK_HOST,
       ...extraHosts,
-      ORCHESTRATOR_TOPOLOGY_ANY_HOST,
+      ...ORCHESTRATOR_TOPOLOGY_PRIVATE_HOSTS,
     ]),
   ];
 }
@@ -130,7 +137,7 @@ function grantOrchestratorTopologyPrivileges(
 
 /**
  * Idempotent create/alter + grants for the organization's Orchestrator
- * topology account at every monitor-account host plus any host. Safe to re-run on
+ * topology account at every monitor-account host plus the private ranges. Safe to re-run on
  * every apply: `CREATE USER IF NOT EXISTS` then `ALTER USER … IDENTIFIED BY`
  * re-asserts the derived password without a drop.
  */
