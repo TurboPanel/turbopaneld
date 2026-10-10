@@ -69,7 +69,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
    runs as is missing (only the playbook can create the account). On-demand like
-   Docker; daemon-converge does not install it. Required for hostname ingress.
+   Docker on deploy; `daemon-converge` backfills tpedge, Caddy, and the ingress
+   guard on enrolled hosts (`hosting-caddy/tasks/backfill-edge-account.yml`).
+   Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
    (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):

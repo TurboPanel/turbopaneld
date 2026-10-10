@@ -1,7 +1,7 @@
 ---
-# Backfill the hosting Caddy edge account and ingress guard on hosts that
-# received sudoers for TP_HOSTING_CADDY_VALIDATE before their first deploy.
-# Idempotent; no-op when {{ hosting_caddy_user }} already exists.
+# Backfill the hosting Caddy edge account, vendored binary, and ingress guard on
+# hosts that received sudoers for TP_HOSTING_CADDY_VALIDATE before their first
+# deploy. Idempotent; no-op when tpedge, Caddy, and the guard are already ready.
 
 - name: Probe hosting Caddy account
   ansible.builtin.command:
@@ -10,8 +10,39 @@
   failed_when: false
   changed_when: false
 
-- name: Vendor hosting Caddy when the edge account is absent
-  when: _hosting_caddy_account.rc != 0
+- name: Stat vendored hosting Caddy binary
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/caddy/current/caddy"
+  register: _hosting_caddy_binary
+
+- name: Stat ingress guard ruleset
+  ansible.builtin.stat:
+    path: "{{ hosting_ingress_guard_rules }}"
+  register: _hosting_ingress_guard_file
+
+- name: Probe ingress guard ruleset version
+  ansible.builtin.command:
+    cmd: >-
+      grep -Fq '# turbopanel-ingress-guard {{ hosting_ingress_guard_version }}'
+      '{{ hosting_ingress_guard_rules }}'
+  register: _hosting_ingress_guard_marker
+  failed_when: false
+  changed_when: false
+  when: _hosting_ingress_guard_file.stat.exists | default(false)
+
+- name: Probe ingress guard unit
+  ansible.builtin.command:
+    cmd: systemctl is-active --quiet turbopanel-ingress-guard.service
+  register: _hosting_ingress_guard_unit
+  failed_when: false
+  changed_when: false
+
+- name: Vendor hosting Caddy when edge prep is incomplete
+  when: >
+    _hosting_caddy_account.rc != 0
+    or not (_hosting_caddy_binary.stat.exists | default(false))
+    or _hosting_ingress_guard_marker.rc | default(1) != 0
+    or _hosting_ingress_guard_unit.rc != 0
   block:
     - name: Install vendored Caddy binary
       ansible.builtin.import_role:

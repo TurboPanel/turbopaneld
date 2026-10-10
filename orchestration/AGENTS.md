@@ -331,8 +331,8 @@ removed, not migrated (the internal CA and ACME account are recreated).
 `caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
 whenever the binary **or** the account is missing (`ensureHostingCaddy`).
 `playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
-when `getent` shows no `tpedge` account, so enrolled hosts are edge-ready
-before the first compose deploy. The
+when `tpedge`, the vendored Caddy binary, or the ingress guard is missing or
+stale, so enrolled hosts are edge-ready before the first compose deploy. The
 role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on

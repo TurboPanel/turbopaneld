@@ -506,7 +506,9 @@ async function ensureDeployIngress(
       activeIngressServiceIds,
       { runDocker },
     );
-    await ensureHostingCaddyRuntime(layout);
+    if (hostingsNeedPublicHttpEdge(allHostings)) {
+      await ensureHostingCaddyRuntime(layout);
+    }
     return;
   }
   await ensureDockerFn();
