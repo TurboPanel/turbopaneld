@@ -74,6 +74,32 @@ function isReplicationAnalysisMasterRow(
   return analysis !== undefined && isDeadPrimaryProblem(analysis);
 }
 
+type DeadPrimaryEmitCandidate = {
+  managedId: string;
+  incidentKey: string;
+  emitKey: { hostname?: string; port?: number };
+};
+
+function orchestratorEmitKeyComplete(
+  key: { hostname?: string; port?: number },
+): boolean {
+  return key.hostname !== undefined && key.port !== undefined;
+}
+
+/** Prefer a candidate whose emit key carries proved instance coordinates. */
+export function mergeDeadPrimaryEmitCandidate(
+  existing: DeadPrimaryEmitCandidate,
+  incoming: DeadPrimaryEmitCandidate,
+): DeadPrimaryEmitCandidate {
+  if (
+    orchestratorEmitKeyComplete(incoming.emitKey) &&
+    !orchestratorEmitKeyComplete(existing.emitKey)
+  ) {
+    return { ...existing, emitKey: incoming.emitKey };
+  }
+  return existing;
+}
+
 export class ManagedHaObserver {
   readonly #intervalMs: number;
   readonly #now: () => string;
@@ -87,6 +113,7 @@ export class ManagedHaObserver {
   readonly #incidentLastEmit = new Map<string, number>();
   readonly #emittedThisPoll = new Set<string>();
   #deadIncidentsThisPoll = new Set<string>();
+  #pendingDeadPrimaryEmits = new Map<string, DeadPrimaryEmitCandidate>();
   #lastReviveAttemptMs: number | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
 
@@ -189,7 +216,7 @@ export class ManagedHaObserver {
     }
   }
 
-  async #tryEmitOrchestratorDeadPrimary(
+  async #recordOrchestratorDeadPrimary(
     layout: LayoutPaths,
     analyzedKey: { hostname?: string; port?: number },
     clusterAlias?: string,
@@ -203,7 +230,26 @@ export class ManagedHaObserver {
     );
     if (!ctx) return;
     this.#deadIncidentsThisPoll.add(ctx.incidentKey);
-    this.#emitDeadPrimary(ctx.managedId, ctx.incidentKey, ctx.emitKey);
+    const candidate: DeadPrimaryEmitCandidate = {
+      managedId: ctx.managedId,
+      incidentKey: ctx.incidentKey,
+      emitKey: ctx.emitKey,
+    };
+    const prior = this.#pendingDeadPrimaryEmits.get(ctx.incidentKey);
+    this.#pendingDeadPrimaryEmits.set(
+      ctx.incidentKey,
+      prior ? mergeDeadPrimaryEmitCandidate(prior, candidate) : candidate,
+    );
+  }
+
+  #flushPendingDeadPrimaryEmits(): void {
+    for (const candidate of this.#pendingDeadPrimaryEmits.values()) {
+      this.#emitDeadPrimary(
+        candidate.managedId,
+        candidate.incidentKey,
+        candidate.emitKey,
+      );
+    }
   }
 
   async #pollProblems(
@@ -216,7 +262,7 @@ export class ManagedHaObserver {
       if (!alias || !MANAGED_ID_RE.test(alias)) return;
       const names = problem.problems ?? [];
       if (!names.some((name) => isDeadPrimaryProblem(name))) return;
-      await this.#tryEmitOrchestratorDeadPrimary(
+      await this.#recordOrchestratorDeadPrimary(
         layout,
         problem.key ?? {},
         alias,
@@ -233,7 +279,7 @@ export class ManagedHaObserver {
       if (!isReplicationAnalysisMasterRow(entry)) return;
       const hostname = entry.key?.hostname;
       const port = entry.key?.port;
-      await this.#tryEmitOrchestratorDeadPrimary(
+      await this.#recordOrchestratorDeadPrimary(
         layout,
         { hostname, port },
         entry.clusterAlias,
@@ -244,6 +290,7 @@ export class ManagedHaObserver {
   async poll(): Promise<void> {
     this.#emittedThisPoll.clear();
     this.#deadIncidentsThisPoll = new Set();
+    this.#pendingDeadPrimaryEmits = new Map();
     const layout = this.#resolveLayout();
     try {
       if (!(await this.#isStackPresent())) return;
@@ -261,6 +308,7 @@ export class ManagedHaObserver {
           sanitizeForLog(err),
         );
       }
+      this.#flushPendingDeadPrimaryEmits();
       this.#clearRecoveredIncidents();
     } catch (err) {
       logWarn("managed", "managed-ha observe failed:", sanitizeForLog(err));

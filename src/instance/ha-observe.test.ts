@@ -9,7 +9,11 @@ import {
 } from "../managed/engine-paths.ts";
 import { reviveStoppedOrchestratorContainer } from "../managed/orchestrator.ts";
 import type { OrchestratorProblem } from "../managed/orchestrator-api.ts";
-import { type ManagedHaEventMessage, ManagedHaObserver } from "./ha-observe.ts";
+import {
+  type ManagedHaEventMessage,
+  ManagedHaObserver,
+  mergeDeadPrimaryEmitCandidate,
+} from "./ha-observe.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -704,6 +708,110 @@ test("ManagedHaObserver dedupes problems and replication-analysis for one incide
     await observer.poll();
     assertEquals(sent.length, 1);
     assertEquals(sent[0]?.managedId, MANAGED_ID);
+    assertEquals(sent[0]?.instanceHost, dial.hostname);
+    assertEquals(sent[0]?.instancePort, dial.port);
+  });
+});
+
+test("mergeDeadPrimaryEmitCandidate keeps the complete emit key regardless of order", () => {
+  const incomplete = {
+    managedId: MANAGED_ID,
+    incidentKey: `${MANAGED_ID}:172.20.4.10:45001`,
+    emitKey: {},
+  };
+  const complete = {
+    managedId: MANAGED_ID,
+    incidentKey: `${MANAGED_ID}:172.20.4.10:45001`,
+    emitKey: { hostname: "172.20.4.10", port: 45001 },
+  };
+  assertEquals(
+    mergeDeadPrimaryEmitCandidate(incomplete, complete).emitKey,
+    complete.emitKey,
+  );
+  assertEquals(
+    mergeDeadPrimaryEmitCandidate(complete, incomplete).emitKey,
+    complete.emitKey,
+  );
+});
+
+test("ManagedHaObserver upgrades coordinate-less problems row with replication-analysis dial", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const dial = { hostname: "172.20.4.10", port: 45001 };
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(dial),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: (url) => {
+          if (url.includes("/api/replication-analysis")) {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  Details: [{
+                    AnalyzedInstanceKey: {
+                      Hostname: dial.hostname,
+                      Port: dial.port,
+                    },
+                    ClusterDetails: { ClusterAlias: MANAGED_ID },
+                    IsMaster: true,
+                    Analysis: "DeadMaster",
+                  }],
+                }),
+                { status: 200 },
+              ),
+            );
+          }
+          return Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              problems: ["DeadPrimary"],
+            }]),
+          );
+        },
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.instanceHost, dial.hostname);
+    assertEquals(sent[0]?.instancePort, dial.port);
+  });
+});
+
+test("ManagedHaObserver emits proved dial for UUID-alias problems with no instance key", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const dial = { hostname: "172.20.4.10", port: 45001 };
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(dial),
+      send: (message) => {
+        sent.push(message);
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            problemResponse([{
+              clusterAlias: MANAGED_ID,
+              problems: ["DeadPrimary"],
+            }]),
+          ),
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.instanceHost, dial.hostname);
+    assertEquals(sent[0]?.instancePort, dial.port);
   });
 });
 

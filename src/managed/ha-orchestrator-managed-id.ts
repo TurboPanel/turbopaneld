@@ -182,10 +182,12 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   if (!orchestratorKeysMatch(analyzedKey, dial)) return null;
 
   const incidentKey = `${managedId}:${orchestratorIncidentPrimaryKey(dial)}`;
-  let emitKey: { hostname?: string; port?: number } = {};
-  if (hasFullKey && orchestratorKeysMatch(analyzedKey, dial)) {
-    emitKey = { hostname: dial.hostname, port: dial.port };
-  }
+  const analyzedKeyEmpty = analyzedHost === undefined &&
+    analyzedPort === undefined;
+  const emitKey =
+    (hasFullKey || analyzedKeyEmpty) && orchestratorKeysMatch(analyzedKey, dial)
+      ? { hostname: dial.hostname, port: dial.port }
+      : {};
   return { managedId, incidentKey, emitKey };
 }
 
