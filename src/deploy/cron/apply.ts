@@ -21,6 +21,7 @@ import type { RunFn } from "../ensure-principal.ts";
 import { SYSTEMD_UNIT_DIR } from "../native/unit.ts";
 import {
   applyUnitSet,
+  installedTimerUnits,
   removeUnitSet,
   runHostCommand,
   type UnitSetFamily,
@@ -146,6 +147,23 @@ export async function applyCronJobs(
     );
   }
   return { changed, removed };
+}
+
+/**
+ * Does the host still carry cron timers for this environment? The deploy's cron
+ * sweep retires them when the new payload declares none, so a cancel has to
+ * treat that sweep as a change to what is running.
+ */
+export async function hasInstalledCronUnits(
+  environmentId: string,
+  opts: CronApplyOpts = {},
+): Promise<boolean> {
+  const installed = await installedTimerUnits(
+    opts.run ?? runHostCommand,
+    opts.systemdUnitDir ?? SYSTEMD_UNIT_DIR,
+    cronFamily(environmentId).prefix,
+  );
+  return installed.length > 0;
 }
 
 /** Remove every cron unit belonging to an environment (teardown path). */

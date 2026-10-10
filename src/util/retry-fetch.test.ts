@@ -136,3 +136,62 @@ test("parseRetryAfterMs reads seconds and dates and ignores junk", () => {
   assertEquals(parseRetryAfterMs("Thu, 01 Oct 2026 00:00:03 GMT", now), 3000);
   assertEquals(isTransientNetworkError("nope"), false);
 });
+
+test("statuses and networkErrors narrow what is retried, and onRetry reports each wait", async () => {
+  const only429 = scripted([reply(503), reply(200)]);
+  const res = await fetchWithRetry(only429.doFetch, {
+    sleep: only429.sleep,
+    statuses: new Set([429]),
+  });
+  assertEquals(res.status, 503);
+  assertEquals(only429.calls.n, 1);
+  await res.body?.cancel();
+
+  const reset = scripted([
+    new TypeError("fetch failed", {
+      cause: new Error("read ECONNRESET"),
+    }),
+  ]);
+  await assertRejects(
+    () =>
+      fetchWithRetry(reset.doFetch, {
+        sleep: reset.sleep,
+        networkErrors: false,
+      }),
+    TypeError,
+  );
+  assertEquals(reset.calls.n, 1);
+
+  const notices: Array<
+    { retry: number; status: number | null; delayMs: number }
+  > = [];
+  const retried = scripted([reply(429), reply(429), reply(200)]);
+  const done = await fetchWithRetry(retried.doFetch, {
+    sleep: retried.sleep,
+    onRetry: (notice) => notices.push(notice),
+  });
+  assertEquals(done.status, 200);
+  assertEquals(notices, [
+    { retry: 1, status: 429, delayMs: 2000 },
+    { retry: 2, status: 429, delayMs: 4000 },
+  ]);
+  await done.body?.cancel();
+});
+
+test("retryAfterOnlyExtends lets Retry-After lengthen a wait but never shorten it", async () => {
+  const short = scripted([reply(429, { "retry-after": "1" }), reply(200)]);
+  const first = await fetchWithRetry(short.doFetch, {
+    sleep: short.sleep,
+    retryAfterOnlyExtends: true,
+  });
+  assertEquals(short.waits, [2000]);
+  await first.body?.cancel();
+
+  const long = scripted([reply(429, { "retry-after": "5" }), reply(200)]);
+  const second = await fetchWithRetry(long.doFetch, {
+    sleep: long.sleep,
+    retryAfterOnlyExtends: true,
+  });
+  assertEquals(long.waits, [5000]);
+  await second.body?.cancel();
+});

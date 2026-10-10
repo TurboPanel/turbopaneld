@@ -1,7 +1,9 @@
 import { join } from "@std/path";
-import type {
-  EnvironmentDeployPayload,
-  EnvironmentDeployTlsMaterial,
+import {
+  type EnvironmentDeployPayload,
+  type EnvironmentDeployTlsMaterial,
+  hostingServedNames,
+  hostingWwwRedirects,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -77,9 +79,12 @@ export function hostnameTlsMap(
   const map = new Map<string, string>();
   for (const hosting of payload.hostings) {
     if (!hosting.tlsId || hosting.tlsMode === "acme") continue;
-    for (const hostname of hosting.hostnames) {
-      map.set(hostname, hosting.tlsId);
-    }
+    // Served names and `www` redirect names all sit under the same pinned pair.
+    const names = [
+      ...hostingServedNames(hosting),
+      ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
+    ];
+    for (const hostname of names) map.set(hostname, hosting.tlsId);
   }
   return map;
 }

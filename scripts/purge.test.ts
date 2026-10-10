@@ -43,6 +43,8 @@ const CONSTANTS = [
   "TP_OWNED_TREES",
   "TP_DOCKER_PACKAGES",
   "TP_OTHER_UNITS",
+  "TP_PRINCIPAL_ID_MIN",
+  "TP_PRINCIPAL_ID_MAX",
 ];
 
 function extractFunction(source: string, name: string): string | null {
@@ -671,6 +673,41 @@ test("an inactive slice systemd keeps without a unit file is not reported as lef
   assertEquals(running.stdout.trim(), "present", running.stderr);
 });
 
+test("the unit scan skips a stopped slice with no unit file but keeps a running one", async () => {
+  const body = [
+    "TP_SYSTEMD_DIRS=$TP_TMP/none",
+    ': > "$TP_TMP/inv.units"',
+    "tp_scan_systemctl_units",
+    'cat "$TP_TMP/inv.units"',
+  ].join("\n");
+  const stubFor = (state: string) =>
+    stubBin(
+      "systemctl",
+      [
+        'case "$*" in',
+        "  *LoadState*) echo loaded ;;",
+        "  *FragmentPath*) echo ;;",
+        `  *ActiveState*) echo ${state} ;;`,
+        '  *list-units*) echo "turbopanel.slice loaded ${state} dead TurboPanel" ;;',
+        "esac",
+      ].join("\n"),
+    );
+  const fns = [
+    "tp_scan_systemctl_units",
+    "tp_note_unit",
+    "tp_unit_present",
+    "tp_list_has_word",
+  ];
+  const gone = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("inactive")}:${BASE_PATH}`,
+  });
+  assertEquals(gone.stdout.trim(), "", gone.stderr);
+  const running = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("active")}:${BASE_PATH}`,
+  });
+  assertStringIncludes(running.stdout, "turbopanel.slice", running.stderr);
+});
+
 test("containers are not carried into the final check once Docker Engine was purged", async () => {
   const stub = await stubBin("docker", "exit 1");
   const run = (gone: string, left = "false") =>
@@ -934,5 +971,102 @@ test("Docker Engine counts as gone only when no daemon, snap, service or socket 
     assertEquals(await engineGone({}, { TP_DOCKER_SOCKETS: sock }), "present");
   } finally {
     listener.close();
+  }
+});
+
+// getent and groupdel stand-ins over a temp group/passwd pair: groupdel drops
+// the line, as the real one would; tp_run prints "▸ groupdel <name>".
+const GROUP_STUBS = `
+getent() {
+  if [ "$#" -lt 2 ]; then cat "$TP_TMP/$1"; return; fi
+  awk -F: -v n="$2" '$1 == n { print; found = 1 } END { exit !found }' "$TP_TMP/$1"
+}
+groupdel() {
+  awk -F: -v n="$1" '$1 != n' "$TP_TMP/group" > "$TP_TMP/group.new"
+  mv "$TP_TMP/group.new" "$TP_TMP/group"
+}
+`;
+
+async function purgeGroups(
+  group: string[],
+  passwd: string[],
+  call: string,
+): Promise<ShResult> {
+  const result = await runPurgeSh(
+    [
+      "tp_principal_band_gid",
+      "tp_gid_is_primary",
+      "tp_group_has_members",
+      "tp_principal_leave_home",
+      "tp_purge_principal_groups",
+    ],
+    [
+      GROUP_STUBS,
+      `printf '%s\\n' ${
+        group.map((l) => `'${l}'`).join(" ")
+      } > "$TP_TMP/group"`,
+      `printf '%s\\n' ${
+        passwd.map((l) => `'${l}'`).join(" ")
+      } > "$TP_TMP/passwd"`,
+      `if ${call}; then echo KEPT_HOME=no; else echo KEPT_HOME=yes; fi`,
+    ].join("\n"),
+    { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin" },
+  );
+  return { ...result, stdout: result.stdout + result.stderr };
+}
+
+test("purge removes a site owner's own group and an old <name>-grp, engines or not", async () => {
+  const result = await purgeGroups(
+    ["alice:x:15001:tpnginx", "alice-grp:x:15002:", "sudo:x:27:"],
+    ["root:x:0:0::/root:/bin/sh"],
+    `tp_purge_principal_groups alice /srv/users/alice account`,
+  );
+  assertStringIncludes(result.stdout, "groupdel alice\n");
+  assertStringIncludes(result.stdout, "groupdel alice-grp\n");
+  assertStringIncludes(result.stdout, "KEPT_HOME=no");
+});
+
+test("purge never removes a group of the owner's name outside the band", async () => {
+  for (const name of ["sudo", "admin", "staff"]) {
+    const result = await purgeGroups(
+      [`${name}:x:27:`, `${name}-grp:x:1001:`],
+      ["root:x:0:0::/root:/bin/sh"],
+      `tp_purge_principal_groups ${name} /srv/users/${name} orphan`,
+    );
+    assert(!result.stdout.includes("groupdel"), result.stdout);
+    assertStringIncludes(result.stdout, "KEPT_HOME=no");
+    assertStringIncludes(
+      result.stdout,
+      `kept group ${name} (its id is outside`,
+    );
+  }
+});
+
+test("purge keeps an orphan's group that still has members or is a primary group", async () => {
+  const members = await purgeGroups(
+    ["carol:x:15003:tpnginx"],
+    ["root:x:0:0::/root:/bin/sh"],
+    `tp_purge_principal_groups carol /srv/users/carol orphan`,
+  );
+  assert(!members.stdout.includes("groupdel"), members.stdout);
+  assertStringIncludes(members.stdout, "KEPT_HOME=yes");
+
+  const primary = await purgeGroups(
+    ["dave:x:15004:"],
+    ["erin:x:15005:15004::/home/erin:/bin/sh"],
+    `tp_purge_principal_groups dave /srv/users/dave account`,
+  );
+  assert(!primary.stdout.includes("groupdel"), primary.stdout);
+  assertStringIncludes(primary.stdout, "KEPT_HOME=yes");
+});
+
+test("purge never touches a group named root or tp*", async () => {
+  for (const name of ["root", "tp", "tpnginx"]) {
+    const result = await purgeGroups(
+      [`${name}:x:15006:`],
+      ["root:x:0:0::/root:/bin/sh"],
+      `tp_purge_principal_groups ${name} /srv/users/${name} orphan`,
+    );
+    assert(!result.stdout.includes("groupdel"), result.stdout);
   }
 });

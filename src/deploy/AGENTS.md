@@ -69,28 +69,40 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
    runs as is missing (only the playbook can create the account). On-demand like
-   Docker; daemon-converge does not install it. Required for hostname ingress.
+   Docker on deploy; `daemon-converge` backfills tpedge, Caddy, and the ingress
+   guard on enrolled hosts (`hosting-caddy/tasks/backfill-edge-account.yml`).
+   Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
    (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
    would let a tenant `ls` every account). The home itself, `sites/` and
-   `volumes/` are `0750` **root**:`<username>-grp` (an owner can rename its
+   `volumes/` are `0750` **root**:`<username>` (an owner can rename its
    entries, so nothing root writes into may sit in a tenant-owned directory);
    `home/` (the passwd home, `useradd -d <root>/<username>/home`), `data/` and
-   `tmp/` are `0700` `username:<username>-grp`. SSH keys live in
+   `tmp/` are `0700` `username:<username>`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
-   is not edited). An explicit operator override must be ≥ **15001**, and every
+   is not edited). An explicit operator override must be **15001–60000** (above it is
+   systemd's range for throwaway build users, which tp-host never treats as a
+   site owner), and every
    override in the batch is checked before the first host call so a later id
    below that floor cannot leave an earlier account already created. Existing
-   accounts are adopted and never renumbered. Username max
-   length is **28** so `<username>-grp` fits the Linux 32-char group-name
-   limit (keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID
-   override is supplied and `<username>-grp` already exists with a different
-   numeric GID, ensure fails (conflict) instead of silently attaching the
-   principal to that group. Shell comes from `principalMaterial[].shell`
+   accounts are adopted and never renumbered. The primary group is the
+   standard Debian per-user group: named after the user (`<username>`), gid in
+   the same band. Username max length is **28** (keep in sync with instance
+   `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID override is supplied and the
+   group `<username>` already exists with a different numeric GID, ensure fails
+   (conflict) instead of silently attaching the principal to that group. An
+   existing group `<username>` is adopted only when its gid is in the band and,
+   if the account exists, it is the account's primary group; an existing
+   account whose primary group is neither is refused. A host set up while the
+   group was still called `<username>-grp` gets it renamed in place
+   (`tp-host groupmod -n <username> <username>-grp`, only for that exact shape:
+   a principal whose primary group it is, in the band, no group `<username>`
+   yet); files and memberships follow the gid. Units rendered before the rename
+   still say `Group=<username>-grp` until the same deploy rewrites them. Shell comes from `principalMaterial[].shell`
    (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing
    accounts are adopted only when the passwd **home** matches the expected
    path — a username collision with a foreign home fails the deploy instead
@@ -105,12 +117,20 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (the storage UUID). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
    directory/file entries arrive with `sourcePath` — principal-owned defaults
-   are `/srv/users/<username>/volumes/<storageId>` (explicit operator paths
-   still win). Never write under `/var/lib/docker/volumes`.
+   are `/srv/users/<username>/volumes/<storageId>`; a `sourcePath` outside the
+   assigned site owner's `volumes/` directory (or with no site owner) is refused
+   before anything is created, re-owned or mounted (`assertSourcePathConfined`). Never write under `/var/lib/docker/volumes`.
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
-   mode `0600`, dir `0700`). Write the payload `.env` (non-secrets only, `0640`)
+   mode `0600`, dir `0700`). Files are only written before `up`. Once the new release is up (and its
+   post-deploy hooks passed; for a sequential deploy, after the health gate),
+   `pruneStaleSecretFiles` removes every file in that directory that is not in
+   the deploy's secret plan (a detached binding's old password, a removed
+   variable, a half-written `.tmp`), and an empty plan removes the whole
+   directory. A failed, cancelled or reverted deploy never prunes: the release
+   still running, or the one restored, may point at those files. Rehydrate never
+   prunes. Write the payload `.env` (non-secrets only, `0640`)
    next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**
    (`apply-storage-volumes.ts`) — docker volumes emit
    `volumes.<name> = { name, external: true }` so Compose mounts the
@@ -214,13 +234,44 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `HEAD` + `redirect: manual`) and sending a daemon-initiated
    `acme-issuance-event` only on a state change — a debounced failure (two
    consecutive bad polls, so the few seconds Caddy needs right after a fresh
-   deploy never false-alarms) or an immediate recovery. Caddy's admin API has
+   deploy never false-alarms), an immediate recovery, the first good
+   sighting of a hostname, or a renewal (the probe's `notAfter` changed).
+   Good events carry that `notAfter` when the probe could read it. Caddy's admin API has
    no issuance-status endpoint to poll instead — verified empirically against
    a real container before choosing the live-handshake probe (see
    `src/deploy/acme-probe.ts`'s header comment). The control plane
    merge-patches the matching `managed` `lets_encrypt` row's
-   `tls.metadata.acme.lastError` and deliberately never touches `tls.status`
+   `tls.metadata.acme` (`lastError`, `lastIssuedAt`, `notAfter`) and deliberately never touches `tls.status`
    — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
+11b. **www modes** (`hostings[].www`, omitted = `off`): `both` serves the site
+   on the hostname and its other spelling (`www.` added or removed);
+   `www-to-root` serves the bare name and turns `www.<name>` into a
+   redirect-only site; `root-to-www` the other way round. The direction is
+   about the names, not about which one was typed. One helper,
+   `hostingWwwNames` in `src/contracts/commands-contracts.ts` (twin of the
+   control plane's `src/contracts/commands/hostname.ts`), expands a hostname;
+   `hostingServedNames` feeds the Caddy sites, the Traefik `Host()` rule and
+   the pinned-certificate map, and `hostingWwwRedirects` the redirect sites.
+   A redirect site answers `http://` and `https://` with one permanent
+   redirect to the scheme its target serves: `https://<target>{uri}` in one
+   hop normally (path and query kept), `http://<target>{uri}` when the target
+   has forced HTTPS off and so no HTTPS site. It runs under the hosting's own
+   TLS mode, so in `acme` mode it gets its own certificate and lands in the
+   acme manifest. Names with no www spelling (IP addresses, one-word names like
+   `localhost` or `com` from `www.com`) expand to nothing extra. An older
+   control plane's `wwwRedirect: true` is read as `www-to-root`
+   (`root-to-www` when the first name starts with `www.`).
+   **Where the rules are enforced:** `validateDeployWwwModes` (refuses a mode
+   on `tcp`/`udp`, a name with no other spelling, an other spelling already a
+   hostname in the deploy, and different www choices on paths of one name) is
+   run by the **control plane** before it sends the deploy; the daemon only
+   carries the twin for parity and tests. On the daemon side the guards are:
+   `assertHostingNamesFree` (called by `deploy-environment.ts` before
+   `compose up`: refuses a deploy whose names, typed or added by a www choice,
+   another environment's live site file already answers on, so the shared
+   Traefik never gets a routing label for someone else's name),
+   `addWwwRedirectSites` never replacing a served name, and Caddy's own
+   refusal of a duplicate site in the staged candidate check.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
@@ -754,29 +805,25 @@ materialization, PHP-FPM wiring, managed-directory sites.
 `/usr/local/bin/php` resolves which co-installed series a bare `php` means for
 the calling account and execs the real binary.
 
-**It grants nothing.** The enforcement is the kernel's at `execve`, against
-`/usr/bin/php<series>` being `root:tpphp<SS> 0750` (the `dpkg-statoverride` the
-php-fpm role applies). The wrapper itself is `root:root 0750` with an execute
-ACL per entitled series group — same answer as running `/usr/bin/php8.3`
-directly. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
+**It grants nothing.** Every installed series may be run by every site owner's
+Linux user: sury's `/usr/bin/php<series>` keeps its packaged `root:root 0755`.
+The wrapper itself is `root:root 0750` with an `other:rx` ACL entry, so every
+account may run it. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
 asserts both.
 
 **It is not a diversion.** `/usr/local/bin` precedes `/usr/bin` in Debian's
 default PATH, so the dispatcher shadows sury's `update-alternatives` link
 without removing it — removing it would break every other package that expects
-`php` to exist. That link was never a privilege leak either: it resolves to
-`/usr/bin/php<series>`, whose mode the kernel checks. What it actually is, is a
-*usability* problem — which series a bare `php` resolves to would otherwise be
-decided by host-global alternatives priority, so two tenants entitled to
-different series would both land on whichever apt installed last.
+`php` to exist. What it fixes is *usability*: which series a bare `php`
+resolves to would otherwise be decided by host-global alternatives priority,
+so two site owners on different series would both land on whichever apt
+installed last.
 
 Resolution order: `$TURBOPANEL_PHP`, then a root-owned per-account pin under
-`<configDir>/php/pins/<username>`, then the highest entitled series. Only ever
-selected from what the account already holds — passing a request straight
-through would reach `execve` and come back as a bare `EACCES` with nothing
-explaining why. The group→series table is **rendered from the registry**, not
-parsed out of the group name (`tpphp810` cannot be read back unambiguously as
-8.10 rather than 81.0), and ordering uses `sort -V` for that same reason.
+`<configDir>/php/pins/<username>`, then the highest installed series. Only ever
+selected from the series installed here (rendered from the playbook's series
+list and checked with `-x`), so a request for a missing one is named instead of
+failing at `execve`. Ordering uses `sort -V`, so 8.10 comes after 8.4.
 
 
 ## Scheduled jobs
@@ -813,8 +860,9 @@ new sink still needs a `SINKS` row and a refusal test.
 | `hostings[].tlsId` | hosting Caddyfile `tls` paths | `safeConfigToken` |
 | `hostings[].hostnames` | hosting Caddyfile site addresses, Traefik `Host` | `isValidHostname` (contract parse) |
 | `hostings[].bindAddress` | hosting Caddyfile `bind` | IP literal (contract parse, `assertValidBindAddress`) |
-| `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) |
-| `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped: a multi-line PEM is legitimate and other engines carry it) |
+| `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` (refused) / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) (value left out and named by `planSiteWebEnv`, not refused; `apacheSetEnvLine` still throws as the last line of defence) |
+| `sites[].webEnv` key / value | nginx `fastcgi_param` | `safeEnvName` (refused) / `safeEnvValue` and no `$` (nginx expands it inside quotes, no escape) and no name nginx or PHP sets itself (`SCRIPT_FILENAME`, `REMOTE_ADDR`, `HTTP_*`, ...) (all dropped and named, not refused: variables are inherited into every hosting) |
+| `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped, and named by `planSiteWebEnv`) |
 | `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
 | `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |
 | `sites[].root` | every engine's document root | `assertSafeRoot` |
@@ -835,3 +883,50 @@ own reader and is not loaded by any engine.
 - `traefik.*` labels and `com.turbopanel.raw-port` are reserved owner labels: routing is generated by the daemon only. HTTP-hosted containers get `com.turbopanel.system.routed=true`; the shared Traefik carries `--providers.docker.constraints` on it.
 - Transition: while a running container still routes HTTP (`traefik.http.*` labels) without the routed label, the shared Traefik is rendered without the constraint (`legacyHttpContainersPresent`), so no site goes dark; the render after the last such container is redeployed turns the constraint on. Both the legacy docker.sock file and the socket-proxy shape go through the same `traefikCompose`.
 - The resolved-model policy also refuses, without host-level approval, published host ports inside the platform's bands (`RESERVED_HOST_PORT_RANGES`) and `gpus` / `group_add` / device reservations (the control plane gates `gpus` and `group_add` the same way); it always refuses an authored network that is the hosting-ingress or managed network. Not checkable in the daemon: a volume's `name:` / `external:` pointing at another project's volume — the control plane rewrites its own storage volumes to external named volumes, so only its host-access gate can tell. The legacy-container check lists stopped containers too (`docker ps -a`).
+
+## Cancelling a running deploy (`deploy-cancel.ts`)
+
+The control plane sends the cell message `deploy-cancel { id, commandId }`
+(handled in `instance/client.ts`, answered with `deploy-cancel-result` carrying
+`outcome: cancelling | too_late | not_running`; advertised as the wire feature
+`deploy-cancel-v1`). It is a cell message, not a queued command, because a running
+deploy holds its queue slot for the whole run. `handleCommandDispatch` registers
+a `DeployCancelToken` per `environment.deploy` in `deployCancels` and always
+unregisters it in `finally`; the handler receives it as `deps.cancel`.
+
+**The cutover rule: a cancel is honoured only while nothing the old version
+depends on has changed.** The first step that changes what is serving calls
+`token.commit(where)` (synchronous, atomic with the abort check). After it the
+deploy runs to its normal end and a cancel answers `too_late`. Commit points, in
+the order they occur: the first release switch inside `applySourceReleases`
+(native promote, rollback / re-cut-over; a Railpack image record is not a switch);
+the host-native phase (reclaim of removed release trees, sites, native apps, the
+cron sweep) when the deploy has any of that to do (`hostNativeCutoverPending`;
+any doubt counts as yes); retiring an earlier compose project or the zero-service
+removal; pre-deploy hooks; the sequential engine's `commit` step (before the old
+version is stopped); and right before `compose up` on the in-place path. Before
+the first of them everything is cancellable: ingress and principals, git clone,
+the source build (sandbox unit), the Railpack image build, `docker compose
+build` / `pull`.
+
+On a cancel the deploy throws `DeployCancelledError`, whose message always starts
+with `cancelled: ` (the control plane reads that prefix out of the command
+outcome string, like `rolled_back: `). The existing `finally` blocks clean up the
+scratch checkout, the build work tree and the compose stage directory. If the new
+compose files were already published (they are before the build on the container
+path), `revertPublishedCompose` puts `previous/` back, or removes the published
+files on a first deploy.
+
+Children are stopped through an `AbortSignal` (`AbortSignal.any` with each tool's
+own timeout): git, the unsandboxed build shell, the Railpack tools and every
+streamed docker call. A sandboxed build is stopped the way its timeout stops it
+(kill the `sudo` client, then `systemctl stop` the build unit, then take the work
+tree back). A cancel for a command that has not started yet answers
+`not_running` and is remembered for 15 minutes (256 ids), so the late dispatch
+fails at once.
+
+Limits: a deploy with several Git services is committed at the first release
+switch, so a cancel during the second service's build answers `too_late`; the
+unsandboxed (development) build kills its shell, not necessarily grandchildren; a
+cancel behind another build waiting for the single build slot takes effect when the
+slot frees.

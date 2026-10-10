@@ -42,8 +42,8 @@ type Host = {
   unitDir: string;
   run: RunFn;
   calls: string[];
-  /** `systemctl show` answer; `null` makes it fail. */
-  showOutput: string | null;
+  /** `systemctl list-timers --output=json` answer: the timer's `next` in microseconds, `""` for an empty list; `null` makes it fail. */
+  nextMicros: number | "" | null;
   /** Whether the policies file existed when each unit install ran. */
   policiesFileAtInstall: boolean[];
   cleanup: () => Promise<void>;
@@ -107,7 +107,7 @@ async function makeHost(): Promise<Host> {
     layout,
     unitDir,
     calls: [],
-    showOutput: `@${NEXT_UNIX}`,
+    nextMicros: NEXT_UNIX * 1_000_000,
     policiesFileAtInstall: [],
     run: () => Promise.resolve(ok()),
     cleanup: () => Deno.remove(root, { recursive: true }),
@@ -115,9 +115,11 @@ async function makeHost(): Promise<Host> {
   host.run = async (command, args) => {
     host.calls.push([command, ...args].join(" "));
     if (command === "systemctl") {
-      return host.showOutput === null
-        ? fail("unit not loaded")
-        : ok(host.showOutput);
+      assertEquals(args.slice(0, 3), ["list-timers", "--all", "--output=json"]);
+      if (host.nextMicros === null) return fail("unit not loaded");
+      if (host.nextMicros === "") return ok("[]");
+      const unit = args.at(-1) as string;
+      return ok(JSON.stringify([{ next: host.nextMicros, unit }]));
     }
     const [tool, ...tail] = args[0] === "-n" ? args.slice(1) : args;
     const last = tail.at(-1) as string;
@@ -302,19 +304,19 @@ test("an empty set removes every backup timer and nothing else", async () => {
 
 test("an unscheduled timer has no next run; a failed query is a warning", async () => {
   await withHost(async (host) => {
-    host.showOutput = "";
+    host.nextMicros = "";
     let result = await reconcile(host, [policy(A)]);
     assertEquals(result.nextRuns, [{ policyId: A }]);
     assertEquals(result.warnings, []);
 
-    host.showOutput = null;
+    host.nextMicros = null;
     result = await reconcile(host, [policy(A)]);
     assertEquals(result.nextRuns, [{ policyId: A }]);
     assertEquals(result.warnings.length, 1);
     // The next-run read never goes through sudo.
     assert(
       host.calls.every((call) =>
-        !call.startsWith("sudo") || !call.includes(" show ")
+        !call.startsWith("sudo") || !call.includes(" list-timers ")
       ),
     );
   });
@@ -353,6 +355,7 @@ test("a copy policy makes sure the helper image is present; a pull failure is a 
       copyId: C,
       copyProvider: "docker",
       volumeName: "shop_uploads",
+      storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     });
     let pulls = 0;
     const run = (answer: string | undefined) =>
@@ -394,6 +397,7 @@ test("a set with no enabled copy policy never touches the helper image", async (
             copyId: C,
             copyProvider: "docker",
             volumeName: "shop_uploads",
+            storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
             enabled: false,
           }),
         ],
@@ -425,6 +429,7 @@ function volumePolicy(
     copyId: C,
     copyProvider: "docker",
     volumeName: "shop_uploads",
+    storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     ...overrides,
   });
 }

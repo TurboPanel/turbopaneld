@@ -7,8 +7,6 @@ import {
   accessGroup,
   allAccessGroups,
   allManagedGroups,
-  isRuntimeName,
-  runtimeGroup,
 } from "../runtime/registry.ts";
 
 export type PrincipalEnsureSpec = {
@@ -36,20 +34,13 @@ export type PrincipalEnsureSpec = {
   home?: string;
   shell?: string;
   /**
-   * Runtimes this principal may execute, as `{ runtime, series }` pairs. The
-   * **effective** set (explicit operator grants plus what its services imply),
-   * resolved control-plane side — the daemon reconciles, it does not derive.
-   */
-  runtimes?: readonly { runtime: string; series: string }[];
-  /**
    * SSH access groups this principal should hold (`tpsftp` / `tpshell`), or
    * `[]` for an account that may not log in.
    *
    * Resolved control-plane side from the account's shell *and* whether it holds
-   * any key, for the same reason `runtimes` is: the daemon reconciles a stated
-   * set rather than deriving one, so there is exactly one place that decides.
-   * Same containment rule too — a name outside the registry is refused, not
-   * created.
+   * any key: the daemon reconciles a stated set rather than deriving one, so
+   * there is exactly one place that decides. A name outside the registry is
+   * refused, not created.
    */
   accessGroups?: readonly string[];
   /**
@@ -123,16 +114,25 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const PASSWORD_HASH_RE =
   /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
 /**
- * Cap so `${username}-grp` fits the Linux 32-char group-name limit.
- * Keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`.
+ * Longest site owner's Linux user name. The group carries the same name, well
+ * inside the Linux 32-character limit. Keep in sync with instance
+ * `MAX_PRINCIPAL_USERNAME_LENGTH`.
  */
 const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 /**
- * Primary group name created by {@link ensureSystemPrincipals}
- * (`groupadd … ${username}-grp`).
+ * Primary group name created by {@link ensureSystemPrincipals}: the standard
+ * Debian per-user group, named after the user (`groupadd … ${username}`).
  */
 export function principalUnixGroupName(username: string): string {
+  return username;
+}
+
+/**
+ * The name the group carried before it took the user's own name. Only
+ * {@link ensurePrincipalGroup} still looks for it, to rename it in place.
+ */
+export function legacyPrincipalUnixGroupName(username: string): string {
   return `${username}-grp`;
 }
 
@@ -198,7 +198,10 @@ function assertSafePrincipalUsername(username: string): string {
   if (
     username.length === 0 ||
     username.length > MAX_PRINCIPAL_USERNAME_LENGTH ||
-    !PRINCIPAL_USERNAME_RE.test(username)
+    !PRINCIPAL_USERNAME_RE.test(username) ||
+    // `<name>-grp` is an older site owner's group: a new user of that name
+    // would share it.
+    username.endsWith("-grp")
   ) {
     throw new Error(`Invalid principal username: ${username}`);
   }
@@ -315,6 +318,114 @@ async function ensureDir(
   }
 }
 
+/** The account's passwd entry, or `null` when there is no such account. */
+async function principalAccount(
+  username: string,
+  runFn: RunFn,
+): Promise<{ uid: number; gid: number; home: string; shell: string } | null> {
+  const userCheck = await runFn("getent", ["passwd", username]);
+  if (!userCheck.success) return null;
+  const current = parsePasswdHomeShell(userCheck.stdout);
+  if (!current) {
+    throw new Error(
+      `Failed to parse passwd entry for principal user ${username}`,
+    );
+  }
+  return current;
+}
+
+/**
+ * An existing group's gid must match an explicit override and otherwise sit in
+ * the principal band: a group outside it was not made for a site owner (or
+ * predates the current floor), and tp-host would refuse it on first use.
+ */
+function assertAdoptedGroupGid(
+  principal: PrincipalEnsureSpec,
+  groupName: string,
+  currentGid: number,
+): void {
+  // Explicit gid overrides must match the existing group — never silently
+  // attach a principal to a colliding group with a different numeric id.
+  if (principal.gid !== undefined) {
+    if (currentGid !== principal.gid) {
+      throw new Error(
+        `Principal group ${groupName} already exists with gid=${currentGid}; expected gid=${principal.gid}`,
+      );
+    }
+  } else if (currentGid < PRINCIPAL_ID_MIN) {
+    // Adopted from a host provisioned before the current floor
+    // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
+    // tp-host hard-floors `tp_is_principal_group` at PRINCIPAL_ID_MIN, so
+    // silently adopting this group would only defer the failure to the
+    // first host command that touches its home tree.
+    throw new Error(
+      `Principal group ${groupName} has gid=${currentGid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (groupmod -g <new gid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${groupName}, then chown -R the principal's home tree) before this host can be used again`,
+    );
+  } else if (currentGid > PRINCIPAL_ID_MAX) {
+    throw new Error(
+      `refusing to use the existing group ${groupName}: gid=${currentGid} is above ${PRINCIPAL_ID_MAX}, so it was not made for a site owner's Linux user`,
+    );
+  }
+}
+
+/**
+ * The group the account `<name>` already exists with must be that account's
+ * primary group. A group of the same name that belongs to nobody, or to some
+ * other purpose, is never adopted.
+ */
+function assertGroupIsAccountPrimary(
+  username: string,
+  groupName: string,
+  groupLine: string,
+  groupGid: number,
+  account: { gid: number } | null,
+): void {
+  // Without the account, only a group nobody joined yet is taken over (a run
+  // that stopped between groupadd and useradd); tp-host's useradd also
+  // refuses a group that is already some account's primary group.
+  if (!account && (groupLine.split(":")[3] ?? "").trim() !== "") {
+    throw new Error(
+      `refusing to use the existing group ${groupName} (gid=${groupGid}): it already has members and there is no account ${username}`,
+    );
+  }
+  if (account && account.gid !== groupGid) {
+    throw new Error(
+      `refusing to use the existing group ${groupName} (gid=${groupGid}): the account ${username} has primary gid=${account.gid}`,
+    );
+  }
+}
+
+/**
+ * A host set up before the group took the user's own name still has
+ * `<name>-grp` as the account's primary group. Rename it in place (tp-host
+ * `groupmod -n <name> <name>-grp`, which checks the same things again as
+ * root); files and memberships follow the gid, so nothing else moves.
+ * Returns false when there is no such group to rename.
+ */
+async function renameLegacyPrincipalGroup(
+  principal: PrincipalEnsureSpec,
+  groupName: string,
+  account: { gid: number },
+  runFn: RunFn,
+): Promise<boolean> {
+  const legacyName = legacyPrincipalUnixGroupName(principal.username);
+  const legacyCheck = await runFn("getent", ["group", legacyName]);
+  if (!legacyCheck.success) return false;
+  const legacyGid = parseGroupGid(legacyCheck.stdout);
+  if (legacyGid === null || legacyGid !== account.gid) return false;
+  assertAdoptedGroupGid(principal, legacyName, legacyGid);
+  const rename = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "groupmod", "-n", groupName, legacyName]),
+  );
+  if (!rename.success) {
+    throw new Error(
+      rename.stderr || `Failed to rename group ${legacyName} to ${groupName}`,
+    );
+  }
+  return true;
+}
+
 async function ensurePrincipalGroup(
   principal: PrincipalEnsureSpec,
   groupName: string,
@@ -328,25 +439,31 @@ async function ensurePrincipalGroup(
         `Failed to parse group entry for principal group ${groupName}`,
       );
     }
-    // Explicit gid overrides must match the existing group — never silently
-    // attach a principal to a colliding group with a different numeric id.
-    if (principal.gid !== undefined) {
-      if (currentGid !== principal.gid) {
-        throw new Error(
-          `Principal group ${groupName} already exists with gid=${currentGid}; expected gid=${principal.gid}`,
-        );
-      }
-    } else if (currentGid < PRINCIPAL_ID_MIN) {
-      // Adopted from a host provisioned before the current floor
-      // (PRINCIPAL_ID_MIN was raised from 10001 to 15001 on 2026-09-25).
-      // tp-host hard-floors `tp_is_principal_group` at PRINCIPAL_ID_MIN, so
-      // silently adopting this group would only defer the failure to the
-      // first host command that touches its home tree.
-      throw new Error(
-        `Principal group ${groupName} has gid=${currentGid}, below the current PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — needs UID/GID migration (groupmod -g <new gid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${groupName}, then chown -R the principal's home tree) before this host can be used again`,
-      );
-    }
+    assertAdoptedGroupGid(principal, groupName, currentGid);
+    const owner = await principalAccount(principal.username, runFn);
+    // An explicit id override that the account contradicts says so first.
+    if (owner) assertAdoptedIdsMatch(principal, owner);
+    assertGroupIsAccountPrimary(
+      principal.username,
+      groupName,
+      groupCheck.stdout,
+      currentGid,
+      owner,
+    );
     return;
+  }
+  const account = await principalAccount(principal.username, runFn);
+  if (account) {
+    if (
+      await renameLegacyPrincipalGroup(principal, groupName, account, runFn)
+    ) {
+      return;
+    }
+    throw new Error(
+      `refusing to adopt the existing account ${principal.username}: its primary group (gid=${account.gid}) is neither ${groupName} nor ${
+        legacyPrincipalUnixGroupName(principal.username)
+      }`,
+    );
   }
   const args = ["-n", "groupadd"];
   if (principal.gid !== undefined) {
@@ -423,6 +540,27 @@ async function assertCreatedUidAboveFloor(
     throw new Error(
       `Principal user ${username} was created with uid=${entry.uid}, below PRINCIPAL_ID_MIN=${PRINCIPAL_ID_MIN} — the host ignored the requested uid range (check tp-host useradd passes -K through). Repair: usermod -u <free uid in [${PRINCIPAL_ID_MIN}, ${PRINCIPAL_ID_MAX}]> ${username}; chown -R the principal's home tree and group to match (find / -xdev -uid ${entry.uid} -exec chown -h <new uid> {} +), then retry`,
     );
+  }
+}
+
+/**
+ * An operator's uid/gid override must sit in the principal band
+ * [{@link PRINCIPAL_ID_MIN}, {@link PRINCIPAL_ID_MAX}]. Above it starts
+ * systemd's range for throwaway build users (61184–65519), which tp-host
+ * never treats as a site owner; it refuses such an override too, this only
+ * says so first, in plain words.
+ */
+export function assertIdOverridesInBand(principal: PrincipalEnsureSpec): void {
+  for (const [field, id] of [["uid", principal.uid], ["gid", principal.gid]]) {
+    if (id === undefined) continue;
+    if (
+      typeof id !== "number" || !Number.isInteger(id) ||
+      id < PRINCIPAL_ID_MIN || id > PRINCIPAL_ID_MAX
+    ) {
+      throw new RangeError(
+        `Principal ${principal.username}: ${field} ${id} is outside ${PRINCIPAL_ID_MIN}–${PRINCIPAL_ID_MAX}`,
+      );
+    }
   }
 }
 
@@ -506,16 +644,10 @@ async function ensurePrincipalUser(
   groupName: string,
   runFn: RunFn,
 ): Promise<void> {
-  const userCheck = await runFn("getent", ["passwd", principal.username]);
-  if (!userCheck.success) {
+  const current = await principalAccount(principal.username, runFn);
+  if (!current) {
     await createPrincipalUser(principal, home, shell, groupName, runFn);
     return;
-  }
-  const current = parsePasswdHomeShell(userCheck.stdout);
-  if (!current) {
-    throw new Error(
-      `Failed to parse passwd entry for principal user ${principal.username}`,
-    );
   }
   assertAdoptedIdsMatch(principal, current);
   assertAdoptedUidAboveFloor(principal, current);
@@ -716,6 +848,7 @@ async function ensureOnePrincipal(
   if (!ALLOWED_PRINCIPAL_SHELLS.includes(shell)) {
     throw new TypeError(`Principal shell is not allowed: ${shell}`);
   }
+  assertIdOverridesInBand(principal);
 
   // 0750 plus other:x, not 0751. A world bit trips ansible:S2612; the ACL
   // is traverse without list. A principal with a shell can otherwise
@@ -734,9 +867,8 @@ async function ensureOnePrincipal(
     runFn,
   );
   await ensurePrincipalHomeTree(home, principal.username, groupName, runFn);
-  // Runs here, before any unit is installed or pool staged: systemd resolves
-  // supplementary groups at `execve`, so a unit started before its principal
-  // joined the runtime group dies `203/EXEC`.
+  // Runs here, before any unit is installed or pool staged, so a login the
+  // reconcile revokes never outlives the deploy that revoked it.
   const warnings = await ensurePrincipalManagedGroups(
     principal.username,
     resolveManagedGroups(principal),
@@ -751,28 +883,18 @@ async function ensureOnePrincipal(
 }
 
 /**
- * Every group one principal should hold: runtime entitlements plus SSH access.
+ * Every group one principal should hold: its SSH access groups.
  *
- * Resolved together because they are reconciled together — see
- * {@link ensurePrincipalManagedGroups} for why the containment set has to be a
- * single one.
- *
- * Unknown **runtime** series are dropped rather than thrown: a newer control
- * plane must not fail every deploy on a host that has simply not learned about
- * a series yet, and the site's own version gate is what reports that. Unknown
- * **access** groups are dropped for the opposite reason — there is a fixed pair
- * of them, so a third name is a control-plane bug, and inventing the group
- * would hand out an `sshd` Match block nobody wrote.
+ * Every installed runtime may be run by every site owner's Linux user, so no
+ * runtime appears here (owner decision 2026-10-07). Unknown access groups are
+ * dropped: there is a fixed set of them, so another name is a control-plane
+ * bug, and inventing the group would hand out an `sshd` Match block nobody
+ * wrote.
  */
 export function resolveManagedGroups(
   principal: PrincipalEnsureSpec,
 ): Set<string> {
   const groups = new Set<string>();
-  for (const entry of principal.runtimes ?? []) {
-    if (!isRuntimeName(entry.runtime)) continue;
-    const group = runtimeGroup(entry.runtime, entry.series);
-    if (group) groups.add(group);
-  }
   const known = allAccessGroups();
   for (const group of principal.accessGroups ?? []) {
     if (known.has(group)) groups.add(group);
@@ -867,30 +989,22 @@ async function removeSupplementaryGroupMembership(
 }
 
 /**
- * Reconcile every group TurboPanel manages on a principal — which runtimes it
- * may execute, and how it may log in.
+ * Reconcile every group TurboPanel manages on a principal — how it may log in.
  *
- * A runtime entitlement is a **unix group**, because that is the only form the
- * kernel enforces at `execve` time. Anything derived only into a generated
- * systemd unit or an FPM pool is invisible to an interactive shell or a cron
- * job — both of which run as the principal and are exactly the cases the group
- * has to cover. SSH access is a group for a different reason: `sshd` matches on
- * groups, not on shells.
+ * SSH access is a group because `sshd` matches on groups, not on shells.
  *
  * **Revocation is the reason this exists.** `usermod -aG` alone can only ever
- * add, so a principal that once deployed a Node app could execute Node forever,
- * and one downgraded from a shell to files-only would keep its shell. Stale
+ * add, so one downgraded from a shell to files-only would keep its shell. Stale
  * membership is dropped here — but **only** for group names the registry
- * defines. That containment is what makes revoking safe: `<username>-grp`,
+ * defines. That containment is what makes revoking safe: the user's own group,
  * `tp`, an engine group, and anything an operator added by hand are never
  * touched, no matter what the wire asks for.
  *
  * Adds are best-effort and logged (a host provisioned some other way may
- * legitimately not have the group yet, and the unit's own health probe is what
- * catches a genuinely unreachable runtime) — except the every-principal group
+ * legitimately not have the group yet) — except the every-principal group
  * (`accessGroup("principal")`), whose add is loud like a revoke: without it the
- * sshd backstop block does not apply. A failed **revoke** is loud: an
- * entitlement or a login that silently outlives its grant is a security
+ * sshd backstop block does not apply. A failed **revoke** is loud: a login
+ * that silently outlives its grant is a security
  * problem, not an inconvenience.
  *
  * Returns one warning per add that failed, so a caller that has somewhere to
@@ -929,7 +1043,7 @@ export async function ensurePrincipalManagedGroups(
       if (isRequiredManagedGroup(group)) throw err;
       const warning = `could not add ${username} to ${group}: ${
         err instanceof Error ? err.message : String(err)
-      } (is that runtime installed on this host?)`;
+      }`;
       logWarn("deploy", warning);
       warnings.push(warning);
     }
@@ -940,8 +1054,9 @@ export async function ensurePrincipalManagedGroups(
 /**
  * Let a web engine read one principal's published releases.
  *
- * A published release is root-owned, group `<username>-grp`, mode `0550` — the
- * group bit is the only way anything other than root reads it, and re-chowning
+ * A published release is root-owned, group `<username>` (the user's own
+ * group), mode `0550` — the group bit is the only way anything other than root
+ * reads it, and re-chowning
  * an immutable tree to a serving engine would defeat the point. So the engine
  * service account (`tpnginx` / `tpapache` / `tpols`) joins the principal's own
  * group instead: read + traverse, never write.

@@ -132,6 +132,13 @@ Deploy-time `fabricNetworks[]` is the belt-and-braces bridge path alongside
 command-driven reconcile and boot restore. **Not** wired into
 `daemon-converge.yml` (command-driven, plus boot restore).
 
+Observed peers in the reconcile result carry `interface`: the local NIC whose
+connected subnet holds the peer's live endpoint (`src/commands/fabric-peer-interface.ts`,
+matched against the addresses `collectServerIps` already reports, so it starts
+no process and changes no route). Absent means the endpoint is reached by the
+default route. The control plane's traffic map compares it with the datacenter
+it planned the endpoint from.
+
 ### ProxySQL (`proxysql`)
 
 Moved to `roles/proxysql/AGENTS.md`.
@@ -153,7 +160,7 @@ Debian 13 too), extracts the binary with `dpkg-deb -x` (same pattern as the
 `{{ turbopanel_vendor_dir }}/nginx/<version>/sbin/nginx` + `current`. Main
 config is templated to `/etc/turbopanel/nginx/nginx.conf` and
 `Include`s `/etc/turbopanel/nginx/sites/*.conf`. Temp paths / logs / pidfile
-are under `/var/lib|/var/log|/run/turbopanel/nginx/`. Driven by
+are under `/var/lib|/var/log` and the unit's own `RuntimeDirectory=turbopanel-nginx` (`/run/turbopanel-nginx/`, recreated by systemd on every start, so it survives a reboot). Driven by
 **`turbopanel-nginx.service`** (runs as `tpnginx`; high-port vhosts only —
 hosting Caddy owns `:80`/`:443`).
 
@@ -167,11 +174,30 @@ account php-fpm's master runs as) when the daemon passes
 
 ### Apache (`apache`)
 
-Vendored — **never** a distro package. The role downloads pinned ASF
-**httpd** + **APR** + **APR-util** source tarballs, builds them with
-`--prefix={{ turbopanel_vendor_dir }}/apache/<version>` (compile-time apt
-deps only: `build-essential`, `libssl-dev`, `libpcre2-dev`, … — not
-`apache2`), and points `current` at that tree. Main config is
+Vendored — **never** a distro package, and never compiled on the host (a
+2-core build took over 10 minutes and timed the first deploy out). Apache
+(httpd + bundled APR / APR-util) is built **once in CI** by
+`.github/workflows/vendor-apache.yml` (`scripts/build-apache.sh`, native
+amd64 and arm64 runners, same configure flags) and published as the release
+`apache-httpd-<httpdver>` (never marked Latest): `apache-httpd-<httpdver>-<arch>.tar.zst`
+(arch amd64/arm64, zstd like the daemon's own assets, with the ASF LICENSE and NOTICE
+files under `share/licenses`) plus `SHA256SUMS`. The role pins version, URL and per-arch SHA-256 in its defaults
+(`apache_sha256`), asserts the digest like the caddy role (`get_url`
+`checksum:`), unpacks into `{{ turbopanel_vendor_dir }}/apache/<version>`
+(`creates:` on `bin/httpd` keeps it idempotent) and points `current` at that
+tree. The build script verifies the ASF source tarballs against pinned SHA-256s,
+verifies each tarball's ASF GPG signature against the pinned release-manager fingerprint (KEYS from downloads.apache.org),
+switches off optional modules and APR-util drivers that need extra libraries (HTTP/2, brotli, lua,
+md, proxy_html, xml2enc, session_crypto), and fails if `httpd` or a module
+links anything outside the runtime list (`ldd` gate over bin, modules and lib; a failing ldd or "not found" also fails). The tree bakes in `/opt/turbopanel/vendor`, so the role refuses any other vendor directory. The release job only runs from trunk. Only those runtime
+libraries (`apache_runtime_packages`: `libexpat1`, `libpcre2-8-0`, `libssl3`,
+`libuuid1`, `zlib1g`) come from apt. The tree is built with the default vendor
+root as its prefix (so `apxs`/`envvars` paths are right there) and shipped
+root-owned; the role extracts it with `--no-same-owner` and re-asserts root
+ownership and no group/world write. The role refuses to run while a digest is the `UNPINNED` placeholder: run
+the workflow, then pin its checksums. A published release is never overwritten
+(a rebuild changes the digest); to change the build, bump the version or use a
+new release name. A release is never rebuilt on the host as a fallback. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
 **`turbopanel-apache.service`**, which runs the whole server, master
@@ -187,42 +213,45 @@ bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
 fragment exists (Apache refuses zero-Listen configs). ASF httpd has **no**
 mod_php — PHP is the sibling `php-fpm` role below.
 
-### Runtime entitlements (`runtime-entitlement`, `runtime-registry.json`)
+### Runtime access (`runtime-access`, `runtime-registry.json`)
 
-**A runtime entitlement is a unix group**, because that is the only form the
-kernel enforces at `execve`. Anything derived only into a generated systemd unit
-or an FPM pool is invisible to an interactive shell or a cron job — both of which
-run as the principal, and both of which are exactly the cases the grant has to
-cover.
+**Every installed PHP, Node or Deno series may be run by every site owner's
+Linux user** (owner decision 2026-10-07). There is no per-version group: the
+vendored trees (`vendor/lsphp/<series>/`, `vendor/node-app/<series>/`,
+`vendor/deno-app/<series>/`) are root-owned, readable and executable by
+everyone, never writable but by root, and sury's `/usr/bin/php<series>`,
+`/usr/bin/php-cgi<series>` and `/usr/sbin/php-fpm<series>` keep their packaged
+`root:root 0755`. `/opt/turbopanel`, `vendor/` and each runtime's tree root stay
+`0750` with an `other:x` ACL, the traverse-without-list contract
+`principal-access` uses on the home root: a path into a runtime works, a
+listing of the panel's own trees does not.
 
-`orchestration/runtime-registry.json` is the single artifact: Ansible reads it
-with `include_vars` in the `runtime-entitlement` role, and the daemon imports the
-same file in `../src/runtime/registry.ts`. Same bytes, so group names and gids
-cannot drift.
+`orchestration/runtime-registry.json` lists the series a host offers. Ansible
+reads it with `include_vars` and the daemon imports the same file in
+`../src/runtime/registry.ts`, so the two cannot drift. It also defines the SSH
+access groups (`tpsftp`, `tpshell`, `tppasswd`, `tpprincipal`), which are the
+only groups the daemon reconciles on a site owner's Linux user.
 
-**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24` — never one group
-per runtime. Co-installed PHP versions are distinct binaries, so a single
-`tpphp` would mean granting 8.4 also grants 8.3 with whatever CVEs another
-tenant's pinned app carries. It is also what lets a shell wrapper resolve a
-caller's series from its group list. One PHP group spans both flavors:
-`tpphp84` owns `/usr/sbin/php-fpm8.4`, `/usr/bin/php8.4`, **and**
-`vendor/lsphp/8.4/current/bin/lsphp` — "may execute PHP 8.4 here", whichever
-engine serves the site.
+The `runtime-access` role (included by `php-fpm`, `openlitespeed` for lsphp,
+`node-app-runtime` and `deno-app-runtime`) sets those ACLs and removes what
+older releases left behind: every group named `tpphp<NN>`, `tpnode<N>` or
+`tpdeno<N>` with a gid in **9900–9979** (name and band must both match), first
+the `dpkg-statoverride` entries that name one (dpkg refuses to run while an
+override names a missing group; the binary is put back to `root:root 0755`),
+then their ACL entries, then the group. Nothing else may take a gid in that
+band; **9980–9999** is service identities (9994 stays reserved for `tpbuild`,
+the retired shared build account; builds now run as per-build systemd
+`DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
+enforces both.
 
-gids are hand-assigned in the registry, never computed from the version string
-(that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities (`tpbuild`, the sandboxed build account
-from the `build-user` role, is 9994). `../src/orchestration/service-accounts.test.ts`
-enforces uniqueness across both and that entitlement gids stay inside their band.
-
-**Membership is reconciled by the daemon, not by this role.** The role only
-creates groups and grants them traverse-only ACLs on `/opt/turbopanel` and
-`vendor/`. `ensurePrincipalManagedGroups` (`../src/deploy/ensure-principal.ts`)
-adds *and revokes* during principal materialization — which runs before any unit
-is installed, because systemd resolves supplementary groups at `execve` and a
-unit started too early dies `203/EXEC`. Revocation only ever touches names the
-registry defines, so `<username>-grp`, `tp`, engine groups, and anything an
-operator added by hand are never stripped.
+**Deno** (`deno-app-runtime` role, `playbooks/deno-app-runtime-apply.yml`) vendors the
+tenant Deno under `vendor/deno-app/<series>/current`, the way `node-app-runtime`
+vendors Node: the newest stable release of the series from the official Deno
+distribution (`dl.deno.land/release-latest.txt`, else the release list when the
+series is no longer the newest), the archive checked against the release's
+published SHA-256 before it is unpacked. Deno ships one major, so the series is
+the major (`2`). The playbook and its `deno_app_versions` extra-var are on
+`tp-orchestrate`'s allowlists.
 
 ### php-fpm (`php-fpm`)
 
@@ -300,7 +329,10 @@ the unit's `StateDirectory=turbopanel-hosting-caddy`, which systemd creates
 owned by `tpedge`; the old root-written `<state>/hosting-caddy` store is
 removed, not migrated (the internal CA and ACME account are recreated).
 `caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
-whenever the binary **or** the account is missing (`ensureHostingCaddy`). The
+whenever the binary **or** the account is missing (`ensureHostingCaddy`).
+`playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
+when `tpedge`, the vendored Caddy binary, or the ingress guard is missing or
+stale, so enrolled hosts are edge-ready before the first compose deploy. The
 role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on

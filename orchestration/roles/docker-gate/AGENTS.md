@@ -57,8 +57,8 @@ Deny: `Privileged`; host / `container:` `NetworkMode` `PidMode` `IpcMode`
 `DeviceRequests`; `CapAdd` outside the allowlist (default none);
 `SecurityOpt` other than `no-new-privileges`; `CgroupParent`; `Sysctls`;
 `VolumesFrom`; any `MaskedPaths` / `ReadonlyPaths`; a non-`runc` `Runtime`;
-privileged `exec`; `exec`/`attach`/`archive` on a platform container (rules
-`platform-exec`, `platform-attach`, `platform-archive`) except the daemon's own
+privileged `exec`; `exec`/`attach`/`archive`/`export` on a platform container (rules
+`platform-exec`, `platform-attach`, `platform-archive`, `platform-export`) except the daemon's own
 pairs in `PLATFORM_EXEC_ALLOWLIST` (managed engines; ProxySQL `mysql` only); binds (`Binds`, `Mounts` of type bind, and `local`-driver
 volumes that are really `o=bind,device=<path>` or a `device=/dev/...`) whose
 resolved source is `/`, the Docker socket, a denied tree (`/etc`, `/run`,
@@ -340,6 +340,15 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - Turn the switch on by default (or for every managed host) and prove it on
   canary with `scripts/docker-gate-proof.sh` section 5, before enforcement:
   an enforcing gate refuses the Tecnativa container's socket bind.
+- One proof script per claim, all run as root on a canary host with the switch on
+  (each leaves only `tpgate-proof-*` throwaways, removed on exit):
+  `scripts/docker-gate-proof-udp.sh` (a raw UDP route through a service Traefik on
+  the read-only socket, and again after a gate restart),
+  `scripts/docker-gate-proof-tls.sh` (an HTTPS route on the shared Traefik's
+  `websecure` entrypoint over HTTP/2, and again after a gate restart) and
+  `scripts/docker-gate-proof-reconcile.sh [seconds]` (before/after a
+  `system.reconcile` restart of the shared ingress, which an operator triggers in
+  the panel while the script waits).
 - The Tecnativa container stays on a host until every TCP/UDP service with a
   service Traefik has been redeployed once with the switch on: stage 4 cannot
   claim "no socket mounts" before that (re-render them during the switch, or
@@ -438,7 +447,7 @@ BuildKit's `/session` and `/grpc` upgrade to HTTP/2 the gate cannot read: every 
 mounts) rides inside them. They open only on the **build listener** (`build.ts`):
 
 - **Identity.** The client is the daemon account `tp` (`railpack-build.ts` runs `docker buildx build` as tp; Compose
-  builds too). The sandboxed build runner (`tpbuild`, `tp-host build-run`) never speaks Docker: its unit makes
+  builds too). The sandboxed build runner (`tp-host build-run`'s per-build throwaway users) never speaks Docker: its unit makes
   `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
   SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
   `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).

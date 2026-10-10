@@ -7,6 +7,7 @@
  * recoveries.
  */
 
+import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
   assertValidBindAddress,
@@ -30,7 +31,7 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { logInfo } from "../util/logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { pruneStaleManagedDockerNetworks } from "./networks.ts";
 import {
@@ -43,15 +44,22 @@ import {
   orchestratorConfigDir,
   orchestratorConfPath,
   orchestratorDataDir,
+  orchestratorHostPrepMarkerPath,
   orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
 } from "./engine-paths.ts";
-import type {
-  EnvironmentDeployContainer,
-  ManagedHaRaftConfig,
+import {
+  type EnvironmentDeployContainer,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+  type ManagedHaRaftConfig,
 } from "../contracts/commands-contracts.ts";
-import { parseProxySqlClientCnf } from "./proxysql-admin.ts";
+import {
+  formatMysqlClientCnf,
+  parseProxySqlClientCnf,
+  writeMysqlClientCnfAtomic,
+} from "./proxysql-admin.ts";
 
 /**
  * Percona's maintained Orchestrator distribution — public on Docker Hub and
@@ -65,7 +73,10 @@ export const ORCHESTRATOR_IMAGE = "percona/percona-orchestrator:3.2.6-24";
 export const MANAGED_HA_HTTP_PORT = 33001;
 export const MANAGED_HA_RAFT_PORT = 33002;
 
-type RunDockerFn = (
+/** Topology CA inside the Orchestrator container (`./tls` bind). */
+export const ORCHESTRATOR_TLS_CA_PATH = "/etc/orchestrator/tls/ca.pem";
+
+export type RunDockerFn = (
   args: string[],
   options?: RunDockerOptions,
 ) => Promise<DockerCliResult>;
@@ -97,6 +108,42 @@ export type OrchestratorApiCredentials = {
   user: string;
   password: string;
 };
+
+/** Write org-wide Orchestrator HTTP credentials for loopback clients and compose. */
+export async function materializeOrchestratorApiCredentials(
+  layout: LayoutPaths,
+  httpAuth: OrchestratorApiCredentials,
+): Promise<void> {
+  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await writeMysqlClientCnfAtomic(
+    orchestratorApiCnfPath(layout),
+    formatMysqlClientCnf(httpAuth.user, httpAuth.password),
+  );
+}
+
+/** Write org-wide Orchestrator Raft token for loopback clients and compose. */
+export async function materializeOrchestratorRaftCredentials(
+  layout: LayoutPaths,
+  raftToken: string,
+): Promise<void> {
+  await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await writeMysqlClientCnfAtomic(
+    orchestratorRaftCnfPath(layout),
+    formatMysqlClientCnf("raft", raftToken),
+  );
+}
+
+/** Write org-wide Orchestrator HTTP + Raft secrets for loopback clients and compose. */
+export async function materializeOrchestratorHostCredentials(
+  layout: LayoutPaths,
+  input: {
+    httpAuth: OrchestratorApiCredentials;
+    raftToken: string;
+  },
+): Promise<void> {
+  await materializeOrchestratorApiCredentials(layout, input.httpAuth);
+  await materializeOrchestratorRaftCredentials(layout, input.raftToken);
+}
 
 export async function loadOrchestratorApiCredentials(
   layout: LayoutPaths,
@@ -142,6 +189,11 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
     MySQLTopologyPassword: input.topologyPassword,
     PostgreSQLTopologyUser: input.topologyUser,
     PostgreSQLTopologyPassword: input.topologyPassword,
+    // Topology TLS is MySQLTopologyUseMutualTLS (MySQLTopologyUseSSL is not a
+    // recognized key and is ignored). SkipVerify is true only without a CA.
+    // MySQLTopologySSLCAFile is still written when a CA path exists, but the
+    // process uses SSL_CERT_FILE as trust roots — the CAFile key is not.
+    MySQLTopologyUseMutualTLS: true,
     MySQLTopologySSLSkipVerify: input.sslCaPath === undefined,
     Recover: false,
     RecoverMasterClusterFilters: [],
@@ -167,6 +219,286 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
   return `${JSON.stringify(conf, null, 2)}\n`;
 }
 
+export type OrchestratorTopologyAlias = {
+  name: string;
+  address: string;
+};
+
+/**
+ * extra_hosts entries so Orchestrator can resolve a member's Docker name to
+ * the private-listener address used at register time. Skips names that are
+ * already the register host, and hosts that are not an IP literal.
+ */
+export function orchestratorTopologyAliases(
+  members: readonly { host: string; containerName?: string }[],
+): OrchestratorTopologyAlias[] {
+  const aliases: OrchestratorTopologyAlias[] = [];
+  const seen = new Set<string>();
+  for (const member of members) {
+    const name = member.containerName;
+    if (!name || name === member.host || seen.has(name)) continue;
+    const address = extraHostsAddress(member.host);
+    if (address === null) continue;
+    seen.add(name);
+    aliases.push({ name, address });
+  }
+  return aliases;
+}
+
+function extraHostsAddress(host: string): string | null {
+  if (isValidIpv4Literal(host)) return host;
+  if (isValidIpv6Literal(host)) return `[${host}]`;
+  return null;
+}
+
+/** True when `host` is already an address every Raft peer can dial. */
+export function isOrchestratorRegisterHost(host: string): boolean {
+  return extraHostsAddress(host) !== null;
+}
+
+const LOOPBACK_HOST = "127.0.0.1";
+
+const UNREACHABLE_PUBLISH_IPS = new Set([
+  "",
+  "0.0.0.0",
+  "::",
+  "[::]",
+  LOOPBACK_HOST,
+  "::1",
+  "[::1]",
+]);
+
+/**
+ * Host:port Orchestrator should discover, taken from an engine container's
+ * published private listener. Container names only resolve on that member's
+ * Docker network, so Raft peers on other hosts cannot use them.
+ */
+export function pickPublishedEngineDial(
+  portsJson: string,
+  containerPort: number,
+): { host: string; port: number } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(portsJson);
+  } catch {
+    return null;
+  }
+  return pickEngineDialFromPorts(parsed, containerPort);
+}
+
+function pickEngineDialFromPorts(
+  parsed: unknown,
+  containerPort: number,
+): { host: string; port: number } | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const ports = parsed as Record<
+    string,
+    Array<{ HostIp?: string; HostPort?: string }> | null
+  >;
+  const bound = ports[`${containerPort}/tcp`] ?? [];
+  for (const binding of bound) {
+    const host = unwrapPublishedHost(binding.HostIp);
+    const port = Number(binding.HostPort);
+    if (UNREACHABLE_PUBLISH_IPS.has(host)) continue;
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) continue;
+    if (!isOrchestratorRegisterHost(host)) continue;
+    return { host, port };
+  }
+  return null;
+}
+
+function unwrapPublishedHost(host: string | undefined): string {
+  const raw = (host ?? "").trim();
+  if (raw.startsWith("[") && raw.endsWith("]")) return raw.slice(1, -1);
+  return raw;
+}
+
+/**
+ * The address Orchestrator knows a LOCAL member by, given the Docker name and
+ * private-listener port the control plane sends for a recover. Members are
+ * registered by `<published private IP>:<port>` (see
+ * {@link resolveOrchestratorRegisterHost}), so a name would never match its
+ * instance key. Finds the published binding whose host port equals `port`.
+ */
+export function pickPublishedDialByHostPort(
+  portsJson: string,
+  hostPort: number,
+): { host: string; port: number } | null {
+  let ports: Record<
+    string,
+    Array<{ HostIp?: string; HostPort?: string }> | null
+  >;
+  try {
+    const parsed: unknown = JSON.parse(portsJson);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    ports = parsed as typeof ports;
+  } catch {
+    return null;
+  }
+  for (const bound of Object.values(ports)) {
+    for (const binding of bound ?? []) {
+      const host = unwrapPublishedHost(binding.HostIp);
+      if (Number(binding.HostPort) !== hostPort) continue;
+      if (UNREACHABLE_PUBLISH_IPS.has(host)) continue;
+      if (!isOrchestratorRegisterHost(host)) continue;
+      return { host, port: hostPort };
+    }
+  }
+  return null;
+}
+
+/**
+ * Map a recover endpoint to the key Orchestrator registered it under. An IP
+ * literal (remote member) is already that key; a Docker name (member on this
+ * host) is translated through its published private listener. Falls back to
+ * the endpoint as given when the container cannot be inspected.
+ */
+export async function resolveOrchestratorRecoverEndpoint(
+  endpoint: { host: string; port: number },
+  run: RunDockerFn = defaultRunDocker,
+): Promise<{ host: string; port: number }> {
+  if (isOrchestratorRegisterHost(endpoint.host)) return endpoint;
+  const inspect = await run([
+    "inspect",
+    "--format",
+    "{{json .NetworkSettings.Ports}}",
+    endpoint.host,
+  ]);
+  if (!inspect.success) return endpoint;
+  return pickPublishedDialByHostPort(inspect.stdout.trim(), endpoint.port) ??
+    endpoint;
+}
+
+export async function resolveOrchestratorRegisterHost(
+  member: { host: string; port: number; containerName?: string },
+  run: RunDockerFn,
+): Promise<{ host: string; port: number }> {
+  if (isOrchestratorRegisterHost(member.host)) {
+    return { host: member.host, port: member.port };
+  }
+  const name = member.containerName;
+  if (!name) return { host: member.host, port: member.port };
+  const inspect = await run([
+    "inspect",
+    "--format",
+    "{{json .NetworkSettings.Ports}}",
+    name,
+  ]);
+  if (!inspect.success) {
+    throw new Error(
+      `orchestrator could not inspect ${name} for a register address: ${
+        inspect.stderr || "docker inspect failed"
+      }`,
+    );
+  }
+  const dial = pickPublishedEngineDial(inspect.stdout.trim(), member.port);
+  if (!dial) {
+    throw new Error(
+      `orchestrator needs a host-published port for ${name}:${member.port}`,
+    );
+  }
+  return dial;
+}
+
+const LIVE_AND_CONFIGURED_PORTS_FORMAT =
+  '{"live":{{json .NetworkSettings.Ports}},"configured":{{json .HostConfig.PortBindings}}}';
+
+/**
+ * The private listener a member was registered under, read from the live
+ * published ports or, when the container has stopped, from its configured
+ * port bindings. Docker empties `.NetworkSettings.Ports` once a container
+ * exits, and a dead primary is exactly the one the HA observer must name.
+ */
+export function pickLiveOrConfiguredEngineDial(
+  inspectJson: string,
+  containerPort: number,
+): { host: string; port: number } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inspectJson);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { live, configured } = parsed as {
+    live?: unknown;
+    configured?: unknown;
+  };
+  return pickEngineDialFromPorts(live, containerPort) ??
+    pickEngineDialFromPorts(configured, containerPort);
+}
+
+/**
+ * Like {@link resolveOrchestratorRegisterHost}, but also answers for a stopped
+ * or killed container (see {@link pickLiveOrConfiguredEngineDial}). Throws when
+ * the container cannot be inspected or has no private published listener.
+ */
+export async function resolveOrchestratorMemberDial(
+  member: { containerName: string; port: number },
+  run: RunDockerFn,
+): Promise<{ host: string; port: number }> {
+  const inspect = await run([
+    "inspect",
+    "--format",
+    LIVE_AND_CONFIGURED_PORTS_FORMAT,
+    member.containerName,
+  ]);
+  if (!inspect.success) {
+    throw new Error(
+      `orchestrator could not inspect ${member.containerName} for its listener: ${
+        inspect.stderr || "docker inspect failed"
+      }`,
+    );
+  }
+  const dial = pickLiveOrConfiguredEngineDial(
+    inspect.stdout.trim(),
+    member.port,
+  );
+  if (!dial) {
+    throw new Error(
+      `orchestrator needs a host-published port for ${member.containerName}:${member.port}`,
+    );
+  }
+  return dial;
+}
+
+/**
+ * True for an address only a private network can reach: RFC 1918, carrier
+ * grade NAT (the range overlay networks often use), and IPv6 unique local.
+ */
+export function isPrivateAdvertiseAddress(address: string): boolean {
+  if (isValidIpv4Literal(address)) {
+    const [a, b] = address.split(".").map(Number) as [number, number];
+    if (a === 10) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    return a === 100 && b >= 64 && b <= 127;
+  }
+  const lower = address.toLowerCase();
+  return lower.startsWith("fc") || lower.startsWith("fd");
+}
+
+function httpPublishPorts(raft: ManagedHaRaftConfig): string[] {
+  // Local API + wait-ready probe this host's loopback; Raft followers proxy
+  // HTTP to HTTPAdvertise (`advertiseAddress:httpPort`), so that same port
+  // must also be published on the advertise address.
+  const loopback = formatPublishedPort(LOOPBACK_HOST, raft.httpPort);
+  if (raft.advertiseAddress === LOOPBACK_HOST) return [loopback];
+  if (!isPrivateAdvertiseAddress(raft.advertiseAddress)) {
+    // The Orchestrator API takes admin actions; never publish it on an
+    // address that is not on a private network.
+    logWarn(
+      "managed",
+      `orchestrator HTTP not published on ${raft.advertiseAddress}: not a private address`,
+    );
+    return [loopback];
+  }
+  return [
+    loopback,
+    formatPublishedPort(raft.advertiseAddress, raft.httpPort),
+  ];
+}
+
 /**
  * Compose document for the per-org Orchestrator Raft group.
  *
@@ -175,11 +507,38 @@ export function renderOrchestratorConf(input: OrchestratorConfInput): string {
  * <path> …` resolves the project without `-p`, which is what lets the Ansible
  * stack unit stop templating a project name it cannot know at converge time.
  */
+/** Compose label carrying {@link orchestratorFilesDigest}. */
+export const ORCHESTRATOR_FILES_DIGEST_LABEL = "tp.managed.config-digest";
+
+/**
+ * Digest of the files Orchestrator reads once at start: its conf and the
+ * Organization CA bundle it trusts through `SSL_CERT_FILE`. Both reach the
+ * container as bind mounts, which compose does not compare, so the digest is
+ * stamped on the service as a label: a changed conf or bundle changes the
+ * compose file, and compose recreates the container. Because the label is
+ * compared with the running container, a reconcile that failed after writing
+ * the files still recreates on the next try. The conf's secrets are long
+ * derived values, so a truncated SHA-256 of them gives nothing away.
+ */
+export async function orchestratorFilesDigest(
+  conf: string,
+  caPem: string | null,
+): Promise<string> {
+  const bytes = new TextEncoder().encode(`${conf}\n--ca--\n${caPem ?? ""}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(
+    digest.subarray(0, 16),
+    (b) => b.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 export function orchestratorCompose(
   identity: SystemComponentDescriptor,
   raft: ManagedHaRaftConfig,
   managedNetwork: string,
   daemonGid?: number | null,
+  topologyAliases: readonly OrchestratorTopologyAlias[] = [],
+  filesDigest?: string,
 ): string {
   const project = orchestratorProject(identity.serviceId);
   assertSafeComposeProjectName(project);
@@ -187,7 +546,7 @@ export function orchestratorCompose(
     raft.advertiseAddress,
     raft.raftPort,
   );
-  const httpPublish = formatPublishedPort("127.0.0.1", raft.httpPort);
+  const httpPublish = httpPublishPorts(raft);
   // Literal `./` prefix — `join(".", …)` normalizes it away and compose then
   // reads the source as a NAMED VOLUME instead of a bind mount.
   const confMountSpec =
@@ -205,25 +564,41 @@ export function orchestratorCompose(
     `      component: ${SYSTEM_MANAGED_HA_COMPONENT}`,
     `      serviceId: ${identity.serviceId}`,
     `      containerName: ${identity.containerName}`,
-    "    restart: unless-stopped",
+    "    restart: always",
     // The image runs as uid 1001 (`mysql`), but the daemon writes the
     // bind-mounted conf and TLS CA as `tp:tp` 0640 (they hold the topology
     // and HTTP-auth passwords, so never world-readable). Joining the
     // daemon's group is what lets the container read them; without it the
     // process dies on start with "Cannot read config file … permission
-    // denied" and `restart: unless-stopped` loops it forever.
+    // denied" and `restart: always` loops it forever.
     ...(typeof daemonGid === "number" && Number.isInteger(daemonGid) &&
         daemonGid > 0
       ? ["    group_add:", `      - ${quoteYamlScalar(String(daemonGid))}`]
       : []),
     "    ports:",
-    `      - ${httpPublish}`,
+    ...httpPublish.map((publish) => `      - ${publish}`),
     `      - ${raftPublish}`,
+    ...(topologyAliases.length > 0
+      ? [
+        "    extra_hosts:",
+        ...topologyAliases.map((alias) => {
+          const entry = quoteYamlScalar(alias.name + ":" + alias.address);
+          return `      - ${entry}`;
+        }),
+      ]
+      : []),
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_SYSTEM}`,
     `      ${LABEL_SYSTEM_COMPONENT}: ${
       quoteYamlScalar(SYSTEM_MANAGED_HA_COMPONENT)
     }`,
+    ...(filesDigest
+      ? [
+        `      ${ORCHESTRATOR_FILES_DIGEST_LABEL}: ${
+          quoteYamlScalar(filesDigest)
+        }`,
+      ]
+      : []),
     "    volumes:",
     "      - orchestrator-data:/var/lib/orchestrator",
     // Quote the WHOLE mount string: a quoted source path immediately
@@ -231,6 +606,8 @@ export function orchestratorCompose(
     // and fails compose's loader ("did not find expected '-'").
     `      - ${quoteYamlScalar(confMountSpec)}`,
     `      - ${quoteYamlScalar(tlsMountSpec)}`,
+    "    environment:",
+    `      SSL_CERT_FILE: ${quoteYamlScalar(ORCHESTRATOR_TLS_CA_PATH)}`,
     "    networks:",
     `      - ${managedNetwork}`,
     "    command:",
@@ -282,6 +659,132 @@ export function hasOrchestratorLabels(
 export type InspectOrchestratorDeps = {
   runDocker?: RunDockerFn;
 };
+
+const ORCHESTRATOR_LIVE_STATES = new Set(["running", "restarting"]);
+const ORCHESTRATOR_STACK_BUSY_MS = 5 * 60_000;
+const orchestratorStackBusyUntil = new Map<string, Map<symbol, number>>();
+const stoppedOrchestratorObservations = new Map<string, number>();
+
+export type OrchestratorReviveOutcome =
+  | "absent"
+  | "busy"
+  | "running"
+  | "stopped"
+  | "started";
+
+function beginOrchestratorStackMutation(layout: LayoutPaths): () => void {
+  const composePath = orchestratorComposePath(layout);
+  const token = Symbol();
+  const active = orchestratorStackBusyUntil.get(composePath) ?? new Map();
+  active.set(token, Date.now() + ORCHESTRATOR_STACK_BUSY_MS);
+  orchestratorStackBusyUntil.set(composePath, active);
+  stoppedOrchestratorObservations.delete(composePath);
+  return () => {
+    active.delete(token);
+    if (active.size === 0) orchestratorStackBusyUntil.delete(composePath);
+  };
+}
+
+async function withOrchestratorStackMutation<T>(
+  layout: LayoutPaths,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  const endStackMutation = beginOrchestratorStackMutation(layout);
+  try {
+    return await mutate();
+  } finally {
+    endStackMutation();
+  }
+}
+
+function isOrchestratorStackBusy(composePath: string): boolean {
+  const active = orchestratorStackBusyUntil.get(composePath);
+  if (!active) return false;
+  const now = Date.now();
+  for (const [token, busyUntil] of active) {
+    if (busyUntil <= now) active.delete(token);
+  }
+  if (active.size > 0) return true;
+  orchestratorStackBusyUntil.delete(composePath);
+  return false;
+}
+
+function clearStoppedOrchestratorObservation(composePath: string): void {
+  stoppedOrchestratorObservations.delete(composePath);
+}
+
+/**
+ * Start a stopped Orchestrator container without recreating a torn-down stack.
+ *
+ * A stack mutation suppresses revival, and a stopped container must remain
+ * stopped for two observer polls. That keeps the exited window during an
+ * intentional teardown or recreate from racing with `compose start`.
+ */
+export async function reviveStoppedOrchestratorContainer(
+  layout: LayoutPaths,
+  run: RunDockerFn = defaultRunDocker,
+): Promise<OrchestratorReviveOutcome> {
+  const composePath = orchestratorComposePath(layout);
+  if (isOrchestratorStackBusy(composePath)) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "busy";
+  }
+  if (!(await pathExists(composePath))) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "absent";
+  }
+
+  let ps: DockerCliResult;
+  try {
+    ps = await run([
+      "compose",
+      "-f",
+      composePath,
+      "ps",
+      "-a",
+      "--format",
+      "json",
+    ]);
+  } catch (err) {
+    clearStoppedOrchestratorObservation(composePath);
+    throw err;
+  }
+  if (!ps.success) {
+    clearStoppedOrchestratorObservation(composePath);
+    throw new Error(ps.stderr || "docker compose ps failed");
+  }
+
+  let stopped = false;
+  for (const entry of parseComposePsEntries(ps.stdout)) {
+    const row = readComposePsContainer(entry, "turbopanel");
+    if (row === null) continue;
+    if (ORCHESTRATOR_LIVE_STATES.has(row.status.toLowerCase())) {
+      clearStoppedOrchestratorObservation(composePath);
+      return "running";
+    }
+    stopped = true;
+  }
+  if (!stopped) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "absent";
+  }
+
+  const observations = (stoppedOrchestratorObservations.get(composePath) ?? 0) +
+    1;
+  stoppedOrchestratorObservations.set(composePath, observations);
+  if (observations < 2) return "stopped";
+  if (isOrchestratorStackBusy(composePath)) {
+    clearStoppedOrchestratorObservation(composePath);
+    return "busy";
+  }
+  clearStoppedOrchestratorObservation(composePath);
+
+  const start = await run(["compose", "-f", composePath, "start"]);
+  if (!start.success) {
+    throw new Error(start.stderr || "orchestrator compose start failed");
+  }
+  return "started";
+}
 
 export async function inspectOrchestratorContainer(
   layout: LayoutPaths,
@@ -340,6 +843,7 @@ export type EnsureOrchestratorOptions = {
    */
   daemonGid?: number;
   stability?: ContainerStabilityOptions;
+  topologyAliases?: readonly OrchestratorTopologyAlias[];
 };
 
 export async function ensureOrchestratorStack(
@@ -378,11 +882,19 @@ export async function ensureOrchestratorStack(
   // container must join to read it (`tp` on a host; the dev user's group in
   // the Vagrant overlay). Read off the file so no `--allow-sys` is needed.
   const daemonGid = options.daemonGid ?? (await Deno.stat(confPath)).gid;
+  // The trust bundle was written just before this (or is absent without
+  // Organization CA material); its digest goes on the compose file with the
+  // conf's, so compose recreates the container when either one changes.
+  const caPem = await readPreviousConfig(
+    join(orchestratorTlsDir(layout), "ca.pem"),
+  );
   const composeYaml = orchestratorCompose(
     descriptor,
     raft,
     managedNetwork,
     daemonGid,
+    options.topologyAliases ?? [],
+    await orchestratorFilesDigest(conf, caPem),
   );
   const restarted = previousCompose !== composeYaml || previousConf !== conf ||
     networkRenamed;
@@ -397,7 +909,10 @@ export async function ensureOrchestratorStack(
     "--remove-orphans",
   ];
   if (networkRenamed) upArgs.push("--force-recreate");
-  const up = await run(upArgs);
+  const up = await withOrchestratorStackMutation(
+    layout,
+    () => run(upArgs),
+  );
   if (!up.success) {
     throw new Error(up.stderr || "orchestrator compose up failed");
   }
@@ -422,13 +937,17 @@ export async function stopOrchestratorStack(
 ): Promise<void> {
   const composePath = orchestratorComposePath(layout);
   if (!(await pathExists(composePath))) return;
-  const down = await run([
-    "compose",
-    "-f",
-    composePath,
-    "down",
-    "--remove-orphans",
-  ]);
+  const down = await withOrchestratorStackMutation(
+    layout,
+    () =>
+      run([
+        "compose",
+        "-f",
+        composePath,
+        "down",
+        "--remove-orphans",
+      ]),
+  );
   if (!down.success) {
     throw new Error(down.stderr || "orchestrator compose down failed");
   }
@@ -440,25 +959,42 @@ export async function restartOrchestratorStack(
 ): Promise<void> {
   const composePath = orchestratorComposePath(layout);
   if (!(await pathExists(composePath))) return;
-  const restart = await run([
-    "compose",
-    "-f",
-    composePath,
-    "restart",
-  ]);
+  const restart = await withOrchestratorStackMutation(
+    layout,
+    () =>
+      run([
+        "compose",
+        "-f",
+        composePath,
+        "restart",
+      ]),
+  );
   if (!restart.success) {
     throw new Error(restart.stderr || "orchestrator compose restart failed");
   }
 }
 
-export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
+async function orchestratorHostPrepRegularFile(
+  path: string,
+): Promise<boolean> {
   try {
-    await Deno.stat(orchestratorApiCnfPath(layout));
-    return true;
+    const info = await Deno.stat(path);
+    return info.isFile;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return false;
     throw err;
   }
+}
+
+/**
+ * True when Ansible finished Orchestrator host prep. The readiness script lives
+ * under root-only `libexec/` (the systemd unit runs it as root); the daemon
+ * checks `host-prep.ok` in the group-readable config dir instead.
+ */
+export async function hostPrepPresent(layout: LayoutPaths): Promise<boolean> {
+  return await orchestratorHostPrepRegularFile(
+    orchestratorHostPrepMarkerPath(layout),
+  );
 }
 
 /** True once `managed.ha.reconcile` has written the daemon-owned compose file. */

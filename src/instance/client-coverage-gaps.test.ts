@@ -9,6 +9,7 @@ import {
   PARKED_BACKOFF_MIN_MS,
 } from "./client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
+import { deployCancels } from "../deploy/deploy-cancel.ts";
 import { PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN } from "../metrics/capability-plan.ts";
 import {
   readCapabilityPlan,
@@ -539,6 +540,114 @@ it({
             undefined,
           );
         } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_INSTANCE_RUNTIME", originalRuntime);
+    }
+  },
+});
+
+it({
+  name:
+    "deploy-cancel answers not_running for an unknown deploy and then cancelling for a live one",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalRuntime = Deno.env.get("TURBOPANEL_INSTANCE_RUNTIME");
+    const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      Deno.env.delete("TURBOPANEL_INSTANCE_RUNTIME");
+      const { signing, authToken, enroll } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      scriptStandardAuth(api, signing, authToken, enroll);
+      api.script(
+        "/api/daemon/v1/deployments/secrets/rehydrate",
+        () =>
+          new Response(JSON.stringify({ deployments: [] }), { status: 200 }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+          httpClient: {} as Deno.HttpClient,
+        });
+        const live = deployCancels.begin("cmd-live");
+        try {
+          client.start();
+          const socket = await waitFor(
+            "deploy-cancel websocket",
+            () => sockets.at(0),
+          );
+          socket.open();
+          await flushMicrotasks();
+
+          socket.receive({
+            type: "deploy-cancel",
+            id: "cancel-1",
+            commandId: "cmd-unknown",
+            at: new Date().toISOString(),
+          });
+          const unknown = await waitFor(
+            "deploy-cancel-result (unknown)",
+            () => lastFrameOfType(socket, "deploy-cancel-result"),
+          );
+          assertEquals(
+            unknown as { id?: string; ok?: boolean; outcome?: string },
+            {
+              ...(unknown as object),
+              id: "cancel-1",
+              ok: true,
+              outcome: "not_running",
+            },
+          );
+
+          socket.receive({
+            type: "deploy-cancel",
+            id: "cancel-2",
+            commandId: "cmd-live",
+            at: new Date().toISOString(),
+          });
+          const running = await waitFor(
+            "deploy-cancel-result (live)",
+            () => {
+              const frame = lastFrameOfType(socket, "deploy-cancel-result");
+              return (frame as { id?: string } | undefined)?.id === "cancel-2"
+                ? frame
+                : undefined;
+            },
+          );
+          assertEquals((running as { outcome?: string }).outcome, "cancelling");
+          assertEquals(live.signal.aborted, true);
+        } finally {
+          deployCancels.end("cmd-live");
           client.stop();
         }
       });

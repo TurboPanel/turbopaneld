@@ -73,10 +73,11 @@ export async function beginManagedCommandIntent(
 export async function endManagedCommandIntent(
   token: ManagedCommandIntentToken | null,
   succeeded: boolean,
+  options?: { keepHeld?: boolean },
 ): Promise<void> {
   if (!token) return;
   await guarded("intent marker refresh", async () => {
-    await endManagedIntent(hookLayout().stateDir, token, succeeded);
+    await endManagedIntent(hookLayout().stateDir, token, succeeded, options);
   });
 }
 
@@ -107,7 +108,8 @@ export async function noteManagedPromoteSucceeded(
 /**
  * After `managed.ha.failover` `recover` succeeded (Orchestrator recover-to or
  * its internal `managed.promote` fallback): the target member on this host
- * is now the primary and must be watched.
+ * is now the primary and must be watched. `repoint` leaves the local member
+ * a replica following the new primary.
  */
 export async function noteManagedFailoverSucceeded(
   payload: ManagedHaFailoverPayload,
@@ -125,8 +127,10 @@ export async function noteManagedFailoverSucceeded(
 
 export async function noteManagedDestroySucceeded(
   payload: ManagedDestroyPayload,
-): Promise<void> {
+): Promise<boolean> {
+  let recordGone = false;
   await guarded("ha-member remove", async () => {
-    await removeManagedHaMember(hookLayout(), payload.managedId);
+    recordGone = await removeManagedHaMember(hookLayout(), payload.managedId);
   });
+  return recordGone;
 }

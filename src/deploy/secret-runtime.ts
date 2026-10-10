@@ -55,6 +55,34 @@ export async function removeSecretTree(
   }
 }
 
+/**
+ * Remove every secret file in the environment's directory that is not in the
+ * current plan (a binding that was detached or a variable that was removed
+ * leaves its file behind otherwise, and so does an interrupted `.tmp` write).
+ * Only regular files and links directly in the directory are removed; the
+ * caller passes the whole environment's plan, never a per-service slice.
+ */
+export async function pruneStaleSecretFiles(
+  layout: { runDir: string },
+  projectId: string,
+  environmentId: string,
+  plan: readonly { relativePath: string }[],
+): Promise<string[]> {
+  const dir = secretHostDirectory(layout, projectId, environmentId);
+  const keep = new Set(plan.map((entry) => entry.relativePath));
+  const removed: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(dir)) {
+      if (entry.isDirectory || keep.has(entry.name)) continue;
+      await Deno.remove(join(dir, entry.name));
+      removed.push(entry.name);
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return removed;
+}
+
 export async function plannedSecretsMissing(
   layout: { runDir: string },
   projectId: string,
@@ -159,7 +187,7 @@ function plaintextKey(
   return `${entry.composeServiceName ?? ""}::${entry.key}`;
 }
 
-async function decryptEnvelopes(
+export async function decryptEnvelopes(
   decryptSecrets: DecryptSecretsFn,
   envelopes: readonly string[],
 ): Promise<(string | null)[]> {

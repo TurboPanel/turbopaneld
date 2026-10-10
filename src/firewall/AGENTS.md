@@ -137,4 +137,17 @@ The control plane's outside probe that sends the confirm
 (`fw-derived-rules`); the
 installer's bootstrap ruleset (`fw-installer-bootstrap`; the ufw/firewalld
 removal itself is done — `orchestration/roles/daemon-prereqs/tasks/firewall-takeover.yml`,
-on every converge, `fw-takeover`); the panel-side derivation of a managed public listener's exact peer sources (the daemon fold in `fold.ts` is built and inert until the panel sends that rule; TurboFabric's `TP-FORWARD` stays its own chain).
+on every converge, `fw-takeover`). TurboFabric's `TP-FORWARD` stays its own chain.
+
+## Stage 6 with the panel's rule (proven in a container, 2026-10-05)
+
+The control plane derives a managed public listener's rule with the cluster's
+exact peer servers plus its cross-host consumer servers (turbopanel
+`features/firewall/facts.ts`, `reach: "peers"`, `destinations: [bind]`): the
+same sources `resolveManagedPublicAllowedSources` gives the legacy chain, never
+"all servers in the organization". On a real kernel the fold removes
+`TP-MANAGED-PUB` once that rule is loaded and confirmed, and the next managed
+apply does not rebuild it; a rule missing one source keeps the legacy chain.
+Proof: `../testing/firewall-fold-kernel-proof.ts` (container command in its
+header); the captured `iptables -S` is pinned by `fold.kernel.test.ts`. On a
+host it only happens once apply is on for that server.

@@ -57,9 +57,40 @@ function dockerResult(success: boolean, stderr = ""): DockerCliResult {
   return { success, code: success ? 0 : 1, stdout: "", stderr };
 }
 
-function volumeSource(): CopyBackupSource {
-  return { copyId: COPY, copyProvider: "docker", volumeName: "shop_uploads" };
+/** A `docker volume inspect` answer: an ordinary local volume carrying `labels`. */
+function inspectResult(
+  labels: Record<string, string> = {},
+  extra: Record<string, unknown> = {},
+): DockerCliResult {
+  return {
+    success: true,
+    code: 0,
+    stdout: JSON.stringify({ Driver: "local", Labels: labels, ...extra }),
+    stderr: "",
+  };
 }
+
+function volumeSource(): CopyBackupSource {
+  return {
+    copyId: COPY,
+    copyProvider: "docker",
+    volumeName: STORAGE,
+    storageId: STORAGE,
+  };
+}
+
+const PATH_SOURCE: CopyBackupSource = {
+  copyId: COPY,
+  copyProvider: "path",
+  hostPath: "/srv/users/shop/volumes/uploads",
+  ownerUsername: "shop",
+};
+
+/** A tree with no links, whatever the path. */
+const NO_LINKS = {
+  lstat: () => Promise.resolve({ isSymlink: false }),
+  realPath: (path: string) => Promise.resolve(path),
+};
 
 /** Records docker calls; the archive writes `bytes` unless `archiveError` is set. */
 function fakeDeps(
@@ -70,11 +101,16 @@ function fakeDeps(
   return {
     runDocker: (args) => {
       calls.push(args);
-      const success = args[0] === "volume"
-        ? options.volumeExists ?? true
-        : true;
-      return Promise.resolve(dockerResult(success));
+      if (args[0] === "volume") {
+        return Promise.resolve(
+          options.volumeExists === false
+            ? dockerResult(false)
+            : inspectResult(),
+        );
+      }
+      return Promise.resolve(dockerResult(true));
     },
+    guard: NO_LINKS,
     runArchive: async (argv, destination) => {
       calls.push(argv);
       const writer = destination.getWriter();
@@ -97,7 +133,7 @@ async function listNames(dir: string): Promise<string[]> {
 test("resolveCopyMount mounts a docker copy by volume name", () => {
   assertEquals(resolveCopyMount(FIXED_LAYOUT, volumeSource()), {
     type: "volume",
-    name: "shop_uploads",
+    name: STORAGE,
   });
   assertThrows(
     () =>
@@ -113,6 +149,7 @@ test("resolveCopyMount accepts a tenant directory and the default storage path",
       copyId: COPY,
       copyProvider: "path",
       hostPath: "/srv/users/shop/volumes/uploads",
+      ownerUsername: "shop",
     }),
     { type: "bind", path: "/srv/users/shop/volumes/uploads" },
   );
@@ -144,6 +181,7 @@ test("resolveCopyMount refuses host paths outside the allowed roots", () => {
         copyId: COPY,
         copyProvider: "path",
         hostPath,
+        ownerUsername: "shop",
       })
     );
   }
@@ -176,6 +214,12 @@ test("the archive runs offline, read-only and from the pinned image", () => {
     "tar",
     "-C",
     "/src",
+    "--exclude",
+    "./.tp-restore-stage",
+    "--exclude",
+    "./.tp-restore-old",
+    "--exclude",
+    "./.tp-restore-done",
     "-czf",
     "-",
     ".",
@@ -204,7 +248,7 @@ test("artifact paths refuse unsafe ids", () => {
 
 test("createCopyBackupArtifact writes a 0600 checksummed archive and prunes its directory", async () => {
   await withLayout(async (layout) => {
-    const bytes = new TextEncoder().encode("tar-bytes");
+    const bytes = new Uint8Array(2048).fill(7);
     const calls: string[][] = [];
     // Sequential on purpose: each run prunes what the previous ones wrote.
     const artifacts = await mapSequential(
@@ -251,7 +295,7 @@ test("a missing volume is refused before the helper runs (docker would create it
       Error,
       "not found on this host",
     );
-    assertEquals(calls.at(-1), ["volume", "inspect", "shop_uploads"]);
+    assertEquals(calls.at(-1)?.slice(0, 2), ["volume", "inspect"]);
     assertEquals(calls.some((args) => args[0] === "run"), false);
   });
 });
@@ -384,5 +428,197 @@ test("a failed pull errors clearly and leaves no artifact or directory", async (
     await assertRejects(() =>
       Deno.stat(join(layout.backupDir, "copies", COPY))
     );
+  });
+});
+
+test("an explicit path must be inside the named site owner's volumes directory", () => {
+  for (
+    const [hostPath, ownerUsername] of [
+      ["/srv/users/victim/volumes/uploads", "shop"],
+      ["/srv/users/shop/volumes", "shop"],
+      ["/srv/users/shop/.ssh", "shop"],
+      ["/srv/users/shopper/volumes/x", "shop"],
+    ] as const
+  ) {
+    assertThrows(
+      () =>
+        resolveCopyMount(FIXED_LAYOUT, {
+          copyId: COPY,
+          copyProvider: "path",
+          hostPath,
+          ownerUsername,
+        }),
+      Error,
+      "volumes directory",
+    );
+  }
+  // No owner named: refused as well.
+  assertThrows(() =>
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      hostPath: "/srv/users/shop/volumes/uploads",
+    })
+  );
+});
+
+test("a backup refuses a symlinked directory, a symlinked parent and a foreign volume", async () => {
+  await withLayout(async (layout) => {
+    const calls: string[][] = [];
+    const links = new Set(["/srv/users/shop/volumes/uploads"]);
+    const symlinkLeaf: CopyBackupDeps = {
+      ...fakeDeps(new Uint8Array(2048), calls),
+      guard: {
+        lstat: (p) => Promise.resolve({ isSymlink: links.has(p) }),
+        realPath: (p) => Promise.resolve(p),
+      },
+    };
+    await assertRejects(
+      () =>
+        createCopyBackupArtifact(
+          layout,
+          { source: PATH_SOURCE, backupId: "bk_1" },
+          symlinkLeaf,
+        ),
+      Error,
+      "symbolic link",
+    );
+    links.clear();
+    links.add("/srv/users/shop/volumes");
+    await assertRejects(
+      () =>
+        createCopyBackupArtifact(
+          layout,
+          { source: PATH_SOURCE, backupId: "bk_1" },
+          symlinkLeaf,
+        ),
+      Error,
+      "symbolic link",
+    );
+    // Another owner's directory under a valid-looking source.
+    await assertRejects(
+      () =>
+        createCopyBackupArtifact(
+          layout,
+          {
+            source: { ...PATH_SOURCE, ownerUsername: "intruder" },
+            backupId: "bk_1",
+          },
+          symlinkLeaf,
+        ),
+      Error,
+      "volumes directory",
+    );
+    // A volume that is neither this storage's nor the project's.
+    const foreign: CopyBackupDeps = {
+      ...fakeDeps(new Uint8Array(2048), calls),
+      runDocker: () => Promise.resolve(inspectResult()),
+    };
+    await assertRejects(
+      () =>
+        createCopyBackupArtifact(
+          layout,
+          {
+            source: { ...volumeSource(), volumeName: "someone_elses_data" },
+            backupId: "bk_1",
+          },
+          foreign,
+        ),
+      Error,
+      "does not belong",
+    );
+    assertEquals(calls.some((args) => args[0] === "run"), false);
+  });
+});
+
+test("a volume backed by a host path, or by another driver, is refused", async () => {
+  await withLayout(async (layout) => {
+    for (
+      const answer of [
+        inspectResult({}, {
+          Options: { type: "none", o: "bind", device: "/etc" },
+        }),
+        inspectResult({}, { Driver: "nfs-plugin" }),
+      ]
+    ) {
+      await assertRejects(
+        () =>
+          createCopyBackupArtifact(
+            layout,
+            { source: volumeSource(), backupId: "bk_1" },
+            {
+              ...fakeDeps(new Uint8Array(2048), []),
+              runDocker: () => Promise.resolve(answer),
+            },
+          ),
+        Error,
+      );
+    }
+  });
+});
+
+test("an externally named volume is accepted only with the project's compose label", async () => {
+  await withLayout(async (layout) => {
+    const source: CopyBackupSource = {
+      ...volumeSource(),
+      volumeName: "legacy_data",
+      composeProject: "tp-proj",
+    };
+    const withLabels = (labels: Record<string, string>): CopyBackupDeps => ({
+      ...fakeDeps(new Uint8Array(2048), []),
+      runDocker: (args) =>
+        Promise.resolve(
+          args[0] === "volume" ? inspectResult(labels) : dockerResult(true),
+        ),
+    });
+    await assertRejects(
+      () =>
+        createCopyBackupArtifact(
+          layout,
+          { source, backupId: "bk_1" },
+          withLabels({}),
+        ),
+      Error,
+      "does not belong",
+    );
+    await assertRejects(
+      () =>
+        createCopyBackupArtifact(
+          layout,
+          { source, backupId: "bk_1" },
+          withLabels({ "com.docker.compose.project": "other" }),
+        ),
+      Error,
+      "does not belong",
+    );
+    const done = await createCopyBackupArtifact(
+      layout,
+      { source, backupId: "bk_1" },
+      withLabels({ "com.docker.compose.project": "tp-proj" }),
+    );
+    assertEquals(done.sizeBytes, 2048);
+  });
+});
+
+test("an empty archive is kept but never counts as a good copy or prunes the good ones", async () => {
+  await withLayout(async (layout) => {
+    const calls: string[][] = [];
+    const run = (backupId: string, size: number) =>
+      createCopyBackupArtifact(
+        layout,
+        { source: volumeSource(), backupId, retentionKeep: 1 },
+        fakeDeps(new Uint8Array(size).fill(1), calls),
+      );
+    await run("bk_1", 4096);
+    const empty = await run("bk_2", 45);
+    assertEquals(empty.pruned, []);
+    const dir = join(layout.backupDir, "copies", COPY);
+    assertEquals(await listNames(dir), ["bk_1.tar.gz", "bk_2.tar.gz"]);
+    // A second empty run still leaves the good one alone.
+    assertEquals((await run("bk_3", 45)).pruned, []);
+    // A good run now prunes only down to the newest good one.
+    const good = await run("bk_4", 4096);
+    assert(good.pruned.includes("bk_1"));
+    assert(!good.pruned.includes("bk_4"));
   });
 });

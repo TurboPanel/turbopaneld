@@ -5,6 +5,13 @@ machine-key / runtime inventory probes attached on hello and refreshed by
 change-detected heartbeats.
 
 - **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
+- **Host resources** — `src/host/host-inventory.ts` (`readHostResources`,
+  process-cached). Static capacity for hello: CPU sockets, GPUs, memory /
+  swap `totalBytes`, and optional `memory.pageSizeBytes` (positive integer
+  bytes from `getconf PAGESIZE`, Linux only; omitted on other OS or when
+  unreadable / non-positive). Spawn is behind `HostInventoryIo.getconfPagesize`
+  so tests never need a live host.
+- **Kernel features** — `src/host/kernel-features.ts` is the typed registry mirroring `orchestration/scripts/tp-kernel-features` (`pi-4k-pagesize`); the daemon never calls the helper. Commands printed to a person use the absolute path `/opt/turbopanel/share/orchestration/scripts/tp-orchestrate` (`tp-orchestrate` is not on PATH). The installer reboots only on a first install: it records whether `server.id` existed and when the run began, and a reboot needs fresh enrolment files (`server.id`, `server-key-id`, the saved server key). `undo` only removes a line this tool added (marker in `/var/lib/turbopanel-kernel`).
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
   read; carried on hello and change-detected heartbeats with `ips` from
@@ -14,7 +21,12 @@ change-detected heartbeats.
   `readDefaultRouteInterfaces()` (parsed from `/proc/net/route` and
   `/proc/net/ipv6_route`) and the addresses on the default-route NIC are marked
   `preferred`, so a multi-homed host advertises the address a peer would
-  actually reach it on. **These are load-bearing, not decorative:** whenever the
+  actually reach it on. `readHostInterfaceLinkStates()` (two sysfs reads per
+  NIC: `operstate`, then `carrier`) stamps each address with `link: 'up' | 'down'`,
+  because `Deno.networkInterfaces()` keeps listing a static address after its
+  cable is pulled; the control plane uses it to move traffic off a dead network
+  (absent means "unknown", read as up). A link flip rides the existing
+  change-detected heartbeat. **These are load-bearing, not decorative:** whenever the
   daemon reaches the control plane through a reverse proxy, a Cloudflare Tunnel,
   or a forwarded port, the peer address the control plane sees is the proxy's,
   and this list is what it shows instead (`../turbopanel/AGENTS.md` → Caddy →
@@ -35,7 +47,12 @@ change-detected heartbeats.
   https://turbopanel.io/docs/architecture/turbofabric-path-model — no daemon
   behavior change in this slice. `{ enabled: false }`
   tears down `tp0`, routed bridges, `TP-FORWARD`, keys, and local state — not a
-  no-op. The daemon owns apply (no Ansible round-trip): it persists the private
+  no-op. It removes every fabric bridge (`tpn_<network uuid>`, never another
+  name): the ones `state.json` names and any other on the host, e.g. from a
+  half-finished first enable. A bridge it cannot remove yet is recorded in
+  `network/teardown-pending.json` (never `state.json`, whose presence means
+  enabled) and retried on the next teardown and at daemon start while fabric
+  is off; an enable that uses the bridge again takes it off that list. The daemon owns apply (no Ansible round-trip): it persists the private
   key at `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
   `fabricNetworkDir`), writes mode-0600 `tp0.conf` (PSK plaintext inlined, temp
   `psk/` files deleted after apply), `wg syncconf`, enables `wg-quick@tp0` for

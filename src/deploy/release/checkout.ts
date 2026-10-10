@@ -28,6 +28,7 @@
 
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
+import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 
@@ -56,6 +57,8 @@ export type GitRunner = (
   cwd: string,
   env: Record<string, string>,
   onOutput?: ReleaseOutputHandler,
+  /** Kills git when aborted (a cancelled deploy). */
+  signal?: AbortSignal,
 ) => Promise<GitRunResult>;
 
 export type CheckoutParams = {
@@ -93,6 +96,11 @@ export type CheckoutParams = {
   redactSummary?: CommandSummaryRedactor;
   /** Test seam — defaults to spawning real `git`. */
   runGit?: GitRunner;
+  /**
+   * Cancel signal of the deploy. Aborting it kills the running git process and
+   * makes the checkout throw `DeployCancelledError`.
+   */
+  signal?: AbortSignal;
 };
 
 export type CheckoutResult = {
@@ -130,17 +138,52 @@ export const DEFAULT_HTTPS_CREDENTIAL_USERNAME = "x-access-token";
 function askpassScript(
   credentialValue: string,
   username: string,
+  host: string,
 ): string {
   const escaped = credentialValue.replaceAll("'", `'"'"'`);
   const escapedUsername = username.replaceAll("'", `'"'"'`);
   return [
     "#!/bin/sh",
+    // Answer only a prompt that names the host this checkout was minted for
+    // (`Username for 'https://host'` / `Password for 'https://user@host'`).
+    // A redirect to another host makes git ask again under that host's name;
+    // that prompt gets no credential.
+    'case "$1" in',
+    `  *"//${host}'"*|*"@${host}'"*) ;;`,
+    "  *) exit 1 ;;",
+    "esac",
     'case "$1" in',
     `  Username*) printf '%s' '${escapedUsername}' ;;`,
     `  *) printf '%s' '${escaped}' ;;`,
     "esac",
     "",
   ].join("\n");
+}
+
+const ASKPASS_HOST_RE = /^[a-z0-9.-]+(:\d{1,5})?$|^\[[0-9a-f:.]+\](:\d{1,5})?$/;
+
+/**
+ * The `host[:port]` git names in its credential prompts for `cloneUrl`, or
+ * `null` when the URL is not http(s) at all (a local path, `file://`): git
+ * never prompts there, so there is nothing a credential could be offered to.
+ *
+ * Throws for an http(s) URL with no usable host: a credential is never written
+ * for a clone whose destination cannot be pinned. The charset check also keeps
+ * the value safe to place inside the generated shell script.
+ */
+export function askpassHostForCloneUrl(cloneUrl: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(cloneUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  const host = parsed.host.toLowerCase();
+  if (!ASKPASS_HOST_RE.test(host)) {
+    throw new Error("clone credential refused: clone url has no valid host");
+  }
+  return host;
 }
 
 /** Payload-supplied user, else the HTTPS default. */
@@ -235,10 +278,16 @@ export async function writeCheckoutCredentialFiles(
     await Deno.writeTextFile(knownHostsPath, "", { mode: 0o600 });
     return { askpassPath: null, sshKeyPath, knownHostsPath };
   }
+  const askpassHost = askpassHostForCloneUrl(params.cloneUrl);
+  if (askpassHost === null) return NO_CREDENTIAL_FILES;
   const askpassPath = join(params.scratchDir, ".git-askpass");
   await Deno.writeTextFile(
     askpassPath,
-    askpassScript(params.credential, resolveCredentialUsername(params)),
+    askpassScript(
+      params.credential,
+      resolveCredentialUsername(params),
+      askpassHost,
+    ),
     { mode: 0o600 },
   );
   await Deno.chmod(askpassPath, 0o700);
@@ -290,9 +339,11 @@ async function runGit(
   cwd: string,
   env: Record<string, string>,
   onOutput?: ReleaseOutputHandler,
+  cancelSignal?: AbortSignal,
 ): Promise<GitRunResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CHECKOUT_TIMEOUT_MS);
+  const signal = withCancelSignal(controller.signal, cancelSignal);
   try {
     const child = new Deno.Command(GIT_BIN, {
       args,
@@ -302,7 +353,7 @@ async function runGit(
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
-      signal: controller.signal,
+      signal,
     }).spawn();
     const [status, stdout, stderr] = await Promise.all([
       child.status,
@@ -400,7 +451,16 @@ export async function checkoutRelease(
   params: CheckoutParams,
 ): Promise<CheckoutResult> {
   const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
-  const git = params.runGit ?? runGit;
+  const runner = params.runGit ?? runGit;
+  // Every git call is followed by a cancel check: a cancelled deploy kills the
+  // running git (via the signal) and stops here instead of reading its failure
+  // as a clone error.
+  const git: GitRunner = async (args, cwd, env, onOutput) => {
+    throwIfAborted(params.signal, "before the source was fetched");
+    const result = await runner(args, cwd, env, onOutput, params.signal);
+    throwIfAborted(params.signal, "while the source was being fetched");
+    return result;
+  };
   const workingDir = params.checkoutDir ?? join(params.scratchDir, "source");
   const credentialFiles = await writeCheckoutCredentialFiles(params);
   const env = gitEnvironment(credentialFiles, params.scratchDir);

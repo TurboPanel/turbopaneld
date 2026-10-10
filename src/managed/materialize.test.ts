@@ -6,6 +6,7 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   materializeManagedState,
   normalizeManagedFileOwnership,
+  normalizeManagedSecretOwnership,
 } from "./materialize.ts";
 import { managedConfigDir, managedTlsDir } from "./engine-paths.ts";
 import { ensureManagedSelfSignedCert } from "./tls.ts";
@@ -434,4 +435,61 @@ test("normalizeManagedFileOwnership formats multi-line verification failures as 
       true,
     );
   });
+});
+
+const OK = { success: true, code: 0, stdout: "", stderr: "" };
+
+Deno.test("normalizeManagedSecretOwnership hands the file over in a locked-down helper and verifies as the engine user", async () => {
+  const calls: string[][] = [];
+  await normalizeManagedSecretOwnership(
+    "postgres:18",
+    "/state/managed/x",
+    "postgres",
+    "postgres",
+    (args) => {
+      calls.push(args);
+      return Promise.resolve(OK);
+    },
+  );
+  assertEquals(calls.length, 2);
+  const [chown, verify] = calls as [string[], string[]];
+  const script = chown[chown.length - 1]!;
+  assertEquals(
+    script.includes("chmod 0400 /managed/secrets/root-password"),
+    true,
+  );
+  assertEquals(script.includes("USER_NAME='postgres'"), true);
+  // Only the secrets directory, no whole-root mount, no network, minimal caps.
+  assertEquals(
+    chown.includes("/state/managed/x/secrets:/managed/secrets"),
+    true,
+  );
+  assertEquals(chown.some((a) => a === "/state/managed/x:/managed"), false);
+  assertEquals(chown.join(" ").includes("--network none"), true);
+  assertEquals(
+    chown.join(" ").includes(
+      "--cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_READ_SEARCH",
+    ),
+    true,
+  );
+  assertEquals(chown.join(" ").includes("no-new-privileges"), true);
+  assertEquals(chown.includes("--privileged"), false);
+  assertEquals(verify.join(" ").includes("--user postgres:postgres"), true);
+  assertEquals(verify.join(" ").includes("--network none"), true);
+  assertEquals(verify[verify.length - 1]!.includes("test -r"), true);
+});
+
+Deno.test("normalizeManagedSecretOwnership fails closed when the engine user cannot read the file", async () => {
+  let n = 0;
+  await assertRejects(
+    () =>
+      normalizeManagedSecretOwnership("img", "/s", "u", "g", () => {
+        n++;
+        return Promise.resolve(
+          n === 1 ? OK : { ...OK, success: false, stderr: "denied" },
+        );
+      }),
+    Error,
+    "verification failed",
+  );
 });

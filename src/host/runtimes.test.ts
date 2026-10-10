@@ -3,7 +3,6 @@ import {
   parsePhpExtensionsFromModsAvailable,
   parsePhpSeriesFromBinaries,
   readHostRuntimes,
-  RUNTIME_ENTITLEMENT_GID_BAND,
 } from "./runtimes.ts";
 
 const test = Deno.test.bind(Deno);
@@ -108,15 +107,6 @@ function dirEntry(name: string): Deno.DirEntry {
     isSymlink: false,
   };
 }
-
-test("RUNTIME_ENTITLEMENT_GID_BAND re-exports the registry band", () => {
-  assertEquals(typeof RUNTIME_ENTITLEMENT_GID_BAND.min, "number");
-  assertEquals(typeof RUNTIME_ENTITLEMENT_GID_BAND.max, "number");
-  assertEquals(
-    RUNTIME_ENTITLEMENT_GID_BAND.min <= RUNTIME_ENTITLEMENT_GID_BAND.max,
-    true,
-  );
-});
 
 test("parsePhpExtensionsFromModsAvailable caps, dedupes, and ignores junk", () => {
   const overflow = Array.from({ length: 130 }, (_, i) => `e${i}.ini`);
@@ -254,5 +244,23 @@ test("readHostRuntimes reports php-fpm series and mods-available extensions", ()
   } finally {
     Deno.readDirSync = originalReadDir;
     Deno.removeSync(dir, { recursive: true });
+  }
+});
+
+test("readHostRuntimes reports a vendored Deno series once current resolves", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${dir}/deno-app/2`, { recursive: true });
+    assertEquals(readHostRuntimes(dir)?.deno, undefined);
+    await Deno.mkdir(`${dir}/deno-app/2/v2.9.7`, { recursive: true });
+    await Deno.symlink(
+      `${dir}/deno-app/2/v2.9.7`,
+      `${dir}/deno-app/2/current`,
+    );
+    assertEquals(readHostRuntimes(dir)?.deno, { series: ["2"] });
+    // Node and Deno are reported apart.
+    assertEquals(readHostRuntimes(dir)?.node, undefined);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

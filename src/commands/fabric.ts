@@ -16,11 +16,15 @@
  * local-bridge ↔ remote peer prefix (non-/32) forwarding.
  */
 import { encodeHex } from "@std/encoding/hex";
+import { fabricAllowedIpsPolicyError } from "./fabric-allowed-ips.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
+import { collectServerIps } from "../host/server-addresses.ts";
+import type { ServerReportedIp } from "../contracts/server-reported-ip.ts";
+import { stampObservedPeerInterfaces } from "./fabric-peer-interface.ts";
 import { fabricNetworkDir, resolveLayout } from "../paths/layout.ts";
 import {
   type FabricPeerHealth,
@@ -53,8 +57,13 @@ const FABRIC_SYSCTL_CONTENTS = "net.ipv4.ip_forward=1\n";
 const WG_QUICK_UNIT = `wg-quick@${FABRIC_INTERFACE_NAME}`;
 const WG_QUICK_CONF_PATH = `/etc/wireguard/${FABRIC_INTERFACE_NAME}.conf`;
 const PREFLIGHT_TIMEOUT_MS = 5_000;
-/** ~3× `PersistentKeepalive = 25` — handshake inside this window is healthy. */
-export const FABRIC_HANDSHAKE_HEALTHY_MS = 75_000;
+/**
+ * WireGuard renews a handshake after 120 s of traffic (REKEY_AFTER_TIME) and
+ * declares a session dead after 180 s (REJECT_AFTER_TIME); keepalive packets
+ * are not handshakes. A handshake up to 180 s old (plus a margin for the
+ * poll interval) therefore still means a working tunnel.
+ */
+export const FABRIC_HANDSHAKE_HEALTHY_MS = 195_000;
 const FABRIC_PROBE_KEEPALIVE = 25;
 const WG_DUMP_ENDPOINT_NONE = "(none)";
 
@@ -99,6 +108,7 @@ let networkDirOverride: string | null = null;
 let runOverride: FabricRunFn | null = null;
 let enableIpForwardingOverride: (() => Promise<void>) | null = null;
 let skipRealSyscalls = false;
+let localAddressesOverride: (() => ServerReportedIp[]) | null = null;
 
 /** Test-only: treat this directory as `<daemonStateDir>/network/`. */
 export function setFabricNetworkDirForTests(dir: string | null): void {
@@ -125,7 +135,15 @@ export function setFabricSkipRealSyscallsForTests(skip: boolean): void {
   skipRealSyscalls = skip;
 }
 
+/** Test-only local address list for the endpoint-to-NIC match. */
+export function setFabricLocalAddressesForTests(
+  fn: (() => ServerReportedIp[]) | null,
+): void {
+  localAddressesOverride = fn;
+}
+
 export function resetFabricTestOverrides(): void {
+  localAddressesOverride = null;
   networkDirOverride = null;
   runOverride = null;
   enableIpForwardingOverride = null;
@@ -315,6 +333,75 @@ function privateKeyPath(networkDir: string): string {
 
 function stateFilePath(networkDir: string): string {
   return join(networkDir, "state.json");
+}
+
+/**
+ * Bridges a teardown could not remove yet (containers still attached, or a
+ * Docker failure). Kept
+ * apart from `state.json`, whose presence means "fabric enabled" to the boot
+ * restore.
+ */
+function teardownPendingPath(networkDir: string): string {
+  return join(networkDir, "teardown-pending.json");
+}
+
+async function readTeardownPending(networkDir: string): Promise<string[]> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(teardownPendingPath(networkDir));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    const names = typeof parsed === "object" && parsed !== null
+      ? (parsed as { networks?: unknown }).networks
+      : undefined;
+    return Array.isArray(names)
+      ? names.filter((name): name is string =>
+        typeof name === "string" && isFabricBridgeName(name)
+      )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeTeardownPending(
+  networkDir: string,
+  names: readonly string[],
+): Promise<void> {
+  if (names.length === 0) {
+    await removePathBestEffort(teardownPendingPath(networkDir));
+    return;
+  }
+  await Deno.mkdir(networkDir, { recursive: true });
+  await writeMode600(
+    teardownPendingPath(networkDir),
+    `${JSON.stringify({ networks: names })}\n`,
+  );
+}
+
+/**
+ * Remove every TurboFabric bridge this host still has: the ones `state.json`
+ * names, the ones an earlier teardown left behind, and any other `tpn_*`
+ * network. What cannot be removed yet is recorded for the next attempt.
+ */
+async function removeAllFabricBridges(
+  networkDir: string,
+  stateNetworks: readonly string[],
+): Promise<string[]> {
+  const names = [
+    ...new Set([
+      ...stateNetworks,
+      ...(await readTeardownPending(networkDir)),
+      ...(await listFabricDockerNetworks()),
+    ]),
+  ];
+  const left = await removeFabricDockerNetworks(names);
+  await writeTeardownPending(networkDir, left);
+  return left;
 }
 
 function wgConfPath(networkDir: string): string {
@@ -748,19 +835,62 @@ export async function ensureFabricDockerNetworks(
 }
 
 /**
- * Best-effort `docker network rm`. Missing networks and active-endpoint
- * failures are logged and ignored (retried on the next reconcile).
+ * Best-effort `docker network rm`; never throws. A missing network counts as
+ * removed. Returns the names still present (containers still attached, or
+ * any other failure, which is logged) so the caller can retry them later.
  */
 export async function removeFabricDockerNetworks(
   names: readonly string[],
-): Promise<void> {
+): Promise<string[]> {
+  const left: string[] = [];
   await forEachSequential(names, async (name) => {
-    await runTeardownBestEffort(
-      "docker",
-      ["network", "rm", name],
-      (result) => isMissingDeviceText(result) || isActiveEndpointsText(result),
+    const result = await runHost("docker", ["network", "rm", name]);
+    if (result.success || isMissingDeviceText(result)) return;
+    left.push(name);
+    if (isActiveEndpointsText(result)) return;
+    logWarn(
+      "commands",
+      `TurboFabric teardown docker network rm ${name}: ${
+        result.stderr || result.stdout || `exit ${result.code}`
+      }`,
     );
   });
+  return left;
+}
+
+/** Routed TurboFabric bridges are named `tpn_*` (see commands-contracts). */
+const FABRIC_BRIDGE_PREFIX = "tpn_";
+
+/**
+ * A routed fabric bridge's exact name: `tpn_<network uuid>` (the control
+ * plane's composeNetworkHostName). An operator may register a Docker network
+ * that merely starts with `tpn_`; teardown never touches one.
+ */
+const FABRIC_BRIDGE_NAME_RE =
+  /^tpn_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+
+export function isFabricBridgeName(name: string): boolean {
+  return FABRIC_BRIDGE_NAME_RE.test(name);
+}
+
+/**
+ * The `tpn_*` Docker networks on this host, whatever `state.json` says: a
+ * first enable that failed half way creates bridges before `state.json` is
+ * written. Best effort: an unreadable list is empty.
+ */
+async function listFabricDockerNetworks(): Promise<string[]> {
+  const listed = await runHost("docker", [
+    "network",
+    "ls",
+    "--filter",
+    `name=${FABRIC_BRIDGE_PREFIX}`,
+    "--format",
+    "{{.Name}}",
+  ]);
+  if (!listed.success) return [];
+  return listed.stdout.split("\n").map((line) => line.trim()).filter(
+    isFabricBridgeName,
+  );
 }
 
 async function ensureIptablesChain(name: string): Promise<void> {
@@ -1275,12 +1405,30 @@ export function getLastObservedFabricPeers(): FabricReconcileObservedPeer[] {
   return lastObservedFabricPeers;
 }
 
+/**
+ * Local addresses for the endpoint-to-NIC match; none when the host cannot
+ * list them, or when a test runner is installed (the real NICs of the machine
+ * running the tests must not leak into observed peers).
+ */
+function observedPeerAddresses(): ServerReportedIp[] {
+  if (localAddressesOverride) return localAddressesOverride();
+  if (runOverride !== null || skipRealSyscalls) return [];
+  try {
+    return collectServerIps();
+  } catch {
+    return [];
+  }
+}
+
 async function collectFabricPeerState(): Promise<
   FabricReconcileObservedPeer[]
 > {
   const dump = await runHost("wg", ["show", FABRIC_INTERFACE_NAME, "dump"]);
   if (!dump.success) return [];
-  const peers = stampObservedPeerHealth(parseWgDumpPeers(dump.stdout));
+  const peers = stampObservedPeerInterfaces(
+    stampObservedPeerHealth(parseWgDumpPeers(dump.stdout)),
+    observedPeerAddresses(),
+  );
   lastObservedFabricPeers = peers;
   return peers;
 }
@@ -1433,7 +1581,8 @@ async function handleFabricTeardown(
     ["link", "delete", FABRIC_INTERFACE_NAME],
     isMissingDeviceText,
   );
-  await removeFabricDockerNetworks(
+  const left = await removeAllFabricBridges(
+    networkDir,
     (state?.networks ?? []).map((network) => network.name),
   );
   await teardownIptables();
@@ -1446,7 +1595,49 @@ async function handleFabricTeardown(
   await removePathBestEffort(applyStampPath(networkDir));
   await removePathBestEffort(stateFilePath(networkDir));
 
+  if (left.length > 0) {
+    return {
+      summary: `TurboFabric torn down; not removed yet, retried later: ${
+        left.join(", ")
+      }`,
+    };
+  }
   return { summary: "TurboFabric torn down" };
+}
+
+/**
+ * An enable that wants a bridge again takes it off the teardown list, so a
+ * later retry never removes a bridge the running fabric uses.
+ */
+async function forgetPendingTeardown(
+  networkDir: string,
+  desired: ReadonlySet<string>,
+): Promise<void> {
+  const pending = await readTeardownPending(networkDir);
+  const kept = pending.filter((name) => !desired.has(name));
+  if (kept.length !== pending.length) {
+    await writeTeardownPending(networkDir, kept);
+  }
+}
+
+/**
+ * Daemon start with fabric off: retry the bridges an earlier teardown could
+ * not remove (their containers may be gone now). Never throws.
+ */
+async function retryPendingFabricTeardown(networkDir: string): Promise<void> {
+  try {
+    const pending = await readTeardownPending(networkDir);
+    if (pending.length === 0) return;
+    const left = await removeFabricDockerNetworks(pending);
+    await writeTeardownPending(networkDir, left);
+  } catch (err) {
+    logWarn(
+      "commands",
+      `TurboFabric leftover bridge cleanup failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 async function applyEnabledFabric(
@@ -1470,6 +1661,7 @@ async function applyEnabledFabric(
     .map((network) => network.name)
     .filter((name) => !desired.has(name));
   await removeFabricDockerNetworks(stale);
+  await forgetPendingTeardown(networkDir, desired);
   await reconcileFabricForwarding(
     payload.networks ?? [],
     payload.peers,
@@ -1481,6 +1673,8 @@ async function handleFabricEnable(
   payload: FabricReconcileEnabledPayload,
   deps?: FabricHandlerDeps,
 ): Promise<FabricReconcileResult> {
+  const policyError = fabricAllowedIpsPolicyError(payload);
+  if (policyError) throw new Error(policyError);
   const networkDir = resolveNetworkDir();
   const publicKey = await ensureFabricKeypair(networkDir);
   const currentStamp = await computeFabricApplyStamp(payload, publicKey);
@@ -1574,9 +1768,14 @@ export async function reinstallFabricForwardingIfEnabled(): Promise<void> {
 export async function restoreFabricFromPersistedState(): Promise<void> {
   const networkDir = resolveNetworkDir();
   const state = await readFabricState(networkDir);
-  if (!state) return;
+  if (!state) {
+    await retryPendingFabricTeardown(networkDir);
+    return;
+  }
   try {
     const payload = enabledPayloadFromState(state);
+    const policyError = fabricAllowedIpsPolicyError(payload);
+    if (policyError) throw new Error(policyError);
     const mtu = resolvePayloadMtu(payload);
     await ensureTp0Interface(payload.address);
     await applyMtu(mtu);

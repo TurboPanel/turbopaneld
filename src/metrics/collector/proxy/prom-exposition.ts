@@ -84,16 +84,24 @@ function parseLabels(blob: string): Record<string, string> {
   return labels;
 }
 
+/** Beyond any real counter or gauge (a forged or corrupt line, not traffic). */
+export const MAX_PLAUSIBLE_VALUE = 1e18;
+/** Longest line worth a regex pass; real sample lines are far shorter. */
+const MAX_LINE_LENGTH = 8 * 1024;
+
 /** Parse Prometheus text exposition into flat samples; malformed lines are skipped. */
 export function parsePrometheusExposition(text: string): PromSample[] {
   const samples: PromSample[] = [];
   for (const rawLine of text.split("\n")) {
+    if (rawLine.length > MAX_LINE_LENGTH) continue;
     const line = rawLine.trim();
     if (line.length === 0 || line.startsWith("#")) continue;
     const match = SAMPLE_LINE.exec(line);
     if (!match) continue;
     const value = Number(match[4]);
-    if (!Number.isFinite(value)) continue;
+    if (!Number.isFinite(value) || Math.abs(value) > MAX_PLAUSIBLE_VALUE) {
+      continue;
+    }
     samples.push({
       name: match[1]!,
       labels: match[3] ? parseLabels(match[3]) : {},
@@ -146,23 +154,93 @@ export function containsAnyMetricName(
 }
 
 const FETCH_TIMEOUT_MS = 3_000;
+/** A real exposition is tens to hundreds of KiB; anything past this is not one. */
+export const MAX_SCRAPE_BODY_BYTES = 2 * 1024 * 1024;
+const EXPOSITION_CONTENT_TYPE =
+  /^(text\/plain|application\/openmetrics-text)\b/i;
+
+export type LoopbackFetchDeps = {
+  fetch?: typeof fetch;
+  maxBytes?: number;
+  timeoutMs?: number;
+};
+
+/**
+ * Read at most `maxBytes` of `response`'s body as text; `undefined` when the
+ * body is larger (the stream is cancelled, so an endless sender is dropped
+ * at the cap instead of being buffered).
+ */
+async function readCappedText(
+  response: Response,
+  maxBytes: number,
+): Promise<string | undefined> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const chunks: Uint8Array[] = [];
+  const pump = async (received: number): Promise<number | undefined> => {
+    const { done, value } = await reader.read();
+    if (done) return received;
+    const total = received + value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return undefined;
+    }
+    chunks.push(value);
+    return await pump(total);
+  };
+  const total = await pump(0);
+  if (total === undefined) return undefined;
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
 
 /**
  * `GET http://<addr><path>` with a short timeout; `undefined` on any
- * network failure, non-2xx status, or timeout. Never throws.
+ * network failure, non-2xx status, timeout, oversized body or a response
+ * that is not Prometheus text. The fixed loopback ports can be bound by any
+ * local user when the real exporter is down, so the body is capped in bytes
+ * and time and its shape checked before anything parses it. Never throws.
  */
 export async function fetchLoopbackText(
   addr: string,
   path: string,
+  deps?: LoopbackFetchDeps,
 ): Promise<string | undefined> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    deps?.timeoutMs ?? FETCH_TIMEOUT_MS,
+  );
   try {
-    const response = await fetch(`http://${addr}${path}`, {
+    const response = await (deps?.fetch ?? fetch)(`http://${addr}${path}`, {
       signal: controller.signal,
     });
-    if (!response.ok) return undefined;
-    return await response.text();
+    if (!response.ok) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    if (
+      !EXPOSITION_CONTENT_TYPE.test(
+        response.headers.get("content-type") ?? "text/plain",
+      )
+    ) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    return await readCappedText(
+      response,
+      deps?.maxBytes ?? MAX_SCRAPE_BODY_BYTES,
+    );
   } catch {
     return undefined;
   } finally {

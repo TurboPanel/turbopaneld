@@ -22,6 +22,7 @@ import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { firstSequential } from "../util/sequential.ts";
 import { backupResultsDir, MAX_RESULT_ERROR_LENGTH } from "./result-spool.ts";
+import { parseTimerNextRun, timerNextRunArgs } from "./timer-next-run.ts";
 
 const REPORT_INTERVAL_MS = 60_000;
 /** Reports sent per tick: a backlog drains over several ticks, oldest first. */
@@ -176,14 +177,6 @@ export function parseSpooledBackupRunResult(
   return result as SpooledBackupRunResult;
 }
 
-/** `systemctl show --timestamp=unix` prints `@<seconds>`, or nothing when no run is scheduled. */
-export function parseSystemdUnixTimestamp(text: string): string | undefined {
-  const match = /^@(\d+)$/.exec(text.trim());
-  if (!match) return undefined;
-  const seconds = Number(match[1]);
-  return seconds > 0 ? new Date(seconds * 1000).toISOString() : undefined;
-}
-
 /**
  * When `turbopanel-backup-<policyId>.timer` next fires. A read-only query (no
  * sudo); undefined when the unit does not exist yet, is not scheduled, or
@@ -194,19 +187,14 @@ export async function readTimerNextRun(
 ): Promise<string | undefined> {
   if (!POLICY_ID_RE.test(policyId)) return undefined;
   try {
+    const timer = `turbopanel-backup-${policyId}.timer`;
     const out = await new Deno.Command("systemctl", {
-      args: [
-        "show",
-        `turbopanel-backup-${policyId}.timer`,
-        "--property=NextElapseUSecRealtime",
-        "--value",
-        "--timestamp=unix",
-      ],
+      args: timerNextRunArgs(timer),
       stdout: "piped",
       stderr: "null",
     }).output();
     if (!out.success) return undefined;
-    return parseSystemdUnixTimestamp(new TextDecoder().decode(out.stdout));
+    return parseTimerNextRun(new TextDecoder().decode(out.stdout), timer);
   } catch {
     return undefined;
   }

@@ -1,22 +1,25 @@
 import { assertEquals } from "@std/assert";
+import registryJson from "../../orchestration/runtime-registry.json" with {
+  type: "json",
+};
 import {
   accessGroup,
   allAccessGroups,
   allManagedGroups,
-  allRuntimeGroups,
   baselineExtensions,
   defaultSeries,
-  entitlementSeries,
   isAllowedExtension,
   isRuntimeName,
+  isSupportedSeries,
   optionalExtensions,
   phpBinaryPaths,
+  phpBuiltinExtensions,
   phpFpmUnit,
-  RUNTIME_GID_BAND,
+  phpSeriesForSuite,
   RUNTIME_NAMES,
-  runtimeGid,
-  runtimeGroup,
+  runtimeSeries,
   supportedSeries,
+  unsupportedPhpSeriesMessage,
   unsupportedSeriesMessage,
 } from "./registry.ts";
 
@@ -29,12 +32,13 @@ import {
 const test = Deno.test.bind(Deno);
 
 test("RUNTIME_NAMES is the sorted runtime set", () => {
-  assertEquals([...RUNTIME_NAMES], ["node", "php"]);
+  assertEquals([...RUNTIME_NAMES], ["deno", "node", "php"]);
 });
 
 test("isRuntimeName accepts only registry names", () => {
   assertEquals(isRuntimeName("php"), true);
   assertEquals(isRuntimeName("node"), true);
+  assertEquals(isRuntimeName("deno"), true);
   assertEquals(isRuntimeName("python"), false);
   assertEquals(isRuntimeName(""), false);
 });
@@ -50,61 +54,48 @@ test("accessGroup and allAccessGroups cover SSH levels", () => {
   );
 });
 
-test("RUNTIME_GID_BAND matches the entitlement band", () => {
-  assertEquals(RUNTIME_GID_BAND.min, 9900);
-  assertEquals(RUNTIME_GID_BAND.max, 9979);
-});
-
-test("entitlementSeries uses major.minor for php and major for node", () => {
-  assertEquals(entitlementSeries("php", "8.4.3"), "8.4");
-  assertEquals(entitlementSeries("php", " 8.3 "), "8.3");
-  assertEquals(entitlementSeries("node", "24.17.0"), "24");
-  assertEquals(entitlementSeries("node", "22"), "22");
+test("runtimeSeries uses major.minor for php and major for node", () => {
+  assertEquals(runtimeSeries("php", "8.4.3"), "8.4");
+  assertEquals(runtimeSeries("php", " 8.3 "), "8.3");
+  assertEquals(runtimeSeries("node", "24.17.0"), "24");
+  assertEquals(runtimeSeries("node", "22"), "22");
+  assertEquals(runtimeSeries("deno", "2.9.7"), "2");
 });
 
 test("supportedSeries and defaultSeries come from the registry", () => {
-  assertEquals(supportedSeries("php"), ["8.3", "8.4"]);
+  assertEquals(supportedSeries("php"), ["8.1", "8.2", "8.3", "8.4", "8.5"]);
   assertEquals(supportedSeries("node"), ["22", "24", "26"]);
+  assertEquals(supportedSeries("deno"), ["2"]);
+  assertEquals(defaultSeries("deno"), "2");
   assertEquals(defaultSeries("php"), "8.4");
   assertEquals(defaultSeries("node"), "24");
 });
 
-test("runtimeGroup and runtimeGid resolve known series and unknown as undefined", () => {
-  assertEquals(runtimeGroup("php", "8.4.3"), "tpphp84");
-  assertEquals(runtimeGid("php", "8.4.3"), 9902);
-  assertEquals(runtimeGroup("php", "8.3"), "tpphp83");
-  assertEquals(runtimeGid("php", "8.3"), 9901);
-  assertEquals(runtimeGroup("node", "24.17.0"), "tpnode24");
-  assertEquals(runtimeGid("node", "24.17.0"), 9923);
-  assertEquals(runtimeGroup("node", "22"), "tpnode22");
-  assertEquals(runtimeGid("node", "22"), 9921);
-  assertEquals(runtimeGroup("node", "26.10.0"), "tpnode26");
-  assertEquals(runtimeGid("node", "26"), 9925);
-  assertEquals(runtimeGroup("php", "7.4"), undefined);
-  assertEquals(runtimeGid("node", "18"), undefined);
+test("isSupportedSeries resolves known series and refuses unknown ones", () => {
+  assertEquals(isSupportedSeries("php", "8.4.3"), true);
+  assertEquals(isSupportedSeries("php", "8.1"), true);
+  assertEquals(isSupportedSeries("node", "24.17.0"), true);
+  assertEquals(isSupportedSeries("deno", "2.9.7"), true);
+  assertEquals(isSupportedSeries("php", "7.4"), false);
+  assertEquals(isSupportedSeries("deno", "3"), false);
+  assertEquals(isSupportedSeries("node", "18"), false);
 });
 
-test("allRuntimeGroups and allManagedGroups are the containment sets", () => {
-  const runtime = [...allRuntimeGroups()].sort((a, b) => a.localeCompare(b));
-  assertEquals(runtime, [
-    "tpnode22",
-    "tpnode24",
-    "tpnode26",
-    "tpphp83",
-    "tpphp84",
-  ]);
+test("allManagedGroups is the SSH access groups and nothing per runtime", () => {
   const managed = [...allManagedGroups()].sort((a, b) => a.localeCompare(b));
-  assertEquals(managed, [
-    "tpnode22",
-    "tpnode24",
-    "tpnode26",
-    "tppasswd",
-    "tpphp83",
-    "tpphp84",
-    "tpprincipal",
-    "tpsftp",
-    "tpshell",
-  ]);
+  assertEquals(managed, ["tppasswd", "tpprincipal", "tpsftp", "tpshell"]);
+});
+
+test("no runtime series carries a group any more", () => {
+  for (const runtime of RUNTIME_NAMES) {
+    const series = (registryJson.runtimes as Record<
+      string,
+      { series: Record<string, Record<string, unknown>> }
+    >)[runtime]?.series ?? {};
+    for (const entry of Object.values(series)) {
+      assertEquals(Object.keys(entry), []);
+    }
+  }
 });
 
 test("php extensions: baseline, optional, and allowlist", () => {
@@ -132,4 +123,49 @@ test("unsupportedSeriesMessage names the supported series, and is silent for kno
     unsupportedSeriesMessage("node", "27"),
     "node 27 is not a supported node version on this server. Supported series: 22, 24, 26.",
   );
+});
+
+test("phpSeriesForSuite lists what the OS offers, and every series for an unlisted suite", () => {
+  assertEquals(phpSeriesForSuite("trixie"), [
+    "8.1",
+    "8.2",
+    "8.3",
+    "8.4",
+    "8.5",
+  ]);
+  assertEquals(phpSeriesForSuite(" Trixie "), phpSeriesForSuite("trixie"));
+  // Not in the table: no block here, the roles report a missing pin.
+  assertEquals(phpSeriesForSuite("bookworm"), supportedSeries("php"));
+  assertEquals(phpSeriesForSuite(undefined), supportedSeries("php"));
+});
+
+test("every suite series is a registry series, and the default is offered on each suite", () => {
+  const suites = registryJson.runtimes.php.suiteSeries as Record<
+    string,
+    string[]
+  >;
+  for (const [suite, series] of Object.entries(suites)) {
+    for (const entry of series) {
+      assertEquals(
+        supportedSeries("php").includes(entry),
+        true,
+        `${suite} lists ${entry}, which has no registry group`,
+      );
+    }
+    assertEquals(series.includes(defaultSeries("php")), true, suite);
+  }
+});
+
+test("unsupportedPhpSeriesMessage names the series the OS offers", () => {
+  assertEquals(unsupportedPhpSeriesMessage("8.4.3", "trixie"), undefined);
+  assertEquals(unsupportedPhpSeriesMessage("8.1", "trixie"), undefined);
+  assertEquals(
+    unsupportedPhpSeriesMessage("7.4", "trixie"),
+    "php 7.4 is not offered on this server's operating system. Offered series: 8.1, 8.2, 8.3, 8.4, 8.5.",
+  );
+});
+
+test("phpBuiltinExtensions names what a series compiles in", () => {
+  assertEquals(phpBuiltinExtensions("8.5"), ["opcache"]);
+  assertEquals(phpBuiltinExtensions("8.4"), []);
 });

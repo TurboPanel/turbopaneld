@@ -54,6 +54,23 @@ the request (nothing is applied, the tunnel is not torn down). The legacy
 plaintext `keyPem` / `token` from an older control plane is still accepted
 until both floors pass the release that ships this; then those fields go.
 
+**Deploy cancel (`deploy-cancel-v1`).** The daemon advertises the feature in
+`hello.features`. A control plane that sees it may send `deploy-cancel`
+(`commandId`) and gets `deploy-cancel-result` (`ok`, `outcome`: `cancelling`,
+`too_late` or `not_running`) on the same id. `InstanceClient.#handleDeployCancel`
+hands it to `deployCancels` (`src/deploy/deploy-cancel.ts`) and always answers.
+It is not a queued command: a running deploy holds the queue slot. The deploy
+itself ends with a `command-outcome` whose error starts with `cancelled: `. The
+cutover rule and its limits are in `../deploy/AGENTS.md`.
+
+**Site database bindings (`site-db-bindings-v1`).** The daemon advertises the
+feature in `hello.features`. A control plane that sees it may send
+`sites[].dbCa` (a public CA bundle the daemon keeps as a file for the site
+owner's Linux user and points variables at) and `sites[].requiredEnv`; the
+`environment.deploy` result may carry `warnings` (variables a site's web server
+could not carry, named, never their values). All additive: an older control
+plane sends neither and ignores `warnings`. See `../deploy/site/AGENTS.md`.
+
 **On-demand managed health (`managed-health-v1`).** The daemon advertises
 the feature in `hello.features`. A control plane that sees it may send
 `managed-health-request` (`managedId`, `memberId`, `role`, `engine`) and gets
@@ -68,6 +85,45 @@ additive and no floor moved. A replica's `member.replication` also carries
 `receivedLsn` / `replayLsn` and, once `PgStandbySampler` has seen it streaming,
 `lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
 control plane ignores them.
+
+**Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
+(`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
+(all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends
+one `managed-health-report` frame (`members[]`, at most 32) to a control plane
+that lists the feature. A replica whose engine is down goes out as
+`down: true`; any other probe error sends nothing for that replica, so the
+control plane lets the old reading age out. Fire-and-forget and read-only. It
+exists because health was only read when someone asked: a quiet cluster aged
+past the control plane's freshness window and a stopped replica kept its last
+`streaming` line.
+
+**Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
+replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded
+opaque text, 4096 chars max) and `fullyApplied` (computed on the daemon from the
+GTID sets: MySQL received is a subset of executed; MariaDB `Gtid_IO_Pos` equals
+`gtid_slave_pos`). A failed, empty or malformed read omits them: unknown, never
+`true`. A second `PgStandbySampler` (engines mysql, mariadb, every 2 s) feeds
+the same streaming tracker, so `lastStreaming.ageMs` exists for them too (MySQL:
+newest heartbeat or queued transaction while the IO thread is `ON`; MariaDB: IO
+thread `Yes`, which only shows the thread is connected and stays `Yes` until
+`slave_net_timeout`, ~60 s after the source dies, so the gate must also rely
+on `fullyApplied` and peer evidence). Empty/NULL GTID sets are omitted, never
+sent as `""`. MySQL reads the default channel only; MariaDB needs `Using_Gtid`
+Slave_Pos/Current_Pos. Parsers: `managed/engines/replica-freshness.ts`.
+
+**Rate-limited control-plane calls (HTTP 429).** The control plane limits each
+daemon's REST calls to about 30 a minute per route per server. An authenticated
+`DaemonApiClient` call (secrets/decrypt, the command log, rehydrate, ...) that
+gets a 429 is retried, 6 tries in all with 2, 4, 8, 16 and 32 s waits (about
+62 s, one full limiter window); a `Retry-After` header can lengthen a wait but
+never past 30 s. Each retry logs a WARN naming the route and the try number. When
+the tries run out the call throws `DaemonApiError(429, ...)` whose message starts
+`rate_limited:` and says the limit was still in effect after 6 tries, so a failed
+managed command shows a clear reason. Only 429 is retried (no other status, no
+network error), the 401 token refresh still runs on every try, and the
+unauthenticated enroll/challenge/session calls keep a single try (the connect
+loop backs a 429 off itself). `DaemonApiClientOptions.sleep` is the test seam; the
+policy sits in `util/retry-fetch.ts` options.
 
 ### Instance Let's Encrypt renewal (`src/instance/instance-acme-renew.ts`)
 
@@ -119,7 +175,9 @@ identifier per hour (one refill every 12 minutes). The tenant
   64-bit Pi OS still reports `ID=debian`).   **Host resources** (static
   capacity under `resources.cpus[]` / `gpus[]` / `memory` / `swap`: per-socket
   `vendorId` / `name` / `cores` / `threads` / `cache` / `speedMhz` / `turboMhz`,
-  GPU identity + memory, `totalBytes`, plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
+  GPU identity + memory, `totalBytes`, optional `memory.pageSizeBytes` (kernel
+  page size in bytes from `getconf PAGESIZE`, Linux only — omitted elsewhere or
+  when unreadable), plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
   + `/sys` (cpufreq, cache, DRM) via `src/host/host-inventory.ts` (process-cached; cpus/gpus/mem/swap on hello only)
   and `collectServerIps()` (`src/host/server-addresses.ts`) as
   `{ address, version, scope, cidr?, interface? }[]` (public + private; `interface`
@@ -145,14 +203,39 @@ identifier per hour (one refill every 12 minutes). The tenant
   check interval (default), `IdlePresence` allows ~5s of `setInterval` skew so
   early ticks still send — otherwise early fires were skipped and Redis coalesce
   could false-demote a live socket.
-- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, resources?, docker? }`
+- Sends app-level `{ type: "heartbeat", at, daemonBuild?, timeSync?, resources?, docker?, runtimes?, releaseLinkScan? }`
   when the daemon build commit changed **or** when `timeSync` / `resources.ips` /
-  `docker` differ from the snapshot seeded on hello (change-detected, still
-  cadence-bound to the ~60s idle tick). Do **not** put OS or cpus/gpus/mem/swap on heartbeat. Offline
+  `docker` / `releaseLinkScan` differ from the snapshot seeded on hello
+  (change-detected, still cadence-bound to the ~60s idle tick).
+  `releaseLinkScan` is a bounded summary of `release-link-scan.json`
+  (`{ scannedAt, findingCount, findings[{ username, serviceId, releaseId?,
+  linkCount, error? }] }`, first 20 sites, no link text); the boot scan runs
+  after the first hello, so it normally arrives on a heartbeat. The control
+  plane stores it at `server.metadata.releaseLinkScan` and returns it on
+  `GET /api/client/v1/servers`. Do **not** put OS or cpus/gpus/mem/swap on heartbeat. Offline
   self-heal
   (Postgres `connected: false` while the socket is still live) is handled by the
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`
   — not by a periodic daemon heartbeat.
+
+- Presence also carries **`services`** (per-service run state: running /
+  restart count / last error), change-detected like `docker` and sent on hello.
+  The sentinel (`src/monitor/sentinel.ts`, derivation in
+  `src/monitor/service-run-state.ts`) registers a source through
+  `src/host/service-run-state.ts`; `undefined` (Docker not watched, or the first
+  container listing not in yet) omits the field, `[]` is sent so the control
+  plane clears. A container is `running` only after 60 s up (`SERVICE_SETTLE_MS`),
+  `crashing` while Docker restarts it, `stopped_after_crashes` once it is down
+  after 10 restarts in a row (`SERVICE_CRASH_LIMIT`). The crash-loop guard
+  (`src/monitor/crash-loop-guard.ts`, wired through `SentinelOptions.stopContainer`)
+  does the stopping: it counts restarts since the container last stayed up for
+  60 s, runs `docker stop` once at the limit and leaves the authored restart
+  policy alone. A manual start zeroes Docker's `RestartCount`, which clears the
+  mark. Only service containers are guarded (not ingress/platform), and native
+  (systemd) apps are not watched. `asOf` is when the state last changed, so an idle service
+  never re-triggers a heartbeat. Wire twin: `src/contracts/service-run-state.ts`
+  (checked by `check:contract-drift`). The last log line comes from
+  `docker logs --tail 5`, fetched in the background once per restart count.
 
 Command handlers (`server.timezone.set`, `server.ntp.set`,
 `server.firewall.reconcile`, deploy/managed/fabric, …) live in
@@ -299,13 +382,13 @@ dev-user parameters — not shipped in release; resolved via
 `TURBOPANEL_DEV_ORCHESTRATION_DIR` / `resolveDevOrchestrationDir`, layered with
 daemon production roles through `ANSIBLE_ROLES_PATH`). Production installs
 extract **`orchestration.tar.zst`** from the channel manifest into
-`/opt/turbopanel/share/orchestration/`. Release CDN artifacts are four split
-tarballs per build under versioned paths (`channels/trunk/daemon/<buildId>/…`):
+`/opt/turbopanel/share/orchestration/`. Release artifacts are four split
+tarballs per build on GitHub Releases:
 host-arch `turbopaneld-{amd64,arm64}.tar.zst`, shared `turbopaneld.js.tar.zst`
 (Deno JS runtime for hosts that cannot execute the native binary), and shared
-`orchestration.tar.zst`. Manifest artifact URLs are canonical — Bunny CDN
-ignores `?build=` query cache-bust, so each publish uploads to a new
-`<buildId>/` prefix with `Cache-Control: immutable`.
+`orchestration.tar.zst`. Manifest artifact URLs are canonical: assets are added
+under build-unique names, so a manifest never names a file a later publish
+replaces.
 
 **Two managed ExecStart modes (native vs Deno JS):** `run.sh` always downloads
 the host-arch native binary and orchestration tree, then probes
@@ -336,14 +419,20 @@ installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 daemon does not download or pipe the script itself: it resolves the trust
 regime (`resolveAutomaticUpdateTrust` — public TLS or the
 configured Platform CA; never `curl -k`) and then runs
-`sudo -n tp-orchestrate update --license … [--host …] [--dl-base …]
-[--instance-ca …] [--channel …] [--manifest-url …] --no-start`. The helper
+`sudo -n tp-orchestrate update --license-stdin [--host …] [--dl-base …]
+[--instance-ca …] [--channel …] [--manifest-url …] --no-start`, writing the
+host license as one line to the helper's stdin. The license never goes in
+argv (sudo logs it and any local user can read `/proc/<pid>/cmdline`): the
+helper refuses `--license`, and hands the value to `run.sh` in
+`TURBOPANEL_LICENSE`. A development host sets it at the top of the script it
+pipes through `sudo sh -s`. The helper
 fetches `run.sh` from `turbopanel.sh` (or `<instance>/run.sh` for an HTTPS
 overlay host) and re-validates every flag against the root-pinned
 `/opt/turbopanel/lib/update-origin` that `run.sh` wrote at install, so a
 daemon cannot point root at another origin or control plane. Co-located dev
-still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
-`--host`, …) remain supported for scripts and sudo re-exec. There is no
+still pipes the downloaded script through `sudo sh -s`. `run.sh` itself
+still takes `--host` and the other flags for scripts and its own sudo
+re-exec. There is no
 separate update binary installed under `/opt/turbopanel/bin/`.
 
 `run.sh --daemon-only` on a host that already has the control-plane binary
@@ -599,8 +688,8 @@ same shape: server-scoped, carries the full desired state, no reply channel. It
 exists because a deploy is the wrong trigger for a **revocation** — removing a
 key must not wait for an unrelated environment to ship — and because a deploy
 payload can never carry the complete set that safe removal requires. It
-subsumes shell and entitlement changes too, so granting a principal PHP 8.4 no
-longer means deploying one of its environments. See `../deploy/ssh/` for the
+subsumes shell and SSH access changes too, so changing them no longer means
+deploying one of its environments. See `../deploy/ssh/` for the
 host side. `run.sh` still pins
 `--cacert` first (`tp_fetch_instance_ca`); on HTTP `000` with an existing CA
 it asks again with the **system roots** — a `404` there means the control

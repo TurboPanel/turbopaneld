@@ -6,11 +6,9 @@ One systemd timer per `x-turbopanel.cron[]` entry, plus the `oneshot` service it
 triggers. Same pure-renderer / apply split as `native/`.
 
 **Why timers rather than `/etc/cron.d`.** The service sets `User=`, so
-`ExecStart` reaches `execve` **after** systemd has dropped privileges — which
-makes `/usr/bin/php8.4` succeed or fail purely on the account's entitlement
-groups. Nothing in the generated unit grants anything, and that is the cleanest
-demonstration that entitlement had to be an OS grant rather than something baked
-into generated config. It also reuses the per-principal slice (a runaway job
+`ExecStart` reaches `execve` **after** systemd has dropped privileges, so a job
+runs with exactly the account's own rights. Nothing in the generated unit grants
+anything. It also reuses the per-principal slice (a runaway job
 counts against the same account ceiling its app does) and journald captures
 output, which is why the command parser can refuse `>>` outright — there is
 somewhere better for it to go.

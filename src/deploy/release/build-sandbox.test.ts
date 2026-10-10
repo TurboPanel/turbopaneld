@@ -13,12 +13,14 @@ import {
   buildSpecCwd,
   type BuildWork,
   createBuildWorkDir,
+  removeBuildTree,
   removeBuildWork,
   renderBuildSpec,
   resolveBuildWork,
   runSandboxedBuild,
   type SandboxSpawn,
   sweepStaleBuildWork,
+  withBuildSlot,
 } from "./build-sandbox.ts";
 
 /**
@@ -38,7 +40,12 @@ function managed(...argv: string[]): string[] {
 
 async function work(root = "/var/lib/turbopanel-build"): Promise<BuildWork> {
   return await resolveBuildWork(
-    { serviceId: "svc1", releaseId: "20260927-120000", projectId: PROJECT },
+    {
+      serviceId: "svc1",
+      releaseId: "20260927-120000",
+      projectId: PROJECT,
+      owner: "alice",
+    },
     root,
   );
 }
@@ -116,22 +123,17 @@ function recordingRunFn(
 test("the sandbox is decided by root-owned facts, not by the guessed install mode", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-markers-" });
   try {
-    const passwd = join(dir, "passwd");
+    const buildRoot = join(dir, "turbopanel-build");
     const tpHost = join(dir, "tp-host");
-    const markers = { passwd, tpHost };
-    await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
-    // A developer's machine: no build account, no managed tp-host.
+    const markers = { buildRoot, tpHost };
+    // A developer's machine: no build tree, no managed tp-host.
     assertEquals(await buildSandboxEnabled(markers), false);
     // This suite runs in a "development" layout (what a planted main.ts or
-    // ansible.cfg would make the daemon guess); the account alone wins.
-    await Deno.writeTextFile(
-      passwd,
-      "tpbuild:x:9994:9994::/nonexistent:/usr/sbin/nologin\n",
-      { append: true },
-    );
+    // ansible.cfg would make the daemon guess); the build tree alone wins.
+    await Deno.mkdir(buildRoot);
     assertEquals(await buildSandboxEnabled(markers), true);
     // So does the managed tp-host alone (the role not yet converged).
-    await Deno.writeTextFile(passwd, "root:x:0:0::/root:/bin/sh\n");
+    await Deno.remove(buildRoot);
     await Deno.writeTextFile(tpHost, "#!/bin/sh\n");
     assertEquals(await buildSandboxEnabled(markers), true);
   } finally {
@@ -149,16 +151,47 @@ test("a build's work tree is derived from its release and named the way tp-host 
     `/var/lib/turbopanel-build/work/${first.buildId}`,
   );
   assertEquals(first.checkoutDir, `${first.workDir}/source`);
-  assertEquals(first.cacheDir, `/var/lib/turbopanel-build/cache/${PROJECT}`);
+  assertEquals(first.owner, "alice");
+  // One cache per site owner and project, where the unit binds it.
+  assertEquals(
+    first.cacheDir,
+    `/var/lib/turbopanel-build/caches/alice/${PROJECT}`,
+  );
   await assertRejects(
     () =>
       resolveBuildWork({
         serviceId: "svc1",
         releaseId: "r1",
         projectId: "../etc",
+        owner: "alice",
       }),
     Error,
     "cannot name a build cache directory",
+  );
+  await Promise.all(
+    [
+      "",
+      "../x",
+      "a/b",
+      "-x",
+      "x-",
+      "a--b",
+      "a.b",
+      "a b",
+      "x".repeat(33),
+    ].map((owner) =>
+      assertRejects(
+        () =>
+          resolveBuildWork({
+            serviceId: "svc1",
+            releaseId: "r1",
+            projectId: PROJECT,
+            owner,
+          }),
+        Error,
+        "cannot own a sandboxed build",
+      )
+    ),
   );
 });
 
@@ -239,7 +272,7 @@ test("a build is the fixed build-run argv with the spec on stdin, then build-ret
     onOutput: (_stream, line) => lines.push(line),
   });
   assertEquals(child.argv, [
-    managed("build-run", target.buildId, PROJECT),
+    managed("build-run", target.buildId, PROJECT, "alice"),
   ]);
   assertEquals(child.stdin(), "tp-build-spec 1\nrun dHJ1ZQ==\nend\n");
   assertEquals(lines, ["built"]);
@@ -467,4 +500,171 @@ test("trees left by a dead daemon are stopped, taken back and removed; live ones
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+test("a tree a build locked with mode 000 is still removed", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-locked-" });
+  try {
+    const tree = join(dir, "work1");
+    await Deno.mkdir(join(tree, "d", "e"), { recursive: true });
+    await Deno.writeTextFile(join(tree, "d", "e", "f"), "x");
+    await Deno.symlink("/nonexistent", join(tree, "d", "link"));
+    await Deno.chmod(join(tree, "d", "e"), 0o000);
+    await Deno.chmod(join(tree, "d"), 0o000);
+    assertEquals(await removeBuildTree(tree), true);
+    assertEquals(await Deno.stat(tree).catch(() => null), null);
+    // Removing what is already gone is not an error.
+    assertEquals(await removeBuildTree(tree), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("removeBuildWork reports nothing for a locked tree and clears it", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-locked-" });
+  try {
+    const target = { ...(await work(dir)), workDir: join(dir, "w") };
+    await Deno.mkdir(join(target.workDir, "d"), { recursive: true });
+    await Deno.chmod(join(target.workDir, "d"), 0o000);
+    const messages: string[] = [];
+    await removeBuildWork(target, (_s, line) => messages.push(line));
+    assertEquals(messages, []);
+    assertEquals(await Deno.stat(target.workDir).catch(() => null), null);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+const stuck: typeof Deno.remove = () =>
+  Promise.reject(new Deno.errors.PermissionDenied("stuck"));
+
+test("a tree that cannot be removed is renamed aside so the release can build again", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-aside-" });
+  try {
+    const tree = join(dir, "abc123");
+    await Deno.mkdir(join(tree, "d"), { recursive: true });
+    assertEquals(await removeBuildTree(tree, stuck), false);
+    assertEquals(await Deno.stat(tree).catch(() => null), null);
+    const names = (await Array.fromAsync(Deno.readDir(dir))).map((e) => e.name);
+    assertEquals(names.length, 1);
+    assert(names[0].startsWith("q-") && names[0].endsWith("-abc123"));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("removeBuildWork says when it had to move a tree aside", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-aside-" });
+  try {
+    const target = { ...(await work(dir)), workDir: join(dir, "w1") };
+    await Deno.mkdir(target.workDir);
+    const original = Deno.remove;
+    Deno.remove = stuck;
+    const messages: string[] = [];
+    try {
+      await removeBuildWork(target, (_s, line) => messages.push(line));
+    } finally {
+      Deno.remove = original;
+    }
+    assertEquals(messages.length, 1);
+    assertStringIncludes(messages[0], "moved aside");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("the stale sweep retries a tree that was moved aside, without a unit stop", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-sandbox-sweep-" });
+  try {
+    await Deno.mkdir(join(dir, "work", "q-k1-abc123", "d"), {
+      recursive: true,
+    });
+    await Deno.chmod(join(dir, "work", "q-k1-abc123", "d"), 0o000);
+    const { runFn, calls } = recordingRunFn();
+    const out: string[] = [];
+    await sweepStaleBuildWork(dir, {
+      runFn,
+      maxAgeMs: -1000,
+      onOutput: (_s, line) => out.push(line),
+    });
+    assertEquals(calls, []);
+    assertEquals(out.length, 1);
+    assertStringIncludes(out[0], "reclaimed");
+    assertEquals(
+      await Deno.stat(join(dir, "work", "q-k1-abc123")).catch(() => null),
+      null,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("waiting builds are served round-robin by project", async () => {
+  const order: string[] = [];
+  let open = () => {};
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const job = (name: string, project: string, wait?: Promise<void>) =>
+    withBuildSlot(undefined, async () => {
+      await wait;
+      order.push(name);
+    }, project);
+  const all = [
+    job("a1", "A", gate),
+    job("a2", "A"),
+    job("a3", "A"),
+    job("b1", "B"),
+    job("c1", "C"),
+  ];
+  open();
+  await Promise.all(all);
+  assertEquals(order, ["a1", "b1", "a2", "c1", "a3"]);
+});
+
+test("a build that floods its output is stopped and does not buffer it", async () => {
+  const target = await work();
+  const killed: string[] = [];
+  let finish = () => {};
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const flood = (chunks: number) => {
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent >= chunks) {
+          await gate;
+          return controller.close();
+        }
+        sent += 1;
+        controller.enqueue(new TextEncoder().encode("x".repeat(65536)));
+      },
+    });
+  };
+  const spawn: SandboxSpawn = () =>
+    ({
+      stdin: new WritableStream<Uint8Array>(),
+      stdout: flood(64),
+      stderr: flood(0),
+      status: gate.then(() => ({ success: false, code: 143, signal: null })),
+      kill: (signal: string) => {
+        killed.push(signal);
+        finish();
+      },
+    }) as unknown as Deno.ChildProcess;
+  const { runFn } = recordingRunFn();
+  await assertRejects(
+    () =>
+      runSandboxedBuild({
+        work: target,
+        spec: "",
+        spawn,
+        runFn,
+        maxOutputChars: 1_000_000,
+      }),
+    Error,
+    "build output exceeded the size limit",
+  );
+  assertEquals(killed, ["SIGTERM"]);
 });

@@ -12,11 +12,17 @@ import {
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../util/logger.ts";
+import type {
+  ProxySqlProtocolFamily,
+  ProxySqlRuntimeServerRow,
+} from "./proxysql.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { join } from "@std/path";
 import {
   proxysqlAdminCnfPath,
   proxysqlMonitorCnfPath,
 } from "./engine-paths.ts";
+import { quoteLiteral } from "./engines/mysql-sql.ts";
 
 export type ProxySqlAdminCredentials = {
   user: string;
@@ -48,6 +54,72 @@ function redactCredentials(text: string, password: string): string {
   return sanitizeForLog(text.replaceAll(password, "***"));
 }
 
+/** Render a mysql-client-style `[client]` defaults file with quoted secrets. */
+export function formatMysqlClientCnf(user: string, password: string): string {
+  return `[client]\nuser=${quoteLiteral(user)}\npassword=${
+    quoteLiteral(password)
+  }\n`;
+}
+
+function parseMysqlClientOptionValue(raw: string): string {
+  const trimmed = raw.trim();
+  if (
+    trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")
+  ) {
+    const inner = trimmed.slice(1, -1);
+    let out = "";
+    for (let i = 0; i < inner.length; i++) {
+      const ch = inner[i]!;
+      if (ch === "\\" && i + 1 < inner.length) {
+        const next = inner[i + 1]!;
+        if (next === "'" || next === "\\") {
+          out += next;
+          i++;
+          continue;
+        }
+      }
+      out += ch;
+    }
+    return out;
+  }
+  return trimmed;
+}
+
+/**
+ * Atomically write a host `[client]` defaults file (mode 0600).
+ * Refuses a Docker bind-mount directory scar at the target path.
+ */
+export async function writeMysqlClientCnfAtomic(
+  path: string,
+  contents: string,
+): Promise<void> {
+  const dir = join(path, "..");
+  await Deno.mkdir(dir, { recursive: true });
+  try {
+    const existing = await Deno.lstat(path);
+    if (existing.isSymlink) {
+      throw new TypeError(
+        `mysql client defaults path is a symlink: ${path}`,
+      );
+    }
+    if (existing.isDirectory) {
+      throw new TypeError(
+        `mysql client defaults path is a directory (Docker bind-mount scar): ${path}`,
+      );
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  const tmpPath = join(dir, `.${crypto.randomUUID()}.tmp`);
+  await Deno.writeTextFile(tmpPath, contents, { mode: 0o600 });
+  try {
+    await Deno.rename(tmpPath, path);
+  } catch (err) {
+    await Deno.remove(tmpPath).catch(() => {});
+    throw err;
+  }
+}
+
 /**
  * Parse a mysql-client-style `[client]` defaults file.
  */
@@ -71,7 +143,7 @@ export function parseProxySqlClientCnf(
     const separator = line.indexOf("=");
     if (separator === -1) continue;
     const key = line.slice(0, separator).trim().toLowerCase();
-    const value = line.slice(separator + 1).trim();
+    const value = parseMysqlClientOptionValue(line.slice(separator + 1));
     if (key === "user") user = value;
     if (key === "password") password = value;
   }
@@ -188,27 +260,33 @@ export async function loadProxySqlMonitorCredentials(
   return parseProxySqlMonitorCnf(contents);
 }
 
-export async function applyProxySqlAdminStatements(
-  statements: readonly string[],
-  options?: {
-    runDocker?: ProxySqlAdminDeps["runDocker"];
-    layout?: LayoutPaths;
-    containerName?: string;
-    /** Override container defaults path (tests). Defaults to mounted admin.cnf. */
-    defaultsFile?: string;
-    /** Override connect-retry backoff (tests). Defaults to 3s. */
-    retryDelayMs?: number;
-  },
-): Promise<void> {
-  if (statements.length === 0) return;
+type ProxySqlAdminRunOptions = {
+  runDocker?: ProxySqlAdminDeps["runDocker"];
+  layout?: LayoutPaths;
+  containerName?: string;
+  /** Override container defaults path (tests). Defaults to mounted admin.cnf. */
+  defaultsFile?: string;
+  /** Override connect-retry backoff (tests). Defaults to 3s. */
+  retryDelayMs?: number;
+};
 
+/**
+ * Send `sql` to the ProxySQL admin interface (docker exec, SQL on stdin) and
+ * return stdout. Credentials stay in the mounted defaults file, never argv.
+ */
+async function runProxySqlAdminSql(
+  caller: { name: string; failureText: string },
+  sql: string,
+  extraArgs: readonly string[],
+  options?: ProxySqlAdminRunOptions,
+): Promise<string> {
   const layout = options?.layout;
   if (!layout) {
-    throw new TypeError("applyProxySqlAdminStatements requires layout");
+    throw new TypeError(`${caller.name} requires layout`);
   }
   const containerName = options?.containerName;
   if (!containerName || containerName.length === 0) {
-    throw new TypeError("applyProxySqlAdminStatements requires containerName");
+    throw new TypeError(`${caller.name} requires containerName`);
   }
 
   // Validate host admin.cnf exists (and for redacting error strings).
@@ -217,7 +295,6 @@ export async function applyProxySqlAdminStatements(
     PROXYSQL_ADMIN_DEFAULTS_PATH;
 
   const run = options?.runDocker ?? defaultRunDocker;
-  const sql = `${statements.join(";\n")};\n`;
 
   const argv = [
     "exec",
@@ -228,6 +305,7 @@ export async function applyProxySqlAdminStatements(
     `--defaults-extra-file=${containerDefaultsPath}`,
     "-h127.0.0.1",
     `-P6032`,
+    ...extraArgs,
   ];
 
   // A freshly `compose up`'d ProxySQL takes a few seconds before the admin
@@ -256,11 +334,68 @@ export async function applyProxySqlAdminStatements(
   if (!result.success) {
     throw new Error(
       redactCredentials(
-        result.stderr || result.stdout || "proxysql admin apply failed",
+        result.stderr || result.stdout || caller.failureText,
         credentials.password,
       ),
     );
   }
+  return result.stdout;
+}
+
+export async function applyProxySqlAdminStatements(
+  statements: readonly string[],
+  options?: ProxySqlAdminRunOptions,
+): Promise<void> {
+  if (statements.length === 0) return;
+  await runProxySqlAdminSql(
+    {
+      name: "applyProxySqlAdminStatements",
+      failureText: "proxysql admin apply failed",
+    },
+    `${statements.join(";\n")};\n`,
+    [],
+    options,
+  );
+}
+
+function parseRuntimeServerRow(line: string): ProxySqlRuntimeServerRow {
+  const [hostgroup, hostname, port, status, ...extra] = line.split("\t");
+  const hostgroupId = Number(hostgroup);
+  const portNumber = Number(port);
+  if (
+    extra.length > 0 || hostname === undefined || hostname.length === 0 ||
+    status === undefined || !Number.isInteger(hostgroupId) ||
+    !Number.isInteger(portNumber)
+  ) {
+    throw new Error(
+      `unexpected ProxySQL runtime table output: ${sanitizeForLog(line)}`,
+    );
+  }
+  return { hostgroupId, hostname, port: portNumber, status };
+}
+
+/**
+ * Read the live `runtime_<family>_servers` table back through the same admin
+ * path as {@link applyProxySqlAdminStatements}. An empty table is an empty list.
+ */
+export async function readProxySqlRuntimeServers(
+  family: ProxySqlProtocolFamily,
+  options?: ProxySqlAdminRunOptions,
+): Promise<ProxySqlRuntimeServerRow[]> {
+  const stdout = await runProxySqlAdminSql(
+    {
+      name: "readProxySqlRuntimeServers",
+      failureText: "proxysql runtime read failed",
+    },
+    `SELECT hostgroup_id,hostname,port,status FROM runtime_${family}_servers;\n`,
+    ["--batch", "--skip-column-names"],
+    options,
+  );
+  return stdout
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .map(parseRuntimeServerRow);
 }
 
 /** `ERROR 2002` (socket/TCP connect) — admin interface not up yet. */

@@ -7,6 +7,8 @@ import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
+  hostingServedNames,
+  hostingWwwRedirects,
   isValidIpv4Literal,
   isValidIpv6Literal,
 } from "../contracts/commands-contracts.ts";
@@ -292,7 +294,10 @@ export function caddyTraefikUpstream(hop: "http" | "https"): string {
   }
 }`;
   }
+  // Caddy rewrites Host to the upstream address on a TLS hop, and Traefik
+  // routes on the original hostname, so pass it through explicitly.
   return `reverse_proxy ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT} {
+  header_up Host {host}
   transport http {
     proxy_protocol v2
     keepalive off
@@ -324,9 +329,18 @@ export function setIngressHostCommandForTest(
   fn?: IngressHostCommandFn,
 ): () => void {
   const previous = hostCommandOverride;
+  const previousBeforeValidate = ensureBeforeValidateOverride;
   hostCommandOverride = fn;
+  if (
+    fn !== undefined &&
+    ensureBeforeValidateOverride === undefined &&
+    ensureHostingCaddyRuntimeOverride === undefined
+  ) {
+    ensureBeforeValidateOverride = () => Promise.resolve();
+  }
   return () => {
     hostCommandOverride = previous;
+    ensureBeforeValidateOverride = previousBeforeValidate;
   };
 }
 
@@ -956,11 +970,65 @@ async function installAndStartCaddy(
   return true;
 }
 
+let ensureHostingCaddyRuntimeOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+let ensureBeforeValidateOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+/** Coalesces full runtime ensures with {@link ensureDeployIngress} in one deploy. */
+let hostingCaddyRuntimeEnsuredThisDeploy = false;
+
+/** Reset at the start of each `environment.deploy` (tests may call directly). */
+export function resetHostingCaddyRuntimeEnsuredForDeploy(): void {
+  hostingCaddyRuntimeEnsuredThisDeploy = false;
+}
+
+function markHostingCaddyRuntimeEnsuredForDeploy(): void {
+  hostingCaddyRuntimeEnsuredThisDeploy = true;
+}
+
+/**
+ * True when `caddy validate` as {@link HOSTING_CADDY_USER} is required for this
+ * candidate set (tenant HTTP routes or non-reserved snippets already on disk).
+ */
+export function hostingCaddyValidateNeedsEdgeRuntime(
+  siteContent: string,
+  otherSnippetNames: readonly string[],
+  siteFile: string,
+): boolean {
+  if (siteContent.trim().length > 0) return true;
+  return otherSnippetNames
+    .filter((name) => name !== siteFile)
+    .some((name) => !isDaemonReservedHostingSite(name));
+}
+
+/**
+ * Test-only: observe or stub {@link ensureHostingCaddyRuntime}. Returns a
+ * restore function.
+ */
+export function setEnsureHostingCaddyRuntimeForTest(
+  fn?: (layout: LayoutPaths) => Promise<void>,
+): () => void {
+  const previous = ensureHostingCaddyRuntimeOverride;
+  ensureHostingCaddyRuntimeOverride = fn;
+  return () => {
+    ensureHostingCaddyRuntimeOverride = previous;
+  };
+}
+
 /** Ensure hosting Caddy binary, Caddyfile, sites dir, and systemd unit. */
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
   deps?: EnsureHostingCaddyDeps,
 ): Promise<void> {
+  if (ensureHostingCaddyRuntimeOverride) {
+    await ensureHostingCaddyRuntimeOverride(layout);
+    markHostingCaddyRuntimeEnsuredForDeploy();
+    return;
+  }
   await ensureHostingCaddy(layout, deps);
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
@@ -996,6 +1064,7 @@ export async function ensureHostingCaddyRuntime(
     await Deno.remove(unitSource).catch(() => {});
     throw new Error("hosting Caddy could not be installed or started");
   }
+  markHostingCaddyRuntimeEnsuredForDeploy();
 }
 
 /** Optional test seams for {@link ensureHostingIngress}. */
@@ -1545,6 +1614,8 @@ type HostnameSite = {
   bindAddress?: string;
   routes: CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
+  /** Set on a `www` redirect name: send every request to `<redirectTo>`. */
+  redirectTo?: string;
 };
 
 function hostingTlsDirective(
@@ -1677,9 +1748,39 @@ export type SiteSnippetOptions = Readonly<{
   upstream?: CaddyUpstream;
   routes?: readonly CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
+  /**
+   * Serve this name as a permanent redirect to `<redirectTo>` (path and query
+   * kept) instead of proxying. With `forceHttps` (the default) both plain HTTP
+   * and HTTPS land on `https://<redirectTo>` in one hop; without it both land
+   * on `http://<redirectTo>`, the only site the target then has.
+   */
+  redirectTo?: string;
 }>;
 
+/** A name that only redirects, under its own certificate on the HTTPS side. */
+function redirectSiteSnippet(options: SiteSnippetOptions): string {
+  const { hostname, tlsDir, tlsId, bindAddress, tlsMode } = options;
+  const target = safeConfigToken("hostings[].www", options.redirectTo!);
+  const tlsDirective = hostingTlsDirective(tlsMode, tlsId, tlsDir);
+  const tlsLine = tlsDirective ? `${tlsDirective}\n` : "";
+  const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
+  // Both schemes land on the scheme the target actually serves: HTTPS in one
+  // hop normally, plain HTTP when the target has forced HTTPS off (it then has
+  // no HTTPS site to land on).
+  const scheme = emitHttpsSite(options.forceHttps ?? true, tlsMode)
+    ? "https"
+    : "http";
+  const redirect = `  redir ${scheme}://${target}{uri} permanent\n`;
+  return `http://${hostname} {
+${bindLine}${redirect}}
+
+${hostname} {
+${bindLine}${tlsLine}${redirect}}
+`;
+}
+
 export function siteSnippet(options: SiteSnippetOptions): string {
+  if (options.redirectTo !== undefined) return redirectSiteSnippet(options);
   const {
     hostname,
     tlsDir,
@@ -1848,13 +1949,56 @@ export function buildCaddyHostnameRoutes(
     if (hosting.hostnames.length === 0) continue;
 
     const route = buildCaddySiteRoute(hosting, loopbackByService);
-    for (const hostname of hosting.hostnames) {
+    for (const hostname of hostingServedNames(hosting)) {
       const site = getOrCreateHostnameSite(byHostname, hostname);
       mergeHostingIntoHostnameSite(site, hosting, route);
     }
   }
 
+  addWwwRedirectSites(byHostname, payload.hostings);
   return byHostname;
+}
+
+/**
+ * The redirect-only names from `www` modes: one redirect site per name, under
+ * the same TLS mode and bind address as the hosting. A name some hosting
+ * already serves is left alone (the control plane refuses that deploy; this
+ * keeps a stray payload from replacing a real site).
+ */
+function addWwwRedirectSites(
+  byHostname: Map<string, HostnameSite>,
+  hostings: readonly EnvironmentDeployHosting[],
+): void {
+  for (const hosting of hostings) {
+    if ((hosting.protocol ?? "http") !== "http") continue;
+    for (const { from, to } of hostingWwwRedirects(hosting)) {
+      if (byHostname.has(from)) continue;
+      byHostname.set(from, redirectSiteFor(hosting, to, byHostname.get(to)));
+    }
+  }
+}
+
+/**
+ * The redirect-only site for one name: the hosting's TLS mode and bind
+ * address, and the HTTPS setting the target site actually serves (every path
+ * of it), so the redirect never lands on a scheme the target lacks.
+ */
+function redirectSiteFor(
+  hosting: EnvironmentDeployHosting,
+  to: string,
+  target: HostnameSite | undefined,
+): HostnameSite {
+  const acme = hosting.tlsMode === "acme";
+  const forceHttps = target
+    ? emitHttpsSite(target.forceHttps, target.tlsMode)
+    : acme || (hosting.proxy?.forceHttps ?? true);
+  return {
+    forceHttps,
+    routes: [],
+    redirectTo: to,
+    ...(acme ? { tlsMode: "acme" as const } : {}),
+    ...(hosting.bindAddress ? { bindAddress: hosting.bindAddress } : {}),
+  };
 }
 
 /** Companion manifest naming which of an environment's hostnames run tlsMode: 'acme'. */
@@ -2058,6 +2202,69 @@ async function hostingCandidateRefusal(
   return test.stderr || "caddy validate failed";
 }
 
+/**
+ * The site addresses one snippet answers on: every top-level `name {` /
+ * `http://name {` line the daemon itself wrote (`siteSnippet`).
+ */
+export function snippetSiteAddresses(contents: string): string[] {
+  const names: string[] = [];
+  for (const line of contents.split("\n")) {
+    if (line.length === 0 || line.startsWith(" ") || !line.endsWith(" {")) {
+      continue;
+    }
+    const address = line.slice(0, -2).trim();
+    names.push(
+      address.startsWith("http://") ? address.slice("http://".length) : address,
+    );
+  }
+  return names;
+}
+
+/**
+ * Before any container starts: refuse a deploy that would answer on a name
+ * another environment's live site already answers on on this server. A www
+ * choice adds names the panel's uniqueness check may not have seen, and the
+ * shared Traefik would otherwise route that name to this environment's
+ * containers even though Caddy later refuses the duplicate site.
+ */
+export async function assertHostingNamesFree(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const wanted = new Set(
+    payload.hostings
+      .filter((hosting) => (hosting.protocol ?? "http") === "http")
+      .flatMap((hosting) => [
+        ...hostingServedNames(hosting),
+        ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
+      ]),
+  );
+  if (wanted.size === 0) return;
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  let names: string[];
+  try {
+    names = await liveSnippetNames(sitesDir);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    throw err;
+  }
+  const own = `${payload.environmentId}.caddy`;
+  const others = names.filter((name) =>
+    name !== own && !isDaemonReservedHostingSite(name)
+  );
+  const contents = await Promise.all(
+    others.map((name) => Deno.readTextFile(join(sitesDir, name))),
+  );
+  const taken = contents.flatMap(snippetSiteAddresses).find((name) =>
+    wanted.has(name)
+  );
+  if (taken !== undefined) {
+    throw new Error(
+      `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
+    );
+  }
+}
+
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {
   const entries: Array<{ name: string; modified: number }> = [];
   for await (const entry of Deno.readDir(sitesDir)) {
@@ -2145,6 +2352,18 @@ async function quarantineHostingSnippets(
  * other environments' files fail on their own, without the new one), that file
  * is set aside and the new snippet is judged again.
  */
+async function ensureHostingCaddyRuntimeBeforeValidate(
+  layout: LayoutPaths,
+): Promise<void> {
+  if (hostingCaddyRuntimeEnsuredThisDeploy) return;
+  if (ensureBeforeValidateOverride && !ensureHostingCaddyRuntimeOverride) {
+    await ensureBeforeValidateOverride(layout);
+    markHostingCaddyRuntimeEnsuredForDeploy();
+    return;
+  }
+  await ensureHostingCaddyRuntime(layout);
+}
+
 async function validateHostingCaddyCandidate(
   layout: LayoutPaths,
   hostingDir: string,
@@ -2158,6 +2377,11 @@ async function validateHostingCaddyCandidate(
     const others = (await liveSnippetNames(sitesDir)).filter((name) =>
       name !== siteFile
     );
+    if (
+      hostingCaddyValidateNeedsEdgeRuntime(contents, others, siteFile)
+    ) {
+      await ensureHostingCaddyRuntimeBeforeValidate(layout);
+    }
     await Promise.all(
       others.map((name) =>
         Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
@@ -2234,6 +2458,11 @@ async function guardHostingCaddySitesLocked(
     throw err;
   }
   if (names.length === 0) return [];
+  const substantive = names.filter((name) =>
+    !isDaemonReservedHostingSite(name)
+  );
+  if (substantive.length === 0) return [];
+  await ensureHostingCaddyRuntimeBeforeValidate(layout);
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
     await Promise.all(
@@ -2387,6 +2616,7 @@ async function rewriteHostingCaddySitesLocked(
         bindAddress: site.bindAddress,
         routes: site.routes,
         tlsMode: site.tlsMode,
+        redirectTo: site.redirectTo,
       });
     })
     .join("\n");

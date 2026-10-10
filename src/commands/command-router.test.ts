@@ -831,6 +831,99 @@ test({
   },
 });
 
+const DEPLOY_PAYLOAD = {
+  environmentId: "env-1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "tp-demo-router",
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime",
+    content: "services: {}\n",
+  }],
+  hostings: [],
+};
+
+const STUB_DEPLOY_RESULT = { projectName: "tp-demo-router", summary: "stub" };
+
+function deployDispatch(commandId: string): CommandDispatchMessage {
+  return {
+    type: "command-dispatch",
+    id: commandId,
+    commandId,
+    commandType: "environment.deploy",
+    payload: DEPLOY_PAYLOAD,
+    at: new Date().toISOString(),
+  };
+}
+
+test({
+  name:
+    "a cancel landing mid-deploy ends the command with the cancelled: outcome and frees the registry",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const { deployCancels, DeployCancelledError } = await import(
+      "../deploy/deploy-cancel.ts"
+    );
+    setCommandRouterHandlersForTests({
+      handleEnvironmentDeploy: (_payload, _at, deps) => {
+        // The cell handler answers `cancelling` while the deploy is running.
+        assertEquals(deployCancels.cancel("cmd-mid"), "cancelling");
+        deps?.cancel?.throwIfCancelled("while building");
+        return Promise.resolve(STUB_DEPLOY_RESULT);
+      },
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(deployDispatch("cmd-mid"), ws);
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, false);
+      assertEquals(
+        frames[1]?.error,
+        new DeployCancelledError(
+          "stopped while building; nothing was switched over, the previous version is still serving",
+        ).message,
+      );
+      // Finished: the id is no longer live.
+      assertEquals(deployCancels.cancel("cmd-mid"), "not_running");
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
+test({
+  name:
+    "a deploy dispatched after its cancel fails at once without running the handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const { deployCancels } = await import("../deploy/deploy-cancel.ts");
+    let ran = 0;
+    setCommandRouterHandlersForTests({
+      handleEnvironmentDeploy: () => {
+        ran += 1;
+        return Promise.resolve(STUB_DEPLOY_RESULT);
+      },
+    });
+    try {
+      assertEquals(deployCancels.cancel("cmd-early"), "not_running");
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(deployDispatch("cmd-early"), ws);
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.ok, false);
+      assertMatch(String(frames[1]?.error), /^cancelled: /);
+      assertEquals(ran, 0);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
 test({
   name: "handleCommandDispatch routes managed.apply through stub handler",
   permissions: { env: true, read: true },

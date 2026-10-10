@@ -8,8 +8,10 @@
  *
  * Mirrors the TurboFabric `TP-FORWARD` pattern in
  * `../commands/fabric.ts`: a dedicated chain hung off `DOCKER-USER`,
- * `iptables -C` before insert, `-D` on teardown, and every failure logged and
- * swallowed — firewall scoping must never block apply or destroy.
+ * `iptables -C` before insert, `-D` on teardown (destroy, and apply when the
+ * listener is cleared or no longer public), and every failure logged and
+ * swallowed — firewall scoping must never block apply or destroy. A leftover
+ * DROP must not block a later cluster that reuses the same address/port.
  *
  * Published container ports traverse `DOCKER-USER` **post-DNAT**, so the
  * original host address/port is matched via `conntrack --ctorigdst` /
@@ -166,15 +168,23 @@ async function ensureRule(
 /**
  * Restrict a public managed listener to the cluster's known peer addresses.
  *
- * No-op (and no rule installed) when the listener is not public, the bind is
- * not IPv4, or no stable peer address is known — an overly-broad fallback is
- * worse than leaving the port as the operator's firewall found it.
+ * When the listener is absent or not public, drop this cluster's `TP-MGD-<id>`
+ * chain (idempotent if already gone). Clearing the listener is a normal apply
+ * for a single-member cluster that only publishes while a remote app is bound;
+ * a leftover DROP would block a later cluster that reuses the same address/port.
+ *
+ * No rule is installed when the bind is not IPv4 or no stable peer address is
+ * known — an overly-broad fallback is worse than leaving the port as the
+ * operator's firewall found it.
  */
 export async function reconcileManagedPublicFirewall(
   payload: ManagedApplyPayload,
 ): Promise<void> {
   const listener = payload.privateListener;
-  if (listener?.transport !== "public") return;
+  if (listener?.transport !== "public") {
+    await removeManagedPublicFirewall(payload.managedId);
+    return;
+  }
   if (!isValidIpv4Literal(listener.address)) return;
 
   const sources = resolveManagedPublicAllowedSources(payload);

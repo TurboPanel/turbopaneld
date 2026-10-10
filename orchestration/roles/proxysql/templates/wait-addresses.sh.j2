@@ -1,0 +1,36 @@
+#!/bin/sh
+# Wait (bounded) for every specific IPv4 address the ProxySQL compose file
+# publishes on to exist on a local interface, so `docker compose up` does not
+# fail its host publish ("cannot assign requested address") when the unit runs
+# a moment before the NIC is configured after a hard reboot.
+#
+# Wildcard and loopback binds never wait. The compose file is daemon-writable,
+# so only strict dotted-quad text is ever used; everything else is ignored. A
+# timeout is not an error: the daemon's boot repair recreates the container
+# once the address appears.
+set -eu
+
+compose_file="{{ proxysql_config_dir }}/docker-compose.yml"
+max_attempts=60
+sleep_seconds=2
+
+[ -f "$compose_file" ] || exit 0
+command -v ip >/dev/null 2>&1 || exit 0
+
+addresses="$(sed -n 's/^[[:space:]]*- "\([0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\):[0-9]*:[0-9]*"$/\1/p' "$compose_file" | sort -u)"
+
+for address in $addresses; do
+  case "$address" in
+    0.0.0.0 | 127.*) continue ;;
+  esac
+  i=0
+  while ! ip -o -4 addr show | grep -qE "[[:space:]]inet ${address}/"; do
+    i=$((i + 1))
+    if [ "$i" -ge "$max_attempts" ]; then
+      echo "address ${address} not present after $((max_attempts * sleep_seconds))s; continuing"
+      break
+    fi
+    sleep "$sleep_seconds"
+  done
+done
+exit 0

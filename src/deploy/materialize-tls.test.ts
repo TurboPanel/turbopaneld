@@ -237,3 +237,60 @@ test("hostnameTlsMap skips acme-mode hostings even when tlsId is set", () => {
   const map = hostnameTlsMap(payload);
   assertEquals(map.has("acme.example.test"), false);
 });
+
+test("hostnameTlsMap pins every www name to the same certificate", () => {
+  const hosting = {
+    hostingId: "h1",
+    serviceId: "s1",
+    composeServiceName: "web",
+    tlsId: TLS_ID,
+  };
+  const payload = {
+    hostings: [
+      { ...hosting, hostnames: ["example.com"], www: "www-to-root" },
+      { ...hosting, hostnames: ["shop.example.com"], www: "root-to-www" },
+      { ...hosting, hostnames: ["blog.example.com"], www: "both" },
+      { ...hosting, hostnames: ["plain.example.com"] },
+    ],
+  } as EnvironmentDeployPayload;
+  const map = hostnameTlsMap(payload);
+  for (
+    const name of [
+      "example.com",
+      "www.example.com",
+      "shop.example.com",
+      "www.shop.example.com",
+      "blog.example.com",
+      "www.blog.example.com",
+      "plain.example.com",
+    ]
+  ) {
+    assertEquals(map.get(name), TLS_ID, name);
+  }
+  assertEquals(map.has("www.plain.example.com"), false);
+});
+
+test("hostnameTlsMap puts each www name under its own hosting's pair", () => {
+  const hosting = { serviceId: "s1", composeServiceName: "web" };
+  const map = hostnameTlsMap({
+    hostings: [
+      {
+        ...hosting,
+        hostingId: "h1",
+        hostnames: ["a.example.com"],
+        tlsId: "tls-a",
+        www: "www-to-root",
+      },
+      {
+        ...hosting,
+        hostingId: "h2",
+        hostnames: ["b.example.com"],
+        tlsId: "tls-b",
+        www: "root-to-www",
+      },
+    ],
+  } as EnvironmentDeployPayload);
+  assertEquals(map.get("www.a.example.com"), "tls-a");
+  assertEquals(map.get("b.example.com"), "tls-b");
+  assertEquals(map.get("www.b.example.com"), "tls-b");
+});

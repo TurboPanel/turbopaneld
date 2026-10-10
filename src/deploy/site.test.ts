@@ -1,6 +1,7 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   apacheSiteConfig,
+  assertPhpSeriesOffered,
   caddySiteConfig,
   DEFAULT_PHP_SERIES,
   defaultIndexHtml,
@@ -458,7 +459,7 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
     "/run/turbopanel/php/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = site_user");
-  assertStringIncludes(conf, "group = site_user-grp");
+  assertStringIncludes(conf, "group = site_user");
   assertStringIncludes(conf, "listen.owner = tpapache");
   assertStringIncludes(conf, "listen.group = tpapache");
 });
@@ -608,6 +609,7 @@ test("openlitespeedVhostConfig serves a static document root with no directory l
   const conf = openlitespeedVhostConfig();
   assertStringIncludes(conf, "docRoot $VH_ROOT/");
   assertStringIncludes(conf, "autoIndex 0");
+  assertStringIncludes(conf, "useServer 0");
   // `allowBrowse` is OpenLiteSpeed's "Accessible" flag: 0 answers 403 for `/`.
   assertStringIncludes(conf, "allowBrowse 1");
   assertEquals(conf.includes("allowBrowse 0"), false);
@@ -922,7 +924,12 @@ test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starti
       conf,
       `add                       ${type}:php_tp_env1_phpapp php`,
     );
-    assertStringIncludes(conf, "indexFiles index.php, index.html");
+    // Without `useServer 0` OLS keeps the server-level `indexFiles index.html`
+    // and `/` never reaches index.php.
+    assertStringIncludes(
+      conf,
+      "indexFiles index.php, index.html\n  useServer 0\n  autoIndex 0",
+    );
     // OpenLiteSpeed runs as tpols and cannot switch users: no suEXEC lines,
     // no binary to start, and the settings live in the runtime's php.ini.
     for (
@@ -1166,4 +1173,99 @@ test("the Caddy dotfile rule refuses .env and nested dotfiles, not /.well-known/
   ) {
     assertEquals(caddyRefusesDotPath(path), false, path);
   }
+});
+
+const NGINX_PHP_SITE: SiteApplySpec = {
+  composeServiceName: "app",
+  engine: "nginx",
+  root: "public",
+  listenPort: 18080,
+  php: { version: "8.4" },
+};
+
+/** The nginx vhost of a PHP site carrying `webEnv`. */
+function nginxPhpWith(webEnv?: Record<string, string>): string {
+  return nginxSiteConfig(
+    { ...NGINX_PHP_SITE, ...(webEnv ? { webEnv } : {}) },
+    "/srv/users/alice/sites/app/current/public",
+    null,
+    { phpFpmSocket: "/run/turbopanel/php/8.4/tp-env-app.sock" },
+  );
+}
+
+test("nginxSiteConfig passes site variables to PHP as fastcgi_param, name order, before the pinned parameters", () => {
+  const conf = nginxPhpWith({ ZED: "z", APP_ENV: "production" });
+  assertStringIncludes(conf, '    fastcgi_param APP_ENV "production";\n');
+  assertStringIncludes(conf, '    fastcgi_param ZED "z";\n');
+  assertEquals(conf.indexOf("APP_ENV") < conf.indexOf("ZED"), true);
+  // Platform-pinned parameters come last, so a site cannot move the script.
+  assertEquals(
+    conf.indexOf("ZED") < conf.indexOf("fastcgi_param SCRIPT_FILENAME"),
+    true,
+  );
+});
+
+test("nginxSiteConfig escapes quotes and backslashes in a site variable", () => {
+  const conf = nginxPhpWith({ QUOTED: String.raw`a"b\c` });
+  assertStringIncludes(conf, String.raw`fastcgi_param QUOTED "a\"b\\c";`);
+});
+
+test("nginxSiteConfig drops a site variable it cannot carry and keeps the rest, never printing the value", () => {
+  const conf = nginxPhpWith({
+    KEEP: "ok",
+    // nginx expands `$name` inside quotes and has no escape.
+    DOLLAR: "alpha$host",
+    NEWLINE: "a\nfastcgi_param X y",
+    // Parameters the platform sets itself.
+    SCRIPT_FILENAME: "/etc/passwd",
+    REMOTE_ADDR: "127.0.0.1",
+    HTTP_HOST: "evil",
+    http_authorization: "x",
+    HTTPS: "on",
+  });
+  assertStringIncludes(conf, 'fastcgi_param KEEP "ok";');
+  const gone = ["DOLLAR", "alpha", "NEWLINE", "/etc/passwd", "evil", "HTTPS"];
+  for (const text of [...gone, '127.0.0.1"', "http_authorization"]) {
+    assertEquals(conf.includes(text), false, text);
+  }
+  // Only the platform's own SCRIPT_FILENAME is left.
+  assertEquals(conf.match(/fastcgi_param SCRIPT_FILENAME /g)?.length, 1);
+});
+
+test("nginxSiteConfig still refuses a name that is not an environment variable name", () => {
+  assertThrows(() => nginxPhpWith({ "BAD-NAME": "x" }));
+});
+
+test("nginxSiteConfig carries no site variables outside the PHP location", () => {
+  assertEquals(
+    nginxPhpWith({ APP_ENV: "production" }).replace(
+      '    fastcgi_param APP_ENV "production";\n',
+      "",
+    ),
+    nginxPhpWith(),
+  );
+  // A static site has no PHP location, so nothing to pass the variables to.
+  const staticSite = nginxSiteConfig(
+    {
+      composeServiceName: "app",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      webEnv: { APP_ENV: "production" },
+    },
+    "/srv/users/alice/sites/app/current/public",
+  );
+  assertEquals(staticSite.includes("APP_ENV"), false);
+});
+
+test("a PHP series the server's operating system does not offer is refused before any playbook runs", () => {
+  assertPhpSeriesOffered(["8.1", "8.4", "8.5"], "trixie");
+  assertThrows(
+    () => assertPhpSeriesOffered(["8.4", "7.4"], "trixie"),
+    Error,
+    "php 7.4 is not offered on this server's operating system. Offered series: 8.1, 8.2, 8.3, 8.4, 8.5.",
+  );
+  // A suite the table does not list gets every registry series.
+  assertPhpSeriesOffered(["8.1"], "bookworm");
+  assertThrows(() => assertPhpSeriesOffered(["7.4"], "bookworm"), Error);
 });

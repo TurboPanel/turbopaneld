@@ -1,0 +1,27 @@
+-P INPUT ACCEPT
+-P FORWARD ACCEPT
+-P OUTPUT ACCEPT
+-N DOCKER-USER
+-N TP-FWD
+-N TP-INPUT
+-N TP-MANAGED-PUB
+-N TP-MGD-550e8400e29b41d4a716
+-A FORWARD -j DOCKER-USER
+-A DOCKER-USER -j TP-FWD
+-A DOCKER-USER -j TP-MANAGED-PUB
+-A TP-FWD -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "tp:system:established" -j RETURN
+-A TP-FWD -i docker0 -m comment --comment "tp:system:container-egress" -j RETURN
+-A TP-FWD -i br-+ -m comment --comment "tp:system:container-egress" -j RETURN
+-A TP-FWD -i tp0 -m comment --comment "tp:system:container-egress" -j RETURN
+-A TP-FWD -s 198.51.100.80/32 -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -m comment --comment "tp:derived:d:cluster:tcp:45001:peers Managed cluster peers" -j RETURN
+-A TP-FWD -s 203.0.113.52/32 -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -m comment --comment "tp:derived:d:cluster:tcp:45001:peers Managed cluster peers" -j RETURN
+-A TP-FWD -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -m comment --comment "tp:derived:d:cluster:tcp:45001:peers Managed cluster peers" -j DROP
+-A TP-INPUT -i lo -m comment --comment "tp:system:loopback" -j ACCEPT
+-A TP-INPUT -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "tp:system:established" -j ACCEPT
+-A TP-INPUT -p icmp -m comment --comment "tp:system:icmp" -j ACCEPT
+-A TP-INPUT -p udp -m udp --sport 67 --dport 68 -m comment --comment "tp:system:dhcp" -j ACCEPT
+-A TP-INPUT -p tcp -m tcp --dport 22 -m comment --comment "tp:system:tcp-22" -j ACCEPT
+-A TP-MANAGED-PUB -j TP-MGD-550e8400e29b41d4a716
+-A TP-MGD-550e8400e29b41d4a716 -s 198.51.100.80/32 -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j ACCEPT
+-A TP-MGD-550e8400e29b41d4a716 -s 203.0.113.52/32 -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j ACCEPT
+-A TP-MGD-550e8400e29b41d4a716 -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP

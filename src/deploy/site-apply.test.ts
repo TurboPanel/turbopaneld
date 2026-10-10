@@ -26,6 +26,11 @@ import {
   sitePhpRuntimeId,
   type SitePhpRuntimeMode,
 } from "./site/php-runtime.ts";
+import {
+  holdPhpSeries,
+  resetPhpSeriesPruneForTests,
+} from "./site/php-series-prune.ts";
+import { engineHoldKey, holdPruneKeys } from "./site/prune-holds.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -755,7 +760,7 @@ test("applySites rejects unsafe document root", async () => {
 
 const RELEASE_USERNAME = "appuser";
 const RELEASE_SERVICE_ID = "svc-1";
-const RELEASE_GROUP = `${RELEASE_USERNAME}-grp`;
+const RELEASE_GROUP = `${RELEASE_USERNAME}`;
 
 const releaseBinding: SiteRelease = {
   serviceId: RELEASE_SERVICE_ID,
@@ -1631,6 +1636,169 @@ test("removeSites drops nginx pools and reloads php-fpm", async () => {
       true,
     );
   } finally {
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Unused PHP series are removed; one anything still uses never is.
+// ---------------------------------------------------------------------------
+
+/** The host reports PHP 8.4 installed (the real `/usr/sbin` is never probed). */
+const hostWithPhp84 = () => ({ php: { series: ["8.4"] } });
+
+/**
+ * An empty systemd unit folder inside the test layout, so the per-site PHP
+ * unit listing never depends on the machine's own `/etc/systemd/system` (a
+ * listing that fails keeps every series).
+ */
+async function emptyUnitDir(layout: LayoutPaths): Promise<string> {
+  const dir = join(layout.stateDir, "test-systemd-units");
+  await Deno.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+/** `php_series_prune` lists the playbook runs asked for, in order. */
+function pruneRequests(
+  captured: ReturnType<typeof capturePlaybooks>,
+): unknown[] {
+  return captured.extraVars
+    .filter((entry) => entry.label.startsWith("php-series-prune"))
+    .map((entry) => entry.vars.php_series_prune);
+}
+
+test("removeSites removes PHP 8.4 once the last site using it goes", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    await applySites(layout, "envpruneA", [nginxPhpSite], {
+      run,
+      runPlaybook: applied.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    // Applying a site that uses the series asks for no removal.
+    assertEquals(pruneRequests(applied), []);
+
+    const removal = capturePlaybooks();
+    await removeSites(layout, "envpruneA", {
+      run,
+      runPlaybook: removal.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    assertEquals(pruneRequests(removal), [["8.4"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("removeSites keeps a PHP series another environment still uses", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    for (
+      const [environmentId, listenPort] of [
+        ["envshareA", 18083],
+        ["envshareB", 18183],
+      ] as const
+    ) {
+      await applySites(
+        layout,
+        environmentId,
+        [{ ...nginxPhpSite, listenPort }],
+        {
+          run,
+          runPlaybook: applied.runPlaybook,
+          hostRuntimes: hostWithPhp84,
+          systemdUnitDir: await emptyUnitDir(layout),
+        },
+      );
+    }
+    const first = capturePlaybooks();
+    await removeSites(layout, "envshareA", {
+      run,
+      runPlaybook: first.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    assertEquals(pruneRequests(first), []);
+
+    const last = capturePlaybooks();
+    await removeSites(layout, "envshareB", {
+      run,
+      runPlaybook: last.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    assertEquals(pruneRequests(last), [["8.4"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("removeSites never removes a PHP series a deploy in flight holds", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    await applySites(layout, "envholdA", [nginxPhpSite], {
+      run,
+      runPlaybook: applied.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    const release = await holdPhpSeries(["8.4"]);
+    const held = capturePlaybooks();
+    await removeSites(layout, "envholdA", {
+      run,
+      runPlaybook: held.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    assertEquals(pruneRequests(held), []);
+
+    release();
+    const after = capturePlaybooks();
+    await removeSites(layout, "envholdA", {
+      run,
+      runPlaybook: after.runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    assertEquals(pruneRequests(after), [["8.4"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("a failed PHP series removal never fails the teardown that triggered it", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await applySites(layout, "envfailA", [nginxPhpSite], {
+      run,
+      runPlaybook: capturePlaybooks().runPlaybook,
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+    await removeSites(layout, "envfailA", {
+      run,
+      runPlaybook: () => Promise.reject(new Error("apt is busy")),
+      hostRuntimes: hostWithPhp84,
+      systemdUnitDir: await emptyUnitDir(layout),
+    });
+  } finally {
+    resetPhpSeriesPruneForTests();
     await cleanup();
   }
 });
@@ -4565,5 +4733,111 @@ test("nginx+apache -> nginx: Apache drops the backend vhost, and PHP's socket mo
     assert(socketRestart >= 0 && socketRestart < nginxTest, "socket restarted");
   } finally {
     await h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Unused web engines are removed; one a site or a deploy still needs never is.
+// ---------------------------------------------------------------------------
+
+/** Mark `engine` installed the way the roles do (`<vendor>/<engine>/current`). */
+async function installEngine(
+  layout: LayoutPaths,
+  engine: string,
+): Promise<void> {
+  await Deno.mkdir(join(layout.runtimesDir, engine, "current"), {
+    recursive: true,
+  });
+}
+
+/** `engine_prune` lists the playbook runs asked for, in order. */
+function enginePruneRequests(
+  captured: ReturnType<typeof capturePlaybooks>,
+): unknown[] {
+  return captured.extraVars
+    .filter((entry) => entry.label.startsWith("engine-prune"))
+    .map((entry) => entry.vars.engine_prune);
+}
+
+test("applySites removes an installed engine no site uses, and keeps the one it serves", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const applied = capturePlaybooks();
+  try {
+    await installEngine(layout, "nginx");
+    await installEngine(layout, "apache");
+    await applySites(layout, "envengA", [nginxSite], {
+      run,
+      runPlaybook: applied.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(applied), [["apache"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("removeSites removes nginx once its last site goes, unless a deploy holds it", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await installEngine(layout, "nginx");
+    await applySites(layout, "envengB", [nginxSite], {
+      run,
+      runPlaybook: capturePlaybooks().runPlaybook,
+    });
+    const release = await holdPruneKeys([engineHoldKey("nginx")]);
+    const held = capturePlaybooks();
+    await removeSites(layout, "envengB", {
+      run,
+      runPlaybook: held.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(held), []);
+
+    release();
+    const after = capturePlaybooks();
+    await removeSites(layout, "envengB", {
+      run,
+      runPlaybook: after.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(after), [["nginx"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+test("an OpenLiteSpeed site directory keeps the engine, and a failed removal never fails the teardown", async () => {
+  resetPhpSeriesPruneForTests();
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  try {
+    await installEngine(layout, "openlitespeed");
+    const vhost = join(layout.configDir, "openlitespeed", "vhosts", "left");
+    await Deno.mkdir(vhost, { recursive: true });
+    const kept = capturePlaybooks();
+    await removeSites(layout, "envengC", {
+      run,
+      runPlaybook: kept.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(kept), []);
+
+    await Deno.remove(vhost);
+    await removeSites(layout, "envengC", {
+      run,
+      runPlaybook: () => Promise.reject(new Error("unit busy")),
+    });
+    // The failure kept the engine and locked nothing: the next teardown asks again.
+    const retry = capturePlaybooks();
+    await removeSites(layout, "envengC", {
+      run,
+      runPlaybook: retry.runPlaybook,
+    });
+    assertEquals(enginePruneRequests(retry), [["openlitespeed"]]);
+  } finally {
+    resetPhpSeriesPruneForTests();
+    await cleanup();
   }
 });

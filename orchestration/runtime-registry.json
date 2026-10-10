@@ -1,34 +1,22 @@
 {
   "$comment": [
-    "Single source of truth for runtime entitlements. Read by BOTH the daemon",
-    "(src/runtime/registry.ts, via a JSON import) and Ansible (include_vars in",
-    "the runtime-entitlement role) \u2014 same bytes, so the two cannot drift.",
+    "Runtimes and series this host offers. Read by BOTH the daemon",
+    "(src/runtime/registry.ts, via a JSON import) and Ansible (include_vars) \u2014",
+    "same bytes, so the two cannot drift.",
     "",
-    "A group here means exactly one thing: 'this principal may execute this",
-    "runtime series on this host'. Groups are per (runtime, series), not per",
-    "runtime: co-installed PHP versions are distinct binaries, so a single",
-    "tpphp group would mean granting 8.4 also grants 8.3 with whatever CVEs",
-    "another tenant's app is pinned to.",
-    "",
-    "gids are hand-assigned, never computed from the version string \u2014 that",
-    "breaks the day 8.10 exists. Band 9900-9979 is reserved for entitlement",
-    "groups; 9980-9999 is the service-identity band (web-service-user, tp,",
-    "tpnodeapp, tpcaddysite). src/orchestration/service-accounts.test.ts",
-    "enforces global uniqueness across both."
+    "Every installed series may be run by every site owner's Linux user: there",
+    "is no per-version group (owner decision 2026-10-07). Vendored runtime trees",
+    "are root-owned, readable and executable by everyone, never writable.",
+    "Groups in the 9900-9979 gid band named tpphp<NN>, tpnode<N> or tpdeno<N>",
+    "are leftovers of the old per-version groups; the runtime-access role",
+    "deletes them on its next run."
   ],
   "version": 1,
-  "gidBand": {
-    "min": 9900,
-    "max": 9979
-  },
   "$accessGroupsComment": [
-    "SSH access groups. Not entitlement groups, and deliberately not in the",
-    "9900-9979 band: an entitlement group protects a binary's mode bits, while",
-    "these only select an `sshd` Match block. They live here anyway because",
-    "revocation needs ONE containment set — ensurePrincipalManagedGroups removes",
-    "stale membership only for names this file defines, so <user>-grp, tp, and",
-    "anything an operator added by hand are never touched. Two files would mean",
-    "two containment sets and a downgrade that leaves a group behind.",
+    "SSH access groups. They only select an `sshd` Match block; they protect",
+    "no binary. ensurePrincipalManagedGroups removes stale membership only for",
+    "names this file defines, so the user's own group, tp, and anything an operator added",
+    "by hand are never touched.",
     "",
     "One group per access level rather than one 'tpssh' group plus a shell",
     "check: sshd matches on groups, not on shells, so ForceCommand",
@@ -63,19 +51,46 @@
       "seriesKey": "major.minor",
       "default": "8.4",
       "series": {
-        "8.3": {
-          "group": "tpphp83",
-          "gid": 9901
-        },
-        "8.4": {
-          "group": "tpphp84",
-          "gid": 9902
-        }
+        "8.1": {},
+        "8.2": {},
+        "8.3": {},
+        "8.4": {},
+        "8.5": {}
       },
-      "$comment": [
-        "One group spans both PHP flavors: tpphp84 owns /usr/sbin/php-fpm8.4,",
-        "/usr/bin/php8.4, AND vendor/lsphp/8.4/current/bin/lsphp. Semantically",
-        "'may execute PHP 8.4 here', whichever engine serves the site."
+      "suiteSeries": {
+        "trixie": [
+          "8.1",
+          "8.2",
+          "8.3",
+          "8.4",
+          "8.5"
+        ]
+      },
+      "$suiteSeriesComment": [
+        "PHP series offered per Debian/Ubuntu suite (VERSION_CODENAME), and the",
+        "same list for every engine: lsphp (OpenLiteSpeed) and php-fpm (nginx,",
+        "Apache). Owner decision 2026-10-07: mirror what the LiteSpeed repository",
+        "(rpms.litespeedtech.com/debian/dists/<suite>/main) publishes for the",
+        "suite, so web hosting is at parity across engines and server versions.",
+        "Debian 13 (trixie) is the only supported OS today, so it is the only",
+        "suite listed. Checked 2026-10-07: LiteSpeed also publishes 7.4 and 8.0",
+        "for bullseye, bookworm and jammy, 8.1-8.5 for noble, 8.2-8.5 for",
+        "resolute; ondrej/sury publishes every one of those series for Debian",
+        "(trixie, bookworm, bullseye). A suite is added here only together with",
+        "its pinned lsphp digests and the 7.4/8.0 registry series; a test fails",
+        "a suite that lists a series the lsphp role cannot install.",
+        "Nothing is installed up front: a series lands on the first deploy that",
+        "names it and goes when no site uses it any more (series prune)."
+      ],
+      "builtinExtensions": {
+        "8.5": [
+          "opcache"
+        ]
+      },
+      "$builtinExtensionsComment": [
+        "Extensions compiled into the interpreter for a series: there is no",
+        "php<series>-<name> / lsphp<NN>-<name> package to install (PHP 8.5 builds",
+        "opcache in), and loading opcache.so from php.ini would fail."
       ],
       "baselineExtensions": [
         "bcmath",
@@ -84,6 +99,7 @@
         "mbstring",
         "mysql",
         "opcache",
+        "pgsql",
         "sqlite3",
         "xml",
         "zip"
@@ -98,7 +114,6 @@
         "ldap",
         "memcached",
         "msgpack",
-        "pgsql",
         "redis",
         "snmp",
         "soap",
@@ -121,19 +136,22 @@
       "seriesKey": "major",
       "default": "24",
       "series": {
-        "22": {
-          "group": "tpnode22",
-          "gid": 9921
-        },
-        "24": {
-          "group": "tpnode24",
-          "gid": 9923
-        },
-        "26": {
-          "group": "tpnode26",
-          "gid": 9925
-        }
+        "22": {},
+        "24": {},
+        "26": {}
       }
+    },
+    "deno": {
+      "seriesKey": "major",
+      "default": "2",
+      "series": {
+        "2": {}
+      },
+      "$comment": [
+        "Deno publishes one major (2) and ships minors often, so a series is the",
+        "major: the vendoring role installs the newest 2.x release and moves",
+        "`current` at it. Add a series only when Deno ships a new major."
+      ]
     }
   }
 }

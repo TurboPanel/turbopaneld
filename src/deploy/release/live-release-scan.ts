@@ -193,3 +193,89 @@ export async function reportLiveReleaseLinks(
   );
   return findings;
 }
+
+/** Most findings the control plane is told about; `findingCount` is the full count. */
+export const MAX_REPORTED_LINK_FINDINGS = 20;
+
+/** Longest text (site name, error) put on the wire. */
+const MAX_REPORTED_TEXT_LENGTH = 120;
+
+/** One site in {@link ReleaseLinkScanReport}: which site, never the link text. */
+export type ReleaseLinkScanReportFinding = {
+  username: string;
+  serviceId: string;
+  releaseId?: string;
+  /** Links that leave the release or reach into `shared/`. */
+  linkCount: number;
+  /** Set when the site could not be checked at all. */
+  error?: string;
+};
+
+/**
+ * What the daemon tells the control plane about the last boot scan, sent with
+ * its presence frames. Bounded on purpose: a count, the first
+ * {@link MAX_REPORTED_LINK_FINDINGS} sites, and no link text, which the site
+ * owner controls.
+ */
+export type ReleaseLinkScanReport = {
+  scannedAt: string;
+  findingCount: number;
+  findings: ReleaseLinkScanReportFinding[];
+};
+
+function boundedText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0
+    ? value.slice(0, MAX_REPORTED_TEXT_LENGTH)
+    : undefined;
+}
+
+function reportFinding(value: unknown): ReleaseLinkScanReportFinding | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  const releaseId = boundedText(raw.releaseId);
+  const error = boundedText(raw.error);
+  return {
+    username: boundedText(raw.username) ?? "",
+    serviceId: boundedText(raw.serviceId) ?? "",
+    ...(releaseId === undefined ? {} : { releaseId }),
+    linkCount: Array.isArray(raw.links) ? raw.links.length : 0,
+    ...(error === undefined ? {} : { error }),
+  };
+}
+
+/** `undefined` unless `value` is a version-1 `release-link-scan.json` body. */
+export function summarizeReleaseLinkScan(
+  value: unknown,
+): ReleaseLinkScanReport | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.version !== 1 || !Array.isArray(raw.findings)) return undefined;
+  const scannedAt = boundedText(raw.scannedAt);
+  if (scannedAt === undefined) return undefined;
+  const findings = raw.findings
+    .map(reportFinding)
+    .filter((finding) => finding !== null);
+  return {
+    scannedAt,
+    findingCount: findings.length,
+    findings: findings.slice(0, MAX_REPORTED_LINK_FINDINGS),
+  };
+}
+
+/**
+ * The last scan's report, read from `<daemonStateDir>/release-link-scan.json`.
+ * `undefined` when no scan has run yet or the file is unreadable: presence must
+ * never fail on it.
+ */
+export function readReleaseLinkScanReport(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): ReleaseLinkScanReport | undefined {
+  try {
+    const text = Deno.readTextFileSync(
+      join(layout.daemonStateDir, RELEASE_LINK_SCAN_FILENAME),
+    );
+    return summarizeReleaseLinkScan(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}

@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { METRICS_TEXT_FIELD_NAMES } from "../../contracts/metrics-contract.ts";
 import {
+  countFailedUnits,
   HOST_TEXT_TTL_MS,
   HostTextCollector,
   type HostTextIo,
@@ -14,6 +15,7 @@ import {
   parseSharedFpmPool,
   parseVirt,
   parseWebEngines,
+  PROC_SCAN_CONCURRENCY,
   raidStateFromMdstat,
   readOnlyMounts,
   shortName,
@@ -141,6 +143,7 @@ test("HostTextCollector gathers short-name facts and never reads command lines",
   assertEquals(first.os, "debian 13");
   assertEquals(first.rebootRequired, true);
   assertEquals(first.unhealthyUnits, ["foo.service"]);
+  assertEquals(first.failedUnitCount, 1);
   assertEquals(first.phpVersions, ["8.3"]);
   assertEquals(first.topMemProcess, "heavy");
   assertEquals(first.topCpuProcess, undefined);
@@ -285,6 +288,46 @@ Deno.test("hostTextToExtended uses exactly the contract's text keys", () => {
   assertEquals(hostTextToExtended({}), {});
 });
 
+Deno.test("hostTextToExtended reports the full failed-unit count, zero included", () => {
+  assertEquals(
+    hostTextToExtended({
+      unhealthyUnits: ["a.service"],
+      failedUnitCount: 9,
+    }).host,
+    { systemdUnitsFailed: 9 },
+  );
+  assertEquals(
+    hostTextToExtended({ unhealthyUnits: [], failedUnitCount: 0 }).host,
+    { systemdUnitsFailed: 0 },
+  );
+  assertEquals(hostTextToExtended({}).host, undefined);
+});
+
+Deno.test("HostTextCollector reports zero failed units when systemctl prints nothing, unknown when it fails", async () => {
+  const run = (
+    result: { code: number; stdout: string } | null,
+  ): HostTextIo => ({
+    ...fakeIo().io,
+    run: () => Promise.resolve(result),
+  });
+  const none = await new HostTextCollector(run({ code: 0, stdout: "" })).read();
+  assertEquals(none.failedUnitCount, 0);
+  assertEquals(hostTextToExtended(none).host, { systemdUnitsFailed: 0 });
+  const unknown = await new HostTextCollector(run(null)).read();
+  assertEquals(unknown.failedUnitCount, undefined);
+});
+
+Deno.test("countFailedUnits counts past the name cap and treats empty output as zero", () => {
+  const many = Array.from(
+    { length: 8 },
+    (_, i) => `u${i}.service loaded failed`,
+  )
+    .join("\n");
+  assertEquals(countFailedUnits(many), 8);
+  assertEquals(parseFailedUnits(many).length, 5);
+  assertEquals(countFailedUnits(""), 0);
+});
+
 Deno.test("shared php-fpm masters attribute workers to the pool in the process title", () => {
   const cg =
     "0::/system.slice/system-turbopanel\\x2dphp\\x2dfpm.slice/turbopanel-php-fpm@8.3.service\n";
@@ -321,4 +364,60 @@ Deno.test("fpmBusiest includes workers of a shared php-fpm master", async () => 
     pageSizeBytes: 4096,
   };
   assertEquals((await new HostTextCollector(io).read()).fpmBusiest, "shared-a");
+});
+
+test("smart verdict: a failing drive (non-zero exit bitmask) is reported failing", async () => {
+  const { io } = fakeIo();
+  const outputs: Record<string, { code: number; stdout: string } | null> = {
+    sda: { code: 8, stdout: '{"smart_status":{"passed":false}}' },
+    sdb: { code: 0, stdout: '{"smart_status":{"passed":true}}' },
+    sdc: { code: 2, stdout: "" },
+    sdd: { code: 4, stdout: "not json" },
+  };
+  const collector = new HostTextCollector({
+    ...io,
+    blockDisks: () => Promise.resolve(["sda", "sdb", "sdc", "sdd"]),
+    run: (cmd, args) =>
+      Promise.resolve(
+        cmd === "smartctl" ? outputs[args.at(-1)!.replace("/dev/", "")] : null,
+      ),
+  });
+  const { smart } = await collector.read();
+  assertEquals(smart, { sda: "failing", sdb: "ok" });
+});
+
+test("process scan keeps /proc reads bounded on a box with thousands of processes", async () => {
+  const { io } = fakeIo();
+  let inFlight = 0;
+  let peak = 0;
+  const pids = Array.from({ length: 5000 }, (_, i) => String(1000 + i));
+  const collector = new HostTextCollector({
+    ...io,
+    listPids: () => Promise.resolve(pids),
+    readFile: async (p) => {
+      if (!p.startsWith("/proc/1") || !p.endsWith("/stat")) return undefined;
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await Promise.resolve();
+      await Promise.resolve();
+      inFlight -= 1;
+      return `1 (p) S 1 1 1 0 -1 0 0 0 0 0 5 0 0 0`;
+    },
+  });
+  await collector.read();
+  assertEquals(peak > 0 && peak <= PROC_SCAN_CONCURRENCY, true);
+});
+
+test("two concurrent reads share one scan", async () => {
+  const { io } = fakeIo();
+  let listings = 0;
+  const collector = new HostTextCollector({
+    ...io,
+    listPids: () => {
+      listings += 1;
+      return Promise.resolve([]);
+    },
+  });
+  await Promise.all([collector.read(), collector.read()]);
+  assertEquals(listings, 1);
 });

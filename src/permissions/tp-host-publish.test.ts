@@ -6,6 +6,7 @@
  * owns, and swaps `current`. In test mode the file mechanics run for real and
  * only the chowns are printed.
  */
+import { waitFor } from "../testing/wait-for.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { type Host, refused, withHost } from "../testing/tp-host-fixture.ts";
@@ -105,7 +106,7 @@ test("publish seals every entry, not only the top, and swaps current", async () 
     assertEquals(result.code, 0, result.stderr);
     assertStringIncludes(
       result.stdout,
-      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice] [.]",
     );
 
     const release = host.path(`${SITE}/releases/r1`);
@@ -273,7 +274,7 @@ test("the staging area and release directories are closed to generic verbs", asy
         ["install", "-d", "-m", "0700", leaf],
         ["mkdir", "-p", "--", join(leaf, "x")],
         ["rm", "-rf", "--", leaf],
-        ["chown", "-R", "root:alice-grp", leaf],
+        ["chown", "-R", "root:alice", leaf],
         ["chmod", "0755", leaf],
         ["ln", "-s", "--", "../../shared", join(leaf, "shared")],
         [
@@ -284,7 +285,7 @@ test("the staging area and release directories are closed to generic verbs", asy
           "-o",
           "root",
           "-g",
-          "alice-grp",
+          "alice",
           release,
         ],
         ["mkdir", "-p", "--", release],
@@ -303,17 +304,29 @@ test("publish-open and publish wait for another call on the same release", async
     await openRelease(host);
     const lock = host.path("run/tp-publish/alice.web.r1.lock");
     assertEquals(await exists(lock), true);
+    // The holder takes the lock, drops a marker, then keeps it for a second.
+    // Waiting for the marker (not a fixed sleep) proves the lock is held
+    // before publish-open starts, however slow flock is to spawn.
+    const marker = await Deno.makeTempFile();
+    await Deno.remove(marker);
     const holder = new Deno.Command("flock", {
-      args: [lock, "sleep", "1.5"],
+      args: [lock, "sh", "-c", `touch '${marker}'; sleep 1`],
     }).spawn();
-    // Let the holder take the lock first.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const started = Date.now();
+    const holderExit = holder.status.then(() => Date.now());
+    await waitFor("the holder to take the lock", () => exists(marker));
     const again = await host.run(["publish-open", "alice", "web", "r1"]);
-    const waited = Date.now() - started;
-    await holder.status;
+    const finished = Date.now();
+    const exited = await holderExit;
+    await Deno.remove(marker);
     assertEquals(again.code, 0, again.stderr);
-    assertEquals(waited >= 900, true, `did not wait (${waited} ms)`);
+    // Not held back, it would finish about a second before the holder exits.
+    assertEquals(
+      finished >= exited - 200,
+      true,
+      `did not wait (finished ${
+        exited - finished
+      } ms before the holder exited)`,
+    );
   });
 });
 

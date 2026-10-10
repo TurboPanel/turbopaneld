@@ -48,14 +48,24 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
 import {
+  ENGINE_PRUNE_PLAYBOOK,
   ORCHESTRATION_DIR,
+  PHP_SERIES_PRUNE_PLAYBOOK,
   SITE_APACHE_APPLY_PLAYBOOK,
   SITE_CADDY_APPLY_PLAYBOOK,
   SITE_NGINX_APPLY_PLAYBOOK,
   SITE_OPENLITESPEED_APPLY_PLAYBOOK,
 } from "../orchestration/assets.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { isAllowedExtension } from "../runtime/registry.ts";
+import { readOsRelease } from "../host/os-release.ts";
+import {
+  type HostRuntimeMetadata,
+  readHostRuntimes,
+} from "../host/runtimes.ts";
+import {
+  isAllowedExtension,
+  unsupportedPhpSeriesMessage,
+} from "../runtime/registry.ts";
 import {
   principalHomePath,
   siteCurrentSymlink,
@@ -104,6 +114,18 @@ import {
   type ProbeHostPortFn,
 } from "../managed/proxysql.ts";
 import {
+  type PhpSeriesUsageInput,
+  prunePhpSeries,
+  unusedPhpSeries,
+} from "./site/php-series-prune.ts";
+import {
+  type EngineUsage,
+  PRUNABLE_ENGINES,
+  type PrunableEngine,
+  pruneEngines,
+} from "./site/engine-prune.ts";
+import { engineHoldKey, phpSeriesHoldKey } from "./site/prune-holds.ts";
+import {
   apacheBehindNginxLines,
   apacheDotfileDenyLines,
   isNginxApacheSite,
@@ -114,6 +136,7 @@ import {
   siteServingEngines,
 } from "./site/nginx-apache.ts";
 import {
+  isSitePhpRuntimeId,
   isSitePhpRuntimeOf,
   sitePhpFpmConf,
   sitePhpIni,
@@ -138,6 +161,8 @@ import {
   listSitePhpUnits,
   orphanSitePhpRuntimes,
   type PreparedSitePhpRuntime,
+  readSiteConfigTexts,
+  readSitePhpUnits,
   removeSitePhpRuntimes,
   rollbackSitePhpRuntime,
   settleSitePhpRuntimes,
@@ -210,6 +235,8 @@ type SiteIo = {
   /** Where per-site PHP units live (`/etc/systemd/system` on a host). */
   unitDir?: string;
   sleep?: (ms: number) => Promise<void>;
+  /** What the host has installed; the real probe is skipped when seams are set. */
+  hostRuntimes?: () => HostRuntimeMetadata | undefined;
 };
 
 let activeIo: SiteIo | undefined;
@@ -420,6 +447,81 @@ export function nginxFastcgiParamsPath(layout: LayoutPaths): string {
 }
 
 /**
+ * FastCGI parameter names the platform sets itself: every name in the shared
+ * parameter set, the two the PHP location pins after it, and the ones PHP
+ * derives its own state from. A site variable with one of these names would
+ * override request data (or `SCRIPT_FILENAME`), so it is refused, not sent.
+ */
+const NGINX_RESERVED_FASTCGI_PARAMS: ReadonlySet<string> = new Set([
+  ...NGINX_INLINE_FASTCGI_PARAMS.map((line) => line.split(" ")[1] as string),
+  "SCRIPT_FILENAME",
+  "PATH_INFO",
+  "PATH_TRANSLATED",
+  "REDIRECT_STATUS",
+  "HTTPS",
+]);
+
+/**
+ * Why nginx cannot carry a site variable, or `null` when it can.
+ *
+ * nginx expands `$name` inside a quoted string and has no escape for it, so a
+ * value holding `$` cannot be written safely; a name nginx or PHP sets itself
+ * would override request data. The value must also stay on its line
+ * (`safeEnvValue`).
+ */
+function nginxEnvRefusal(
+  field: string,
+  name: string,
+  raw: string,
+): string | null {
+  if (
+    NGINX_RESERVED_FASTCGI_PARAMS.has(name) ||
+    name.toUpperCase().startsWith("HTTP_")
+  ) {
+    return "is a FastCGI parameter nginx sets itself";
+  }
+  try {
+    safeEnvValue(field, raw);
+  } catch (error) {
+    if (error instanceof ConfigValueError) return error.message;
+    throw error;
+  }
+  return raw.includes("$") ? "holds a $, which nginx expands in quotes" : null;
+}
+
+/**
+ * The site's variables as `fastcgi_param` lines, in name order.
+ *
+ * A variable nginx cannot carry is **dropped and named** (never its value: it
+ * may be a decrypted secret), not a failed deploy: variables are inherited from
+ * the organization, project and environment into every hosting, so one value
+ * that suits another engine must not stop an unrelated nginx site. A name that
+ * is not an environment variable name is still refused (`safeEnvName`).
+ */
+function nginxFastcgiEnvLines(site: SiteApplySpec): string[] {
+  const env = site.webEnv ?? {};
+  const lines: string[] = [];
+  for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
+    const field = `sites.${site.composeServiceName}.webEnv`;
+    const name = safeEnvName(field, key);
+    const raw = env[key] ?? "";
+    const refusal = nginxEnvRefusal(`${field}.${name}`, name, raw);
+    if (refusal !== null) {
+      logWarn(
+        "site",
+        `nginx site ${site.composeServiceName}: variable ${name} not passed to PHP (${refusal})`,
+      );
+      continue;
+    }
+    const escaped = raw
+      .replaceAll("\\", String.raw`\\`)
+      .replaceAll('"', String.raw`\"`);
+    lines.push(`fastcgi_param ${name} "${escaped}";`);
+  }
+  return lines;
+}
+
+/**
  * `location ~ \.php$` handing scripts to this site's own php-fpm pool.
  *
  * `SCRIPT_FILENAME` is emitted **after** the shared parameter set so it wins
@@ -430,6 +532,7 @@ export function nginxFastcgiParamsPath(layout: LayoutPaths): string {
 function buildNginxPhpLocation(
   phpFpmSocket: string,
   fastcgiParamsPath: string | null,
+  envLines: readonly string[],
 ): string {
   const params = fastcgiParamsPath
     ? [`include ${fastcgiParamsPath};`]
@@ -441,6 +544,7 @@ function buildNginxPhpLocation(
     `    fastcgi_pass unix:${phpFpmSocket};`,
     "    fastcgi_index index.php;",
     ...params.map((line) => `    ${line}`),
+    ...envLines.map((line) => `    ${line}`),
     "    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;",
     "    fastcgi_param PATH_INFO $fastcgi_path_info;",
     "  }",
@@ -494,6 +598,106 @@ function isReleaseTopRoot(root: string): boolean {
  */
 function isSafeCaddyEnvValue(value: string): boolean {
   return !/[{}"\\]/.test(value) && !hasLineBreakOrControl(value);
+}
+
+/** Why the site Caddy cannot carry a variable value, or `null` when it can. */
+function caddyEnvRefusal(value: string): string | null {
+  if (hasLineBreakOrControl(value)) {
+    return "holds a line break or control character";
+  }
+  return isSafeCaddyEnvValue(value)
+    ? null
+    : "holds a brace, quote or backslash, which Caddy reads as syntax";
+}
+
+/**
+ * Why Apache cannot carry a variable value, or `null` when it can. `SetEnv`
+ * stays on one line, and Apache expands `${NAME}` on every config line with no
+ * escape.
+ */
+function apacheEnvRefusal(field: string, raw: string): string | null {
+  try {
+    safeEnvValue(field, raw);
+  } catch (error) {
+    if (error instanceof ConfigValueError) return error.message;
+    throw error;
+  }
+  return raw.includes("${") ? "holds ${, which Apache expands" : null;
+}
+
+const ENGINE_ENV_LABELS: Readonly<Record<SiteApplySpec["engine"], string>> = {
+  caddy: "Caddy",
+  apache: "Apache",
+  nginx: "nginx",
+  openlitespeed: "OpenLiteSpeed",
+  "nginx+apache": "Apache behind nginx",
+};
+
+/** Why this site's web server cannot carry the variable, or `null`. */
+function webEnvRefusal(
+  site: SiteApplySpec,
+  name: string,
+  raw: string,
+): string | null {
+  const field = `sites.${site.composeServiceName}.webEnv.${name}`;
+  switch (site.engine) {
+    case "nginx":
+      return nginxEnvRefusal(field, name, raw);
+    case "apache":
+    case "nginx+apache":
+      return apacheEnvRefusal(field, raw);
+    case "caddy":
+      return caddyEnvRefusal(raw);
+    default:
+      // OpenLiteSpeed receives no variables at all (handled by the caller).
+      return null;
+  }
+}
+
+/**
+ * Check a site's variables against its web server before anything is written.
+ *
+ * A value the engine cannot carry is **left out and named** (never its value:
+ * it may be a decrypted secret), the same way nginx always has, so one
+ * variable that suits another engine does not stop an unrelated site. The
+ * exception is a name in `requiredEnv` (a database binding's connection
+ * settings): starting the site without them would look like it worked, so the
+ * deploy stops with an error naming the variable. Returns the warnings, in
+ * name order. A name that is not an environment variable name still throws
+ * where the engine writes it.
+ */
+export function planSiteWebEnv(site: SiteApplySpec): string[] {
+  const env = site.webEnv ?? {};
+  const required = site.requiredEnv ?? [];
+  const label = ENGINE_ENV_LABELS[site.engine];
+  const name = site.composeServiceName;
+  if (site.engine === "openlitespeed" && required.length > 0) {
+    throw new Error(
+      `Site ${name} needs its database settings as variables, and OpenLiteSpeed does not pass variables to PHP yet. Move the site to Apache, nginx or Caddy, then deploy again.`,
+    );
+  }
+  const warnings: string[] = [];
+  for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
+    const refusal = webEnvRefusal(site, key, env[key] ?? "");
+    if (refusal === null) continue;
+    if (required.includes(key)) {
+      throw new Error(
+        `Site ${name} cannot start: its database setting ${key} cannot be passed to ${label} (${refusal}). The deploy was stopped instead of starting the site without it.`,
+      );
+    }
+    warnings.push(
+      `Site ${name}: variable ${key} was left out because ${label} cannot carry it (${refusal}).`,
+    );
+  }
+  const missing = required.filter((key) => env[key] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `Site ${name} cannot start: its database settings are incomplete (missing ${
+        missing.join(", ")
+      }). The deploy was stopped instead of starting the site without them.`,
+    );
+  }
+  return warnings;
 }
 
 /**
@@ -617,7 +821,11 @@ ${nginxApacheLocations(backendPort)}
   const indexFiles = needsPhp ? "index.php index.html" : "index.html";
   const phpBlock = needsPhp && phpFpmSocket
     ? `\n\n${
-      buildNginxPhpLocation(phpFpmSocket, opts?.fastcgiParamsPath ?? null)
+      buildNginxPhpLocation(
+        phpFpmSocket,
+        opts?.fastcgiParamsPath ?? null,
+        nginxFastcgiEnvLines(site),
+      )
     }`
     : "";
   return `server {
@@ -1086,7 +1294,7 @@ export type ApacheSiteConfigOpts = Readonly<{
  * `${`: Apache expands `${NAME}` from its own environment on every config
  * line, quoted or not, and has no escape for it.
  */
-function apacheSetEnvLine(
+export function apacheSetEnvLine(
   service: string,
   key: string,
   raw: string,
@@ -1150,9 +1358,14 @@ export function apacheSiteConfig(
   if (site.webEnv) {
     const keys = Object.keys(site.webEnv).sort((a, b) => a.localeCompare(b));
     for (const key of keys) {
-      envLines.push(
-        apacheSetEnvLine(site.composeServiceName, key, site.webEnv[key] ?? ""),
-      );
+      const raw = site.webEnv[key] ?? "";
+      // Left out here, named by `planSiteWebEnv` (the deploy's warnings); the
+      // strict `apacheSetEnvLine` below stays the last line of defence.
+      if (apacheEnvRefusal(`sites.${site.composeServiceName}.webEnv`, raw)) {
+        safeEnvName(`sites.${site.composeServiceName}.webEnv`, key);
+        continue;
+      }
+      envLines.push(apacheSetEnvLine(site.composeServiceName, key, raw));
     }
   }
   const phpBlock = buildApachePhpBlock(
@@ -1346,6 +1559,10 @@ END_rules
  * `allowBrowse` is OpenLiteSpeed's "Accessible" switch for the context, not
  * directory listing (that is `autoIndex`): `0` answers 403 for everything.
  *
+ * `useServer 0` in the `index` block makes the vhost's own file list count: left
+ * out, OpenLiteSpeed keeps the server-level `indexFiles index.html` and a
+ * directory request never reaches `index.php`.
+ *
  * Static document root only (no directory listing) unless `php` is supplied, in
  * which case the vhost also carries the processor for the site's own runtime
  * and a `.php` script handler bound to it. The hosting PHP settings live in
@@ -1358,6 +1575,7 @@ export function openlitespeedVhostConfig(
     return `docRoot $VH_ROOT/
 index {
   indexFiles index.html
+  useServer 0
   autoIndex 0
 }
 ${openlitespeedScriptDenyRewrite(false)}
@@ -1380,6 +1598,7 @@ context / {
   return `docRoot $VH_ROOT/
 index {
   indexFiles index.php, index.html
+  useServer 0
   autoIndex 0
 }
 
@@ -1482,11 +1701,48 @@ export function formatHostingEnvFile(env: Record<string, string>): string {
   return `${lines.join("\n")}\n`;
 }
 
+/** The managed database's CA bundle, in the site's hosting folder. */
+export const SITE_DB_CA_FILE_NAME = "managed-ca.pem";
+
+/**
+ * Point every `dbCa.variables` name at the CA file the owner's folder will
+ * hold, so the site's engine renders a path instead of a multi-line value. The
+ * file lives with the other hosting files and is written by the same call, so
+ * only a site with a Linux user owning its tree can take one.
+ */
+export function withDbCaVariables(
+  layout: LayoutPaths,
+  site: SiteApplySpec,
+  owner: { username: string; serviceId: string } | undefined,
+): SiteApplySpec {
+  if (!site.dbCa) return site;
+  if (!owner) {
+    throw new Error(
+      `Site ${site.composeServiceName} has a database certificate to deliver but no site owner's Linux user to keep it for. Give the site an owner, then deploy again.`,
+    );
+  }
+  const path = join(
+    siteMetadataDir(principalHomePath(layout, owner.username), owner.serviceId),
+    SITE_DB_CA_FILE_NAME,
+  );
+  const webEnv = { ...site.webEnv };
+  for (const variable of site.dbCa.variables) webEnv[variable] = path;
+  return { ...site, webEnv };
+}
+
 /** `hosting.env` / `php.json` contents, or `null` when the site declares neither. */
-function hostingWebMetadataFiles(
+export function hostingWebMetadataFiles(
   site: SiteApplySpec,
 ): Array<{ name: string; contents: string }> {
   const files: Array<{ name: string; contents: string }> = [];
+  if (site.dbCa !== undefined) {
+    files.push({
+      name: SITE_DB_CA_FILE_NAME,
+      contents: site.dbCa.pem.endsWith("\n")
+        ? site.dbCa.pem
+        : `${site.dbCa.pem}\n`,
+    });
+  }
   if (site.webEnv !== undefined && Object.keys(site.webEnv).length > 0) {
     files.push({
       name: "hosting.env",
@@ -2075,7 +2331,7 @@ async function chownWebTree(
 /**
  * Legacy site trees are chowned to the assigned principal with engine group
  * read. A release-backed tree is skipped entirely: the release engine already
- * sealed it `root:<username>-grp` mode `0550`, and re-chowning it would hand
+ * sealed it `root:<username>` mode `0550`, and re-chowning it would hand
  * the app process write access to the code it is running.
  */
 /**
@@ -2117,6 +2373,8 @@ export type ApplySiteOpts = {
   runPlaybook?: SitePlaybookFn;
   /** Test seam: the systemd unit directory per-site PHP units go to. */
   systemdUnitDir?: string;
+  /** Test seam: the runtimes the host reports installed (unused-series check). */
+  hostRuntimes?: () => HostRuntimeMetadata | undefined;
   /** Test seam: the pause before a started PHP runtime is checked. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam: whether a loopback port could be bound right now. */
@@ -2126,7 +2384,9 @@ export type ApplySiteOpts = {
 /** Optional test seams for {@link removeSites}. */
 export type RemoveSiteDeps = {
   run?: SiteRunFn;
+  runPlaybook?: SitePlaybookFn;
   systemdUnitDir?: string;
+  hostRuntimes?: () => HostRuntimeMetadata | undefined;
 };
 
 function resolveSiteIo(
@@ -2135,6 +2395,7 @@ function resolveSiteIo(
     runPlaybook?: SitePlaybookFn;
     systemdUnitDir?: string;
     sleep?: (ms: number) => Promise<void>;
+    hostRuntimes?: () => HostRuntimeMetadata | undefined;
   }>,
 ): SiteIo | undefined {
   if (!opts?.run && !opts?.runPlaybook) return undefined;
@@ -2145,6 +2406,9 @@ function resolveSiteIo(
       ? {}
       : { unitDir: opts.systemdUnitDir }),
     ...(opts.sleep === undefined ? {} : { sleep: opts.sleep }),
+    ...(opts.hostRuntimes === undefined
+      ? {}
+      : { hostRuntimes: opts.hostRuntimes }),
   };
 }
 
@@ -2226,6 +2490,21 @@ export function resolveSiteEngineNeeds(
 }
 
 /**
+ * What a deploy of `sites` holds against unused-software removal for its
+ * whole length: every PHP series it names and every engine that serves one of
+ * its sites (both are installed long before the site config that uses them).
+ */
+export function pruneHoldKeysForDeploy(
+  sites: readonly SiteApplySpec[],
+): string[] {
+  const needs = resolveSiteEngineNeeds(sites);
+  return [
+    ...phpSeriesForDeploy(sites).map(phpSeriesHoldKey),
+    ...PRUNABLE_ENGINES.filter((engine) => needs[engine]).map(engineHoldKey),
+  ];
+}
+
+/**
  * The `-e` JSON object each site-engine apply playbook takes. One JSON object,
  * not key=value, so the version list stays a list and the extension map a map
  * (tp-orchestrate accepts these keys in `TP_JSON_EXTRA_VAR_KEYS`).
@@ -2255,6 +2534,21 @@ export function siteEngineApplyExtraArgs(
 }
 
 /**
+ * Refuse a PHP series this server's operating system does not offer, before any
+ * playbook runs. The offered list is per OS (`suiteSeries` in the registry) and
+ * the same for every engine.
+ */
+export function assertPhpSeriesOffered(
+  phpSeries: readonly string[],
+  codename: string | undefined = readOsRelease()?.codename,
+): void {
+  for (const series of phpSeries) {
+    const message = unsupportedPhpSeriesMessage(series, codename);
+    if (message) throw new Error(message);
+  }
+}
+
+/**
  * `phpSeries` is the distinct set this deploy needs. The role only ever
  * *installs* what it is handed — it must not remove a series it was not asked
  * about, because the host serves many environments and this payload describes
@@ -2265,6 +2559,7 @@ async function installSiteEngines(
   phpSeries: readonly string[],
   phpExtensions: Record<string, string[]>,
 ): Promise<void> {
+  assertPhpSeriesOffered(phpSeries);
   const engines = [
     [
       needs.caddy,
@@ -2306,14 +2601,9 @@ async function installSiteEngines(
 }
 
 /**
- * Vendor the PHP runtimes (and so create their `tpphp<series>` entitlement
- * groups) for a deploy's PHP sites, ahead of the principal reconcile.
- *
- * The reconcile joins the site owner's Linux user to those groups, and a join
- * to a group that does not exist yet is skipped: on the first PHP deploy of a
- * series the user missed the group and `php-cgi` was permission denied. Same
- * ordering fix as `ensureNativeAppRuntime` for Node. {@link applySites} runs the
- * same idempotent playbooks again afterwards.
+ * Vendor the PHP runtimes for a deploy's PHP sites early in the deploy, the
+ * way `ensureNativeAppRuntime` does for Node. {@link applySites} runs the same
+ * idempotent playbooks again afterwards.
  */
 export async function ensureSitePhpRuntimes(
   sites: readonly SiteApplySpec[],
@@ -3123,7 +3413,7 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
 /**
  * Create a managed-directory site's tree.
  *
- * `sites/<serviceId>/` is root-owned, group `<username>-grp`, `0750` — the same
+ * `sites/<serviceId>/` is root-owned, group `<username>`, `0750` — the same
  * shape as the release lane: the tenant cannot rename what sits in it, and the
  * serving engine traverses it through its membership of the principal's group.
  * The leaves below it (`webroot/`, `shared/`, the document root) are the
@@ -3302,12 +3592,13 @@ async function siteCaddyUnmounted(dirs: readonly string[]): Promise<string[]> {
 async function applyOneSite(
   layout: LayoutPaths,
   environmentId: string,
-  site: SiteApplySpec,
+  declared: SiteApplySpec,
   sitesDirs: SiteConfigDirs,
   dockerBind: string | null,
   release?: SiteRelease,
   managed?: SiteManagedDirectory,
 ): Promise<ApplyOneSiteResult> {
+  const site = withDbCaVariables(layout, declared, release ?? managed);
   const base = siteDir(
     layout,
     environmentId,
@@ -3807,6 +4098,9 @@ export async function applySites(
         )
         .map((site) => site.composeServiceName),
     );
+    // A site that moved to another PHP series or engine may have left the old
+    // one empty.
+    await pruneUnusedSoftware(layout);
 
     // `reloaded=` empty is the expected shape of a release promote that only
     // moved `current` — say so, or a skipped reload looks like a lost step.
@@ -3903,7 +4197,8 @@ async function installedPhpSeries(layout: LayoutPaths): Promise<string[]> {
  *
  * Retiring a series is a **removal-path** decision, never a side effect of an
  * install: the deploy payload describes one environment, but the host serves
- * many. Packages stay installed — uninstalling is a fleet decision.
+ * many. Removing the packages is a separate step, {@link prunePhpSeries},
+ * once no site uses the series.
  */
 async function disableIdlePhpSeries(
   layout: LayoutPaths,
@@ -3929,6 +4224,141 @@ async function disableIdlePhpSeries(
   if (!stop.success) {
     logWarn("deploy", `could not disable idle ${unit}: ${stop.stderr}`);
   }
+}
+
+/**
+ * Read the host for {@link prunePhpSeries}: what is installed and every place a
+ * series can be used. `null` when something that could name a series could not
+ * be read. The expensive part (every vhost's text) is read only when a series
+ * is still unclaimed after the cheap checks.
+ */
+async function gatherPhpSeriesUsage(
+  layout: LayoutPaths,
+): Promise<PhpSeriesUsageInput | null> {
+  // With test seams set the real host is never probed.
+  const host = activeIo
+    ? activeIo.hostRuntimes?.()
+    : readHostRuntimes(layout.runtimesDir);
+  const installed = [
+    ...new Set([
+      ...(host?.php?.series ?? []),
+      ...(host?.lsphp?.series ?? []),
+      ...await installedPhpSeries(layout),
+    ]),
+  ];
+  const pools = new Map<string, string[]>();
+  try {
+    await forEachSequential(installed, async (series) => {
+      pools.set(
+        series,
+        await listEngineConfigDir(phpFpmPoolsDir(layout, series)) ?? [],
+      );
+    });
+  } catch {
+    return null;
+  }
+  // A unit listing that failed is doubt, not "no per-site runtimes".
+  const units = await readSitePhpUnits(sitePhpIo());
+  if (units === null) return null;
+  const runtimeIds = [...units.keys()].filter(isSitePhpRuntimeId);
+  const cheap: PhpSeriesUsageInput = {
+    installed,
+    pools,
+    runtimeIds,
+    configTexts: [],
+  };
+  if (unusedPhpSeries(cheap).length === 0) return cheap;
+  const configTexts = await readSiteConfigTexts(sitePhpIo(), layout.configDir);
+  return configTexts === null ? null : { ...cheap, configTexts };
+}
+
+/** Whether `<vendor>/<engine>/current` exists (the engine is installed). */
+async function engineInstalled(
+  layout: LayoutPaths,
+  engine: PrunableEngine,
+): Promise<boolean> {
+  try {
+    await Deno.lstat(join(layout.runtimesDir, engine, "current"));
+    return true;
+  } catch {
+    // Missing, or a vendor tree the daemon cannot see into: either way it is
+    // not removed on the strength of this check.
+    return false;
+  }
+}
+
+/**
+ * Read the host for {@link pruneEngines}: every installed engine with its
+ * `sites/` (and OpenLiteSpeed's `vhosts/`) entries. `null` when any of those
+ * could not be listed.
+ */
+async function gatherEngineUsage(
+  layout: LayoutPaths,
+): Promise<EngineUsage[] | null> {
+  const usages: EngineUsage[] = [];
+  try {
+    await forEachSequential([...PRUNABLE_ENGINES], async (engine) => {
+      if (!await engineInstalled(layout, engine)) return;
+      const sites = await listEngineConfigDir(
+        join(layout.configDir, engine, "sites"),
+      ) ?? [];
+      const vhosts = engine === "openlitespeed"
+        ? await listEngineConfigDir(openlitespeedVhostsDir(layout)) ?? []
+        : [];
+      usages.push({ engine, sites, vhosts });
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn(
+      "deploy",
+      `web engine configs unreadable, none removed: ${message}`,
+    );
+    return null;
+  }
+  return usages;
+}
+
+/** Run one unused-software removal; a failure is logged, never thrown. */
+async function pruneQuietly(
+  label: string,
+  prune: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await prune();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logWarn("deploy", `unused ${label} not checked: ${message}`);
+  }
+}
+
+/**
+ * Remove the PHP series (packages, vendored lsphp, config) and then the web
+ * engines (vendored tree, unit, config) no site uses any more. Installing
+ * stays lazy; this is its counterpart, run after a deploy or a teardown
+ * changed what a host serves. Best-effort: the deploy or teardown that called
+ * it has already succeeded, and whatever stays is retried by the next one.
+ */
+async function pruneUnusedSoftware(layout: LayoutPaths): Promise<void> {
+  await pruneQuietly("PHP series", () =>
+    prunePhpSeries({
+      gather: () => gatherPhpSeriesUsage(layout),
+      remove: (series) =>
+        runSitePlaybook(
+          PHP_SERIES_PRUNE_PLAYBOOK,
+          `php-series-prune (remove unused PHP ${series.join(", ")})`,
+          ["-e", JSON.stringify({ php_series_prune: series })],
+        ),
+    }));
+  await pruneQuietly("web engines", () =>
+    pruneEngines({
+      gather: () => gatherEngineUsage(layout),
+      remove: (engines) =>
+        runSitePlaybook(
+          ENGINE_PRUNE_PLAYBOOK,
+          `engine-prune (remove unused ${engines.join(", ")})`,
+          ["-e", JSON.stringify({ engine_prune: engines })],
+        ),
+    }));
 }
 
 /** Remove an OpenLiteSpeed vhost dir; best-effort (missing dir is not an error). */
@@ -4096,6 +4526,9 @@ export async function removeSites(
       ...nginxRemoved.services,
       ...apacheRemoved.services,
     ]);
+    // Nothing names the PHP or the engines this environment used: remove them
+    // once no other environment on the host uses them either.
+    await pruneUnusedSoftware(layout);
   });
 }
 

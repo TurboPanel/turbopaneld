@@ -6,8 +6,10 @@ import {
   assertThrows,
 } from "@std/assert";
 import { dirname, join } from "@std/path";
+import type { EnvironmentDeployHosting } from "../contracts/commands-contracts.ts";
 import { INSTANCE_ACME_HTTP01_SITE } from "./instance-acme-http01.ts";
 import {
+  assertHostingNamesFree,
   assertSafeComposeProjectName,
   assertSafeHostingPathPrefix,
   assertValidBindAddress,
@@ -28,6 +30,7 @@ import {
   HOSTING_CADDY_ADMIN_SOCKET,
   HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
+  hostingCaddyValidateNeedsEdgeRuntime,
   hostingIngressComposePath,
   hostingIngressDir,
   INGRESS_GATE_SOCKET_DIR,
@@ -48,8 +51,10 @@ import {
   serviceIngressProject,
   serviceIngressUsesSocketProxy,
   serviceTraefikCompose,
+  setEnsureHostingCaddyRuntimeForTest,
   setIngressHostCommandForTest,
   siteSnippet,
+  snippetSiteAddresses,
   sortCaddySiteRoutes,
   syncTcpUdpIngressEntries,
   TcpUdpPortConflictError,
@@ -486,6 +491,12 @@ test("caddyTraefikUpstream http hop uses h2c and PROXY v2", () => {
   assertStringIncludes(upstream, "keepalive off");
 });
 
+test("caddyTraefikUpstream https hop preserves the original Host header", () => {
+  // Without this Caddy sends Host: 127.0.0.1:7443 and Traefik answers 404.
+  assertStringIncludes(caddyTraefikUpstream("https"), "header_up Host {host}");
+  assertEquals(caddyTraefikUpstream("http").includes("header_up"), false);
+});
+
 test("caddyTraefikUpstream https hop uses TLS skip-verify and PROXY v2", () => {
   const upstream = caddyTraefikUpstream("https");
   assertStringIncludes(upstream, "127.0.0.1:7443");
@@ -562,6 +573,7 @@ test("siteSnippet acme mode still emits HTTPS when forceHttps is false", () => {
   assertEquals(snippet.includes("tls internal"), false);
   assertStringIncludes(snippet, `app.example.com {`);
   assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+  assertStringIncludes(snippet, "header_up Host {host}");
 });
 
 test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
@@ -603,6 +615,7 @@ test("siteSnippet acme mode omits the tls line and keeps the redirect block", ()
   assertEquals(snippet.includes("tls internal"), false);
   assertStringIncludes(snippet, `app.example.com {`);
   assertStringIncludes(snippet, caddyTraefikUpstream("https"));
+  assertStringIncludes(snippet, "header_up Host {host}");
   // Manual `caddy adapt` of this snippet (when the binary is available)
   // succeeds: omitting `tls` leaves Caddy's ACME client on :80/:443.
 });
@@ -1504,6 +1517,101 @@ function hostingPayload(environmentId: string, hostname: string) {
 }
 
 const noGrant = () => Promise.resolve();
+
+test("hostingCaddyValidateNeedsEdgeRuntime ignores reserved snippets and empty content", () => {
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime("", [], "env.caddy"),
+    false,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime(
+      "",
+      [INSTANCE_ACME_HTTP01_SITE, "00-empty.caddy"],
+      "env.caddy",
+    ),
+    false,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime(
+      "app.example.com {\n}\n",
+      [],
+      "env.caddy",
+    ),
+    true,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime("", ["other-env.caddy"], "env.caddy"),
+    true,
+  );
+});
+
+test("rewriteHostingCaddySites skips edge runtime when nothing needs Caddy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let ensured = 0;
+  const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+    ensured += 1;
+    return Promise.resolve();
+  });
+  const restoreHost = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      {
+        ...hostingPayload("env-tcp", "unused.example.com"),
+        hostings: [{
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "db",
+          hostnames: [],
+          protocol: "tcp",
+          ports: [{ published: 5432, target: 5432 }],
+        }],
+      },
+      undefined,
+      noGrant,
+    );
+    assertEquals(ensured, 0);
+  } finally {
+    restoreHost();
+    restoreEnsure();
+    await cleanup();
+  }
+});
+
+test("guardHostingCaddySites ensures hosting Caddy edge before caddy validate", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const events: string[] = [];
+  const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+    events.push("ensure-edge-runtime");
+    return Promise.resolve();
+  });
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    if (args.includes("validate")) {
+      events.push("caddy-validate");
+    }
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "a.example.com {\n}\n",
+    );
+    await guardHostingCaddySites(layout, noGrant);
+    const ensureIdx = events.indexOf("ensure-edge-runtime");
+    const validateIdx = events.indexOf("caddy-validate");
+    assertEquals(ensureIdx >= 0, true);
+    assertEquals(validateIdx >= 0, true);
+    assertEquals(ensureIdx < validateIdx, true);
+  } finally {
+    restoreHost();
+    restoreEnsure();
+    await cleanup();
+  }
+});
 
 /**
  * What `caddy validate` says about the staged set, as far as these tests care:
@@ -4022,4 +4130,292 @@ Deno.test("the hosting Caddyfile exposes totals-only metrics on loopback, with n
   );
   assertStringIncludes(text, "  metrics\n  servers {");
   assertEquals(text.includes("per_host"), false);
+});
+
+const WWW_BASE_PAYLOAD = {
+  environmentId: "env-www-1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "demo",
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime" as const,
+    content: "services: {}",
+  }],
+};
+
+function wwwHosting(
+  hostnames: string[],
+  www?: EnvironmentDeployHosting["www"],
+  extra: Partial<EnvironmentDeployHosting> = {},
+): EnvironmentDeployHosting {
+  return {
+    hostingId: `h-${hostnames.join("-")}`,
+    serviceId: "s1",
+    composeServiceName: "web",
+    hostnames,
+    ...(www ? { www } : {}),
+    ...extra,
+  };
+}
+
+test("buildCaddyHostnameRoutes www-to-root serves the bare name and redirects www", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com", "www.shop.example.com"], "www-to-root", {
+        tlsMode: "acme",
+        bindAddress: "203.0.113.10",
+      }),
+    ],
+  });
+  assertEquals(
+    [...routes.keys()].sort(),
+    [
+      "example.com",
+      "shop.example.com",
+      "www.example.com",
+      "www.shop.example.com",
+    ],
+  );
+  const redirect = routes.get("www.example.com")!;
+  assertEquals(redirect.redirectTo, "example.com");
+  assertEquals(redirect.routes, []);
+  assertEquals(redirect.tlsMode, "acme");
+  assertEquals(redirect.bindAddress, "203.0.113.10");
+  // Typed as www, still served on the bare name: the mode names the direction.
+  assertEquals(
+    routes.get("www.shop.example.com")!.redirectTo,
+    "shop.example.com",
+  );
+  assertEquals(routes.get("shop.example.com")!.routes.length, 1);
+  assertEquals(routes.get("example.com")!.redirectTo, undefined);
+});
+
+test("buildCaddyHostnameRoutes root-to-www serves www and redirects the bare name", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [wwwHosting(["example.com"], "root-to-www")],
+  });
+  assertEquals([...routes.keys()].sort(), ["example.com", "www.example.com"]);
+  assertEquals(routes.get("example.com")!.redirectTo, "www.example.com");
+  assertEquals(routes.get("example.com")!.routes, []);
+  assertEquals(routes.get("www.example.com")!.redirectTo, undefined);
+  assertEquals(routes.get("www.example.com")!.routes.length, 1);
+});
+
+test("buildCaddyHostnameRoutes redirect names follow the target's HTTPS setting", () => {
+  const plain = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "www-to-root", {
+        proxy: { forceHttps: false },
+      }),
+    ],
+  });
+  assertEquals(plain.get("example.com")!.forceHttps, false);
+  assertEquals(plain.get("www.example.com")!.forceHttps, false);
+  // Let's Encrypt always keeps HTTPS, on the site and on its redirect name.
+  const acme = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "root-to-www", {
+        tlsMode: "acme",
+        proxy: { forceHttps: false },
+      }),
+    ],
+  });
+  assertEquals(acme.get("example.com")!.forceHttps, true);
+  assertEquals(acme.get("example.com")!.tlsMode, "acme");
+});
+
+test("buildCaddyHostnameRoutes both serves the site on both names", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [wwwHosting(["www.example.com"], "both")],
+  });
+  assertEquals([...routes.keys()].sort(), ["example.com", "www.example.com"]);
+  for (const name of ["example.com", "www.example.com"]) {
+    assertEquals(routes.get(name)!.redirectTo, undefined);
+    assertEquals(routes.get(name)!.routes.length, 1);
+  }
+});
+
+test("buildCaddyHostnameRoutes merges path routes of one name onto its www spelling", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "root-to-www"),
+      wwwHosting(["example.com"], "root-to-www", {
+        hostingId: "h-api",
+        composeServiceName: "api",
+        pathPrefix: "/api",
+      }),
+    ],
+  });
+  assertEquals(routes.get("www.example.com")!.routes.length, 2);
+  assertEquals(routes.get("example.com")!.redirectTo, "www.example.com");
+});
+
+test("siteSnippet www redirect sends plain HTTP straight to the HTTPS target, path and query kept", () => {
+  const snippet = siteSnippet({
+    hostname: "www.example.com",
+    tlsDir: "/etc/turbopanel/tls",
+    tlsMode: "acme",
+    redirectTo: "example.com",
+  });
+  // One hop from http://www to https://root; Caddy's {uri} is path plus query.
+  assertStringIncludes(
+    snippet,
+    "http://www.example.com {\n  redir https://example.com{uri} permanent\n}",
+  );
+  assertStringIncludes(
+    snippet,
+    "www.example.com {\n  redir https://example.com{uri} permanent\n}",
+  );
+  assertEquals(snippet.includes("reverse_proxy"), false);
+});
+
+test("siteSnippet www redirect without forced HTTPS lands on the target's plain HTTP site", () => {
+  const snippet = siteSnippet({
+    hostname: "example.com",
+    tlsDir: "/etc/turbopanel/tls",
+    forceHttps: false,
+    redirectTo: "www.example.com",
+  });
+  assertStringIncludes(
+    snippet,
+    "http://example.com {\n  redir http://www.example.com{uri} permanent\n}",
+  );
+  assertStringIncludes(
+    snippet,
+    "example.com {\n  tls internal\n  redir http://www.example.com{uri} permanent\n}",
+  );
+});
+
+test("buildCaddyHostnameRoutes ignores www off, on tcp, and on a name already served", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["example.com"],
+        www: "www-to-root",
+      },
+      {
+        hostingId: "h2",
+        serviceId: "s2",
+        composeServiceName: "blog",
+        hostnames: ["www.example.com"],
+      },
+      {
+        hostingId: "h3",
+        serviceId: "s3",
+        composeServiceName: "db",
+        hostnames: [],
+        protocol: "tcp",
+        ports: [{ published: 5432, target: 5432 }],
+        www: "www-to-root",
+      },
+      {
+        hostingId: "h4",
+        serviceId: "s4",
+        composeServiceName: "plain",
+        hostnames: ["plain.example.com"],
+      },
+    ],
+  });
+  assertEquals(routes.get("www.example.com")!.redirectTo, undefined);
+  assertEquals(routes.has("www.plain.example.com"), false);
+});
+
+test("rewriteHostingCaddySites serves the www name and lists it in the acme manifest", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(layout, {
+      ...WWW_BASE_PAYLOAD,
+      hostings: [
+        {
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "web",
+          hostnames: ["example.com"],
+          tlsMode: "acme",
+          www: "www-to-root",
+        },
+      ],
+    });
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    const site = await Deno.readTextFile(join(sitesDir, "env-www-1.caddy"));
+    assertStringIncludes(
+      site,
+      `www.example.com {\n  redir https://example.com{uri} permanent\n}`,
+    );
+    assertEquals(
+      JSON.parse(
+        await Deno.readTextFile(
+          join(sitesDir, "env-www-1.acme-hostnames.json"),
+        ),
+      ),
+      ["example.com", "www.example.com"],
+    );
+    assertEquals(await readAcmeModeHostnames(layout), [
+      "example.com",
+      "www.example.com",
+    ]);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("snippetSiteAddresses reads back the names a snippet answers on", () => {
+  const snippet = siteSnippet({
+    hostname: "www.example.com",
+    tlsDir: "/etc/turbopanel/tls",
+    redirectTo: "example.com",
+  }) + siteSnippet({ hostname: "example.com", tlsDir: "/etc/turbopanel/tls" });
+  assertEquals(
+    [...new Set(snippetSiteAddresses(snippet))].sort(),
+    ["example.com", "www.example.com"],
+  );
+});
+
+test("assertHostingNamesFree refuses a www name another environment serves, before any container starts", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const payload = {
+      ...WWW_BASE_PAYLOAD,
+      hostings: [wwwHosting(["example.com"], "both")],
+    };
+    // Nothing deployed yet on this server: free.
+    await assertHostingNamesFree(layout, payload);
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-other.caddy"),
+      siteSnippet({ hostname: "www.example.com", tlsDir: layout.tlsDir }),
+    );
+    // This environment's own earlier file never counts against it.
+    await Deno.writeTextFile(
+      join(sitesDir, "env-www-1.caddy"),
+      siteSnippet({ hostname: "example.com", tlsDir: layout.tlsDir }),
+    );
+    await assertRejects(
+      () => assertHostingNamesFree(layout, payload),
+      Error,
+      "www.example.com is already served by another environment on this server",
+    );
+    await assertHostingNamesFree(layout, {
+      ...payload,
+      hostings: [wwwHosting(["example.com"])],
+    });
+  } finally {
+    await cleanup();
+  }
 });

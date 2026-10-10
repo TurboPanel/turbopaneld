@@ -39,6 +39,7 @@ import {
   parseTlsTrustReconcilePayload,
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import { deployCancels } from "../deploy/deploy-cancel.ts";
 import { handleManagedApply } from "../managed/apply.ts";
 import {
   beginManagedCommandIntent,
@@ -241,6 +242,7 @@ export async function handleCommandDispatch(
     message.payload,
   );
   let commandSucceeded = false;
+  let destroyRecordGone = false;
 
   try {
     let ok: boolean;
@@ -346,13 +348,21 @@ export async function handleCommandDispatch(
       }
       case "environment.deploy": {
         const payload = parseEnvironmentDeployPayload(message.payload);
-        result = await pickCommandRouterHandler(
-          "handleEnvironmentDeploy",
-          handleEnvironmentDeploy,
-        )(payload, daemonReceivedAt, {
-          decryptSecrets: deps?.decryptSecrets,
-          logSink,
-        });
+        // Throws `cancelled: …` when a cancel arrived before this dispatch; the
+        // catch below reports it as the command's outcome like any failure.
+        const cancel = deployCancels.begin(message.commandId);
+        try {
+          result = await pickCommandRouterHandler(
+            "handleEnvironmentDeploy",
+            handleEnvironmentDeploy,
+          )(payload, daemonReceivedAt, {
+            decryptSecrets: deps?.decryptSecrets,
+            logSink,
+            cancel,
+          });
+        } finally {
+          deployCancels.end(message.commandId);
+        }
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -419,7 +429,7 @@ export async function handleCommandDispatch(
         )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
-        await noteManagedDestroySucceeded(payload);
+        destroyRecordGone = await noteManagedDestroySucceeded(payload);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -565,7 +575,9 @@ export async function handleCommandDispatch(
       daemonRespondedAt,
     });
   } finally {
-    await endManagedCommandIntent(managedIntent, commandSucceeded);
+    await endManagedCommandIntent(managedIntent, commandSucceeded, {
+      keepHeld: managedIntent?.kind === "destroy" && !destroyRecordGone,
+    });
     // Transcript upload is never load-bearing — finalize() never throws.
     await logSink.finalize();
   }

@@ -2,7 +2,7 @@ import { assertEquals } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { emptyDirectoryUsageSnapshot } from "./directory-usage.ts";
 import { EventCollectorSet } from "./events/index.ts";
-import { LinuxMetricsCollector } from "./linux-collector.ts";
+import { EVENT_MAX_AGE_MS, LinuxMetricsCollector } from "./linux-collector.ts";
 import { PRESENCE_WINDOW_SAMPLES } from "./presence.ts";
 import { computeTopologyFingerprint } from "../topology/generation.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
@@ -123,6 +123,9 @@ type RawFixtureMap = Partial<{
   "/proc/sys/net/netfilter/nf_conntrack_max": string;
   "/proc/mounts": string;
   "/proc/mdstat": string;
+  "/proc/loadavg": string;
+  "/proc/sys/kernel/pid_max": string;
+  "/proc/sys/kernel/threads-max": string;
 }>;
 
 /**
@@ -352,29 +355,6 @@ test("LinuxMetricsCollector smoke test: a normal 1-NIC VM produces a logically c
   assertEquals(result.sample.events, []);
   assertEquals(result.sample.ingressSources, []);
   assertEquals(result.sample.databaseProxies, []);
-});
-
-test("LinuxMetricsCollector never throws out of collect() — falls back to a minimal valid sample", async () => {
-  const collector = new LinuxMetricsCollector({
-    readProcFile: () => undefined,
-    statfs: () => null,
-    now: () => 1_000,
-    collectTopology: () => Promise.reject(new Error("topology boom")),
-    io: { listDir: () => [], readFile: () => undefined },
-    pageSizeBytes: 4096,
-  });
-
-  const result = await collector.collect({ sequence: 1 });
-  if (!result.supported) {
-    throw new TypeError("expected a supported (fallback) sample");
-  }
-  assertEquals(result.sample.type, "metrics");
-  assertEquals(result.sample.metadata.topologyGeneration, 0);
-  assertEquals(result.sample.metadata.bootGeneration, 0);
-  assertEquals(result.sample.host.cpu.busyPercent, null);
-  assertEquals(result.sample.networks, []);
-  assertEquals(result.sample.filesystems, []);
-  assertEquals(result.sample.blockDevices, []);
 });
 
 test("LinuxMetricsCollector re-baselines (nulls once) on a boot generation change", async () => {
@@ -1380,10 +1360,227 @@ test("LinuxMetricsCollector puts container, TLS, site and host text data in exte
   assertEquals(extended?.text?.topSites, "site-a=700");
 });
 
-test("LinuxMetricsCollector sends no extended section when nothing v7 was collected", async () => {
+test("LinuxMetricsCollector sends only the always-known RAID zeros when nothing else v7 was collected", async () => {
   const result = await new LinuxMetricsCollector(
     makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
   ).collect({ sequence: 1, nowMs: 1_000_000 });
   if (!result.supported) throw new TypeError("expected a supported sample");
-  assertEquals(result.sample.extended, undefined);
+  assertEquals(result.sample.extended, {
+    host: { mdArraysDegraded: 0, mdArraysResyncing: 0 },
+  });
+});
+
+const HOST_EXTENDED_RAW: RawFixtureMap = {
+  "/proc/loadavg": "0.48 0.37 0.35 1/352 151909\n",
+  "/proc/sys/kernel/pid_max": "4194304\n",
+  "/proc/sys/kernel/threads-max": "7040\n",
+  "/proc/mounts": "/dev/sda1 / ext4 rw,relatime 0 0\n",
+};
+
+test("LinuxMetricsCollector fills extended.host: PID limit, OOM kills, root disk queue and IOPS", async () => {
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(
+      () => ({
+        ...(tick === 0 ? TICK_1 : TICK_2),
+        ...HOST_EXTENDED_RAW,
+        "/proc/vmstat": fixture(`proc-vmstat-${tick + 1}.txt`),
+      }),
+      fullTopologySnapshot(),
+      () => nowMs,
+    ),
+  );
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a supported sample");
+  // The first tick has no counter baseline: rates and the OOM delta stay unknown.
+  assertEquals(first.sample.extended?.host, {
+    pidLimitUsedPercent: (352 / 7040) * 100,
+    mdArraysDegraded: 0,
+    mdArraysResyncing: 0,
+  });
+  tick = 1;
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+  assertEquals(second.sample.extended?.host, {
+    pidLimitUsedPercent: (352 / 7040) * 100,
+    oomKills: 1,
+    rootDiskQueueDepth: 0.03,
+    rootDiskOpsPerSecond: 200 / 60,
+    mdArraysDegraded: 0,
+    mdArraysResyncing: 0,
+  });
+});
+
+test("LinuxMetricsCollector reads the root disk through an LVM mapper source and leaves it out when the root is not a service disk", async () => {
+  const lvm = fullTopologySnapshot({
+    blockDevices: [{
+      deviceId: "blk:dm-0",
+      kernelName: "dm-0",
+      deviceType: "virtual",
+      isServiceDevice: true,
+    }],
+  });
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const raw = () => ({
+    ...(tick === 0 ? TICK_1 : TICK_2),
+    "/proc/mounts": "/dev/mapper/vg0-root / ext4 rw 0 0\n",
+    "/proc/diskstats":
+      (tick === 0
+        ? fixture("proc-diskstats-virtio-1.txt")
+        : fixture("proc-diskstats-virtio-2.txt")).replace("vda", "dm-0"),
+  });
+  const deps: CollectorDeps = {
+    ...makeDeps(raw, lvm, () => nowMs),
+    io: {
+      listDir: (path) => path === "/sys/block" ? ["dm-0"] : [],
+      readFile: (path) =>
+        path === "/sys/block/dm-0/dm/name" ? "vg0-root\n" : undefined,
+    },
+  };
+  const collector = new LinuxMetricsCollector(deps);
+  await collector.collect({ sequence: 1, nowMs });
+  tick = 1;
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
+  assertEquals(second.sample.extended?.host?.rootDiskOpsPerSecond, 200 / 60);
+
+  // Root on a disk the topology does not list as a service disk: unknown, not 0.
+  const other = new LinuxMetricsCollector(
+    makeDeps(
+      () => ({ ...TICK_2, "/proc/mounts": "/dev/sdz1 / ext4 rw 0 0\n" }),
+      fullTopologySnapshot(),
+      () => nowMs,
+    ),
+  );
+  await other.collect({ sequence: 1, nowMs });
+  nowMs += 60_000;
+  const third = await other.collect({ sequence: 2, nowMs });
+  if (!third.supported) throw new TypeError("expected a supported sample");
+  assertEquals(third.sample.extended?.host?.rootDiskQueueDepth, undefined);
+  assertEquals(third.sample.extended?.host?.rootDiskOpsPerSecond, undefined);
+});
+
+test("LinuxMetricsCollector: a live-stream collect never runs event detection (the stream sample is non-durable)", async () => {
+  let detects = 0;
+  const nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    eventCollectors: {
+      detect: () => {
+        detects += 1;
+        return Promise.resolve([]);
+      },
+    },
+  });
+  await collector.collect({ sequence: 1, nowMs, live: true });
+  assertEquals(detects, 0);
+  await collector.collect({ sequence: 2, nowMs: nowMs + 60_000 });
+  assertEquals(detects, 1);
+});
+
+test("LinuxMetricsCollector: a hung statfs / GPU / ingress / event source degrades to nulls instead of hanging the collect", async () => {
+  const never = new Promise<never>(() => {});
+  const nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    sourceDeadlineMs: 20,
+    statfs: () => never,
+    gpuAdapters: {
+      nvml: { id: "nvml", probe: () => never, read: () => never },
+      dcgm: { id: "dcgm", probe: () => never, read: () => never },
+      sysfs: { id: "sysfs", probe: () => never, read: () => never },
+      nvidiaSmi: { id: "nvidia-smi", probe: () => never, read: () => never },
+    } as unknown as GpuAdapterSet,
+    eventCollectors: { detect: () => never },
+    hostText: () => never,
+  });
+  const result = await collector.collect({ sequence: 1, nowMs });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+  assertEquals(result.sample.events, []);
+  assertEquals(result.sample.host.storage.rootFilesystemAvailableBytes, null);
+});
+
+test("LinuxMetricsCollector: an internal failure is thrown (so the scheduler logs it and sends nothing), not turned into an all-null row", async () => {
+  const nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    collectTopology: () => Promise.reject(new Error("topology exploded")),
+  });
+  let message = "";
+  try {
+    await collector.collect({ sequence: 1, nowMs });
+  } catch (err) {
+    message = String(err);
+  }
+  assertEquals(message.includes("topology exploded"), true);
+});
+
+test("LinuxMetricsCollector: events from a detect that overruns the deadline are carried to the next sample, never lost or run concurrently", async () => {
+  const nowMs = 1_000_000;
+  let release: (events: never[] | unknown[]) => void = () => {};
+  let running = 0;
+  let peak = 0;
+  let calls = 0;
+  const event = {
+    eventId: "e1",
+    at: new Date(0).toISOString(),
+    kind: "oom_kill",
+    severity: "warning",
+  } as const;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    sourceDeadlineMs: 20,
+    eventCollectors: {
+      detect: () => {
+        calls += 1;
+        running += 1;
+        peak = Math.max(peak, running);
+        return new Promise((resolve) => {
+          release = (events) => {
+            running -= 1;
+            resolve(events as never);
+          };
+        });
+      },
+    },
+  });
+  const first = await collector.collect({ sequence: 1, nowMs });
+  if (!first.supported) throw new TypeError("expected a sample");
+  assertEquals(first.sample.events, []);
+  release([event]);
+  const second = await collector.collect({
+    sequence: 2,
+    nowMs: nowMs + 60_000,
+  });
+  if (!second.supported) throw new TypeError("expected a sample");
+  assertEquals(second.sample.events, [event]);
+  assertEquals(peak, 1);
+  assertEquals(calls >= 1, true);
+});
+
+test("LinuxMetricsCollector: a carried event older than the control plane's 7-day window is dropped, never sent", async () => {
+  const nowMs = 20 * 24 * 3_600_000;
+  const stale = {
+    eventId: "stale",
+    at: new Date(nowMs - EVENT_MAX_AGE_MS - 1_000).toISOString(),
+    kind: "oom_kill",
+    severity: "warning",
+  } as const;
+  const fresh = {
+    eventId: "fresh",
+    at: new Date(nowMs - EVENT_MAX_AGE_MS + 60_000).toISOString(),
+    kind: "oom_kill",
+    severity: "warning",
+  } as const;
+  const collector = new LinuxMetricsCollector({
+    ...makeDeps(() => TICK_1, fullTopologySnapshot(), () => nowMs),
+    eventCollectors: { detect: () => Promise.resolve([stale, fresh] as never) },
+  });
+  const result = await collector.collect({ sequence: 1, nowMs });
+  if (!result.supported) throw new TypeError("expected a sample");
+  assertEquals(result.sample.events.map((e) => e.eventId), ["fresh"]);
 });

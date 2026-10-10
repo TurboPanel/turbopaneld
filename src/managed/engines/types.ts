@@ -79,6 +79,18 @@ export type ManagedEngineRuntime = {
     ctx: ManagedEngineContext,
     credentials: { user: string; password: string },
   ): Promise<void>;
+  /**
+   * Optional: the organization's single Orchestrator topology account
+   * (`managed.apply` `topologyUser`). MySQL-family only — Orchestrator speaks
+   * the MySQL protocol and never dials a Postgres member, so Postgres leaves
+   * this unimplemented. Primary/writable members only: a standby boots
+   * `read_only=ON, super_read_only=ON` and receives the account through the
+   * binlog instead.
+   */
+  ensureOrchestratorTopology?(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void>;
   applyDatabases(
     ctx: ManagedEngineContext,
     ops: ManagedApplyDatabaseOp[],
@@ -134,6 +146,14 @@ export type ManagedEngineReplicationRuntime = {
     },
   ): Promise<void>;
   /**
+   * Create each missing physical replication slot on a primary (Postgres).
+   * MySQL / MariaDB have no slots — a documented no-op.
+   */
+  ensureSlots(
+    ctx: ManagedEngineContext,
+    slots: readonly string[],
+  ): Promise<void>;
+  /**
    * Seed an empty data volume from the primary via basebackup and mark it
    * as a standby. Must run **before** `compose up`. Returns `needs_resync`
    * when the volume is already initialized but is not a standby.
@@ -158,6 +178,14 @@ export type ManagedEngineReplicationRuntime = {
     },
   ): Promise<"seeded" | "already_standby" | "needs_resync">;
   /**
+   * Read-only classification of the data volume (never seeds or wipes):
+   * `not_standby` means data is present without the standby marker, so the
+   * member must not be started as-is.
+   */
+  probeStandbyData(
+    ctx: ManagedEngineProbeContext,
+  ): Promise<"uninitialized" | "standby" | "not_standby">;
+  /**
    * Engines whose standby is configured by SQL rather than by config file
    * (MySQL / MariaDB GTID). Called **after** compose up + waitReady and
    * before the standby early-return that skips credential/database mutation.
@@ -176,7 +204,77 @@ export type ManagedEngineReplicationRuntime = {
       slotName: string;
     },
   ): Promise<void>;
-  promote(ctx: ManagedEngineContext): Promise<void>;
+  /**
+   * Postgres only. Drop the managed replication slots that are not in
+   * `desired`. `ensurePrimary` does this for clusters with replicas; this is
+   * the same sweep for a cluster that just lost its last replica and so no
+   * longer gets a replication payload.
+   */
+  pruneOrphanSlots?(
+    ctx: ManagedEngineContext,
+    desired: readonly string[],
+  ): Promise<void>;
+  /** Single-statement admin query (`-N -B`) for switchover GTID proof. */
+  runAdminScalarQuery?(
+    ctx: ManagedEngineContext,
+    sql: string,
+  ): Promise<string>;
+  promote(
+    ctx: ManagedEngineContext,
+    options?: {
+      requiredExecutedGtidSet?: string;
+      gtidWaitTimeoutSeconds?: number;
+    },
+  ): Promise<void>;
+  /**
+   * Planned switchover: make the old primary read-only and return its final
+   * GTID position for the promotion target to prove before promote.
+   */
+  quiesceFormerPrimaryForSwitchover?(
+    ctx: ManagedEngineContext,
+  ): Promise<string>;
+  /**
+   * True when the running engine still accepts writes as a former primary
+   * (not in recovery / not globally read-only).
+   */
+  isWritableFormerPrimary?(ctx: ManagedEngineContext): Promise<boolean>;
+  /**
+   * Best-effort quiesce for a fenced member whose container is already up.
+   * The durable fence is on-disk (`standby.signal` / volume markers) before
+   * stop; this covers the window until compose stop completes.
+   */
+  enforceFencedFormerPrimaryReadOnly?(
+    ctx: ManagedEngineContext,
+  ): Promise<void>;
+  /**
+   * Refuse reactivation when this member is no longer quiesced (promotion may
+   * have started locally or the data directory was mutated).
+   */
+  assertFormerPrimarySafeToReactivateAfterSwitchoverAbort?(
+    ctx: ManagedEngineContext,
+  ): Promise<void>;
+  /** Undo a switchover abort on the old primary after it is started again. */
+  reactivateFormerPrimaryAfterSwitchoverAbort?(
+    ctx: ManagedEngineContext,
+  ): Promise<void>;
+  /** True when this member is a replica (in recovery / replica status present). */
+  isStandby(ctx: ManagedEngineContext): Promise<boolean>;
+  /**
+   * Point an already-seeded standby at a new primary after switchover or
+   * automatic failover. Must not re-seed or wipe the data volume. Postgres
+   * rewrites `primary_conninfo` in place; MySQL / MariaDB change only the
+   * source host and port so existing replica credentials stay.
+   */
+  followPrimary(
+    ctx: ManagedEngineContext,
+    spec: {
+      primary: {
+        host: string;
+        hostaddr?: string;
+        port: number;
+      };
+    },
+  ): Promise<void>;
   readHealth(
     ctx: ManagedEngineContext,
     role: "primary" | "standby",
@@ -198,6 +296,12 @@ export type ManagedEngineBootstrapContext = {
   ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
 };
 
+/** What a read-only data-volume probe needs (subset of the bootstrap context). */
+export type ManagedEngineProbeContext = Pick<
+  ManagedEngineBootstrapContext,
+  "image" | "volumes" | "containerUser" | "runDocker"
+>;
+
 /**
  * The last time this daemon saw a standby's WAL receiver `streaming`, from
  * the in-process tracker (`../standby-streaming.ts`). `ageMs` is measured on
@@ -214,9 +318,40 @@ export type ManagedLastStreamingObservation = {
   receiveLagBytes?: number;
 };
 
+/**
+ * Primary only: how much WAL the replicas' replication slots hold back.
+ * `ok`: nothing unusual. `lagging`: a slot holds more than `max_wal_size`
+ * (a replica is away or far behind; disk is filling). `critical`: a slot is
+ * about to be, or already is, invalidated by the `max_slot_wal_keep_size`
+ * cap, or its replacement is still waiting for the replica to be re-seeded
+ * (`walStatus: "awaiting_resync"`), so that replica needs a Resync. The cut-off
+ * stays reported on every apply until the Resync reserves the slot again.
+ */
+export type ManagedSlotRetention = {
+  state: "ok" | "lagging" | "critical";
+  /** The worst slot (absent when `ok`). */
+  slot?: string;
+  /**
+   * Postgres `wal_status` of that slot: reserved, extended, unreserved, lost;
+   * or `awaiting_resync` for the replacement of a lost slot.
+   */
+  walStatus?: string;
+  /** Bytes of WAL that slot is keeping. */
+  retainedBytes?: number;
+  /** Bytes left before the cap invalidates it; absent when no cap is set. */
+  safeBytes?: number;
+  /** Whether a replica is attached to that slot right now. */
+  active?: boolean;
+};
+
 export type ManagedReplicationObservedHealth = {
   state: string;
   lagBytes?: number;
+  /**
+   * Apply delay while streaming. Postgres: 0 when replay has caught the
+   * primary's last reported WAL end (idle primary, replica fully caught up);
+   * `pg_last_xact_replay_timestamp` only when still behind.
+   */
   lagSeconds?: number;
   observedAt: string;
   /** Standby only: `pg_last_wal_receive_lsn()` (absent when NULL). */
@@ -234,8 +369,27 @@ export type ManagedReplicationObservedHealth = {
    * the streaming tracker uses it to refuse a stale "streaming" read.
    */
   receiptAgeSeconds?: number;
+  /**
+   * Daemon-internal: the oldest `receiptAgeSeconds` that still counts as
+   * receiving (MySQL: twice the heartbeat interval). Default 5 s.
+   */
+  receiptAgeLimitSeconds?: number;
+  /**
+   * MySQL / MariaDB replica only: GTID sets (bounded opaque text) the replica
+   * has received and applied. Absent when not read or malformed (unknown).
+   */
+  receivedGtid?: string;
+  executedGtid?: string;
+  /**
+   * MySQL / MariaDB replica only, computed on the daemon: everything it has
+   * received is applied. Absent (never `true`) when it cannot be proved.
+   * `observedAt` is the sampling time.
+   */
+  fullyApplied?: boolean;
   /** Standby only, on `managed-health-result`. */
   lastStreaming?: ManagedLastStreamingObservation;
+  /** Primary only, Postgres: WAL held back by the replicas' slots. */
+  slotRetention?: ManagedSlotRetention;
 };
 
 export class ManagedEngineNotSupportedError extends Error {

@@ -11,6 +11,9 @@
 
 export type ServerReportedIpScope = "private" | "public";
 
+/** Whether the interface carrying an address has a working link. */
+export type ServerReportedIpLink = "up" | "down";
+
 export type ServerReportedIp = {
   address: string;
   version: 4 | 6;
@@ -29,4 +32,12 @@ export type ServerReportedIp = {
    * peer would reach this host on.
    */
   preferred?: boolean;
+  /**
+   * Link state of `interface`, read from the kernel (`operstate`, then
+   * `carrier`). `Deno.networkInterfaces()` keeps listing a static address after
+   * its cable is pulled, so without this the control plane cannot tell a dead
+   * backhaul NIC from a live one. Absent when the kernel did not say (non-Linux
+   * host, unreadable sysfs): the control plane treats absent as up.
+   */
+  link?: ServerReportedIpLink;
 };

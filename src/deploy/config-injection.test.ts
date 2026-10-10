@@ -21,8 +21,10 @@ import { cronServiceContent, cronTimerContent } from "./cron/unit.ts";
 import { siteSnippet } from "./ingress.ts";
 import { nativeAppUnitContent } from "./native/unit.ts";
 import {
+  apacheSetEnvLine,
   apacheSiteConfig,
   caddySiteConfig,
+  nginxSiteConfig,
   openlitespeedVhostConfig,
   phpAdminValues,
   phpFpmPoolAdminDirectives,
@@ -279,13 +281,15 @@ test("Traefik labels refuse a stripPrefix that would add list entries or syntax"
   }
 });
 
-test("Apache SetEnv refuses a line break in a value or a key, and ${ in a value", () => {
-  for (const ch of ["\n", "\r", "\0", "\u0085", " ", " "]) {
-    assertThrows(
-      () => apacheWithEnv({ TOKEN: `x${ch}CustomLog "|/bin/sh" common` }),
-      Error,
-      "sites.phpapp.webEnv.TOKEN must not contain line breaks",
-    );
+test("Apache SetEnv leaves out a hostile value, refuses a bad name", () => {
+  for (const ch of ["\n", "\r", "\0", "\u0085", "\u2028", "\u2029"]) {
+    const conf = apacheWithEnv({
+      TOKEN: `x${ch}CustomLog "|/bin/sh" common`,
+      KEEP: "ok",
+    });
+    assertEquals(conf.includes("TOKEN"), false);
+    assertEquals(conf.includes("CustomLog"), false);
+    assertEquals(conf.includes('SetEnv KEEP "ok"'), true);
   }
   for (const key of ["A\nB", "A B", "A}", "1A", ""]) {
     assertThrows(
@@ -294,15 +298,51 @@ test("Apache SetEnv refuses a line break in a value or a key, and ${ in a value"
       "sites.phpapp.webEnv must be a letter",
     );
   }
-  assertThrows(
-    () => apacheWithEnv({ LEAK: "${PATH}" }),
-    Error,
-    "sites.phpapp.webEnv.LEAK must not contain ${",
+  assertEquals(apacheWithEnv({ LEAK: "${PATH}" }).includes("LEAK"), false);
+  assertEquals(
+    apacheWithEnv({ BIG: "x".repeat(4097) }).includes("BIG"),
+    false,
   );
+  // The strict line renderer is still the last line of defence.
   assertThrows(
-    () => apacheWithEnv({ BIG: "x".repeat(4097) }),
+    () => apacheSetEnvLine("phpapp", "TOKEN", "x\ny"),
     Error,
-    "sites.phpapp.webEnv.BIG must be at most",
+    "sites.phpapp.webEnv.TOKEN must not contain line breaks",
+  );
+});
+
+function nginxWithEnv(webEnv: Record<string, string>): string {
+  return nginxSiteConfig(
+    { ...apacheSite, engine: "nginx", webEnv },
+    "/srv/x/public",
+    null,
+    { phpFpmSocket: FPM_SOCKET },
+  );
+}
+
+test("nginx fastcgi_param drops a hostile value, refuses a bad name, and escapes the quote", () => {
+  for (
+    const ch of ["\n", "\r", "\0", "\u0085", "\u2028", "\u2029", "$", "${host}"]
+  ) {
+    const conf = nginxWithEnv({
+      VAR_X: `x${ch}fastcgi_param SCRIPT_FILENAME /etc/passwd;`,
+      BIG: "x".repeat(4097),
+    });
+    assertEquals(conf.includes("VAR_X"), false);
+    assertEquals(conf.includes("BIG"), false);
+    assertEquals(conf.includes("/etc/passwd"), false);
+  }
+  for (const key of ["A\nB", "A B", "A;", "1A", ""]) {
+    assertThrows(
+      () => nginxWithEnv({ [key]: "x" }),
+      Error,
+      "sites.phpapp.webEnv must be a letter",
+    );
+  }
+  // `;`, braces and `#` are inert inside a quoted value.
+  assertEquals(
+    nginxWithEnv({ V: 'a";}#{' }).includes('fastcgi_param V "a\\";}#{";'),
+    true,
   );
 });
 
@@ -441,6 +481,43 @@ test("renderers route tenant fields through their named validators", () => {
       `${file} interpolates a tenant field without a validator: ${
         raw.join(" ")
       }`,
+    );
+  }
+});
+
+test("www redirect sites render byte-identical configs (acme, pinned with bind)", () => {
+  assertEquals(
+    siteSnippet({
+      hostname: "www.example.com",
+      tlsDir: TLS_DIR,
+      tlsMode: "acme",
+      redirectTo: "example.com",
+    }),
+    golden("hosting-caddy-www-redirect-acme.caddy"),
+  );
+  assertEquals(
+    siteSnippet({
+      hostname: "example.com",
+      tlsDir: TLS_DIR,
+      tlsId: "tls-1",
+      bindAddress: "203.0.113.10",
+      redirectTo: "www.example.com",
+    }),
+    golden("hosting-caddy-www-redirect-pinned.caddy"),
+  );
+});
+
+test("www redirect target refuses a hostile name", () => {
+  for (const fragment of HOSTILE_CONFIG_FRAGMENTS) {
+    assertThrows(
+      () =>
+        siteSnippet({
+          hostname: "www.example.com",
+          tlsDir: TLS_DIR,
+          redirectTo: `example.com${fragment}x`,
+        }),
+      Error,
+      "hostings[].www must be",
     );
   }
 });

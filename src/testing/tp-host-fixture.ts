@@ -17,6 +17,7 @@ export type Host = {
   run: (
     args: string[],
     stdin?: string,
+    env?: Record<string, string>,
   ) => Promise<{ code: number; stdout: string; stderr: string }>;
   path: (rel: string) => string;
   cleanup: () => Promise<void>;
@@ -75,10 +76,10 @@ export async function makeHost(): Promise<Host> {
       "docker:x:998:tp",
       "tp:x:9999:",
       "tpnginx:x:9990:",
-      "tpphp84:x:9902:",
+      "tpshell:x:9985:",
       "tpsftp:x:9986:",
-      "alice-grp:x:15001:",
-      "carol-grp:x:15003:",
+      "alice:x:15001:",
+      "carol:x:15003:",
       "",
     ].join("\n"),
   );
@@ -88,11 +89,15 @@ export async function makeHost(): Promise<Host> {
   return {
     prefix,
     path,
-    run: async (args, stdin) => {
+    run: async (args, stdin, extraEnv) => {
       const child = new Deno.Command("sh", {
         args: [script, ...args],
         clearEnv: true,
-        env: { PATH: "/usr/bin:/bin", TP_HOST_TEST_PREFIX: prefix },
+        env: {
+          PATH: "/usr/bin:/bin",
+          TP_HOST_TEST_PREFIX: prefix,
+          ...extraEnv,
+        },
         stdin: stdin === undefined ? "null" : "piped",
         stdout: "piped",
         stderr: "piped",

@@ -63,11 +63,17 @@ export const DAEMON_WIRE_FEATURES = [
   "update-progress-v1",
   "sealed-instance-secrets-v1",
   "managed-health-v1",
+  "managed-health-report-v1",
+  "managed-replica-freshness-v1",
   "managed-ha-probe-v1",
   "managed-ha-instance-v1",
+  "managed-ha-boot-hold-v1",
   "metrics-v7",
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
+  "deploy-cancel-v1",
+  "site-db-bindings-v1",
+  "deno-native-apps-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -88,6 +94,22 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
 export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
 
 /**
+ * This daemon pushes `managed-health-report` (every local replica's fresh
+ * replication reading, every 30 s) so a quiet cluster's health never ages out.
+ * It sends one only to a control plane that lists this feature.
+ */
+export const MANAGED_HEALTH_REPORT_FEATURE: DaemonWireFeature =
+  "managed-health-report-v1";
+
+/**
+ * A MySQL / MariaDB replica's `replication` carries `receivedGtid`,
+ * `executedGtid`, `fullyApplied` and `lastStreaming` (sampled every 2 s), the
+ * proof the control plane's host-loss failover gate needs.
+ */
+export const MANAGED_REPLICA_FRESHNESS_FEATURE: DaemonWireFeature =
+  "managed-replica-freshness-v1";
+
+/**
  * This daemon may send `managed-ha-event` with `detector: 'postgres-probe'`
  * (its own dead-primary probe for managed Postgres). It sends one only to a
  * control plane that lists this feature, because only such a control plane
@@ -105,6 +127,18 @@ export const MANAGED_HA_PROBE_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_HA_INSTANCE_FEATURE: DaemonWireFeature =
   "managed-ha-instance-v1";
+
+/**
+ * After a host restart that was not a clean shutdown, this daemon holds each
+ * HA primary it runs (engine stopped) and reports it with `managed-ha-event`
+ * `detector: 'boot-hold'` until the control plane answers (`managed.lifecycle
+ * start` = still the primary; a role change = stays stopped). A control plane
+ * that does not list this feature cannot answer, so the daemon releases the
+ * hold itself. A control plane that lists it also trusts that a daemon listing
+ * it will not let a stale primary serve writes again unchecked.
+ */
+export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
+  "managed-ha-boot-hold-v1";
 
 /**
  * Metrics schema v7. This daemon can produce v7 samples (`metadata.version`
@@ -131,6 +165,32 @@ export const SITE_ENGINE_NGINX_APACHE_FEATURE: DaemonWireFeature =
  * and Caddy sites still ignore `php.mode`.
  */
 export const PHP_SITE_MODES_FEATURE: DaemonWireFeature = "php-site-modes-v1";
+
+/**
+ * This daemon understands `deploy-cancel` (stop one running `environment.deploy`
+ * before it switches over) and answers `deploy-cancel-result`. The control plane
+ * sends the message only to a daemon that lists this feature; an older daemon
+ * would drop it and the deploy would run on.
+ */
+export const DEPLOY_CANCEL_FEATURE: DaemonWireFeature = "deploy-cancel-v1";
+
+/**
+ * This daemon takes `sites[].dbCa` (a managed database's CA as a file the site
+ * owner's Linux user can read) and `sites[].requiredEnv` (variables a site
+ * cannot run without), and answers an `environment.deploy` with `warnings`. The
+ * control plane sends those fields only to a daemon that lists this feature.
+ */
+export const SITE_DB_BINDINGS_FEATURE: DaemonWireFeature =
+  "site-db-bindings-v1";
+
+/**
+ * This daemon runs a native app on Deno (`nativeAppServices[].runtime: "deno"`,
+ * `denoVersion`) and vendors the Deno runtime for it. The control plane sends
+ * those fields only to a daemon that lists this feature; an older daemon would
+ * ignore `runtime` and start the app on Node.
+ */
+export const DENO_NATIVE_APPS_FEATURE: DaemonWireFeature =
+  "deno-native-apps-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

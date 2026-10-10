@@ -7,7 +7,9 @@ import {
   collectServerIps,
   parseIpv4DefaultRouteInterface,
   parseIpv6DefaultRouteInterface,
+  parseLinkState,
   readDefaultRouteInterfaces,
+  readInterfaceLinkStates,
 } from "./server-addresses.ts";
 
 /**
@@ -719,4 +721,75 @@ test({
       assertEquals(/^(docker|br-|veth|virbr)/.test(ip.interface ?? ""), false);
     }
   },
+});
+
+test("parseLinkState trusts a definite operstate and settles the rest by carrier", () => {
+  assertEquals(parseLinkState("up\n", undefined), "up");
+  assertEquals(parseLinkState("down\n", "1\n"), "down");
+  assertEquals(parseLinkState("lowerlayerdown\n", undefined), "down");
+  assertEquals(parseLinkState("notpresent\n", undefined), "down");
+  assertEquals(parseLinkState("unknown\n", "1\n"), "up");
+  assertEquals(parseLinkState("dormant\n", "0\n"), "down");
+  assertEquals(parseLinkState("unknown\n", undefined), undefined);
+  assertEquals(parseLinkState(undefined, undefined), undefined);
+  assertEquals(parseLinkState("weird\n", "x"), undefined);
+});
+
+test("readInterfaceLinkStates reads operstate then carrier per NIC and skips unreadable ones", () => {
+  const files = new Map<string, string>([
+    ["/sys/class/net/eth0/operstate", "up\n"],
+    ["/sys/class/net/eth0/carrier", "1\n"],
+    ["/sys/class/net/eth1/operstate", "down\n"],
+    ["/sys/class/net/eth2/operstate", "unknown\n"],
+    ["/sys/class/net/eth2/carrier", "0\n"],
+  ]);
+  const states = readInterfaceLinkStates(
+    ["eth0", "eth1", "eth2", "eth3", "bad/name", "eth0"],
+    (path) => files.get(path),
+  );
+  assertEquals([...states.entries()], [
+    ["eth0", "up"],
+    ["eth1", "down"],
+    ["eth2", "down"],
+  ]);
+});
+
+test("collectServerIps stamps each address with its NIC link and omits unknown ones", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv4", address: "10.0.0.5" },
+      { name: "eth1", family: "IPv4", address: "10.9.0.5" },
+      { name: "eth2", family: "IPv4", address: "10.8.0.5" },
+    ],
+    () => {
+      assertEquals(
+        collectServerIps(
+          undefined,
+          new Map([["eth0", "up"], ["eth1", "down"]] as const),
+        ),
+        [
+          {
+            address: "10.0.0.5",
+            version: 4,
+            scope: "private",
+            interface: "eth0",
+            link: "up",
+          },
+          {
+            address: "10.8.0.5",
+            version: 4,
+            scope: "private",
+            interface: "eth2",
+          },
+          {
+            address: "10.9.0.5",
+            version: 4,
+            scope: "private",
+            interface: "eth1",
+            link: "down",
+          },
+        ],
+      );
+    },
+  );
 });
