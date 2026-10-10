@@ -15,6 +15,8 @@ import {
   apacheSiteConfig,
   caddySiteConfig,
   hostingWebMetadataFiles,
+  openlitespeedEnvLine,
+  openlitespeedVhostConfig,
   planSiteWebEnv,
   SITE_DB_CA_FILE_NAME,
   type SiteApplySpec,
@@ -94,7 +96,15 @@ test("nginx names a value it cannot carry through the plan", () => {
 });
 
 test("nothing to say when every variable fits the engine", () => {
-  for (const engine of ["apache", "nginx", "caddy", "nginx+apache"] as const) {
+  for (
+    const engine of [
+      "apache",
+      "nginx",
+      "caddy",
+      "nginx+apache",
+      "openlitespeed",
+    ] as const
+  ) {
     assertEquals(planSiteWebEnv(site(engine, DB_ENV)), []);
   }
 });
@@ -123,17 +133,77 @@ test("an incomplete required set is refused naming what is missing", () => {
   );
 });
 
-test("OpenLiteSpeed gets no variables, so a bound site there is refused", () => {
-  assertThrows(
+function olsPhp(webEnv?: Record<string, string>) {
+  return openlitespeedVhostConfig({
+    processorName: "php_x",
+    mode: "lsphp-detached",
+    socket: "/run/turbopanel-php-x/php.sock",
+    children: 10,
+    lockedValues: [],
+    composeServiceName: "wordpress",
+    webEnv,
+  });
+}
+
+test("OpenLiteSpeed passes bound connection settings to PHP on the processor", () => {
+  assertEquals(
+    planSiteWebEnv(site("openlitespeed", DB_ENV, { requiredEnv: REQUIRED })),
+    [],
+  );
+  const conf = olsPhp(DB_ENV);
+  assertStringIncludes(
+    conf,
+    "env                       DATABASE_HOST=127.0.0.1",
+  );
+  assertStringIncludes(
+    conf,
+    "env                       DATABASE_PASSWORD=secret",
+  );
+  assertStringIncludes(conf, "env                       DATABASE_PORT=13306");
+  for (const mode of ["fastcgi", "fpm", "lsphp-detached"] as const) {
+    const body = openlitespeedVhostConfig({
+      processorName: "php_x",
+      mode,
+      socket: "/run/x/php.sock",
+      children: 10,
+      lockedValues: [],
+      composeServiceName: "wordpress",
+      webEnv: DB_ENV,
+    });
+    assertStringIncludes(body, "env                       DATABASE_USER=wp");
+  }
+});
+
+test("OpenLiteSpeed drops an unsafe value and stops a required one without printing it", () => {
+  const warnings = planSiteWebEnv(
+    site("openlitespeed", { ...DB_ENV, NOTE: "a$b" }),
+  );
+  assertEquals(warnings.length, 1);
+  assertStringIncludes(warnings[0], "NOTE");
+  assertStringIncludes(warnings[0], "OpenLiteSpeed");
+  assertEquals(warnings[0].includes("a$b"), false);
+  assertEquals(olsPhp({ KEEP: "ok", NOTE: "a$b" }).includes("NOTE"), false);
+  assertStringIncludes(
+    olsPhp({ KEEP: "ok", NOTE: "a$b" }),
+    "env                       KEEP=ok",
+  );
+  const error = assertThrows(
     () =>
       planSiteWebEnv(
-        site("openlitespeed", DB_ENV, { requiredEnv: REQUIRED }),
+        site("openlitespeed", { ...DB_ENV, DATABASE_PASSWORD: "a$b" }, {
+          requiredEnv: REQUIRED,
+        }),
       ),
     Error,
-    "OpenLiteSpeed does not pass variables",
+    "DATABASE_PASSWORD",
   );
-  // No required settings: unchanged behaviour.
-  assertEquals(planSiteWebEnv(site("openlitespeed", { A: "1" })), []);
+  assertStringIncludes(error.message, "cannot start");
+  assertEquals(error.message.includes("a$b"), false);
+  assertThrows(
+    () => openlitespeedEnvLine("wordpress", "TOKEN", "x$y"),
+    Error,
+    "OpenLiteSpeed",
+  );
 });
 
 const layout = resolveLayout();
