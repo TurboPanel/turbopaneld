@@ -164,7 +164,7 @@ export class ManagedHaObserver {
     this.#emittedThisPoll.add(incidentKey);
     this.#incidentLastEmit.set(incidentKey, now);
     const { hostname, port } = key;
-    const instance = hostname && port !== undefined
+    const instance = hostname !== undefined && port !== undefined
       ? { instanceHost: hostname, instancePort: port }
       : {};
     this.#send({

@@ -97,9 +97,8 @@ async function managedIdForAnalyzedDial(
       run,
     );
     if (
-      dial &&
-      dial.hostname === key.hostname &&
-      dial.port === key.port
+      dial?.hostname === key.hostname &&
+      dial?.port === key.port
     ) {
       matched = record.managedId;
     }
@@ -152,20 +151,18 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   nowMs: number,
 ): Promise<OrchestratorDeadPrimaryEmitContext | null> {
   const aliasId = orchestratorClusterAliasManagedId(clusterAlias);
-  const hasFullKey = analyzedKey.hostname !== undefined &&
-    analyzedKey.port !== undefined;
+  const analyzedHost = analyzedKey.hostname;
+  const analyzedPort = analyzedKey.port;
+  const hasFullKey = analyzedHost !== undefined && analyzedPort !== undefined;
   let managedId: string | null = null;
 
   if (hasFullKey) {
     const byDial = await managedIdForAnalyzedDial(
       layout,
-      {
-        hostname: analyzedKey.hostname!,
-        port: analyzedKey.port!,
-      },
+      { hostname: analyzedHost, port: analyzedPort },
       run,
     );
-    if (aliasId && byDial && byDial !== aliasId) return null;
+    if (byDial != null && aliasId != null && byDial !== aliasId) return null;
     managedId = byDial ?? aliasId;
   } else if (aliasId) {
     managedId = aliasId;
@@ -185,10 +182,10 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   if (!orchestratorKeysMatch(analyzedKey, dial)) return null;
 
   const incidentKey = `${managedId}:${orchestratorIncidentPrimaryKey(dial)}`;
-  const emitKey = hasFullKey &&
-      orchestratorKeysMatch(analyzedKey, dial)
-    ? { hostname: dial.hostname, port: dial.port }
-    : {};
+  let emitKey: { hostname?: string; port?: number } = {};
+  if (hasFullKey && orchestratorKeysMatch(analyzedKey, dial)) {
+    emitKey = { hostname: dial.hostname, port: dial.port };
+  }
   return { managedId, incidentKey, emitKey };
 }
 
