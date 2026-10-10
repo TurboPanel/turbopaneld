@@ -329,7 +329,10 @@ the unit's `StateDirectory=turbopanel-hosting-caddy`, which systemd creates
 owned by `tpedge`; the old root-written `<state>/hosting-caddy` store is
 removed, not migrated (the internal CA and ACME account are recreated).
 `caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
-whenever the binary **or** the account is missing (`ensureHostingCaddy`). The
+whenever the binary **or** the account is missing (`ensureHostingCaddy`).
+`playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
+when `getent` shows no `tpedge` account, so enrolled hosts are edge-ready
+before the first compose deploy. The
 role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on

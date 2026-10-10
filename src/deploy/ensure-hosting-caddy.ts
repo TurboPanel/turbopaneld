@@ -83,7 +83,26 @@ function caddyBinaryPath(runtimesDir: string): string {
   return join(runtimesDir, "caddy", "current", "caddy");
 }
 
+let caddyBinaryPresentOverride:
+  | ((path: string) => Promise<boolean>)
+  | undefined;
+
+/**
+ * Test-only: treat the vendored hosting Caddy binary as present without
+ * touching disk. Returns a restore function.
+ */
+export function setHostingCaddyBinaryPresentForTest(
+  fn?: (path: string) => Promise<boolean>,
+): () => void {
+  const previous = caddyBinaryPresentOverride;
+  caddyBinaryPresentOverride = fn;
+  return () => {
+    caddyBinaryPresentOverride = previous;
+  };
+}
+
 async function caddyBinaryPresent(path: string): Promise<boolean> {
+  if (caddyBinaryPresentOverride) return await caddyBinaryPresentOverride(path);
   try {
     const stat = await Deno.stat(path);
     return stat.isFile;

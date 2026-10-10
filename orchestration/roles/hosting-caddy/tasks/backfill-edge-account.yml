@@ -1,0 +1,22 @@
+---
+# Backfill the hosting Caddy edge account and ingress guard on hosts that
+# received sudoers for TP_HOSTING_CADDY_VALIDATE before their first deploy.
+# Idempotent; no-op when {{ hosting_caddy_user }} already exists.
+
+- name: Probe hosting Caddy account
+  ansible.builtin.command:
+    cmd: getent passwd {{ hosting_caddy_user }}
+  register: _hosting_caddy_account
+  failed_when: false
+  changed_when: false
+
+- name: Vendor hosting Caddy when the edge account is absent
+  when: _hosting_caddy_account.rc != 0
+  block:
+    - name: Install vendored Caddy binary
+      ansible.builtin.import_role:
+        name: caddy
+
+    - name: Provision hosting Caddy edge account and ingress guard
+      ansible.builtin.import_role:
+        name: hosting-caddy

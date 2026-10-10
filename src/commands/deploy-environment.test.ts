@@ -19,6 +19,7 @@ import {
   buildDeploySummary,
   containerHostingsNeedSharedHttpIngress,
   handleEnvironmentDeploy,
+  hostingsNeedPublicHttpEdge,
   hostNativeComposeServiceNames,
   persistHostingIngressIdentity,
   resolveDeployComposeFiles,
@@ -59,6 +60,20 @@ const hermeticDeployDeps = {
   ensureExternalDockerNetworks: () => Promise.resolve(),
   ensureFabricDockerNetworks: () => Promise.resolve(),
 };
+
+test("hostingsNeedPublicHttpEdge matches containerHostingsNeedSharedHttpIngress", () => {
+  const hostings = [{
+    hostingId: "h1",
+    serviceId: "s1",
+    composeServiceName: "web",
+    hostnames: ["app.example.test"],
+  }];
+  assertEquals(hostingsNeedPublicHttpEdge(hostings), true);
+  assertEquals(
+    hostingsNeedPublicHttpEdge(hostings),
+    containerHostingsNeedSharedHttpIngress(hostings),
+  );
+});
 
 test("containerHostingsNeedSharedHttpIngress requires HTTP hostnames", () => {
   assertEquals(containerHostingsNeedSharedHttpIngress([]), false);

@@ -1556,6 +1556,32 @@ function fakeHostRun(layout: LayoutPaths, calls?: string[][]) {
   };
 }
 
+test("rewriteHostingCaddySites ensures hosting Caddy edge prep before validation", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let ensured = 0;
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-caddy-edge", "app.example.com"),
+      undefined,
+      noGrant,
+      {
+        ensureHostingCaddyRuntime: () => {
+          ensured += 1;
+          return Promise.resolve();
+        },
+      },
+    );
+    assertEquals(ensured, 1);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
 test("rewriteHostingCaddySites validates the staged set, then activates and reloads", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[][] = [];

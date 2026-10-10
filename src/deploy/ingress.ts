@@ -2488,11 +2488,17 @@ async function activateHostingSite(
  * Caddy then refuses the reload the previous snippet is restored and the deploy
  * fails, so the host never keeps a config its next start cannot load.
  */
+/** Optional test seams for {@link rewriteHostingCaddySites}. */
+export type RewriteHostingCaddySitesDeps = {
+  ensureHostingCaddyRuntime?: (layout: LayoutPaths) => Promise<void>;
+};
+
 export function rewriteHostingCaddySites(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
   hostnameTls?: Map<string, string>,
   grantRead: (hostingDir: string) => Promise<void> = grantHostingCaddyRead,
+  deps?: RewriteHostingCaddySitesDeps,
 ): Promise<void> {
   if (!SAFE_FILE_ID_RE.test(payload.environmentId)) {
     return Promise.reject(
@@ -2500,7 +2506,13 @@ export function rewriteHostingCaddySites(
     );
   }
   return withHostingSitesLock(() =>
-    rewriteHostingCaddySitesLocked(layout, payload, hostnameTls, grantRead)
+    rewriteHostingCaddySitesLocked(
+      layout,
+      payload,
+      hostnameTls,
+      grantRead,
+      deps,
+    )
   );
 }
 
@@ -2509,7 +2521,14 @@ async function rewriteHostingCaddySitesLocked(
   payload: EnvironmentDeployPayload,
   hostnameTls: Map<string, string> | undefined,
   grantRead: (hostingDir: string) => Promise<void>,
+  deps?: RewriteHostingCaddySitesDeps,
 ): Promise<void> {
+  if (deps?.ensureHostingCaddyRuntime) {
+    await deps.ensureHostingCaddyRuntime(layout);
+  } else if (!hostCommandOverride) {
+    await ensureHostingCaddyRuntime(layout);
+  }
+
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
