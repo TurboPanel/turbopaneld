@@ -91,7 +91,7 @@ export async function isFencedMemberStillWritable(
     (text) => sanitizeForLog(text),
     run,
   );
-  if (observed !== undefined && observed.length === 0) {
+  if (observed?.length === 0) {
     return false;
   }
 

@@ -72,12 +72,10 @@ export async function resolveLocalReplicationEngine(
 
   const project = managedComposeProject(managedId);
   let containers = await collectManagedContainers(project, undefined, run);
-  if (containers === undefined) {
-    containers = await collectRunningContainersByComposeProjectLabel(
-      project,
-      run,
-    );
-  }
+  containers ??= await collectRunningContainersByComposeProjectLabel(
+    project,
+    run,
+  );
   if (!containers || containers.length === 0) {
     throw new Error(`${commandName}: no running containers for ${managedId}`);
   }
