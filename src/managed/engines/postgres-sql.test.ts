@@ -11,6 +11,7 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
   formatConninfoValue,
   grantDatabaseSql,
@@ -563,6 +564,22 @@ test("rewritePrimaryConninfo drops hostaddr when the new dial is a container nam
   assertEquals(next.includes("hostaddr"), false);
   assertEquals(next.includes("port=5432"), true);
   assertEquals(next.includes("password=repl-plain-fixture"), true);
+});
+
+test("enforceFencedFormerPrimarySql terminates backends and sets cluster read-only", () => {
+  const sql = enforceFencedFormerPrimarySql();
+  assertStringIncludes(sql, "pg_terminate_backend");
+  assertStringIncludes(sql, "backend_type = 'client backend'");
+  assertStringIncludes(sql, "pg_replication_slots");
+  assertStringIncludes(
+    sql,
+    "ALTER SYSTEM SET default_transaction_read_only = on",
+  );
+  assertStringIncludes(sql, "pg_reload_conf");
+  assertStringIncludes(sql, "TRANSACTION READ ONLY");
+  const alterIdx = sql.indexOf("ALTER SYSTEM");
+  const terminateIdx = sql.indexOf("pg_terminate_backend");
+  assertEquals(alterIdx >= 0 && terminateIdx > alterIdx, true);
 });
 
 test("formatConninfoValue quotes empty values and any whitespace", () => {

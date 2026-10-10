@@ -11,7 +11,7 @@ import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
-import { logInfo, sanitizeForLog } from "../../util/logger.ts";
+import { logError, logInfo, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
   applyFollowedPrimaryConninfoSql,
@@ -25,10 +25,12 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
   ensureReadWriteLoginSchemaSql,
   grantDatabaseSql,
   isInRecoverySql,
+  isWritablePrimarySql,
   listDatabasesForRoleReleaseSql,
   listLostPhysicalSlotsSql,
   listManagedSlotsSql,
@@ -38,11 +40,13 @@ import {
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  reactivateFormerPrimaryAfterSwitchoverAbortSql,
   readOnlySessionDefaultSql,
   reconcileDatabaseObjectsSql,
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  resetFencedReadOnlyDefaultSql,
   restoreReadWriteLoginSchemasSql,
   restoreResetSql,
   revokePublicDatabaseAccessSql,
@@ -169,6 +173,26 @@ export function buildBasebackupConnectionString(primary: {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntilWritablePrimary(
+  ctx: ManagedEngineContext,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const poll = async (): Promise<void> => {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "switchover: former primary did not become writable after reactivation",
+      );
+    }
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    if (value === "t" || value === "true") return;
+    await sleep(500);
+    return poll();
+  };
+  await poll();
 }
 
 function psqlArgv(
@@ -628,6 +652,31 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     return "seeded";
   },
 
+  async isWritableFormerPrimary(ctx) {
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    return value === "t" || value === "true";
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runPsql(ctx, enforceFencedFormerPrimarySql());
+  },
+
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    if (value === "t" || value === "true") {
+      throw new Error(
+        "switchover: former primary is already writable; promotion may have started",
+      );
+    }
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runPsql(ctx, reactivateFormerPrimaryAfterSwitchoverAbortSql());
+    await waitUntilWritablePrimary(ctx, 60_000);
+  },
+
   async promote(ctx, _options?) {
     await runPsql(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
@@ -639,8 +688,21 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       await sleep(500);
       return leftRecovery();
     };
-    if (await leftRecovery()) return;
-    throw new Error("pg_promote did not leave recovery within 60s");
+    if (!(await leftRecovery())) {
+      throw new Error("pg_promote did not leave recovery within 60s");
+    }
+    // The engine is already a writable primary here: a failed reset must not
+    // report the promote as failed. A leftover read-only default fails
+    // writes loudly; it is never a second writable primary.
+    try {
+      await runPsql(ctx, resetFencedReadOnlyDefaultSql());
+    } catch (err) {
+      logError(
+        "managed",
+        "postgres promote: could not reset default_transaction_read_only:",
+        sanitizeForLog(err),
+      );
+    }
   },
 
   async isStandby(ctx) {

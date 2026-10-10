@@ -32,7 +32,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `pg-dead-primary.ts` / `../instance/pg-dead-primary-observe.ts` | Postgres dead-primary probe on the primary's **own** host (Orchestrator cannot see Postgres). See **Postgres dead-primary detection** below |
 | `host-boot.ts` / `boot-hold.ts` / `../instance/boot-hold-reporter.ts` | Boot hold after a power cut: see **Boot hold after an unclean host restart** below |
 | `ha-intent.ts` / `ha-member.ts` / `ha-command-hooks.ts` | Probe inputs kept by `command-router.ts`: operator-intent markers around every engine-touching managed verb, and the per-host member record (`managed/<id>/ha-member.json`) |
-| `demoted-marker.ts` / `demoted-guard.ts` | After a fence `managed.lifecycle` stop with `demoted: true`, a durable `<stateDir>/managed/<id>/demoted.json` (0600). A 5 s guard stops that member if its engine is running (`compose -p <id> stop`, intent marker first). Cleared on replica `managed.apply`, `managed.promote`, and `managed.destroy`. |
+| `demoted-marker.ts` / `demoted-fence-volume.ts` / `fenced-member-enforce.ts` / `demoted-guard.ts` | After a fence `managed.lifecycle` stop with `demoted: true`: durable `<stateDir>/managed/<id>/demoted.json` (0600, written first) plus an on-disk fence (Postgres `standby.signal` on the data volume; MySQL / MariaDB a read-only block in the mounted `config/my.cnf`) that survives reboot / hand `docker start`. `managed.lifecycle` start/restart refuses while the marker is present; the 5 s guard stops a writable engine (`compose -p <id> stop`, intent marker first, kill + `unsafe` flag if it stays writable). Cleared only through `clearManagedDemotionArtifacts` (fence first, marker last) on replica `managed.apply`, `managed.promote`, switchover abort and `managed.destroy`. See **Demoted member fence**. |
 | `backup.ts` | `managed.backup` (`create`/`delete`) + `managed.restore` — streamed dump/restore, checksum, prune; exports the shared core (`createManagedBackupArtifact`, `restoreManagedBackupArtifact`, `resolveBackupEngine`) for scheduled runs |
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
@@ -611,15 +611,51 @@ stale primary can accept writes again within seconds of boot.
 ## Demoted member fence
 
 After failover or switchover the old primary is stopped and must stay stopped
-until it is re-added as a replica. The control plane sends `demoted: true` on
-that fence `managed.lifecycle` stop. This daemon writes
-`<stateDir>/managed/<managedId>/demoted.json` (member id + timestamp, 0600,
-atomic) and a 5 s guard (`demoted-guard.ts`, started from `runDaemon`) stops
-the compose project if the engine is running. It writes a held operator-intent
-marker first so the dead-primary probe never treats the stop as a crash. It
-takes `tryWithManagedLifecycleLock` so a replica apply that clears the marker
-inside the same lock is not stopped mid-run. `listManagedHaMembers` already
-skips destroyed members. The marker is cleared on a successful replica apply
-(`status: ready`), on `managed.promote`, and on `managed.destroy`. The guard
-never starts anything and never deletes data.
-Tests: `demoted-marker.test.ts`, `demoted-guard.test.ts`, `lifecycle.test.ts`.
+(or read-only) until it is re-added as a replica. The control plane sends
+`demoted: true` on that fence `managed.lifecycle` stop. In order, so a crash
+between steps is always safe:
+
+1. **Marker** `<stateDir>/managed/<managedId>/demoted.json` (member id +
+   timestamp + engine, 0600, atomic). It drives everything below. It fences
+   the whole cluster on this host whatever member id it or the request names
+   (empty, equal or different): there is one data volume per cluster per host.
+2. **On-disk fence** (`demoted-fence-volume.ts`), verified after writing:
+   Postgres `standby.signal` on the data volume; MySQL / MariaDB a delimited
+   `# BEGIN/END turbopanel demoted fence` block (`read_only=1`, plus
+   `super_read_only=1` on MySQL) appended to the mounted `config/my.cnf`
+   (the file the engine reads as `/etc/mysql/conf.d/zz-turbopanel.cnf`). The
+   file is root-owned after apply, so a root helper container reads it and
+   replaces it atomically (copy keeps owner/mode, then rename). A hand
+   `docker start` re-resolves the bind mount and comes up read-only.
+3. Best-effort SQL read-only (`fenced-member-enforce.ts`), then
+   `compose stop`. A failing step never skips a later one or the stop; the
+   command then fails with "demoted fence is incomplete".
+
+The 5 s guard (`demoted-guard.ts`, from `runDaemon`, under
+`tryWithManagedLifecycleLock`) re-plants the on-disk fence each tick, then
+probes: a standby / read-only engine is left running; a writable one (or one
+it cannot probe) gets SQL read-only, a held stop intent, and up to three
+stop passes (`compose stop`, then `docker stop`/`kill` by id; when every
+listing fails, `compose kill` and stop/kill by container name). Still
+writable: an error log every tick, `compose kill` + kill by id and name, and
+`unsafe` on the marker (marker only; not on the wire yet). Bookkeeping
+failures (plant, intent, marker patches) are logged and never skip a stop.
+MariaDB `read_only` does not bind READ ONLY ADMIN (root), so a running fenced
+MariaDB counts as writable unless it is configured as a replica with
+`read_only` on (a re-seed in progress). Postgres SQL read-only cannot bind a
+superuser either; the container stop is the real fence.
+
+`managed.lifecycle` start/restart refuses while the marker is present (except
+switchover-abort reactivation). A standby `managed.apply` for a marked member
+returns `needs_resync` unless it carries `forceResync` (the fence's own
+`standby.signal` would otherwise make diverged data look like a standby). Clearing goes through ONE helper,
+`clearManagedDemotionArtifacts`: on-disk fence removed and verified gone
+first, marker removed last, any failure throws and keeps the marker. Callers:
+replica `managed.apply` that reached `ready` (inside apply's lock),
+`managed.promote` (takes the lifecycle lock when a marker exists, and Postgres
+promote resets the fence's `default_transaction_read_only`), switchover-abort
+reactivation (takes the lifecycle lock), and `managed.destroy`. The guard never
+starts anything and never deletes data.
+Tests: `demoted-marker.test.ts`, `demoted-fence-volume.test.ts`,
+`fenced-member-enforce.test.ts`, `demoted-guard.test.ts`, `lifecycle.test.ts`,
+`promote.test.ts`.
