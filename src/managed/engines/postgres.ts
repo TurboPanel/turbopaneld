@@ -81,15 +81,19 @@ function assertSafeDatabaseIdentifier(database: string): string {
 }
 
 /**
- * `$1` root user, `$2` database, `$3` reset SQL. The sentinel line is printed
- * by the server only after `COMMIT` succeeded.
+ * `$1` root user, `$2` database, `$3` reset SQL, `$4` per-login schema SQL.
+ * The sentinel line is printed by the server only after `COMMIT` succeeded;
+ * success needs both that line on stdout and psql's exit status.
+ * `client_min_messages = warning` keeps the reset's "drop cascades to ..."
+ * notices out of stderr, so a failure reports the real error line.
  */
 const POSTGRES_RESTORE_SCRIPT = [
   "set -eu",
   "set -o pipefail",
   "set +e",
   "out=$({",
-  String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
+  String
+    .raw`  printf 'BEGIN;\nSET LOCAL client_min_messages = warning;\n%s\n' "$3"`,
   `  if pg_restore --no-owner --clean --if-exists -f - | sed -E '${PG_RESTORE_TIMEOUT_SET_LINE_SED}d'; then`,
   String
     .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,

@@ -20,7 +20,11 @@ const test = Deno.test.bind(Deno);
  * Gating matches `postgres-grants.real-pg.test.ts`: runs when Docker answers
  * and either `CI` or `TURBOPANEL_REAL_POSTGRES=1` is set.
  */
-const SERIES = (Deno.env.get("TURBOPANEL_REAL_POSTGRES_SERIES") ?? "16,18")
+// `18-alpine` is the managed default image; its BusyBox tools differ from the
+// Debian images' GNU ones, so the restore script must pass on both.
+const SERIES = (
+  Deno.env.get("TURBOPANEL_REAL_POSTGRES_SERIES") ?? "16,18,18-alpine"
+)
   .split(",").map((value) => value.trim()).filter((value) => value.length > 0);
 const REQUIRE = Deno.env.get("TURBOPANEL_REQUIRE_REAL_POSTGRES") === "1";
 const WANTED = Deno.env.get("TURBOPANEL_REAL_POSTGRES") === "1" ||
@@ -180,7 +184,17 @@ for (const series of SERIES) {
            CREATE SCHEMA ext;
            CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA ext;
            CREATE PUBLICATION tp_restore_pub FOR TABLE public.orders;
-           SELECT lo_create(424242);`,
+           SELECT lo_create(424242);
+           CREATE TABLE public.items (id int PRIMARY KEY);
+           INSERT INTO public.items SELECT g FROM generate_series(1, 50) g;
+           CREATE TABLE public.notes (
+             item_id int REFERENCES public.items (id), body text);
+           INSERT INTO public.notes VALUES (1, 'n1'), (2, 'n2');
+           CREATE VIEW public.item_notes AS
+             SELECT i.id, n.body FROM public.items i JOIN public.notes n
+               ON n.item_id = i.id;
+           CREATE SEQUENCE public.s_extra;
+           SELECT setval('public.s_extra', 100);`,
         );
         await sql(
           "postgres",
@@ -229,6 +243,9 @@ for (const series of SERIES) {
            CREATE SCHEMA later;
            CREATE TABLE later.t (id int);
            DROP TABLE reports.totals;
+           INSERT INTO public.notes VALUES (3, 'late');
+           SELECT setval('public.s_extra', 500);
+           CREATE TABLE public.after_backup (id int REFERENCES public.items (id));
            CREATE PUBLICATION only_after_backup FOR TABLE public.made_later;`,
         );
         await sql(
@@ -243,6 +260,24 @@ for (const series of SERIES) {
           dump.bytes,
         );
         assertEquals(restored.success, true, restored.stderr);
+        // The schema reset's DROP ... CASCADE notices stay out of the output.
+        assertEquals(
+          restored.stderr.includes("NOTICE"),
+          false,
+          restored.stderr,
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            `SELECT (SELECT count(*) FROM public.items) || ',' ||
+                    (SELECT string_agg(body, ',' ORDER BY body)
+                       FROM public.item_notes) || ',' ||
+                    (SELECT last_value FROM public.s_extra) || ',' ||
+                    (to_regclass('public.after_backup') IS NULL);`,
+          ),
+          "50,n1,n2,100,true",
+          "dependent objects (foreign key, view, sequence) match the backup",
+        );
 
         assertEquals(
           await sql(
@@ -417,6 +452,8 @@ for (const series of SERIES) {
         );
         assertEquals(failed.success, false, "a truncated dump must fail");
         assertStringIncludes(failed.stderr, "database is unchanged");
+        assertStringIncludes(failed.stderr, "pg_restore: error");
+        assertEquals(failed.stderr.includes("NOTICE"), false, failed.stderr);
         assertEquals(
           await sql("postgres", "SELECT count(*) FROM public.orders;"),
           "3",
