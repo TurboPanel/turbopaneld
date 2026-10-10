@@ -1,5 +1,9 @@
 import { assertEquals } from "@std/assert";
-import { engineInspectPortsJson } from "../testing/managed-topology-fixtures.ts";
+import {
+  engineInspectPortsJson,
+  ORCHESTRATOR_DEAD_MASTER_AND_REPLICAS_CAPTURE,
+} from "../testing/managed-topology-fixtures.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { createFakeClock, flushMicrotasks } from "../testing/fake-clock.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -1306,6 +1310,128 @@ test("ManagedHaObserver names a killed primary from its configured port bindings
     assertEquals(sent[0]?.instanceHost, H01_DIAL.hostname);
     assertEquals(sent[0]?.instancePort, H01_DIAL.port);
   });
+});
+
+// --- The real lane LB rerun 7 capture (DeadMasterAndReplicas) --------------
+
+/** The capture's one row, with `edit` applied (to build refused variants). */
+function capturedAnalysis(
+  edit: (row: Record<string, unknown>) => void = () => {},
+): () => Promise<Response> {
+  const body = JSON.parse(ORCHESTRATOR_DEAD_MASTER_AND_REPLICAS_CAPTURE) as {
+    Details: Record<string, unknown>[];
+  };
+  const row = body.Details[0];
+  if (row) edit(row);
+  return () => Promise.resolve(new Response(JSON.stringify(body)));
+}
+
+/** Polls once on the rerun 7 host: primary killed, published on H01_DIAL. */
+async function pollRerun7(
+  analysis: () => Promise<Response>,
+  problems?: () => Promise<Response>,
+): Promise<ManagedHaEventMessage[]> {
+  const sent: ManagedHaEventMessage[] = [];
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerByContainer({ "mysql-primary-1": H01_DIAL }, {
+        stopped: true,
+      }),
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      now: () => "2026-10-10T00:00:00.000Z",
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: API_CREDS,
+        fetch: splitFetch({ analysis, problems }),
+      },
+    });
+    await observer.poll();
+  });
+  return sent;
+}
+
+test("ManagedHaObserver emits once for the captured DeadMasterAndReplicas row", async () => {
+  const sent = await pollRerun7(capturedAnalysis());
+  assertEquals(sent, [{
+    type: "managed-ha-event",
+    managedId: MANAGED_ID,
+    instanceHost: "172.20.4.10",
+    instancePort: 45001,
+    at: "2026-10-10T00:00:00.000Z",
+  }]);
+});
+
+test("ManagedHaObserver emits for every dead-primary analysis code", async () => {
+  const codes = [
+    "DeadMaster",
+    "DeadMasterAndReplicas",
+    "DeadMasterAndSomeReplicas",
+    "DeadMasterWithoutReplicas",
+    "DeadPrimary",
+    "UnreachableMaster",
+    "UnreachablePrimary",
+  ];
+  await forEachSequential(codes, async (code) => {
+    const sent = await pollRerun7(capturedAnalysis((row) => {
+      row.Analysis = code;
+    }));
+    assertEquals(sent.length, 1, code);
+    assertEquals(sent[0]?.instanceHost, H01_DIAL.hostname, code);
+    assertEquals(sent[0]?.instancePort, H01_DIAL.port, code);
+  });
+});
+
+test("ManagedHaObserver refuses the captured row when it is not this host's dead primary", async () => {
+  const refused: Record<string, (row: Record<string, unknown>) => void> = {
+    healthy: (row) => {
+      row.Analysis = "NoProblem";
+    },
+    "primary reachable": (row) => {
+      row.Analysis = "AllMasterReplicasNotReplicating";
+    },
+    "replicas still see it": (row) => {
+      row.Analysis = "UnreachableMasterWithLaggingReplicas";
+    },
+    "replica row": (row) => {
+      row.IsMaster = false;
+    },
+    "the other host's member": (row) => {
+      row.AnalyzedInstanceKey = { Hostname: "172.20.4.20", Port: 45001 };
+    },
+    // Docker networks reuse the same addresses on every host, so the
+    // container's own address never proves the member is the local one.
+    "the container network address": (row) => {
+      row.AnalyzedInstanceKey = { Hostname: "172.18.0.7", Port: 3306 };
+    },
+    "another port on this host": (row) => {
+      row.AnalyzedInstanceKey = { Hostname: "172.20.4.10", Port: 45000 };
+    },
+  };
+  await forEachSequential(Object.entries(refused), async ([label, edit]) => {
+    assertEquals(await pollRerun7(capturedAnalysis(edit)), [], label);
+  });
+});
+
+test("ManagedHaObserver emits DeadMasterAndReplicas from /api/problems with the UUID alias", async () => {
+  const sent = await pollRerun7(
+    () => Promise.resolve(analysisResponse([])),
+    () =>
+      Promise.resolve(problemResponse([{
+        clusterAlias: MANAGED_ID,
+        key: H01_DIAL,
+        problems: ["DeadMasterAndReplicas"],
+      }])),
+  );
+  assertEquals(sent.length, 1);
+  assertEquals(sent[0]?.managedId, MANAGED_ID);
+  assertEquals(sent[0]?.instanceHost, H01_DIAL.hostname);
+  assertEquals(sent[0]?.instancePort, H01_DIAL.port);
 });
 
 test("ManagedHaObserver retries an event the control plane did not receive", async () => {

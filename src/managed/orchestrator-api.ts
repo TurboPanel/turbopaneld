@@ -132,13 +132,30 @@ export type OrchestratorProblem = {
   problems?: string[];
 };
 
+/**
+ * Analysis codes that mean the primary itself is down, as Percona
+ * Orchestrator 3.2.6 names them (read from the shipped binary). Orchestrator
+ * picks the variant by what it sees of the replicas, so after a `docker kill`
+ * it reports `DeadMasterAndReplicas` when it cannot check the replica either.
+ * `DeadMasterWithoutReplicas` is included: the control plane then refuses a
+ * promote with no replica, which is where that decision belongs.
+ *
+ * Deliberately left out: co-master and intermediate-master codes (TurboPanel
+ * never builds those), `UnreachableMasterWithLaggingReplicas` (replicas still
+ * see the primary), and the old `*Slaves` spellings (absent from 3.2.6).
+ * Explicit names, never a prefix rule, so a new code is not trusted blindly.
+ */
 const DEAD_PRIMARY_PROBLEMS = new Set([
   "DeadMaster",
+  "DeadMasterAndReplicas",
+  "DeadMasterAndSomeReplicas",
+  "DeadMasterWithoutReplicas",
   "DeadPrimary",
   "UnreachableMaster",
   "UnreachablePrimary",
 ]);
 
+/** The one gate for both `/api/problems` and `/api/replication-analysis`. */
 export function isDeadPrimaryProblem(problem: string): boolean {
   return DEAD_PRIMARY_PROBLEMS.has(problem);
 }

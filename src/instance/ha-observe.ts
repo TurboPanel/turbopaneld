@@ -1,5 +1,6 @@
 /**
- * Watch the local Orchestrator for DeadPrimary and emit `managed-ha-event`.
+ * Watch the local Orchestrator for a dead primary (any code
+ * {@link isDeadPrimaryProblem} accepts) and emit `managed-ha-event`.
  *
  * Local HTTP poll only — never a control-plane poll loop. The cluster is the
  * managed UUID alias registered on reconcile, or (when that alias call failed)
