@@ -86,6 +86,21 @@ function orchestratorEmitKeyComplete(
   return key.hostname !== undefined && key.port !== undefined;
 }
 
+/**
+ * Re-emit cooldown applies only after a proved instanceHost+instancePort event.
+ * Coordinate-less emits must not block a later full-identity emit for the same
+ * incident.
+ */
+export function shouldSuppressHaIncidentReemit(
+  lastCompleteEmitMs: number | undefined,
+  nowMs: number,
+  emitKey: { hostname?: string; port?: number },
+): boolean {
+  if (!orchestratorEmitKeyComplete(emitKey)) return false;
+  if (lastCompleteEmitMs === undefined) return false;
+  return nowMs - lastCompleteEmitMs < HA_INCIDENT_REEMIT_MS;
+}
+
 /** Prefer a candidate whose emit key carries proved instance coordinates. */
 export function mergeDeadPrimaryEmitCandidate(
   existing: DeadPrimaryEmitCandidate,
@@ -110,7 +125,7 @@ export class ManagedHaObserver {
   readonly #nowMs: () => number;
   readonly #layout: LayoutPaths | undefined;
   readonly #runDocker: RunDockerFn;
-  readonly #incidentLastEmit = new Map<string, number>();
+  readonly #incidentLastCompleteEmit = new Map<string, number>();
   readonly #emittedThisPoll = new Set<string>();
   #deadIncidentsThisPoll = new Set<string>();
   #pendingDeadPrimaryEmits = new Map<string, DeadPrimaryEmitCandidate>();
@@ -184,12 +199,19 @@ export class ManagedHaObserver {
   ): void {
     if (this.#emittedThisPoll.has(incidentKey)) return;
     const now = this.#nowMs();
-    const lastEmit = this.#incidentLastEmit.get(incidentKey);
-    if (lastEmit !== undefined && now - lastEmit < HA_INCIDENT_REEMIT_MS) {
+    if (
+      shouldSuppressHaIncidentReemit(
+        this.#incidentLastCompleteEmit.get(incidentKey),
+        now,
+        key,
+      )
+    ) {
       return;
     }
     this.#emittedThisPoll.add(incidentKey);
-    this.#incidentLastEmit.set(incidentKey, now);
+    if (orchestratorEmitKeyComplete(key)) {
+      this.#incidentLastCompleteEmit.set(incidentKey, now);
+    }
     const { hostname, port } = key;
     const instance = hostname !== undefined && port !== undefined
       ? { instanceHost: hostname, instancePort: port }
@@ -209,9 +231,9 @@ export class ManagedHaObserver {
   }
 
   #clearRecoveredIncidents(): void {
-    for (const key of this.#incidentLastEmit.keys()) {
+    for (const key of this.#incidentLastCompleteEmit.keys()) {
       if (!this.#deadIncidentsThisPoll.has(key)) {
-        this.#incidentLastEmit.delete(key);
+        this.#incidentLastCompleteEmit.delete(key);
       }
     }
   }

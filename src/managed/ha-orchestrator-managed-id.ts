@@ -47,14 +47,16 @@ export function orchestratorIncidentPrimaryKey(
   return `${key.hostname.toLowerCase()}:${key.port}`;
 }
 
-function orchestratorKeysMatch(
+/** Every provided Orchestrator key field must match the local primary dial. */
+export function orchestratorKeysMatch(
   analyzed: { hostname?: string; port?: number },
   dial: OrchestratorInstanceKey,
 ): boolean {
   const { hostname, port } = analyzed;
   if (hostname === undefined && port === undefined) return true;
-  if (hostname === undefined || port === undefined) return true;
-  return hostname === dial.hostname && port === dial.port;
+  if (hostname !== undefined && hostname !== dial.hostname) return false;
+  if (port !== undefined && port !== dial.port) return false;
+  return true;
 }
 
 export async function resolveLocalPrimaryOrchestratorDial(
@@ -184,10 +186,13 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   const incidentKey = `${managedId}:${orchestratorIncidentPrimaryKey(dial)}`;
   const analyzedKeyEmpty = analyzedHost === undefined &&
     analyzedPort === undefined;
-  const emitKey =
-    (hasFullKey || analyzedKeyEmpty) && orchestratorKeysMatch(analyzedKey, dial)
-      ? { hostname: dial.hostname, port: dial.port }
-      : {};
+  const partialKeyVerified = !hasFullKey && !analyzedKeyEmpty;
+  const proveEmitFromLocalDial = analyzedKeyEmpty ||
+    hasFullKey ||
+    (aliasId != null && partialKeyVerified);
+  const emitKey = proveEmitFromLocalDial
+    ? { hostname: dial.hostname, port: dial.port }
+    : {};
   return { managedId, incidentKey, emitKey };
 }
 

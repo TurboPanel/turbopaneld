@@ -3,6 +3,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   orchestratorClusterAliasManagedId,
+  orchestratorKeysMatch,
   resolveManagedIdForOrchestratorInstance,
 } from "./ha-orchestrator-managed-id.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
@@ -16,6 +17,36 @@ import { saveManagedHaMember } from "./ha-member.ts";
 const test = Deno.test.bind(Deno);
 
 const MANAGED_ID = "00000000-0000-4000-8000-0000000000aa";
+
+const LOCAL_DIAL = { hostname: "172.20.4.10", port: 45001 };
+
+test("orchestratorKeysMatch compares each provided field to the local dial", () => {
+  assertEquals(orchestratorKeysMatch({}, LOCAL_DIAL), true);
+  assertEquals(
+    orchestratorKeysMatch({ hostname: LOCAL_DIAL.hostname }, LOCAL_DIAL),
+    true,
+  );
+  assertEquals(
+    orchestratorKeysMatch({ port: LOCAL_DIAL.port }, LOCAL_DIAL),
+    true,
+  );
+  assertEquals(orchestratorKeysMatch(LOCAL_DIAL, LOCAL_DIAL), true);
+  assertEquals(
+    orchestratorKeysMatch({ hostname: "10.0.0.9" }, LOCAL_DIAL),
+    false,
+  );
+  assertEquals(
+    orchestratorKeysMatch({ port: 9999 }, LOCAL_DIAL),
+    false,
+  );
+  assertEquals(
+    orchestratorKeysMatch(
+      { hostname: LOCAL_DIAL.hostname, port: 9999 },
+      LOCAL_DIAL,
+    ),
+    false,
+  );
+});
 
 test("orchestratorClusterAliasManagedId accepts a managed UUID only", () => {
   assertEquals(orchestratorClusterAliasManagedId(MANAGED_ID), MANAGED_ID);
@@ -160,5 +191,101 @@ test("resolveOrchestratorDeadPrimaryEmit includes dial coordinates for an empty 
       Date.now(),
     );
     assertEquals(ctx?.emitKey, { hostname: "172.20.4.10", port: 45001 });
+  });
+});
+
+test("resolveOrchestratorDeadPrimaryEmit refuses UUID alias when only hostname differs from dial", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    const now = new Date().toISOString();
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: "00000000-0000-4000-8000-000000000001",
+      engine: "mysql",
+      role: "primary",
+      containerName: "mysql-primary-1",
+      replicaPeerCount: 1,
+      peerCount: 1,
+      updatedAt: now,
+    });
+    const { resolveOrchestratorDeadPrimaryEmit } = await import(
+      "./ha-orchestrator-managed-id.ts"
+    );
+    const ctx = await resolveOrchestratorDeadPrimaryEmit(
+      layout,
+      { hostname: "10.0.0.9" },
+      MANAGED_ID,
+      (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify({
+              "3306/tcp": [{ HostIp: LOCAL_DIAL.hostname, HostPort: "45001" }],
+            }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
+      },
+      Date.now(),
+    );
+    assertEquals(ctx, null);
+  });
+});
+
+test("resolveOrchestratorDeadPrimaryEmit proves dial for UUID alias with a partial matching hostname", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    const now = new Date().toISOString();
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: "00000000-0000-4000-8000-000000000001",
+      engine: "mysql",
+      role: "primary",
+      containerName: "mysql-primary-1",
+      replicaPeerCount: 1,
+      peerCount: 1,
+      updatedAt: now,
+    });
+    const { resolveOrchestratorDeadPrimaryEmit } = await import(
+      "./ha-orchestrator-managed-id.ts"
+    );
+    const ctx = await resolveOrchestratorDeadPrimaryEmit(
+      layout,
+      { hostname: LOCAL_DIAL.hostname },
+      MANAGED_ID,
+      (args) => {
+        if (args[0] === "inspect") {
+          return Promise.resolve({
+            success: true,
+            stdout: JSON.stringify({
+              "3306/tcp": [{ HostIp: LOCAL_DIAL.hostname, HostPort: "45001" }],
+            }),
+            stderr: "",
+            code: 0,
+          });
+        }
+        return Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr: "",
+          code: 1,
+        });
+      },
+      Date.now(),
+    );
+    assertEquals(ctx?.emitKey, LOCAL_DIAL);
   });
 });
