@@ -89,6 +89,10 @@ import {
   recordRailpackRelease,
   releasePathExists,
 } from "./promote.ts";
+import {
+  effectiveReleaseServiceId,
+  resolveReleaseServiceId,
+} from "./release-service-id.ts";
 import { pruneReleases } from "./retention.ts";
 import { PENDING_RECORD_MARKER } from "./release-health.ts";
 import { isPackageManagerStart } from "../node-package-manager.ts";
@@ -176,35 +180,7 @@ export type AppliedRelease = {
   runtime?: "node" | "deno";
 };
 
-/**
- * Compose service name → TurboPanel service UUID, from the rows that carry it
- * (`hostings[]`, then `ingressServices[]`).
- *
- * A Git-backed service need not publish a hosting (a worker does not), so when
- * neither names it the compose service key is used as the directory segment.
- * It is unique within an environment and charset-safe, which is all the path
- * needs — nothing downstream parses this segment as a UUID.
- */
-export function resolveReleaseServiceId(
-  payload: EnvironmentDeployPayload,
-  composeServiceName: string,
-): string {
-  for (const hosting of payload.hostings ?? []) {
-    if (
-      hosting.composeServiceName === composeServiceName && hosting.serviceId
-    ) {
-      return hosting.serviceId;
-    }
-  }
-  for (const ingress of payload.ingressServices ?? []) {
-    if (
-      ingress.composeServiceName === composeServiceName && ingress.serviceId
-    ) {
-      return ingress.serviceId;
-    }
-  }
-  return composeServiceName;
-}
+export { resolveReleaseServiceId } from "./release-service-id.ts";
 
 /**
  * Decrypt one clone credential.
@@ -1154,7 +1130,15 @@ async function applyOneRelease(
     return null;
   }
 
-  const serviceId = resolveReleaseServiceId(payload, entry.composeServiceName);
+  const serviceId = principal
+    ? await effectiveReleaseServiceId(
+      payload,
+      entry.composeServiceName,
+      layout,
+      principal,
+      deps.runFn ?? runPrivileged,
+    )
+    : resolveReleaseServiceId(payload, entry.composeServiceName);
   // A rollback addresses the tree it is rolling back *to*, not the id the
   // control plane would have allocated for a fresh build.
   const targetReleaseId = entry.rollbackToReleaseId ?? entry.releaseId;

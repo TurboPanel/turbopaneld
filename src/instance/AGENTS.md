@@ -419,14 +419,20 @@ installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 daemon does not download or pipe the script itself: it resolves the trust
 regime (`resolveAutomaticUpdateTrust` — public TLS or the
 configured Platform CA; never `curl -k`) and then runs
-`sudo -n tp-orchestrate update --license … [--host …] [--dl-base …]
-[--instance-ca …] [--channel …] [--manifest-url …] --no-start`. The helper
+`sudo -n tp-orchestrate update --license-stdin [--host …] [--dl-base …]
+[--instance-ca …] [--channel …] [--manifest-url …] --no-start`, writing the
+host license as one line to the helper's stdin. The license never goes in
+argv (sudo logs it and any local user can read `/proc/<pid>/cmdline`): the
+helper refuses `--license`, and hands the value to `run.sh` in
+`TURBOPANEL_LICENSE`. A development host sets it at the top of the script it
+pipes through `sudo sh -s`. The helper
 fetches `run.sh` from `turbopanel.sh` (or `<instance>/run.sh` for an HTTPS
 overlay host) and re-validates every flag against the root-pinned
 `/opt/turbopanel/lib/update-origin` that `run.sh` wrote at install, so a
 daemon cannot point root at another origin or control plane. Co-located dev
-still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
-`--host`, …) remain supported for scripts and sudo re-exec. There is no
+still pipes the downloaded script through `sudo sh -s`. `run.sh` itself
+still takes `--host` and the other flags for scripts and its own sudo
+re-exec. There is no
 separate update binary installed under `/opt/turbopanel/bin/`.
 
 `run.sh --daemon-only` on a host that already has the control-plane binary
