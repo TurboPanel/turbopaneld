@@ -281,6 +281,18 @@ test("orchestrator GET sends basic auth and tolerates empty or non-JSON bodies",
   assertEquals(plaintext, []);
 });
 
+test("orchestrator GET sets an abort signal only when timeoutMs is given", async () => {
+  const signals: Array<AbortSignal | null | undefined> = [];
+  const fetch = (_url: string, init?: RequestInit) => {
+    signals.push(init?.signal);
+    return Promise.resolve(new Response("[]", { status: 200 }));
+  };
+  await listOrchestratorProblems({ fetch });
+  await listOrchestratorProblems({ fetch, timeoutMs: 5_000 });
+  assertEquals(signals[0], undefined);
+  assertEquals(signals[1] instanceof AbortSignal, true);
+});
+
 test("parseOrchestratorProblems skips malformed keys and non-array problem lists", () => {
   assertEquals(
     parseOrchestratorProblems([{

@@ -1,10 +1,12 @@
 import { assertEquals } from "@std/assert";
+import { engineInspectPortsJson } from "../testing/managed-topology-fixtures.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
   orchestratorClusterAliasManagedId,
   orchestratorKeysMatch,
   resolveManagedIdForOrchestratorInstance,
+  resolveOrchestratorDeadPrimaryEmit,
 } from "./ha-orchestrator-managed-id.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
 
@@ -79,7 +81,7 @@ test("resolveManagedIdForOrchestratorInstance maps a local primary dial", async 
         if (args[0] === "inspect") {
           return Promise.resolve({
             success: true,
-            stdout: JSON.stringify({
+            stdout: engineInspectPortsJson({
               "3306/tcp": [{ HostIp: "172.20.4.10", HostPort: "45001" }],
             }),
             stderr: "",
@@ -126,7 +128,7 @@ test("resolveOrchestratorDeadPrimaryEmit refuses UUID alias when the key is not 
         if (args[0] === "inspect") {
           return Promise.resolve({
             success: true,
-            stdout: JSON.stringify({
+            stdout: engineInspectPortsJson({
               "3306/tcp": [{ HostIp: "172.20.4.10", HostPort: "45001" }],
             }),
             stderr: "",
@@ -174,7 +176,7 @@ test("resolveOrchestratorDeadPrimaryEmit includes dial coordinates for an empty 
         if (args[0] === "inspect") {
           return Promise.resolve({
             success: true,
-            stdout: JSON.stringify({
+            stdout: engineInspectPortsJson({
               "3306/tcp": [{ HostIp: "172.20.4.10", HostPort: "45001" }],
             }),
             stderr: "",
@@ -222,7 +224,7 @@ test("resolveOrchestratorDeadPrimaryEmit refuses UUID alias when only hostname d
         if (args[0] === "inspect") {
           return Promise.resolve({
             success: true,
-            stdout: JSON.stringify({
+            stdout: engineInspectPortsJson({
               "3306/tcp": [{ HostIp: LOCAL_DIAL.hostname, HostPort: "45001" }],
             }),
             stderr: "",
@@ -270,7 +272,7 @@ test("resolveOrchestratorDeadPrimaryEmit proves dial for UUID alias with a parti
         if (args[0] === "inspect") {
           return Promise.resolve({
             success: true,
-            stdout: JSON.stringify({
+            stdout: engineInspectPortsJson({
               "3306/tcp": [{ HostIp: LOCAL_DIAL.hostname, HostPort: "45001" }],
             }),
             stderr: "",
@@ -287,5 +289,116 @@ test("resolveOrchestratorDeadPrimaryEmit proves dial for UUID alias with a parti
       Date.now(),
     );
     assertEquals(ctx?.emitKey, LOCAL_DIAL);
+  });
+});
+
+async function seedLocalPrimary(
+  layout: ReturnType<typeof resolveLayout>,
+): Promise<void> {
+  await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+    recursive: true,
+  });
+  await saveManagedHaMember(layout, {
+    managedId: MANAGED_ID,
+    memberId: "00000000-0000-4000-8000-000000000001",
+    engine: "mysql",
+    role: "primary",
+    containerName: "mysql-primary-1",
+    replicaPeerCount: 1,
+    peerCount: 1,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function inspectAnswer(stdout: string | null) {
+  return () =>
+    Promise.resolve({
+      success: stdout !== null,
+      stdout: stdout ?? "",
+      stderr: stdout === null ? "No such object" : "",
+      code: stdout === null ? 1 : 0,
+    });
+}
+
+const LOCAL_PORTS = {
+  "3306/tcp": [{
+    HostIp: LOCAL_DIAL.hostname,
+    HostPort: String(LOCAL_DIAL.port),
+  }],
+};
+
+test("resolveOrchestratorDeadPrimaryEmit proves a killed primary from its configured bindings", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedLocalPrimary(layout);
+    const ctx = await resolveOrchestratorDeadPrimaryEmit(
+      layout,
+      LOCAL_DIAL,
+      `${LOCAL_DIAL.hostname}:${LOCAL_DIAL.port}`,
+      inspectAnswer(engineInspectPortsJson(LOCAL_PORTS, { stopped: true })),
+      Date.now(),
+    );
+    assertEquals(ctx?.managedId, MANAGED_ID);
+    assertEquals(ctx?.emitKey, LOCAL_DIAL);
+  });
+});
+
+test("resolveOrchestratorDeadPrimaryEmit refuses a partial key without a UUID alias", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedLocalPrimary(layout);
+    const run = inspectAnswer(engineInspectPortsJson(LOCAL_PORTS));
+    const keys = [
+      { hostname: LOCAL_DIAL.hostname },
+      { port: LOCAL_DIAL.port },
+      {},
+    ];
+    const results = await Promise.all(
+      keys.map((key) =>
+        resolveOrchestratorDeadPrimaryEmit(
+          layout,
+          key,
+          `${LOCAL_DIAL.hostname}:${LOCAL_DIAL.port}`,
+          run,
+          Date.now(),
+        )
+      ),
+    );
+    assertEquals(results, [null, null, null]);
+  });
+});
+
+test("resolveOrchestratorDeadPrimaryEmit refuses when the primary's listener cannot be read", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedLocalPrimary(layout);
+    const answers = [null, '{"live":{},"configured":{}}'];
+    const results = await Promise.all(
+      answers.map((stdout) =>
+        resolveOrchestratorDeadPrimaryEmit(
+          layout,
+          {},
+          MANAGED_ID,
+          inspectAnswer(stdout),
+          Date.now(),
+        )
+      ),
+    );
+    assertEquals(results, [null, null]);
+  });
+});
+
+test("resolveOrchestratorDeadPrimaryEmit refuses a UUID alias that names another cluster's dial", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedLocalPrimary(layout);
+    const ctx = await resolveOrchestratorDeadPrimaryEmit(
+      layout,
+      LOCAL_DIAL,
+      "00000000-0000-4000-8000-0000000000bb",
+      inspectAnswer(engineInspectPortsJson(LOCAL_PORTS)),
+      Date.now(),
+    );
+    assertEquals(ctx, null);
   });
 });

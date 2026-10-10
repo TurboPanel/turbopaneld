@@ -55,3 +55,19 @@ export function mysqlOrchestratorClientCnf(
   const credKey = ["pass", "word"].join("");
   return `[client]\nuser=${user}\n${credKey}=${secret}\n`;
 }
+
+/**
+ * `docker inspect` stdout for the live-and-configured ports format the HA
+ * observer reads (`resolveOrchestratorMemberDial`). A stopped or killed
+ * container reports `{}` for its live ports and keeps its configured bindings,
+ * which is what Docker 29 prints after `docker kill`.
+ */
+export function engineInspectPortsJson(
+  ports: Record<string, Array<{ HostIp: string; HostPort: string }>>,
+  options: { stopped?: boolean } = {},
+): string {
+  return JSON.stringify({
+    live: options.stopped ? {} : ports,
+    configured: ports,
+  });
+}

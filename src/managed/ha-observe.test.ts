@@ -1,4 +1,5 @@
 import { assertEquals } from "@std/assert";
+import { engineInspectPortsJson } from "../testing/managed-topology-fixtures.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
@@ -38,7 +39,7 @@ function runDockerForDial() {
     if (args[0] === "inspect") {
       return Promise.resolve({
         success: true,
-        stdout: JSON.stringify({
+        stdout: engineInspectPortsJson({
           "3306/tcp": [{
             HostIp: DIAL.hostname,
             HostPort: String(DIAL.port),
@@ -72,6 +73,7 @@ test("ManagedHaObserver emits managed-ha-event once per DeadPrimary alias", asyn
       runDocker: runDockerForDial(),
       send: (message) => {
         sent.push({ type: message.type, managedId: message.managedId });
+        return true;
       },
       isStackPresent: () => Promise.resolve(true),
       api: {
@@ -95,6 +97,7 @@ test("ManagedHaObserver ignores read-replica aliases that are not UUIDs", async 
   const observer = new ManagedHaObserver({
     send: (message) => {
       sent.push({ type: message.type, managedId: message.managedId });
+      return true;
     },
     isStackPresent: () => Promise.resolve(true),
     api: {
@@ -118,7 +121,7 @@ test("ManagedHaObserver ignores read-replica aliases that are not UUIDs", async 
 test("ManagedHaObserver skips poll when orchestrator stack is absent", async () => {
   let fetchCalled = false;
   const observer = new ManagedHaObserver({
-    send: () => {},
+    send: () => true,
     isStackPresent: () => Promise.resolve(false),
     api: {
       credentials: { user: "admin", password: "x" },

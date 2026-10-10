@@ -19,6 +19,8 @@ export type OrchestratorApiDeps = {
   fetch?: OrchestratorHttpFn;
   baseUrl?: string;
   credentials?: OrchestratorApiCredentials;
+  /** Abort the request after this many milliseconds (default: no limit). */
+  timeoutMs?: number;
 };
 
 function basicAuthHeader(creds: OrchestratorApiCredentials): string {
@@ -40,7 +42,11 @@ async function orchestratorGet(
   if (deps.credentials) {
     headers.Authorization = basicAuthHeader(deps.credentials);
   }
-  const response = await fetchFn(`${base}${path}`, { headers });
+  const init: RequestInit = { headers };
+  if (deps.timeoutMs !== undefined) {
+    init.signal = AbortSignal.timeout(deps.timeoutMs);
+  }
+  const response = await fetchFn(`${base}${path}`, init);
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new Error(

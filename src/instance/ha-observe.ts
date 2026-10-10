@@ -1,8 +1,9 @@
 /**
  * Watch the local Orchestrator for DeadPrimary and emit `managed-ha-event`.
  *
- * Local HTTP poll only — never a control-plane poll loop. Cluster alias is
- * the managed UUID registered on reconcile.
+ * Local HTTP poll only — never a control-plane poll loop. The cluster is the
+ * managed UUID alias registered on reconcile, or (when that alias call failed)
+ * the local primary whose published listener equals Orchestrator's key.
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
@@ -22,7 +23,10 @@ import {
   type OrchestratorApiDeps,
   type OrchestratorReplicationAnalysis,
 } from "../managed/orchestrator-api.ts";
-import { resolveOrchestratorDeadPrimaryEmit } from "../managed/ha-orchestrator-managed-id.ts";
+import {
+  type OrchestratorDeadPrimaryEmitContext,
+  resolveOrchestratorDeadPrimaryEmit,
+} from "../managed/ha-orchestrator-managed-id.ts";
 import {
   runDocker as defaultRunDocker,
   type RunDockerFn,
@@ -32,6 +36,8 @@ const HA_OBSERVE_MS = 15_000;
 const HA_REVIVE_COOLDOWN_MS = 60_000;
 /** Matches the control-plane automatic-failover cooldown for re-triggers. */
 const HA_INCIDENT_REEMIT_MS = 15 * 60_000;
+/** Bound each Orchestrator read so one hung request cannot stall polling. */
+const HA_API_TIMEOUT_MS = 10_000;
 const MANAGED_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -48,7 +54,11 @@ export type ManagedHaEventMessage = {
 export type ManagedHaObserverOptions = {
   intervalMs?: number;
   now?: () => string;
-  send: (message: ManagedHaEventMessage) => void;
+  /**
+   * Returns false when the message could not be handed to the control plane
+   * (no open connection); the incident is then retried on the next poll.
+   */
+  send: (message: ManagedHaEventMessage) => boolean;
   api?: OrchestratorApiDeps;
   /** Test seam — defaults to {@link orchestratorStackPresent}. */
   isStackPresent?: () => Promise<boolean>;
@@ -74,61 +84,45 @@ function isReplicationAnalysisMasterRow(
   return analysis !== undefined && isDeadPrimaryProblem(analysis);
 }
 
-type DeadPrimaryEmitCandidate = {
-  managedId: string;
-  incidentKey: string;
-  emitKey: { hostname?: string; port?: number };
+type ObserverApi = OrchestratorApiDeps & {
+  credentials: OrchestratorApiCredentials;
 };
 
-function orchestratorEmitKeyComplete(
-  key: { hostname?: string; port?: number },
-): boolean {
-  return key.hostname !== undefined && key.port !== undefined;
-}
+/** What one poll learned; never shared between polls that overlap. */
+type HaPollState = {
+  generation: number;
+  /** One candidate per incident, so rows from both sources send one event. */
+  pending: Map<string, OrchestratorDeadPrimaryEmitContext>;
+  /** False when a source failed: a missing row then proves no recovery. */
+  complete: boolean;
+};
 
 /**
- * Re-emit cooldown applies only after a proved instanceHost+instancePort event.
- * Coordinate-less emits must not block a later full-identity emit for the same
- * incident.
+ * True while an event for this incident reached the control plane less than
+ * {@link HA_INCIDENT_REEMIT_MS} ago. Only a delivered event (which always
+ * carries the full instance key) starts the cooldown.
  */
 export function shouldSuppressHaIncidentReemit(
-  lastCompleteEmitMs: number | undefined,
+  lastDeliveredMs: number | undefined,
   nowMs: number,
-  emitKey: { hostname?: string; port?: number },
 ): boolean {
-  if (!orchestratorEmitKeyComplete(emitKey)) return false;
-  if (lastCompleteEmitMs === undefined) return false;
-  return nowMs - lastCompleteEmitMs < HA_INCIDENT_REEMIT_MS;
-}
-
-/** Prefer a candidate whose emit key carries proved instance coordinates. */
-export function mergeDeadPrimaryEmitCandidate(
-  existing: DeadPrimaryEmitCandidate,
-  incoming: DeadPrimaryEmitCandidate,
-): DeadPrimaryEmitCandidate {
-  if (
-    orchestratorEmitKeyComplete(incoming.emitKey) &&
-    !orchestratorEmitKeyComplete(existing.emitKey)
-  ) {
-    return { ...existing, emitKey: incoming.emitKey };
-  }
-  return existing;
+  if (lastDeliveredMs === undefined) return false;
+  return nowMs - lastDeliveredMs < HA_INCIDENT_REEMIT_MS;
 }
 
 export class ManagedHaObserver {
   readonly #intervalMs: number;
   readonly #now: () => string;
-  readonly #send: (message: ManagedHaEventMessage) => void;
+  readonly #send: ManagedHaObserverOptions["send"];
   readonly #api: OrchestratorApiDeps | undefined;
   readonly #isStackPresent: () => Promise<boolean>;
   readonly #reviveStack: () => Promise<OrchestratorReviveOutcome>;
   readonly #nowMs: () => number;
   readonly #layout: LayoutPaths | undefined;
   readonly #runDocker: RunDockerFn;
-  readonly #incidentLastCompleteEmit = new Map<string, number>();
-  readonly #emittedThisPoll = new Set<string>();
-  #deadIncidentsThisPoll = new Set<string>();
-  #pendingDeadPrimaryEmits = new Map<string, DeadPrimaryEmitCandidate>();
+  /** Incident key -> when its event last reached the control plane. */
+  readonly #incidentLastDelivered = new Map<string, number>();
+  #pollGeneration = 0;
   #lastReviveAttemptMs: number | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
 
@@ -192,53 +186,53 @@ export class ManagedHaObserver {
     }
   }
 
-  #emitDeadPrimary(
-    managedId: string,
-    incidentKey: string,
-    key: { hostname?: string; port?: number },
-  ): void {
-    if (this.#emittedThisPoll.has(incidentKey)) return;
+  #emitDeadPrimary(candidate: OrchestratorDeadPrimaryEmitContext): void {
+    const { managedId, incidentKey, emitKey } = candidate;
     const now = this.#nowMs();
     if (
       shouldSuppressHaIncidentReemit(
-        this.#incidentLastCompleteEmit.get(incidentKey),
+        this.#incidentLastDelivered.get(incidentKey),
         now,
-        key,
       )
     ) {
       return;
     }
-    this.#emittedThisPoll.add(incidentKey);
-    if (orchestratorEmitKeyComplete(key)) {
-      this.#incidentLastCompleteEmit.set(incidentKey, now);
-    }
-    const { hostname, port } = key;
-    const instance = hostname !== undefined && port !== undefined
-      ? { instanceHost: hostname, instancePort: port }
-      : {};
-    this.#send({
+    const instance = `${emitKey.hostname}:${emitKey.port}`;
+    const delivered = this.#send({
       type: "managed-ha-event",
       managedId,
-      ...instance,
+      instanceHost: emitKey.hostname,
+      instancePort: emitKey.port,
       at: this.#now(),
     });
+    if (!delivered) {
+      logWarn(
+        "managed",
+        `managed-ha-event not sent (no control-plane connection); retrying next poll managedId=${managedId} instance=${instance}`,
+      );
+      return;
+    }
+    this.#incidentLastDelivered.set(incidentKey, now);
     logInfo(
       "managed",
-      `managed-ha-event emitted managedId=${managedId} instance=${
-        hostname ?? "?"
-      }:${port ?? "?"}`,
+      `managed-ha-event emitted managedId=${managedId} instance=${instance}`,
     );
   }
 
-  #clearRecoveredIncidents(): void {
-    for (const key of this.#incidentLastCompleteEmit.keys()) {
-      if (!this.#deadIncidentsThisPoll.has(key)) {
-        this.#incidentLastCompleteEmit.delete(key);
-      }
+  /**
+   * Forget incidents no longer reported dead, so a new failure of the same
+   * primary is sent at once. Only the newest poll, and only one that read
+   * every source, may decide that.
+   */
+  #clearRecoveredIncidents(state: HaPollState): void {
+    if (!state.complete || state.generation !== this.#pollGeneration) return;
+    for (const key of this.#incidentLastDelivered.keys()) {
+      if (!state.pending.has(key)) this.#incidentLastDelivered.delete(key);
     }
   }
 
   async #recordOrchestratorDeadPrimary(
+    state: HaPollState,
     layout: LayoutPaths,
     analyzedKey: { hostname?: string; port?: number },
     clusterAlias?: string,
@@ -250,33 +244,13 @@ export class ManagedHaObserver {
       this.#runDocker,
       this.#nowMs(),
     );
-    if (!ctx) return;
-    this.#deadIncidentsThisPoll.add(ctx.incidentKey);
-    const candidate: DeadPrimaryEmitCandidate = {
-      managedId: ctx.managedId,
-      incidentKey: ctx.incidentKey,
-      emitKey: ctx.emitKey,
-    };
-    const prior = this.#pendingDeadPrimaryEmits.get(ctx.incidentKey);
-    this.#pendingDeadPrimaryEmits.set(
-      ctx.incidentKey,
-      prior ? mergeDeadPrimaryEmitCandidate(prior, candidate) : candidate,
-    );
-  }
-
-  #flushPendingDeadPrimaryEmits(): void {
-    for (const candidate of this.#pendingDeadPrimaryEmits.values()) {
-      this.#emitDeadPrimary(
-        candidate.managedId,
-        candidate.incidentKey,
-        candidate.emitKey,
-      );
-    }
+    if (ctx) state.pending.set(ctx.incidentKey, ctx);
   }
 
   async #pollProblems(
+    state: HaPollState,
     layout: LayoutPaths,
-    api: OrchestratorApiDeps & { credentials: OrchestratorApiCredentials },
+    api: ObserverApi,
   ): Promise<void> {
     const problems = await listOrchestratorProblems(api);
     await forEachSequential(problems, async (problem) => {
@@ -285,6 +259,7 @@ export class ManagedHaObserver {
       const names = problem.problems ?? [];
       if (!names.some((name) => isDeadPrimaryProblem(name))) return;
       await this.#recordOrchestratorDeadPrimary(
+        state,
         layout,
         problem.key ?? {},
         alias,
@@ -293,45 +268,74 @@ export class ManagedHaObserver {
   }
 
   async #pollReplicationAnalysis(
+    state: HaPollState,
     layout: LayoutPaths,
-    api: OrchestratorApiDeps & { credentials: OrchestratorApiCredentials },
+    api: ObserverApi,
   ): Promise<void> {
     const entries = await listOrchestratorReplicationAnalysis(api);
     await forEachSequential(entries, async (entry) => {
       if (!isReplicationAnalysisMasterRow(entry)) return;
-      const hostname = entry.key?.hostname;
-      const port = entry.key?.port;
       await this.#recordOrchestratorDeadPrimary(
+        state,
         layout,
-        { hostname, port },
+        { hostname: entry.key?.hostname, port: entry.key?.port },
         entry.clusterAlias,
       );
     });
   }
 
+  /** Read one source; a failure is logged and marks the poll incomplete. */
+  async #pollSource(
+    state: HaPollState,
+    label: string,
+    read: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await read();
+    } catch (err) {
+      state.complete = false;
+      logWarn(
+        "managed",
+        `orchestrator ${label} poll failed:`,
+        sanitizeForLog(err),
+      );
+    }
+  }
+
   async poll(): Promise<void> {
-    this.#emittedThisPoll.clear();
-    this.#deadIncidentsThisPoll = new Set();
-    this.#pendingDeadPrimaryEmits = new Map();
+    this.#pollGeneration += 1;
+    const state: HaPollState = {
+      generation: this.#pollGeneration,
+      pending: new Map(),
+      complete: true,
+    };
     const layout = this.#resolveLayout();
     try {
       if (!(await this.#isStackPresent())) return;
       await this.#maybeReviveStack();
       const credentials = this.#api?.credentials ??
         await loadOrchestratorApiCredentials(layout);
-      const api = { ...this.#api, credentials };
-      await this.#pollProblems(layout, api);
-      try {
-        await this.#pollReplicationAnalysis(layout, api);
-      } catch (err) {
-        logWarn(
-          "managed",
-          "orchestrator replication-analysis poll failed:",
-          sanitizeForLog(err),
-        );
+      const api: ObserverApi = {
+        timeoutMs: HA_API_TIMEOUT_MS,
+        ...this.#api,
+        credentials,
+      };
+      // Sources are read one after the other and each failure stays local:
+      // a broken /api/problems must never hide a replication-analysis row.
+      await this.#pollSource(
+        state,
+        "problems",
+        () => this.#pollProblems(state, layout, api),
+      );
+      await this.#pollSource(
+        state,
+        "replication-analysis",
+        () => this.#pollReplicationAnalysis(state, layout, api),
+      );
+      for (const candidate of state.pending.values()) {
+        this.#emitDeadPrimary(candidate);
       }
-      this.#flushPendingDeadPrimaryEmits();
-      this.#clearRecoveredIncidents();
+      this.#clearRecoveredIncidents(state);
     } catch (err) {
       logWarn("managed", "managed-ha observe failed:", sanitizeForLog(err));
     }

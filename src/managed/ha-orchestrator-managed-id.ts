@@ -9,7 +9,7 @@
 import type { LayoutPaths } from "../paths/layout.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
-  resolveOrchestratorRegisterHost,
+  resolveOrchestratorMemberDial,
   type RunDockerFn,
 } from "./orchestrator.ts";
 import { isManagedMemberDestroyed } from "./destroyed-marker.ts";
@@ -69,12 +69,8 @@ export async function resolveLocalPrimaryOrchestratorDial(
   const containerPort = ENGINE_CONTAINER_PORT[record.engine];
   if (containerPort === undefined) return null;
   try {
-    const dial = await resolveOrchestratorRegisterHost(
-      {
-        host: record.containerName,
-        port: containerPort,
-        containerName: record.containerName,
-      },
+    const dial = await resolveOrchestratorMemberDial(
+      { containerName: record.containerName, port: containerPort },
       run,
     );
     return { hostname: dial.host, port: dial.port };
@@ -137,13 +133,17 @@ export async function isOrchestratorHaEmitSuppressed(
 export type OrchestratorDeadPrimaryEmitContext = {
   managedId: string;
   incidentKey: string;
-  emitKey: { hostname?: string; port?: number };
+  /**
+   * Always the local primary's published listener, never a partial or
+   * coordinate-less key: the control plane fences only on a full match.
+   */
+  emitKey: OrchestratorInstanceKey;
 };
 
 /**
  * Resolve a dead-primary Orchestrator row to a local cluster and listener proof.
- * Returns null when the cluster is gone, suppressed, or the key does not match
- * this host's primary dial.
+ * Returns null when the cluster is gone, suppressed, the key does not match
+ * this host's primary dial, or that dial cannot be read.
  */
 export async function resolveOrchestratorDeadPrimaryEmit(
   layout: LayoutPaths,
@@ -155,10 +155,9 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   const aliasId = orchestratorClusterAliasManagedId(clusterAlias);
   const analyzedHost = analyzedKey.hostname;
   const analyzedPort = analyzedKey.port;
-  const hasFullKey = analyzedHost !== undefined && analyzedPort !== undefined;
-  let managedId: string | null = null;
+  let managedId: string | null = aliasId;
 
-  if (hasFullKey) {
+  if (analyzedHost !== undefined && analyzedPort !== undefined) {
     const byDial = await managedIdForAnalyzedDial(
       layout,
       { hostname: analyzedHost, port: analyzedPort },
@@ -166,10 +165,10 @@ export async function resolveOrchestratorDeadPrimaryEmit(
     );
     if (byDial != null && aliasId != null && byDial !== aliasId) return null;
     managedId = byDial ?? aliasId;
-  } else if (aliasId) {
-    managedId = aliasId;
   }
 
+  // A partial or empty key proves nothing alone: only a UUID alias names the
+  // cluster, and the provided fields must then match its primary's dial.
   if (!managedId) return null;
   if (await isOrchestratorHaEmitSuppressed(layout, managedId, nowMs)) {
     return null;
@@ -183,17 +182,11 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   if (!dial) return null;
   if (!orchestratorKeysMatch(analyzedKey, dial)) return null;
 
-  const incidentKey = `${managedId}:${orchestratorIncidentPrimaryKey(dial)}`;
-  const analyzedKeyEmpty = analyzedHost === undefined &&
-    analyzedPort === undefined;
-  const partialKeyVerified = !hasFullKey && !analyzedKeyEmpty;
-  const proveEmitFromLocalDial = analyzedKeyEmpty ||
-    hasFullKey ||
-    (aliasId != null && partialKeyVerified);
-  const emitKey = proveEmitFromLocalDial
-    ? { hostname: dial.hostname, port: dial.port }
-    : {};
-  return { managedId, incidentKey, emitKey };
+  return {
+    managedId,
+    incidentKey: `${managedId}:${orchestratorIncidentPrimaryKey(dial)}`,
+    emitKey: { hostname: dial.hostname, port: dial.port },
+  };
 }
 
 export async function resolveManagedIdForOrchestratorInstance(
