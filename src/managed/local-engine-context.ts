@@ -14,6 +14,7 @@ import { resolveLayout } from "../paths/layout.ts";
 import type { ManagedEngineCode } from "../contracts/commands-contracts.ts";
 import {
   collectManagedContainers,
+  collectRunningContainersByComposeProjectLabel,
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
@@ -69,11 +70,14 @@ export async function resolveLocalReplicationEngine(
   await ensureDocker();
   resolveLayout(Deno.env.toObject());
 
-  const containers = await collectManagedContainers(
-    managedComposeProject(managedId),
-    undefined,
-    run,
-  );
+  const project = managedComposeProject(managedId);
+  let containers = await collectManagedContainers(project, undefined, run);
+  if (containers === undefined) {
+    containers = await collectRunningContainersByComposeProjectLabel(
+      project,
+      run,
+    );
+  }
   if (!containers || containers.length === 0) {
     throw new Error(`${commandName}: no running containers for ${managedId}`);
   }

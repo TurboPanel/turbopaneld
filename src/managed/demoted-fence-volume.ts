@@ -7,7 +7,7 @@ import { dirname, join } from "@std/path";
 import type { ManagedEngineCode } from "../contracts/commands-contracts.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { helperLabelArgs } from "../deploy/labels.ts";
-import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { sanitizeForLog } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { readManagedComposeDataTarget } from "./compose.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
@@ -190,20 +190,12 @@ export async function clearDemotedVolumeFence(
   engine: ManagedEngineCode,
   run: RunDockerFn,
 ): Promise<void> {
-  try {
-    if (engine === "mysql" || engine === "mariadb") {
-      await removeMysqlFamilyConfigFence(layout, managedId);
-      return;
-    }
-    if (engine !== "postgres") return;
-    const runtime = getManagedEngineRuntime(engine);
-    const target = await readComposeProbeTarget(layout, managedId);
-    await removePostgresStandbySignal(target, runtime.containerUser, run);
-  } catch (err) {
-    logWarn(
-      "managed",
-      `demoted fence: volume clear failed managedId=${managedId}:`,
-      sanitizeForLog(err),
-    );
+  if (engine === "mysql" || engine === "mariadb") {
+    await removeMysqlFamilyConfigFence(layout, managedId);
+    return;
   }
+  if (engine !== "postgres") return;
+  const runtime = getManagedEngineRuntime(engine);
+  const target = await readComposeProbeTarget(layout, managedId);
+  await removePostgresStandbySignal(target, runtime.containerUser, run);
 }

@@ -95,7 +95,7 @@ test("isFencedMemberStillWritable follows the postgres probe", async () => {
   });
 });
 
-test("isFencedMemberStillWritable fails open when the engine cannot be reached", async () => {
+test("isFencedMemberStillWritable is false when compose ps reports no containers", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);
     assertEquals(
@@ -110,6 +110,37 @@ test("isFencedMemberStillWritable fails open when the engine cannot be reached",
             stdout: "[]",
             stderr: "",
           }),
+      ),
+      false,
+    );
+  });
+});
+
+test("isFencedMemberStillWritable fails open when compose ps cannot be collected", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await seedCompose(layout);
+    assertEquals(
+      await isFencedMemberStillWritable(
+        layout,
+        MANAGED_ID,
+        "postgres",
+        (args) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve({
+              success: false,
+              code: 1,
+              stdout: "",
+              stderr: "ps failed",
+            });
+          }
+          return Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: "t\n",
+            stderr: "",
+          });
+        },
       ),
       true,
     );
@@ -126,6 +157,49 @@ test("enforceFencedMemberIfRunning continues when the volume fence cannot be rea
           success: true,
           code: 0,
           stdout: RUNNING_PS,
+          stderr: "",
+        });
+      }
+      if (args[0] === "exec") execCalls++;
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "f\n",
+        stderr: "",
+      });
+    };
+    await enforceFencedMemberIfRunning(layout, MANAGED_ID, "postgres", run);
+    assertEquals(execCalls > 0, true);
+  });
+});
+
+test("enforceFencedMemberIfRunning runs SQL enforce when compose ps fails (fail closed)", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await seedCompose(layout);
+    let execCalls = 0;
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "ps failed",
+        });
+      }
+      if (args[0] === "ps" && args.includes("-q")) {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "abc123def456\n",
+          stderr: "",
+        });
+      }
+      if (args[0] === "inspect") {
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "db\n",
           stderr: "",
         });
       }

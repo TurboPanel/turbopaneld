@@ -177,6 +177,111 @@ test("listDemotedFenceTargets merges ha-member records with orphan markers", asy
   });
 });
 
+test("maybeClearDemotedMarkerAfterApply keeps marker when volume clear fails", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    const managedId = `managed_marker_clear_fail_${crypto.randomUUID()}`;
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - fence_data:/var/lib/postgresql",
+        "volumes:",
+        "  fence_data:",
+        "    name: fence_data",
+        "",
+      ].join("\n"),
+    );
+    await writeManagedDemotedMarker(
+      layout,
+      managedId,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "postgres",
+    );
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "run") {
+        const script = args.at(-1) ?? "";
+        if (script.includes("rm -f")) {
+          return Promise.reject(new Error("volume fence remove failed"));
+        }
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "present\n",
+          stderr: "",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    let threw = false;
+    try {
+      await maybeClearDemotedMarkerAfterApply(
+        layout,
+        { managedId, memberRole: "replica", engine: "postgres" },
+        "ready",
+        run,
+      );
+    } catch {
+      threw = true;
+    }
+    assert(threw);
+    assert(await isManagedMemberDemoted(layout, managedId, MEMBER_ID));
+  });
+});
+
+test("maybeClearDemotedMarkerAfterApply clears marker only after volume fence succeeds", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    const managedId = `managed_marker_order_${crypto.randomUUID()}`;
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(join(root, "config", "conf.d"), { recursive: true });
+    const cnfPath = join(root, "config", MYSQL_FAMILY_DEMOTED_FENCE_CNF_REL);
+    await Deno.writeTextFile(cnfPath, "read_only=1\n");
+    await writeManagedDemotedMarker(
+      layout,
+      managedId,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+      "mysql",
+    );
+    const steps: string[] = [];
+    const run = (): Promise<DockerCliResult> =>
+      Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" });
+    const originalRemove = Deno.remove.bind(Deno);
+    Deno.remove = (path: string | URL) => {
+      const text = String(path);
+      if (text.includes(MYSQL_FAMILY_DEMOTED_FENCE_CNF_REL)) {
+        steps.push("volume-fence");
+      } else if (text.endsWith("demoted.json")) {
+        steps.push("marker");
+      }
+      return originalRemove(path);
+    };
+    try {
+      await maybeClearDemotedMarkerAfterApply(
+        layout,
+        { managedId, memberRole: "replica", engine: "mysql" },
+        "ready",
+        run,
+      );
+    } finally {
+      Deno.remove = originalRemove;
+    }
+    assertEquals(steps, ["volume-fence", "marker"]);
+  });
+});
+
 test("maybeClearDemotedMarkerAfterApply removes mysql volume fence artefacts", async () => {
   await withTempLayout(async ({ env }) => {
     const layout = resolveLayout(env);

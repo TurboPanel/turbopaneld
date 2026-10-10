@@ -33,6 +33,18 @@ const RUNNING_PS = JSON.stringify([
   },
 ]);
 
+const POSTGRES_COMPOSE = [
+  "services:",
+  "  db:",
+  "    image: postgres:18",
+  "    volumes:",
+  "      - guard_data:/var/lib/postgresql",
+  "volumes:",
+  "  guard_data:",
+  "    name: guard_data",
+  "",
+].join("\n");
+
 function memberRecord(managedId = MANAGED_ID) {
   return {
     managedId,
@@ -60,6 +72,7 @@ function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
     : psStdoutOrOpts;
   const calls: string[][] = [];
   let stdout = opts.psStdout ?? RUNNING_PS;
+  let composeStopSucceeded = false;
   const writablePrimary = opts.writablePrimary ?? true;
   const run = (args: string[]): Promise<DockerCliResult> => {
     calls.push(args);
@@ -80,7 +93,6 @@ function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
       });
     }
     if (args[0] === "compose" && args.at(-1) === "stop") {
-      stdout = "[]";
       if (opts.stopFails) {
         return Promise.resolve({
           success: false,
@@ -89,14 +101,39 @@ function docker(psStdoutOrOpts: string | DockerFakeOptions = RUNNING_PS) {
           stderr: "stop failed",
         });
       }
+      composeStopSucceeded = true;
+      stdout = "[]";
+    }
+    if (args[0] === "ps" && args.includes("-aq")) {
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "abc123def456\n",
+        stderr: "",
+      });
+    }
+    if (args[0] === "stop" && args.length > 1) {
+      if (opts.stopFails) {
+        return Promise.resolve({
+          success: false,
+          code: 1,
+          stdout: "",
+          stderr: "docker stop failed",
+        });
+      }
+      stdout = "[]";
+    }
+    if (args[0] === "kill" && !opts.stopFails) {
+      stdout = "[]";
     }
     if (args[0] === "exec") {
       const joined = args.join(" ");
       const mysqlFamily = joined.includes("mysql") ||
         joined.includes("mariadb");
+      const stillWritable = composeStopSucceeded ? false : writablePrimary;
       const stdout = mysqlFamily
-        ? (writablePrimary ? "0\t0\n" : "1\t1\n")
-        : (writablePrimary ? "t\n" : "f\n");
+        ? (stillWritable ? "0\t0\n" : "1\t1\n")
+        : (stillWritable ? "t\n" : "f\n");
       return Promise.resolve({
         success: true,
         code: 0,
@@ -113,9 +150,9 @@ async function seedMember(
   layout: ReturnType<typeof resolveLayout>,
   managedId = MANAGED_ID,
 ): Promise<void> {
-  await Deno.mkdir(`${layout.stateDir}/managed/${managedId}`, {
-    recursive: true,
-  });
+  const root = `${layout.stateDir}/managed/${managedId}`;
+  await Deno.mkdir(root, { recursive: true });
+  await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
   await saveManagedHaMember(layout, memberRecord(managedId));
 }
 
@@ -151,8 +188,10 @@ test("a running demoted member is stopped once and a held intent is written firs
     assertEquals(marker.intent.untilMs, null);
     assertEquals(marker.intent.maxUntilMs, null);
     await guard.tick();
-    const stops = fake.calls.filter((args) => args.at(-1) === "stop");
-    assertEquals(stops.length, 1);
+    const composeStops = fake.calls.filter((args) =>
+      args[0] === "compose" && args.at(-1) === "stop"
+    );
+    assertEquals(composeStops.length, 1);
   });
 });
 
@@ -261,7 +300,7 @@ test("start and stop wire the interval without throwing", async () => {
   });
 });
 
-test("a compose stop failure is logged and does not throw", async () => {
+test("compose stop failure escalates to docker stop then kill and retries on the next tick", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
     const layout = resolveLayout(env);
@@ -280,8 +319,18 @@ test("a compose stop failure is logged and does not throw", async () => {
     });
     await guard.tick();
     assertEquals(
-      fake.calls.filter((args) => args.at(-1) === "stop").length,
+      fake.calls.filter((args) =>
+        args[0] === "compose" && args.at(-1) === "stop"
+      ).length,
       1,
+    );
+    assert(fake.calls.some((args) => args[0] === "stop" && args.length > 1));
+    assert(fake.calls.some((args) => args[0] === "kill"));
+    await guard.tick();
+    assert(
+      fake.calls.filter((args) =>
+        args[0] === "compose" && args.at(-1) === "stop"
+      ).length >= 2,
     );
   });
 });
@@ -411,7 +460,7 @@ test("a stopped demoted member is left alone", async () => {
       MEMBER_ID,
       "2026-10-08T12:00:00.000Z",
     );
-    const fake = docker("[]");
+    const fake = docker({ psStdout: "[]", writablePrimary: false });
     const guard = new DemotedMemberGuard({
       layout,
       run: fake.run,

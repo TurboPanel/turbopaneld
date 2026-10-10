@@ -48,9 +48,9 @@ export async function enforceFencedMemberIfRunning(
     (text) => sanitizeForLog(text),
     run,
   );
-  if (
-    !containers?.some((row) => row.status.toLowerCase() === "running")
-  ) {
+  const enginePossiblyRunning = containers === undefined ||
+    containers.some((row) => row.status.toLowerCase() === "running");
+  if (!enginePossiblyRunning) {
     return;
   }
 
@@ -84,6 +84,16 @@ export async function isFencedMemberStillWritable(
   const runtime = getManagedEngineRuntime(engine);
   const isWritable = runtime.replication?.isWritableFormerPrimary;
   if (!isWritable) return false;
+
+  const project = managedComposeProject(managedId);
+  const observed = await collectManagedContainers(
+    project,
+    (text) => sanitizeForLog(text),
+    run,
+  );
+  if (observed !== undefined && observed.length === 0) {
+    return false;
+  }
 
   try {
     const { engine: resolved, ctx } = await resolveLocalReplicationEngine(

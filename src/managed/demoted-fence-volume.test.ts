@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -98,6 +98,46 @@ test("persistDemotedVolumeFence skips planting when standby.signal already exist
     };
     await persistDemotedVolumeFence(layout, managedId, "postgres", run);
     assertEquals(touched.length, 0);
+  });
+});
+
+test("clearDemotedVolumeFence propagates postgres standby.signal removal failures", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    const managedId = `managed_fence_clear_fail_${crypto.randomUUID()}`;
+    const root = managedDir(layout, managedId);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      if (args[0] === "run") {
+        const script = args.at(-1) ?? "";
+        if (script.includes("rm -f")) {
+          return Promise.resolve({
+            success: false,
+            code: 1,
+            stdout: "",
+            stderr: "rm failed",
+          });
+        }
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "present\n",
+          stderr: "",
+        });
+      }
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    await assertRejects(
+      () => clearDemotedVolumeFence(layout, managedId, "postgres", run),
+      Error,
+      "could not remove standby.signal",
+    );
   });
 });
 

@@ -5,7 +5,7 @@
  */
 
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
-import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { logError, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { collectManagedContainers } from "./containers.ts";
@@ -24,6 +24,41 @@ import type { ManagedHaMemberRecord } from "./ha-member.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
 
 export const DEMOTED_GUARD_INTERVAL_MS = 5_000;
+
+const COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
+const SAFE_CONTAINER_ID_RE = /^[a-f0-9]{12,64}$/i;
+
+function parseComposeProjectContainerIds(stdout: string): string[] {
+  return stdout
+    .trim()
+    .split(/\s+/)
+    .filter((id) => SAFE_CONTAINER_ID_RE.test(id));
+}
+
+async function listComposeProjectContainerIds(
+  run: DockerRunFn,
+  project: string,
+): Promise<string[] | null> {
+  const listed = await run([
+    "ps",
+    "-aq",
+    "--filter",
+    `label=${COMPOSE_PROJECT_LABEL}=${project}`,
+  ]);
+  if (!listed.success) return null;
+  return parseComposeProjectContainerIds(listed.stdout);
+}
+
+async function forceStopComposeProjectContainers(
+  run: DockerRunFn,
+  project: string,
+): Promise<void> {
+  const ids = await listComposeProjectContainerIds(run, project);
+  if (ids === null || ids.length === 0) return;
+  const stopped = await run(["stop", ...ids]);
+  if (stopped.success) return;
+  await run(["kill", ...ids]);
+}
 
 export type DockerRunFn = (args: string[]) => Promise<DockerCliResult>;
 
@@ -84,25 +119,34 @@ async function stopWritableDemotedEngine(
     warned.add(member.managedId);
   }
   await stopDemotedEngine(run, member.managedId);
+  const stillWritableAfterStop = await isFencedMemberStillWritable(
+    layout,
+    member.managedId,
+    member.engine,
+    run,
+  );
+  if (stillWritableAfterStop) {
+    logError(
+      "managed",
+      `demoted member guard: engine still writable after stop managedId=${member.managedId} member=${member.memberId}`,
+    );
+  }
 }
 
 async function stopDemotedEngine(
   run: DockerRunFn,
   managedId: string,
 ): Promise<void> {
-  const result = await run([
-    "compose",
-    "-p",
-    managedComposeProject(managedId),
-    "stop",
-  ]);
+  const project = managedComposeProject(managedId);
+  const result = await run(["compose", "-p", project, "stop"]);
   if (!result.success) {
-    logWarn(
+    logError(
       "managed",
       `demoted member guard: compose stop failed managedId=${managedId}:`,
       sanitizeForLog(result.stderr || result.stdout),
     );
   }
+  await forceStopComposeProjectContainers(run, project);
 }
 
 export class DemotedMemberGuard {
@@ -211,8 +255,16 @@ export class DemotedMemberGuard {
     }
     const running = await engineRunningState(this.#run, member.managedId);
     if (running === "stopped") {
-      this.#warned.delete(member.managedId);
-      return;
+      const stillWritable = await isFencedMemberStillWritable(
+        this.#layout,
+        member.managedId,
+        member.engine,
+        this.#run,
+      );
+      if (!stillWritable) {
+        this.#warned.delete(member.managedId);
+        return;
+      }
     }
     if (running === "unknown") {
       logWarn(
