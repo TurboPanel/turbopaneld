@@ -2217,12 +2217,11 @@ export class InstanceClient {
     const reconcileCaPath = trust.kind === "platform-ca"
       ? trust.caPath
       : undefined;
-    const licenseArg = encodeLicenseArg(
+    const license = encodeLicenseArg(
       credentials.licenseId,
       credentials.licenseToken,
     );
     const reconcileArgs = buildRunReconcileArgs({
-      licenseArg,
       instanceUrl,
       instanceCaPath: reconcileCaPath,
       insecureTls: false,
@@ -2253,6 +2252,7 @@ export class InstanceClient {
     await clientTestHooks.executeRunReconcile({
       script,
       args: reconcileArgs,
+      license,
       channel: config.channel,
       manifestUrl: manifestForReconcile,
       onStage: (stage) => {
