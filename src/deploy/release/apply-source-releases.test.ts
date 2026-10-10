@@ -114,20 +114,18 @@ async function mkdirReleaseTree(
     releaseDir: string;
   },
 ): Promise<void> {
-  for (
-    const dir of [
+  await Promise.all(
+    [
       paths.sitesDir,
       paths.siteDir,
       paths.releasesDir,
       paths.sharedDir,
       paths.releaseDir,
-    ]
-  ) {
-    await Deno.mkdir(dir, { recursive: true });
-  }
+    ].map((dir) => Deno.mkdir(dir, { recursive: true })),
+  );
 }
 
-test("resolveReleaseServiceId prefers hosting serviceId", () => {
+test("resolveReleaseServiceId prefers sourceMaterial releaseServiceId", () => {
   const payload = basePayload({
     hostings: [{
       hostingId: "host-1",
@@ -135,29 +133,44 @@ test("resolveReleaseServiceId prefers hosting serviceId", () => {
       serviceId: "svc-hosting",
       hostnames: ["app.example.com"],
     }],
-    ingressServices: [{
-      composeServiceName: "web",
-      serviceId: "svc-ingress",
-      containerName: "svc-ingress-in",
-    }],
+    sourceMaterial: [
+      baseSource({
+        composeServiceName: "web",
+        releaseServiceId: "svc-canonical",
+      }),
+    ],
   });
-  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-hosting");
+  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-canonical");
 });
 
-test("resolveReleaseServiceId falls back to ingress serviceId", () => {
+test("resolveReleaseServiceId uses nativeAppServices when releaseServiceId absent", () => {
   const payload = basePayload({
-    ingressServices: [{
-      composeServiceName: "api",
-      serviceId: "svc-ingress",
-      containerName: "svc-ingress-in",
+    nativeAppServices: [{
+      composeServiceName: "app",
+      serviceId: "svc-env-a",
+      listenPort: 18080,
+      framework: "auto",
     }],
   });
-  assertEquals(resolveReleaseServiceId(payload, "api"), "svc-ingress");
+  assertEquals(resolveReleaseServiceId(payload, "app"), "svc-env-a");
 });
 
 test("resolveReleaseServiceId uses compose service name when unmatched", () => {
   const payload = basePayload({ hostings: [], ingressServices: [] });
   assertEquals(resolveReleaseServiceId(payload, "worker"), "worker");
+});
+
+test("resolveReleaseServiceId keys a git worker from releaseServiceId without nativeAppServices", () => {
+  const envServiceId = "00000000-0000-4000-8000-0000000000c1";
+  const payload = basePayload({
+    sourceMaterial: [
+      baseSource({
+        composeServiceName: "worker",
+        releaseServiceId: envServiceId,
+      }),
+    ],
+  });
+  assertEquals(resolveReleaseServiceId(payload, "worker"), envServiceId);
 });
 
 test("resolveReleaseServiceId treats empty hosting and ingress arrays as absent", () => {
@@ -236,6 +249,7 @@ test("applySourceReleases promotes native releases with injected checkout/build/
             baseSource({
               composeServiceName: "web",
               releaseId: "rel-new",
+              releaseServiceId: serviceId,
               principal: {
                 principalId: "pr-1",
                 username: "appuser",
@@ -525,6 +539,7 @@ test("applySourceReleases rolls back native releases without fetch or build", as
             baseSource({
               releaseId: "rel-new",
               rollbackToReleaseId: "rel-old",
+              releaseServiceId: serviceId,
               commitSha: "wire-placeholder",
               principal: {
                 principalId: "pr-1",
@@ -688,6 +703,7 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
               composeServiceName: "web",
               releaseId: "rel-new",
               rollbackToReleaseId: "rel-rail",
+              releaseServiceId: serviceId,
               build: { kind: "railpack" },
             }),
           ],
@@ -740,6 +756,7 @@ test("applySourceReleases builds railpack releases without a project principal",
             baseSource({
               composeServiceName: "api",
               releaseId: "rel-pack",
+              releaseServiceId: serviceId,
               build: { kind: "railpack" },
             }),
           ],
@@ -966,6 +983,190 @@ test("a standalone build with a start command that needs package scripts warns, 
           )
         ),
         true,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("shared principal keeps separate release trees per nativeAppServices serviceId", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const principal = {
+        principalId: "pr-1",
+        username: "appuser",
+        uid: 2000,
+        gid: 2001,
+      };
+      const serviceA = "svc-env-production";
+      const serviceB = "svc-env-staging";
+      const pathsA = resolveReleasePaths(layout, {
+        username: principal.username,
+        serviceId: serviceA,
+        releaseId: "rel-a",
+      });
+      const pathsB = resolveReleasePaths(layout, {
+        username: principal.username,
+        serviceId: serviceB,
+        releaseId: "rel-b",
+      });
+
+      const sharedPromote = (
+        marker: string,
+        serviceId: string,
+        releaseId: string,
+        composeServiceName: string,
+      ) =>
+      async (params: {
+        paths: ReturnType<typeof resolveReleasePaths>;
+      }) => {
+        await Deno.writeTextFile(
+          join(params.paths.releaseDir, "branch.txt"),
+          marker,
+        );
+        await writeReleaseManifest(params.paths.releaseDir, {
+          version: 1,
+          serviceId,
+          composeServiceName,
+          releaseId,
+          sourceId: "src-1",
+          commitSha: "commit",
+          ref: "main",
+          promotedAt: "2026-01-01T00:00:00.000Z",
+          standaloneOutput: false,
+          staticExport: false,
+        });
+        await swapCurrentSymlink(params.paths);
+        return params.paths.releaseDir;
+      };
+
+      const baseDeps = () => ({
+        logSink: fakeLogSink().sink,
+        decryptSecrets: undefined as DecryptSecretsFn | undefined,
+        now: () => "2026-01-01T00:00:00.000Z",
+        ensureReleaseTreeFn: async (
+          treePaths: Parameters<typeof mkdirReleaseTree>[0],
+        ) => {
+          await mkdirReleaseTree(treePaths);
+        },
+        checkoutReleaseFn: async (params: { scratchDir: string }) => {
+          const workingDir = join(params.scratchDir, "source");
+          await Deno.mkdir(workingDir, { recursive: true });
+          return { workingDir, commitSha: "commit" };
+        },
+        runReleaseBuildFn: () => Promise.resolve(),
+        prepareNativeAppBuildOutputFn: () =>
+          Promise.resolve({
+            standaloneOutput: false,
+            staticExport: false,
+            outputDirectory: undefined,
+          }),
+        pruneReleasesFn: () => Promise.resolve([]),
+      });
+
+      await applySourceReleases(
+        layout,
+        basePayload({
+          environmentId: "env-production",
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "app",
+              releaseId: "rel-a",
+              releaseServiceId: serviceA,
+              principal,
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "app",
+            serviceId: serviceA,
+            listenPort: 18080,
+            framework: "auto",
+          }],
+        }),
+        {
+          ...baseDeps(),
+          promoteReleaseFn: sharedPromote("main", serviceA, "rel-a", "app"),
+        },
+      );
+
+      await applySourceReleases(
+        layout,
+        basePayload({
+          environmentId: "env-staging",
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "app",
+              releaseId: "rel-b",
+              releaseServiceId: serviceB,
+              principal,
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "app",
+            serviceId: serviceB,
+            listenPort: 18081,
+            framework: "auto",
+          }],
+        }),
+        {
+          ...baseDeps(),
+          promoteReleaseFn: sharedPromote("branch-a", serviceB, "rel-b", "app"),
+        },
+      );
+
+      assertEquals(
+        await Deno.readTextFile(join(pathsA.releaseDir, "branch.txt")),
+        "main",
+      );
+      assertEquals(
+        await Deno.readTextFile(join(pathsB.releaseDir, "branch.txt")),
+        "branch-a",
+      );
+
+      await applySourceReleases(
+        layout,
+        basePayload({
+          environmentId: "env-staging",
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "app",
+              releaseId: "rel-b2",
+              releaseServiceId: serviceB,
+              principal,
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "app",
+            serviceId: serviceB,
+            listenPort: 18081,
+            framework: "auto",
+          }],
+        }),
+        {
+          ...baseDeps(),
+          promoteReleaseFn: sharedPromote(
+            "branch-b",
+            serviceB,
+            "rel-b2",
+            "app",
+          ),
+        },
+      );
+
+      assertEquals(
+        await Deno.readTextFile(join(pathsA.releaseDir, "branch.txt")),
+        "main",
+      );
+      const pathsB2 = resolveReleasePaths(layout, {
+        username: principal.username,
+        serviceId: serviceB,
+        releaseId: "rel-b2",
+      });
+      assertEquals(
+        await Deno.readTextFile(join(pathsB2.releaseDir, "branch.txt")),
+        "branch-b",
       );
     } finally {
       await fixture.cleanup();
