@@ -162,6 +162,19 @@ test("resolveReleaseServiceId uses compose service name when unmatched", () => {
   assertEquals(resolveReleaseServiceId(payload, "worker"), "worker");
 });
 
+test("resolveReleaseServiceId keys a git worker from releaseServiceId without nativeAppServices", () => {
+  const envServiceId = "00000000-0000-4000-8000-0000000000c1";
+  const payload = basePayload({
+    sourceMaterial: [
+      baseSource({
+        composeServiceName: "worker",
+        releaseServiceId: envServiceId,
+      }),
+    ],
+  });
+  assertEquals(resolveReleaseServiceId(payload, "worker"), envServiceId);
+});
+
 test("resolveReleaseServiceId treats empty hosting and ingress arrays as absent", () => {
   const payload = basePayload({ hostings: [], ingressServices: [] });
   assertEquals(resolveReleaseServiceId(payload, "web"), "web");
