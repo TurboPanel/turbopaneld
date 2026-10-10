@@ -425,12 +425,13 @@ test("parseEnvironmentDeployPayload carries a Deno native app's runtime and deno
     ...DEPLOY_BASE,
     nativeAppServices: [
       { ...base, runtime: "deno", denoVersion: "2.9" },
-      base,
+      { ...base, composeServiceName: "worker", serviceId: "svc-native-2" },
     ],
   });
   assertEquals(payload.nativeAppServices?.[0]?.runtime, "deno");
   assertEquals(payload.nativeAppServices?.[0]?.denoVersion, "2.9");
   // A Node app's wire shape is untouched.
+  assertEquals(payload.nativeAppServices?.[1]?.composeServiceName, "worker");
   assertEquals("runtime" in (payload.nativeAppServices?.[1] ?? {}), false);
   for (const bad of [{ runtime: "bun" }, { denoVersion: "latest" }]) {
     assertThrows(

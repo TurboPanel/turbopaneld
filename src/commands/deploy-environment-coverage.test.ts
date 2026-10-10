@@ -891,6 +891,7 @@ test({
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",
+            releaseServiceId: serviceId,
             provider: "github",
             cloneUrl: "https://example.test/repo.git",
             ref: "main",
