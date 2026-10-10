@@ -6,6 +6,7 @@
       { "name": "address", "required": true, "type": "string" },
       { "name": "cidr", "required": false, "type": "string" },
       { "name": "interface", "required": false, "type": "string" },
+      { "name": "link", "required": false, "type": "'down' | 'up'" },
       { "name": "preferred", "required": false, "type": "boolean" },
       { "name": "scope", "required": true, "type": "'private' | 'public'" },
       { "name": "version", "required": true, "type": "4 | 6" }
