@@ -1001,9 +1001,15 @@ tp_unit_present() {
         *.slice)
           _up_frag=$(systemctl show -p FragmentPath --value "$_up_unit" 2>/dev/null || true)
           _up_act=$(systemctl show -p ActiveState --value "$_up_unit" 2>/dev/null || true)
-          if [ -n "$_up_frag" ]; then
-            return 0
-          fi
+          case $_up_frag in
+            ""|"[unprintable]")
+              ;;
+            *)
+              if [ -f "$_up_frag" ] || [ -L "$_up_frag" ]; then
+                return 0
+              fi
+              ;;
+          esac
           case $_up_act in
             inactive|"") ;;
             *) return 0 ;;
@@ -1255,6 +1261,13 @@ tp_docker_consider_row() {
   case $_dcr_name in
     turbopanel*|tpn_*) _dcr_match=true ;;
   esac
+  # Managed orchestrator HA containers use a service-id name ending in -ha.
+  case $_dcr_name in
+    *-ha) _dcr_match=true ;;
+  esac
+  case $_dcr_component in
+    managed-ha|managed-ingress) _dcr_match=true ;;
+  esac
   # shellcheck disable=SC2086
   if tp_list_has_word "$_dcr_name" $TP_LEGACY_CONTAINER_NAMES; then
     _dcr_match=true
@@ -1296,15 +1309,15 @@ tp_docker_collect() {
     }' "$_dc_rows" > "$TP_TMP/docker.tsv"
     while IFS= read -r _dc_line; do
       [ -n "$_dc_line" ] || continue
-      _dc_saved=$IFS
-      IFS='	'
-      set -f
-      # shellcheck disable=SC2086
-      set -- $_dc_line
-      set +f
-      IFS=$_dc_saved
-      [ "$#" -ge 7 ] || continue
-      tp_docker_consider_row "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+      _dc_name=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $1 }')
+      _dc_role=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $2 }')
+      _dc_component=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $3 }')
+      _dc_service=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $4 }')
+      _dc_work=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $5 }')
+      _dc_config=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $6 }')
+      _dc_project=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $7 }')
+      [ -n "$_dc_name" ] || continue
+      tp_docker_consider_row "$_dc_name" "$_dc_role" "$_dc_component" "$_dc_service" "$_dc_work" "$_dc_config" "$_dc_project"
     done < "$TP_TMP/docker.tsv"
   else
     tp_print_warn "docker ps label format failed; matching container names only"
@@ -2142,6 +2155,87 @@ tp_remove_units() {
     systemctl reset-failed $_ru_units || true
 }
 
+tp_docker_inventory_container_name() {
+  _dicn=$1
+  case $_dicn in
+    *" (older release)") printf '%s\n' "${_dicn% (older release)}" ;;
+    *) printf '%s\n' "$_dicn" ;;
+  esac
+}
+
+tp_docker_build_removal_list() {
+  : > "$TP_TMP/docker.rm"
+  if ! tp_docker_collect; then
+    return 1
+  fi
+  if [ -s "$TP_TMP/work.containers" ]; then
+    while IFS= read -r _dbr_name; do
+      [ -n "$_dbr_name" ] || continue
+      tp_file_add "$TP_TMP/docker.rm" "$_dbr_name"
+    done < "$TP_TMP/work.containers"
+  fi
+  if [ -f "$TP_TMP/before.containers" ]; then
+    while IFS= read -r _dbr_inv; do
+      [ -n "$_dbr_inv" ] || continue
+      _dbr_inv=$(tp_docker_inventory_container_name "$_dbr_inv")
+      tp_file_add "$TP_TMP/docker.rm" "$_dbr_inv"
+    done < "$TP_TMP/before.containers"
+  fi
+  return 0
+}
+
+# One container at a time: log the outcome and keep going even when rm fails.
+tp_docker_remove_one_container() {
+  _droc_name=$1
+  [ -n "$_droc_name" ] || return 0
+  if [ "$DRY_RUN" = true ]; then
+    tp_print_step "·" "[dry-run] would run: docker rm -f ${_droc_name}"
+    printf '%s\n' "docker rm -f ${_droc_name}" >> "$TP_TMP/removed"
+    return 0
+  fi
+  tp_print_step "▸" "docker rm -f ${_droc_name}"
+  tp_log_line "run: docker rm -f ${_droc_name}"
+  if docker rm -f "$_droc_name" >> "$TP_LOG_FILE" 2>&1; then
+    tp_log_line "ok: docker rm -f ${_droc_name}"
+    printf '%s\n' "docker rm -f ${_droc_name}" >> "$TP_TMP/removed"
+    return 0
+  fi
+  tp_log_line "fail: docker rm -f ${_droc_name}"
+  tp_print_warn "docker rm -f ${_droc_name} failed (continuing with other containers)"
+  return 1
+}
+
+tp_remove_docker_containers() {
+  if ! tp_docker_build_removal_list; then
+    return 1
+  fi
+  if [ ! -s "$TP_TMP/docker.rm" ]; then
+    return 0
+  fi
+  while IFS= read -r _rdc_name; do
+    [ -n "$_rdc_name" ] || continue
+    tp_docker_remove_one_container "$_rdc_name" || true
+  done < "$TP_TMP/docker.rm"
+  return 0
+}
+
+tp_finalize_turbopanel_units() {
+  tp_print_step "▸" "Units (after Docker)"
+  if ! tp_has_tool systemctl; then
+    tp_record_skip "systemctl not installed"
+    return 0
+  fi
+  for _ftu_slice in turbopanel.slice turbopanel-containers.slice turbopaneld.slice; do
+    tp_stop_disable_unit "$_ftu_slice"
+  done
+  tp_collect_unit_names
+  tp_stop_units_matching other
+  tp_run "systemctl daemon-reload" systemctl daemon-reload || true
+  # shellcheck disable=SC2086
+  tp_run "clear failed TurboPanel unit state" \
+    systemctl reset-failed turbopanel* turbopaneld* || true
+}
+
 tp_remove_docker() {
   tp_print_step "▸" "Docker containers and networks"
   if ! tp_has_tool docker; then
@@ -2159,16 +2253,13 @@ tp_remove_docker() {
       return 0
     fi
   fi
-  tp_docker_collect || {
+  if ! tp_remove_docker_containers; then
     TP_DOCKER_LEFT=true
     tp_record_fail "list docker containers"
     return 0
-  }
-  if [ -s "$TP_TMP/work.containers" ]; then
-    while IFS= read -r _rd_name; do
-      [ -n "$_rd_name" ] || continue
-      tp_run "docker rm -f $_rd_name" docker rm -f "$_rd_name" || true
-    done < "$TP_TMP/work.containers"
+  fi
+  if [ -s "$TP_TMP/docker.rm" ]; then
+    tp_remove_docker_containers || true
   else
     tp_print_ok "no TurboPanel containers"
   fi
@@ -3090,12 +3181,29 @@ tp_purge_docker_engine() {
       tp_record_skip "groupdel not installed"
     fi
   fi
+  hash -r 2>/dev/null || true
   if tp_docker_engine_gone; then
     TP_DOCKER_ENGINE_GONE=true
     tp_purge_docker_network_state
-  else
+  elif tp_docker_engine_packages_remain; then
     tp_print_warn "Docker Engine is still installed; its bridges and firewall rules were left"
+  else
+    TP_DOCKER_ENGINE_GONE=true
+    tp_purge_docker_network_state
   fi
+}
+
+# True when an engine package from TP_DOCKER_PACKAGES is still on the host.
+tp_docker_engine_packages_remain() {
+  if ! tp_has_tool dpkg-query; then
+    return 1
+  fi
+  for _depr in $TP_DOCKER_PACKAGES; do
+    if tp_pkg_installed "$_depr"; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Docker Engine is gone only when nothing of it remains: no daemon binary
@@ -3449,6 +3557,15 @@ tp_report_remaining() {
   : > "$TP_TMP/remain.real"
   while IFS= read -r _rr_line; do
     [ -n "$_rr_line" ] || continue
+    if [ "$_rr_key" = units ]; then
+      _rr_unit=$_rr_line
+      case $_rr_unit in
+        *" (older release)") _rr_unit=${_rr_unit% (older release)} ;;
+      esac
+      if ! tp_unit_present "$_rr_unit"; then
+        continue
+      fi
+    fi
     if [ "$_rr_key" = folders_remove ] || [ "$_rr_key" = folders_keep ] || [ "$_rr_key" = principals ] || [ "$_rr_key" = purge_targets ]; then
       _rr_path=$_rr_line
       case $_rr_path in
@@ -3611,6 +3728,7 @@ tp_main() {
   tp_remove_folders_and_shell
   tp_remove_processes_and_accounts
   tp_purge_hosted_data
+  tp_finalize_turbopanel_units
   TP_INV_QUIET=true
   tp_inventory
   tp_print_summary

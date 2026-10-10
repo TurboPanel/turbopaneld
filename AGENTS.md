@@ -1121,7 +1121,11 @@ and the mount kept). There is one copy of that function. A Docker apt
 **Post-check rules (what "left over" means).** The final inventory must
 match what can exist after the purge. A `.slice` unit that systemd still
 reports as loaded but with no unit file and inactive (the retired `tpbuild.slice`) is gone
-(`tp_unit_present`). Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
+(`tp_unit_present`). After Docker Engine is purged, `tp_finalize_turbopanel_units`
+stops `turbopanel.slice` / `turbopanel-containers.slice` again, runs
+`daemon-reload` and `reset-failed`, so implicit slices are not reported as
+left over while a container cgroup still held them. The summary's unit diff
+also skips names `tp_unit_present` already treats as gone. Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
 the final inventory skips Docker, so the `<id>-in` containers removed with it
 are not reported. Anything else still on disk stays a failure. When the Docker daemon is not answering at the final check, the pre-purge container and network lists are carried forward only if the removal step itself was skipped (`TP_DOCKER_LEFT`); a daemon that is gone after a removal that ran holds nothing, so it is never a false failure. The purge also
 removes `/var/lib/turbopanel-hosting-caddy` (the hosting Caddy's
