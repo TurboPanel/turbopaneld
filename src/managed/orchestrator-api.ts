@@ -105,6 +105,94 @@ export async function setClusterAlias(
   );
 }
 
+function hostOf(endpoint: string): string | null {
+  try {
+    const url = new URL(
+      endpoint.includes("://") ? endpoint : `http://${endpoint}`,
+    );
+    return url.hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether this Orchestrator node can take write calls (`discover`,
+ * `register-candidate`, `set-cluster-alias`, `recover`) from `/api/raft-status`.
+ *
+ * A follower that does not know a leader answers every write with
+ * `HTTP 500 {"Message":"Unauthorized"}`; one that still holds a `LeaderURI`
+ * from an older leader (restored from its Raft snapshot after a restart)
+ * proxies to that address instead. So it is ready only as the leader, or as a
+ * follower whose `LeaderURI` points at the host of the current `Leader` (the
+ * Raft and HTTP advertise addresses are the same address in our stack).
+ * `null` when the body is not a Raft status (Raft off, or an older image).
+ */
+export function orchestratorRaftReady(status: unknown): boolean | null {
+  if (status === null || typeof status !== "object") return null;
+  const { State, Leader, LeaderURI } = status as Record<string, unknown>;
+  if (typeof State !== "string") return null;
+  if (State === "Leader") return true;
+  if (typeof Leader !== "string" || typeof LeaderURI !== "string") {
+    return false;
+  }
+  const leaderHost = hostOf(Leader);
+  return leaderHost !== null && leaderHost === hostOf(LeaderURI);
+}
+
+export type OrchestratorRaftWaitOptions = {
+  /** Give up after this long (default 45 s; a restarted node measured 25 s). */
+  timeoutMs?: number;
+  /** Pause between polls (default 1 s). */
+  intervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+};
+
+/**
+ * Poll `/api/raft-status` until this node can take writes
+ * ({@link orchestratorRaftReady}). A (re)created stack, or several hosts of
+ * one Raft group recreated together, has no leader for a few seconds, and a
+ * reconcile that registers clusters inside that window fails for every one.
+ * Returns `true` when ready or when readiness cannot be told, `false` on
+ * timeout (the caller goes on; registration then reports its own error).
+ */
+export async function waitForOrchestratorRaftLeader(
+  deps: OrchestratorApiDeps = {},
+  options: OrchestratorRaftWaitOptions = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const intervalMs = options.intervalMs ?? 1_000;
+  const sleep = options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  const pollDeps: OrchestratorApiDeps = {
+    ...deps,
+    timeoutMs: deps.timeoutMs ?? 5_000,
+  };
+  // One poll per call (no loop): wait, then poll again until the deadline.
+  const poll = async (): Promise<boolean> => {
+    let ready: boolean | null = false;
+    try {
+      ready = orchestratorRaftReady(
+        await orchestratorGet("/api/raft-status", pollDeps),
+      );
+    } catch (err) {
+      // Not listening yet (refused, or the poll timed out): keep polling. An
+      // HTTP error answer means no Raft status to read: go on.
+      if (!(err instanceof TypeError || err instanceof DOMException)) {
+        return true;
+      }
+    }
+    if (ready !== false) return true;
+    if (now() >= deadline) return false;
+    await sleep(intervalMs);
+    return await poll();
+  };
+  return await poll();
+}
+
 export type OrchestratorRecoverTarget = {
   sourceHost: string;
   sourcePort: number;

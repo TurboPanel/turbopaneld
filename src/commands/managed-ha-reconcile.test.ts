@@ -588,6 +588,74 @@ test({
 
 test({
   name:
+    "handleManagedHaReconcile waits for a Raft leader before registering clusters",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const apiCalls: string[] = [];
+      let statusPolls = 0;
+      try {
+        const result = await handleManagedHaReconcile(
+          presentPayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                apiCalls.push(url);
+                if (url.endsWith("/api/raft-status")) {
+                  statusPolls++;
+                  const leader = statusPolls < 3 ? "" : "10.100.0.11:33002";
+                  return Promise.resolve(
+                    Response.json({
+                      State: "Follower",
+                      Leader: leader,
+                      LeaderURI: "http://10.100.0.11:33001",
+                    }),
+                  );
+                }
+                // A follower with no leader refuses every write like this.
+                return Promise.resolve(
+                  statusPolls < 3
+                    ? Response.json(
+                      { Code: "ERROR", Message: "Unauthorized" },
+                      {
+                        status: 500,
+                      },
+                    )
+                    : new Response("", { status: 200 }),
+                );
+              },
+            },
+            raftWait: { sleep: () => Promise.resolve() },
+          },
+        );
+        assertEquals(statusPolls, 3);
+        assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.failedClusters, []);
+        const firstDiscover = apiCalls.findIndex((url) =>
+          url.includes("/api/discover/")
+        );
+        assertEquals(
+          apiCalls.slice(0, firstDiscover).filter((url) =>
+            url.endsWith("/api/raft-status")
+          ).length,
+          3,
+        );
+      } finally {
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+test({
+  name:
     "handleManagedHaReconcile registers the listener address, not the container name",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
