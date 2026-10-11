@@ -1571,9 +1571,18 @@ test("ManagedHaObserver ignores a recovery seen by an older overlapping poll", a
     await seedMysqlPrimary(layout);
     const sent: ManagedHaEventMessage[] = [];
     const gates: Array<(rows: unknown[]) => void> = [];
+    let resolveSecondAnalysisEntered!: () => void;
+    const secondAnalysisEntered = new Promise<void>((resolve) => {
+      resolveSecondAnalysisEntered = resolve;
+    });
+    let resolveThirdAnalysisEntered!: () => void;
+    const thirdAnalysisEntered = new Promise<void>((resolve) => {
+      resolveThirdAnalysisEntered = resolve;
+    });
     const observer = new ManagedHaObserver({
       layout,
       runDocker: runDockerByContainer({ "mysql-primary-1": H01_DIAL }),
+      reviveStack: () => Promise.resolve("absent"),
       send: (message) => {
         sent.push(message);
         return true;
@@ -1585,13 +1594,15 @@ test("ManagedHaObserver ignores a recovery seen by an older overlapping poll", a
           analysis: () =>
             new Promise((resolve) => {
               gates.push((rows) => resolve(analysisResponse(rows)));
+              if (gates.length === 2) resolveSecondAnalysisEntered();
+              if (gates.length === 3) resolveThirdAnalysisEntered();
             }),
         }),
       },
     });
     const older = observer.poll();
     const newer = observer.poll();
-    await waitForGates(gates, 2);
+    await secondAnalysisEntered;
     gates[1]?.([replicationRow(H01_DIAL)]);
     await newer;
     assertEquals(sent.length, 1);
@@ -1600,7 +1611,7 @@ test("ManagedHaObserver ignores a recovery seen by an older overlapping poll", a
     gates[0]?.([]);
     await older;
     const third = observer.poll();
-    await waitForGates(gates, 3);
+    await thirdAnalysisEntered;
     gates[2]?.([replicationRow(H01_DIAL)]);
     await third;
     assertEquals(sent.length, 1);
