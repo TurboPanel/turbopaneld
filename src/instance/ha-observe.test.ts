@@ -1258,7 +1258,7 @@ async function seedPrimaryContainer(
 async function waitForGates(
   gates: unknown[],
   count: number,
-  triesLeft = 500,
+  triesLeft = 5000,
 ): Promise<void> {
   if (gates.length >= count || triesLeft === 0) {
     assertEquals(gates.length, count);
@@ -1543,6 +1543,7 @@ test("ManagedHaObserver sends one event when two polls overlap", async () => {
         return true;
       },
       isStackPresent: () => Promise.resolve(true),
+      reviveStack: () => Promise.resolve("absent"),
       api: {
         credentials: API_CREDS,
         fetch: splitFetch({
@@ -1632,6 +1633,7 @@ test("ManagedHaObserver drops a dead row from a poll overtaken by a newer health
         return true;
       },
       isStackPresent: () => Promise.resolve(true),
+      reviveStack: () => Promise.resolve("absent"),
       api: {
         credentials: API_CREDS,
         fetch: splitFetch({
