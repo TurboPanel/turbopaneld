@@ -158,6 +158,48 @@ test("runScheduledBackup writes the artifact under the policy's directory and sp
   });
 });
 
+/** Run one scheduled managed MariaDB policy and return the dump command it issued. */
+async function mariadbDumpArgv(
+  policy: Partial<BackupPolicyWireEntry>,
+): Promise<string[]> {
+  let argv: string[] = [];
+  await withLayout(async (layout) => {
+    const entry = managedPolicy({
+      engine: "mariadb",
+      artifactExtension: "sql",
+      ...policy,
+    });
+    await writeBackupPoliciesFile(layout, { policies: [entry] });
+    const deps = fakeDeps(new TextEncoder().encode("dump"));
+    const artifact = deps.artifact!;
+    const outcome = await runScheduledBackup(entry.policyId, {
+      ...deps,
+      artifact: {
+        ...artifact,
+        runDump: (dumpArgv, destination) => {
+          argv = dumpArgv;
+          return artifact.runDump!(dumpArgv, destination);
+        },
+      },
+      layout,
+    });
+    assert(outcome.kind === "ran");
+    assertEquals(outcome.result.status, "succeeded");
+  });
+  return argv;
+}
+
+test("runScheduledBackup dumps the database the policy entry names", async () => {
+  const argv = await mariadbDumpArgv({ database: "defaultdb" });
+  assertEquals(argv.at(-1), "defaultdb");
+  assert(!argv.includes("appdb"));
+});
+
+test("runScheduledBackup falls back to the engine default when the entry names no database", async () => {
+  const argv = await mariadbDumpArgv({});
+  assertEquals(argv.at(-1), "appdb");
+});
+
 test("runScheduledBackup prunes only the policy's own artifacts and reports them", async () => {
   await withLayout(async (layout) => {
     const policy = managedPolicy({ retentionKeep: 1 });
@@ -229,7 +271,8 @@ function copyPolicy(
     targetKind: "copy",
     copyId: crypto.randomUUID(),
     copyProvider: "docker",
-    volumeName: "shop_uploads",
+    volumeName: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
+    storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     onCalendar: "hourly",
     retentionKeep: 3,
     enabled: true,
@@ -255,7 +298,9 @@ function copyDeps(
         return Promise.resolve({
           success,
           code: success ? 0 : 1,
-          stdout: "",
+          stdout: args[0] === "volume"
+            ? JSON.stringify({ Driver: "local", Labels: {} })
+            : "",
           stderr: success ? "" : "no such volume",
         });
       },
@@ -299,13 +344,19 @@ test("runScheduledBackup archives a docker copy under its policy directory throu
     assertEquals(argv[argv.indexOf("--network") + 1], "none");
     assertEquals(
       argv[argv.indexOf("--mount") + 1],
-      "type=volume,src=shop_uploads,dst=/src,readonly",
+      "type=volume,src=0192f1de-7c3b-7e4a-9f10-0000000000b1,dst=/src,readonly",
     );
-    assertEquals(argv.slice(-7), [
+    assertEquals(argv.slice(argv.indexOf(COPY_BACKUP_HELPER_IMAGE)), [
       COPY_BACKUP_HELPER_IMAGE,
       "tar",
       "-C",
       "/src",
+      "--exclude",
+      "./.tp-restore-stage",
+      "--exclude",
+      "./.tp-restore-old",
+      "--exclude",
+      "./.tp-restore-done",
       "-czf",
       "-",
       ".",
@@ -334,7 +385,9 @@ test("runScheduledBackup refuses a copy directory outside the allowed roots", as
     const policy = copyPolicy({
       copyProvider: "path",
       volumeName: undefined,
+      storageId: undefined,
       hostPath: "/opt/elsewhere",
+      ownerUsername: "shop",
     });
     await writeBackupPoliciesFile(layout, { policies: [policy] });
     const calls: ArchiveCalls = { argv: [], inspected: [] };
@@ -344,7 +397,7 @@ test("runScheduledBackup refuses a copy directory outside the allowed roots", as
     });
     assert(outcome.kind === "ran");
     assertEquals(outcome.result.status, "failed");
-    assertMatch(outcome.result.error ?? "", /only \/srv\/users\//);
+    assertMatch(outcome.result.error ?? "", /site owner/);
     assertEquals(calls.argv.length, 0);
   });
 });
@@ -509,7 +562,12 @@ test("a managed database run and a volume run on one host overlap without refusi
       },
       copy: {
         runDocker: () =>
-          Promise.resolve({ success: true, code: 0, stdout: "", stderr: "" }),
+          Promise.resolve({
+            success: true,
+            code: 0,
+            stdout: JSON.stringify({ Driver: "local", Labels: {} }),
+            stderr: "",
+          }),
         runArchive: (_argv, destination) => write(destination),
       },
     };

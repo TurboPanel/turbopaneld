@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { parse } from "yaml";
 import { DAEMON_ROOT } from "./assets.ts";
@@ -12,11 +12,14 @@ import { DAEMON_ROOT } from "./assets.ts";
 const test = Deno.test.bind(Deno);
 
 /**
- * The build-user role (`orchestration/roles/build-user`): the account, tree and
- * slice `tp-host build-run` runs sandboxed tenant builds in. tp-host checks the
- * same shape on every run and refuses to build otherwise, so these pin what it
- * expects: tpbuild outside docker and tp, `/var/lib/turbopanel-build` root:tp
- * 0710 (root-owned, not group/world-writable), `work/` root:tp 1770, `cache/` root 0700, and `tpbuild.slice`.
+ * The build-user role (`orchestration/roles/build-user`): the tree
+ * `tp-host build-run` runs sandboxed builds from. Builds run as a throwaway
+ * user systemd creates for each one (DynamicUser=yes) in the site owner's own
+ * slice, so the role creates no account; it retires the shared `tpbuild`
+ * account, its cache and `tpbuild.slice`. tp-host checks the tree on every run
+ * and refuses to build otherwise, so these pin what it expects:
+ * `/var/lib/turbopanel-build` root:tp 0710, `work/` root:tp 1770 and
+ * `caches/` root:root 0700.
  */
 const ORCHESTRATION = join(DAEMON_ROOT, "orchestration");
 const ROLE = join(ORCHESTRATION, "roles/build-user");
@@ -41,51 +44,31 @@ function tasksUsing(tasks: Task[], module: string): Task[] {
   return tasks.filter((task) => `ansible.builtin.${module}` in task);
 }
 
-test("build-user defaults pin tpbuild at 9994 and tp-host's layout", async () => {
+test("build-user defaults pin tp-host's layout and the retired account", async () => {
   const defaults = await readYaml<Record<string, unknown>>(
     join(ROLE, "defaults/main.yml"),
   );
-  assertEquals(defaults.build_user, "tpbuild");
-  assertEquals(defaults.build_group, "tpbuild");
-  assertEquals(defaults.build_uid, 9994);
-  assertEquals(defaults.build_gid, 9994);
   assertEquals(defaults.build_root, "/var/lib/turbopanel-build");
-  assertEquals(defaults.build_slice, "tpbuild.slice");
-});
-
-test("the build account is a nologin system user with no home and no free group list", async () => {
-  const users = tasksUsing(await roleTasks(), "user");
-  const account = users.find((task) => !("groups" in moduleArgs(task, "user")));
-  assert(account, "expected a task that creates the build account");
-  const args = moduleArgs(account, "user");
-  assertEquals(args.name, "{{ build_user }}");
-  assertEquals(args.uid, "{{ build_uid }}");
-  assertEquals(args.group, "{{ build_group }}");
-  assertEquals(args.home, "/nonexistent");
-  assertEquals(args.create_home, false);
-  assertEquals(args.shell, "/usr/sbin/nologin");
-  assertEquals(args.system, true);
-
-  // Any group list must append Node runtime groups only: a bare `groups:`
-  // would either strip node-app-runtime's appends or add something else.
-  for (const task of users.filter((t) => t !== account)) {
-    const grant = moduleArgs(task, "user");
-    assertEquals(grant.append, true, `${task.name} must append`);
-    const vars = JSON.stringify(task.vars ?? {});
-    assertStringIncludes(vars, "runtimes.node.series");
+  assertEquals(defaults.build_retired_user, "tpbuild");
+  assertEquals(defaults.build_retired_uid, 9994);
+  assertEquals(defaults.build_retired_slice, "tpbuild.slice");
+  for (
+    const gone of ["build_user", "build_group", "build_uid", "build_slice"]
+  ) {
+    assertEquals(gone in defaults, false, `${gone} is retired`);
   }
 });
 
-test("the converge refuses a build account in docker, tp or sudo", async () => {
-  const asserts = tasksUsing(await roleTasks(), "assert");
-  const refusal = asserts.find((task) =>
-    JSON.stringify(task.loop ?? []).includes("docker")
+test("the role creates no account and removes the shared build account", async () => {
+  const tasks = await roleTasks();
+  const users = tasksUsing(tasks, "user").map((task) =>
+    moduleArgs(task, "user")
   );
-  assert(refusal, "expected an assert over the build account's groups");
-  const loop = refusal.loop as string[];
-  for (const group of ["docker", "{{ turbopanel_group }}", "sudo"]) {
-    assert(loop.includes(group), `assert must cover ${group}`);
-  }
+  const groups = tasksUsing(tasks, "group").map((task) =>
+    moduleArgs(task, "group")
+  );
+  assertEquals(users, [{ name: "{{ build_retired_user }}", state: "absent" }]);
+  assertEquals(groups, [{ name: "{{ build_retired_user }}", state: "absent" }]);
 });
 
 test("the build tree matches what tp-host build-run checks", async () => {
@@ -103,7 +86,7 @@ test("the build tree matches what tp-host build-run checks", async () => {
       group: "{{ turbopanel_group }}",
       mode: "1770",
     },
-    { path: "{{ build_root }}/cache", group: "root", mode: "0700" },
+    { path: "{{ build_root }}/caches", group: "root", mode: "0700" },
   ];
   for (const want of expected) {
     const dir = dirs.find((args) => args.path === want.path);
@@ -116,22 +99,24 @@ test("the build tree matches what tp-host build-run checks", async () => {
   }
 });
 
-test("the role installs tpbuild.slice root-owned with no limits of its own", async () => {
-  const [slice] = tasksUsing(await roleTasks(), "template");
-  const args = moduleArgs(slice, "template");
-  assertEquals(args.src, "tpbuild.slice.j2");
-  assertEquals(args.dest, "/etc/systemd/system/{{ build_slice }}");
-  assertEquals(args.owner, "root");
-  assertEquals(args.mode, "0640");
-  assertEquals(slice.notify, "Reload systemd for the build slice");
-
-  const unit = await Deno.readTextFile(
-    join(ROLE, "templates/tpbuild.slice.j2"),
+test("the role removes the retired shared cache and tpbuild.slice", async () => {
+  const tasks = await roleTasks();
+  const removed = tasksUsing(tasks, "file")
+    .map((task) => ({ task, args: moduleArgs(task, "file") }))
+    .filter(({ args }) => args.state === "absent");
+  assertEquals(removed.map(({ args }) => args.path), [
+    "{{ build_root }}/cache",
+    "/etc/systemd/system/{{ build_retired_slice }}",
+  ]);
+  assertEquals(
+    removed[1].task.notify,
+    "Reload systemd for the build slice",
   );
-  assertStringIncludes(unit, "[Slice]");
-  for (const key of ["User=", "Delegate=", "ExecStart="]) {
-    assertEquals(unit.includes(key), false, `slice must not set ${key}`);
-  }
+  assertEquals(tasksUsing(tasks, "template"), []);
+  const templates = await Array.fromAsync(
+    Deno.readDir(join(ROLE, "templates")),
+  ).catch(() => []);
+  assertEquals(templates, []);
 });
 
 test("every daemon playbook runs build-user unconditionally", async () => {
@@ -151,23 +136,16 @@ test("every daemon playbook runs build-user unconditionally", async () => {
   }
 });
 
-test("node-app-runtime adds the build account to each series it vendors", async () => {
+test("node-app-runtime adds no account to any group", async () => {
   const defaults = await readYaml<Record<string, unknown>>(
     join(ORCHESTRATION, "roles/node-app-runtime/defaults/main.yml"),
   );
-  assertEquals(defaults.node_app_build_user, "tpbuild");
-
+  assertEquals("node_app_build_user" in defaults, false);
   const tasks = await readYaml<Task[]>(
     join(ORCHESTRATION, "roles/node-app-runtime/tasks/vendor-series.yml"),
   );
-  const grant = tasksUsing(tasks, "user").find((task) =>
-    moduleArgs(task, "user").name === "{{ node_app_build_user }}"
-  );
-  assert(grant, "expected the build account's series append");
-  const args = moduleArgs(grant, "user");
-  assertEquals(args.groups, "{{ node_app_series_group }}");
-  assertEquals(args.append, true);
-  // The play can run before build-user has converged; it must not create the
-  // account (without its uid) or fail on a host that lacks it.
-  assertStringIncludes(String(grant.when), "getent_passwd");
+  // Every site owner's Linux user, the daemon and a build may run every
+  // installed series: the tree is readable by everyone, so nobody joins a
+  // group for it.
+  assertEquals(tasksUsing(tasks, "user"), []);
 });

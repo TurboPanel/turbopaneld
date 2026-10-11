@@ -312,26 +312,6 @@ test("parseEnvironmentDeployPayload rejects principalMaterial field errors", () 
       principalMaterial: [{
         principalId: PRINCIPAL_ID,
         username: "deploy_user",
-        runtimes: "php",
-      }],
-    },
-    "Invalid environment deploy principalMaterial runtimes",
-  );
-  rejectDeploy(
-    {
-      principalMaterial: [{
-        principalId: PRINCIPAL_ID,
-        username: "deploy_user",
-        runtimes: [{ runtime: "php", series: "latest" }],
-      }],
-    },
-    "Invalid environment deploy principalMaterial runtimes entry",
-  );
-  rejectDeploy(
-    {
-      principalMaterial: [{
-        principalId: PRINCIPAL_ID,
-        username: "deploy_user",
         accessGroups: ["TPNODEAPP"],
       }],
     },
@@ -371,21 +351,20 @@ test("parseEnvironmentDeployPayload rejects principalMaterial field errors", () 
   }
 });
 
-test("parsePrincipalsReconcilePayload rejects malformed principal grants", () => {
-  assertThrows(
-    () =>
-      parsePrincipalsReconcilePayload({
-        principals: [{
-          principalId: PRINCIPAL_ID,
-          username: "deploy_user",
-          home: "/srv/users/deploy_user",
-          shell: "/usr/sbin/nologin",
-          runtimes: [{ series: "8.4" }],
-        }],
-      }),
-    TypeError,
-    "Invalid environment deploy principalMaterial runtimes entry",
-  );
+test("parsePrincipalsReconcilePayload ignores a leftover runtimes field", () => {
+  // Older control planes sent per-version runtime grants; every installed
+  // runtime is now open to every site owner's Linux user, so the field is
+  // dropped whatever its shape.
+  const payload = parsePrincipalsReconcilePayload({
+    principals: [{
+      principalId: PRINCIPAL_ID,
+      username: "deploy_user",
+      home: "/srv/users/deploy_user",
+      shell: "/usr/sbin/nologin",
+      runtimes: [{ series: "8.4" }],
+    }],
+  });
+  assertEquals("runtimes" in payload.principals[0], false);
 });
 
 test("parsePrincipalsReconcilePayload round-trips a password hash", () => {
@@ -569,6 +548,60 @@ test("parseEnvironmentDeployPayload rejects sites engine cron and sourceKind", (
   );
 });
 
+test("parseEnvironmentDeployPayload rejects duplicate nativeAppServices serviceId", () => {
+  rejectDeploy(
+    {
+      nativeAppServices: [
+        {
+          composeServiceName: "a",
+          serviceId: "svc-dup",
+          listenPort: 18080,
+          framework: "node",
+        },
+        {
+          composeServiceName: "b",
+          serviceId: "svc-dup",
+          listenPort: 18081,
+          framework: "node",
+        },
+      ],
+    },
+    "Duplicate nativeAppServices serviceId svc-dup",
+  );
+});
+
+test("parseEnvironmentDeployPayload rejects duplicate sourceMaterial releaseServiceId", () => {
+  rejectDeploy(
+    {
+      sourceMaterial: [
+        {
+          sourceId: "src-a",
+          composeServiceName: "web",
+          releaseServiceId: "svc-dup-release",
+          provider: "git",
+          cloneUrl: "https://github.com/example/a.git",
+          ref: "main",
+          commitSha: "abc123def4567890123456789012345678901234",
+          releaseId: "rel-a",
+          build: { kind: "native" },
+        },
+        {
+          sourceId: "src-b",
+          composeServiceName: "api",
+          releaseServiceId: "svc-dup-release",
+          provider: "git",
+          cloneUrl: "https://github.com/example/b.git",
+          ref: "main",
+          commitSha: "def456abc7890123456789012345678901234ab",
+          releaseId: "rel-b",
+          build: { kind: "native" },
+        },
+      ],
+    },
+    "Duplicate sourceMaterial releaseServiceId svc-dup-release",
+  );
+});
+
 test("parseEnvironmentDeployPayload rejects nativeAppServices resource limits", () => {
   rejectDeploy(
     { nativeAppServices: [null] },
@@ -712,6 +745,88 @@ test("parseEnvironmentDeployPayload keeps restartPolicy and serviceLabels", () =
   assertEquals(payload.nativeAppServices?.[0]?.serviceLabels, {
     "com.example.team": "platform",
   });
+});
+
+const NATIVE_VARIABLES_APP = {
+  composeServiceName: "api",
+  serviceId: "svc-native-1",
+  listenPort: 13000,
+  framework: "node",
+};
+
+test("parseEnvironmentDeployPayload keeps nativeAppServices variables", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [{
+      ...NATIVE_VARIABLES_APP,
+      variables: [
+        { name: "API_URL", value: "https://example.test" },
+        { name: "DB_PASSWORD", secretKey: "DB_PASSWORD" },
+      ],
+    }],
+  });
+  assertEquals(payload.nativeAppServices?.[0]?.variables, [
+    { name: "API_URL", value: "https://example.test" },
+    { name: "DB_PASSWORD", secretKey: "DB_PASSWORD" },
+  ]);
+  // An empty list is the same as none.
+  const empty = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [{ ...NATIVE_VARIABLES_APP, variables: [] }],
+  });
+  assertEquals(empty.nativeAppServices?.[0]?.variables, undefined);
+});
+
+test("parseEnvironmentDeployPayload rejects unsafe nativeAppServices variables", () => {
+  const withVariables = (variables: unknown) => ({
+    nativeAppServices: [{ ...NATIVE_VARIABLES_APP, variables }],
+  });
+  rejectDeploy(
+    withVariables("API_URL=1"),
+    "Invalid nativeAppServices variables",
+  );
+  rejectDeploy(
+    withVariables([null]),
+    "Invalid nativeAppServices variables entry",
+  );
+  for (
+    const name of ["1ABC", "A-B", "A B", "", "A=B", "A\nB", "x".repeat(129)]
+  ) {
+    rejectDeploy(
+      withVariables([{ name, value: "v" }]),
+      "Invalid nativeAppServices variables name",
+    );
+  }
+  rejectDeploy(
+    withVariables([{ name: "A" }]),
+    "needs exactly one of value or secretKey",
+  );
+  rejectDeploy(
+    withVariables([{ name: "A", value: "v", secretKey: "A" }]),
+    "needs exactly one of value or secretKey",
+  );
+  rejectDeploy(
+    withVariables([{ name: "A", value: 7 }]),
+    "Invalid nativeAppServices variable value for A",
+  );
+  rejectDeploy(
+    withVariables([{ name: "A", value: "a\0b" }]),
+    "Invalid nativeAppServices variable value for A",
+  );
+  rejectDeploy(
+    withVariables([{ name: "A", secretKey: "" }]),
+    "Invalid nativeAppServices variable secretKey for A",
+  );
+  rejectDeploy(
+    withVariables([{ name: "A", value: "1" }, { name: "A", value: "2" }]),
+    "Duplicate nativeAppServices variable A",
+  );
+  rejectDeploy(
+    withVariables(
+      Array.from({ length: 257 }, (_, i) => ({ name: `V${i}`, value: "1" })),
+    ),
+    "Invalid nativeAppServices variables",
+  );
 });
 
 test("parseEnvironmentDeployPayload rejects sourceMaterial parse errors", () => {

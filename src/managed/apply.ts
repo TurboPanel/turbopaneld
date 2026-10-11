@@ -1,12 +1,15 @@
 /**
- * Managed engine apply: materialize → compose up → credentials.
+ * Managed engine apply: materialize → compose up → databases/credentials.
  */
 
-import type {
-  EnvironmentDeployContainer,
-  ManagedApplyCredential,
-  ManagedApplyPayload,
-  ManagedApplyResult,
+import {
+  type EnvironmentDeployContainer,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+  type ManagedApplyCredential,
+  type ManagedApplyDatabaseOp,
+  type ManagedApplyPayload,
+  type ManagedApplyResult,
 } from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureManagedIngressNetwork } from "./networks.ts";
@@ -25,7 +28,7 @@ import {
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import { redactPlaintexts } from "../logs/redactor.ts";
-import { logInfo, sanitizeForLog } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
@@ -34,6 +37,8 @@ import {
 } from "../orchestration/ansible.ts";
 import {
   assertPublicPrivateListenerTls,
+  composeUsesRootPasswordInterpolation,
+  MANAGED_ROOT_PASSWORD_FILE_SOURCE,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
 } from "./compose.ts";
@@ -42,22 +47,41 @@ import {
   resolveEngineContainerId,
 } from "./containers.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
+import {
+  isManagedMemberDemoted,
+  maybeClearDemotedMarkerAfterApply,
+} from "./demoted-marker.ts";
+import {
+  isManagedMemberDestroyed,
+  ManagedDestroyedError,
+} from "./destroyed-marker.ts";
 import { reconcileManagedPublicFirewallBestEffort } from "./firewall.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 import {
   materializeManagedState,
   normalizeManagedFileOwnership,
+  normalizeManagedSecretOwnership,
 } from "./materialize.ts";
 import {
   assertSafeManagedIdentifiers,
   managedComposePath,
   managedComposeProject,
+  managedDir,
   managedEnvFilePath,
+  managedRootPasswordPath,
+  managedSecretsDir,
 } from "./engine-paths.ts";
 import {
   loadProxySqlMonitorCredentials,
   proxySqlHostPrepPresent,
 } from "./proxysql-admin.ts";
+import {
+  buildNeedsResyncMember,
+  stopManagedProjectForResync,
+} from "./needs-resync.ts";
+
+export { buildNeedsResyncMember };
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (
@@ -140,10 +164,13 @@ export function buildEngineExec(
   run: RunDockerFn,
   retryDelayMs: number = ENGINE_EXEC_RETRY_MS,
 ): ManagedEngineContext["exec"] {
+  // Root explicitly: the MariaDB UBI image defaults to user `mysql`, but the
+  // platform admin is `root@localhost` over `unix_socket`, which only maps
+  // from OS user root. Other variants already default to root.
   return async (argv, input) => {
     const execOnce = () =>
       run(
-        ["exec", "-i", containerId, ...argv],
+        ["exec", "-i", "-u", "0", containerId, ...argv],
         input === undefined ? undefined : { input },
       );
     const retryWhileTransient = async (
@@ -171,24 +198,34 @@ export function buildEngineExec(
   };
 }
 
+function isClientSourceHostLiteral(address: string): boolean {
+  return isValidIpv4Literal(address) || isValidIpv6Literal(address);
+}
+
 /**
- * Cross-host addresses whose ProxySQL dials this engine's private listener:
- * peer members plus bound consumer servers. MySQL/MariaDB scope account
- * hosts with these; Postgres admission lives in pg_hba (control-plane
- * config). Container-name peers ride the managed docker network pattern —
- * only address literals need per-host accounts.
+ * Cross-host addresses whose ProxySQL dials this engine's private listener.
+ * Every member host IP (peers + this host's private listener) plus bound
+ * consumer servers. MySQL/MariaDB scope monitor/client/root accounts with
+ * these; Postgres admission lives in pg_hba (control-plane config).
+ * Container-name peers ride the managed docker network pattern — only
+ * address literals need per-host accounts. Own-host is required: this
+ * server's ProxySQL reaches replicas via the published listener, so the
+ * engine sees the host address, not a docker-network source.
  */
 export function resolveClientSourceHosts(
   payload: ManagedApplyPayload,
 ): string[] {
   const hosts = new Set<string>();
-  for (
-    const address of [
-      ...(payload.replication?.peerAddresses ?? []),
-      ...(payload.ingressSourceAddresses ?? []),
-    ]
-  ) {
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(address) || address.includes(":")) {
+  const candidates = [
+    payload.privateListener?.address,
+    payload.replication?.primary?.hostaddr,
+    payload.replication?.primary?.host,
+    ...(payload.replication?.peerAddresses ?? []),
+    ...(payload.peers ?? []).map((peer) => peer.address),
+    ...(payload.ingressSourceAddresses ?? []),
+  ];
+  for (const address of candidates) {
+    if (address !== undefined && isClientSourceHostLiteral(address)) {
       hosts.add(address);
     }
   }
@@ -212,6 +249,8 @@ async function requireDecryptedCredentials(
     rootCredential: ManagedApplyCredential;
     /** Per-fronting-server ProxySQL monitor roles (decrypted), when shipped. */
     monitorUsers?: Array<{ user: string; password: string }>;
+    /** Organization Orchestrator topology role (decrypted), when shipped. */
+    topologyUser?: { user: string; password: string };
   }
 > {
   if (!deps?.decryptSecrets) {
@@ -257,7 +296,20 @@ async function requireDecryptedCredentials(
     }
   }
 
-  return { decrypted, redact, rootCredential, monitorUsers };
+  let topologyUser: { user: string; password: string } | undefined;
+  if (payload.topologyUser) {
+    const [plain] = await deps.decryptSecrets([payload.topologyUser.password]);
+    const username = payload.topologyUser.username;
+    if (typeof plain !== "string" || plain.length === 0) {
+      throw new Error(
+        `failed to decrypt topology credential for ${username}`,
+      );
+    }
+    decrypted.plaintexts.push(plain);
+    topologyUser = { user: username, password: plain };
+  }
+
+  return { decrypted, redact, rootCredential, monitorUsers, topologyUser };
 }
 
 async function cleanupManagedEnvFile(
@@ -293,6 +345,82 @@ async function rewriteDaemonOwnedFile(
   await Deno.chmod(path, mode);
 }
 
+/**
+ * Write the engine root password for the engine's `<KEY>_FILE` read.
+ *
+ * Created 0600 by the daemon, then handed to the engine's own user by
+ * {@link normalizeManagedSecretOwnership} (the daemon cannot chown), which
+ * leaves it `engineUser:engineGroup` 0400. Once handed over the daemon can no
+ * longer read it, so an existing file is never rewritten: the engine only
+ * reads it at first initialisation. Returns true when the file still needs the
+ * ownership hand-over (new, or still daemon-owned after a failed hand-over).
+ */
+export async function writeManagedRootPasswordFile(
+  dir: string,
+  path: string,
+  password: string,
+): Promise<boolean> {
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+  try {
+    const existing = await Deno.stat(path);
+    if (existing.uid !== Deno.uid()) return false;
+    await Deno.remove(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await Deno.writeTextFile(path, password, { mode: 0o600 });
+  return true;
+}
+
+/** Write the root password file and, when new, hand it to the engine user. */
+export async function provisionManagedRootPasswordFile(
+  layout: LayoutPaths,
+  payload: ManagedApplyPayload,
+  password: string,
+  engine: { engineUser: string; engineGroup: string; run: RunDockerFn },
+): Promise<void> {
+  const needsHandOver = await writeManagedRootPasswordFile(
+    managedSecretsDir(layout, payload.managedId),
+    managedRootPasswordPath(layout, payload.managedId),
+    password,
+  );
+  if (needsHandOver) {
+    await normalizeManagedSecretOwnership(
+      payload.image,
+      managedDir(layout, payload.managedId),
+      engine.engineUser,
+      engine.engineGroup,
+      engine.run,
+    );
+  }
+}
+
+/**
+ * Pick the compose form for this apply. A cluster created before the file
+ * form has a persisted compose with the password as an env var; when this
+ * apply changes nothing else about that compose, keep it byte-identical so
+ * `compose up` does not recreate (restart) the engine. Any apply that
+ * recreates the container anyway moves it to the file form.
+ */
+export async function chooseManagedCompose(
+  composePath: string,
+  payload: ManagedApplyPayload,
+) {
+  let previous: string | null = null;
+  try {
+    previous = await Deno.readTextFile(composePath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  if (previous !== null && composeUsesRootPasswordInterpolation(previous)) {
+    const legacy = normalizeManagedCompose(payload, {
+      legacyRootPasswordEnv: true,
+    });
+    if (legacy.composeYaml === previous) return legacy;
+  }
+  return normalizeManagedCompose(payload);
+}
+
 async function composeUpWithDockerRetry(
   run: RunDockerFn,
   args: string[],
@@ -309,7 +437,7 @@ async function composeUpWithDockerRetry(
   return await run(args);
 }
 
-type ComposeUpManagedEngineArgs = {
+export type ComposeUpManagedEngineArgs = {
   layout: LayoutPaths;
   payload: ManagedApplyPayload;
   composeYaml: string;
@@ -318,9 +446,12 @@ type ComposeUpManagedEngineArgs = {
   runDockerSetup: () => Promise<void>;
   logSink: CommandOutputSink;
   runStreamed: RunDockerStreamedFn;
+  run: RunDockerFn;
+  engineUser: string;
+  engineGroup: string;
 };
 
-async function composeUpManagedEngine({
+export async function composeUpManagedEngine({
   layout,
   payload,
   composeYaml,
@@ -329,6 +460,9 @@ async function composeUpManagedEngine({
   runDockerSetup,
   logSink,
   runStreamed,
+  run,
+  engineUser,
+  engineGroup,
 }: ComposeUpManagedEngineArgs): Promise<string> {
   const composePath = managedComposePath(layout, payload.managedId);
   const envPath = managedEnvFilePath(layout, payload.managedId);
@@ -336,12 +470,24 @@ async function composeUpManagedEngine({
 
   await rewriteDaemonOwnedFile(composePath, composeYaml, 0o640);
 
-  try {
-    await rewriteDaemonOwnedFile(
-      envPath,
-      `${MANAGED_ROOT_PASSWORD_VAR}=${rootCredential.password}\n`,
-      0o600,
+  const needsEnvFile = composeUsesRootPasswordInterpolation(composeYaml);
+  if (composeYaml.includes(`${MANAGED_ROOT_PASSWORD_FILE_SOURCE}:`)) {
+    await provisionManagedRootPasswordFile(
+      layout,
+      payload,
+      rootCredential.password,
+      { engineUser, engineGroup, run },
     );
+  }
+
+  try {
+    if (needsEnvFile) {
+      await rewriteDaemonOwnedFile(
+        envPath,
+        `${MANAGED_ROOT_PASSWORD_VAR}=${rootCredential.password}\n`,
+        0o600,
+      );
+    }
 
     logSink.setPhase(COMMAND_LOG_PHASES.MANAGED_APPLY);
     const up = await composeUpWithDockerRetry(
@@ -351,8 +497,7 @@ async function composeUpManagedEngine({
         }),
       [
         "compose",
-        "--env-file",
-        envPath,
+        ...(needsEnvFile ? ["--env-file", envPath] : []),
         "-p",
         project,
         "-f",
@@ -405,8 +550,17 @@ async function dropManagedUsers(
   appliedUsers.push(...dropped);
 }
 
+async function applyDatabaseOps(
+  ctx: ManagedEngineContext,
+  engine: ReturnType<typeof getManagedEngineRuntime>,
+  ops: ManagedApplyDatabaseOp[],
+): Promise<string[]> {
+  return ops.length === 0 ? [] : await engine.applyDatabases(ctx, ops);
+}
+
 /**
- * Primary path: credentials + databases + version.
+ * Primary path: databases created, credentials, user drops, monitor roles,
+ * databases dropped, version.
  * Standby is read-only for **user-data** mutation — never run credential /
  * database SQL here. Engines whose standby is configured by SQL (MySQL /
  * MariaDB) still run {@link ManagedEngineReplicationRuntime.configureStandby}
@@ -421,6 +575,7 @@ export async function applyManagedEngineState(
     runHostPrep?: () => Promise<void>;
     /** Decrypted per-fronting-server monitor roles from payload.monitorUsers. */
     monitorUsers?: Array<{ user: string; password: string }>;
+    topologyUser?: { user: string; password: string };
   },
 ): Promise<
   {
@@ -444,12 +599,28 @@ export async function applyManagedEngineState(
     return { appliedUsers: [], appliedDatabases: [], engineVersion };
   }
 
+  // Databases that must exist come first: credential grants reference them,
+  // and an apply that failed early (say, on a user delete) must not leave a
+  // database uncreated, or every retry would fail at its grant. Drops come
+  // last, after the users are dropped, so a deleted owner is handled by the
+  // engine's drop-user path before its database goes.
+  const databaseOps = payload.databases ?? [];
+  const appliedDatabases = await applyDatabaseOps(
+    ctx,
+    engine,
+    databaseOps.filter((op) => op.action === "create"),
+  );
   const appliedUsers = await engine.applyCredentials(ctx, credentials);
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
   await ensureProxySqlMonitorRoles(ctx, engine, deps);
-  const appliedDatabases = payload.databases
-    ? await engine.applyDatabases(ctx, payload.databases)
-    : [];
+  await ensureOrchestratorTopologyRole(ctx, engine, deps);
+  appliedDatabases.push(
+    ...await applyDatabaseOps(
+      ctx,
+      engine,
+      databaseOps.filter((op) => op.action === "drop"),
+    ),
+  );
   const engineVersion = await engine.readVersion(ctx);
   return { appliedUsers, appliedDatabases, engineVersion };
 }
@@ -484,12 +655,27 @@ async function configureStandbyIfSupported(
  * engine with its own identity. Standbys inherit the roles via WAL replay.
  * Legacy fallback: host-seeded monitor.cnf (older control planes).
  */
+async function ensureOrchestratorTopologyRole(
+  ctx: ManagedEngineContext,
+  engine: ReturnType<typeof getManagedEngineRuntime>,
+  deps?: {
+    topologyUser?: { user: string; password: string };
+  },
+): Promise<void> {
+  if (!engine.ensureOrchestratorTopology) return;
+  const topologyUser = deps?.topologyUser;
+  if (!topologyUser) return;
+  await engine.ensureOrchestratorTopology(ctx, topologyUser);
+  logInfo("managed", "managed.apply ensured Orchestrator topology role");
+}
+
 async function ensureProxySqlMonitorRoles(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   deps?: {
     runHostPrep?: () => Promise<void>;
     monitorUsers?: Array<{ user: string; password: string }>;
+    topologyUser?: { user: string; password: string };
   },
 ): Promise<void> {
   if (!engine.ensureProxySqlMonitor) return;
@@ -521,21 +707,6 @@ async function ensureProxySqlMonitorRoles(
       "managed.apply skipped ProxySQL monitor role (monitor.cnf missing)",
     );
   }
-}
-
-/** Pure member DTO for needs_resync early-return path. Exported for tests. */
-export function buildNeedsResyncMember(
-  memberId: string,
-): NonNullable<ManagedApplyResult["member"]> {
-  return {
-    memberId,
-    role: "replica",
-    status: "needs_resync",
-    replication: {
-      state: "needs_resync",
-      observedAt: new Date().toISOString(),
-    },
-  };
 }
 
 function buildManagedApplyResult(
@@ -570,6 +741,20 @@ function buildManagedApplyResult(
 }
 
 /**
+ * A demoted former primary carries the fence's own standby.signal, so its
+ * diverged data would probe as a standby. Only a forced re-seed (fresh
+ * basebackup) may bring it back as a replica.
+ */
+async function isUnforcedDemotedStandbyApply(
+  layout: LayoutPaths,
+  payload: ManagedApplyPayload,
+): Promise<boolean> {
+  if (payload.replication?.role !== "standby") return false;
+  if (payload.forceResync === true) return false;
+  return await isManagedMemberDemoted(layout, payload.managedId);
+}
+
+/**
  * Volume already has data that is not a standby. Stop any running project so
  * we never promote it as a writable primary, and return needs_resync without
  * compose up or engine SQL mutation.
@@ -579,16 +764,7 @@ async function returnStandbyNeedsResync(
   redact: (text: string) => string,
   run: RunDockerFn,
 ): Promise<ManagedApplyResult> {
-  const project = managedComposeProject(payload.managedId);
-  const stop = await run(["compose", "-p", project, "stop"]);
-  if (!stop.success) {
-    logInfo(
-      "managed",
-      `needs_resync compose stop soft-failed project=${project}: ${
-        redact(stop.stderr || stop.stdout || "compose stop failed")
-      }`,
-    );
-  }
+  await stopManagedProjectForResync(payload.managedId, redact, run);
 
   const observedAt = new Date().toISOString();
   const member = payload.memberId
@@ -608,7 +784,7 @@ async function returnStandbyNeedsResync(
   );
 }
 
-async function collectMemberHealth(
+export async function collectMemberHealth(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   payload: ManagedApplyPayload,
@@ -642,6 +818,26 @@ async function collectMemberHealth(
     };
   }
 
+  // A primary with no replication payload is a single-member cluster: every
+  // replication slot it still holds belongs to a replica that was removed, and
+  // would keep all WAL until the disk is full.
+  // Best effort: a slot that became active between the list and the drop, or
+  // a transient SQL error, must not fail the apply of a single-member cluster
+  // (it did no SQL here before); the next apply repeats the sweep.
+  if (
+    payload.memberRole === "primary" && engine.replication?.pruneOrphanSlots
+  ) {
+    try {
+      await engine.replication.pruneOrphanSlots(ctx, []);
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managedId=${payload.managedId} orphan replication slot sweep failed:`,
+        sanitizeForLog(err),
+      );
+    }
+  }
+
   return {
     memberId: payload.memberId,
     role: payload.memberRole,
@@ -651,14 +847,50 @@ async function collectMemberHealth(
 
 export async function handleManagedApply(
   payload: ManagedApplyPayload,
-  _daemonReceivedAt: string,
+  daemonReceivedAt: string,
   deps?: ManagedApplyHandlerDeps,
 ): Promise<ManagedApplyResult> {
   assertSafeManagedIdentifiers(payload);
+  const layout = resolveLayout(Deno.env.toObject());
+  // One apply or destroy per managed id at a time, and a destroyed member is
+  // never rebuilt: the check runs inside the lock, so an apply that waited
+  // behind a destroy sees its marker.
+  return await withManagedLifecycleLock(layout, payload.managedId, async () => {
+    if (
+      await isManagedMemberDestroyed(
+        layout.stateDir,
+        payload.managedId,
+        payload.memberId,
+      )
+    ) {
+      throw new ManagedDestroyedError(payload.managedId);
+    }
+    const result = await applyManagedEngine(
+      payload,
+      daemonReceivedAt,
+      layout,
+      deps,
+    );
+    const runDocker = deps?.runDocker ?? defaultRunDocker;
+    await maybeClearDemotedMarkerAfterApply(
+      layout,
+      payload,
+      result.member?.status,
+      (args) => runDocker(args),
+    );
+    return result;
+  });
+}
+
+async function applyManagedEngine(
+  payload: ManagedApplyPayload,
+  _daemonReceivedAt: string,
+  layout: LayoutPaths,
+  deps?: ManagedApplyHandlerDeps,
+): Promise<ManagedApplyResult> {
   // Fail before any state is materialized: a public listener without org-CA
   // material must never reach materialize/compose up.
   assertPublicPrivateListenerTls(payload);
-  const layout = resolveLayout(Deno.env.toObject());
   const engine = getManagedEngineRuntime(payload.engine);
   const run = deps?.runDocker ?? defaultRunDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
@@ -688,10 +920,14 @@ export async function handleManagedApply(
     run,
   );
 
-  const { decrypted, redact, rootCredential, monitorUsers } =
+  const { decrypted, redact, rootCredential, monitorUsers, topologyUser } =
     await requireDecryptedCredentials(payload, deps);
   // Same deny-set for the bounded WS error text and the streamed transcript.
   logSink.addSecrets(decrypted.plaintexts);
+
+  if (await isUnforcedDemotedStandbyApply(layout, payload)) {
+    return await returnStandbyNeedsResync(payload, redact, run);
+  }
 
   // Standby bootstrap must run before compose up (empty volume → avoid dual primary).
   if (
@@ -748,7 +984,10 @@ export async function handleManagedApply(
     }
   }
 
-  const { composeYaml, composeServiceName } = normalizeManagedCompose(payload);
+  const { composeYaml, composeServiceName } = await chooseManagedCompose(
+    managedComposePath(layout, payload.managedId),
+    payload,
+  );
   const project = await composeUpManagedEngine({
     layout,
     payload,
@@ -758,9 +997,13 @@ export async function handleManagedApply(
     runDockerSetup,
     logSink,
     runStreamed,
+    run,
+    engineUser: engine.containerUser,
+    engineGroup: engine.containerGroup,
   });
 
-  // Scope the public listener once the publish exists; never blocks apply.
+  // Scope a public listener once the publish exists; drop the legacy chain
+  // when the listener is gone. Never blocks apply.
   await reconcileManagedPublicFirewallBestEffort(payload);
 
   const engineContainers = await collectManagedContainers(project, redact, run);
@@ -787,7 +1030,7 @@ export async function handleManagedApply(
       engine,
       payload,
       decrypted.credentials,
-      { runHostPrep, monitorUsers },
+      { runHostPrep, monitorUsers, topologyUser },
     );
 
     const member = await collectMemberHealth(

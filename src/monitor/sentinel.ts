@@ -11,13 +11,36 @@ import {
   createHostSummaryCollector,
   type HostSummaryCollector,
 } from "./host-summary.ts";
+import { CrashLoopGuard, type StopContainer } from "./crash-loop-guard.ts";
 import { normalizeContainer } from "./normalize.ts";
 import type { MonitorResourceState } from "./protocol.ts";
+import type { ServiceRunState } from "../contracts/service-run-state.ts";
+import {
+  deriveServiceRunStates,
+  type ServiceContainerObservation,
+  serviceIdForContainer,
+  ServiceRunStateStamper,
+  wantsLastLogLine,
+} from "./service-run-state.ts";
 
 export type SentinelOptions = {
   dockerMonitor?: DockerMonitor;
   hostSummaryCollector?: HostSummaryCollector;
+  /**
+   * Reads the last log line of a failing container (`docker logs --tail 5`).
+   * Without it service run states carry no log line, only the exit code.
+   */
+  fetchLastLogLine?: (containerId: string) => Promise<string>;
+  /**
+   * Stops a service container that kept restarting past the limit (10
+   * restarts without staying up for 60 s). Without it nothing is stopped and
+   * Docker's own restart policy decides.
+   */
+  stopContainer?: StopContainer;
 };
+
+/** A fetched log line, valid for the restart count it was read at. */
+type CachedLogLine = { restartCount: number; line: string };
 
 export type SentinelTransitionCallback = (
   bundle: MonitorDeliveryBundle<MonitorTransitionPayload>,
@@ -48,6 +71,13 @@ export class Sentinel {
   readonly #hostSummaryCollector: HostSummaryCollector;
   readonly #delta = createMonitorDeltaTracker();
   readonly #transitionCallbacks = new Set<SentinelTransitionCallback>();
+  readonly #fetchLastLogLine: SentinelOptions["fetchLastLogLine"];
+  readonly #stamper = new ServiceRunStateStamper();
+  readonly #crashGuard: CrashLoopGuard | undefined;
+  readonly #logLines = new Map<string, CachedLogLine>();
+  readonly #logFetchesInFlight = new Set<string>();
+  /** True once the Docker monitor's first listing is in; before that the list is empty, not true. */
+  #containersKnown = false;
   #signal: AbortSignal | undefined;
   #unsubscribe: (() => void) | undefined;
   readonly #ready: Promise<void>;
@@ -65,6 +95,10 @@ export class Sentinel {
       createEmptyContainerMonitor();
     this.#hostSummaryCollector = options.hostSummaryCollector ??
       createHostSummaryCollector();
+    this.#fetchLastLogLine = options.fetchLastLogLine;
+    if (options.stopContainer) {
+      this.#crashGuard = new CrashLoopGuard(options.stopContainer);
+    }
   }
 
   onTransition(callback: SentinelTransitionCallback): () => void {
@@ -102,6 +136,20 @@ export class Sentinel {
     const instance = await this.#hostSummaryCollector.collect();
     const resources = this.#collectNormalizedResources();
     return this.#delta.buildHeartbeat(instance, resources);
+  }
+
+  /**
+   * Run state of every service with a container on this host, or `undefined`
+   * when Docker is not being watched. A failing container whose log line is
+   * not cached yet starts a background fetch; the next call carries it.
+   */
+  serviceRunStates(now: Date = new Date()): ServiceRunState[] | undefined {
+    if (!this.#dockerEnabled || !this.#containersKnown) return undefined;
+    const observations = this.#observeServices(now);
+    return this.#stamper.stamp(
+      deriveServiceRunStates(observations, now.getTime()),
+      now,
+    );
   }
 
   handleAck(acceptedSequence: number): void {
@@ -144,6 +192,76 @@ export class Sentinel {
     return resources;
   }
 
+  /** Collect the service containers, apply the crash-loop limit and queue log fetches. */
+  #observeServices(now: Date = new Date()): ServiceContainerObservation[] {
+    const collected = this.#collectServiceObservations();
+    const observations = this.#crashGuard
+      ? this.#crashGuard.review(collected, now.getTime())
+      : collected;
+    this.#scheduleLogFetches(observations);
+    return observations;
+  }
+
+  #collectServiceObservations(): ServiceContainerObservation[] {
+    const observations: ServiceContainerObservation[] = [];
+    for (const summary of this.#dockerMonitor.getContainers()) {
+      const inspect = this.#dockerMonitor.getContainerInspect(summary.Id);
+      const serviceId = serviceIdForContainer(
+        inspect?.Config?.Labels ?? summary.Labels,
+      );
+      if (!serviceId) continue;
+      const cached = this.#logLines.get(summary.Id);
+      observations.push({
+        serviceId,
+        containerId: summary.Id,
+        summary,
+        inspect,
+        ...(cached ? { lastLogLine: cached.line } : {}),
+      });
+    }
+    return observations;
+  }
+
+  #scheduleLogFetches(observations: ServiceContainerObservation[]): void {
+    const fetchLine = this.#fetchLastLogLine;
+    if (!fetchLine) return;
+    const liveIds = new Set(observations.map((obs) => obs.containerId));
+    for (const id of this.#logLines.keys()) {
+      if (!liveIds.has(id)) this.#logLines.delete(id);
+    }
+    for (const obs of observations) {
+      if (!wantsLastLogLine(obs)) continue;
+      const restartCount = obs.inspect?.RestartCount ?? 0;
+      if (this.#logLines.get(obs.containerId)?.restartCount === restartCount) {
+        continue;
+      }
+      if (this.#logFetchesInFlight.has(obs.containerId)) continue;
+      void this.#fetchAndCache(fetchLine, obs);
+    }
+  }
+
+  async #fetchAndCache(
+    fetchLine: (containerId: string) => Promise<string>,
+    obs: ServiceContainerObservation,
+  ): Promise<void> {
+    this.#logFetchesInFlight.add(obs.containerId);
+    try {
+      const line = await fetchLine(obs.containerId);
+      this.#logLines.set(obs.containerId, {
+        restartCount: obs.inspect?.RestartCount ?? 0,
+        line,
+      });
+    } catch (err) {
+      logWarn(
+        "sentinel",
+        "last log line fetch failed:",
+        err instanceof Error ? err.message : err,
+      );
+    } finally {
+      this.#logFetchesInFlight.delete(obs.containerId);
+    }
+  }
+
   async #bootstrap(signal: AbortSignal): Promise<void> {
     try {
       if (!this.#dockerEnabled) {
@@ -153,6 +271,7 @@ export class Sentinel {
 
       await this.#dockerMonitor.waitUntilReady();
       if (signal.aborted) return;
+      this.#containersKnown = true;
 
       this.#delta.seedTracked(this.#collectNormalizedResources());
 
@@ -175,6 +294,9 @@ export class Sentinel {
 
     try {
       const resourcesAfter = this.#collectNormalizedResources();
+      // Warm the log-line cache so the next presence tick already has it, and
+      // stop a crash loop as soon as Docker reports the restart that crosses it.
+      this.#observeServices();
 
       if (change.removed) {
         const resourceKey = this.#resourceKeyForChange(change);

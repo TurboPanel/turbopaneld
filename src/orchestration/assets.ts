@@ -331,6 +331,26 @@ export const SITE_OPENLITESPEED_APPLY_PLAYBOOK = join(
   "site-openlitespeed-apply.yml",
 );
 /**
+ * Removes PHP series no site uses any more: sury php-fpm packages, the vendored
+ * lsphp tree, and the series' config/log/runtime directories. The daemon passes
+ * `php_series_prune`; the role refuses a series with a site pool or runtime.
+ */
+export const PHP_SERIES_PRUNE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "php-series-prune.yml",
+);
+/**
+ * Removes web engines (nginx, Apache, OpenLiteSpeed) no site uses any more:
+ * the vendored tree, the `turbopanel-<engine>` unit and its config directory.
+ * The daemon passes `engine_prune`; the role refuses an engine with a site.
+ */
+export const ENGINE_PRUNE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "engine-prune.yml",
+);
+/**
  * Vendors the **tenant** Node release for native `serviceKind: node` apps.
  * Deliberately separate from the `node-runtime` role that vendors the
  * instance's own Node: bumping the runtime tenants execute must not perturb the
@@ -340,6 +360,16 @@ export const NODE_APP_RUNTIME_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
   "node-app-runtime-apply.yml",
+);
+/**
+ * Vendors the **tenant** Deno release for native `runtime: deno` apps, under
+ * `vendor/deno-app/<series>/current`. Nothing else on the host runs it: the
+ * panel itself is not started from this tree.
+ */
+export const DENO_APP_RUNTIME_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "deno-app-runtime-apply.yml",
 );
 export const DAEMON_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,

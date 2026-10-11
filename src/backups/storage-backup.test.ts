@@ -45,7 +45,8 @@ function payload(
   return {
     copyId: COPY,
     copyProvider: "docker",
-    volumeName: "shop_uploads",
+    volumeName: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
+    storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     action: "create",
     backupId: "bk_manual",
     ...overrides,
@@ -69,6 +70,12 @@ function deps(
         return Promise.resolve(
           dockerResult(options.pullWorks ?? true, "registry unreachable"),
         );
+      }
+      if (args[0] === "volume") {
+        return Promise.resolve({
+          ...dockerResult(true),
+          stdout: JSON.stringify({ Driver: "local", Labels: {} }),
+        });
       }
       return Promise.resolve(dockerResult(true));
     },
@@ -189,7 +196,8 @@ test("the payload parser refuses a policy id on create and unsafe sources", () =
   const base = {
     copyId: COPY,
     copyProvider: "docker",
-    volumeName: "shop_uploads",
+    volumeName: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
+    storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     action: "create",
     backupId: "bk_manual",
   };
@@ -204,7 +212,9 @@ test("the payload parser refuses a policy id on create and unsafe sources", () =
         copyProvider: "path",
         volumeName: undefined,
         hostPath: "/srv/users/../etc",
+        ownerUsername: "shop",
       },
+      { ...base, storageId: undefined },
       { ...base, backupId: "../x" },
     ]
   ) {

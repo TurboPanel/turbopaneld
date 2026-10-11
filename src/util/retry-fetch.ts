@@ -18,7 +18,25 @@ export type RetryFetchOptions = {
   delayMs?: (retry: number) => number;
   /** Longest wait a `Retry-After` header may impose. Default 10 s. */
   maxRetryAfterMs?: number;
+  /**
+   * When true a `Retry-After` can only lengthen the wait (the larger of the
+   * backoff and the capped header), so a short header never shrinks the
+   * total retry budget. Default false: the capped header replaces the backoff.
+   */
+  retryAfterOnlyExtends?: boolean;
+  /** Statuses worth retrying. Default 429, 502, 503, 504. */
+  statuses?: ReadonlySet<number>;
+  /** Retry connection-style network errors. Default true. */
+  networkErrors?: boolean;
+  /** Called before each wait: `retry` is the attempt that just failed (1-based). */
+  onRetry?: (info: RetryNotice) => void;
   sleep?: (ms: number) => Promise<void>;
+};
+
+export type RetryNotice = {
+  retry: number;
+  status: number | null;
+  delayMs: number;
 };
 
 const DEFAULT_ATTEMPTS = 4;
@@ -69,7 +87,11 @@ function waitBeforeRetry(
   if (status !== 429) return base;
   const asked = parseRetryAfterMs(retryAfterHeader);
   if (asked === null) return base;
-  return Math.min(asked, options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS);
+  const capped = Math.min(
+    asked,
+    options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS,
+  );
+  return options.retryAfterOnlyExtends ? Math.max(base, capped) : capped;
 }
 
 /** What the retry loop needs to know about a result of type `T`. */
@@ -88,12 +110,16 @@ export function retryTransient<T>(
 ): Promise<T> {
   const attempts = options.attempts ?? DEFAULT_ATTEMPTS;
   const sleep = options.sleep ?? defaultSleep;
+  const statuses = options.statuses ?? TRANSIENT_STATUSES;
+  const retryNetwork = options.networkErrors ?? true;
 
   const again = async (n: number, result: T | null): Promise<T> => {
     const status = result === null ? null : view.status(result);
     const header = result === null ? null : view.retryAfter(result);
     if (result !== null) await view.discard?.(result);
-    await sleep(waitBeforeRetry(status, header, n, options));
+    const delayMs = waitBeforeRetry(status, header, n, options);
+    options.onRetry?.({ retry: n, status, delayMs });
+    await sleep(delayMs);
     return attempt(n + 1);
   };
 
@@ -102,10 +128,12 @@ export function retryTransient<T>(
     try {
       result = await doFetch();
     } catch (err) {
-      if (n >= attempts || !isTransientNetworkError(err)) throw err;
+      if (n >= attempts || !retryNetwork || !isTransientNetworkError(err)) {
+        throw err;
+      }
       return again(n, null);
     }
-    if (n >= attempts || !TRANSIENT_STATUSES.has(view.status(result))) {
+    if (n >= attempts || !statuses.has(view.status(result))) {
       return result;
     }
     return again(n, result);

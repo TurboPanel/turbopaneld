@@ -570,7 +570,7 @@ async function readSftpChroot(
  *
  * With `prune: true`, `principals` is the **complete** managed set for this
  * host and an account missing from it has its key file removed — the same
- * containment doctrine as runtime entitlements: the control plane resolves the
+ * containment doctrine as SSH access groups: the control plane resolves the
  * effective set, the daemon reconciles to it, and "absent" is a real
  * instruction rather than an absence of one. A caller that holds only part of
  * the host (a deploy, which describes one environment) must leave `prune` off,

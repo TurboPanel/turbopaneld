@@ -23,6 +23,7 @@ import {
   resolveReleasePaths,
 } from "./release-layout.ts";
 import { swapCurrentSymlink } from "./promote.ts";
+import type { NativeAppBuildContext } from "./build.ts";
 import {
   applySourceReleases,
   resolveReleaseServiceId,
@@ -114,17 +115,15 @@ async function mkdirReleaseTree(
     releaseDir: string;
   },
 ): Promise<void> {
-  for (
-    const dir of [
+  await Promise.all(
+    [
       paths.sitesDir,
       paths.siteDir,
       paths.releasesDir,
       paths.sharedDir,
       paths.releaseDir,
-    ]
-  ) {
-    await Deno.mkdir(dir, { recursive: true });
-  }
+    ].map((dir) => Deno.mkdir(dir, { recursive: true })),
+  );
 }
 
 const PRINCIPAL = {
@@ -180,21 +179,22 @@ function nativeDeps(sink: ReturnType<typeof fakeLogSink>["sink"]) {
   };
 }
 
-test("resolveReleaseServiceId skips a hosting with an empty serviceId", () => {
+test("resolveReleaseServiceId ignores hostings when releaseServiceId is absent", () => {
   const payload = basePayload({
     hostings: [{
       hostingId: "host-empty",
       composeServiceName: "web",
-      serviceId: "",
+      serviceId: "svc-hosting-only",
       hostnames: ["app.example.com"],
     }],
-    ingressServices: [{
+    nativeAppServices: [{
       composeServiceName: "web",
-      serviceId: "svc-ingress",
-      containerName: "svc-ingress-in",
+      serviceId: "svc-native",
+      listenPort: 18080,
+      framework: "auto",
     }],
   });
-  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-ingress");
+  assertEquals(resolveReleaseServiceId(payload, "web"), "svc-native");
 });
 
 test("applySourceReleases fails a railpack rollback with no release record", async () => {
@@ -409,6 +409,7 @@ test("applySourceReleases rollback restores standaloneOutput and commit metadata
             baseSource({
               releaseId: "rel-new",
               rollbackToReleaseId: "rel-old",
+              releaseServiceId: serviceId,
               principal: PRINCIPAL,
             }),
           ],
@@ -519,6 +520,8 @@ test("applySourceReleases railpack prune logs superseded releases and optional m
               frontendLayoutDir: "/tmp/frontend",
               frontendDigest: "sha256:front",
             }),
+          // A development host: the prepare step runs unsandboxed here.
+          sandboxedBuilds: false,
           runRailpackBuildFn: (params) => {
             assertEquals(params.redactSummary?.("token"), "token");
             return Promise.resolve({
@@ -574,7 +577,7 @@ test("applySourceReleases native builds honor subdirectory, credentials, and cur
       let capturedSubdirectory: string | undefined;
       let capturedOutput: string | undefined;
       let capturedNodeEnv: string | undefined;
-      let prepareCalled = false;
+      let prepareContext: NativeAppBuildContext | undefined;
       const decryptSecrets: DecryptSecretsFn = () =>
         Promise.resolve(["ghs_decrypted"]);
 
@@ -628,12 +631,13 @@ test("applySourceReleases native builds honor subdirectory, credentials, and cur
             assertEquals(params.redactSummary?.("secret"), "secret");
             return Promise.resolve();
           },
-          prepareNativeAppBuildOutputFn: () => {
-            prepareCalled = true;
+          prepareNativeAppBuildOutputFn: (context) => {
+            prepareContext = context;
             return Promise.resolve({
               standaloneOutput: false,
               staticExport: false,
               outputDirectory: undefined,
+              start: { kind: "file", path: "server.js" },
             });
           },
           promoteReleaseFn: async (params) => {
@@ -655,7 +659,11 @@ test("applySourceReleases native builds honor subdirectory, credentials, and cur
       assertEquals(capturedSubdirectory, "apps/web");
       assertEquals(capturedOutput, "dist");
       assertEquals(capturedNodeEnv, "development");
-      assertEquals(prepareCalled, false);
+      // The declared output directory is the release root as written: only
+      // how it starts is still worked out, inside it.
+      assertEquals(prepareContext?.outputDirectory, "dist");
+      assertEquals(prepareContext?.detectStart, true);
+      assertEquals(row.nativeStart, { kind: "file", path: "server.js" });
       assertEquals(row.previousReleaseId, "rel-old");
       assertEquals(row.commitMessage, "feat");
       assertEquals(row.commitAuthor, "dev@example.com");
@@ -845,6 +853,7 @@ test("applySourceReleases records pending before the promote (a kill mid-promote
           hostings,
           sourceMaterial: [baseSource({
             commitSha: "site-commit",
+            releaseServiceId: serviceId,
             principal: PRINCIPAL,
           })],
         });
@@ -1056,7 +1065,11 @@ test("applySourceReleases cuts over to a re-sent release this host already publi
             serviceId,
             hostnames: ["resent.example.com"],
           }],
-          sourceMaterial: [baseSource({ commitSha, principal: PRINCIPAL })],
+          sourceMaterial: [baseSource({
+            commitSha,
+            releaseServiceId: serviceId,
+            principal: PRINCIPAL,
+          })],
         });
       const calls: string[] = [];
       const deps = {

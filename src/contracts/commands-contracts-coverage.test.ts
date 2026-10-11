@@ -255,6 +255,38 @@ test("parseEnvironmentDeployPayload round-trips managed-directory site with cron
   assertEquals(site?.principal?.username, "site_user");
 });
 
+test("parseEnvironmentDeployPayload keeps sealed site variables apart from webEnv", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "site",
+      hostnames: ["site.example.test"],
+      web: {
+        env: { APP_ENV: "production" },
+        secretEnv: { SITE_VAR: "tpdaemon.abc", BAD: 7 },
+      },
+    }],
+    sites: [{
+      composeServiceName: "site",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      webEnv: { APP_ENV: "production" },
+      webSecretEnv: { SITE_VAR: "tpdaemon.abc", BAD: 7 },
+    }],
+  });
+  const site = payload.sites?.[0];
+  assertEquals(site?.webEnv, { APP_ENV: "production" });
+  // Only string envelopes survive the parse.
+  assertEquals(site?.webSecretEnv, { SITE_VAR: "tpdaemon.abc" });
+  assertEquals(payload.hostings[0]?.web?.secretEnv, {
+    SITE_VAR: "tpdaemon.abc",
+  });
+});
+
 test("parseEnvironmentDeployPayload rejects cron and managed-directory without principal", () => {
   assertThrows(
     () =>
@@ -380,6 +412,37 @@ test("parseEnvironmentDeployPayload round-trips nativeAppServices optional limit
   assertEquals(app?.nodeVersion, "22.11");
   assertEquals(app?.resources?.cpus, 2);
   assertEquals(app?.accountLimits?.tasksMax, 4);
+});
+
+test("parseEnvironmentDeployPayload carries a Deno native app's runtime and denoVersion", () => {
+  const base = {
+    composeServiceName: "api",
+    serviceId: "svc-native-1",
+    listenPort: 13000,
+    framework: "auto",
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    nativeAppServices: [
+      { ...base, runtime: "deno", denoVersion: "2.9" },
+      { ...base, composeServiceName: "worker", serviceId: "svc-native-2" },
+    ],
+  });
+  assertEquals(payload.nativeAppServices?.[0]?.runtime, "deno");
+  assertEquals(payload.nativeAppServices?.[0]?.denoVersion, "2.9");
+  // A Node app's wire shape is untouched.
+  assertEquals(payload.nativeAppServices?.[1]?.composeServiceName, "worker");
+  assertEquals("runtime" in (payload.nativeAppServices?.[1] ?? {}), false);
+  for (const bad of [{ runtime: "bun" }, { denoVersion: "latest" }]) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          nativeAppServices: [{ ...base, ...bad }],
+        }),
+      TypeError,
+    );
+  }
 });
 
 test("parseEnvironmentDeployPayload rejects invalid nativeAppServices fields", () => {
@@ -545,10 +608,10 @@ test("parseEnvironmentDeployPayload rejects invalid secretPlan and oversized env
       parseEnvironmentDeployPayload({
         ...DEPLOY_BASE,
         secretPlan: [{
-          key: "DB_PASS",
+          key: "SITE_VAR",
           composeServiceName: "web",
           source: "../escape",
-          target: "DB_PASS",
+          target: "SITE_VAR",
           relativePath: "db_pass",
         }],
       }),
@@ -611,7 +674,7 @@ test("parseEnvironmentDeployPayload rejects invalid generation replicaCounts and
   );
 });
 
-test("parseEnvironmentDeployPayload round-trips principalMaterial runtimes and sshKeys", () => {
+test("parseEnvironmentDeployPayload ignores a leftover runtimes field and round-trips sshKeys", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
     principalMaterial: [{
@@ -619,16 +682,17 @@ test("parseEnvironmentDeployPayload round-trips principalMaterial runtimes and s
       username: "deploy_user",
       home: "/srv/users/deploy_user",
       shell: "/bin/bash",
+      // A leftover `runtimes` field from an older control plane is ignored.
       runtimes: [{ runtime: "php", series: "8.4" }],
-      accessGroups: ["tpnodeapp"],
+      accessGroups: ["tpshell"],
       sshKeys: [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGEmvBcjT+NvO6sokGNoJ0zA3dr0nhIQhhZ3wP220uFZ",
       ],
     }],
   });
   const principal = payload.principalMaterial?.[0];
-  assertEquals(principal?.runtimes?.[0]?.series, "8.4");
-  assertEquals(principal?.accessGroups, ["tpnodeapp"]);
+  assertEquals("runtimes" in (principal ?? {}), false);
+  assertEquals(principal?.accessGroups, ["tpshell"]);
   assertEquals(principal?.sshKeys?.length, 1);
 });
 
@@ -1386,5 +1450,52 @@ test("parseFirewallReconcileResult round-trips the daemon report", () => {
     () => parseFirewallReconcileResult({ generation: 7 }),
     Error,
     "mode must be",
+  );
+});
+
+test("parseEnvironmentDeployPayload keeps a www mode, drops off, and rejects unknown values", () => {
+  const withHosting = (extra: Record<string, unknown>) =>
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      hostings: [{
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["example.com"],
+        ...extra,
+      }],
+      hostingIngressNetwork: HOSTING_INGRESS_NETWORK,
+    });
+  for (const www of ["both", "www-to-root", "root-to-www"]) {
+    assertEquals(withHosting({ www }).hostings[0]?.www, www);
+  }
+  assertEquals(withHosting({ www: "off" }).hostings[0]?.www, undefined);
+  assertEquals(withHosting({}).hostings[0]?.www, undefined);
+  for (const www of ["yes", true]) {
+    assertThrows(
+      () => withHosting({ www }),
+      TypeError,
+      "hostings[].www must be off, both, www-to-root, or root-to-www",
+    );
+  }
+  // An older control plane's on/off flag is honoured, never dropped silently.
+  assertEquals(
+    withHosting({ wwwRedirect: true }).hostings[0]?.www,
+    "www-to-root",
+  );
+  assertEquals(
+    withHosting({ wwwRedirect: true, hostnames: ["www.example.com"] })
+      .hostings[0]?.www,
+    "root-to-www",
+  );
+  assertEquals(
+    withHosting({ wwwRedirect: true, www: "both" }).hostings[0]?.www,
+    "both",
+  );
+  assertEquals(withHosting({ wwwRedirect: false }).hostings[0]?.www, undefined);
+  assertThrows(
+    () => withHosting({ wwwRedirect: "yes" }),
+    TypeError,
+    "hostings[].wwwRedirect must be a boolean",
   );
 });

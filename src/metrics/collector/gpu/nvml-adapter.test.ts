@@ -428,7 +428,7 @@ function fakeLibrary(
   };
 }
 
-test("createNvmlBindingFromLibrary decodes every NVML field from the FFI out-buffers", () => {
+test("createNvmlBindingFromLibrary decodes every NVML field from the FFI out-buffers", async () => {
   const seenBusIds: Uint8Array[] = [];
   let closed = false;
   const binding = createNvmlBindingFromLibrary(fakeLibrary({
@@ -441,8 +441,8 @@ test("createNvmlBindingFromLibrary decodes every NVML field from the FFI out-buf
     closed = true;
   }));
 
-  assertEquals(binding.init(), true);
-  const handle = binding.getHandleByPciBusId("0000:01:00.0");
+  assertEquals(await binding.init(), true);
+  const handle = await binding.getHandleByPciBusId("0000:01:00.0");
   if (handle === null) {
     throw new TypeError("expected a decoded NVML handle");
   }
@@ -450,28 +450,34 @@ test("createNvmlBindingFromLibrary decodes every NVML field from the FFI out-buf
     new TextDecoder().decode(seenBusIds[0]).startsWith("0000:01:00.0"),
     true,
   );
-  assertEquals(binding.getUtilizationRates(handle), {
+  assertEquals(await binding.getUtilizationRates(handle), {
     gpuPercent: 41,
     memoryPercent: 17,
   });
-  assertEquals(binding.getMemoryUsedBytes(handle), 8 * 1024 * 1024 * 1024);
-  assertEquals(binding.getTemperatureCelsius(handle), 62);
-  assertEquals(binding.getPowerWatts(handle), 215);
-  assertEquals(binding.getPcieThroughputBytesPerSecond(handle), {
+  assertEquals(
+    await binding.getMemoryUsedBytes(handle),
+    8 * 1024 * 1024 * 1024,
+  );
+  assertEquals(await binding.getTemperatureCelsius(handle), 62);
+  assertEquals(await binding.getPowerWatts(handle), 215);
+  assertEquals(await binding.getPcieThroughputBytesPerSecond(handle), {
     rx: 8 * 1024,
     tx: 4 * 1024,
   });
-  assertEquals(binding.getThermalViolationNanoseconds(handle), 3_000_000_000);
-  assertEquals(binding.getEccDoubleBitAggregateTotal(handle), 5);
-  assertEquals(binding.getLastXidErrorCode(handle), 79);
-  assertEquals(binding.getRemappedRows(handle), {
+  assertEquals(
+    await binding.getThermalViolationNanoseconds(handle),
+    3_000_000_000,
+  );
+  assertEquals(await binding.getEccDoubleBitAggregateTotal(handle), 5);
+  assertEquals(await binding.getLastXidErrorCode(handle), 79);
+  assertEquals(await binding.getRemappedRows(handle), {
     correctable: 4,
     uncorrectable: 1,
     pending: true,
     failureOccurred: false,
   });
-  assertEquals(binding.getRetiredPagesPending(handle), true);
-  binding.shutdown();
+  assertEquals(await binding.getRetiredPagesPending(handle), true);
+  await binding.shutdown();
   assertEquals(closed, true);
 });
 
@@ -482,7 +488,7 @@ test({
   // that needs an unscoped FFI grant (Deno.UnsafePointer.create) throws
   // NotCapable there and every NVML field reads as unavailable.
   permissions: { ffi: ["/usr/lib"] },
-  fn() {
+  async fn() {
     const seenHandles: bigint[] = [];
     const binding = createNvmlBindingFromLibrary(fakeLibrary({
       nvmlDeviceGetHandleByPciBusId_v2: (_bus, out) => {
@@ -496,10 +502,10 @@ test({
         return 0;
       },
     }));
-    const handle = binding.getHandleByPciBusId("0000:01:00.0");
+    const handle = await binding.getHandleByPciBusId("0000:01:00.0");
     assertEquals(handle, 0x7f00_1234_5000n);
     if (handle === null) throw new TypeError("expected a decoded NVML handle");
-    assertEquals(binding.getUtilizationRates(handle), {
+    assertEquals(await binding.getUtilizationRates(handle), {
       gpuPercent: 9,
       memoryPercent: 3,
     });
@@ -507,17 +513,17 @@ test({
   },
 });
 
-test("createNvmlBindingFromLibrary treats a null nvmlDevice_t as no handle", () => {
+test("createNvmlBindingFromLibrary treats a null nvmlDevice_t as no handle", async () => {
   const binding = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlDeviceGetHandleByPciBusId_v2: (_bus, out) => {
       writeU64(out, 0, 0n);
       return 0;
     },
   }));
-  assertEquals(binding.getHandleByPciBusId("0000:01:00.0"), null);
+  assertEquals(await binding.getHandleByPciBusId("0000:01:00.0"), null);
 });
 
-test("createNvmlBindingFromLibrary nulls a field when that NVML call returns non-success", () => {
+test("createNvmlBindingFromLibrary nulls a field when that NVML call returns non-success", async () => {
   const binding = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlDeviceGetHandleByPciBusId_v2: () => NVML_FAIL,
     nvmlDeviceGetUtilizationRates: () => NVML_FAIL,
@@ -532,41 +538,41 @@ test("createNvmlBindingFromLibrary nulls a field when that NVML call returns non
     nvmlDeviceGetRetiredPagesPendingStatus: () => NVML_FAIL,
   }));
   const dummy: bigint = 0x100n;
-  assertEquals(binding.getHandleByPciBusId("0000:01:00.0"), null);
-  assertEquals(binding.getUtilizationRates(dummy), null);
-  assertEquals(binding.getMemoryUsedBytes(dummy), null);
-  assertEquals(binding.getTemperatureCelsius(dummy), null);
-  assertEquals(binding.getPowerWatts(dummy), null);
-  assertEquals(binding.getPcieThroughputBytesPerSecond(dummy), null);
-  assertEquals(binding.getThermalViolationNanoseconds(dummy), null);
-  assertEquals(binding.getEccDoubleBitAggregateTotal(dummy), null);
-  assertEquals(binding.getLastXidErrorCode(dummy), null);
-  assertEquals(binding.getRemappedRows(dummy), null);
-  assertEquals(binding.getRetiredPagesPending(dummy), null);
+  assertEquals(await binding.getHandleByPciBusId("0000:01:00.0"), null);
+  assertEquals(await binding.getUtilizationRates(dummy), null);
+  assertEquals(await binding.getMemoryUsedBytes(dummy), null);
+  assertEquals(await binding.getTemperatureCelsius(dummy), null);
+  assertEquals(await binding.getPowerWatts(dummy), null);
+  assertEquals(await binding.getPcieThroughputBytesPerSecond(dummy), null);
+  assertEquals(await binding.getThermalViolationNanoseconds(dummy), null);
+  assertEquals(await binding.getEccDoubleBitAggregateTotal(dummy), null);
+  assertEquals(await binding.getLastXidErrorCode(dummy), null);
+  assertEquals(await binding.getRemappedRows(dummy), null);
+  assertEquals(await binding.getRetiredPagesPending(dummy), null);
 });
 
-test("createNvmlBindingFromLibrary init returns false when nvmlInit_v2 throws or fails", () => {
+test("createNvmlBindingFromLibrary init returns false when nvmlInit_v2 throws or fails", async () => {
   const failing = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlInit_v2: () => NVML_FAIL,
   }));
-  assertEquals(failing.init(), false);
+  assertEquals(await failing.init(), false);
 
   const throwing = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlInit_v2: () => {
       throw new Error("ABI mismatch");
     },
   }));
-  assertEquals(throwing.init(), false);
+  assertEquals(await throwing.init(), false);
 });
 
-test("createNvmlBindingFromLibrary shutdown swallows library-close failures", () => {
+test("createNvmlBindingFromLibrary shutdown swallows library-close failures", async () => {
   const binding = createNvmlBindingFromLibrary(fakeLibrary({}, () => {
     throw new Error("already closed");
   }));
-  binding.shutdown();
+  await binding.shutdown();
 });
 
-test("createNvmlBindingFromLibrary treats a per-field XID nvmlReturn as missing", () => {
+test("createNvmlBindingFromLibrary treats a per-field XID nvmlReturn as missing", async () => {
   const binding = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlDeviceGetFieldValues: (_handle, _count, out) => {
       writeI32(out, 28, NVML_FAIL);
@@ -575,10 +581,10 @@ test("createNvmlBindingFromLibrary treats a per-field XID nvmlReturn as missing"
     },
   }));
   const dummy: bigint = 0x100n;
-  assertEquals(binding.getLastXidErrorCode(dummy), null);
+  assertEquals(await binding.getLastXidErrorCode(dummy), null);
 });
 
-test("createNvmlBindingFromLibrary reports remapped-row failure and no pending retirement", () => {
+test("createNvmlBindingFromLibrary reports remapped-row failure and no pending retirement", async () => {
   const binding = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlDeviceGetRemappedRows: (_handle, corr, unc, pending, failure) => {
       writeU32(corr, 0, 0);
@@ -593,16 +599,16 @@ test("createNvmlBindingFromLibrary reports remapped-row failure and no pending r
     },
   }));
   const dummy: bigint = 0x100n;
-  assertEquals(binding.getRemappedRows(dummy), {
+  assertEquals(await binding.getRemappedRows(dummy), {
     correctable: 0,
     uncorrectable: 2,
     pending: false,
     failureOccurred: true,
   });
-  assertEquals(binding.getRetiredPagesPending(dummy), false);
+  assertEquals(await binding.getRetiredPagesPending(dummy), false);
 });
 
-test("createNvmlBindingFromLibrary nulls PCIe when only one direction succeeds", () => {
+test("createNvmlBindingFromLibrary nulls PCIe when only one direction succeeds", async () => {
   const binding = createNvmlBindingFromLibrary(fakeLibrary({
     nvmlDeviceGetPcieThroughput: (_handle, counter, out) => {
       if (counter === 0) {
@@ -613,7 +619,7 @@ test("createNvmlBindingFromLibrary nulls PCIe when only one direction succeeds",
     },
   }));
   const dummy: bigint = 0x100n;
-  assertEquals(binding.getPcieThroughputBytesPerSecond(dummy), null);
+  assertEquals(await binding.getPcieThroughputBytesPerSecond(dummy), null);
 });
 
 test("NvmlGpuAdapter.readHealthSignals treats a throwing handle lookup as unresolved", async () => {
@@ -631,4 +637,25 @@ test("NvmlGpuAdapter.readHealthSignals treats a throwing handle lookup as unreso
     remappedRows: null,
     retiredPagesPending: null,
   });
+});
+
+test("the binding works over a non-blocking (promise-returning) library", async () => {
+  const lib = fakeLibrary();
+  const asyncSymbols = Object.fromEntries(
+    Object.entries(lib.symbols).map((
+      [name, fn],
+    ) => [
+      name,
+      (...args: unknown[]) =>
+        Promise.resolve((fn as (...a: unknown[]) => number)(...args)),
+    ]),
+  ) as NvmlLibrary["symbols"];
+  const binding = createNvmlBindingFromLibrary({
+    symbols: asyncSymbols,
+    close: () => {},
+  });
+  assertEquals(await binding.init(), true);
+  const handle = await binding.getHandleByPciBusId("0000:01:00.0");
+  assertEquals(handle, 0x100n);
+  assertEquals(await binding.getTemperatureCelsius(handle!), 62);
 });

@@ -12,7 +12,8 @@ web_service_key: ""
 web_service_user_map:
   # Site Caddy — the unprivileged per-site server. NOT the control-plane Caddy
   # (tpcaddy/9993 via instance-user) and NOT the root edge Caddy that owns
-  # public :80/:443. 9988 is taken by tpnodeapp, so this is the next free slot.
+  # public :80/:443. 9988 stays held back (the retired tpnodeapp group had it),
+  # so this is the next free slot.
   caddy:
     user: tpcaddysite
     uid: 9987

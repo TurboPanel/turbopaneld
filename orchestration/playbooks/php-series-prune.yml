@@ -1,0 +1,17 @@
+---
+# Remove PHP series no site on this host uses any more (php-fpm packages from
+# sury, the vendored lsphp tree, the series' config/log/runtime directories).
+#
+# The daemon passes the series as `-e {"php_series_prune": ["8.1"]}` once it has
+# checked that no vhost, pool, per-site runtime or in-flight deploy names them
+# (src/deploy/site/php-series-prune.ts). The role re-checks the on-disk part and
+# refuses a series that still has a site pool or a per-site runtime.
+- name: TurboPanel unused PHP series removal
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Remove the unused PHP series
+      ansible.builtin.include_role:
+        name: php-series-prune

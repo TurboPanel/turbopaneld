@@ -4,7 +4,13 @@ import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
 import type { ServerReportedIp } from "../host/server-addresses.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
-import { IdlePresence, installIdlePresenceProviders } from "./idle-presence.ts";
+import {
+  IdlePresence,
+  installIdlePresenceProviders,
+  jitteredMaxConnectionAgeMs,
+  MAX_CONNECTION_AGE_JITTER,
+  MAX_CONNECTION_AGE_MS,
+} from "./idle-presence.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -79,7 +85,7 @@ const FULL_HOST: HostHelloIdentity = {
         threads: { total: 4 },
       },
     ],
-    memory: { totalBytes: 16_384 * 1024 * 1024 },
+    memory: { totalBytes: 16_384 * 1024 * 1024, pageSizeBytes: 16384 },
     swap: { totalBytes: 0 },
   },
 };
@@ -400,6 +406,56 @@ test({
       const heartbeat = heartbeats[0] as Record<string, unknown>;
       assertEquals(heartbeat.docker, docker);
       assertEquals("os" in heartbeat, false);
+      assertEquals("daemonBuild" in heartbeat, false);
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});
+
+test({
+  name:
+    "IdlePresence emits heartbeat when the release link scan lands after hello",
+  fn: async () => {
+    let releaseLinkScan:
+      | { scannedAt: string; findingCount: number; findings: [] }
+      | undefined;
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
+      getHostHelloIdentity: () => FULL_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+        ...(releaseLinkScan ? { releaseLinkScan } : {}),
+      }),
+    });
+    const idleCheckIntervalMs = 15;
+    const socket = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-hb-scan",
+      idleCheckIntervalMs,
+      idleThresholdMs: idleCheckIntervalMs,
+      staleConnectionMs: 60_000,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+      assertEquals("releaseLinkScan" in hello, false);
+      releaseLinkScan = {
+        scannedAt: "2026-10-04T00:00:00.000Z",
+        findingCount: 0,
+        findings: [],
+      };
+      await sleep(idleCheckIntervalMs + 25);
+      const heartbeats = framesOfType(socket, "heartbeat");
+      assertEquals(heartbeats.length, 1);
+      const heartbeat = heartbeats[0] as Record<string, unknown>;
+      assertEquals(heartbeat.releaseLinkScan, releaseLinkScan);
       assertEquals("daemonBuild" in heartbeat, false);
     } finally {
       presence.detach();
@@ -736,6 +792,81 @@ test("IdlePresence hello and heartbeat carry runtimes when present", async () =>
   }
 });
 
+test("IdlePresence hello and heartbeat carry per-service run state, empty list included", async () => {
+  const running = [{
+    serviceId: "svc-1",
+    state: "running" as const,
+    restartCount: 0,
+    asOf: "2026-10-04T10:00:00.000Z",
+  }];
+  let snapshotServices: typeof running | undefined = running;
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+      ...(snapshotServices ? { services: snapshotServices } : {}),
+    }),
+  });
+  const idleCheckIntervalMs = 15;
+  const socket = openMockSocket();
+  const presence = new IdlePresence({
+    serverId: "srv-services",
+    idleCheckIntervalMs,
+    idleThresholdMs: idleCheckIntervalMs,
+    staleConnectionMs: 60_000,
+  });
+  try {
+    presence.attach(socket as unknown as WebSocket);
+    const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+    assertEquals(hello.services, running);
+
+    // The service goes away: an empty list must still be sent so the control
+    // plane clears it.
+    snapshotServices = [];
+    await sleep(idleCheckIntervalMs + 25);
+    const heartbeats = framesOfType(socket, "heartbeat");
+    assertEquals(heartbeats.length, 1);
+    assertEquals((heartbeats[0] as Record<string, unknown>).services, []);
+  } finally {
+    presence.detach();
+    restore();
+  }
+});
+
+test("IdlePresence omits services when the daemon is not watching Docker", () => {
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+    }),
+  });
+  const socket = openMockSocket();
+  const presence = new IdlePresence({
+    serverId: "srv-no-services",
+    staleConnectionMs: 60_000,
+  });
+  try {
+    presence.attach(socket as unknown as WebSocket);
+    const hello = framesOfType(socket, "hello")[0] as Record<string, unknown>;
+    assertEquals("services" in hello, false);
+  } finally {
+    presence.detach();
+    restore();
+  }
+});
+
 test({
   name: "IdlePresence onStaleConnection fires once until inbound traffic",
   fn: async () => {
@@ -859,5 +990,20 @@ test({
       presence.detach();
       restore();
     }
+  },
+});
+
+test({
+  name: "jitteredMaxConnectionAgeMs spreads the 2 h recycle age by +-10%",
+  fn: () => {
+    const ages = new Set<number>();
+    for (let i = 0; i < 1_000; i += 1) {
+      const age = jitteredMaxConnectionAgeMs(MAX_CONNECTION_AGE_MS);
+      assert(age >= MAX_CONNECTION_AGE_MS * (1 - MAX_CONNECTION_AGE_JITTER));
+      assert(age <= MAX_CONNECTION_AGE_MS * (1 + MAX_CONNECTION_AGE_JITTER));
+      ages.add(age);
+    }
+    assert(ages.size > 100, "recycle ages must differ per connection");
+    assertEquals(jitteredMaxConnectionAgeMs(1_000, () => 0.5), 1_000);
   },
 });

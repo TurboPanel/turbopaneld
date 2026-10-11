@@ -18,14 +18,22 @@
 #   galaxy-docker-role
 #       Fetch the geerlingguy.docker role pinned in requirements-docker.yml
 #       into the root-owned vendor roles dir (codeload tag tarball).
-#   update --license <b64url> [--host URL] [--dl-base URL]
+#   update --license-stdin [--host URL] [--dl-base URL]
 #          [--instance-ca /etc/turbopanel/instance-ca.pem] [--channel NAME]
 #          [--manifest-url https://…] --no-start
 #       Fetch run.sh (the CDN, or the control plane for an HTTPS overlay
 #       host) and run it as root with exactly those flags. The
 #       script body is never accepted from the caller, --insecure-tls is not
 #       a recognised flag here, and the only CA the fetch trusts beyond the
-#       system store is the daemon's canonical Platform CA file.
+#       system store is the daemon's canonical Platform CA file. The host
+#       license (base64url id:token) is read as one line from stdin and
+#       handed to run.sh in TURBOPANEL_LICENSE, never on a command line
+#       (sudo logs argv and any local user can read it from /proc).
+#
+#   kernel-features list|status [ID]|apply ID [--reboot] [--countdown N]|undo ID
+#       Named kernel/boot features (orchestration/scripts/tp-kernel-features),
+#       for the installer and an operator. `apply` and `undo` are refused when
+#       sudo was run by the daemon account.
 #
 # Every input that could steer root is taken from this root-owned tree, not
 # from the caller: the orchestration dir is derived from $0, ansible.cfg and
@@ -316,7 +324,7 @@ tp_backup_dir_ok() {
 # Keys a JSON-object extra-var may carry (-e '{"k": …}'), for the playbooks
 # whose inputs are lists or booleans: time sync, Docker addressing, native
 # app runtimes, site engines. Checked by tp_json_extra_var_ok.
-TP_JSON_EXTRA_VAR_KEYS="turbopanel_timezone turbopanel_ntp_servers turbopanel_ntp_fallback_servers turbopanel_ntp_enabled turbopanel_apply_ntp_config turbopanel_docker_address_pools turbopanel_docker_default_bridge_cidr turbopanel_docker_clear_addressing node_app_versions turbopanel_php_fpm_install php_fpm_versions php_fpm_extensions turbopanel_lsphp_install openlitespeed_lsphp_versions"
+TP_JSON_EXTRA_VAR_KEYS="turbopanel_timezone turbopanel_ntp_servers turbopanel_ntp_fallback_servers turbopanel_ntp_enabled turbopanel_apply_ntp_config turbopanel_docker_address_pools turbopanel_docker_default_bridge_cidr turbopanel_docker_clear_addressing node_app_versions deno_app_versions turbopanel_php_fpm_install php_fpm_versions php_fpm_extensions turbopanel_lsphp_install openlitespeed_lsphp_versions php_series_prune engine_prune"
 
 # A single-line JSON object whose keys are all in TP_JSON_EXTRA_VAR_KEYS and
 # whose leaf strings carry no Jinja delimiter or control character and no
@@ -364,8 +372,26 @@ if any(k not in allowed for k in doc):
 # option, a version pin or a second package.
 series = re.compile(r"[0-9]\.[0-9]{1,2}")
 ext = re.compile(r"[a-z0-9][a-z0-9.+-]{0,31}")
-versions = doc.get("php_fpm_versions", [])
-if not (isinstance(versions, list) and all(isinstance(x, str) and series.fullmatch(x) for x in versions)):
+# php_series_prune names the series whose packages root purges: the same shape
+# as php_fpm_versions, and a name here is a series, never an apt option.
+for key in ("php_fpm_versions", "php_series_prune"):
+    versions = doc.get(key, [])
+    if not (isinstance(versions, list) and all(isinstance(x, str) and series.fullmatch(x) for x in versions)):
+        sys.exit(1)
+# The tenant Node and Deno series become a directory name and part of a
+# download URL before the role asserts them: only digits (Node also accepts
+# 24.17.0 style pins) get that far.
+node_series = re.compile(r"[0-9]{1,3}(\.[0-9]{1,3}){0,2}")
+deno_series = re.compile(r"[0-9]{1,3}")
+for key, shape in (("node_app_versions", node_series), ("deno_app_versions", deno_series)):
+    vals = doc.get(key, [])
+    if not (isinstance(vals, list) and all(isinstance(x, str) and shape.fullmatch(x) for x in vals)):
+        sys.exit(1)
+# engine_prune names the web engines whose tree, unit and config root deletes:
+# only these three, never Caddy, lsphp or a path.
+engines = doc.get("engine_prune", [])
+if not (isinstance(engines, list) and len(engines) <= 3
+        and all(isinstance(x, str) and x in ("nginx", "apache", "openlitespeed") for x in engines)):
     sys.exit(1)
 exts = doc.get("php_fpm_extensions", {})
 if not isinstance(exts, dict):
@@ -404,7 +430,7 @@ tp_valid_extra_var() {
 # A playbook shipped in the tree but missing from this list is refused, so a
 # new play the daemon runs through the helper must be added here
 # (src/orchestration/tp-orchestrate.test.ts checks the list against the daemon).
-TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml docker-setup.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml postgres-setup.yml proxysql-setup.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml socket-dirs-setup.yml time-sync-apply.yml"
+TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml deno-app-runtime-apply.yml docker-setup.yml engine-prune.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml php-series-prune.yml postgres-setup.yml proxysql-setup.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml socket-dirs-setup.yml time-sync-apply.yml"
 
 # Resolve the caller's playbook argument into $_resolved, or die. It is a bare
 # basename, or the daemon's absolute constant (<orchestration>/playbooks/<name>),
@@ -629,9 +655,9 @@ tp_read_control_plane_pin() {
 # Release-rail manifest URL check, on the raw string: https only, exact host,
 # no %, @, :, ?, #, \, whitespace or controls, no empty, "." or ".." path
 # segment, and one exact rail shape per kind (daemon, instance, ui):
-#   daemon    https://dl.trbp.nl/channels/<channel>/manifest*.json
 #   any kind  https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json
 #             https://github.com/TurboPanel/<repo>/releases/latest/download/manifest*.json
+# (dl.trbp.nl is no longer on the rail: the trunk CDN drop was retired.)
 # Byte-identical in scripts/run.sh and orchestration/scripts/tp-orchestrate;
 # src/update/urls.ts releaseManifestUrlAllowed is the TypeScript copy, and
 # src/testing/release-manifest-url-corpus.json pins all three together.
@@ -664,10 +690,6 @@ tp_release_manifest_url_ok() {
     *) return 1 ;;
   esac
   case "$_rmu_host" in
-    dl.trbp.nl)
-      [ "$_rmu_kind" = daemon ] || return 1
-      _rmu_mid="${_rmu_path#/channels/}"
-      ;;
     github.com)
       _rmu_mid="${_rmu_path#/TurboPanel/"$_rmu_repo"/releases/}"
       ;;
@@ -678,13 +700,6 @@ tp_release_manifest_url_ok() {
     */*) _rmu_mid="${_rmu_mid%/*}" ;;
     *) return 1 ;;
   esac
-  if [ "$_rmu_host" = dl.trbp.nl ]; then
-    case "$_rmu_mid" in
-      */*) return 1 ;;
-      *) ;;
-    esac
-    return 0
-  fi
   case "$_rmu_mid" in
     latest/download) return 0 ;;
     download/*/*) return 1 ;;
@@ -750,6 +765,7 @@ tp_verb_update() {
   tp_require_root_scratch
   tp_read_update_origin_pin
   _license=""
+  _license_stdin=false
   _host=""
   _dl_base=""
   _ca=""
@@ -759,13 +775,13 @@ tp_verb_update() {
   _no_start=false
   while [ $# -gt 0 ]; do
     case "$1" in
+      --license-stdin)
+        _license_stdin=true
+        shift
+        ;;
       --license)
-        [ $# -ge 2 ] || tp_die "--license requires a value"
-        case "$2" in
-          *[!A-Za-z0-9_=-]*|"") tp_die "refusing malformed --license" ;;
-        esac
-        _license="$2"
-        shift 2
+        # The license would be in sudo's log and in /proc/<pid>/cmdline.
+        tp_die "refusing --license: the license is read from stdin (--license-stdin)"
         ;;
       --host)
         [ $# -ge 2 ] || tp_die "--host requires a value"
@@ -818,7 +834,11 @@ tp_verb_update() {
         ;;
     esac
   done
-  [ -n "$_license" ] || tp_die "update requires --license"
+  [ "$_license_stdin" = true ] || tp_die "update requires --license-stdin"
+  IFS= read -r _license || [ -n "$_license" ] || tp_die "update: no license on stdin"
+  case "$_license" in
+    *[!A-Za-z0-9_=-]*|"") tp_die "refusing a malformed license on stdin" ;;
+  esac
   [ "$_no_start" = true ] || tp_die "update requires --no-start (the daemon restarts itself)"
   # Absent flags take the pinned values, so the installer always records the
   # control plane, overlay and CA this host was enrolled with.
@@ -839,7 +859,7 @@ tp_verb_update() {
   # the host / overlay / CA the installer records are the pinned ones.
   tp_fetch_pinned_run_script
 
-  set -- --license "$_license"
+  set --
   [ -n "$_host" ] && set -- "$@" --host "$_host"
   # An overlay host was installed with --dev-allow-unsigned (the root-owned
   # pin exists only for such an install), so the refresh carries it too.
@@ -851,7 +871,9 @@ tp_verb_update() {
   set -- "$@" --no-start
   cd "$INSTALL_ROOT"
   _rc=0
-  sh "$_script" "$@" || _rc=$?
+  # run.sh reads TURBOPANEL_LICENSE when no --license flag is given; a root
+  # process's environment is readable only by root.
+  TURBOPANEL_LICENSE="$_license" sh "$_script" "$@" </dev/null || _rc=$?
   rm -f "$_script"
   exit "$_rc"
 }
@@ -1005,7 +1027,31 @@ tp_verb_migrate() {
   timeout 120 env TURBOPANEL_DATABASE_URL="$_url" "$_bin" migrate
 }
 
-[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|update-colocated|migrate …"
+# Named kernel/boot features (orchestration/scripts/tp-kernel-features). The
+# installer and an operator use this; the daemon account never applies one, so
+# `apply` and `undo` are refused when sudo was invoked by that account (it may
+# still list and read status). The helper itself accepts only its fixed feature
+# ids and options; nothing the caller passes becomes a path, a line of text or a
+# command.
+tp_verb_kernel_features() {
+  [ $# -ge 1 ] || tp_die "kernel-features needs list, status, apply or undo"
+  case "$1" in
+    list|status) ;;
+    apply|undo)
+      _kf_daemon_uid="$(id -u tp 2>/dev/null || true)"
+      if [ -n "$_kf_daemon_uid" ] && [ "${SUDO_UID:-}" = "$_kf_daemon_uid" ]; then
+        tp_die "kernel-features $1 is for the installer and an operator, not the daemon account"
+      fi
+      ;;
+    *) tp_die "kernel-features: unknown action $1" ;;
+  esac
+  _kf_script="$ORCH_DIR/scripts/tp-kernel-features"
+  [ -f "$_kf_script" ] && [ ! -L "$_kf_script" ] && [ -x "$_kf_script" ] ||
+    tp_die "missing $_kf_script"
+  exec "$_kf_script" "$@"
+}
+
+[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|update-colocated|migrate|kernel-features …"
 _verb="$1"
 shift
 case "$_verb" in
@@ -1015,5 +1061,6 @@ case "$_verb" in
   update-instance) tp_verb_update_instance "$@" ;;
   update-colocated) tp_verb_update_colocated "$@" ;;
   migrate) tp_verb_migrate "$@" ;;
+  kernel-features) tp_verb_kernel_features "$@" ;;
   *) tp_die "unknown verb $_verb" ;;
 esac

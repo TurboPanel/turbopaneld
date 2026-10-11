@@ -463,6 +463,66 @@ test("parseManagedLifecyclePayload and parseManagedDestroyPayload reject optiona
     TypeError,
     "Invalid managed.lifecycle payload",
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: true,
+    }).demoted,
+    true,
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+    }).demoted,
+    undefined,
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      captureSwitchoverGtid: true,
+    }).captureSwitchoverGtid,
+    true,
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "start",
+      reactivateAfterSwitchoverAbort: true,
+    }).reactivateAfterSwitchoverAbort,
+    true,
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "start",
+      switchoverAbortPromoteSafe: true,
+      switchoverTargetPromoteCompleted: true,
+    }).switchoverAbortPromoteSafe,
+    true,
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "stop",
+        captureSwitchoverGtid: false,
+      }),
+    TypeError,
+    "Invalid managed.lifecycle payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "start",
+        reactivateAfterSwitchoverAbort: "yes",
+      }),
+    TypeError,
+    "Invalid managed.lifecycle payload",
+  );
   assertThrows(
     () => parseManagedDestroyPayload(null),
     TypeError,
@@ -542,6 +602,34 @@ test("parseManagedPromotePayload rejects invalid ids and engines", () => {
     }).engine,
     "mariadb",
   );
+  const withGtid = parseManagedPromotePayload({
+    managedId: MANAGED_ID,
+    memberId: MEMBER_ID,
+    requiredExecutedGtidSet: "0-1-50",
+    gtidWaitTimeoutSeconds: 120,
+  });
+  assertEquals(withGtid.requiredExecutedGtidSet, "0-1-50");
+  assertEquals(withGtid.gtidWaitTimeoutSeconds, 120);
+  assertThrows(
+    () =>
+      parseManagedPromotePayload({
+        managedId: MANAGED_ID,
+        memberId: MEMBER_ID,
+        requiredExecutedGtidSet: "",
+      }),
+    TypeError,
+    "Invalid managed.promote payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedPromotePayload({
+        managedId: MANAGED_ID,
+        memberId: MEMBER_ID,
+        gtidWaitTimeoutSeconds: 0,
+      }),
+    TypeError,
+    "Invalid managed.promote payload",
+  );
   assertEquals(
     parseManagedPromoteResult({
       status: "ready",
@@ -552,6 +640,28 @@ test("parseManagedPromotePayload rejects invalid ids and engines", () => {
       summary: "promoted",
     }).demotedMemberId,
     REPLICA_ID,
+  );
+});
+
+test("parseManagedBackupPayload carries a canonical policyId and rejects a malformed one", () => {
+  const base = {
+    managedId: MANAGED_ID,
+    engine: "postgres",
+    action: "delete",
+    backupId: "bk_1",
+    artifactExtension: "dump",
+    scope: "instance",
+  };
+  const policyId = "11111111-1111-4111-8111-111111111111";
+  assertEquals(
+    parseManagedBackupPayload({ ...base, policyId }).policyId,
+    policyId,
+  );
+  assertEquals("policyId" in parseManagedBackupPayload(base), false);
+  assertThrows(
+    () => parseManagedBackupPayload({ ...base, policyId: "../policy" }),
+    Error,
+    "Invalid managed.backup payload policyId",
   );
 });
 
@@ -980,6 +1090,75 @@ test("parseManagedHaFailoverPayload rejects missing fields and optional host/por
         targetMemberId: REPLICA_ID,
         phase: "recover",
         targetPort: 0,
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+});
+
+test("parseManagedHaFailoverPayload accepts undrain and switchover GTID fields", () => {
+  const undrain = parseManagedHaFailoverPayload({
+    managedId: MANAGED_ID,
+    sourceMemberId: MEMBER_ID,
+    targetMemberId: REPLICA_ID,
+    phase: "undrain",
+    sourceHost: "203.0.113.10",
+    sourcePort: 3306,
+  });
+  assertEquals(undrain.phase, "undrain");
+  const recover = parseManagedHaFailoverPayload({
+    managedId: MANAGED_ID,
+    sourceMemberId: MEMBER_ID,
+    targetMemberId: REPLICA_ID,
+    phase: "recover",
+    requiredExecutedGtidSet: "0-1-9",
+    gtidWaitTimeoutSeconds: 45,
+  });
+  assertEquals(recover.requiredExecutedGtidSet, "0-1-9");
+  assertEquals(recover.gtidWaitTimeoutSeconds, 45);
+});
+
+test("parseManagedHaFailoverPayload accepts ensureSlots and rejects bad entries", () => {
+  const parsed = parseManagedHaFailoverPayload({
+    managedId: MANAGED_ID,
+    sourceMemberId: MEMBER_ID,
+    targetMemberId: REPLICA_ID,
+    phase: "repoint",
+    ensureSlots: ["tp_member_2", "tp_member_3"],
+  });
+  assertEquals(parsed.ensureSlots, ["tp_member_2", "tp_member_3"]);
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: ["tp-member-2"],
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: Array.from({ length: 33 }, (_, i) => `tp_member_${i}`),
+      }),
+    TypeError,
+    "Invalid managed.ha.failover payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedHaFailoverPayload({
+        managedId: MANAGED_ID,
+        sourceMemberId: MEMBER_ID,
+        targetMemberId: REPLICA_ID,
+        phase: "repoint",
+        ensureSlots: "tp_member_2",
       }),
     TypeError,
     "Invalid managed.ha.failover payload",

@@ -40,6 +40,7 @@ import { logInfo } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
+import { frontendBindingsHealth, wantedMappings } from "./proxysql-bindings.ts";
 import {
   proxysqlComposePath,
   proxysqlConfigDir,
@@ -249,11 +250,11 @@ export type ProxySqlDesiredState = {
    * reachable only via the organization's managed Docker network, never the
    * host).
    *
-   * More than one entry when the instance resolved distinct interfaces for the
-   * enabled access scopes (a datacenter private IP *and* a TurboFabric `tp0`
-   * address, say): one address per scope, because those are different IPs on the
-   * same host and ranking them would silently strand every client on the scope
-   * that lost. `0.0.0.0` arrives as a single entry covering all interfaces.
+   * Decided by the server's single "allow external access to the databases on
+   * this server" setting, so the control plane sends exactly one entry:
+   * `127.0.0.1` when it is off (services on the server only) or `0.0.0.0` when
+   * it is on (every address of the server). Several entries are still accepted
+   * and each is published, so older callers keep working.
    *
    * Never conflate this with ProxySQL's *internal* container listen address
    * (always `0.0.0.0` — see {@link renderProtocolFamilySection}); those are
@@ -378,6 +379,13 @@ function clientPortMappings(
     mappings.push(mapping);
   }
   return mappings;
+}
+
+/** Every published client-listener `host:port`, admin and REST API excluded. */
+export function readPublishedClientMappingsFromCompose(
+  composeText: string,
+): Array<{ host: string; port: number }> {
+  return clientPortMappings(composeText);
 }
 
 /**
@@ -750,8 +758,8 @@ function renderProxySqlTopLevelNetworks(
  * entirely, so the frontend is reachable exclusively via
  * the organization's managed Docker network (co-located compose services with
  * a binding) and never from the host or the public internet. Pass the addresses
- * resolved from enabled cluster exposure to additionally publish on each of
- * them; both protocol listeners are published per address. The admin port
+ * chosen by the server's "allow external access" setting (loopback, or all
+ * interfaces) to publish on each of them; both protocol listeners are published per address. The admin port
  * always publishes to `127.0.0.1` only, regardless.
  */
 export function proxysqlCompose(
@@ -883,6 +891,22 @@ export function buildProxySqlDrainStatements(
   return [
     `UPDATE mysql_servers SET status='OFFLINE_SOFT' WHERE hostname='${host}' AND port=${port}`,
     `UPDATE pgsql_servers SET status='OFFLINE_SOFT' WHERE hostname='${host}' AND port=${port}`,
+    "LOAD MYSQL SERVERS TO RUNTIME",
+    "LOAD PGSQL SERVERS TO RUNTIME",
+    "SAVE MYSQL SERVERS TO DISK",
+    "SAVE PGSQL SERVERS TO DISK",
+  ];
+}
+
+/** Restore a drained backend to the writer pool on this host's ProxySQL. */
+export function buildProxySqlUndrainStatements(
+  hostname: string,
+  port: number,
+): string[] {
+  const host = escapeSqlString(hostname);
+  return [
+    `UPDATE mysql_servers SET status='ONLINE' WHERE hostname='${host}' AND port=${port}`,
+    `UPDATE pgsql_servers SET status='ONLINE' WHERE hostname='${host}' AND port=${port}`,
     "LOAD MYSQL SERVERS TO RUNTIME",
     "LOAD PGSQL SERVERS TO RUNTIME",
     "SAVE MYSQL SERVERS TO DISK",
@@ -1410,6 +1434,140 @@ export function buildProxySqlAdminStatements(
   return statements;
 }
 
+/** One row of ProxySQL's live `runtime_<family>_servers` table. */
+export type ProxySqlRuntimeServerRow = {
+  hostgroupId: number;
+  hostname: string;
+  port: number;
+  status: string;
+};
+
+/** The protocol families (and so `runtime_*_servers` tables) a desired state uses. */
+export function proxySqlFamiliesInUse(
+  desired: ProxySqlDesiredState,
+): ProxySqlProtocolFamily[] {
+  const families: ProxySqlProtocolFamily[] = [];
+  if (clusterUsesMysql(desired.clusters)) families.push("mysql");
+  if (clusterUsesPgsql(desired.clusters)) families.push("pgsql");
+  return families;
+}
+
+type PlacedServer = { hostgroup: number; hostname: string; port: number };
+
+function placedServers(cluster: ProxySqlClusterDesired): PlacedServer[] {
+  return cluster.backends.map((backend) => ({
+    hostgroup: backendPlacement(cluster, backend).hostgroup,
+    hostname: backend.address,
+    port: backend.port,
+  }));
+}
+
+function placedServerKey(server: PlacedServer): string {
+  return `${server.hostgroup}\t${server.hostname}\t${server.port}`;
+}
+
+function runtimeRowKey(row: ProxySqlRuntimeServerRow): string {
+  return placedServerKey({
+    hostgroup: row.hostgroupId,
+    hostname: row.hostname,
+    port: row.port,
+  });
+}
+
+function serverAddress(server: { hostname: string; port: number }): string {
+  return `${server.hostname}:${server.port}`;
+}
+
+/**
+ * A writer hostgroup row nobody asked for: the old primary left behind.
+ *
+ * ProxySQL keeps a backend that was just removed in the runtime table as
+ * `OFFLINE_HARD` while its connections drain. That row takes no traffic, so it
+ * is not "still the writer".
+ */
+function staleWriterMismatch(
+  cluster: ProxySqlClusterDesired,
+  rows: readonly ProxySqlRuntimeServerRow[],
+  wanted: ReadonlySet<string>,
+): string | null {
+  const stale = rows.filter((row) =>
+    row.hostgroupId === cluster.writerHostgroup &&
+    row.status !== "OFFLINE_HARD" &&
+    !wanted.has(runtimeRowKey(row))
+  );
+  if (stale.length === 0) return null;
+  const expected = placedServers(cluster)
+    .filter((server) => server.hostgroup === cluster.writerHostgroup)
+    .map(serverAddress);
+  return `writer for ${cluster.managedId} is still ${
+    stale.map(serverAddress).join(", ")
+  }, expected ${expected.length > 0 ? expected.join(", ") : "no writer"}`;
+}
+
+/** A desired backend that is not in the runtime table at all. */
+function missingServerMismatch(
+  cluster: ProxySqlClusterDesired,
+  present: ReadonlySet<string>,
+): string | null {
+  const missing = placedServers(cluster).find((server) =>
+    !present.has(placedServerKey(server))
+  );
+  if (!missing) return null;
+  const role = missing.hostgroup === cluster.writerHostgroup
+    ? "writer"
+    : "reader";
+  return `${
+    serverAddress(missing)
+  } is missing from the ${role} hostgroup for ${cluster.managedId}`;
+}
+
+function familyRuntimeMismatch(
+  clusters: readonly ProxySqlClusterDesired[],
+  rows: readonly ProxySqlRuntimeServerRow[],
+): string | null {
+  const wanted = new Set(clusters.flatMap(placedServers).map(placedServerKey));
+  const present = new Set(rows.map(runtimeRowKey));
+  for (const cluster of clusters) {
+    const stale = staleWriterMismatch(cluster, rows, wanted);
+    if (stale !== null) return stale;
+  }
+  for (const cluster of clusters) {
+    const missing = missingServerMismatch(cluster, present);
+    if (missing !== null) return missing;
+  }
+  return null;
+}
+
+/**
+ * Compare what ProxySQL is actually routing to (its runtime tables, read back
+ * after an admin apply) with the placement the desired state asked for.
+ *
+ * Every desired (hostgroup, hostname, port) must be present, and a cluster's
+ * writer hostgroup must hold nothing that was not asked for, so an old primary
+ * left in the writer hostgroup fails. `status` is deliberately not compared:
+ * ProxySQL's own monitor may shun a backend at any moment. Families the desired
+ * state does not use are not checked. Returns a plain-words message naming only
+ * backend addresses already in the desired state or the runtime table, or `null`
+ * when ProxySQL is routing as desired.
+ */
+export function findIngressRuntimeMismatch(
+  desired: ProxySqlDesiredState,
+  runtime: Partial<
+    Record<ProxySqlProtocolFamily, readonly ProxySqlRuntimeServerRow[]>
+  >,
+): string | null {
+  for (const family of proxySqlFamiliesInUse(desired)) {
+    const clusters = desired.clusters.filter((cluster) =>
+      clusterMatchesFamily(cluster, family)
+    );
+    const mismatch = familyRuntimeMismatch(clusters, runtime[family] ?? []);
+    if (mismatch !== null) {
+      return `ProxySQL on this server did not repoint: ${mismatch}`;
+    }
+  }
+  return null;
+}
+
 export async function writeProxySqlConfigAtomic(
   path: string,
   contents: string,
@@ -1530,7 +1688,63 @@ export type EnsureProxySqlIngressOptions = {
   readonly listenerPorts: ProxySqlListenerPorts | null | undefined;
   readonly managedNetwork: string;
   readonly stability?: ContainerStabilityOptions;
+  /** Test seam: the host kernel's memory page size in bytes. */
+  readonly pageSizeBytes?: () => Promise<number | undefined>;
 };
+
+/** The largest kernel memory page size the published proxy image can start on. */
+export const PROXYSQL_MAX_SUPPORTED_PAGE_SIZE = 4096;
+
+/**
+ * Plain-words error for a host whose kernel pages memory in larger blocks than
+ * the proxy image supports, or `undefined` when the host is fine.
+ *
+ * The published proxy image bundles a memory allocator compiled for 4 KiB
+ * pages. On a kernel with bigger pages (a Raspberry Pi 5 on its default
+ * kernel, Apple Silicon, some 64 KiB ARM servers) it aborts on start, so the
+ * container crash-loops with no useful message and every managed database on
+ * the server loses its client port. Failing early, with the reason, is better
+ * than a restart loop.
+ */
+export function proxySqlPageSizeError(
+  pageSizeBytes: number | undefined,
+): string | undefined {
+  if (
+    pageSizeBytes === undefined ||
+    !Number.isFinite(pageSizeBytes) ||
+    pageSizeBytes <= PROXYSQL_MAX_SUPPORTED_PAGE_SIZE
+  ) {
+    return undefined;
+  }
+  return `This kernel uses ${pageSizeBytes / 1024} KiB memory pages and the ` +
+    `database proxy only starts on 4 KiB pages (its memory allocator is built ` +
+    `for 4 KiB). Every server needs the proxy when an app on it uses a ` +
+    `managed database, even if no database runs on that server (apps reach ` +
+    `their databases through localhost:13306 and localhost:15432). To ` +
+    `switch, run: sudo /opt/turbopanel/share/orchestration/scripts/tp-orchestrate ` +
+    `kernel-features apply pi-4k-pagesize --reboot (Raspberry Pi OS on ` +
+    `Debian 13 only; on anything else, boot a 4 KiB-page kernel).`;
+}
+
+/** Read the host kernel page size in bytes (Linux only; `undefined` if unknown). */
+async function readHostPageSizeBytes(): Promise<number | undefined> {
+  if (Deno.build.os !== "linux") return undefined;
+  try {
+    const out = await new Deno.Command("getconf", {
+      args: ["PAGESIZE"],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    if (!out.success) return undefined;
+    const value = Number.parseInt(
+      new TextDecoder().decode(out.stdout).trim(),
+      10,
+    );
+    return Number.isFinite(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Write identity-bearing compose and bring the shared ProxySQL project up.
@@ -1557,19 +1771,29 @@ export async function ensureProxySqlIngress(
     managedNetwork,
     stability,
   } = options;
+  const pageSizeError = proxySqlPageSizeError(
+    await (options.pageSizeBytes ?? readHostPageSizeBytes)(),
+  );
+  if (pageSizeError) throw new Error(pageSizeError);
   const composePath = proxysqlComposePath(layout);
   await Deno.mkdir(proxysqlConfigDir(layout), { recursive: true, mode: 0o750 });
-  await Deno.writeTextFile(
-    composePath,
-    proxysqlComposeWithAttachments(
-      descriptor,
-      bindAddresses,
-      segmentAttachments,
-      listenerPorts,
-      managedNetwork,
-    ),
-    { mode: 0o640 },
+  const composeText = proxysqlComposeWithAttachments(
+    descriptor,
+    bindAddresses,
+    segmentAttachments,
+    listenerPorts,
+    managedNetwork,
   );
+  await Deno.writeTextFile(composePath, composeText, { mode: 0o640 });
+  // A container that failed its publish bind at boot stays "running" with no
+  // bindings, and a plain `up -d` leaves it alone (config unchanged). Recreate
+  // it then; an unreadable state falls back to the plain `up -d`.
+  const wanted = wantedMappings(
+    readPublishedClientMappingsFromCompose(composeText),
+  );
+  const health = await frontendBindingsHealth(run, composePath, wanted);
+  const missingBindings = health.ok && health.present && !health.healthy &&
+    wanted.length > 0;
   const up = await run([
     "compose",
     "-f",
@@ -1577,6 +1801,7 @@ export async function ensureProxySqlIngress(
     "up",
     "-d",
     "--remove-orphans",
+    ...(missingBindings ? ["--force-recreate"] : []),
   ]);
   if (!up.success) {
     throw new Error(up.stderr || "proxysql compose up failed");

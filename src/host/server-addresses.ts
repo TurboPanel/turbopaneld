@@ -1,9 +1,13 @@
 import type {
   ServerReportedIp,
+  ServerReportedIpLink,
   ServerReportedIpScope,
 } from "../contracts/server-reported-ip.ts";
 
-export type { ServerReportedIp, ServerReportedIpScope };
+export type { ServerReportedIp, ServerReportedIpLink, ServerReportedIpScope };
+
+/** Link state per interface name, as read from the kernel. */
+export type InterfaceLinkStates = ReadonlyMap<string, ServerReportedIpLink>;
 
 /** Default-route interface per address family, as read from the kernel. */
 export type DefaultRouteInterfaces = {
@@ -180,6 +184,7 @@ function buildReportedIp(
   scope: ServerReportedIpScope,
   addr: Deno.NetworkInterfaceInfo,
   defaultRoute: DefaultRouteInterfaces | undefined,
+  linkStates: InterfaceLinkStates | undefined,
 ): ServerReportedIp {
   const entry: ServerReportedIp = { address, version, scope };
   const cidr = cidrForAddress(address, addr);
@@ -188,6 +193,10 @@ function buildReportedIp(
   if (iface.length > 0 && iface.length <= 64) entry.interface = iface;
   const routeIface = version === 4 ? defaultRoute?.v4 : defaultRoute?.v6;
   if (routeIface && routeIface === entry.interface) entry.preferred = true;
+  const link = entry.interface === undefined
+    ? undefined
+    : linkStates?.get(entry.interface);
+  if (link) entry.link = link;
   return entry;
 }
 
@@ -243,12 +252,16 @@ export function parseIpv6DefaultRouteInterface(
   return best?.iface;
 }
 
-function readRouteTable(path: string): string | undefined {
+/**
+ * A kernel text file (`/proc/net/route`, `/sys/class/net/<nic>/operstate`), or
+ * `undefined` on a non-Linux host, with /proc or /sys not mounted, or when the
+ * kernel refuses the read (`carrier` on an administratively down NIC): the
+ * addresses still report, just without a preferred marker or a link state.
+ */
+function readOptionalText(path: string): string | undefined {
   try {
     return Deno.readTextFileSync(path);
   } catch {
-    // Non-Linux host, or /proc not mounted — addresses still report, just
-    // without a preferred marker.
     return undefined;
   }
 }
@@ -259,12 +272,12 @@ function readRouteTable(path: string): string | undefined {
  */
 export function readDefaultRouteInterfaces(): DefaultRouteInterfaces {
   const out: DefaultRouteInterfaces = {};
-  const v4 = readRouteTable("/proc/net/route");
+  const v4 = readOptionalText("/proc/net/route");
   if (v4) {
     const iface = parseIpv4DefaultRouteInterface(v4);
     if (iface) out.v4 = iface;
   }
-  const v6 = readRouteTable("/proc/net/ipv6_route");
+  const v6 = readOptionalText("/proc/net/ipv6_route");
   if (v6) {
     const iface = parseIpv6DefaultRouteInterface(v6);
     if (iface) out.v6 = iface;
@@ -273,14 +286,79 @@ export function readDefaultRouteInterfaces(): DefaultRouteInterfaces {
 }
 
 /**
+ * Link state from the two kernel files of one interface.
+ *
+ * `operstate` decides when it is definite (`up`, or `down` / `lowerlayerdown` /
+ * `notpresent`). A NIC that reports `unknown`, `dormant` or `testing` is
+ * settled by `carrier` (`1` up, `0` down). Anything else is `undefined`: the
+ * daemon does not guess.
+ */
+export function parseLinkState(
+  operstate: string | undefined,
+  carrier: string | undefined,
+): ServerReportedIpLink | undefined {
+  const state = operstate?.trim().toLowerCase();
+  if (state === "up") return "up";
+  if (
+    state === "down" || state === "lowerlayerdown" || state === "notpresent"
+  ) {
+    return "down";
+  }
+  const wire = carrier?.trim();
+  if (wire === "1") return "up";
+  if (wire === "0") return "down";
+  return undefined;
+}
+
+/**
+ * Link state of every named interface. Read-only: two small sysfs reads per
+ * NIC, no process and no route change. An interface the kernel does not
+ * describe is left out of the map.
+ */
+export function readInterfaceLinkStates(
+  names: Iterable<string>,
+  readText: (path: string) => string | undefined = readOptionalText,
+): Map<string, ServerReportedIpLink> {
+  const out = new Map<string, ServerReportedIpLink>();
+  for (const name of names) {
+    if (out.has(name) || name.length === 0 || /[/\s]/.test(name)) continue;
+    const base = `/sys/class/net/${name}`;
+    const link = parseLinkState(
+      readText(`${base}/operstate`),
+      readText(`${base}/carrier`),
+    );
+    if (link) out.set(name, link);
+  }
+  return out;
+}
+
+/** Link states for the interfaces {@link collectServerIps} would report on. */
+export function readHostInterfaceLinkStates(): Map<
+  string,
+  ServerReportedIpLink
+> {
+  try {
+    const names = new Set<string>();
+    for (const addr of Deno.networkInterfaces()) {
+      if (isPhysicalInterface(addr.name)) names.add(addr.name);
+    }
+    return readInterfaceLinkStates(names);
+  } catch {
+    return new Map();
+  }
+}
+
+/**
  * Enumerate reportable host addresses.
  *
  * Pass {@link readDefaultRouteInterfaces} output to mark the addresses on the
- * default-route NIC as `preferred`; omit it (tests, non-Linux) and the list is
- * unmarked but otherwise identical.
+ * default-route NIC as `preferred`, and {@link readHostInterfaceLinkStates}
+ * output to stamp each address with its NIC's `link`; omit them (tests,
+ * non-Linux) and the list is unmarked but otherwise identical.
  */
 export function collectServerIps(
   defaultRoute?: DefaultRouteInterfaces,
+  linkStates?: InterfaceLinkStates,
 ): ServerReportedIp[] {
   const byAddress = new Map<string, ServerReportedIp>();
 
@@ -291,12 +369,26 @@ export function collectServerIps(
       if (isPrivateIpv4(addr.address)) {
         rememberIp(
           byAddress,
-          buildReportedIp(addr.address, 4, "private", addr, defaultRoute),
+          buildReportedIp(
+            addr.address,
+            4,
+            "private",
+            addr,
+            defaultRoute,
+            linkStates,
+          ),
         );
       } else if (isPublicIpv4(addr.address)) {
         rememberIp(
           byAddress,
-          buildReportedIp(addr.address, 4, "public", addr, defaultRoute),
+          buildReportedIp(
+            addr.address,
+            4,
+            "public",
+            addr,
+            defaultRoute,
+            linkStates,
+          ),
         );
       }
       continue;
@@ -305,12 +397,26 @@ export function collectServerIps(
     if (isPrivateIpv6(addr.address)) {
       rememberIp(
         byAddress,
-        buildReportedIp(addr.address, 6, "private", addr, defaultRoute),
+        buildReportedIp(
+          addr.address,
+          6,
+          "private",
+          addr,
+          defaultRoute,
+          linkStates,
+        ),
       );
     } else if (isPublicIpv6(addr.address)) {
       rememberIp(
         byAddress,
-        buildReportedIp(addr.address, 6, "public", addr, defaultRoute),
+        buildReportedIp(
+          addr.address,
+          6,
+          "public",
+          addr,
+          defaultRoute,
+          linkStates,
+        ),
       );
     }
   }

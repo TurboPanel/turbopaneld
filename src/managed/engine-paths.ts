@@ -97,6 +97,16 @@ export function orchestratorRaftCnfPath(layout: LayoutPaths): string {
   return join(orchestratorConfigDir(layout), "raft.cnf");
 }
 
+/** Root-only readiness script installed by Ansible for the stack systemd unit. */
+export function orchestratorWaitReadyScriptPath(layout: LayoutPaths): string {
+  return join(layout.home, "libexec", "orchestrator-wait-ready.sh");
+}
+
+/** Written by the `orchestrator` Ansible role after dirs + unit install. */
+export function orchestratorHostPrepMarkerPath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "host-prep.ok");
+}
+
 export function orchestratorTlsDir(layout: LayoutPaths): string {
   return join(orchestratorConfigDir(layout), "tls");
 }
@@ -136,6 +146,26 @@ export function managedEnvFilePath(
   managedId: string,
 ): string {
   return join(managedDir(layout, managedId), ".env");
+}
+
+/**
+ * Daemon-owned (0750, group = engine group after hand-over) directory holding the engine root password file the
+ * engine reads through `<KEY>_FILE`. Not under `config/` or `tls/`, so
+ * ownership normalization never touches it.
+ */
+export function managedSecretsDir(
+  layout: LayoutPaths,
+  managedId: string,
+): string {
+  return join(managedDir(layout, managedId), "secrets");
+}
+
+/** Matches `MANAGED_ROOT_PASSWORD_FILE_SOURCE` (`./secrets/root-password`). */
+export function managedRootPasswordPath(
+  layout: LayoutPaths,
+  managedId: string,
+): string {
+  return join(managedSecretsDir(layout, managedId), "root-password");
 }
 
 /**

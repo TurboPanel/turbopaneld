@@ -565,3 +565,31 @@ test("buildHostingLabelsFragment re-unions mapping networks across hostings on t
     undefined,
   );
 });
+
+test("buildHostingLabelsFragment routes the names a www mode serves", () => {
+  const ruleFor = (
+    www: EnvironmentDeployPayload["hostings"][number]["www"],
+  ) => {
+    const hostings = [{
+      hostingId: "hosting_www",
+      serviceId: "service_123",
+      composeServiceName: "app",
+      hostnames: ["example.test"],
+      ...(www ? { www } : {}),
+    }];
+    const fragment = buildHostingLabelsFragment({
+      payload: { ...payload, hostings },
+      hostings,
+      resolved: appResolved,
+    });
+    const labels = fragment.services?.app?.labels as Record<string, string>;
+    return labels["traefik.http.routers.hosting_www.rule"];
+  };
+  assertEquals(ruleFor(undefined), "Host(`example.test`)");
+  assertEquals(ruleFor("www-to-root"), "Host(`example.test`)");
+  assertEquals(ruleFor("root-to-www"), "Host(`www.example.test`)");
+  assertEquals(
+    ruleFor("both"),
+    "Host(`example.test`) || Host(`www.example.test`)",
+  );
+});

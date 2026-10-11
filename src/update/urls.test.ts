@@ -1,15 +1,14 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { InsecureOverlayBaseError } from "./errors.ts";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   absolutizeChannelManifestJson,
   absolutizeRootCatalogJson,
   builtinChannelManifestUrl,
-  DL_BASE_URL,
+  describeMissingBuiltinChannel,
   isExactBuildManifestUrl,
   pinnedChannelManifestUrl,
   type ReleaseArtifactKind,
-  resolveDlBase,
   resolveMaybeRelativeUrl,
   resolveOverlayDlBase,
   resolvePinnedManifestUrl,
@@ -27,16 +26,6 @@ const ROOT = dirname(dirname(dirname(fromFileUrl(import.meta.url))));
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
-
-test("resolveDlBase prefers TURBOPANEL_DL_BASE over the public CDN", () => {
-  assertEquals(resolveDlBase({}), DL_BASE_URL);
-  assertEquals(
-    resolveDlBase({
-      TURBOPANEL_DL_BASE: "https://turbopanel.dev/downloads/daemon/",
-    }),
-    "https://turbopanel.dev/downloads/daemon",
-  );
-});
 
 test("resolvePinnedManifestUrl accepts only a release-rail https pin", () => {
   assertEquals(resolvePinnedManifestUrl({}), null);
@@ -90,11 +79,8 @@ test("resolveOverlayDlBase accepts https and rejects a configured non-https base
   );
 });
 
-test("builtinChannelManifestUrl: trunk on the CDN, canary/rc/release on GitHub Releases, edge none", () => {
-  assertEquals(
-    builtinChannelManifestUrl("trunk"),
-    "https://dl.trbp.nl/channels/trunk/manifest.json",
-  );
+test("builtinChannelManifestUrl: canary/rc/release on GitHub Releases, trunk and edge none", () => {
+  assertEquals(builtinChannelManifestUrl("trunk"), null);
   assertEquals(
     builtinChannelManifestUrl("rc"),
     "https://github.com/TurboPanel/turbopaneld/releases/download/rc/manifest.json",
@@ -319,9 +305,24 @@ test("scripts/run.sh mirrors builtinChannelManifestUrl for every artifact kind",
       }
     }
   }
-  const daemonDefault = await shellBuiltinManifestUrl("trunk");
-  assertEquals(daemonDefault.code, 0);
-  assertEquals(daemonDefault.stdout, builtinChannelManifestUrl("trunk"));
+  const retired = await shellBuiltinManifestUrl("trunk");
+  assertEquals(retired.code, 1);
+  assertEquals(retired.stdout, "");
+});
+
+test("describeMissingBuiltinChannel tells a trunk host to switch and leaves other channels generic", () => {
+  assertStringIncludes(
+    describeMissingBuiltinChannel("trunk"),
+    "trunk update channel was retired",
+  );
+  assertStringIncludes(
+    describeMissingBuiltinChannel("trunk"),
+    "canary, rc or release",
+  );
+  assertEquals(
+    describeMissingBuiltinChannel("edge"),
+    "Channel has no built-in manifest location: edge",
+  );
 });
 
 test("rootCatalogUrl joins channels.json onto the overlay origin", () => {
@@ -329,7 +330,6 @@ test("rootCatalogUrl joins channels.json onto the overlay origin", () => {
     rootCatalogUrl("https://turbopanel.dev/downloads/daemon"),
     "https://turbopanel.dev/downloads/daemon/channels.json",
   );
-  assertEquals(rootCatalogUrl(), `${DL_BASE_URL}/channels.json`);
 });
 
 test("resolveMaybeRelativeUrl resolves overlay-relative catalog paths", () => {
@@ -476,6 +476,7 @@ test("isExactBuildManifestUrl: channel pointers and off-rail URLs float", () => 
     ),
     false,
   );
+  // the retired CDN host is off the rail, so it is not a build either
   assertEquals(
     isExactBuildManifestUrl(
       "daemon",

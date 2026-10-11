@@ -48,6 +48,7 @@ import {
   backupTimerPath,
   backupUnitName,
 } from "./units.ts";
+import { parseTimerNextRun, timerNextRunArgs } from "./timer-next-run.ts";
 
 export type BackupsReconcileDeps = {
   resolveLayout?: () => LayoutPaths;
@@ -115,8 +116,6 @@ async function writePoliciesIfChanged(
   return true;
 }
 
-const UNIX_TIMESTAMP_RE = /^@(\d+)$/;
-
 /**
  * When a policy's timer next fires, read from systemd without sudo (a read-only
  * query). `undefined` when nothing is scheduled; a string warning on failure.
@@ -126,19 +125,12 @@ async function readNextRun(
   policyId: string,
 ): Promise<{ nextRunAt?: string; warning?: string }> {
   const timer = `${backupUnitName(policyId)}.timer`;
-  const show = await runFn("systemctl", [
-    "show",
-    timer,
-    "--property=NextElapseUSecRealtime",
-    "--value",
-    "--timestamp=unix",
-  ]);
+  const show = await runFn("systemctl", timerNextRunArgs(timer));
   if (!show.success) {
     return { warning: `next run unknown for ${timer}: ${show.stderr}` };
   }
-  const match = UNIX_TIMESTAMP_RE.exec(show.stdout.trim());
-  if (!match) return {};
-  return { nextRunAt: new Date(Number(match[1]) * 1000).toISOString() };
+  const nextRunAt = parseTimerNextRun(show.stdout, timer);
+  return nextRunAt ? { nextRunAt } : {};
 }
 
 export async function handleBackupsReconcile(

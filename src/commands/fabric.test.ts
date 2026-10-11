@@ -22,6 +22,7 @@ import {
   type FabricRunResult,
   handleFabricPathProbe,
   handleFabricReconcile,
+  isFabricBridgeName,
   isFreshProbeHandshake,
   parsePeerPresharedKeysFromWgConf,
   parseWgDumpPeers,
@@ -29,6 +30,7 @@ import {
   resetFabricTestOverrides,
   restoreFabricFromPersistedState,
   setFabricEnableIpForwardingForTests,
+  setFabricLocalAddressesForTests,
   setFabricNetworkDirForTests,
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
@@ -291,6 +293,30 @@ test("disabled fabric payload tears down even when nothing exists", async () => 
       return null;
     },
   );
+});
+
+test("reconcile result names the local NIC that carries each peer endpoint", async () => {
+  await withFabricDir("tp-fabric-nic-", async () => {
+    const parsed = parseFabricReconcilePayload(enabledPayload());
+    if (!parsed.enabled) {
+      throw new TypeError("expected enabled fabric payload");
+    }
+    const when = new Date().toISOString();
+    const without = await handleFabricReconcile(parsed, when);
+    assertEquals(without.peers?.[0]?.interface, undefined);
+
+    setFabricLocalAddressesForTests(() => [
+      {
+        address: "203.0.113.9",
+        version: 4,
+        scope: "public",
+        cidr: "203.0.113.9/24",
+        interface: "eno2",
+      },
+    ]);
+    const withNic = await handleFabricReconcile(parsed, when);
+    assertEquals(withNic.peers?.[0]?.interface, "eno2");
+  });
 });
 
 test("enabled fabric reconcile writes key/state and applies mtu/keepalive/wg-quick", async () => {
@@ -570,6 +596,150 @@ test("teardown with persisted state is idempotent on a second call", async () =>
   );
 });
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+test("teardown records a bridge that still has containers and retries it on the next teardown", async () => {
+  let busy = true;
+  await withFabricDir(
+    "tp-fabric-teardown-busy-",
+    async (networkDir) => {
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(parsed, new Date().toISOString());
+      const first = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(
+        first.summary,
+        `TurboFabric torn down; not removed yet, retried later: ${NETWORK_NAME}`,
+      );
+      // state.json is gone (fabric is off), the leftover is kept apart.
+      assertEquals(await pathExists(join(networkDir, "state.json")), false);
+      const pending = JSON.parse(
+        await Deno.readTextFile(join(networkDir, "teardown-pending.json")),
+      );
+      assertEquals(pending, { networks: [NETWORK_NAME] });
+
+      busy = false;
+      const second = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(second.summary, "TurboFabric torn down");
+      assertEquals(
+        await pathExists(join(networkDir, "teardown-pending.json")),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return busy
+          ? fail(
+            `Error response from daemon: error while removing network: network ${NETWORK_NAME} has active endpoints`,
+          )
+          : ok("");
+      }
+      return null;
+    },
+  );
+});
+
+const ORPHAN_BRIDGE = "tpn_6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
+
+test("teardown removes TurboFabric bridges that state.json does not name, and nothing else", async () => {
+  await withFabricDir(
+    "tp-fabric-teardown-orphan-",
+    async (_networkDir, invocations) => {
+      const result = await handleFabricReconcile(
+        { enabled: false },
+        new Date().toISOString(),
+      );
+      assertEquals(result.summary, "TurboFabric torn down");
+      const removed = invocations.filter((line) =>
+        line.startsWith("docker network rm")
+      );
+      assertEquals(removed, [`docker network rm ${ORPHAN_BRIDGE}`]);
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "ls") {
+        // An operator network named tpn_mynet, and a look-alike, stay.
+        return ok(`${ORPHAN_BRIDGE}\ntpn_mynet\nmy-tpn_app\n`);
+      }
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return ok("");
+      }
+      return null;
+    },
+  );
+});
+
+test("daemon start with fabric off retries bridges an earlier teardown left", async () => {
+  await withFabricDir(
+    "tp-fabric-boot-pending-",
+    async (networkDir, invocations) => {
+      await Deno.writeTextFile(
+        join(networkDir, "teardown-pending.json"),
+        `${JSON.stringify({ networks: [NETWORK_NAME, "tpn_mynet"] })}\n`,
+      );
+      await restoreFabricFromPersistedState();
+      assertEquals(
+        invocations.filter((line) => line.startsWith("docker network rm")),
+        [`docker network rm ${NETWORK_NAME}`],
+      );
+      assertEquals(
+        await pathExists(join(networkDir, "teardown-pending.json")),
+        false,
+      );
+    },
+    (cmd, args) => {
+      if (cmd === "docker" && args[0] === "network" && args[1] === "rm") {
+        return ok("");
+      }
+      return null;
+    },
+  );
+});
+
+test("an enable that uses a bridge again takes it off the teardown list", async () => {
+  await withFabricDir(
+    "tp-fabric-enable-pending-",
+    async (networkDir) => {
+      const other = "tpn_0a1b2c3d-4e5f-4a6b-8c7d-8899aabbccdd";
+      await Deno.writeTextFile(
+        join(networkDir, "teardown-pending.json"),
+        `${JSON.stringify({ networks: [NETWORK_NAME, other] })}\n`,
+      );
+      const parsed = parseFabricReconcilePayload(enabledPayload());
+      if (!parsed.enabled) {
+        throw new TypeError("expected enabled fabric payload");
+      }
+      await handleFabricReconcile(parsed, new Date().toISOString());
+      const pending = JSON.parse(
+        await Deno.readTextFile(join(networkDir, "teardown-pending.json")),
+      );
+      assertEquals(pending, { networks: [other] });
+    },
+  );
+});
+
+test("isFabricBridgeName accepts only tpn_<uuid>", () => {
+  assertEquals(isFabricBridgeName(NETWORK_NAME), true);
+  assertEquals(isFabricBridgeName("tpn_mynet"), false);
+  assertEquals(isFabricBridgeName(`x${NETWORK_NAME}`), false);
+  assertEquals(isFabricBridgeName(`${NETWORK_NAME}x`), false);
+});
+
 test("teardown fails when wg-quick unit cannot be disabled", async () => {
   await withFabricDir(
     "tp-fabric-teardown-disable-",
@@ -614,6 +784,31 @@ test("preflight failure names the missing tool", async () => {
       return null;
     },
   );
+});
+
+test("a default route in a peer's allowedIPs is refused before anything is applied", async () => {
+  await withFabricDir("tp-fabric-policy-", async (networkDir, invocations) => {
+    const payload = parseFabricReconcilePayload({
+      ...enabledPayload(),
+      peers: [{
+        publicKey: WG_PUBKEY_B,
+        endpoint: "203.0.113.1:51820",
+        allowedIPs: ["10.250.0.12/32", "0.0.0.0/0"],
+      }],
+    });
+    await assertRejects(
+      () => handleFabricReconcile(payload, new Date().toISOString()),
+      Error,
+      "TurboFabric refused a peer route",
+    );
+    assertEquals(
+      invocations.some((line) =>
+        line.includes("link add") || line.includes("syncconf")
+      ),
+      false,
+    );
+    await assertRejects(() => Deno.stat(join(networkDir, "state.json")));
+  });
 });
 
 test("boot-time restore reconstructs tp0 from state.json", async () => {
@@ -1190,6 +1385,19 @@ test("classifyPeerHandshakeHealth maps missing, fresh, and aged handshakes", () 
     ),
     "stale",
   );
+});
+
+test("classifyPeerHandshakeHealth follows WireGuard timers: re-handshake ~120 s, dead at 180 s", () => {
+  const now = Date.parse("2026-08-18T18:00:00.000Z");
+  const aged = (seconds: number) =>
+    classifyPeerHandshakeHealth(
+      new Date(now - seconds * 1000).toISOString(),
+      now,
+    );
+  for (const seconds of [0, 75, 100, 125, 170, 180]) {
+    assertEquals(aged(seconds), "healthy", `${seconds} s`);
+  }
+  assertEquals(aged(300), "stale");
 });
 
 test("handleFabricPathProbe collect-only returns dump health", async () => {

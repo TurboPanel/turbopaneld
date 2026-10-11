@@ -176,7 +176,11 @@ test({
       assertEquals(ws, "platform-attach");
       const cp = rule("/containers/c/archive", labels, undefined);
       assertEquals(cp, "platform-archive");
+      const exported = rule("/containers/c/export", labels, undefined);
+      assertEquals(exported, "platform-export");
     }
+    // A tenant container's export is not a platform finding (ownership only).
+    assertEquals(rule("/containers/c/export", tenant, undefined), undefined);
   },
 });
 

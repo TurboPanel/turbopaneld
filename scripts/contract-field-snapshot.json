@@ -6,6 +6,7 @@
       { "name": "address", "required": true, "type": "string" },
       { "name": "cidr", "required": false, "type": "string" },
       { "name": "interface", "required": false, "type": "string" },
+      { "name": "link", "required": false, "type": "'down' | 'up'" },
       { "name": "preferred", "required": false, "type": "boolean" },
       { "name": "scope", "required": true, "type": "'private' | 'public'" },
       { "name": "version", "required": true, "type": "4 | 6" }
@@ -95,6 +96,21 @@
       { "name": "upgradeId", "required": false, "type": "string" }
     ]
   },
+  "ServiceRunState": {
+    "instance": "src/contracts/service-run-state.ts",
+    "daemon": "src/contracts/service-run-state.ts",
+    "fields": [
+      { "name": "asOf", "required": true, "type": "string" },
+      { "name": "lastError", "required": false, "type": "string" },
+      { "name": "restartCount", "required": true, "type": "number" },
+      { "name": "serviceId", "required": true, "type": "string" },
+      {
+        "name": "state",
+        "required": true,
+        "type": "'crashing' | 'running' | 'starting' | 'stopped_after_crashes' | 'stopped' | 'unhealthy' | 'unknown'"
+      }
+    ]
+  },
   "InstanceAcmeWireSettings": {
     "instance": "src/contracts/cell-protocol.ts",
     "daemon": "src/contracts/cell-messages.ts",
@@ -133,21 +149,43 @@
       }
     ]
   },
+  "ManagedLifecyclePayload": {
+    "instance": "src/contracts/commands/schemas.ts",
+    "daemon": "src/contracts/commands-contracts.ts",
+    "fields": [
+      {
+        "name": "action",
+        "required": true,
+        "type": "'restart' | 'start' | 'stop'"
+      },
+      { "name": "demoted", "required": false, "type": "boolean" },
+      { "name": "managedId", "required": true, "type": "string" },
+      { "name": "memberId", "required": false, "type": "string" },
+      {
+        "name": "role",
+        "required": false,
+        "type": "'primary' | 'replica'"
+      }
+    ]
+  },
   "BackupPolicyWireEntry": {
     "instance": "src/contracts/commands/schemas.ts",
     "daemon": "src/contracts/commands-contracts.ts",
     "fields": [
+      { "name": "composeProject", "required": false, "type": "string" },
       { "name": "copyId", "required": false, "type": "string" },
       {
         "name": "copyProvider",
         "required": false,
         "type": "'docker' | 'path'"
       },
+      { "name": "database", "required": false, "type": "string" },
       { "name": "enabled", "required": true, "type": "boolean" },
       { "name": "hostPath", "required": false, "type": "string" },
       { "name": "managedId", "required": false, "type": "string" },
       { "name": "onCalendar", "required": true, "type": "string" },
       { "name": "organizationId", "required": false, "type": "string" },
+      { "name": "ownerUsername", "required": false, "type": "string" },
       { "name": "policyId", "required": true, "type": "string" },
       { "name": "retentionKeep", "required": true, "type": "number" },
       { "name": "storageId", "required": false, "type": "string" },

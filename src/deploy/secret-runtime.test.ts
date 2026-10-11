@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import {
   materializeSecretFiles,
   plannedSecretsMissing,
+  pruneStaleSecretFiles,
   removeSecretTree,
   rewriteComposeSecretFilePaths,
   SECRET_FILE_MODE,
@@ -562,6 +563,50 @@ test("writeSecretFiles writes in order and an unsafe path stops the later files"
         { relativePath: "third" },
       ]),
       true,
+    );
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+test("pruneStaleSecretFiles removes files that left the plan and keeps the planned ones", async () => {
+  const tmp = await Deno.makeTempDir({ prefix: "tp-secret-prune-" });
+  try {
+    const layout = { runDir: tmp };
+    await writeSecretFiles(layout, "proj", "env", [
+      { relativePath: "web--DATABASE_PASSWORD", plaintext: "new" },
+      { relativePath: "web--OLD_DATABASE_PASSWORD", plaintext: "detached" },
+    ]);
+    const dir = join(tmp, "deployments", "proj", "env", "secrets");
+    await Deno.writeTextFile(join(dir, "web--HALF.tmp"), "partial");
+    const removed = await pruneStaleSecretFiles(layout, "proj", "env", [
+      { relativePath: "web--DATABASE_PASSWORD" },
+    ]);
+    assertEquals(removed.sort(), [
+      "web--HALF.tmp",
+      "web--OLD_DATABASE_PASSWORD",
+    ]);
+    assertEquals(
+      await Deno.readTextFile(join(dir, "web--DATABASE_PASSWORD")),
+      "new",
+    );
+    assertEquals(
+      await plannedSecretsMissing(layout, "proj", "env", [
+        { relativePath: "web--OLD_DATABASE_PASSWORD" },
+      ]),
+      true,
+    );
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+test("pruneStaleSecretFiles is a no-op when the directory does not exist", async () => {
+  const tmp = await Deno.makeTempDir({ prefix: "tp-secret-prune-none-" });
+  try {
+    assertEquals(
+      await pruneStaleSecretFiles({ runDir: tmp }, "proj", "env", []),
+      [],
     );
   } finally {
     await Deno.remove(tmp, { recursive: true });

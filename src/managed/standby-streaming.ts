@@ -57,14 +57,18 @@ export class StandbyStreamingTracker {
       | "observedAt"
       | "receiveLagBytes"
       | "receiptAgeSeconds"
+      | "receiptAgeLimitSeconds"
     >,
     monoMs: number,
   ): void {
     if (health.state !== "streaming") return;
     const receiptAgeMs = (health.receiptAgeSeconds ?? Number.NaN) * 1000;
+    const limitMs = health.receiptAgeLimitSeconds === undefined
+      ? MAX_STREAMING_RECEIPT_AGE_MS
+      : health.receiptAgeLimitSeconds * 1000;
     if (
       !Number.isFinite(receiptAgeMs) || receiptAgeMs < 0 ||
-      receiptAgeMs > MAX_STREAMING_RECEIPT_AGE_MS
+      receiptAgeMs > limitMs
     ) {
       return;
     }
@@ -101,6 +105,10 @@ export class StandbyStreamingTracker {
         ? {}
         : { receiveLagBytes: record.receiveLagBytes }),
     };
+  }
+
+  forget(memberId: string): void {
+    this.#records.delete(memberId);
   }
 
   /** Drop members this host no longer runs as a standby. */

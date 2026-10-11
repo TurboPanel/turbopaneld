@@ -29,8 +29,10 @@ export async function createTempLayout(): Promise<TempLayoutFixture> {
   const backupDir = `${root}/backup`;
   const runDir = `${root}/run`;
   const runtimesDir = `${root}/runtimes`;
+  const homeDir = `${root}/turbopanel-home`;
 
   await Deno.mkdir(configDir);
+  await Deno.mkdir(homeDir);
   await Deno.mkdir(stateDir);
   await Deno.mkdir(logDir);
   await Deno.mkdir(backupDir);
@@ -59,6 +61,7 @@ export async function createTempLayout(): Promise<TempLayoutFixture> {
       TURBOPANEL_RUN_DIR: runDir,
       TURBOPANEL_DAEMON_STATE_DIR: stateDir,
       TURBOPANEL_RUNTIMES_DIR: runtimesDir,
+      TURBOPANEL_HOME: homeDir,
     },
     cleanup,
   };

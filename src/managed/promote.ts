@@ -11,52 +11,63 @@ import type {
   ManagedPromotePayload,
   ManagedPromoteResult,
 } from "../contracts/commands-contracts.ts";
-import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
-import {
-  type DockerCliResult,
-  runDocker as defaultRunDocker,
-  type RunDockerOptions,
-} from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
-  collectManagedContainers,
-  resolveEngineContainerId,
-} from "./containers.ts";
-import { getManagedEngineRuntime } from "./engines/index.ts";
-import type { ManagedEngineContext } from "./engines/types.ts";
-import { ManagedReplicationNotSupportedError } from "./engines/types.ts";
-import { managedComposeProject } from "./engine-paths.ts";
+  clearManagedDemotionArtifacts,
+  isManagedMemberDemoted,
+} from "./demoted-marker.ts";
+import { withManagedLifecycleLock } from "./target-lock.ts";
+import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
+import {
+  parseSwitchoverPromoteFailureCode,
+  switchoverCaughtErrorDetail,
+} from "./engines/switchover-promote-error.ts";
+import {
+  type LocalEngineContextDeps,
+  resolveLocalReplicationEngine,
+} from "./local-engine-context.ts";
+import { proveSwitchoverGtidBeforePromote } from "./switchover-gtid-proof.ts";
+import { writeSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
-type RunDockerFn = (
-  args: string[],
-  options?: RunDockerOptions,
-) => Promise<DockerCliResult>;
 
-export type ManagedPromoteHandlerDeps = {
+export type ManagedPromoteHandlerDeps = LocalEngineContextDeps & {
   decryptSecrets?: DecryptSecretsFn;
-  /** Test seam — defaults to {@link defaultRunDocker}. */
-  runDocker?: RunDockerFn;
-  /** Test seam — defaults to {@link defaultEnsureDocker}. */
-  ensureDocker?: () => Promise<void>;
 };
 
-function buildEngineExec(
-  containerId: string,
-  run: RunDockerFn,
-): ManagedEngineContext["exec"] {
-  return async (argv, input) => {
-    const result = await run(
-      ["exec", "-i", containerId, ...argv],
-      input === undefined ? undefined : { input },
-    );
-    return {
-      success: result.success,
-      stdout: result.stdout,
-      stderr: sanitizeForLog(result.stderr),
-    };
+function switchoverGtidProofInput(
+  payload: ManagedPromotePayload,
+): {
+  managedId: string;
+  engine: ManagedPromotePayload["engine"];
+  requiredExecutedGtidSet: string;
+  gtidWaitTimeoutSeconds?: number;
+} {
+  const input = {
+    managedId: payload.managedId,
+    engine: payload.engine,
+    requiredExecutedGtidSet: payload.requiredExecutedGtidSet!,
   };
+  return payload.gtidWaitTimeoutSeconds === undefined
+    ? input
+    : { ...input, gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds };
+}
+
+async function recordSwitchoverPromoteStartedOnFailure(
+  layout: ReturnType<typeof resolveLayout>,
+  payload: ManagedPromotePayload,
+  error: unknown,
+): Promise<void> {
+  const code = parseSwitchoverPromoteFailureCode(
+    switchoverCaughtErrorDetail(error),
+  );
+  if (code !== "promote_started") return;
+  await writeSwitchoverPromoteLocalMarker(
+    layout,
+    payload.managedId,
+    "started",
+    new Date().toISOString(),
+  );
 }
 
 export async function handleManagedPromote(
@@ -64,39 +75,66 @@ export async function handleManagedPromote(
   _daemonReceivedAt: string,
   deps?: ManagedPromoteHandlerDeps,
 ): Promise<ManagedPromoteResult> {
-  const engine = getManagedEngineRuntime(payload.engine ?? "postgres");
-  if (!engine.replication) {
-    throw new ManagedReplicationNotSupportedError(engine.engine);
+  const layout = resolveLayout(Deno.env.toObject());
+  if (!(await isManagedMemberDemoted(layout, payload.managedId))) {
+    return await promoteManagedMember(payload, layout, deps);
   }
+  // A marked member is writable between promote and the marker clear; hold
+  // the lock the demoted guard takes so it cannot stop the new primary.
+  return await withManagedLifecycleLock(
+    layout,
+    payload.managedId,
+    () => promoteManagedMember(payload, layout, deps),
+  );
+}
 
-  const run = deps?.runDocker ?? defaultRunDocker;
-  const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
-
-  await ensureDocker();
-  resolveLayout(Deno.env.toObject());
-
-  const project = managedComposeProject(payload.managedId);
-  const containers = await collectManagedContainers(project, undefined, run);
-  if (!containers || containers.length === 0) {
-    throw new Error(
-      `managed.promote: no running containers for ${payload.managedId}`,
-    );
-  }
-  const containerId = resolveEngineContainerId(
-    containers,
-    containers[0]!.composeServiceName,
+async function promoteManagedMember(
+  payload: ManagedPromotePayload,
+  layout: ReturnType<typeof resolveLayout>,
+  deps: ManagedPromoteHandlerDeps | undefined,
+): Promise<ManagedPromoteResult> {
+  const { engine, ctx } = await resolveLocalReplicationEngine(
+    payload.managedId,
+    payload.engine,
+    "managed.promote",
+    deps,
   );
 
-  const ctx: ManagedEngineContext = {
-    containerId,
-    composeServiceName: containers[0]!.composeServiceName,
-    rootUsername: engine.rootUsername,
-    defaultDatabase: engine.defaultDatabase,
-    exec: buildEngineExec(containerId, run),
-  };
-
-  await engine.replication.promote(ctx);
-  const health = await engine.replication.readHealth(ctx, "primary");
+  const switchoverPromote = payload.requiredExecutedGtidSet !== undefined;
+  try {
+    if (switchoverPromote) {
+      await proveSwitchoverGtidBeforePromote(
+        switchoverGtidProofInput(payload),
+        deps,
+      );
+      await engine.replication!.promote(ctx, {
+        ...(payload.gtidWaitTimeoutSeconds !== undefined
+          ? { gtidWaitTimeoutSeconds: payload.gtidWaitTimeoutSeconds }
+          : {}),
+      });
+    } else {
+      await engine.replication!.promote(ctx, undefined);
+    }
+  } catch (error) {
+    if (switchoverPromote) {
+      await recordSwitchoverPromoteStartedOnFailure(layout, payload, error);
+    }
+    throw error;
+  }
+  if (switchoverPromote) {
+    await writeSwitchoverPromoteLocalMarker(
+      layout,
+      payload.managedId,
+      "completed",
+      new Date().toISOString(),
+    );
+  }
+  const run = deps?.runDocker ?? defaultRunDocker;
+  await clearManagedDemotionArtifacts(layout, payload.managedId, {
+    engine: payload.engine,
+    run: (args) => run(args),
+  });
+  const health = await engine.replication!.readHealth(ctx, "primary");
 
   return {
     status: "ready",

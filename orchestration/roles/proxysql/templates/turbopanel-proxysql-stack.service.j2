@@ -1,6 +1,7 @@
 [Unit]
 Description=TurboPanel ProxySQL managed ingress
-After=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
 Requires=docker.service
 
 [Service]
@@ -15,6 +16,7 @@ RemainAfterExit=yes
 # Compose is daemon-written under configDir/proxysql. Before the first
 # managed.ingress.reconcile there is no docker-compose.yml — exit 0 so the unit
 # can enable on a fresh host without failing converge.
+ExecStartPre={{ proxysql_wait_addresses_script }}
 ExecStart=/bin/sh -c 'if [ -f {{ proxysql_config_dir }}/docker-compose.yml ]; then /usr/bin/docker compose -f {{ proxysql_config_dir }}/docker-compose.yml up -d --remove-orphans; else echo "proxysql compose not yet provisioned; skipping up"; fi'
 ExecStart=/bin/sh -c 'if [ -f {{ proxysql_config_dir }}/docker-compose.yml ]; then {{ proxysql_wait_ready_script }}; fi'
 ExecStop=/bin/sh -c 'if [ -f {{ proxysql_config_dir }}/docker-compose.yml ]; then /usr/bin/docker compose -f {{ proxysql_config_dir }}/docker-compose.yml down; fi'

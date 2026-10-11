@@ -1,27 +1,23 @@
 /**
- * Runtime entitlement registry — the daemon's view of
- * `orchestration/runtime-registry.json`.
+ * Runtime registry — the daemon's view of `orchestration/runtime-registry.json`.
  *
  * The JSON is imported rather than re-declared so the daemon and Ansible read
- * the same bytes. Anything derived from it (group names, gids, binary paths,
- * unit names) belongs here, not scattered across call sites the way
- * `NATIVE_APP_RUNTIME_GROUP` used to be.
+ * the same bytes. Anything derived from it (supported series, binary paths,
+ * unit names, SSH access groups) belongs here, not scattered across call sites.
  *
- * **Why per-(runtime, series) groups.** A group means "this principal may
- * execute this runtime series". Co-installed PHP versions are distinct
- * binaries, so one `tpphp` group would mean granting 8.4 also grants 8.3 —
- * including whatever CVEs another tenant's pinned app is carrying. It is also
- * what lets a shell wrapper resolve a caller's series from its group list.
+ * Every installed series may be run by every site owner's Linux user: there is
+ * no per-version group (owner decision 2026-10-07). The registry only says
+ * which series a host offers.
  */
 
 import registryJson from "../../orchestration/runtime-registry.json" with {
   type: "json",
 };
 
-export type RuntimeName = "php" | "node";
+export type RuntimeName = "php" | "node" | "deno";
 
-export type RuntimeSeriesEntry = Readonly<{
-  /** Unix group whose only meaning is "may exec this runtime series". */
+/** One SSH access group: its name and hand-assigned gid. */
+export type AccessGroupEntry = Readonly<{
   group: string;
   gid: number;
 }>;
@@ -29,9 +25,13 @@ export type RuntimeSeriesEntry = Readonly<{
 type RuntimeEntry = Readonly<{
   seriesKey: string;
   default: string;
-  series: Readonly<Record<string, RuntimeSeriesEntry>>;
+  series: Readonly<Record<string, Readonly<Record<string, never>>>>;
   baselineExtensions?: readonly string[];
   optionalExtensions?: readonly string[];
+  /** Series offered per Debian/Ubuntu suite (`VERSION_CODENAME`). PHP only. */
+  suiteSeries?: Readonly<Record<string, readonly string[]>>;
+  /** Extensions compiled into a series, so no package exists for them. */
+  builtinExtensions?: Readonly<Record<string, readonly string[]>>;
 }>;
 
 const RUNTIMES = registryJson.runtimes as unknown as Readonly<
@@ -53,15 +53,15 @@ export type PrincipalAccessGroupLevel =
   | "principal";
 
 const ACCESS_GROUPS = registryJson.accessGroups as unknown as Readonly<
-  Record<PrincipalAccessGroupLevel, RuntimeSeriesEntry>
+  Record<PrincipalAccessGroupLevel, AccessGroupEntry>
 >;
 
 /**
  * Group that puts a principal in one `sshd` Match block.
  *
- * Not an entitlement group: it protects no inode and grants no `execve`. It
- * exists because `sshd` matches on groups rather than on shells, so
- * `ForceCommand internal-sftp` needs a group of its own to hang from.
+ * It protects no inode and grants no `execve`. It exists because `sshd`
+ * matches on groups rather than on shells, so `ForceCommand internal-sftp`
+ * needs a group of its own to hang from.
  */
 export function accessGroup(
   level: PrincipalAccessGroupLevel,
@@ -74,11 +74,6 @@ export function allAccessGroups(): ReadonlySet<string> {
   return new Set(Object.values(ACCESS_GROUPS).map((entry) => entry.group));
 }
 
-export const RUNTIME_GID_BAND = Object.freeze({
-  min: registryJson.gidBand.min,
-  max: registryJson.gidBand.max,
-});
-
 /** Runtime names the registry knows, sorted. */
 export const RUNTIME_NAMES: readonly RuntimeName[] = Object.freeze(
   (Object.keys(RUNTIMES) as RuntimeName[]).sort((a, b) => a.localeCompare(b)),
@@ -89,12 +84,13 @@ export function isRuntimeName(value: string): value is RuntimeName {
 }
 
 /**
- * Normalize a version to the **exec boundary**, which is what a group protects.
+ * Normalize a version to its **series** — what the registry lists and what a
+ * vendored tree is keyed on.
  *
  * `php 8.4.3 -> 8.4`, `node 24.17.0 -> 24`. Compose accepts three-component
- * Node pins, so without this the group set would grow one entry per patch.
+ * Node pins, so without this every patch would look like its own series.
  */
-export function entitlementSeries(
+export function runtimeSeries(
   runtime: RuntimeName,
   version: string,
 ): string {
@@ -110,75 +106,89 @@ export function supportedSeries(runtime: RuntimeName): readonly string[] {
   );
 }
 
+/**
+ * PHP series offered on a host whose `VERSION_CODENAME` is `codename`.
+ *
+ * The table mirrors what LiteSpeed's repository publishes per suite and is the
+ * same list for every engine (lsphp and php-fpm), so hosting is at parity
+ * across engines and server versions. A suite the table does not list (or an
+ * unreadable codename) gets every series the registry knows rather than none:
+ * the roles then fail with their own clear message if a pin is missing.
+ */
+export function phpSeriesForSuite(
+  codename: string | undefined,
+): readonly string[] {
+  const listed = codename
+    ? RUNTIMES.php.suiteSeries?.[codename.trim().toLowerCase()]
+    : undefined;
+  return listed ? [...listed] : supportedSeries("php");
+}
+
+/**
+ * Clear error for a PHP series the host's OS does not offer, or `undefined`
+ * when it does. Checked before any playbook runs, like
+ * {@link unsupportedSeriesMessage}.
+ */
+export function unsupportedPhpSeriesMessage(
+  version: string,
+  codename: string | undefined,
+): string | undefined {
+  const series = runtimeSeries("php", version);
+  const offered = phpSeriesForSuite(codename);
+  if (offered.includes(series) && isSupportedSeries("php", series)) {
+    return undefined;
+  }
+  return `php ${version} is not offered on this server's operating system. Offered series: ${
+    offered.join(", ")
+  }.`;
+}
+
+/** Extensions compiled into a PHP series (no package to install for them). */
+export function phpBuiltinExtensions(series: string): readonly string[] {
+  return RUNTIMES.php.builtinExtensions?.[series] ?? [];
+}
+
 export function defaultSeries(runtime: RuntimeName): string {
   return RUNTIMES[runtime].default;
 }
 
-/**
- * Entitlement group for one runtime series, or `undefined` when the series is
- * not in the registry. Callers treat `undefined` as "not supported here" rather
- * than inventing a group name — an invented name would `usermod -aG` a group
- * that does not exist and fail at a confusing distance from the cause.
- */
-export function runtimeGroup(
+/** Whether the registry lists the series `version` belongs to. */
+export function isSupportedSeries(
   runtime: RuntimeName,
   version: string,
-): string | undefined {
-  return RUNTIMES[runtime].series[entitlementSeries(runtime, version)]?.group;
+): boolean {
+  return Object.hasOwn(
+    RUNTIMES[runtime].series,
+    runtimeSeries(runtime, version),
+  );
 }
 
 /**
  * Clear error for a requested series this host does not offer, or `undefined`
- * when it is supported. Checked before any playbook runs: an unknown series
- * has no entitlement group, so the playbook would otherwise die with only
+ * when it is supported. Checked before any playbook runs: the vendoring role
+ * refuses an unknown series, so the playbook would otherwise die with only
  * "ansible-playbook failed".
  */
 export function unsupportedSeriesMessage(
   runtime: RuntimeName,
   version: string,
 ): string | undefined {
-  if (runtimeGroup(runtime, version)) return undefined;
+  if (isSupportedSeries(runtime, version)) return undefined;
   return `${runtime} ${version} is not a supported ${runtime} version on this server. Supported series: ${
     supportedSeries(runtime).join(", ")
   }.`;
 }
 
-export function runtimeGid(
-  runtime: RuntimeName,
-  version: string,
-): number | undefined {
-  return RUNTIMES[runtime].series[entitlementSeries(runtime, version)]?.gid;
-}
-
 /**
- * Every entitlement group the registry defines.
+ * Every group TurboPanel reconciles on a principal: the SSH access groups.
  *
- * Not the containment set for revocation on its own — {@link allManagedGroups}
- * is, and it has to be, because SSH access is reconciled in the same pass.
- */
-export function allRuntimeGroups(): ReadonlySet<string> {
-  const groups = new Set<string>();
-  for (const runtime of RUNTIME_NAMES) {
-    for (const entry of Object.values(RUNTIMES[runtime].series)) {
-      groups.add(entry.group);
-    }
-  }
-  return groups;
-}
-
-/**
- * Every group TurboPanel reconciles on a principal — runtime entitlements plus
- * SSH access.
- *
- * **This is the containment set for revocation**, and it must be exactly one
- * set. `ensurePrincipalManagedGroups` removes stale membership only for names
- * in here, so `<username>-grp`, `tp`, an engine group, and anything an operator
- * added by hand survive untouched. Two sets would mean two containment rules,
- * and a principal downgraded from shell to files-only would keep `tpshell`
- * because the entitlement pass did not recognize it.
+ * **This is the containment set for revocation.**
+ * `ensurePrincipalManagedGroups` removes stale membership only for names in
+ * here, so the principal's own group, `tp`, an engine group, and anything an
+ * operator added by hand survive untouched.
  */
 export function allManagedGroups(): ReadonlySet<string> {
-  return new Set([...allRuntimeGroups(), ...allAccessGroups()]);
+  return allAccessGroups();
 }
 
 /** Extensions installed on every series, whether or not a site asked. */

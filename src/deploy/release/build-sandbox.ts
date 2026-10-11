@@ -6,21 +6,26 @@
  * daemon account (which can reach the Docker socket, the daemon's state and
  * `sudo tp-host`). The daemon clones into `work/<buildId>` under
  * {@link BUILD_SANDBOX_ROOT}, writes a spec, and asks `tp-host build-run` to
- * hand the tree to the unprivileged build account and run the spec in a
- * transient `turbopanel-build-<buildId>.service` whose sandbox and limits
- * tp-host fixes (no docker or tp group, daemon trees and sockets hidden,
- * private-range and metadata egress denied, 4G memory, 2 CPUs, 30 minutes).
- * `build-return` gives the tree back only once that unit is gone, and only
- * then does the daemon read it (`./safe-copy.ts`, contained in `work/<id>`).
+ * run the spec in a transient `turbopanel-build-<buildId>.service` whose
+ * sandbox and limits tp-host fixes. The unit runs as a throwaway user systemd
+ * creates for that one run (`DynamicUser=yes`, never a host account, never in
+ * docker or tp), inside the site owner's own resource group
+ * (`turbopanel-<owner>-build.slice`), with daemon trees and sockets hidden,
+ * private-range and metadata egress denied, 4G memory, 2 CPUs, 30 minutes.
+ * The unit hands the tree to its user as it starts; `build-return` gives it
+ * back only once that unit is gone, and only then does the daemon read it
+ * (`./safe-copy.ts`, contained in `work/<id>`). Package caches live in
+ * `caches/<owner>/<project>`, one per site owner and project, handed to each
+ * build's user only while it runs; no other build can see them.
  *
  * Spec format and runner semantics: `orchestration/scripts/tp-build-runner`.
  */
 
 import { encodeBase64 } from "@std/encoding/base64";
 import { encodeHex } from "@std/encoding/hex";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
-import { pumpLines } from "../../logs/line-stream.ts";
+import { BUILD_OUTPUT_LIMITS, pumpLines } from "../../logs/line-stream.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import { PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
@@ -28,6 +33,7 @@ import type { RunFn } from "../ensure-principal.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { runPrivileged } from "./release-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { throwIfAborted } from "../deploy-cancel.ts";
 
 /** The build-user role's tree; tp-host pins the same path. */
 export const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
@@ -43,6 +49,25 @@ const RUNNER_REFUSED_EXITS = new Set([64, 65]);
 
 /** `tp-host`'s id rule: lower-case letters, digits and `-`, not leading `-`. */
 const SANDBOX_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/** Letters, digits, `_` and `-`, 1 to 32 of them. */
+const SANDBOX_OWNER_CHARS_RE = /^[\w-]{1,32}$/;
+
+/**
+ * The owner of a build nobody owns (an image build for a service with no site
+ * owner). tp-host runs it in `turbopanel-tpbuild.slice`, which no site owner's
+ * Linux user can own (their names never start with `tp`).
+ */
+export const BUILD_NO_OWNER = "tpbuild";
+
+/**
+ * `tp-host build-run`'s rule for the site owner's Linux user name: it names a
+ * slice (`turbopanel-<owner>-build.slice`, where a dash is a slice level) and a
+ * cache directory, so no leading, trailing or doubled dash.
+ */
+export function isSandboxOwnerName(owner: string): boolean {
+  return SANDBOX_OWNER_CHARS_RE.test(owner) && !owner.startsWith("-") &&
+    !owner.endsWith("-") && !owner.includes("--");
+}
 const SPEC_ENV_NAME_RE = /^[A-Za-z_]\w*$/;
 const SPEC_CWD_RE = /^[\w.@+,=/-]+$/;
 const SUDO_PATH = "/usr/sbin:/usr/bin:/sbin:/bin";
@@ -51,26 +76,32 @@ const ERROR_TAIL_LINES = 80;
 export type BuildWork = {
   /** `turbopanel-build-<buildId>.service`; also the `work/` entry name. */
   buildId: string;
-  /** The project's cache directory name (`cache/<projectKey>`). */
+  /** The project id: with {@link owner}, names the build's cache. */
   projectKey: string;
+  /**
+   * The site owner's Linux user. The build runs in that user's resource group
+   * (`turbopanel-<owner>-build.slice`) and keeps its cache apart from every
+   * other site owner's; it never runs as that user.
+   */
+  owner: string;
   /** `work/<buildId>`: the containment root for everything the build wrote. */
   workDir: string;
   /** The clone, inside {@link workDir}. */
   checkoutDir: string;
-  /** `cache/<projectKey>`, bound into the build unit at the same path. */
+  /** `caches/<owner>/<projectKey>`, bound into the build unit at the same path. */
   cacheDir: string;
 };
 
 /** Root-owned facts that mark a host whose builds must be sandboxed. */
 export type BuildSandboxMarkers = {
-  /** The account database the build account is looked up in. */
-  passwd: string;
+  /** The build-user role's root-owned tree. */
+  buildRoot: string;
   /** The managed install's root helper. */
   tpHost: string;
 };
 
 const HOST_MARKERS: BuildSandboxMarkers = {
-  passwd: "/etc/passwd",
+  buildRoot: BUILD_SANDBOX_ROOT,
   tpHost: join(PROD_LIB_DIR_DEFAULT, "tp-host"),
 };
 
@@ -95,14 +126,11 @@ const MANAGED = {
 export async function buildSandboxEnabled(
   markers: BuildSandboxMarkers = HOST_MARKERS,
 ): Promise<boolean> {
-  const [account, helper] = await Promise.all([
-    Deno.readTextFile(markers.passwd).then(
-      (text) => text.split("\n").some((line) => line.startsWith("tpbuild:")),
-      () => false,
-    ),
+  const [tree, helper] = await Promise.all([
+    lstatOrNull(markers.buildRoot).then((info) => info !== null, () => true),
     lstatOrNull(markers.tpHost).then((info) => info !== null, () => true),
   ]);
-  return account || helper;
+  return tree || helper;
 }
 
 /**
@@ -110,12 +138,23 @@ export async function buildSandboxEnabled(
  * release, so a rerun after a crash finds (and reclaims) the same tree.
  */
 export async function resolveBuildWork(
-  params: { serviceId: string; releaseId: string; projectId: string },
+  params: {
+    serviceId: string;
+    releaseId: string;
+    projectId: string;
+    /** The site owner's Linux user. */
+    owner: string;
+  },
   root: string = BUILD_SANDBOX_ROOT,
 ): Promise<BuildWork> {
   if (!SANDBOX_ID_RE.test(params.projectId)) {
     throw new Error(
       `project id ${params.projectId} cannot name a build cache directory`,
+    );
+  }
+  if (!isSandboxOwnerName(params.owner)) {
+    throw new Error(
+      `site owner ${params.owner} cannot own a sandboxed build`,
     );
   }
   const digest = await crypto.subtle.digest(
@@ -127,9 +166,10 @@ export async function resolveBuildWork(
   return {
     buildId,
     projectKey: params.projectId,
+    owner: params.owner,
     workDir,
     checkoutDir: join(workDir, "source"),
-    cacheDir: join(root, "cache", params.projectId),
+    cacheDir: join(root, "caches", params.owner, params.projectId),
   };
 }
 
@@ -176,6 +216,59 @@ export function isSpecEnvName(name: string): boolean {
   return SPEC_ENV_NAME_RE.test(name);
 }
 
+/** Prefix of a work tree moved aside because it could not be removed. */
+const QUARANTINE_PREFIX = "q-";
+
+/**
+ * Give the daemon back access to a tree it owns but a build locked
+ * (mode 000, no-write directories). Top-down, never follows a symlink.
+ */
+async function makeTreeRemovable(path: string): Promise<void> {
+  const info = await lstatOrNull(path);
+  if (!info?.isDirectory) return;
+  await Deno.chmod(path, 0o700);
+  const entries = await Array.fromAsync(Deno.readDir(path));
+  await forEachSequential(
+    entries.filter((entry) => entry.isDirectory),
+    (entry) => makeTreeRemovable(join(path, entry.name)),
+  );
+}
+
+/**
+ * Remove a returned work tree. A build can leave directories the daemon
+ * cannot enter, so a failed removal is retried after restoring owner
+ * access, and as a last resort the tree is renamed aside so the same
+ * release can be built again. Resolves true when the tree is gone.
+ */
+export async function removeBuildTree(
+  path: string,
+  remove: typeof Deno.remove = Deno.remove,
+): Promise<boolean> {
+  try {
+    await remove(path, { recursive: true });
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return true;
+  }
+  try {
+    await makeTreeRemovable(path);
+    await remove(path, { recursive: true });
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return true;
+    const parent = join(path, "..");
+    const aside = join(
+      parent,
+      `${QUARANTINE_PREFIX}${Date.now().toString(36)}-${basename(path)}`.slice(
+        0,
+        64,
+      ),
+    );
+    await Deno.rename(path, aside);
+    return false;
+  }
+}
+
 /**
  * Create `work/<buildId>` for a fresh clone. A tree left by a crashed run is
  * handed back and removed first; a missing `work/` names the role to run.
@@ -189,7 +282,7 @@ export async function createBuildWorkDir(
     // can be handed back (build-return refuses an active unit).
     await stopBuildUnit(work, runFn);
     await returnBuildWork(work, runFn);
-    await Deno.remove(work.workDir, { recursive: true });
+    await removeBuildTree(work.workDir);
   }
   try {
     await Deno.mkdir(work.workDir, { mode: 0o700 });
@@ -242,6 +335,7 @@ export async function sweepStaleBuildWork(
       return {
         buildId: name,
         projectKey: "",
+        owner: "",
         workDir,
         checkoutDir: join(workDir, "source"),
         cacheDir: "",
@@ -260,10 +354,17 @@ async function reclaimStaleWork(
   onOutput?: ReleaseOutputHandler,
 ): Promise<void> {
   try {
-    await stopBuildUnit(work, runFn);
-    await returnBuildWork(work, runFn);
-    await Deno.remove(work.workDir, { recursive: true });
-    onOutput?.("stdout", `reclaimed a stale build tree ${work.workDir}`);
+    if (!basename(work.workDir).startsWith(QUARANTINE_PREFIX)) {
+      await stopBuildUnit(work, runFn);
+      await returnBuildWork(work, runFn);
+    }
+    const gone = await removeBuildTree(work.workDir);
+    onOutput?.(
+      "stdout",
+      gone
+        ? `reclaimed a stale build tree ${work.workDir}`
+        : `moved a build tree that would not delete aside from ${work.workDir}`,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     onOutput?.(
@@ -279,9 +380,13 @@ export async function removeBuildWork(
   onOutput?: ReleaseOutputHandler,
 ): Promise<void> {
   try {
-    await Deno.remove(work.workDir, { recursive: true });
+    if (!(await removeBuildTree(work.workDir))) {
+      onOutput?.(
+        "stderr",
+        `the build tree ${work.workDir} would not delete; it was moved aside`,
+      );
+    }
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
     const message = err instanceof Error ? err.message : String(err);
     onOutput?.(
       "stderr",
@@ -360,32 +465,58 @@ export type SandboxedBuildParams = {
   runFn?: RunFn;
   spawn?: SandboxSpawn;
   timeoutMs?: number;
+  /** Stop the build once it has printed this many characters. */
+  maxOutputChars?: number;
+  /**
+   * Cancel signal of the deploy: aborting it stops the build unit the same way
+   * the timeout does (client killed first, then `systemctl stop`), takes the
+   * work tree back, and throws `DeployCancelledError`.
+   */
+  signal?: AbortSignal;
 };
 
 // One build at a time per host: tp-host holds a root-only lock as well, but
 // queueing here keeps a waiting deploy visible in its transcript.
-let buildQueue: Promise<void> = Promise.resolve();
-let buildsQueued = 0;
+type BuildWaiter = { projectKey: string; go: () => void };
+const buildWaiters: BuildWaiter[] = [];
+let buildBusy = false;
+let lastBuildProject = "";
 
-async function withBuildSlot<T>(
+/** Hand the slot to the longest waiter, preferring a project that did not just build. */
+function nextBuildWaiter(): void {
+  const index = buildWaiters.findIndex((w) =>
+    w.projectKey !== lastBuildProject
+  );
+  const [waiter] = buildWaiters.splice(Math.max(index, 0), 1);
+  if (!waiter) {
+    buildBusy = false;
+    return;
+  }
+  lastBuildProject = waiter.projectKey;
+  waiter.go();
+}
+
+/**
+ * One build at a time on the host. Waiting builds are served round-robin by
+ * project (oldest first within a project's turn), so one project that deploys
+ * over and over cannot keep every other project's build waiting.
+ */
+export async function withBuildSlot<T>(
   onOutput: ReleaseOutputHandler | undefined,
   run: () => Promise<T>,
+  projectKey = "",
 ): Promise<T> {
-  if (buildsQueued > 0) {
+  if (buildBusy) {
     onOutput?.("stdout", "waiting for another build on this host to finish");
+    await new Promise<void>((go) => buildWaiters.push({ projectKey, go }));
+  } else {
+    buildBusy = true;
+    lastBuildProject = projectKey;
   }
-  buildsQueued += 1;
-  const previous = buildQueue;
-  let release = () => {};
-  buildQueue = new Promise((resolve) => {
-    release = resolve;
-  });
   try {
-    await previous;
     return await run();
   } finally {
-    buildsQueued -= 1;
-    release();
+    nextBuildWaiter();
   }
 }
 
@@ -431,20 +562,36 @@ async function runBuildUnit(
     ((text: string) => redactCommandSummary(text));
   const timeoutMs = params.timeoutMs ?? SANDBOX_BUILD_TIMEOUT_MS;
   const child = (params.spawn ?? spawnSudo)(
-    hostSudoArgs(["-n", "build-run", work.buildId, work.projectKey], MANAGED),
+    hostSudoArgs(
+      ["-n", "build-run", work.buildId, work.projectKey, work.owner],
+      MANAGED,
+    ),
   );
   let aborted: Promise<void> | null = null;
-  const timer = setTimeout(() => {
-    // Kill the client first, so a tp-host still waiting on the host lock
-    // cannot start the unit after the stop.
+  let abortReason = `build timed out after ${timeoutMs}ms`;
+  // Kill the client first, so a tp-host still waiting on the host lock
+  // cannot start the unit after the stop.
+  const abort = (reason: string) => {
+    if (aborted !== null) return;
+    abortReason = reason;
     aborted = abortBuildUnit(child, work, runFn);
-  }, timeoutMs);
+  };
+  const timer = setTimeout(() => abort(abortReason), timeoutMs);
+  const onCancel = () => abort("the deploy was cancelled");
+  params.signal?.addEventListener("abort", onCancel, { once: true });
+  if (params.signal?.aborted) onCancel();
+  const limits = {
+    ...BUILD_OUTPUT_LIMITS,
+    maxTotalChars: params.maxOutputChars ?? BUILD_OUTPUT_LIMITS.maxTotalChars,
+    onLimit: () =>
+      abort("build output exceeded the size limit; the build was stopped"),
+  };
   let outcome: [Deno.CommandStatus, string, string, void];
   try {
     outcome = await Promise.all([
       child.status,
-      pumpLines(child.stdout, (line) => onOutput?.("stdout", line)),
-      pumpLines(child.stderr, (line) => onOutput?.("stderr", line)),
+      pumpLines(child.stdout, (line) => onOutput?.("stdout", line), limits),
+      pumpLines(child.stderr, (line) => onOutput?.("stderr", line), limits),
       writeSpec(child.stdin, params.spec),
     ]);
   } catch (err) {
@@ -453,13 +600,13 @@ async function runBuildUnit(
     throw err;
   } finally {
     clearTimeout(timer);
+    params.signal?.removeEventListener("abort", onCancel);
   }
   const [status, stdout, stderr] = outcome;
   if (aborted !== null) {
     await aborted;
-    throw new Error(
-      `build timed out after ${timeoutMs}ms; the build unit was stopped`,
-    );
+    throwIfAborted(params.signal, "while the build was running");
+    throw new Error(`${abortReason}; the build unit was stopped`);
   }
   if (!status.success) {
     throw new Error(failureMessage(status.code, stdout, stderr, redact));
@@ -492,6 +639,8 @@ export async function runSandboxedBuild(
   await withBuildSlot(params.onOutput, async () => {
     let failure: unknown = null;
     try {
+      // A deploy cancelled while it waited for the build slot never starts one.
+      throwIfAborted(params.signal, "before the build started");
       await runBuildUnit(params, runFn);
     } catch (err) {
       failure = err;
@@ -503,6 +652,9 @@ export async function runSandboxedBuild(
       const message = err instanceof Error ? err.message : String(err);
       params.onOutput?.("stderr", message);
     }
-    if (failure !== null) throw failure;
-  });
+    if (failure !== null) {
+      throwIfAborted(params.signal, "while the build was running");
+      throw failure;
+    }
+  }, params.work.projectKey);
 }
