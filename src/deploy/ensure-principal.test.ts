@@ -323,7 +323,7 @@ test("ensureSystemPrincipals rejects an adopted group below the current UID/GID 
         home: defaultHome,
       }], run),
     Error,
-    "Principal group appuser has gid=10001, below the current PRINCIPAL_ID_MIN=15001 — needs UID/GID migration",
+    "The name appuser is already used by a group on this host with gid=10001, below the current PRINCIPAL_ID_MIN=15001 — needs UID/GID migration",
   );
   assertEquals(
     calls.some((c) => c.command === "getent" && c.args[0] === "passwd"),
@@ -482,7 +482,7 @@ test("ensureSystemPrincipals rejects existing group with mismatched gid override
         shell: "/bin/bash",
       }], run),
     Error,
-    "Principal group appuser already exists with gid=33; expected gid=15001",
+    "The name appuser is already used by a group on this host (gid=33); expected gid=15001",
   );
   assertEquals(
     calls.some((c) => c.command === "sudo" && c.args.includes("useradd")),

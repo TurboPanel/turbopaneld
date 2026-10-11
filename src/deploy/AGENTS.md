@@ -92,7 +92,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    accounts are adopted and never renumbered. The primary group is the
    standard Debian per-user group: named after the user (`<username>`), gid in
    the same band. Username max length is **28** (keep in sync with instance
-   `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID override is supplied and the
+   `MAX_PRINCIPAL_USERNAME_LENGTH`). A name reserved for the host's own
+   accounts is refused here before useradd/groupadd
+   (`src/deploy/reserved-principal-names.ts`); tp-host's `TP_RESERVED_NAMES`
+   must gain the same new names (owner action: flagged, not done in this
+   change). When a GID override is supplied and the
    group `<username>` already exists with a different numeric GID, ensure fails
    (conflict) instead of silently attaching the principal to that group. An
    existing group `<username>` is adopted only when its gid is in the band and,
