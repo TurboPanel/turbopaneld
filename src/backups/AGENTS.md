@@ -32,15 +32,23 @@ policies file first (only when the set changed, so an unchanged set leaves its
 each enabled policy only when the bytes differ, one `daemon-reload`, `enable
 --now` only the timers that moved, and remove every `turbopanel-backup-*` timer
 the set no longer names (disabled policies included). Next runs come from
-`systemctl show <timer> --property=NextElapseUSecRealtime --value
---timestamp=unix`, unprivileged; a failed read is a warning, not an error.
+`systemctl list-timers --all --output=json <timer>` (`timer-next-run.ts`; its
+`next` is microseconds since the epoch), unprivileged; a failed read is a
+warning, not an error. Do not use `systemctl show --timestamp=unix`: `show`
+ignores `--timestamp` and prints the local "Tue 2026-10-06 03:25:35 CDT" form.
 
 The units: the service is a oneshot as `tp:tp` whose only `ExecStart` is the
 wrapper with its own policy id, reading `daemon.env`, at `Nice=10` /
 `IOSchedulingClass=idle`, no `[Install]` (only its timer starts it). The timer
 is `Persistent=true` (a run missed while the host was off happens once when it
-returns) with a 300 s `RandomizedDelaySec`. tp-host pins every one of those
-lines — change `units.ts` and `tp_backup_unit_ok` together.
+returns). How late it may start depends on how often it fires, read from the
+`OnCalendar` value by `backupTimerTiming()`: more than once an hour (minute
+field is a step, list or `*`) gets `RandomizedDelaySec=0` and `AccuracySec=1s`
+so a 2-minute policy really fires every 2 minutes; hourly or every few hours
+gets 30 s; daily, weekly and monthly keep 300 s. An `OnCalendar` value it cannot
+read gets no delay. tp-host pins the service lines (`tp_backup_unit_ok`), not
+the timer's delay values — change `units.ts` and `tp_backup_unit_ok` together
+for the service, and `units.test.ts` for the timer.
 
 ## What the runner may do (Deno permissions)
 
@@ -96,10 +104,18 @@ narrowed at runtime; narrowing them would take a second compiled binary.
 - The image is pulled by `server.backups.reconcile` when an enabled copy
   policy exists (a failed pull is a warning) and by a manual `storage.backup`;
   a scheduled run never pulls.
-- Sources: a Docker volume by name (`docker volume inspect` first, so a
-  missing volume is refused rather than created empty), or a host directory
-  under `/srv/users/` or `<stateDir>/storage/` only. Never
-  `/var/lib/docker/volumes`.
+- Sources: a Docker volume by name, or a host directory. `copy-source-guard.ts`
+  checks both before every mount (backup, restore, and again under the restore
+  lock). A volume must be the storage's own (name = `storageId`) or carry the
+  project's `com.docker.compose.project` label, and must be a plain local
+  volume (no `device`/bind options, no other driver); `docker volume inspect`
+  also refuses a missing volume. A host path must be inside
+  `/srv/users/<ownerUsername>/volumes/` (the wire names the owner) or the
+  default `<stateDir>/storage/` root, with no symlink component below the
+  owner's home / storage root. Never `/var/lib/docker/volumes`.
+- Retention (`pruneBackupArtifacts` with `COPY_ARCHIVE_MIN_GOOD_BYTES`): an
+  archive under 1 KiB holds no files; it is kept, never counts toward
+  `retentionKeep`, and a run that produced one prunes nothing.
 - `<runDir>/copy-locks/<copyId>.lock` is the per-copy flock: a scheduled run,
   a manual backup and a restore of one copy never run at once.
 
@@ -119,7 +135,13 @@ Keep this order (`copy-restore.ts`, pinned by `copy-restore.test.ts`):
    extracts into `/dst/.tp-restore-stage`, moves the current entries to
    `/dst/.tp-restore-old`, moves the staged ones up, deletes the old ones
    (`RESTORE_SCRIPT`: exit 3 = unextractable, copy unchanged; 4 = swap failed,
-   old contents put back; 5 = putting them back failed too).
+   old contents put back; 5 = putting them back failed too; 6 = an earlier
+   restore left `.tp-restore-old` without its `.tp-restore-done` marker, so
+   nothing is touched. The script never deletes such an `old`).
+   Before step 2 an intent file (`<backupDir>/restore-intents/<copyId>.json`:
+   container ids, helper name) is written; it is removed once the containers
+   run again, and `recoverInterruptedRestores` (daemon boot) starts them if the
+   daemon died in between.
 4. Always: start every container stopped in step 2; report the ones that
    would not start.
 
@@ -155,9 +177,8 @@ deploy.
   `ok` true (recorded) or false (refused for good). No answer leaves it for
   the next tick; the control plane records a run once however often it is
   sent. A closed socket ends the tick.
-- `nextRunAt` comes from `systemctl show turbopanel-backup-<policyId>.timer
-  --property=NextElapseUSecRealtime --value --timestamp=unix` (read-only, no
-  sudo); it is omitted while the unit does not exist or is not scheduled.
+- `nextRunAt` comes from `systemctl list-timers --all --output=json
+  turbopanel-backup-<policyId>.timer` (read-only, no sudo; `timer-next-run.ts`); it is omitted while the unit does not exist or is not scheduled.
 - A spooled file that would not pass the control plane's frame check is
   renamed to `.<runId>.json.invalid` and never sent: an out-of-shape frame
   closes the socket, which would otherwise repeat every tick.

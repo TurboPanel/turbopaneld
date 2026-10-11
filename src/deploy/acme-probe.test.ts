@@ -82,8 +82,21 @@ test("probeAcmeHostname truncates an excessively long error message", async () =
     fetchImpl: fakeFetch(() => Promise.reject(new Error("x".repeat(1000)))),
   });
   if (result.ok) throw new TypeError("expected a failed probe result");
-  assertEquals(result.errorMessage.length <= 501, true);
-  assertEquals(result.errorMessage.endsWith("…"), true);
+  assertEquals(result.errorMessage.length <= 500, true);
+  assertEquals(result.errorMessage.startsWith("…"), true);
+});
+
+test("probeAcmeHostname keeps the cause when a long message is cut", async () => {
+  const cause = new Error("certificate has expired");
+  const result = await probeAcmeHostname("example.test", {
+    fetchImpl: fakeFetch(() =>
+      Promise.reject(
+        new Error(`fetch failed ${"padding ".repeat(100)}`, { cause }),
+      )
+    ),
+  });
+  if (result.ok) throw new TypeError("expected a failed probe result");
+  assertEquals(result.errorMessage.endsWith(": certificate has expired"), true);
 });
 
 test("probeAcmeHostname reports failure on a client-side timeout", async () => {

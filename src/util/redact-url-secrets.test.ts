@@ -10,3 +10,48 @@ Deno.test("redactUrlSecrets drops the signed query and user info, keeps host and
   );
   assertEquals(redactUrlSecrets("no url here"), "no url here");
 });
+
+Deno.test("redactUrlSecrets drops a password that holds ?, # or @", () => {
+  assertEquals(
+    redactUrlSecrets("fetch https://user:pa?ss@host.example/repo.git failed"),
+    "fetch https://host.example/repo.git failed",
+  );
+  assertEquals(
+    redactUrlSecrets("fetch https://user:pa#ss@host.example/x?y=1 failed"),
+    "fetch https://host.example/x?[redacted] failed",
+  );
+  assertEquals(
+    redactUrlSecrets("fetch https://user:p@ss:w?rd@host.example failed"),
+    "fetch https://host.example failed",
+  );
+  assertEquals(
+    redactUrlSecrets("https://user:pa?ss@host.example"),
+    "https://host.example",
+  );
+});
+
+Deno.test("redactUrlSecrets keeps an @ that belongs to the path or the query", () => {
+  assertEquals(
+    redactUrlSecrets("GET https://registry.example/@scope/pkg ok"),
+    "GET https://registry.example/@scope/pkg ok",
+  );
+  assertEquals(
+    redactUrlSecrets("GET https://host.example?mail=a@b.test ok"),
+    "GET https://host.example?[redacted] ok",
+  );
+});
+
+Deno.test("redactUrlSecrets drops a token-only user name before a query or fragment with @", () => {
+  const first = redactUrlSecrets("https://TOKEN@host.example?mail=a@b.test");
+  assertEquals(first, "https://host.example?[redacted]");
+  assertEquals(redactUrlSecrets(first), first);
+  const second = redactUrlSecrets("https://TOKEN@host.example#x@y");
+  assertEquals(second, "https://host.example?[redacted]");
+  assertEquals(redactUrlSecrets(second), second);
+});
+
+Deno.test("redactUrlSecrets gives the same text when applied twice", () => {
+  const once = redactUrlSecrets("see https://u:p?w@h.test/a?b=c#d and more");
+  assertEquals(once, "see https://h.test/a?[redacted] and more");
+  assertEquals(redactUrlSecrets(once), once);
+});

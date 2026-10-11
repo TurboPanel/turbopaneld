@@ -18,6 +18,11 @@ export function normalizeNodePackageManagerCommand(command: string): string {
 const PACKAGE_MANAGER_START_RE =
   /^(?:corepack\s+)?(?:pnpm|yarn|npm)\s+start\s*$/;
 
+/** True for a bare `pnpm|yarn|npm start` (optionally through Corepack). */
+export function isPackageManagerStart(command: string): boolean {
+  return PACKAGE_MANAGER_START_RE.test(command.trim());
+}
+
 /**
  * Resolve the shell command for a native app's systemd `ExecStart`.
  *
@@ -32,7 +37,7 @@ export function resolveNativeAppRuntimeStartCommand(
   nodeBinary: string,
 ): string {
   const trimmed = command.trim();
-  if (PACKAGE_MANAGER_START_RE.test(trimmed)) {
+  if (isPackageManagerStart(trimmed)) {
     return `${nodeBinary} --run start`;
   }
   return normalizeNodePackageManagerCommand(trimmed);

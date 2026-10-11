@@ -92,8 +92,9 @@ const ACCOUNTS: AccountEntry[] = [
 const WEB_SERVICE_ACCOUNTS = [
   // Site Caddy. Distinct from tpcaddy(9993), which is the control-plane Caddy
   // provisioned by instance-user, and from the root edge Caddy on :80/:443.
-  // 9988 is tpnodeapp, so 9987 is the next free slot in the 99xx block — the
-  // "globally unique" test below is what enforces that.
+  // 9988 stays held back (the retired tpnodeapp group had it), so 9987 is the
+  // next free slot in the 99xx block — the "globally unique" test below is
+  // what enforces that.
   { key: "caddy", account: "tpcaddysite", id: 9987 },
   { key: "nginx", account: "tpnginx", id: 9992 },
   { key: "apache", account: "tpapache", id: 9991 },
@@ -293,52 +294,49 @@ test("converge and web-service account ids are globally unique", async () => {
   );
   const webServiceMap = parseWebServiceUserMap(webServiceDefaults);
 
-  // Runtime entitlement gids share the same numeric space as service accounts,
-  // so they belong in the same uniqueness check — a collision between, say,
-  // tpnode24 and a service account would silently hand a tenant an identity.
   const registry = JSON.parse(
     await Deno.readTextFile(
       join(CHECKOUT_ORCHESTRATION_DIR, "runtime-registry.json"),
     ),
   ) as {
-    gidBand: { min: number; max: number };
-    runtimes: Record<string, { series: Record<string, { gid: number }> }>;
     accessGroups: Record<string, { group: string; gid: number }>;
   };
-  const entitlementIds = Object.values(registry.runtimes).flatMap((runtime) =>
-    Object.values(runtime.series).map((entry) => entry.gid)
-  );
+  // 9900-9979 held the old per-version runtime groups. The runtime-access role
+  // deletes any `tpphp<NN>` / `tpnode<N>` / `tpdeno<N>` group left there, so
+  // nothing else may take a gid in that band.
+  const legacy = parse(
+    await readRole("roles/runtime-access/defaults/main.yml"),
+  ) as {
+    runtime_access_legacy_gid_min: number;
+    runtime_access_legacy_gid_max: number;
+  };
+  const band = {
+    min: legacy.runtime_access_legacy_gid_min,
+    max: legacy.runtime_access_legacy_gid_max,
+  };
 
-  // The two bands must not overlap: 9900-9979 entitlements, 9980+ identities.
-  for (const id of entitlementIds) {
-    if (id < registry.gidBand.min || id > registry.gidBand.max) {
-      throw new Error(
-        `runtime entitlement gid ${id} is outside the declared band ${registry.gidBand.min}-${registry.gidBand.max}`,
-      );
-    }
-  }
-
-  // SSH access groups share the same numeric space. They belong to the 9980+
-  // identity band rather than the entitlement band, because they protect no
-  // binary — they only select an `sshd` Match block — but a collision with a
-  // service account would be just as bad, so they go through the same check.
+  // SSH access groups share the same numeric space as service accounts, so a
+  // collision would be just as bad: they go through the same check.
   const accessGroupIds = Object.values(registry.accessGroups).map((entry) =>
     entry.gid
   );
   for (const id of accessGroupIds) {
-    if (id >= registry.gidBand.min && id <= registry.gidBand.max) {
+    if (id >= band.min && id <= band.max) {
       throw new Error(
-        `SSH access gid ${id} is inside the runtime entitlement band ${registry.gidBand.min}-${registry.gidBand.max}; it belongs in the 9980+ identity band`,
+        `SSH access gid ${id} is inside the old runtime group band ${band.min}-${band.max}; it belongs in the 9980+ identity band`,
       );
     }
   }
 
-  // tpbuild (build-user) takes the 9994 slot, uid and gid alike.
+  // 9994 stays reserved for the retired shared build account (tpbuild,
+  // build-user): an old file may still carry it, so nothing reuses it.
   const buildDefaults = parse(
     await readRole("roles/build-user/defaults/main.yml"),
-  ) as { build_uid: number; build_gid: number };
-  if (buildDefaults.build_uid !== 9994 || buildDefaults.build_gid !== 9994) {
-    throw new Error("build-user: tpbuild must be uid/gid 9994");
+  ) as { build_retired_uid: number };
+  if (buildDefaults.build_retired_uid !== 9994) {
+    throw new Error(
+      "build-user: the retired tpbuild id 9994 must stay reserved",
+    );
   }
 
   const convergeIds = ACCOUNTS.map((entry) => entry.id);
@@ -346,20 +344,19 @@ test("converge and web-service account ids are globally unique", async () => {
   const hostingCaddy = parse(
     await readRole("roles/hosting-caddy/defaults/main.yml"),
   ) as { hosting_caddy_uid: number };
-  // tpedge (uid == gid) is a service identity, never an entitlement gid.
+  // tpedge (uid == gid) is a service identity, never in the old runtime band.
   if (
-    hostingCaddy.hosting_caddy_uid >= registry.gidBand.min &&
-    hostingCaddy.hosting_caddy_uid <= registry.gidBand.max
+    hostingCaddy.hosting_caddy_uid >= band.min &&
+    hostingCaddy.hosting_caddy_uid <= band.max
   ) {
     throw new Error(
-      `hosting Caddy id ${hostingCaddy.hosting_caddy_uid} is inside the runtime entitlement band; it belongs in the 9980+ identity band`,
+      `hosting Caddy id ${hostingCaddy.hosting_caddy_uid} is inside the old runtime group band; it belongs in the 9980+ identity band`,
     );
   }
   const ids = [
     ...convergeIds,
     ...webIds,
-    buildDefaults.build_uid,
-    ...entitlementIds,
+    buildDefaults.build_retired_uid,
     ...accessGroupIds,
     hostingCaddy.hosting_caddy_uid,
   ];

@@ -74,7 +74,7 @@ test("cronServiceContent quotes argv and hardens the oneshot service", () => {
 
   assertStringIncludes(content, "Type=oneshot");
   assertStringIncludes(content, "User=appuser");
-  assertStringIncludes(content, "Group=appuser-grp");
+  assertStringIncludes(content, "Group=appuser");
   assertStringIncludes(content, "Slice=turbopanel-appuser.slice");
   assertStringIncludes(content, "Environment=HOME=/srv/users/appuser");
   assertStringIncludes(

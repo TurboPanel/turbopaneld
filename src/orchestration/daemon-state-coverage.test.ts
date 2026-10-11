@@ -39,6 +39,8 @@ const EXEMPT: Record<string, string> = {
   "config/apache": "root role",
   "config/openlitespeed": "root role (openlitespeed)",
   "config/php": "root role (php-fpm)",
+  "config/node-app-env":
+    "root-owned: tp-host app-env-install makes it and its files; the unit's EnvironmentFile= names it, the daemon never writes it",
   "config/system": "root role (system stack)",
   "config/instance": "control plane (state root not sealed co-located)",
   "state/instance": "control plane (state root not sealed co-located)",

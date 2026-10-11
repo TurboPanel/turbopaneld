@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Remove PHP series no site uses any more: the php-fpm packages from sury,
+    the vendored lsphp tree, and the series' config, log and runtime
+    directories. The daemon decides which series are unused and passes only
+    those; this role refuses a series that still has a site pool or a
+    per-site runtime on this host.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+dependencies: []

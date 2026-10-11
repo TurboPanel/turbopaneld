@@ -12,8 +12,10 @@ import {
 import {
   handleStorageRestore,
   mountUsesCopy,
+  recoverInterruptedRestores,
   RESTORE_SCRIPT,
   restoreArgv,
+  restoreIntentDir,
   type StorageRestoreHandlerDeps,
 } from "./copy-restore.ts";
 
@@ -26,6 +28,7 @@ import {
 const test = Deno.test.bind(Deno);
 
 const COPY = "0192f1de-7c3b-7e4a-9f10-0000000000c1";
+const VOLUME = "0192f1de-7c3b-7e4a-9f10-0000000000b1";
 const POLICY = "0192f1de-7c3b-7e4a-9f10-0000000000d1";
 const NOW = new Date("2026-09-30T04:00:00.000Z");
 const WEB = "a".repeat(64);
@@ -44,7 +47,7 @@ function fail(code: number, stderr = ""): DockerCliResult {
 const INSPECT = JSON.stringify([
   {
     Id: WEB,
-    Mounts: [{ Type: "volume", Name: "shop_uploads", Destination: "/data" }],
+    Mounts: [{ Type: "volume", Name: VOLUME, Destination: "/data" }],
   },
   {
     Id: OTHER,
@@ -54,7 +57,7 @@ const INSPECT = JSON.stringify([
     Id: WORKER,
     Mounts: [
       { Type: "bind", Source: "/etc/localtime" },
-      { Type: "volume", Name: "shop_uploads", Destination: "/srv" },
+      { Type: "volume", Name: VOLUME, Destination: "/srv" },
     ],
   },
 ]);
@@ -79,6 +82,11 @@ function fakeDocker(): FakeDocker {
       const answer = fake.answers.get(label);
       if (answer instanceof Error) return Promise.reject(answer);
       if (answer) return Promise.resolve(answer);
+      if (args[0] === "volume") {
+        return Promise.resolve(
+          ok(JSON.stringify({ Driver: "local", Labels: {} })),
+        );
+      }
       if (args[0] === "ps") {
         return Promise.resolve(ok(`${WEB}\n${OTHER}\n${WORKER}\n`));
       }
@@ -118,7 +126,8 @@ async function artifact(
   const payload: StorageRestorePayload = {
     copyId: COPY,
     copyProvider: "docker",
-    volumeName: "shop_uploads",
+    volumeName: VOLUME,
+    storageId: VOLUME,
     backupId: "bk_one",
     checksum: "",
     ...overrides,
@@ -138,7 +147,15 @@ function deps(
   layout: LayoutPaths,
   docker: FakeDocker,
 ): StorageRestoreHandlerDeps {
-  return { layout, now: () => NOW, runDocker: docker.run };
+  return {
+    layout,
+    now: () => NOW,
+    runDocker: docker.run,
+    guard: {
+      lstat: () => Promise.resolve({ isSymlink: false }),
+      realPath: (path) => Promise.resolve(path),
+    },
+  };
 }
 
 const PREFLIGHT = ["image inspect", "volume inspect"];
@@ -153,6 +170,8 @@ test("restore stops exactly the containers mounting the copy, extracts, then sta
     );
     assertEquals(docker.calls, [
       ...PREFLIGHT,
+      // The source is looked at again under the lock.
+      "volume inspect",
       "ps -q",
       `inspect ${WEB}`,
       `stop ${WEB}`,
@@ -161,6 +180,11 @@ test("restore stops exactly the containers mounting the copy, extracts, then sta
       `start ${WEB}`,
       `start ${WORKER}`,
     ]);
+    // The intent that would restart them after a crash is gone again.
+    await assertRejects(
+      () => Deno.stat(join(restoreIntentDir(layout), `${COPY}.json`)),
+      Deno.errors.NotFound,
+    );
     assertEquals(result.stopped, [WEB, WORKER]);
     assertEquals(result.restarted, [WEB, WORKER]);
     assertEquals(result.notRestarted, []);
@@ -300,19 +324,23 @@ test("a missing volume or directory, or an unpullable image, stops nothing", asy
           deps(layout, docker),
         ),
       Error,
-      "docker volume shop_uploads not found",
+      `docker volume ${VOLUME} not found`,
     );
 
     const pathPayload = await artifact(layout, {
       copyProvider: "path",
       volumeName: undefined,
+      storageId: undefined,
       hostPath: "/srv/users/shop/volumes/uploads",
+      ownerUsername: "shop",
     });
     await assertRejects(
       () =>
         handleStorageRestore(pathPayload, "", {
           ...deps(layout, docker),
-          directoryExists: () => Promise.resolve(false),
+          guard: {
+            lstat: () => Promise.reject(new Deno.errors.NotFound("gone")),
+          },
         }),
       Error,
       "directory /srv/users/shop/volumes/uploads not found",
@@ -348,7 +376,9 @@ test("a directory outside the allowed roots is refused before any docker call", 
             await artifact(layout, {
               copyProvider: "path",
               volumeName: undefined,
+              storageId: undefined,
               hostPath,
+              ownerUsername: "shop",
             }),
             "",
             deps(layout, docker),
@@ -398,10 +428,10 @@ test("a stopped container is not started by a restore that did not stop it", asy
 });
 
 test("only the copy's own volume, or binds at or under its directory, count as using it", () => {
-  const volume = { type: "volume" as const, name: "shop_uploads" };
-  assert(mountUsesCopy({ Type: "volume", Name: "shop_uploads" }, volume));
+  const volume = { type: "volume" as const, name: VOLUME };
+  assert(mountUsesCopy({ Type: "volume", Name: VOLUME }, volume));
   assert(!mountUsesCopy({ Type: "volume", Name: "shop_uploads2" }, volume));
-  assert(!mountUsesCopy({ Type: "bind", Source: "shop_uploads" }, volume));
+  assert(!mountUsesCopy({ Type: "bind", Source: VOLUME }, volume));
 
   const dir = { type: "bind" as const, path: "/srv/users/shop/volumes/up" };
   assert(
@@ -425,14 +455,14 @@ test("only the copy's own volume, or binds at or under its directory, count as u
 
 test("the helper mounts the copy read-write and the archive read-only, offline", () => {
   const argv = restoreArgv(
-    { type: "volume", name: "shop_uploads" },
+    { type: "volume", name: VOLUME },
     "/var/lib/turbopanel/backups/copies/c/bk_one.tar.gz",
   );
   const mounts = argv.flatMap((arg, i) =>
     argv[i - 1] === "--mount" ? [arg] : []
   );
   assertEquals(mounts, [
-    "type=volume,src=shop_uploads,dst=/dst",
+    `type=volume,src=${VOLUME},dst=/dst`,
     "type=bind,src=/var/lib/turbopanel/backups/copies/c/bk_one.tar.gz,dst=/archive.tar.gz,readonly",
   ]);
   assertEquals(argv[argv.indexOf("--network") + 1], "none");
@@ -514,5 +544,166 @@ test("the swap script leaves the copy untouched when the archive is unreadable",
     const before = await tree(dst);
     assertEquals(await runScript(dst, archive), 3);
     assertEquals(await tree(dst), before);
+  });
+});
+
+async function tarOf(source: string, archive: string) {
+  const tar = await new Deno.Command("tar", {
+    args: ["-C", source, "-czf", archive, "."],
+  }).output();
+  assert(tar.success);
+}
+
+test("an earlier restore that did not finish keeps its old data: the script refuses and touches nothing", async () => {
+  await withScriptDirs(async ({ dst, archive, source }) => {
+    await tarOf(source, archive);
+    const old = join(dst, ".tp-restore-old");
+    await Deno.mkdir(old);
+    await Deno.writeTextFile(join(old, "precious"), "only copy");
+    const before = await tree(dst);
+    assertEquals(await runScript(dst, archive), 6);
+    assertEquals(await tree(dst), before);
+  });
+});
+
+test("an earlier restore that finished but did not clean up is cleaned, then the restore runs", async () => {
+  await withScriptDirs(async ({ dst, archive, source }) => {
+    await tarOf(source, archive);
+    const old = join(dst, ".tp-restore-old");
+    await Deno.mkdir(old);
+    await Deno.writeTextFile(join(old, "stale"), "from a finished restore");
+    await Deno.writeTextFile(join(dst, ".tp-restore-done"), "");
+    assertEquals(await runScript(dst, archive), 0);
+    assertEquals(await tree(dst), await tree(source));
+  });
+});
+
+test("a restore failing with exit 6 reports why and starts the containers again", async () => {
+  await withLayout(async (layout) => {
+    const docker = fakeDocker();
+    docker.answers.set("run helper", fail(6));
+    await assertRejects(
+      async () =>
+        await handleStorageRestore(
+          await artifact(layout),
+          "",
+          deps(layout, docker),
+        ),
+      Error,
+      "an earlier restore did not finish",
+    );
+    assert(docker.calls.includes(`start ${WEB}`));
+  });
+});
+
+test("the intent is written before anything stops, and kept for the ones that would not start", async () => {
+  await withLayout(async (layout) => {
+    const docker = fakeDocker();
+    const seen: string[] = [];
+    const run = docker.run;
+    docker.run = async (args) => {
+      if (args[0] === "stop") {
+        seen.push(
+          await Deno.readTextFile(
+            join(restoreIntentDir(layout), `${COPY}.json`),
+          ),
+        );
+      }
+      return run(args);
+    };
+    docker.answers.set(`start ${WORKER}`, fail(1));
+    await assertRejects(
+      async () =>
+        await handleStorageRestore(
+          await artifact(layout),
+          "",
+          deps(layout, docker),
+        ),
+      Error,
+      "could not restart",
+    );
+    const first = JSON.parse(seen[0]);
+    assertEquals(first.containers, [WEB, WORKER]);
+    assertEquals(first.helper, `tp-restore-${COPY}`);
+    const kept = JSON.parse(
+      await Deno.readTextFile(join(restoreIntentDir(layout), `${COPY}.json`)),
+    );
+    assertEquals(kept.containers, [WORKER]);
+  });
+});
+
+test("daemon start restarts what a killed restore stopped, unless its helper still runs", async () => {
+  await withLayout(async (layout) => {
+    const dir = restoreIntentDir(layout);
+    await Deno.mkdir(dir, { recursive: true });
+    const write = (copyId: string, helper: string) =>
+      Deno.writeTextFile(
+        join(dir, `${copyId}.json`),
+        JSON.stringify({ copyId, helper, containers: [WEB, WORKER] }),
+      );
+    await write(COPY, "tp-restore-dead");
+    const docker = fakeDocker();
+    docker.answers.set("ps -q", ok(""));
+    assertEquals(await recoverInterruptedRestores(layout, docker.run), 1);
+    assertEquals(docker.calls, ["ps -q", `start ${WEB}`, `start ${WORKER}`]);
+    await assertRejects(
+      () => Deno.stat(join(dir, `${COPY}.json`)),
+      Deno.errors.NotFound,
+    );
+
+    await write(COPY, "tp-restore-alive");
+    const alive = fakeDocker();
+    alive.answers.set("ps -q", ok("abc\n"));
+    assertEquals(await recoverInterruptedRestores(layout, alive.run), 0);
+    assertEquals(alive.calls, ["ps -q"]);
+    await Deno.stat(join(dir, `${COPY}.json`));
+  });
+});
+
+test("a restore refuses a symlinked directory or another owner's directory before stopping anything", async () => {
+  await withLayout(async (layout) => {
+    const docker = fakeDocker();
+    const pathPayload = await artifact(layout, {
+      copyProvider: "path",
+      volumeName: undefined,
+      storageId: undefined,
+      hostPath: "/srv/users/shop/volumes/uploads",
+      ownerUsername: "shop",
+    });
+    await assertRejects(
+      () =>
+        handleStorageRestore(pathPayload, "", {
+          ...deps(layout, docker),
+          guard: {
+            lstat: (p) =>
+              Promise.resolve({ isSymlink: p.endsWith("/volumes/uploads") }),
+            realPath: (p) => Promise.resolve(p),
+          },
+        }),
+      Error,
+      "symbolic link",
+    );
+    await assertRejects(
+      () =>
+        handleStorageRestore(
+          { ...pathPayload, ownerUsername: "other" },
+          "",
+          deps(layout, docker),
+        ),
+      Error,
+      "volumes directory",
+    );
+    await assertRejects(
+      async () =>
+        await handleStorageRestore(
+          { ...(await artifact(layout)), volumeName: "someone_elses_data" },
+          "",
+          deps(layout, docker),
+        ),
+      Error,
+      "does not belong",
+    );
+    assert(!docker.calls.some((c) => c.startsWith("stop")));
+    assert(!docker.calls.includes("run helper"));
   });
 });

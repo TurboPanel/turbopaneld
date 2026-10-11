@@ -3,13 +3,14 @@
 # proxy's (POSIX sh, root:root, installed next to tp-host in lib/).
 #
 # A per-site PHP unit (turbopanel-php-<id>.service) may dial 127.0.0.1, but the
-# unit cannot say "port 13306 only" (systemd filters by address). This script
+# unit cannot say "the database ports only" (systemd filters by address). This script
 # adds the port filter: one nftables table, `inet turbopanel_php`, whose output
 # hook (before Docker's NAT, so a published 127.0.0.1:<port> is still seen as
 # 127.0.0.1) refuses, for every site owner's Linux user that has a PHP unit,
 # anything bound for 127.0.0.0/8 or ::1 except
 #
-#   - 127.0.0.1 tcp 13306   the database proxy (src/managed/proxysql.ts MYSQL_PORT)
+#   - 127.0.0.1 tcp 13306   the database proxy, MySQL family (proxysql.ts MYSQL_PORT)
+#   - 127.0.0.1 tcp 15432   the database proxy, Postgres (proxysql.ts PGSQL_PORT)
 #   - 127.0.0.53 port 53    systemd-resolved's stub
 #
 # so ProxySQL's admin (6032) and metrics (6070) ports, other sites' ports and
@@ -43,6 +44,7 @@ umask 077
 
 PRINCIPAL_ID_MIN=15001
 DB_PORT=13306
+PG_PORT=15432
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 tp_die() {
@@ -112,6 +114,7 @@ $_line
     type filter hook output priority -150; policy accept;
     meta skuid @owners ct state established,related accept
     meta skuid @owners ip daddr 127.0.0.1 tcp dport $DB_PORT accept
+    meta skuid @owners ip daddr 127.0.0.1 tcp dport $PG_PORT accept
     meta skuid @owners ip daddr 127.0.0.53 udp dport 53 accept
     meta skuid @owners ip daddr 127.0.0.53 tcp dport 53 accept
     meta skuid @owners ip daddr 127.0.0.0/8 meta l4proto tcp reject with tcp reset

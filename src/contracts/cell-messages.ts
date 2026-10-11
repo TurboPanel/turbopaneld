@@ -35,6 +35,15 @@ export type CellAttachVersionMessage = {
   features?: string[];
 };
 
+/** One replica in a `managed-health-report`: `down`, or its reading. */
+export type ManagedHealthReportMember = {
+  managedId: string;
+  memberId: string;
+  /** The engine is not running or not answering. */
+  down?: true;
+  replication?: NonNullable<ManagedMemberObservedResult["replication"]>;
+};
+
 /** Daemon → control plane hello. `features` is the advertised wire set. */
 export type DaemonHelloMessage = {
   type: "hello";
@@ -235,6 +244,17 @@ export type DaemonMessage =
     at: string;
   }
   | {
+    /**
+     * Daemon-initiated, fire-and-forget: every managed replica this host runs,
+     * read just now. Sent every 30 s, only to a control plane advertising
+     * `managed-health-report-v1`. A replica whose engine is down is sent as
+     * `down: true` (no `replication`).
+     */
+    type: "managed-health-report";
+    members: ManagedHealthReportMember[];
+    at: string;
+  }
+  | {
     type: "container-logs-request";
     id: string;
     containerId: string;
@@ -386,6 +406,30 @@ export type DaemonMessage =
   }
   | {
     /**
+     * Control plane asks the daemon to stop one running `environment.deploy`
+     * (`commandId`). Sent only to a daemon advertising `deploy-cancel-v1`.
+     */
+    type: "deploy-cancel";
+    id: string;
+    commandId: string;
+    at: string;
+  }
+  | {
+    /**
+     * `cancelling`: the deploy was signalled and will end with a
+     * `cancelled: ` command outcome. `too_late`: it already switched over and
+     * will finish normally. `not_running`: no such deploy is running here (the
+     * cancel is remembered briefly, so a dispatch that arrives later is refused).
+     */
+    type: "deploy-cancel-result";
+    id: string;
+    ok: boolean;
+    outcome?: "cancelling" | "too_late" | "not_running";
+    error?: string;
+    at: string;
+  }
+  | {
+    /**
      * Daemon-initiated, fire-and-forget (no correlated request/result) —
      * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
      * and generation, reported over the socket by `TopologyReporter`
@@ -413,9 +457,12 @@ export type DaemonMessage =
     /**
      * Who decided the primary is dead. Absent = the Orchestrator poller
      * (`ha-observe.ts`); `postgres-probe` = `pg-dead-primary-observe.ts`,
-     * sent only to a control plane advertising `managed-ha-probe-v1`.
+     * sent only to a control plane advertising `managed-ha-probe-v1`;
+     * `boot-hold` = a primary held after an unclean host restart
+     * (`instance/boot-hold-reporter.ts`, feature `managed-ha-boot-hold-v1`),
+     * never a failover request.
      */
-    detector?: "orchestrator" | "postgres-probe";
+    detector?: "orchestrator" | "postgres-probe" | "boot-hold";
     /**
      * Orchestrator's key for the dead instance (`ha-observe.ts` only; feature
      * `managed-ha-instance-v1`). Both or neither. The control plane fences
@@ -432,12 +479,18 @@ export type DaemonMessage =
      * Daemon-initiated, fire-and-forget (no correlated request/result, same
      * shape as `managed-ha-event`) — `AcmeIssuanceObserver`'s live TLS-probe
      * verdict for one `tlsMode: 'acme'` hostname, sent only on a state
-     * change (first failure after a short debounce, or a recovery).
+     * change (first failure after a short debounce, a recovery, the first
+     * good sighting, or a renewal that moves `notAfter`).
      */
     type: "acme-issuance-event";
     hostname: string;
     ok: boolean;
     errorMessage?: string;
+    /**
+     * Leaf expiry (ISO 8601) the probe read, sent with `ok: true` on the
+     * first good sighting, on recovery and when a renewal changes it.
+     */
+    notAfter?: string;
     at: string;
   }
   | {

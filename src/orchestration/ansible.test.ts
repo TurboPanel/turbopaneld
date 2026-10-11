@@ -1625,6 +1625,15 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   );
   assertMatch(nginxDefaults, /nginx_version:\s*"1\.\d+\.\d+"/, "nginx pin");
   assertMatch(apacheDefaults, /apache_version:\s*"2\.\d+\.\d+"/, "apache pin");
+  // Prebuilt, checksum-pinned tarball: no host compile, fail closed while the
+  // digests are unpinned placeholders.
+  assertMatch(apacheDefaults, /apache_sha256:/, "apache digest table");
+  const apacheTasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
+  );
+  assertEquals(apacheTasks.includes("./configure"), false);
+  assertEquals(apacheTasks.includes("make install"), false);
+  assertMatch(apacheTasks, /vendor-apache workflow/, "unpinned message");
   // php-fpm is the one component that is NOT vendored: it comes from Ondrej
   // Sury's Debian repo. So the series is the pin (there is no source-build
   // patch version), and the repo wiring must stay deb822 + Signed-By.
@@ -1647,13 +1656,10 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   // Re-validated inside the loop: the series is a path segment, a package
   // name, AND a systemd instance name.
   assertEquals(phpFpmSeriesTasks.includes("Validate the PHP series"), true);
-  // The exec gate is the per-series entitlement group, never `tp`.
-  assertEquals(
-    phpFpmSeriesTasks.includes(
-      "tpphp{{ php_fpm_series_item | replace('.', '') }}",
-    ),
-    true,
-  );
+  // Every installed series is open to every site owner's Linux user: no
+  // per-version group and no statoverride restricting the binaries.
+  assertEquals(phpFpmSeriesTasks.includes("tpphp"), false);
+  assertEquals(phpFpmSeriesTasks.includes("dpkg-statoverride"), false);
 
   assertMatch(
     phpFpmDefaults,
@@ -1742,7 +1748,7 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
     "site caddy user",
   );
   assertEquals(webUserDefaults.includes("uid: 9987"), true);
-  // 9988 belongs to tpnodeapp; reusing it would collide.
+  // 9988 stays held back (the retired tpnodeapp group had it).
   assertEquals(webUserDefaults.includes("uid: 9988"), false);
 
   const siteCaddyUnit = await Deno.readTextFile(

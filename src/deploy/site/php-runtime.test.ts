@@ -28,7 +28,9 @@ import {
 import {
   holdSitePhpRuntime,
   installSitePhpRuntime,
+  listSitePhpUnits,
   orphanSitePhpRuntimes,
+  readSitePhpUnits,
   reconcileSitePhpRuntimes,
   type SitePhpRuntimeFiles,
   type SitePhpRuntimeIo,
@@ -47,7 +49,7 @@ const SPEC: SitePhpRuntimeSpec = {
   mode: "fastcgi",
   series: "8.4",
   user: "alice",
-  group: "alice-grp",
+  group: "alice",
   home: "/srv/users/alice",
   configDir: "/etc/turbopanel",
   libDir: "/opt/turbopanel/lib",
@@ -281,11 +283,22 @@ test("detached lsphp: the vendored binary on a socket, its own php.ini through P
   );
   assertStringIncludes(
     ini,
-    "[PHP]\nextension_dir = /opt/turbopanel/vendor/lsphp/8.4/current/lib/php/ext\nzend_extension = opcache.so\nextension = curl.so\nextension = mysqli.so\nextension = pdo_mysql.so\n",
+    "[PHP]\nextension_dir = /opt/turbopanel/vendor/lsphp/8.4/current/lib/php/ext\nzend_extension = opcache.so\nextension = curl.so\nextension = mysqli.so\nextension = pdo_mysql.so\nextension = pgsql.so\nextension = pdo_pgsql.so\n",
   );
   assertStringIncludes(ini, "memory_limit = 256M\n");
   // php-cgi and php-fpm load modules from their packaged conf.d.
   assertEquals(sitePhpIni([], SPEC.home).includes("extension"), false);
+});
+
+test("detached lsphp on a series with a compiled-in opcache never loads opcache.so", () => {
+  const ini = sitePhpIni([], SPEC.home, {
+    mode: "lsphp-detached",
+    runtimesDir: "/opt/turbopanel/vendor",
+    series: "8.5",
+  });
+  assertStringIncludes(ini, "extension = mysqli.so\n");
+  assertStringIncludes(ini, "extension = pdo_pgsql.so\n");
+  assertEquals(ini.includes("opcache.so"), false);
 });
 
 test("a runtime's children: the site's pm.max_children for php-fpm, fixed otherwise", () => {
@@ -747,4 +760,24 @@ Deno.test("php-fpm pool locks memory_limit as php_admin_value", () => {
   const admin = sitePhpLockedValues([{ key: "memory_limit", value: "64M" }]);
   const conf = sitePhpFpmConf({ ...SPEC, mode: "fpm" }, { pool: [], admin });
   assertStringIncludes(conf, "php_admin_value[memory_limit] = 64M");
+});
+
+test("a unit listing that fails reads as doubt, not as no per-site runtimes", async () => {
+  const io = (success: boolean): SitePhpRuntimeIo => ({
+    unitDir: "/units",
+    run: () =>
+      Promise.resolve({
+        success,
+        stdout: success
+          ? "turbopanel-php-shop-0a1b2c3d4e5f-fcgi84.service"
+          : "",
+        stderr: success ? "" : "ls: permission denied",
+      }),
+  });
+  assertEquals(await readSitePhpUnits(io(false)), null);
+  assertEquals((await listSitePhpUnits(io(false))).size, 0);
+  assertEquals(
+    [...(await readSitePhpUnits(io(true)))?.keys() ?? []],
+    ["shop-0a1b2c3d4e5f-fcgi84"],
+  );
 });

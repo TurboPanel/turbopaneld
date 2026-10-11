@@ -21,6 +21,7 @@
  */
 
 import { dirname, join } from "@std/path";
+import { clipKeepingEnd } from "../util/error-line.ts";
 import type { InstanceAcmeWireSettings } from "../contracts/cell-messages.ts";
 import {
   closeInstanceAcmeWindow,
@@ -627,8 +628,7 @@ function installedLeafPath(certsDir: string, host: string): string {
 
 function clipError(message: string): string {
   const text = message.replaceAll("\n", " ").trim();
-  if (text.length <= EVENT_ERROR_MAX) return text;
-  return `${text.slice(0, EVENT_ERROR_MAX)}…`;
+  return clipKeepingEnd(text, EVENT_ERROR_MAX);
 }
 
 /**

@@ -1,0 +1,33 @@
+---
+# Removes PHP series that no site uses any more. Install is lazy (a series
+# lands on the first deploy that names it, see the php-fpm and openlitespeed
+# roles); this is its counterpart. There are no per-version groups to remove:
+# every installed series may be run by every site owner's Linux user.
+#
+# The daemon works out which series are unused (it sees every vhost, pool and
+# per-site runtime on the host and every deploy in flight). Root re-checks the
+# on-disk part here before it removes anything: a series with a site pool or a
+# per-site runtime is refused, so a daemon bug cannot take a running site's
+# interpreter away.
+- name: Load the shared runtime registry
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
+- name: Validate the series to remove
+  ansible.builtin.assert:
+    that:
+      - php_series_prune is sequence
+      - php_series_prune is not string
+      - php_series_prune | length <= 16
+      - php_series_prune | map('string') | select('match', '^[0-9]\.[0-9]{1,2}$') | list | length == php_series_prune | length
+      - php_series_prune | difference(runtime_registry.runtimes.php.series.keys() | list) | length == 0
+    fail_msg: >-
+      php_series_prune must be a list of PHP series (major.minor) the runtime
+      registry knows; got {{ php_series_prune }}.
+
+- name: Remove each unused PHP series
+  ansible.builtin.include_tasks: series.yml
+  loop: "{{ php_series_prune | unique | list }}"
+  loop_control:
+    loop_var: php_prune_series

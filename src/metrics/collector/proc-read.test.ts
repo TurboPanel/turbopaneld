@@ -37,7 +37,8 @@ test({
 
 test("readProcFile uses cat fallback when Deno.readTextFile fails", async () => {
   const text = await readProcFile("/proc/sys/kernel/osrelease", {
-    readTextFile: () => Promise.reject(new Error("blocked")),
+    readTextFile: () =>
+      Promise.reject(new Deno.errors.PermissionDenied("blocked")),
     runCat: () =>
       Promise.resolve({
         code: 0,
@@ -50,7 +51,8 @@ test("readProcFile uses cat fallback when Deno.readTextFile fails", async () => 
 test("readProcFile returns undefined when cat exits non-zero", async () => {
   assertEquals(
     await readProcFile("/ignored", {
-      readTextFile: () => Promise.reject(new Error("blocked")),
+      readTextFile: () =>
+        Promise.reject(new Deno.errors.PermissionDenied("blocked")),
       runCat: () => Promise.resolve({ code: 1, stdout: new Uint8Array() }),
     }),
     undefined,
@@ -60,7 +62,8 @@ test("readProcFile returns undefined when cat exits non-zero", async () => {
 test("readProcFile returns undefined when cat itself throws", async () => {
   assertEquals(
     await readProcFile("/ignored", {
-      readTextFile: () => Promise.reject(new Error("blocked")),
+      readTextFile: () =>
+        Promise.reject(new Deno.errors.PermissionDenied("blocked")),
       runCat: () => Promise.reject(new Error("no cat")),
     }),
     undefined,
@@ -80,7 +83,8 @@ test({
       await Deno.writeTextFile(path, "default-cat-body\n");
       assertEquals(
         await readProcFile(path, {
-          readTextFile: () => Promise.reject(new Error("blocked")),
+          readTextFile: () =>
+            Promise.reject(new Deno.errors.PermissionDenied("blocked")),
         }),
         "default-cat-body\n",
       );
@@ -93,4 +97,31 @@ test({
       await Deno.remove(dir, { recursive: true });
     }
   },
+});
+
+test("readProcFile does not fork cat when the file is missing", async () => {
+  let cats = 0;
+  const text = await readProcFile("/proc/pressure/cpu", {
+    readTextFile: () => Promise.reject(new Deno.errors.NotFound("gone")),
+    runCat: () => {
+      cats += 1;
+      return Promise.resolve({ code: 0, stdout: new Uint8Array() });
+    },
+  });
+  assertEquals(text, undefined);
+  assertEquals(cats, 0);
+});
+
+test("readProcFile only hands cat an absolute path without traversal", async () => {
+  let cats = 0;
+  const io = {
+    readTextFile: () => Promise.reject(new Deno.errors.PermissionDenied("x")),
+    runCat: () => {
+      cats += 1;
+      return Promise.resolve({ code: 0, stdout: new Uint8Array() });
+    },
+  };
+  assertEquals(await readProcFile("proc/stat", io), undefined);
+  assertEquals(await readProcFile("/proc/../etc/shadow", io), undefined);
+  assertEquals(cats, 0);
 });

@@ -461,6 +461,7 @@ test("handleManagedRestore streams the artifact into the engine on a checksum ma
     await Deno.writeFile(artifactPath, bytes, { mode: 0o600 });
     const checksum = await sha256Hex(bytes);
 
+    let restoreArgv: string[] = [];
     let streamed: Uint8Array | undefined;
     const result = await handleManagedRestore(
       {
@@ -476,13 +477,16 @@ test("handleManagedRestore streams the artifact into the engine on a checksum ma
       {
         ensureDocker: noopEnsureDocker,
         resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
-        runRestore: async (_argv, source) => {
+        runRestore: async (argv, source) => {
+          restoreArgv = argv;
           streamed = await drainStream(source);
           return { success: true, stderr: "" };
         },
       },
     );
 
+    // Root exec: the MariaDB UBI image defaults to OS user `mysql`.
+    assertEquals(restoreArgv.slice(0, 4), ["exec", "-i", "-u", "0"]);
     assertEquals(streamed, bytes);
     assertEquals(result.status, "restored");
     assertEquals(result.database, "app");
@@ -762,6 +766,48 @@ test("handleManagedBackup delete removes the artifact when present", async () =>
     try {
       await Deno.stat(artifactPath);
       throw new TypeError("artifact should be deleted");
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  });
+});
+
+test("handleManagedBackup delete removes a scheduled backup from its policy directory", async () => {
+  await withTempStateDir(async (tmp) => {
+    const managedId = `bk-${crypto.randomUUID()}`;
+    const backupId = "scheduled_one";
+    const policyId = "11111111-1111-4111-8111-111111111111";
+    const layout = { backupDir: tmp } as Parameters<
+      typeof managedBackupArtifactPath
+    >[0];
+    const artifactPath = managedBackupArtifactPath(
+      layout,
+      managedId,
+      backupId,
+      "dump",
+      policyId,
+    );
+    await Deno.mkdir(dirname(artifactPath), { recursive: true, mode: 0o750 });
+    await Deno.writeFile(artifactPath, new TextEncoder().encode("keep"), {
+      mode: 0o600,
+    });
+
+    await handleManagedBackup(
+      {
+        managedId,
+        engine: "postgres",
+        action: "delete",
+        backupId,
+        artifactExtension: "dump",
+        scope: "database",
+        policyId,
+      },
+      new Date().toISOString(),
+    );
+
+    try {
+      await Deno.stat(artifactPath);
+      throw new TypeError("scheduled artifact should be deleted");
     } catch (err) {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     }

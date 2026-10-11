@@ -215,6 +215,9 @@ export const DAEMON_RUN_PROGRAMS: readonly string[] = [
   "test",
   "smartctl",
   "nvidia-smi",
+  // clock and NTP state (`timedatectl show` / `status`, read-only); without it
+  // the daemon reports only the timezone, never whether NTP is on or in sync
+  "timedatectl",
   // who holds :80 during instance ACME (`ss -H -ltnp`)
   "ss",
   // networking / firewall / fabric

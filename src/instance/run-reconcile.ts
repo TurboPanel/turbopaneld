@@ -297,6 +297,26 @@ export function encodeLicenseArg(
 }
 
 /**
+ * The host license (base64url `id:token`) never travels on a command line:
+ * sudo logs argv and any local user can read `/proc/<pid>/cmdline`. Through
+ * the root helper it goes on stdin (`tp-orchestrate update --license-stdin`);
+ * on a development host it is set in the piped script's own environment.
+ * Both places refuse anything outside base64url, so it can be quoted safely.
+ */
+function assertLicenseArg(license: string): void {
+  if (!/^[\w=-]+$/.test(license)) {
+    throw new Error("refusing a malformed host license");
+  }
+}
+
+/** Development hosts: run.sh reads TURBOPANEL_LICENSE when no flag is given. */
+export function scriptWithLicense(script: string, license?: string): string {
+  if (license === undefined) return script;
+  assertLicenseArg(license);
+  return `TURBOPANEL_LICENSE='${license}'\nexport TURBOPANEL_LICENSE\n${script}`;
+}
+
+/**
  * Resolve where reconcile downloads `run.sh` from.
  *
  * Production Caddy never serves `/run.sh` — managed installs curl the CDN.
@@ -415,13 +435,12 @@ export function resolveBootstrapInsecureTls(options: {
 }
 
 export function buildRunReconcileArgs(options: {
-  licenseArg: string;
   instanceUrl?: string;
   instanceCaPath?: string;
   insecureTls?: boolean;
   dlBase?: string;
 }): string[] {
-  const args = ["--license", options.licenseArg];
+  const args: string[] = [];
   const trimmedUrl = options.instanceUrl?.trim();
   const instanceUrl = trimmedUrl ? stripTrailingSlashes(trimmedUrl) : undefined;
   if (instanceUrl && instanceUrl !== PRODUCTION_CONTROL_PLANE) {
@@ -511,13 +530,14 @@ export function reconcileNeedsRootHelper(
 /**
  * The helper invocation for a reconcile — exported for tests. sudo resets
  * the environment, so what run.sh used to read from the daemon's env
- * (channel, manifest pin) travels as validated flags instead.
+ * (channel, manifest pin) travels as validated flags instead. The license is
+ * written to the helper's stdin, never put in argv.
  */
 export function rootHelperReconcileInvocation(
   args: string[],
   options: { channel?: string; manifestUrl?: string } = {},
 ): { bin: string; args: string[] } {
-  const flags = [...args];
+  const flags = ["--license-stdin", ...args];
   const channel = options.channel?.trim();
   if (channel && !flags.includes("--channel")) {
     flags.push("--channel", channel);
@@ -560,6 +580,58 @@ export function rootHelperColocatedRefreshInvocation(
     bin: "sudo",
     args: ["-n", "--", ORCHESTRATE_HELPER, "update-colocated", ...flags],
   };
+}
+
+/**
+ * What the daemon writes to the root helper's stdin — exported for tests:
+ * the license line for `update --license-stdin`, nothing for a co-located
+ * refresh (it does not enrol).
+ */
+export function rootHelperReconcileStdin(options: {
+  colocated?: boolean;
+  license?: string;
+}): string | undefined {
+  if (options.colocated) return undefined;
+  if (options.license === undefined) {
+    throw new Error(
+      "a daemon update through the root helper needs the host license",
+    );
+  }
+  assertLicenseArg(options.license);
+  return `${options.license}\n`;
+}
+
+async function writeHelperStdin(
+  stdin: WritableStream<Uint8Array>,
+  text: string,
+): Promise<void> {
+  const writer = stdin.getWriter();
+  await writer.write(new TextEncoder().encode(text));
+  await writer.close();
+}
+
+/**
+ * Start the root helper and hand it `stdinText` (when there is any) — exported
+ * for tests. With no text, stdin stays closed.
+ */
+export async function spawnRootHelper(
+  helper: { bin: string; args: string[] },
+  cwd: string,
+  stdinText: string | undefined,
+): Promise<Deno.ChildProcess> {
+  const child = new Deno.Command(helper.bin, {
+    args: helper.args,
+    cwd,
+    stdin: stdinText === undefined ? "null" : "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  if (stdinText !== undefined) {
+    // If the helper exits before reading (refused flag, sudo failure), the
+    // write fails with a broken pipe; its own message on stderr says why.
+    await writeHelperStdin(child.stdin, stdinText).catch(() => {});
+  }
+  return child;
 }
 
 /**
@@ -659,6 +731,12 @@ export async function executeRunReconcile(options: {
   /** run.sh body — required on development hosts, ignored through the helper. */
   script?: string;
   args: string[];
+  /**
+   * Host license (base64url `id:token`) for an enrolling update. Handed over
+   * on stdin (root helper) or in the script's environment (development
+   * host), never in argv. Not used by a co-located refresh.
+   */
+  license?: string;
   channel?: string;
   /**
    * Control plane's target. An exact-build URL beats the host's
@@ -715,13 +793,11 @@ export async function executeRunReconcile(options: {
       channel,
       manifestUrl: manifestForHelper,
     });
-    const child = new Deno.Command(helper.bin, {
-      args: helper.args,
-      cwd: reconcileCwd,
-      stdin: "null",
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
+    const child = await spawnRootHelper(
+      helper,
+      reconcileCwd,
+      rootHelperReconcileStdin(options),
+    );
     const stdout = child.stdout;
     const stderrChunks: string[] = [];
     const stderrReader = child.stderr.getReader();
@@ -757,7 +833,7 @@ export async function executeRunReconcile(options: {
       stdout: "piped",
       stderr: "piped",
     }),
-    { stdin: options.script, onStage },
+    { stdin: scriptWithLicense(options.script, options.license), onStage },
   );
 }
 

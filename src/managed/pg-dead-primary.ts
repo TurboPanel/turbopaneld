@@ -47,6 +47,7 @@ import type {
   DockerCliResult,
   RunDockerOptions,
 } from "../deploy/docker-cli.ts";
+import { clipKeepingEnd } from "../util/error-line.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 
 /** Engine dead, host alive. See the module comment for widening. */
@@ -404,7 +405,7 @@ export class DeadPrimaryDetector {
       evidence: {
         failures: this.#streak,
         spanMs: context.nowMs - (this.#streakStartMs ?? context.nowMs),
-        lastError: sanitizeForLog(this.#lastError).slice(0, 300),
+        lastError: clipKeepingEnd(sanitizeForLog(this.#lastError), 300),
         ...(this.#lastContainer ? { container: this.#lastContainer } : {}),
         scope: DEAD_PRIMARY_DETECTION_SCOPE,
         attempt: this.#incidentEvents + 1,
@@ -542,7 +543,7 @@ export async function readPgReady(
   if (stderr.length > 0) {
     return {
       kind: "unreadable",
-      reason: sanitizeForLog(stderr).slice(0, 200),
+      reason: clipKeepingEnd(sanitizeForLog(stderr), 200),
     };
   }
   return { kind: "exit", code: result.code, output: "" };

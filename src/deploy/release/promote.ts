@@ -14,7 +14,7 @@
  *    writes the release manifest;
  * 3. the health probe runs against the staged tree;
  * 4. tp-host `publish` takes the leaf away from the daemon, seals it
- *    recursively (`root:<username>-grp`, no set-id, nothing group- or
+ *    recursively (`root:<username>`, no set-id, nothing group- or
  *    world-writable), refuses hard links, special files and symlinks that
  *    resolve outside it, renames it to `releases/<releaseId>` (same
  *    filesystem), links `shared`, drops the top to `0550` and renames
@@ -576,7 +576,7 @@ function assertSealedReleaseDir(stat: Deno.FileInfo, releaseId: string): void {
  * The rollback half of the engine. Nothing is fetched, built, staged, sealed,
  * or re-linked: the target tree was produced by an earlier successful promote,
  * so it already carries its `shared` link, its `.turbopanel/release.json`
- * manifest, and its sealed `root:<username>-grp 0550` ownership. Re-running any
+ * manifest, and its sealed `root:<username> 0550` ownership. Re-running any
  * of those steps would either fail against a read-only tree or quietly rewrite
  * history that a previous deploy recorded.
  *

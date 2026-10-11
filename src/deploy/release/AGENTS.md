@@ -46,14 +46,14 @@ serving change in the next phase addresses the same tree without restating it):
 ```
 <principalHomeRoot>/.tp-staging/                 root:tp 0710 (publish-open)
   <username>.<serviceId>.<releaseId>/            tp 0700 until tp-host publish
-<principalHomeRoot>/<username>/sites/            root:<username>-grp 0750
-  <serviceId>/                                   root:<username>-grp 0750
-    releases/                                    root:<username>-grp 0750
-      <releaseId>/        root:<username>-grp, top 0550, nothing g/o-writable
+<principalHomeRoot>/<username>/sites/            root:<username> 0750
+  <serviceId>/                                   root:<username> 0750
+    releases/                                    root:<username> 0750
+      <releaseId>/        root:<username>, top 0550, nothing g/o-writable
       <releaseId>/.turbopanel/release.json        per-release manifest
       <releaseId>/shared -> ../../shared              relative convenience link
     current -> releases/<releaseId>
-    shared/               <username>:<username>-grp 0750
+    shared/               <username>:<username> 0750
     .turbopanel-hosting/  root:root 0711  (hosting.env / php.json: <username>:root 0400)
 ```
 
@@ -115,8 +115,11 @@ hit is a `release` warning in the daemon log and an entry in
 replaced each start). A sealed release cannot be re-sealed without the link and
 the host has no per-site safe state short of taking the site down, which would
 break working sites whose only hit is a pre-check `uploads`/`storage` link;
-redeploying publishes a vetted release. Surfacing the findings in the control
-plane's server status needs a cell-protocol message and is a follow-up.
+redeploying publishes a vetted release. The daemon also sends a bounded summary
+of the file with its presence frames (`readReleaseLinkScanReport`: scan time,
+total count, the first 20 sites with a link count, never link text), so the
+control plane shows it in server status (`releaseLinkScan` on the servers
+list).
 
 A published release is **read-only to the runtime user** on purpose: an app
 process that can rewrite its own code turns any RCE into persistence. That is an
@@ -131,7 +134,7 @@ reuses the single `sudo -n install -d` seam in `ensure-principal.ts`
 (`ensureDirectoryWithOwner` for the root-owned side,
 `ensureDirectoryOwnedByPrincipal` for `shared/`); retention removal goes
 through the same `sudo -n` runner seam, never a second mkdir helper. The daemon
-is **not** in `<username>-grp`, so it cannot traverse the root-owned `0750`
+is **not** in the group `<username>`, so it cannot traverse the root-owned `0750`
 site tree: unprivileged `readlink` of `current`, the rollback swap and the
 probes fall back to that same `sudo -n` runner when Deno returns EACCES. Tests
 that own a temp tree keep the Deno path (copy, link, manifest, probe, seal,
@@ -164,9 +167,14 @@ asked for was pruned on this host" is exactly what the operator needs told.
 **A rollback trusts only the daemon's own release record.** Every successful
 promote — native or Railpack — leaves a copy of its manifest under the
 daemon-owned `<daemonStateDir>/release-records/` root
-(`resolveDaemonReleasePaths`); for the native lane it is written after the seal
-and swap succeed, so its existence is this host's statement that the release was
-published. `resolveRollbackTarget` reads that record and nothing else: the copy
+(`resolveDaemonReleasePaths`); for the native lane it is written **before** the
+promote, under a `.pending` marker, so a write failure fails the deploy with
+`current` untouched, and the marker is cleared only once the seal and swap have
+succeeded (a failed promote removes the record). Only a record without the
+marker counts as this host's statement that the release was published. The
+manifest goes through temp file, fsync and rename, and a record is removed with
+its tree: by retention for one release, and with the whole site when a service
+loses its source. `resolveRollbackTarget` reads that record and nothing else: the copy
 inside a native release tree sits in the principal's home, which the principal
 owns, so neither the lane (`imageTag`), the commit, nor the runtime shape is
 ever taken from it, and no privileged read of that tree exists. A release with
@@ -198,7 +206,7 @@ the probe. `tp-host publish <user> <svc> <id>` then, as root and with every
 path built from the ids: takes the leaf (`root:root 0700`), refuses hard-linked
 files (before any `chown -R`, so no outside inode is re-owned), FIFOs,
 sockets, devices and a shipped `shared`, seals it
-(`chown -R -h -P root:<user>-grp`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
+(`chown -R -h -P root:<user>`, `chmod -R u-s,g-s,go-w,g+rX,o-rwx`) and
 re-checks that nothing is left foreign-owned, set-id or group/other-writable,
 resolves every symlink physically (`realpath -m`) and refuses one that lands
 outside the leaf (so the two-link `s1/s2/up → ../..` + `s1/s2/s3/x → ../up/..`
@@ -261,21 +269,33 @@ removed on the rerun); git clones into `work/<id>/source` while git's HOME
 and the credential files stay in the daemon-only scratch dir, and the build
 refuses to start if a credential file is still there; the commands, the
 filtered env (`PATH`/`HOME`/`LD_*`/`GIT_*` reserved, Node `bin/` leading
-`PATH` for a native app, Corepack/npm/XDG caches in `cache/<projectId>`) and
-the cwd go to `sudo tp-host build-run <id> <projectId>` as a spec on stdin
-(`orchestration/scripts/tp-build-runner` documents the format). tp-host runs
-them as `tpbuild` in a transient `turbopanel-build-<id>.service` with a fixed
-sandbox: no docker or tp group, daemon trees and sockets inaccessible,
-private-range / metadata egress denied, 4G memory, 2 CPUs, 1024 tasks, 30
-minutes, one build per host (the daemon also queues its own builds and says
-so in the transcript). Output streams back line by line. On any abort (the
+`PATH` for a native app, Corepack/npm/XDG caches in
+`caches/<owner>/<projectId>`) and the cwd go to `sudo tp-host build-run <id>
+<projectId> <owner>` as a spec on stdin (`orchestration/scripts/tp-build-runner`
+documents the format; `<owner>` is the site owner's Linux user,
+`entry.principal.username`). tp-host runs them in a transient
+`turbopanel-build-<id>.service` as a throwaway user systemd creates for that
+one build (`DynamicUser=yes`: never the site owner's user, never a host
+account, never in docker or tp), inside the site owner's
+`turbopanel-<owner>-build.slice` (a child of their own slice), with a fixed
+sandbox: daemon trees and sockets inaccessible, only this build's work tree and
+its owner's project cache visible under `/var/lib/turbopanel-build`,
+private-range / metadata egress denied, loopback platform ports refused for the
+unit's cgroup, 4G memory, 2 CPUs, 1024 tasks, 30 minutes, one build per host
+(the daemon also queues its own builds and says so in the transcript). Output streams back line by line. On any abort (the
 daemon-side ceiling, a lost client) the daemon runs `tp-host systemctl stop
 turbopanel-build-<id>.service`; then, success or not, `tp-host build-return
 <id>` gives the tree back only once the unit is gone, and only after that do
 the Next fold and the stage read it, contained in `work/<id>` (so a build
 that swapped `source` itself for a link is refused). Systemd 247–254 hosts
-get tp-host's reduced sandbox and a warning; below 247 builds refuse. Docker
-and Railpack builds stay on the Docker lane. There is no opt-out on a managed
+get tp-host's reduced sandbox and a warning; below 247 builds refuse. Image
+builds: the image builder's prepare step (it reads and interprets the whole
+repository) runs in this same sandbox (`image-prepare-sandbox.ts`: the daemon
+copies the vendored tool into `work/<id>/tools/`, the spec runs it, and the
+plan comes back as one regular file checked on its open handle); with no site
+owner the build runs in `turbopanel-tpbuild.slice`. The image build itself
+(`docker buildx`, Compose `build:`) stays on the Docker lane: the Engine's
+BuildKit, driven by `tp`, with no per-site-owner limits yet. There is no opt-out on a managed
 host. A development install runs the commands as the developer with `clearEnv` and an explicit
 allow-list, and no resource caps.
 
@@ -287,17 +307,43 @@ not after promote. When an entry belongs to a `nativeAppServices[]` row,
 series' `bin/` leads a **curated** `PATH` (`<bin>:/usr/bin:/bin`, never the
 daemon's PATH — Deno's `node_compat_bin` would shadow `node`, and an
 unreadable `/usr/local/sbin` makes dash report `corepack: Permission denied`
-for a missing binary). In the sandbox `tpbuild` reaches the series through
-its own `tpnode<series>` membership (node-app-runtime role). Unsandboxed, the
-child is `sudo -n -u <self> -- env … sh -c` so
-`initgroups()` picks up `tpnode<series>` without a daemon re-login and
-without exec'ing the passwd shell (`sg` dies on `/usr/sbin/nologin` with
-"This account is currently not available" — the managed daemon user `tp`
-and tenant principals are both nologin). Corepack caches under the
+for a missing binary). The vendored trees are readable by everyone, so the
+sandbox's throwaway user (and, unsandboxed, the daemon's plain `sh -c` child)
+reaches the series with no group at all. Corepack caches under the
 project's sandbox cache (unsandboxed: `<checkout>/.corepack`) with its download
 prompt off — never a host-wide
 Corepack install, never the daemon's home. `NODE_ENV` follows the app's
 `appMode` (default `production`) in the build exactly as in the generated unit.
+
+**Deno builds (`runtime: deno`).** The same lane with the vendored Deno in
+place of Node (`nativeRuntime.runtime === "deno"`): `vendor/deno-app/<series>/current/bin`
+leads the curated `PATH` (readable by everyone, so the build's user needs no
+group), `DENO_DIR` is the project's sandbox cache (unsandboxed: `<checkout>/.deno`), and
+`DENO_NO_UPDATE_CHECK=1` / `DENO_NO_PROMPT=1` are set. The network rules are the
+build's usual ones (the public internet only). Nothing is derived from Node's
+package manager. `deno-build.ts` derives, from the project's own files
+(`deno.json`, else `deno.jsonc`, parsed with comments and trailing commas):
+
+1. `deno install` when a `deno.lock`, a `package.json` or a `nodeModulesDir`
+   setting needs the dependencies fetched ahead of the run;
+2. `deno task build` when the config has a `build` task;
+3. `deno cache <entry>`, after the two above, when the author typed neither an
+   install nor a build command and an entry file can be named (the file a plain
+   `deno run` start task runs, else the entry the start detection would pick).
+   It fetches the imports with the build's network and writes `deno.lock` into
+   the tree. The lock matters at run time: the release is read-only, and `deno
+   run` with remote imports and no lockfile dies trying to write one.
+
+An author's own install or build command always wins and is never rewritten.
+The start is detected after the build, from the built tree
+(`detectDenoStart`): the config's `start` task (`deno task start`), else the
+first entry file that exists among `main`, the `.` export, the entry of a
+`serve` / `server` / `run` task (`deno run <flags> <file>`), then `main.ts`,
+`mod.ts`, `server.ts`, `main.js`, `index.ts` (`deno run --allow-all <file>`).
+It is recorded in the release record like a Node start (`deno-task` /
+`deno-file`), so a rollback restarts the old release the way it ran. Nothing
+found fails the build, before promote. A broken config fails the build naming
+the file. A Deno release is never read as a Next.js build.
 
 A missing `installCommand` is then **derived** rather than skipped
 (`deriveNodeInstallCommand`): the operator's `build.packageManager` wins, else
@@ -316,7 +362,20 @@ build runs under `NODE_ENV=production`, where npm, pnpm, and classic yarn
 silently omit `devDependencies` — which is where every build toolchain lives.
 An explicit `installCommand` always wins, no `package.json` derives nothing,
 and the transcript records a `derived install command …` line so the operator
-can see what ran.
+can see what ran. `npm-shrinkwrap.json` counts as an npm lockfile (`npm ci`).
+Bun lockfiles are not used: the native lane vendors no Bun, so such a repo
+installs with npm.
+
+A missing `buildCommand` is derived the same way (`deriveNodeBuildCommand`):
+when `package.json` has a non-empty `build` script, the build runs
+`corepack pnpm run build`, `corepack yarn run build` or `npm run build` with the
+manager the install picked, and the transcript says `derived build command
+from …`. No `build` script derives nothing; an explicit `buildCommand` always
+wins. How the release then starts is detected from the built tree and recorded
+with it (`../native/AGENTS.md`, Entrypoint). These follow the usual Node
+conventions (package manager from the `packageManager` pin, then the lockfile;
+the `build` script; then the `start` script, `main`, `index.js`), implemented
+here so the decision runs on the native build's own tree and toolchain.
 
 **Retention** — `retention.ts` keeps the newest `DEFAULT_RELEASE_RETENTION` (5)
 releases **plus whatever `current` resolves to**, even when that falls outside
@@ -340,7 +399,10 @@ candidate) and **before** the new manifest is written. Path segments are
 re-validated on the way out — the manifest is read back from disk, so it is not
 trusted to name a safe path. A service that is still sourced keeps its tree even
 if its principal changed: reclaiming it would delete live `shared/` state.
-Best-effort per entry, like the rest of retention.
+Once a tree is gone, the daemon's records for that service
+(`<daemonStateDir>/release-records/sites/<serviceId>`) are removed too, without
+privilege (the daemon owns them); a tree that could not be removed keeps its
+records. Best-effort per entry, like the rest of retention.
 
 **Sites now serve out of `current`.** `deploy-environment.ts`
 builds a `composeServiceName → { serviceId, username }` map from

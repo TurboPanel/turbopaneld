@@ -73,7 +73,7 @@ test("ensureReleaseTree makes the immutable tree root-owned", async () => {
       assertEquals(installCall(calls, dir), {
         mode: RELEASE_DIR_MODE,
         owner: "root",
-        group: "appuser-grp",
+        group: "appuser",
       });
     }
   } finally {
@@ -114,7 +114,7 @@ test("ensureReleaseTree hands shared/ to the principal", async () => {
     );
     const install = installCall(calls, paths.sharedDir);
     assertEquals(
-      chown?.args.includes("appuser:appuser-grp") ??
+      chown?.args.includes("appuser:appuser") ??
         install?.owner === "appuser",
       true,
     );
@@ -208,7 +208,7 @@ test("sealPublishedRelease and removePublishedRelease go through the privileged 
       "-n",
       "chown",
       "-R",
-      "root:appuser-grp",
+      "root:appuser",
       paths.releaseDir,
     ]);
     assertEquals(calls[1]?.args, [

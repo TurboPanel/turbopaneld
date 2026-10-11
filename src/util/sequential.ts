@@ -80,3 +80,29 @@ export function repeatSequential(
     next();
   });
 }
+
+/**
+ * Like `Array.map` with at most `limit` steps in flight at once: `limit`
+ * lanes, each running its share of the items one after another. Results keep
+ * the input order. Use it for bulk reads (every `/proc/<pid>`) where
+ * `Promise.all` over thousands of items would exhaust file descriptors.
+ */
+export async function mapLimit<T, R>(
+  items: Iterable<T>,
+  limit: number,
+  step: (item: T, index: number) => Promise<R> | R,
+): Promise<R[]> {
+  const all = [...items];
+  const results = new Array<R>(all.length);
+  const lanes = Math.max(1, Math.min(Math.floor(limit), all.length));
+  await Promise.all(
+    Array.from({ length: lanes }, (_, lane) =>
+      forEachSequential(
+        all.keys().filter((i) => i % lanes === lane),
+        async (i) => {
+          results[i] = await step(all[i], i);
+        },
+      )),
+  );
+  return results;
+}

@@ -19,6 +19,7 @@ import {
   MANAGED_COMMAND_INTENT_KINDS,
   MANAGED_INTENT_GRACE_MS,
   MANAGED_INTENT_MAX_RUNNING_MS,
+  MANAGED_INTENT_SETTLED_TTL_MS,
   MANAGED_INTENT_TTL_MS,
   managedCommandIntent,
   managedIntentPath,
@@ -26,9 +27,13 @@ import {
   recordManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
-import { setManagedCommandHooksLayoutForTests } from "./ha-command-hooks.ts";
+import {
+  noteManagedDestroySucceeded,
+  setManagedCommandHooksLayoutForTests,
+} from "./ha-command-hooks.ts";
 import {
   haMemberRecordFromApply,
+  managedHaMemberPath,
   markManagedHaMemberPromoted,
   readManagedHaMember,
   saveManagedHaMember,
@@ -78,7 +83,7 @@ test("the router records the intent before dispatch and refreshes it after", asy
   const begin = source.indexOf("await beginManagedCommandIntent(");
   const dispatch = source.indexOf("switch (message.commandType)");
   const end = source.indexOf(
-    "await endManagedCommandIntent(managedIntent, commandSucceeded)",
+    "await endManagedCommandIntent(managedIntent, commandSucceeded,",
   );
   assert(begin > 0 && dispatch > 0 && end > 0);
   assert(begin < dispatch, "intent must be recorded before any handler runs");
@@ -274,6 +279,95 @@ test("destroy is held from the start, so a failed destroy never re-arms the prob
   });
 });
 
+test("a destroy that succeeded leaves no marker behind", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    resetManagedIntentsForTests();
+    const destroy = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "destroy",
+    );
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "found",
+    );
+    await endManagedIntent(dirs.stateDir, destroy, true);
+    assertEquals(
+      (await lookupManagedIntent(dirs.stateDir, MANAGED_ID)).status,
+      "none",
+    );
+    resetManagedIntentsForTests();
+    assertEquals(await readManagedIntent(dirs.stateDir, MANAGED_ID), null);
+  });
+});
+
+test("a destroy that succeeded but could not remove the member record keeps the marker", async () => {
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      // A non-empty directory where the record file should be: the remove
+      // fails with something other than NotFound.
+      const recordPath = managedHaMemberPath(layout, MANAGED_ID);
+      await Deno.mkdir(recordPath, { recursive: true });
+      await Deno.writeTextFile(`${recordPath}/stuck`, "x");
+      const destroy = await beginManagedIntent(
+        fixture.dirs.stateDir,
+        MANAGED_ID,
+        "destroy",
+      );
+      const recordGone = await noteManagedDestroySucceeded(
+        {
+          managedId: MANAGED_ID,
+        } as Parameters<typeof noteManagedDestroySucceeded>[0],
+      );
+      assertEquals(recordGone, false);
+      await endManagedIntent(fixture.dirs.stateDir, destroy, true, {
+        keepHeld: !recordGone,
+      });
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "found",
+      );
+    } finally {
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
+test("a destroy that succeeded with the member record gone clears the marker", async () => {
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      const destroy = await beginManagedIntent(
+        fixture.dirs.stateDir,
+        MANAGED_ID,
+        "destroy",
+      );
+      const recordGone = await noteManagedDestroySucceeded(
+        {
+          managedId: MANAGED_ID,
+        } as Parameters<typeof noteManagedDestroySucceeded>[0],
+      );
+      assertEquals(recordGone, true);
+      await endManagedIntent(fixture.dirs.stateDir, destroy, true, {
+        keepHeld: !recordGone,
+      });
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "none",
+      );
+    } finally {
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
 test("clearManagedIntent removes memory and disk copies", async () => {
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
@@ -386,6 +480,7 @@ const INTENT_DISPATCHES: Array<{
       copyId: "00000000-0000-4000-8000-0000000000c1",
       copyProvider: "docker",
       volumeName: "managed_data",
+      storageId: "00000000-0000-4000-8000-0000000000b1",
       backupId: "bk_0123abcd",
       checksum: "a".repeat(64),
     },
@@ -522,6 +617,94 @@ test("apply records the member; promote flips it; destroy removes it", async () 
   });
 });
 
+test("a managed.destroy through the router keeps the marker held when the member record cannot be removed", async () => {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("../commands/command-router.ts");
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      const recordPath = managedHaMemberPath(layout, MANAGED_ID);
+      await Deno.mkdir(recordPath, { recursive: true });
+      await Deno.writeTextFile(`${recordPath}/stuck`, "x");
+      setCommandRouterHandlersForTests({
+        handleManagedDestroy: () =>
+          Promise.resolve({ status: "stopped", containers: [] }),
+      });
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-managed.destroy",
+          commandId: "cmd-managed.destroy",
+          commandType: "managed.destroy",
+          payload: { managedId: MANAGED_ID, removeVolumes: false },
+          at: new Date().toISOString(),
+        },
+        new MockWebSocket() as unknown as WebSocket,
+        { decryptSecrets: (c) => Promise.resolve(c) },
+      );
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "found",
+      );
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
+test("a managed.destroy through the router clears the marker once the member record is gone", async () => {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("../commands/command-router.ts");
+  await withTempLayout(async (fixture) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(fixture.env);
+    setManagedCommandHooksLayoutForTests(layout);
+    try {
+      await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+        recursive: true,
+      });
+      await saveManagedHaMember(layout, {
+        managedId: MANAGED_ID,
+        memberId: MEMBER_ID,
+        engine: "postgres",
+        role: "primary",
+        containerName: "svc-1",
+        replicaPeerCount: 0,
+        updatedAt: new Date().toISOString(),
+      });
+      setCommandRouterHandlersForTests({
+        handleManagedDestroy: () =>
+          Promise.resolve({ status: "stopped", containers: [] }),
+      });
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-managed.destroy",
+          commandId: "cmd-managed.destroy",
+          commandType: "managed.destroy",
+          payload: { managedId: MANAGED_ID, removeVolumes: false },
+          at: new Date().toISOString(),
+        },
+        new MockWebSocket() as unknown as WebSocket,
+        { decryptSecrets: (c) => Promise.resolve(c) },
+      );
+      assertEquals(await readManagedHaMember(layout, MANAGED_ID), null);
+      resetManagedIntentsForTests();
+      assertEquals(
+        (await lookupManagedIntent(fixture.dirs.stateDir, MANAGED_ID)).status,
+        "none",
+      );
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
 test("managed.ha.failover recover flips the local target member to primary", async () => {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("../commands/command-router.ts");
@@ -565,6 +748,59 @@ test("managed.ha.failover recover flips the local target member to primary", asy
       assertEquals(
         (await readManagedHaMember(layout, MANAGED_ID))?.role,
         "primary",
+      );
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      setManagedCommandHooksLayoutForTests(null);
+    }
+  });
+});
+
+test("managed.ha.failover repoint does not flip the local replica to primary", async () => {
+  const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+    await import("../commands/command-router.ts");
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+      recursive: true,
+    });
+    await saveManagedHaMember(layout, {
+      managedId: MANAGED_ID,
+      memberId: MEMBER_ID,
+      engine: "postgres",
+      role: "replica",
+      containerName: "svc-3",
+      replicaPeerCount: 2,
+      updatedAt: new Date().toISOString(),
+    });
+    setManagedCommandHooksLayoutForTests(layout);
+    setCommandRouterHandlersForTests({
+      handleManagedHaFailover: () =>
+        Promise.resolve({ summary: "repointed", phase: "repoint" }),
+    });
+    try {
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-repoint",
+          commandId: "cmd-repoint",
+          commandType: "managed.ha.failover",
+          payload: {
+            managedId: MANAGED_ID,
+            sourceMemberId: "00000000-0000-4000-8000-0000000000a9",
+            targetMemberId: "00000000-0000-4000-8000-0000000000aa",
+            phase: "repoint",
+            targetHost: "10.100.0.4",
+            targetPort: 45001,
+          },
+          at: new Date().toISOString(),
+        },
+        new MockWebSocket() as unknown as WebSocket,
+        { decryptSecrets: (c) => Promise.resolve(c) },
+      );
+      assertEquals(
+        (await readManagedHaMember(layout, MANAGED_ID))?.role,
+        "replica",
       );
     } finally {
       setCommandRouterHandlersForTests(null);
@@ -658,5 +894,77 @@ test("1+1 cluster: the promoted replica is watched at once (old primary counted 
       (await readManagedHaMember(layout, MANAGED_ID))?.replicaPeerCount,
       1,
     );
+  });
+});
+
+test("managed.ha.failover repoint carries no intent but drain and recover do", () => {
+  const base = {
+    managedId: MANAGED_ID,
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+  };
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "repoint" }),
+    null,
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", {
+      ...base,
+      phase: "repoint",
+      ensureSlots: ["tp_member_2"],
+    }),
+    null,
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "recover" }),
+    { managedId: MANAGED_ID, kind: "failover" },
+  );
+  assertEquals(
+    managedCommandIntent("managed.ha.failover", { ...base, phase: "drain" }),
+    { managedId: MANAGED_ID, kind: "failover" },
+  );
+});
+
+test("a successful promote or failover stops suppressing the probe after a minute, other outcomes keep the long window", async () => {
+  await withTempLayout(async ({ dirs }) => {
+    for (const kind of ["promote", "failover"] as const) {
+      resetManagedIntentsForTests();
+      const before = Date.now();
+      const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, kind);
+      await endManagedIntent(dirs.stateDir, token, true);
+      const ended = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+      assert(ended?.untilMs !== null && ended?.untilMs !== undefined);
+      assert(ended.untilMs >= before + MANAGED_INTENT_SETTLED_TTL_MS);
+      assert(
+        ended.untilMs < before + MANAGED_INTENT_TTL_MS,
+        `${kind}: the marker must be well under the long window`,
+      );
+      // A promoted primary that dies two minutes later is a real failure.
+      assert(
+        !isManagedIntentActive(
+          ended,
+          before + 2 * MANAGED_INTENT_SETTLED_TTL_MS + 1_000,
+        ),
+      );
+    }
+    for (
+      const [kind, succeeded] of [
+        ["promote", false],
+        ["failover", false],
+        ["apply", true],
+        ["restart", true],
+      ] as const
+    ) {
+      resetManagedIntentsForTests();
+      const before = Date.now();
+      const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, kind);
+      await endManagedIntent(dirs.stateDir, token, succeeded);
+      const ended = await readManagedIntent(dirs.stateDir, MANAGED_ID);
+      assert(ended?.untilMs !== null && ended?.untilMs !== undefined);
+      assert(
+        ended.untilMs >= before + MANAGED_INTENT_TTL_MS,
+        `${kind} (succeeded=${succeeded}) keeps the long window`,
+      );
+    }
   });
 });

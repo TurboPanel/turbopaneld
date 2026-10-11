@@ -164,3 +164,25 @@ test("UpdateProgressReporter replays queued stages in order on a fresh instance"
   ]);
   await Deno.remove(root, { recursive: true });
 });
+
+test("UpdateProgressReporter strips signed URL secrets from a stage detail", async () => {
+  const root = await Deno.makeTempDir({ prefix: "update-progress-" });
+  const sent: Array<string | undefined> = [];
+  const reporter = new UpdateProgressReporter({
+    stateDir: join(root, "state"),
+    progressId: "req-1",
+    canSend: () => true,
+    send: (message) => {
+      sent.push(message.detail);
+      return true;
+    },
+  });
+  reporter.reportStage("daemon", "failed", {
+    detail:
+      "download failed: https://objects.example.com/a.tar.zst?X-Amz-Signature=abc&token=secret",
+  });
+  await reporter.flush();
+  assertEquals(sent, [
+    "download failed: https://objects.example.com/a.tar.zst?[redacted]",
+  ]);
+});

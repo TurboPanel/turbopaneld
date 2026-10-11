@@ -43,6 +43,8 @@ const CONSTANTS = [
   "TP_OWNED_TREES",
   "TP_DOCKER_PACKAGES",
   "TP_OTHER_UNITS",
+  "TP_PRINCIPAL_ID_MIN",
+  "TP_PRINCIPAL_ID_MAX",
 ];
 
 function extractFunction(source: string, name: string): string | null {
@@ -671,6 +673,237 @@ test("an inactive slice systemd keeps without a unit file is not reported as lef
   assertEquals(running.stdout.trim(), "present", running.stderr);
 });
 
+const TP_TEST_UUID = "12345678-1234-1234-1234-123456789abc";
+
+test("managed-ha orchestrator containers are included in the removal list", async () => {
+  const result = await runPurgeSh(
+    ["tp_docker_consider_row", "tp_file_add"],
+    [
+      ': > "$TP_TMP/work.containers"',
+      `tp_docker_consider_row "${TP_TEST_UUID}-ha" - managed-ha - - - -`,
+      'cat "$TP_TMP/work.containers"',
+    ].join("\n"),
+  );
+  assertStringIncludes(result.stdout, `${TP_TEST_UUID}-ha`, result.stderr);
+});
+
+test("TurboPanel container names match only anchored UUID shapes", async () => {
+  const fns = [
+    "tp_is_turbopanel_container_name",
+    "tp_docker_container_name_is_turbopanel",
+    "tp_docker_consider_row",
+    "tp_file_add",
+    "tp_list_has_word",
+  ];
+  const owned = [
+    TP_TEST_UUID,
+    `${TP_TEST_UUID}-ha`,
+    `${TP_TEST_UUID}-in`,
+    `${TP_TEST_UUID}-1`,
+  ];
+  const foreign = [
+    "myapp-ha",
+    "nginx-ha",
+    `${TP_TEST_UUID}-extra`,
+    `${TP_TEST_UUID}-ha`.toUpperCase(),
+    `prefix-${TP_TEST_UUID}`,
+  ];
+  for (const name of owned) {
+    const result = await runPurgeSh(
+      fns,
+      `if tp_is_turbopanel_container_name "${name}"; then echo yes; else echo no; fi`,
+    );
+    assertEquals(result.stdout.trim(), "yes", name);
+  }
+  for (const name of foreign) {
+    const result = await runPurgeSh(
+      fns,
+      `if tp_is_turbopanel_container_name "${name}"; then echo yes; else echo no; fi`,
+    );
+    assertEquals(result.stdout.trim(), "no", name);
+  }
+  const namesOnly = await runPurgeSh(
+    fns,
+    [
+      ': > "$TP_TMP/work.containers"',
+      ...foreign.map(
+        (name) => `tp_docker_consider_row "${name}" - - - - - -`,
+      ),
+      `tp_docker_consider_row "${TP_TEST_UUID}-in" - - - - - -`,
+      'wc -l < "$TP_TMP/work.containers"',
+    ].join("\n"),
+  );
+  assertEquals(namesOnly.stdout.trim(), "1", namesOnly.stderr);
+});
+
+test("look-alike -ha names are not merged from the pre-purge inventory", async () => {
+  const stub = await stubBin(
+    "docker",
+    [
+      'case "$1" in',
+      "  ps)",
+      '    if [ "$2" = "-a" ]; then',
+      '      printf "%s\\n" "myapp-ha|-|-|-|-|-|-"',
+      "    fi",
+      "    ;;",
+      '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_docker_ready",
+      "tp_docker_collect",
+      "tp_docker_consider_row",
+      "tp_is_turbopanel_container_name",
+      "tp_docker_container_name_is_turbopanel",
+      "tp_docker_build_removal_list",
+      "tp_docker_remove_one_container",
+      "tp_remove_docker_containers",
+      "tp_has_tool",
+      "tp_list_has_word",
+    ],
+    [
+      "export TP_TMP",
+      'echo "myapp-ha" > "$TP_TMP/before.containers"',
+      'tp_has_tool() { [ "$1" = docker ] && return 0; command -v "$1" >/dev/null 2>&1; }',
+      "tp_docker_ready() { return 0; }",
+      "tp_remove_docker_containers",
+      'test ! -s "$TP_TMP/docker.rmlog" && echo no_removals',
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertStringIncludes(result.stdout, "no_removals", result.stderr);
+});
+
+test("container removal merges the pre-purge inventory and removes every name", async () => {
+  const stub = await stubBin(
+    "docker",
+    [
+      'case "$1" in',
+      "  ps)",
+      '    if [ "$2" = "-a" ]; then',
+      '      printf "%s\\n" "turbopanel-database|turbopanel.role|database|-|-|-|-"',
+      `      printf "%s\\\\n" "${TP_TEST_UUID}-ha|-|managed-ha|-|-|-|-"`,
+      "    fi",
+      "    ;;",
+      '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_docker_ready",
+      "tp_docker_collect",
+      "tp_docker_consider_row",
+      "tp_docker_build_removal_list",
+      "tp_docker_remove_one_container",
+      "tp_remove_docker_containers",
+      "tp_has_tool",
+    ],
+    [
+      "export TP_TMP",
+      'echo "turbopanel-database" > "$TP_TMP/before.containers"',
+      `echo "${TP_TEST_UUID}-ha" >> "$TP_TMP/before.containers"`,
+      'tp_has_tool() { [ "$1" = docker ] && return 0; command -v "$1" >/dev/null 2>&1; }',
+      "tp_docker_ready() { return 0; }",
+      "tp_remove_docker_containers",
+      "tp_remove_docker_containers",
+      'sort "$TP_TMP/docker.rmlog"',
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  const lines = result.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("rm:"));
+  lines.sort();
+  assertEquals(lines, [
+    `rm:${TP_TEST_UUID}-ha`,
+    `rm:${TP_TEST_UUID}-ha`,
+    "rm:turbopanel-database",
+    "rm:turbopanel-database",
+  ]);
+});
+
+test("the summary does not treat inactive slices as left over after they unload", async () => {
+  const stub = await stubBin(
+    "systemctl",
+    [
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo inactive ;;",
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    ["tp_unit_present", "tp_report_remaining"],
+    [
+      'printf "%s\\n" turbopanel.slice turbopanel-containers.slice > "$TP_TMP/before.units"',
+      'printf "%s\\n" turbopanel.slice turbopanel-containers.slice > "$TP_TMP/inv.units"',
+      "tp_report_remaining units units",
+      'test ! -s "$TP_TMP/failed" && echo summary_ok',
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertStringIncludes(result.stdout, "summary_ok", result.stderr);
+});
+
+test("a slice whose unit file is already gone is not still counted as present", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  const stub = await stubBin(
+    "systemctl",
+    [
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo /etc/systemd/system/turbopanel.slice ;;",
+      "  *ActiveState*) echo inactive ;;",
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    ["tp_unit_present"],
+    `TP_SYSTEMD_DIRS=${units}\nif tp_unit_present turbopanel.slice; then echo present; else echo absent; fi`,
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertEquals(result.stdout.trim(), "absent", result.stderr);
+});
+
+test("the unit scan skips a stopped slice with no unit file but keeps a running one", async () => {
+  const body = [
+    "TP_SYSTEMD_DIRS=$TP_TMP/none",
+    ': > "$TP_TMP/inv.units"',
+    "tp_scan_systemctl_units",
+    'cat "$TP_TMP/inv.units"',
+  ].join("\n");
+  const stubFor = (state: string) =>
+    stubBin(
+      "systemctl",
+      [
+        'case "$*" in',
+        "  *LoadState*) echo loaded ;;",
+        "  *FragmentPath*) echo ;;",
+        `  *ActiveState*) echo ${state} ;;`,
+        '  *list-units*) echo "turbopanel.slice loaded ${state} dead TurboPanel" ;;',
+        "esac",
+      ].join("\n"),
+    );
+  const fns = [
+    "tp_scan_systemctl_units",
+    "tp_note_unit",
+    "tp_unit_present",
+    "tp_list_has_word",
+  ];
+  const gone = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("inactive")}:${BASE_PATH}`,
+  });
+  assertEquals(gone.stdout.trim(), "", gone.stderr);
+  const running = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("active")}:${BASE_PATH}`,
+  });
+  assertStringIncludes(running.stdout, "turbopanel.slice", running.stderr);
+});
+
 test("containers are not carried into the final check once Docker Engine was purged", async () => {
   const stub = await stubBin("docker", "exit 1");
   const run = (gone: string, left = "false") =>
@@ -914,6 +1147,57 @@ async function engineGone(
   return result.stdout.trim();
 }
 
+test("Docker Engine still-installed warning follows dpkg, not a stale dockerd on PATH", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-deb-" });
+  await Deno.writeTextFile(
+    join(dir, "dpkg-query"),
+    '#!/bin/sh\ncase "$*" in *-s*docker-ce*) exit 1 ;; *) exit 0 ;; esac\n',
+    { mode: 0o755 },
+  );
+  await Deno.writeTextFile(join(dir, "dockerd"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const result = await runPurgeSh(
+    [
+      "tp_docker_engine_packages_remain",
+      "tp_pkg_installed",
+      "tp_has_tool",
+      "tp_docker_engine_gone",
+    ],
+    [
+      "DRY_RUN=false",
+      "if tp_docker_engine_packages_remain; then echo packages=yes; else echo packages=no; fi",
+      "if tp_docker_engine_gone; then echo gone=yes; else echo gone=no; fi",
+    ].join("\n"),
+    { PATH: dir, TP_DOCKER_SOCKETS: "/nonexistent/x.sock" },
+  );
+  assertStringIncludes(result.stdout, "packages=no");
+  assertStringIncludes(result.stdout, "gone=no");
+});
+
+test("moby or snap Docker left after apt purge does not mark the engine gone", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-moby-" });
+  await Deno.writeTextFile(
+    join(dir, "dpkg-query"),
+    '#!/bin/sh\ncase "$*" in *moby-engine*) printf "install ok installed\\n" ;; *) exit 1 ;; esac\n',
+    { mode: 0o755 },
+  );
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const result = await runPurgeSh(
+    ["tp_docker_engine_gone", "tp_has_tool", "tp_pkg_installed"],
+    [
+      "DRY_RUN=false",
+      "TP_DOCKER_ENGINE_GONE=false",
+      "if tp_docker_engine_gone; then TP_DOCKER_ENGINE_GONE=true; else tp_print_warn leftover; fi",
+      'echo "gone=${TP_DOCKER_ENGINE_GONE}"',
+    ].join("\n"),
+    { PATH: dir, TP_DOCKER_SOCKETS: "/nonexistent/x.sock" },
+  );
+  assertStringIncludes(result.stdout, "gone=false");
+  assertStringIncludes(result.stderr + result.stdout, "leftover");
+});
+
 test("Docker Engine counts as gone only when no daemon, snap, service or socket remains", async () => {
   assertEquals(await engineGone({}), "gone");
   assertEquals(await engineGone({ dockerd: "exit 0" }), "present");
@@ -934,5 +1218,102 @@ test("Docker Engine counts as gone only when no daemon, snap, service or socket 
     assertEquals(await engineGone({}, { TP_DOCKER_SOCKETS: sock }), "present");
   } finally {
     listener.close();
+  }
+});
+
+// getent and groupdel stand-ins over a temp group/passwd pair: groupdel drops
+// the line, as the real one would; tp_run prints "▸ groupdel <name>".
+const GROUP_STUBS = `
+getent() {
+  if [ "$#" -lt 2 ]; then cat "$TP_TMP/$1"; return; fi
+  awk -F: -v n="$2" '$1 == n { print; found = 1 } END { exit !found }' "$TP_TMP/$1"
+}
+groupdel() {
+  awk -F: -v n="$1" '$1 != n' "$TP_TMP/group" > "$TP_TMP/group.new"
+  mv "$TP_TMP/group.new" "$TP_TMP/group"
+}
+`;
+
+async function purgeGroups(
+  group: string[],
+  passwd: string[],
+  call: string,
+): Promise<ShResult> {
+  const result = await runPurgeSh(
+    [
+      "tp_principal_band_gid",
+      "tp_gid_is_primary",
+      "tp_group_has_members",
+      "tp_principal_leave_home",
+      "tp_purge_principal_groups",
+    ],
+    [
+      GROUP_STUBS,
+      `printf '%s\\n' ${
+        group.map((l) => `'${l}'`).join(" ")
+      } > "$TP_TMP/group"`,
+      `printf '%s\\n' ${
+        passwd.map((l) => `'${l}'`).join(" ")
+      } > "$TP_TMP/passwd"`,
+      `if ${call}; then echo KEPT_HOME=no; else echo KEPT_HOME=yes; fi`,
+    ].join("\n"),
+    { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin" },
+  );
+  return { ...result, stdout: result.stdout + result.stderr };
+}
+
+test("purge removes a site owner's own group and an old <name>-grp, engines or not", async () => {
+  const result = await purgeGroups(
+    ["alice:x:15001:tpnginx", "alice-grp:x:15002:", "sudo:x:27:"],
+    ["root:x:0:0::/root:/bin/sh"],
+    `tp_purge_principal_groups alice /srv/users/alice account`,
+  );
+  assertStringIncludes(result.stdout, "groupdel alice\n");
+  assertStringIncludes(result.stdout, "groupdel alice-grp\n");
+  assertStringIncludes(result.stdout, "KEPT_HOME=no");
+});
+
+test("purge never removes a group of the owner's name outside the band", async () => {
+  for (const name of ["sudo", "admin", "staff"]) {
+    const result = await purgeGroups(
+      [`${name}:x:27:`, `${name}-grp:x:1001:`],
+      ["root:x:0:0::/root:/bin/sh"],
+      `tp_purge_principal_groups ${name} /srv/users/${name} orphan`,
+    );
+    assert(!result.stdout.includes("groupdel"), result.stdout);
+    assertStringIncludes(result.stdout, "KEPT_HOME=no");
+    assertStringIncludes(
+      result.stdout,
+      `kept group ${name} (its id is outside`,
+    );
+  }
+});
+
+test("purge keeps an orphan's group that still has members or is a primary group", async () => {
+  const members = await purgeGroups(
+    ["carol:x:15003:tpnginx"],
+    ["root:x:0:0::/root:/bin/sh"],
+    `tp_purge_principal_groups carol /srv/users/carol orphan`,
+  );
+  assert(!members.stdout.includes("groupdel"), members.stdout);
+  assertStringIncludes(members.stdout, "KEPT_HOME=yes");
+
+  const primary = await purgeGroups(
+    ["dave:x:15004:"],
+    ["erin:x:15005:15004::/home/erin:/bin/sh"],
+    `tp_purge_principal_groups dave /srv/users/dave account`,
+  );
+  assert(!primary.stdout.includes("groupdel"), primary.stdout);
+  assertStringIncludes(primary.stdout, "KEPT_HOME=yes");
+});
+
+test("purge never touches a group named root or tp*", async () => {
+  for (const name of ["root", "tp", "tpnginx"]) {
+    const result = await purgeGroups(
+      [`${name}:x:15006:`],
+      ["root:x:0:0::/root:/bin/sh"],
+      `tp_purge_principal_groups ${name} /srv/users/${name} orphan`,
+    );
+    assert(!result.stdout.includes("groupdel"), result.stdout);
   }
 });

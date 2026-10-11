@@ -40,6 +40,10 @@ import {
   removeIfExists,
 } from "../managed/backup.ts";
 import { SAFE_MANAGED_ID_RE } from "../managed/engine-paths.ts";
+import {
+  assertCopyMountSafe,
+  type CopyGuardDeps,
+} from "./copy-source-guard.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 
 /**
@@ -50,7 +54,14 @@ export const COPY_BACKUP_HELPER_IMAGE =
   "docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
 
 /** Tenant directories (`/srv/users/<user>/volumes/<storageId>`, explicit copy paths). */
-const PRINCIPAL_ROOT = "/srv/users/";
+export const PRINCIPAL_ROOT = "/srv/users";
+
+/**
+ * An archive smaller than this holds no files: gzip of an empty tar is under
+ * 100 bytes. Such an archive is kept but never counts as a good copy, so it
+ * cannot push real ones out of retention.
+ */
+export const COPY_ARCHIVE_MIN_GOOD_BYTES = 1024;
 
 type StreamExecOutcome = { success: boolean; stderr: string };
 
@@ -67,6 +78,10 @@ export type CopyBackupDeps = {
     argv: string[],
     destination: WritableStream<Uint8Array>,
   ) => Promise<StreamExecOutcome>;
+  /** Filesystem seams of the source check (tests). */
+  guard?: Omit<CopyGuardDeps, "runDocker">;
+  /** Where site owners' homes live; tests only. */
+  principalRoot?: string;
 };
 
 function assertSafeId(label: string, value: string): void {
@@ -101,16 +116,6 @@ export function copyBackupArtifactPath(
   );
 }
 
-/** Whether `path` is inside one of the directories a copy may live in. */
-function isAllowedCopyDirectory(layout: LayoutPaths, path: string): boolean {
-  const storageRoot = `${join(layout.stateDir, "storage")}/`;
-  return path.startsWith(PRINCIPAL_ROOT) || path.startsWith(storageRoot);
-}
-
-/**
- * Where the copy's bytes are, as the helper mounts them. Throws for a source
- * this host will not touch (a path outside the allowed roots).
- */
 /** The copy's host directory: its own path, or the default deploy materializes. */
 function copyHostPath(
   layout: LayoutPaths,
@@ -129,6 +134,7 @@ function copyHostPath(
 export function resolveCopyMount(
   layout: LayoutPaths,
   source: CopyBackupSource,
+  principalRoot = PRINCIPAL_ROOT,
 ): CopyMount {
   if (source.copyProvider === "docker") {
     if (!source.volumeName) {
@@ -140,10 +146,22 @@ export function resolveCopyMount(
   if (!path || !isSafeCopyHostPath(path)) {
     throw new Error("the copy has no usable host directory");
   }
-  if (!isAllowedCopyDirectory(layout, path)) {
-    throw new Error(
-      `refusing to back up ${path}: only /srv/users/ and the storage root can be backed up`,
-    );
+  if (source.hostPath) {
+    // An explicit path must be inside the site owner's own volumes directory.
+    const ownerVolumes = `${principalRoot}/${source.ownerUsername}/volumes/`;
+    if (
+      !source.ownerUsername || !path.startsWith(ownerVolumes) ||
+      path.length === ownerVolumes.length
+    ) {
+      throw new Error(
+        `refusing to back up ${path}: it is not inside the site owner's volumes directory`,
+      );
+    }
+    return { type: "bind", path };
+  }
+  const storageRoot = `${join(layout.stateDir, "storage")}/`;
+  if (!path.startsWith(storageRoot)) {
+    throw new Error(`refusing to back up ${path}: outside the storage root`);
   }
   return { type: "bind", path };
 }
@@ -179,6 +197,12 @@ export function copyArchiveArgv(mount: CopyMount): string[] {
     "tar",
     "-C",
     "/src",
+    "--exclude",
+    "./.tp-restore-stage",
+    "--exclude",
+    "./.tp-restore-old",
+    "--exclude",
+    "./.tp-restore-done",
     "-czf",
     "-",
     ".",
@@ -191,18 +215,6 @@ async function defaultRunArchive(
 ): Promise<StreamExecOutcome> {
   const child = await spawnDockerStreaming(argv, { stdout: "piped" });
   return await pipeDumpOutput(child, destination);
-}
-
-/** `docker run -v <name>` would create a missing volume empty; refuse instead. */
-async function assertVolumeExists(
-  mount: CopyMount,
-  runDocker: NonNullable<CopyBackupDeps["runDocker"]>,
-): Promise<void> {
-  if (mount.type !== "volume") return;
-  const inspect = await runDocker(["volume", "inspect", mount.name]);
-  if (!inspect.success) {
-    throw new Error(`docker volume ${mount.name} not found on this host`);
-  }
 }
 
 /**
@@ -300,7 +312,10 @@ export async function createCopyBackupArtifact(
   // here; checked before anything is written so a failed pull leaves no trace.
   const imageIssue = await ensureCopyBackupImage(deps);
   if (imageIssue) throw new Error(imageIssue);
-  await assertVolumeExists(mount, deps.runDocker ?? defaultRunDocker);
+  await assertCopyMountSafe(layout, source, mount, {
+    runDocker: deps.runDocker ?? defaultRunDocker,
+    ...deps.guard,
+  }, deps.principalRoot);
 
   const dir = copyBackupArtifactDir(layout, source.copyId, request.policyId);
   await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
@@ -322,6 +337,7 @@ export async function createCopyBackupArtifact(
     COPY_BACKUP_ARTIFACT_EXTENSION,
     request.retentionKeep,
     request.backupId,
+    COPY_ARCHIVE_MIN_GOOD_BYTES,
   );
   return { path: artifactPath, sizeBytes: stat.size, checksum, pruned };
 }

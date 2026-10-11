@@ -20,6 +20,7 @@ import {
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
+  readHostInterfaceLinkStates,
   type ServerReportedIp,
 } from "../host/server-addresses.ts";
 import {
@@ -136,16 +137,24 @@ import {
 import { installOriginNeedsInsecureTls } from "./install-tls.ts";
 import { ManagedHaObserver } from "./ha-observe.ts";
 import { PgDeadPrimaryObserver } from "./pg-dead-primary-observe.ts";
-import { PgStandbySampler } from "./pg-standby-sampler.ts";
+import { BootHoldReporter } from "./boot-hold-reporter.ts";
+import {
+  MYSQL_FAMILY_SAMPLED_ENGINES,
+  PgStandbySampler,
+} from "./pg-standby-sampler.ts";
+import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
+  MANAGED_HEALTH_REPORT_FEATURE,
   resolveDaemonCapabilities,
 } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
+import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
   DaemonMessage,
@@ -244,6 +253,13 @@ export interface InstanceClientOptions {
 
 export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
 export const DEFAULT_MAX_BACKOFF_MS = 30_000;
+/** Smallest reconnect delay; a tiny floor keeps the draw truly spread (full jitter). */
+export const RECONNECT_FLOOR_MS = 250;
+/**
+ * Widest first-attempt window after a clean drop. A control-plane deploy drops
+ * every daemon at once; spreading them over this window avoids a handshake wave.
+ */
+export const RECONNECT_FIRST_WINDOW_MS = 8_000;
 export const PARKED_BACKOFF_MIN_MS = 5 * 60_000;
 export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
 /**
@@ -402,6 +418,7 @@ export class InstanceClient {
   #stopped = false;
   #connectLoopStarted = false;
   #backoffMs: number;
+  #wideNextReconnect = false;
   #hadStableSession = false;
   readonly #devSync = new Map<string, DevSyncState>();
   /** Transfer ids already refused at dev-sync-begin (managed / non-checkout). */
@@ -429,6 +446,8 @@ export class InstanceClient {
    * omits `features` — default closed.
    */
   #peerFeatures: readonly string[] = [];
+  /** The attach frame (which carries the feature list) has arrived on this socket. */
+  #peerFeaturesKnown = false;
   /** Last unsupported version we already logged, so reconnects do not repeat it. */
   #loggedUnsupportedInstanceVersion: string | undefined;
   #licenseStamp: string | undefined;
@@ -437,7 +456,10 @@ export class InstanceClient {
   readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
   #pgProbeObserver: PgDeadPrimaryObserver | undefined;
+  #bootHoldReporter: BootHoldReporter | undefined;
   #pgStandbySampler: PgStandbySampler | undefined;
+  #mysqlFamilySampler: PgStandbySampler | undefined;
+  #managedHealthReporter: ManagedHealthReporter | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
@@ -697,6 +719,7 @@ export class InstanceClient {
 
   /** Attach-frame advertisement. A missing or non-array field is closed. */
   #notePeerFeatures(features: unknown): void {
+    this.#peerFeaturesKnown = true;
     if (!Array.isArray(features)) {
       this.#peerFeatures = [];
       return;
@@ -808,9 +831,16 @@ export class InstanceClient {
     this.#backoffMs = nextBackoffMs(this.#backoffMs, this.#maxBackoffMs);
   }
 
-  /** Full-jitter sleep: random delay in [floor, ceiling] inclusive. */
+  /** Full-jitter sleep: random delay in [RECONNECT_FLOOR_MS, backoff ceiling] inclusive. */
   #nextReconnectDelayMs(): number {
-    return fullJitterMs(this.#initialBackoffMs, this.#backoffMs);
+    const wide = this.#wideNextReconnect;
+    this.#wideNextReconnect = false;
+    return fullJitterMs(
+      RECONNECT_FLOOR_MS,
+      wide
+        ? Math.max(this.#backoffMs, RECONNECT_FIRST_WINDOW_MS)
+        : this.#backoffMs,
+    );
   }
 
   async fetchVersion(): Promise<{ commit: string; branch: string }> {
@@ -864,7 +894,10 @@ export class InstanceClient {
     this.#idlePresence = undefined;
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#bootHoldReporter?.detach();
     this.#pgStandbySampler?.detach();
+    this.#mysqlFamilySampler?.detach();
+    this.#managedHealthReporter?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -948,7 +981,10 @@ export class InstanceClient {
     this.#idlePresence?.detach();
     this.#haObserver?.detach();
     this.#pgProbeObserver?.detach();
+    this.#bootHoldReporter?.detach();
     this.#pgStandbySampler?.detach();
+    this.#mysqlFamilySampler?.detach();
+    this.#managedHealthReporter?.detach();
     this.#backupReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
@@ -1361,14 +1397,25 @@ export class InstanceClient {
 
     sessionRegistered = true;
     this.#hadStableSession = true;
+    // The feature list arrives with this socket's attach frame, after the
+    // observers below attach: until then nothing may read it as "unsupported".
+    this.#peerFeaturesKnown = false;
     const connectedAt = now();
     this.#idlePresence?.attach(ws);
     this.#ensureHaObserver();
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
     this.#pgProbeObserver?.attach();
+    this.#ensureBootHoldReporter();
+    this.#bootHoldReporter?.attach();
     this.#pgStandbySampler ??= new PgStandbySampler();
     this.#pgStandbySampler.attach();
+    this.#mysqlFamilySampler ??= new PgStandbySampler({
+      engines: MYSQL_FAMILY_SAMPLED_ENGINES,
+      globallyEnabled: () => true,
+    });
+    this.#mysqlFamilySampler.attach();
+    this.#ensureManagedHealthReporter().attach();
     this.#ensureBackupReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
@@ -1423,10 +1470,14 @@ export class InstanceClient {
       if (this.#ws !== undefined && this.#ws !== ws) return;
       this.#ws = undefined;
       this.#peerFeatures = [];
+      this.#peerFeaturesKnown = false;
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
+      this.#bootHoldReporter?.detach();
       this.#pgStandbySampler?.detach();
+      this.#mysqlFamilySampler?.detach();
+      this.#managedHealthReporter?.detach();
       this.#backupReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
@@ -1461,6 +1512,9 @@ export class InstanceClient {
       now() - connectedAt >= STABLE_SESSION_MS;
     if (wasStableSession) {
       this.#resetBackoff();
+      // A drop after a healthy session is how a control-plane deploy looks to
+      // the whole fleet at once: spread that first reconnect over a wide window.
+      this.#wideNextReconnect = true;
     } else {
       this.#increaseBackoff();
     }
@@ -1470,8 +1524,9 @@ export class InstanceClient {
     if (this.#haObserver) return;
     this.#haObserver = new ManagedHaObserver({
       send: (message) => {
-        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
         this.#ws.send(JSON.stringify(message));
+        return true;
       },
     });
   }
@@ -1486,6 +1541,34 @@ export class InstanceClient {
       },
       peerSupportsProbe: () => this.instanceSupports(MANAGED_HA_PROBE_FEATURE),
     });
+  }
+
+  #ensureBootHoldReporter(): void {
+    if (this.#bootHoldReporter) return;
+    this.#bootHoldReporter = new BootHoldReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerBootHoldSupport: () =>
+        this.#peerFeaturesKnown
+          ? this.instanceSupports(MANAGED_HA_BOOT_HOLD_FEATURE)
+          : undefined,
+    });
+  }
+
+  #ensureManagedHealthReporter(): ManagedHealthReporter {
+    this.#managedHealthReporter ??= new ManagedHealthReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsReport: () =>
+        this.instanceSupports(MANAGED_HEALTH_REPORT_FEATURE),
+    });
+    return this.#managedHealthReporter;
   }
 
   #ensureBackupReporter(): BackupResultReporter {
@@ -1713,6 +1796,9 @@ export class InstanceClient {
         break;
       case "capability-plan-clear":
         this.#applyCapabilityPlanClear(message, ws);
+        break;
+      case "deploy-cancel":
+        this.#handleDeployCancel(message, ws);
         break;
       case "container-logs-request":
         this.#collectContainerLogs(message, ws);
@@ -2132,12 +2218,11 @@ export class InstanceClient {
     const reconcileCaPath = trust.kind === "platform-ca"
       ? trust.caPath
       : undefined;
-    const licenseArg = encodeLicenseArg(
+    const license = encodeLicenseArg(
       credentials.licenseId,
       credentials.licenseToken,
     );
     const reconcileArgs = buildRunReconcileArgs({
-      licenseArg,
       instanceUrl,
       instanceCaPath: reconcileCaPath,
       insecureTls: false,
@@ -2168,6 +2253,7 @@ export class InstanceClient {
     await clientTestHooks.executeRunReconcile({
       script,
       args: reconcileArgs,
+      license,
       channel: config.channel,
       manifestUrl: manifestForReconcile,
       onStage: (stage) => {
@@ -2546,7 +2632,10 @@ export class InstanceClient {
   ): void {
     let ips: ServerReportedIp[];
     try {
-      ips = clientTestHooks.collectServerIps(readDefaultRouteInterfaces());
+      ips = clientTestHooks.collectServerIps(
+        readDefaultRouteInterfaces(),
+        readHostInterfaceLinkStates(),
+      );
     } catch (err) {
       logWarn(
         "instance",
@@ -2866,6 +2955,33 @@ export class InstanceClient {
       ...(error === undefined ? {} : { error }),
       at: new Date().toISOString(),
     };
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
+  }
+
+  /** Stop one running deploy; always answers, never throws. */
+  #handleDeployCancel(
+    message: Extract<DaemonMessage, { type: "deploy-cancel" }>,
+    ws: WebSocket,
+  ): void {
+    let result: DaemonMessage;
+    try {
+      result = {
+        type: "deploy-cancel-result",
+        id: message.id,
+        ok: true,
+        outcome: deployCancels.cancel(message.commandId),
+        at: new Date().toISOString(),
+      };
+    } catch (err) {
+      logWarn("instance", "deploy cancel failed:", sanitizeForLog(err));
+      result = {
+        type: "deploy-cancel-result",
+        id: message.id,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        at: new Date().toISOString(),
+      };
+    }
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 

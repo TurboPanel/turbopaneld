@@ -16,14 +16,13 @@
 
 import { readEnv, resolveRuntimesDir } from "../paths/layout.ts";
 
-/** Re-exported so the registry's band stays one definition. */
-export { RUNTIME_GID_BAND as RUNTIME_ENTITLEMENT_GID_BAND } from "../runtime/registry.ts";
-
 export type HostRuntimeMetadata = {
   /** php-fpm series installed from sury, e.g. `["8.3", "8.4"]`. */
   php?: { series: string[]; extensions?: Record<string, string[]> };
   /** Vendored tenant Node series (`vendor/node-app/<series>/current`). */
   node?: { series: string[] };
+  /** Vendored tenant Deno series (`vendor/deno-app/<series>/current`). */
+  deno?: { series: string[] };
   /** Vendored OpenLiteSpeed LSAPI PHP series (`vendor/lsphp/<series>/current`). */
   lsphp?: { series: string[] };
 };
@@ -134,6 +133,9 @@ export function readHostRuntimes(
 
   const nodeSeries = vendoredSeries(`${resolvedVendorDir}/node-app`);
   if (nodeSeries.length > 0) meta.node = { series: nodeSeries };
+
+  const denoSeries = vendoredSeries(`${resolvedVendorDir}/deno-app`);
+  if (denoSeries.length > 0) meta.deno = { series: denoSeries };
 
   const lsphpSeries = vendoredSeries(`${resolvedVendorDir}/lsphp`);
   if (lsphpSeries.length > 0) meta.lsphp = { series: lsphpSeries };

@@ -55,10 +55,9 @@ ours by construction — so `root`'s keys and an administrator's own
 
 **Access is a group, not a shell test**, because `sshd` matches on groups:
 `tpsftp` (files only, `ForceCommand internal-sftp`) and `tpshell`. Membership is
-reconciled by `ensurePrincipalManagedGroups` in the same pass as runtime
-entitlements — one containment set (`allManagedGroups`), or a principal
-downgraded from shell to files-only would keep `tpshell` because the entitlement
-pass did not recognize it.
+reconciled by `ensurePrincipalManagedGroups` against one containment set
+(`allManagedGroups`, the registry's SSH access groups), which both adds and
+revokes, so a principal downgraded from shell to files-only loses `tpshell`.
 
 **Every principal is matched, including one with no level.** `tpprincipal`
 (registry `accessGroups.principal`) is joined by every principal in

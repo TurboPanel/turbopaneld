@@ -124,3 +124,36 @@ test("a read past its deadline records nothing and is not doubled while it hangs
   assertEquals(reads, 2);
   release?.();
 });
+
+test("a MySQL-family sampler records its engines, forgets only its own", async () => {
+  const tracker = new StandbyStreamingTracker();
+  tracker.record(
+    "pg1",
+    { state: "streaming", observedAt: AT, receiptAgeSeconds: 0 },
+    1_000,
+  );
+  const sampler = new PgStandbySampler({
+    tracker,
+    monoMs: () => 1_000,
+    globallyEnabled: () => true,
+    engines: ["mysql", "mariadb"],
+    listMembers: () =>
+      Promise.resolve([
+        member("m1", "replica", "mysql"),
+        member("b1", "replica", "mariadb"),
+        member("pg1", "replica"),
+      ]),
+    readStandby: (_name, engine): Promise<ManagedReplicationObservedHealth> =>
+      Promise.resolve({
+        state: engine === "mysql" ? "streaming" : "stopped",
+        observedAt: AT,
+        receiptAgeSeconds: 0,
+      }),
+  });
+  await sampler.poll();
+  assertEquals(tracker.lastStreaming("m1", 1_000)?.ageMs, 0);
+  assertEquals(tracker.lastStreaming("b1", 1_000), undefined);
+  // The Postgres member is not this sampler's: untouched.
+  assertEquals(tracker.lastStreaming("pg1", 1_000)?.ageMs, 0);
+  assertEquals(isSampledStandby(member("m", "replica", "mysql")), false);
+});

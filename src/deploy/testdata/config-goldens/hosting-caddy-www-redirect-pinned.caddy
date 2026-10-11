@@ -1,0 +1,10 @@
+http://example.com {
+  bind 203.0.113.10
+  redir https://www.example.com{uri} permanent
+}
+
+example.com {
+  bind 203.0.113.10
+  tls /etc/turbopanel/tls/tls-1/fullchain.pem /etc/turbopanel/tls/tls-1/privkey.pem
+  redir https://www.example.com{uri} permanent
+}

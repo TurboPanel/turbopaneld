@@ -1,14 +1,13 @@
 # Publishes a GitHub Release on a v* tag: compiles and packages the daemon
-# exactly like publish-daemon-trunk.yml does for the trunk/CDN drop, but
+# exactly like publish-daemon-trunk.yml does for the rolling canary, but
 # with a real version (TURBOPANEL_RELEASE_VERSION, already supported
 # end-to-end by scripts/package-daemon-release.sh and
 # scripts/bundle-orchestration.sh — this workflow is the first caller to
-# actually set it), and publishes to GitHub Releases instead of Bunny/CDN.
+# actually set it), and publishes to GitHub Releases.
 #
-# The existing trunk → Bunny/dl.trbp.nl path in publish-daemon-trunk.yml is
-# UNCHANGED and stays on its own push-to-trunk trigger — `retire-cdn` on the
-# Road page already decided dl.trbp.nl is kept, not replaced, so this adds a
-# second, independent publish path rather than touching the first.
+# There is no per-merge CDN drop any more (owner decision 2026-10-05: the
+# `trunk` channel is retired). publish-daemon-trunk.yml keeps its push-to-trunk
+# trigger only to publish the rolling GitHub canary.
 #
 # The manifest.json this generates records the tag-pinned GitHub Release
 # download URL for every asset (ARTIFACT_BASE_URL below — see
@@ -66,13 +65,19 @@ jobs:
     steps:
       - name: Resolve version and channel
         id: resolve
+        # Event values reach the shell through env, never spliced into the
+        # script: a tag name may hold $ ( ) ; and quotes.
+        env:
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -eu
-          if [ -n "${{ inputs.version }}" ]; then
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "channel=${{ inputs.channel }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$INPUT_VERSION" ]; then
+            echo "version=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "channel=${INPUT_CHANNEL}" >> "$GITHUB_OUTPUT"
           else
-            _ref="${{ github.ref_name }}"
+            _ref="$REF_NAME"
             echo "version=${_ref#v}" >> "$GITHUB_OUTPUT"
             echo "channel=release" >> "$GITHUB_OUTPUT"
           fi
@@ -181,13 +186,15 @@ jobs:
         run: deno task package:release
 
       - name: Verify release packages and stage publish tree
+        env:
+          RELEASE_VERSION_OUT: ${{ needs.prepare.outputs.version }}
         run: |
           set -eu
           # shellcheck source=scripts/lib/release-artifacts.sh
           . scripts/lib/release-artifacts.sh
           chmod +x scripts/verify-release-root.sh
 
-          _version="${{ needs.prepare.outputs.version }}"
+          _version="$RELEASE_VERSION_OUT"
           _publish_dir="release-assets"
           mkdir -p "$_publish_dir"
 

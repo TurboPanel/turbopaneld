@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
-import { MYSQL_PORT } from "../managed/proxysql.ts";
+import { MYSQL_PORT, PGSQL_PORT } from "../managed/proxysql.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -79,7 +79,7 @@ test("the ruleset names every site owner with a PHP unit once", async () => {
   });
 });
 
-test("only the database port on 127.0.0.1 and the resolver stub get through; every other loopback port is refused", async () => {
+test("only the two database ports on 127.0.0.1 and the resolver stub get through; every other loopback port is refused", async () => {
   await withTree(
     { "turbopanel-php-a-fcgi84.service": "alice" },
     async (run) => {
@@ -88,6 +88,7 @@ test("only the database port on 127.0.0.1 and the resolver stub get through; eve
       assertEquals(accepts, [
         "meta skuid @owners ct state established,related accept",
         `meta skuid @owners ip daddr 127.0.0.1 tcp dport ${MYSQL_PORT} accept`,
+        `meta skuid @owners ip daddr 127.0.0.1 tcp dport ${PGSQL_PORT} accept`,
         "meta skuid @owners ip daddr 127.0.0.53 udp dport 53 accept",
         "meta skuid @owners ip daddr 127.0.0.53 tcp dport 53 accept",
       ]);
@@ -124,6 +125,13 @@ test("the database port is the one ProxySQL publishes", async () => {
   assertStringIncludes(
     await Deno.readTextFile(SCRIPT),
     `DB_PORT=${MYSQL_PORT}\n`,
+  );
+});
+
+test("the Postgres port is the one ProxySQL publishes", async () => {
+  assertStringIncludes(
+    await Deno.readTextFile(SCRIPT),
+    `PG_PORT=${PGSQL_PORT}\n`,
   );
 });
 

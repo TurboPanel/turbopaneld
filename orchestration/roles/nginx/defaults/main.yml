@@ -18,3 +18,8 @@ turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
+
+# systemd RuntimeDirectory= name (under /run). Top level on purpose, like
+# Apache's: systemd recreates it on every start, so the pidfile directory
+# survives a reboot (/run is tmpfs) without the role having to run first.
+nginx_runtime_directory: turbopanel-nginx

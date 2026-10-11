@@ -53,7 +53,9 @@ Docker Compose. The daemon:
    the runtime's php.ini, and the site fragment flips
    `enableScript 1`. Every `context /` renders `allowBrowse 1`: in OLS that is
    the context's "Accessible" flag (`0` is a 403 for everything); listing is
-   `autoIndex 0`. `httpd_config.conf` sets `fileAccessControl`
+   `autoIndex 0`. The `index` block carries `useServer 0` so the vhost's own
+   `indexFiles` (`index.php` first on PHP sites) wins over the server-level
+   `index.html`. `httpd_config.conf` sets `fileAccessControl`
    `requiredPermissionMask 000`: by default OLS answers 403 for any static file
    without the world-read bit, and site files are shared with `tpols` by group.
 
@@ -83,8 +85,45 @@ Docker Compose. The daemon:
    environment, but the host serves many. Retiring a series belongs to the
    *removal* path: `removeSites` sweeps every installed series' pools and
    `disableIdlePhpSeries` disables a master whose pool directory holds nothing
-   but the bootstrap `default.conf`. Packages stay installed; uninstalling is a
-   fleet decision.
+   but the bootstrap `default.conf`.
+
+   **A series nothing uses is removed** (owner decision 2026-10-07: install on
+   first use, remove when unused). After `applySites` and `removeSites`,
+   `pruneUnusedSoftware` asks `prunePhpSeries` (`site/php-series-prune.ts`)
+   which installed series (php-fpm binaries, vendored `lsphp`, a config tree) no
+   site uses: no non-bootstrap pool, no per-site runtime unit, no vhost or
+   OpenLiteSpeed config naming a pool socket, a runtime socket or the vendored
+   `lsphp` of that series (`readSiteConfigTexts`). Anything it cannot read keeps
+   every series. A deploy in this process **holds** the series it names for its
+   whole length (`handleEnvironmentDeploy` -> `holdPruneKeys`): a series is
+   installed minutes before its pool exists, so without the hold a concurrent
+   teardown could take it. A hold only waits for a removal that covers its
+   series; one removal runs at a time. The removal is `php-series-prune.yml`
+   (`php-series-prune` role, on `tp-orchestrate`'s playbook allowlist and
+   `php_series_prune` JSON key): it purges `php<series>` and `php<series>-*` (no
+   autoremove), drops the stat overrides, the masked sury unit, the series'
+   config/log/run directories and the vendored `lsphp/<series>` tree, and it
+   refuses a series that still has a site pool or a per-site runtime unit on
+   disk. A failed removal is logged and retried by the next deploy or teardown; it never fails the one that triggered it.
+
+   **A web engine nothing uses is removed too** (owner decision 2026-10-07).
+   Right after the PHP series step, `pruneEngines` (`site/engine-prune.ts`)
+   looks at nginx, Apache and OpenLiteSpeed: installed means
+   `<vendor>/<engine>/current` exists; in use means its `sites/` holds a
+   `.conf`, `.tpnew` or `.tpprev`, or (OpenLiteSpeed) anything sits in
+   `vhosts/`. A directory it cannot list keeps every engine. Holds are keyed
+   (`site/prune-holds.ts`: `php:8.4`, `engine:nginx`); a deploy holds every
+   series it names and every engine `resolveSiteEngineNeeds` says it serves
+   (`pruneHoldKeysForDeploy`). One removal of either kind runs at a time; a
+   removal asked for while another runs is skipped (the next deploy or
+   teardown asks again). The removal is `engine-prune.yml` (`engine-prune`
+   role, `engine_prune` JSON key checked to nginx|apache|openlitespeed by
+   `tp-orchestrate`): it re-checks the config on disk and refuses an engine with
+   a site, stops and disables `turbopanel-<engine>`, refuses to go on while it
+   is still active, then deletes the unit file, `<vendor>/<engine>` and
+   `<config>/<engine>`. Service accounts, logs and state directories stay. Never
+   Caddy, `turbopanel-php-fpm@` or `vendor/lsphp`. The engine's role installs it
+   again on the next site that needs it.
 
    `php-fpm` and `lsphp` remain different binaries from different sources, but a
    series string means the same thing to both, so one value still selects both.
@@ -160,10 +199,8 @@ Docker Compose. The daemon:
    changed too. RFC 1918 stays open
    (scope addresses, VPC services, operator-set Docker pools), so the host's
    private addresses and other containers' bridge IPs are not closed by it.
-   The `tpphp<series>` entitlement (the binaries are
-   `0750 root:tpphp<series>`) is resolved control-plane side as a `deploy`
-   entitlement; the daemon also adds it on deploy only to
-   cover an older control plane.
+   Every installed PHP series may be run by every site owner's Linux user, so
+   a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a
    principal, or lsphp on nginx/Apache, is refused. OpenLiteSpeed runs the same
    runtimes (plus `-lsd<series>`, detached lsphp) behind `tpols`; Caddy ignores
@@ -181,7 +218,7 @@ Docker Compose. The daemon:
    `u=rwX,g=rX` + setgid dirs so the engine can read while the principal owns
    writes. Without a pin, ownership stays the engine user (previous default).
    nginx/Apache php-fpm pools run workers as the principal when pinned (`user` /
-   `group = ${username}-grp` from `ensureSystemPrincipals`); the listen socket is
+   `group = ${username}` from `ensureSystemPrincipals`); the listen socket is
    owned by the serving engine (`tpnginx` / `tpapache`). An OpenLiteSpeed vhost
    declares no identity: its PHP runs as the owner through the per-site
    runtime, and the old `extUser`/`extGroup`/`setUIDMode` lines never took
@@ -277,7 +314,7 @@ root-owned `0550` by design:
 - **`chownWebTree` is skipped entirely.** Re-chowning the tree to the principal
   would hand a compromised app process write access to the code it runs — the
   exact property the release layout exists to prevent. Read access instead comes
-  from `usermod -aG <username>-grp <engineUser>`
+  from `usermod -aG <username> <engineUser>`
   (`ensureEngineGroupMembership`), giving the engine service account group `r-x`
   and nothing more. Supplementary groups are resolved when a process **starts**,
   so the first time an engine joins a group that engine is `systemctl restart`ed
@@ -405,10 +442,49 @@ under `<configDir>/openlitespeed/sites/` on each apply/remove (no
 `sites-enabled` convention). PHP context lives inside the per-site
 `vhosts/<name>/vhconf.conf` and fragment that removal already deletes, so
 `removeOpenLiteSpeedSites` needs no PHP-specific step. `web.env`
-hints remain unapplied for OLS (Apache-only `SetEnv`) — PHP parity did not
-change that.
+hints remain unapplied for OLS (see **Site variables** below).
 
-Future seams (not MVP): multi-version PHP side-by-side, OLS/nginx `web.env`,
+**Site variables (`sites[].webEnv`, `sites[].webSecretEnv`).** Runtime variables
+set on a PHP site's hostings reach PHP as FastCGI parameters, so `getenv()` and
+`$_SERVER` see them: site Caddy `php_fastcgi { env }`, Apache `SetEnv`
+(mod_proxy_fcgi forwards it), nginx `fastcgi_param` after the shared parameter
+set and before the pinned `SCRIPT_FILENAME` / `PATH_INFO`. Not yet delivered:
+OpenLiteSpeed, and `$_ENV` in every mode (FastCGI parameters never fill it;
+`variables_order` is `GPCS`). Secret variables travel sealed: the control plane
+sends each as a `tpdaemon` envelope in `sites[].webSecretEnv`, and
+`resolveSiteSecretEnv` (`site/site-secret-env.ts`, called from
+`handleEnvironmentDeploy` before the site apply, the only caller of
+`applySites`) decrypts them through the `secrets/decrypt` seam (so they join the
+transcript redaction deny-set) and folds them into `webEnv`. The plaintext then
+lives only in the engine's own config (`root:<engine group>` `0640`) and the
+owner-only `hosting.env`. Variables are inherited from the organization, project
+and environment into every hosting, so nginx **drops and names** (never prints
+the value) a variable it cannot carry rather than failing the deploy: a value
+holding `$` (nginx expands `$name` inside quotes, with no escape), a value that
+is not one line, and a name nginx or PHP sets itself (`SCRIPT_FILENAME`,
+`REMOTE_ADDR`, `HTTP_*`, ...). A name that is not an environment variable name
+is still refused. `PHP_VALUE` and `PHP_ADMIN_VALUE` (any case) are reserved on
+every engine: PHP-FPM reads them from the FastCGI request as ini overrides, so
+`resolveSiteSecretEnv` drops them (plain or sealed, before decrypting) and names
+them in the log; the control plane drops them first.
+
+**Managed database bindings (`site-db-bindings-v1`).** A site bound to a managed
+database carries `sites[].requiredEnv` (the connection variables it cannot run
+without) and `sites[].dbCa` (`{ variables, pem }`). `planSiteWebEnv` runs before
+anything is written: every variable the site's engine cannot carry is **left out
+and named** in the command log and in `warnings[]` on the deploy result (Apache
+and Caddy now do what nginx always did; a bad *name* is still refused), but a
+name in `requiredEnv` that is left out or missing stops the deploy with a
+plain-words error, and so does `requiredEnv` on an OpenLiteSpeed site (it gets
+no variables at all). `dbCa.pem` is a public CA bundle, certificate blocks only
+(checked at parse). It lands as `<siteRoot>/.turbopanel-hosting/managed-ca.pem`
+through the same `sudo -n install` call as `hosting.env` (owner's Linux user,
+`0400`, directory `root:root` `0711`), and every name in `dbCa.variables` is set
+to that path, so a multi-line certificate never enters the web server's
+environment. A site with `dbCa` and no owning Linux user is refused. Native
+apps are unchanged: their environment file carries a multi-line value as is.
+
+Future seams (not MVP): multi-version PHP side-by-side, OLS `web.env`,
 swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
 single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
@@ -438,7 +514,7 @@ the static list stays short.
 
 - The control plane allocates `backendPort` from the same loopback ledger as
   `listenPort`; the parser requires it (and a distinct value) for this engine.
-- A paired site needs a principal: its tree carries `<user>-grp`, which both
+- A paired site needs a principal: its tree carries the group `<user>` (the owner's own group), which both
   `tpnginx` and `tpapache` join (`resolveSiteOwnership`,
   `ensureEnginesCanReadPrincipalTree`).
 - Rollout is Apache first (`SITE_ENGINE_ORDER`), probed on `backendPort`,

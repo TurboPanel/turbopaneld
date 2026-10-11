@@ -6,7 +6,7 @@
  * as `EXEC [argv]…` instead of run. Unit files come from the daemon's own
  * renderers, so the allowlist is proven against what the daemon writes.
  */
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   type Host,
@@ -24,6 +24,7 @@ import {
   nativeAppUnitContent,
   principalSliceContent,
 } from "../deploy/native/unit.ts";
+import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { phpFpmPoolConfig } from "../deploy/site.ts";
 import { allAccessGroups } from "../runtime/registry.ts";
@@ -181,14 +182,14 @@ test("install -d and mkdir -p create directories only below a managed root", asy
       "-o",
       "alice",
       "-g",
-      "alice-grp",
+      "alice",
       dir,
     ]);
     assertEquals(ok.code, 0, ok.stderr);
     assertEquals((await Deno.stat(dir)).isDirectory, true);
     assertStringIncludes(
       ok.stdout,
-      "EXEC [chown] [-h] [--] [alice:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [alice:alice] [.]",
     );
     await refused(host, [
       "install",
@@ -247,6 +248,24 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
             composeServiceName: "web",
             listenPort: 3000,
             resources: { cpus: 1.5, memoryBytes: 536870912 },
+          } as unknown as EnvironmentDeployNativeAppService,
+        }),
+      ],
+      [
+        // A Deno app: the same directives, the vendored Deno as ExecStart.
+        "turbopanel-app-svc2.service",
+        nativeAppUnitContent({
+          layout,
+          username: "alice",
+          environmentId: "env1",
+          environmentFile: true,
+          nativeStart: { kind: "deno-file", path: "src/main.ts" },
+          app: {
+            serviceId: "svc2",
+            composeServiceName: "api",
+            listenPort: 3001,
+            runtime: "deno",
+            framework: "auto",
           } as unknown as EnvironmentDeployNativeAppService,
         }),
       ],
@@ -438,6 +457,490 @@ async function refusedUnit(host: Host, name: string, content: string) {
   ]);
 }
 
+test("a native app unit may load its own variables file and no other", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const unitFor = (serviceId: string) =>
+      nativeAppUnitContent({
+        layout,
+        username: "alice",
+        environmentId: "env1",
+        environmentFile: true,
+        app: {
+          serviceId,
+          composeServiceName: "web",
+          listenPort: 3000,
+        } as unknown as EnvironmentDeployNativeAppService,
+      });
+    const name = "turbopanel-app-svc1.service";
+    const unit = unitFor("svc1");
+    const own = `EnvironmentFile=${
+      host.path("etc/turbopanel/node-app-env/svc1.env")
+    }`;
+    assertStringIncludes(unit, own);
+    const result = await installUnit(host, name, unit);
+    assertEquals(result.code, 0, result.stderr);
+
+    const hostile: Array<[string, string]> = [
+      // Another service's file: one tenant's unit would load another's secrets.
+      ["another service's file", unitFor("svc2")],
+      [
+        // The folder the daemon stages into and can write: a unit naming it
+        // would have systemd (root) read whatever the daemon put there.
+        "the daemon-writable staging path",
+        unit.replace(
+          own,
+          `EnvironmentFile=${
+            host.path("etc/turbopanel/node-apps/envs/svc1.env")
+          }`,
+        ),
+      ],
+      [
+        "a path outside the node-app-env tree",
+        unit.replace(own, "EnvironmentFile=/etc/turbopanel/daemon.env"),
+      ],
+      [
+        "the daemon's own environment file",
+        unit.replace(
+          own,
+          `EnvironmentFile=${host.path("etc/turbopanel/daemon.env")}`,
+        ),
+      ],
+      ["the optional (-) spelling", unit.replace(own, own.replace("=", "=-"))],
+      [
+        "a path that climbs out of the directory",
+        unit.replace(
+          own,
+          own.replace("node-app-env/svc1.env", "node-app-env/../daemon.env"),
+        ),
+      ],
+      [
+        "a trailing-space spelling",
+        unit.replace(own, `${own} `),
+      ],
+      [
+        "a second EnvironmentFile",
+        unit.replace(own, `${own}\n${own}`),
+      ],
+      [
+        "an indented directive",
+        unit.replace(own, ` ${own}`),
+      ],
+    ];
+    for (const [label, content] of hostile) {
+      await Deno.writeTextFile(host.path("tmp/bad"), content);
+      try {
+        await refused(host, [
+          "install",
+          "-m",
+          "0644",
+          "-o",
+          "root",
+          "-g",
+          "root",
+          host.path("tmp/bad"),
+          host.path(`etc/systemd/system/${name}`),
+        ]);
+      } catch (err) {
+        throw new Error(
+          `${label}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    // Only app units: a cron unit (or any other tenant unit) gains nothing.
+    const cronName = "turbopanel-cron-env1-web-nightly.service";
+    const cron = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/true"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    });
+    await refusedUnit(
+      host,
+      cronName,
+      cron.replace("[Service]", `[Service]\n${own}`),
+    );
+  });
+});
+
+// --- app-env-install / app-env-remove ---------------------------------------
+// A Node app's variables: tp-host copies the daemon's staged file into a folder
+// only root can write, and the unit loads that copy. Run unprivileged in test
+// mode, where "root" is the account running the tests; the one refusal that
+// needs a second real account (a staged file owned by someone else) is proved
+// in the root container run instead (see the PR).
+
+const ENV_STAGED = "etc/turbopanel/node-apps/envs/svc1.env";
+const ENV_COPY = "etc/turbopanel/node-app-env/svc1.env";
+
+const ENV_PEM = [
+  "-----BEGIN PRIVATE KEY-----",
+  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+  "LD_PRELOAD=/not/a/line",
+  "-----END PRIVATE KEY-----",
+].join("\n");
+
+const ENV_ENTRIES = [
+  { name: "PLAIN", value: "value" },
+  { name: "DOLLAR", value: "pa$$word $HOME ${X}" },
+  { name: "BACKSLASH", value: String.raw`C:\temp\new` },
+  { name: "SPECIFIER", value: "%h %n" },
+  { name: "BOTH_QUOTES", value: `it's "quoted" \`tick\`` },
+  { name: "MULTILINE", value: "one\ntwo\n\nfour" },
+  { name: "PEM", value: ENV_PEM },
+  { name: "EMPTY", value: "" },
+  { name: "TRAILING_BACKSLASH", value: "ends\\" },
+];
+
+async function stageEnv(host: Host, text: string, rel = ENV_STAGED) {
+  await Deno.mkdir(host.path(rel.slice(0, rel.lastIndexOf("/"))), {
+    recursive: true,
+  });
+  await Deno.writeTextFile(host.path(rel), text);
+}
+
+async function modeOf(path: string): Promise<number> {
+  return (await Deno.stat(path)).mode! & 0o777;
+}
+
+async function refusedEnvInstall(host: Host, label: string, id = "svc1") {
+  try {
+    const stderr = await refused(host, ["app-env-install", id]);
+    assertEquals(stderr.includes("root-only secret"), false, label);
+  } catch (err) {
+    throw new Error(`${label}: ${err instanceof Error ? err.message : err}`);
+  }
+  const copied = await Deno.lstat(host.path(ENV_COPY)).then(
+    () => true,
+    () => false,
+  );
+  assertEquals(copied, false, label);
+}
+
+test("app-env-install copies a checked file into a root-only folder, every value intact", async () => {
+  await withHost(async (host) => {
+    const text = renderNativeAppEnvFile(ENV_ENTRIES);
+    await stageEnv(host, text);
+    const result = await host.run(["app-env-install", "svc1"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), text);
+    assertEquals(await modeOf(host.path(ENV_COPY)), 0o600);
+    assertEquals(await modeOf(host.path("etc/turbopanel/node-app-env")), 0o700);
+    // Nothing is left beside it: no scratch directory.
+    assertEquals(
+      [...Deno.readDirSync(host.path("etc/turbopanel/node-app-env"))].map((
+        entry,
+      ) => entry.name),
+      ["svc1.env"],
+    );
+    // The daemon's staged file is its own to delete; tp-host leaves it alone.
+    assertEquals(await Deno.readTextFile(host.path(ENV_STAGED)), text);
+  });
+});
+
+test("app-env-install is idempotent and a later run replaces the copy", async () => {
+  await withHost(async (host) => {
+    const first = renderNativeAppEnvFile([{ name: "A", value: "1" }]);
+    await stageEnv(host, first);
+    for (const _ of [1, 2]) {
+      const result = await host.run(["app-env-install", "svc1"]);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), first);
+    }
+    const second = renderNativeAppEnvFile([{ name: "A", value: "2" }]);
+    await stageEnv(host, second);
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), second);
+    assertEquals(await modeOf(host.path(ENV_COPY)), 0o600);
+    // An empty file (an app whose names were all platform-managed never gets
+    // here, but an empty one is a valid, empty set).
+    await stageEnv(host, "");
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+  });
+});
+
+test("app-env-install refuses what is not a plain regular file the daemon owns", async () => {
+  await withHost(async (host) => {
+    const good = renderNativeAppEnvFile([{ name: "A", value: "1" }]);
+    const envs = host.path("etc/turbopanel/node-apps/envs");
+    const reset = async () => {
+      await Deno.remove(host.path("etc/turbopanel/node-apps"), {
+        recursive: true,
+      }).catch(() => undefined);
+      await stageEnv(host, good);
+    };
+
+    // A symlink at the staged path to a file only root can read: the daemon
+    // would otherwise have root copy it where the unit reads it.
+    await reset();
+    await Deno.remove(host.path(ENV_STAGED));
+    await Deno.symlink(host.path("outside/secret"), host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "symlink at the staged path");
+
+    // A symlink to a file that is a valid env file: still a link.
+    await reset();
+    await Deno.writeTextFile(host.path("tmp/valid.env"), good);
+    await Deno.remove(host.path(ENV_STAGED));
+    await Deno.symlink(host.path("tmp/valid.env"), host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "symlink to an acceptable file");
+
+    // The staging folder swapped for a link to another folder.
+    await reset();
+    await Deno.mkdir(host.path("outside/envs"), { recursive: true });
+    await Deno.writeTextFile(host.path("outside/envs/svc1.env"), good);
+    await Deno.rename(envs, host.path("tmp/envs-moved"));
+    await Deno.symlink(host.path("outside/envs"), envs);
+    await refusedEnvInstall(host, "staging folder swapped for a link");
+
+    // The folder above it (node-apps) swapped for a link.
+    await reset();
+    await Deno.rename(
+      host.path("etc/turbopanel/node-apps"),
+      host.path("tmp/node-apps-moved"),
+    );
+    await Deno.symlink(
+      host.path("tmp/node-apps-moved"),
+      host.path("etc/turbopanel/node-apps"),
+    );
+    await refusedEnvInstall(host, "node-apps swapped for a link");
+
+    // No staged file, a directory in its place, a named pipe in its place (a
+    // plain open would block root), a second hard link.
+    await reset();
+    await Deno.remove(host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "no staged file");
+    await Deno.mkdir(host.path(ENV_STAGED));
+    await refusedEnvInstall(host, "a directory");
+    await Deno.remove(host.path(ENV_STAGED));
+    const fifo = await new Deno.Command("mkfifo", {
+      args: [host.path(ENV_STAGED)],
+    }).output();
+    assertEquals(fifo.code, 0);
+    await refusedEnvInstall(host, "a named pipe");
+    await Deno.remove(host.path(ENV_STAGED));
+    await Deno.writeTextFile(host.path(ENV_STAGED), good);
+    await Deno.link(host.path(ENV_STAGED), host.path("tmp/second-link"));
+    await refusedEnvInstall(host, "a second hard link");
+  });
+});
+
+test("app-env-install refuses a file over the size limit", async () => {
+  await withHost(async (host) => {
+    const line = `A='${"x".repeat(60_000)}'\n`;
+    await stageEnv(host, line.repeat(18));
+    const stderr = await refused(host, ["app-env-install", "svc1"]);
+    assertStringIncludes(stderr, "over 1048576 bytes");
+    await assertRejects(
+      () => Deno.lstat(host.path(ENV_COPY)),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+test("app-env-install refuses every line shape the daemon never writes", async () => {
+  await withHost(async (host) => {
+    const bad: Array<[string, string]> = [
+      ["a line that is not NAME=value", "just words\n"],
+      ["an unquoted value", "A=1\n"],
+      ["an empty unquoted value", "A=\n"],
+      ["a name starting with a digit", "1A='x'\n"],
+      ["a name with a dash", "A-B='x'\n"],
+      ["a name with a space", "A B='x'\n"],
+      ["an indented entry", " A='x'\n"],
+      ["export", "export A='x'\n"],
+      ["text after the closing quote", "A='x' B='y'\n"],
+      ["a second entry glued on after a quote", "A='x'\nB='y'C\n"],
+      ["an unterminated quote", "A='x\nB='y'\n"],
+      ["an unterminated double quote", 'A="x\n'],
+      ["an unescaped dollar in double quotes", `A="it's $HOME"\n`],
+      ["an unescaped backtick in double quotes", 'A="it\'s `id`"\n'],
+      ["an unknown escape", 'A="it\\\'s \\n"\n'],
+      ["a trailing backslash in double quotes", 'A="x\\\n'],
+      ["a repeated name", "A='1'\nA='2'\n"],
+      ["a carriage return", "A='1'\r\nB='2'\n"],
+      ["a NUL byte", "A='1'\u0000B='2'\n"],
+      ["an EnvironmentFile-looking line", "EnvironmentFile=/etc/shadow\n"],
+      ["a name over 255 characters", `${"N".repeat(256)}='x'\n`],
+    ];
+    for (const [label, text] of bad) {
+      await stageEnv(host, text);
+      await refusedEnvInstall(host, label);
+    }
+    // Quoted newlines are values, not lines: a "line" inside a PEM that looks
+    // like an entry or a directive is fine, and the same text outside quotes
+    // is not.
+    await stageEnv(
+      host,
+      renderNativeAppEnvFile([{ name: "K", value: "a\nB=c\n#d" }]),
+    );
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    const before = await Deno.readTextFile(host.path(ENV_COPY));
+    await stageEnv(host, "K='a'\nB=c\n");
+    await refused(host, ["app-env-install", "svc1"]);
+    // A refused file leaves the copy already in place as it was.
+    assertEquals(await Deno.readTextFile(host.path(ENV_COPY)), before);
+  });
+});
+
+test("app-env-install and app-env-remove take one service id and nothing that is a path", async () => {
+  await withHost(async (host) => {
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    await stageEnv(host, "A='1'\n", "etc/turbopanel/node-apps/envs/-x.env");
+    await Deno.writeTextFile(host.path("etc/turbopanel/daemon.env"), "A='1'\n");
+    for (const verb of ["app-env-install", "app-env-remove"]) {
+      for (
+        const args of [
+          [],
+          ["svc1", "svc2"],
+          [""],
+          ["-x"],
+          ["--"],
+          [".."],
+          ["../daemon"],
+          ["svc1/../svc1"],
+          ["/etc/turbopanel/daemon"],
+          ["svc1.env"],
+          ["svc 1"],
+          ["svc1\\x"],
+          ["a".repeat(129)],
+          [host.path(ENV_STAGED)],
+        ]
+      ) {
+        await refused(host, [verb, ...args]);
+      }
+    }
+    await assertRejects(
+      () => Deno.lstat(host.path("etc/turbopanel/node-app-env")),
+      Deno.errors.NotFound,
+    );
+  });
+});
+
+test("app-env-install refuses a variables folder or parent that is not root's", async () => {
+  await withHost(async (host) => {
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    // A folder someone made with a wider mode (or owner) is not trusted.
+    await Deno.mkdir(host.path("etc/turbopanel/node-app-env"), { mode: 0o755 });
+    await Deno.chmod(host.path("etc/turbopanel/node-app-env"), 0o755);
+    await refusedEnvInstall(host, "a 0755 folder");
+    await refused(host, ["app-env-remove", "svc1"]);
+    await Deno.chmod(host.path("etc/turbopanel/node-app-env"), 0o700);
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    // A config root the daemon could write would let it rename the folder.
+    await Deno.chmod(host.path("etc/turbopanel"), 0o777);
+    await Deno.remove(host.path(ENV_COPY));
+    await refusedEnvInstall(host, "a world-writable config root");
+    await Deno.chmod(host.path("etc/turbopanel"), 0o755);
+    // A link where the folder should be.
+    await Deno.remove(host.path("etc/turbopanel/node-app-env"));
+    await Deno.mkdir(host.path("outside/app-env"));
+    await Deno.symlink(
+      host.path("outside/app-env"),
+      host.path("etc/turbopanel/node-app-env"),
+    );
+    await refused(host, ["app-env-install", "svc1"]);
+    await refused(host, ["app-env-remove", "svc1"]);
+    assertEquals([...Deno.readDirSync(host.path("outside/app-env"))], []);
+  });
+});
+
+test("app-env-remove deletes the copy, and an absent file or folder is fine", async () => {
+  await withHost(async (host) => {
+    assertEquals((await host.run(["app-env-remove", "svc1"])).code, 0);
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    await Deno.writeTextFile(
+      host.path("etc/turbopanel/node-app-env/svc2.env"),
+      "B='2'\n",
+    );
+    for (const _ of [1, 2]) {
+      assertEquals((await host.run(["app-env-remove", "svc1"])).code, 0);
+    }
+    await assertRejects(
+      () => Deno.lstat(host.path(ENV_COPY)),
+      Deno.errors.NotFound,
+    );
+    // One id, one file: another app's copy stays.
+    assertEquals(
+      (await Deno.lstat(host.path("etc/turbopanel/node-app-env/svc2.env")))
+        .isFile,
+      true,
+    );
+  });
+});
+
+test("no generic verb reaches the variables folder, so only app-env-install can fill it", async () => {
+  await withHost(async (host) => {
+    const dirPath = host.path("etc/turbopanel/node-app-env");
+    const file = `${dirPath}/svc1.env`;
+    assertEquals(
+      (await host.run(["app-env-install", "svc1"])).code === 0,
+      false,
+    );
+    await stageEnv(host, renderNativeAppEnvFile([{ name: "A", value: "1" }]));
+    assertEquals((await host.run(["app-env-install", "svc1"])).code, 0);
+    await Deno.writeTextFile(host.path("tmp/plain"), "A='planted'\n");
+    const attempts: string[][] = [
+      ["install", "-m", "0600", host.path("tmp/plain"), file],
+      [
+        "install",
+        "-m",
+        "0600",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        host.path("tmp/plain"),
+        `${dirPath}/svc9.env`,
+      ],
+      ["install", "-d", "-m", "0700", `${dirPath}/sub`],
+      ["install", "-d", "-m", "0700", dirPath],
+      ["mkdir", "-p", `${dirPath}/sub`],
+      ["cp", "-p", "--", host.path("tmp/plain"), file],
+      ["cp", "-p", "--", file, `${dirPath}/copy.env`],
+      ["mv", "-T", host.path("tmp/plain"), file],
+      ["mv", "-T", file, host.path("tmp/stolen")],
+      ["mv", "-T", dirPath, host.path("tmp/dir-moved")],
+      ["rm", "-f", file],
+      ["rm", "-rf", dirPath],
+      ["ln", "-s", "--", host.path("outside/secret"), `${dirPath}/link.env`],
+      ["ln", "-s", "--", host.path("outside"), dirPath],
+      ["chown", "tp", file],
+      ["chmod", "0644", file],
+      ["cat", file],
+      ["cmp", file, host.path("tmp/plain")],
+      ["ls", dirPath],
+      ["tee", file],
+      ["test", "-e", file],
+      ["readlink", file],
+      ["find", dirPath, "-maxdepth", "1"],
+    ];
+    for (const args of attempts) {
+      await refused(host, args, "A='planted'\n");
+    }
+    assertEquals(
+      await Deno.readTextFile(file),
+      renderNativeAppEnvFile([{ name: "A", value: "1" }]),
+    );
+    assertEquals([...Deno.readDirSync(dirPath)].map((e) => e.name), [
+      "svc1.env",
+    ]);
+  });
+});
+
 test("the hosting Caddy unit passes only as tpedge with CAP_NET_BIND_SERVICE alone", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({
@@ -604,9 +1107,15 @@ test("scheduled-backup units pass only in their exact shape; tenant units gain n
     const service = backupServiceContent(layout, BACKUP_ID);
     const timer = backupTimerContent(BACKUP_ID, "*-*-* 03:00:00");
 
-    // The daemon's own rendering passes.
+    // The daemon's own rendering passes, including a sub-hourly timer with
+    // its tightened accuracy.
+    const frequentTimer = backupTimerContent(BACKUP_ID, "*-*-* *:0/2:00");
     for (
-      const [name, content] of [[serviceName, service], [timerName, timer]]
+      const [name, content] of [
+        [serviceName, service],
+        [timerName, timer],
+        [timerName, frequentTimer],
+      ]
     ) {
       const result = await installUnit(host, name, content);
       assertEquals(result.code, 0, `${name}: ${result.stderr}`);
@@ -640,7 +1149,7 @@ test("scheduled-backup units pass only in their exact shape; tenant units gain n
         "a principal instead of the daemon",
         service.replace("User=tp", "User=alice").replace(
           "Group=tp",
-          "Group=alice-grp",
+          "Group=alice",
         ),
       ],
       [
@@ -796,7 +1305,7 @@ test("numeric owner and group ids resolve to the same accounts the name checks a
     assertEquals(mine.code, 0, mine.stderr);
     assertStringIncludes(
       mine.stdout,
-      "EXEC [chown] [-h] [--] [alice:alice-grp] [./home]",
+      "EXEC [chown] [-h] [--] [alice:alice] [./home]",
     );
 
     const staged = host.path("tmp/staged");
@@ -839,17 +1348,17 @@ test("rm, chown and chmod stay inside the trees and never follow a symlink", asy
 
     const release = host.path("srv/users/alice/sites/web/releases/r1");
     await Deno.mkdir(release, { recursive: true });
-    const chown = await host.run(["chown", "-R", "root:alice-grp", release]);
+    const chown = await host.run(["chown", "-R", "root:alice", release]);
     assertEquals(chown.code, 0, chown.stderr);
     assertStringIncludes(
       chown.stdout,
-      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice-grp] [./r1]",
+      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice] [./r1]",
     );
     await refused(host, ["chown", "alice", host.path("etc/turbopanel")]);
     await refused(host, ["chown", "-R", "tp", host.path("outside")]);
     await refused(host, [
       "chown",
-      "alice:alice-grp",
+      "alice:alice",
       host.path("var/lib/turbopanel/x"),
     ]);
 
@@ -977,7 +1486,7 @@ test("accounts: only principals are created or changed, and only into registry g
       "-K",
       "UID_MAX=60000",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -990,14 +1499,14 @@ test("accounts: only principals are created or changed, and only into registry g
     // charge, which on a host with a 9999 account yields uid 10000/10001.
     assertStringIncludes(
       add.stdout,
-      "EXEC [useradd] [-K] [UID_MIN=15001] [-K] [UID_MAX=60000] [-g] [carol-grp]",
+      "EXEC [useradd] [-K] [UID_MIN=15001] [-K] [UID_MAX=60000] [-g] [carol]",
     );
     const addU = await host.run([
       "useradd",
       "-u",
       "15555",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -1008,7 +1517,7 @@ test("accounts: only principals are created or changed, and only into registry g
     assertEquals(addU.code, 0, addU.stderr);
     assertStringIncludes(
       addU.stdout,
-      "EXEC [useradd] [-u] [15555] [-g] [carol-grp]",
+      "EXEC [useradd] [-u] [15555] [-g] [carol]",
     );
     for (
       const args of [
@@ -1017,7 +1526,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-u",
           "0",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           home,
           "-M",
@@ -1032,7 +1541,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-K",
           "UID_MAX=60000",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           "/root",
           "-M",
@@ -1062,7 +1571,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-K",
           "UID_MAX=60000",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           home,
           "-M",
@@ -1074,18 +1583,24 @@ test("accounts: only principals are created or changed, and only into registry g
         ["usermod", "-aG", "docker", "tp"],
         ["usermod", "-s", "/bin/bash", "root"],
         ["usermod", "-p", "!", "tp"],
-        ["gpasswd", "-d", "alice", "alice-grp"],
+        ["gpasswd", "-d", "alice", "alice"],
         ["getent", "shadow", "--", "root"],
+        // The per-version runtime groups are gone from the registry, so a
+        // principal can no longer be put in one.
+        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpnode24", "alice"],
+        // The registry name is matched literally: `.` is not a wildcard.
+        ["usermod", "-aG", "tps.ell", "alice"],
       ]
     ) {
       await refused(host, args);
     }
     for (
       const args of [
-        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpshell", "alice"],
         ["usermod", "-aG", "tpsftp", "alice"],
-        ["usermod", "-aG", "alice-grp", "tpnginx"],
-        ["gpasswd", "-d", "alice", "tpphp84"],
+        ["usermod", "-aG", "alice", "tpnginx"],
+        ["gpasswd", "-d", "alice", "tpshell"],
         ["usermod", "-p", "!", "alice"],
       ]
     ) {
@@ -1225,8 +1740,8 @@ test("tp-host unit metadata is parsed by key and never shifts on an empty field"
   const meta = (u: string, g: string, s: string, n: string) =>
     `user=${u}\ngroup=${g}\nslice=${s}\nnnp=${n}`;
   assertEquals(
-    await parseUnitMeta(meta("a", "a-grp", "a.slice", "yes")),
-    "ok [a] [a-grp] [a.slice] [yes]",
+    await parseUnitMeta(meta("a", "a", "a.slice", "yes")),
+    "ok [a] [a] [a.slice] [yes]",
   );
   // Empty first, middle and last fields stay in place.
   assertEquals(
@@ -1243,8 +1758,8 @@ test("tp-host unit metadata is parsed by key and never shifts on an empty field"
   );
   // The previously shifted case: empty user with the rest populated.
   assertEquals(
-    await parseUnitMeta(meta("", "alice-grp", "turbopanel-alice.slice", "yes")),
-    "ok [] [alice-grp] [turbopanel-alice.slice] [yes]",
+    await parseUnitMeta(meta("", "alice", "turbopanel-alice.slice", "yes")),
+    "ok [] [alice] [turbopanel-alice.slice] [yes]",
   );
   // A value may hold `=` and a literal "-".
   assertEquals(
@@ -1273,7 +1788,7 @@ test("tp-host refuses a tenant unit whose User= is empty", async () => {
     const unit = [
       "[Service]",
       "User=",
-      "Group=alice-grp",
+      "Group=alice",
       "Slice=turbopanel-alice.slice",
       "NoNewPrivileges=yes",
       "ExecStart=/bin/true",
@@ -1306,20 +1821,20 @@ test("principal home: the home root itself is still root:root", async () => {
     const root = host.path("srv/users");
     const ok = await host.run(installDir(root, "0750", "root", "root"));
     assertEquals(ok.code, 0, ok.stderr);
-    await refused(host, installDir(root, "0750", "alice", "alice-grp"));
+    await refused(host, installDir(root, "0750", "alice", "alice"));
   });
 });
 
-test("principal home: the skeleton is root's, never group-writable, and only root:<p>-grp", async () => {
+test("principal home: the skeleton is root's, never group-writable, and only root:<p>", async () => {
   await withHost(async (host) => {
     const home = host.path("srv/users/alice");
     const sealed = await host.run(
-      installDir(home, "0750", "root", "alice-grp"),
+      installDir(home, "0750", "root", "alice"),
     );
     assertEquals(sealed.code, 0, sealed.stderr);
     assertStringIncludes(
       sealed.stdout,
-      "EXEC [chown] [-h] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [root:alice] [.]",
     );
     const structural = [
       home,
@@ -1331,16 +1846,16 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
     ];
     for (const dir of structural) {
       // The tenant owning any of these could rename root's paths below it.
-      await refused(host, installDir(dir, "0750", "alice", "alice-grp"));
+      await refused(host, installDir(dir, "0750", "alice", "alice"));
       await refused(host, installDir(dir, "0750", "15001"));
-      await refused(host, ["chown", "alice:alice-grp", dir]);
+      await refused(host, ["chown", "alice:alice", dir]);
       await refused(host, ["chown", "tpnginx", dir]);
-      // The engines are in alice-grp: group write is the same rename hole.
-      await refused(host, installDir(dir, "0770", "root", "alice-grp"));
-      await refused(host, installDir(dir, "0752", "root", "alice-grp"));
-      await refused(host, installDir(dir, "2750", "root", "alice-grp"));
+      // The engines are in alice: group write is the same rename hole.
+      await refused(host, installDir(dir, "0770", "root", "alice"));
+      await refused(host, installDir(dir, "0752", "root", "alice"));
+      await refused(host, installDir(dir, "2750", "root", "alice"));
       // Another principal's group, or an engine's, never holds the skeleton.
-      await refused(host, installDir(dir, "0750", "root", "carol-grp"));
+      await refused(host, installDir(dir, "0750", "root", "carol"));
       await refused(host, installDir(dir, "0750", "root", "tpnginx"));
     }
     await Deno.mkdir(`${home}/sites/web/releases/r1`, { recursive: true });
@@ -1351,23 +1866,23 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
       if (dir.endsWith("/releases/r1")) {
         // A release directory appears only through publish, sealed.
-        await refused(host, installDir(dir, "0750", "root", "alice-grp"));
+        await refused(host, installDir(dir, "0750", "root", "alice"));
         continue;
       }
-      const ok = await host.run(installDir(dir, "0750", "root", "alice-grp"));
+      const ok = await host.run(installDir(dir, "0750", "root", "alice"));
       assertEquals(ok.code, 0, `${dir}: ${ok.stderr}`);
     }
     // Recursion from a skeleton directory would walk the tenant's leaves as
     // root; only a release (all root's) is re-owned in one sweep.
     for (const dir of structural.slice(0, 5)) {
-      await refused(host, ["chown", "-R", "root:alice-grp", dir]);
+      await refused(host, ["chown", "-R", "root:alice", dir]);
       await refused(host, ["chmod", "-R", "0750", dir]);
       await refused(host, setgidDirectoriesFindArgs(dir));
     }
     const seal = await host.run([
       "chown",
       "-R",
-      "root:alice-grp",
+      "root:alice",
       `${home}/sites/web/releases/r1`,
     ]);
     assertEquals(seal.code, 0, seal.stderr);
@@ -1380,22 +1895,22 @@ test("principal home: home/, data/ and tmp/ are the principal's alone, in a seal
     await Deno.chmod(home, 0o750);
     for (const name of ["home", "data", "tmp"]) {
       const dir = `${home}/${name}`;
-      const ok = await host.run(installDir(dir, "0700", "alice", "alice-grp"));
+      const ok = await host.run(installDir(dir, "0700", "alice", "alice"));
       assertEquals(ok.code, 0, ok.stderr);
       assertEquals((await Deno.lstat(dir)).isDirectory, true);
       assertStringIncludes(
         ok.stdout,
-        "EXEC [chown] [-h] [--] [alice:alice-grp] [.]",
+        "EXEC [chown] [-h] [--] [alice:alice] [.]",
       );
-      // 0700: the engine accounts in alice-grp stay out.
-      await refused(host, installDir(dir, "0750", "alice", "alice-grp"));
-      await refused(host, installDir(dir, "0701", "alice", "alice-grp"));
+      // 0700: the engine accounts in alice stay out.
+      await refused(host, installDir(dir, "0750", "alice", "alice"));
+      await refused(host, installDir(dir, "0701", "alice", "alice"));
       await refused(host, ["chmod", "0770", dir]);
       await refused(host, ["chmod", "u=rwX,g=rX,o=", dir]);
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
       // Nobody else owns them: not root, an engine, or another principal.
-      await refused(host, installDir(dir, "0700", "tpnginx", "alice-grp"));
-      await refused(host, installDir(dir, "0700", "alice", "carol-grp"));
+      await refused(host, installDir(dir, "0700", "tpnginx", "alice"));
+      await refused(host, installDir(dir, "0700", "alice", "carol"));
       await refused(host, installDir(dir, "0700", "alice", "tpnginx"));
       await refused(host, ["chown", "root", dir]);
     }
@@ -1404,7 +1919,7 @@ test("principal home: home/, data/ and tmp/ are the principal's alone, in a seal
       const leaf of ["sites/web/shared", "sites/web/webroot", "volumes/v1"]
     ) {
       const ok = await host.run(
-        installDir(`${home}/${leaf}`, "0750", "alice", "alice-grp"),
+        installDir(`${home}/${leaf}`, "0750", "alice", "alice"),
       );
       assertEquals(ok.code, 0, `${leaf}: ${ok.stderr}`);
     }
@@ -1421,7 +1936,7 @@ test("principal home: a planted link or an unsealed parent stops the tenant dire
     await Deno.symlink(outside, `${home}/home`);
     await refused(
       host,
-      installDir(`${home}/home`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/home`, "0700", "alice", "alice"),
     );
     assertEquals((await Deno.stat(outside)).mode! & 0o777, 0o755);
     await refused(host, ["chmod", "0700", `${home}/home`]);
@@ -1429,16 +1944,16 @@ test("principal home: a planted link or an unsealed parent stops the tenant dire
     await Deno.chmod(home, 0o770);
     const stderr = await refused(
       host,
-      installDir(`${home}/data`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/data`, "0700", "alice", "alice"),
     );
     assertStringIncludes(stderr, "not sealed");
     await refused(
       host,
-      installDir(`${home}/sites`, "0750", "root", "alice-grp"),
+      installDir(`${home}/sites`, "0750", "root", "alice"),
     );
     await Deno.chmod(home, 0o750);
     const ok = await host.run(
-      installDir(`${home}/data`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/data`, "0700", "alice", "alice"),
     );
     assertEquals(ok.code, 0, ok.stderr);
   });
@@ -1452,7 +1967,7 @@ test("useradd: the passwd home is <root>/<name>/home and nothing else", async ()
       "-u",
       "15003",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -1493,7 +2008,7 @@ async function addPhpAccounts(host: Host) {
   await Deno.writeTextFile(host.path("etc/passwd"), bob, { append: true });
   await Deno.writeTextFile(
     host.path("etc/group"),
-    "bob-grp:x:15002:\ntpapache:x:9991:\ntpols:x:9992:\n",
+    "bob:x:15002:\ntpapache:x:9991:\ntpols:x:9992:\n",
     { append: true },
   );
 }
@@ -1551,7 +2066,7 @@ function phpService(host: Host, mode: PhpMode): string {
     `ExecStart=${phpExec(host, mode)}`,
     ...byMode[mode],
     "User=alice",
-    "Group=alice-grp",
+    "Group=alice",
     "Slice=turbopanel-alice.slice",
     "NoNewPrivileges=yes",
     "CapabilityBoundingSet=",
@@ -1645,7 +2160,7 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
       ["runs as another principal", line("User=", "User=bob")],
       ["root group", line("Group=", "Group=root")],
       ["web server group", line("Group=", "Group=tpnginx")],
-      ["another principal's group", line("Group=", "Group=bob-grp")],
+      ["another principal's group", line("Group=", "Group=bob")],
       [
         "another principal's slice",
         line("Slice=", "Slice=turbopanel-bob.slice"),
@@ -1980,7 +2495,7 @@ test("per-site PHP units: only exact names, and the generic tenant shape gains n
     const tenant = [
       "[Service]",
       "User=alice",
-      "Group=alice-grp",
+      "Group=alice",
       "Slice=turbopanel-alice.slice",
       "NoNewPrivileges=yes",
       "ExecStart=/bin/sh -c id",
@@ -2031,7 +2546,7 @@ test("per-site PHP sockets: a hostile corpus is refused", async () => {
       ["owned by a web server", line("SocketUser=", "SocketUser=tpnginx")],
       ["group tp", line("SocketGroup=", "SocketGroup=tp")],
       ["group root", line("SocketGroup=", "SocketGroup=root")],
-      ["the owner's group", line("SocketGroup=", "SocketGroup=alice-grp")],
+      ["the owner's group", line("SocketGroup=", "SocketGroup=alice")],
       [
         "the Caddy site account",
         line("SocketGroup=", "SocketGroup=tpcaddysite"),
@@ -2120,38 +2635,38 @@ async function installPhpConf(
     "-o",
     opts.owner ?? "root",
     "-g",
-    opts.group ?? "alice-grp",
+    opts.group ?? "alice",
     host.path("tmp/conf"),
     `${phpConfDir(host)}/${name}`,
   ]);
 }
 
-test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowlist", async () => {
+test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist", async () => {
   await withPhpHost(async (host) => {
     const dir = phpConfDir(host);
     const mkdir = (
       path: string,
       mode = "0750",
       owner = "root",
-      group = "alice-grp",
+      group = "alice",
     ) =>
       host.run(["install", "-d", "-m", mode, "-o", owner, "-g", group, path]);
     const made = await mkdir(dir);
     assertEquals(made.code, 0, made.stderr);
     assertStringIncludes(
       made.stdout,
-      "EXEC [chown] [-h] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [root:alice] [.]",
     );
     for (
       const [mode, owner, group, path] of [
-        ["0755", "root", "alice-grp", dir],
-        ["0770", "root", "alice-grp", dir],
-        ["0750", "alice", "alice-grp", dir],
-        ["0750", "tp", "alice-grp", dir],
+        ["0755", "root", "alice", dir],
+        ["0770", "root", "alice", dir],
+        ["0750", "alice", "alice", dir],
+        ["0750", "tp", "alice", dir],
         ["0750", "root", "tpnginx", dir],
-        ["0750", "root", "carol-grp", dir],
-        ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
-        ["0750", "root", "alice-grp", `${dir}/deeper`],
+        ["0750", "root", "carol", dir],
+        ["0750", "root", "alice", phpConfDir(host, "Shop")],
+        ["0750", "root", "alice", `${dir}/deeper`],
         ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
       ]
     ) {
@@ -2172,7 +2687,7 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       assertEquals(ok.code, 0, `${name}: ${ok.stderr}`);
       assertStringIncludes(
         ok.stdout,
-        "EXEC [chown] [-h] [--] [root:alice-grp] [./f]",
+        "EXEC [chown] [-h] [--] [root:alice] [./f]",
       );
       assertEquals(await Deno.readTextFile(`${dir}/${name}`), content);
       for (
@@ -2234,7 +2749,7 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "extension = /usr/lib/php/x/curl.so",
       "extension = curl.so.so",
       "extension = curlx",
-      "extension = pdo_pgsql",
+      "extension = pdo_sqlite",
       "zend_extension = /usr/lib/php/20240924/opcache.so",
       "zend_extension = xdebug.so",
       "extension_dir = /usr/lib/php/20240924x",
@@ -2264,6 +2779,8 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "extension = curl.so",
       "extension = mysqli.so",
       "extension = pdo_mysql",
+      "extension = pgsql.so",
+      "extension = pdo_pgsql",
     ].join("\n");
     const lsphp = await installPhpConf(
       host,
@@ -2355,7 +2872,7 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
       "-o",
       "root",
       "-g",
-      "alice-grp",
+      "alice",
       dir,
     ]);
     assertEquals(
@@ -2379,7 +2896,7 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
       const args of [
         ["tee", ini],
         ["chmod", "0666", ini],
-        ["chown", "alice:alice-grp", ini],
+        ["chown", "alice:alice", ini],
         ["chown", "tp", dir],
         ["chmod", "0777", dir],
         ["cp", "-p", "--", ini, `${dir}/php-fpm.conf`],
@@ -2499,7 +3016,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           mode,
           series: "8.4",
           user: "alice",
-          group: "alice-grp",
+          group: "alice",
           home,
           configDir: host.path("etc/turbopanel"),
           libDir: host.path("opt/turbopanel/lib"),
@@ -2515,7 +3032,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           "-o",
           "root",
           "-g",
-          "alice-grp",
+          "alice",
           dir,
         ]);
         assertEquals(made.code, 0, made.stderr);
@@ -2550,7 +3067,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
             "-o",
             "root",
             "-g",
-            "alice-grp",
+            "alice",
             host.path("tmp/conf"),
             `${dir}/${name}`,
           ]);
@@ -2606,7 +3123,7 @@ test("one site is bound to one owner across its service, socket and config", asy
       "-o",
       "root",
       "-g",
-      "bob-grp",
+      "bob",
       phpConfDir(host),
     ]);
   });

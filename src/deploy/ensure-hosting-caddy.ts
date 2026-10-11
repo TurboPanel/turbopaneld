@@ -1,12 +1,15 @@
 /**
  * Ensure the hosting Caddy binary and its account exist.
  *
- * Called from environment.deploy (not daemon-converge). Managed hosts often
- * have no Caddy until the first deploy that needs hostname ingress. The
- * `caddy-setup` playbook (root) vendors the binary and provisions
+ * Called from `environment.deploy` and from the pre-validate hook in
+ * `ingress.ts` (deploy paths and boot guard). `daemon-converge` backfills
+ * {@link HOSTING_CADDY_USER}, the vendored binary, and the ingress guard on
+ * enrolled hosts via `hosting-caddy/tasks/backfill-edge-account.yml`. Managed
+ * hosts often have no Caddy until the first deploy that needs hostname ingress.
+ * The `caddy-setup` playbook (root) vendors the binary and provisions
  * {@link HOSTING_CADDY_USER} with read access to what Caddy loads; it runs
- * whenever either is missing, so a host that already has the binary from an
- * older release still gets the account.
+ * whenever any of those pieces is missing, so a host that already has the
+ * binary from an older release still gets the account.
  */
 
 import { encodeHex } from "@std/encoding/hex";
@@ -83,7 +86,26 @@ function caddyBinaryPath(runtimesDir: string): string {
   return join(runtimesDir, "caddy", "current", "caddy");
 }
 
+let caddyBinaryPresentOverride:
+  | ((path: string) => Promise<boolean>)
+  | undefined;
+
+/**
+ * Test-only: treat the vendored hosting Caddy binary as present without
+ * touching disk. Returns a restore function.
+ */
+export function setHostingCaddyBinaryPresentForTest(
+  fn?: (path: string) => Promise<boolean>,
+): () => void {
+  const previous = caddyBinaryPresentOverride;
+  caddyBinaryPresentOverride = fn;
+  return () => {
+    caddyBinaryPresentOverride = previous;
+  };
+}
+
 async function caddyBinaryPresent(path: string): Promise<boolean> {
+  if (caddyBinaryPresentOverride) return await caddyBinaryPresentOverride(path);
   try {
     const stat = await Deno.stat(path);
     return stat.isFile;

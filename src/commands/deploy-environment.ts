@@ -3,10 +3,15 @@ import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
+import {
+  DeployCancelledError,
+  type DeployCancelToken,
+} from "../deploy/deploy-cancel.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
   composeFileArgs,
+  DEPLOYMENT_MANIFEST_FILENAME,
   type DeploymentManifest,
   type DeploymentManifestRelease,
   type DeploymentManifestSecret,
@@ -51,6 +56,7 @@ import {
   type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
@@ -60,11 +66,13 @@ import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts"
 import { ensureSystemPrincipals } from "../deploy/ensure-principal.ts";
 import { applySshAccess, type PrincipalSshSpec } from "../deploy/ssh/apply.ts";
 import {
+  assertHostingNamesFree,
   buildTcpUdpIngressEntries,
   cleanupStaleTcpUdpServiceIngress,
   ensureHostingCaddyRuntime,
   ensureHostingIngress,
   ensureServiceIngress,
+  resetHostingCaddyRuntimeEnsuredForDeploy,
   rewriteHostingCaddySites,
   serviceIngressComposePath,
   serviceIngressProject,
@@ -94,19 +102,25 @@ import {
 import {
   applySites,
   ensureSitePhpRuntimes,
+  planSiteWebEnv,
+  pruneHoldKeysForDeploy,
   resolveSiteDocumentRoot,
-  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
-import { sitePhpRuntimeMode } from "../deploy/site/php-runtime.ts";
-import { applyCronJobs, type CronApplySpec } from "../deploy/cron/apply.ts";
+import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
+import {
+  applyCronJobs,
+  type CronApplySpec,
+  hasInstalledCronUnits,
+} from "../deploy/cron/apply.ts";
 import {
   type AppliedRelease,
   applySourceReleases,
   resolveReleaseServiceId,
 } from "../deploy/release/apply-source-releases.ts";
+import { effectiveReleaseServiceId } from "../deploy/release/release-service-id.ts";
 import {
   applyNativeAppServices,
   type ApplyNativeAppsOpts,
@@ -139,6 +153,7 @@ import {
 } from "../deploy/site-docker.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { definedFields } from "../util/optional-fields.ts";
 import {
   assertComposeHostPathsConfined,
   collectAuthoredHostPaths,
@@ -147,6 +162,8 @@ import {
 } from "../deploy/compose-host-paths.ts";
 import {
   materializeSecretFiles,
+  pruneStaleSecretFiles,
+  removeSecretTree,
   rewriteComposeSecretFilePaths,
 } from "../deploy/secret-runtime.ts";
 import {
@@ -353,7 +370,30 @@ export type EnvironmentDeployDeps = {
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
   /** Test seam — the Ansible runner for the pre-principal PHP runtime step. */
   siteIo?: Parameters<typeof ensureSitePhpRuntimes>[1];
+  /**
+   * Cancel token of this deploy (`../deploy/deploy-cancel.ts`). Checked between
+   * phases and handed to the processes the deploy spawns; the first step that
+   * changes what is serving commits it, after which a cancel is "too late".
+   */
+  cancel?: DeployCancelToken;
+  /** Test seam — whether cron timers from an earlier deploy are installed. */
+  hasCronUnits?: (environmentId: string) => Promise<boolean>;
 };
+
+/**
+ * True when any HTTP hosting publishes at least one public hostname on the
+ * edge (hosting Caddy and/or shared loopback Traefik). `tcp`/`udp` hostings
+ * and empty hostname lists are ignored.
+ */
+export function hostingsNeedPublicHttpEdge(
+  hostings: readonly EnvironmentDeployHosting[],
+): boolean {
+  for (const hosting of hostings) {
+    if (hosting.protocol === "tcp" || hosting.protocol === "udp") continue;
+    if (hosting.hostnames.length > 0) return true;
+  }
+  return false;
+}
 
 /**
  * True when any container hosting routes HTTP hostnames through the shared
@@ -363,11 +403,7 @@ export type EnvironmentDeployDeps = {
 export function containerHostingsNeedSharedHttpIngress(
   hostings: readonly EnvironmentDeployHosting[],
 ): boolean {
-  for (const hosting of hostings) {
-    if (hosting.protocol === "tcp" || hosting.protocol === "udp") continue;
-    if (hosting.hostnames.length > 0) return true;
-  }
-  return false;
+  return hostingsNeedPublicHttpEdge(hostings);
 }
 
 /**
@@ -470,7 +506,9 @@ async function ensureDeployIngress(
       activeIngressServiceIds,
       { runDocker },
     );
-    await ensureHostingCaddyRuntime(layout);
+    if (hostingsNeedPublicHttpEdge(allHostings)) {
+      await ensureHostingCaddyRuntime(layout);
+    }
     return;
   }
   await ensureDockerFn();
@@ -518,6 +556,12 @@ async function ensureDeployIngress(
       { runDocker },
     );
   });
+
+  // Edge hostnames on host-native services (sites, native apps) still reach
+  // hosting Caddy even when no container hosting needs shared Traefik.
+  if (hostingsNeedPublicHttpEdge(allHostings)) {
+    await ensureHostingCaddyRuntime(layout);
+  }
 }
 
 /**
@@ -546,48 +590,7 @@ export function deployPrincipalSpecs(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
     });
   }
-  return withSitePhpRuntimes([...byId.values()], parsedPayload.sites ?? []);
-}
-
-/**
- * A per-site PHP runtime runs `php-cgi<series>` / `php-fpm<series>` as the
- * site's principal, and those binaries are `0750 root:tpphp<series>`: the
- * principal must hold that series' entitlement or its unit dies `203/EXEC`.
- *
- * The grant belongs in the control plane's effective runtime set (see
- * `PrincipalEnsureSpec.runtimes`: the daemon reconciles, it does not derive),
- * which persists it as a `deploy` entitlement the way a native app's Node
- * series is, so `server.principals.reconcile` and every other environment's
- * deploy (both full-replace) carry it too. Adding it here as well only covers
- * a control plane older than that, since the daemon ships first: a deploy
- * from one still starts its runtime, though a later reconcile from it can
- * still take the grant away.
- */
-function withSitePhpRuntimes(
-  principals: EnvironmentDeployPrincipalMaterial[],
-  sites: readonly EnvironmentDeploySite[],
-): EnvironmentDeployPrincipalMaterial[] {
-  const implied = new Map<string, Set<string>>();
-  for (const site of sites) {
-    if (!site.principal || sitePhpRuntimeMode(site) === null) continue;
-    const series = resolveSitePhpSeries(site);
-    if (!series) continue;
-    const set = implied.get(site.principal.principalId) ?? new Set<string>();
-    set.add(series);
-    implied.set(site.principal.principalId, set);
-  }
-  return principals.map((principal) => {
-    const series = implied.get(principal.principalId);
-    if (!series) return principal;
-    const runtimes = [...(principal.runtimes ?? [])];
-    for (const entry of series) {
-      const held = runtimes.some((r) =>
-        r.runtime === "php" && r.series === entry
-      );
-      if (!held) runtimes.push({ runtime: "php", series: entry });
-    }
-    return { ...principal, runtimes };
-  });
+  return [...byId.values()];
 }
 
 async function ensureDeployPrincipals(
@@ -604,9 +607,6 @@ async function ensureDeployPrincipals(
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
       ...(principal.home === undefined ? {} : { home: principal.home }),
       ...(principal.shell === undefined ? {} : { shell: principal.shell }),
-      ...(principal.runtimes === undefined
-        ? {}
-        : { runtimes: principal.runtimes }),
       ...(principal.accessGroups === undefined
         ? {}
         : { accessGroups: principal.accessGroups }),
@@ -758,7 +758,8 @@ function serviceIdsForManifest(
  * cannot say what code it is running once the control plane is unreachable.
  *
  * `serviceId` is resolved the same way the release engine resolves the release
- * directory segment ({@link resolveReleaseServiceId}), so the recorded identity
+ * directory segment ({@link effectiveReleaseServiceId} when the release engine
+ * ran, else {@link resolveReleaseServiceId}), so the recorded identity
  * addresses the tree that was actually published.
  *
  * **The commit comes from the release engine, not the payload, whenever the
@@ -856,21 +857,41 @@ function deployResultReleases(
  * Built from `sourceMaterial[]` on **every** deploy, not only when a release was
  * freshly promoted: a redeploy that does not touch the source still has to point
  * the document root at `current`, or the site would silently fall back to the
- * empty daemon-owned tree. `serviceId` resolves the same way the release engine
- * resolved it ({@link resolveReleaseServiceId}), so this addresses the tree that
- * was actually published. Entries with no principal are skipped for the same
- * reason the release engine skips them — there is no home to serve out of.
+ * empty daemon-owned tree. `serviceId` uses {@link effectiveReleaseServiceId}
+ * so legacy `sites/<compose>/` trees stay aligned with promote/bindings/vhosts.
+ * Entries with no principal are skipped for the same reason the release engine
+ * skips them — there is no home to serve out of.
  */
-function deployReleaseBindings(
+async function deployReleaseBindings(
   payload: EnvironmentDeployPayload,
-): Map<string, SiteRelease> {
+  layout: LayoutPaths,
+  runFn: RunFn,
+): Promise<Map<string, SiteRelease>> {
   const bindings = new Map<string, SiteRelease>();
-  for (const entry of payload.sourceMaterial ?? []) {
-    const principal = entry.principal;
-    if (!principal) continue;
-    bindings.set(entry.composeServiceName, {
-      serviceId: resolveReleaseServiceId(payload, entry.composeServiceName),
-      username: principal.username,
+  const entries = (payload.sourceMaterial ?? []).filter(
+    (
+      entry,
+    ): entry is typeof entry & {
+      principal: NonNullable<typeof entry.principal>;
+    } => entry.principal !== undefined,
+  );
+  const resolved = await Promise.all(
+    entries.map(async (entry) => ({
+      composeServiceName: entry.composeServiceName,
+      serviceId: await effectiveReleaseServiceId(
+        payload,
+        entry.composeServiceName,
+        layout,
+        entry.principal,
+        runFn,
+      ),
+      username: entry.principal.username,
+    })),
+  );
+  for (const row of resolved) {
+    bindings.set(row.composeServiceName, {
+      serviceId: row.serviceId,
+      username: row.username,
     });
   }
   return bindings;
@@ -890,21 +911,40 @@ function deployReleaseBindings(
  * branch first for that reason; the entry is dropped here so the two never
  * disagree about which lane a site is on.
  */
-function deployManagedDirectoryBindings(
+async function deployManagedDirectoryBindings(
   payload: EnvironmentDeployPayload,
   releaseBindings: ReadonlyMap<string, SiteRelease>,
-): Map<string, SiteManagedDirectory> {
+  layout: LayoutPaths,
+  runFn: RunFn,
+): Promise<Map<string, SiteManagedDirectory>> {
   const bindings = new Map<string, SiteManagedDirectory>();
-  for (const site of payload.sites ?? []) {
-    if (site.sourceKind !== "managed-directory") continue;
-    if (releaseBindings.has(site.composeServiceName)) continue;
-    // The wire parser already refuses a managed directory with no principal;
-    // this keeps the type honest rather than re-reporting it.
-    const principal = site.principal;
-    if (!principal) continue;
-    bindings.set(site.composeServiceName, {
-      serviceId: resolveReleaseServiceId(payload, site.composeServiceName),
-      username: principal.username,
+  const sites = (payload.sites ?? []).filter(
+    (
+      site,
+    ): site is typeof site & {
+      principal: NonNullable<typeof site.principal>;
+    } =>
+      site.sourceKind === "managed-directory" &&
+      !releaseBindings.has(site.composeServiceName) &&
+      site.principal !== undefined,
+  );
+  const resolved = await Promise.all(
+    sites.map(async (site) => ({
+      composeServiceName: site.composeServiceName,
+      serviceId: await effectiveReleaseServiceId(
+        payload,
+        site.composeServiceName,
+        layout,
+        site.principal,
+        runFn,
+      ),
+      username: site.principal.username,
+    })),
+  );
+  for (const row of resolved) {
+    bindings.set(row.composeServiceName, {
+      serviceId: row.serviceId,
+      username: row.username,
     });
   }
   return bindings;
@@ -960,6 +1000,21 @@ function releasePrincipalForService(
  * the operator is not asked to re-declare `serviceKind` to get a working
  * deploy.
  */
+/** Align wire `serviceId` with the release tree segment the engine just used. */
+function nativeAppsWithAppliedServiceIds(
+  apps: readonly EnvironmentDeployNativeAppService[],
+  applied: readonly AppliedRelease[],
+): EnvironmentDeployNativeAppService[] {
+  const byCompose = new Map(
+    applied.map((entry) => [entry.composeServiceName, entry.serviceId]),
+  );
+  return apps.map((app) => {
+    const releaseServiceId = byCompose.get(app.composeServiceName);
+    if (!releaseServiceId || releaseServiceId === app.serviceId) return app;
+    return { ...app, serviceId: releaseServiceId };
+  });
+}
+
 export function resolveHostNativeLanes(
   payload: EnvironmentDeployPayload,
   appliedReleases: readonly AppliedRelease[],
@@ -1008,13 +1063,32 @@ export function resolveHostNativeLanes(
   return { sites, nativeAppServices };
 }
 
-/** `serviceId`s this payload still carries a `sourceMaterial[]` entry for. */
+/**
+ * `serviceId`s this payload still carries a `sourceMaterial[]` entry for.
+ *
+ * Uses the segments the release engine just applied when present, and keeps the
+ * legacy compose-key name as an alias while migration can still serve there.
+ */
 function currentReleaseServiceIds(
   payload: EnvironmentDeployPayload,
+  applied: readonly AppliedRelease[],
 ): Set<string> {
+  const appliedByCompose = new Map(
+    applied.map((entry) => [entry.composeServiceName, entry.serviceId]),
+  );
   const ids = new Set<string>();
   for (const entry of payload.sourceMaterial ?? []) {
-    ids.add(resolveReleaseServiceId(payload, entry.composeServiceName));
+    const canonical = resolveReleaseServiceId(
+      payload,
+      entry.composeServiceName,
+    );
+    const effective = appliedByCompose.get(entry.composeServiceName) ??
+      canonical;
+    ids.add(effective);
+    ids.add(canonical);
+    if (entry.composeServiceName !== canonical) {
+      ids.add(entry.composeServiceName);
+    }
   }
   return ids;
 }
@@ -1052,6 +1126,7 @@ async function previousReleaseTrees(
 async function reclaimRemovedServiceReleaseTrees(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
+  applied: readonly AppliedRelease[],
   deploymentDir: string,
   logSink: CommandOutputSink,
   runFn: RunFn,
@@ -1061,7 +1136,7 @@ async function reclaimRemovedServiceReleaseTrees(
   const removed = await reclaimRemovedReleaseTrees({
     layout,
     previous,
-    currentServiceIds: currentReleaseServiceIds(payload),
+    currentServiceIds: currentReleaseServiceIds(payload, applied),
     runFn,
     onOutput: (stream, line) => logSink.onLine(stream, line),
   });
@@ -1268,21 +1343,50 @@ async function applyDeployNativeApps(
   apps: readonly EnvironmentDeployNativeAppService[],
   applied: readonly AppliedRelease[],
   logSink: CommandOutputSink,
+  decryptSecrets: DecryptSecretsFn | undefined,
   io?: Omit<ApplyNativeAppsOpts, "bindings">,
 ): Promise<void> {
   if (apps.length === 0) return;
   const previousReleaseByService = new Map<string, string | null>(
     applied.map((entry) => [entry.composeServiceName, entry.previousReleaseId]),
   );
-  await applyNativeAppServices(layout, parsedPayload.environmentId, apps, {
-    ...io,
-    onOutput: io?.onOutput ??
-      ((stream, line) => logSink.onLine(stream, line)),
-    bindings: nativeAppBindingsFromPayload(
-      parsedPayload,
-      previousReleaseByService,
-    ),
-  });
+  const appliedByService = new Map(
+    applied.map((entry) => [
+      entry.composeServiceName,
+      definedFields({
+        releaseId: entry.releaseId,
+        nativeStart: entry.nativeStart,
+        runtime: entry.runtime,
+      }),
+    ]),
+  );
+  // The live release's own runtime wins over the payload's: a rollback across a
+  // Node/Deno switch restores the unit the old release needs.
+  const appsForRelease = nativeAppsWithAppliedServiceIds(apps, applied).map(
+    (app) => {
+      const runtime = appliedByService.get(app.composeServiceName)?.runtime;
+      if (runtime === undefined) return app;
+      const { runtime: _runtime, ...rest } = app;
+      return runtime === "deno" ? { ...rest, runtime } : rest;
+    },
+  );
+  await applyNativeAppServices(
+    layout,
+    parsedPayload.environmentId,
+    appsForRelease,
+    {
+      variableMaterial: parsedPayload.variableMaterial ?? [],
+      decryptSecrets,
+      ...io,
+      onOutput: io?.onOutput ??
+        ((stream, line) => logSink.onLine(stream, line)),
+      bindings: nativeAppBindingsFromPayload(
+        parsedPayload,
+        previousReleaseByService,
+        appliedByService,
+      ),
+    },
+  );
 }
 
 function buildDaemonOverlayFragment(
@@ -1338,6 +1442,7 @@ type DeployContainerServicesInput = {
     networks: readonly EnvironmentDeployFabricNetwork[],
     defaultMtu: number,
   ) => Promise<void>;
+  cancel?: DeployCancelToken;
 };
 
 /**
@@ -1376,6 +1481,41 @@ async function materializeDeploySecrets(
     payload.variableMaterial ?? [],
     decryptSecrets,
   );
+}
+
+/**
+ * Remove secret files that left the plan. Runs only once the new release is
+ * up (and its hooks passed): until then the previous release, or the one a
+ * failed or cancelled deploy restores, may still point at these files, so a
+ * restart of it has to find them. The plan is the whole environment's; an
+ * empty plan means every binding or secret variable is gone and the whole
+ * directory goes. Never called from rehydrate.
+ */
+async function pruneDeploySecrets(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const plan = payload.secretPlan ?? [];
+  try {
+    if (plan.length === 0) {
+      await removeSecretTree(layout, payload.projectId, payload.environmentId);
+      return;
+    }
+    await pruneStaleSecretFiles(
+      layout,
+      payload.projectId,
+      payload.environmentId,
+      plan,
+    );
+  } catch (err) {
+    // The release is already running; a leftover file is not a failed deploy.
+    logWarn(
+      "deploy",
+      `could not remove secret files that left the plan: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 function applySecretFilePaths(
@@ -1442,6 +1582,7 @@ async function runComposeBuild(
     "--no-cache",
     "--pull",
   ], { onLine });
+  input.cancel?.throwIfCancelled("while the images were building");
   if (!build.success) {
     // Docker echoes build args and failing command output verbatim —
     // redact against the sink's deny-set before it becomes a summary.
@@ -1500,6 +1641,7 @@ async function deploySequentially(
         onProgress: (message) => logSink.onLine("stdout", message),
       }),
     restorePrevious: () => restorePreviousDeployment(deploymentDir),
+    commit: () => input.cancel?.commit("before the old version was stopped"),
     composeArgs: (paths) => composeFileArgs(projectName, paths),
     redact: (text) => logSink.redactSummary(text),
     log: (line) => logSink.onLine("stdout", line),
@@ -1553,6 +1695,7 @@ async function prepareSequentialDeploy(
       ...composeFileArgs(parsedPayload.projectName, chain),
       "build",
     ], { onLine });
+    input.cancel?.throwIfCancelled("while the images were building");
     if (!build.success) {
       throw new Error(
         logSink.redactSummary(build.stderr) || "Docker Compose build failed",
@@ -1565,6 +1708,39 @@ async function prepareSequentialDeploy(
     "pull",
     "--ignore-buildable",
   ], { onLine });
+  input.cancel?.throwIfCancelled("while the images were being pulled");
+}
+
+/**
+ * Undo {@link publishStagedRuntimeCompose} for a deploy cancelled before it
+ * started anything: put the previous version's files back as the live ones, or
+ * (a first deploy has none) remove what was published. Never throws: the
+ * cancel is what the operator is told about.
+ */
+async function revertPublishedCompose(
+  deploymentDir: string,
+  hadPrevious: boolean,
+): Promise<void> {
+  try {
+    if (hadPrevious) {
+      await restorePreviousDeployment(deploymentDir);
+      return;
+    }
+    await Deno.remove(join(deploymentDir, RUNTIME_COMPOSE_FILENAME)).catch(
+      () => undefined,
+    );
+    await Deno.remove(join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME)).catch(
+      () => undefined,
+    );
+    await removeComposeEnvFile(deploymentDir);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `could not put the previous compose files back after a cancel: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 /**
@@ -1593,6 +1769,9 @@ async function deployContainerServices(
   } = input;
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
+  const cancel = input.cancel;
+  let published = false;
+  let hadPrevious = false;
   const stageDir = await resetComposeStageDir(deploymentDir);
   // Read before publish replaces the live files.
   const previousProjects = await readPreviousProjects(deploymentDir);
@@ -1694,6 +1873,7 @@ async function deployContainerServices(
     if (resolved.serviceNames.length === 0) {
       // Nothing comes up, so containers an earlier deploy started would keep
       // running untracked: take the project (and any earlier-named one) down.
+      cancel?.commit("before the old containers were removed");
       await retirePreviousProjects(
         previousProjects,
         parsedPayload.projectName,
@@ -1719,11 +1899,16 @@ async function deployContainerServices(
 
     await validateComposeConfig(parsedPayload.projectName, [stagedPath], run);
 
+    cancel?.throwIfCancelled("before the new version was published");
     const chain = await publishStagedRuntimeCompose(
       deploymentDir,
       stageDir,
       manifest,
     );
+    // From here until the cutover a cancel has to put the live compose files
+    // back, or they would describe a version that never started.
+    published = true;
+    hadPrevious = (await previousComposePaths(deploymentDir)) !== null;
     await persistComposeEnvFile(deploymentDir, parsedPayload.envFile);
 
     // A stack started under an earlier project name is replaced, not kept
@@ -1736,6 +1921,7 @@ async function deployContainerServices(
         "pull",
         "--ignore-buildable",
       ], { onLine });
+      cancel?.commit("before the earlier containers were removed");
     }
     retiredEarlier = await retirePreviousProjects(
       previousProjects,
@@ -1746,18 +1932,22 @@ async function deployContainerServices(
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
     if (parsedPayload.deployStrategy === "sequential") {
-      return await deploySequentially(input, {
+      const sequential = await deploySequentially(input, {
         chain,
         serviceHooks,
         labeledServices,
         deploymentDir,
         onLine,
       });
+      await pruneDeploySecrets(layout, parsedPayload);
+      return sequential;
     }
     if (serviceHooks.length > 0) {
       // Every hook must be confined to a compose service this deploy runs;
       // the runner then executes it inside that service's container.
       assertHooksConfined(serviceHooks, labeledServices);
+      // Pre-deploy hooks run inside the live containers and may migrate data.
+      cancel?.commit("before the pre-deploy hooks ran");
       logSink.setPhase(COMMAND_LOG_PHASES.PRE_DEPLOY);
       await runDeployServiceHooks(serviceHooks, {
         projectName: parsedPayload.projectName,
@@ -1775,6 +1965,7 @@ async function deployContainerServices(
       await runComposeBuild(input, chain, onLine);
     }
 
+    cancel?.commit("before the new version was started");
     logSink.setPhase(COMMAND_LOG_PHASES.COMPOSE_UP);
     const up = await runStreamed([
       ...composeFileArgs(parsedPayload.projectName, chain),
@@ -1799,11 +1990,17 @@ async function deployContainerServices(
       });
     }
 
+    // The new release is up and its hooks passed: only now may the files the
+    // previous one needed (and this plan no longer lists) be removed.
+    await pruneDeploySecrets(layout, parsedPayload);
     return {
       serviceNames: labeledServices,
       composePaths: chain,
     };
   } catch (err) {
+    if (published && err instanceof DeployCancelledError) {
+      await revertPublishedCompose(deploymentDir, hadPrevious);
+    }
     if (retiredEarlier.length > 0 && err instanceof Error) {
       err.message +=
         " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
@@ -1896,6 +2093,8 @@ export function shapeEnvironmentDeployResult(input: {
   releases?: readonly EnvironmentDeployResultRelease[];
   /** Per-site application facts for the sites this deploy applied. */
   siteApps?: readonly EnvironmentDeployResultSite[];
+  /** What the deploy worked around without failing; omitted when empty. */
+  warnings?: readonly string[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -1921,6 +2120,9 @@ export function shapeEnvironmentDeployResult(input: {
     ...(input.siteApps && input.siteApps.length > 0
       ? { sites: [...input.siteApps] }
       : {}),
+    ...(input.warnings && input.warnings.length > 0
+      ? { warnings: [...input.warnings] }
+      : {}),
   };
 }
 
@@ -1940,9 +2142,15 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
 } {
   const run = deps?.runDocker ?? defaultRunDocker;
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  const streamed = createStreamedRunner(deps?.runDocker);
+  const cancel = deps?.cancel;
   return {
     run,
-    runStreamed: createStreamedRunner(deps?.runDocker),
+    // Every streamed docker call (build, pull, up) dies with a cancel; once the
+    // deploy has committed, the signal can no longer fire.
+    runStreamed: cancel
+      ? (args, options) => streamed(args, { ...options, signal: cancel.signal })
+      : streamed,
     logSink,
     // Every plaintext this deploy decrypts (variable material, principal
     // passwords, TLS private keys) joins the transcript redaction deny-set.
@@ -2015,14 +2223,63 @@ async function collectEnvironmentDeployContainers(input: {
   return containers;
 }
 
+/**
+ * Would the host-native steps of this deploy change what is serving? Sites and
+ * native apps obviously do; so does the removal sweep when an earlier deploy
+ * left release trees or cron timers behind. A container-only deploy with none of
+ * those stays cancellable until its own cutover. Any doubt answers `true`.
+ */
+async function hostNativeCutoverPending(input: {
+  sites: readonly EnvironmentDeploySite[];
+  nativeAppServices: readonly EnvironmentDeployNativeAppService[];
+  deploymentDir: string;
+  environmentId: string;
+  hasCronUnits?: (environmentId: string) => Promise<boolean>;
+}): Promise<boolean> {
+  if (input.sites.length > 0 || input.nativeAppServices.length > 0) return true;
+  try {
+    if ((await previousReleaseTrees(input.deploymentDir)).length > 0) {
+      return true;
+    }
+    return await (input.hasCronUnits ?? hasInstalledCronUnits)(
+      input.environmentId,
+    );
+  } catch {
+    return true;
+  }
+}
+
 export async function handleEnvironmentDeploy(
   payload: EnvironmentDeployPayload,
   daemonReceivedAt: string,
   deps?: EnvironmentDeployDeps,
 ): Promise<EnvironmentDeployResult> {
   const parsedPayload = parseEnvironmentDeployPayload(payload);
+  // A PHP series or a web engine is installed long before the site config that
+  // uses it exists (the release builds in between), so no unused-software
+  // removal may take one this deploy needs.
+  const releaseHolds = await holdPruneKeys(
+    pruneHoldKeysForDeploy(parsedPayload.sites ?? []),
+  );
+  try {
+    return await deployEnvironmentHolding(
+      parsedPayload,
+      daemonReceivedAt,
+      deps,
+    );
+  } finally {
+    releaseHolds();
+  }
+}
+
+async function deployEnvironmentHolding(
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  daemonReceivedAt: string,
+  deps?: EnvironmentDeployDeps,
+): Promise<EnvironmentDeployResult> {
   assertSafeDeploymentIdentifiers(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
+  resetHostingCaddyRuntimeEnsuredForDeploy();
   const runtime = resolveEnvironmentDeployRuntime(deps);
 
   const files = resolveDeployComposeFiles(parsedPayload);
@@ -2037,6 +2294,8 @@ export async function handleEnvironmentDeploy(
     (hosting) => !hostNativeNames.has(hosting.composeServiceName),
   );
 
+  const cancel = deps?.cancel;
+  cancel?.throwIfCancelled("before the deploy started");
   const ingressServices = parsedPayload.ingressServices ?? [];
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
@@ -2053,6 +2312,7 @@ export async function handleEnvironmentDeploy(
     listenerPorts: parsedPayload.listenerPorts,
   });
 
+  cancel?.throwIfCancelled("while the host was being prepared");
   const deploymentDir = environmentDeploymentDir(
     layout,
     parsedPayload.projectId,
@@ -2060,17 +2320,13 @@ export async function handleEnvironmentDeploy(
   );
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
-  // Before the principals: the playbook creates the `tpnode<NN>` runtime
-  // groups, and the principal reconcile joins the site owner's Linux user to
-  // them. Joining a group that does not exist yet is skipped with a warning, so
-  // on the first deploy of a series the user missed the group and the unit died
-  // 203/EXEC. Tenant Node must also exist before the Git build: native installs
-  // run `corepack` from `vendor/node-app/<series>/current/bin`.
+  // Tenant Node must exist before the Git build: native installs run
+  // `corepack` from `vendor/node-app/<series>/current/bin`.
   await ensureNativeAppRuntime(
     parsedPayload.nativeAppServices ?? [],
     deps?.nativeAppIo,
   );
-  // Same for PHP: the site engine playbooks create the `tpphp<series>` groups.
+  // PHP too, so a site's runtime is on disk before anything starts it.
   await ensureSitePhpRuntimes(parsedPayload.sites ?? [], deps?.siteIo);
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];
@@ -2082,28 +2338,47 @@ export async function handleEnvironmentDeploy(
   // Git-backed releases run before the compose / site apply steps,
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
   // the site apply below points a document root at it.
+  cancel?.throwIfCancelled("while the host was being prepared");
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    ...(cancel === undefined ? {} : { cancel }),
   });
+  // Which host-native lane each service ends up on can only be decided once the
+  // releases are built: a `serviceKind: node` service that turned out to be a
+  // static export is served as files, not supervised as a process.
+  const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
+  const { nativeAppServices } = lanes;
+  // Everything from here on (release trees reclaimed, sites and native apps
+  // applied, cron timers swept) changes what is serving. A deploy with none of
+  // that to do stays cancellable until its containers are touched.
+  if (
+    cancel &&
+    await hostNativeCutoverPending({
+      sites: lanes.sites,
+      nativeAppServices,
+      deploymentDir,
+      environmentId: parsedPayload.environmentId,
+      hasCronUnits: deps?.hasCronUnits,
+    })
+  ) {
+    cancel.commit("before the sites and apps were switched over");
+  }
   // Whole-tree cleanup for services that lost their source since last deploy —
   // per-release retention only ever walks services still being published.
   await reclaimRemovedServiceReleaseTrees(
     layout,
     parsedPayload,
+    appliedReleases,
     deploymentDir,
     runtime.logSink,
     runtime.runPrivileged,
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
 
-  // Which host-native lane each service ends up on can only be decided once the
-  // releases are built: a `serviceKind: node` service that turned out to be a
-  // static export is served as files, not supervised as a process.
-  const { sites, nativeAppServices } = resolveHostNativeLanes(
-    parsedPayload,
-    appliedReleases,
-  );
+  // Secret runtime variables arrive sealed; the engine configs and
+  // `hosting.env` take them from `webEnv` once decrypted.
+  const sites = await resolveSiteSecretEnv(lanes.sites, runtime.decryptSecrets);
 
   const mountPaths = await resolveDeployMountPaths(
     layout,
@@ -2112,10 +2387,28 @@ export async function handleEnvironmentDeploy(
     runtime.decryptSecrets,
   );
 
-  const siteReleaseBindings = deployReleaseBindings(parsedPayload);
-  const siteManagedBindings = deployManagedDirectoryBindings(
+  // Before anything is written: a variable a site's web server cannot carry is
+  // named in the command log and the result, a required database setting stops
+  // the deploy here.
+  const siteWarnings = sites.flatMap(planSiteWebEnv);
+  for (const warning of siteWarnings) {
+    runtime.logSink.onLine("stderr", warning);
+  }
+
+  const siteReleaseBindings = await deployReleaseBindings(
+    parsedPayload,
+    layout,
+    runtime.runPrivileged,
+  );
+  const siteManagedBindings = await deployManagedDirectoryBindings(
     parsedPayload,
     siteReleaseBindings,
+    layout,
+    runtime.runPrivileged,
+  );
+  const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
+    nativeAppServices,
+    appliedReleases,
   );
   await applyDeploySites(
     layout,
@@ -2151,9 +2444,10 @@ export async function handleEnvironmentDeploy(
   await applyDeployNativeApps(
     layout,
     parsedPayload,
-    nativeAppServices,
+    nativeAppServicesForHost,
     appliedReleases,
     runtime.logSink,
+    runtime.decryptSecrets,
     deps?.nativeAppIo,
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
@@ -2173,9 +2467,13 @@ export async function handleEnvironmentDeploy(
     sites,
     siteReleaseBindings,
     siteManagedBindings,
-    nativeAppServices,
+    nativeAppServicesForHost,
     nativeAppBindingsFromPayload(parsedPayload),
   );
+
+  // Before any container carries a routing label for a name another
+  // environment already serves here.
+  await assertHostingNamesFree(layout, parsedPayload);
 
   const published = await publishDeployedCompose({
     hasContainers,
@@ -2193,6 +2491,7 @@ export async function handleEnvironmentDeploy(
     decryptSecrets: runtime.decryptSecrets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
+    ...(cancel === undefined ? {} : { cancel }),
   });
 
   const hostnameTls = await materializeDeployTls(
@@ -2227,5 +2526,6 @@ export async function handleEnvironmentDeploy(
     containers,
     releases: deployResultReleases(appliedReleases),
     siteApps,
+    warnings: siteWarnings,
   });
 }

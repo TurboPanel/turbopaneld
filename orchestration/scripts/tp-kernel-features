@@ -1,0 +1,585 @@
+#!/bin/sh
+# tp-kernel-features — named kernel/boot features for a host (POSIX sh,
+# root:root 0755). Run by the installer (scripts/run.sh) on a first install and
+# by an operator through `tp-orchestrate kernel-features …`. The daemon never
+# calls it, and `tp-orchestrate` refuses `apply`/`undo` from the daemon account.
+#
+#   tp-kernel-features list
+#       One feature id per line.
+#   tp-kernel-features status [ID]
+#       `ID<TAB>STATE<TAB>reason` per feature. STATE is one of
+#       not-applicable, switchable, restart-needed, ready, blocked.
+#   tp-kernel-features apply ID [--reboot] [--countdown SECONDS]
+#       Make the feature true. Idempotent. With --reboot, a feature that needs
+#       a restart is followed by a visible countdown and a reboot (see below).
+#   tp-kernel-features undo ID
+#       Remove what apply added (only when this tool added it: a marker in
+#       /var/lib/turbopanel-kernel says so). Never reboots.
+#   tp-kernel-features installer-step
+#       The last step of a first install (scripts/run.sh). For each feature that
+#       applies to this host: say what is about to happen in plain words, save
+#       the change, then count down and restart. Does nothing on a host the
+#       features do not apply to, when TURBOPANEL_SKIP_KERNEL_SWITCH=1, and it
+#       never restarts while an update guard is armed. Its exit status is
+#       informational: the install has already succeeded.
+#
+# Features are fixed in this file; nothing the caller passes is used as a path,
+# a line of text or a command. A feature declares: an id, a platform test
+# (what it needs to be true of the host), the desired state (applied
+# idempotently), whether it needs a reboot, how to verify it, and how to undo it.
+#
+#   pi-4k-pagesize   Raspberry Pi OS on Debian 13 (trixie) boots a 16 KiB-page
+#                    kernel by default; the database proxy needs 4 KiB pages.
+#                    Desired state: `kernel=kernel8.img` is the first line of
+#                    /boot/firmware/config.txt (before any [section]).
+#                    Needs a reboot. Verify: `getconf PAGESIZE` prints 4096.
+#                    Undo: remove that line (the backup copy is left alone).
+#
+# Two backends back the features. Only the first is used today:
+#   boot-config   edits a fixed boot file with a text transform (this file).
+#   modules-load  would write /etc/modules-load.d/turbopanel-<feature>.conf for
+#                 any Debian host; no feature uses it yet, so it reports
+#                 `unsupported` rather than guessing (src/host/kernel-features
+#                 in the daemon repo carries the typed registry and an example).
+#
+# Reboot safety: a reboot is only ever offered after the change is written and
+# read back, and (when the daemon is installed) only once the daemon has saved
+# its enrolment (server.id, server-key-id and the saved server key file). The registration
+# key is single use, so a restart before that would leave the host unable to
+# enrol (it parked a host on 2026-10-04). `--countdown` shows one line per
+# second; Ctrl-C cancels the reboot and prints the manual command. Without a
+# terminal the same lines are printed without carriage returns.
+#
+# Test mode: unprivileged runs with TP_KERNEL_TEST_PREFIX set (paths live under
+# that prefix, `reboot` is replaced by TP_KERNEL_TEST_REBOOT_CMD, the page size
+# by TP_KERNEL_TEST_PAGESIZE, sleeping is skipped). As root every one of those
+# variables is ignored.
+set -eu
+umask 022
+
+tp_die() {
+  printf 'tp-kernel-features: %s\n' "$*" >&2
+  exit 1
+}
+
+if [ "$(id -u)" = "0" ]; then
+  TP_TEST=""
+  P=""
+else
+  [ -n "${TP_KERNEL_TEST_PREFIX:-}" ] || tp_die "must run as root (sudo /opt/turbopanel/share/orchestration/scripts/tp-orchestrate kernel-features …)"
+  TP_TEST=1
+  P="$TP_KERNEL_TEST_PREFIX"
+fi
+
+KF_IDS="pi-4k-pagesize"
+# tp-orchestrate is not on root's sudo PATH, so every command printed to a person
+# uses its full path.
+KF_CMD="/opt/turbopanel/share/orchestration/scripts/tp-orchestrate"
+# Root-owned on purpose (not the daemon's state dir): a note that THIS tool added
+# a line, so `undo` never removes a line a person wrote themselves.
+KF_MARKER_DIR="$P/var/lib/turbopanel-kernel"
+KF_LINE="kernel=kernel8.img"
+KF_BOOT_DIR="$P/boot/firmware"
+KF_STATE_DIR="$P/var/lib/turbopanel"
+
+# --- facts --------------------------------------------------------------------
+
+kf_model() {
+  tr -d '\000' < "$P/proc/device-tree/model" 2>/dev/null || true
+}
+
+kf_codename() {
+  sed -n 's/^VERSION_CODENAME=//p' "$P/etc/os-release" 2>/dev/null | head -n 1 | tr -d '"'
+}
+
+kf_pagesize() {
+  if [ -n "$TP_TEST" ] && [ -n "${TP_KERNEL_TEST_PAGESIZE:-}" ]; then
+    printf '%s\n' "$TP_KERNEL_TEST_PAGESIZE"
+    return 0
+  fi
+  getconf PAGESIZE 2>/dev/null || true
+}
+
+# --- backend: boot-config -----------------------------------------------------
+
+# Prints "none", "kernel8-top", "kernel8-later" or "other" for the active
+# kernel= lines of FILE (CRLF tolerated). "other" wins: any kernel= line that
+# is not kernel8.img means the person chose a kernel themselves, so it is left
+# alone. kernel8-top means kernel8.img is chosen before any [section] header.
+kf_bootcfg_scan() {
+  awk '
+    { sub(/\r$/, "") }
+    /^[ \t]*\[/ { section = 1; next }
+    /^[ \t]*kernel[ \t]*=/ {
+      v = $0
+      sub(/^[ \t]*kernel[ \t]*=[ \t]*/, "", v)
+      sub(/[ \t]+$/, "", v)
+      if (v == "kernel8.img") { if (section) later = 1; else top = 1 }
+      else other = 1
+    }
+    END {
+      if (other) print "other"
+      else if (top) print "kernel8-top"
+      else if (later) print "kernel8-later"
+      else print "none"
+    }
+  ' "$1"
+}
+
+# Keep the file's own line endings: CRLF only when its first line has one.
+kf_bootcfg_cr() {
+  if [ "$(head -n 1 "$1" | od -An -c | tr -d ' \n' | sed -n 's/.*\(\\r\\n\)$/crlf/p')" = "crlf" ]; then
+    printf '\r'
+  fi
+}
+
+# Put LINE first in FILE. Copies FILE to FILE.tp-backup-<UTC time> first,
+# writes through a temporary name in the same directory and `mv -T`, reads the
+# result back, and prints the backup path. The boot partition is FAT, so there
+# is no mode or owner to keep.
+kf_bootcfg_add_top() {
+  _bt_file="$1"
+  _bt_line="$2"
+  _bt_dir="${_bt_file%/*}"
+  _bt_name="${_bt_file##*/}"
+  CDPATH='' cd -P -- "$_bt_dir" || tp_die "cannot enter $_bt_dir"
+  [ "$(pwd -P)" = "$_bt_dir" ] || tp_die "refusing $_bt_dir: a component is a symlink"
+  [ -f "$_bt_name" ] && [ ! -L "$_bt_name" ] || tp_die "$_bt_file is not a plain file"
+  _bt_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  _bt_backup="$_bt_name.tp-backup-$_bt_stamp"
+  _bt_new=".$_bt_name.tp-new.$$"
+  _bt_n=1
+  while [ -e "$_bt_backup" ]; do
+    _bt_backup="$_bt_name.tp-backup-$_bt_stamp-$_bt_n"
+    _bt_n=$((_bt_n + 1))
+  done
+  trap 'rm -f -- "$_bt_new"' EXIT
+  cp -- "$_bt_name" "$_bt_backup" || tp_die "cannot save a backup copy of $_bt_file"
+  cmp -s -- "$_bt_name" "$_bt_backup" || tp_die "the backup does not match $_bt_file"
+  _bt_cr="$(kf_bootcfg_cr "$_bt_name")"
+  (
+    set -C
+    : > "$_bt_new"
+  ) || tp_die "cannot create a temporary file in $_bt_dir"
+  {
+    printf '%s%s\n' "$_bt_line" "$_bt_cr"
+    cat -- "$_bt_name"
+  } > "$_bt_new" || tp_die "cannot write the new $_bt_file"
+  [ "$(head -n 1 "$_bt_new" | tr -d '\r')" = "$_bt_line" ] ||
+    tp_die "the new file does not start with $_bt_line"
+  tail -n +2 "$_bt_new" | cmp -s - "$_bt_name" ||
+    tp_die "the new file does not keep the old content of $_bt_file"
+  mv -T -f -- "$_bt_new" "$_bt_name" || tp_die "cannot replace $_bt_file"
+  trap - EXIT
+  sync || tp_die "cannot flush $_bt_file to disk"
+  [ "$(kf_bootcfg_scan "$_bt_name")" = "kernel8-top" ] ||
+    tp_die "$_bt_file does not read back with the line in place"
+  printf '%s/%s\n' "$_bt_dir" "$_bt_backup"
+}
+
+# Remove every exact LINE that comes before the first [section] header, the
+# same way (backup, temporary file, mv -T, read back). Prints the backup path.
+kf_bootcfg_remove_top() {
+  _br_file="$1"
+  _br_line="$2"
+  _br_dir="${_br_file%/*}"
+  _br_name="${_br_file##*/}"
+  CDPATH='' cd -P -- "$_br_dir" || tp_die "cannot enter $_br_dir"
+  [ "$(pwd -P)" = "$_br_dir" ] || tp_die "refusing $_br_dir: a component is a symlink"
+  [ -f "$_br_name" ] && [ ! -L "$_br_name" ] || tp_die "$_br_file is not a plain file"
+  _br_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  _br_backup="$_br_name.tp-backup-$_br_stamp"
+  _br_new=".$_br_name.tp-new.$$"
+  _br_n=1
+  while [ -e "$_br_backup" ]; do
+    _br_backup="$_br_name.tp-backup-$_br_stamp-$_br_n"
+    _br_n=$((_br_n + 1))
+  done
+  trap 'rm -f -- "$_br_new"' EXIT
+  cp -- "$_br_name" "$_br_backup" || tp_die "cannot save a backup copy of $_br_file"
+  cmp -s -- "$_br_name" "$_br_backup" || tp_die "the backup does not match $_br_file"
+  (
+    set -C
+    : > "$_br_new"
+  ) || tp_die "cannot create a temporary file in $_br_dir"
+  # LINE is "kernel=<value>"; spaces and tabs around the name, the = and the
+  # value are tolerated, the same way the scan reads them.
+  _br_value="${_br_line#*=}"
+  awk -v want="$_br_value" '
+    {
+      raw = $0
+      line = $0
+      sub(/\r$/, "", line)
+      if (line ~ /^[ \t]*\[/) section = 1
+      if (!section && line ~ /^[ \t]*kernel[ \t]*=/) {
+        v = line
+        sub(/^[ \t]*kernel[ \t]*=[ \t]*/, "", v)
+        sub(/[ \t]+$/, "", v)
+        if (v == want) next
+      }
+      print raw
+    }
+  ' "$_br_name" > "$_br_new" || tp_die "cannot write the new $_br_file"
+  mv -T -f -- "$_br_new" "$_br_name" || tp_die "cannot replace $_br_file"
+  trap - EXIT
+  sync || tp_die "cannot flush $_br_file to disk"
+  case "$(kf_bootcfg_scan "$_br_name")" in
+    kernel8-top) tp_die "$_br_file still has the line after removing it" ;;
+  esac
+  printf '%s/%s\n' "$_br_dir" "$_br_backup"
+}
+
+# --- feature: pi-4k-pagesize ----------------------------------------------------
+
+# Prints STATE<TAB>reason.
+kf_pi_4k_pagesize_state() {
+  _ps="$(kf_pagesize)"
+  case "$_ps" in
+    ''|*[!0-9]*)
+      printf 'not-applicable\tthe memory page size could not be read\n'
+      return 0
+      ;;
+  esac
+  if [ "$_ps" -le 4096 ]; then
+    printf 'ready\tthis server already uses 4 KiB memory pages\n'
+    return 0
+  fi
+  case "$(kf_model)" in
+    *"Raspberry Pi"*) ;;
+    *)
+      printf 'not-applicable\tthis server is not a Raspberry Pi\n'
+      return 0
+      ;;
+  esac
+  if [ "$(kf_codename)" != "trixie" ]; then
+    printf 'not-applicable\tonly Raspberry Pi OS based on Debian 13 (trixie) is supported\n'
+    return 0
+  fi
+  if [ "$_ps" != "16384" ]; then
+    printf 'not-applicable\tthis server uses %s-byte memory pages, not the 16 KiB Raspberry Pi kernel\n' "$_ps"
+    return 0
+  fi
+  if [ ! -f "$KF_BOOT_DIR/config.txt" ] || [ -L "$KF_BOOT_DIR/config.txt" ]; then
+    printf 'blocked\t%s is missing\n' "/boot/firmware/config.txt"
+    return 0
+  fi
+  if [ ! -f "$KF_BOOT_DIR/kernel8.img" ] || [ -L "$KF_BOOT_DIR/kernel8.img" ]; then
+    printf 'blocked\tthe 4 KiB kernel (kernel8.img) is not on the boot partition\n'
+    return 0
+  fi
+  _mods=0
+  for _m in "$P"/lib/modules/*-rpi-v8; do
+    if [ -d "$_m" ]; then _mods=1; fi
+  done
+  if [ "$_mods" != "1" ]; then
+    printf 'blocked\tthe modules for the 4 KiB kernel (*-rpi-v8) are not installed\n'
+    return 0
+  fi
+  if grep -qi '^[[:space:]]*auto_initramfs[[:space:]]*=[[:space:]]*1' "$KF_BOOT_DIR/config.txt" &&
+    { [ ! -f "$KF_BOOT_DIR/initramfs8" ] || [ -L "$KF_BOOT_DIR/initramfs8" ]; }; then
+    printf 'blocked\tconfig.txt turns on auto_initramfs but initramfs8 is missing from the boot partition\n'
+    return 0
+  fi
+  case "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt")" in
+    other)
+      printf 'blocked\tconfig.txt already chooses a different kernel, so it is left as it is\n'
+      ;;
+    kernel8-top)
+      printf 'restart-needed\tthe switch is saved in config.txt; the server needs a restart\n'
+      ;;
+    *)
+      printf 'switchable\tthis server can switch to the 4 KiB kernel (a restart is needed)\n'
+      ;;
+  esac
+}
+
+# Prints the backup path (nothing when already in place).
+kf_pi_4k_pagesize_apply() {
+  # The marker goes first: if the edit then fails, a marker without the line is
+  # harmless (undo cleans it up); the line without a marker would never be undone.
+  mkdir -p -- "$KF_MARKER_DIR" || return 1
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$KF_MARKER_DIR/pi-4k-pagesize.applied" || return 1
+  _ap_backup="$(kf_bootcfg_add_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")" || {
+    # A failure after the replace leaves the line in place: keep the marker so
+    # undo can still remove it. Drop it only when the line never got there.
+    if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt" 2>/dev/null)" != "kernel8-top" ]; then
+      rm -f -- "$KF_MARKER_DIR/pi-4k-pagesize.applied"
+    fi
+    return 1
+  }
+  [ -n "$_ap_backup" ] || return 1
+  printf '%s\n' "$_ap_backup"
+}
+
+# Prints the backup path, or nothing when the line is no longer at the top.
+# The caller has already checked that the marker exists.
+kf_pi_4k_pagesize_undo() {
+  _un_marker="$KF_MARKER_DIR/pi-4k-pagesize.applied"
+  if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt")" != "kernel8-top" ]; then
+    rm -f -- "$_un_marker"
+    return 0
+  fi
+  _un_backup="$(kf_bootcfg_remove_top "$KF_BOOT_DIR/config.txt" "$KF_LINE")" || return 1
+  [ -n "$_un_backup" ] || return 1
+  rm -f -- "$_un_marker"
+  printf '%s\n' "$_un_backup"
+}
+
+kf_needs_reboot() {
+  case "$1" in
+    pi-4k-pagesize) return 0 ;;
+  esac
+  return 1
+}
+
+kf_fn() {
+  # pi-4k-pagesize -> kf_pi_4k_pagesize_<what>
+  printf 'kf_%s_%s' "$(printf '%s' "$1" | tr '-' '_')" "$2"
+}
+
+kf_known() {
+  for _k in $KF_IDS; do
+    [ "$_k" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# --- reboot ----------------------------------------------------------------------
+
+kf_manual_reboot_hint() {
+  printf 'To finish, restart this server yourself when it suits you:\n  sudo reboot\n'
+}
+
+# With TP_KF_ENROL_REF set (the installer does this), the three enrolment files
+# must be newer than that file, so files left by an earlier enrolment do not
+# count. A person running the command on an already enrolled server has no such
+# reference and the files simply have to exist.
+kf_enrol_files_fresh() {
+  [ -n "${TP_KF_ENROL_REF:-}" ] || return 0
+  [ -f "$TP_KF_ENROL_REF" ] || return 1
+  for _ef in "$KF_STATE_DIR/server.id" "$KF_STATE_DIR/server-key-id" "$1"; do
+    [ -n "$(find "$_ef" -newer "$TP_KF_ENROL_REF" 2>/dev/null)" ] || return 1
+  done
+}
+
+# The daemon must have saved its enrolment before a restart.
+kf_wait_enrolled() {
+  # Fail closed: with no state folder there is nothing to prove the enrolment
+  # is saved, so the server is not restarted.
+  [ -d "$KF_STATE_DIR" ] || return 1
+  _we_waited=0
+  _we_max=120
+  [ -z "$TP_TEST" ] || _we_max="${TP_KERNEL_TEST_ENROL_WAIT:-0}"
+  while :; do
+    # The saved server key file is matched by glob (its name ends in .j*).
+    set -- "$KF_STATE_DIR"/server-key.j*
+    if [ -s "$KF_STATE_DIR/server.id" ] && [ -s "$KF_STATE_DIR/server-key-id" ] &&
+      [ -s "$1" ] && kf_enrol_files_fresh "$1"; then
+      return 0
+    fi
+    [ "$_we_waited" -lt "$_we_max" ] || return 1
+    [ "$_we_waited" -gt 0 ] || printf 'Waiting for this server to finish enrolling with TurboPanel before restarting…\n'
+    if [ -z "$TP_TEST" ]; then sleep 2; fi
+    _we_waited=$((_we_waited + 2))
+  done
+}
+
+kf_countdown_and_reboot() {
+  _cd_total="$1"
+  trap 'printf "\n"; printf "Restart cancelled.\n"; kf_manual_reboot_hint; exit 130' INT TERM
+  _cd_tty=""
+  if [ -t 1 ]; then _cd_tty=1; fi
+  _cd_n="$_cd_total"
+  while [ "$_cd_n" -gt 0 ]; do
+    if [ -n "$_cd_tty" ]; then
+      printf '\rRestarting in %s second(s)… press Ctrl-C to cancel   ' "$_cd_n"
+    else
+      printf 'Restarting in %s second(s)…\n' "$_cd_n"
+    fi
+    if [ -z "$TP_TEST" ]; then sleep 1; fi
+    _cd_n=$((_cd_n - 1))
+  done
+  if [ -n "$_cd_tty" ]; then printf '\r%60s\r' ''; fi
+  printf 'Restarting now.\n'
+  trap - INT TERM
+  sync
+  if [ -n "$TP_TEST" ]; then
+    # shellcheck disable=SC2086
+    ${TP_KERNEL_TEST_REBOOT_CMD:-true}
+    return 0
+  fi
+  systemctl reboot
+}
+
+# --- verbs -------------------------------------------------------------------------
+
+kf_verb_list() {
+  [ $# -eq 0 ] || tp_die "list takes no arguments"
+  for _id in $KF_IDS; do printf '%s\n' "$_id"; done
+}
+
+kf_verb_status() {
+  [ $# -le 1 ] || tp_die "status takes at most one feature id"
+  if [ $# -eq 1 ]; then
+    kf_known "$1" || tp_die "unknown feature: $1"
+    _ids="$1"
+  else
+    _ids="$KF_IDS"
+  fi
+  for _id in $_ids; do
+    printf '%s\t' "$_id"
+    "$(kf_fn "$_id" state)"
+  done
+}
+
+# Said when a step of the switch failed. It says what state the file is in,
+# because a failure after the replace leaves the new line in place.
+kf_apply_failed() {
+  if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt" 2>/dev/null)" = "kernel8-top" ]; then
+    tp_die "the line was written to /boot/firmware/config.txt but the switch could not be confirmed, so the server will not restart; check that file (a backup copy is next to it) or undo it with the undo command"
+  fi
+  tp_die "the change could not be saved and /boot/firmware/config.txt is unchanged, so the server will not restart"
+}
+
+kf_verb_apply() {
+  [ $# -ge 1 ] || tp_die "apply needs a feature id"
+  _id="$1"
+  shift
+  kf_known "$_id" || tp_die "unknown feature: $_id"
+  _reboot=""
+  _countdown=10
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reboot) _reboot=1 ;;
+      --countdown)
+        [ $# -ge 2 ] || tp_die "--countdown needs a number of seconds"
+        case "$2" in ''|*[!0-9]*) tp_die "--countdown needs a number of seconds" ;; esac
+        [ "$2" -ge 3 ] && [ "$2" -le 300 ] || tp_die "--countdown must be between 3 and 300 seconds"
+        _countdown="$2"
+        shift
+        ;;
+      *) tp_die "unknown option: $1" ;;
+    esac
+    shift
+  done
+  _line="$("$(kf_fn "$_id" state)")"
+  _state="${_line%%"$(printf '\t')"*}"
+  _reason="${_line#*"$(printf '\t')"}"
+  _changed=no
+  _backup=""
+  case "$_state" in
+    ready)
+      printf 'kernel-feature %s state=ready changed=no\n' "$_id"
+      printf '%s.\n' "$_reason"
+      return 0
+      ;;
+    not-applicable)
+      printf 'kernel-feature %s state=not-applicable changed=no\n' "$_id"
+      printf 'Nothing to do: %s.\n' "$_reason"
+      return 3
+      ;;
+    blocked)
+      printf 'kernel-feature %s state=blocked changed=no\n' "$_id"
+      tp_die "$_reason"
+      ;;
+    switchable)
+      _backup="$("$(kf_fn "$_id" apply)")" || kf_apply_failed
+      [ -n "$_backup" ] || kf_apply_failed
+      _post="$("$(kf_fn "$_id" state)")" || tp_die "cannot read back the state, so the server will not restart"
+      case "$_post" in
+        restart-needed*) ;;
+        *) tp_die "the change was written but does not read back as saved, so the server will not restart" ;;
+      esac
+      _changed=yes
+      _state=restart-needed
+      printf 'kernel-feature %s state=restart-needed changed=yes backup=%s\n' "$_id" "$_backup"
+      printf 'Saved. A copy of the old boot settings is at %s.\n' "$_backup"
+      ;;
+    restart-needed)
+      printf 'kernel-feature %s state=restart-needed changed=no\n' "$_id"
+      printf '%s.\n' "$_reason"
+      ;;
+  esac
+  if kf_needs_reboot "$_id" && [ "$_state" = "restart-needed" ]; then
+    if [ -z "$_reboot" ]; then
+      printf 'The change takes effect after a restart.\n'
+      kf_manual_reboot_hint
+      return 0
+    fi
+    if ! kf_wait_enrolled; then
+      printf 'This server has not finished enrolling with TurboPanel yet, so it will not restart on its own.\n'
+      kf_manual_reboot_hint
+      return 0
+    fi
+    kf_countdown_and_reboot "$_countdown"
+  fi
+}
+
+kf_verb_undo() {
+  [ $# -eq 1 ] || tp_die "undo needs exactly one feature id"
+  kf_known "$1" || tp_die "unknown feature: $1"
+  if [ ! -f "$KF_MARKER_DIR/$1.applied" ]; then
+    printf 'kernel-feature %s changed=no\n' "$1"
+    printf 'Nothing to undo: this tool did not add the line. If you added kernel=kernel8.img yourself, remove it from /boot/firmware/config.txt by hand.\n'
+    return 0
+  fi
+  _backup="$("$(kf_fn "$1" undo)")" || tp_die "the change could not be undone; /boot/firmware/config.txt is as it was"
+  if [ -z "$_backup" ]; then
+    printf 'kernel-feature %s changed=no\n' "$1"
+    printf 'TurboPanel added the line earlier, but it is no longer at the top of /boot/firmware/config.txt (it was changed or removed since), so nothing was removed. Check that file by hand.\n'
+    return 0
+  fi
+  printf 'kernel-feature %s changed=yes backup=%s\n' "$1" "$_backup"
+  printf 'Removed. A copy of the boot settings from before is at %s. The change takes effect after the next restart.\n' "$_backup"
+}
+
+kf_verb_installer_step() {
+  [ $# -eq 0 ] || tp_die "installer-step takes no arguments"
+  if [ "${TURBOPANEL_SKIP_KERNEL_SWITCH:-}" = "1" ]; then
+    printf 'Skipping the kernel switch (TURBOPANEL_SKIP_KERNEL_SWITCH=1).\n'
+    return 0
+  fi
+  _line="$(kf_pi_4k_pagesize_state)"
+  _state="${_line%%"$(printf '\t')"*}"
+  _reason="${_line#*"$(printf '\t')"}"
+  case "$_state" in
+    switchable|restart-needed) ;;
+    blocked)
+      printf 'Not switching this Raspberry Pi to the 4 KiB kernel: %s.\n' "$_reason"
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+  if [ "${TP_KF_FIRST_INSTALL:-}" != "1" ]; then
+    printf '\nThis Raspberry Pi runs the 16 KiB kernel, which the database proxy cannot use.\n'
+    printf 'Only a first install restarts the server by itself. To switch it yourself:\n'
+    printf '  sudo %s kernel-features apply pi-4k-pagesize --reboot\n\n' "$KF_CMD"
+    return 0
+  fi
+  printf '\nInstall finished. TurboPanel is installed and set to start by itself.\n'
+  printf 'This Raspberry Pi runs the 16 KiB kernel, which the database proxy cannot use.\n'
+  printf 'TurboPanel will switch it to the 4 KiB kernel and restart this server now.\n'
+  printf 'It comes back by itself in about a minute. To skip this next time, set TURBOPANEL_SKIP_KERNEL_SWITCH=1.\n'
+  printf 'To undo it later: sudo %s kernel-features undo pi-4k-pagesize\n\n' "$KF_CMD"
+  if [ -f "$P/run/turbopanel/update-guard.json" ]; then
+    printf 'An update is still being checked, so this server will not restart on its own.\n'
+    kf_verb_apply pi-4k-pagesize
+    return 0
+  fi
+  # No `|| true`: that would switch off `set -e` inside the apply, and a failed
+  # step could then carry on to a restart. A failure here ends the script
+  # (nonzero, with a message) before any countdown.
+  kf_verb_apply pi-4k-pagesize --reboot --countdown 10
+}
+
+_verb="${1:-}"
+[ -n "$_verb" ] || tp_die "usage: tp-kernel-features list|status [ID]|apply ID [--reboot] [--countdown N]|undo ID|installer-step"
+shift
+case "$_verb" in
+  list) kf_verb_list "$@" ;;
+  status) kf_verb_status "$@" ;;
+  apply) kf_verb_apply "$@" ;;
+  undo) kf_verb_undo "$@" ;;
+  installer-step) kf_verb_installer_step "$@" ;;
+  *) tp_die "unknown verb: $_verb" ;;
+esac

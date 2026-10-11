@@ -17,6 +17,10 @@
 import { join } from "@std/path";
 import { writeComposeFileAtomic } from "../compose-files.ts";
 import { RELEASE_METADATA_DIRNAME } from "./release-layout.ts";
+import {
+  isNativeAppStart,
+  type NativeAppStart,
+} from "../native/start-entry.ts";
 
 export const RELEASE_MANIFEST_FILENAME = "release.json";
 
@@ -55,6 +59,31 @@ export type ReleaseManifestV1 = {
   standaloneOutput?: boolean;
   staticExport?: boolean;
   /**
+   * How the unit starts this release when its author typed no start command
+   * (`../native/start-entry.ts`), decided from the built tree. Recorded for the
+   * same reason as the two above: a rollback cannot look inside the release
+   * (it is readable only by the site owner's Linux user), and must restart the
+   * old release the way it ran when it was live. Optional: an older record
+   * reads back as `undefined`, which means `node server.js`.
+   */
+  nativeStart?: NativeAppStart;
+  /**
+   * Which runtime the unit ran this release on. Written only for `deno`; a
+   * record without it ran on Node (every record written before Deno apps
+   * existed, and every Node release since, so Node manifests are unchanged).
+   * A rollback reads it to put back the unit of the runtime that release ran
+   * on, not the runtime the newer payload asks for, so a site switched from
+   * Node to Deno (or back) is restored to the runtime its old release needs.
+   */
+  runtime?: "node" | "deno";
+  /**
+   * The author's start command and startup file when this release was built,
+   * so a rollback after a failed health check starts this release the way it
+   * ran, not with whatever the newer deploy asked for. Absent when unset.
+   */
+  startCommand?: string;
+  startupFile?: string;
+  /**
    * Railpack lane only: the OCI image this release produced, and the pinned
    * tools that produced it.
    *
@@ -77,44 +106,60 @@ export type ReleaseManifestV1 = {
   railpackPlanVersion?: string;
 };
 
+/** Every named field is absent or passes `ok`. */
+function optionalFieldsOk(
+  record: Record<string, unknown>,
+  keys: readonly string[],
+  ok: (field: unknown) => boolean,
+): boolean {
+  return keys.every((key) => record[key] === undefined || ok(record[key]));
+}
+
 function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
   const record = value as Record<string, unknown>;
   if (record.version !== 1) return false;
-  for (
-    const key of [
-      "serviceId",
-      "composeServiceName",
-      "releaseId",
-      "sourceId",
-      "commitSha",
-      "ref",
-      "promotedAt",
-    ]
-  ) {
+  const required = [
+    "serviceId",
+    "composeServiceName",
+    "releaseId",
+    "sourceId",
+    "commitSha",
+    "ref",
+    "promotedAt",
+  ];
+  const requiredOk = required.every((key) => {
     const field = record[key];
-    if (typeof field !== "string" || field.length === 0) return false;
-  }
-  for (const key of ["standaloneOutput", "staticExport"]) {
-    const field = record[key];
-    if (field !== undefined && typeof field !== "boolean") return false;
-  }
-  for (
-    const key of [
-      "commitMessage",
-      "commitAuthor",
-      "imageTag",
-      "imageDigest",
-      "railpackFrontendVersion",
-      "railpackPlanVersion",
-    ]
-  ) {
-    const field = record[key];
-    if (field !== undefined && typeof field !== "string") return false;
-  }
-  return true;
+    return typeof field === "string" && field.length > 0;
+  });
+  if (!requiredOk) return false;
+  return optionalFieldsOk(
+    record,
+    ["standaloneOutput", "staticExport"],
+    (field) => typeof field === "boolean",
+  ) &&
+    optionalFieldsOk(record, ["nativeStart"], isNativeAppStart) &&
+    optionalFieldsOk(
+      record,
+      ["runtime"],
+      (field) => field === "node" || field === "deno",
+    ) &&
+    optionalFieldsOk(
+      record,
+      [
+        "commitMessage",
+        "commitAuthor",
+        "startCommand",
+        "startupFile",
+        "imageTag",
+        "imageDigest",
+        "railpackFrontendVersion",
+        "railpackPlanVersion",
+      ],
+      (field) => typeof field === "string",
+    );
 }
 
 /** `<releaseDir>/.turbopanel/release.json`. */

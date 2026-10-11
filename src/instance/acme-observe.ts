@@ -7,7 +7,8 @@
  * (a recovery is never reported once the original event fired), ACME state
  * is not monotonic — a hostname can fail, then succeed on retry — so this
  * tracks last-reported outcome per hostname and emits again on either
- * direction of a state change. A failure needs
+ * direction of a state change, plus when a good certificate's expiry moves
+ * (a renewal) so the control plane learns the new `notAfter`. A failure needs
  * {@link MIN_CONSECUTIVE_FAILURES} consecutive bad polls before it's
  * reported, so the few seconds Caddy normally takes to obtain a fresh
  * certificate right after a deploy never fires a false alarm; a recovery is
@@ -31,6 +32,8 @@ export type AcmeIssuanceEventMessage = {
   hostname: string;
   ok: boolean;
   errorMessage?: string;
+  /** Leaf expiry (ISO) the probe read; sent with `ok: true` when known. */
+  notAfter?: string;
   at: string;
 };
 
@@ -51,6 +54,8 @@ type HostState = {
   lastReportedOk: boolean | undefined;
   /** Consecutive failed polls since the last reported-ok state. */
   consecutiveFailures: number;
+  /** Expiry last reported with an ok event, to spot a renewal. */
+  lastNotAfter?: string;
 };
 
 export class AcmeIssuanceObserver {
@@ -103,55 +108,75 @@ export class AcmeIssuanceObserver {
         if (!current.has(key)) this.#state.delete(key);
       }
 
-      await forEachSequential(hostnames, async (hostname) => {
-        const result = await this.#probe(hostname);
-        const state = this.#state.get(hostname) ??
-          { lastReportedOk: undefined, consecutiveFailures: 0 };
-
-        if (result.ok) {
-          state.consecutiveFailures = 0;
-          if (state.lastReportedOk === false) {
-            state.lastReportedOk = true;
-            this.#state.set(hostname, state);
-            this.#send({
-              type: "acme-issuance-event",
-              hostname,
-              ok: true,
-              at: this.#now(),
-            });
-            logInfo(
-              "deploy",
-              `acme-issuance-event recovered hostname=${hostname}`,
-            );
-          } else {
-            state.lastReportedOk = true;
-            this.#state.set(hostname, state);
-          }
-          return;
-        }
-
-        state.consecutiveFailures += 1;
-        this.#state.set(hostname, state);
-        if (
-          state.consecutiveFailures >= MIN_CONSECUTIVE_FAILURES &&
-          state.lastReportedOk !== false
-        ) {
-          state.lastReportedOk = false;
-          this.#send({
-            type: "acme-issuance-event",
-            hostname,
-            ok: false,
-            errorMessage: result.errorMessage,
-            at: this.#now(),
-          });
-          logWarn(
-            "deploy",
-            `acme-issuance-event failed hostname=${hostname}: ${result.errorMessage}`,
-          );
-        }
-      });
+      await forEachSequential(hostnames, (hostname) => this.#observe(hostname));
     } catch (err) {
       logWarn("deploy", "acme-issuance observe failed:", sanitizeForLog(err));
     }
+  }
+
+  async #observe(hostname: string): Promise<void> {
+    const result = await this.#probe(hostname);
+    const state = this.#state.get(hostname) ??
+      { lastReportedOk: undefined, consecutiveFailures: 0 };
+    this.#state.set(hostname, state);
+    if (result.ok) {
+      this.#observeOk(hostname, state, result.notAfter);
+    } else {
+      this.#observeFailure(hostname, state, result.errorMessage);
+    }
+  }
+
+  /**
+   * A good poll is reported when the control plane has not yet heard this
+   * hostname is fine (first sighting, or a recovery) and again whenever the
+   * certificate's expiry changes, which is how a renewal shows up. A second
+   * good poll with the same expiry sends nothing.
+   */
+  #observeOk(
+    hostname: string,
+    state: HostState,
+    notAfter: string | undefined,
+  ): void {
+    state.consecutiveFailures = 0;
+    const wasOk = state.lastReportedOk === true;
+    const expiryChanged = notAfter !== undefined &&
+      notAfter !== state.lastNotAfter;
+    state.lastReportedOk = true;
+    if (notAfter !== undefined) state.lastNotAfter = notAfter;
+    if (wasOk && !expiryChanged) return;
+    this.#send({
+      type: "acme-issuance-event",
+      hostname,
+      ok: true,
+      ...(notAfter === undefined ? {} : { notAfter }),
+      at: this.#now(),
+    });
+    logInfo("deploy", `acme-issuance-event ok hostname=${hostname}`);
+  }
+
+  #observeFailure(
+    hostname: string,
+    state: HostState,
+    errorMessage: string,
+  ): void {
+    state.consecutiveFailures += 1;
+    if (
+      state.consecutiveFailures < MIN_CONSECUTIVE_FAILURES ||
+      state.lastReportedOk === false
+    ) {
+      return;
+    }
+    state.lastReportedOk = false;
+    this.#send({
+      type: "acme-issuance-event",
+      hostname,
+      ok: false,
+      errorMessage,
+      at: this.#now(),
+    });
+    logWarn(
+      "deploy",
+      `acme-issuance-event failed hostname=${hostname}: ${errorMessage}`,
+    );
   }
 }

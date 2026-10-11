@@ -38,6 +38,7 @@ const copyEntry: BackupPolicyWireEntry = {
   copyId: COPY_ID,
   copyProvider: "docker",
   volumeName: "shop_uploads",
+  storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
   onCalendar: "hourly",
   retentionKeep: 24,
   enabled: false,
@@ -47,6 +48,32 @@ test("server.backups.reconcile accepts managed and copy entries as the complete 
   assertEquals(
     parseBackupsReconcilePayload({ policies: [managedEntry, copyEntry] }),
     { policies: [managedEntry, copyEntry] },
+  );
+});
+
+test("server.backups.reconcile carries a managed entry's database and refuses an unsafe or copy-side one", () => {
+  const withDatabase = { ...managedEntry, database: "defaultdb" };
+  assertEquals(
+    parseBackupsReconcilePayload({ policies: [withDatabase] }),
+    { policies: [withDatabase] },
+  );
+  for (const database of ["", "a b", "x;rm -rf /", 7]) {
+    assertThrows(
+      () =>
+        parseBackupsReconcilePayload({
+          policies: [{ ...managedEntry, database }],
+        }),
+      Error,
+      "managed database",
+    );
+  }
+  assertThrows(
+    () =>
+      parseBackupsReconcilePayload({
+        policies: [{ ...copyEntry, database: "defaultdb" }],
+      }),
+    Error,
+    "copy target",
   );
 });
 
@@ -153,6 +180,7 @@ test("server.backups.reconcile copy entries name exactly one safe source", () =>
     copyId: COPY_ID,
     copyProvider: "path",
     hostPath: "/srv/users/shop/volumes/uploads",
+    ownerUsername: "shop",
     onCalendar: "hourly",
     retentionKeep: 24,
     enabled: true,
@@ -182,6 +210,13 @@ test("server.backups.reconcile copy entries name exactly one safe source", () =>
       { ...copyEntry, volumeName: "bad name" },
       { ...copyEntry, copyProvider: "nfs" },
       { ...copyEntry, hostPath: "/srv/users/x" },
+      { ...copyEntry, storageId: undefined },
+      { ...copyEntry, ownerUsername: "shop" },
+      { ...copyEntry, composeProject: "Bad Name" },
+      { ...pathEntry, ownerUsername: undefined },
+      { ...pathEntry, ownerUsername: "../root" },
+      { ...pathEntry, composeProject: "proj" },
+      { ...defaultPath, ownerUsername: "shop" },
       { ...pathEntry, hostPath: "/srv/users/../etc" },
       { ...pathEntry, hostPath: "srv/users/x" },
       { ...pathEntry, hostPath: undefined },
@@ -258,6 +293,7 @@ const RESTORE = {
   copyId: COPY_ID,
   copyProvider: "docker",
   volumeName: "shop_uploads",
+  storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
   backupId: "bk_0123abcd",
   checksum: "a".repeat(64),
 };
@@ -277,6 +313,14 @@ test("storage.restore needs the archive's checksum and a safe source", () => {
       { ...RESTORE, policyId: "not-a-uuid" },
       { ...RESTORE, backupId: "../x" },
       { ...RESTORE, volumeName: "bad name" },
+      { ...RESTORE, storageId: undefined },
+      {
+        ...RESTORE,
+        volumeName: undefined,
+        storageId: undefined,
+        copyProvider: "path",
+        hostPath: "/srv/users/shop/volumes/x",
+      },
       { ...RESTORE, copyProvider: "path", hostPath: "/srv/users/../etc" },
     ]
   ) {

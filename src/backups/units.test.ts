@@ -5,6 +5,7 @@ import {
   backupServicePath,
   backupTimerContent,
   backupTimerPath,
+  backupTimerTiming,
   backupUnitName,
 } from "./units.ts";
 
@@ -75,4 +76,56 @@ test("the timer starts only its own service and catches up once after downtime",
   assertStringIncludes(timer, "RandomizedDelaySec=");
   assertStringIncludes(timer, "[Install]\nWantedBy=timers.target");
   assertEquals(timer.includes("[Service]"), false);
+});
+
+test("a timer that fires more than once an hour has no random delay and tight accuracy", () => {
+  for (
+    const calendar of [
+      "*-*-* *:0/2:00",
+      "*-*-* *:*:00",
+      "*-*-* *:0,30:00",
+      "Mon *-*-* *:0/15:00 Europe/Berlin",
+    ]
+  ) {
+    const timer = backupTimerContent(ID, calendar);
+    assertStringIncludes(timer, "RandomizedDelaySec=0\n");
+    assertStringIncludes(timer, "AccuracySec=1s\n");
+    assertStringIncludes(timer, "Persistent=true");
+  }
+});
+
+test("an hourly timer may start at most thirty seconds late", () => {
+  for (
+    const calendar of [
+      "*-*-* *:00:00",
+      "*-*-* 0/6:15:00",
+      "*-*-* 0,12:30:00 UTC",
+    ]
+  ) {
+    const timer = backupTimerContent(ID, calendar);
+    assertStringIncludes(timer, "RandomizedDelaySec=30\n");
+    assertEquals(timer.includes("AccuracySec="), false);
+  }
+});
+
+test("a daily or weekly timer keeps the full spread", () => {
+  for (
+    const calendar of [
+      "*-*-* 03:07:00",
+      "Sun *-*-* 03:00:00 America/Chicago",
+      "*-1-* 04:30:00",
+    ]
+  ) {
+    assertStringIncludes(
+      backupTimerContent(ID, calendar),
+      "RandomizedDelaySec=300\n",
+    );
+  }
+});
+
+test("a calendar value it cannot read is never made later than it asked", () => {
+  assertEquals(backupTimerTiming("weekly").randomizedDelaySec, 0);
+  assertEquals(backupTimerTiming("").randomizedDelaySec, 0);
+  assertEquals(backupTimerTiming("*-*-* *:0/2:00").randomizedDelaySec, 0);
+  assertEquals(backupTimerTiming("*-*-* 03:07:00").randomizedDelaySec, 300);
 });

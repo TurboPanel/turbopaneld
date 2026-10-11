@@ -20,6 +20,24 @@ import {
 /** Placeholder token permitted in managed compose (mirrors ManagedSecretPlaceholder). */
 export const MANAGED_ROOT_PASSWORD_VAR = "TURBOPANEL_MANAGED_ROOT_PASSWORD"; // NOSONAR typescript:S2068 — compose env var name for ${…} interpolation, not a credential value
 
+/** Host path (relative to the compose file) of the engine root password file. */
+export const MANAGED_ROOT_PASSWORD_FILE_SOURCE = "./secrets/root-password";
+/** Where the engine container sees that file; the `<KEY>_FILE` env points here. */
+export const MANAGED_ROOT_PASSWORD_FILE_TARGET =
+  "/run/secrets/tp_root_password";
+
+/**
+ * Engine env keys the official images also accept as `<KEY>_FILE`. A value of
+ * exactly the root-password placeholder is moved to the file form so
+ * `docker inspect` shows a path, never the password.
+ */
+const ROOT_PASSWORD_ENV_KEYS = new Set([
+  "POSTGRES_PASSWORD",
+  "MYSQL_ROOT_PASSWORD",
+  "MARIADB_ROOT_PASSWORD",
+]);
+const ROOT_PASSWORD_PLACEHOLDER = `\${${MANAGED_ROOT_PASSWORD_VAR}}`;
+
 const INTERPOLATION_RE = /\$\{([^}]+)\}/g;
 const MANAGED_SERVICE_DENYLIST = new Set([
   "privileged",
@@ -464,10 +482,56 @@ function ensureDocumentManagedNetwork(
 }
 
 /**
+ * Replace `KEY: ${TURBOPANEL_MANAGED_ROOT_PASSWORD}` with
+ * `KEY_FILE: /run/secrets/tp_root_password` plus a read-only bind of the
+ * daemon-written secret file. Returns whether anything was moved.
+ */
+function moveRootPasswordToFile(service: ComposeService): boolean {
+  const existing = service.environment;
+  let env: Record<string, string>;
+  if (Array.isArray(existing)) env = environmentFromArray(existing);
+  else if (isRecord(existing)) env = environmentFromRecord(existing);
+  else return false;
+
+  let moved = false;
+  for (const key of ROOT_PASSWORD_ENV_KEYS) {
+    if (env[key]?.trim() !== ROOT_PASSWORD_PLACEHOLDER) continue;
+    delete env[key];
+    env[`${key}_FILE`] = MANAGED_ROOT_PASSWORD_FILE_TARGET;
+    moved = true;
+  }
+  if (!moved) return false;
+  service.environment = env;
+  const mounts = Array.isArray(service.volumes) ? [...service.volumes] : [];
+  mounts.push(
+    `${MANAGED_ROOT_PASSWORD_FILE_SOURCE}:${MANAGED_ROOT_PASSWORD_FILE_TARGET}:ro`,
+  );
+  service.volumes = mounts;
+  return true;
+}
+
+/** True when the rendered compose still needs the `--env-file` interpolation. */
+export function composeUsesRootPasswordInterpolation(
+  composeYaml: string,
+): boolean {
+  return composeYaml.includes(ROOT_PASSWORD_PLACEHOLDER);
+}
+
+export type NormalizeManagedComposeOptions = {
+  /**
+   * Keep the root password as a plain env var (legacy form, visible to
+   * `docker inspect`). Only for an engine whose compose is unchanged, so the
+   * apply does not recreate (restart) it. Default: file form.
+   */
+  legacyRootPasswordEnv?: boolean;
+};
+
+/**
  * Produce the authoritative runtime compose document for a managed apply.
  */
 export function normalizeManagedCompose(
   payload: ManagedApplyPayload,
+  options: NormalizeManagedComposeOptions = {},
 ): NormalizedManagedCompose {
   const document = parseCompose(payload.composeYaml);
   const { composeServiceName, service } = resolveSoleManagedService(document);
@@ -487,6 +551,8 @@ export function normalizeManagedCompose(
     applyDockerOptions(service, payload.dockerOptions, payload.engine);
   }
 
+  if (options.legacyRootPasswordEnv !== true) moveRootPasswordToFile(service);
+
   stampManagedEngineLabels(service, payload);
   attachManagedIngressNetwork(service, payload.managedNetwork);
   ensureDocumentManagedNetwork(document, payload.managedNetwork);
@@ -496,4 +562,65 @@ export function normalizeManagedCompose(
     composeYaml: stringify(document),
     composeServiceName,
   };
+}
+
+/** Image plus named data volumes of a persisted managed compose file. */
+export type ManagedComposeDataTarget = {
+  image: string;
+  volumes: Array<{ name: string; target: string }>;
+};
+
+function namedVolumeMount(
+  entry: unknown,
+  topLevel: Record<string, unknown>,
+): { name: string; target: string } | undefined {
+  if (typeof entry !== "string") return undefined;
+  const [source, target] = entry.split(":");
+  if (!source || !target || !Object.hasOwn(topLevel, source)) {
+    return undefined;
+  }
+  const declared = topLevel[source];
+  const name = isRecord(declared) && typeof declared.name === "string"
+    ? declared.name
+    : source;
+  return { name, target };
+}
+
+/**
+ * Read the image and named volumes (in mount order, bind mounts skipped) from
+ * the compose file `managed.apply` persisted, so read-only data-volume probes
+ * mount exactly what `compose start` will.
+ */
+export function readManagedComposeDataTarget(
+  composeYaml: string,
+): ManagedComposeDataTarget {
+  const document = parseCompose(composeYaml);
+  const { service } = resolveSoleManagedService(document);
+  if (typeof service.image !== "string" || service.image.length === 0) {
+    throw new Error("managed compose service has no image");
+  }
+  const topLevel = isRecord(document.volumes) ? document.volumes : {};
+  const mounts = Array.isArray(service.volumes) ? service.volumes : [];
+  const volumes = mounts
+    .map((entry) => namedVolumeMount(entry, topLevel))
+    .filter((mount) => mount !== undefined);
+  return { image: service.image, volumes };
+}
+
+/**
+ * Container name of the sole managed service as the persisted compose file
+ * creates it: `container_name` when set, else compose's `<project>-<service>-1`.
+ * The demoted-member guard stops by name when every container listing fails.
+ */
+export function readManagedComposeContainerName(
+  composeYaml: string,
+  project: string,
+): string {
+  const { composeServiceName, service } = resolveSoleManagedService(
+    parseCompose(composeYaml),
+  );
+  return typeof service.container_name === "string" &&
+      service.container_name.length > 0
+    ? service.container_name
+    : `${project}-${composeServiceName}-1`;
 }

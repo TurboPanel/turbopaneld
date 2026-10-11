@@ -15,6 +15,7 @@ import {
   orchestratorConfigDir,
   orchestratorConfPath,
   orchestratorDataDir,
+  orchestratorHostPrepMarkerPath,
   orchestratorProject,
   orchestratorRaftCnfPath,
   orchestratorTlsDir,
@@ -304,6 +305,10 @@ test("orchestrator path helpers join under config/state", () => {
   assertEquals(
     orchestratorRaftCnfPath(LAYOUT),
     "/etc/turbopanel/orchestrator/raft.cnf",
+  );
+  assertEquals(
+    orchestratorHostPrepMarkerPath(LAYOUT),
+    "/etc/turbopanel/orchestrator/host-prep.ok",
   );
   assertEquals(
     orchestratorTlsDir(LAYOUT),

@@ -61,7 +61,7 @@ test("contract rejects names outside the POSIX allowlist", () => {
 
 test("group name for the longest accepted name fits 32 characters", () => {
   const group = principalUnixGroupName("a".repeat(28));
-  assertEquals(group, `${"a".repeat(28)}-grp`);
+  assertEquals(group, `${"a".repeat(28)}`);
   assert(group.length <= 32);
 });
 
@@ -91,7 +91,7 @@ for (const name of [PLAIN, PARTIAL, RANDOM]) {
     assert(add.includes(name), "useradd must carry the given name");
     assert(add.includes(`/srv/users/${name}/home`));
     const group = calls.find((c) => c.includes("groupadd"));
-    assert(group?.includes(`${name}-grp`));
+    assert(group?.includes(`${name}`));
   });
 }
 

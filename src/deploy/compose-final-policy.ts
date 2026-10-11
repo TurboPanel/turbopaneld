@@ -178,6 +178,13 @@ function publishedRange(port: unknown): [number, number] | undefined {
   return Number.isInteger(lo) && Number.isInteger(hi) ? [lo, hi] : undefined;
 }
 
+/** The reserved host ports as a short list, e.g. `80, 443, 7080-7081`. */
+function describeReservedHostPorts(): string {
+  return RESERVED_HOST_PORT_RANGES.map(([lo, hi]) =>
+    lo === hi ? String(lo) : `${lo}-${hi}`
+  ).join(", ");
+}
+
 function reservedPortFindings(
   name: string,
   service: Record<string, unknown>,
@@ -193,7 +200,7 @@ function reservedPortFindings(
       ? [
         `service ${name} publishes host port ${
           range[0]
-        }, which the platform uses`,
+        }, which the platform reserves for its own services (reserved host ports: ${describeReservedHostPorts()}); publish a different host port`,
       ]
       : [];
   });

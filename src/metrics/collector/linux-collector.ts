@@ -23,17 +23,20 @@
  */
 import { toContainerHealthSample } from "./docker-containers.ts";
 import {
+  type BlockDeviceSample,
   buildMetricsSample,
   type DiagnosticsSample,
   type DockerUsageSample,
   type GpuSample,
   type HostMetrics,
+  type MetricEvent,
   METRICS_LEGACY_WIRE_VERSION,
-  type MetricsSample,
+  type MetricsExtended,
   type RouterSample,
   type StorageSample,
 } from "../../contracts/metrics-contract.ts";
 import { truncateSampleToCapabilityPlan } from "../capability-plan-truncate.ts";
+import { backsServiceDevice } from "../topology/block-topology.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -71,7 +74,7 @@ import {
   emptyManagedEngineCensus,
   type ManagedEngineCensusReading,
 } from "./managed-engines.ts";
-import { parseProcMounts } from "./mounts.ts";
+import { backingDeviceNames, parseProcMounts } from "./mounts.ts";
 import { buildNetworkDeviceSamples } from "./network.ts";
 import { parseDiskstatsRows } from "./parse-diskstats.ts";
 import {
@@ -102,7 +105,9 @@ import {
   type VmstatRates,
   vmstatRates,
 } from "./parse-vmstat.ts";
+import { buildHostExtended } from "./extended-host.ts";
 import { buildCollectedExtended, mergeExtended } from "./extended-v7.ts";
+import { SOURCE_DEADLINE_MS, withDeadline } from "./deadline.ts";
 import { type HostTextSample, hostTextToExtended } from "./host-text.ts";
 import type {
   CollectorDeps,
@@ -128,6 +133,9 @@ const PROC_CONNTRACK_COUNT = "/proc/sys/net/netfilter/nf_conntrack_count";
 const PROC_CONNTRACK_MAX = "/proc/sys/net/netfilter/nf_conntrack_max";
 const PROC_MOUNTS = "/proc/mounts";
 const PROC_MDSTAT = "/proc/mdstat";
+const PROC_LOADAVG = "/proc/loadavg";
+const PROC_PID_MAX = "/proc/sys/kernel/pid_max";
+const PROC_THREADS_MAX = "/proc/sys/kernel/threads-max";
 
 type PreviousCpuSnapshot = {
   atMs: number;
@@ -166,6 +174,9 @@ type RawTexts = {
   conntrackMaxText: string | undefined;
   mountsText: string | undefined;
   mdstatText: string | undefined;
+  loadavgText: string | undefined;
+  pidMaxText: string | undefined;
+  threadsMaxText: string | undefined;
 };
 
 async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
@@ -187,6 +198,9 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     conntrackMaxText,
     mountsText,
     mdstatText,
+    loadavgText,
+    pidMaxText,
+    threadsMaxText,
   ] = await Promise.all([
     deps.readProcFile(PROC_STAT),
     deps.readProcFile(PROC_MEMINFO),
@@ -205,6 +219,9 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     deps.readProcFile(PROC_CONNTRACK_MAX),
     deps.readProcFile(PROC_MOUNTS),
     deps.readProcFile(PROC_MDSTAT),
+    deps.readProcFile(PROC_LOADAVG),
+    deps.readProcFile(PROC_PID_MAX),
+    deps.readProcFile(PROC_THREADS_MAX),
   ]);
   return {
     statText,
@@ -224,7 +241,60 @@ async function readRawTexts(deps: CollectorDeps): Promise<RawTexts> {
     conntrackMaxText,
     mountsText,
     mdstatText,
+    loadavgText,
+    pidMaxText,
+    threadsMaxText,
   };
+}
+
+const OOM_KILLS_BASELINE_KEY = "ext:host:oom_kills";
+
+/**
+ * Kernel OOM kills since the previous tick. A key of its own: the OOM event
+ * detector diffs the same counter under another key, and a tracker key must
+ * only be advanced by one reader. `null` on the first tick, after a reboot or
+ * when the counter is unreadable.
+ */
+function oomKillsThisTick(
+  tracker: CounterBaselineTracker,
+  total: number | null,
+  bootGeneration: number,
+): number | null {
+  if (total === null) {
+    tracker.invalidate(OOM_KILLS_BASELINE_KEY);
+    return null;
+  }
+  return tracker.delta(OOM_KILLS_BASELINE_KEY, total, bootGeneration);
+}
+
+/**
+ * The block-device sample of the disk that holds `/`: the mount's backing
+ * device (a `/dev/mapper` source resolves to its `dm-N`) matched to the
+ * topology's service device that is, or is the whole disk of, that device.
+ * Never throws; `undefined` when the root device cannot be matched.
+ */
+async function rootDiskSample(
+  deps: CollectorDeps,
+  topology: TopologySnapshot["blockDevices"],
+  mountEntries: Parameters<typeof backingDeviceNames>[0],
+  samples: ReturnType<typeof buildBlockDeviceSamples>,
+): Promise<BlockDeviceSample | undefined> {
+  try {
+    const [rootName] = await backingDeviceNames(
+      mountEntries,
+      ["/"],
+      deps.io,
+      deps.sysRoot,
+    );
+    if (rootName === undefined) return undefined;
+    const device = topology.find((candidate) =>
+      candidate.isServiceDevice &&
+      backsServiceDevice(candidate.kernelName, [rootName])
+    );
+    return samples.find((sample) => sample.deviceId === device?.deviceId);
+  } catch {
+    return undefined;
+  }
 }
 
 function swapUsedBytes(
@@ -233,68 +303,6 @@ function swapUsedBytes(
 ): number | null {
   if (swapTotalBytes === null || swapFreeBytes === null) return null;
   return swapTotalBytes - swapFreeBytes;
-}
-
-/** Minimal-but-valid v5 sample for the collect-failure path — never throws out of `collect()`. */
-function emptySample(
-  nowMs: number,
-  seconds: number,
-  sequence: number,
-): MetricsSample {
-  return buildMetricsSample({
-    metadata: {
-      version: METRICS_LEGACY_WIRE_VERSION,
-      sampledAt: new Date(nowMs).toISOString(),
-      intervalSeconds: seconds,
-      sequence,
-      topologyGeneration: 0,
-      bootGeneration: 0,
-    },
-    host: {
-      cpu: {
-        busyPercent: null,
-        userPercent: null,
-        systemPercent: null,
-        iowaitPercent: null,
-        stealPercent: null,
-        softirqPercent: null,
-        pressureSomePercent: null,
-        saturatedCoreCount: null,
-        procsRunning: null,
-        procsBlocked: null,
-        processCount: null,
-      },
-      kernel: { fileHandlesUsedPercent: null, conntrackUsedPercent: null },
-      memory: {
-        usedBytes: null,
-        cachedFilesBytes: null,
-        swapUsedBytes: null,
-        pressureSomePercent: null,
-        pressureFullPercent: null,
-        swapInBytesPerSecond: null,
-        swapOutBytesPerSecond: null,
-        majorPageFaultsPerSecond: null,
-      },
-      storage: {
-        ioPressureSomePercent: null,
-        ioPressureFullPercent: null,
-        diskReadBytesPerSecond: null,
-        diskWriteBytesPerSecond: null,
-        diskLatencyMs: null,
-        rootFilesystemAvailableBytes: null,
-        rootFilesystemFreeInodes: null,
-      },
-      network: { tcpRetransmitPercent: null, softnetDropsPerSecond: null },
-    },
-    networks: [],
-    filesystems: [],
-    blockDevices: [],
-    gpus: [],
-    hardwareSignals: [],
-    ingressSources: [],
-    databaseProxies: [],
-    events: [],
-  });
 }
 
 /** Shared per-tick rate inputs every domain helper threads through the baseline tracker. */
@@ -714,6 +722,11 @@ function gpuHasValue(gpu: GpuSample): boolean {
   ].some((value) => value !== null);
 }
 
+/** The control plane's ingest window for an event's `at` (turbopanel `MAX_EVENT_AGE_MS`). */
+export const EVENT_MAX_AGE_MS = 7 * 24 * 3_600_000;
+
+type BuiltExtendedInput = Parameters<typeof buildCollectedExtended>[0];
+
 export class LinuxMetricsCollector implements MetricsCollector {
   #previous: PreviousCpuSnapshot | undefined;
   readonly #tracker = new CounterBaselineTracker();
@@ -722,6 +735,8 @@ export class LinuxMetricsCollector implements MetricsCollector {
   readonly #deps: CollectorDeps;
   readonly #nominalIntervalSeconds: number;
   readonly #pageSizeBytes: number;
+  #detecting: Promise<void> | undefined;
+  readonly #carriedEvents: MetricEvent[] = [];
 
   constructor(
     deps: CollectorDeps,
@@ -732,28 +747,24 @@ export class LinuxMetricsCollector implements MetricsCollector {
     this.#pageSizeBytes = deps.pageSizeBytes;
   }
 
-  async collect(options: {
+  /**
+   * Any failure propagates: the scheduler logs it (rate limited) and sends
+   * nothing for this tick. A placeholder all-null row would be stored as real
+   * data, with generations 0 that the control plane can read as a reboot.
+   */
+  collect(options: {
     sequence: number;
     nowMs?: number;
+    live?: boolean;
   }): Promise<MetricsCollectResult> {
     const nowMs = options.nowMs ?? this.#deps.now();
-    try {
-      return await this.#collectTick(options.sequence, nowMs);
-    } catch {
-      return {
-        supported: true,
-        sample: emptySample(
-          nowMs,
-          this.#nominalIntervalSeconds,
-          options.sequence,
-        ),
-      };
-    }
+    return this.#collectTick(options.sequence, nowMs, options.live === true);
   }
 
   async #collectTick(
     sequence: number,
     nowMs: number,
+    live: boolean,
   ): Promise<MetricsCollectResult> {
     const [snapshot, raw, overrides] = await Promise.all([
       this.#deps.collectTopology(),
@@ -768,6 +779,15 @@ export class LinuxMetricsCollector implements MetricsCollector {
       nowMs,
       this.#nominalIntervalSeconds,
     );
+    const deadlineMs = this.#deps.sourceDeadlineMs ?? SOURCE_DEADLINE_MS;
+    const statfsIo = {
+      statfs: (path: string) =>
+        withDeadline(
+          Promise.resolve(this.#deps.statfs(path)),
+          deadlineMs,
+          null,
+        ),
+    };
     this.#tracker.beginTick(nowMs);
     const bootGeneration = snapshot.bootGeneration;
     const bootChanged = bootGenerationChanged(previous, bootGeneration);
@@ -786,11 +806,11 @@ export class LinuxMetricsCollector implements MetricsCollector {
 
     const filesystems = await buildFilesystemSamples(
       snapshot.filesystems,
-      { statfs: this.#deps.statfs },
+      statfsIo,
     );
     const rootFilesystemCapacity = await probeRootFilesystemCapacity(
       snapshot.filesystems,
-      { statfs: this.#deps.statfs },
+      statfsIo,
     );
     const networks = await buildNetworkDeviceSamples(
       monitoredNetworkDevices(snapshot, overrides),
@@ -805,20 +825,29 @@ export class LinuxMetricsCollector implements MetricsCollector {
     );
     // GPU sampling leads hardware signals: GPU temperature/power are
     // `hardware.physical` signals now, and this merge is their only source.
-    const gpuResult = await collectGpuSamples(this.#deps, snapshot.gpus, rates);
+    const gpuResult = await withDeadline(
+      collectGpuSamples(this.#deps, snapshot.gpus, rates),
+      deadlineMs,
+      emptyGpuSamplesResult(),
+    );
     const gpus = gpuResult.samples;
-    const ingressSources = await buildIngressSources(
-      this.#deps.ingressAdapters,
-      rates,
-    );
-    const databaseProxies = await buildDatabaseProxies(
-      this.#deps.databaseProxyAdapters,
-      rates,
-    );
-    const router = await buildRouterSample(this.#deps.routerAdapters, {
-      ...rates,
-      nowMs,
-    });
+    const [ingressSources, databaseProxies, router] = await Promise.all([
+      withDeadline(
+        buildIngressSources(this.#deps.ingressAdapters, rates),
+        deadlineMs,
+        [],
+      ),
+      withDeadline(
+        buildDatabaseProxies(this.#deps.databaseProxyAdapters, rates),
+        deadlineMs,
+        [],
+      ),
+      withDeadline(
+        buildRouterSample(this.#deps.routerAdapters, { ...rates, nowMs }),
+        deadlineMs,
+        null,
+      ),
+    ]);
     const hardwareSignalResult = await buildHardwareSignalSamples(
       snapshot.hardwareSignals,
       {
@@ -866,7 +895,9 @@ export class LinuxMetricsCollector implements MetricsCollector {
       dockerUsageReading?.dockerUsedBytes ?? null,
       this.#deps.managedEngines?.() ?? null,
     );
-    const events = await collectEvents(this.#deps, {
+    // The live stream's sample is never stored, so a transition the detectors
+    // consumed there would be lost: only the durable baseline detects events.
+    const events = live ? [] : await this.#detectEvents({
       nowMs,
       snapshot,
       tracker: this.#tracker,
@@ -882,7 +913,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       mdstatText: raw.mdstatText,
       io: this.#deps.io,
       sysRoot: this.#deps.sysRoot,
-    });
+    }, deadlineMs);
 
     const sample = buildMetricsSample({
       metadata: {
@@ -942,25 +973,35 @@ export class LinuxMetricsCollector implements MetricsCollector {
       cpu: cpu.currentCpu,
       cores: cpu.currentCores,
     };
-    const hostText = await this.#readHostText();
-    const containerReading = this.#deps.containers?.() ?? null;
-    const containers = containerReading
-      ? toContainerHealthSample(containerReading, this.#tracker, bootGeneration)
-      : undefined;
-    // Everything v7 adds rides in the contract's `extended` block: host text,
-    // container health, Docker reclaimable bytes, TLS expiry and the largest
-    // sites. The scheduler strips `extended` (and stamps v6) unless metrics-v7
-    // is negotiated. Added after plan truncation, so no plan gates it.
-    const extended = mergeExtended(
-      outgoing.extended,
-      hostText ? hostTextToExtended(hostText) : undefined,
-      buildCollectedExtended({
-        containers,
-        dockerUsage: dockerUsageReading?.usage,
-        tlsExpiry: this.#deps.tlsExpiry?.(),
-        topSites: directoryUsage?.topSites,
-      }),
-    );
+    const hostText = await this.#readHostText(deadlineMs);
+    const hostExtended = buildHostExtended({
+      loadavgText: raw.loadavgText,
+      pidMaxText: raw.pidMaxText,
+      threadsMaxText: raw.threadsMaxText,
+      mdstatText: raw.mdstatText,
+      oomKills: oomKillsThisTick(
+        this.#tracker,
+        memory.vmstat.oomKill,
+        bootGeneration,
+      ),
+      rootDisk: await rootDiskSample(
+        this.#deps,
+        snapshot.blockDevices,
+        mountEntries,
+        disks.blockDevices,
+      ),
+    });
+    const { extended, containers } = this.#buildExtended({
+      outgoing,
+      hostText,
+      hostExtended,
+      bootGeneration,
+      // A stale reading's reclaimable bytes are not reported as current.
+      dockerUsage: dockerUsageReading?.stale
+        ? undefined
+        : dockerUsageReading?.usage,
+      topSites: directoryUsage?.topSites,
+    });
     return {
       supported: true,
       sample: extended ? { ...outgoing, extended } : outgoing,
@@ -968,11 +1009,87 @@ export class LinuxMetricsCollector implements MetricsCollector {
     };
   }
 
+  /**
+   * Everything v7 adds rides in the contract's `extended` block: host text,
+   * container health, Docker reclaimable bytes, TLS expiry and the largest
+   * sites. The scheduler strips `extended` (and stamps v6) unless metrics-v7
+   * is negotiated. Added after plan truncation, so no plan gates it. A failure
+   * here drops only the v7 block, never the good v6 sample around it.
+   */
+  #buildExtended(input: {
+    outgoing: { extended?: MetricsExtended };
+    hostText: HostTextSample | undefined;
+    hostExtended: MetricsExtended["host"];
+    bootGeneration: number;
+    dockerUsage: DockerUsageSample | undefined;
+    topSites: BuiltExtendedInput["topSites"];
+  }): {
+    extended?: MetricsExtended;
+    containers?: ReturnType<typeof toContainerHealthSample>;
+  } {
+    try {
+      const containerReading = this.#deps.containers?.() ?? null;
+      const containers = containerReading
+        ? toContainerHealthSample(
+          containerReading,
+          this.#tracker,
+          input.bootGeneration,
+        )
+        : undefined;
+      const extended = mergeExtended(
+        input.outgoing.extended,
+        input.hostText ? hostTextToExtended(input.hostText) : undefined,
+        input.hostExtended ? { host: input.hostExtended } : undefined,
+        buildCollectedExtended({
+          containers,
+          dockerUsage: input.dockerUsage,
+          tlsExpiry: this.#deps.tlsExpiry?.(),
+          topSites: input.topSites,
+        }),
+      );
+      return { extended, containers };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Event detectors are edge-triggered: whatever a run detects has already been
+   * consumed from their state. A run that overruns the deadline is therefore
+   * never abandoned or repeated; it finishes in the background, its events are
+   * carried onto the next durable sample, and no second run starts while it is
+   * still going (detectors are not re-entrant).
+   */
+  async #detectEvents(
+    ctx: Parameters<typeof collectEvents>[1],
+    deadlineMs: number,
+  ): Promise<MetricEvent[]> {
+    this.#detecting ??= collectEvents(this.#deps, ctx).then(
+      (events) => {
+        this.#carriedEvents.push(...events);
+      },
+      () => {},
+    ).finally(() => {
+      this.#detecting = undefined;
+    });
+    await withDeadline(this.#detecting, deadlineMs, undefined);
+    // The control plane rejects a whole sample holding an event older than 7
+    // days, so a carried event that old (a detect stuck for days) is dropped.
+    const oldest = ctx.nowMs - EVENT_MAX_AGE_MS;
+    return this.#carriedEvents.splice(0).filter((event) =>
+      Date.parse(event.at) >= oldest
+    );
+  }
+
   /** Free-text facts never break a sample: any failure just omits them. */
-  async #readHostText(): Promise<HostTextSample | undefined> {
+  async #readHostText(deadlineMs: number): Promise<HostTextSample | undefined> {
     if (!this.#deps.hostText) return undefined;
     try {
-      return await this.#deps.hostText();
+      return await withDeadline(
+        Promise.resolve(this.#deps.hostText()),
+        deadlineMs,
+        undefined,
+      );
     } catch {
       return undefined;
     }

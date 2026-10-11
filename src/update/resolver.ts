@@ -14,6 +14,7 @@ import {
   absolutizeChannelManifestJson,
   absolutizeRootCatalogJson,
   builtinChannelManifestUrl,
+  describeMissingBuiltinChannel,
   resolveOverlayDlBase,
   resolvePinnedManifestUrl,
   rootCatalogUrl,
@@ -97,7 +98,7 @@ async function resolveManifestLocation(
     const manifestUrl = builtinChannelManifestUrl(config.channel);
     if (manifestUrl === null) {
       throw new MissingChannelError(
-        `Channel has no built-in manifest location: ${config.channel}`,
+        describeMissingBuiltinChannel(config.channel),
       );
     }
     return { manifestUrl, overlay: false };
