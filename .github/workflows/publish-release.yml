@@ -58,7 +58,7 @@ jobs:
       # The newest rc above the newest release — what staging holds.
       - name: Work out the rc to release from the tags
         id: rc
-        uses: TurboPanel/dev/.github/actions/version@66284778b3db591fab29c96aee4f1b4bd0147282 # dev#67
+        uses: TurboPanel/dev/.github/actions/version@c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
         with:
           mode: release-rc
 
@@ -173,7 +173,7 @@ jobs:
 
       - name: Work out the next version from the tags
         id: next
-        uses: TurboPanel/dev/.github/actions/version@66284778b3db591fab29c96aee4f1b4bd0147282 # dev#67
+        uses: TurboPanel/dev/.github/actions/version@c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
         with:
           mode: base
 
@@ -192,7 +192,7 @@ jobs:
 
       - name: Open the version PR for the next patch
         id: pr
-        uses: TurboPanel/dev/.github/actions/start-version-pr@66284778b3db591fab29c96aee4f1b4bd0147282 # dev#67
+        uses: TurboPanel/dev/.github/actions/start-version-pr@c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
         with:
           version: ${{ steps.next.outputs.base }}
           github-token: ${{ steps.app.outputs.token }}

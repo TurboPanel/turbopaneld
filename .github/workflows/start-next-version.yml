@@ -78,7 +78,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: 66284778b3db591fab29c96aee4f1b4bd0147282 # dev#67
+          ref: c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
           path: .promote
           fetch-depth: 1
           persist-credentials: false
