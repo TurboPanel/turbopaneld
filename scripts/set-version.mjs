@@ -18,61 +18,81 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
 
-/** One committed version field: where it is and how to read and replace it. */
-const FIELDS = [
-  {
-    file: "deno.json",
-    // The top-level "version" is the first one in the file.
-    pattern: /^(\s*"version"\s*:\s*")([^"]*)(")/m,
-  },
+export const USAGE =
+  "usage: node scripts/set-version.mjs [--check] X.Y.Z (a plain X.Y.Z, no v and no -suffix)";
+
+/** One committed version field: the file and the pattern whose group 2 is the value. */
+export const FIELDS = [
+  // The top-level "version" is the first one in the file.
+  { file: "deno.json", pattern: /^( *"version" *: *")([^"\n]*)(")/m },
   {
     file: "sonar-project.properties",
-    pattern: /^(sonar\.projectVersion=)([^\r\n]*?)([ \t\r]*)$/m,
+    pattern: /^(sonar\.projectVersion=)(\S*)()/m,
   },
 ];
 
-function fail(message) {
-  console.error(message);
-  process.exit(2);
-}
-
-const args = process.argv.slice(2);
-const check = args[0] === "--check";
-const version = check ? args[1] : args[0];
-if (args.length !== (check ? 2 : 1) || !PLAIN_VERSION.test(version ?? "")) {
-  fail(
-    "usage: node scripts/set-version.mjs [--check] X.Y.Z (a plain X.Y.Z, no v and no -suffix)",
-  );
-}
-
-const mismatches = [];
-for (const { file, pattern } of FIELDS) {
-  const path = join(ROOT, file);
-  const text = readFileSync(path, "utf8");
-  const match = pattern.exec(text);
-  if (!match) fail(`${file} has no version field`);
-  const current = match[2].trim();
-  if (current === version) continue;
-  if (check) {
-    mismatches.push(
-      `${file} says ${current}, the next version is ${version}: merge the "chore: start ${version}" PR (or run node scripts/set-version.mjs ${version} in a PR)`,
-    );
-    continue;
+/** `{ check, version }` from the arguments, or null when they are not usable. */
+export function parseArgs(args) {
+  const check = args[0] === "--check";
+  const version = check ? args[1] : args[0];
+  if (args.length !== (check ? 2 : 1) || !PLAIN_VERSION.test(version ?? "")) {
+    return null;
   }
-  writeFileSync(
-    path,
-    text.replace(pattern, (_, before, _old, after) => before + version + after),
-  );
-  console.log(`${file}: ${current} -> ${version}`);
+  return { check, version };
 }
 
-if (mismatches.length > 0) {
-  for (const line of mismatches) console.log(line);
-  process.exit(1);
+/**
+ * Checks (or, without `check`, rewrites) every field under `root`. Returns the
+ * process exit code and the lines to print.
+ */
+export function run(root, { check, version }) {
+  const out = [];
+  const mismatches = [];
+  for (const { file, pattern } of FIELDS) {
+    const path = join(root, file);
+    const text = readFileSync(path, "utf8");
+    const match = pattern.exec(text);
+    if (!match) return { code: 2, out: [`${file} has no version field`] };
+    const current = match[2];
+    if (current === version) continue;
+    if (check) {
+      mismatches.push(
+        `${file} says ${current}, the next version is ${version}: merge the "chore: start ${version}" PR (or run node scripts/set-version.mjs ${version} in a PR)`,
+      );
+      continue;
+    }
+    writeFileSync(
+      path,
+      text.replace(
+        pattern,
+        (_, before, _old, after) => before + version + after,
+      ),
+    );
+    out.push(`${file}: ${current} -> ${version}`);
+  }
+  if (mismatches.length > 0) return { code: 1, out: mismatches };
+  if (check) out.push(`every version field says ${version}`);
+  return { code: 0, out };
 }
-if (check) console.log(`every version field says ${version}`);
+
+function main() {
+  const parsed = parseArgs(process.argv.slice(2));
+  if (!parsed) {
+    console.error(USAGE);
+    process.exit(2);
+  }
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const { code, out } = run(root, parsed);
+  for (const line of out) (code === 2 ? console.error : console.log)(line);
+  process.exit(code);
+}
+
+if (
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main();
+}

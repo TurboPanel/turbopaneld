@@ -1,11 +1,13 @@
 /**
  * scripts/set-version.mjs: sets every committed version field, and `--check`
- * refuses (exit 1, one line per file) while any field disagrees. Each test
- * runs the real script from a copy inside a throwaway repo root, so the
- * checkout's own files are never touched.
+ * refuses (exit 1, one line per file) while any field disagrees. The CLI
+ * tests run the real script from a copy inside a throwaway repo root, and the
+ * in-process ones point `run` at one, so the checkout's own files are never
+ * touched.
  */
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { parseArgs, run as setVersion } from "./set-version.mjs";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -137,4 +139,68 @@ test("the checkout's own version fields agree with each other", () => {
     stdout: "piped",
   }).outputSync();
   assertEquals(result.code, 0);
+});
+
+test("parseArgs takes a plain X.Y.Z, with or without --check", () => {
+  assertEquals(parseArgs(["0.1.9"]), { check: false, version: "0.1.9" });
+  assertEquals(parseArgs(["--check", "1.0.0"]), {
+    check: true,
+    version: "1.0.0",
+  });
+  for (
+    const args of [[], ["v0.1.9"], ["0.1.9-rc.1"], ["--check"], ["1", "2"]]
+  ) {
+    assertEquals(parseArgs(args), null, `args: ${args.join(" ")}`);
+  }
+});
+
+test("run checks, then sets, every field in place", () => {
+  const dir = fixture();
+  try {
+    const before = setVersion(dir, { check: true, version: "0.2.0" });
+    assertEquals(before.code, 1);
+    assertEquals(before.out.length, 2);
+    assertStringIncludes(before.out[0], "deno.json says 0.1.6");
+    assertEquals(read(dir, "deno.json"), DENO_JSON);
+
+    const set = setVersion(dir, { check: false, version: "0.2.0" });
+    assertEquals(set, {
+      code: 0,
+      out: [
+        "deno.json: 0.1.6 -> 0.2.0",
+        "sonar-project.properties: 0.1.6 -> 0.2.0",
+      ],
+    });
+    assertStringIncludes(
+      read(dir, "deno.json"),
+      '"nested": { "version": "9.9.9" }',
+    );
+
+    assertEquals(setVersion(dir, { check: true, version: "0.2.0" }), {
+      code: 0,
+      out: ["every version field says 0.2.0"],
+    });
+    assertEquals(setVersion(dir, { check: false, version: "0.2.0" }), {
+      code: 0,
+      out: [],
+    });
+  } finally {
+    Deno.removeSync(dir, { recursive: true });
+  }
+});
+
+test("run refuses a file with no version field", () => {
+  const dir = fixture();
+  try {
+    Deno.writeTextFileSync(
+      join(dir, "sonar-project.properties"),
+      "sonar.projectKey=x\n",
+    );
+    assertEquals(setVersion(dir, { check: true, version: "0.1.6" }), {
+      code: 2,
+      out: ["sonar-project.properties has no version field"],
+    });
+  } finally {
+    Deno.removeSync(dir, { recursive: true });
+  }
 });
