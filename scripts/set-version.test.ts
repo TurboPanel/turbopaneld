@@ -204,3 +204,19 @@ test("run refuses a file with no version field", () => {
     Deno.removeSync(dir, { recursive: true });
   }
 });
+
+test("a symlinked script still runs and still fails a wrong version", () => {
+  const dir = Deno.makeTempDirSync({ prefix: "set-version-link-" });
+  try {
+    const link = join(dir, "set-version.mjs");
+    Deno.symlinkSync(SCRIPT, link);
+    const result = new Deno.Command(Deno.execPath(), {
+      args: ["run", "--no-config", "--allow-read", link, "--check", "0.0.0"],
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    assertEquals(result.code, 1);
+  } finally {
+    Deno.removeSync(dir, { recursive: true });
+  }
+});

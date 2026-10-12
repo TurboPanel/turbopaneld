@@ -15,10 +15,10 @@
  * From Tags action); the trunk build runs `--check` with that number and
  * refuses a canary while the committed files say something else.
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import process from "node:process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
 
@@ -95,8 +95,19 @@ function main() {
   process.exit(code);
 }
 
+/** A path with symlinks resolved (Node resolves import.meta.url, Deno does not); a missing path stays as given. */
+function realScriptPath(argv1) {
+  try {
+    return realpathSync(resolve(argv1));
+  } catch {
+    return resolve(argv1);
+  }
+}
+
 if (
-  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+  process.argv[1] &&
+  realScriptPath(fileURLToPath(import.meta.url)) ===
+    realScriptPath(process.argv[1])
 ) {
   main();
 }
