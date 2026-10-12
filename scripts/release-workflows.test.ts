@@ -2,8 +2,9 @@
  * Shape rules for the release workflows: the tags work out the version
  * (Road to 0.2.x, versioning Phase 3), no workflow gates on a minor, no release
  * step reads its version from deno.json, the trunk build refuses a canary
- * whose committed version fields disagree with the tags, and starting a minor
- * or major is the "Start Next Version" workflow.
+ * whose committed version fields disagree with the tags, a release opens the
+ * "chore: start <next patch>" PR, and starting a minor or major is the
+ * "Start Next Version" workflow (which opens the same kind of PR).
  */
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
@@ -66,7 +67,7 @@ function workflowFiles(): string[] {
     .sort((a, b) => a.localeCompare(b));
 }
 
-test("no workflow opens a Start PR or gates on a minor", () => {
+test("no workflow opens an old-style Start PR or gates on a minor", () => {
   const files = workflowFiles();
   assert(files.length > 0);
   for (const file of files) {
@@ -134,7 +135,7 @@ test("the trunk build stamps the tag-derived base into deno.json before compilin
     !text.includes("GITHUB_RUN_NUMBER"),
     "the canary counter is not the run number",
   );
-  // A manual run (Start Next Version's rebuild) only ever builds trunk.
+  // A manual run only ever builds trunk.
   assertMatch(text, /^ {2}workflow_dispatch:$/m);
   assertMatch(
     text,
@@ -160,43 +161,91 @@ test("Start Next Version is a manual minor|major button over the four repos", ()
   const call = text.slice(text.indexOf("start-version.sh"));
   for (
     const spec of [
-      "TurboPanel/turbopaneld:publish-daemon-trunk.yml",
-      "TurboPanel/turbopanel:build.yml",
-      "TurboPanel/ui:verify.yml",
-      "TurboPanel/website:promote-prs.yml",
+      "TurboPanel/turbopaneld",
+      "TurboPanel/turbopanel",
+      "TurboPanel/ui",
+      "TurboPanel/website",
     ]
   ) {
     assert(call.includes(spec), `start-version.sh is not given ${spec}`);
   }
 });
 
-test("the release workflows pin one TurboPanel/dev commit", () => {
-  const pins = new Set<string>();
-  for (
-    const file of [
-      "publish-daemon-trunk.yml",
-      "publish-rc.yml",
-      "publish-release.yml",
-      "promote-prs.yml",
-      "promote-ok.yml",
-      "start-next-version.yml",
-    ]
-  ) {
+const RELEASE_WORKFLOWS = [
+  "publish-daemon-trunk.yml",
+  "publish-rc.yml",
+  "publish-release.yml",
+  "promote-prs.yml",
+  "promote-ok.yml",
+  "start-next-version.yml",
+];
+
+/**
+ * The TurboPanel/dev shas pinned across the release workflows, split in two:
+ * the reusable promote workflows (`.github/workflows/gh-*.yml` and the
+ * `dev-ref:` they are handed), and the scripts (the composite actions and the
+ * checkouts of `scripts/promote`). Each group must be one sha; the groups may
+ * differ because a reusable workflow's inputs and secrets can change between
+ * dev commits, while the scripts only add steps.
+ */
+function devPins(): { workflows: Set<string>; scripts: Set<string> } {
+  const workflows = new Set<string>();
+  const scripts = new Set<string>();
+  for (const file of RELEASE_WORKFLOWS) {
     const text = read(file);
     for (
       const m of text.matchAll(
-        /TurboPanel\/dev\/\.github\/(?:workflows\/[\w.-]+|actions\/version)@([0-9a-f]{40})/g,
+        /TurboPanel\/dev\/\.github\/workflows\/[\w.-]+@([0-9a-f]{40})/g,
       )
-    ) {
-      pins.add(m[1]);
+    ) workflows.add(m[1]);
+    for (const m of text.matchAll(/^ +dev-ref: ([0-9a-f]{40})(?: #.*)?$/gm)) {
+      workflows.add(m[1]);
     }
     for (
-      const m of text.matchAll(/^ +(?:dev-)?ref: ([0-9a-f]{40})(?: #.*)?$/gm)
-    ) {
-      pins.add(m[1]);
+      const m of text.matchAll(
+        /TurboPanel\/dev\/\.github\/actions\/[\w-]+@([0-9a-f]{40})/g,
+      )
+    ) scripts.add(m[1]);
+    for (const m of text.matchAll(/^ +ref: ([0-9a-f]{40})(?: #.*)?$/gm)) {
+      scripts.add(m[1]);
     }
   }
-  assertEquals(pins.size, 1, `pins: ${[...pins].join(", ")}`);
+  return { workflows, scripts };
+}
+
+test("the release workflows pin one TurboPanel/dev commit per kind", () => {
+  const { workflows, scripts } = devPins();
+  assertEquals(
+    workflows.size,
+    1,
+    `workflow pins: ${[...workflows].join(", ")}`,
+  );
+  assertEquals(scripts.size, 1, `script pins: ${[...scripts].join(", ")}`);
+});
+
+test("a release opens the next patch's version PR after it is finalized", () => {
+  const text = read("publish-release.yml");
+  const job = text.slice(text.indexOf("\n  start-next:\n"));
+  assert(job.length > 1, "publish-release.yml has no start-next job");
+  assertMatch(job, /^ {4}needs: \[prepare, finalize\]$/m);
+  assertMatch(job, /^ {4}permissions:\n {6}contents: read\n {4}steps:/m);
+  assertMatch(
+    job,
+    /uses: actions\/create-github-app-token@[0-9a-f]{40} # v[\d.]+\n(?: {8}.*\n)*? {10}repositories: turbopaneld\n/,
+  );
+  const base = job.indexOf("mode: base");
+  const guard = job.indexOf('[ "$NEWEST" != "$RELEASED" ]');
+  const pr = job.indexOf("TurboPanel/dev/.github/actions/start-version-pr@");
+  assert(
+    base > 0 && base < guard && guard < pr,
+    "base, then the check, then the PR",
+  );
+  assertMatch(job, /version: \$\{\{ steps\.next\.outputs\.base \}\}/);
+  assertMatch(
+    job,
+    /reason: It was opened after v\$\{\{ needs\.prepare\.outputs\.version \}\} was released\./,
+  );
+  assertMatch(text, /^permissions:\n {2}contents: read\n/m);
 });
 
 test("no run: step splices an input, the ref name or a job output into the shell", () => {

@@ -31,9 +31,9 @@
 # reports plain X.Y.Z; `-canary.<N>` lives only in the asset names and the
 # signed manifest.
 #
-# workflow_dispatch re-runs the whole thing for trunk's head: "Start Next
-# Version" uses it so a started minor gets its first canary without waiting
-# for the next merge. A dispatch on any other branch does nothing.
+# workflow_dispatch re-runs the whole thing for trunk's head (for example once
+# a "chore: start X.Y.Z" PR has merged, if no other merge follows it). A
+# dispatch on any other branch does nothing.
 
 name: Publish Daemon Trunk Build
 
@@ -119,7 +119,7 @@ jobs:
 
       - name: Work out this build's version from the tags
         id: version
-        uses: TurboPanel/dev/.github/actions/version@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+        uses: TurboPanel/dev/.github/actions/version@66284778b3db591fab29c96aee4f1b4bd0147282 # dev#67
         with:
           mode: canary
 
