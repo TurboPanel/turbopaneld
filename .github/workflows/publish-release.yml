@@ -4,7 +4,7 @@
 # first merge, which brings this file into live, already works).
 #
 #   1. resolve  the merged PR and the newest rc that has not shipped (from the
-#               tags, never a version file) — that rc's bytes become the release
+#               tags) — that rc's bytes become the release
 #   2. prepare / publish / finalize   the shared promote workflows
 #               (TurboPanel/dev). prepare still waits on the `release`
 #               environment approval: keep it until this path has run once end

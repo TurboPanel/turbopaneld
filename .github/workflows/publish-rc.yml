@@ -6,7 +6,7 @@
 #   1. resolve  the merged PR's head commit and the canary that was built from
 #               it (waits for it if it is still building): the manifest on the
 #               rolling canary release that names exactly that commit. Its
-#               version (<base>-canary.<N>) came from tags, not deno.json.
+#               version (<base>-canary.<N>) came from tags; deno.json said <base>.
 #   2. prepare / publish / finalize   the shared promote workflows
 #               (TurboPanel/dev) with NO approval gate — the merge was the
 #               deliberate act; the rc is the canary's bytes re-signed

@@ -1,9 +1,9 @@
 /**
- * Shape rules for the release workflows since versions come from git tags
- * (Road to 0.2.x, versioning Phase 3): no workflow opens a "Start x.y.z" PR or
- * gates on a minor, no release step reads deno.json's version, and the one
- * deliberate act, starting a minor or major, is the "Start Next Version"
- * workflow.
+ * Shape rules for the release workflows: the tags work out the version
+ * (Road to 0.2.x, versioning Phase 3), no workflow gates on a minor, no release
+ * step reads its version from deno.json, the trunk build refuses a canary
+ * whose committed version fields disagree with the tags, and starting a minor
+ * or major is the "Start Next Version" workflow.
  */
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
@@ -111,9 +111,16 @@ test("the trunk build stamps the tag-derived base into deno.json before compilin
   const version = text.indexOf(
     "- name: Work out this build's version from the tags",
   );
+  const check = text.indexOf(
+    "- name: Check the committed version matches the tags",
+  );
   const stamp = text.indexOf("- name: Stamp the version into deno.json");
   const compile = text.indexOf("- name: Compile native binary");
-  assert(version > 0 && version < stamp && stamp < compile);
+  assert(version > 0 && version < check && check < stamp && stamp < compile);
+  assertMatch(
+    text,
+    /BASE_VERSION: \$\{\{ steps\.version\.outputs\.base \}\}\n {8}run: node scripts\/set-version\.mjs --check "\$BASE_VERSION"\n/,
+  );
   assertMatch(
     text,
     /uses: TurboPanel\/dev\/\.github\/actions\/version@[0-9a-f]{40} # dev#\d+\n {8}with:\n {10}mode: canary\n/,
