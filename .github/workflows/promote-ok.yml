@@ -4,7 +4,7 @@
 #   "Release Candidate x.y.z-rc.N" (trunk -> staging): the head commit's trunk
 #       publish-daemon-trunk.yml run passed and its canary is on the rolling `canary` release.
 #   "Release x.y.z" (staging -> live): the newest rc that has not shipped
-#       (read from the tags; no version file) is published and staging is
+#       (read from the tags) is published and staging is
 #       exactly its content.
 #
 # While what a merge would publish is still being built, the check stays

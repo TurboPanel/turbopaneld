@@ -34,7 +34,11 @@ test("the automatic release workflows exist and AGENTS.md calls the form break-g
   assertStringIncludes(read("AGENTS.md").toLowerCase(), "break-glass");
 });
 
-/** Every TurboPanel/dev reusable workflow and the signer in the three promotion workflows. */
+/**
+ * Every TurboPanel/dev reusable workflow (with its dev-ref) and the signer in
+ * the three promotion workflows. The composite actions are pinned on their own
+ * (scripts/release-workflows.test.ts).
+ */
 function promotionPins(): { dev: string[]; signer: string[] } {
   const files = ["promote.yml", "publish-rc.yml", "publish-release.yml"];
   const text = files.map((file) => read(`.github/workflows/${file}`)).join(
@@ -42,7 +46,7 @@ function promotionPins(): { dev: string[]; signer: string[] } {
   );
   const dev = [
     ...text.matchAll(
-      /TurboPanel\/dev\/\.github\/(?:workflows|actions)\/[\w-]+(?:\.yml)?@([0-9a-f]{40})/g,
+      /TurboPanel\/dev\/\.github\/workflows\/[\w-]+\.yml@([0-9a-f]{40})/g,
     ),
   ].map((match) => match[1]);
   const devRef = [...text.matchAll(/^\s+dev-ref:\s*([0-9a-f]{40})/gm)].map((
