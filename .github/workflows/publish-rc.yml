@@ -6,7 +6,7 @@
 #   1. resolve  the merged PR's head commit and the canary that was built from
 #               it (waits for it if it is still building): the manifest on the
 #               rolling canary release that names exactly that commit. Its
-#               version (<base>-canary.<N>) came from tags, not deno.json.
+#               version (<base>-canary.<N>) came from tags; deno.json said <base>.
 #   2. prepare / publish / finalize   the shared promote workflows
 #               (TurboPanel/dev) with NO approval gate — the merge was the
 #               deliberate act; the rc is the canary's bytes re-signed
@@ -113,7 +113,7 @@ jobs:
       - name: Find the canary built from that commit
         id: canary
         if: steps.r.outputs.proceed == 'true'
-        uses: TurboPanel/dev/.github/actions/version@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+        uses: TurboPanel/dev/.github/actions/version@c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
         with:
           mode: canary-of
           commit: ${{ steps.r.outputs.commit }}
@@ -216,7 +216,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+          ref: c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
           path: .promote
           fetch-depth: 1
           persist-credentials: false

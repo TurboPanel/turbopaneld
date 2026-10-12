@@ -1,20 +1,23 @@
 # Start Next Version: the one button that starts a new minor or major across
 # turbopaneld, turbopanel, ui and website (Road to 0.2.x, versioning Phase 3).
 #
-# Patches need no button: once vX.Y.Z is released, every repo's next canary is
-# X.Y.(Z+1) by itself, because versions come from git tags, not from a file and
-# not from a "Start x.y.z" PR. A minor (next X.Y.0) or a major (next X.0.0;
-# the first is 1.0.0) is the one deliberate act, and this is it:
+# Patches need no button: right after vX.Y.Z is released, publish-release.yml
+# opens the "chore: start X.Y.(Z+1)" PR in that repo, which merges itself once
+# its checks pass. A minor (next X.Y.0) or a
+# major (next X.0.0; the first is 1.0.0) is the one deliberate act, and this is
+# it:
 #
 #   1. each repo's target is the next minor/major after THAT repo's newest
 #      release (repos release independently). A repo already building the
 #      target or later is skipped, so running this twice is harmless.
 #   2. an annotated tag start/v<target> is pushed at the repo's trunk head
-#      (Release App token). That marker is the whole signal; no file changes,
-#      no PR opens. It matches no release-tag ruleset and no tag trigger.
-#   3. each repo's trunk build runs again on trunk, so its next canary, and the
-#      Release Candidate PR, carry the new number at once (website has no
-#      build: its Release Candidate PR is refreshed instead).
+#      (Release App token). That marker moves what the tags say the version
+#      is. It matches no release-tag ruleset and no tag trigger.
+#   3. each repo gets a "chore: start <target>" PR that moves its committed
+#      version numbers (node scripts/set-version.mjs <target>, a signed commit
+#      made through the GitHub API), which merges itself once its checks pass.
+#      Until it merges, that repo's canary build is refused, so nothing is
+#      rebuilt here. Running this again retries a PR that failed to open.
 #
 # From then on every release of that repo, a hotfix included, carries the new
 # number: run this only when everything on trunk may ship as the new version.
@@ -44,8 +47,8 @@ on:
         type: boolean
         default: false
 
-# The GITHUB_TOKEN only checks out TurboPanel/dev; the tags and the rebuilds in
-# all four repos go through the Release App token.
+# The GITHUB_TOKEN only checks out TurboPanel/dev; the tags and the version
+# PRs in all four repos go through the Release App token.
 permissions:
   contents: read
 
@@ -75,7 +78,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+          ref: c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
           path: .promote
           fetch-depth: 1
           persist-credentials: false
@@ -91,7 +94,7 @@ jobs:
         run: |
           echo "### Start Next Version: $BUMP" >> "$GITHUB_STEP_SUMMARY"
           sh .promote/scripts/promote/start-version.sh "$BUMP" \
-            TurboPanel/turbopaneld:publish-daemon-trunk.yml \
-            TurboPanel/turbopanel:build.yml \
-            TurboPanel/ui:verify.yml \
-            TurboPanel/website:promote-prs.yml
+            TurboPanel/turbopaneld \
+            TurboPanel/turbopanel \
+            TurboPanel/ui \
+            TurboPanel/website
