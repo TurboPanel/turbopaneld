@@ -89,18 +89,21 @@ function main() {
     console.error(USAGE);
     process.exit(2);
   }
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = join(
+    dirname(realScriptPath(fileURLToPath(import.meta.url))),
+    "..",
+  );
   const { code, out } = run(root, parsed);
   for (const line of out) (code === 2 ? console.error : console.log)(line);
   process.exit(code);
 }
 
 /** A path with symlinks resolved (Node resolves import.meta.url, Deno does not); a missing path stays as given. */
-function realScriptPath(argv1) {
+function realScriptPath(p) {
   try {
-    return realpathSync(resolve(argv1));
+    return realpathSync(resolve(p));
   } catch {
-    return resolve(argv1);
+    return resolve(p);
   }
 }
 
