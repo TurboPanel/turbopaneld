@@ -15,8 +15,9 @@
 #               sonar-project.properties) still says <version>, so every canary
 #               is refused until it moves. This opens the "chore: start
 #               <next>" PR that moves it (Release App token, a signed commit
-#               made through the GitHub API); the owner merges it. Minors and
-#               majors are started with start-next-version.yml.
+#               made through the GitHub API), which merges itself once its
+#               checks pass. Minors and majors are started with
+#               start-next-version.yml.
 #
 # A push to live that is not a merged staging PR (a break-glass promotion, the
 # finalize fast-forward) does nothing. workflow_dispatch re-runs the release
@@ -196,6 +197,7 @@ jobs:
           version: ${{ steps.next.outputs.base }}
           github-token: ${{ steps.app.outputs.token }}
           reason: It was opened after v${{ needs.prepare.outputs.version }} was released.
+          auto-merge: "true"
 
       - name: Say where the PR is
         env:
@@ -203,7 +205,7 @@ jobs:
           NEXT: ${{ steps.next.outputs.base }}
         run: |
           if [ -n "$PR_URL" ]; then
-            echo "chore: start ${NEXT}: $PR_URL (merge it to let canaries build again)" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "chore: start ${NEXT}: $PR_URL (it merges itself once its checks pass; canaries build again after that)" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "the committed version already says ${NEXT}" | tee -a "$GITHUB_STEP_SUMMARY"
           fi

@@ -245,6 +245,7 @@ test("a release opens the next patch's version PR after it is finalized", () => 
     job,
     /reason: It was opened after v\$\{\{ needs\.prepare\.outputs\.version \}\} was released\./,
   );
+  assertMatch(job, /^ {10}auto-merge: "true"$/m);
   assertMatch(text, /^permissions:\n {2}contents: read\n/m);
 });
 

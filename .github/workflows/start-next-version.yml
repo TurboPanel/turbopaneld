@@ -2,7 +2,8 @@
 # turbopaneld, turbopanel, ui and website (Road to 0.2.x, versioning Phase 3).
 #
 # Patches need no button: right after vX.Y.Z is released, publish-release.yml
-# opens the "chore: start X.Y.(Z+1)" PR in that repo. A minor (next X.Y.0) or a
+# opens the "chore: start X.Y.(Z+1)" PR in that repo, which merges itself once
+# its checks pass. A minor (next X.Y.0) or a
 # major (next X.0.0; the first is 1.0.0) is the one deliberate act, and this is
 # it:
 #
@@ -14,9 +15,9 @@
 #      is. It matches no release-tag ruleset and no tag trigger.
 #   3. each repo gets a "chore: start <target>" PR that moves its committed
 #      version numbers (node scripts/set-version.mjs <target>, a signed commit
-#      made through the GitHub API). Until the owner merges it, that repo's
-#      canary build is refused, so nothing is rebuilt here. Running this again
-#      retries a PR that failed to open.
+#      made through the GitHub API), which merges itself once its checks pass.
+#      Until it merges, that repo's canary build is refused, so nothing is
+#      rebuilt here. Running this again retries a PR that failed to open.
 #
 # From then on every release of that repo, a hotfix included, carries the new
 # number: run this only when everything on trunk may ship as the new version.

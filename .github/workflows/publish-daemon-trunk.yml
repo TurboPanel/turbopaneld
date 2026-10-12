@@ -127,7 +127,8 @@ jobs:
         # The committed version fields (deno.json, sonar-project.properties)
         # must already say the base the tags work out. Right after a release
         # a "chore: start X.Y.Z" PR bumps them (node scripts/set-version.mjs
-        # X.Y.Z); until the owner merges it, every canary is refused here.
+        # X.Y.Z) and merges itself once its checks pass; until it merges,
+        # every canary is refused here.
         env:
           BASE_VERSION: ${{ steps.version.outputs.base }}
         run: node scripts/set-version.mjs --check "$BASE_VERSION"
