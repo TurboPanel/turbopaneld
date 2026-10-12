@@ -25,13 +25,16 @@ const PLAIN_VERSION = /^\d+\.\d+\.\d+$/;
 export const USAGE =
   "usage: node scripts/set-version.mjs [--check] X.Y.Z (a plain X.Y.Z, no v and no -suffix)";
 
-/** One committed version field: the file and the pattern whose group 2 is the value. */
+/**
+ * One committed version field: the file and a pattern whose group 1 is what
+ * comes before the value and group 2 is the value.
+ */
 export const FIELDS = [
   // The top-level "version" is the first one in the file.
   { file: "deno.json", pattern: /^( *"version" *: *")([^"\n]*)(")/m },
   {
     file: "sonar-project.properties",
-    pattern: /^(sonar\.projectVersion=)(\S*)()/m,
+    pattern: /^(sonar\.projectVersion=)(\S*)/m,
   },
 ];
 
@@ -69,7 +72,8 @@ export function run(root, { check, version }) {
       path,
       text.replace(
         pattern,
-        (_, before, _old, after) => before + version + after,
+        (whole, before, old) =>
+          before + version + whole.slice(before.length + old.length),
       ),
     );
     out.push(`${file}: ${current} -> ${version}`);
