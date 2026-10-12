@@ -113,8 +113,9 @@ jobs:
 
       - name: Stamp the version into deno.json
         # What the binary reports (src/version.ts reads deno.json): the tag's
-        # number. Versions come from tags now, so deno.json's committed number
-        # is not checked against the tag; it is overwritten in this checkout.
+        # number. The committed number is checked against the tags only on the
+        # canary path (publish-daemon-trunk.yml); here it is overwritten in
+        # this checkout.
         # A dry run's throwaway version (not X.Y.Z) leaves deno.json alone.
         run: |
           set -eu
