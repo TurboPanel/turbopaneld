@@ -24,7 +24,8 @@ export type AccessGroupEntry = Readonly<{
 
 type RuntimeEntry = Readonly<{
   seriesKey: string;
-  default: string;
+  /** Absent for Node: an app that pins nothing runs the newest series. */
+  default?: string;
   series: Readonly<Record<string, Readonly<Record<string, never>>>>;
   baselineExtensions?: readonly string[];
   optionalExtensions?: readonly string[];
@@ -148,8 +149,22 @@ export function phpBuiltinExtensions(series: string): readonly string[] {
   return RUNTIMES.php.builtinExtensions?.[series] ?? [];
 }
 
-export function defaultSeries(runtime: RuntimeName): string {
-  return RUNTIMES[runtime].default;
+/**
+ * The series a runtime uses when a site names none and the registry says which.
+ * Node has none: it runs {@link newestSeries} instead.
+ */
+export function defaultSeries(runtime: Exclude<RuntimeName, "node">): string {
+  const series = RUNTIMES[runtime].default;
+  if (series === undefined) {
+    throw new Error(`runtime registry has no default series for ${runtime}`);
+  }
+  return series;
+}
+
+/** The highest series the registry offers, compared as numbers. */
+export function newestSeries(runtime: RuntimeName): string {
+  const offered = supportedSeries(runtime);
+  return offered[offered.length - 1] as string;
 }
 
 /** Whether the registry lists the series `version` belongs to. */
