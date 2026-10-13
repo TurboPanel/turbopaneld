@@ -34,6 +34,7 @@ import type {
   AnsibleTaskStartEvent,
 } from "../orchestration/ansible-events.ts";
 import { ansibleFailureLine } from "../orchestration/ansible-failure.ts";
+import { definedFields } from "../util/optional-fields.ts";
 
 export const DEPLOY_PROGRESS_DETAIL_INTERVAL_MS = 2000;
 
@@ -172,9 +173,9 @@ export function clampCommandProgress(
   return clamped;
 }
 
-/** `JSON.stringify` drops `undefined` fields; strip them so snapshots compare. */
+/** A copy without the `undefined` fields, so snapshots compare as sent. */
 function definedStep(step: CommandProgressStep): CommandProgressStep {
-  return JSON.parse(JSON.stringify(step)) as CommandProgressStep;
+  return definedFields({ ...step });
 }
 
 class DeployStepReporterImpl implements DeployStepReporter {

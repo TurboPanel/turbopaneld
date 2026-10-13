@@ -193,11 +193,16 @@ export async function probeDeployPresence(
       probes.runtimes ?? (() => readHostRuntimes(layout.runtimesDir)),
     )
     : undefined;
-  const webServers = new Set<SiteEngineId>();
-  for (const engine of needs.webServers) {
-    const binary = join(layout.runtimesDir, ...WEB_SERVER_BINARIES[engine]);
-    if (await probeOr(true, () => fileExists(binary))) webServers.add(engine);
-  }
+  // Independent file stats: probe every engine binary at once.
+  const engineBinaries = await Promise.all(
+    needs.webServers.map(async (engine) => {
+      const binary = join(layout.runtimesDir, ...WEB_SERVER_BINARIES[engine]);
+      return [engine, await probeOr(true, () => fileExists(binary))] as const;
+    }),
+  );
+  const webServers = new Set<SiteEngineId>(
+    engineBinaries.filter(([, present]) => present).map(([engine]) => engine),
+  );
   const buildTool = await probeOr(
     needs.buildTool,
     probes.buildTool ?? (() => buildToolPresent(layout.runtimesDir)),
