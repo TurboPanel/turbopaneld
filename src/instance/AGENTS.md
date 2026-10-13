@@ -689,8 +689,13 @@ exists because a deploy is the wrong trigger for a **revocation** — removing a
 key must not wait for an unrelated environment to ship — and because a deploy
 payload can never carry the complete set that safe removal requires. It
 subsumes shell and SSH access changes too, so changing them no longer means
-deploying one of its environments. See `../deploy/ssh/` for the
-host side. `run.sh` still pins
+deploying one of its environments. An **empty** `principals` prunes no key
+file unless the payload says `allowEmpty: true` (an empty list is far more
+often a control plane that lost track of the server than a host that manages
+nobody). Optional `retirePrincipals[]` names accounts the panel deleted; the
+handler removes them through `tp-host principal-remove` after the surviving
+set is applied, and reports them in `principalsRetired`. See
+`../deploy/ssh/` for the host side. `run.sh` still pins
 `--cacert` first (`tp_fetch_instance_ca`); on HTTP `000` with an existing CA
 it asks again with the **system roots** — a `404` there means the control
 plane moved to public TLS and the stale CA is dropped — and only then retries
