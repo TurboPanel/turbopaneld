@@ -765,6 +765,45 @@ test("parseEnvironmentLifecyclePayload rejects unknown action", () => {
   );
 });
 
+test("parsePrincipalsReconcilePayload carries retirePrincipals and allowEmpty", () => {
+  assertEquals(
+    parsePrincipalsReconcilePayload({
+      principals: [],
+      retirePrincipals: [{ username: "old_user" }],
+      allowEmpty: true,
+    }),
+    {
+      principals: [],
+      retirePrincipals: [{ username: "old_user" }],
+      allowEmpty: true,
+    },
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({
+        principals: [{ principalId: PRINCIPAL_ID, username: "kept" }],
+        retirePrincipals: [{ username: "kept" }],
+      }),
+    Error,
+    "retirePrincipals names kept, which is also in principals",
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({
+        principals: [],
+        retirePrincipals: [{ username: "bad name" }],
+      }),
+    TypeError,
+    "Invalid retirePrincipals entry",
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({ principals: [], allowEmpty: "yes" }),
+    TypeError,
+    "allowEmpty must be a boolean",
+  );
+});
+
 test("parsePrincipalsReconcilePayload accepts empty list and rejects duplicate username", () => {
   assertEquals(parsePrincipalsReconcilePayload({ principals: [] }), {
     principals: [],

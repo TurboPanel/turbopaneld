@@ -122,6 +122,17 @@ export type NtpSetResult = {
 };
 
 /**
+ * The uid and primary gid a site owner's Linux user has on this host, reported
+ * back so the control plane records them per server. Must stay in sync with the
+ * instance canonical result shapes.
+ */
+export type PrincipalIdReport = {
+  principalId: string;
+  uid: number;
+  gid: number;
+};
+
+/**
  * Must stay in sync with the instance canonical `server.principals.reconcile`
  * shape.
  *
@@ -134,6 +145,21 @@ export type NtpSetResult = {
  */
 export type PrincipalsReconcilePayload = {
   principals: EnvironmentDeployPrincipalMaterial[];
+  /**
+   * Accounts the panel has deleted and this host should remove once the set
+   * above is applied: user, group, home and slice go through `tp-host
+   * principal-remove`, the same path a delete teardown's `environment.stop`
+   * takes. A name here may not also be in `principals`. Optional, additive:
+   * an older control plane never sends it.
+   */
+  retirePrincipals?: Array<{ username: string }>;
+  /**
+   * Explicit opt-in for an **empty** `principals`. Without it an empty set
+   * prunes nothing: the host keeps every key file it has, because an empty
+   * list is far more often a control-plane bug than a real "nobody is managed
+   * here any more". Optional, additive.
+   */
+  allowEmpty?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `server.principals.reconcile` shape. */
@@ -147,6 +173,18 @@ export type PrincipalsReconcileResult = {
    * SFTP chroot switch is on). Additive: older control planes ignore it.
    */
   sftpChroot: boolean;
+  /**
+   * Accounts from `retirePrincipals` that the host removed. One the host kept
+   * (still referenced, or not a TurboPanel principal) is named in `warnings`.
+   * Additive: older control planes ignore it.
+   */
+  principalsRetired?: string[];
+  /**
+   * The uid and primary gid each applied account has on this host, so the
+   * control plane records them per server. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
   warnings: string[];
 };
 
@@ -762,6 +800,15 @@ export type EnvironmentDeployPrincipalMaterial = {
   username: string;
   uid?: number;
   gid?: number;
+  /**
+   * `central` when `uid`/`gid` were chosen by the control plane's
+   * installation-wide allocation rather than set by an operator. Such ids are
+   * advisory: they are used to create a new account, but an account or group
+   * that already exists on the host is adopted with the ids it has (and
+   * reported back), never renumbered. Absent means an operator override,
+   * which is binding. Additive: an older daemon treats every id as binding.
+   */
+  idSource?: "central";
   home?: string;
   shell?: string;
   /**
@@ -874,6 +921,8 @@ export type EnvironmentDeploySitePrincipal = {
   username: string;
   uid?: number;
   gid?: number;
+  /** See {@link EnvironmentDeployPrincipalMaterial.idSource}. */
+  idSource?: "central";
 };
 
 /**
@@ -1519,6 +1568,12 @@ export type EnvironmentDeployResult = {
   releases?: EnvironmentDeployResultRelease[];
   /** Per-site facts for the sites this deploy applied; omitted when none. */
   sites?: EnvironmentDeployResultSite[];
+  /**
+   * The uid and primary gid each account this deploy ensured has on this host.
+   * Omitted when the deploy ensured none. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
 };
 
 export type EnvironmentStopPayload = {
@@ -2647,10 +2702,12 @@ export function parseTimezoneSetPayload(value: unknown): TimezoneSetPayload {
  * deploy and by a reconcile must validate identically, or one channel becomes a
  * way to say something the other refuses.
  *
- * An **empty** `principals` array is legal and means "TurboPanel manages no
- * accounts on this server" — which is a real instruction (remove every key
- * file), not an empty request. A missing or non-array `principals` is a
- * malformed payload and throws, so the two can never be confused.
+ * An **empty** `principals` array parses (an older control plane may send
+ * it), but it only means "remove every key file" when `allowEmpty` is set;
+ * the handler keeps the host's key files otherwise. A missing or non-array
+ * `principals` is a malformed payload and throws, so the two can never be
+ * confused. A `retirePrincipals` name that is also in `principals` is
+ * refused: one payload cannot both keep and remove an account.
  */
 export function parsePrincipalsReconcilePayload(
   value: unknown,
@@ -2673,7 +2730,24 @@ export function parsePrincipalsReconcilePayload(
     }
     seen.add(principal.username);
   }
-  return { principals };
+  const retirePrincipals = parseOptionalMaterialArray(
+    value.retirePrincipals,
+    "retirePrincipals",
+    parseRetirePrincipalEntry,
+  );
+  for (const entry of retirePrincipals ?? []) {
+    if (seen.has(entry.username)) {
+      throw new Error(
+        `retirePrincipals names ${entry.username}, which is also in principals`,
+      );
+    }
+  }
+  const allowEmpty = parseOptionalBoolean(value.allowEmpty, "allowEmpty");
+  return {
+    principals,
+    ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
+    ...(allowEmpty === undefined ? {} : { allowEmpty }),
+  };
 }
 
 export function parseTlsTrustReconcilePayload(
@@ -4333,6 +4407,7 @@ function parsePrincipalMaterial(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
   const home = parsePrincipalOptionalString(
     value.home,
@@ -4517,6 +4592,7 @@ function parseSitePrincipal(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
 }
 
@@ -6106,12 +6182,13 @@ function parseStopSiteRelease(
   return { serviceId: value.serviceId, username: value.username };
 }
 
-function parseStopRetirePrincipal(value: unknown): { username: string } {
+/** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */
+function parseRetirePrincipalEntry(value: unknown): { username: string } {
   if (
     !isRecord(value) || typeof value.username !== "string" ||
     !STOP_SITE_RELEASE_USERNAME_RE.test(value.username)
   ) {
-    throw new TypeError("Invalid environment.stop retirePrincipals entry");
+    throw new TypeError("Invalid retirePrincipals entry");
   }
   return { username: value.username };
 }
@@ -6155,7 +6232,7 @@ export function parseEnvironmentStopPayload(
   const retirePrincipals = parseOptionalMaterialArray(
     value.retirePrincipals,
     "retirePrincipals",
-    parseStopRetirePrincipal,
+    parseRetirePrincipalEntry,
   );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),

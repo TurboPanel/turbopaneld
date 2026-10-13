@@ -119,7 +119,7 @@ jobs:
 
       - name: Work out this build's version from the tags
         id: version
-        uses: TurboPanel/dev/.github/actions/version@c4ae5d95b3784421efcd136928bc706ffa239b6e # dev#68
+        uses: TurboPanel/dev/.github/actions/version@fbb7c467f5d403a577e62864c6c1a6b30be661cd # dev#69
         with:
           mode: canary
 

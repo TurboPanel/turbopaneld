@@ -6,7 +6,10 @@ import type {
   SshApplyPaths,
   SshApplyResult,
 } from "../deploy/ssh/apply.ts";
-import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
+import {
+  EMPTY_SET_KEPT_WARNING,
+  handlePrincipalsReconcile,
+} from "./principals-reconcile.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -59,6 +62,7 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
         ensured.push(principals);
         return Promise.resolve();
       },
+      reportPrincipalIds: () => Promise.resolve([]),
       applySshAccess: (principals, paths) => {
         sshCalls.push({ principals, paths });
         return Promise.resolve(ssh);
@@ -152,5 +156,99 @@ test("handlePrincipalsReconcile reports a failed runtime group grant as a warnin
   assertEquals(result.warnings, [
     "could not add erin to tpsftp: no such group",
     "AllowUsers is set",
+  ]);
+});
+
+const NO_CHANGE: SshApplyResult = {
+  changedPrincipals: [],
+  removedPrincipals: [],
+  sshdReloaded: false,
+  sftpChroot: false,
+  warnings: [],
+};
+
+test("handlePrincipalsReconcile keeps key files on an empty set unless allowEmpty is set", async () => {
+  const prunes: Array<boolean | undefined> = [];
+  const deps = {
+    resolveLayout: () => LAYOUT,
+    ensureSystemPrincipals: () => Promise.resolve(),
+    applySshAccess: (
+      _principals: readonly PrincipalSshSpec[],
+      paths?: SshApplyPaths,
+    ) => {
+      prunes.push(paths?.prune);
+      return Promise.resolve(NO_CHANGE);
+    },
+  };
+  const kept = await handlePrincipalsReconcile(
+    { principals: [] },
+    "2026-01-01T00:00:00.000Z",
+    deps,
+  );
+  assertEquals(kept.warnings, [EMPTY_SET_KEPT_WARNING]);
+  assertEquals(kept.principalsRetired, undefined);
+
+  const pruned = await handlePrincipalsReconcile(
+    { principals: [], allowEmpty: true },
+    "2026-01-01T00:00:00.000Z",
+    deps,
+  );
+  assertEquals(pruned.warnings, []);
+  assertEquals(prunes, [false, true]);
+});
+
+test("handlePrincipalsReconcile retires named accounts after the set is applied", async () => {
+  const order: string[] = [];
+  const result = await handlePrincipalsReconcile(
+    {
+      principals: [{ principalId: "p5", username: "frank" }],
+      retirePrincipals: [{ username: "gone" }, { username: "busy" }],
+    },
+    "2026-01-01T00:00:00.000Z",
+    {
+      resolveLayout: () => LAYOUT,
+      ensureSystemPrincipals: () => {
+        order.push("ensure");
+        return Promise.resolve();
+      },
+      applySshAccess: () => {
+        order.push("ssh");
+        return Promise.resolve(NO_CHANGE);
+      },
+      retirePrincipals: (usernames) => {
+        order.push(`retire:${usernames.join(",")}`);
+        return Promise.resolve({
+          retired: ["gone"],
+          failed: [{ username: "busy", error: "sites/ not empty" }],
+        });
+      },
+    },
+  );
+  assertEquals(order, ["ensure", "ssh", "retire:gone,busy"]);
+  assertEquals(result.principalsRetired, ["gone"]);
+  assertEquals(result.warnings, ["principal busy kept: sites/ not empty"]);
+});
+
+test("handlePrincipalsReconcile reports the ids each account ended up with", async () => {
+  const result = await handlePrincipalsReconcile(
+    { principals: [{ principalId: "p1", username: "alice" }] },
+    new Date().toISOString(),
+    {
+      resolveLayout: () => LAYOUT,
+      ensureSystemPrincipals: () => Promise.resolve(),
+      reportPrincipalIds: () =>
+        Promise.resolve([{ principalId: "p1", uid: 20001, gid: 20001 }]),
+      applySshAccess: () =>
+        Promise.resolve({
+          changedPrincipals: [],
+          removedPrincipals: [],
+          sshdReloaded: false,
+          sftpChroot: false,
+          warnings: [],
+        }),
+    },
+  );
+  assertEquals(result.principals, [
+    { principalId: "p1", uid: 20001, gid: 20001 },
   ]);
 });

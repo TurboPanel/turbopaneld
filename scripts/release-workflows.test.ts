@@ -28,6 +28,21 @@ function read(name: string): string {
   return Deno.readTextFileSync(join(WORKFLOWS, name));
 }
 
+/** One top-level job of a workflow file (empty when there is none). */
+function jobText(source: string, name: string): string {
+  const start = source.indexOf(`\n  ${name}:\n`);
+  if (start < 0) return "";
+  const rest = source.slice(start + 1);
+  const end = rest.slice(1).search(/\n {2}[\w-]+:\n/);
+  return end < 0 ? rest : rest.slice(0, end + 2);
+}
+
+/** The source with one top-level job removed. */
+function withoutJob(source: string, name: string): string {
+  const job = jobText(source, name);
+  return job ? source.replace(job, "") : source;
+}
+
 /**
  * The text of every `run:` step in a workflow file (single-line and block
  * scalars), found by indentation so no YAML parser is needed.
@@ -181,18 +196,33 @@ const RELEASE_WORKFLOWS = [
 ];
 
 /**
+ * The jobs that call gh-promote-ok.yml. The Promote OK check pins its own dev
+ * commit, so its fixes can ship without moving the rest of the promotion chain.
+ */
+const PROMOTE_OK_JOBS: Record<string, string> = {
+  "promote-ok.yml": "evaluate",
+  "promote-ok-recheck.yml": "dry-run",
+};
+
+/**
  * The TurboPanel/dev shas pinned across the release workflows, split in two:
  * the reusable promote workflows (`.github/workflows/gh-*.yml` and the
  * `dev-ref:` they are handed), and the scripts (the composite actions and the
  * checkouts of `scripts/promote`). Each group must be one sha; the groups may
  * differ because a reusable workflow's inputs and secrets can change between
- * dev commits, while the scripts only add steps.
+ * dev commits, while the scripts only add steps. The Promote OK jobs are left
+ * out: they are their own group (checked below).
  */
 function devPins(): { workflows: Set<string>; scripts: Set<string> } {
   const workflows = new Set<string>();
   const scripts = new Set<string>();
   for (const file of RELEASE_WORKFLOWS) {
-    const text = read(file);
+    let text = read(file);
+    if (PROMOTE_OK_JOBS[file]) text = withoutJob(text, PROMOTE_OK_JOBS[file]);
+    assert(
+      !text.includes("gh-promote-ok.yml@"),
+      `${file} calls gh-promote-ok.yml outside its job`,
+    );
     for (
       const m of text.matchAll(
         /TurboPanel\/dev\/\.github\/workflows\/[\w.-]+@([0-9a-f]{40})/g,
@@ -221,6 +251,22 @@ test("the release workflows pin one TurboPanel/dev commit per kind", () => {
     `workflow pins: ${[...workflows].join(", ")}`,
   );
   assertEquals(scripts.size, 1, `script pins: ${[...scripts].join(", ")}`);
+});
+
+test("the Promote OK jobs pin one TurboPanel/dev commit, and hand it on as dev-ref", () => {
+  const pins = new Set<string>();
+  for (const [file, name] of Object.entries(PROMOTE_OK_JOBS)) {
+    const job = jobText(read(file), name);
+    const uses = [
+      ...job.matchAll(/gh-promote-ok\.yml@([0-9a-f]{40}) # dev#\d+$/gm),
+    ];
+    const refs = [...job.matchAll(/^ +dev-ref: ([0-9a-f]{40})(?: #.*)?$/gm)];
+    assertEquals(uses.length, 1, `${file} ${name}: one gh-promote-ok.yml call`);
+    assertEquals(refs.length, 1, `${file} ${name}: one dev-ref`);
+    pins.add(uses[0][1]);
+    pins.add(refs[0][1]);
+  }
+  assertEquals(pins.size, 1, `Promote OK pins: ${[...pins].join(", ")}`);
 });
 
 test("a release opens the next patch's version PR after it is finalized", () => {

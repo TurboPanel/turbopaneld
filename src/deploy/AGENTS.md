@@ -342,11 +342,26 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   `sequence`. The file is the durability source of truth; the in-memory buffer
   is only a batching cache.
 - **Phases** — lines are tagged with the deploy step they belong to: `prepare`,
-  `pull`, `fetch`, `build`, `release-promote`, `pre-deploy`, `compose-up`,
-  `health`, `post-deploy`, plus `hooks`, `managed-apply`, `lifecycle-start` /
-  `lifecycle-stop` / `lifecycle-restart`, and `stop` (`COMMAND_LOG_PHASES` in
-  `src/logs/contracts.ts`). `fetch` / `release-promote` bracket the Git-backed
-  release engine; its build output shares the existing `build` phase.
+  `install-docker`, `install-gateway`, `install-runtime`, `install-web-server`,
+  `install-build-tool`, `pull`, `fetch`, `build`, `release-promote`,
+  `pre-deploy`, `compose-up`, `health`, `post-deploy`, plus `hooks`,
+  `managed-apply`, `lifecycle-start` / `lifecycle-stop` / `lifecycle-restart`,
+  and `stop` (`COMMAND_LOG_PHASES` in `src/logs/contracts.ts`). `fetch` /
+  `release-promote` bracket the Git-backed release engine; its build output
+  shares the existing `build` phase. The `install-*` phases bracket the
+  on-demand playbooks (Docker, gateway, Node / Deno, web engines + PHP, the
+  build tool): each task start is one transcript line, failures carry their
+  message, raw playbook stdout is never streamed.
+- **Step plan** (`src/commands/deploy-progress.ts`, `deploy-progress-plan.ts`)
+  — before `prepare`, the deploy probes what is already on the host (Docker
+  engine, gateway, vendored runtimes, web engine binaries, PHP series, build
+  tool) without installing anything and sends a `command-progress` cell
+  message: the ordered step list (`ready` for what is present, `pending`
+  otherwise), then one message per step transition and a throttled `detail`
+  (≤ 1 per 2 s) while a playbook runs. On failure or cancel a final payload
+  (`running` → `failed` / `skipped`, `pending` → `skipped`) goes out before
+  `command-outcome`. The planner only runs when the router supplied a sender;
+  hermetic callers get the no-op reporter and never probe the host.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
   zero-based and gap-free per command (the first upload is always `seq = 0`),
   and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.

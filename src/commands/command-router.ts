@@ -40,6 +40,10 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
+import {
+  createDeployStepReporter,
+  sendOverOpenSocket,
+} from "./deploy-progress.ts";
 import { handleManagedApply } from "../managed/apply.ts";
 import {
   beginManagedCommandIntent,
@@ -351,6 +355,13 @@ export async function handleCommandDispatch(
         // Throws `cancelled: …` when a cancel arrived before this dispatch; the
         // catch below reports it as the command's outcome like any failure.
         const cancel = deployCancels.begin(message.commandId);
+        // Step plan + live progress ride the same socket as the outcome,
+        // fire-and-forget like `update-progress`.
+        const progress = createDeployStepReporter({
+          id: message.id,
+          commandId: message.commandId,
+          send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+        });
         try {
           result = await pickCommandRouterHandler(
             "handleEnvironmentDeploy",
@@ -359,6 +370,7 @@ export async function handleCommandDispatch(
             decryptSecrets: deps?.decryptSecrets,
             logSink,
             cancel,
+            progress,
           });
         } finally {
           deployCancels.end(message.commandId);

@@ -18,6 +18,7 @@ import { dirname, join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
 import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../orchestration/ansible-events.ts";
 import { type LayoutPaths, PROD_LIB_DIR_DEFAULT } from "../paths/layout.ts";
 
 /**
@@ -144,6 +145,8 @@ async function runDefault(
 /** Optional test seams for {@link ensureHostingCaddy}. */
 export type EnsureHostingCaddyDeps = {
   runCaddySetup?: () => Promise<void>;
+  /** Playbook events from the default caddy-setup, for the deploy transcript. */
+  onEvent?: AnsibleEventHandler;
   runCommand?: (
     command: string,
     args: string[],
@@ -436,27 +439,54 @@ async function hostingCaddyAccountExists(): Promise<boolean> {
  * Ensure `<runtimesDir>/caddy/current/caddy` and the hosting Caddy account
  * exist for hosting ingress.
  */
+type HostingCaddyChecks = {
+  accountExists: () => Promise<boolean>;
+  guardCurrent: () => Promise<boolean>;
+  guardActive: () => Promise<boolean>;
+};
+
+function resolveHostingCaddyChecks(
+  deps?: EnsureHostingCaddyDeps,
+): HostingCaddyChecks {
+  return {
+    accountExists: deps?.accountExists ?? hostingCaddyAccountExists,
+    guardCurrent: deps?.ingressGuardCurrent ??
+      (() => ingressGuardInstalled()),
+    guardActive: deps?.ingressGuardActive ?? ingressGuardUnitActive,
+  };
+}
+
+/**
+ * True when hosting Caddy is fully in place: vendored binary, its account,
+ * and the ingress guard installed at the current version and active. The
+ * presence half of {@link ensureHostingCaddy}; it installs nothing, so the
+ * deploy preflight can plan the gateway step without starting it.
+ */
+export async function hostingCaddyReady(
+  layout: Pick<LayoutPaths, "runtimesDir">,
+  deps?: EnsureHostingCaddyDeps,
+): Promise<boolean> {
+  const checks = resolveHostingCaddyChecks(deps);
+  return await caddyBinaryPresent(caddyBinaryPath(layout.runtimesDir)) &&
+    await checks.accountExists() &&
+    await checks.guardCurrent() && await checks.guardActive();
+}
+
 export async function ensureHostingCaddy(
   layout: LayoutPaths,
   deps?: EnsureHostingCaddyDeps,
 ): Promise<string> {
-  const runSetup = deps?.runCaddySetup ?? defaultRunCaddySetup;
+  const runSetup = deps?.runCaddySetup ??
+    (() => defaultRunCaddySetup(deps?.onEvent));
   const runCommand = deps?.runCommand ?? runDefault;
   const resolveArch = deps?.resolveArch ?? resolveCaddyArchDefault;
   const verifyTarballSha256 = deps?.verifyTarballSha256 ??
     verifyHostingCaddyTarballSha256;
-  const accountExists = deps?.accountExists ?? hostingCaddyAccountExists;
-  const guardCurrent = deps?.ingressGuardCurrent ??
-    (() => ingressGuardInstalled());
-  const guardActive = deps?.ingressGuardActive ?? ingressGuardUnitActive;
+  const { accountExists, guardCurrent, guardActive } =
+    resolveHostingCaddyChecks(deps);
 
   const caddy = caddyBinaryPath(layout.runtimesDir);
-  if (
-    await caddyBinaryPresent(caddy) && await accountExists() &&
-    await guardCurrent() && await guardActive()
-  ) {
-    return caddy;
-  }
+  if (await hostingCaddyReady(layout, deps)) return caddy;
 
   try {
     await runSetup();
