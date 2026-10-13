@@ -2008,3 +2008,73 @@ test("reportPrincipalIds reads back uid and gid and skips missing accounts", asy
     [{ principalId: "p1", uid: 20001, gid: 20002 }],
   );
 });
+
+test("central ids never touch an account that already exists: it is adopted as it is and reported", async () => {
+  const { run, calls } = captureRun({
+    getentGroup: { success: true, stdout: "appuser:x:15004:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:15004:15004::${loginHome}:/usr/sbin/nologin`,
+      stderr: "",
+    },
+  });
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    uid: 30001,
+    gid: 30001,
+    idSource: "central",
+    home: defaultHome,
+  }], run);
+  assertEquals(
+    calls.some((c) =>
+      c.command === "sudo" &&
+      (c.args.includes("useradd") || c.args.includes("groupadd") ||
+        c.args.includes("groupmod") ||
+        (c.args.includes("usermod") && c.args.includes("-u")))
+    ),
+    false,
+  );
+  assertEquals(
+    await reportPrincipalIds([{
+      principalId: baseSpec.principalId,
+      username: "appuser",
+    }], run),
+    [{ principalId: baseSpec.principalId, uid: 15004, gid: 15004 }],
+  );
+});
+
+test("the same ids from an operator are binding and still refuse an existing account", async () => {
+  const { run } = captureRun({
+    getentGroup: { success: true, stdout: "appuser:x:15004:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:15004:15004::${loginHome}:/usr/sbin/nologin`,
+      stderr: "",
+    },
+  });
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        uid: 30001,
+        gid: 30001,
+        home: defaultHome,
+      }], run),
+    Error,
+  );
+});
+
+test("central ids create a brand-new account with exactly those ids", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    uid: 30001,
+    gid: 30001,
+    idSource: "central",
+    home: defaultHome,
+  }], run);
+  const useradd = calls.find((c) =>
+    c.command === "sudo" && c.args.includes("useradd")
+  );
+  assertEquals(useradd?.args.slice(0, 3), ["-n", "useradd", "-u"]);
+});

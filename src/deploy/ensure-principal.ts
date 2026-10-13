@@ -31,6 +31,14 @@ export type PrincipalEnsureSpec = {
    */
   uid?: number;
   gid?: number;
+  /**
+   * `central` marks `uid`/`gid` as the control plane's own pick rather than an
+   * operator override. Advisory ids create a new account but never touch one
+   * that exists: when the account or its group is already on the host the ids
+   * are dropped, the account is adopted as it is, and
+   * {@link reportPrincipalIds} tells the control plane what it has.
+   */
+  idSource?: "central";
   home?: string;
   shell?: string;
   /**
@@ -922,13 +930,33 @@ export async function reportPrincipalIds(
   return reports;
 }
 
+/** See {@link PrincipalEnsureSpec.idSource}. */
+async function withoutAdvisoryIdsOfExistingAccount(
+  spec: PrincipalEnsureSpec,
+  groupName: string,
+  runFn: RunFn,
+): Promise<PrincipalEnsureSpec> {
+  if (spec.idSource !== "central") return spec;
+  if (spec.uid === undefined && spec.gid === undefined) return spec;
+  const exists = (await runFn("getent", ["group", groupName])).success ||
+    (await principalAccount(spec.username, runFn)) !== null;
+  if (!exists) return spec;
+  const { uid: _uid, gid: _gid, ...adopted } = spec;
+  return adopted;
+}
+
 async function ensureOnePrincipal(
   layout: LayoutPaths,
-  principal: PrincipalEnsureSpec,
+  requested: PrincipalEnsureSpec,
   runFn: RunFn,
 ): Promise<string[]> {
-  assertSafePrincipalUsername(principal.username);
-  const groupName = principalUnixGroupName(principal.username);
+  assertSafePrincipalUsername(requested.username);
+  const groupName = principalUnixGroupName(requested.username);
+  const principal = await withoutAdvisoryIdsOfExistingAccount(
+    requested,
+    groupName,
+    runFn,
+  );
   const home = assertSafeAbsolutePath(
     principal.home ?? join(layout.principalHomeRoot, principal.username),
     "home",

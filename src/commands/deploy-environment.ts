@@ -690,6 +690,9 @@ export function deployPrincipalSpecs(
       username: principal.username,
       ...(principal.uid === undefined ? {} : { uid: principal.uid }),
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
+      ...(principal.idSource === undefined
+        ? {}
+        : { idSource: principal.idSource }),
     });
   }
   return [...byId.values()];
@@ -707,6 +710,9 @@ async function ensureDeployPrincipals(
       username: principal.username,
       ...(principal.uid === undefined ? {} : { uid: principal.uid }),
       ...(principal.gid === undefined ? {} : { gid: principal.gid }),
+      ...(principal.idSource === undefined
+        ? {}
+        : { idSource: principal.idSource }),
       ...(principal.home === undefined ? {} : { home: principal.home }),
       ...(principal.shell === undefined ? {} : { shell: principal.shell }),
       ...(principal.accessGroups === undefined

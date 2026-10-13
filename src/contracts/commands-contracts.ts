@@ -800,6 +800,15 @@ export type EnvironmentDeployPrincipalMaterial = {
   username: string;
   uid?: number;
   gid?: number;
+  /**
+   * `central` when `uid`/`gid` were chosen by the control plane's
+   * installation-wide allocation rather than set by an operator. Such ids are
+   * advisory: they are used to create a new account, but an account or group
+   * that already exists on the host is adopted with the ids it has (and
+   * reported back), never renumbered. Absent means an operator override,
+   * which is binding. Additive: an older daemon treats every id as binding.
+   */
+  idSource?: "central";
   home?: string;
   shell?: string;
   /**
@@ -912,6 +921,8 @@ export type EnvironmentDeploySitePrincipal = {
   username: string;
   uid?: number;
   gid?: number;
+  /** See {@link EnvironmentDeployPrincipalMaterial.idSource}. */
+  idSource?: "central";
 };
 
 /**
@@ -4396,6 +4407,7 @@ function parsePrincipalMaterial(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
   const home = parsePrincipalOptionalString(
     value.home,
@@ -4580,6 +4592,7 @@ function parseSitePrincipal(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
 }
 
