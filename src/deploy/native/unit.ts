@@ -34,7 +34,7 @@ import {
   nativeAppStartExec,
 } from "./start-entry.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
-import { runtimeSeries } from "../../runtime/registry.ts";
+import { newestSeries, runtimeSeries } from "../../runtime/registry.ts";
 import type {
   EnvironmentDeployNativeAppRestartPolicy,
   EnvironmentDeployNativeAppService,
@@ -61,7 +61,10 @@ export const SYSTEMD_UNIT_DIR = "/etc/systemd/system";
 export const NATIVE_APP_CONFIG_DIRNAME = "node-apps";
 
 /**
- * Node series a native app runs on when the payload declared no `nodeVersion`.
+ * Node series a native app runs on when the payload declared no `nodeVersion`:
+ * the newest series the runtime registry offers. There is no separately chosen
+ * default, so adding a series to the registry moves unpinned apps onto it at
+ * their next deploy (a rollback keeps the series it recorded).
  *
  * A **series**, not a patch pin, for the same reason the wire contract accepts
  * one: the daemon does not choose which patch release a tenant gets, the
@@ -69,7 +72,7 @@ export const NATIVE_APP_CONFIG_DIRNAME = "node-apps";
  * per-series `current` symlink at it. Declaring a patch here would make every
  * upstream security release a daemon change.
  */
-export const DEFAULT_NATIVE_APP_NODE_VERSION = "24";
+export const NEWEST_NATIVE_APP_NODE_VERSION = newestSeries("node");
 
 /**
  * Root of the **tenant** Node tree, kept apart from the instance's own Node.
@@ -87,14 +90,14 @@ export function nativeAppRuntimeRoot(
   return join(layout.runtimesDir, "node-app");
 }
 
-/** The series one app runs on: its own pin, else {@link DEFAULT_NATIVE_APP_NODE_VERSION}. */
+/** The series one app runs on: its own pin, else {@link NEWEST_NATIVE_APP_NODE_VERSION}. */
 export function resolveNativeAppNodeVersion(
   app: Pick<EnvironmentDeployNativeAppService, "nodeVersion">,
 ): string {
   const declared = app.nodeVersion?.trim();
   return declared && declared.length > 0
     ? declared
-    : DEFAULT_NATIVE_APP_NODE_VERSION;
+    : NEWEST_NATIVE_APP_NODE_VERSION;
 }
 
 /**
@@ -106,7 +109,7 @@ export function resolveNativeAppNodeVersion(
  */
 export function nativeAppNodeBinary(
   layout: Pick<LayoutPaths, "runtimesDir">,
-  nodeVersion: string = DEFAULT_NATIVE_APP_NODE_VERSION,
+  nodeVersion: string = NEWEST_NATIVE_APP_NODE_VERSION,
 ): string {
   return join(nativeAppNodeBinDir(layout, nodeVersion), "node");
 }
@@ -114,7 +117,7 @@ export function nativeAppNodeBinary(
 /** `<runtimesDir>/node-app/<series>/current/bin` — leads native-app unit `PATH`. */
 export function nativeAppNodeBinDir(
   layout: Pick<LayoutPaths, "runtimesDir">,
-  nodeVersion: string = DEFAULT_NATIVE_APP_NODE_VERSION,
+  nodeVersion: string = NEWEST_NATIVE_APP_NODE_VERSION,
 ): string {
   return join(
     nativeAppRuntimeRoot(layout),

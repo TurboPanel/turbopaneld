@@ -367,7 +367,8 @@ it is required as corroboration, and a build that also emitted
 **Per-app Node version.** `nativeAppServices[].nodeVersion` is a **series**
 ("24", "24.17", "24.17.0"), not necessarily a patch pin. `apply-native-apps.ts`
 collects the distinct series this deploy needs (an app that declared none
-contributes `DEFAULT_NATIVE_APP_NODE_VERSION`) and passes them to the vendoring
+contributes `NEWEST_NATIVE_APP_NODE_VERSION`, the newest series the
+runtime registry offers — there is no separately chosen default) and passes them to the vendoring
 playbook as `-e {"node_app_versions": [...]}`; the role resolves the newest
 upstream release inside each series and points
 `vendor/node-app/<series>/current` at it. The unit's `ExecStart` is

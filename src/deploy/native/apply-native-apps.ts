@@ -880,8 +880,8 @@ async function applyPrincipalSlices(
  * is stable across deploys (an unstable argument would show up as churn in the
  * transcript for a deploy that changed nothing).
  *
- * An app with no `nodeVersion` contributes `DEFAULT_NATIVE_APP_NODE_VERSION`,
- * so the default series is vendored exactly like an explicitly pinned one
+ * An app with no `nodeVersion` contributes `NEWEST_NATIVE_APP_NODE_VERSION`,
+ * so the newest series is vendored exactly like an explicitly pinned one
  * instead of being a separate special case on the host.
  */
 export function nativeAppNodeVersions(
