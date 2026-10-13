@@ -244,3 +244,21 @@ test("deploy result carries warnings only when there are some", () => {
     ["a", "b"],
   );
 });
+
+test("deploy result carries the account ids only when there are some", () => {
+  const base = {
+    projectName: "demo",
+    environmentId: "env-1",
+    labeledServices: [],
+    sites: [],
+    containers: [],
+  };
+  assertEquals("principals" in shapeEnvironmentDeployResult(base), false);
+  assertEquals(
+    shapeEnvironmentDeployResult({
+      ...base,
+      principals: [{ principalId: "p1", uid: 20001, gid: 20001 }],
+    }).principals,
+    [{ principalId: "p1", uid: 20001, gid: 20001 }],
+  );
+});
