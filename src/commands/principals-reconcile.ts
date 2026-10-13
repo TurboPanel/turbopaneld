@@ -24,6 +24,7 @@ import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   ensureSystemPrincipals,
   type PrincipalEnsureSpec,
+  type RunFn,
 } from "../deploy/ensure-principal.ts";
 import {
   applySshAccess,
@@ -36,7 +37,6 @@ import {
   type RetirePrincipalsResult,
 } from "../deploy/retire-principals.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
-import type { RunFn } from "../deploy/ensure-principal.ts";
 import type {
   PrincipalsReconcilePayload,
   PrincipalsReconcileResult,
