@@ -95,7 +95,6 @@ import {
 } from "./release-service-id.ts";
 import { pruneReleases } from "./retention.ts";
 import { PENDING_RECORD_MARKER } from "./release-health.ts";
-import { isPackageManagerStart } from "../node-package-manager.ts";
 import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -1043,7 +1042,7 @@ async function buildNativeTree(
       onOutput,
     }));
   if (output.standaloneOutput) {
-    assertStandaloneStartCommand(entry.build.startCommand);
+    assertStandaloneStart(entry.build.startCommand, nativeApp.startupFile);
   }
   return output;
 }
@@ -1081,40 +1080,53 @@ function authorChoseStart(
  */
 const NEXT_START_RE = /(?:^|\s|\/)next\s+start(?:\s|$)/;
 
-/** `pnpm|yarn|npm run start`, optionally through Corepack. */
-const PACKAGE_MANAGER_RUN_START_RE =
-  /^(?:corepack\s+)?(?:pnpm|yarn|npm)\s+run\s+start(?:\s|$)/;
+/**
+ * The package `start` script by any route — `pnpm start`, `npm run start`,
+ * `npm run-script start`, with or without arguments, optionally through
+ * Corepack. `pnpm start:prod` is a different script and passes.
+ */
+const PACKAGE_START_SCRIPT_RE =
+  /^(?:corepack\s+)?(?:pnpm|yarn|npm)\s+(?:run(?:-script)?\s+)?start(?:\s|$)/;
 
 /**
  * A Next standalone release is `server.js` plus a pruned `node_modules`: it
  * has no `next` command and no package scripts, so a start command that needs
  * either (`pnpm start`, `next start`) can only crash-loop. The daemon also
- * publishes the standalone subtree *as* the release, so a path under
- * `.next/standalone/` points at nothing. Both are known before anything live
- * changes, so the build fails here with the fix spelled out instead of
- * promoting a release that cannot start.
+ * publishes the standalone subtree *as* the release, so a start command or
+ * startup file under `.next/standalone/` points at nothing. All of this is
+ * known before anything live changes, so the build fails here with the fix
+ * spelled out instead of promoting a release that cannot start.
  */
-function assertStandaloneStartCommand(startCommand: string | undefined): void {
-  const command = startCommand?.trim();
-  if (!command) return;
+function assertStandaloneStart(
+  startCommand: string | undefined,
+  startupFile: string | undefined,
+): void {
   const remedy =
     "Clear the start command and the app starts with node server.js.";
-  if (
-    isPackageManagerStart(command) ||
-    PACKAGE_MANAGER_RUN_START_RE.test(command) ||
-    NEXT_START_RE.test(command)
-  ) {
-    throw new Error(
-      `the build produced a Next.js standalone release, which has no "next" ` +
-        `command and no package scripts, so the start command "${command}" ` +
-        `cannot run it. ${remedy}`,
-    );
+  const command = startCommand?.trim();
+  if (command) {
+    if (PACKAGE_START_SCRIPT_RE.test(command) || NEXT_START_RE.test(command)) {
+      throw new Error(
+        `the build produced a Next.js standalone release, which has no "next" ` +
+          `command and no package scripts, so the start command "${command}" ` +
+          `cannot run it. ${remedy}`,
+      );
+    }
+    if (command.includes(".next/standalone/")) {
+      throw new Error(
+        `the build produced a Next.js standalone release, and that tree is ` +
+          `published as the release itself, so the start command "${command}" ` +
+          `points at a path that does not exist there. ${remedy}`,
+      );
+    }
   }
-  if (command.includes(".next/standalone/")) {
+  const file = startupFile?.trim();
+  if (file?.includes(".next/standalone/")) {
     throw new Error(
       `the build produced a Next.js standalone release, and that tree is ` +
-        `published as the release itself, so the start command "${command}" ` +
-        `points at a path that does not exist there. ${remedy}`,
+        `published as the release itself, so the startup file "${file}" ` +
+        `points at a path that does not exist there. Clear the startup file ` +
+        `and the app starts with node server.js.`,
     );
   }
 }

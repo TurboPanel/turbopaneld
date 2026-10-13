@@ -910,7 +910,8 @@ test("applySourceReleases propagates staticExport from native app build shaping"
  */
 async function applyStandaloneRelease(
   layout: ReturnType<typeof layoutFromFixture>,
-  startCommand: string,
+  startCommand: string | undefined,
+  startupFile?: string,
 ): Promise<{
   result: ReturnType<typeof applySourceReleases>;
   promoted: () => boolean;
@@ -946,6 +947,7 @@ async function applyStandaloneRelease(
         serviceId,
         listenPort: 3002,
         framework: "next",
+        startupFile,
       }],
     }),
     {
@@ -984,19 +986,18 @@ async function applyStandaloneRelease(
   };
 }
 
+const NO_NEXT_COMMAND = 'has no "next" command and no package scripts';
+const NO_SUCH_PATH = "points at a path that does not exist there";
+
 for (
   const [startCommand, reason] of [
-    ["pnpm start", 'has no "next" command and no package scripts'],
-    ["corepack pnpm run start", 'has no "next" command and no package scripts'],
-    ["npx next start -p 3000", 'has no "next" command and no package scripts'],
-    [
-      "./node_modules/.bin/next start",
-      'has no "next" command and no package scripts',
-    ],
-    [
-      "node .next/standalone/server.js",
-      "points at a path that does not exist there",
-    ],
+    ["pnpm start", NO_NEXT_COMMAND],
+    ["npm start -- -p 3000", NO_NEXT_COMMAND],
+    ["corepack pnpm run start", NO_NEXT_COMMAND],
+    ["npm run-script start", NO_NEXT_COMMAND],
+    ["npx next start -p 3000", NO_NEXT_COMMAND],
+    ["./node_modules/.bin/next start", NO_NEXT_COMMAND],
+    ["node .next/standalone/server.js", NO_SUCH_PATH],
   ] as const
 ) {
   test(`a standalone build fails before promotion when the start command is "${startCommand}"`, async () => {
@@ -1026,6 +1027,28 @@ for (
     });
   });
 }
+
+test("a standalone build fails before promotion when the startup file points under .next/standalone/", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const apply = await applyStandaloneRelease(
+        layout,
+        undefined,
+        ".next/standalone/server.js",
+      );
+      const err = await assertRejects(() => apply.result, Error);
+      assertStringIncludes(
+        err.message,
+        'startup file ".next/standalone/server.js"',
+      );
+      assertStringIncludes(err.message, NO_SUCH_PATH);
+      assertEquals(apply.promoted(), false);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
 
 test("a standalone build keeps an author start command that runs server.js, and records no detected start", async () => {
   await createTempLayout().then(async (fixture) => {
