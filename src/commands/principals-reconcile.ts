@@ -24,6 +24,7 @@ import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   ensureSystemPrincipals,
   type PrincipalEnsureSpec,
+  reportPrincipalIds,
   type RunFn,
 } from "../deploy/ensure-principal.ts";
 import {
@@ -38,6 +39,7 @@ import {
 } from "../deploy/retire-principals.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
 import type {
+  PrincipalIdReport,
   PrincipalsReconcilePayload,
   PrincipalsReconcileResult,
 } from "../contracts/commands-contracts.ts";
@@ -50,6 +52,9 @@ export type PrincipalsReconcileDeps = {
     usernames: readonly string[],
     runFn: RunFn,
   ) => Promise<RetirePrincipalsResult>;
+  reportPrincipalIds?: (
+    principals: ReadonlyArray<{ principalId: string; username: string }>,
+  ) => Promise<PrincipalIdReport[]>;
   ensureSystemPrincipals?: (
     layout: LayoutPaths,
     principals: PrincipalEnsureSpec[],
@@ -89,6 +94,10 @@ export async function handlePrincipalsReconcile(
           : { passwordHash: principal.passwordHash }),
       })),
     );
+
+  const idReports = await (deps.reportPrincipalIds ?? reportPrincipalIds)(
+    payload.principals,
+  );
 
   // An empty set is almost always a control plane that lost track of this
   // server, not a host that really manages nobody. Pruning on it would delete
@@ -140,6 +149,7 @@ export async function handlePrincipalsReconcile(
     ...(retirement === undefined
       ? {}
       : { principalsRetired: retirement.retired }),
+    ...(idReports.length === 0 ? {} : { principals: idReports }),
     warnings: [
       ...(groupWarnings ?? []),
       ...ssh.warnings,

@@ -122,6 +122,17 @@ export type NtpSetResult = {
 };
 
 /**
+ * The uid and primary gid a site owner's Linux user has on this host, reported
+ * back so the control plane records them per server. Must stay in sync with the
+ * instance canonical result shapes.
+ */
+export type PrincipalIdReport = {
+  principalId: string;
+  uid: number;
+  gid: number;
+};
+
+/**
  * Must stay in sync with the instance canonical `server.principals.reconcile`
  * shape.
  *
@@ -168,6 +179,12 @@ export type PrincipalsReconcileResult = {
    * Additive: older control planes ignore it.
    */
   principalsRetired?: string[];
+  /**
+   * The uid and primary gid each applied account has on this host, so the
+   * control plane records them per server. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
   warnings: string[];
 };
 
@@ -1540,6 +1557,12 @@ export type EnvironmentDeployResult = {
   releases?: EnvironmentDeployResultRelease[];
   /** Per-site facts for the sites this deploy applied; omitted when none. */
   sites?: EnvironmentDeployResultSite[];
+  /**
+   * The uid and primary gid each account this deploy ensured has on this host.
+   * Omitted when the deploy ensured none. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
 };
 
 export type EnvironmentStopPayload = {

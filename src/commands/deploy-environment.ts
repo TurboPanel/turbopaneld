@@ -78,7 +78,10 @@ import {
   planDeploySteps,
   probeDeployPresence,
 } from "./deploy-progress-plan.ts";
-import { ensureSystemPrincipals } from "../deploy/ensure-principal.ts";
+import {
+  ensureSystemPrincipals,
+  reportPrincipalIds,
+} from "../deploy/ensure-principal.ts";
 import { applySshAccess, type PrincipalSshSpec } from "../deploy/ssh/apply.ts";
 import {
   assertHostingNamesFree,
@@ -197,6 +200,7 @@ import {
   type EnvironmentDeploySite,
   type EnvironmentDeploySource,
   parseEnvironmentDeployPayload,
+  type PrincipalIdReport,
 } from "../contracts/commands-contracts.ts";
 import {
   type LayoutPaths,
@@ -694,8 +698,8 @@ export function deployPrincipalSpecs(
 async function ensureDeployPrincipals(
   layout: LayoutPaths,
   principalMaterial: EnvironmentDeployPrincipalMaterial[],
-): Promise<void> {
-  if (principalMaterial.length === 0) return;
+): Promise<PrincipalIdReport[]> {
+  if (principalMaterial.length === 0) return [];
   await ensureSystemPrincipals(
     layout,
     principalMaterial.map((principal) => ({
@@ -715,6 +719,7 @@ async function ensureDeployPrincipals(
   );
 
   await applyDeploySshAccess(principalMaterial);
+  return await reportPrincipalIds(principalMaterial);
 }
 
 /**
@@ -2193,6 +2198,8 @@ export function shapeEnvironmentDeployResult(input: {
   siteApps?: readonly EnvironmentDeployResultSite[];
   /** What the deploy worked around without failing; omitted when empty. */
   warnings?: readonly string[];
+  /** The uid/gid each ensured account has on this host. */
+  principals?: readonly PrincipalIdReport[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -2220,6 +2227,9 @@ export function shapeEnvironmentDeployResult(input: {
       : {}),
     ...(input.warnings && input.warnings.length > 0
       ? { warnings: [...input.warnings] }
+      : {}),
+    ...(input.principals && input.principals.length > 0
+      ? { principals: [...input.principals] }
       : {}),
   };
 }
@@ -2569,7 +2579,7 @@ async function deployEnvironmentHolding(
   );
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];
-  await ensureDeployPrincipals(
+  const principalIdReports = await ensureDeployPrincipals(
     layout,
     deployPrincipalSpecs(parsedPayload, principalMaterial),
   );
@@ -2790,5 +2800,6 @@ async function deployEnvironmentHolding(
     releases: deployResultReleases(appliedReleases),
     siteApps,
     warnings: siteWarnings,
+    principals: principalIdReports,
   });
 }
