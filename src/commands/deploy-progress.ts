@@ -7,8 +7,10 @@
  * Delivery is best effort (fire-and-forget over the open socket, like
  * `update-progress`); a lost message is harmless because the next one carries
  * the whole payload again. `detail` changes alone go out at most once every
- * {@link DEPLOY_PROGRESS_DETAIL_INTERVAL_MS}; the next transition carries the
- * latest text, so nothing is scheduled and no timer can leak.
+ * {@link DEPLOY_PROGRESS_DETAIL_INTERVAL_MS}: a change inside the window is
+ * stored and flushed by one trailing timer when the window ends (a long task
+ * such as a package install must not run for minutes with no ticker), and any
+ * transition clears that timer because it carries the latest text itself.
  */
 import {
   COMMAND_PROGRESS_MAX_BYTES,
@@ -48,11 +50,23 @@ export type DeployStepReporter = {
   /**
    * Mark steps running (`current` is the first). A `ready` or already finished
    * step is left alone, so wrapping an idempotent `ensureX` twice is safe.
+   * Whatever was running before is finished, unless `nested` is set: an
+   * install that happens inside a phase step (the build tool mid-`build`)
+   * keeps that step running and hands `current` back to it afterwards.
    */
-  start(ids: string | readonly string[]): void;
+  start(ids: string | readonly string[], options?: { nested?: boolean }): void;
   done(ids: string | readonly string[]): void;
+  /**
+   * The step(s) failed. A `ready` step whose ensure still failed is marked
+   * failed too; a running step this one was nested in goes back to pending
+   * (it never ran), so the final payload shows it skipped.
+   */
   fail(ids: string | readonly string[]): void;
-  /** Live ticker text of a running step; throttled on the wire. */
+  /**
+   * Live ticker text; throttled on the wire. When `id` is not the running
+   * step (a grouped install whose first step was already `ready`) the text
+   * goes to the step that is running.
+   */
   detail(id: string, text: string): void;
   /**
    * Follow a transcript phase: `fetch` / `build` / `compose-up` / `health`
@@ -79,13 +93,23 @@ export type DeployStepReporterOptions = {
   send: (message: CommandProgressMessage) => boolean;
   /** Test seam — wall clock. */
   now?: () => Date;
+  /** Test seams — the trailing detail flush timer. */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 };
 
-/** Transcript phases that are also steps of the plan. */
+/**
+ * Transcript phases that are also steps of the plan. Promote and the deploy
+ * hooks are part of starting the new version: they close `build` and keep
+ * `start` going until the health check.
+ */
 const PHASE_STEPS: Readonly<Record<string, string>> = {
   [COMMAND_LOG_PHASES.FETCH]: "fetch",
   [COMMAND_LOG_PHASES.BUILD]: "build",
+  [COMMAND_LOG_PHASES.RELEASE_PROMOTE]: "start",
+  [COMMAND_LOG_PHASES.PRE_DEPLOY]: "start",
   [COMMAND_LOG_PHASES.COMPOSE_UP]: "start",
+  [COMMAND_LOG_PHASES.POST_DEPLOY]: "start",
   [COMMAND_LOG_PHASES.HEALTH]: "health",
 };
 
@@ -159,15 +183,24 @@ class DeployStepReporterImpl implements DeployStepReporter {
   readonly #commandId: string;
   readonly #send: (message: CommandProgressMessage) => boolean;
   readonly #now: () => Date;
+  readonly #setTimer: (fn: () => void, ms: number) => unknown;
+  readonly #clearTimer: (handle: unknown) => void;
   #steps: CommandProgressStep[] = [];
   #current: string | null = null;
+  /** The phase step a nested install interrupted; `current` returns to it. */
+  #resume: string | null = null;
   #lastSentAt = Number.NEGATIVE_INFINITY;
+  #flushTimer: unknown = undefined;
 
   constructor(options: DeployStepReporterOptions) {
     this.#id = options.id;
     this.#commandId = options.commandId;
     this.#send = options.send;
     this.#now = options.now ?? (() => new Date());
+    this.#setTimer = options.setTimer ??
+      ((fn, ms) => setTimeout(fn, ms));
+    this.#clearTimer = options.clearTimer ??
+      ((handle) => clearTimeout(handle as number));
   }
 
   plan(steps: readonly PlannedDeployStep[]): void {
@@ -177,21 +210,32 @@ class DeployStepReporterImpl implements DeployStepReporter {
       state: step.state,
     }));
     this.#current = null;
+    this.#resume = null;
     this.#sendNow();
   }
 
-  start(ids: string | readonly string[]): void {
-    const started = idList(ids).filter((id) => {
-      const step = this.#find(id);
-      return step !== undefined && step.state === "pending";
-    });
+  start(
+    ids: string | readonly string[],
+    options: { nested?: boolean } = {},
+  ): void {
+    const started = idList(ids).filter((id) =>
+      this.#find(id)?.state === "pending"
+    );
     if (started.length === 0) return;
     const at = this.#now().toISOString();
-    // One thing runs at a time: whatever was running before has finished.
-    for (const step of this.#steps) {
-      if (step.state === "running" && !started.includes(step.id)) {
-        this.#close(step, "done", at);
+    if (options.nested) {
+      // The enclosing step keeps running; `current` comes back to it.
+      if (this.#current !== null && !started.includes(this.#current)) {
+        this.#resume = this.#current;
       }
+    } else {
+      // One thing runs at a time: whatever was running before has finished.
+      for (const step of this.#steps) {
+        if (step.state === "running" && !started.includes(step.id)) {
+          this.#close(step, "done", at);
+        }
+      }
+      this.#resume = null;
     }
     for (const id of started) {
       const step = this.#find(id);
@@ -213,14 +257,20 @@ class DeployStepReporterImpl implements DeployStepReporter {
   }
 
   detail(id: string, text: string): void {
-    const step = this.#find(id);
-    if (!step || step.state !== "running") return;
+    const named = this.#find(id);
+    const step = named?.state === "running" ? named : this.#running();
+    if (!step) return;
     const trimmed = text.trim();
     if (trimmed.length === 0 || step.detail === trimmed) return;
     step.detail = clip(trimmed, COMMAND_PROGRESS_MAX_DETAIL_CHARS);
-    const now = this.#now().getTime();
-    if (now - this.#lastSentAt >= DEPLOY_PROGRESS_DETAIL_INTERVAL_MS) {
+    const elapsed = this.#now().getTime() - this.#lastSentAt;
+    if (elapsed >= DEPLOY_PROGRESS_DETAIL_INTERVAL_MS) {
       this.#sendNow();
+    } else if (this.#flushTimer === undefined) {
+      this.#flushTimer = this.#setTimer(() => {
+        this.#flushTimer = undefined;
+        if (this.#running()) this.#sendNow();
+      }, DEPLOY_PROGRESS_DETAIL_INTERVAL_MS - elapsed);
     }
   }
 
@@ -249,7 +299,9 @@ class DeployStepReporterImpl implements DeployStepReporter {
       }
     }
     this.#current = null;
+    this.#resume = null;
     if (changed) this.#sendNow();
+    else this.#cancelFlush();
   }
 
   snapshot(): CommandProgress {
@@ -265,6 +317,15 @@ class DeployStepReporterImpl implements DeployStepReporter {
     return this.#steps.find((step) => step.id === id);
   }
 
+  /** The current step while it runs, else any running step. */
+  #running(): CommandProgressStep | undefined {
+    const current = this.#current === null
+      ? undefined
+      : this.#find(this.#current);
+    if (current?.state === "running") return current;
+    return this.#steps.find((step) => step.state === "running");
+  }
+
   #close(
     step: CommandProgressStep,
     state: "done" | "failed" | "skipped",
@@ -272,7 +333,8 @@ class DeployStepReporterImpl implements DeployStepReporter {
   ): void {
     step.state = state;
     step.finishedAt = at;
-    delete step.detail;
+    // A failure keeps its last line: it says which task broke.
+    if (state !== "failed") delete step.detail;
     if (this.#current === step.id) this.#current = null;
   }
 
@@ -284,14 +346,35 @@ class DeployStepReporterImpl implements DeployStepReporter {
     let changed = false;
     for (const id of idList(ids)) {
       const step = this.#find(id);
-      if (!step || step.state !== "running") continue;
+      if (!step) continue;
+      const failedWhileReady = state === "failed" && step.state === "ready";
+      if (step.state !== "running" && !failedWhileReady) continue;
       this.#close(step, state, at);
       changed = true;
     }
-    if (changed) this.#sendNow();
+    if (!changed) return;
+    const resume = this.#resume === null ? undefined : this.#find(this.#resume);
+    if (resume?.state === "running") {
+      if (state === "failed") {
+        // The enclosing step never ran: back to pending, skipped at finish.
+        resume.state = "pending";
+        delete resume.startedAt;
+      } else if (this.#current === null) {
+        this.#current = resume.id;
+      }
+    }
+    if (this.#current === null) this.#resume = null;
+    this.#sendNow();
+  }
+
+  #cancelFlush(): void {
+    if (this.#flushTimer === undefined) return;
+    this.#clearTimer(this.#flushTimer);
+    this.#flushTimer = undefined;
   }
 
   #sendNow(): void {
+    this.#cancelFlush();
     const at = this.#now();
     this.#lastSentAt = at.getTime();
     try {
@@ -359,8 +442,11 @@ export function createPlaybookEventHandler(
       }
       case "v2_runner_on_failed":
       case "v2_runner_on_unreachable": {
-        const line = ansibleFailureLine(event as AnsibleTaskResultEvent);
-        if (line === null) break;
+        const raw = ansibleFailureLine(event as AnsibleTaskResultEvent);
+        if (raw === null) break;
+        // A module message can quote a value the deploy decrypted; the
+        // transcript redacts on its own, the ticker goes out as-is.
+        const line = sink.redactSummary(raw);
         sink.onLine("stderr", line);
         progress.detail(stepId, line);
         break;

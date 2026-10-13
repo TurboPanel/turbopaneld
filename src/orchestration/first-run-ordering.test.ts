@@ -2,7 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { parse } from "yaml";
 import { DAEMON_ROOT } from "./assets.ts";
-import { ensureSitePhpRuntimes, type SiteApplySpec } from "../deploy/site.ts";
+import { ensureSiteEngines, type SiteApplySpec } from "../deploy/site.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -15,7 +15,7 @@ const tasksOf = async (role: string): Promise<Task[]> =>
     ),
   ) as Task[];
 
-test("deploy vendors PHP runtimes before joining principals", async () => {
+test("deploy vendors the site engines and PHP before joining principals", async () => {
   const src = await Deno.readTextFile(
     join(DAEMON_ROOT, "src/commands/deploy-environment.ts"),
   );
@@ -25,7 +25,7 @@ test("deploy vendors PHP runtimes before joining principals", async () => {
   assertEquals(php < principals, true);
 });
 
-test("ensureSitePhpRuntimes runs the engine playbook for PHP sites only", async () => {
+test("ensureSiteEngines runs one engine playbook per engine, PHP series on the engine that serves them", async () => {
   const phpSite: SiteApplySpec = {
     composeServiceName: "phpsite",
     engine: "nginx",
@@ -44,12 +44,16 @@ test("ensureSitePhpRuntimes runs the engine playbook for PHP sites only", async 
     labels.push(`${label} ${(args ?? []).join(" ")}`);
     return Promise.resolve();
   };
-  await ensureSitePhpRuntimes([staticSite], { runPlaybook });
-  assertEquals(labels, []);
-  await ensureSitePhpRuntimes([staticSite, phpSite], { runPlaybook });
+  await ensureSiteEngines([staticSite], { runPlaybook });
   assertEquals(labels.length, 1);
-  assert(labels[0].includes("nginx"));
-  assert(labels[0].includes('"php_fpm_versions":["8.4"]'));
+  assert(labels[0].includes("caddy"));
+  assert(!labels[0].includes("8.4"));
+  labels.length = 0;
+  await ensureSiteEngines([staticSite, phpSite], { runPlaybook });
+  assertEquals(labels.length, 2);
+  assert(labels[0].includes("caddy"));
+  assert(labels[1].includes("nginx"));
+  assert(labels[1].includes('"php_fpm_versions":["8.4"]'));
 });
 
 test("apache creates its log directory before the main config is installed", async () => {

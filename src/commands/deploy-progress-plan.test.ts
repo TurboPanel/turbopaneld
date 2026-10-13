@@ -316,6 +316,19 @@ test("probeDeployPresence runs only the probes the plan needs and treats a throw
   assertEquals(asked.includes("buildTool"), false, "not needed, not probed");
   assertEquals(asked.includes("sharedIngress"), true);
 
+  // A runtimes probe that throws means nothing vendored, not a failed deploy.
+  const thrown = await probeDeployPresence(layout, FULL_NEEDS, {
+    docker: () => Promise.resolve(true),
+    sharedIngress: () => Promise.resolve(true),
+    publicEdge: () => Promise.resolve(true),
+    runtimes: () => {
+      throw new Error("readdir failed");
+    },
+    fileExists: () => Promise.resolve(true),
+    buildTool: () => Promise.resolve(true),
+  });
+  assertEquals(thrown.runtimes, undefined);
+
   // Without a reachable engine the shared gateway cannot be running: skipped.
   const noDocker = await probeDeployPresence(layout, FULL_NEEDS, {
     docker: () => Promise.resolve(false),

@@ -159,6 +159,17 @@ async function probeOr(
   }
 }
 
+/** A runtimes probe that throws counts as "nothing vendored". */
+function readRuntimesOr(
+  probe: () => HostRuntimeMetadata | undefined,
+): HostRuntimeMetadata | undefined {
+  try {
+    return probe();
+  } catch {
+    return undefined;
+  }
+}
+
 export async function probeDeployPresence(
   layout: LayoutPaths,
   needs: DeployStepNeeds,
@@ -178,7 +189,9 @@ export async function probeDeployPresence(
   const wantsRuntimes = needs.nodeSeries.length > 0 ||
     needs.denoSeries.length > 0 || needs.phpSeries.length > 0;
   const runtimes = wantsRuntimes
-    ? (probes.runtimes ?? (() => readHostRuntimes(layout.runtimesDir)))()
+    ? readRuntimesOr(
+      probes.runtimes ?? (() => readHostRuntimes(layout.runtimesDir)),
+    )
     : undefined;
   const webServers = new Set<SiteEngineId>();
   for (const engine of needs.webServers) {

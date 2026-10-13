@@ -504,7 +504,8 @@ async function runInstallStep<T>(
 ): Promise<T> {
   const previousPhase = runtime.currentPhase();
   runtime.logSink.setPhase(phase);
-  runtime.progress.start(ids);
+  // Nested: an install mid-`build` (the build tool) leaves `build` running.
+  runtime.progress.start(ids, { nested: true });
   try {
     const result = await fn();
     runtime.progress.done(ids);
@@ -517,16 +518,24 @@ async function runInstallStep<T>(
   }
 }
 
-/** Playbook events → transcript lines + the first step's ticker text. */
+/**
+ * Playbook events → transcript lines + the ticker of the first step of the
+ * group that actually has work (a grouped install may start with a `ready`
+ * one: Node 20 vendored, Node 22 missing).
+ */
 function installEvents(
   runtime: DeployProgressRuntime,
   ids: readonly string[],
   fallbackId: string,
+  plan: readonly PlannedDeployStep[] = [],
 ) {
+  const pending = plan.find((step) =>
+    step.state === "pending" && ids.includes(step.id)
+  );
   return createPlaybookEventHandler(
     runtime.logSink,
     runtime.progress,
-    ids[0] ?? fallbackId,
+    pending?.id ?? ids[0] ?? fallbackId,
   );
 }
 
@@ -2421,11 +2430,21 @@ async function planDeployProgress(
   probes: DeployPresenceProbes | undefined,
 ): Promise<PlannedDeployStep[]> {
   if (!runtime.progress.enabled) return [];
-  const needs = deployStepNeeds(parsedPayload, edge);
-  const presence = await probeDeployPresence(layout, needs, probes);
-  const steps = planDeploySteps(needs, presence);
-  runtime.progress.plan(steps);
-  return steps;
+  try {
+    const needs = deployStepNeeds(parsedPayload, edge);
+    const presence = await probeDeployPresence(layout, needs, probes);
+    const steps = planDeploySteps(needs, presence);
+    runtime.progress.plan(steps);
+    return steps;
+  } catch (err) {
+    // The plan is a courtesy to the UI; a probe that cannot answer must not
+    // stop the deploy. Without a plan the steps simply never show.
+    logWarn(
+      "deploy",
+      `deploy step plan skipped: ${err instanceof Error ? err.message : err}`,
+    );
+    return [];
+  }
 }
 
 /**
@@ -2452,7 +2471,12 @@ async function ensureDeployNativeRuntimes(
       () =>
         ensureNativeAppRuntime(ofKind, {
           ...io,
-          onEvent: installEvents(runtime, ids, `install-runtime:${kind}`),
+          onEvent: installEvents(
+            runtime,
+            ids,
+            `install-runtime:${kind}`,
+            plan,
+          ),
         }),
     );
   });
@@ -2535,7 +2559,12 @@ async function deployEnvironmentHolding(
     () =>
       ensureSiteEngines(parsedPayload.sites ?? [], {
         ...deps?.siteIo,
-        onEvent: installEvents(runtime, siteInstallIds, "install-web-server"),
+        onEvent: installEvents(
+          runtime,
+          siteInstallIds,
+          "install-web-server",
+          plan,
+        ),
       }),
   );
 

@@ -35,6 +35,9 @@ const PLAN: PlannedDeployStep[] = [
 function harness(startMs = 1_000_000) {
   let nowMs = startMs;
   const sent: CommandProgressMessage[] = [];
+  // Fake timers: the trailing flush fires when the harness advances past it.
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  let nextTimer = 1;
   const reporter = createDeployStepReporter({
     id: "dispatch-1",
     commandId: "cmd-1",
@@ -43,12 +46,26 @@ function harness(startMs = 1_000_000) {
       return true;
     },
     now: () => new Date(nowMs),
+    setTimer: (fn, ms) => {
+      const handle = nextTimer++;
+      timers.set(handle, { at: nowMs + ms, fn });
+      return handle;
+    },
+    clearTimer: (handle) => {
+      timers.delete(handle as number);
+    },
   });
   return {
     reporter,
     sent,
+    timers,
     advance: (ms: number) => {
       nowMs += ms;
+      for (const [handle, timer] of [...timers]) {
+        if (timer.at > nowMs) continue;
+        timers.delete(handle);
+        timer.fn();
+      }
     },
     last: () => sent[sent.length - 1].progress,
     states: () =>
@@ -134,22 +151,123 @@ test("detail is throttled to one message per interval and rides the next transit
   h.reporter.detail("install-php:8.3", "Install php8.3-fpm");
   assertEquals(h.sent.length, before, "inside the interval: stored only");
   h.advance(DEPLOY_PROGRESS_DETAIL_INTERVAL_MS);
-  h.reporter.detail("install-php:8.3", "Enable php8.3-fpm");
-  assertEquals(h.sent.length, before + 1, "interval elapsed: sent");
+  assertEquals(h.sent.length, before + 1, "flushed when the window ends");
   assertEquals(
     h.last().steps.find((s) => s.id === "install-php:8.3")?.detail,
-    "Enable php8.3-fpm",
+    "Install php8.3-fpm",
   );
+  h.advance(DEPLOY_PROGRESS_DETAIL_INTERVAL_MS);
+  h.reporter.detail("install-php:8.3", "Enable php8.3-fpm");
+  assertEquals(h.sent.length, before + 2, "interval elapsed: sent at once");
   h.advance(100);
   h.reporter.detail("install-php:8.3", "Restart php8.3-fpm");
-  assertEquals(h.sent.length, before + 1, "throttled again");
   h.reporter.detail("install-php:8.3", "Restart php8.3-fpm");
-  assertEquals(h.sent.length, before + 1, "unchanged text never sends");
+  assertEquals(h.sent.length, before + 2, "throttled again, one timer armed");
+  assertEquals(h.timers.size, 1);
   h.reporter.done("install-php:8.3");
+  assertEquals(h.timers.size, 0, "the transition carries it; timer cleared");
   const finished = h.last().steps.find((s) => s.id === "install-php:8.3");
-  assertEquals(finished?.detail, undefined, "a finished step has no ticker");
-  h.reporter.detail("fetch", "ignored: not running");
-  assertEquals(h.sent.length, before + 2);
+  assertEquals(finished?.detail, undefined, "a done step has no ticker");
+  h.reporter.detail("fetch", "ignored: nothing running");
+  assertEquals(h.sent.length, before + 3);
+  assertEquals(h.timers.size, 0);
+});
+
+test("a long first task still gets its ticker: one trailing flush, no more", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  h.reporter.start("install-php:8.3");
+  const before = h.sent.length;
+  h.advance(500);
+  h.reporter.detail("install-php:8.3", "Install php8.3-fpm (takes minutes)");
+  h.advance(DEPLOY_PROGRESS_DETAIL_INTERVAL_MS - 500);
+  assertEquals(h.sent.length, before + 1);
+  h.advance(60_000);
+  assertEquals(h.sent.length, before + 1, "nothing new to say, nothing sent");
+  h.reporter.finish("failed");
+  assertEquals(h.timers.size, 0);
+});
+
+test("detail for a step that is not running goes to the running step of the group", () => {
+  const h = harness();
+  h.reporter.plan([
+    { id: "install-runtime:node-20", label: "Install Node 20", state: "ready" },
+    {
+      id: "install-runtime:node-22",
+      label: "Install Node 22",
+      state: "pending",
+    },
+    ...PLAN,
+  ]);
+  h.reporter.start(["install-runtime:node-20", "install-runtime:node-22"]);
+  assertEquals(h.last().current, "install-runtime:node-22");
+  h.advance(DEPLOY_PROGRESS_DETAIL_INTERVAL_MS);
+  h.reporter.detail("install-runtime:node-20", "Download Node 22");
+  const steps = h.last().steps;
+  assertEquals(
+    steps.find((s) => s.id === "install-runtime:node-20")?.detail,
+    undefined,
+  );
+  assertEquals(
+    steps.find((s) => s.id === "install-runtime:node-22")?.detail,
+    "Download Node 22",
+  );
+});
+
+test("a nested install keeps the enclosing step running and hands current back", () => {
+  const h = harness();
+  h.reporter.plan([
+    {
+      id: "install-build-tool",
+      label: "Install the build tool",
+      state: "pending",
+    },
+    ...PLAN,
+  ]);
+  h.reporter.phase(COMMAND_LOG_PHASES.BUILD);
+  h.reporter.start("install-build-tool", { nested: true });
+  assertEquals(h.states().build, "running");
+  assertEquals(h.last().current, "install-build-tool");
+  h.reporter.done("install-build-tool");
+  assertEquals(h.last().current, "build");
+  assertEquals(h.states().build, "running");
+  // Restoring the phase afterwards changes nothing.
+  const sentBefore = h.sent.length;
+  h.reporter.phase(COMMAND_LOG_PHASES.BUILD);
+  assertEquals(h.sent.length, sentBefore);
+
+  const failing = harness();
+  failing.reporter.plan([
+    {
+      id: "install-build-tool",
+      label: "Install the build tool",
+      state: "pending",
+    },
+    ...PLAN,
+  ]);
+  failing.reporter.phase(COMMAND_LOG_PHASES.BUILD);
+  failing.reporter.start("install-build-tool", { nested: true });
+  failing.reporter.fail("install-build-tool");
+  assertEquals(failing.states()["install-build-tool"], "failed");
+  assertEquals(failing.states().build, "pending", "the build never ran");
+  failing.reporter.finish("failed");
+  assertEquals(failing.states().build, "skipped");
+});
+
+test("promote and the deploy hooks belong to start, not build or health", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  h.reporter.phase(COMMAND_LOG_PHASES.BUILD);
+  h.reporter.phase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+  assertEquals(h.states().build, "done");
+  assertEquals(h.states().start, "running");
+  h.reporter.phase(COMMAND_LOG_PHASES.PRE_DEPLOY);
+  h.reporter.phase(COMMAND_LOG_PHASES.COMPOSE_UP);
+  h.reporter.phase(COMMAND_LOG_PHASES.HEALTH);
+  h.reporter.phase(COMMAND_LOG_PHASES.POST_DEPLOY);
+  assertEquals(h.states().health, "done");
+  assertEquals(h.states().start, "running");
+  assertEquals(h.last().current, "start");
 });
 
 test("detail is capped and ignored for a step that is not running", () => {
@@ -217,10 +335,25 @@ test("fail marks only the running steps and a group starts together", () => {
   h.reporter.start(["install-web-server:apache", "install-php:8.3"]);
   assertEquals(h.last().current, "install-web-server:apache");
   assertEquals(h.states()["install-php:8.3"], "running");
+  h.advance(DEPLOY_PROGRESS_DETAIL_INTERVAL_MS);
+  h.reporter.detail("install-php:8.3", "Install php8.3-fpm: apt failed");
   h.reporter.fail(["install-web-server:apache", "install-php:8.3", "fetch"]);
   assertEquals(h.states()["install-web-server:apache"], "failed");
   assertEquals(h.states()["install-php:8.3"], "failed");
   assertEquals(h.states().fetch, "pending");
+  assertEquals(
+    h.last().steps.find((s) => s.id === "install-php:8.3")?.detail,
+    "Install php8.3-fpm: apt failed",
+    "a failed step keeps the line that explains it",
+  );
+  // A ready step whose ensure still failed is not left ticked.
+  h.reporter.fail("install-docker");
+  assertEquals(h.states()["install-docker"], "failed");
+  h.reporter.finish("failed");
+  assertEquals(
+    h.last().steps.find((s) => s.id === "install-php:8.3")?.detail,
+    "Install php8.3-fpm: apt failed",
+  );
 });
 
 test("the payload stays inside the wire caps", () => {

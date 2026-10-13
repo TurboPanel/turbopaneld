@@ -2622,18 +2622,6 @@ async function installSiteEngines(
 }
 
 /**
- * Vendor the PHP runtimes for a deploy's PHP sites early in the deploy, the
- * way `ensureNativeAppRuntime` does for Node. {@link applySites} runs the same
- * idempotent playbooks again afterwards.
- */
-export async function ensureSitePhpRuntimes(
-  sites: readonly SiteApplySpec[],
-  opts?: Pick<ApplySiteOpts, "runPlaybook" | "onEvent">,
-): Promise<void> {
-  await ensureSiteEngines(sites.filter(siteNeedsPhp), opts);
-}
-
-/**
  * Install every engine and PHP series a deploy's sites need, early in the
  * deploy and before the first site config is written, so the whole install
  * shows up as its own step in the deploy progress rather than inside the
