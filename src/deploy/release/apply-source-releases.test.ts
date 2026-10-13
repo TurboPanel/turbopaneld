@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { COMMAND_LOG_PHASES } from "../../logs/contracts.ts";
 import type {
@@ -903,87 +903,152 @@ test("applySourceReleases propagates staticExport from native app build shaping"
   });
 });
 
-test("a standalone build with a start command that needs package scripts warns, and records no detected start", async () => {
+/**
+ * Apply one Next release whose build produced a standalone tree, with the
+ * author's `startCommand`. Returns what the apply did so a test can check
+ * whether the release was promoted and what the build recorded.
+ */
+async function applyStandaloneRelease(
+  layout: ReturnType<typeof layoutFromFixture>,
+  startCommand: string,
+): Promise<{
+  result: ReturnType<typeof applySourceReleases>;
+  promoted: () => boolean;
+  detectStart: () => boolean | undefined;
+}> {
+  const serviceId = "svc-standalone";
+  const log = fakeLogSink();
+  let detectStart: boolean | undefined;
+  let promoted = false;
+  const result = applySourceReleases(
+    layout,
+    basePayload({
+      hostings: [{
+        hostingId: "host-standalone",
+        composeServiceName: "web",
+        serviceId,
+        hostnames: ["standalone.example.com"],
+      }],
+      sourceMaterial: [
+        baseSource({
+          releaseId: "rel-standalone",
+          principal: {
+            principalId: "pr-3",
+            username: "siteuser",
+            uid: 2100,
+            gid: 2101,
+          },
+          build: { kind: "native", startCommand },
+        }),
+      ],
+      nativeAppServices: [{
+        composeServiceName: "web",
+        serviceId,
+        listenPort: 3002,
+        framework: "next",
+      }],
+    }),
+    {
+      logSink: log.sink,
+      decryptSecrets: undefined,
+      ensureReleaseTreeFn: mkdirReleaseTree,
+      checkoutReleaseFn: async (params) => {
+        const workingDir = join(params.scratchDir, "source");
+        await Deno.mkdir(workingDir, { recursive: true });
+        return { workingDir, commitSha: "standalone-commit" };
+      },
+      runReleaseBuildFn: () => Promise.resolve(),
+      prepareNativeAppBuildOutputFn: (context) => {
+        detectStart = context.detectStart;
+        return Promise.resolve({
+          standaloneOutput: true,
+          staticExport: false,
+          outputDirectory: ".next/standalone",
+        });
+      },
+      promoteReleaseFn: async (params) => {
+        promoted = true;
+        await swapCurrentSymlink(params.paths);
+        return params.paths.releaseDir;
+      },
+      pruneReleasesFn: () => Promise.resolve([]),
+    },
+  );
+  // Settle before returning so a rejection is observed by the caller's
+  // `assertRejects`, not reported as unhandled.
+  await result.catch(() => undefined);
+  return {
+    result,
+    promoted: () => promoted,
+    detectStart: () => detectStart,
+  };
+}
+
+for (
+  const [startCommand, reason] of [
+    ["pnpm start", 'has no "next" command and no package scripts'],
+    ["corepack pnpm run start", 'has no "next" command and no package scripts'],
+    ["npx next start -p 3000", 'has no "next" command and no package scripts'],
+    [
+      "./node_modules/.bin/next start",
+      'has no "next" command and no package scripts',
+    ],
+    [
+      "node .next/standalone/server.js",
+      "points at a path that does not exist there",
+    ],
+  ] as const
+) {
+  test(`a standalone build fails before promotion when the start command is "${startCommand}"`, async () => {
+    await createTempLayout().then(async (fixture) => {
+      try {
+        const layout = layoutFromFixture(fixture);
+        const apply = await applyStandaloneRelease(layout, startCommand);
+        const err = await assertRejects(() => apply.result, Error);
+        assertStringIncludes(err.message, `start command "${startCommand}"`);
+        assertStringIncludes(err.message, reason);
+        assertStringIncludes(
+          err.message,
+          "Clear the start command and the app starts with node server.js.",
+        );
+        assertEquals(apply.promoted(), false);
+        // Nothing was promoted, so nothing was recorded for a rollback either.
+        const record = await readReleaseManifest(
+          resolveDaemonReleasePaths(layout, {
+            serviceId: "svc-standalone",
+            releaseId: "rel-standalone",
+          }).releaseDir,
+        );
+        assertEquals(record, null);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  });
+}
+
+test("a standalone build keeps an author start command that runs server.js, and records no detected start", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
-      const serviceId = "svc-standalone";
-      const log = fakeLogSink();
-      let detectStart: boolean | undefined;
-      const applied = await applySourceReleases(
+      const apply = await applyStandaloneRelease(
         layout,
-        basePayload({
-          hostings: [{
-            hostingId: "host-standalone",
-            composeServiceName: "web",
-            serviceId,
-            hostnames: ["standalone.example.com"],
-          }],
-          sourceMaterial: [
-            baseSource({
-              releaseId: "rel-standalone",
-              principal: {
-                principalId: "pr-3",
-                username: "siteuser",
-                uid: 2100,
-                gid: 2101,
-              },
-              build: { kind: "native", startCommand: "pnpm start" },
-            }),
-          ],
-          nativeAppServices: [{
-            composeServiceName: "web",
-            serviceId,
-            listenPort: 3002,
-            framework: "next",
-          }],
-        }),
-        {
-          logSink: log.sink,
-          decryptSecrets: undefined,
-          ensureReleaseTreeFn: mkdirReleaseTree,
-          checkoutReleaseFn: async (params) => {
-            const workingDir = join(params.scratchDir, "source");
-            await Deno.mkdir(workingDir, { recursive: true });
-            return { workingDir, commitSha: "standalone-commit" };
-          },
-          runReleaseBuildFn: () => Promise.resolve(),
-          prepareNativeAppBuildOutputFn: (context) => {
-            detectStart = context.detectStart;
-            return Promise.resolve({
-              standaloneOutput: true,
-              staticExport: false,
-              outputDirectory: ".next/standalone",
-            });
-          },
-          promoteReleaseFn: async (params) => {
-            await swapCurrentSymlink(params.paths);
-            return params.paths.releaseDir;
-          },
-          pruneReleasesFn: () => Promise.resolve([]),
-        },
+        "PORT=3002 node server.js",
       );
-      assertEquals(detectStart, false);
+      const applied = await apply.result;
+      assertEquals(apply.detectStart(), false);
+      assertEquals(apply.promoted(), true);
       assertEquals(applied[0]?.nativeStart, undefined);
       // The author's start command is recorded, so a rollback to this
       // release would start it the same way.
       const record = await readReleaseManifest(
         resolveDaemonReleasePaths(layout, {
-          serviceId,
+          serviceId: "svc-standalone",
           releaseId: "rel-standalone",
         }).releaseDir,
       );
-      assertEquals(record?.startCommand, "pnpm start");
+      assertEquals(record?.startCommand, "PORT=3002 node server.js");
       assertEquals(record?.startupFile, undefined);
-      assertEquals(
-        log.lines.some(({ stream, message }) =>
-          stream === "stderr" &&
-          message.includes(
-            'start command "pnpm start" will likely fail. Remove the start command',
-          )
-        ),
-        true,
-      );
     } finally {
       await fixture.cleanup();
     }

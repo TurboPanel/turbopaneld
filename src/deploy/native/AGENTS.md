@@ -340,8 +340,11 @@ into it (the layout Next documents) and publishes that subtree, so `server.js`
 lands at the release root and the unit runs `node server.js`. Without
 `output: "standalone"` the whole build tree ships (with a warning) and the app
 runs `next start` on 127.0.0.1. A standalone build with an author start command
-that needs package scripts or `next` (`pnpm start`, `next start`) gets a build
-warning: the standalone tree has neither. An operator-declared
+that needs package scripts or `next` (`pnpm start`, `pnpm run start`, `next
+start`), or that points under `.next/standalone/` (the subtree *is* the
+release, so the path does not exist), **fails the build** before anything is
+promoted: the standalone tree has neither, and the error names `node server.js`
+as the fix. An operator-declared
 `outputDirectory` always wins (no fold, no export detection; only the start is
 looked for inside it).
 
