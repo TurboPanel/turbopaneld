@@ -63,6 +63,21 @@ import {
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
+import { ensureBuildkitRailpack } from "../deploy/release/railpack-build.ts";
+import { nativeAppRuntimeKind } from "../deploy/native/unit.ts";
+import {
+  createNoopDeployStepReporter,
+  createPlaybookEventHandler,
+  type DeployStepReporter,
+  type PlannedDeployStep,
+} from "./deploy-progress.ts";
+import {
+  type DeployPresenceProbes,
+  deployStepNeeds,
+  installStepIds,
+  planDeploySteps,
+  probeDeployPresence,
+} from "./deploy-progress-plan.ts";
 import { ensureSystemPrincipals } from "../deploy/ensure-principal.ts";
 import { applySshAccess, type PrincipalSshSpec } from "../deploy/ssh/apply.ts";
 import {
@@ -101,7 +116,7 @@ import {
 } from "../deploy/run-deploy-hooks.ts";
 import {
   applySites,
-  ensureSitePhpRuntimes,
+  ensureSiteEngines,
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
   resolveSiteDocumentRoot,
@@ -368,8 +383,16 @@ export type EnvironmentDeployDeps = {
    * or a real `ansible-playbook` run.
    */
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
-  /** Test seam — the Ansible runner for the pre-principal PHP runtime step. */
-  siteIo?: Parameters<typeof ensureSitePhpRuntimes>[1];
+  /** Test seam — the Ansible runner for the early site engine install. */
+  siteIo?: Parameters<typeof ensureSiteEngines>[1];
+  /**
+   * Step plan + live progress reporter (`./deploy-progress.ts`), created by
+   * the command router on the dispatch socket. Absent (tests, other callers)
+   * means the no-op reporter: nothing is planned and no host probe runs.
+   */
+  progress?: DeployStepReporter;
+  /** Test seam — the presence probes behind the step plan. */
+  presenceProbes?: DeployPresenceProbes;
   /**
    * Cancel token of this deploy (`../deploy/deploy-cancel.ts`). Checked between
    * phases and handed to the processes the deploy spawns; the first step that
@@ -457,7 +480,64 @@ type EnsureDeployIngressParams = {
   /** Docker CLI seam — must reach every ingress helper so tests never touch real Docker. */
   runDocker: RunDockerFn;
   listenerPorts?: EnvironmentDeployPayload["listenerPorts"];
+  progress: DeployProgressRuntime;
 };
+
+/** The transcript sink and step reporter one deploy shares. */
+type DeployProgressRuntime = {
+  logSink: CommandOutputSink;
+  progress: DeployStepReporter;
+  /** The phase the sink is on, so an install can hand it back afterwards. */
+  currentPhase: () => string;
+};
+
+/**
+ * One on-demand install as a step of the plan: its own transcript phase while
+ * it runs, the step(s) running → done / failed around it, and the previous
+ * phase restored afterwards (the build tool installs mid-`build`).
+ */
+async function runInstallStep<T>(
+  runtime: DeployProgressRuntime,
+  ids: readonly string[],
+  phase: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previousPhase = runtime.currentPhase();
+  runtime.logSink.setPhase(phase);
+  // Nested: an install mid-`build` (the build tool) leaves `build` running.
+  runtime.progress.start(ids, { nested: true });
+  try {
+    const result = await fn();
+    runtime.progress.done(ids);
+    return result;
+  } catch (err) {
+    runtime.progress.fail(ids);
+    throw err;
+  } finally {
+    runtime.logSink.setPhase(previousPhase);
+  }
+}
+
+/**
+ * Playbook events → transcript lines + the ticker of the first step of the
+ * group that actually has work (a grouped install may start with a `ready`
+ * one: Node 20 vendored, Node 22 missing).
+ */
+function installEvents(
+  runtime: DeployProgressRuntime,
+  ids: readonly string[],
+  fallbackId: string,
+  plan: readonly PlannedDeployStep[] = [],
+) {
+  const pending = plan.find((step) =>
+    step.state === "pending" && ids.includes(step.id)
+  );
+  return createPlaybookEventHandler(
+    runtime.logSink,
+    runtime.progress,
+    pending?.id ?? ids[0] ?? fallbackId,
+  );
+}
 
 /**
  * Both ingress paths below run only when this deploy has hostings, and the
@@ -489,7 +569,18 @@ async function ensureDeployIngress(
     ensureDockerFn,
     runDocker,
     listenerPorts,
+    progress,
   } = params;
+  const gatewayStep = <T>(fn: () => Promise<T>) =>
+    runInstallStep(
+      progress,
+      ["install-gateway"],
+      COMMAND_LOG_PHASES.INSTALL_GATEWAY,
+      fn,
+    );
+  const caddyDeps = {
+    onEvent: installEvents(progress, ["install-gateway"], "install-gateway"),
+  };
   const activeIngressServiceIds = new Set(
     ingressServices.map((ingress) => ingress.serviceId),
   );
@@ -507,20 +598,27 @@ async function ensureDeployIngress(
       { runDocker },
     );
     if (hostingsNeedPublicHttpEdge(allHostings)) {
-      await ensureHostingCaddyRuntime(layout);
+      await gatewayStep(() => ensureHostingCaddyRuntime(layout, caddyDeps));
     }
     return;
   }
-  await ensureDockerFn();
+  await runInstallStep(
+    progress,
+    ["install-docker"],
+    COMMAND_LOG_PHASES.INSTALL_DOCKER,
+    ensureDockerFn,
+  );
 
   // Shared loopback Traefik only when something HTTP actually needs it —
   // bare nginx/workload deploys must not create the platform `-in` proxy.
   if (containerHostingsNeedSharedHttpIngress(containerHostings)) {
     await persistHostingIngressIdentity(layout, hostingIngress);
-    await ensureHostingIngress(
-      layout,
-      requireHostingIngressNetwork(hostingIngressNetwork),
-      { runDocker },
+    await gatewayStep(() =>
+      ensureHostingIngress(
+        layout,
+        requireHostingIngressNetwork(hostingIngressNetwork),
+        { runDocker },
+      )
     );
   }
 
@@ -560,7 +658,7 @@ async function ensureDeployIngress(
   // Edge hostnames on host-native services (sites, native apps) still reach
   // hosting Caddy even when no container hosting needs shared Traefik.
   if (hostingsNeedPublicHttpEdge(allHostings)) {
-    await ensureHostingCaddyRuntime(layout);
+    await gatewayStep(() => ensureHostingCaddyRuntime(layout, caddyDeps));
   }
 }
 
@@ -2126,10 +2224,36 @@ export function shapeEnvironmentDeployResult(input: {
   };
 }
 
+/**
+ * The deploy's sink, with the step reporter following its phases: `fetch`,
+ * `build`, `compose-up` and `health` are steps of the plan, so every existing
+ * `setPhase` site marks its step without knowing about progress.
+ */
+function progressFollowingSink(
+  inner: CommandOutputSink,
+  progress: DeployStepReporter,
+): { logSink: CommandOutputSink; currentPhase: () => string } {
+  let phase: string = COMMAND_LOG_PHASES.PREPARE;
+  const logSink: CommandOutputSink = {
+    onLine: (stream, message) => inner.onLine(stream, message),
+    setPhase: (next) => {
+      phase = next;
+      inner.setPhase(next);
+      progress.phase(next);
+    },
+    addSecrets: (values) => inner.addSecrets(values),
+    redactSummary: (text) => inner.redactSummary(text),
+    finalize: () => inner.finalize(),
+  };
+  return { logSink, currentPhase: () => phase };
+}
+
 function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   run: RunDockerFn;
   runStreamed: RunDockerStreamedFn;
   logSink: CommandOutputSink;
+  progress: DeployStepReporter;
+  currentPhase: () => string;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureDockerFn: () => Promise<void>;
   ensureExternalNetworks: (
@@ -2141,11 +2265,22 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   runPrivileged: RunFn;
 } {
   const run = deps?.runDocker ?? defaultRunDocker;
-  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  const progress = deps?.progress ?? createNoopDeployStepReporter();
+  const { logSink, currentPhase } = progressFollowingSink(
+    deps?.logSink ?? createNoopCommandOutputSink(),
+    progress,
+  );
   const streamed = createStreamedRunner(deps?.runDocker);
   const cancel = deps?.cancel;
+  const dockerEvents = createPlaybookEventHandler(
+    logSink,
+    progress,
+    "install-docker",
+  );
   return {
     run,
+    progress,
+    currentPhase,
     // Every streamed docker call (build, pull, up) dies with a cancel; once the
     // deploy has committed, the signal can no longer fire.
     runStreamed: cancel
@@ -2155,7 +2290,8 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     // Every plaintext this deploy decrypts (variable material, principal
     // passwords, TLS private keys) joins the transcript redaction deny-set.
     decryptSecrets: captureDecryptedSecrets(deps?.decryptSecrets, logSink),
-    ensureDockerFn: deps?.ensureDocker ?? defaultEnsureDocker,
+    ensureDockerFn: deps?.ensureDocker ??
+      (() => defaultEnsureDocker({ onEvent: dockerEvents })),
     ensureExternalNetworks: deps?.ensureExternalDockerNetworks ??
       ((networks: readonly ExternalDockerNetworkSpec[]) =>
         defaultEnsureExternalDockerNetworks(networks, run)),
@@ -2262,14 +2398,88 @@ export async function handleEnvironmentDeploy(
     pruneHoldKeysForDeploy(parsedPayload.sites ?? []),
   );
   try {
-    return await deployEnvironmentHolding(
+    const result = await deployEnvironmentHolding(
       parsedPayload,
       daemonReceivedAt,
       deps,
     );
+    deps?.progress?.finish("succeeded");
+    return result;
+  } catch (err) {
+    // The last payload goes out before the outcome: the running step failed
+    // (or was skipped by a cancel), the rest never ran.
+    deps?.progress?.finish(
+      err instanceof DeployCancelledError ? "cancelled" : "failed",
+    );
+    throw err;
   } finally {
     releaseHolds();
   }
+}
+
+/**
+ * Preflight: what this deploy will do on the server and what is already
+ * there, probed without installing anything, then sent as the first
+ * `command-progress`. Nothing runs for the no-op reporter.
+ */
+async function planDeployProgress(
+  runtime: DeployProgressRuntime,
+  layout: LayoutPaths,
+  parsedPayload: EnvironmentDeployPayload,
+  edge: { hasContainers: boolean; sharedIngress: boolean; publicEdge: boolean },
+  probes: DeployPresenceProbes | undefined,
+): Promise<PlannedDeployStep[]> {
+  if (!runtime.progress.enabled) return [];
+  try {
+    const needs = deployStepNeeds(parsedPayload, edge);
+    const presence = await probeDeployPresence(layout, needs, probes);
+    const steps = planDeploySteps(needs, presence);
+    runtime.progress.plan(steps);
+    return steps;
+  } catch (err) {
+    // The plan is a courtesy to the UI; a probe that cannot answer must not
+    // stop the deploy. Without a plan the steps simply never show.
+    logWarn(
+      "deploy",
+      `deploy step plan skipped: ${err instanceof Error ? err.message : err}`,
+    );
+    return [];
+  }
+}
+
+/**
+ * Vendor the Node and Deno series the deploy's apps run on, one install step
+ * group per runtime so the rail shows which one is being fetched.
+ */
+async function ensureDeployNativeRuntimes(
+  runtime: DeployProgressRuntime,
+  plan: readonly PlannedDeployStep[],
+  apps: readonly EnvironmentDeployNativeAppService[],
+  io: Omit<ApplyNativeAppsOpts, "bindings"> | undefined,
+): Promise<void> {
+  const groups = [
+    ["node", installStepIds(plan, "install-runtime:node-")],
+    ["deno", installStepIds(plan, "install-runtime:deno-")],
+  ] as const;
+  await forEachSequential(groups, async ([kind, ids]) => {
+    const ofKind = apps.filter((app) => nativeAppRuntimeKind(app) === kind);
+    if (ofKind.length === 0) return;
+    await runInstallStep(
+      runtime,
+      ids,
+      COMMAND_LOG_PHASES.INSTALL_RUNTIME,
+      () =>
+        ensureNativeAppRuntime(ofKind, {
+          ...io,
+          onEvent: installEvents(
+            runtime,
+            ids,
+            `install-runtime:${kind}`,
+            plan,
+          ),
+        }),
+    );
+  });
 }
 
 async function deployEnvironmentHolding(
@@ -2297,6 +2507,12 @@ async function deployEnvironmentHolding(
   const cancel = deps?.cancel;
   cancel?.throwIfCancelled("before the deploy started");
   const ingressServices = parsedPayload.ingressServices ?? [];
+  const plan = await planDeployProgress(runtime, layout, parsedPayload, {
+    hasContainers,
+    sharedIngress: containerHostingsNeedSharedHttpIngress(containerHostings),
+    publicEdge: hostingsNeedPublicHttpEdge(parsedPayload.hostings),
+  }, deps?.presenceProbes);
+  cancel?.throwIfCancelled("before the deploy started");
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
     layout,
@@ -2310,6 +2526,7 @@ async function deployEnvironmentHolding(
     ensureDockerFn: runtime.ensureDockerFn,
     runDocker: runtime.run,
     listenerPorts: parsedPayload.listenerPorts,
+    progress: runtime,
   });
 
   cancel?.throwIfCancelled("while the host was being prepared");
@@ -2322,12 +2539,34 @@ async function deployEnvironmentHolding(
 
   // Tenant Node must exist before the Git build: native installs run
   // `corepack` from `vendor/node-app/<series>/current/bin`.
-  await ensureNativeAppRuntime(
+  await ensureDeployNativeRuntimes(
+    runtime,
+    plan,
     parsedPayload.nativeAppServices ?? [],
     deps?.nativeAppIo,
   );
-  // PHP too, so a site's runtime is on disk before anything starts it.
-  await ensureSitePhpRuntimes(parsedPayload.sites ?? [], deps?.siteIo);
+  // The web engines and PHP too, so a site's runtime is on disk before
+  // anything starts it. One engine playbook vendors the engine and its PHP
+  // series together, so their steps run and finish as one group.
+  const siteInstallIds = [
+    ...installStepIds(plan, "install-web-server:"),
+    ...installStepIds(plan, "install-php:"),
+  ];
+  await runInstallStep(
+    runtime,
+    siteInstallIds,
+    COMMAND_LOG_PHASES.INSTALL_WEB_SERVER,
+    () =>
+      ensureSiteEngines(parsedPayload.sites ?? [], {
+        ...deps?.siteIo,
+        onEvent: installEvents(
+          runtime,
+          siteInstallIds,
+          "install-web-server",
+          plan,
+        ),
+      }),
+  );
 
   const principalMaterial = parsedPayload.principalMaterial ?? [];
   await ensureDeployPrincipals(
@@ -2342,6 +2581,20 @@ async function deployEnvironmentHolding(
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    ensureBuildkitRailpackFn: (releaseLayout) =>
+      runInstallStep(
+        runtime,
+        ["install-build-tool"],
+        COMMAND_LOG_PHASES.INSTALL_BUILD_TOOL,
+        () =>
+          ensureBuildkitRailpack(releaseLayout, {
+            onEvent: installEvents(
+              runtime,
+              ["install-build-tool"],
+              "install-build-tool",
+            ),
+          }),
+      ),
     ...(cancel === undefined ? {} : { cancel }),
   });
   // Which host-native lane each service ends up on can only be decided once the
@@ -2410,6 +2663,10 @@ async function deployEnvironmentHolding(
     nativeAppServices,
     appliedReleases,
   );
+  // Host-native lanes start here; `compose-up` marks the step for containers.
+  if (sites.length > 0 || nativeAppServicesForHost.length > 0) {
+    runtime.progress.start("start");
+  }
   await applyDeploySites(
     layout,
     parsedPayload.environmentId,
@@ -2439,18 +2696,21 @@ async function deployEnvironmentHolding(
   // the vhost tree is settled, so a unit that fails its health probe fails only
   // itself and rolls its own `current` back. Health (not promote) owns this
   // pass so start + unit journal land in the same transcript section as the
-  // probe verdict.
-  runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
-  await applyDeployNativeApps(
-    layout,
-    parsedPayload,
-    nativeAppServicesForHost,
-    appliedReleases,
-    runtime.logSink,
-    runtime.decryptSecrets,
-    deps?.nativeAppIo,
-  );
-  runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+  // probe verdict. A deploy without native apps keeps `prepare`, so the
+  // step rail does not show "Check it answers" before anything started.
+  if (nativeAppServicesForHost.length > 0) {
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+    await applyDeployNativeApps(
+      layout,
+      parsedPayload,
+      nativeAppServicesForHost,
+      appliedReleases,
+      runtime.logSink,
+      runtime.decryptSecrets,
+      deps?.nativeAppIo,
+    );
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+  }
 
   // After *both* host-native applies, because a job's WorkingDirectory is the
   // tree its owner just settled — a site's document root, or a native app's
@@ -2494,6 +2754,8 @@ async function deployEnvironmentHolding(
     ...(cancel === undefined ? {} : { cancel }),
   });
 
+  // Planned only when the payload carries certificate material.
+  runtime.progress.start("certificates");
   const hostnameTls = await materializeDeployTls(
     layout,
     parsedPayload,
@@ -2501,6 +2763,7 @@ async function deployEnvironmentHolding(
   );
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
+  runtime.progress.done("certificates");
 
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({

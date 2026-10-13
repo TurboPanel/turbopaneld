@@ -1,5 +1,6 @@
 import { logInfo } from "../util/logger.ts";
 import { runDockerSetup as defaultRunDockerSetup } from "../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../orchestration/ansible-events.ts";
 import { dockerEngineProbe } from "./docker-cli.ts";
 import { diagnoseDockerUnreachable } from "./docker-diagnosis.ts";
 
@@ -14,6 +15,11 @@ export type EnsureDockerDeps = {
   diagnose?: () => Promise<string>;
   /** Host-free seam for the default binary probe (`Deno.stat`). */
   stat?: (path: string) => Promise<Deno.FileInfo>;
+  /**
+   * Structured playbook events from the default docker-setup (task starts,
+   * failures) for the deploy transcript. Ignored by a custom `runDockerSetup`.
+   */
+  onEvent?: AnsibleEventHandler;
 };
 
 async function dockerBinaryPresentDefault(
@@ -28,21 +34,46 @@ async function dockerBinaryPresentDefault(
   }
 }
 
-async function ensureDockerOnce(deps?: EnsureDockerDeps): Promise<void> {
-  const presentFn = deps?.dockerBinaryPresent ??
-    (() => dockerBinaryPresentDefault(deps?.stat ?? Deno.stat));
-  let lastProbeStderr = "";
-  const reachableFn = deps?.dockerEngineReachable ?? (async () => {
-    const probe = await dockerEngineProbe();
-    lastProbeStderr = probe.stderr;
-    return probe.success;
-  });
-  const setupFn = deps?.runDockerSetup ?? defaultRunDockerSetup;
-  const diagnoseFn = deps?.diagnose ??
-    (() => diagnoseDockerUnreachable(lastProbeStderr));
+type DockerProbes = {
+  present: () => Promise<boolean>;
+  reachable: () => Promise<boolean>;
+  /** Stderr of the last engine probe, for the diagnosis. */
+  lastProbeStderr: () => string;
+};
 
-  const present = await presentFn();
-  const reachable = present ? await reachableFn() : false;
+function resolveDockerProbes(deps?: EnsureDockerDeps): DockerProbes {
+  let lastProbeStderr = "";
+  return {
+    present: deps?.dockerBinaryPresent ??
+      (() => dockerBinaryPresentDefault(deps?.stat ?? Deno.stat)),
+    reachable: deps?.dockerEngineReachable ?? (async () => {
+      const probe = await dockerEngineProbe();
+      lastProbeStderr = probe.stderr;
+      return probe.success;
+    }),
+    lastProbeStderr: () => lastProbeStderr,
+  };
+}
+
+/**
+ * True when the Docker binary is installed and the Engine API answers. The
+ * presence half of {@link ensureDocker}: it never runs docker-setup, so the
+ * deploy preflight can plan the install step without starting it.
+ */
+export async function dockerReady(deps?: EnsureDockerDeps): Promise<boolean> {
+  const probes = resolveDockerProbes(deps);
+  return await probes.present() && await probes.reachable();
+}
+
+async function ensureDockerOnce(deps?: EnsureDockerDeps): Promise<void> {
+  const probes = resolveDockerProbes(deps);
+  const setupFn = deps?.runDockerSetup ??
+    (() => defaultRunDockerSetup(undefined, deps?.onEvent));
+  const diagnoseFn = deps?.diagnose ??
+    (() => diagnoseDockerUnreachable(probes.lastProbeStderr()));
+
+  const present = await probes.present();
+  const reachable = present ? await probes.reachable() : false;
 
   if (present && reachable) return;
 
@@ -54,7 +85,7 @@ async function ensureDockerOnce(deps?: EnsureDockerDeps): Promise<void> {
   );
   await setupFn();
 
-  if (!(await reachableFn())) {
+  if (!(await probes.reachable())) {
     throw new Error(await diagnoseFn());
   }
 }

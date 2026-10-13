@@ -63,6 +63,7 @@ import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { runBuildkitSetup as defaultRunBuildkitSetup } from "../../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../../orchestration/ansible-events.ts";
 import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
@@ -247,6 +248,8 @@ function resolveArchDefault(): "arm64" | "amd64" {
 /** Optional test seams for {@link ensureBuildkitRailpack}. */
 export type EnsureBuildkitRailpackDeps = {
   runBuildkitSetup?: () => Promise<void>;
+  /** Playbook events from the default setup, for the deploy transcript. */
+  onEvent?: AnsibleEventHandler;
   runCommand?: (
     command: string,
     args: string[],
@@ -472,6 +475,15 @@ async function installRailpack(
 }
 
 /**
+ * True when the vendored build tool and its frontend are already on disk; the
+ * deploy preflight plans "Install the build tool" as ready from this without
+ * running the setup.
+ */
+export async function buildToolPresent(runtimesDir: string): Promise<boolean> {
+  return (await resolveTools(runtimesDir)) !== undefined;
+}
+
+/**
  * Ensure `railpack` **and the vendored gateway frontend** exist under the
  * vendor tree.
  *
@@ -488,7 +500,8 @@ export async function ensureBuildkitRailpack(
   layout: LayoutPaths,
   deps?: EnsureBuildkitRailpackDeps,
 ): Promise<BuildkitRailpackTools> {
-  const runSetup = deps?.runBuildkitSetup ?? defaultRunBuildkitSetup;
+  const runSetup = deps?.runBuildkitSetup ??
+    (() => defaultRunBuildkitSetup(deps?.onEvent));
   const runCommand = deps?.runCommand ?? runDefault;
   const resolveArch = deps?.resolveArch ?? resolveArchDefault;
 

@@ -340,8 +340,12 @@ into it (the layout Next documents) and publishes that subtree, so `server.js`
 lands at the release root and the unit runs `node server.js`. Without
 `output: "standalone"` the whole build tree ships (with a warning) and the app
 runs `next start` on 127.0.0.1. A standalone build with an author start command
-that needs package scripts or `next` (`pnpm start`, `next start`) gets a build
-warning: the standalone tree has neither. An operator-declared
+that needs package scripts or `next` (`pnpm start`, `npm run start -- -p 3000`,
+`next start`), or a start command or startup file that points under
+`.next/standalone/` (the subtree *is* the release, so the path does not
+exist), **fails the build** before anything is
+promoted: the standalone tree has neither, and the error names `node server.js`
+as the fix. An operator-declared
 `outputDirectory` always wins (no fold, no export detection; only the start is
 looked for inside it).
 
@@ -363,7 +367,8 @@ it is required as corroboration, and a build that also emitted
 **Per-app Node version.** `nativeAppServices[].nodeVersion` is a **series**
 ("24", "24.17", "24.17.0"), not necessarily a patch pin. `apply-native-apps.ts`
 collects the distinct series this deploy needs (an app that declared none
-contributes `DEFAULT_NATIVE_APP_NODE_VERSION`) and passes them to the vendoring
+contributes `NEWEST_NATIVE_APP_NODE_VERSION`, the newest series the
+runtime registry offers — there is no separately chosen default) and passes them to the vendoring
 playbook as `-e {"node_app_versions": [...]}`; the role resolves the newest
 upstream release inside each series and points
 `vendor/node-app/<series>/current` at it. The unit's `ExecStart` is

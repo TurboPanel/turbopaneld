@@ -3,7 +3,6 @@ import { resolveLayout } from "../../paths/layout.ts";
 import type { EnvironmentDeployNativeAppService } from "../../contracts/commands-contracts.ts";
 import {
   DEFAULT_NATIVE_APP_DENO_VERSION,
-  DEFAULT_NATIVE_APP_NODE_VERSION,
   DEFAULT_START_SCRIPT,
   formatCpuQuota,
   formatMemoryBytes,
@@ -21,6 +20,7 @@ import {
   nativeAppUnitContent,
   nativeAppUnitName,
   nativeAppUnitPath,
+  NEWEST_NATIVE_APP_NODE_VERSION,
   principalSliceContent,
   principalSliceName,
   principalSliceStagedPath,
@@ -59,11 +59,11 @@ const app: EnvironmentDeployNativeAppService = {
 test("resolveNativeAppNodeVersion defaults when nodeVersion is blank", () => {
   assertEquals(
     resolveNativeAppNodeVersion({}),
-    DEFAULT_NATIVE_APP_NODE_VERSION,
+    NEWEST_NATIVE_APP_NODE_VERSION,
   );
   assertEquals(
     resolveNativeAppNodeVersion({ nodeVersion: "   " }),
-    DEFAULT_NATIVE_APP_NODE_VERSION,
+    NEWEST_NATIVE_APP_NODE_VERSION,
   );
   assertEquals(
     resolveNativeAppNodeVersion({ nodeVersion: "22" }),
@@ -547,7 +547,7 @@ test("the Node unit is untouched by the Deno runtime", () => {
   });
   assertEquals(unit.includes("DENO"), false);
   assertStringIncludes(unit, "Environment=COREPACK_HOME=");
-  assertStringIncludes(unit, "node-app/24/current/bin/node server.js\n");
+  assertStringIncludes(unit, "node-app/26/current/bin/node server.js\n");
 });
 
 test("resolveExecStart for Deno: command, startup file, detected start, then deno task start", () => {

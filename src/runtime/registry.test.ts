@@ -11,6 +11,7 @@ import {
   isAllowedExtension,
   isRuntimeName,
   isSupportedSeries,
+  newestSeries,
   optionalExtensions,
   phpBinaryPaths,
   phpBuiltinExtensions,
@@ -62,13 +63,14 @@ test("runtimeSeries uses major.minor for php and major for node", () => {
   assertEquals(runtimeSeries("deno", "2.9.7"), "2");
 });
 
-test("supportedSeries and defaultSeries come from the registry", () => {
+test("supportedSeries, defaultSeries and newestSeries come from the registry", () => {
   assertEquals(supportedSeries("php"), ["8.1", "8.2", "8.3", "8.4", "8.5"]);
   assertEquals(supportedSeries("node"), ["22", "24", "26"]);
   assertEquals(supportedSeries("deno"), ["2"]);
   assertEquals(defaultSeries("deno"), "2");
   assertEquals(defaultSeries("php"), "8.4");
-  assertEquals(defaultSeries("node"), "24");
+  assertEquals(newestSeries("node"), "26");
+  assertEquals(newestSeries("php"), "8.5");
 });
 
 test("isSupportedSeries resolves known series and refuses unknown ones", () => {

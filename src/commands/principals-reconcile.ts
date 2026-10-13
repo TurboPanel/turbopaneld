@@ -24,6 +24,7 @@ import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   ensureSystemPrincipals,
   type PrincipalEnsureSpec,
+  type RunFn,
 } from "../deploy/ensure-principal.ts";
 import {
   applySshAccess,
@@ -31,6 +32,11 @@ import {
   type SshApplyPaths,
   type SshApplyResult,
 } from "../deploy/ssh/apply.ts";
+import {
+  retirePrincipals as retirePrincipalsOnHost,
+  type RetirePrincipalsResult,
+} from "../deploy/retire-principals.ts";
+import { runPrivileged } from "../deploy/release/release-layout.ts";
 import type {
   PrincipalsReconcilePayload,
   PrincipalsReconcileResult,
@@ -38,6 +44,12 @@ import type {
 
 export type PrincipalsReconcileDeps = {
   resolveLayout?: () => LayoutPaths;
+  /** Privileged runner for `tp-host principal-remove`; test seam. */
+  runPrivileged?: RunFn;
+  retirePrincipals?: (
+    usernames: readonly string[],
+    runFn: RunFn,
+  ) => Promise<RetirePrincipalsResult>;
   ensureSystemPrincipals?: (
     layout: LayoutPaths,
     principals: PrincipalEnsureSpec[],
@@ -78,6 +90,10 @@ export async function handlePrincipalsReconcile(
       })),
     );
 
+  // An empty set is almost always a control plane that lost track of this
+  // server, not a host that really manages nobody. Pruning on it would delete
+  // every key file at once, so that needs saying explicitly (`allowEmpty`).
+  const prune = payload.principals.length > 0 || payload.allowEmpty === true;
   const ssh = await (deps.applySshAccess ?? applySshAccess)(
     payload.principals.map((principal) => ({
       username: principal.username,
@@ -90,12 +106,29 @@ export async function handlePrincipalsReconcile(
     })),
     // The one caller that holds the whole server, and therefore the only one
     // allowed to delete a key file. See `SshApplyPaths.prune`.
-    { prune: true },
+    { prune },
   );
+
+  // Deleted accounts go last, once the surviving set is in place: tp-host
+  // refuses an account the host still references. The parser keeps a retiree
+  // out of `principals`, so a prune above already dropped its key file; the
+  // retire removes it again regardless, which is why an un-pruned empty set
+  // still loses exactly the retired accounts' files and nothing else.
+  const retireNames = (payload.retirePrincipals ?? []).map((entry) =>
+    entry.username
+  );
+  const retirement = retireNames.length > 0
+    ? await (deps.retirePrincipals ?? defaultRetirePrincipals)(
+      retireNames,
+      deps.runPrivileged ?? runPrivileged,
+    )
+    : undefined;
 
   logInfo(
     "command",
-    `principals reconciled: ${payload.principals.length} accounts, ${ssh.changedPrincipals.length} key files updated, ${ssh.removedPrincipals.length} removed`,
+    `principals reconciled: ${payload.principals.length} accounts, ${ssh.changedPrincipals.length} key files updated, ${ssh.removedPrincipals.length} removed, ${
+      retirement?.retired.length ?? 0
+    } retired`,
   );
 
   return {
@@ -104,6 +137,27 @@ export async function handlePrincipalsReconcile(
     keysRemoved: ssh.removedPrincipals,
     sshdReloaded: ssh.sshdReloaded,
     sftpChroot: ssh.sftpChroot,
-    warnings: [...(groupWarnings ?? []), ...ssh.warnings],
+    ...(retirement === undefined
+      ? {}
+      : { principalsRetired: retirement.retired }),
+    warnings: [
+      ...(groupWarnings ?? []),
+      ...ssh.warnings,
+      ...(prune ? [] : [EMPTY_SET_KEPT_WARNING]),
+      ...(retirement?.failed ?? []).map((entry) =>
+        `principal ${entry.username} kept: ${entry.error}`
+      ),
+    ],
   };
+}
+
+/** Surfaced in the command result so the panel can see nothing was pruned. */
+export const EMPTY_SET_KEPT_WARNING =
+  "principals is empty without allowEmpty: no key file was pruned (only retired accounts lose theirs)";
+
+function defaultRetirePrincipals(
+  usernames: readonly string[],
+  runFn: RunFn,
+): Promise<RetirePrincipalsResult> {
+  return retirePrincipalsOnHost(usernames, { runFn });
 }

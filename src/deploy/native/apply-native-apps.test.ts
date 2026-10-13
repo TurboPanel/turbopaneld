@@ -24,13 +24,13 @@ import {
   removeNativeAppServices,
 } from "./apply-native-apps.ts";
 import {
-  DEFAULT_NATIVE_APP_NODE_VERSION,
   nativeAppConfigDir,
   nativeAppEnvPath,
   nativeAppEnvStagePath,
   nativeAppNodeBinary,
   nativeAppUnitName,
   nativeAppUnitPath,
+  NEWEST_NATIVE_APP_NODE_VERSION,
   principalSliceContent,
   principalSlicePath,
 } from "./unit.ts";
@@ -1152,12 +1152,12 @@ test("an app with no nodeVersion vendors and runs the default series", async () 
     assertStringIncludes(
       unit,
       `ExecStart=${
-        nativeAppNodeBinary(host.layout, DEFAULT_NATIVE_APP_NODE_VERSION)
+        nativeAppNodeBinary(host.layout, NEWEST_NATIVE_APP_NODE_VERSION)
       } server.js`,
     );
     assertEquals(
       JSON.parse(playbook.calls[0]?.extraArgs?.[1] ?? "{}"),
-      { node_app_versions: [DEFAULT_NATIVE_APP_NODE_VERSION] },
+      { node_app_versions: [NEWEST_NATIVE_APP_NODE_VERSION] },
     );
   } finally {
     await host.cleanup();
@@ -1217,7 +1217,7 @@ test("ensureNativeAppRuntime vendors the distinct series before the Git build", 
   assertEquals(playbook.calls.length, 1);
   const extraArgs = playbook.calls[0]!.extraArgs ?? [];
   assertEquals(JSON.parse(extraArgs[1] ?? "{}"), {
-    node_app_versions: ["22", DEFAULT_NATIVE_APP_NODE_VERSION],
+    node_app_versions: ["22", NEWEST_NATIVE_APP_NODE_VERSION],
   });
 });
 
@@ -1725,7 +1725,7 @@ test("removeNativeAppServices warns when daemon-reload fails after teardown", as
 });
 
 test("nativeAppNodeVersions deduplicates and sorts series pins", () => {
-  assertEquals(DEFAULT_NATIVE_APP_NODE_VERSION, "24");
+  assertEquals(NEWEST_NATIVE_APP_NODE_VERSION, "26");
   assertEquals(
     nativeAppNodeVersions([
       makeApp({ nodeVersion: "24" }),
@@ -1747,7 +1747,8 @@ test("nativeAppNodeVersions deduplicates and sorts series pins", () => {
         listenPort: 18103,
       }),
     ]),
-    ["22", "24"],
+    // The app that pins nothing contributes the newest offered series.
+    ["22", "24", "26"],
   );
 });
 

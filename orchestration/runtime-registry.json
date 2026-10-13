@@ -134,7 +134,6 @@
     },
     "node": {
       "seriesKey": "major",
-      "default": "24",
       "series": {
         "22": {},
         "24": {},
