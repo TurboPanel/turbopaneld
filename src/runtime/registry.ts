@@ -163,8 +163,7 @@ export function defaultSeries(runtime: Exclude<RuntimeName, "node">): string {
 
 /** The highest series the registry offers, compared as numbers. */
 export function newestSeries(runtime: RuntimeName): string {
-  const offered = supportedSeries(runtime);
-  return offered[offered.length - 1] as string;
+  return supportedSeries(runtime).at(-1) as string;
 }
 
 /** Whether the registry lists the series `version` belongs to. */
