@@ -216,7 +216,10 @@ support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
 `version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
+ignored by a peer that does not list the feature. `command-progress` (the
+deploy step plan, `src/commands/deploy-progress.ts`) is fire-and-forget too
+but carries no feature of its own: both control-plane inbound paths drop an
+unknown message type, so an older peer just never draws the step rail. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
 `php.mode` (FastCGI or php-fpm on nginx and Apache); the control plane refuses to
 deploy any mode but php-fpm to a daemon without it. OpenLiteSpeed and Caddy sites
 still ignore `php.mode` (the lsphp work is turbopaneld#250). `managed-health-v1` is the

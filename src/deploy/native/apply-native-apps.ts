@@ -43,6 +43,7 @@ import {
   devOwnershipPlaybookExtraArgs,
   runLocalPlaybook,
 } from "../../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../../orchestration/ansible-events.ts";
 import {
   DENO_APP_RUNTIME_APPLY_PLAYBOOK,
   NODE_APP_RUNTIME_APPLY_PLAYBOOK,
@@ -140,6 +141,11 @@ export type ApplyNativeAppsOpts = {
   run?: NativeAppRunFn;
   /** Test seam: Ansible playbook runner (vendor tenant Node). */
   runPlaybook?: NativeAppPlaybookFn;
+  /**
+   * Playbook events from the default runner (task starts, failures) for the
+   * deploy transcript. Ignored by a custom `runPlaybook`.
+   */
+  onEvent?: AnsibleEventHandler;
   /** Test seam: loopback health probe. */
   probe?: NativeAppProbeFn;
   /** Test seam: sleep between probe attempts. */
@@ -186,6 +192,7 @@ async function runPlaybookDefault(
   playbookPath: string,
   label: string,
   extraArgs: string[] = [],
+  onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   try {
     await Deno.stat(playbookPath);
@@ -203,7 +210,17 @@ async function runPlaybookDefault(
   await runLocalPlaybook(playbookPath, [
     ...devOwnershipPlaybookExtraArgs(),
     ...extraArgs,
-  ]);
+  ], onEvent);
+}
+
+/** The injected runner, else the default one wired to `onEvent`. */
+function resolvePlaybookRunner(
+  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook" | "onEvent">,
+): NativeAppPlaybookFn {
+  if (opts?.runPlaybook) return opts.runPlaybook;
+  const onEvent = opts?.onEvent;
+  return (playbookPath, label, extraArgs) =>
+    runPlaybookDefault(playbookPath, label, extraArgs, onEvent);
 }
 
 /**
@@ -246,10 +263,12 @@ type NativeAppIo = {
   onOutput?: ReleaseOutputHandler;
 };
 
-function resolveIo(opts?: Partial<NativeAppIo>): NativeAppIo {
+function resolveIo(
+  opts?: Partial<NativeAppIo> & Pick<ApplyNativeAppsOpts, "onEvent">,
+): NativeAppIo {
   return {
     run: opts?.run ?? runDefault,
-    runPlaybook: opts?.runPlaybook ?? runPlaybookDefault,
+    runPlaybook: resolvePlaybookRunner(opts),
     probe: opts?.probe ?? probeDefault,
     sleep: opts?.sleep ?? sleepDefault,
     ...(opts?.onOutput === undefined ? {} : { onOutput: opts.onOutput }),
@@ -910,7 +929,7 @@ export function nativeAppDenoVersions(
  */
 export async function ensureNativeAppRuntime(
   apps: readonly EnvironmentDeployNativeAppService[],
-  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook">,
+  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook" | "onEvent">,
 ): Promise<void> {
   if (apps.length === 0) return;
   const nodeVersions = nativeAppNodeVersions(apps);
@@ -923,7 +942,7 @@ export async function ensureNativeAppRuntime(
     const message = unsupportedSeriesMessage("deno", version);
     if (message) throw new Error(message);
   }
-  const runPlaybook = opts?.runPlaybook ?? runPlaybookDefault;
+  const runPlaybook = resolvePlaybookRunner(opts);
   if (nodeVersions.length > 0) {
     await runPlaybook(
       NODE_APP_RUNTIME_APPLY_PLAYBOOK,

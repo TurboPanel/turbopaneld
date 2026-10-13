@@ -47,6 +47,7 @@ import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../orchestration/ansible-events.ts";
 import {
   ENGINE_PRUNE_PLAYBOOK,
   ORCHESTRATION_DIR,
@@ -231,7 +232,10 @@ export type SitePlaybookFn = (
 
 type SiteIo = {
   run: SiteRunFn;
-  runPlaybook: SitePlaybookFn;
+  /** Absent means the default runner (with `onEvent` when set). */
+  runPlaybook?: SitePlaybookFn;
+  /** Playbook events from the default runner, for the deploy transcript. */
+  onEvent?: AnsibleEventHandler;
   /** Where per-site PHP units live (`/etc/systemd/system` on a host). */
   unitDir?: string;
   sleep?: (ms: number) => Promise<void>;
@@ -2209,11 +2213,12 @@ async function runSitePlaybookDefault(
   playbookPath: string,
   label: string,
   extraArgs: string[] = [],
+  onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   try {
     await Deno.stat(playbookPath);
     logInfo("deploy", `running ${label} playbook`);
-    await runLocalPlaybook(playbookPath, extraArgs);
+    await runLocalPlaybook(playbookPath, extraArgs, onEvent);
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) {
       logWarn(
@@ -2231,8 +2236,16 @@ async function runSitePlaybook(
   label: string,
   extraArgs: string[] = [],
 ): Promise<void> {
-  const impl = activeIo?.runPlaybook ?? runSitePlaybookDefault;
-  await impl(playbookPath, label, extraArgs);
+  if (activeIo?.runPlaybook) {
+    await activeIo.runPlaybook(playbookPath, label, extraArgs);
+    return;
+  }
+  await runSitePlaybookDefault(
+    playbookPath,
+    label,
+    extraArgs,
+    activeIo?.onEvent,
+  );
 }
 
 function assertSite(site: SiteApplySpec): void {
@@ -2371,6 +2384,11 @@ export type ApplySiteOpts = {
   run?: SiteRunFn;
   /** Test seam: Ansible playbook runner (vendor nginx/apache/OLS). */
   runPlaybook?: SitePlaybookFn;
+  /**
+   * Playbook events from the default runner (task starts, failures) for the
+   * deploy transcript. Ignored by a custom `runPlaybook`.
+   */
+  onEvent?: AnsibleEventHandler;
   /** Test seam: the systemd unit directory per-site PHP units go to. */
   systemdUnitDir?: string;
   /** Test seam: the runtimes the host reports installed (unused-series check). */
@@ -2393,15 +2411,18 @@ function resolveSiteIo(
   opts?: Readonly<{
     run?: SiteRunFn;
     runPlaybook?: SitePlaybookFn;
+    onEvent?: AnsibleEventHandler;
     systemdUnitDir?: string;
     sleep?: (ms: number) => Promise<void>;
     hostRuntimes?: () => HostRuntimeMetadata | undefined;
   }>,
 ): SiteIo | undefined {
-  if (!opts?.run && !opts?.runPlaybook) return undefined;
+  if (!opts?.run && !opts?.runPlaybook && !opts?.onEvent) return undefined;
   return {
     run: opts.run ?? runDefault,
-    runPlaybook: opts.runPlaybook ?? runSitePlaybookDefault,
+    ...(opts.runPlaybook === undefined
+      ? { onEvent: opts.onEvent }
+      : { runPlaybook: opts.runPlaybook }),
     ...(opts.systemdUnitDir === undefined
       ? {}
       : { unitDir: opts.systemdUnitDir }),
@@ -2607,15 +2628,27 @@ async function installSiteEngines(
  */
 export async function ensureSitePhpRuntimes(
   sites: readonly SiteApplySpec[],
-  opts?: Pick<ApplySiteOpts, "runPlaybook">,
+  opts?: Pick<ApplySiteOpts, "runPlaybook" | "onEvent">,
 ): Promise<void> {
-  const phpSites = sites.filter(siteNeedsPhp);
-  if (phpSites.length === 0) return;
+  await ensureSiteEngines(sites.filter(siteNeedsPhp), opts);
+}
+
+/**
+ * Install every engine and PHP series a deploy's sites need, early in the
+ * deploy and before the first site config is written, so the whole install
+ * shows up as its own step in the deploy progress rather than inside the
+ * site apply. {@link applySites} runs the same idempotent playbooks again.
+ */
+export async function ensureSiteEngines(
+  sites: readonly SiteApplySpec[],
+  opts?: Pick<ApplySiteOpts, "runPlaybook" | "onEvent">,
+): Promise<void> {
+  if (sites.length === 0) return;
   await withSiteIo(resolveSiteIo(opts), async () => {
     await installSiteEngines(
-      resolveSiteEngineNeeds(phpSites),
-      phpSeriesForDeploy(phpSites),
-      phpExtensionsForDeploy(phpSites),
+      resolveSiteEngineNeeds(sites),
+      phpSeriesForDeploy(sites),
+      phpExtensionsForDeploy(sites),
     );
   });
 }

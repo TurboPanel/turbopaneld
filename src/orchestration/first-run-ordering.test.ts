@@ -19,7 +19,7 @@ test("deploy vendors PHP runtimes before joining principals", async () => {
   const src = await Deno.readTextFile(
     join(DAEMON_ROOT, "src/commands/deploy-environment.ts"),
   );
-  const php = src.search(/await\s+ensureSitePhpRuntimes\(/);
+  const php = src.search(/ensureSiteEngines\(/);
   const principals = src.search(/await\s+ensureDeployPrincipals\(\s*layout,/);
   assert(php > 0 && principals > 0);
   assertEquals(php < principals, true);
