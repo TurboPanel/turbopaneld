@@ -110,8 +110,10 @@ export async function handlePrincipalsReconcile(
   );
 
   // Deleted accounts go last, once the surviving set is in place: tp-host
-  // refuses an account the host still references, and the retire itself
-  // removes the key file, so the prune above did not need to.
+  // refuses an account the host still references. The parser keeps a retiree
+  // out of `principals`, so a prune above already dropped its key file; the
+  // retire removes it again regardless, which is why an un-pruned empty set
+  // still loses exactly the retired accounts' files and nothing else.
   const retireNames = (payload.retirePrincipals ?? []).map((entry) =>
     entry.username
   );
@@ -151,7 +153,7 @@ export async function handlePrincipalsReconcile(
 
 /** Surfaced in the command result so the panel can see nothing was pruned. */
 export const EMPTY_SET_KEPT_WARNING =
-  "principals is empty without allowEmpty: no key file was removed";
+  "principals is empty without allowEmpty: no key file was pruned (only retired accounts lose theirs)";
 
 function defaultRetirePrincipals(
   usernames: readonly string[],
