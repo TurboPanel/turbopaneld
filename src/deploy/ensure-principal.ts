@@ -8,6 +8,7 @@ import {
   allAccessGroups,
   allManagedGroups,
 } from "../runtime/registry.ts";
+import type { PrincipalIdReport } from "../contracts/commands-contracts.ts";
 import { isReservedPrincipalUsername } from "./reserved-principal-names.ts";
 
 export type PrincipalEnsureSpec = {
@@ -19,19 +20,25 @@ export type PrincipalEnsureSpec = {
    * `useradd` / `groupadd`. An explicit value must be ≥ {@link PRINCIPAL_ID_MIN}.
    * Existing accounts are adopted and never renumbered.
    *
-   * This pair is also the seam a **stable, control-plane-allocated** id will
-   * arrive through when shared POSIX storage spans hosts: a tree written as
-   * uid 1007 on one server and read as uid 1009 on another is the same account
-   * to TurboPanel and two different owners to the kernel, so the allocation has
-   * to be made once, centrally, and asserted here. It will never be authored in
-   * compose — `ROOT_KEY_REDIRECTS` in the control plane's
-   * `lib/compose/root-extension.ts` refuses `uid` / `gid` at the root for
-   * exactly that reason, and a per-service `x-turbopanel.principal` names an
-   * alias, never an id. Nothing about this field changes when that lands; only
-   * who fills it in.
+   * This pair is how the control plane's installation-wide allocation arrives:
+   * one number per principal, the same on every server it is placed on, so a
+   * tree written as uid 20001 on one server is owned by the same account on
+   * the next. It is never authored in compose (`ROOT_KEY_REDIRECTS` in the
+   * control plane's `lib/compose/root-extension.ts` refuses `uid` / `gid`). A
+   * requested id another account holds is refused before anything is created
+   * ({@link PrincipalIdTakenError}); an existing account is never renumbered,
+   * and {@link reportPrincipalIds} reads back what it has.
    */
   uid?: number;
   gid?: number;
+  /**
+   * `central` marks `uid`/`gid` as the control plane's own pick rather than an
+   * operator override. Advisory ids create a new account but never touch one
+   * that exists: when the account or its group is already on the host the ids
+   * are dropped, the account is adopted as it is, and
+   * {@link reportPrincipalIds} tells the control plane what it has.
+   */
+  idSource?: "central";
   home?: string;
   shell?: string;
   /**
@@ -135,6 +142,32 @@ export function principalUnixGroupName(username: string): string {
  */
 export function legacyPrincipalUnixGroupName(username: string): string {
   return `${username}-grp`;
+}
+
+/**
+ * A numeric id the control plane asked for is already held on this host by
+ * something that is not this site owner's Linux user. The daemon refuses
+ * before it creates anything (so no half-made account is left behind) and says
+ * which id, so the control plane can pick another one and ask again. It never
+ * renumbers an account that exists.
+ *
+ * The message starts with {@link PRINCIPAL_ID_TAKEN_MARKER} followed by
+ * `kind=… id=… principalId=…`; the control plane reads that line.
+ */
+export const PRINCIPAL_ID_TAKEN_MARKER = "principal_id_taken";
+
+export class PrincipalIdTakenError extends Error {
+  constructor(
+    readonly kind: "uid" | "gid",
+    readonly id: number,
+    readonly principalId: string,
+    readonly username: string,
+  ) {
+    super(
+      `${PRINCIPAL_ID_TAKEN_MARKER} kind=${kind} id=${id} principalId=${principalId}: the ${kind} ${id} asked for ${username} is already used by another account on this host`,
+    );
+    this.name = "PrincipalIdTakenError";
+  }
 }
 
 export type RunResult = {
@@ -834,13 +867,96 @@ export async function ensureSystemPrincipals(
   return warnings;
 }
 
+/**
+ * Before anything is created for a brand-new account: a uid/gid the control
+ * plane asked for must not already belong to someone else. An existing account
+ * (or its leftover group) is judged by the adoption checks instead, which
+ * refuse a mismatch and never renumber.
+ */
+async function assertRequestedIdsFree(
+  principal: PrincipalEnsureSpec,
+  groupName: string,
+  runFn: RunFn,
+): Promise<void> {
+  if (principal.uid === undefined && principal.gid === undefined) return;
+  if ((await runFn("getent", ["group", groupName])).success) return;
+  if (await principalAccount(principal.username, runFn)) return;
+  if (
+    principal.gid !== undefined &&
+    (await runFn("getent", ["group", String(principal.gid)])).success
+  ) {
+    throw new PrincipalIdTakenError(
+      "gid",
+      principal.gid,
+      principal.principalId,
+      principal.username,
+    );
+  }
+  if (
+    principal.uid !== undefined &&
+    (await runFn("getent", ["passwd", String(principal.uid)])).success
+  ) {
+    throw new PrincipalIdTakenError(
+      "uid",
+      principal.uid,
+      principal.principalId,
+      principal.username,
+    );
+  }
+}
+
+/**
+ * Read back the uid and primary gid each account actually has, so the control
+ * plane can record them per server. Read-only; an account that is not there
+ * (or whose entry cannot be read) is left out rather than guessed.
+ */
+export async function reportPrincipalIds(
+  principals: ReadonlyArray<{ principalId: string; username: string }>,
+  runFn: RunFn = runDefault,
+): Promise<PrincipalIdReport[]> {
+  const reports: PrincipalIdReport[] = [];
+  await forEachSequential(principals, async (principal) => {
+    const account = await principalAccount(principal.username, runFn).catch(
+      () => null,
+    );
+    if (account) {
+      reports.push({
+        principalId: principal.principalId,
+        uid: account.uid,
+        gid: account.gid,
+      });
+    }
+  });
+  return reports;
+}
+
+/** See {@link PrincipalEnsureSpec.idSource}. */
+async function withoutAdvisoryIdsOfExistingAccount(
+  spec: PrincipalEnsureSpec,
+  groupName: string,
+  runFn: RunFn,
+): Promise<PrincipalEnsureSpec> {
+  if (spec.idSource !== "central") return spec;
+  if (spec.uid === undefined && spec.gid === undefined) return spec;
+  const exists = (await runFn("getent", ["group", groupName])).success ||
+    (await principalAccount(spec.username, runFn)) !== null;
+  if (!exists) return spec;
+  const { uid: _uid, gid: _gid, ...adopted } = spec;
+  return adopted;
+}
+
 async function ensureOnePrincipal(
   layout: LayoutPaths,
-  principal: PrincipalEnsureSpec,
+  requested: PrincipalEnsureSpec,
   runFn: RunFn,
 ): Promise<string[]> {
-  assertSafePrincipalUsername(principal.username);
-  const groupName = principalUnixGroupName(principal.username);
+  assertSafePrincipalUsername(requested.username);
+  const groupName = principalUnixGroupName(requested.username);
+  const principal = await withoutAdvisoryIdsOfExistingAccount(
+    requested,
+    groupName,
+    runFn,
+  );
   const home = assertSafeAbsolutePath(
     principal.home ?? join(layout.principalHomeRoot, principal.username),
     "home",
@@ -859,6 +975,7 @@ async function ensureOnePrincipal(
   // `ls /srv/users` and enumerate every other tenant. Homes are 0750 so
   // contents were never exposed — the account names were. `install -d -m`
   // resets the other class, so the ACL is applied after, not instead of.
+  await assertRequestedIdsFree(principal, groupName, runFn);
   await ensureDir(layout.principalHomeRoot, "0750", "root:root", runFn);
   await ensurePrincipalHomeRootTraverse(layout.principalHomeRoot, runFn);
   await ensurePrincipalGroup(principal, groupName, runFn);

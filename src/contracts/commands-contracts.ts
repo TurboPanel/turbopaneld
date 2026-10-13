@@ -122,6 +122,17 @@ export type NtpSetResult = {
 };
 
 /**
+ * The uid and primary gid a site owner's Linux user has on this host, reported
+ * back so the control plane records them per server. Must stay in sync with the
+ * instance canonical result shapes.
+ */
+export type PrincipalIdReport = {
+  principalId: string;
+  uid: number;
+  gid: number;
+};
+
+/**
  * Must stay in sync with the instance canonical `server.principals.reconcile`
  * shape.
  *
@@ -168,6 +179,12 @@ export type PrincipalsReconcileResult = {
    * Additive: older control planes ignore it.
    */
   principalsRetired?: string[];
+  /**
+   * The uid and primary gid each applied account has on this host, so the
+   * control plane records them per server. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
   warnings: string[];
 };
 
@@ -783,6 +800,15 @@ export type EnvironmentDeployPrincipalMaterial = {
   username: string;
   uid?: number;
   gid?: number;
+  /**
+   * `central` when `uid`/`gid` were chosen by the control plane's
+   * installation-wide allocation rather than set by an operator. Such ids are
+   * advisory: they are used to create a new account, but an account or group
+   * that already exists on the host is adopted with the ids it has (and
+   * reported back), never renumbered. Absent means an operator override,
+   * which is binding. Additive: an older daemon treats every id as binding.
+   */
+  idSource?: "central";
   home?: string;
   shell?: string;
   /**
@@ -895,6 +921,8 @@ export type EnvironmentDeploySitePrincipal = {
   username: string;
   uid?: number;
   gid?: number;
+  /** See {@link EnvironmentDeployPrincipalMaterial.idSource}. */
+  idSource?: "central";
 };
 
 /**
@@ -1540,6 +1568,12 @@ export type EnvironmentDeployResult = {
   releases?: EnvironmentDeployResultRelease[];
   /** Per-site facts for the sites this deploy applied; omitted when none. */
   sites?: EnvironmentDeployResultSite[];
+  /**
+   * The uid and primary gid each account this deploy ensured has on this host.
+   * Omitted when the deploy ensured none. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
 };
 
 export type EnvironmentStopPayload = {
@@ -4373,6 +4407,7 @@ function parsePrincipalMaterial(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
   const home = parsePrincipalOptionalString(
     value.home,
@@ -4557,6 +4592,7 @@ function parseSitePrincipal(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
 }
 

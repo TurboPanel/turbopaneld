@@ -62,6 +62,7 @@ test("handlePrincipalsReconcile maps optional fields and defaults ssh keys", asy
         ensured.push(principals);
         return Promise.resolve();
       },
+      reportPrincipalIds: () => Promise.resolve([]),
       applySshAccess: (principals, paths) => {
         sshCalls.push({ principals, paths });
         return Promise.resolve(ssh);
@@ -226,4 +227,28 @@ test("handlePrincipalsReconcile retires named accounts after the set is applied"
   assertEquals(order, ["ensure", "ssh", "retire:gone,busy"]);
   assertEquals(result.principalsRetired, ["gone"]);
   assertEquals(result.warnings, ["principal busy kept: sites/ not empty"]);
+});
+
+test("handlePrincipalsReconcile reports the ids each account ended up with", async () => {
+  const result = await handlePrincipalsReconcile(
+    { principals: [{ principalId: "p1", username: "alice" }] },
+    new Date().toISOString(),
+    {
+      resolveLayout: () => LAYOUT,
+      ensureSystemPrincipals: () => Promise.resolve(),
+      reportPrincipalIds: () =>
+        Promise.resolve([{ principalId: "p1", uid: 20001, gid: 20001 }]),
+      applySshAccess: () =>
+        Promise.resolve({
+          changedPrincipals: [],
+          removedPrincipals: [],
+          sshdReloaded: false,
+          sftpChroot: false,
+          warnings: [],
+        }),
+    },
+  );
+  assertEquals(result.principals, [
+    { principalId: "p1", uid: 20001, gid: 20001 },
+  ]);
 });
