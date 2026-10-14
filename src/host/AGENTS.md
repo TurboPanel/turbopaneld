@@ -17,7 +17,17 @@ change-detected heartbeats.
   read; carried on hello and change-detected heartbeats with `ips` from
   `src/host/server-addresses.ts`).
 - **Addresses** — `src/host/server-addresses.ts` (`collectServerIps`): non-virtual
-  interface addresses, classified public/private per family. Pass
+  interface addresses, classified public/private per family. The TurboFabric
+  mesh interface `tp0` is skipped with the other virtual interfaces (its
+  address belongs to the mesh, not the server; `FABRIC_MESH_INTERFACE` mirrors
+  `src/commands/fabric.ts`'s `FABRIC_INTERFACE_NAME`, guarded by a test).
+  Loopback, link-local (169.254/16, fe80::/10), unspecified and multicast
+  addresses are never reported, and `reportedAddressScope` uses the same
+  private ranges as the control plane's `PRIVATE_CIDRS`
+  (`turbopanel/src/lib/ip-address.ts`: RFC1918, carrier-grade NAT 100.64/10,
+  fc00::/7 and the reserved IPv4 blocks), so an address the control plane
+  treats as private is never reported as public. IPv6 outside 2000::/3 that is
+  not private is dropped. Pass
   `readDefaultRouteInterfaces()` (parsed from `/proc/net/route` and
   `/proc/net/ipv6_route`) and the addresses on the default-route NIC are marked
   `preferred`, so a multi-homed host advertises the address a peer would
