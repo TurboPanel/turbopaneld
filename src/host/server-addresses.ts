@@ -6,9 +6,11 @@ import type {
 
 import {
   addressInCidrLiteral,
+  ipLiteralToBigInt,
   isValidIpv4Literal,
   isValidIpv6Literal,
 } from "../contracts/commands-contracts.ts";
+import { FABRIC_INTERFACE_NAME } from "./fabric-interface.ts";
 
 export type { ServerReportedIp, ServerReportedIpLink, ServerReportedIpScope };
 
@@ -21,17 +23,10 @@ export type DefaultRouteInterfaces = {
   v6?: string;
 };
 
-/**
- * TurboFabric mesh interface. Mirrors `FABRIC_INTERFACE_NAME` in
- * `src/commands/fabric.ts` (not imported: that module imports this one, and the
- * value is needed while this module is still loading). Its address belongs to
- * the mesh, not to the server, so it is never reported here.
- */
-export const FABRIC_MESH_INTERFACE = "tp0";
-
 const VIRTUAL_INTERFACE = [
   /^lo$/,
-  new RegExp(`^${FABRIC_MESH_INTERFACE}$`),
+  // The TurboFabric mesh: its address belongs to the mesh, not the server.
+  new RegExp(`^${FABRIC_INTERFACE_NAME}$`),
   /^docker\d*$/,
   /^br-/,
   /^veth/,
@@ -54,8 +49,10 @@ function isPhysicalInterface(name: string): boolean {
 
 // The ranges below mirror the control plane's `ipAddressScope`
 // (`turbopanel/src/lib/ip-address.ts`: `UNUSABLE_CIDRS`, `LOOPBACK_CIDRS`,
-// `LINK_LOCAL_CIDRS`, `PRIVATE_CIDRS`) so the daemon never calls an address
-// public that the control plane treats as private. Keep them in step.
+// `LINK_LOCAL_CIDRS`, `PRIVATE_CIDRS`, `isLocalNat64`, `embeddedIpv4`) so the
+// daemon never calls an address public that the control plane treats as
+// private. The daemon is stricter in one direction only: IPv6 outside 2000::/3
+// that is not private is dropped rather than reported public. Keep them in step.
 
 /** Never a host address: unspecified, multicast, broadcast. */
 const UNUSABLE_CIDRS: readonly string[] = [
@@ -91,8 +88,52 @@ const PRIVATE_CIDRS: readonly string[] = [
   "240.0.0.0/4", // NOSONAR typescript:S1313 — reserved class E classification
 ];
 
-/** IPv6 global unicast; any other IPv6 outside the lists above is dropped. */
+/** IPv6 global unicast; any other IPv6 that is not private is dropped. */
 const IPV6_GLOBAL_UNICAST_CIDR = "2000::/3"; // NOSONAR typescript:S1313 — RFC4291 global unicast classification
+
+/** `64:ff9b:1::/48` (RFC 8215): local-use NAT64, private whatever it embeds. */
+const LOCAL_NAT64_CIDR = "64:ff9b:1::/48"; // NOSONAR typescript:S1313 — RFC8215 local-use NAT64 classification
+
+const IPV4_MASK = 0xffffffffn;
+/** `::ffff:0:0/96` (RFC 4291 IPv4-mapped): the address shifted right by 32 bits. */
+const IPV4_MAPPED_PREFIX = 0xffffn;
+/** `64:ff9b::/96` (RFC 6052 NAT64): the address shifted right by 32 bits. */
+const NAT64_PREFIX = 0x64ff9b0000000000000000n;
+/** `2002::/16` (RFC 3056 6to4): the address shifted right by 112 bits. */
+const SIX_TO_FOUR_PREFIX = 0x2002n;
+/** `2001::/32` (RFC 4380 Teredo): the address shifted right by 96 bits. */
+const TEREDO_PREFIX = 0x20010000n;
+
+function ipv4FromBigInt(value: bigint): string {
+  return [24n, 16n, 8n, 0n].map((shift) => String((value >> shift) & 0xffn))
+    .join(".");
+}
+
+/**
+ * The IPv4 addresses an IPv6 transition address delivers to: IPv4-compatible
+ * and IPv4-mapped (low 32 bits), NAT64 (low 32 bits), 6to4 (bits 16-47),
+ * Teredo (the server in bits 32-63 and the client, inverted, in the low 32).
+ * Each is where the packet really ends up, so it is classified like that IPv4
+ * address would be.
+ */
+function embeddedIpv4(address: string): string[] {
+  const value = ipLiteralToBigInt(address);
+  if (value === null) return [];
+  const high = value >> 32n;
+  if (high === 0n || high === IPV4_MAPPED_PREFIX || high === NAT64_PREFIX) {
+    return [ipv4FromBigInt(value & IPV4_MASK)];
+  }
+  if (value >> 112n === SIX_TO_FOUR_PREFIX) {
+    return [ipv4FromBigInt((value >> 80n) & IPV4_MASK)];
+  }
+  if (value >> 96n === TEREDO_PREFIX) {
+    return [
+      ipv4FromBigInt((value >> 64n) & IPV4_MASK),
+      ipv4FromBigInt((value & IPV4_MASK) ^ IPV4_MASK),
+    ];
+  }
+  return [];
+}
 
 function inAny(address: string, cidrs: readonly string[]): boolean {
   return cidrs.some((cidr) => addressInCidrLiteral(address, cidr));
@@ -100,7 +141,8 @@ function inAny(address: string, cidrs: readonly string[]): boolean {
 
 /**
  * Scope of one interface address, or `null` when it is not reported
- * (malformed, unusable, loopback, link-local, or IPv6 outside global unicast).
+ * (malformed, unusable, loopback, link-local, an IPv6 transition address that
+ * delivers to one of those, or other IPv6 outside global unicast).
  */
 export function reportedAddressScope(
   address: string,
@@ -115,10 +157,14 @@ export function reportedAddressScope(
     return null;
   }
   if (inAny(bare, PRIVATE_CIDRS)) return "private";
-  if (version === 6 && !addressInCidrLiteral(bare, IPV6_GLOBAL_UNICAST_CIDR)) {
-    return null;
-  }
-  return "public";
+  if (version === 4) return "public";
+  if (addressInCidrLiteral(bare, LOCAL_NAT64_CIDR)) return "private";
+  // The first embedded IPv4 that is not public decides, as on the control plane.
+  const embedded = embeddedIpv4(bare)
+    .map((ipv4) => reportedAddressScope(ipv4, 4))
+    .find((scope) => scope !== "public");
+  if (embedded !== undefined) return embedded;
+  return addressInCidrLiteral(bare, IPV6_GLOBAL_UNICAST_CIDR) ? "public" : null;
 }
 
 function parseIpv4Octets(
