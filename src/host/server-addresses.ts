@@ -4,6 +4,14 @@ import type {
   ServerReportedIpScope,
 } from "../contracts/server-reported-ip.ts";
 
+import {
+  addressInCidrLiteral,
+  ipLiteralToBigInt,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+} from "../contracts/commands-contracts.ts";
+import { FABRIC_INTERFACE_NAME } from "./fabric-interface.ts";
+
 export type { ServerReportedIp, ServerReportedIpLink, ServerReportedIpScope };
 
 /** Link state per interface name, as read from the kernel. */
@@ -15,25 +23,10 @@ export type DefaultRouteInterfaces = {
   v6?: string;
 };
 
-function isLoopbackIpv4(address: string): boolean {
-  return address.startsWith("127.");
-}
-
-function isLoopbackIpv6(address: string): boolean {
-  const lower = address.toLowerCase();
-  return lower === "::1" || lower === "0:0:0:0:0:0:0:1";
-}
-
-function isLinkLocalIpv4(address: string): boolean {
-  return address.startsWith("169.254.");
-}
-
-function isLinkLocalIpv6(address: string): boolean {
-  return address.toLowerCase().startsWith("fe80:");
-}
-
 const VIRTUAL_INTERFACE = [
   /^lo$/,
+  // The TurboFabric mesh: its address belongs to the mesh, not the server.
+  new RegExp(`^${FABRIC_INTERFACE_NAME}$`),
   /^docker\d*$/,
   /^br-/,
   /^veth/,
@@ -54,6 +47,126 @@ function isPhysicalInterface(name: string): boolean {
   return !VIRTUAL_INTERFACE.some((pattern) => pattern.test(name));
 }
 
+// The ranges below mirror the control plane's `ipAddressScope`
+// (`turbopanel/src/lib/ip-address.ts`: `UNUSABLE_CIDRS`, `LOOPBACK_CIDRS`,
+// `LINK_LOCAL_CIDRS`, `PRIVATE_CIDRS`, `isLocalNat64`, `embeddedIpv4`) so the
+// daemon never calls an address public that the control plane treats as
+// private. The daemon is stricter in one direction only: IPv6 outside 2000::/3
+// that is not private is dropped rather than reported public. Keep them in step.
+
+/** Never a host address: unspecified, multicast, broadcast. */
+const UNUSABLE_CIDRS: readonly string[] = [
+  "0.0.0.0/8", // NOSONAR typescript:S1313 — unspecified IPv4, not a host
+  "224.0.0.0/4", // NOSONAR typescript:S1313 — IPv4 multicast classification
+  "255.255.255.255/32", // NOSONAR typescript:S1313 — IPv4 limited broadcast, not a host
+  "::/128", // NOSONAR typescript:S1313 — unspecified IPv6, not a host
+  "ff00::/8", // NOSONAR typescript:S1313 — IPv6 multicast classification
+];
+
+/** Reachable only from the host itself or the same link: never reported. */
+const HOST_OR_LINK_ONLY_CIDRS: readonly string[] = [
+  "127.0.0.0/8", // NOSONAR typescript:S1313 — IPv4 loopback classification
+  "::1/128", // NOSONAR typescript:S1313 — IPv6 loopback classification
+  "169.254.0.0/16", // NOSONAR typescript:S1313 — RFC3927 IPv4 link-local classification
+  "fe80::/10", // NOSONAR typescript:S1313 — RFC4291 IPv6 link-local classification
+];
+
+/**
+ * Not globally routable, but a real host address a peer on the same network
+ * can reach: RFC1918, carrier-grade NAT (RFC 6598), unique local IPv6
+ * (RFC 4193), and the reserved IPv4 blocks (RFC 6890 protocol assignments,
+ * RFC 2544 benchmarking, old class E).
+ */
+const PRIVATE_CIDRS: readonly string[] = [
+  "10.0.0.0/8", // NOSONAR typescript:S1313 — RFC1918 private classification
+  "172.16.0.0/12", // NOSONAR typescript:S1313 — RFC1918 private classification
+  "192.168.0.0/16", // NOSONAR typescript:S1313 — RFC1918 private classification
+  "100.64.0.0/10", // NOSONAR typescript:S1313 — RFC6598 CGNAT classification
+  "fc00::/7", // NOSONAR typescript:S1313 — RFC4193 ULA classification
+  "192.0.0.0/24", // NOSONAR typescript:S1313 — RFC6890 protocol assignments classification
+  "198.18.0.0/15", // NOSONAR typescript:S1313 — RFC2544 benchmarking classification
+  "240.0.0.0/4", // NOSONAR typescript:S1313 — reserved class E classification
+];
+
+/** IPv6 global unicast; any other IPv6 that is not private is dropped. */
+const IPV6_GLOBAL_UNICAST_CIDR = "2000::/3"; // NOSONAR typescript:S1313 — RFC4291 global unicast classification
+
+/** `64:ff9b:1::/48` (RFC 8215): local-use NAT64, private whatever it embeds. */
+const LOCAL_NAT64_CIDR = "64:ff9b:1::/48"; // NOSONAR typescript:S1313 — RFC8215 local-use NAT64 classification
+
+const IPV4_MASK = 0xffffffffn;
+/** `::ffff:0:0/96` (RFC 4291 IPv4-mapped): the address shifted right by 32 bits. */
+const IPV4_MAPPED_PREFIX = 0xffffn;
+/** `64:ff9b::/96` (RFC 6052 NAT64): the address shifted right by 32 bits. */
+const NAT64_PREFIX = 0x64ff9b0000000000000000n;
+/** `2002::/16` (RFC 3056 6to4): the address shifted right by 112 bits. */
+const SIX_TO_FOUR_PREFIX = 0x2002n;
+/** `2001::/32` (RFC 4380 Teredo): the address shifted right by 96 bits. */
+const TEREDO_PREFIX = 0x20010000n;
+
+function ipv4FromBigInt(value: bigint): string {
+  return [24n, 16n, 8n, 0n].map((shift) => String((value >> shift) & 0xffn))
+    .join(".");
+}
+
+/**
+ * The IPv4 addresses an IPv6 transition address delivers to: IPv4-compatible
+ * and IPv4-mapped (low 32 bits), NAT64 (low 32 bits), 6to4 (bits 16-47),
+ * Teredo (the server in bits 32-63 and the client, inverted, in the low 32).
+ * Each is where the packet really ends up, so it is classified like that IPv4
+ * address would be.
+ */
+function embeddedIpv4(address: string): string[] {
+  const value = ipLiteralToBigInt(address);
+  if (value === null) return [];
+  const high = value >> 32n;
+  if (high === 0n || high === IPV4_MAPPED_PREFIX || high === NAT64_PREFIX) {
+    return [ipv4FromBigInt(value & IPV4_MASK)];
+  }
+  if (value >> 112n === SIX_TO_FOUR_PREFIX) {
+    return [ipv4FromBigInt((value >> 80n) & IPV4_MASK)];
+  }
+  if (value >> 96n === TEREDO_PREFIX) {
+    return [
+      ipv4FromBigInt((value >> 64n) & IPV4_MASK),
+      ipv4FromBigInt((value & IPV4_MASK) ^ IPV4_MASK),
+    ];
+  }
+  return [];
+}
+
+function inAny(address: string, cidrs: readonly string[]): boolean {
+  return cidrs.some((cidr) => addressInCidrLiteral(address, cidr));
+}
+
+/**
+ * Scope of one interface address, or `null` when it is not reported
+ * (malformed, unusable, loopback, link-local, an IPv6 transition address that
+ * delivers to one of those, or other IPv6 outside global unicast).
+ */
+export function reportedAddressScope(
+  address: string,
+  version: 4 | 6,
+): ServerReportedIpScope | null {
+  const bare = version === 6 ? address.split("%")[0] : address;
+  const valid = version === 4
+    ? isValidIpv4Literal(bare)
+    : isValidIpv6Literal(bare);
+  if (!valid) return null;
+  if (inAny(bare, UNUSABLE_CIDRS) || inAny(bare, HOST_OR_LINK_ONLY_CIDRS)) {
+    return null;
+  }
+  if (inAny(bare, PRIVATE_CIDRS)) return "private";
+  if (version === 4) return "public";
+  if (addressInCidrLiteral(bare, LOCAL_NAT64_CIDR)) return "private";
+  // The first embedded IPv4 that is not public decides, as on the control plane.
+  const embedded = embeddedIpv4(bare)
+    .map((ipv4) => reportedAddressScope(ipv4, 4))
+    .find((scope) => scope !== "public");
+  if (embedded !== undefined) return embedded;
+  return addressInCidrLiteral(bare, IPV6_GLOBAL_UNICAST_CIDR) ? "public" : null;
+}
+
 function parseIpv4Octets(
   address: string,
 ): [number, number, number, number] | null {
@@ -65,53 +178,6 @@ function parseIpv4Octets(
     return null;
   }
   return octets as [number, number, number, number];
-}
-
-function isUsableIpv4(address: string): boolean {
-  if (isLoopbackIpv4(address) || isLinkLocalIpv4(address)) return false;
-
-  const octets = parseIpv4Octets(address);
-  if (!octets) return false;
-
-  const [a] = octets;
-  return a > 0 && a < 224;
-}
-
-function isPrivateIpv4(address: string): boolean {
-  const octets = parseIpv4Octets(address);
-  if (!octets) return false;
-
-  const [a, b] = octets;
-  if (a === 10) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  return false;
-}
-
-function isPublicIpv4(address: string): boolean {
-  return isUsableIpv4(address) && !isPrivateIpv4(address);
-}
-
-function isUsableIpv6(address: string): boolean {
-  const lower = address.toLowerCase().split("%")[0];
-  if (isLoopbackIpv6(lower) || isLinkLocalIpv6(lower)) return false;
-  if (lower.startsWith("ff")) return false;
-  return true;
-}
-
-function isPrivateIpv6(address: string): boolean {
-  const lower = address.toLowerCase().split("%")[0];
-  // Unique local addresses (ULA), fc00::/7
-  return lower.startsWith("fc") || lower.startsWith("fd");
-}
-
-function isPublicIpv6(address: string): boolean {
-  const lower = address.toLowerCase().split("%")[0];
-  if (!isUsableIpv6(lower) || isPrivateIpv6(lower)) return false;
-
-  // Global unicast, 2000::/3
-  const first = lower.replace(/^::/, "")[0];
-  return first === "2" || first === "3";
 }
 
 function ipv4PrefixFromNetmask(netmask: string): number | null {
@@ -364,61 +430,20 @@ export function collectServerIps(
 
   for (const addr of Deno.networkInterfaces()) {
     if (!isPhysicalInterface(addr.name)) continue;
-
-    if (addr.family === "IPv4") {
-      if (isPrivateIpv4(addr.address)) {
-        rememberIp(
-          byAddress,
-          buildReportedIp(
-            addr.address,
-            4,
-            "private",
-            addr,
-            defaultRoute,
-            linkStates,
-          ),
-        );
-      } else if (isPublicIpv4(addr.address)) {
-        rememberIp(
-          byAddress,
-          buildReportedIp(
-            addr.address,
-            4,
-            "public",
-            addr,
-            defaultRoute,
-            linkStates,
-          ),
-        );
-      }
-      continue;
-    }
-
-    if (isPrivateIpv6(addr.address)) {
-      rememberIp(
-        byAddress,
-        buildReportedIp(
-          addr.address,
-          6,
-          "private",
-          addr,
-          defaultRoute,
-          linkStates,
-        ),
-      );
-    } else if (isPublicIpv6(addr.address)) {
-      rememberIp(
-        byAddress,
-        buildReportedIp(
-          addr.address,
-          6,
-          "public",
-          addr,
-          defaultRoute,
-          linkStates,
-        ),
-      );
-    }
+    const version = addr.family === "IPv4" ? 4 : 6;
+    const scope = reportedAddressScope(addr.address, version);
+    if (scope === null) continue;
+    rememberIp(
+      byAddress,
+      buildReportedIp(
+        addr.address,
+        version,
+        scope,
+        addr,
+        defaultRoute,
+        linkStates,
+      ),
+    );
   }
 
   return [...byAddress.values()].sort((a, b) =>
