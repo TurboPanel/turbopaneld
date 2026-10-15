@@ -74,6 +74,7 @@ export const DAEMON_WIRE_FEATURES = [
   "deploy-cancel-v1",
   "site-db-bindings-v1",
   "deno-native-apps-v1",
+  "managed-ingress-ipv6-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -191,6 +192,15 @@ export const SITE_DB_BINDINGS_FEATURE: DaemonWireFeature =
  */
 export const DENO_NATIVE_APPS_FEATURE: DaemonWireFeature =
   "deno-native-apps-v1";
+
+/**
+ * This daemon publishes the shared database listeners on the IPv6 wildcard
+ * (`::` in `managed.ingress.reconcile` `bindAddresses`, next to `0.0.0.0`) and
+ * reads that publish back on self-heal. The control plane adds `::` only for a
+ * daemon that lists this feature, and only on a server that has IPv6.
+ */
+export const MANAGED_INGRESS_IPV6_FEATURE: DaemonWireFeature =
+  "managed-ingress-ipv6-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

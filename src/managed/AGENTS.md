@@ -185,6 +185,13 @@ side, so the daemon must treat them as data:
   / `readPublishedListenerPortsFromCompose` match the generic
   `host:port:port` shape instead of looking for `15432` / `13306`, so a
   bind-address or port recovered from an existing stack survives a port change.
+- **External access publishes both families.** With the setting on the
+  control plane sends `["0.0.0.0", "::"]` on a server with IPv6 (only to a
+  daemon advertising `managed-ingress-ipv6-v1`), else `["0.0.0.0"]`. `::`
+  renders as `"[::]:<port>:<port>"` and reads back unbracketed, so self-heal
+  keeps the IPv6 publish. Docker's userland proxy carries IPv6 clients to the
+  IPv4-only managed network; with `userland-proxy: false` an IPv6 host publish
+  to an IPv4-only container has no NAT path.
 - **Self-heal round-trips the ports.** `system.reconcile` → `proxysql` reads the
   current ports off disk and re-renders with them; it must not fall back to the
   platform defaults, or a heal would silently move an operator's listeners.

@@ -94,9 +94,9 @@ function desiredStateFromPayload(
   payload: ManagedIngressReconcilePayload,
 ): ProxySqlDesiredState {
   return {
-    // The instance sends one address from the server's single "allow external
+    // The instance sends the addresses from the server's single "allow external
     // access to the databases on this server" setting (`127.0.0.1` off,
-    // `0.0.0.0` on). Missing/empty `bindAddresses` means nothing is published
+    // `0.0.0.0` on, plus `::` on a server with IPv6). Missing/empty `bindAddresses` means nothing is published
     // to the host — it must never be widened to "publish on every
     // interface". `[]` here means the shared frontend is reachable only via
     // the organization's managed Docker network (bindings from co-located
