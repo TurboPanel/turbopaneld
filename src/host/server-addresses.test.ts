@@ -10,6 +10,7 @@ import {
   parseLinkState,
   readDefaultRouteInterfaces,
   readInterfaceLinkStates,
+  reportedAddressScope,
 } from "./server-addresses.ts";
 
 /**
@@ -792,4 +793,151 @@ test("collectServerIps stamps each address with its NIC link and omits unknown o
       );
     },
   );
+});
+
+test("collectServerIps never reports the TurboFabric mesh interface", () => {
+  withNetworkInterfaces(
+    [
+      { name: "tp0", family: "IPv4", address: "10.250.0.11" },
+      { name: "tp0", family: "IPv6", address: "fd00:250::11" },
+      { name: "tp01", family: "IPv4", address: "10.0.0.7" },
+      { name: "eth0", family: "IPv4", address: "203.0.113.9" },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "10.0.0.7",
+          version: 4,
+          scope: "private",
+          interface: "tp01",
+        },
+        {
+          address: "203.0.113.9",
+          version: 4,
+          scope: "public",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});
+
+test("collectServerIps reports carrier-grade NAT 100.64.0.0/10 as private", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv4", address: "100.64.0.1" },
+      { name: "eth0", family: "IPv4", address: "100.127.255.254" },
+      { name: "eth0", family: "IPv4", address: "100.63.255.255" },
+      { name: "eth0", family: "IPv4", address: "100.128.0.1" },
+    ],
+    () => {
+      assertEquals(
+        collectServerIps().map(({ address, scope }) => ({ address, scope })),
+        [
+          { address: "100.127.255.254", scope: "private" },
+          { address: "100.128.0.1", scope: "public" },
+          { address: "100.63.255.255", scope: "public" },
+          { address: "100.64.0.1", scope: "private" },
+        ],
+      );
+    },
+  );
+});
+
+test("collectServerIps never reports link-local addresses", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv4", address: "169.254.0.1" },
+      { name: "eth0", family: "IPv4", address: "169.254.255.254" },
+      { name: "eth0", family: "IPv6", address: "fe80::1" },
+      { name: "eth0", family: "IPv6", address: "fe80::1%eth0" },
+      { name: "eth0", family: "IPv6", address: "FE80::abcd" },
+      { name: "eth0", family: "IPv6", address: "febf::1" },
+    ],
+    () => {
+      assertEquals(collectServerIps(), []);
+    },
+  );
+});
+
+test("collectServerIps keeps ordinary public IPv4 and IPv6 public", () => {
+  withNetworkInterfaces(
+    [
+      { name: "eth0", family: "IPv4", address: "203.0.113.9" },
+      { name: "eth0", family: "IPv6", address: "2001:db8::9" },
+    ],
+    () => {
+      assertEquals(collectServerIps(), [
+        {
+          address: "2001:db8::9",
+          version: 6,
+          scope: "public",
+          interface: "eth0",
+        },
+        {
+          address: "203.0.113.9",
+          version: 4,
+          scope: "public",
+          interface: "eth0",
+        },
+      ]);
+    },
+  );
+});
+
+test("reportedAddressScope mirrors the control plane's private ranges", () => {
+  const cases: [string, 4 | 6, "private" | "public" | null][] = [
+    ["192.0.0.8", 4, "private"],
+    ["198.18.0.1", 4, "private"],
+    ["198.19.255.254", 4, "private"],
+    ["240.0.0.1", 4, "private"],
+    ["198.20.0.1", 4, "public"],
+    ["192.0.0.255", 4, "private"],
+    ["192.0.1.0", 4, "public"],
+    ["198.19.255.255", 4, "private"],
+    ["198.17.255.255", 4, "public"],
+    ["255.255.255.255", 4, null],
+    ["::", 6, null],
+    ["fd00::1", 6, "private"],
+    ["0.0.0.1", 4, null],
+    ["224.0.0.1", 4, null],
+    ["127.0.0.1", 4, null],
+    ["::1", 6, null],
+    ["ff02::1", 6, null],
+    ["64:ff9b::1", 6, null],
+    ["not-an-ip", 4, null],
+    ["10.0.0.1", 6, null],
+  ];
+  for (const [address, version, scope] of cases) {
+    assertEquals(
+      reportedAddressScope(address, version),
+      scope,
+      `${address} (IPv${version})`,
+    );
+  }
+});
+
+test("reportedAddressScope classifies IPv6 transition addresses by the IPv4 they deliver to", () => {
+  const cases: [string, "private" | "public" | null][] = [
+    // 6to4 (2002::/16) of 10.0.0.1, and of a public 203.0.113.9.
+    ["2002:a00:1::1", "private"],
+    ["2002:cb00:7109::1", "public"],
+    // Teredo (2001::/32): server 10.0.0.1 in bits 32-63.
+    ["2001:0:a00:1::1", "private"],
+    // Teredo client (inverted low 32 bits) of 192.168.0.1.
+    ["2001:0:cb00:7109::3f57:fffe", "private"],
+    ["2001:0:cb00:7109::3457:8ef6", "public"],
+    // Teredo whose client is loopback 127.0.0.1: never reported.
+    ["2001:0:cb00:7109::80ff:fffe", null],
+    // NAT64 (64:ff9b::/96) and local-use NAT64 (64:ff9b:1::/48).
+    ["64:ff9b::a00:1", "private"],
+    ["64:ff9b:1::cb00:7109", "private"],
+    // IPv4-compatible and IPv4-mapped forms.
+    ["::a00:1", "private"],
+    ["::ffff:c0a8:1", "private"],
+    ["::ffff:7f00:1", null],
+  ];
+  for (const [address, scope] of cases) {
+    assertEquals(reportedAddressScope(address, 6), scope, address);
+  }
 });
