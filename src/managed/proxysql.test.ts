@@ -610,6 +610,27 @@ test("readPublishedBindAddressesFromCompose recovers every scope's address in or
   });
 });
 
+test("external access on a server with IPv6 publishes both wildcards and reads them back", () => {
+  const ports = { pgsql: 18432, mysql: 18306 };
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["0.0.0.0", "::"],
+    [],
+    ports,
+    MANAGED_NETWORK,
+  );
+  assertStringIncludes(compose, '- "0.0.0.0:18432:18432"');
+  assertStringIncludes(compose, '- "0.0.0.0:18306:18306"');
+  assertStringIncludes(compose, '- "[::]:18432:18432"');
+  assertStringIncludes(compose, '- "[::]:18306:18306"');
+  // Self-heal must keep the IPv6 publish, unbracketed, and the family order.
+  assertEquals(readPublishedBindAddressesFromCompose(compose), [
+    "0.0.0.0",
+    "::",
+  ]);
+  assertEquals(readPublishedListenerPortsFromCompose(compose), ports);
+});
+
 test("readCurrentProxySqlBindAddresses returns [] when the compose file has never been written", async () => {
   const { createTempLayout } = await import("../testing/temp-layout.ts");
   const { resolveLayout } = await import("../paths/layout.ts");
@@ -1556,6 +1577,35 @@ test("port preflight only probes ports the current frontend does not already hol
     probe,
   );
   assertEquals(probed, [15432, 13306]);
+});
+
+test("port preflight skips held ports when the IPv6 wildcard is added", async () => {
+  const probed: string[] = [];
+  const probe = (host: string, port: number) => {
+    probed.push(`${host}:${port}`);
+    return Promise.resolve(true);
+  };
+  // Turning IPv6 on keeps the ports: ProxySQL already holds them on 0.0.0.0.
+  await assertManagedIngressPortsBindable(
+    ["0.0.0.0", "::"],
+    { pgsql: 15432, mysql: 13306 },
+    { pgsql: 15432, mysql: 13306 },
+    probe,
+  );
+  assertEquals(probed, []);
+
+  await assertManagedIngressPortsBindable(
+    ["0.0.0.0", "::"],
+    { pgsql: 15432, mysql: 13306 },
+    null,
+    probe,
+  );
+  assertEquals(probed, [
+    "0.0.0.0:15432",
+    "0.0.0.0:13306",
+    ":::15432",
+    ":::13306",
+  ]);
 });
 
 test("port preflight skips probing entirely when the frontend is not published", async () => {

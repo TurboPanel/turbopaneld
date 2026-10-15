@@ -2185,10 +2185,11 @@ export type ManagedIngressReconcilePayload = {
    */
   managedNetwork: string;
   /**
-   * Every host address the client listeners publish on. The instance sends one
-   * entry, from the server's single "allow external access to the databases on
-   * this server" setting: `127.0.0.1` (off) or `0.0.0.0` (on). Absent or empty
-   * means no host publish at all.
+   * Every host address the client listeners publish on, from the server's
+   * single "allow external access to the databases on this server" setting:
+   * `127.0.0.1` (off), or `0.0.0.0` (on) plus `::` when the server has IPv6 and
+   * this daemon lists `managed-ingress-ipv6-v1`. Absent or empty means no host
+   * publish at all.
    */
   bindAddresses?: string[];
   /**

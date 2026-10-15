@@ -10,6 +10,7 @@ import {
   MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
+  MANAGED_INGRESS_IPV6_FEATURE,
   MANAGED_REPLICA_FRESHNESS_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
@@ -203,6 +204,17 @@ test("deno-native-apps-v1 is advertised on the wire and raised no floor", () => 
   assertEquals(
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(
       DENO_NATIVE_APPS_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-ingress-ipv6-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(MANAGED_INGRESS_IPV6_FEATURE, "managed-ingress-ipv6-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_INGRESS_IPV6_FEATURE,
     ),
     true,
   );

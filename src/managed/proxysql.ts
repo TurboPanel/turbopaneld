@@ -251,10 +251,11 @@ export type ProxySqlDesiredState = {
    * host).
    *
    * Decided by the server's single "allow external access to the databases on
-   * this server" setting, so the control plane sends exactly one entry:
-   * `127.0.0.1` when it is off (services on the server only) or `0.0.0.0` when
-   * it is on (every address of the server). Several entries are still accepted
-   * and each is published, so older callers keep working.
+   * this server" setting: `127.0.0.1` when it is off (services on the server
+   * only), `0.0.0.0` when it is on (every IPv4 address of the server), plus
+   * `::` (every IPv6 address, rendered `[::]`) when the server has IPv6 and
+   * this daemon advertises `managed-ingress-ipv6-v1`. Any list is accepted and
+   * each entry is published, so older callers keep working.
    *
    * Never conflate this with ProxySQL's *internal* container listen address
    * (always `0.0.0.0` — see {@link renderProtocolFamilySection}); those are
