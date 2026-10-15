@@ -23,6 +23,7 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { collectServerIps } from "../host/server-addresses.ts";
+import { FABRIC_INTERFACE_NAME } from "../host/fabric-interface.ts";
 import type { ServerReportedIp } from "../contracts/server-reported-ip.ts";
 import { stampObservedPeerInterfaces } from "./fabric-peer-interface.ts";
 import { fabricNetworkDir, resolveLayout } from "../paths/layout.ts";
@@ -40,7 +41,7 @@ import {
 } from "../contracts/commands-contracts.ts";
 
 /** Public WireGuard interface name for TurboFabric. */
-export const FABRIC_INTERFACE_NAME = "tp0";
+export { FABRIC_INTERFACE_NAME };
 
 /** Default `tp0` / Docker-network MTU when the payload omits `mtu`. */
 export const FABRIC_DEFAULT_MTU = 1420;
