@@ -530,3 +530,13 @@ on a closed Postgres port.
 ### System services Compose stack (`system-compose`)
 
 Moved to `roles/system-compose/AGENTS.md`.
+
+## Instance restart on a replaced binary
+
+`instance-launch` only ensures `turbopanel-instance` is started, and the
+one-shot installer (`run.sh --instance`) replaces `bin/turbopanel` before that
+play runs. "Read the running instance process" therefore reports `stale` when
+the running process holds a deleted executable or started before the file on
+disk, and "Restart the instance when its binary was replaced under it" notifies
+`Restart turbopanel instance` (handler, end of play). Without it a canary kept
+serving the previous panel build after a successful update.

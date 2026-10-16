@@ -11,6 +11,7 @@ import type {
   ManagedBackupArtifactExtension,
   ManagedEngineCode,
 } from "../../contracts/commands-contracts.ts";
+import type { ObservedLogin } from "../../contracts/cell-messages.ts";
 import type { ManagedEngineCensus } from "./census.ts";
 
 export type { ManagedEngineCensus } from "./census.ts";
@@ -18,7 +19,23 @@ export type { ManagedEngineCensus } from "./census.ts";
 export type ManagedEngineExec = (
   argv: string[],
   input?: string,
+  /** Optional: kill the exec when aborted (the permissions read's budget). */
+  options?: { signal?: AbortSignal },
 ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
+
+/** Extra, optional facts for `applyCredentials`; absent = today's behaviour. */
+export type ManagedApplyCredentialsOptions = {
+  /**
+   * Postgres: databases the control plane made with an owner role. The engine
+   * checks each really belongs to its owner role before treating it as one.
+   */
+  ownerRoleDatabases?: readonly string[];
+  /**
+   * Postgres: the subset of `ownerRoleDatabases` whose chosen owner is a login
+   * (database name -> applied username).
+   */
+  ownerLogins?: Readonly<Record<string, string>>;
+};
 
 export type ManagedEngineContext = {
   containerId: string;
@@ -40,6 +57,79 @@ export type ManagedEngineContext = {
    */
   clientSourceHosts?: readonly string[];
 };
+
+/** What `readPermissions` is asked for (already validated by the caller). */
+export type ManagedPermissionsReadRequest = {
+  /** Applied engine usernames, unique, at most 50. */
+  logins: readonly string[];
+  /** Postgres: databases whose objects to read. MySQL / MariaDB ignore it. */
+  databases: readonly string[];
+};
+
+/** One engine's answer; the caller stamps `engine` / `observedAt` and caps it. */
+export type ManagedPermissionsEngineReport = {
+  serverVersion?: string;
+  databasesRead?: string[];
+  databasesFailed?: string[];
+  logins: ObservedLogin[];
+};
+
+/**
+ * Wall-clock budget for one permissions read. The control plane gives up at
+ * 15 s; 8 s leaves room for the resolve, the frame and the wire. A reader
+ * starts a query only while at least {@link PERMISSIONS_QUERY_LIMIT_MS} is
+ * left, and `permissions-read.ts` kills any exec still running when the
+ * budget ends, so the answer is always sent in time.
+ */
+export const PERMISSIONS_READ_BUDGET_MS = 8_000;
+
+/**
+ * The engine's own limit on one statement of the read (Postgres
+ * `statement_timeout`, MySQL `max_execution_time`, MariaDB
+ * `max_statement_time`), and the least budget a new query needs.
+ */
+export const PERMISSIONS_QUERY_LIMIT_MS = 3_000;
+
+/** One read's budget, shared by the reader and its exec. */
+export type PermissionsReadDeadline = {
+  expired: () => boolean;
+  /** Milliseconds left, never below 0. */
+  remainingMs: () => number;
+  /** True while a query bounded by the per-query limit still fits. */
+  roomForQuery: () => boolean;
+};
+
+/** Test seams for the readers' time budget. */
+export type ManagedPermissionsReadClock = {
+  /** Milliseconds, monotonic enough for a budget (`performance.now`). */
+  now?: () => number;
+  budgetMs?: number;
+  /** An already running budget (the handler's), used as is. */
+  deadline?: PermissionsReadDeadline;
+};
+
+/** The clock's running budget, or a new one of `budgetMs` from now. */
+export function permissionsReadDeadline(
+  clock: ManagedPermissionsReadClock = {},
+): PermissionsReadDeadline {
+  if (clock.deadline) return clock.deadline;
+  const now = clock.now ?? (() => performance.now());
+  const end = now() + (clock.budgetMs ?? PERMISSIONS_READ_BUDGET_MS);
+  const remainingMs = () => Math.max(0, end - now());
+  return {
+    expired: () => remainingMs() <= 0,
+    remainingMs,
+    roomForQuery: () => remainingMs() > PERMISSIONS_QUERY_LIMIT_MS,
+  };
+}
+
+/** An exec refused or killed because the read's budget ran out. */
+export class PermissionsBudgetError extends Error {
+  constructor() {
+    super("the permissions read ran out of time");
+    this.name = "PermissionsBudgetError";
+  }
+}
 
 export type ManagedEngineRuntime = {
   engine: ManagedEngineCode;
@@ -67,9 +157,20 @@ export type ManagedEngineRuntime = {
    * not is `{ healthy: true }` with `null` connections.
    */
   readCensus?(ctx: ManagedEngineContext): Promise<ManagedEngineCensus>;
+  /**
+   * Optional, read only: what each login may do right now, in the engine's
+   * own words (`managed-permissions-request`). Runs SELECT / SHOW statements
+   * as the engine root over the container socket and never changes anything.
+   */
+  readPermissions?(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
+  ): Promise<ManagedPermissionsEngineReport>;
   applyCredentials(
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],
+    options?: ManagedApplyCredentialsOptions,
   ): Promise<string[]>;
   /**
    * Optional: host-wide ProxySQL health-check principal (from `monitor.cnf`).

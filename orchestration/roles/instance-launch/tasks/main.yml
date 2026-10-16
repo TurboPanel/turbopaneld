@@ -673,6 +673,35 @@
 - name: Apply instance database migrations
   ansible.builtin.import_tasks: instance-migrate.yml
 
+# A running instance keeps executing the file it started from. `run.sh --instance`
+# replaces `bin/turbopanel` on an update and this play only "starts" the unit, so
+# without this check an already-running panel would keep serving the old build
+# (against a database the new build just migrated). Stateless: the running
+# process either holds a deleted executable or began before the file on disk.
+- name: Read the running instance process
+  when:
+    - instance_start | bool
+    - (turbopanel_instance_run_mode | default('compiled')) == 'compiled'
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      pid="$(systemctl show -p MainPID --value "{{ instance_service_name }}")"
+      [ -n "$pid" ] && [ "$pid" != 0 ] && [ -d "/proc/$pid" ] || exit 0
+      exe="$(readlink "/proc/$pid/exe" || true)"
+      case "$exe" in *"(deleted)") echo stale; exit 0 ;; esac
+      if [ "{{ turbopanel_instance_binary }}" -nt "/proc/$pid" ]; then echo stale; fi
+    executable: /bin/sh
+  register: _instance_running_build
+  changed_when: false
+
+- name: Restart the instance when its binary was replaced under it
+  when: (_instance_running_build.stdout | default('') | trim) == 'stale'
+  ansible.builtin.debug:
+    msg: "{{ instance_service_name }} is running a replaced binary; restarting it"
+  changed_when: true
+  notify:
+    - Restart turbopanel instance
+
 - name: Ensure instance service desired state
   ansible.builtin.systemd:
     name: "{{ instance_service_name }}"

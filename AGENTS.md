@@ -227,7 +227,9 @@ worked example of a control-plane-initiated correlated request
 (`managed-health-request` / `managed-health-result`): this daemon advertises it
 in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
 daemon whose `hello.features` lists it, falling back to its stored observation
-otherwise. A control-plane update the daemon is about to install is refused
+otherwise. `managed-permissions-read-v1` follows the same pattern for
+`managed-permissions-request` / `managed-permissions-result` (a login's current
+permissions, read only). A control-plane update the daemon is about to install is refused
 when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.

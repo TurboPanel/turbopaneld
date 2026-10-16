@@ -23,6 +23,9 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `networks.ts` | Ensure the organization's managed Docker network by the name the command payload carries (`ensureManagedIngressNetwork(name, run)` — no daemon-side default) **and** attach ProxySQL to consumer `tpn_*` compose-bridge subnets |
 | `firewall.ts` | Best-effort idempotent `iptables` scoping for a **public** private listener: `TP-MANAGED-PUB` off `DOCKER-USER`, per-cluster `TP-MGD-<id>` chain matching the pre-DNAT publish via `conntrack --ctorigdst/--ctorigdstport`, ACCEPT known peers then DROP. Apply **removes** that chain (idempotent if absent) when the listener is cleared or not public — a single-member cluster only publishes while a remote app is bound, so leaving a DROP would block a later cluster that reuses the address/port. Destroy still tears the chain down. No new rules without a public IPv4 listener or known peers; never blocks apply/destroy. **Slated to fold into the managed host firewall** (`src/firewall/`, `server.firewall.reconcile` — Road row `fw-fold-existing`): the same scoping becomes a `published` rule the panel derives, rendered by one renderer with IPv6 parity |
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
+| `proxysql-ipv6.ts` | ProxySQL's own IPv6-only network (ULA /64 per server) and IPv6 listener addresses, so IPv6 clients keep their real address — see **Real client addresses (IPv6 network)** |
+| `proxysql-server-version.ts` | Which engine version each client listener reports (`mysql-server_version` / `pgsql-server_version`) — see **Server version reported to clients** |
+| `proxysql-root-guard.ts` | Source guard for each cluster's **root** login on the shared ProxySQL. A root `users[]` entry carrying `allowedSources` (present, even empty) gets query rules (`username` + `client_addr`, `apply=1`) rendered ahead of the read-split rules: one pass rule per allowed source, then a catch-all `error_msg` rule, so a query from anywhere else is refused (the login still authenticates; the block lands on the first query). `client_addr` matches an exact address or a trailing `%` prefix only (CIDR silently never matches), so subnets become `%` prefixes on octet / 16-bit group boundaries. Allowed sources = the control plane's list (other servers' and this server's own public addresses) **plus** host-local sources the daemon reads on every reconcile: loopback and every subnet of every Docker network the ProxySQL container is attached to (`docker-proxy` shows loopback and hairpin callers as the network gateway; a container dialing by name shows its own address). Anything arriving as the gateway is therefore allowed. `allowedSources` absent (older control plane) = no rules, as before. Never set `fast_forward` on a root row: it skips query rules entirely. Guard rules are admin-SQL only (not in `proxysql.cnf`). **App logins use the same guard** (feature `managed-login-limits-v1`): a `users[]` entry with `allowedSources` (exact addresses or trailing `%` prefixes, present even when empty) gets pass rules + catch-all (`LOGIN_GUARD_ERROR_MESSAGE`); `allowLocalSources: true` adds the host-local sources (root always has them); read-only and `tool` logins get no reader rule. Rules are rendered in one id sequence ahead of read-split rules and rebuilt (hand rules wiped) on every apply. `maxConnections` becomes the user row's `max_connections` |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
 | `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` / `follow-primary.ts` | Engine command handlers (wired from `command-router.ts`); `applyManagedEngineState` order on a primary is: database **creates**, credentials (grants reference those databases), `dropUsers`, ProxySQL monitor roles, database **drops** last (after users are gone, so a deleted owner is released first) — an apply that fails early therefore never leaves a referenced database uncreated and the next retry heals; apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing. **`managed.destroy` always `compose -p <managedId> down`** — the compose project is the bare `managed` row UUID — even if the state dir is missing, then `docker ps -aq --filter label=com.docker.compose.project=…` and `docker rm -f` leftovers; compose down failure is **not** success while labeled containers remain. No `-f` (same interpolation rule as lifecycle). With `removeVolumes`, also `docker volume rm -f managed_<id>_data` best-effort by exact name — compose down -v only removes project-labeled volumes and misses pre-pin bare-name orphans. **Destroy vs apply:** destroy writes `<stateDir>/managed-intent/<id>.destroyed.json` (`destroyed-marker.ts`, names the member, 24 h life) BEFORE removing anything, then takes the per-id `withManagedLifecycleLock` (`<runDir>/managed-locks/<id>.lifecycle.lock`, blocking, shared with apply); apply takes the same lock and refuses (`ManagedDestroyedError`) a member whose marker is live. Destroy re-checks for re-created containers/state dir before reporting success; `listManagedHaMembers` skips destroyed members. |
@@ -37,6 +40,7 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `target-lock.ts` | Per-engine `flock` (`withManagedTargetLock`, `ManagedTargetBusyError`) shared by the backup/restore handlers and the scheduled `backup-run` process |
 | `logs.ts` | Bounded `compose logs`; cell `managed-logs-request` / `managed-logs-result` (not a command) |
 | `health.ts` | On-demand member health; cell `managed-health-request` / `managed-health-result` (feature `managed-health-v1`, not a command). Runs `collectManagedMemberHealth` with the request's **real** role — a `replica` is read as a `standby`; the primary query reports `pg_stat_replication` rows and would pass a promote gate for a replica that is not streaming. Never throws: any failure (bad ids, unsupported engine, engine down — `collectManagedMemberHealth` swallows errors and omits `member`) is `{ ok: false, error }` so the control plane is answered instead of waiting out its timeout. Nothing is persisted here; the control plane writes the observation |
+| `permissions-read.ts` + `engines/postgres-permissions.ts` / `engines/mysql-permissions.ts` | Read-only "what may these logins do" report; cell `managed-permissions-request` / `managed-permissions-result` (feature `managed-permissions-read-v1`, not a command). `resolveLocalEngine` (`local-engine-context.ts`) finds the engine container without Docker setup and refuses when its `tp.managed.engine` label is missing or names another engine; the engine's optional `readPermissions` runs only `SELECT` / `SHOW` as the engine root over the socket (Postgres inside `BEGIN READ ONLY`, one JSON document per query). Postgres: attributes, every membership reached through inheriting grants (`via` = the role it is held through; `inherit_option` on 16+, the member's `rolinherit` on 15), tablespace and parameter ACLs, then per requested database every explicit ACL entry (database, schema, table, sequence, column, routine, type, language, foreign, large object, default privileges) whose grantee is the login, a role it inherits (`via`) or PUBLIC; a NULL ACL reports nothing. A database dropped or closed to connections since it was listed is skipped; any other failure, or one not read within the 8 s budget (`PERMISSIONS_READ_BUDGET_MS`; the control plane gives up at 15 s), goes in `databasesFailed` and every login is `truncated`. The budget is hard: a query starts only while more than the 3 s per-statement limit is left (`PERMISSIONS_QUERY_LIMIT_MS`, also Postgres `statement_timeout`, MySQL `max_execution_time`, MariaDB `max_statement_time`), and `budgetedExec` races every exec against the time left and kills the `docker exec` child through its `signal` (`resolveLocalEngine` runs execs with `runDockerStreamed`; other callers are unchanged). Only the database's own name in psql's "does not exist" / "not currently accepting connections" words counts as gone. Only Postgres reads `databases`: past 100 the list is cut (logins `truncated`), never refused; MySQL / MariaDB ignore it. MySQL / MariaDB: account rows (lock from `account_locked` / MariaDB `global_priv`), `SHOW GRANTS FOR` per row (escaped batch output, never `-r`, so a name holding a newline cannot pose as a GRANT line; the escapes are undone per line) parsed up to ` TO ` (MariaDB's `IDENTIFIED BY PASSWORD` hash and every trailer never leave the daemon), granted roles read the same way (`via`, at most 50 roles, depth 4); `ALL PRIVILEGES` / `USAGE` are kept as written and `WITH GRANT OPTION` adds `GRANT OPTION`; a database-level name keeps escaped `\_` / `\%` as literal characters and sets `pattern: true` when it holds a bare `_` / `%` wildcard. `REVOKE` lines (partial revokes), an account host that cannot be quoted, the role limits and the time budget mark the login `truncated` rather than modelling or failing. Caps of `ManagedPermissionsObserved` per list, and the frame cut under 100 KB (`truncated: true`), never failed. Never throws: `{ ok: false, error }`, `engine not running` when no container runs |
 | `standby-streaming.ts` / `../instance/pg-standby-sampler.ts` | Last `streaming` read per local Postgres standby. The sampler reads this host's replicas every 2 s (5 s deadline per read, never two reads of one container at once; off with `TURBOPANEL_MANAGED_PG_PROBE=off`) and records a streaming read only when the receiver heard from the primary within 5 s (`now() - last_msg_receipt_time`; a silently dropped link stays `streaming` until `wal_receiver_timeout`), stamped at that last receipt on the monotonic clock; `health.ts` adds it to a replica's answer as `replication.lastStreaming` (`ageMs`, plus that read's lag) next to `receivedLsn` / `replayLsn`. The control plane's automatic-failover fresh-standby gate needs it: once the primary is gone the WAL receiver exits and Postgres no longer knows when it last streamed. In memory only; after a restart there is no record and the control plane refuses |
 | `engines/` | Per-engine runtime registry (`postgres`, `mysql`, `mariadb`); optional `dropUsers` / `backup` / `replication` (+ optional `configureStandby` for SQL-configured standbys) |
 | `engines/sql-stdin.ts` | Shared stdin SQL exec: retry once when docker exec closes stdin (`Writable stream is closed` / EPIPE) with no SQL output, only for batches marked `idempotent` (reads, `CREATE IF NOT EXISTS`, slot ensure); never retry promote or other non-idempotent SQL; never retry a SQL `ERROR` |
@@ -52,6 +56,19 @@ Orchestrator topology TLS: engines that require encrypted transport reject a pla
 Orchestrator topology **login** is one derived account per organization (`tp_topology_<org prefix>`, HKDF off the instance root secret on the control plane — see `../turbopanel/src/features/managed/topology-credential.ts`), not a cluster replication user: Orchestrator holds a single `MySQLTopologyUser`, one Orchestrator runs per organization, and a server with two HA clusters has two replication users, so whichever one the payload named was refused by every member of the other cluster (`Error 1045`) and nothing registered. Primary `managed.apply` ships `topologyUser` and the MySQL/MariaDB engine runs `ensureOrchestratorTopologyAccountSql` (`orchestrator-topology-sql.ts`: the monitor account's host list **plus the private ranges `10.0.0.0/8` and `192.168.0.0/16`** — discovery and recovery run on the organization's Raft leader, which can be an Orchestrator server outside the cluster and dials from its own address on the route to the member, so a members-only host list left the leader refused with `Error 1045 … @'<leader address>'` and nothing registered; MySQL `SUPER`/`PROCESS`/`REPLICATION CLIENT`/`RELOAD` on `*.*`, MariaDB adds `REPLICA MONITOR` for `SHOW REPLICA STATUS`, plus `SELECT` on the `meta` schema, `REQUIRE SSL`, no `IDENTIFIED WITH` so MySQL 8.4/9.x mint `caching_sha2_password`; `orchestrator-topology-sql.docker.test.ts` applies the generated SQL to `mysql:8.4`/`9.7` and `mariadb:11.8`/`12.3` when Docker is available). **Binlogging stays on for it** — a standby boots `read_only=ON, super_read_only=ON` and cannot mint the account itself (1290), so the primary's statements have to replicate, exactly as the monitor roles do; a `SET SESSION sql_log_bin=0` wrapper would strand the account on the primary and leave Orchestrator denied on every replica, and the errant-GTID hazard it guards against cannot arise because `applyManagedEngineState` returns early for a standby. The engine-specific replication-table grant (`mysql.slave_master_info` / MariaDB `mysql.gtid_slave_pos`) is a separate advisory statement: a table-level grant fails outright on a release that does not ship that table and Orchestrator only warns without it. `managed.ha.reconcile` sets `MySQLTopologyUser` / `MySQLTopologyPassword` from the same payload field; Postgres clusters in the reconcile list are dropped before anything is resolved or registered (Orchestrator speaks MySQL only). **Orchestrator HTTP basic auth and Raft** use the same derivation machinery (`orchestrator-api-credential.ts` on the control plane): `orchestratorApiUser` + `orchestratorRaftToken` on the reconcile payload, materialized to `api.cnf` / `raft.cnf` on every org Orchestrator host (Ansible no longer mints per-host RNG). Raft voters are only servers hosting a MySQL/MariaDB primary or same-DC `failover` replica.
 
 Orchestrator self-heal: `restart: always` does not bring back a container that was killed by hand, so the stack stays down until the next apply/`managed.ha.reconcile`. While the compose file exists, `ManagedHaObserver` (`../instance/ha-observe.ts`) polls every 15 s and, before the API poll, calls `reviveStoppedOrchestratorContainer`: `compose start` only after two consecutive polls still list an exited/dead/created container. Stop, restart, and apply set an in-process busy-until marker around their compose mutation (cleared in `finally`), and a busy or live/absent observation resets the stopped streak. Completed checks are cooled down for 60 s. This closes the mid-`compose down` / recreate window without losing self-heal for a container killed by hand.
+
+**Routing by login kind** (`managed.ingress.reconcile` user `connectionRole` and optional `tool`): a `read-only` login defaults to the reader hostgroup only when the cluster has a read-eligible replica; on a single server it defaults to the writer (the primary), because its grants, not its route, keep it read-only. A `tool` login (used by a database tool) always defaults to the primary and never gets a read/write split rule. `fast_forward` is not used anywhere. Absent `tool` means false.
+
+**Per-login grant mode** (`grantMode` on a `managed.apply` credential, optional): absent, `preset` and `recipe` behave exactly as before (the daemon sets permissions from `privileges` on every apply; recipes are not built yet). `self` means the site owner manages permissions by hand. The login, password, host rows, `NOSUPERUSER`, connection limit and, on Postgres, `CONNECT` on its listed databases stay the panel's, and the cluster-wide PUBLIC connect revoke still runs. Postgres skips `revokeUnlistedDatabasesSql`, the `grantDatabaseSql` REVOKE/GRANT pair, `exactObjectAclSql`, the per-login schema and read-only session default, and leaves the login out of the `defaultPrivilegeSql` creators list; MySQL/MariaDB skip `grantDatabasePrivileges`. `grant-mode.test.ts` pins preset output to hashes captured from trunk and asserts none of the skipped statements appear for a `self` login. Dropping the login still works as before.
+
+**MySQL / MariaDB database names in grants** (`engines/grant-pattern.ts`): a database-level `GRANT` reads `_` and `%` in the name as wildcards, so `GRANT ... ON \`wp_site\`.*` also reached `wpXsite`. `grantDatabaseSql` now writes the name escaped (`wp\_site`). Versions before that left the plain grant on the account; every apply grants on the escaped name first and then, for a database whose name holds `_` or `%`, removes the plain row for that account and host (`revokePlainDatabaseGrantSql`: two `REVOKE`s (`ALL PRIVILEGES`, then `GRANT OPTION`; the combined form does not parse with an `ON` clause), each run only while `mysql.db` still has that exact row, so nothing errors when it is absent). It runs only on databases the panel grants on (never a `self` login, except the Database admin login) and only after every grant on that database succeeded, so a login keeps access throughout. Anything added by hand on the plain row itself goes with it (the escaped row holds exactly the current preset). Hand-made grants on other names, and the account and its data, are untouched. Proven on MySQL 9.7; MariaDB uses the same statements.
+
+**MySQL / MariaDB levels are three jobs, data only below the migration login** (`engines/grant-pattern.ts`, feature `managed-data-only-readwrite-v1`): `read-only` = SELECT, SHOW VIEW (no EXECUTE: a routine runs with its definer's rights, so a login allowed to call one could change data); `read-write` = SELECT, INSERT, UPDATE, DELETE, EXECUTE, LOCK TABLES, CREATE TEMPORARY TABLES, SHOW VIEW and nothing that creates, alters or drops a table, index, view, routine, trigger or event; `owner` (the migration login) = ALL PRIVILEGES on its database, no GRANT OPTION; `admin` (the Database admin login) = ALL PRIVILEGES WITH GRANT OPTION. A `GRANT` only adds, so each level grants its set and then revokes the rest of the database-level privileges (and `GRANT OPTION`) the row holds (a prepared `REVOKE` built from `mysql.db`, because MySQL refuses a `REVOKE` naming a privilege the row lacks, error 1141): a login made under the older wide recipe is tightened by its next apply, and a repeat apply changes nothing. A login that lists several levels gets the strongest only (`grantDatabasePrivileges`), because a weaker level would revoke what a stronger one granted. Objects the migration login makes need no extra grant: grants are database-wide. `self` logins are never touched (the Database admin login is still granted in `self` mode). `TRIGGER` and `EVENT` are left on a login that still defines a trigger or a scheduled event in the database (they run with the definer's rights: a trigger fails with error 1142 on every write once the definer loses `TRIGGER`, an event stops firing); they go when those are recreated by the migration login. Known limit: a database whose name holds `_` and still carries the pre-escape plain grant row loses its trigger right when `revokePlainDatabaseGrantSql` removes that row. MariaDB images are 11.4 and newer, which have `Show_create_routine_priv` (older servers would fail the apply). Data changes only also means no `TRUNCATE TABLE` (it needs `DROP`). Rights reached through a hand-made role are not seen (no `mysql.db` row).
+
+
+**Postgres owner role per database and the Database admin login** (`databases[].ownerRole` on a `managed.apply` create/drop op, and the `admin` entry in a credential's `privileges`; both optional, absent = today's behaviour). A database made with `ownerRole` gets three roles that cannot log in, `tp_<db>_owner`, `_rw` and `_ro` (`postgres-owner-role-sql.ts`; the `tp_` prefix is reserved for logins by the control plane; database names are at most 54 characters), and `CREATE DATABASE ... OWNER tp_<db>_owner`. A database that already exists with another owner is left exactly as it is: moving a database that holds data onto an owner role is a separate explicit action that does not exist yet (only an empty first database is moved, see below). `applyCredentials` takes an optional `{ ownerRoleDatabases }` (the flagged names) and checks the catalog that each really belongs to its owner role; with none flagged nothing extra runs and the SQL is byte-identical to before (`grant-mode.test.ts` hashes). On an owner-role database the per-login machinery is replaced: a login with `owner` becomes a member of the owner role with `INHERIT FALSE, SET TRUE` (Postgres 16+; on 15 a plain grant plus role-wide `NOINHERIT`) and gets `ALTER ROLE ... IN DATABASE ... SET role = owner role`, so tables it creates from any tool belong to the owner role; `read-write` / `read-only` become inheriting members of `_rw` / `_ro`; default privileges for objects created by the owner role, the platform admin and the exposed root login grant the groups data access, and objects that already exist are healed. A login no longer on the database loses the memberships and gets `RESET role` (otherwise it could not connect). The Database admin login (`admin`) is a member of the owner role with `INHERIT TRUE, SET TRUE`, the same session default, and `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`; on a database without an owner role it gets the read-write rights (see Chosen database owner below). Its rights are the panel's whatever `grantMode` says. On MySQL/MariaDB `admin` grants `ALL PRIVILEGES ON <db>.* ... WITH GRANT OPTION` on the login's listed databases (`owner` is the same without the grant option), never anything global (no `CREATE USER`, `SET_ANY_DEFINER`, `SET USER`, `*.*`). Dropping a flagged database drops its three roles (best effort). **Chosen database owner (`managed-database-owner-v1`).** `databases[].ownerLogin` (Postgres create with `ownerRole`, the applied username of a login) makes that login the database's owner. The roles are still made first and `CREATE DATABASE` still names `tp_<db>_owner`, because the login may not exist yet; `applyCredentials` (given `{ ownerRoleDatabases, ownerLogins }`) then runs `adoptChosenOwners` before the catalog check: the database moves onto the login (`ALTER DATABASE ... OWNER TO`) only when it is still owned by `tp_<db>_owner` or is the platform admin's and empty (`databaseIsEmptySql`: nothing a person made), the login is a preset-mode, non-read-only login listed on it, and otherwise is left exactly as it is. The catalog check then accepts the recorded login as the owner as well as `tp_<db>_owner`. The login works through the owner role like a Database admin (`INHERIT TRUE, SET TRUE`, `role` session default), so what it creates belongs to `tp_<db>_owner` and the rw/ro groups see it; default privileges also cover objects it creates under its own name. Never the platform admin or root login. The first database of a new cluster is made by the engine's first start for the platform admin: `createOwnerRoleDatabase` moves it onto its owner role while it is empty, and leaves it alone once anything is in it. `dropUsers` first hands every owner-role database the dropped login owns back to its `tp_<db>_owner` (`ownerLoginReturnSql`), so deleting a login never gives a database to the platform admin. A Database admin login on a database that has no owner role gets the read-write rights there (CONNECT and TEMPORARY, data access to what exists and what is created later, no ownership, no grant option, no membership in a platform role) instead of CONNECT only; the control plane says so in plain words. Changing an existing database's owner is not an apply step.
+
+Backup restore skips per-login schemas on an owner-role database; a restored table is owned by the platform admin until fixed.
 
 ## State tree
 
@@ -185,6 +202,12 @@ side, so the daemon must treat them as data:
   / `readPublishedListenerPortsFromCompose` match the generic
   `host:port:port` shape instead of looking for `15432` / `13306`, so a
   bind-address or port recovered from an existing stack survives a port change.
+- **External access publishes both families.** With the setting on the
+  control plane sends `["0.0.0.0", "::"]` on a server with IPv6 (only to a
+  daemon advertising `managed-ingress-ipv6-v1`), else `["0.0.0.0"]`. `::`
+  renders as `"[::]:<port>:<port>"` and reads back unbracketed, so self-heal
+  keeps the IPv6 publish. See **Real client addresses (IPv6 network)** below
+  for how IPv6 clients reach ProxySQL with their own address.
 - **Self-heal round-trips the ports.** `system.reconcile` → `proxysql` reads the
   current ports off disk and re-renders with them; it must not fall back to the
   platform defaults, or a heal would silently move an operator's listeners.
@@ -200,6 +223,109 @@ side, so the daemon must treat them as data:
   looser daemon check would accept a payload the control plane considers
   invalid, which is how a half-configured ingress happens. Canonical rules:
   `turbopanel/src/features/managed/AGENTS.md` → **Client listener ports**.
+
+### Real client addresses (IPv6 network)
+
+ProxySQL's `cli_host` (and anything that later filters on the client address)
+is only as good as what Docker hands it. Before this, the managed network was
+IPv4 only, so Docker's userland proxy (`docker-proxy`) accepted every IPv6
+connection on the host and opened a fresh IPv4 one to the container: every
+IPv6 client showed up as the managed network's gateway (`172.x.0.1`, measured
+on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
+
+- **ProxySQL's own IPv6-only network.** While a client listener is published on
+  an IPv6 address (`proxySqlBindsUseIpv6`), the compose file joins a
+  compose-owned network `proxysql-ipv6` (`enable_ipv4: false`,
+  `enable_ipv6: true`, one unique local /64 from SHA-256 of the managed-ingress
+  `serviceId`, `proxySqlIpv6Subnet`). Docker picks the IPv4 and IPv6 gateways
+  separately (the first endpoint with each family, moby `getGatewayEndpoint`)
+  and maps each family's host ports on its own gateway endpoint, so the IPv4
+  gateway and IPv4 publish stay exactly where they were and the `[::]`
+  publish becomes a kernel DNAT to the container's address on this network.
+  Only ProxySQL joins it; the shared managed network (engines, Orchestrator)
+  is not touched or recreated. No IPv6 publish, no network: an IPv4-only
+  server's compose file is byte-for-byte what it was.
+- **ProxySQL listens on IPv6 too.** `mysql-interfaces` / `pgsql-interfaces`
+  become `0.0.0.0:<port>;[::]:<port>` with the network
+  (`desiredProxySqlListenerInterfaces`). ProxySQL sets `IPV6_V6ONLY`, so the
+  two do not collide and IPv4 clients keep plain IPv4 addresses. Both are read
+  only at start, and `proxysql.cnf` only on a first boot (an existing
+  `proxysql.db` in the data volume wins, ProxySQL "ignoring configuration
+  file"), so `managed.ingress.reconcile` reads `runtime_global_variables` and,
+  when the running value differs, `SET`s them and `SAVE … VARIABLES TO DISK`
+  (no `LOAD … TO RUNTIME`: ProxySQL would put the running value back) *before*
+  compose recreates the container (`stageProxySqlListenerInterfaces`), so the
+  new container starts with them. After the admin apply it reads them again
+  and, if they still differ (no recreate happened, or staging could not reach
+  the admin port), saves them and restarts the container once, then checks
+  they took (`activateProxySqlListenerInterfaces`). With an IPv6 listener it
+  then probes `[::1]:<port>` inside the container for each family in use with
+  the container's own `mysql` client (the only command the docker-gate allows
+  there; a refused connect, ERROR 2002/2003, means closed, anything past the
+  connect means open), because the variable says nothing about whether the
+  bind worked; a failed probe fails the reconcile. Staging uses no admin
+  connect retries, so a missing or stuck container costs nothing. The same path also applies a
+  changed listener port on a host whose `proxysql.db` predates it.
+- **Upgrade path.** The next `managed.ingress.reconcile` on a server publishing
+  `::` re-renders compose and recreates the container onto the new network
+  (data volume kept) with the IPv6 listeners already saved: one short listener
+  blip, no engine container and no database data touched. The
+  `system.reconcile` self-heal keeps exactly the IPv6 network on disk
+  (`readCurrentProxySqlIpv6Subnet`) and never adds it, because it does not
+  switch the listeners: a network without the IPv6 listener would send IPv6
+  clients to a closed port.
+- **What clients show after the fix.** Internet IPv6 clients: their real
+  address. Internet IPv4 clients: their real address (unchanged, DNAT). Host
+  processes on `127.0.0.1` (site PHP through `tp-php-loopback`, the panel
+  host's own tools): still the managed network's IPv4 gateway — Docker serves
+  loopback publishes through `docker-proxy` (and with `userland-proxy: false`
+  masquerades them), so a loopback client is never seen as itself. `::1` is
+  not published. Containers that dial ProxySQL by name on a network it shares
+  (the managed network, a `tpn_*` attachment): their own container address, as
+  before. A container on the managed network that dials the host's public
+  address instead is hairpinned through `docker-proxy` and shows the gateway.
+  (The loopback and hairpin answers follow from Docker's documented rules; the
+  canary client-address test is the measurement.)
+- **Firewall.** IPv6 published traffic now crosses ip6tables `FORWARD` /
+  `DOCKER-USER` like IPv4 instead of the host's `INPUT` chain, so the host
+  firewall's `published` rules apply to it (`src/firewall/render.ts` renders
+  both families). `firewall.ts` `TP-MGD-<id>` is engine private-listener
+  scoping and stays IPv4 only.
+- **Host requirements.** Docker Engine 28+ (separate IPv4/IPv6 gateway
+  choice and IPv6-only networks: on Engine 27 one network is the gateway for
+  both families, so the IPv4 path could move) and Compose 2.33.1+
+  (`enable_ipv4`). The reconcile checks both (`proxySqlIpv6NetworkSupport`);
+  on an older version it renders no IPv6 network and no IPv6 listener and logs
+  a warning, so IPv6 keeps the old `docker-proxy` path (connected, gateway
+  address). A version that cannot be read (dockerd restarting) keeps whatever
+  the previous compose file had. dockerd also needs `ip6tables` on (the default
+  since Docker 27); without it the publish falls back to `docker-proxy`.
+- **Turning IPv6 off** drops the network from compose and `[::]` from the
+  listeners (same staging). Compose leaves the now-unused
+  `<project>_proxysql-ipv6` network behind; it is empty, harmless, and reused
+  (same subnet) if IPv6 comes back.
+
+### Server version reported to clients
+
+ProxySQL answers the client handshake itself with one global string per
+module: `mysql-server_version` (default `8.0.11`) and `pgsql-server_version`
+(default `16.1`), so PostgreSQL 18, MySQL 9.7 and MariaDB 11.8 all looked like
+PostgreSQL 16.1 / MySQL 8.0.11 to drivers and tools. The control plane sends
+each cluster's `engineVersion` (the release series from its image: `18`,
+`9.7`, `11.8`) and `buildProxySqlAdminStatements` sets both variables
+(`SET … ; LOAD … TO RUNTIME; SAVE … TO DISK`, dynamic, no restart). Rule
+(`proxysql-server-version.ts`), per listener: the newest PostgreSQL series on
+the PostgreSQL listener; on the shared MySQL-family listener the newest MySQL series when any
+MySQL cluster is on it, else the newest MariaDB series as `<series>-MariaDB`
+(MariaDB 11+ format, no `5.5.5-` prefix). Clusters without a version count for
+nothing; a family with none keeps its value. The series has no patch level, so
+it is padded with zeros because clients parse the string (MySQL-family drivers
+such as Connector/Python, Rails, libmysqlclient and mysqlnd want three parts;
+PostgreSQL versions always have two, so a longer one is cut): `9.7.0`,
+`11.8.0-MariaDB`, `18.0`. MySQL and PostgreSQL variables share one
+`LOAD`/`SAVE` per family with the monitor credentials.
+Never written into `proxysql.cnf`: that file is read on a first boot only, and
+a static-section change restarts ProxySQL for every client.
 
 ### Managed network self-heal
 

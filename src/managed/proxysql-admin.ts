@@ -268,6 +268,11 @@ type ProxySqlAdminRunOptions = {
   defaultsFile?: string;
   /** Override connect-retry backoff (tests). Defaults to 3s. */
   retryDelayMs?: number;
+  /**
+   * Connect-class retries while the admin port comes up. Defaults to 10; a
+   * best-effort read that has a fallback passes 0 so it never waits.
+   */
+  connectRetries?: number;
 };
 
 /**
@@ -321,7 +326,7 @@ async function runProxySqlAdminSql(
       !ADMIN_CONNECT_RETRYABLE_RE.test(
         `${previous.stderr}\n${previous.stdout}`,
       ) ||
-      attempt >= ADMIN_CONNECT_RETRIES
+      attempt >= (options?.connectRetries ?? ADMIN_CONNECT_RETRIES)
     ) {
       return previous;
     }
@@ -396,6 +401,34 @@ export async function readProxySqlRuntimeServers(
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0)
     .map(parseRuntimeServerRow);
+}
+
+/**
+ * The listener addresses ProxySQL is actually serving
+ * (`runtime_global_variables` `mysql-interfaces` / `pgsql-interfaces`). A
+ * family is absent when the row is missing (nothing to compare against).
+ */
+export async function readProxySqlRuntimeInterfaces(
+  options?: ProxySqlAdminRunOptions,
+): Promise<Partial<Record<ProxySqlProtocolFamily, string>>> {
+  const stdout = await runProxySqlAdminSql(
+    {
+      name: "readProxySqlRuntimeInterfaces",
+      failureText: "proxysql runtime interfaces read failed",
+    },
+    "SELECT variable_name,variable_value FROM runtime_global_variables " +
+      "WHERE variable_name IN ('mysql-interfaces','pgsql-interfaces');\n",
+    ["--batch", "--skip-column-names"],
+    options,
+  );
+  const interfaces: Partial<Record<ProxySqlProtocolFamily, string>> = {};
+  for (const line of stdout.split("\n")) {
+    const [name, value] = line.trimEnd().split("\t");
+    if (value === undefined) continue;
+    if (name === "mysql-interfaces") interfaces.mysql = value;
+    if (name === "pgsql-interfaces") interfaces.pgsql = value;
+  }
+  return interfaces;
 }
 
 /** `ERROR 2002` (socket/TCP connect) — admin interface not up yet. */
