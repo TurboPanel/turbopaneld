@@ -41,6 +41,15 @@ import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import { frontendBindingsHealth, wantedMappings } from "./proxysql-bindings.ts";
+import { proxySqlServerVersions } from "./proxysql-server-version.ts";
+import {
+  proxySqlBindsUseIpv6,
+  proxySqlIpv6Subnet,
+  proxySqlListenerInterfaces,
+  readProxySqlIpv6SubnetFromCompose,
+  renderProxySqlIpv6ServiceNetwork,
+  renderProxySqlIpv6TopLevelNetwork,
+} from "./proxysql-ipv6.ts";
 import {
   proxysqlComposePath,
   proxysqlConfigDir,
@@ -104,16 +113,6 @@ function resolveListenerPorts(
 ): ProxySqlListenerPorts {
   return ports ?? DEFAULT_PROXYSQL_LISTENER_PORTS;
 }
-
-/**
- * ProxySQL's listen address *inside its own container network namespace* —
- * always all-interfaces so both a host publish (compose `ports:`) and
- * sibling containers on the organization's managed Docker network (bindings
- * with no host publish at all) can reach it. This is never the same knob as
- * {@link ProxySqlDesiredState.bindAddresses}, which only decides whether/where
- * compose *publishes* that already-listening port to the host.
- */
-const CONTAINER_LISTEN_ADDRESS = "0.0.0.0";
 
 export { SYSTEM_MANAGED_INGRESS_COMPONENT };
 
@@ -204,6 +203,12 @@ export type ProxySqlClusterDesired = {
   managedId: string;
   engine: string;
   /**
+   * Engine release series (`18`, `9.7`, `11.8`) — what the listener reports
+   * to clients as the server version (`proxysql-server-version.ts`). Absent
+   * from an older control plane.
+   */
+  engineVersion?: string;
+  /**
    * Client listener this cluster is reached on — one of the two ports in
    * {@link ProxySqlDesiredState.listenerPorts}. Organization-configurable, so
    * never infer the protocol module from its value; see {@link family}.
@@ -258,7 +263,8 @@ export type ProxySqlDesiredState = {
    * each entry is published, so older callers keep working.
    *
    * Never conflate this with ProxySQL's *internal* container listen address
-   * (always `0.0.0.0` — see {@link renderProtocolFamilySection}); those are
+   * (always all-interfaces — see {@link desiredProxySqlListenerInterfaces});
+   * those are
    * independent concerns. See `proxysqlCompose` for how `[]` omits the
    * published port lines entirely.
    */
@@ -769,6 +775,7 @@ export function proxysqlCompose(
   segments: ReadonlyArray<{ name: string; subnet: string }>,
   listenerPorts: ProxySqlListenerPorts | null | undefined,
   managedNetwork: string,
+  ipv6Supported = false,
 ): string {
   return proxysqlComposeWithAttachments(
     identity,
@@ -776,13 +783,32 @@ export function proxysqlCompose(
     segmentAttachmentsFromDesired(segments),
     listenerPorts,
     managedNetwork,
+    ipv6Supported
+      ? desiredProxySqlIpv6Subnet(identity, bindAddresses, managedNetwork)
+      : null,
   );
+}
+
+/**
+ * The IPv6 network subnet a fresh render wants: one per server (seeded by the
+ * managed-ingress `serviceId`, else the managed network name), and only while
+ * a client listener is published on IPv6. See `proxysql-ipv6.ts`.
+ */
+export function desiredProxySqlIpv6Subnet(
+  identity: SystemComponentDescriptor | null | undefined,
+  bindAddresses: readonly string[],
+  managedNetwork: string,
+): string | null {
+  if (!proxySqlBindsUseIpv6(bindAddresses)) return null;
+  return proxySqlIpv6Subnet(identity?.serviceId ?? managedNetwork);
 }
 
 /**
  * Same document as {@link proxysqlCompose}, but from already-pinned segment
  * attachments. The self-heal path uses this to round-trip attachments read
  * back out of the previous compose file, where the source subnet is gone.
+ * `ipv6Subnet` adds ProxySQL's own IPv6-only network (`proxysql-ipv6.ts`);
+ * the self-heal path passes back whatever the previous render wrote.
  */
 export function proxysqlComposeWithAttachments(
   identity: SystemComponentDescriptor | null | undefined,
@@ -790,6 +816,7 @@ export function proxysqlComposeWithAttachments(
   attachments: ReadonlyArray<ProxySqlSegmentAttachment>,
   listenerPorts: ProxySqlListenerPorts | null | undefined,
   managedNetwork: string,
+  ipv6Subnet: string | null = null,
 ): string {
   const binds: string[] = [];
   for (const address of bindAddresses) {
@@ -830,14 +857,18 @@ export function proxysqlComposeWithAttachments(
   ];
 
   const uniqueAttachments = uniqueAttachmentsByName(attachments);
-  const serviceNetworkLines = renderProxySqlServiceNetworks(
-    uniqueAttachments,
-    managedNetwork,
-  );
-  const topLevelNetworkLines = renderProxySqlTopLevelNetworks(
-    uniqueAttachments,
-    managedNetwork,
-  );
+  const serviceNetworkLines = [
+    ...renderProxySqlServiceNetworks(uniqueAttachments, managedNetwork),
+    ...(ipv6Subnet === null ? [] : [renderProxySqlIpv6ServiceNetwork()]),
+  ];
+  // The managed network stays the first top-level entry
+  // (`readManagedNetworkFromCompose` reads it back from there).
+  const topLevelNetworkLines = [
+    ...renderProxySqlTopLevelNetworks(uniqueAttachments, managedNetwork),
+    ...(ipv6Subnet === null
+      ? []
+      : renderProxySqlIpv6TopLevelNetwork(ipv6Subnet)),
+  ];
 
   const nameLines = identity === undefined || identity === null
     ? []
@@ -1167,7 +1198,8 @@ function renderProtocolFamilySection(
 /**
  * Static globals/listeners/TLS paths — excludes dynamic server/user/rule
  * tables. The `interfaces=` lines always bind every interface inside
- * ProxySQL's own container namespace (see {@link CONTAINER_LISTEN_ADDRESS});
+ * ProxySQL's own container namespace (see
+ * {@link desiredProxySqlListenerInterfaces});
  * host-level exposure is a separate, compose-level publish decision (see
  * {@link ProxySqlDesiredState.bindAddresses}).
  */
@@ -1175,8 +1207,10 @@ export function renderProxySqlStaticConfig(
   adminCredentials?: { user: string; password: string } | null,
   monitorCredentials?: { user: string; password: string } | null,
   listenerPorts?: ProxySqlListenerPorts | null,
+  ipv6 = false,
 ): string {
   const ports = resolveListenerPorts(listenerPorts);
+  const interfaces = desiredProxySqlListenerInterfaces(ports, ipv6);
   const adminCredLine = adminCredentials
     ? `    admin_credentials="${
       escapeProxySqlConfigString(adminCredentials.user)
@@ -1207,7 +1241,7 @@ export function renderProxySqlStaticConfig(
     "",
     "mysql_variables=",
     "{",
-    `    interfaces="${CONTAINER_LISTEN_ADDRESS}:${ports.mysql}"`,
+    `    interfaces="${interfaces.mysql}"`,
     "    have_ssl=1",
     `    ssl_p2s_cert="${TLS_FULLCHAIN_PATH}"`,
     `    ssl_p2s_key="${TLS_PRIVKEY_PATH}"`,
@@ -1217,7 +1251,7 @@ export function renderProxySqlStaticConfig(
     "",
     "pgsql_variables=",
     "{",
-    `    interfaces="${CONTAINER_LISTEN_ADDRESS}:${ports.pgsql}"`,
+    `    interfaces="${interfaces.pgsql}"`,
     "    have_ssl=1",
     `    ssl_p2s_cert="${TLS_FULLCHAIN_PATH}"`,
     `    ssl_p2s_key="${TLS_PRIVKEY_PATH}"`,
@@ -1228,6 +1262,61 @@ export function renderProxySqlStaticConfig(
     "",
   ];
   return lines.join("\n");
+}
+
+/**
+ * ProxySQL's `mysql-interfaces` / `pgsql-interfaces` for these ports: every
+ * IPv4 interface (`0.0.0.0`), plus every IPv6 one (`[::]`) when
+ * the container has its IPv6 network (`proxysql-ipv6.ts`).
+ *
+ * These are listen addresses *inside ProxySQL's own container network
+ * namespace*, always all-interfaces so both a host publish (compose `ports:`)
+ * and sibling containers on the organization's managed Docker network
+ * (bindings with no host publish at all) can reach it. Never the same knob as
+ * {@link ProxySqlDesiredState.bindAddresses}, which only decides whether and
+ * where compose *publishes* that already-listening port to the host.
+ *
+ * Both are read only at ProxySQL start, and only from `proxysql.cnf` on a
+ * first boot (an existing `proxysql.db` in the data volume wins), so the
+ * reconcile also writes them through the admin interface and restarts the
+ * proxy when the running value differs (`activateProxySqlListenerInterfaces`
+ * in `managed-ingress-reconcile.ts`).
+ */
+export function desiredProxySqlListenerInterfaces(
+  ports: ProxySqlListenerPorts,
+  ipv6: boolean,
+): Record<ProxySqlProtocolFamily, string> {
+  return {
+    mysql: proxySqlListenerInterfaces(ports.mysql, ipv6),
+    pgsql: proxySqlListenerInterfaces(ports.pgsql, ipv6),
+  };
+}
+
+/**
+ * Write new listener addresses to ProxySQL's on-disk config (`proxysql.db`)
+ * for the next start. `SAVE … TO DISK` only, never `LOAD … TO RUNTIME`:
+ * ProxySQL cannot change a listener while it runs, and a load would put the
+ * running value straight back over the one just set.
+ */
+export function buildProxySqlListenerInterfacesStatements(
+  interfaces: Record<ProxySqlProtocolFamily, string>,
+): string[] {
+  return [
+    `SET mysql-interfaces='${escapeSqlString(interfaces.mysql)}'`,
+    `SET pgsql-interfaces='${escapeSqlString(interfaces.pgsql)}'`,
+    "SAVE MYSQL VARIABLES TO DISK",
+    "SAVE PGSQL VARIABLES TO DISK",
+  ];
+}
+
+/** Families whose running listener addresses differ from `desired`. */
+export function proxySqlListenerInterfacesMismatch(
+  desired: Record<ProxySqlProtocolFamily, string>,
+  running: Partial<Record<ProxySqlProtocolFamily, string>>,
+): ProxySqlProtocolFamily[] {
+  return (["mysql", "pgsql"] as const).filter((family) =>
+    running[family] !== undefined && running[family] !== desired[family]
+  );
 }
 
 /** Extract the static section from a full proxysql.cnf for restart diffing. */
@@ -1265,17 +1354,24 @@ export function staticConfigSectionChanged(
   return prevStatic !== nextStatic;
 }
 
-/** Full durable proxysql.cnf including users/servers/rules for cold start. */
+/**
+ * Full durable proxysql.cnf including users/servers/rules for cold start.
+ * The IPv6 listener needs `ipv6Supported` (this host's Docker can carry
+ * ProxySQL's IPv6 network, `proxySqlIpv6NetworkSupport`) as well as an IPv6
+ * publish; without it the listeners stay IPv4 only.
+ */
 export function renderProxySqlConfig(
   desired: ProxySqlDesiredState,
   adminCredentials?: { user: string; password: string } | null,
   monitorCredentials?: { user: string; password: string } | null,
+  ipv6Supported = false,
 ): string {
   const lines = [
     renderProxySqlStaticConfig(
       adminCredentials,
       monitorCredentials,
       desired.listenerPorts,
+      ipv6Supported && proxySqlBindsUseIpv6(desired.bindAddresses),
     ),
   ];
   if (clusterUsesMysql(desired.clusters)) {
@@ -1413,26 +1509,70 @@ export function buildProxySqlAdminStatements(
       ...renderAdminQueryRuleStatements(family, desired.clusters),
     );
   }
-  const monitor = options?.monitor;
-  if (monitor) {
-    const user = escapeSqlString(monitor.user);
-    const password = escapeSqlString(monitor.password);
+  const versions = serverVersionsFor(desired.clusters);
+  for (const family of ["mysql", "pgsql"] as const) {
     statements.push(
-      `SET mysql-monitor_username='${user}'`,
-      `SET mysql-monitor_password='${password}'`,
-      "LOAD MYSQL VARIABLES TO RUNTIME",
-      "SAVE MYSQL VARIABLES TO DISK",
-      `SET pgsql-monitor_username='${user}'`,
-      `SET pgsql-monitor_password='${password}'`,
-      "SET pgsql-monitor_dbname='postgres'",
-      "LOAD PGSQL VARIABLES TO RUNTIME",
-      "SAVE PGSQL VARIABLES TO DISK",
+      ...renderVariableStatements(family, options?.monitor, versions[family]),
     );
   }
   // Last, so a rotated Organization CA leaf reaches the client listeners
   // without a container restart.
   statements.push(PROXYSQL_RELOAD_TLS_STATEMENT);
   return statements;
+}
+
+/**
+ * The server version each listener reports (rule in
+ * `proxysql-server-version.ts`).
+ */
+function serverVersionsFor(
+  clusters: readonly ProxySqlClusterDesired[],
+): Partial<Record<ProxySqlProtocolFamily, string>> {
+  return proxySqlServerVersions(
+    clusters.map((cluster) => ({
+      family: protocolFamilyForCluster(cluster),
+      engine: cluster.engine,
+      ...(cluster.engineVersion !== undefined
+        ? { engineVersion: cluster.engineVersion }
+        : {}),
+    })),
+  );
+}
+
+/**
+ * One family's global variables, then a single `LOAD … TO RUNTIME` /
+ * `SAVE … TO DISK`. Monitor credentials update without a container restart
+ * (also written into the static cnf for cold start). `server_version` is
+ * dynamic too, so new client sessions see it at once; it goes through the
+ * admin interface only, never `proxysql.cnf`: that file is read on a first
+ * boot alone, and a static-section change there restarts the proxy, which
+ * adding or upgrading one cluster must not do to every other client.
+ */
+function renderVariableStatements(
+  family: ProxySqlProtocolFamily,
+  monitor: { user: string; password: string } | null | undefined,
+  serverVersion: string | undefined,
+): string[] {
+  const sets: string[] = [];
+  if (monitor) {
+    sets.push(
+      `SET ${family}-monitor_username='${escapeSqlString(monitor.user)}'`,
+      `SET ${family}-monitor_password='${escapeSqlString(monitor.password)}'`,
+    );
+    if (family === "pgsql") sets.push("SET pgsql-monitor_dbname='postgres'");
+  }
+  if (serverVersion !== undefined) {
+    sets.push(
+      `SET ${family}-server_version='${escapeSqlString(serverVersion)}'`,
+    );
+  }
+  if (sets.length === 0) return [];
+  const module = family.toUpperCase();
+  return [
+    ...sets,
+    `LOAD ${module} VARIABLES TO RUNTIME`,
+    `SAVE ${module} VARIABLES TO DISK`,
+  ];
 }
 
 /** One row of ProxySQL's live `runtime_<family>_servers` table. */
@@ -1688,6 +1828,11 @@ export type EnsureProxySqlIngressOptions = {
   readonly segmentAttachments: ReadonlyArray<ProxySqlSegmentAttachment>;
   readonly listenerPorts: ProxySqlListenerPorts | null | undefined;
   readonly managedNetwork: string;
+  /**
+   * ProxySQL's IPv6 network subnet, `null`/absent for none. The self-heal path
+   * passes back what is on disk ({@link readCurrentProxySqlIpv6Subnet}).
+   */
+  readonly ipv6Subnet?: string | null;
   readonly stability?: ContainerStabilityOptions;
   /** Test seam: the host kernel's memory page size in bytes. */
   readonly pageSizeBytes?: () => Promise<number | undefined>;
@@ -1770,6 +1915,7 @@ export async function ensureProxySqlIngress(
     segmentAttachments,
     listenerPorts,
     managedNetwork,
+    ipv6Subnet,
     stability,
   } = options;
   const pageSizeError = proxySqlPageSizeError(
@@ -1784,6 +1930,7 @@ export async function ensureProxySqlIngress(
     segmentAttachments,
     listenerPorts,
     managedNetwork,
+    ipv6Subnet ?? null,
   );
   await Deno.writeTextFile(composePath, composeText, { mode: 0o640 });
   // A container that failed its publish bind at boot stays "running" with no
@@ -1865,6 +2012,22 @@ export async function readCurrentProxySqlSegmentAttachments(
     return readSegmentAttachmentsFromCompose(text);
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+}
+
+/**
+ * ProxySQL's IPv6 network subnet already rendered into the on-disk compose
+ * file (`null` when absent). See {@link readProxySqlIpv6SubnetFromCompose}.
+ */
+export async function readCurrentProxySqlIpv6Subnet(
+  layout: LayoutPaths,
+): Promise<string | null> {
+  try {
+    const text = await Deno.readTextFile(proxysqlComposePath(layout));
+    return readProxySqlIpv6SubnetFromCompose(text);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return null;
     throw err;
   }
 }

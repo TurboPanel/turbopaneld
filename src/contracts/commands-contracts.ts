@@ -2155,6 +2155,11 @@ export type ManagedIngressListenerPortsPayload = {
 export type ProxySqlClusterPayload = {
   managedId: string;
   engine: string;
+  /**
+   * Engine release series (`18`, `9.7`, `11.8`). ProxySQL reports it to
+   * clients as the server version; absent from an older control plane.
+   */
+  engineVersion?: string;
   protocolPort: number;
   /**
    * Protocol module this cluster is served by. Explicit because a configurable
@@ -8744,6 +8749,17 @@ function isValidHostgroupId(value: unknown): value is number {
   );
 }
 
+/**
+ * Engine release series as the instance sends it: `18`, `9.7`, `11.8`. Must
+ * stay in sync with the instance's `MANAGED_INGRESS_ENGINE_VERSION_RE`
+ * (`src/contracts/commands/schemas.ts`).
+ */
+const PROXYSQL_ENGINE_VERSION_RE = /^\d{1,4}(?:\.\d{1,4}){0,2}$/;
+
+export function isProxySqlEngineVersion(value: unknown): value is string {
+  return typeof value === "string" && PROXYSQL_ENGINE_VERSION_RE.test(value);
+}
+
 function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
   if (!isRecord(value)) {
     throw new TypeError("Invalid managed.ingress.reconcile cluster");
@@ -8779,6 +8795,14 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
   if (value.family !== undefined && !isManagedIngressFamily(value.family)) {
     throw new TypeError("Invalid managed.ingress.reconcile cluster family");
   }
+  if (
+    value.engineVersion !== undefined &&
+    !isProxySqlEngineVersion(value.engineVersion)
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile cluster engineVersion",
+    );
+  }
   const cluster: ProxySqlClusterPayload = {
     managedId: value.managedId,
     engine: value.engine,
@@ -8789,6 +8813,9 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
     users: value.users.map(parseProxySqlUserPayload),
   };
   if (value.family !== undefined) cluster.family = value.family;
+  if (value.engineVersion !== undefined) {
+    cluster.engineVersion = value.engineVersion;
+  }
   if (value.autoReadSplit !== undefined) {
     cluster.autoReadSplit = value.autoReadSplit;
   }

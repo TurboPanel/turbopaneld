@@ -468,7 +468,7 @@ test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface
   // compose-level publish is private-only (null) or a narrow public IP —
   // sibling containers on the managed network dial this internal
   // address, which is unrelated to whether/where compose publishes to the
-  // host. See `CONTAINER_LISTEN_ADDRESS` in proxysql.ts.
+  // host. See `desiredProxySqlListenerInterfaces` in proxysql.ts.
   const privateCnf = renderProxySqlConfig({
     bindAddresses: [],
     clusters: [clusterDesired()],
@@ -1241,8 +1241,9 @@ test("staticConfigSectionChanged ignores dynamic user/server changes and the pub
   });
   assertEquals(staticConfigSectionChanged(a, b), false);
 
-  // The compose-level publish bind is no longer reflected in the cnf's
-  // `interfaces=` line at all (see `CONTAINER_LISTEN_ADDRESS`) — it is a
+  // An IPv4 publish bind is not reflected in the cnf's `interfaces=` line
+  // (see `desiredProxySqlListenerInterfaces`; only an IPv6 publish adds
+  // `[::]`) — it is a
   // pure compose `ports:` concern now, detected separately in the
   // `managed.ingress.reconcile` handler via
   // `readPublishedBindAddressesFromCompose`, not via the static cnf section.

@@ -23,6 +23,8 @@ Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 | `networks.ts` | Ensure the organization's managed Docker network by the name the command payload carries (`ensureManagedIngressNetwork(name, run)` — no daemon-side default) **and** attach ProxySQL to consumer `tpn_*` compose-bridge subnets |
 | `firewall.ts` | Best-effort idempotent `iptables` scoping for a **public** private listener: `TP-MANAGED-PUB` off `DOCKER-USER`, per-cluster `TP-MGD-<id>` chain matching the pre-DNAT publish via `conntrack --ctorigdst/--ctorigdstport`, ACCEPT known peers then DROP. Apply **removes** that chain (idempotent if absent) when the listener is cleared or not public — a single-member cluster only publishes while a remote app is bound, so leaving a DROP would block a later cluster that reuses the address/port. Destroy still tears the chain down. No new rules without a public IPv4 listener or known peers; never blocks apply/destroy. **Slated to fold into the managed host firewall** (`src/firewall/`, `server.firewall.reconcile` — Road row `fw-fold-existing`): the same scoping becomes a `published` rule the panel derives, rendered by one renderer with IPv6 parity |
 | `proxysql.ts` | Shared ProxySQL compose + durable `proxysql.cnf` generation, static-section diffing, inspect/start/stop/restart |
+| `proxysql-ipv6.ts` | ProxySQL's own IPv6-only network (ULA /64 per server) and IPv6 listener addresses, so IPv6 clients keep their real address — see **Real client addresses (IPv6 network)** |
+| `proxysql-server-version.ts` | Which engine version each client listener reports (`mysql-server_version` / `pgsql-server_version`) — see **Server version reported to clients** |
 | `proxysql-admin.ts` | Runtime admin apply via `docker exec` + `admin.cnf` (`[client]` secrets never on argv/logs) |
 | `containers.ts` | Shared `docker compose ps` collection + running-container resolution used by `apply.ts` and `backup.ts` |
 | `apply.ts` / `lifecycle.ts` / `destroy.ts` / `promote.ts` / `follow-primary.ts` | Engine command handlers (wired from `command-router.ts`); `applyManagedEngineState` order on a primary is: database **creates**, credentials (grants reference those databases), `dropUsers`, ProxySQL monitor roles, database **drops** last (after users are gone, so a deleted owner is released first) — an apply that fails early therefore never leaves a referenced database uncreated and the next retry heals; apply/destroy do **not** bring up per-service Traefik; `managed.promote` is the engine promote step after TurboPanel fencing. **`managed.destroy` always `compose -p <managedId> down`** — the compose project is the bare `managed` row UUID — even if the state dir is missing, then `docker ps -aq --filter label=com.docker.compose.project=…` and `docker rm -f` leftovers; compose down failure is **not** success while labeled containers remain. No `-f` (same interpolation rule as lifecycle). With `removeVolumes`, also `docker volume rm -f managed_<id>_data` best-effort by exact name — compose down -v only removes project-labeled volumes and misses pre-pin bare-name orphans. **Destroy vs apply:** destroy writes `<stateDir>/managed-intent/<id>.destroyed.json` (`destroyed-marker.ts`, names the member, 24 h life) BEFORE removing anything, then takes the per-id `withManagedLifecycleLock` (`<runDir>/managed-locks/<id>.lifecycle.lock`, blocking, shared with apply); apply takes the same lock and refuses (`ManagedDestroyedError`) a member whose marker is live. Destroy re-checks for re-created containers/state dir before reporting success; `listManagedHaMembers` skips destroyed members. |
@@ -189,12 +191,8 @@ side, so the daemon must treat them as data:
   control plane sends `["0.0.0.0", "::"]` on a server with IPv6 (only to a
   daemon advertising `managed-ingress-ipv6-v1`), else `["0.0.0.0"]`. `::`
   renders as `"[::]:<port>:<port>"` and reads back unbracketed, so self-heal
-  keeps the IPv6 publish. Docker's userland proxy carries IPv6 clients to the
-  IPv4-only managed network (measured on Docker 29.8: `docker-proxy` holds
-  `[::]:<port>` beside `0.0.0.0:<port>`, no ip6tables NAT rule is added, and
-  the database sees the bridge gateway as the client address). With
-  `userland-proxy: false` Docker documents no path from an IPv6 host publish
-  to an IPv4-only container (not measured here).
+  keeps the IPv6 publish. See **Real client addresses (IPv6 network)** below
+  for how IPv6 clients reach ProxySQL with their own address.
 - **Self-heal round-trips the ports.** `system.reconcile` → `proxysql` reads the
   current ports off disk and re-renders with them; it must not fall back to the
   platform defaults, or a heal would silently move an operator's listeners.
@@ -210,6 +208,109 @@ side, so the daemon must treat them as data:
   looser daemon check would accept a payload the control plane considers
   invalid, which is how a half-configured ingress happens. Canonical rules:
   `turbopanel/src/features/managed/AGENTS.md` → **Client listener ports**.
+
+### Real client addresses (IPv6 network)
+
+ProxySQL's `cli_host` (and anything that later filters on the client address)
+is only as good as what Docker hands it. Before this, the managed network was
+IPv4 only, so Docker's userland proxy (`docker-proxy`) accepted every IPv6
+connection on the host and opened a fresh IPv4 one to the container: every
+IPv6 client showed up as the managed network's gateway (`172.x.0.1`, measured
+on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
+
+- **ProxySQL's own IPv6-only network.** While a client listener is published on
+  an IPv6 address (`proxySqlBindsUseIpv6`), the compose file joins a
+  compose-owned network `proxysql-ipv6` (`enable_ipv4: false`,
+  `enable_ipv6: true`, one unique local /64 from SHA-256 of the managed-ingress
+  `serviceId`, `proxySqlIpv6Subnet`). Docker picks the IPv4 and IPv6 gateways
+  separately (the first endpoint with each family, moby `getGatewayEndpoint`)
+  and maps each family's host ports on its own gateway endpoint, so the IPv4
+  gateway and IPv4 publish stay exactly where they were and the `[::]`
+  publish becomes a kernel DNAT to the container's address on this network.
+  Only ProxySQL joins it; the shared managed network (engines, Orchestrator)
+  is not touched or recreated. No IPv6 publish, no network: an IPv4-only
+  server's compose file is byte-for-byte what it was.
+- **ProxySQL listens on IPv6 too.** `mysql-interfaces` / `pgsql-interfaces`
+  become `0.0.0.0:<port>;[::]:<port>` with the network
+  (`desiredProxySqlListenerInterfaces`). ProxySQL sets `IPV6_V6ONLY`, so the
+  two do not collide and IPv4 clients keep plain IPv4 addresses. Both are read
+  only at start, and `proxysql.cnf` only on a first boot (an existing
+  `proxysql.db` in the data volume wins, ProxySQL "ignoring configuration
+  file"), so `managed.ingress.reconcile` reads `runtime_global_variables` and,
+  when the running value differs, `SET`s them and `SAVE … VARIABLES TO DISK`
+  (no `LOAD … TO RUNTIME`: ProxySQL would put the running value back) *before*
+  compose recreates the container (`stageProxySqlListenerInterfaces`), so the
+  new container starts with them. After the admin apply it reads them again
+  and, if they still differ (no recreate happened, or staging could not reach
+  the admin port), saves them and restarts the container once, then checks
+  they took (`activateProxySqlListenerInterfaces`). With an IPv6 listener it
+  then probes `[::1]:<port>` inside the container for each family in use with
+  the container's own `mysql` client (the only command the docker-gate allows
+  there; a refused connect, ERROR 2002/2003, means closed, anything past the
+  connect means open), because the variable says nothing about whether the
+  bind worked; a failed probe fails the reconcile. Staging uses no admin
+  connect retries, so a missing or stuck container costs nothing. The same path also applies a
+  changed listener port on a host whose `proxysql.db` predates it.
+- **Upgrade path.** The next `managed.ingress.reconcile` on a server publishing
+  `::` re-renders compose and recreates the container onto the new network
+  (data volume kept) with the IPv6 listeners already saved: one short listener
+  blip, no engine container and no database data touched. The
+  `system.reconcile` self-heal keeps exactly the IPv6 network on disk
+  (`readCurrentProxySqlIpv6Subnet`) and never adds it, because it does not
+  switch the listeners: a network without the IPv6 listener would send IPv6
+  clients to a closed port.
+- **What clients show after the fix.** Internet IPv6 clients: their real
+  address. Internet IPv4 clients: their real address (unchanged, DNAT). Host
+  processes on `127.0.0.1` (site PHP through `tp-php-loopback`, the panel
+  host's own tools): still the managed network's IPv4 gateway — Docker serves
+  loopback publishes through `docker-proxy` (and with `userland-proxy: false`
+  masquerades them), so a loopback client is never seen as itself. `::1` is
+  not published. Containers that dial ProxySQL by name on a network it shares
+  (the managed network, a `tpn_*` attachment): their own container address, as
+  before. A container on the managed network that dials the host's public
+  address instead is hairpinned through `docker-proxy` and shows the gateway.
+  (The loopback and hairpin answers follow from Docker's documented rules; the
+  canary client-address test is the measurement.)
+- **Firewall.** IPv6 published traffic now crosses ip6tables `FORWARD` /
+  `DOCKER-USER` like IPv4 instead of the host's `INPUT` chain, so the host
+  firewall's `published` rules apply to it (`src/firewall/render.ts` renders
+  both families). `firewall.ts` `TP-MGD-<id>` is engine private-listener
+  scoping and stays IPv4 only.
+- **Host requirements.** Docker Engine 28+ (separate IPv4/IPv6 gateway
+  choice and IPv6-only networks: on Engine 27 one network is the gateway for
+  both families, so the IPv4 path could move) and Compose 2.33.1+
+  (`enable_ipv4`). The reconcile checks both (`proxySqlIpv6NetworkSupport`);
+  on an older version it renders no IPv6 network and no IPv6 listener and logs
+  a warning, so IPv6 keeps the old `docker-proxy` path (connected, gateway
+  address). A version that cannot be read (dockerd restarting) keeps whatever
+  the previous compose file had. dockerd also needs `ip6tables` on (the default
+  since Docker 27); without it the publish falls back to `docker-proxy`.
+- **Turning IPv6 off** drops the network from compose and `[::]` from the
+  listeners (same staging). Compose leaves the now-unused
+  `<project>_proxysql-ipv6` network behind; it is empty, harmless, and reused
+  (same subnet) if IPv6 comes back.
+
+### Server version reported to clients
+
+ProxySQL answers the client handshake itself with one global string per
+module: `mysql-server_version` (default `8.0.11`) and `pgsql-server_version`
+(default `16.1`), so PostgreSQL 18, MySQL 9.7 and MariaDB 11.8 all looked like
+PostgreSQL 16.1 / MySQL 8.0.11 to drivers and tools. The control plane sends
+each cluster's `engineVersion` (the release series from its image: `18`,
+`9.7`, `11.8`) and `buildProxySqlAdminStatements` sets both variables
+(`SET … ; LOAD … TO RUNTIME; SAVE … TO DISK`, dynamic, no restart). Rule
+(`proxysql-server-version.ts`), per listener: the newest PostgreSQL series on
+the PostgreSQL listener; on the shared MySQL-family listener the newest MySQL series when any
+MySQL cluster is on it, else the newest MariaDB series as `<series>-MariaDB`
+(MariaDB 11+ format, no `5.5.5-` prefix). Clusters without a version count for
+nothing; a family with none keeps its value. The series has no patch level, so
+it is padded with zeros because clients parse the string (MySQL-family drivers
+such as Connector/Python, Rails, libmysqlclient and mysqlnd want three parts;
+PostgreSQL versions always have two, so a longer one is cut): `9.7.0`,
+`11.8.0-MariaDB`, `18.0`. MySQL and PostgreSQL variables share one
+`LOAD`/`SAVE` per family with the monitor credentials.
+Never written into `proxysql.cnf`: that file is read on a first boot only, and
+a static-section change restarts ProxySQL for every client.
 
 ### Managed network self-heal
 
