@@ -83,10 +83,12 @@ export function createFakeProxySqlAdmin(): FakeProxySqlAdmin {
     }
     const save = SAVE_VARIABLES_RE.exec(line);
     if (!save) return;
+    // SAVE writes main: a pending SET, else the running value (what a LOAD
+    // put back).
     const family = save[1]!.toLowerCase() as ProxySqlProtocolFamily;
-    const pending = pendingInterfaces[family];
-    if (pending === undefined) return;
-    fake.savedInterfaces = { ...fake.savedInterfaces, [family]: pending };
+    const value = pendingInterfaces[family] ?? fake.interfaces?.[family];
+    if (value === undefined) return;
+    fake.savedInterfaces = { ...fake.savedInterfaces, [family]: value };
   };
 
   const applyLine = (line: string): void => {

@@ -263,7 +263,8 @@ export type ProxySqlDesiredState = {
    * each entry is published, so older callers keep working.
    *
    * Never conflate this with ProxySQL's *internal* container listen address
-   * (always all-interfaces — see {@link desiredProxySqlListenerInterfaces}); those are
+   * (always all-interfaces — see {@link desiredProxySqlListenerInterfaces});
+   * those are
    * independent concerns. See `proxysqlCompose` for how `[]` omits the
    * published port lines entirely.
    */
@@ -774,7 +775,7 @@ export function proxysqlCompose(
   segments: ReadonlyArray<{ name: string; subnet: string }>,
   listenerPorts: ProxySqlListenerPorts | null | undefined,
   managedNetwork: string,
-  ipv6Supported = true,
+  ipv6Supported = false,
 ): string {
   return proxysqlComposeWithAttachments(
     identity,
@@ -1197,7 +1198,8 @@ function renderProtocolFamilySection(
 /**
  * Static globals/listeners/TLS paths — excludes dynamic server/user/rule
  * tables. The `interfaces=` lines always bind every interface inside
- * ProxySQL's own container namespace (see {@link desiredProxySqlListenerInterfaces});
+ * ProxySQL's own container namespace (see
+ * {@link desiredProxySqlListenerInterfaces});
  * host-level exposure is a separate, compose-level publish decision (see
  * {@link ProxySqlDesiredState.bindAddresses}).
  */
@@ -1354,14 +1356,15 @@ export function staticConfigSectionChanged(
 
 /**
  * Full durable proxysql.cnf including users/servers/rules for cold start.
- * `ipv6Supported: false` (a Docker too old for the IPv6 network) keeps the
- * listeners IPv4 only whatever the binds.
+ * The IPv6 listener needs `ipv6Supported` (this host's Docker can carry
+ * ProxySQL's IPv6 network, `proxySqlIpv6NetworkSupport`) as well as an IPv6
+ * publish; without it the listeners stay IPv4 only.
  */
 export function renderProxySqlConfig(
   desired: ProxySqlDesiredState,
   adminCredentials?: { user: string; password: string } | null,
   monitorCredentials?: { user: string; password: string } | null,
-  ipv6Supported = true,
+  ipv6Supported = false,
 ): string {
   const lines = [
     renderProxySqlStaticConfig(
@@ -1506,43 +1509,26 @@ export function buildProxySqlAdminStatements(
       ...renderAdminQueryRuleStatements(family, desired.clusters),
     );
   }
-  const monitor = options?.monitor;
-  if (monitor) {
-    const user = escapeSqlString(monitor.user);
-    const password = escapeSqlString(monitor.password);
+  const versions = serverVersionsFor(desired.clusters);
+  for (const family of ["mysql", "pgsql"] as const) {
     statements.push(
-      `SET mysql-monitor_username='${user}'`,
-      `SET mysql-monitor_password='${password}'`,
-      "LOAD MYSQL VARIABLES TO RUNTIME",
-      "SAVE MYSQL VARIABLES TO DISK",
-      `SET pgsql-monitor_username='${user}'`,
-      `SET pgsql-monitor_password='${password}'`,
-      "SET pgsql-monitor_dbname='postgres'",
-      "LOAD PGSQL VARIABLES TO RUNTIME",
-      "SAVE PGSQL VARIABLES TO DISK",
+      ...renderVariableStatements(family, options?.monitor, versions[family]),
     );
   }
-  statements.push(
-    ...renderServerVersionStatements(desired.clusters),
-    // Last, so a rotated Organization CA leaf reaches the client listeners
-    // without a container restart.
-    PROXYSQL_RELOAD_TLS_STATEMENT,
-  );
+  // Last, so a rotated Organization CA leaf reaches the client listeners
+  // without a container restart.
+  statements.push(PROXYSQL_RELOAD_TLS_STATEMENT);
   return statements;
 }
 
 /**
- * `SET <family>-server_version` from the clusters' engine versions (rule in
- * `proxysql-server-version.ts`). Both variables are dynamic, so new client
- * sessions see the change without a restart. Applied through the admin
- * interface only, never written into `proxysql.cnf`: that file is read on a
- * first boot alone, and a static-section change there restarts the proxy,
- * which adding or upgrading one cluster must not do to every other client.
+ * The server version each listener reports (rule in
+ * `proxysql-server-version.ts`).
  */
-function renderServerVersionStatements(
+function serverVersionsFor(
   clusters: readonly ProxySqlClusterDesired[],
-): string[] {
-  const versions = proxySqlServerVersions(
+): Partial<Record<ProxySqlProtocolFamily, string>> {
+  return proxySqlServerVersions(
     clusters.map((cluster) => ({
       family: protocolFamilyForCluster(cluster),
       engine: cluster.engine,
@@ -1551,18 +1537,42 @@ function renderServerVersionStatements(
         : {}),
     })),
   );
-  const statements: string[] = [];
-  for (const family of ["mysql", "pgsql"] as const) {
-    const version = versions[family];
-    if (version === undefined) continue;
-    const module = family.toUpperCase();
-    statements.push(
-      `SET ${family}-server_version='${escapeSqlString(version)}'`,
-      `LOAD ${module} VARIABLES TO RUNTIME`,
-      `SAVE ${module} VARIABLES TO DISK`,
+}
+
+/**
+ * One family's global variables, then a single `LOAD … TO RUNTIME` /
+ * `SAVE … TO DISK`. Monitor credentials update without a container restart
+ * (also written into the static cnf for cold start). `server_version` is
+ * dynamic too, so new client sessions see it at once; it goes through the
+ * admin interface only, never `proxysql.cnf`: that file is read on a first
+ * boot alone, and a static-section change there restarts the proxy, which
+ * adding or upgrading one cluster must not do to every other client.
+ */
+function renderVariableStatements(
+  family: ProxySqlProtocolFamily,
+  monitor: { user: string; password: string } | null | undefined,
+  serverVersion: string | undefined,
+): string[] {
+  const sets: string[] = [];
+  if (monitor) {
+    sets.push(
+      `SET ${family}-monitor_username='${escapeSqlString(monitor.user)}'`,
+      `SET ${family}-monitor_password='${escapeSqlString(monitor.password)}'`,
+    );
+    if (family === "pgsql") sets.push("SET pgsql-monitor_dbname='postgres'");
+  }
+  if (serverVersion !== undefined) {
+    sets.push(
+      `SET ${family}-server_version='${escapeSqlString(serverVersion)}'`,
     );
   }
-  return statements;
+  if (sets.length === 0) return [];
+  const module = family.toUpperCase();
+  return [
+    ...sets,
+    `LOAD ${module} VARIABLES TO RUNTIME`,
+    `SAVE ${module} VARIABLES TO DISK`,
+  ];
 }
 
 /** One row of ProxySQL's live `runtime_<family>_servers` table. */

@@ -268,6 +268,11 @@ type ProxySqlAdminRunOptions = {
   defaultsFile?: string;
   /** Override connect-retry backoff (tests). Defaults to 3s. */
   retryDelayMs?: number;
+  /**
+   * Connect-class retries while the admin port comes up. Defaults to 10; a
+   * best-effort read that has a fallback passes 0 so it never waits.
+   */
+  connectRetries?: number;
 };
 
 /**
@@ -321,7 +326,7 @@ async function runProxySqlAdminSql(
       !ADMIN_CONNECT_RETRYABLE_RE.test(
         `${previous.stderr}\n${previous.stdout}`,
       ) ||
-      attempt >= ADMIN_CONNECT_RETRIES
+      attempt >= (options?.connectRetries ?? ADMIN_CONNECT_RETRIES)
     ) {
       return previous;
     }

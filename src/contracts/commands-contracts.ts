@@ -8749,7 +8749,11 @@ function isValidHostgroupId(value: unknown): value is number {
   );
 }
 
-/** Engine release series as the instance sends it: `18`, `9.7`, `11.8`. */
+/**
+ * Engine release series as the instance sends it: `18`, `9.7`, `11.8`. Must
+ * stay in sync with the instance's `MANAGED_INGRESS_ENGINE_VERSION_RE`
+ * (`src/contracts/commands/schemas.ts`).
+ */
 const PROXYSQL_ENGINE_VERSION_RE = /^\d{1,4}(?:\.\d{1,4}){0,2}$/;
 
 export function isProxySqlEngineVersion(value: unknown): value is string {

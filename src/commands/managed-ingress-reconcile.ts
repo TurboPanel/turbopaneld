@@ -50,6 +50,8 @@ import {
   proxySqlBindsUseIpv6,
   proxySqlIpv6ListenProbeArgs,
   proxySqlIpv6NetworkSupport,
+  proxySqlProbeShowsListening,
+  readProxySqlIpv6SubnetFromCompose,
 } from "../managed/proxysql-ipv6.ts";
 import { runProxySqlSetup } from "../orchestration/ansible.ts";
 import {
@@ -100,6 +102,8 @@ export type ManagedIngressReconcileHandlerDeps = {
   runHostPrep?: () => Promise<void>;
   /** Test seam for the listener-port preflight (defaults to a real bind probe). */
   probeHostPort?: ProbeHostPortFn;
+  /** Test seam: wait between IPv6 listener probes (defaults to 2 s). */
+  ipv6ProbeDelayMs?: number;
 };
 
 function desiredStateFromPayload(
@@ -463,90 +467,94 @@ function readPreviousComposeFacts(previousComposeText: string | null) {
 }
 
 /**
- * Make ProxySQL serve the listener addresses this reconcile wants.
- *
- * `mysql-interfaces` / `pgsql-interfaces` are read only when ProxySQL starts,
- * and from `proxysql.cnf` only on a first boot (an existing `proxysql.db` in
- * the data volume wins), so recreating the container is not enough. When the
- * running value differs (first reconcile with an IPv6 listener, or a listener
- * port change), write the new value to `proxysql.db`, restart the container
- * and check it took. Every other table was saved to disk by the admin apply
- * just before, so the restart loads the same users, servers and rules. Returns
- * whether it restarted. A family with no running row is left alone.
- */
-/**
  * Whether this reconcile may give ProxySQL its IPv6 network: only with an IPv6
  * publish, and only on a Docker that can carry it (`proxysql-ipv6.ts`).
- * Otherwise the IPv6 publish keeps going through `docker-proxy` as before.
+ * Otherwise the IPv6 publish keeps going through `docker-proxy` as before. A
+ * version that cannot be read keeps what the previous render had, so one
+ * failed `docker version` never tears a working network down.
  */
 async function resolveProxySqlIpv6Support(
   bindAddresses: readonly string[],
+  previousComposeText: string | null,
   run: RunDockerFn,
 ): Promise<boolean> {
   if (!proxySqlBindsUseIpv6(bindAddresses)) return true;
   const support = await proxySqlIpv6NetworkSupport(run);
   if (support.supported) return true;
+  const hadNetwork = previousComposeText !== null &&
+    readProxySqlIpv6SubnetFromCompose(previousComposeText) !== null;
+  const keep = support.unreadable && hadNetwork;
   logWarn(
     "commands",
-    `managed.ingress.reconcile: no IPv6 network for ProxySQL (${support.reason}); IPv6 clients keep arriving through docker-proxy with the gateway address`,
+    `managed.ingress.reconcile: ${sanitizeForLog(support.reason)}; ${
+      keep
+        ? "keeping ProxySQL's existing IPv6 network"
+        : "no IPv6 network for ProxySQL, so IPv6 clients keep arriving through docker-proxy with the gateway address"
+    }`,
   );
-  return false;
+  return keep;
 }
 
 /**
  * Best effort, before compose up: when the running listeners differ from
  * `desired`, write the new ones to `proxysql.db` so the recreated container
  * starts with them. A container that is not there or not answering is left
- * to {@link activateProxySqlListenerInterfaces} after the up.
+ * to {@link activateProxySqlListenerInterfaces} after the up (no connect
+ * retries here, so a missing or stuck proxy costs nothing).
  */
 async function stageProxySqlListenerInterfaces(
   desired: Record<ProxySqlProtocolFamily, string>,
-  admin: Parameters<typeof readProxySqlRuntimeInterfaces>[0],
+  admin: ProxySqlAdminTarget,
 ): Promise<void> {
+  const once = { ...admin, connectRetries: 0 };
   try {
-    const running = await readProxySqlRuntimeInterfaces(admin);
+    const running = await readProxySqlRuntimeInterfaces(once);
     if (proxySqlListenerInterfacesMismatch(desired, running).length === 0) {
       return;
     }
     await applyProxySqlAdminStatements(
       buildProxySqlListenerInterfacesStatements(desired),
-      admin,
+      once,
     );
   } catch (err) {
     logInfo(
       "commands",
       `managed.ingress.reconcile: listeners not staged before compose up (${
-        err instanceof Error ? err.message : String(err)
+        sanitizeForLog(err instanceof Error ? err.message : String(err))
       }); checked again after it`,
     );
   }
 }
 
+type ProxySqlAdminTarget = NonNullable<
+  Parameters<typeof readProxySqlRuntimeInterfaces>[0]
+>;
+
 const IPV6_PROBE_ATTEMPTS = 5;
 const IPV6_PROBE_DELAY_MS = 2_000;
 
 /**
- * Prove each IPv6 listener accepts connections inside the container
+ * Prove each IPv6 listener in use accepts connections inside the container
  * (`runtime_global_variables` holds the configured string whether or not the
  * bind worked). A few short retries cover a proxy that has just restarted.
  */
 async function assertProxySqlIpv6Listening(
   run: RunDockerFn,
   containerName: string,
-  ports: { mysql: number; pgsql: number },
+  ports: readonly number[],
+  delayMs: number,
 ): Promise<void> {
-  await forEachSequential([ports.mysql, ports.pgsql], async (port) => {
+  await forEachSequential(ports, async (port) => {
     let attempt = 0;
     let ok = false;
     await repeatSequential(async () => {
       if (attempt > 0) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, IPV6_PROBE_DELAY_MS)
-        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
       attempt += 1;
-      ok = (await run(proxySqlIpv6ListenProbeArgs(containerName, port)))
-        .success;
+      ok = proxySqlProbeShowsListening(
+        await run(proxySqlIpv6ListenProbeArgs(containerName, port)),
+      );
       return !ok && attempt < IPV6_PROBE_ATTEMPTS;
     });
     if (!ok) {
@@ -557,10 +565,23 @@ async function assertProxySqlIpv6Listening(
   });
 }
 
+/**
+ * Make ProxySQL serve the listener addresses this reconcile wants.
+ *
+ * `mysql-interfaces` / `pgsql-interfaces` are read only when ProxySQL starts,
+ * and from `proxysql.cnf` only on a first boot (an existing `proxysql.db` in
+ * the data volume wins), so recreating the container is not enough. When the
+ * running value still differs after the compose up (no recreate happened, or
+ * {@link stageProxySqlListenerInterfaces} could not reach the admin port),
+ * write the new value to `proxysql.db`, restart the container and check it
+ * took. Every other table was saved to disk by the admin apply just before,
+ * so the restart loads the same users, servers and rules. Returns whether it
+ * restarted. A family with no running row is left alone.
+ */
 async function activateProxySqlListenerInterfaces(
   desired: Record<ProxySqlProtocolFamily, string>,
   layout: LayoutPaths,
-  admin: Parameters<typeof readProxySqlRuntimeInterfaces>[0],
+  admin: ProxySqlAdminTarget,
 ): Promise<boolean> {
   const running = await readProxySqlRuntimeInterfaces(admin);
   if (running.mysql === undefined && running.pgsql === undefined) {
@@ -585,7 +606,7 @@ async function activateProxySqlListenerInterfaces(
     buildProxySqlListenerInterfacesStatements(desired),
     admin,
   );
-  await restartProxySqlIngress(layout, admin?.runDocker);
+  await restartProxySqlIngress(layout, admin.runDocker);
   const after = await readProxySqlRuntimeInterfaces(admin);
   const still = proxySqlListenerInterfacesMismatch(desired, after);
   if (still.length > 0) {
@@ -796,7 +817,12 @@ async function reconcileManagedIngress(
   const bindAddresses = desired.bindAddresses;
   const composePath = proxysqlComposePath(layout);
   const configPath = proxysqlConfigPath(layout);
-  const ipv6Supported = await resolveProxySqlIpv6Support(bindAddresses, run);
+  const previousComposeText = await readPreviousConfig(composePath);
+  const ipv6Supported = await resolveProxySqlIpv6Support(
+    bindAddresses,
+    previousComposeText,
+    run,
+  );
   const nextConfig = renderProxySqlConfig(
     desired,
     adminCredentials,
@@ -804,7 +830,6 @@ async function reconcileManagedIngress(
     ipv6Supported,
   );
   const previousConfig = await readPreviousConfig(configPath);
-  const previousComposeText = await readPreviousConfig(composePath);
   const descriptor = await resolveManagedIngressDescriptor(
     layout,
     parsed.identity,
@@ -918,10 +943,12 @@ async function reconcileManagedIngress(
   );
   if (interfacesRestarted) restartNeeded = true;
   if (desiredInterfaces.mysql.includes("[::]")) {
+    const ports = desired.listenerPorts ?? DEFAULT_PROXYSQL_LISTENER_PORTS;
     await assertProxySqlIpv6Listening(
       run,
       containerName,
-      desired.listenerPorts ?? DEFAULT_PROXYSQL_LISTENER_PORTS,
+      proxySqlFamiliesInUse(desired).map((family) => ports[family]),
+      deps?.ipv6ProbeDelayMs ?? IPV6_PROBE_DELAY_MS,
     );
   }
   await assertRuntimeRepointed(desired, {

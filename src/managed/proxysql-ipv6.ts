@@ -82,44 +82,64 @@ function atLeast(version: readonly number[], min: readonly number[]): boolean {
   return true;
 }
 
+export type ProxySqlIpv6NetworkSupport =
+  | { supported: true }
+  | { supported: false; reason: string; unreadable: boolean };
+
 /**
  * Whether this host's Docker can carry the IPv6 network as designed, with a
- * plain-words reason when not. Anything unreadable counts as "no": the
- * listener then keeps the old behaviour (IPv6 through `docker-proxy`, wrong
- * client address, but connected) instead of risking a compose file the host
- * rejects or a moved IPv4 gateway.
+ * plain-words reason when not. `unreadable` tells a version that could not be
+ * read (dockerd restarting, a timeout) from one that is too old: the caller
+ * then keeps whatever the host already has rather than tearing a working
+ * network down for one failed read. Without the network the listener keeps
+ * the old behaviour (IPv6 through `docker-proxy`, gateway address, but
+ * connected).
  */
 export async function proxySqlIpv6NetworkSupport(
   run: RunDockerFn,
-): Promise<{ supported: true } | { supported: false; reason: string }> {
+): Promise<ProxySqlIpv6NetworkSupport> {
   const engine = await run(["version", "--format", "{{.Server.Version}}"]);
   const engineVersion = engine.success ? parseVersion(engine.stdout) : null;
-  if (engineVersion === null || !atLeast(engineVersion, MIN_ENGINE)) {
+  if (engineVersion === null) {
     return {
       supported: false,
-      reason: `Docker Engine ${
-        engine.stdout.trim() || "unknown"
-      } is older than 28.0`,
+      reason: "the Docker Engine version could not be read",
+      unreadable: true,
+    };
+  }
+  if (!atLeast(engineVersion, MIN_ENGINE)) {
+    return {
+      supported: false,
+      reason: `Docker Engine ${engineVersion.join(".")} is older than 28.0`,
+      unreadable: false,
     };
   }
   const compose = await run(["compose", "version", "--short"]);
   const composeVersion = compose.success ? parseVersion(compose.stdout) : null;
-  if (composeVersion === null || !atLeast(composeVersion, MIN_COMPOSE)) {
+  if (composeVersion === null) {
     return {
       supported: false,
-      reason: `Docker Compose ${
-        compose.stdout.trim() || "unknown"
-      } is older than 2.33.1`,
+      reason: "the Docker Compose version could not be read",
+      unreadable: true,
+    };
+  }
+  if (!atLeast(composeVersion, MIN_COMPOSE)) {
+    return {
+      supported: false,
+      reason: `Docker Compose ${composeVersion.join(".")} is older than 2.33.1`,
+      unreadable: false,
     };
   }
   return { supported: true };
 }
 
 /**
- * `docker exec` argv that succeeds only when something accepts a TCP
- * connection on `[::1]:<port>` inside the ProxySQL container — the proof
- * that the IPv6 listener really bound, not just that the variable says so.
- * The image ships bash (`/dev/tcp`), as `wait-ready.sh` already relies on.
+ * `docker exec` argv that dials `[::1]:<port>` inside the ProxySQL container
+ * with its own `mysql` client (the only command the docker-gate lets the
+ * daemon run there). The login is meant to fail: only whether the TCP
+ * connection was accepted matters, read by {@link proxySqlProbeShowsListening}.
+ * On the PostgreSQL port the client gets no MySQL greeting and gives up after
+ * the connect timeout, which still proves the port is open.
  */
 export function proxySqlIpv6ListenProbeArgs(
   containerName: string,
@@ -128,10 +148,32 @@ export function proxySqlIpv6ListenProbeArgs(
   return [
     "exec",
     containerName,
-    "bash",
-    "-c",
-    `true </dev/tcp/::1/${port}`,
+    "mysql",
+    "--no-defaults",
+    "--protocol=TCP",
+    "--host=::1",
+    `--port=${port}`,
+    "--connect-timeout=3",
+    "--user=tp_listen_probe",
+    "--execute=SELECT 1",
   ];
+}
+
+/** Client errors that mean nothing accepted the connection. */
+const NOT_LISTENING_ERRORS = new Set(["2002", "2003", "2005"]);
+
+/**
+ * True when the probe reached a listener: it succeeded, or the client got
+ * past the TCP connect and failed later (access denied, lost connection while
+ * waiting for a greeting). A refused or unreachable connection, or an exec
+ * that never ran the client, is false.
+ */
+export function proxySqlProbeShowsListening(
+  result: { success: boolean; stdout: string; stderr: string },
+): boolean {
+  if (result.success) return true;
+  const code = /ERROR (\d{4})/.exec(`${result.stderr}\n${result.stdout}`)?.[1];
+  return code !== undefined && !NOT_LISTENING_ERRORS.has(code);
 }
 
 function hexGroup(high: number, low: number): string {

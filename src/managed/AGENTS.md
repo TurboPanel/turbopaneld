@@ -244,9 +244,12 @@ on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
   and, if they still differ (no recreate happened, or staging could not reach
   the admin port), saves them and restarts the container once, then checks
   they took (`activateProxySqlListenerInterfaces`). With an IPv6 listener it
-  then probes `[::1]:<port>` inside the container for both families (`bash`
-  `/dev/tcp`), because the variable says nothing about whether the bind
-  worked; a failed probe fails the reconcile. The same path also applies a
+  then probes `[::1]:<port>` inside the container for each family in use with
+  the container's own `mysql` client (the only command the docker-gate allows
+  there; a refused connect, ERROR 2002/2003, means closed, anything past the
+  connect means open), because the variable says nothing about whether the
+  bind worked; a failed probe fails the reconcile. Staging uses no admin
+  connect retries, so a missing or stuck container costs nothing. The same path also applies a
   changed listener port on a host whose `proxysql.db` predates it.
 - **Upgrade path.** The next `managed.ingress.reconcile` on a server publishing
   `::` re-renders compose and recreates the container onto the new network
@@ -277,9 +280,10 @@ on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
   choice and IPv6-only networks: on Engine 27 one network is the gateway for
   both families, so the IPv4 path could move) and Compose 2.33.1+
   (`enable_ipv4`). The reconcile checks both (`proxySqlIpv6NetworkSupport`);
-  on an older or unreadable version it renders no IPv6 network and no IPv6
-  listener and logs a warning, so IPv6 keeps the old `docker-proxy` path
-  (connected, gateway address). dockerd also needs `ip6tables` on (the default
+  on an older version it renders no IPv6 network and no IPv6 listener and logs
+  a warning, so IPv6 keeps the old `docker-proxy` path (connected, gateway
+  address). A version that cannot be read (dockerd restarting) keeps whatever
+  the previous compose file had. dockerd also needs `ip6tables` on (the default
   since Docker 27); without it the publish falls back to `docker-proxy`.
 - **Turning IPv6 off** drops the network from compose and `[::]` from the
   listeners (same staging). Compose leaves the now-unused
@@ -296,13 +300,15 @@ each cluster's `engineVersion` (the release series from its image: `18`,
 `9.7`, `11.8`) and `buildProxySqlAdminStatements` sets both variables
 (`SET … ; LOAD … TO RUNTIME; SAVE … TO DISK`, dynamic, no restart). Rule
 (`proxysql-server-version.ts`), per listener: the newest PostgreSQL series on
-`15432`; on the shared MySQL-family listener the newest MySQL series when any
+the PostgreSQL listener; on the shared MySQL-family listener the newest MySQL series when any
 MySQL cluster is on it, else the newest MariaDB series as `<series>-MariaDB`
 (MariaDB 11+ format, no `5.5.5-` prefix). Clusters without a version count for
 nothing; a family with none keeps its value. The series has no patch level, so
 it is padded with zeros because clients parse the string (MySQL-family drivers
 such as Connector/Python, Rails, libmysqlclient and mysqlnd want three parts;
-PostgreSQL servers always say two): `9.7.0`, `11.8.0-MariaDB`, `18.0`.
+PostgreSQL versions always have two, so a longer one is cut): `9.7.0`,
+`11.8.0-MariaDB`, `18.0`. MySQL and PostgreSQL variables share one
+`LOAD`/`SAVE` per family with the monitor credentials.
 Never written into `proxysql.cnf`: that file is read on a first boot only, and
 a static-section change restarts ProxySQL for every client.
 

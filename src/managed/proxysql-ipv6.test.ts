@@ -21,9 +21,11 @@ import {
 import {
   PROXYSQL_IPV6_NETWORK,
   proxySqlBindsUseIpv6,
+  proxySqlIpv6ListenProbeArgs,
   proxySqlIpv6NetworkSupport,
   proxySqlIpv6Subnet,
   proxySqlListenerInterfaces,
+  proxySqlProbeShowsListening,
   readProxySqlIpv6SubnetFromCompose,
 } from "./proxysql-ipv6.ts";
 import { proxysqlComposePath } from "./engine-paths.ts";
@@ -125,6 +127,44 @@ test("proxySqlIpv6NetworkSupport needs Docker 28 and Compose 2.33.1", async () =
     );
     assertEquals(support.supported, false, `${engine} / ${compose}`);
   }
+  // Too old is a fact; unreadable is not, and the caller keeps what it has.
+  const old = await proxySqlIpv6NetworkSupport(versionRun("27.5.1", "2.40.3"));
+  assertEquals(!old.supported && old.unreadable, false);
+  const blank = await proxySqlIpv6NetworkSupport(versionRun(null, "2.40.3"));
+  assertEquals(!blank.supported && blank.unreadable, true);
+});
+
+test("the IPv6 listener probe runs only the container's mysql client", () => {
+  const args = proxySqlIpv6ListenProbeArgs("c-in", 15432);
+  assertEquals(args.slice(0, 4), ["exec", "c-in", "mysql", "--no-defaults"]);
+  assert(args.includes("--host=::1"));
+  assert(args.includes("--port=15432"));
+});
+
+test("proxySqlProbeShowsListening tells a refused port from a reached one", () => {
+  const fail = (stderr: string) => ({ success: false, stdout: "", stderr });
+  assertEquals(
+    proxySqlProbeShowsListening({ ...fail(""), success: true }),
+    true,
+  );
+  for (
+    const reached of [
+      "ERROR 1045 (28000): ProxySQL Error: Access denied for user",
+      "ERROR 2013 (HY000): Lost connection to server at 'handshake: reading initial communication packet'",
+    ]
+  ) {
+    assertEquals(proxySqlProbeShowsListening(fail(reached)), true, reached);
+  }
+  for (
+    const refused of [
+      "ERROR 2002 (HY000): Can't connect to server on '::1' (115)",
+      "ERROR 2003 (HY000): Can't connect to MySQL server on '::1:15432' (111)",
+      "Error response from daemon: container is not running",
+      "",
+    ]
+  ) {
+    assertEquals(proxySqlProbeShowsListening(fail(refused)), false, refused);
+  }
 });
 
 test("proxySqlListenerInterfaces adds the IPv6 wildcard only with the IPv6 network", () => {
@@ -143,6 +183,7 @@ test("an IPv4-only render carries no IPv6 network, so those hosts do not restart
       [SEGMENT],
       null,
       MANAGED_NETWORK,
+      true,
     );
     assertEquals(text.includes(PROXYSQL_IPV6_NETWORK), false);
     assertEquals(text.includes("enable_ipv6"), false);
@@ -166,6 +207,7 @@ test("an IPv6 publish joins an IPv6-only network and keeps every other fact read
     [SEGMENT],
     null,
     MANAGED_NETWORK,
+    true,
   );
   const doc = composeDoc(text);
   const subnet = proxySqlIpv6Subnet(DESCRIPTOR.serviceId);
@@ -210,21 +252,26 @@ test("readProxySqlIpv6SubnetFromCompose is null for a file without the network",
 });
 
 test("renderProxySqlConfig listens on IPv6 inside the container only with an IPv6 publish", () => {
-  const ipv4Only = renderProxySqlConfig({
-    bindAddresses: ["0.0.0.0"],
-    clusters: [],
-  });
+  const ipv4Only = renderProxySqlConfig(
+    { bindAddresses: ["0.0.0.0"], clusters: [] },
+    null,
+    null,
+    true,
+  );
   assert(ipv4Only.includes('interfaces="0.0.0.0:13306"'));
   assert(ipv4Only.includes('interfaces="0.0.0.0:15432"'));
   assertEquals(ipv4Only.includes("[::]"), false);
 
-  const dual = renderProxySqlConfig({
+  const dualDesired = {
     bindAddresses: ["0.0.0.0", "::"],
     listenerPorts: { pgsql: 25432, mysql: 23306 },
     clusters: [],
-  });
+  };
+  const dual = renderProxySqlConfig(dualDesired, null, null, true);
   assert(dual.includes('interfaces="0.0.0.0:23306;[::]:23306"'));
   assert(dual.includes('interfaces="0.0.0.0:25432;[::]:25432"'));
+  // Without Docker support (the default) the listeners stay IPv4 only.
+  assertEquals(renderProxySqlConfig(dualDesired).includes("[::]"), false);
 });
 
 test("listener interface statements only save to disk, never load to runtime", () => {

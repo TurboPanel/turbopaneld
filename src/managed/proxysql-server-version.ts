@@ -60,9 +60,12 @@ function newest(series: readonly string[]): string | undefined {
   return [...series].sort(compareSeries).at(-1);
 }
 
-/** `9.7` → `9.7.0` (parts = 3); `18` → `18.0` (parts = 2). */
+/**
+ * Exactly `parts` dot groups: `9.7` → `9.7.0` (3), `18` → `18.0` (2),
+ * `16.4.1` → `16.4` (2: PostgreSQL versions have two parts).
+ */
 function padSeries(series: string, parts: number): string {
-  const groups = series.split(".");
+  const groups = series.split(".").slice(0, parts);
   while (groups.length < parts) groups.push("0");
   return groups.join(".");
 }

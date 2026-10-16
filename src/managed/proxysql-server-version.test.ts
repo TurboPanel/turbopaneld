@@ -75,6 +75,9 @@ test("several clusters on one listener report the newest series, compared as num
   assertEquals(proxySqlServerVersions([pg("9.6"), pg("10")]), {
     pgsql: "10.0",
   });
+  // PostgreSQL has two parts, MySQL three, whatever was sent.
+  assertEquals(proxySqlServerVersions([pg("16.4.1")]), { pgsql: "16.4" });
+  assertEquals(proxySqlServerVersions([my("mysql", "9")]), { mysql: "9.0.0" });
   assertEquals(
     proxySqlServerVersions([my("mariadb", "11.8"), my("mariadb", "12.3")]),
     { mysql: "12.3.0-MariaDB" },
