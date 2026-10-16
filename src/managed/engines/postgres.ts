@@ -387,13 +387,27 @@ async function reconcileDatabaseAccess(
   const { granted, usernames, selfManaged, admins } = userAccessList(
     credentials,
   );
-  // Only databases the control plane flagged are looked up; with none flagged
-  // nothing extra runs and every database follows the path below unchanged.
+  // Databases that may belong to an owner role: the ones the control plane
+  // flagged, plus every database a migrations or admin login is listed on, so
+  // an apply that arrives without the flag can never hand such a database to a
+  // login. The catalog decides; with none of these nothing extra runs and
+  // every database follows the path below unchanged.
+  const probe = [
+    ...new Set([
+      ...ownerRoleCandidates,
+      ...credentials
+        .filter((c) =>
+          c.role === "user" &&
+          (c.privileges ?? []).some((p) => p === "owner" || p === "admin")
+        )
+        .flatMap((c) => c.databases),
+    ]),
+  ];
   const ownerRoleDbs = new Set(
-    ownerRoleCandidates.length === 0 ? [] : (await parsePsqlRows(
+    probe.length === 0 ? [] : (await parsePsqlRows(
       ctx,
-      ownerRoleDatabasesAmongSql(ownerRoleCandidates),
-    )).map((row) => row[0]!).filter((name) => name !== undefined),
+      ownerRoleDatabasesAmongSql(probe),
+    )).flatMap((row) => row[0] === undefined ? [] : [row[0]]),
   );
   const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
     c.username
@@ -497,44 +511,53 @@ async function reconcileDatabaseAccess(
 
   // Owner-role databases: group roles, default privileges, and each login's
   // membership. Run inside the database (default privileges are per database).
-  await forEachSequential([...ownerRoleDbs].sort(), async (database) => {
-    const parts = [
-      ownerRoleDatabaseSql(database, [ctx.rootUsername, ...rootUsernames]),
-    ];
-    for (const entry of granted) {
-      const listed = entry.databases.includes(database);
-      parts.push(
-        ownerRoleLoginSql(
-          database,
-          entry.username,
-          listed ? entry.level : null,
-        ),
-      );
-      if (listed) {
+  await forEachSequential(
+    [...ownerRoleDbs].sort((a, b) => a.localeCompare(b)),
+    async (database) => {
+      const parts = [
+        ownerRoleDatabaseSql(database, [ctx.rootUsername, ...rootUsernames]),
+      ];
+      for (const entry of granted) {
+        const listed = entry.databases.includes(database);
         parts.push(
-          readOnlySessionDefaultSql(
+          ownerRoleLoginSql(
             database,
             entry.username,
-            entry.level === "read-only",
+            listed ? entry.level : null,
+          ),
+        );
+        if (listed) {
+          parts.push(
+            readOnlySessionDefaultSql(
+              database,
+              entry.username,
+              entry.level === "read-only",
+            ),
+          );
+        }
+      }
+      for (const entry of admins) {
+        // A login that was read-only before keeps no read-only default.
+        if (entry.databases.includes(database)) {
+          parts.push(
+            readOnlySessionDefaultSql(database, entry.username, false),
+          );
+        }
+        parts.push(
+          ownerRoleLoginSql(
+            database,
+            entry.username,
+            entry.databases.includes(database) ? "admin" : null,
           ),
         );
       }
-    }
-    for (const entry of admins) {
-      parts.push(
-        ownerRoleLoginSql(
-          database,
-          entry.username,
-          entry.databases.includes(database) ? "admin" : null,
-        ),
-      );
-    }
-    for (const username of usernames.keys()) {
-      if (granted.some((entry) => entry.username === username)) continue;
-      parts.push(ownerRoleLoginSql(database, username, null));
-    }
-    await runPsql(ctx, parts.join("\n"), database);
-  });
+      for (const username of usernames.keys()) {
+        if (granted.some((entry) => entry.username === username)) continue;
+        parts.push(ownerRoleLoginSql(database, username, null));
+      }
+      await runPsql(ctx, parts.join("\n"), database);
+    },
+  );
 }
 
 /**

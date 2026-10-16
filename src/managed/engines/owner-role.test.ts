@@ -298,3 +298,13 @@ test("postgres: a database that is not flagged keeps today's SQL (owner login st
   assertEquals(sql.includes("tp_shop"), false);
   assertEquals(sql.includes("pg_auth_members"), false);
 });
+
+test("postgres: a migrations login never takes an owner-role database, even when an apply comes without the flag", async () => {
+  const { ctx, inputs } = harness(ownerRoleAnswers);
+  await postgresManagedEngineRuntime.applyCredentials(ctx, [
+    cred("migrate", ["owner"]),
+  ]);
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes(`OWNER TO "migrate"`), false);
+  assertEquals(sql.includes(`"tp_shop_owner" TO "migrate"`), true);
+});

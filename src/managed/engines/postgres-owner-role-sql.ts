@@ -270,11 +270,26 @@ function membershipSql(
     `    IF NOT ${member}) THEN`,
     `      GRANT ${r} TO ${l};`,
     `    END IF;`,
-    ...(want.inherit ? [] : [`    ALTER ROLE ${l} NOINHERIT;`]),
+    // Role-wide on 15: keep the attribute in step with the wanted level.
+    `    IF ${
+      want.inherit ? "NOT " : ""
+    }(SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname = ${
+      quoteLiteral(login)
+    }) THEN`,
+    `      ALTER ROLE ${l} ${want.inherit ? "INHERIT" : "NOINHERIT"};`,
+    `    END IF;`,
     `  END IF;`,
     `END`,
     `$turbopanel$;`,
   ].join("\n");
+}
+
+function ownerMembershipFor(
+  level: OwnerRoleLoginLevel | null,
+): { inherit: boolean; set: boolean } | null {
+  if (level === "owner") return { inherit: false, set: true };
+  if (level === "admin") return { inherit: true, set: true };
+  return null;
 }
 
 /**
@@ -303,16 +318,15 @@ export function ownerRoleLoginSql(
   const names = ownerRoleNames(database);
   const db = quoteIdentifier(database);
   const l = quoteIdentifier(login);
-  const lines = [
-    membershipSql(
-      names.owner,
-      login,
-      level === "owner"
-        ? { inherit: false, set: true }
-        : level === "admin"
-        ? { inherit: true, set: true }
-        : null,
-    ),
+  const asOwner = level === "owner" || level === "admin";
+  const sessionRole = asOwner
+    ? `ALTER ROLE ${l} IN DATABASE ${db} SET role = ${
+      quoteLiteral(names.owner)
+    };`
+    : `ALTER ROLE ${l} IN DATABASE ${db} RESET role;`;
+  const ownerMembership = ownerMembershipFor(level);
+  const memberships = [
+    membershipSql(names.owner, login, ownerMembership),
     membershipSql(
       names.rw,
       login,
@@ -323,12 +337,12 @@ export function ownerRoleLoginSql(
       login,
       level === "read-only" ? { inherit: true, set: false } : null,
     ),
-    level === "owner" || level === "admin"
-      ? `ALTER ROLE ${l} IN DATABASE ${db} SET role = ${
-        quoteLiteral(names.owner)
-      };`
-      : `ALTER ROLE ${l} IN DATABASE ${db} RESET role;`,
   ];
+  // The session default needs the membership to exist (grant first); a login
+  // losing the role must lose the default first, or it cannot connect.
+  const lines = asOwner
+    ? [...memberships, sessionRole]
+    : [sessionRole, ...memberships];
   return lines.join("\n");
 }
 
