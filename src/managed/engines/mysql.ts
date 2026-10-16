@@ -401,8 +401,10 @@ async function applyOneCredential(
     ),
   );
 
+  // A login the site owner manages by hand keeps its account and password
+  // but never has its grants written or reset here.
   await grantDatabasePrivileges({
-    databases: credential.databases,
+    databases: credential.grantMode === "self" ? [] : credential.databases,
     privileges: credential.privileges ?? [],
     username: credential.username,
     hosts: ctx.clientSourceHosts ?? [],
