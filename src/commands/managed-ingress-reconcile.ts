@@ -154,6 +154,7 @@ function desiredStateFromPayload(
         ...(user.connectionRole !== undefined
           ? { connectionRole: user.connectionRole }
           : {}),
+        ...(user.tool === true ? { tool: true } : {}),
         ...(user.allowedSources !== undefined
           ? { allowedSources: [...user.allowedSources] }
           : {}),

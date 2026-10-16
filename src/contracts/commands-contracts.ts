@@ -2121,6 +2121,11 @@ export type ProxySqlUserPayload = {
   /** Absent means `read-write` (control-plane skew). */
   connectionRole?: ProxySqlConnectionRolePayload;
   /**
+   * Login used by a database tool: always routed to the primary, never given
+   * read/write split rules. Absent means false (control-plane skew).
+   */
+  tool?: boolean;
+  /**
    * Root logins only: the other-server addresses (and this server's own public
    * addresses) the root login may be used from, as plain IPv4/IPv6 addresses.
    * Present — even empty — means "limit this root login to the server itself,
@@ -8771,6 +8776,12 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
       );
     }
     user.connectionRole = value.connectionRole;
+  }
+  if (value.tool !== undefined) {
+    if (typeof value.tool !== "boolean") {
+      throw new TypeError("Invalid managed.ingress.reconcile user tool");
+    }
+    user.tool = value.tool;
   }
   if (value.allowedSources !== undefined) {
     user.allowedSources = parseProxySqlAllowedSources(value.allowedSources);
