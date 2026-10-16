@@ -62,6 +62,7 @@ import {
   quoteLiteral,
   replicaFreshnessSql,
   resetReplicaGtidStateSql,
+  revokePlainDatabaseGrantSql,
   showReplicaStatusSql,
   startReplicaSql,
   versionSql,
@@ -416,6 +417,7 @@ async function applyOneCredential(
     username: credential.username,
     hosts: ctx.clientSourceHosts ?? [],
     grantSql: grantDatabaseSql,
+    revokePlainSql: revokePlainDatabaseGrantSql,
     run: (sql) => runMysql(ctx, sql),
   });
   await runMysql(ctx, "FLUSH PRIVILEGES;");
