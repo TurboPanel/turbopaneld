@@ -214,11 +214,11 @@ function cluster(
       transport: "local",
     }],
     users: [
-      { username: "app", role: "user", password: "pw-app" },
+      { username: "app", role: "user", password: "s3cret-app" },
       {
         username: "postgres_abc",
         role: "root",
-        password: "pw-root",
+        password: "s3cret-root",
         allowedSources: ["10.0.0.2", "2001:db8::1"],
       },
     ],
@@ -273,7 +273,7 @@ test("a root login with allowedSources gets pass rules, then a catch-all, ahead 
 
 test("without allowedSources the root login gets no guard (older control plane)", () => {
   const old = cluster({
-    users: [{ username: "postgres_abc", role: "root", password: "pw-root" }],
+    users: [{ username: "postgres_abc", role: "root", password: "s3cret-root" }],
   });
   const statements = buildProxySqlAdminStatements(
     { bindAddresses: ["0.0.0.0"], clusters: [old] },
@@ -290,7 +290,7 @@ test("an empty allowedSources list still guards: only this host's own sources pa
         users: [{
           username: "root_abc",
           role: "root",
-          password: "pw",
+          password: "s3cret-root",
           allowedSources: [],
         }],
         engine: "mysql",
