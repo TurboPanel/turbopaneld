@@ -1540,7 +1540,29 @@ function renderAdminQueryRuleStatements(
   return statements;
 }
 
-/** Every guard rule, in evaluation order, for the guarded root logins of one family. */
+/** Guard rules of one limited login; read-only and tool logins get no reader rule. */
+function limitedUserRules(
+  user: ProxySqlUserDesired,
+  readSplit: number | null,
+  localSources: readonly string[],
+): RootGuardRule[] {
+  const sources = mergeRootSources(
+    user.allowedSources ?? [],
+    userAllowsLocalSources(user) ? localSources : [],
+  );
+  const fixedRoute = user.connectionRole === "read-only" || user.tool === true;
+  const message = user.role === "root"
+    ? ROOT_GUARD_ERROR_MESSAGE
+    : LOGIN_GUARD_ERROR_MESSAGE;
+  return rootGuardRulesForUser(
+    user.username,
+    sources,
+    fixedRoute ? null : readSplit,
+    message,
+  );
+}
+
+/** Every guard rule, in evaluation order, for the limited logins (root included) of one family. */
 function rootGuardRules(
   family: "mysql" | "pgsql",
   clusters: readonly ProxySqlClusterDesired[],
@@ -1553,24 +1575,7 @@ function rootGuardRules(
       ? cluster.readerHostgroup
       : null;
     for (const user of cluster.users.filter(isSourceLimitedUser)) {
-      const sources = mergeRootSources(
-        user.allowedSources ?? [],
-        userAllowsLocalSources(user) ? localRootSources : [],
-      );
-      const hostgroup =
-        user.connectionRole === "read-only" || user.tool === true
-          ? null
-          : readSplit;
-      rules.push(
-        ...rootGuardRulesForUser(
-          user.username,
-          sources,
-          hostgroup,
-          user.role === "root"
-            ? ROOT_GUARD_ERROR_MESSAGE
-            : LOGIN_GUARD_ERROR_MESSAGE,
-        ),
-      );
+      rules.push(...limitedUserRules(user, readSplit, localRootSources));
     }
   }
   return rules;

@@ -8791,6 +8791,15 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.tool = value.tool;
   }
+  parseProxySqlUserLimits(value, user);
+  return user;
+}
+
+/** Optional source limit and connection cap of a login (absent = no limit). */
+function parseProxySqlUserLimits(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
   if (value.allowedSources !== undefined) {
     user.allowedSources = parseProxySqlAllowedSources(value.allowedSources);
   }
@@ -8802,19 +8811,18 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.allowLocalSources = value.allowLocalSources;
   }
-  if (value.maxConnections !== undefined) {
+  const cap = value.maxConnections;
+  if (cap !== undefined) {
     if (
-      !Number.isInteger(value.maxConnections) ||
-      (value.maxConnections as number) < 1 ||
-      (value.maxConnections as number) > MAX_PROXYSQL_LOGIN_CONNECTIONS
+      typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 ||
+      cap > MAX_PROXYSQL_LOGIN_CONNECTIONS
     ) {
       throw new TypeError(
         "Invalid managed.ingress.reconcile user maxConnections",
       );
     }
-    user.maxConnections = value.maxConnections as number;
+    user.maxConnections = cap;
   }
-  return user;
 }
 
 function parseProxySqlAllowedSources(value: unknown): string[] {
