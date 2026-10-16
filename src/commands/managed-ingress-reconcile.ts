@@ -27,6 +27,7 @@ import {
 } from "../deploy/system-component.ts";
 import { ingressContainerName } from "../deploy/ingress-identity.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { forEachSequential, repeatSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   containerMissesManagedNetwork,
@@ -534,23 +535,26 @@ async function assertProxySqlIpv6Listening(
   containerName: string,
   ports: { mysql: number; pgsql: number },
 ): Promise<void> {
-  for (const port of [ports.mysql, ports.pgsql]) {
+  await forEachSequential([ports.mysql, ports.pgsql], async (port) => {
+    let attempt = 0;
     let ok = false;
-    for (let attempt = 0; attempt < IPV6_PROBE_ATTEMPTS && !ok; attempt++) {
+    await repeatSequential(async () => {
       if (attempt > 0) {
         await new Promise((resolve) =>
           setTimeout(resolve, IPV6_PROBE_DELAY_MS)
         );
       }
+      attempt += 1;
       ok = (await run(proxySqlIpv6ListenProbeArgs(containerName, port)))
         .success;
-    }
+      return !ok && attempt < IPV6_PROBE_ATTEMPTS;
+    });
     if (!ok) {
       throw new Error(
         `ProxySQL is not accepting connections on [::]:${port} inside its container`,
       );
     }
-  }
+  });
 }
 
 async function activateProxySqlListenerInterfaces(
