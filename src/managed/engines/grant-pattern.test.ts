@@ -3,7 +3,7 @@
  * MariaDB. The panel writes the name escaped and, on the next apply, removes
  * the plain grant older versions left behind (panel-owned grants only).
  */
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { escapeGrantSchemaPattern, hasGrantWildcard } from "./grant-pattern.ts";
 import {
@@ -23,6 +23,14 @@ import type {
 } from "./types.ts";
 
 const test = Deno.test.bind(Deno);
+
+test("a name that no longer fits once escaped is refused with a clear error", () => {
+  const fits = "a_".repeat(31) + "b"; // 63 characters, 31 underscores: 94 escaped
+  for (const grant of [mysqlGrant, mariadbGrant]) {
+    assertThrows(() => grant(fits, "u1", "owner"), Error, "too long");
+    assert(grant("a".repeat(64), "u1", "owner").includes("`a"));
+  }
+});
 
 test("escapeGrantSchemaPattern escapes the pattern characters only", () => {
   assertEquals(escapeGrantSchemaPattern("wp_site"), "wp\\_site");
@@ -129,3 +137,12 @@ for (
     assertEquals(sql.includes("tp_plain"), false);
   });
 }
+
+test("the Database admin login in self mode still gets its plain grant removed", async () => {
+  const sql = await applied(mysqlManagedEngineRuntime, {
+    grantMode: "self",
+    privileges: ["admin"],
+  });
+  assert(sql.includes("ON `wp\\_site`.* TO"), sql);
+  assert(sql.includes("REVOKE GRANT OPTION ON `wp_site`"), sql);
+});

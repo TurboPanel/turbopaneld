@@ -16,6 +16,9 @@ export function hasGrantWildcard(name: string): boolean {
   return /[_%]/.test(name);
 }
 
+/** Longest schema the grant tables hold. */
+const GRANT_SCHEMA_MAX_LENGTH = 64;
+
 /** The quoting helpers of one dialect file (`mysql-sql.ts` / `mariadb-sql.ts`). */
 export type GrantQuoting = {
   quoteIdentifier: (value: string) => string;
@@ -26,7 +29,14 @@ export type GrantQuoting = {
 /** The database name as a schema in a grant: exact, wildcards escaped. */
 export function quoteGrantSchema(quoting: GrantQuoting, name: string): string {
   quoting.quoteIdentifier(name); // validates the name
-  return `\`${escapeGrantSchemaPattern(name)}\``;
+  const escaped = escapeGrantSchemaPattern(name);
+  // The grant table keeps a schema in 64 characters; each escape adds one.
+  if (escaped.length > GRANT_SCHEMA_MAX_LENGTH) {
+    throw new Error(
+      `database name too long to grant on once escaped: ${name}`,
+    );
+  }
+  return `\`${escaped}\``;
 }
 
 /**
