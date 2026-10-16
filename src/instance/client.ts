@@ -29,6 +29,7 @@ import {
 } from "../deploy/release/read-remote-files.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import { probeManagedMemberHealth } from "../managed/health.ts";
+import { readManagedPermissions } from "../managed/permissions-read.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
 import {
@@ -1779,6 +1780,9 @@ export class InstanceClient {
       case "managed-health-request":
         this.#probeManagedHealth(message, ws);
         break;
+      case "managed-permissions-request":
+        void this.#readManagedPermissionsAsync(message, ws);
+        break;
       case "metrics-live-start":
         this.#applyLiveLeaseStart(message, ws);
         break;
@@ -2763,6 +2767,40 @@ export class InstanceClient {
       id: message.id,
       ok: probe.ok,
       ...(probe.ok ? { member: probe.member } : { error: probe.error }),
+      at: new Date().toISOString(),
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  async #readManagedPermissionsAsync(
+    message: Extract<DaemonMessage, { type: "managed-permissions-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    // `readManagedPermissions` never throws — a failure is `ok: false`, so
+    // the control plane is answered instead of waiting out its timeout. The
+    // fields are re-checked there: the frame is only JSON.
+    const read = await readManagedPermissions(
+      {
+        managedId: message.managedId,
+        engine: message.engine,
+        logins: message.logins,
+        databases: message.databases,
+      },
+      {},
+      message.id,
+    );
+    if (!read.ok) {
+      logWarn("instance", "managed permissions read failed:", read.error);
+    }
+
+    const result: DaemonMessage = {
+      type: "managed-permissions-result",
+      id: message.id,
+      ok: read.ok,
+      ...(read.ok ? { permissions: read.permissions } : { error: read.error }),
       at: new Date().toISOString(),
     };
 

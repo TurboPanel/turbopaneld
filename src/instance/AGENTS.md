@@ -86,6 +86,15 @@ additive and no floor moved. A replica's `member.replication` also carries
 `lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
 control plane ignores them.
 
+**Managed permissions read (`managed-permissions-read-v1`).** Same shape as
+on-demand health: a control plane that sees the feature may send
+`managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,
+`databases` up to 100, Postgres only) and gets `managed-permissions-result`
+(`ok`, `permissions` or `error`) on the same id.
+`InstanceClient.#readManagedPermissionsAsync` hands it to
+`readManagedPermissions` (`src/managed/permissions-read.ts`), which always
+answers. Read only, no command row, no outbox; the answer stays under 100 KB.
+
 **Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
 (`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
 (all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends

@@ -84,8 +84,12 @@ import type {
   ManagedEngineContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
+  ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
+import { readMysqlFamilyPermissions } from "./mysql-permissions.ts";
 import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
@@ -841,6 +845,19 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     } catch {
       return undefined;
     }
+  },
+
+  readPermissions(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
+  ): Promise<ManagedPermissionsEngineReport> {
+    return readMysqlFamilyPermissions(
+      "mysql",
+      request,
+      (sql) => runMysqlQuery(ctx, sql),
+      clock,
+    );
   },
 
   async applyCredentials(

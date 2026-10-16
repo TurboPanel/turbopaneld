@@ -81,9 +81,13 @@ import type {
   ManagedEngineProbeContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
+  ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
   ManagedSlotRetention,
 } from "./types.ts";
+import { readPostgresPermissions } from "./postgres-permissions.ts";
 import { execSqlWithStdinRetry } from "./sql-stdin.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
 
@@ -593,6 +597,28 @@ async function createOwnerRoleDatabase(
       sanitizeForLog(name)
     } already exists with another owner; keeping it as it is`,
   );
+}
+
+/** One read-only script in `database`; psql's raw stdout (`-X -q -A -t`). */
+async function queryPsqlJson(
+  ctx: ManagedEngineContext,
+  database: string,
+  sql: string,
+): Promise<string> {
+  const result = await execSqlWithStdinRetry(
+    ctx.exec,
+    [...psqlArgv(ctx, database, "tuples"), "-X", "-q"],
+    sql,
+    { idempotent: true },
+  );
+  if (!result.success) {
+    throw new Error(
+      `psql failed: ${
+        sanitizeForLog(result.stderr || result.stdout || "unknown")
+      }`,
+    );
+  }
+  return result.stdout;
 }
 
 async function parsePsqlRows(
@@ -1165,6 +1191,19 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     if (!result.success) return undefined;
     const version = result.stdout.trim();
     return version.length > 0 ? version : undefined;
+  },
+
+  readPermissions(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
+  ): Promise<ManagedPermissionsEngineReport> {
+    return readPostgresPermissions(
+      request,
+      ctx.defaultDatabase,
+      (database, sql) => queryPsqlJson(ctx, database, sql),
+      clock,
+    );
   },
 
   async applyCredentials(
