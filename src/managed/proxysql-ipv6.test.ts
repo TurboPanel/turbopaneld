@@ -21,6 +21,7 @@ import {
 import {
   PROXYSQL_IPV6_NETWORK,
   proxySqlBindsUseIpv6,
+  proxySqlIpv6NetworkSupport,
   proxySqlIpv6Subnet,
   proxySqlListenerInterfaces,
   readProxySqlIpv6SubnetFromCompose,
@@ -84,6 +85,46 @@ test("proxySqlBindsUseIpv6 is true only for an IPv6 publish", () => {
   assertEquals(proxySqlBindsUseIpv6(["0.0.0.0"]), false);
   assertEquals(proxySqlBindsUseIpv6(["0.0.0.0", "::"]), true);
   assertEquals(proxySqlBindsUseIpv6(["2001:db8::5"]), true);
+  // `::1` stays with docker-proxy either way.
+  assertEquals(proxySqlBindsUseIpv6(["127.0.0.1", "::1"]), false);
+});
+
+function versionRun(engine: string | null, compose: string | null) {
+  return (args: string[]) => {
+    const out = args[0] === "version" ? engine : compose;
+    return Promise.resolve({
+      success: out !== null,
+      stdout: out ?? "",
+      stderr: out === null ? "boom" : "",
+      code: out === null ? 1 : 0,
+    });
+  };
+}
+
+test("proxySqlIpv6NetworkSupport needs Docker 28 and Compose 2.33.1", async () => {
+  assertEquals(
+    await proxySqlIpv6NetworkSupport(versionRun("29.8.1\n", "2.40.3\n")),
+    { supported: true },
+  );
+  assertEquals(
+    await proxySqlIpv6NetworkSupport(versionRun("28.0.0", "v2.33.1")),
+    { supported: true },
+  );
+  for (
+    const [engine, compose] of [
+      ["27.5.1", "2.40.3"],
+      ["29.8.1", "2.33.0"],
+      ["29.8.1", "2.9.9"],
+      [null, "2.40.3"],
+      ["29.8.1", null],
+      ["", "2.40.3"],
+    ] as const
+  ) {
+    const support = await proxySqlIpv6NetworkSupport(
+      versionRun(engine, compose),
+    );
+    assertEquals(support.supported, false, `${engine} / ${compose}`);
+  }
 });
 
 test("proxySqlListenerInterfaces adds the IPv6 wildcard only with the IPv6 network", () => {

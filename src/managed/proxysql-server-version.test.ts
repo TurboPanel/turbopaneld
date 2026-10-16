@@ -54,42 +54,44 @@ function cluster(
 
 test("one cluster per listener reports its own version", () => {
   assertEquals(proxySqlServerVersions([pg("18"), my("mysql", "9.7")]), {
-    pgsql: "18",
-    mysql: "9.7",
+    pgsql: "18.0",
+    mysql: "9.7.0",
   });
   assertEquals(proxySqlServerVersions([my("mariadb", "11.8")]), {
-    mysql: "11.8-MariaDB",
+    mysql: "11.8.0-MariaDB",
   });
 });
 
 test("several clusters on one listener report the newest series, compared as numbers", () => {
   assertEquals(proxySqlServerVersions([pg("9.6"), pg("18"), pg("16")]), {
-    pgsql: "18",
+    pgsql: "18.0",
   });
   assertEquals(
     proxySqlServerVersions([my("mysql", "8.4"), my("mysql", "9.7")]),
     {
-      mysql: "9.7",
+      mysql: "9.7.0",
     },
   );
-  assertEquals(proxySqlServerVersions([pg("9.6"), pg("10")]), { pgsql: "10" });
+  assertEquals(proxySqlServerVersions([pg("9.6"), pg("10")]), {
+    pgsql: "10.0",
+  });
   assertEquals(
     proxySqlServerVersions([my("mariadb", "11.8"), my("mariadb", "12.3")]),
-    { mysql: "12.3-MariaDB" },
+    { mysql: "12.3.0-MariaDB" },
   );
 });
 
 test("MySQL wins the shared listener over MariaDB, whichever is newer", () => {
   assertEquals(
     proxySqlServerVersions([my("mariadb", "12.3"), my("mysql", "8.4")]),
-    { mysql: "8.4" },
+    { mysql: "8.4.0" },
   );
 });
 
 test("clusters without a version (older control plane) count for nothing", () => {
   assertEquals(proxySqlServerVersions([pg(), my("mysql")]), {});
   assertEquals(proxySqlServerVersions([my("mysql"), my("mariadb", "11.8")]), {
-    mysql: "11.8-MariaDB",
+    mysql: "11.8.0-MariaDB",
   });
   assertEquals(
     proxySqlServerVersions([{
@@ -117,8 +119,8 @@ test("admin statements set each listener's version, then reload TLS last", () =>
       }),
     ],
   });
-  const mysqlAt = statements.indexOf("SET mysql-server_version='9.7'");
-  const pgsqlAt = statements.indexOf("SET pgsql-server_version='18'");
+  const mysqlAt = statements.indexOf("SET mysql-server_version='9.7.0'");
+  const pgsqlAt = statements.indexOf("SET pgsql-server_version='18.0'");
   assert(mysqlAt >= 0 && pgsqlAt >= 0, statements.join("\n"));
   assertEquals(statements.slice(mysqlAt + 1, mysqlAt + 3), [
     "LOAD MYSQL VARIABLES TO RUNTIME",

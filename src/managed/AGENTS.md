@@ -236,16 +236,22 @@ on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
   two do not collide and IPv4 clients keep plain IPv4 addresses. Both are read
   only at start, and `proxysql.cnf` only on a first boot (an existing
   `proxysql.db` in the data volume wins, ProxySQL "ignoring configuration
-  file"), so `managed.ingress.reconcile` reads `runtime_global_variables` after
-  the admin apply and, when the running value differs, `SET`s them, `SAVE …
-  VARIABLES TO DISK` (no `LOAD … TO RUNTIME`: that puts the running value back)
-  and restarts the container once, then checks the new value took
-  (`activateProxySqlListenerInterfaces`). The same path now also applies a
+  file"), so `managed.ingress.reconcile` reads `runtime_global_variables` and,
+  when the running value differs, `SET`s them and `SAVE … VARIABLES TO DISK`
+  (no `LOAD … TO RUNTIME`: ProxySQL would put the running value back) *before*
+  compose recreates the container (`stageProxySqlListenerInterfaces`), so the
+  new container starts with them. After the admin apply it reads them again
+  and, if they still differ (no recreate happened, or staging could not reach
+  the admin port), saves them and restarts the container once, then checks
+  they took (`activateProxySqlListenerInterfaces`). With an IPv6 listener it
+  then probes `[::1]:<port>` inside the container for both families (`bash`
+  `/dev/tcp`), because the variable says nothing about whether the bind
+  worked; a failed probe fails the reconcile. The same path also applies a
   changed listener port on a host whose `proxysql.db` predates it.
 - **Upgrade path.** The next `managed.ingress.reconcile` on a server publishing
-  `::` re-renders compose (container recreated onto the new network, data
-  volume kept) and then restarts ProxySQL once for the listeners: two short
-  listener blips, no engine container and no database data touched. The
+  `::` re-renders compose and recreates the container onto the new network
+  (data volume kept) with the IPv6 listeners already saved: one short listener
+  blip, no engine container and no database data touched. The
   `system.reconcile` self-heal keeps exactly the IPv6 network on disk
   (`readCurrentProxySqlIpv6Subnet`) and never adds it, because it does not
   switch the listeners: a network without the IPv6 listener would send IPv6
@@ -267,9 +273,18 @@ on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
   firewall's `published` rules apply to it (`src/firewall/render.ts` renders
   both families). `firewall.ts` `TP-MGD-<id>` is engine private-listener
   scoping and stays IPv4 only.
-- **Host requirements.** dockerd with `ip6tables` on (the default since
-  Docker 27); without it the publish falls back to `docker-proxy` and nothing
-  changes. The network needs Docker 28+ / Compose 2.33.1+ for `enable_ipv4`.
+- **Host requirements.** Docker Engine 28+ (separate IPv4/IPv6 gateway
+  choice and IPv6-only networks: on Engine 27 one network is the gateway for
+  both families, so the IPv4 path could move) and Compose 2.33.1+
+  (`enable_ipv4`). The reconcile checks both (`proxySqlIpv6NetworkSupport`);
+  on an older or unreadable version it renders no IPv6 network and no IPv6
+  listener and logs a warning, so IPv6 keeps the old `docker-proxy` path
+  (connected, gateway address). dockerd also needs `ip6tables` on (the default
+  since Docker 27); without it the publish falls back to `docker-proxy`.
+- **Turning IPv6 off** drops the network from compose and `[::]` from the
+  listeners (same staging). Compose leaves the now-unused
+  `<project>_proxysql-ipv6` network behind; it is empty, harmless, and reused
+  (same subnet) if IPv6 comes back.
 
 ### Server version reported to clients
 
@@ -284,7 +299,10 @@ each cluster's `engineVersion` (the release series from its image: `18`,
 `15432`; on the shared MySQL-family listener the newest MySQL series when any
 MySQL cluster is on it, else the newest MariaDB series as `<series>-MariaDB`
 (MariaDB 11+ format, no `5.5.5-` prefix). Clusters without a version count for
-nothing; a family with none keeps its value. The series has no patch level.
+nothing; a family with none keeps its value. The series has no patch level, so
+it is padded with zeros because clients parse the string (MySQL-family drivers
+such as Connector/Python, Rails, libmysqlclient and mysqlnd want three parts;
+PostgreSQL servers always say two): `9.7.0`, `11.8.0-MariaDB`, `18.0`.
 Never written into `proxysql.cnf`: that file is read on a first boot only, and
 a static-section change restarts ProxySQL for every client.
 

@@ -8,7 +8,8 @@
  * runtime back sees what its own apply wrote (or a frozen stale table).
  * With `interfaces` set it also keeps `mysql-interfaces` / `pgsql-interfaces`
  * the way ProxySQL does: `SET` + `SAVE … TO DISK` change only the saved
- * value, and the running one follows at {@link FakeProxySqlAdmin.restart}.
+ * value, a `LOAD … TO RUNTIME` in between drops the `SET`, and the running
+ * value follows at {@link FakeProxySqlAdmin.restart}.
  */
 
 import type {
@@ -54,6 +55,7 @@ const SELECT_RE = /FROM runtime_(mysql|pgsql)_servers/;
 const INTERFACES_SELECT_RE = /FROM runtime_global_variables/;
 const SET_INTERFACES_RE = /^SET (mysql|pgsql)-interfaces='([^']*)'$/;
 const SAVE_VARIABLES_RE = /^SAVE (MYSQL|PGSQL) VARIABLES TO DISK$/;
+const LOAD_VARIABLES_RE = /^LOAD (MYSQL|PGSQL) VARIABLES TO RUNTIME$/;
 
 function ok(stdout: string): DockerCliResult {
   return { success: true, stdout, stderr: "", code: 0 };
@@ -68,6 +70,15 @@ export function createFakeProxySqlAdmin(): FakeProxySqlAdmin {
     const set = SET_INTERFACES_RE.exec(line);
     if (set) {
       pendingInterfaces[set[1] as ProxySqlProtocolFamily] = set[2]!;
+      return;
+    }
+    // ProxySQL cannot change a listener while it runs, so a load puts the
+    // running value back over one that was only SET.
+    const load = LOAD_VARIABLES_RE.exec(line);
+    if (load) {
+      delete pendingInterfaces[
+        load[1]!.toLowerCase() as ProxySqlProtocolFamily
+      ];
       return;
     }
     const save = SAVE_VARIABLES_RE.exec(line);

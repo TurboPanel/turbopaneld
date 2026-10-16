@@ -27,8 +27,13 @@
  * With one cluster per family, the usual case, that is simply its version.
  * Several clusters of different versions behind one listener cannot all be
  * reported truthfully; the newest is reported because new clusters default to
- * the newest release. The series carries no patch level (`9.7`, not `9.7.2`):
- * the image tag pins only the series, so that is all anyone knows for sure.
+ * the newest release.
+ *
+ * The series carries no patch level (the image tag pins only the series), but
+ * clients parse the string: MySQL-family drivers (Connector/Python, Rails,
+ * libmysqlclient, mysqlnd) want `major.minor.patch` and some fail or misread
+ * anything shorter, and PostgreSQL servers always say `major.minor`. So the
+ * series is padded with zeros: `9.7.0`, `11.8.0-MariaDB`, `18.0`.
  */
 
 import { isProxySqlEngineVersion } from "../contracts/commands-contracts.ts";
@@ -55,6 +60,13 @@ function newest(series: readonly string[]): string | undefined {
   return [...series].sort(compareSeries).at(-1);
 }
 
+/** `9.7` → `9.7.0` (parts = 3); `18` → `18.0` (parts = 2). */
+function padSeries(series: string, parts: number): string {
+  const groups = series.split(".");
+  while (groups.length < parts) groups.push("0");
+  return groups.join(".");
+}
+
 function seriesOf(
   sources: readonly ProxySqlVersionSource[],
   matches: (source: ProxySqlVersionSource) => boolean,
@@ -72,14 +84,16 @@ export function proxySqlServerVersions(
 ): Partial<Record<ProxySqlProtocolFamily, string>> {
   const versions: Partial<Record<ProxySqlProtocolFamily, string>> = {};
   const pgsql = newest(seriesOf(sources, (s) => s.family === "pgsql"));
-  if (pgsql !== undefined) versions.pgsql = pgsql;
+  if (pgsql !== undefined) versions.pgsql = padSeries(pgsql, 2);
   const mysql = newest(
     seriesOf(sources, (s) => s.family === "mysql" && s.engine !== "mariadb"),
   );
   const mariadb = newest(
     seriesOf(sources, (s) => s.family === "mysql" && s.engine === "mariadb"),
   );
-  if (mysql !== undefined) versions.mysql = mysql;
-  else if (mariadb !== undefined) versions.mysql = `${mariadb}-MariaDB`;
+  if (mysql !== undefined) versions.mysql = padSeries(mysql, 3);
+  else if (mariadb !== undefined) {
+    versions.mysql = `${padSeries(mariadb, 3)}-MariaDB`;
+  }
   return versions;
 }

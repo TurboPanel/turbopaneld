@@ -37,15 +37,101 @@
  */
 
 import { crypto } from "@std/crypto";
+import type {
+  DockerCliResult,
+  RunDockerOptions,
+} from "../deploy/docker-cli.ts";
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
 
 /** Compose key (and, prefixed by the project, Docker name) of the network. */
 export const PROXYSQL_IPV6_NETWORK = "proxysql-ipv6";
 
 const ULA_SEED_PREFIX = "turbopanel-proxysql-ipv6:";
 
-/** True when any client listener is published on an IPv6 address. */
+/**
+ * True when a client listener is published on a non-loopback IPv6 address
+ * (`::`, or a literal). `::1` is served by `docker-proxy` either way, so it
+ * needs no network.
+ */
 export function proxySqlBindsUseIpv6(binds: readonly string[]): boolean {
-  return binds.some((bind) => bind.includes(":"));
+  return binds.some((bind) => bind.includes(":") && bind !== "::1");
+}
+
+/**
+ * Oldest Docker Engine / Compose the network relies on: Engine 28 picks the
+ * IPv4 and IPv6 gateways separately (before that one network was the gateway
+ * for both, so the IPv4 path could move) and has IPv6-only networks; Compose
+ * 2.33.1 knows `enable_ipv4`.
+ */
+const MIN_ENGINE: readonly number[] = [28, 0, 0];
+const MIN_COMPOSE: readonly number[] = [2, 33, 1];
+
+function parseVersion(text: string): number[] | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(text.trim());
+  return match ? match.slice(1, 4).map(Number) : null;
+}
+
+function atLeast(version: readonly number[], min: readonly number[]): boolean {
+  for (let i = 0; i < min.length; i++) {
+    if (version[i]! !== min[i]!) return version[i]! > min[i]!;
+  }
+  return true;
+}
+
+/**
+ * Whether this host's Docker can carry the IPv6 network as designed, with a
+ * plain-words reason when not. Anything unreadable counts as "no": the
+ * listener then keeps the old behaviour (IPv6 through `docker-proxy`, wrong
+ * client address, but connected) instead of risking a compose file the host
+ * rejects or a moved IPv4 gateway.
+ */
+export async function proxySqlIpv6NetworkSupport(
+  run: RunDockerFn,
+): Promise<{ supported: true } | { supported: false; reason: string }> {
+  const engine = await run(["version", "--format", "{{.Server.Version}}"]);
+  const engineVersion = engine.success ? parseVersion(engine.stdout) : null;
+  if (engineVersion === null || !atLeast(engineVersion, MIN_ENGINE)) {
+    return {
+      supported: false,
+      reason: `Docker Engine ${
+        engine.stdout.trim() || "unknown"
+      } is older than 28.0`,
+    };
+  }
+  const compose = await run(["compose", "version", "--short"]);
+  const composeVersion = compose.success ? parseVersion(compose.stdout) : null;
+  if (composeVersion === null || !atLeast(composeVersion, MIN_COMPOSE)) {
+    return {
+      supported: false,
+      reason: `Docker Compose ${
+        compose.stdout.trim() || "unknown"
+      } is older than 2.33.1`,
+    };
+  }
+  return { supported: true };
+}
+
+/**
+ * `docker exec` argv that succeeds only when something accepts a TCP
+ * connection on `[::1]:<port>` inside the ProxySQL container — the proof
+ * that the IPv6 listener really bound, not just that the variable says so.
+ * The image ships bash (`/dev/tcp`), as `wait-ready.sh` already relies on.
+ */
+export function proxySqlIpv6ListenProbeArgs(
+  containerName: string,
+  port: number,
+): string[] {
+  return [
+    "exec",
+    containerName,
+    "bash",
+    "-c",
+    `true </dev/tcp/::1/${port}`,
+  ];
 }
 
 function hexGroup(high: number, low: number): string {

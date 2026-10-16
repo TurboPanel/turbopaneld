@@ -774,6 +774,7 @@ export function proxysqlCompose(
   segments: ReadonlyArray<{ name: string; subnet: string }>,
   listenerPorts: ProxySqlListenerPorts | null | undefined,
   managedNetwork: string,
+  ipv6Supported = true,
 ): string {
   return proxysqlComposeWithAttachments(
     identity,
@@ -781,7 +782,9 @@ export function proxysqlCompose(
     segmentAttachmentsFromDesired(segments),
     listenerPorts,
     managedNetwork,
-    desiredProxySqlIpv6Subnet(identity, bindAddresses, managedNetwork),
+    ipv6Supported
+      ? desiredProxySqlIpv6Subnet(identity, bindAddresses, managedNetwork)
+      : null,
   );
 }
 
@@ -1349,18 +1352,23 @@ export function staticConfigSectionChanged(
   return prevStatic !== nextStatic;
 }
 
-/** Full durable proxysql.cnf including users/servers/rules for cold start. */
+/**
+ * Full durable proxysql.cnf including users/servers/rules for cold start.
+ * `ipv6Supported: false` (a Docker too old for the IPv6 network) keeps the
+ * listeners IPv4 only whatever the binds.
+ */
 export function renderProxySqlConfig(
   desired: ProxySqlDesiredState,
   adminCredentials?: { user: string; password: string } | null,
   monitorCredentials?: { user: string; password: string } | null,
+  ipv6Supported = true,
 ): string {
   const lines = [
     renderProxySqlStaticConfig(
       adminCredentials,
       monitorCredentials,
       desired.listenerPorts,
-      proxySqlBindsUseIpv6(desired.bindAddresses),
+      ipv6Supported && proxySqlBindsUseIpv6(desired.bindAddresses),
     ),
   ];
   if (clusterUsesMysql(desired.clusters)) {
