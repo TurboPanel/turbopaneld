@@ -173,7 +173,7 @@ function revokeExcessSql(
       quoteLiteral(database)
     } AND DEFINER = ${quoteLiteral(`${username}@${host}`)}`;
   const statements: string[] = [];
-  const run = (variable: string, list: string, prefix: string) => {
+  const addRevokeStep = (variable: string, list: string, prefix: string) => {
     statements.push(
       `SET @${variable} = (SELECT ${list} ${row});`,
       `SET @${variable}_sql = IF(@${variable} IS NULL OR @${variable} = '', 'DO 0', CONCAT(${
@@ -185,7 +185,7 @@ function revokeExcessSql(
     );
   };
   if (revoked.length > 0) {
-    run(
+    addRevokeStep(
       "tp_excess",
       `CONCAT_WS(', ', ${
         revoked.map(([name, column]) =>
@@ -200,7 +200,7 @@ function revokeExcessSql(
     );
   }
   if (withGrantOption) {
-    run(
+    addRevokeStep(
       "tp_excess_option",
       "IF(Grant_priv = 'Y', 'GRANT OPTION', NULL)",
       "REVOKE ",
