@@ -16,6 +16,8 @@ export function hasGrantWildcard(name: string): boolean {
   return /[_%]/.test(name);
 }
 
+import type { ManagedDatabasePrivilege } from "./mysql-sql.ts";
+
 /** Longest schema the grant tables hold. */
 const GRANT_SCHEMA_MAX_LENGTH = 64;
 
@@ -86,4 +88,32 @@ export function plainGrantRevoker(
 ): (database: string, username: string, host?: string) => string {
   return (database, username, host = defaultHost) =>
     revokePlainPatternGrantSql(quoting, database, username, host);
+}
+
+/** The `GRANT` for one privilege level on one database, for one account. */
+export function grantOnDatabaseSql(
+  quoting: GrantQuoting,
+  database: string,
+  username: string,
+  privilege: ManagedDatabasePrivilege,
+  host: string,
+): string {
+  const db = quoteGrantSchema(quoting, database);
+  const account = quoting.accountAt(username, host);
+  switch (privilege) {
+    case "owner":
+      return `GRANT ALL PRIVILEGES ON ${db}.* TO ${account} WITH GRANT OPTION;`;
+    case "read-write":
+      return (
+        `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, ` +
+        `CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, ` +
+        `CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON ${db}.* TO ${account};`
+      );
+    case "read-only":
+      return `GRANT SELECT, SHOW VIEW ON ${db}.* TO ${account};`;
+    default: {
+      const _exhaustive: never = privilege;
+      throw new Error(`unsupported privilege: ${_exhaustive}`);
+    }
+  }
 }
