@@ -41,6 +41,11 @@ import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import { frontendBindingsHealth, wantedMappings } from "./proxysql-bindings.ts";
+import {
+  mergeRootSources,
+  type RootGuardRule,
+  rootGuardRulesForUser,
+} from "./proxysql-root-guard.ts";
 import { proxySqlServerVersions } from "./proxysql-server-version.ts";
 import {
   proxySqlBindsUseIpv6,
@@ -197,6 +202,13 @@ export type ProxySqlUserDesired = {
   connectionRole?: ProxySqlConnectionRole;
   /** Database-tool login: primary only, no read/write split rules. */
   tool?: boolean;
+  /**
+   * Root logins only. Present (even empty) turns the source-address guard on:
+   * queries from anywhere but these addresses plus this host's own sources are
+   * refused. Absent means no guard, which is what an older control plane
+   * implies.
+   */
+  allowedSources?: string[];
 };
 
 export type ProxySqlClusterDesired = {
@@ -557,24 +569,33 @@ function formatRestApiPublishedPort(): string {
   return quoteYamlScalar(restApiAddress);
 }
 
+/**
+ * Frontend usernames must be unique within one ProxySQL protocol family:
+ * `mysql_users` and `pgsql_users` are separate tables (see
+ * {@link renderUserRows}), so the same name on a Postgres and a MySQL cluster
+ * is fine. MySQL and MariaDB share one family and one listener, so the same
+ * name across those two is still a clash.
+ */
 export function assertNoFrontendUserConflict(
   desired: ProxySqlDesiredState,
 ): void {
   const owners = new Map<string, Set<string>>();
   for (const cluster of desired.clusters) {
+    const family = protocolFamilyForCluster(cluster) ?? "unknown";
     for (const user of cluster.users) {
-      let managedIds = owners.get(user.username);
+      const key = `${family}\0${user.username}`;
+      let managedIds = owners.get(key);
       if (!managedIds) {
         managedIds = new Set<string>();
-        owners.set(user.username, managedIds);
+        owners.set(key, managedIds);
       }
       managedIds.add(cluster.managedId);
     }
   }
-  for (const [username, managedIds] of owners) {
+  for (const [key, managedIds] of owners) {
     if (managedIds.size > 1) {
       throw new ManagedFrontendUserConflictError(
-        username,
+        key.slice(key.indexOf("\0") + 1),
         [...managedIds].sort((a, b) => a.localeCompare(b)),
       );
     }
@@ -1123,9 +1144,17 @@ function sortedReadSplitUsernames(
   cluster: ProxySqlClusterDesired,
 ): string[] {
   return cluster.users
-    .filter((user) => user.connectionRole !== "read-only" && user.tool !== true)
+    .filter((user) =>
+      user.connectionRole !== "read-only" && user.tool !== true &&
+      !isGuardedRootUser(user)
+    )
     .map((user) => user.username)
     .sort((a, b) => a.localeCompare(b));
+}
+
+/** A root login whose queries are limited to allowed source addresses. */
+function isGuardedRootUser(user: ProxySqlUserDesired): boolean {
+  return user.role === "root" && user.allowedSources !== undefined;
 }
 
 /**
@@ -1464,10 +1493,18 @@ function renderAdminUserStatements(
 function renderAdminQueryRuleStatements(
   family: "mysql" | "pgsql",
   clusters: readonly ProxySqlClusterDesired[],
+  localRootSources: readonly string[],
 ): string[] {
   const table = `${family}_query_rules`;
   const statements = [`DELETE FROM ${table}`];
   let ruleId = 1;
+  // Root source guards first: ProxySQL runs the lowest rule id first and a
+  // guarded root login's pass rules end evaluation (`apply=1`), so its
+  // read-split rules below are never shadowed by a later id.
+  for (const rule of rootGuardRules(family, clusters, localRootSources)) {
+    statements.push(renderAdminGuardRule(table, ruleId, rule));
+    ruleId += 1;
+  }
   for (const cluster of clusters) {
     if (!clusterMatchesFamily(cluster, family)) continue;
     if (!clusterEmitsReadSplitRules(cluster)) continue;
@@ -1488,6 +1525,64 @@ function renderAdminQueryRuleStatements(
   return statements;
 }
 
+/** Every guard rule, in evaluation order, for the guarded root logins of one family. */
+function rootGuardRules(
+  family: "mysql" | "pgsql",
+  clusters: readonly ProxySqlClusterDesired[],
+  localRootSources: readonly string[],
+): RootGuardRule[] {
+  const rules: RootGuardRule[] = [];
+  for (const cluster of clusters) {
+    if (!clusterMatchesFamily(cluster, family)) continue;
+    const readSplit = clusterEmitsReadSplitRules(cluster)
+      ? cluster.readerHostgroup
+      : null;
+    for (const user of cluster.users.filter(isGuardedRootUser)) {
+      const sources = mergeRootSources(
+        user.allowedSources ?? [],
+        localRootSources,
+      );
+      const hostgroup = user.connectionRole === "read-only" ? null : readSplit;
+      rules.push(...rootGuardRulesForUser(user.username, sources, hostgroup));
+    }
+  }
+  return rules;
+}
+
+function renderAdminGuardRule(
+  table: string,
+  ruleId: number,
+  rule: RootGuardRule,
+): string {
+  const columns = ["rule_id", "active", "username"];
+  const values = [`${ruleId}`, "1", `'${escapeSqlString(rule.username)}'`];
+  const optional: Array<[string, string | undefined]> = [
+    ["client_addr", rule.clientAddr],
+    ["match_pattern", rule.matchPattern],
+    [
+      "destination_hostgroup",
+      rule.destinationHostgroup === undefined
+        ? undefined
+        : String(rule.destinationHostgroup),
+    ],
+    ["error_msg", rule.errorMsg],
+  ];
+  for (const [column, value] of optional) {
+    if (value === undefined) continue;
+    columns.push(column);
+    values.push(
+      column === "destination_hostgroup"
+        ? value
+        : `'${escapeSqlString(value)}'`,
+    );
+  }
+  columns.push("apply");
+  values.push("1");
+  return `INSERT INTO ${table} (${columns.join(",")}) VALUES (${
+    values.join(",")
+  })`;
+}
+
 /**
  * Ordered admin SQL for **both** protocol families on every reconcile.
  *
@@ -1502,6 +1597,11 @@ export function buildProxySqlAdminStatements(
   desired: ProxySqlDesiredState,
   options?: {
     monitor?: { user: string; password: string } | null;
+    /**
+     * Source addresses (`client_addr` values) local to this host, allowed for
+     * every guarded root login on top of the control plane's list.
+     */
+    localRootSources?: readonly string[];
   },
 ): string[] {
   const statements: string[] = [];
@@ -1509,7 +1609,11 @@ export function buildProxySqlAdminStatements(
     statements.push(
       ...renderAdminServerStatements(family, desired.clusters),
       ...renderAdminUserStatements(family, desired.clusters),
-      ...renderAdminQueryRuleStatements(family, desired.clusters),
+      ...renderAdminQueryRuleStatements(
+        family,
+        desired.clusters,
+        options?.localRootSources ?? [],
+      ),
     );
   }
   const versions = serverVersionsFor(desired.clusters);
