@@ -28,6 +28,8 @@ import type {
   ObservedLogin,
   ObservedMembership,
 } from "../../contracts/cell-messages.ts";
+import { errorText } from "../../util/logger.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 import { quoteIdentifier, quoteLiteral } from "./postgres-sql.ts";
 import {
   type ManagedPermissionsEngineReport,
@@ -172,7 +174,7 @@ function category(
 function granteeFilter(grantees: readonly number[]): string {
   const oids = grantees.map((oid) => {
     if (!Number.isSafeInteger(oid) || oid < 0) {
-      throw new Error("postgres role oid is not a number");
+      throw new TypeError("postgres role oid is not a number");
     }
     return String(oid);
   });
@@ -409,7 +411,7 @@ export function parsePostgresVersion(
   const value = parseJson(stdout, "version") as Record<string, unknown>;
   const num = value?.num;
   if (typeof num !== "number" || !Number.isInteger(num) || num <= 0) {
-    throw new Error("postgres returned an unreadable version");
+    throw new TypeError("postgres returned an unreadable version");
   }
   return { num, text: str(value.text) };
 }
@@ -470,7 +472,7 @@ export function parsePostgresLogins(
 ): PgLoginState[] {
   const rows = parseJson(stdout, "login list");
   if (!Array.isArray(rows)) {
-    throw new Error("postgres returned an unreadable login list");
+    throw new TypeError("postgres returned an unreadable login list");
   }
   const byName = new Map<string, PgLoginRow>();
   for (const row of rows as PgLoginRow[]) {
@@ -578,61 +580,110 @@ function groupColumns(rows: PgAclRow[]): (PgAclRow & { cols: string[] })[] {
   return [...groups.values()];
 }
 
+/** One ACL row placed at its level, ready to attribute. */
+type AclItem = {
+  level: ObservedLevel;
+  row: PgAclRow;
+  schema?: string | null;
+  object?: string | null;
+  columns?: string[];
+};
+
+function itemsAt(
+  level: ObservedLevel,
+  rows: PgAclRow[],
+  withSchema: boolean,
+): AclItem[] {
+  return rows.map((row) => ({
+    level,
+    row,
+    object: row.o,
+    ...(withSchema ? { schema: row.s } : {}),
+  }));
+}
+
+/** Every grant row of one database, in report order. */
+function databaseAclItems(acl: PgDatabaseAcl): AclItem[] {
+  return [
+    ...acl.database.map((row): AclItem => ({ level: "database", row })),
+    ...acl.schemas.map((row): AclItem => ({
+      level: "schema",
+      row,
+      schema: row.s,
+    })),
+    ...acl.relations.map((row): AclItem => ({
+      level: row.k === "S" ? "sequence" : "table",
+      row,
+      schema: row.s,
+      object: row.o,
+    })),
+    ...groupColumns(acl.columns).map((row): AclItem => ({
+      level: "column",
+      row,
+      schema: row.s,
+      object: row.o,
+      columns: row.cols,
+    })),
+    ...itemsAt("routine", acl.routines, true),
+    ...itemsAt("type", acl.types, true),
+    ...itemsAt("language", acl.languages, false),
+    ...itemsAt("foreign", acl.foreign, false),
+    ...itemsAt("largeobject", acl.largeobjects, false),
+  ];
+}
+
+/** Add `item` to the login when its grantee is one of the login's sources. */
+function attributeItem(
+  state: PgLoginState,
+  database: string | undefined,
+  item: AclItem,
+): void {
+  const { row } = item;
+  if (!state.sources.has(row.g)) return;
+  const grant = grantFrom(
+    item.level,
+    database,
+    row,
+    state.sources.get(row.g),
+    { schema: item.schema, object: item.object },
+  );
+  if (item.columns) grant.columns = [...item.columns];
+  state.login.grants.push(grant);
+}
+
+function defaultGrantFrom(
+  database: string,
+  row: PgAclRow & { cr: string; k: string },
+  via: string | undefined,
+): ObservedDefaultGrant {
+  const out: ObservedDefaultGrant = {
+    database,
+    creator: row.cr,
+    objectType: row.k,
+    privileges: [...row.p],
+  };
+  if (row.s) out.schema = row.s;
+  if (row.gp.length > 0) out.grantable = [...row.gp];
+  if (via) out.via = via;
+  return out;
+}
+
 /** Attribute one database's ACL rows to every login whose sources hold the grantee. */
 export function attributeDatabaseAcl(
   acl: PgDatabaseAcl,
   states: PgLoginState[],
 ): void {
-  const db = acl.db;
-  const columns = groupColumns(acl.columns);
-  for (const state of states) {
-    if (!state.login.exists) continue;
-    const add = (
-      level: ObservedLevel,
-      row: PgAclRow,
-      fields: { schema?: string | null; object?: string | null },
-    ): ObservedGrant | undefined => {
-      if (!state.sources.has(row.g)) return undefined;
-      const grant = grantFrom(level, db, row, state.sources.get(row.g), fields);
-      state.login.grants.push(grant);
-      return grant;
-    };
-    for (const row of acl.database) add("database", row, {});
-    for (const row of acl.schemas) add("schema", row, { schema: row.s });
-    for (const row of acl.relations) {
-      add(row.k === "S" ? "sequence" : "table", row, {
-        schema: row.s,
-        object: row.o,
-      });
-    }
-    for (const row of columns) {
-      const grant = add("column", row, { schema: row.s, object: row.o });
-      if (grant) grant.columns = [...row.cols];
-    }
-    for (const row of acl.routines) {
-      add("routine", row, { schema: row.s, object: row.o });
-    }
-    for (const row of acl.types) {
-      add("type", row, { schema: row.s, object: row.o });
-    }
-    for (const row of acl.languages) add("language", row, { object: row.o });
-    for (const row of acl.foreign) add("foreign", row, { object: row.o });
-    for (const row of acl.largeobjects) {
-      add("largeobject", row, { object: row.o });
-    }
-    for (const row of acl.defaults) {
-      if (!state.sources.has(row.g) || !row.cr || !row.k) continue;
-      const out: ObservedDefaultGrant = {
-        database: db,
-        creator: row.cr,
-        objectType: row.k,
-        privileges: [...row.p],
-      };
-      if (row.s) out.schema = row.s;
-      if (row.gp.length > 0) out.grantable = [...row.gp];
-      const via = state.sources.get(row.g);
-      if (via) out.via = via;
-      state.login.defaults.push(out);
+  const items = databaseAclItems(acl);
+  const defaults = acl.defaults.filter((
+    row,
+  ): row is PgAclRow & { cr: string; k: string } => !!row.cr && !!row.k);
+  for (const state of states.filter((entry) => entry.login.exists)) {
+    for (const item of items) attributeItem(state, acl.db, item);
+    for (const row of defaults) {
+      if (!state.sources.has(row.g)) continue;
+      state.login.defaults.push(
+        defaultGrantFrom(acl.db, row, state.sources.get(row.g)),
+      );
     }
   }
 }
@@ -642,26 +693,12 @@ export function attributeSharedAcl(
   acl: PgSharedAcl,
   states: PgLoginState[],
 ): void {
-  for (const state of states) {
-    if (!state.login.exists) continue;
-    const rows: [ObservedLevel, PgAclRow][] = [
-      ...acl.tablespaces.map((row): [ObservedLevel, PgAclRow] => [
-        "tablespace",
-        row,
-      ]),
-      ...acl.parameters.map((row): [ObservedLevel, PgAclRow] => [
-        "parameter",
-        row,
-      ]),
-    ];
-    for (const [level, row] of rows) {
-      if (!state.sources.has(row.g)) continue;
-      state.login.grants.push(
-        grantFrom(level, undefined, row, state.sources.get(row.g), {
-          object: row.o,
-        }),
-      );
-    }
+  const items = [
+    ...itemsAt("tablespace", acl.tablespaces, false),
+    ...itemsAt("parameter", acl.parameters, false),
+  ];
+  for (const state of states.filter((entry) => entry.login.exists)) {
+    for (const item of items) attributeItem(state, undefined, item);
   }
 }
 
@@ -707,7 +744,7 @@ function validateNames(request: ManagedPermissionsReadRequest): void {
  */
 function isDatabaseGone(err: unknown, database: string): boolean {
   if (err instanceof PermissionsBudgetError) return false;
-  const text = err instanceof Error ? err.message : String(err);
+  const text = errorText(err);
   // The exact name being read, so another database's words never match.
   return text.includes(`database "${database}" does not exist`) ||
     text.includes(
@@ -743,81 +780,131 @@ export async function readPostgresPermissions(
   clock: ManagedPermissionsReadClock = {},
 ): Promise<ManagedPermissionsEngineReport> {
   validateNames(request);
-  const deadline = permissionsReadDeadline(clock);
+  const read: PgRead = {
+    query,
+    adminDatabase,
+    deadline: permissionsReadDeadline(clock),
+    states: [],
+    grantees: [],
+    databasesRead: [],
+    databasesFailed: [],
+    truncated: false,
+  };
   const version = parsePostgresVersion(
     await query(adminDatabase, postgresVersionSql()),
   );
-  const states = request.logins.length === 0 ? [] : parsePostgresLogins(
-    await query(adminDatabase, postgresLoginsSql(request.logins, version.num)),
-    request.logins,
-  );
-  const grantees = new Set<number>();
-  for (const state of states) {
-    for (const oid of state.sources.keys()) grantees.add(oid);
-  }
-  const databasesRead: string[] = [];
-  const databasesFailed: string[] = [];
-  let truncated = false;
-  if (grantees.size > 0) {
-    const shared = await withinBudget(
-      deadline,
-      async () =>
-        parsePostgresSharedAcl(
-          await query(
-            adminDatabase,
-            postgresSharedAclSql([...grantees], version.num),
-          ),
-        ),
+  if (request.logins.length > 0) {
+    read.states = parsePostgresLogins(
+      await query(
+        adminDatabase,
+        postgresLoginsSql(request.logins, version.num),
+      ),
+      request.logins,
     );
-    if (shared) {
-      attributeSharedAcl(shared, states);
-      truncated = hitRowLimit([shared.tablespaces, shared.parameters]);
-    } else {
-      truncated = true; // out of time: cluster-wide grants not read
-    }
   }
-  if (grantees.size > 0 && request.databases.length > 0) {
-    const listed = await withinBudget(deadline, async () =>
-      parseJson(
-        await query(adminDatabase, postgresDatabasesSql(request.databases)),
-        "database list",
-      ));
-    if (listed === undefined) databasesFailed.push(...request.databases);
-    const connectable = Array.isArray(listed)
-      ? listed.filter((name): name is string => typeof name === "string")
-      : [];
-    const sql = postgresDatabaseAclSql([...grantees]);
-    for (const database of connectable) {
-      if (!deadline.roomForQuery()) {
-        databasesFailed.push(database); // out of time: not read
-        continue;
-      }
-      let acl: PgDatabaseAcl;
-      try {
-        // Sequential on purpose: one connection at a time per request.
-        acl = parsePostgresDatabaseAcl(await query(database, sql));
-      } catch (err) {
-        // Dropped, or closed to connections, since it was listed: nothing
-        // to read. Any other failure is reported, never shown as "no grants".
-        if (!isDatabaseGone(err, database)) databasesFailed.push(database);
-        continue;
-      }
-      attributeDatabaseAcl(acl, states);
-      truncated ||= hitRowLimit(databaseLists(acl));
-      databasesRead.push(acl.db);
-    }
-    truncated ||= databasesFailed.length > 0;
+  read.grantees = [
+    ...new Set(read.states.flatMap((state) => [...state.sources.keys()])),
+  ];
+  if (read.grantees.length > 0) {
+    await readSharedAcl(read, version.num);
+    await readDatabases(read, request.databases);
   }
-  if (truncated) {
-    for (const state of states) {
+  if (read.truncated || read.databasesFailed.length > 0) {
+    for (const state of read.states) {
       if (state.login.exists) state.login.truncated = true;
     }
   }
   const report: ManagedPermissionsEngineReport = {
-    logins: states.map((state) => state.login),
-    databasesRead,
+    logins: read.states.map((state) => state.login),
+    databasesRead: read.databasesRead,
   };
-  if (databasesFailed.length > 0) report.databasesFailed = databasesFailed;
+  if (read.databasesFailed.length > 0) {
+    report.databasesFailed = read.databasesFailed;
+  }
   if (version.text) report.serverVersion = version.text;
   return report;
+}
+
+/** One read in progress: what is known so far and what was cut. */
+type PgRead = {
+  query: PostgresJsonQuery;
+  adminDatabase: string;
+  deadline: PermissionsReadDeadline;
+  states: PgLoginState[];
+  grantees: number[];
+  databasesRead: string[];
+  databasesFailed: string[];
+  truncated: boolean;
+};
+
+/** Tablespace and parameter ACLs; out of time leaves them unread (truncated). */
+async function readSharedAcl(read: PgRead, versionNum: number): Promise<void> {
+  const shared = await withinBudget(
+    read.deadline,
+    async () =>
+      parsePostgresSharedAcl(
+        await read.query(
+          read.adminDatabase,
+          postgresSharedAclSql(read.grantees, versionNum),
+        ),
+      ),
+  );
+  if (!shared) {
+    read.truncated = true; // out of time: cluster-wide grants not read
+    return;
+  }
+  attributeSharedAcl(shared, read.states);
+  read.truncated ||= hitRowLimit([shared.tablespaces, shared.parameters]);
+}
+
+/** Every connectable database among `databases`, one at a time. */
+async function readDatabases(
+  read: PgRead,
+  databases: readonly string[],
+): Promise<void> {
+  if (databases.length === 0) return;
+  const listed = await withinBudget(read.deadline, async () =>
+    parseJson(
+      await read.query(read.adminDatabase, postgresDatabasesSql(databases)),
+      "database list",
+    ));
+  if (listed === undefined) {
+    read.databasesFailed.push(...databases);
+    return;
+  }
+  const connectable = Array.isArray(listed)
+    ? listed.filter((name): name is string => typeof name === "string")
+    : [];
+  const sql = postgresDatabaseAclSql(read.grantees);
+  // Sequential on purpose: one connection at a time, budget checked before each.
+  await forEachSequential(
+    connectable,
+    (database) => readOneDatabase(read, database, sql),
+  );
+}
+
+/**
+ * Read and attribute one database. Out of time, or failing for any reason
+ * but being gone, lands it in `databasesFailed`, never as "no grants".
+ */
+async function readOneDatabase(
+  read: PgRead,
+  database: string,
+  sql: string,
+): Promise<void> {
+  if (!read.deadline.roomForQuery()) {
+    read.databasesFailed.push(database); // out of time: not read
+    return;
+  }
+  let acl: PgDatabaseAcl;
+  try {
+    acl = parsePostgresDatabaseAcl(await read.query(database, sql));
+  } catch (err) {
+    // Dropped, or closed to connections, since it was listed: nothing to read.
+    if (!isDatabaseGone(err, database)) read.databasesFailed.push(database);
+    return;
+  }
+  attributeDatabaseAcl(acl, read.states);
+  read.truncated ||= hitRowLimit(databaseLists(acl));
+  read.databasesRead.push(acl.db);
 }

@@ -40,6 +40,7 @@ import {
   type ManagedEngineContext,
   type ManagedEngineExec,
   type ManagedEngineRuntime,
+  type ManagedPermissionsEngineReport,
   type ManagedPermissionsReadClock,
   PermissionsBudgetError,
   type PermissionsReadDeadline,
@@ -378,7 +379,7 @@ export function fitPermissions(
 }
 
 function errorText(err: unknown): string {
-  const text = sanitizeForLog(err instanceof Error ? err.message : String(err));
+  const text = sanitizeForLog(err);
   return text.length > MAX_ERROR_CHARS
     ? text.slice(0, MAX_ERROR_CHARS - 1) + ELLIPSIS
     : text;
@@ -455,22 +456,18 @@ export async function readManagedPermissions(
   if ("error" in request) return { ok: false, error: request.error };
   // One budget for the whole read, the resolve included.
   const deadline = permissionsReadDeadline(deps.clock);
+  const cannot = {
+    ok: false as const,
+    error: `engine ${request.engine} cannot report permissions`,
+  };
   try {
-    if (!getManagedEngineRuntime(request.engine).readPermissions) {
-      return {
-        ok: false,
-        error: `engine ${request.engine} cannot report permissions`,
-      };
-    }
+    if (!getManagedEngineRuntime(request.engine).readPermissions) return cannot;
     const resolved = await (deps.resolve
       ? deps.resolve(request.managedId, request.engine)
       : defaultResolve(request.managedId, request.engine, deps));
     const read = resolved.engine.readPermissions;
     if (!read) {
-      return {
-        ok: false,
-        error: `engine ${request.engine} cannot report permissions`,
-      };
+      return cannot;
     }
     const ctx: ManagedEngineContext = {
       ...resolved.ctx,
@@ -480,43 +477,12 @@ export async function readManagedPermissions(
       logins: request.logins,
       databases: request.databases,
     }, { deadline });
-    if (request.databasesCut) {
-      // Databases past the limit were never read: their grants are missing.
-      for (const login of report.logins) {
-        if (login.exists) {
-          login.truncated = true;
-        }
-      }
-    }
     const observedAt = (deps.now ?? (() =>
       new Date()))().toISOString();
-    const permissions: ManagedPermissionsObserved = {
-      engine: request.engine,
-      observedAt,
-      logins: report.logins.slice(0, OBSERVED_MAX_LOGINS).map(boundLogin),
-    };
-    if (report.serverVersion) {
-      permissions.serverVersion = report.serverVersion.slice(
-        0,
-        OBSERVED_MAX_NAME_CHARS,
-      );
-    }
-    if (report.databasesRead && request.engine === "postgres") {
-      permissions.databasesRead = report.databasesRead.slice(
-        0,
-        OBSERVED_MAX_DATABASES,
-      );
-    }
-    if (report.databasesFailed?.length && request.engine === "postgres") {
-      permissions.databasesFailed = report.databasesFailed.slice(
-        0,
-        OBSERVED_MAX_DATABASES,
-      );
-    }
     return {
       ok: true,
       permissions: fitPermissions(
-        permissions,
+        observedReport(request, report, observedAt),
         PERMISSIONS_RESULT_MAX_BYTES,
         (p) => permissionsResultFrame(frameId, observedAt, p),
       ),
@@ -527,4 +493,43 @@ export async function readManagedPermissions(
     }
     return { ok: false, error: errorText(err) };
   }
+}
+
+/** The engine's report stamped, capped per list, before the size fit. */
+function observedReport(
+  request: ValidRequest,
+  report: ManagedPermissionsEngineReport,
+  observedAt: string,
+): ManagedPermissionsObserved {
+  if (request.databasesCut) {
+    // Databases past the limit were never read: their grants are missing.
+    for (const login of report.logins) {
+      if (login.exists) login.truncated = true;
+    }
+  }
+  const permissions: ManagedPermissionsObserved = {
+    engine: request.engine,
+    observedAt,
+    logins: report.logins.slice(0, OBSERVED_MAX_LOGINS).map(boundLogin),
+  };
+  if (report.serverVersion) {
+    permissions.serverVersion = report.serverVersion.slice(
+      0,
+      OBSERVED_MAX_NAME_CHARS,
+    );
+  }
+  if (request.engine !== "postgres") return permissions;
+  if (report.databasesRead) {
+    permissions.databasesRead = report.databasesRead.slice(
+      0,
+      OBSERVED_MAX_DATABASES,
+    );
+  }
+  if (report.databasesFailed?.length) {
+    permissions.databasesFailed = report.databasesFailed.slice(
+      0,
+      OBSERVED_MAX_DATABASES,
+    );
+  }
+  return permissions;
 }

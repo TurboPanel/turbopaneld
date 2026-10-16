@@ -18,6 +18,7 @@ import type {
   ObservedLogin,
   ObservedMembership,
 } from "../../contracts/cell-messages.ts";
+import { mapSequential } from "../../util/sequential.ts";
 import { quoteAccount, quoteLiteral } from "./mysql-sql.ts";
 import {
   type ManagedPermissionsEngineReport,
@@ -241,17 +242,19 @@ export function unescapeWildcards(
 
 type Scope = Extract<ParsedGrantStatement, { kind: "privileges" }>["scope"];
 
+/** Index after a FUNCTION / PROCEDURE / PACKAGE [BODY] keyword, if any. */
+function routinePrefix(tokens: Token[]): { routine: boolean; start: number } {
+  if (isWord(tokens[0], "PACKAGE")) {
+    return { routine: true, start: isWord(tokens[1], "BODY") ? 2 : 1 };
+  }
+  const routine = isWord(tokens[0], "FUNCTION") ||
+    isWord(tokens[0], "PROCEDURE");
+  return { routine, start: routine ? 1 : 0 };
+}
+
 function parseScope(tokens: Token[], isProxy: boolean): Scope | null {
   if (isProxy) return { level: "proxy" };
-  let i = 0;
-  let routine = false;
-  if (
-    isWord(tokens[0], "FUNCTION") || isWord(tokens[0], "PROCEDURE") ||
-    isWord(tokens[0], "PACKAGE")
-  ) {
-    routine = true;
-    i = isWord(tokens[0], "PACKAGE") && isWord(tokens[1], "BODY") ? 2 : 1;
-  }
+  const { routine, start: i } = routinePrefix(tokens);
   const first = tokens[i];
   const dot = tokens[i + 1];
   const second = tokens[i + 2];
@@ -593,26 +596,32 @@ async function readShowGrants(
   } catch (err) {
     // Killed at the end of the budget: nothing more is read.
     if (err instanceof PermissionsBudgetError) return none();
-    const lines: string[][] = [];
-    for (const [index, target] of targets.entries()) {
-      if (!deadline.roomForQuery()) {
-        lines.push([]);
-        unread[index] = true;
-        continue;
-      }
-      try {
-        lines.push(
-          splitShowGrantsBatch(
-            await query(showGrantsBatchSql([target])),
-            1,
-          )[0]!,
-        );
-      } catch {
-        lines.push([]);
-        unread[index] = true;
-      }
-    }
-    return { lines, unread };
+    // One at a time, so the budget is checked before each read.
+    const each = await mapSequential(
+      targets,
+      (target) => readOneTarget(query, target, deadline),
+    );
+    return {
+      lines: each.map((lines) => lines ?? []),
+      unread: each.map((lines) => lines === undefined),
+    };
+  }
+}
+
+/** One target's grant lines, or `undefined` when it could not be read. */
+async function readOneTarget(
+  query: MysqlQuery,
+  target: string,
+  deadline: Deadline,
+): Promise<string[] | undefined> {
+  if (!deadline.roomForQuery()) return undefined;
+  try {
+    return splitShowGrantsBatch(
+      await query(showGrantsBatchSql([target])),
+      1,
+    )[0]!;
+  } catch {
+    return undefined;
   }
 }
 
@@ -677,66 +686,99 @@ function parseLines(
 }
 
 /** Grants held by each role (and the roles it holds), read breadth first. */
+type RoleWalk = {
+  flavour: MysqlFamilyFlavour;
+  query: MysqlQuery;
+  deadline: Deadline;
+  known: Map<string, RoleGrants>;
+  cut: boolean;
+};
+
+/** Roles of `frontier` not read yet, each once, within the role limit. */
+function nextRolesToRead(walk: RoleWalk, frontier: RoleRef[]): RoleRef[] {
+  const unseen = frontier.filter((role) => !walk.known.has(roleKey(role)))
+    .filter((role, index, all) =>
+      all.findIndex((other) => roleKey(other) === roleKey(role)) === index
+    );
+  const pending = unseen.slice(
+    0,
+    Math.max(0, MYSQL_MAX_ROLES_FOLLOWED - walk.known.size),
+  );
+  if (pending.length < unseen.length) walk.cut = true; // role limit
+  return pending;
+}
+
+/**
+ * Read one level of roles and return the roles they hold. A role whose name
+ * cannot be quoted safely stays a membership only.
+ */
+async function readRoleLevel(
+  walk: RoleWalk,
+  pending: RoleRef[],
+): Promise<RoleRef[]> {
+  const readable: { role: RoleRef; target: string }[] = [];
+  for (const role of pending) {
+    walk.known.set(roleKey(role), { grants: [], roles: [], partial: true });
+    const target = grantsTarget(walk.flavour, role);
+    if (target === undefined) walk.cut = true;
+    else readable.push({ role, target });
+  }
+  if (readable.length === 0) return [];
+  const read = await readShowGrants(
+    walk.query,
+    readable.map((e) => e.target),
+    walk.deadline,
+  );
+  const next: RoleRef[] = [];
+  readable.forEach((entry, index) => {
+    const parsed = parseLines(read.lines[index] ?? [], entry.role, {
+      via: roleLabel(entry.role),
+    });
+    const roles = parsed.roles.map((r) => r.role);
+    walk.known.set(roleKey(entry.role), {
+      grants: parsed.grants,
+      roles,
+      partial: parsed.partial || read.unread[index] === true,
+    });
+    next.push(...roles);
+  });
+  return next;
+}
+
+/** Walk the role graph breadth first, one level per call, `depth` levels. */
+async function walkRoles(
+  walk: RoleWalk,
+  frontier: RoleRef[],
+  depth: number,
+): Promise<void> {
+  if (depth === 0) {
+    // Depth limit: roles still to follow were never read.
+    if (frontier.some((role) => !walk.known.has(roleKey(role)))) {
+      walk.cut = true;
+    }
+    return;
+  }
+  const pending = nextRolesToRead(walk, frontier);
+  if (pending.length === 0) return;
+  await walkRoles(walk, await readRoleLevel(walk, pending), depth - 1);
+}
+
+/** Grants held by each role (and the roles it holds), read breadth first. */
 async function readRoleGrants(
   flavour: MysqlFamilyFlavour,
   query: MysqlQuery,
   start: RoleRef[],
   deadline: Deadline,
 ): Promise<{ known: Map<string, RoleGrants>; cut: boolean }> {
-  const known = new Map<string, RoleGrants>();
-  let cut = false;
-  let frontier = start;
-  for (let depth = 0; depth < MYSQL_MAX_ROLE_DEPTH; depth += 1) {
-    const unseen = frontier.filter((role) => !known.has(roleKey(role)))
-      .filter((role, index, all) =>
-        all.findIndex((other) => roleKey(other) === roleKey(role)) === index
-      );
-    const pending = unseen.slice(
-      0,
-      Math.max(0, MYSQL_MAX_ROLES_FOLLOWED - known.size),
-    );
-    if (pending.length < unseen.length) cut = true; // role limit
-    const entries = pending.map((role) => ({
-      role,
-      target: grantsTarget(flavour, role),
-    }));
-    // A role whose name cannot be quoted safely is a membership only.
-    if (entries.some((entry) => entry.target === undefined)) cut = true;
-    const readable = entries.filter((
-      entry,
-    ): entry is { role: RoleRef; target: string } =>
-      entry.target !== undefined
-    );
-    for (const role of pending) {
-      known.set(roleKey(role), { grants: [], roles: [], partial: true });
-    }
-    if (readable.length === 0) {
-      frontier = [];
-      break;
-    }
-    const read = await readShowGrants(
-      query,
-      readable.map((e) => e.target),
-      deadline,
-    );
-    const next: RoleRef[] = [];
-    readable.forEach((entry, index) => {
-      const parsed = parseLines(read.lines[index] ?? [], entry.role, {
-        via: roleLabel(entry.role),
-      });
-      const roles = parsed.roles.map((r) => r.role);
-      known.set(roleKey(entry.role), {
-        grants: parsed.grants,
-        roles,
-        partial: parsed.partial || read.unread[index] === true,
-      });
-      next.push(...roles);
-    });
-    frontier = next;
-  }
-  // Depth limit: roles still to follow were never read.
-  if (frontier.some((role) => !known.has(roleKey(role)))) cut = true;
-  return { known, cut };
+  const walk: RoleWalk = {
+    flavour,
+    query,
+    deadline,
+    known: new Map(),
+    cut: false,
+  };
+  await walkRoles(walk, start, MYSQL_MAX_ROLE_DEPTH);
+  return { known: walk.known, cut: walk.cut };
 }
 
 /** Every role reachable from `roles`, nearest first, each once. */
@@ -799,33 +841,46 @@ function assembleLogin(
   };
   let partial = accountSkipped;
   for (const read of reads) {
-    partial ||= read.partial;
-    if (read.roles.length > 0 && roleGrants.cut) partial = true;
-    login.grants.push(...read.grants);
-    for (const { role, admin } of read.roles) {
-      login.memberships.push({ role: roleLabel(role), admin, host: read.host });
-    }
-    const reachable = reachableRoles(
-      read.roles.map((r) => r.role),
-      roleGrants.known,
-    );
-    for (const { role, through } of reachable) {
-      partial ||= roleGrants.known.get(roleKey(role))?.partial ?? true;
-      if (through) {
-        const membership: ObservedMembership = {
-          role: roleLabel(role),
-          host: read.host,
-          via: roleLabel(through),
-        };
-        login.memberships.push(membership);
-      }
-      for (const grant of roleGrants.known.get(roleKey(role))?.grants ?? []) {
-        login.grants.push({ ...grant, host: read.host });
-      }
-    }
+    if (addAccountRead(login, read, roleGrants)) partial = true;
   }
   if (partial) login.truncated = true;
   return login;
+}
+
+/**
+ * Add one account row's grants, memberships and the grants of every role
+ * it reaches. True when any of it was not fully read.
+ */
+function addAccountRead(
+  login: ObservedLogin,
+  read: AccountRead,
+  roleGrants: { known: Map<string, RoleGrants>; cut: boolean },
+): boolean {
+  let partial = read.partial || (read.roles.length > 0 && roleGrants.cut);
+  login.grants.push(...read.grants);
+  for (const { role, admin } of read.roles) {
+    login.memberships.push({ role: roleLabel(role), admin, host: read.host });
+  }
+  const reachable = reachableRoles(
+    read.roles.map((r) => r.role),
+    roleGrants.known,
+  );
+  for (const { role, through } of reachable) {
+    const held = roleGrants.known.get(roleKey(role));
+    partial ||= held?.partial ?? true;
+    if (through) {
+      const membership: ObservedMembership = {
+        role: roleLabel(role),
+        host: read.host,
+        via: roleLabel(through),
+      };
+      login.memberships.push(membership);
+    }
+    for (const grant of held?.grants ?? []) {
+      login.grants.push({ ...grant, host: read.host });
+    }
+  }
+  return partial;
 }
 
 function validateLogins(logins: readonly string[]): void {
