@@ -1582,3 +1582,41 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     "Invalid managed.ha.failover result",
   );
 });
+
+test("managed.ingress.reconcile root allowedSources is optional and validated", () => {
+  const withSources = (allowedSources: unknown) => ({
+    ...VALID_INGRESS,
+    clusters: [{
+      ...VALID_INGRESS.clusters[0],
+      users: [{
+        ...VALID_INGRESS.clusters[0].users[0],
+        role: "root",
+        allowedSources,
+      }],
+    }],
+  });
+  assertEquals(
+    parseManagedIngressReconcilePayload(
+      withSources(["10.0.0.2", "2001:db8::1"]),
+    )
+      .clusters[0]?.users[0]?.allowedSources,
+    ["10.0.0.2", "2001:db8::1"],
+  );
+  assertEquals(
+    parseManagedIngressReconcilePayload(withSources([])).clusters[0]?.users[0]
+      ?.allowedSources,
+    [],
+  );
+  assertEquals(
+    parseManagedIngressReconcilePayload(VALID_INGRESS).clusters[0]?.users[0]
+      ?.allowedSources,
+    undefined,
+  );
+  for (const bad of ["10.0.0.2", [1], ["10.0.0.0/8"], ["a%"], [""]]) {
+    assertThrows(
+      () => parseManagedIngressReconcilePayload(withSources(bad)),
+      TypeError,
+      "Invalid managed.ingress.reconcile user allowedSources",
+    );
+  }
+});
