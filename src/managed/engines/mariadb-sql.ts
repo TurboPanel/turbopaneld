@@ -5,7 +5,7 @@
  * (`MASTER_USE_GTID=slave_pos` / `gtid_slave_pos` vs `SOURCE_AUTO_POSITION=1`).
  */
 
-import { grantOnDatabaseSql, plainGrantRevoker } from "./grant-pattern.ts";
+import { grantSqlFor } from "./grant-pattern.ts";
 import {
   type FollowSourceDialect,
   renderFollowSourceSql,
@@ -113,22 +113,10 @@ export function dropDatabaseSql(name: string): string {
   return `DROP DATABASE IF EXISTS ${db};`;
 }
 
-const GRANT_QUOTING = { quoteIdentifier, quoteLiteral, accountAt };
-
-/** Removes the plain-name grant older versions wrote; see `grant-pattern.ts`. */
-export const revokePlainDatabaseGrantSql = plainGrantRevoker(
-  GRANT_QUOTING,
+export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
+  { quoteIdentifier, quoteLiteral, accountAt },
   MANAGED_DOCKER_NETWORK_HOST,
 );
-
-export function grantDatabaseSql(
-  database: string,
-  username: string,
-  privilege: ManagedDatabasePrivilege,
-  host: string = MANAGED_DOCKER_NETWORK_HOST,
-): string {
-  return grantOnDatabaseSql(GRANT_QUOTING, database, username, privilege, host);
-}
 
 export function grantRootSql(
   username: string,

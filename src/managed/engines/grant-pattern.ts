@@ -81,15 +81,6 @@ function revokePlainPatternGrantSql(
   ).join("\n");
 }
 
-/** `revokePlainPatternGrantSql` bound to one dialect and its default host. */
-export function plainGrantRevoker(
-  quoting: GrantQuoting,
-  defaultHost: string,
-): (database: string, username: string, host?: string) => string {
-  return (database, username, host = defaultHost) =>
-    revokePlainPatternGrantSql(quoting, database, username, host);
-}
-
 /** The `GRANT` for one privilege level on one database, for one account. */
 export function grantOnDatabaseSql(
   quoting: GrantQuoting,
@@ -116,4 +107,26 @@ export function grantOnDatabaseSql(
       throw new Error(`unsupported privilege: ${_exhaustive}`);
     }
   }
+}
+
+/** Both grant builders bound to one dialect's quoting and default host. */
+export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
+  grantDatabaseSql: (
+    database: string,
+    username: string,
+    privilege: ManagedDatabasePrivilege,
+    host?: string,
+  ) => string;
+  revokePlainDatabaseGrantSql: (
+    database: string,
+    username: string,
+    host?: string,
+  ) => string;
+} {
+  return {
+    grantDatabaseSql: (database, username, privilege, host = defaultHost) =>
+      grantOnDatabaseSql(quoting, database, username, privilege, host),
+    revokePlainDatabaseGrantSql: (database, username, host = defaultHost) =>
+      revokePlainPatternGrantSql(quoting, database, username, host),
+  };
 }
