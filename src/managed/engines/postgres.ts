@@ -67,6 +67,7 @@ import {
   ownerLoginReturnSql,
   ownerRoleDatabasesAmongSql,
   ownerRoleDatabaseSql,
+  type OwnerRoleLoginLevel,
   ownerRoleLoginSql,
   ownerRoleNames,
 } from "./postgres-owner-role-sql.ts";
@@ -479,12 +480,11 @@ async function reconcileDatabaseAccess(
             entry.username,
             // An owner-role database belongs to its owner role, never to a
             // login: the migrations login works through the role instead.
-            ownerRoleDbs.has(database) &&
-              loginOwned.get(database) === entry.username
-              ? "owner"
-              : ownerRoleDbs.has(database) && entry.level === "owner"
-              ? "read-write"
-              : entry.level,
+            databaseGrantLevel(
+              ownerRoleDbs.has(database),
+              loginOwned.get(database) === entry.username,
+              entry.level,
+            ),
           ),
         ),
     ));
@@ -568,11 +568,11 @@ async function reconcileDatabaseAccess(
           ownerRoleLoginSql(
             database,
             entry.username,
-            !listed
-              ? null
-              : loginOwned.get(database) === entry.username
-              ? "admin"
-              : entry.level,
+            ownerRoleLoginLevel(
+              listed,
+              loginOwned.get(database) === entry.username,
+              entry.level,
+            ),
           ),
         );
         if (listed) {
@@ -585,21 +585,7 @@ async function reconcileDatabaseAccess(
           );
         }
       }
-      for (const entry of admins) {
-        // A login that was read-only before keeps no read-only default.
-        if (entry.databases.includes(database)) {
-          parts.push(
-            readOnlySessionDefaultSql(database, entry.username, false),
-          );
-        }
-        parts.push(
-          ownerRoleLoginSql(
-            database,
-            entry.username,
-            entry.databases.includes(database) ? "admin" : null,
-          ),
-        );
-      }
+      parts.push(...adminOwnerRoleSql(database, admins));
       for (const username of usernames.keys()) {
         if (granted.some((entry) => entry.username === username)) continue;
         parts.push(ownerRoleLoginSql(database, username, null));
@@ -659,6 +645,46 @@ async function createOwnerRoleDatabase(
       sanitizeForLog(name)
     } already exists with another owner; keeping it as it is`,
   );
+}
+
+/** The database-level right a login gets on a database. */
+function databaseGrantLevel(
+  ownerRoleDatabase: boolean,
+  isChosenOwner: boolean,
+  level: ManagedDatabasePrivilege,
+): ManagedDatabasePrivilege {
+  // An owner-role database belongs to its owner role (or the login chosen to
+  // own it), never to a migrations login: that one works through the role.
+  if (!ownerRoleDatabase) return level;
+  if (isChosenOwner) return "owner";
+  return level === "owner" ? "read-write" : level;
+}
+
+/** What a login is on an owner-role database (`null` = not on it). */
+function ownerRoleLoginLevel(
+  listed: boolean,
+  isChosenOwner: boolean,
+  level: ManagedDatabasePrivilege,
+): OwnerRoleLoginLevel | null {
+  if (!listed) return null;
+  return isChosenOwner ? "admin" : level;
+}
+
+/** The Database admin logins' statements on one owner-role database. */
+function adminOwnerRoleSql(
+  database: string,
+  admins: readonly { username: string; databases: string[] }[],
+): string[] {
+  return admins.flatMap((entry) => {
+    const listed = entry.databases.includes(database);
+    return [
+      // A login that was read-only before keeps no read-only default.
+      ...(listed
+        ? [readOnlySessionDefaultSql(database, entry.username, false)]
+        : []),
+      ownerRoleLoginSql(database, entry.username, listed ? "admin" : null),
+    ];
+  });
 }
 
 /** Databases the engine itself needs; never handed to an owner role. */
