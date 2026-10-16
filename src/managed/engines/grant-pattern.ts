@@ -46,7 +46,7 @@ export function quoteGrantSchema(quoting: GrantQuoting, name: string): string {
  * grants on other databases and the account itself stay. The caller runs it
  * only after the escaped grant is in place, so the login never loses access.
  */
-export function revokePlainPatternGrantSql(
+function revokePlainPatternGrantSql(
   quoting: GrantQuoting,
   database: string,
   username: string,
@@ -77,4 +77,13 @@ export function revokePlainPatternGrantSql(
       "DEALLOCATE PREPARE tp_plain_revoke;",
     ].join("\n")
   ).join("\n");
+}
+
+/** `revokePlainPatternGrantSql` bound to one dialect and its default host. */
+export function plainGrantRevoker(
+  quoting: GrantQuoting,
+  defaultHost: string,
+): (database: string, username: string, host?: string) => string {
+  return (database, username, host = defaultHost) =>
+    revokePlainPatternGrantSql(quoting, database, username, host);
 }

@@ -5,10 +5,7 @@
  * (`MASTER_USE_GTID=slave_pos` / `gtid_slave_pos` vs `SOURCE_AUTO_POSITION=1`).
  */
 
-import {
-  quoteGrantSchema,
-  revokePlainPatternGrantSql,
-} from "./grant-pattern.ts";
+import { plainGrantRevoker, quoteGrantSchema } from "./grant-pattern.ts";
 import {
   type FollowSourceDialect,
   renderFollowSourceSql,
@@ -144,18 +141,11 @@ export function grantDatabaseSql(
 
 const GRANT_QUOTING = { quoteIdentifier, quoteLiteral, accountAt };
 
-/**
- * Removes the plain-name (pattern) grant that earlier versions wrote for a
- * database name holding `_` or `%`; see `grant-pattern.ts`. Run it only after
- * {@link grantDatabaseSql} has granted on the escaped name.
- */
-export function revokePlainDatabaseGrantSql(
-  database: string,
-  username: string,
-  host: string = MANAGED_DOCKER_NETWORK_HOST,
-): string {
-  return revokePlainPatternGrantSql(GRANT_QUOTING, database, username, host);
-}
+/** Removes the plain-name grant older versions wrote; see `grant-pattern.ts`. */
+export const revokePlainDatabaseGrantSql = plainGrantRevoker(
+  GRANT_QUOTING,
+  MANAGED_DOCKER_NETWORK_HOST,
+);
 
 export function grantRootSql(
   username: string,
