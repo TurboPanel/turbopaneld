@@ -36,11 +36,16 @@ import {
 import { sanitizeForLog } from "../util/logger.ts";
 import { SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
 import { getManagedEngineRuntime } from "./engines/index.ts";
-import type {
-  ManagedEngineContext,
-  ManagedEngineRuntime,
-  ManagedPermissionsReadClock,
+import {
+  type ManagedEngineContext,
+  type ManagedEngineExec,
+  type ManagedEngineRuntime,
+  type ManagedPermissionsReadClock,
+  PermissionsBudgetError,
+  type PermissionsReadDeadline,
+  permissionsReadDeadline,
 } from "./engines/types.ts";
+import type { RunDockerStreamedFn } from "../deploy/docker-cli.ts";
 import {
   type LocalEngineContextDeps,
   LocalEngineNotRunningError,
@@ -73,6 +78,8 @@ export type ManagedPermissionsReadDeps = LocalEngineContextDeps & {
   now?: () => Date;
   /** Test seam: the readers' time budget clock. */
   clock?: ManagedPermissionsReadClock;
+  /** Test seam: runs the engine execs, killing one on abort. */
+  runDockerExec?: RunDockerStreamedFn;
 };
 
 type ValidRequest = {
@@ -399,7 +406,39 @@ async function defaultResolve(
 ): Promise<{ engine: ManagedEngineRuntime; ctx: ManagedEngineContext }> {
   return await resolveLocalEngine(managedId, engine, {
     runDocker: deps.runDocker,
+    runDockerExec: deps.runDockerExec,
   });
+}
+
+/**
+ * `exec` bounded by the read's budget: refused once it is spent, and raced
+ * against what is left (the child is killed through `signal`), so no read
+ * outlives the budget however the engine behaves.
+ */
+export function budgetedExec(
+  exec: ManagedEngineExec,
+  deadline: PermissionsReadDeadline,
+): ManagedEngineExec {
+  return async (argv, input) => {
+    const left = deadline.remainingMs();
+    if (left <= 0) throw new PermissionsBudgetError();
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new PermissionsBudgetError());
+      }, left);
+    });
+    try {
+      return await Promise.race([
+        exec(argv, input, { signal: controller.signal }),
+        expiry,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 /**
@@ -414,6 +453,8 @@ export async function readManagedPermissions(
 ): Promise<ManagedPermissionsReadResult> {
   const request = validatePermissionsRequest(input);
   if ("error" in request) return { ok: false, error: request.error };
+  // One budget for the whole read, the resolve included.
+  const deadline = permissionsReadDeadline(deps.clock);
   try {
     if (!getManagedEngineRuntime(request.engine).readPermissions) {
       return {
@@ -431,10 +472,14 @@ export async function readManagedPermissions(
         error: `engine ${request.engine} cannot report permissions`,
       };
     }
-    const report = await read(resolved.ctx, {
+    const ctx: ManagedEngineContext = {
+      ...resolved.ctx,
+      exec: budgetedExec(resolved.ctx.exec, deadline),
+    };
+    const report = await read(ctx, {
       logins: request.logins,
       databases: request.databases,
-    }, deps.clock);
+    }, { deadline });
     if (request.databasesCut) {
       // Databases past the limit were never read: their grants are missing.
       for (const login of report.logins) {

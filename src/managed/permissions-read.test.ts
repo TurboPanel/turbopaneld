@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import type {
   ManagedPermissionsObserved,
@@ -13,6 +13,7 @@ import type {
 } from "./engines/types.ts";
 import {
   boundLogin,
+  budgetedExec,
   fitPermissions,
   PERMISSIONS_RESULT_MAX_BYTES,
   permissionsResultFrame,
@@ -204,6 +205,7 @@ test("an engine read failure is ok: false with a bounded error", async () => {
   const docker = fakeDocker({ label: "postgres" });
   const result = await readManagedPermissions(input(), {
     runDocker: docker.run,
+    runDockerExec: docker.run,
   });
   assertEquals(result.ok, false);
   if (result.ok) throw new TypeError("expected a failure");
@@ -430,9 +432,87 @@ test("failed databases pass through and a cut database list marks logins", async
     },
   );
   if (!result.ok) throw new TypeError(result.error);
-  assertEquals(seenClock, clock);
+  // The reader shares the handler's running budget.
+  assertEquals(typeof (seenClock as { deadline?: unknown }).deadline, "object");
   assertEquals(result.permissions.databasesRead, ["d0"]);
   assertEquals(result.permissions.databasesFailed, ["d1"]);
   assertEquals(result.permissions.logins[0]?.truncated, true);
   assertEquals(result.permissions.logins[1]?.truncated, undefined);
+});
+
+const OPEN_DEADLINE = {
+  expired: () => false,
+  remainingMs: () => 30,
+  roomForQuery: () => true,
+};
+
+test("a budgeted exec is refused once spent and killed when it overruns", async () => {
+  const spent = budgetedExec(
+    () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
+    { ...OPEN_DEADLINE, expired: () => true, remainingMs: () => 0 },
+  );
+  await assertRejects(() => spent(["true"]), Error, "ran out of time");
+
+  let aborted = false;
+  const hanging = budgetedExec(
+    (_argv, _input, options) =>
+      new Promise(() => {
+        options?.signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+      }),
+    OPEN_DEADLINE,
+  );
+  await assertRejects(() => hanging(["psql"]), Error, "ran out of time");
+  assertEquals(aborted, true);
+
+  const quick = budgetedExec(
+    () => Promise.resolve({ success: true, stdout: "ok", stderr: "" }),
+    OPEN_DEADLINE,
+  );
+  assertEquals((await quick(["true"])).stdout, "ok");
+});
+
+test("a stuck database read is killed and reported as failed", async () => {
+  let killed = false;
+  const answers: [string, string][] = [
+    ["server_version_num", '{"num": 180006, "text": "18.6"}'],
+    [
+      "WITH RECURSIVE",
+      '[{"username": "u1", "oid": 16390, "attributes": {}, "memberships": [], "inherits": []}]',
+    ],
+    ["'tablespaces'", '{"tablespaces": [], "parameters": []}'],
+    ["datallowconn", '["slow"]'],
+  ];
+  const { ctx } = fakeEngine({ logins: [] });
+  const result = await readManagedPermissions(input({ databases: ["slow"] }), {
+    clock: { deadline: OPEN_DEADLINE },
+    resolve: () =>
+      Promise.resolve({
+        engine: postgresManagedEngineRuntime,
+        ctx: {
+          ...ctx,
+          exec: (_argv, sql, options) => {
+            const answer = answers.find(([marker]) => sql?.includes(marker));
+            if (answer) {
+              return Promise.resolve({
+                success: true,
+                stdout: answer[1],
+                stderr: "",
+              });
+            }
+            return new Promise(() => {
+              options?.signal?.addEventListener("abort", () => {
+                killed = true;
+              });
+            });
+          },
+        },
+      }),
+  });
+  if (!result.ok) throw new TypeError(result.error);
+  assertEquals(killed, true);
+  assertEquals(result.permissions.databasesFailed, ["slow"]);
+  assertEquals(result.permissions.databasesRead, []);
+  assertEquals(result.permissions.logins[0]?.truncated, true);
 });

@@ -435,11 +435,12 @@ test("the time budget stops before the next database and names the rest", async 
     query,
     { now: () => ms, budgetMs: 10_000 },
   );
-  // version, logins, shared ACLs and the list use 16 s: no database fits.
+  // Version and logins use 8 s; 2 s left is no room for a 3 s query, so the
+  // shared ACLs, the database list and every database are left unread.
   assertEquals(report.databasesRead, []);
   assertEquals(report.databasesFailed, ["appdb", "second", "third"]);
   assertEquals(report.logins[0]?.truncated, true);
-  assertEquals(psql.calls.some((call) => call.database !== "postgres"), false);
+  assertEquals(psql.calls.length, 2);
 
   ms = 0;
   const roomy = await readPostgresPermissions(
@@ -448,8 +449,37 @@ test("the time budget stops before the next database and names the rest", async 
     query,
     { now: () => ms, budgetMs: 21_000 },
   );
-  assertEquals(roomy.databasesRead, ["appdb", "second"]);
-  assertEquals(roomy.databasesFailed, ["third"]);
+  // 16 s through the list, appdb starts with 5 s left, second with 1 s.
+  assertEquals(roomy.databasesRead, ["appdb"]);
+  assertEquals(roomy.databasesFailed, ["second", "third"]);
+});
+
+test("only the database's own name means it is gone", async () => {
+  const psql = fakePsql({
+    appdb: APPDB,
+    other: new Error(
+      'psql failed: ERROR:  cross-database reference: database "appdb" does not exist',
+    ),
+  });
+  const report = await readPostgresPermissions(
+    { logins: ["u1"], databases: ["appdb", "other"] },
+    "postgres",
+    psql.query,
+  );
+  assertEquals(report.databasesRead, ["appdb"]);
+  assertEquals(report.databasesFailed, ["other"]);
+});
+
+test("a database read killed by the budget is failed, not gone", async () => {
+  const { PermissionsBudgetError } = await import("./types.ts");
+  const psql = fakePsql({ appdb: new PermissionsBudgetError() });
+  const report = await readPostgresPermissions(
+    { logins: ["u1"], databases: ["appdb"] },
+    "postgres",
+    psql.query,
+  );
+  assertEquals(report.databasesFailed, ["appdb"]);
+  assertEquals(report.logins[0]?.truncated, true);
 });
 
 test("a clean read of every database is not truncated", async () => {

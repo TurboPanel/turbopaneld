@@ -33,6 +33,9 @@ import {
   type ManagedPermissionsEngineReport,
   type ManagedPermissionsReadClock,
   type ManagedPermissionsReadRequest,
+  PERMISSIONS_QUERY_LIMIT_MS,
+  PermissionsBudgetError,
+  type PermissionsReadDeadline,
   permissionsReadDeadline,
 } from "./types.ts";
 
@@ -51,7 +54,7 @@ const PARAMETER_ACL_VERSION = 150000;
 function readOnly(sql: string): string {
   return [
     "BEGIN READ ONLY;",
-    "SET LOCAL statement_timeout = '5s';",
+    `SET LOCAL statement_timeout = '${PERMISSIONS_QUERY_LIMIT_MS}ms';`,
     sql,
     "COMMIT;",
   ].join("\n");
@@ -702,10 +705,28 @@ function validateNames(request: ManagedPermissionsReadRequest): void {
  * psql's words for a database that was dropped or closed to connections
  * after it was listed: skipped silently. Anything else is a failure.
  */
-function isDatabaseGone(err: unknown): boolean {
+function isDatabaseGone(err: unknown, database: string): boolean {
+  if (err instanceof PermissionsBudgetError) return false;
   const text = err instanceof Error ? err.message : String(err);
-  return /database "[^"]*" does not exist/.test(text) ||
-    text.includes("is not currently accepting connections");
+  // The exact name being read, so another database's words never match.
+  return text.includes(`database "${database}" does not exist`) ||
+    text.includes(
+      `database "${database}" is not currently accepting connections`,
+    );
+}
+
+/** `run()`, or `undefined` when the budget ran out before or during it. */
+async function withinBudget<T>(
+  deadline: PermissionsReadDeadline,
+  run: () => Promise<T>,
+): Promise<T | undefined> {
+  if (!deadline.roomForQuery()) return undefined;
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof PermissionsBudgetError) return undefined;
+    throw err;
+  }
 }
 
 /**
@@ -738,26 +759,36 @@ export async function readPostgresPermissions(
   const databasesFailed: string[] = [];
   let truncated = false;
   if (grantees.size > 0) {
-    const shared = parsePostgresSharedAcl(
-      await query(
-        adminDatabase,
-        postgresSharedAclSql([...grantees], version.num),
-      ),
+    const shared = await withinBudget(
+      deadline,
+      async () =>
+        parsePostgresSharedAcl(
+          await query(
+            adminDatabase,
+            postgresSharedAclSql([...grantees], version.num),
+          ),
+        ),
     );
-    attributeSharedAcl(shared, states);
-    truncated = hitRowLimit([shared.tablespaces, shared.parameters]);
+    if (shared) {
+      attributeSharedAcl(shared, states);
+      truncated = hitRowLimit([shared.tablespaces, shared.parameters]);
+    } else {
+      truncated = true; // out of time: cluster-wide grants not read
+    }
   }
   if (grantees.size > 0 && request.databases.length > 0) {
-    const listed = parseJson(
-      await query(adminDatabase, postgresDatabasesSql(request.databases)),
-      "database list",
-    );
+    const listed = await withinBudget(deadline, async () =>
+      parseJson(
+        await query(adminDatabase, postgresDatabasesSql(request.databases)),
+        "database list",
+      ));
+    if (listed === undefined) databasesFailed.push(...request.databases);
     const connectable = Array.isArray(listed)
       ? listed.filter((name): name is string => typeof name === "string")
       : [];
     const sql = postgresDatabaseAclSql([...grantees]);
     for (const database of connectable) {
-      if (deadline.expired()) {
+      if (!deadline.roomForQuery()) {
         databasesFailed.push(database); // out of time: not read
         continue;
       }
@@ -768,7 +799,7 @@ export async function readPostgresPermissions(
       } catch (err) {
         // Dropped, or closed to connections, since it was listed: nothing
         // to read. Any other failure is reported, never shown as "no grants".
-        if (!isDatabaseGone(err)) databasesFailed.push(database);
+        if (!isDatabaseGone(err, database)) databasesFailed.push(database);
         continue;
       }
       attributeDatabaseAcl(acl, states);

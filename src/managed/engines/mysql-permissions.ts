@@ -23,6 +23,9 @@ import {
   type ManagedPermissionsEngineReport,
   type ManagedPermissionsReadClock,
   type ManagedPermissionsReadRequest,
+  PERMISSIONS_QUERY_LIMIT_MS,
+  PermissionsBudgetError,
+  type PermissionsReadDeadline,
   permissionsReadDeadline,
 } from "./types.ts";
 
@@ -556,7 +559,7 @@ export function splitShowGrantsBatch(
   return out;
 }
 
-type Deadline = { expired: () => boolean };
+type Deadline = PermissionsReadDeadline;
 
 /** Grant lines per target; `unread[i]` when target `i` could not be read. */
 type ShowGrantsRead = { lines: string[][]; unread: boolean[] };
@@ -574,9 +577,11 @@ async function readShowGrants(
 ): Promise<ShowGrantsRead> {
   const unread = targets.map(() => false);
   if (targets.length === 0) return { lines: [], unread };
-  if (deadline.expired()) {
-    return { lines: targets.map(() => []), unread: targets.map(() => true) };
-  }
+  const none = () => ({
+    lines: targets.map((): string[] => []),
+    unread: targets.map(() => true),
+  });
+  if (!deadline.roomForQuery()) return none();
   try {
     return {
       lines: splitShowGrantsBatch(
@@ -585,10 +590,12 @@ async function readShowGrants(
       ),
       unread,
     };
-  } catch {
+  } catch (err) {
+    // Killed at the end of the budget: nothing more is read.
+    if (err instanceof PermissionsBudgetError) return none();
     const lines: string[][] = [];
     for (const [index, target] of targets.entries()) {
-      if (deadline.expired()) {
+      if (!deadline.roomForQuery()) {
         lines.push([]);
         unread[index] = true;
         continue;
@@ -838,15 +845,29 @@ function firstLine(stdout: string): string | undefined {
   return line;
 }
 
+/**
+ * Every script starts by bounding each statement on the server: MySQL
+ * `max_execution_time` (milliseconds; it bounds SELECTs only, the SHOW
+ * GRANTS reads are bounded by the exec kill), MariaDB `max_statement_time`
+ * (seconds, every statement).
+ */
+export function statementLimitSql(flavour: MysqlFamilyFlavour): string {
+  return flavour === "mysql"
+    ? `SET SESSION max_execution_time = ${PERMISSIONS_QUERY_LIMIT_MS};`
+    : `SET SESSION max_statement_time = ${PERMISSIONS_QUERY_LIMIT_MS / 1000};`;
+}
+
 /** Read the report for MySQL or MariaDB (`flavour` picks the dialect). */
 export async function readMysqlFamilyPermissions(
   flavour: MysqlFamilyFlavour,
   request: ManagedPermissionsReadRequest,
-  query: MysqlQuery,
+  engineQuery: MysqlQuery,
   clock: ManagedPermissionsReadClock = {},
 ): Promise<ManagedPermissionsEngineReport> {
   validateLogins(request.logins);
   const deadline = permissionsReadDeadline(clock);
+  const query: MysqlQuery = (sql) =>
+    engineQuery(`${statementLimitSql(flavour)}\n${sql}`);
   const serverVersion = firstLine(await query("SELECT VERSION();"));
   const report: ManagedPermissionsEngineReport = { logins: [] };
   if (serverVersion) report.serverVersion = serverVersion;

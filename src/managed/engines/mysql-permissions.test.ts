@@ -7,6 +7,7 @@ import {
   readMysqlFamilyPermissions,
   showGrantsBatchSql,
   splitShowGrantsBatch,
+  statementLimitSql,
   unescapeBatchField,
   unescapeWildcards,
 } from "./mysql-permissions.ts";
@@ -274,7 +275,13 @@ test("batch output splits back per account", () => {
 /** A fake engine: answers by SQL text, records what it was asked. */
 function fakeEngine(grants: Record<string, string[]>, accounts: string) {
   const asked: string[] = [];
-  const query = (sql: string): Promise<string> => {
+  const query = (script: string): Promise<string> => {
+    // Every script opens with the per-statement limit.
+    const [limit, ...rest] = script.split("\n");
+    if (!limit?.startsWith("SET SESSION max_")) {
+      return Promise.reject(new Error(`no statement limit: ${script}`));
+    }
+    const sql = rest.join("\n");
     asked.push(sql);
     if (sql === "SELECT VERSION();") return Promise.resolve("11.8.9-MariaDB\n");
     if (sql.includes("FROM mysql.")) return Promise.resolve(accounts);
@@ -443,7 +450,7 @@ test("MySQL and MariaDB runtimes read escaped batch output as the socket root", 
       "-N",
       "-B",
       "-e",
-      "SELECT VERSION();",
+      `${statementLimitSql(client)}\nSELECT VERSION();`,
     ]);
   }
 });
@@ -591,11 +598,22 @@ test("past the time budget accounts are left unread and marked", async () => {
     },
     { now: () => ms, budgetMs: 10_000 },
   );
-  // version, accounts, failed batch (12 s), then nothing more is read.
+  // Version and accounts use 8 s; 2 s left is no room for a 3 s query.
   const [u1, u2] = report.logins;
   assertEquals(u1?.grants, []);
   assertEquals(u1?.truncated, true);
   assertEquals(u2?.grants, []);
   assertEquals(u2?.truncated, true);
-  assertEquals(engine.asked.length, 3);
+  assertEquals(engine.asked.length, 2);
+});
+
+test("each script bounds its statements on the server", () => {
+  assertEquals(
+    statementLimitSql("mysql"),
+    "SET SESSION max_execution_time = 3000;",
+  );
+  assertEquals(
+    statementLimitSql("mariadb"),
+    "SET SESSION max_statement_time = 3;",
+  );
 });

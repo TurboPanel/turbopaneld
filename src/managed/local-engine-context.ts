@@ -9,6 +9,8 @@ import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
+  runDockerStreamed as defaultRunDockerStreamed,
+  type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { sanitizeForLog } from "../util/logger.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -78,7 +80,11 @@ export async function resolveLocalReplicationEngine(
   }
   return {
     engine,
-    ctx: engineContext(engine, container, run),
+    ctx: engineContext(
+      engine,
+      container,
+      buildEngineExec(container.containerId, run),
+    ),
   };
 }
 
@@ -107,14 +113,36 @@ async function findLocalEngineContainer(
 function engineContext(
   engine: ReturnType<typeof getManagedEngineRuntime>,
   container: LocalEngineContainer,
-  run: RunDockerFn,
+  exec: ManagedEngineContext["exec"],
 ): ManagedEngineContext {
   return {
     containerId: container.containerId,
     composeServiceName: container.composeServiceName,
     rootUsername: engine.rootUsername,
     defaultDatabase: engine.defaultDatabase,
-    exec: buildEngineExec(container.containerId, run),
+    exec,
+  };
+}
+
+/**
+ * Read-path exec: like {@link buildEngineExec}, but an aborted `signal`
+ * kills the `docker exec` child, so a read bounded by a time budget never
+ * waits on a stuck engine.
+ */
+function buildKillableEngineExec(
+  containerId: string,
+  run: RunDockerStreamedFn,
+): ManagedEngineContext["exec"] {
+  return async (argv, input, options) => {
+    const result = await run(["exec", "-i", "-u", "0", containerId, ...argv], {
+      ...(input === undefined ? {} : { input }),
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
+    });
+    return {
+      success: result.success,
+      stdout: result.stdout,
+      stderr: sanitizeForLog(result.stderr),
+    };
   };
 }
 
@@ -152,7 +180,10 @@ async function readContainerEngineLabel(
 export async function resolveLocalEngine(
   managedId: string,
   engineCode: ManagedEngineCode,
-  deps?: Pick<LocalEngineContextDeps, "runDocker">,
+  deps?: Pick<LocalEngineContextDeps, "runDocker"> & {
+    /** Runs the engine execs; it must honour `signal` (kill on abort). */
+    runDockerExec?: RunDockerStreamedFn;
+  },
 ): Promise<{
   engine: ReturnType<typeof getManagedEngineRuntime>;
   ctx: ManagedEngineContext;
@@ -176,5 +207,9 @@ export async function resolveLocalEngine(
       `this database runs ${sanitizeForLog(label)}, not ${engineCode}`,
     );
   }
-  return { engine, ctx: engineContext(engine, container, run) };
+  const exec = buildKillableEngineExec(
+    container.containerId,
+    deps?.runDockerExec ?? defaultRunDockerStreamed,
+  );
+  return { engine, ctx: engineContext(engine, container, exec) };
 }
