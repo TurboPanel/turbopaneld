@@ -64,6 +64,15 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
     ),
     true,
   );
+  // Below the migration level, MariaDB's own DELETE HISTORY is taken back too.
+  assertEquals(
+    grantDatabaseSql("db", "u", "read-write").includes("Delete_history_priv"),
+    true,
+  );
+  assertEquals(
+    grantDatabaseSql("db", "u", "owner").includes("Delete_history_priv"),
+    false,
+  );
   const repl = ensureReplicationAccountSql("tp_repl", "x", ["203.0.113.5"]);
   assertEquals(repl.includes("`tp_repl`@'203.0.113.5'"), true);
   // Server-side TLS enforcement, independent of what the standby requests.
@@ -156,8 +165,12 @@ test("account, privilege, and census SQL builders cover MariaDB hosts", () => {
   assertEquals(create.includes("CREATE USER IF NOT EXISTS"), true);
 
   assertEquals(
-    grantDatabaseSql("appdb", "app", "owner").includes("WITH GRANT OPTION"),
+    grantDatabaseSql("appdb", "app", "admin").includes("WITH GRANT OPTION"),
     true,
+  );
+  assertEquals(
+    grantDatabaseSql("appdb", "app", "owner").includes("WITH GRANT OPTION"),
+    false,
   );
   assertEquals(
     grantDatabaseSql("appdb", "app", "read-only").includes("SELECT, SHOW VIEW"),

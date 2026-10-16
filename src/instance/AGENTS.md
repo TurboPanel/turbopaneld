@@ -92,6 +92,13 @@ login. The control plane records an owner role, and accepts an admin login,
 only for a primary that lists it (else 409
 `managed_owner_role_needs_daemon_update`).
 
+**Data-only read/write (`managed-data-only-readwrite-v1`).** No message: it
+says this daemon grants a MySQL or MariaDB `read-write` login data changes
+only, and the `owner` (migration) login everything in its database without
+`GRANT OPTION` (the Database admin login keeps it). The control plane gives a
+new MySQL or MariaDB `read-write` login only to a primary that lists it (else
+409 `managed_readwrite_needs_daemon_update`).
+
 **Managed permissions read (`managed-permissions-read-v1`).** Same shape as
 on-demand health: a control plane that sees the feature may send
 `managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,

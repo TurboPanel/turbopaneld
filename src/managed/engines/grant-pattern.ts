@@ -26,6 +26,8 @@ export type GrantQuoting = {
   quoteIdentifier: (value: string) => string;
   quoteLiteral: (value: string) => string;
   accountAt: (username: string, host: string) => string;
+  /** Database-level privileges only this dialect has: [name, `mysql.db` column]. */
+  extraPrivileges?: ReadonlyArray<readonly [string, string]>;
 };
 
 /** The database name as a schema in a grant: exact, wildcards escaped. */
@@ -81,7 +83,123 @@ function revokePlainPatternGrantSql(
   ).join("\n");
 }
 
-/** The `GRANT` for one privilege level on one database, for one account. */
+/**
+ * Every privilege a database-level grant can hold on both engines, with the
+ * `mysql.db` column that records it. A level grants its own set, then revokes
+ * the rest, so a login made under an older, wider recipe is tightened by its
+ * next apply (a `GRANT` alone only ever adds).
+ */
+const DATABASE_PRIVILEGES: ReadonlyArray<readonly [string, string]> = [
+  ["SELECT", "Select_priv"],
+  ["INSERT", "Insert_priv"],
+  ["UPDATE", "Update_priv"],
+  ["DELETE", "Delete_priv"],
+  ["CREATE", "Create_priv"],
+  ["DROP", "Drop_priv"],
+  ["REFERENCES", "References_priv"],
+  ["INDEX", "Index_priv"],
+  ["ALTER", "Alter_priv"],
+  ["CREATE TEMPORARY TABLES", "Create_tmp_table_priv"],
+  ["LOCK TABLES", "Lock_tables_priv"],
+  ["EXECUTE", "Execute_priv"],
+  ["CREATE VIEW", "Create_view_priv"],
+  ["SHOW VIEW", "Show_view_priv"],
+  ["CREATE ROUTINE", "Create_routine_priv"],
+  ["ALTER ROUTINE", "Alter_routine_priv"],
+  ["EVENT", "Event_priv"],
+  ["TRIGGER", "Trigger_priv"],
+];
+
+/**
+ * What each level may do inside its one database.
+ *
+ * - `read-only`: read rows and view definitions. No `EXECUTE`: a stored
+ *   routine runs with its definer's rights, so a login allowed to call one
+ *   could change data through it.
+ * - `read-write`: change rows, and what ordinary app queries need: `EXECUTE`
+ *   (call routines the migration login made), `LOCK TABLES` and
+ *   `CREATE TEMPORARY TABLES` (private to the session, gone when it ends).
+ *   Nothing that creates, changes or drops a table, index, view, routine,
+ *   trigger or event.
+ * - `owner` (the migration login): everything inside its database, and no
+ *   `GRANT OPTION`.
+ * - `admin` (the Database admin login): the same, with `GRANT OPTION`.
+ */
+const LEVEL_PRIVILEGES: Record<
+  "read-write" | "read-only",
+  readonly string[]
+> = {
+  "read-only": ["SELECT", "SHOW VIEW"],
+  "read-write": [
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "EXECUTE",
+    "LOCK TABLES",
+    "CREATE TEMPORARY TABLES",
+    "SHOW VIEW",
+  ],
+};
+
+/**
+ * Revokes, from one account on one database, the privileges in `revoked` that
+ * the grant row actually holds (and `GRANT OPTION` when `withGrantOption`).
+ * MySQL refuses a `REVOKE` that names a privilege the row lacks (error 1141),
+ * so the list is built from `mysql.db` at run time and nothing runs when the
+ * row holds none of them: a repeat apply is a no-op. The caller grants first,
+ * so the row exists and the login never has less than its level in between.
+ */
+function revokeExcessSql(
+  quoting: GrantQuoting,
+  schema: string,
+  username: string,
+  host: string,
+  revoked: ReadonlyArray<readonly [string, string]>,
+  withGrantOption: boolean,
+): string {
+  const { quoteLiteral } = quoting;
+  const row = `FROM mysql.db WHERE Db = ${quoteLiteral(schema)} AND User = ${
+    quoteLiteral(username)
+  } AND Host = ${quoteLiteral(host)}`;
+  const tail = ` ON \`${schema}\`.* FROM ${quoting.accountAt(username, host)}`;
+  const statements: string[] = [];
+  const run = (variable: string, list: string, prefix: string) => {
+    statements.push(
+      `SET @${variable} = (SELECT ${list} ${row});`,
+      `SET @${variable}_sql = IF(@${variable} IS NULL OR @${variable} = '', 'DO 0', CONCAT(${
+        quoteLiteral(prefix)
+      }, @${variable}, ${quoteLiteral(tail)}));`,
+      `PREPARE ${variable} FROM @${variable}_sql;`,
+      `EXECUTE ${variable};`,
+      `DEALLOCATE PREPARE ${variable};`,
+    );
+  };
+  if (revoked.length > 0) {
+    run(
+      "tp_excess",
+      `CONCAT_WS(', ', ${
+        revoked.map(([name, column]) =>
+          `IF(${column} = 'Y', ${quoteLiteral(name)}, NULL)`
+        ).join(", ")
+      })`,
+      "REVOKE ",
+    );
+  }
+  if (withGrantOption) {
+    run(
+      "tp_excess_option",
+      "IF(Grant_priv = 'Y', 'GRANT OPTION', NULL)",
+      "REVOKE ",
+    );
+  }
+  return statements.join("\n");
+}
+
+/**
+ * The `GRANT` for one privilege level on one database, for one account,
+ * followed by the revokes that take back what the level does not hold.
+ */
 export function grantOnDatabaseSql(
   quoting: GrantQuoting,
   database: string,
@@ -91,17 +209,38 @@ export function grantOnDatabaseSql(
 ): string {
   const db = quoteGrantSchema(quoting, database);
   const account = quoting.accountAt(username, host);
+  // The name as `mysql.db` stores it: wildcards escaped, no backticks.
+  const schema = db.slice(1, -1);
+  const revokeFrom = (
+    held: readonly string[],
+  ) =>
+    revokeExcessSql(
+      quoting,
+      schema,
+      username,
+      host,
+      [
+        ...DATABASE_PRIVILEGES,
+        ...(quoting.extraPrivileges ?? []),
+      ].filter(([name]) => !held.includes(name)),
+      true,
+    );
   switch (privilege) {
-    case "owner":
+    case "admin":
       return `GRANT ALL PRIVILEGES ON ${db}.* TO ${account} WITH GRANT OPTION;`;
+    case "owner":
+      return [
+        `GRANT ALL PRIVILEGES ON ${db}.* TO ${account};`,
+        revokeExcessSql(quoting, schema, username, host, [], true),
+      ].join("\n");
     case "read-write":
-      return (
-        `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, ` +
-        `CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, ` +
-        `CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON ${db}.* TO ${account};`
-      );
-    case "read-only":
-      return `GRANT SELECT, SHOW VIEW ON ${db}.* TO ${account};`;
+    case "read-only": {
+      const held = LEVEL_PRIVILEGES[privilege];
+      return [
+        `GRANT ${held.join(", ")} ON ${db}.* TO ${account};`,
+        revokeFrom(held),
+      ].join("\n");
+    }
     default: {
       const _exhaustive: never = privilege;
       throw new Error(`unsupported privilege: ${_exhaustive}`);

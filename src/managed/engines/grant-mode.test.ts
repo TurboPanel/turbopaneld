@@ -24,8 +24,8 @@ const test = Deno.test.bind(Deno);
 /** Captured from trunk before the grant-mode branches existed. */
 const GOLDEN: Record<string, string> = {
   __MARIADB__:
-    "6f02baf9d2f1e4f4ebb6155e740d970341909d0d24155539c87def40089657ef",
-  __MYSQL__: "ca708e4081dad384b5ed7c4093c70bed7e8400d649b7c61d6da9369b77555bf0",
+    "f1a5ed4d116c8a040e74342522a478f70e6ea25936d1f7ce7063daf217667c93",
+  __MYSQL__: "91676a94ee6afa8036e611a9ddc83fda25379b6cc23a4669285dcfb20fd97843",
   __POSTGRES__:
     "d5357cfaad5de77daffd3a65b5e665c2a7db6913f943fee11963f0b6ab1db4cf",
 };
