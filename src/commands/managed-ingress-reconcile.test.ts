@@ -2037,6 +2037,60 @@ test({
 
 test({
   name:
+    "handleManagedIngressReconcile recreates a container left off its IPv6 network by a failed up",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const admin = createFakeProxySqlAdmin();
+        admin.interfaces = { mysql: "0.0.0.0:13306", pgsql: "0.0.0.0:15432" };
+        const deps = {
+          decryptSecrets: decryptSecretsEcho,
+          ensureDocker: () => Promise.resolve(),
+        };
+        await handleManagedIngressReconcile(
+          basePayload("0.0.0.0", "::"),
+          new Date().toISOString(),
+          { ...deps, runDocker: restartingRun(admin, []) },
+        );
+        // Same desired state, but the running container only has the
+        // managed network (the up that should have attached it failed).
+        const calls: string[][] = [];
+        const inner = restartingRun(admin, calls);
+        await handleManagedIngressReconcile(
+          basePayload("0.0.0.0", "::"),
+          new Date().toISOString(),
+          {
+            ...deps,
+            runDocker: (args, options) => {
+              if (args[0] === "inspect" && args[1] === "-f") {
+                return okResult(`${MANAGED_NETWORK}\n`);
+              }
+              if (args[0] === "compose" && args.includes("ps")) {
+                calls.push(args);
+                return okResult(runningProxySqlPsStdout());
+              }
+              return inner(args, options);
+            },
+          },
+        );
+        assertEquals(
+          calls.some((args) => args[0] === "compose" && args.includes("up")),
+          true,
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
     "handleManagedIngressReconcile fails when ProxySQL comes back without its new listeners",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {

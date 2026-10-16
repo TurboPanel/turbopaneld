@@ -47,6 +47,7 @@ import {
   readProxySqlRuntimeServers,
 } from "../managed/proxysql-admin.ts";
 import {
+  PROXYSQL_IPV6_NETWORK,
   proxySqlBindsUseIpv6,
   proxySqlIpv6ListenProbeArgs,
   proxySqlIpv6NetworkSupport,
@@ -84,6 +85,7 @@ import {
   proxysqlComposePath,
   proxysqlConfigPath,
   proxysqlMonitorCnfPath,
+  proxysqlProject,
   proxysqlTlsDir,
 } from "../managed/engine-paths.ts";
 
@@ -881,9 +883,18 @@ async function reconcileManagedIngress(
     parsed.managedNetwork,
   );
   const migrateManagedNetwork = networkRenamed || attachedToStale;
+  // A compose up that failed after the file was written leaves the old
+  // container running without ProxySQL's IPv6 network while the file on disk
+  // already matches; a restart would not attach it, only a recreate does.
+  const missesIpv6Network =
+    readProxySqlIpv6SubnetFromCompose(nextComposeText) !== null &&
+    attachedNetworks.length > 0 &&
+    !attachedNetworks.includes(
+      `${proxysqlProject(descriptor.serviceId)}_${PROXYSQL_IPV6_NETWORK}`,
+    );
   const composeNeedsUp =
     previousComposeText?.trimEnd() !== nextComposeText.trimEnd() ||
-    migrateManagedNetwork;
+    migrateManagedNetwork || missesIpv6Network;
   let restartNeeded = composeNeedsUp ||
     staticConfigSectionChanged(previousConfig, nextConfig) ||
     !sameBindAddresses(previousBindAddresses, bindAddresses);
