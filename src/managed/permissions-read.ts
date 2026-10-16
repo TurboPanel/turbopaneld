@@ -39,6 +39,7 @@ import { getManagedEngineRuntime } from "./engines/index.ts";
 import type {
   ManagedEngineContext,
   ManagedEngineRuntime,
+  ManagedPermissionsReadClock,
 } from "./engines/types.ts";
 import {
   type LocalEngineContextDeps,
@@ -70,6 +71,8 @@ export type ManagedPermissionsReadDeps = LocalEngineContextDeps & {
     engine: ManagedEngineCode,
   ) => Promise<{ engine: ManagedEngineRuntime; ctx: ManagedEngineContext }>;
   now?: () => Date;
+  /** Test seam: the readers' time budget clock. */
+  clock?: ManagedPermissionsReadClock;
 };
 
 type ValidRequest = {
@@ -77,6 +80,8 @@ type ValidRequest = {
   engine: ManagedEngineCode;
   logins: string[];
   databases: string[];
+  /** Postgres: more than {@link OBSERVED_MAX_DATABASES} named; the rest dropped. */
+  databasesCut: boolean;
 };
 
 function isEngineCode(value: unknown): value is ManagedEngineCode {
@@ -88,11 +93,21 @@ function nameList(
   value: unknown,
   max: number,
   what: string,
-): string[] | string {
+  overflow: "refuse" | "cut" = "refuse",
+): { names: string[]; cut: boolean } | string {
   if (!Array.isArray(value)) return `${what} must be a list`;
-  if (value.length > max) return `at most ${max} ${what} per request`;
+  if (overflow === "refuse" && value.length > max) {
+    return `at most ${max} ${what} per request`;
+  }
   const out: string[] = [];
-  for (const entry of value) {
+  for (const [index, entry] of value.entries()) {
+    if (out.length === max) {
+      // Keep the first `max` distinct names; only the rest is not looked at.
+      return {
+        names: out,
+        cut: value.slice(index).some((e) => !out.includes(e)),
+      };
+    }
     if (
       typeof entry !== "string" || entry.length === 0 ||
       entry.length > OBSERVED_MAX_NAME_CHARS
@@ -101,7 +116,7 @@ function nameList(
     }
     if (!out.includes(entry)) out.push(entry);
   }
-  return out;
+  return { names: out, cut: false };
 }
 
 /** Shape checks; the engine reader applies its own identifier checks. */
@@ -119,18 +134,25 @@ export function validatePermissionsRequest(
   }
   const logins = nameList(input.logins, OBSERVED_MAX_LOGINS, "logins");
   if (typeof logins === "string") return { error: logins };
+  const request: ValidRequest = {
+    managedId: input.managedId,
+    engine: input.engine,
+    logins: logins.names,
+    databases: [],
+    databasesCut: false,
+  };
+  // MySQL / MariaDB have no per-database read: the list is ignored, unread.
+  if (input.engine !== "postgres") return request;
   const databases = nameList(
     input.databases,
     OBSERVED_MAX_DATABASES,
     "databases",
+    "cut",
   );
   if (typeof databases === "string") return { error: databases };
-  return {
-    managedId: input.managedId,
-    engine: input.engine,
-    logins,
-    databases: input.engine === "postgres" ? databases : [],
-  };
+  request.databases = databases.names;
+  request.databasesCut = databases.cut;
+  return request;
 }
 
 // --- bounds -----------------------------------------------------------------
@@ -412,7 +434,15 @@ export async function readManagedPermissions(
     const report = await read(resolved.ctx, {
       logins: request.logins,
       databases: request.databases,
-    });
+    }, deps.clock);
+    if (request.databasesCut) {
+      // Databases past the limit were never read: their grants are missing.
+      for (const login of report.logins) {
+        if (login.exists) {
+          login.truncated = true;
+        }
+      }
+    }
     const observedAt = (deps.now ?? (() =>
       new Date()))().toISOString();
     const permissions: ManagedPermissionsObserved = {
@@ -428,6 +458,12 @@ export async function readManagedPermissions(
     }
     if (report.databasesRead && request.engine === "postgres") {
       permissions.databasesRead = report.databasesRead.slice(
+        0,
+        OBSERVED_MAX_DATABASES,
+      );
+    }
+    if (report.databasesFailed?.length && request.engine === "postgres") {
+      permissions.databasesFailed = report.databasesFailed.slice(
         0,
         OBSERVED_MAX_DATABASES,
       );

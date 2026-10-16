@@ -85,6 +85,7 @@ import type {
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
   ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
   ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
@@ -283,11 +284,9 @@ async function runMysql(
   }
 }
 
-/** `raw`: `-r`, so backslashes in names (`\_`) are printed as the server sends them. */
 async function runMysqlQuery(
   ctx: ManagedEngineContext,
   sql: string,
-  raw = false,
 ): Promise<string> {
   const result = await execMysql(
     ctx,
@@ -298,7 +297,6 @@ async function runMysqlQuery(
       ctx.rootUsername,
       "-N",
       "-B",
-      ...(raw ? ["-r"] : []),
       "-e",
       sql,
     ],
@@ -852,11 +850,13 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
   readPermissions(
     ctx: ManagedEngineContext,
     request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
   ): Promise<ManagedPermissionsEngineReport> {
     return readMysqlFamilyPermissions(
       "mysql",
       request,
-      (sql) => runMysqlQuery(ctx, sql, true),
+      (sql) => runMysqlQuery(ctx, sql),
+      clock,
     );
   },
 

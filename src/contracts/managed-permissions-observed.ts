@@ -51,6 +51,12 @@ export type ObservedGrant = {
   host?: string;
   /** Postgres: the role that made the grant. */
   grantor?: string;
+  /**
+   * MySQL / MariaDB database level: the database name (as printed, escapes
+   * undone) holds an unescaped `_` or `%`, so the grant is a wildcard that
+   * matches every database the pattern fits, not one database.
+   */
+  pattern?: boolean;
 };
 
 /** A Postgres default privilege: applied to objects a creator role makes later. */
@@ -125,6 +131,12 @@ export type ManagedPermissionsObserved = {
   observedAt: string;
   /** Postgres: the databases whose objects were read. */
   databasesRead?: string[];
+  /**
+   * Postgres: databases asked for that could not be read (an error other
+   * than "gone", or the time budget ran out). Their grants are missing and
+   * every login is `truncated`.
+   */
+  databasesFailed?: string[];
   logins: ObservedLogin[];
 };
 

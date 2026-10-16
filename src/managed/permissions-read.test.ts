@@ -124,12 +124,40 @@ test("request validation: ids, engine, list sizes and name lengths", () => {
     validatePermissionsRequest(input({ logins: ["x".repeat(257)] })),
     { error: "logins must be names of 1 to 256 characters" },
   );
-  assertEquals(
-    validatePermissionsRequest(
-      input({ databases: Array.from({ length: 101 }, (_, i) => `d${i}`) }),
-    ),
-    { error: "at most 100 databases per request" },
+  // Postgres: past 100 databases the list is cut, not refused.
+  const many = validatePermissionsRequest(
+    input({ databases: Array.from({ length: 150 }, (_, i) => `d${i}`) }),
   );
+  if ("error" in many) throw new TypeError(many.error);
+  assertEquals(many.databases.length, 100);
+  assertEquals(many.databases.at(-1), "d99");
+  assertEquals(many.databasesCut, true);
+  // Repeats past the limit are not a cut.
+  const repeated = validatePermissionsRequest(
+    input({
+      databases: [...Array.from({ length: 100 }, (_, i) => `d${i}`), "d0"],
+    }),
+  );
+  if ("error" in repeated) throw new TypeError(repeated.error);
+  assertEquals(repeated.databasesCut, false);
+  assertEquals(
+    validatePermissionsRequest(input({ databases: [""] })),
+    { error: "databases must be names of 1 to 256 characters" },
+  );
+  // MySQL / MariaDB ignore the list, whatever it holds.
+  for (
+    const databases of [
+      undefined,
+      "x",
+      Array.from({ length: 5000 }, () => 7),
+    ]
+  ) {
+    const ignored = validatePermissionsRequest(
+      input({ engine: "mariadb", databases }),
+    );
+    if ("error" in ignored) throw new TypeError(ignored.error);
+    assertEquals(ignored.databases, []);
+  }
   // Duplicates collapse; MySQL-family requests drop the database list.
   assertEquals(
     validatePermissionsRequest(
@@ -140,6 +168,7 @@ test("request validation: ids, engine, list sizes and name lengths", () => {
       engine: "mysql",
       logins: ["u1", "u2"],
       databases: [],
+      databasesCut: false,
     },
   );
 });
@@ -357,4 +386,53 @@ test("an engine without a reader is refused", async () => {
     ok: false,
     error: "engine postgres cannot report permissions",
   });
+});
+
+test("failed databases pass through and a cut database list marks logins", async () => {
+  let seenClock: unknown;
+  const clock = { now: () => 0, budgetMs: 1 };
+  const { engine, ctx } = fakeEngine({ logins: [] });
+  const result = await readManagedPermissions(
+    input({ databases: Array.from({ length: 120 }, (_, i) => `d${i}`) }),
+    {
+      clock,
+      resolve: () =>
+        Promise.resolve({
+          ctx,
+          engine: {
+            ...engine,
+            readPermissions: (_ctx, request, given) => {
+              seenClock = given;
+              assertEquals(request.databases.length, 100);
+              return Promise.resolve({
+                databasesRead: ["d0"],
+                databasesFailed: ["d1"],
+                logins: [
+                  {
+                    username: "u1",
+                    exists: true,
+                    memberships: [],
+                    grants: [],
+                    defaults: [],
+                  },
+                  {
+                    username: "u2",
+                    exists: false,
+                    memberships: [],
+                    grants: [],
+                    defaults: [],
+                  },
+                ],
+              });
+            },
+          },
+        }),
+    },
+  );
+  if (!result.ok) throw new TypeError(result.error);
+  assertEquals(seenClock, clock);
+  assertEquals(result.permissions.databasesRead, ["d0"]);
+  assertEquals(result.permissions.databasesFailed, ["d1"]);
+  assertEquals(result.permissions.logins[0]?.truncated, true);
+  assertEquals(result.permissions.logins[1]?.truncated, undefined);
 });

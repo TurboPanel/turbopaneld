@@ -82,6 +82,7 @@ import type {
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
   ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
   ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
   ManagedSlotRetention,
@@ -1195,11 +1196,13 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   readPermissions(
     ctx: ManagedEngineContext,
     request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
   ): Promise<ManagedPermissionsEngineReport> {
     return readPostgresPermissions(
       request,
       ctx.defaultDatabase,
       (database, sql) => queryPsqlJson(ctx, database, sql),
+      clock,
     );
   },
 

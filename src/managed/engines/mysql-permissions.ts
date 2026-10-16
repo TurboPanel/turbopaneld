@@ -19,9 +19,11 @@ import type {
   ObservedMembership,
 } from "../../contracts/cell-messages.ts";
 import { quoteAccount, quoteLiteral } from "./mysql-sql.ts";
-import type {
-  ManagedPermissionsEngineReport,
-  ManagedPermissionsReadRequest,
+import {
+  type ManagedPermissionsEngineReport,
+  type ManagedPermissionsReadClock,
+  type ManagedPermissionsReadRequest,
+  permissionsReadDeadline,
 } from "./types.ts";
 
 export type MysqlFamilyFlavour = "mysql" | "mariadb";
@@ -33,6 +35,14 @@ export type MysqlQuery = (sql: string) => Promise<string>;
 export const MYSQL_MAX_ROLES_FOLLOWED = 50;
 const MYSQL_MAX_ROLE_DEPTH = 4;
 const ACCOUNT_MARK = "tp-permissions-account";
+const BACKSLASH = "\\";
+/** The client's batch-mode escapes (`mysql -B` without `-r`). */
+const BATCH_ESCAPES: Readonly<Record<string, string>> = {
+  n: "\n",
+  t: "\t",
+  "0": "\0",
+  [BACKSLASH]: BACKSLASH,
+};
 
 // --- tokenizer ------------------------------------------------------------
 
@@ -119,7 +129,7 @@ export type ParsedGrantStatement =
     scope:
       | { level: "global" }
       | { level: "proxy" }
-      | { level: "database"; database: string }
+      | { level: "database"; database: string; pattern: boolean }
       | { level: "table"; database: string; object: string }
       | { level: "routine"; database: string; object: string };
     grantOption: boolean;
@@ -201,9 +211,29 @@ function nameToken(token: Token | undefined): string | undefined {
   return undefined;
 }
 
-/** `\_` and `\%` in a database-level name are escaped wildcards. */
-function unescapeWildcards(name: string): string {
-  return name.replaceAll(String.raw`\_`, "_").replaceAll(String.raw`\%`, "%");
+/**
+ * A database-level name as MySQL prints it: `\_` and `\%` are literal
+ * characters (escapes undone), a bare `_` or `%` is a wildcard (`pattern`).
+ */
+export function unescapeWildcards(
+  name: string,
+): { name: string; pattern: boolean } {
+  let out = "";
+  let pattern = false;
+  let i = 0;
+  while (i < name.length) {
+    const ch = name[i]!;
+    const next = name[i + 1];
+    if (ch === BACKSLASH && (next === "_" || next === "%")) {
+      out += next;
+      i += 2;
+      continue;
+    }
+    if (ch === "_" || ch === "%") pattern = true;
+    out += ch;
+    i += 1;
+  }
+  return { name: out, pattern };
 }
 
 type Scope = Extract<ParsedGrantStatement, { kind: "privileges" }>["scope"];
@@ -229,9 +259,9 @@ function parseScope(tokens: Token[], isProxy: boolean): Scope | null {
   const database = nameToken(first);
   if (database === undefined) return null;
   if (isPunct(second, "*")) {
-    return routine
-      ? null
-      : { level: "database", database: unescapeWildcards(database) };
+    if (routine) return null;
+    const { name, pattern } = unescapeWildcards(database);
+    return { level: "database", database: name, pattern };
   }
   const object = nameToken(second);
   if (object === undefined) return null;
@@ -377,6 +407,7 @@ export function grantsFromStatement(
         level: "database",
         database: scope.database,
         privileges: plain,
+        ...(scope.pattern ? { pattern: true } : {}),
       });
       break;
     case "routine":
@@ -453,6 +484,30 @@ export function accountsSql(
     "'0') NOT IN ('1', 'true') ORDER BY User, Host;";
 }
 
+/**
+ * Undo the client's batch-mode escapes in one field (`\\`, `\n`, `\t`,
+ * `\0`). Raw output (`-r`) is never used: there a name holding a newline
+ * would split into a second line that could pass for a GRANT. Escaped, every
+ * record stays on one line and the newline comes back inside its name.
+ */
+export function unescapeBatchField(field: string): string {
+  if (!field.includes(BACKSLASH)) return field;
+  let out = "";
+  let i = 0;
+  while (i < field.length) {
+    const ch = field[i]!;
+    const next = field[i + 1];
+    if (ch !== BACKSLASH || next === undefined) {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    out += BATCH_ESCAPES[next] ?? `${BACKSLASH}${next}`;
+    i += 2;
+  }
+  return out;
+}
+
 /** `User\tHost\tlocked` rows → accounts per login. */
 export function parseAccountRows(
   stdout: string,
@@ -460,7 +515,7 @@ export function parseAccountRows(
   const out = new Map<string, ObservedAccount[]>();
   for (const line of stdout.split("\n")) {
     if (line.trim().length === 0) continue;
-    const [user, host, locked] = line.split("\t");
+    const [user, host, locked] = line.split("\t").map(unescapeBatchField);
     if (user === undefined || host === undefined) continue;
     const account: ObservedAccount = { host };
     if (locked === "Y") account.locked = true;
@@ -494,45 +549,82 @@ export function splitShowGrantsBatch(
         : -1;
       continue;
     }
-    if (current >= 0 && line.trim().length > 0) out[current]!.push(line);
+    if (current >= 0 && line.trim().length > 0) {
+      out[current]!.push(unescapeBatchField(line));
+    }
   }
   return out;
 }
 
+type Deadline = { expired: () => boolean };
+
+/** Grant lines per target; `unread[i]` when target `i` could not be read. */
+type ShowGrantsRead = { lines: string[][]; unread: boolean[] };
+
 /**
- * Grant lines per target. One batch first; when a target vanished between
- * the account read and the batch (the batch stops at its error), each
- * target is read alone and a missing one reads as no grants.
+ * Grant lines per target. One batch first; when it fails (an account
+ * vanished between the reads stops the batch at its error), each target is
+ * read alone until the time budget runs out. A target not read is `unread`,
+ * so its login is reported `truncated` rather than as having no grants.
  */
 async function readShowGrants(
   query: MysqlQuery,
   targets: readonly string[],
-): Promise<string[][]> {
-  if (targets.length === 0) return [];
+  deadline: Deadline,
+): Promise<ShowGrantsRead> {
+  const unread = targets.map(() => false);
+  if (targets.length === 0) return { lines: [], unread };
+  if (deadline.expired()) {
+    return { lines: targets.map(() => []), unread: targets.map(() => true) };
+  }
   try {
-    return splitShowGrantsBatch(
-      await query(showGrantsBatchSql(targets)),
-      targets.length,
-    );
+    return {
+      lines: splitShowGrantsBatch(
+        await query(showGrantsBatchSql(targets)),
+        targets.length,
+      ),
+      unread,
+    };
   } catch {
-    const out: string[][] = [];
-    for (const target of targets) {
+    const lines: string[][] = [];
+    for (const [index, target] of targets.entries()) {
+      if (deadline.expired()) {
+        lines.push([]);
+        unread[index] = true;
+        continue;
+      }
       try {
-        out.push(
+        lines.push(
           splitShowGrantsBatch(
             await query(showGrantsBatchSql([target])),
             1,
           )[0]!,
         );
       } catch {
-        out.push([]);
+        lines.push([]);
+        unread[index] = true;
       }
     }
-    return out;
+    return { lines, unread };
   }
 }
 
-type RoleGrants = { grants: ObservedGrant[]; roles: RoleRef[] };
+type RoleGrants = {
+  grants: ObservedGrant[];
+  roles: RoleRef[];
+  /** Not fully read: a REVOKE line, a limit, the time budget or an error. */
+  partial: boolean;
+};
+
+/**
+ * MySQL 8+ with `partial_revokes` prints `REVOKE ... ON db.* FROM ...` lines
+ * that take privileges back from a global grant. They are not modelled
+ * (a grant item has no "minus"); the login is reported `truncated` instead
+ * so the global grant is not read as the whole truth.
+ */
+function isRevokeLine(line: string): boolean {
+  return /^\s*REVOKE\s/i.test(line);
+}
 
 /**
  * Whether a statement is about `owner` itself. MariaDB's `SHOW GRANTS FOR
@@ -554,10 +646,16 @@ function parseLines(
 ): {
   grants: ObservedGrant[];
   roles: { role: RoleRef; admin: boolean }[];
+  partial: boolean;
 } {
   const grants: ObservedGrant[] = [];
   const roles: { role: RoleRef; admin: boolean }[] = [];
+  let partial = false;
   for (const line of lines) {
+    if (isRevokeLine(line)) {
+      partial = true;
+      continue;
+    }
     const statement = parseShowGrantsLine(line);
     if (!statement || !grantedTo(statement, owner)) continue;
     if (statement.kind === "roles") {
@@ -568,7 +666,7 @@ function parseLines(
       grants.push(...grantsFromStatement(statement, extra));
     }
   }
-  return { grants, roles };
+  return { grants, roles, partial };
 }
 
 /** Grants held by each role (and the roles it holds), read breadth first. */
@@ -576,37 +674,62 @@ async function readRoleGrants(
   flavour: MysqlFamilyFlavour,
   query: MysqlQuery,
   start: RoleRef[],
-): Promise<Map<string, RoleGrants>> {
+  deadline: Deadline,
+): Promise<{ known: Map<string, RoleGrants>; cut: boolean }> {
   const known = new Map<string, RoleGrants>();
+  let cut = false;
   let frontier = start;
   for (let depth = 0; depth < MYSQL_MAX_ROLE_DEPTH; depth += 1) {
-    const pending = frontier.filter((role) => !known.has(roleKey(role)))
+    const unseen = frontier.filter((role) => !known.has(roleKey(role)))
       .filter((role, index, all) =>
         all.findIndex((other) => roleKey(other) === roleKey(role)) === index
-      )
-      .slice(0, Math.max(0, MYSQL_MAX_ROLES_FOLLOWED - known.size));
-    const readable = pending
-      .map((role) => ({ role, target: grantsTarget(flavour, role) }))
-      .filter((entry): entry is { role: RoleRef; target: string } =>
-        entry.target !== undefined
       );
+    const pending = unseen.slice(
+      0,
+      Math.max(0, MYSQL_MAX_ROLES_FOLLOWED - known.size),
+    );
+    if (pending.length < unseen.length) cut = true; // role limit
+    const entries = pending.map((role) => ({
+      role,
+      target: grantsTarget(flavour, role),
+    }));
+    // A role whose name cannot be quoted safely is a membership only.
+    if (entries.some((entry) => entry.target === undefined)) cut = true;
+    const readable = entries.filter((
+      entry,
+    ): entry is { role: RoleRef; target: string } =>
+      entry.target !== undefined
+    );
     for (const role of pending) {
-      known.set(roleKey(role), { grants: [], roles: [] });
+      known.set(roleKey(role), { grants: [], roles: [], partial: true });
     }
-    if (readable.length === 0) break;
-    const lines = await readShowGrants(query, readable.map((e) => e.target));
+    if (readable.length === 0) {
+      frontier = [];
+      break;
+    }
+    const read = await readShowGrants(
+      query,
+      readable.map((e) => e.target),
+      deadline,
+    );
     const next: RoleRef[] = [];
     readable.forEach((entry, index) => {
-      const parsed = parseLines(lines[index] ?? [], entry.role, {
+      const parsed = parseLines(read.lines[index] ?? [], entry.role, {
         via: roleLabel(entry.role),
       });
       const roles = parsed.roles.map((r) => r.role);
-      known.set(roleKey(entry.role), { grants: parsed.grants, roles });
+      known.set(roleKey(entry.role), {
+        grants: parsed.grants,
+        roles,
+        partial: parsed.partial || read.unread[index] === true,
+      });
       next.push(...roles);
     });
     frontier = next;
   }
-  return known;
+  // Depth limit: roles still to follow were never read.
+  if (frontier.some((role) => !known.has(roleKey(role)))) cut = true;
+  return { known, cut };
 }
 
 /** Every role reachable from `roles`, nearest first, each once. */
@@ -640,13 +763,15 @@ type AccountRead = {
   host: string;
   grants: ObservedGrant[];
   roles: { role: RoleRef; admin: boolean }[];
+  partial: boolean;
 };
 
 function assembleLogin(
   username: string,
   accounts: ObservedAccount[] | undefined,
   reads: AccountRead[],
-  roleGrants: Map<string, RoleGrants>,
+  roleGrants: { known: Map<string, RoleGrants>; cut: boolean },
+  accountSkipped: boolean,
 ): ObservedLogin {
   if (!accounts || accounts.length === 0) {
     return {
@@ -665,13 +790,20 @@ function assembleLogin(
     grants: [],
     defaults: [],
   };
+  let partial = accountSkipped;
   for (const read of reads) {
+    partial ||= read.partial;
+    if (read.roles.length > 0 && roleGrants.cut) partial = true;
     login.grants.push(...read.grants);
     for (const { role, admin } of read.roles) {
       login.memberships.push({ role: roleLabel(role), admin, host: read.host });
     }
-    const reachable = reachableRoles(read.roles.map((r) => r.role), roleGrants);
+    const reachable = reachableRoles(
+      read.roles.map((r) => r.role),
+      roleGrants.known,
+    );
     for (const { role, through } of reachable) {
+      partial ||= roleGrants.known.get(roleKey(role))?.partial ?? true;
       if (through) {
         const membership: ObservedMembership = {
           role: roleLabel(role),
@@ -680,11 +812,12 @@ function assembleLogin(
         };
         login.memberships.push(membership);
       }
-      for (const grant of roleGrants.get(roleKey(role))?.grants ?? []) {
+      for (const grant of roleGrants.known.get(roleKey(role))?.grants ?? []) {
         login.grants.push({ ...grant, host: read.host });
       }
     }
   }
+  if (partial) login.truncated = true;
   return login;
 }
 
@@ -710,8 +843,10 @@ export async function readMysqlFamilyPermissions(
   flavour: MysqlFamilyFlavour,
   request: ManagedPermissionsReadRequest,
   query: MysqlQuery,
+  clock: ManagedPermissionsReadClock = {},
 ): Promise<ManagedPermissionsEngineReport> {
   validateLogins(request.logins);
+  const deadline = permissionsReadDeadline(clock);
   const serverVersion = firstLine(await query("SELECT VERSION();"));
   const report: ManagedPermissionsEngineReport = { logins: [] };
   if (serverVersion) report.serverVersion = serverVersion;
@@ -721,36 +856,53 @@ export async function readMysqlFamilyPermissions(
     await query(accountsSql(flavour, request.logins)),
   );
   const targets: { username: string; host: string; target: string }[] = [];
+  const skipped = new Set<string>();
   for (const username of request.logins) {
     for (const account of accounts.get(username) ?? []) {
-      targets.push({
-        username,
+      const target = grantsTarget(flavour, {
+        name: username,
         host: account.host,
-        target: `${quoteAccount(username)}@${quoteLiteral(account.host)}`,
       });
+      if (target === undefined) {
+        // A host the literal quoting refuses (control characters): that
+        // account is listed but its grants are not read.
+        skipped.add(username);
+        continue;
+      }
+      targets.push({ username, host: account.host, target });
     }
   }
-  const lines = await readShowGrants(query, targets.map((t) => t.target));
-  const reads: AccountRead[] = targets.map((target, index) => ({
-    username: target.username,
-    host: target.host,
-    ...parseLines(
-      lines[index] ?? [],
+  const read = await readShowGrants(
+    query,
+    targets.map((t) => t.target),
+    deadline,
+  );
+  const reads: AccountRead[] = targets.map((target, index) => {
+    const parsed = parseLines(
+      read.lines[index] ?? [],
       { name: target.username, host: target.host },
       { host: target.host },
-    ),
-  }));
+    );
+    return {
+      username: target.username,
+      host: target.host,
+      ...parsed,
+      partial: parsed.partial || read.unread[index] === true,
+    };
+  });
   const roleGrants = await readRoleGrants(
     flavour,
     query,
-    reads.flatMap((read) => read.roles.map((r) => r.role)),
+    reads.flatMap((entry) => entry.roles.map((r) => r.role)),
+    deadline,
   );
   report.logins = request.logins.map((username) =>
     assembleLogin(
       username,
       accounts.get(username),
-      reads.filter((read) => read.username === username),
+      reads.filter((entry) => entry.username === username),
       roleGrants,
+      skipped.has(username),
     )
   );
   return report;

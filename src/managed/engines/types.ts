@@ -63,8 +63,31 @@ export type ManagedPermissionsReadRequest = {
 export type ManagedPermissionsEngineReport = {
   serverVersion?: string;
   databasesRead?: string[];
+  databasesFailed?: string[];
   logins: ObservedLogin[];
 };
+
+/**
+ * Wall-clock budget for one permissions read. The control plane waits 15 s;
+ * a reader stops starting new queries after this and reports what it skipped.
+ */
+export const PERMISSIONS_READ_BUDGET_MS = 10_000;
+
+/** Test seams for the readers' time budget. */
+export type ManagedPermissionsReadClock = {
+  /** Milliseconds, monotonic enough for a budget (`performance.now`). */
+  now?: () => number;
+  budgetMs?: number;
+};
+
+/** `expired()` turns true once `budgetMs` has passed since creation. */
+export function permissionsReadDeadline(
+  clock: ManagedPermissionsReadClock = {},
+): { expired: () => boolean } {
+  const now = clock.now ?? (() => performance.now());
+  const end = now() + (clock.budgetMs ?? PERMISSIONS_READ_BUDGET_MS);
+  return { expired: () => now() >= end };
+}
 
 export type ManagedEngineRuntime = {
   engine: ManagedEngineCode;
@@ -100,6 +123,7 @@ export type ManagedEngineRuntime = {
   readPermissions?(
     ctx: ManagedEngineContext,
     request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
   ): Promise<ManagedPermissionsEngineReport>;
   applyCredentials(
     ctx: ManagedEngineContext,

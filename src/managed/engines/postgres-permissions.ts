@@ -29,9 +29,11 @@ import type {
   ObservedMembership,
 } from "../../contracts/cell-messages.ts";
 import { quoteIdentifier, quoteLiteral } from "./postgres-sql.ts";
-import type {
-  ManagedPermissionsEngineReport,
-  ManagedPermissionsReadRequest,
+import {
+  type ManagedPermissionsEngineReport,
+  type ManagedPermissionsReadClock,
+  type ManagedPermissionsReadRequest,
+  permissionsReadDeadline,
 } from "./types.ts";
 
 /** Run one SQL script in `database`; resolves to psql's stdout (`-A -t`). */
@@ -49,7 +51,7 @@ const PARAMETER_ACL_VERSION = 150000;
 function readOnly(sql: string): string {
   return [
     "BEGIN READ ONLY;",
-    "SET LOCAL statement_timeout = '30s';",
+    "SET LOCAL statement_timeout = '5s';",
     sql,
     "COMMIT;",
   ].join("\n");
@@ -697,16 +699,30 @@ function validateNames(request: ManagedPermissionsReadRequest): void {
 }
 
 /**
- * Read the report. `query(database, sql)` runs one read-only script; a
- * database that is gone or refuses the connection is skipped (left out of
- * `databasesRead`), any other failure throws.
+ * psql's words for a database that was dropped or closed to connections
+ * after it was listed: skipped silently. Anything else is a failure.
+ */
+function isDatabaseGone(err: unknown): boolean {
+  const text = err instanceof Error ? err.message : String(err);
+  return /database "[^"]*" does not exist/.test(text) ||
+    text.includes("is not currently accepting connections");
+}
+
+/**
+ * Read the report. `query(database, sql)` runs one read-only script. A
+ * database that is gone or closed to connections is skipped (left out of
+ * `databasesRead`); one that fails otherwise, or is not reached within the
+ * time budget, is listed in `databasesFailed` and every login is
+ * `truncated`. A failure on the admin database throws.
  */
 export async function readPostgresPermissions(
   request: ManagedPermissionsReadRequest,
   adminDatabase: string,
   query: PostgresJsonQuery,
+  clock: ManagedPermissionsReadClock = {},
 ): Promise<ManagedPermissionsEngineReport> {
   validateNames(request);
+  const deadline = permissionsReadDeadline(clock);
   const version = parsePostgresVersion(
     await query(adminDatabase, postgresVersionSql()),
   );
@@ -719,6 +735,7 @@ export async function readPostgresPermissions(
     for (const oid of state.sources.keys()) grantees.add(oid);
   }
   const databasesRead: string[] = [];
+  const databasesFailed: string[] = [];
   let truncated = false;
   if (grantees.size > 0) {
     const shared = parsePostgresSharedAcl(
@@ -740,17 +757,25 @@ export async function readPostgresPermissions(
       : [];
     const sql = postgresDatabaseAclSql([...grantees]);
     for (const database of connectable) {
+      if (deadline.expired()) {
+        databasesFailed.push(database); // out of time: not read
+        continue;
+      }
       let acl: PgDatabaseAcl;
       try {
         // Sequential on purpose: one connection at a time per request.
         acl = parsePostgresDatabaseAcl(await query(database, sql));
-      } catch {
-        continue; // dropped or not connectable since it was listed
+      } catch (err) {
+        // Dropped, or closed to connections, since it was listed: nothing
+        // to read. Any other failure is reported, never shown as "no grants".
+        if (!isDatabaseGone(err)) databasesFailed.push(database);
+        continue;
       }
       attributeDatabaseAcl(acl, states);
       truncated ||= hitRowLimit(databaseLists(acl));
       databasesRead.push(acl.db);
     }
+    truncated ||= databasesFailed.length > 0;
   }
   if (truncated) {
     for (const state of states) {
@@ -761,6 +786,7 @@ export async function readPostgresPermissions(
     logins: states.map((state) => state.login),
     databasesRead,
   };
+  if (databasesFailed.length > 0) report.databasesFailed = databasesFailed;
   if (version.text) report.serverVersion = version.text;
   return report;
 }

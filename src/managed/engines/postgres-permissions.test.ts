@@ -187,15 +187,26 @@ function fakePsql(perDatabase: Record<string, unknown>) {
 test("report attributes ACL rows to the login, its inherited roles and PUBLIC", async () => {
   const psql = fakePsql({
     appdb: APPDB,
-    dropped: new Error("psql failed: database does not exist"),
+    dropped: new Error(
+      'psql failed: connection to server on socket failed: FATAL:  database "dropped" does not exist',
+    ),
+    closed: new Error(
+      'psql failed: FATAL:  database "closed" is not currently accepting connections',
+    ),
+    broken: new Error("psql failed: ERROR:  out of shared memory"),
   });
   const report = await readPostgresPermissions(
-    { logins: ["u1", "nobody"], databases: ["appdb", "dropped", "missing"] },
+    {
+      logins: ["u1", "nobody"],
+      databases: ["appdb", "dropped", "closed", "broken", "missing"],
+    },
     "postgres",
     psql.query,
   );
   assertEquals(report.serverVersion, "18.6");
   assertEquals(report.databasesRead, ["appdb"]);
+  // A database that fails for another reason is named, never "no grants".
+  assertEquals(report.databasesFailed, ["broken"]);
   const [u1, nobody] = report.logins;
   assertEquals(nobody, {
     username: "nobody",
@@ -283,7 +294,7 @@ test("report attributes ACL rows to the login, its inherited roles and PUBLIC", 
       via: "grp_rw",
     },
   ]);
-  assertEquals(u1?.truncated, undefined);
+  assertEquals(u1?.truncated, true);
   // The per-database query ran in the database itself, for every grantee.
   const perDb = psql.calls.find((c) => c.database === "appdb");
   assertStringIncludes(
@@ -405,4 +416,48 @@ test("the runtime runs each script through psql on stdin, read only", async () =
     calls.every((call) => call.input?.startsWith("BEGIN READ ONLY;")),
     true,
   );
+});
+
+test("the time budget stops before the next database and names the rest", async () => {
+  let ms = 0;
+  const psql = fakePsql({
+    appdb: APPDB,
+    second: { ...APPDB, db: "second" },
+    third: { ...APPDB, db: "third" },
+  });
+  const query = (database: string, sql: string) => {
+    ms += 4000; // every query takes 4 s on this fake clock
+    return psql.query(database, sql);
+  };
+  const report = await readPostgresPermissions(
+    { logins: ["u1"], databases: ["appdb", "second", "third"] },
+    "postgres",
+    query,
+    { now: () => ms, budgetMs: 10_000 },
+  );
+  // version, logins, shared ACLs and the list use 16 s: no database fits.
+  assertEquals(report.databasesRead, []);
+  assertEquals(report.databasesFailed, ["appdb", "second", "third"]);
+  assertEquals(report.logins[0]?.truncated, true);
+  assertEquals(psql.calls.some((call) => call.database !== "postgres"), false);
+
+  ms = 0;
+  const roomy = await readPostgresPermissions(
+    { logins: ["u1"], databases: ["appdb", "second", "third"] },
+    "postgres",
+    query,
+    { now: () => ms, budgetMs: 21_000 },
+  );
+  assertEquals(roomy.databasesRead, ["appdb", "second"]);
+  assertEquals(roomy.databasesFailed, ["third"]);
+});
+
+test("a clean read of every database is not truncated", async () => {
+  const report = await readPostgresPermissions(
+    { logins: ["u1"], databases: ["appdb"] },
+    "postgres",
+    fakePsql({ appdb: APPDB }).query,
+  );
+  assertEquals(report.databasesFailed, undefined);
+  assertEquals(report.logins[0]?.truncated, undefined);
 });

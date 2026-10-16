@@ -7,6 +7,8 @@ import {
   readMysqlFamilyPermissions,
   showGrantsBatchSql,
   splitShowGrantsBatch,
+  unescapeBatchField,
+  unescapeWildcards,
 } from "./mysql-permissions.ts";
 
 /**
@@ -404,7 +406,7 @@ test("no logins reads only the version; a bad login name is refused", async () =
   );
 });
 
-test("MySQL and MariaDB runtimes read raw batch output as the socket root", async () => {
+test("MySQL and MariaDB runtimes read escaped batch output as the socket root", async () => {
   const { mysqlManagedEngineRuntime } = await import("./mysql.ts");
   const { mariadbManagedEngineRuntime } = await import("./mariadb.ts");
   for (
@@ -440,9 +442,160 @@ test("MySQL and MariaDB runtimes read raw batch output as the socket root", asyn
       "root",
       "-N",
       "-B",
-      "-r",
       "-e",
       "SELECT VERSION();",
     ]);
   }
+});
+
+test("a bare _ or % in a database-level name is a wildcard pattern", () => {
+  assertEquals(unescapeWildcards("shop_1"), { name: "shop_1", pattern: true });
+  assertEquals(unescapeWildcards("shop%"), { name: "shop%", pattern: true });
+  assertEquals(unescapeWildcards(String.raw`shop\_1`), {
+    name: "shop_1",
+    pattern: false,
+  });
+  assertEquals(unescapeWildcards(String.raw`a\_b_c`), {
+    name: "a_b_c",
+    pattern: true,
+  });
+  assertEquals(grantsOf("GRANT SELECT ON `shop_1`.* TO `u1`@`%`")[0], {
+    host: "%",
+    level: "database",
+    database: "shop_1",
+    privileges: ["SELECT"],
+    pattern: true,
+  });
+  // Table-level names are never patterns.
+  assertEquals(
+    grantsOf("GRANT SELECT ON `shop_1`.`t_1` TO `u1`@`%`")[0]?.pattern,
+    undefined,
+  );
+});
+
+test("batch escapes are undone per field", () => {
+  assertEquals(unescapeBatchField("plain"), "plain");
+  assertEquals(
+    unescapeBatchField(String.raw`a\nb\tc\\d\0e`),
+    "a\nb\tc\\d\0e",
+  );
+  // The server's own `\_` arrives doubled and comes back as `\_`.
+  assertEquals(unescapeBatchField(String.raw`app\\_db2`), String.raw`app\_db2`);
+  assertEquals(unescapeBatchField("odd\\q end\\"), "odd\\q end\\");
+});
+
+test("a table name holding a newline cannot fake a grant line", async () => {
+  // What `mysql -N -B` prints for a table named "x<newline>GRANT ALL
+  // PRIVILEGES ON *.* TO `u1`@`%`": one line, the newline escaped.
+  const escaped = "GRANT SELECT ON `appdb`.`x" + String.raw`\n` +
+    "GRANT ALL PRIVILEGES ON *.* TO ``u1``@``%``` TO `u1`@`%`";
+  const engine = fakeEngine({ "`u1`@'%'": [escaped] }, "u1\t%\tN\n");
+  const report = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1"], databases: [] },
+    engine.query,
+  );
+  assertEquals(report.logins[0]?.grants, [{
+    host: "%",
+    level: "table",
+    database: "appdb",
+    object: "x\nGRANT ALL PRIVILEGES ON *.* TO `u1`@`%`",
+    privileges: ["SELECT"],
+  }]);
+});
+
+test("REVOKE lines (partial revokes) mark the login truncated", async () => {
+  const engine = fakeEngine({
+    "`u1`@'%'": [
+      "GRANT SELECT, INSERT ON *.* TO `u1`@`%`",
+      "REVOKE INSERT ON `mysql`.* FROM `u1`@`%`",
+    ],
+  }, "u1\t%\tN\n");
+  const report = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1"], databases: [] },
+    engine.query,
+  );
+  assertEquals(report.logins[0]?.grants.length, 1);
+  assertEquals(report.logins[0]?.truncated, true);
+});
+
+test("an account host that cannot be quoted is skipped, not fatal", async () => {
+  const engine = fakeEngine(
+    {
+      "`u1`@'%'": ["GRANT USAGE ON *.* TO `u1`@`%`"],
+      "`u2`@'%'": ["GRANT USAGE ON *.* TO `u2`@`%`"],
+    },
+    "u1\t%\tN\nu1\tbad\u0001host\tN\nu2\t%\tN\n",
+  );
+  const report = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1", "u2"], databases: [] },
+    engine.query,
+  );
+  const [u1, u2] = report.logins;
+  assertEquals(u1?.accounts?.length, 2);
+  assertEquals(u1?.grants.length, 1);
+  assertEquals(u1?.truncated, true);
+  assertEquals(u2?.grants.length, 1);
+  assertEquals(u2?.truncated, undefined);
+});
+
+test("the role limits cut the report honestly", async () => {
+  // r0 → r1 → … → r5: deeper than the four levels followed.
+  const grants: Record<string, string[]> = {
+    "`u1`@'%'": ["GRANT `r0`@`%` TO `u1`@`%`"],
+  };
+  for (let i = 0; i < 6; i += 1) {
+    grants[`\`r${i}\`@'%'`] = [`GRANT \`r${i + 1}\`@\`%\` TO \`r${i}\`@\`%\``];
+  }
+  const engine = fakeEngine(grants, "u1\t%\tN\n");
+  const report = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1"], databases: [] },
+    engine.query,
+  );
+  assertEquals(report.logins[0]?.truncated, true);
+  assertEquals(report.logins[0]?.memberships.map((m) => m.role), [
+    "r0",
+    "r1",
+    "r2",
+    "r3",
+    "r4",
+  ]);
+
+  const shallow = fakeEngine({
+    "`u1`@'%'": ["GRANT `r0`@`%` TO `u1`@`%`"],
+    "`r0`@'%'": ["GRANT SELECT ON `appdb`.* TO `r0`@`%`"],
+  }, "u1\t%\tN\n");
+  const whole = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1"], databases: [] },
+    shallow.query,
+  );
+  assertEquals(whole.logins[0]?.truncated, undefined);
+});
+
+test("past the time budget accounts are left unread and marked", async () => {
+  let ms = 0;
+  const engine = fakeEngine({
+    "`u1`@'%'": ["GRANT USAGE ON *.* TO `u1`@`%`"],
+    "`u2`@'%'": ["GRANT USAGE ON *.* TO `u2`@`%`"],
+  }, "u1\t%\tN\nu1\tgone\tN\nu2\t%\tN\n");
+  const report = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1", "u2"], databases: [] },
+    (sql) => {
+      ms += 4000;
+      return engine.query(sql);
+    },
+    { now: () => ms, budgetMs: 10_000 },
+  );
+  // version, accounts, failed batch (12 s), then nothing more is read.
+  const [u1, u2] = report.logins;
+  assertEquals(u1?.grants, []);
+  assertEquals(u1?.truncated, true);
+  assertEquals(u2?.grants, []);
+  assertEquals(u2?.truncated, true);
+  assertEquals(engine.asked.length, 3);
 });
