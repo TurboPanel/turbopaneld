@@ -1765,6 +1765,15 @@ export type ManagedApplyDatabaseOp = {
    * Never converts a database that already exists with another owner.
    */
   ownerRole?: boolean;
+  /**
+   * Postgres only, with `ownerRole`. The applied username of a login that owns
+   * the database instead of the no-login owner role being the only owner. The
+   * three roles are still made and still own what is created; the login owns
+   * the database and works through the owner role. Moved onto the login once
+   * the login exists, only when the database is the panel's own or still empty.
+   * Needs `managed-database-owner-v1`.
+   */
+  ownerLogin?: string;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -7113,6 +7122,23 @@ function parseManagedTopologyUser(
   return parseManagedSealedCredential(value, `Invalid ${label} topologyUser`);
 }
 
+/** `ownerLogin` of a database op: a login name, only on a create with `ownerRole`. */
+function parseManagedDatabaseOwnerLogin(
+  entry: Record<string, unknown>,
+): string | undefined {
+  const value = entry.ownerLogin;
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" || !isSafeIdentifier(value) ||
+    entry.ownerRole !== true || entry.action !== "create"
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: ownerLogin must be a login name on a created database with ownerRole",
+    );
+  }
+  return value;
+}
+
 function parseManagedApplyDatabases(
   value: unknown,
 ): ManagedApplyDatabaseOp[] | undefined {
@@ -7139,10 +7165,12 @@ function parseManagedApplyDatabases(
         "Invalid managed.apply databases entry: ownerRole must be true or false",
       );
     }
+    const ownerLogin = parseManagedDatabaseOwnerLogin(entry);
     databases.push({
       name: entry.name,
       action: entry.action as ManagedApplyDatabaseOp["action"],
       ...(entry.ownerRole === true ? { ownerRole: true } : {}),
+      ...(ownerLogin === undefined ? {} : { ownerLogin }),
     });
   }
   return databases;

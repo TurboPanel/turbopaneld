@@ -55,15 +55,108 @@ export function databaseOwnerSql(name: string): string {
  * Of the named databases, those that really belong to their owner role (the
  * database exists and its owner is `tp_<name>_owner`). Tuples-only friendly.
  */
-export function ownerRoleDatabasesAmongSql(names: readonly string[]): string {
+export function ownerRoleDatabasesAmongSql(
+  names: readonly string[],
+  ownerLogins: Readonly<Record<string, string>> = {},
+  platformRoles: readonly string[] = [],
+): string {
   const list = names.map((name) => quoteLiteral(name)).join(", ");
+  // A database whose owner is a login the customer chose is still the
+  // panel's: only that exact login, recorded for that exact database, counts.
+  const chosen = Object.entries(ownerLogins)
+    .filter(([database]) => names.includes(database))
+    .map(([database, login]) =>
+      `(${quoteLiteral(database)}, ${quoteLiteral(login)})`
+    );
+  // A database that has its owner role and is owned by a login is the
+  // panel's whichever login that is, so an apply that leaves the choice out
+  // can never send it down the path for ordinary databases.
+  const notPlatform = [
+    "'postgres'",
+    ...platformRoles.map((r) => quoteLiteral(r)),
+  ]
+    .join(", ");
+  const byLogin =
+    `(EXISTS (SELECT 1 FROM pg_catalog.pg_roles o WHERE o.rolname = 'tp_' || d.datname || '_owner') AND r.rolname NOT IN (${notPlatform}))`;
+  const owner = chosen.length === 0
+    ? `(r.rolname = 'tp_' || d.datname || '_owner' OR ${byLogin})`
+    : `(r.rolname = 'tp_' || d.datname || '_owner' OR (d.datname, r.rolname) IN (${
+      chosen.join(", ")
+    }) OR ${byLogin})`;
   return [
     `SELECT d.datname FROM pg_catalog.pg_database d`,
     `JOIN pg_catalog.pg_roles r ON r.oid = d.datdba`,
     `WHERE d.datname IN (${list})`,
-    `AND r.rolname = 'tp_' || d.datname || '_owner'`,
+    `AND ${owner}`,
     `ORDER BY d.datname;`,
   ].join(" ");
+}
+
+/**
+ * Run connected to the database: one row, `t` when it holds nothing a person
+ * made (no tables, views, sequences, extra schemas, functions, types or
+ * extensions beyond the engine's own). Only such a database is ever handed to
+ * its owner role or chosen owner from the platform admin that initdb made it
+ * for.
+ */
+export function databaseIsEmptySql(): string {
+  const userSchema =
+    `n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`;
+  return [
+    `SELECT (NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c`,
+    `JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE ${userSchema})`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE ${userSchema}`,
+    `AND n.nspname <> 'public')`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p`,
+    `JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE p.oid >= 16384 AND ${userSchema})`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type t WHERE t.oid >= 16384`,
+    `AND t.typtype IN ('e', 'd', 'r', 'm'))`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e WHERE e.extname <> 'plpgsql')`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_largeobject_metadata)`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_publication)`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger)`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_foreign_server))::text;`,
+  ].join(" ");
+}
+
+/** Hand the database to `owner`; a no-op when it already belongs to it. */
+export function moveDatabaseOwnerSql(database: string, owner: string): string {
+  return [
+    `DO $turbopanel$`,
+    `BEGIN`,
+    `  IF (SELECT d.datdba FROM pg_catalog.pg_database d WHERE d.datname = ${
+      quoteLiteral(database)
+    }) IS DISTINCT FROM (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ${
+      quoteLiteral(owner)
+    }) THEN`,
+    `    ALTER DATABASE ${quoteIdentifier(database)} OWNER TO ${
+      quoteIdentifier(owner)
+    };`,
+    `  END IF;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
+}
+
+/**
+ * Run before a login is dropped: every database the login owns that has an
+ * owner role goes back to that owner role, so dropping the login never hands
+ * a database to the platform admin.
+ */
+export function ownerLoginReturnSql(login: string): string {
+  return [
+    `DO $turbopanel$`,
+    `DECLARE r record;`,
+    `BEGIN`,
+    `  FOR r IN SELECT d.datname FROM pg_catalog.pg_database d`,
+    `           JOIN pg_catalog.pg_roles w ON w.oid = d.datdba`,
+    `           WHERE w.rolname = ${quoteLiteral(login)}`,
+    `           AND EXISTS (SELECT 1 FROM pg_catalog.pg_roles o WHERE o.rolname = 'tp_' || d.datname || '_owner') LOOP`,
+    `    EXECUTE pg_catalog.format('ALTER DATABASE %I OWNER TO %I', r.datname, 'tp_' || r.datname || '_owner');`,
+    `  END LOOP;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
 }
 
 /** Create the three NOLOGIN roles when missing. Safe to repeat. */
@@ -192,12 +285,19 @@ function healExistingObjectsSql(names: OwnerRoleNames): string {
 export function ownerRoleDatabaseSql(
   database: string,
   platformCreators: readonly string[],
+  ownerLogin?: string,
 ): string {
   const names = ownerRoleNames(database);
   const owner = quoteIdentifier(names.owner);
   const rw = quoteIdentifier(names.rw);
   const ro = quoteIdentifier(names.ro);
-  const creators = [...new Set([names.owner, ...platformCreators])];
+  const creators = [
+    ...new Set([
+      names.owner,
+      ...(ownerLogin === undefined ? [] : [ownerLogin]),
+      ...platformCreators,
+    ]),
+  ];
   const lines = [
     closePublicSchemaSql(),
     `GRANT USAGE, CREATE ON SCHEMA public TO ${owner};`,

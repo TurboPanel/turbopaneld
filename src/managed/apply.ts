@@ -613,10 +613,19 @@ export async function applyManagedEngineState(
   const ownerRoleDatabases = databaseOps
     .filter((op) => op.action === "create" && op.ownerRole === true)
     .map((op) => op.name);
+  const ownerLogins: Record<string, string> = {};
+  for (const op of databaseOps) {
+    if (op.action === "create" && op.ownerRole === true && op.ownerLogin) {
+      ownerLogins[op.name] = op.ownerLogin;
+    }
+  }
   const appliedUsers = await engine.applyCredentials(
     ctx,
     credentials,
-    ownerRoleDatabases.length === 0 ? undefined : { ownerRoleDatabases },
+    ownerRoleDatabases.length === 0 ? undefined : {
+      ownerRoleDatabases,
+      ...(Object.keys(ownerLogins).length > 0 ? { ownerLogins } : {}),
+    },
   );
   await dropManagedUsers(ctx, engine, payload, appliedUsers);
   await ensureProxySqlMonitorRoles(ctx, engine, deps);

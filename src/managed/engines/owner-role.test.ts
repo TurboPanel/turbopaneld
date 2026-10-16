@@ -239,18 +239,20 @@ test("postgres: the Database admin login is a plain member of the owner role wit
   );
 });
 
-test("postgres: a Database admin on a database without an owner role only gets CONNECT", async () => {
+test("postgres: a Database admin on a database without an owner role gets the read-write rights", async () => {
   const { ctx, inputs } = harness();
   await postgresManagedEngineRuntime.applyCredentials(ctx, [
     cred("dba", ["admin"]),
   ]);
   const sql = inputs.join("\n");
-  assertEquals(sql.includes(`GRANT CONNECT ON DATABASE "shop" TO "dba"`), true);
   assertEquals(
     sql.includes(`GRANT CONNECT, TEMPORARY ON DATABASE "shop" TO "dba"`),
-    false,
+    true,
   );
   assertEquals(sql.includes("tp_shop_owner"), false);
+  // Never ownership, never membership in a platform role.
+  assertEquals(sql.includes(`OWNER TO "dba"`), false);
+  assertEquals(/GRANT "[^"]+" TO "dba"/.test(sql), false);
 });
 
 for (
@@ -307,4 +309,151 @@ test("postgres: a migrations login never takes an owner-role database, even when
   const sql = inputs.join("\n");
   assertEquals(sql.includes(`OWNER TO "migrate"`), false);
   assertEquals(sql.includes(`"tp_shop_owner" TO "migrate"`), true);
+});
+
+/** The catalog answers for the database owner, emptiness and owner-role probe. */
+function chosenOwnerAnswers(owner: string, empty: boolean) {
+  return (input: string): string => {
+    if (input.includes("r.rolname FROM pg_catalog.pg_database")) {
+      return `${owner}\n`;
+    }
+    if (input.includes("SELECT (NOT EXISTS")) {
+      return empty ? "true\n" : "false\n";
+    }
+    if (input.includes("SELECT d.datname FROM pg_catalog.pg_database d")) {
+      return owner === "app" || owner === "tp_shop_owner" ? "shop\n" : "";
+    }
+    return "";
+  };
+}
+
+test("postgres: the first database of a new cluster moves onto its owner role while it is empty", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("root", true));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "shop", action: "create", ownerRole: true },
+  ]);
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes("CREATE DATABASE"), false);
+  assertEquals(sql.includes(`CREATE ROLE "tp_shop_owner" NOLOGIN`), true);
+  assertEquals(
+    sql.includes(`ALTER DATABASE "shop" OWNER TO "tp_shop_owner"`),
+    true,
+  );
+});
+
+test("postgres: the first database keeps its owner once anything is in it", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("root", false));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "shop", action: "create", ownerRole: true },
+  ]);
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes("ALTER DATABASE"), false);
+  assertEquals(sql.includes("CREATE ROLE"), false);
+});
+
+test("postgres: a chosen owner login takes the database and works through the owner role", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("tp_shop_owner", true));
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("app", ["read-write"]), cred("viewer", ["read-only"])],
+    { ownerRoleDatabases: ["shop"], ownerLogins: { shop: "app" } },
+  );
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes(`ALTER DATABASE "shop" OWNER TO "app"`), true);
+  assertEquals(
+    sql.includes(`(r.rolname = 'tp_' || d.datname || '_owner' OR`),
+    true,
+  );
+  // The owner role still owns what gets created; the login works as it.
+  assertEquals(
+    sql.includes(
+      `ALTER ROLE "app" IN DATABASE "shop" SET role = 'tp_shop_owner';`,
+    ),
+    true,
+  );
+  assertEquals(
+    sql.includes(`ALTER DEFAULT PRIVILEGES FOR ROLE "app" GRANT`),
+    true,
+  );
+  // The login is not also a group member of the data roles.
+  assertEquals(sql.includes(`"tp_shop_rw" TO "app"`), false);
+  assertEquals(sql.includes(`"tp_shop_ro" TO "viewer"`), true);
+});
+
+test("postgres: a chosen owner login never takes a database that someone else owns", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("other", true));
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("app", ["read-write"])],
+    { ownerRoleDatabases: ["shop"], ownerLogins: { shop: "app" } },
+  );
+  assertEquals(inputs.join("\n").includes(`OWNER TO "app"`), false);
+});
+
+test("postgres: a read-only login never takes a database over", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("tp_shop_owner", true));
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("viewer", ["read-only"])],
+    { ownerRoleDatabases: ["shop"], ownerLogins: { shop: "viewer" } },
+  );
+  assertEquals(inputs.join("\n").includes(`OWNER TO "viewer"`), false);
+});
+
+test("postgres: a database already owned by its chosen login is not reported as another owner", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("app", true));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "shop", action: "create", ownerRole: true, ownerLogin: "app" },
+  ]);
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes("CREATE DATABASE"), false);
+  assertEquals(sql.includes("ALTER DATABASE"), false);
+  assertEquals(sql.includes(`CREATE ROLE "tp_shop_owner" NOLOGIN`), true);
+});
+
+test("postgres: a database with an owner role and a login owner stays an owner-role database when the choice is left out", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("app", true));
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("migrate", ["owner"])],
+    { ownerRoleDatabases: ["shop"] },
+  );
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes(`OWNER TO "migrate"`), false);
+  assertEquals(sql.includes(`"tp_shop_owner" TO "migrate"`), true);
+  assertEquals(sql.includes("AND r.rolname NOT IN ('postgres'"), true);
+});
+
+test("postgres: a platform role named as owner is ignored", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("root", true));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "shop", action: "create", ownerRole: true, ownerLogin: "root" },
+  ]);
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("app", ["read-write"])],
+    { ownerRoleDatabases: ["shop"], ownerLogins: { shop: "root" } },
+  );
+  assertEquals(inputs.join("\n").includes(`OWNER TO "root"`), false);
+});
+
+test("postgres: the engine's own databases are never handed to an owner role", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("root", true));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "template1", action: "create", ownerRole: true },
+  ]);
+  assertEquals(inputs.join("\n").includes("ALTER DATABASE"), false);
+});
+
+test("postgres: an owner login that no longer qualifies hands the database back to the owner role", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("app", true));
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("app", ["read-only"])],
+    { ownerRoleDatabases: ["shop"], ownerLogins: { shop: "app" } },
+  );
+  assertEquals(
+    inputs.join("\n").includes(`OWNER TO "tp_shop_owner"`),
+    true,
+  );
 });
