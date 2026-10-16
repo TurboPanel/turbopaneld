@@ -7,6 +7,7 @@ import {
   DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
   instanceUnsupportedReason,
+  MANAGED_DATABASE_OWNER_FEATURE,
   MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
@@ -162,9 +163,15 @@ test("managed-permissions-read-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("managed-owner-role-v1 is advertised last and raised no floor", () => {
+test("managed-owner-role-v1 is advertised and raised no floor", () => {
   assertEquals(MANAGED_OWNER_ROLE_FEATURE, "managed-owner-role-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), MANAGED_OWNER_ROLE_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(MANAGED_OWNER_ROLE_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-database-owner-v1 is advertised last and raised no floor", () => {
+  assertEquals(MANAGED_DATABASE_OWNER_FEATURE, "managed-database-owner-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), MANAGED_DATABASE_OWNER_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

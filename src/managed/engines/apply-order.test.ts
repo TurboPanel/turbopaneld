@@ -107,7 +107,8 @@ for (
 }
 
 test("postgres dropUsers handles users in order and stops at the first failure", async () => {
-  // Per user: list databases (empty here, role "absent"), then DROP ROLE.
+  // Per user: give back databases it owns, list databases (empty here, role
+  // "absent"), then DROP ROLE.
   const { ctx, inputs, maxInFlight } = failingContext("user_b");
   await assertRejects(() =>
     postgresManagedEngineRuntime.dropUsers!(ctx, [
@@ -116,10 +117,10 @@ test("postgres dropUsers handles users in order and stops at the first failure",
       "user_c",
     ])
   );
-  assertEquals(inputs.length, 3);
+  assertEquals(inputs.length, 4);
   assertEquals(inputs[0]!.includes("user_a"), true);
-  assertEquals(inputs[1]!.includes("DROP ROLE"), true);
-  assertEquals(inputs[2]!.includes("user_b"), true);
+  assertEquals(inputs[2]!.includes("DROP ROLE"), true);
+  assertEquals(inputs[3]!.includes("user_b"), true);
   assertEquals(inputs.some((input) => input.includes("user_c")), false);
   assertEquals(maxInFlight(), 1);
 });

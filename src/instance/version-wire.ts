@@ -78,6 +78,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-login-limits-v1",
   "managed-permissions-read-v1",
   "managed-owner-role-v1",
+  "managed-database-owner-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -233,6 +234,17 @@ export const MANAGED_LOGIN_LIMITS_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_OWNER_ROLE_FEATURE: DaemonWireFeature =
   "managed-owner-role-v1";
+
+/**
+ * This daemon honours `ownerLogin` on a Postgres database (a login the
+ * customer picked owns it) and gives the first database of a new cluster, which
+ * the engine's first start makes, an owner role while it is still empty. Also
+ * gives a Database admin login on a database without an owner role the
+ * read-write rights instead of refusing. The control plane sends `ownerLogin`,
+ * and flags a cluster's first database, only for a primary that lists this.
+ */
+export const MANAGED_DATABASE_OWNER_FEATURE: DaemonWireFeature =
+  "managed-database-owner-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

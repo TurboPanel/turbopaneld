@@ -1637,6 +1637,34 @@ test("parseManagedApplyPayload: databases[].ownerRole is optional (version skew)
   );
 });
 
+test("parseManagedApplyPayload: databases[].ownerLogin is optional, a login name, and needs ownerRole on a create", () => {
+  const withOp = (extra: Record<string, unknown>) =>
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      databases: [{ name: "shop", action: "create", ...extra }],
+    }).databases![0]!;
+  assertEquals("ownerLogin" in withOp({ ownerRole: true }), false);
+  assertEquals(
+    withOp({ ownerRole: true, ownerLogin: "app" }).ownerLogin,
+    "app",
+  );
+  assertThrows(
+    () => withOp({ ownerLogin: "app" }),
+    TypeError,
+    "ownerLogin must be a login name",
+  );
+  assertThrows(
+    () => withOp({ ownerRole: true, ownerLogin: 7 }),
+    TypeError,
+    "ownerLogin must be a login name",
+  );
+  assertThrows(
+    () => withOp({ ownerRole: true, ownerLogin: 'a"b' }),
+    TypeError,
+    "ownerLogin must be a login name",
+  );
+});
+
 test("parseManagedApplyPayload: the admin privilege parses like any other name", () => {
   const credential = parseManagedApplyPayload({
     ...VALID_MANAGED_APPLY,

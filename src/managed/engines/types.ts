@@ -30,6 +30,11 @@ export type ManagedApplyCredentialsOptions = {
    * checks each really belongs to its owner role before treating it as one.
    */
   ownerRoleDatabases?: readonly string[];
+  /**
+   * Postgres: the subset of `ownerRoleDatabases` whose chosen owner is a login
+   * (database name -> applied username).
+   */
+  ownerLogins?: Readonly<Record<string, string>>;
 };
 
 export type ManagedEngineContext = {

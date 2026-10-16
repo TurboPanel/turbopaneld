@@ -298,11 +298,13 @@ test("dropUsers releases the role in every connectable database before DROP ROLE
   }
   // Order: list databases, release each one, only then DROP ROLE (last).
   const steps = calls.map((c) => {
+    if (c.input?.includes("ALTER DATABASE %I OWNER TO")) return "return";
     if (c.input?.includes("pg_database d")) return "list";
     if (c.input?.includes("REASSIGN OWNED")) return `release:${databaseOf(c)}`;
     return "drop";
   });
   assertEquals(steps, [
+    "return",
     "list",
     "release:p_db",
     "release:postgres",

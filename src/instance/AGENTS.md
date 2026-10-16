@@ -92,6 +92,13 @@ login. The control plane records an owner role, and accepts an admin login,
 only for a primary that lists it (else 409
 `managed_owner_role_needs_daemon_update`).
 
+**Managed database owner (`managed-database-owner-v1`).** No message: it
+says this daemon honours `databases[].ownerLogin` on a Postgres create, moves
+a cluster's own, still empty first database onto its owner role, and gives a
+Database admin login on a database without an owner role the read-write rights.
+The control plane sends those only to a primary that lists it (else 409
+`managed_database_owner_needs_daemon_update` for a chosen login owner).
+
 **Managed permissions read (`managed-permissions-read-v1`).** Same shape as
 on-demand health: a control plane that sees the feature may send
 `managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,
