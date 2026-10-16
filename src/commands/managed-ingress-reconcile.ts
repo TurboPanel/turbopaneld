@@ -64,6 +64,7 @@ import {
   desiredProxySqlListenerInterfaces,
   findIngressRuntimeMismatch,
   inspectProxySqlContainer,
+  isSourceLimitedUser,
   type ProbeHostPortFn,
   proxysqlCompose,
   type ProxySqlDesiredState,
@@ -77,6 +78,7 @@ import {
   renderProxySqlConfig,
   restartProxySqlIngress,
   staticConfigSectionChanged,
+  userAllowsLocalSources,
   writeProxySqlConfigAtomic,
 } from "../managed/proxysql.ts";
 import { collectLocalRootSources } from "../managed/proxysql-root-guard.ts";
@@ -157,6 +159,12 @@ function desiredStateFromPayload(
         ...(user.tool === true ? { tool: true } : {}),
         ...(user.allowedSources !== undefined
           ? { allowedSources: [...user.allowedSources] }
+          : {}),
+        ...(user.allowLocalSources !== undefined
+          ? { allowLocalSources: user.allowLocalSources }
+          : {}),
+        ...(user.maxConnections !== undefined
+          ? { maxConnections: user.maxConnections }
           : {}),
       })),
       ...(cluster.autoReadSplit !== undefined
@@ -315,7 +323,7 @@ async function ensureProxySqlComposeUp(
 function desiredHasGuardedRoot(desired: ProxySqlDesiredState): boolean {
   return desired.clusters.some((cluster) =>
     cluster.users.some((user) =>
-      user.role === "root" && user.allowedSources !== undefined
+      isSourceLimitedUser(user) && userAllowsLocalSources(user)
     )
   );
 }

@@ -42,7 +42,9 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
 import { frontendBindingsHealth, wantedMappings } from "./proxysql-bindings.ts";
 import {
+  LOGIN_GUARD_ERROR_MESSAGE,
   mergeRootSources,
+  ROOT_GUARD_ERROR_MESSAGE,
   type RootGuardRule,
   rootGuardRulesForUser,
 } from "./proxysql-root-guard.ts";
@@ -203,12 +205,16 @@ export type ProxySqlUserDesired = {
   /** Database-tool login: primary only, no read/write split rules. */
   tool?: boolean;
   /**
-   * Root logins only. Present (even empty) turns the source-address guard on:
-   * queries from anywhere but these addresses plus this host's own sources are
-   * refused. Absent means no guard, which is what an older control plane
-   * implies.
+   * Present (even empty) turns the source-address guard on: queries from
+   * anywhere but these addresses (exact, or a trailing `%` prefix) plus, for a
+   * root login or `allowLocalSources`, this host's own sources are refused.
+   * Absent means no guard, which is what an older control plane implies.
    */
   allowedSources?: string[];
+  /** App logins: also allow this host's own sources (loopback, Docker networks). Root always does. */
+  allowLocalSources?: boolean;
+  /** Most simultaneous client connections for this login (`max_connections`). Absent = ProxySQL's default. */
+  maxConnections?: number;
 };
 
 export type ProxySqlClusterDesired = {
@@ -1146,15 +1152,20 @@ function sortedReadSplitUsernames(
   return cluster.users
     .filter((user) =>
       user.connectionRole !== "read-only" && user.tool !== true &&
-      !isGuardedRootUser(user)
+      !isSourceLimitedUser(user)
     )
     .map((user) => user.username)
     .sort((a, b) => a.localeCompare(b));
 }
 
-/** A root login whose queries are limited to allowed source addresses. */
-function isGuardedRootUser(user: ProxySqlUserDesired): boolean {
-  return user.role === "root" && user.allowedSources !== undefined;
+/** A login whose queries are limited to allowed source addresses. */
+export function isSourceLimitedUser(user: ProxySqlUserDesired): boolean {
+  return user.allowedSources !== undefined;
+}
+
+/** Whether this limited login also gets the host-local sources. */
+export function userAllowsLocalSources(user: ProxySqlUserDesired): boolean {
+  return user.role === "root" || user.allowLocalSources === true;
 }
 
 /**
@@ -1458,8 +1469,12 @@ function renderAdminUserInsert(
   const useSsl = cluster.requireTls ? 1 : 0;
   const username = escapeSqlString(user.username);
   const password = escapeSqlString(user.password);
-  const columns = "username,password,default_hostgroup,active,use_ssl";
-  const values = `'${username}','${password}',${defaultHostgroup},1,${useSsl}`;
+  let columns = "username,password,default_hostgroup,active,use_ssl";
+  let values = `'${username}','${password}',${defaultHostgroup},1,${useSsl}`;
+  if (user.maxConnections !== undefined) {
+    columns += ",max_connections";
+    values += `,${Math.trunc(user.maxConnections)}`;
+  }
   if (family === "mysql" && user.defaultDatabase) {
     const schema = escapeSqlString(user.defaultDatabase);
     return `INSERT INTO ${table} (${columns},default_schema) VALUES (${values},'${schema}')`;
@@ -1525,7 +1540,29 @@ function renderAdminQueryRuleStatements(
   return statements;
 }
 
-/** Every guard rule, in evaluation order, for the guarded root logins of one family. */
+/** Guard rules of one limited login; read-only and tool logins get no reader rule. */
+function limitedUserRules(
+  user: ProxySqlUserDesired,
+  readSplit: number | null,
+  localSources: readonly string[],
+): RootGuardRule[] {
+  const sources = mergeRootSources(
+    user.allowedSources ?? [],
+    userAllowsLocalSources(user) ? localSources : [],
+  );
+  const fixedRoute = user.connectionRole === "read-only" || user.tool === true;
+  const message = user.role === "root"
+    ? ROOT_GUARD_ERROR_MESSAGE
+    : LOGIN_GUARD_ERROR_MESSAGE;
+  return rootGuardRulesForUser(
+    user.username,
+    sources,
+    fixedRoute ? null : readSplit,
+    message,
+  );
+}
+
+/** Every guard rule, in evaluation order, for the limited logins (root included) of one family. */
 function rootGuardRules(
   family: "mysql" | "pgsql",
   clusters: readonly ProxySqlClusterDesired[],
@@ -1537,13 +1574,8 @@ function rootGuardRules(
     const readSplit = clusterEmitsReadSplitRules(cluster)
       ? cluster.readerHostgroup
       : null;
-    for (const user of cluster.users.filter(isGuardedRootUser)) {
-      const sources = mergeRootSources(
-        user.allowedSources ?? [],
-        localRootSources,
-      );
-      const hostgroup = user.connectionRole === "read-only" ? null : readSplit;
-      rules.push(...rootGuardRulesForUser(user.username, sources, hostgroup));
+    for (const user of cluster.users.filter(isSourceLimitedUser)) {
+      rules.push(...limitedUserRules(user, readSplit, localRootSources));
     }
   }
   return rules;
