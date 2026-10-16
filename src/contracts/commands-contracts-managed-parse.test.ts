@@ -1582,3 +1582,21 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     "Invalid managed.ha.failover result",
   );
 });
+
+test("parseManagedApplyPayload: credential grantMode is optional (version skew) and checked", () => {
+  const withMode = (extra: Record<string, unknown>) =>
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      credentials: [{ ...VALID_MANAGED_APPLY.credentials[0], ...extra }],
+    }).credentials[0]!;
+  // An older control plane sends no field: parses exactly as before.
+  assertEquals("grantMode" in withMode({}), false);
+  assertEquals(withMode({ grantMode: "self" }).grantMode, "self");
+  assertEquals(withMode({ grantMode: "recipe" }).grantMode, "recipe");
+  assertEquals(withMode({ grantMode: "preset" }).grantMode, "preset");
+  assertThrows(
+    () => withMode({ grantMode: "wild" }),
+    TypeError,
+    "grantMode must be preset, recipe or self",
+  );
+});

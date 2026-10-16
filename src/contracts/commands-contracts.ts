@@ -1731,12 +1731,25 @@ export type ManagedApplyExposure = {
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
+export const MANAGED_GRANT_MODES = ["preset", "recipe", "self"] as const;
+
+export type ManagedGrantMode = (typeof MANAGED_GRANT_MODES)[number];
+
 export type ManagedApplyCredential = {
   principalId: string;
   username: string;
   role: "root" | "user" | "replication";
   databases: string[];
   privileges?: string[];
+  /**
+   * How the daemon treats this login's permissions. Absent, `preset` and
+   * `recipe` all mean today's behaviour (the daemon sets the permissions from
+   * `privileges` on every apply; recipes are not built yet, so `recipe` acts
+   * like `preset` here). `self` means the site owner manages permissions by
+   * hand: the daemon keeps the login, password and database connect right and
+   * never resets or revokes anything below the database.
+   */
+  grantMode?: ManagedGrantMode;
   /** Daemon-recipient sealed password (`tpdaemon.…`). */
   password: string;
 };
@@ -6988,6 +7001,14 @@ function parseManagedApplyCredentialEntry(
     throw new TypeError("Invalid managed.apply credentials entry");
   }
   const privileges = parseManagedCredentialPrivileges(entry.privileges);
+  if (
+    entry.grantMode !== undefined &&
+    !(MANAGED_GRANT_MODES as readonly unknown[]).includes(entry.grantMode)
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply credentials entry: grantMode must be preset, recipe or self",
+    );
+  }
   return {
     principalId: entry.principalId,
     username: entry.username,
@@ -6995,6 +7016,9 @@ function parseManagedApplyCredentialEntry(
     databases: parseManagedCredentialDatabases(entry.databases),
     password: entry.password,
     ...(privileges === undefined ? {} : { privileges }),
+    ...(entry.grantMode === undefined
+      ? {}
+      : { grantMode: entry.grantMode as ManagedGrantMode }),
   };
 }
 
