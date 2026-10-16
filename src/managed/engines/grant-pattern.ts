@@ -164,19 +164,24 @@ function revokeExcessSql(
     quoteLiteral(username)
   } AND Host = ${quoteLiteral(host)}`;
   const tail = ` ON \`${schema}\`.* FROM ${quoting.accountAt(username, host)}`;
-  // A trigger fires with its definer's rights and fails (error 1142) once the
-  // definer has lost TRIGGER on the table, which would stop every write to it.
-  // So TRIGGER stays on a login that still defines a trigger in this database;
-  // it goes when those triggers are moved to the migration login.
+  // A trigger or a scheduled event runs with its definer's rights and stops
+  // working (a trigger with error 1142 on every write to its table) once the
+  // definer has lost TRIGGER or EVENT. So each stays on a login that still
+  // defines one in this database; it goes when those are recreated by the
+  // migration login.
   const definer = quoteLiteral(username + "@" + host);
-  const triggerDefinedBy =
-    `SELECT 1 FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ${
-      quoteLiteral(database)
-    } AND DEFINER = ${definer}`;
+  const schemaName = quoteLiteral(database);
+  const definedBy: Record<string, string> = {
+    Trigger_priv:
+      `SELECT 1 FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ${schemaName} AND DEFINER = ${definer}`,
+    Event_priv:
+      `SELECT 1 FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ${schemaName} AND DEFINER = ${definer}`,
+  };
   const held = (name: string, column: string): string => {
-    const test = column === "Trigger_priv"
-      ? `${column} = 'Y' AND NOT EXISTS (${triggerDefinedBy})`
-      : `${column} = 'Y'`;
+    const lookup = definedBy[column];
+    const test = lookup === undefined
+      ? `${column} = 'Y'`
+      : `${column} = 'Y' AND NOT EXISTS (${lookup})`;
     return `IF(${test}, ${quoteLiteral(name)}, NULL)`;
   };
   const statements: string[] = [];
