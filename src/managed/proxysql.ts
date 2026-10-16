@@ -569,24 +569,33 @@ function formatRestApiPublishedPort(): string {
   return quoteYamlScalar(restApiAddress);
 }
 
+/**
+ * Frontend usernames must be unique within one ProxySQL protocol family:
+ * `mysql_users` and `pgsql_users` are separate tables (see
+ * {@link renderUserRows}), so the same name on a Postgres and a MySQL cluster
+ * is fine. MySQL and MariaDB share one family and one listener, so the same
+ * name across those two is still a clash.
+ */
 export function assertNoFrontendUserConflict(
   desired: ProxySqlDesiredState,
 ): void {
   const owners = new Map<string, Set<string>>();
   for (const cluster of desired.clusters) {
+    const family = protocolFamilyForCluster(cluster) ?? "unknown";
     for (const user of cluster.users) {
-      let managedIds = owners.get(user.username);
+      const key = `${family}\0${user.username}`;
+      let managedIds = owners.get(key);
       if (!managedIds) {
         managedIds = new Set<string>();
-        owners.set(user.username, managedIds);
+        owners.set(key, managedIds);
       }
       managedIds.add(cluster.managedId);
     }
   }
-  for (const [username, managedIds] of owners) {
+  for (const [key, managedIds] of owners) {
     if (managedIds.size > 1) {
       throw new ManagedFrontendUserConflictError(
-        username,
+        key.slice(key.indexOf("\0") + 1),
         [...managedIds].sort((a, b) => a.localeCompare(b)),
       );
     }
