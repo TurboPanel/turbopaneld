@@ -785,6 +785,17 @@ test("parseManagedIngressReconcilePayload rejects cluster backend user and bindA
     TypeError,
     "Invalid managed.ingress.reconcile cluster family",
   );
+  for (const engineVersion of ["", "9.7'", "18-alpine", "1.2.3.4", 18]) {
+    assertThrows(
+      () =>
+        parseManagedIngressReconcilePayload({
+          ...VALID_INGRESS,
+          clusters: [{ ...VALID_INGRESS.clusters[0], engineVersion }],
+        }),
+      TypeError,
+      "Invalid managed.ingress.reconcile cluster engineVersion",
+    );
+  }
   assertThrows(
     () =>
       parseManagedIngressReconcilePayload({
@@ -889,6 +900,7 @@ test("parseManagedIngressReconcilePayload rejects cluster backend user and bindA
     clusters: [{
       ...VALID_INGRESS.clusters[0],
       family: "pgsql",
+      engineVersion: "18",
       autoReadSplit: true,
       requireTls: true,
       users: [{
@@ -899,6 +911,7 @@ test("parseManagedIngressReconcilePayload rejects cluster backend user and bindA
     segments: [{ name: "tpn_net1", subnet: "10.192.11.0/24" }],
   });
   assertEquals(accepted.clusters[0]?.family, "pgsql");
+  assertEquals(accepted.clusters[0]?.engineVersion, "18");
   assertEquals(accepted.clusters[0]?.users[0]?.connectionRole, "read-only");
   assertEquals(accepted.segments?.[0]?.name, "tpn_net1");
 });

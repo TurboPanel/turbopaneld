@@ -1635,12 +1635,187 @@ test({
           "engine-2",
         );
         // The runtime table was read back after each apply, for the family in use only.
-        const selects = inputs.filter((input) => input.includes("SELECT"));
+        const selects = inputs.filter((input) =>
+          input.includes("SELECT") && input.includes("_servers")
+        );
         assertEquals(selects.length, 2);
         for (const select of selects) {
           assertStringIncludes(select, "runtime_pgsql_servers");
           assertEquals(select.includes("runtime_mysql_servers"), false);
         }
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+/** Fake docker where `compose … restart` restarts the fake ProxySQL. */
+function restartingRun(
+  admin: ReturnType<typeof createFakeProxySqlAdmin>,
+  calls: string[][],
+  restartTakes = true,
+): (args: string[], options?: RunDockerOptions) => Promise<DockerCliResult> {
+  const run = fakeRun(admin);
+  return (args, options) => {
+    calls.push(args);
+    if (args[0] === "compose" && args.at(-1) === "restart" && restartTakes) {
+      admin.restart();
+    }
+    return run(args, options);
+  };
+}
+
+function isComposeRestart(args: string[]): boolean {
+  return args[0] === "compose" && args.at(-1) === "restart";
+}
+
+test({
+  name:
+    "handleManagedIngressReconcile: an IPv6 publish saves the IPv6 listeners and restarts ProxySQL once",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const admin = createFakeProxySqlAdmin();
+        // An existing host: proxysql.db still holds the IPv4-only listeners.
+        admin.interfaces = { mysql: "0.0.0.0:13306", pgsql: "0.0.0.0:15432" };
+        const calls: string[][] = [];
+        const deps = {
+          runDocker: restartingRun(admin, calls),
+          decryptSecrets: decryptSecretsEcho,
+          ensureDocker: () => Promise.resolve(),
+        };
+        const result = await handleManagedIngressReconcile(
+          basePayload("0.0.0.0", "::"),
+          new Date().toISOString(),
+          deps,
+        );
+        assertEquals(result.restarted, true);
+        assertEquals(admin.interfaces, {
+          mysql: "0.0.0.0:13306;[::]:13306",
+          pgsql: "0.0.0.0:15432;[::]:15432",
+        });
+        assertEquals(calls.filter(isComposeRestart).length, 1);
+
+        // Once running, a repeat reconcile restarts nothing.
+        calls.length = 0;
+        await handleManagedIngressReconcile(
+          basePayload("0.0.0.0", "::"),
+          new Date().toISOString(),
+          deps,
+        );
+        assertEquals(calls.filter(isComposeRestart).length, 0);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile: IPv4-only listeners already running need no restart",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const admin = createFakeProxySqlAdmin();
+        admin.interfaces = { mysql: "0.0.0.0:13306", pgsql: "0.0.0.0:15432" };
+        const calls: string[][] = [];
+        await handleManagedIngressReconcile(
+          basePayload("0.0.0.0"),
+          new Date().toISOString(),
+          {
+            runDocker: restartingRun(admin, calls),
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(calls.filter(isComposeRestart).length, 0);
+        assertEquals(admin.savedInterfaces, undefined);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile reports the cluster's engine version to clients",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const inputs: string[] = [];
+        const run = fakeRun(createFakeProxySqlAdmin());
+        const payload = basePayload();
+        payload.clusters[0]!.engineVersion = "18";
+        await handleManagedIngressReconcile(
+          payload,
+          new Date().toISOString(),
+          {
+            runDocker: (args: string[], options?: RunDockerOptions) => {
+              if (options?.input) inputs.push(options.input);
+              return run(args, options);
+            },
+            decryptSecrets: decryptSecretsEcho,
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(
+          inputs.some((input) =>
+            input.includes("SET pgsql-server_version='18';")
+          ),
+          true,
+        );
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile fails when ProxySQL comes back without its new listeners",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const admin = createFakeProxySqlAdmin();
+        admin.interfaces = { mysql: "0.0.0.0:13306", pgsql: "0.0.0.0:15432" };
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              basePayload("0.0.0.0", "::"),
+              new Date().toISOString(),
+              {
+                runDocker: restartingRun(admin, [], false),
+                decryptSecrets: decryptSecretsEcho,
+                ensureDocker: () => Promise.resolve(),
+              },
+            ),
+          Error,
+          "ProxySQL did not take its new listeners after a restart",
+        );
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

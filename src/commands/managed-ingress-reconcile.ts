@@ -42,25 +42,32 @@ import {
   loadProxySqlAdminCredentials,
   loadProxySqlMonitorCredentials,
   proxySqlHostPrepPresent,
+  readProxySqlRuntimeInterfaces,
   readProxySqlRuntimeServers,
 } from "../managed/proxysql-admin.ts";
+import { proxySqlBindsUseIpv6 } from "../managed/proxysql-ipv6.ts";
 import { runProxySqlSetup } from "../orchestration/ansible.ts";
 import {
   assertManagedIngressPortsBindable,
   assertNoFrontendUserConflict,
   buildProxySqlAdminStatements,
+  buildProxySqlListenerInterfacesStatements,
   DEFAULT_PROXYSQL_LISTENER_PORTS,
+  desiredProxySqlListenerInterfaces,
   findIngressRuntimeMismatch,
   inspectProxySqlContainer,
   type ProbeHostPortFn,
   proxysqlCompose,
   type ProxySqlDesiredState,
   proxySqlFamiliesInUse,
+  proxySqlListenerInterfacesMismatch,
+  type ProxySqlProtocolFamily,
   type ProxySqlRuntimeServerRow,
   readManagedNetworkFromCompose,
   readPublishedBindAddressesFromCompose,
   readPublishedListenerPortsFromCompose,
   renderProxySqlConfig,
+  restartProxySqlIngress,
   staticConfigSectionChanged,
   writeProxySqlConfigAtomic,
 } from "../managed/proxysql.ts";
@@ -116,6 +123,9 @@ function desiredStateFromPayload(
     clusters: payload.clusters.map((cluster) => ({
       managedId: cluster.managedId,
       engine: cluster.engine,
+      ...(cluster.engineVersion !== undefined
+        ? { engineVersion: cluster.engineVersion }
+        : {}),
       protocolPort: cluster.protocolPort,
       ...(cluster.family !== undefined ? { family: cluster.family } : {}),
       writerHostgroup: cluster.writerHostgroup,
@@ -448,6 +458,52 @@ function readPreviousComposeFacts(previousComposeText: string | null) {
 }
 
 /**
+ * Make ProxySQL serve the listener addresses this reconcile wants.
+ *
+ * `mysql-interfaces` / `pgsql-interfaces` are read only when ProxySQL starts,
+ * and from `proxysql.cnf` only on a first boot (an existing `proxysql.db` in
+ * the data volume wins), so recreating the container is not enough. When the
+ * running value differs (first reconcile with an IPv6 listener, or a listener
+ * port change), write the new value to `proxysql.db`, restart the container
+ * and check it took. Every other table was saved to disk by the admin apply
+ * just before, so the restart loads the same users, servers and rules. Returns
+ * whether it restarted. A family with no running row is left alone.
+ */
+async function activateProxySqlListenerInterfaces(
+  desired: Record<ProxySqlProtocolFamily, string>,
+  layout: LayoutPaths,
+  admin: Parameters<typeof readProxySqlRuntimeInterfaces>[0],
+): Promise<boolean> {
+  const running = await readProxySqlRuntimeInterfaces(admin);
+  const stale = proxySqlListenerInterfacesMismatch(desired, running);
+  if (stale.length === 0) return false;
+  logInfo(
+    "commands",
+    `managed.ingress.reconcile restarting ProxySQL for new listeners: ${
+      stale.map((family) =>
+        `${family} ${running[family]} -> ${desired[family]}`
+      )
+        .join(", ")
+    }`,
+  );
+  await applyProxySqlAdminStatements(
+    buildProxySqlListenerInterfacesStatements(desired),
+    admin,
+  );
+  await restartProxySqlIngress(layout, admin?.runDocker);
+  const after = await readProxySqlRuntimeInterfaces(admin);
+  const still = proxySqlListenerInterfacesMismatch(desired, after);
+  if (still.length > 0) {
+    throw new Error(
+      `ProxySQL did not take its new listeners after a restart: ${
+        still.map((family) => `${family} is ${after[family]}`).join(", ")
+      }`,
+    );
+  }
+  return true;
+}
+
+/**
  * Compose up when the stack needs it. During a managed-network migration a
  * compose failure is tolerated: the follow-up `docker network connect`
  * ({@link ensureContainerJoinedManagedNetwork}) still moves the frontend.
@@ -742,6 +798,15 @@ async function reconcileManagedIngress(
     layout,
     containerName,
   });
+  const interfacesRestarted = await activateProxySqlListenerInterfaces(
+    desiredProxySqlListenerInterfaces(
+      desired.listenerPorts ?? DEFAULT_PROXYSQL_LISTENER_PORTS,
+      proxySqlBindsUseIpv6(bindAddresses),
+    ),
+    layout,
+    { runDocker: run, layout, containerName },
+  );
+  if (interfacesRestarted) restartNeeded = true;
   await assertRuntimeRepointed(desired, {
     runDocker: run,
     layout,
