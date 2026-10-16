@@ -23,7 +23,11 @@ const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
  */
 export const MANAGED_DOCKER_NETWORK_HOST = "172.16.0.0/255.240.0.0";
 
-export type ManagedDatabasePrivilege = "owner" | "read-write" | "read-only";
+export type ManagedDatabasePrivilege =
+  | "admin"
+  | "owner"
+  | "read-write"
+  | "read-only";
 
 export function quoteIdentifier(
   value: string,
@@ -114,7 +118,15 @@ export function dropDatabaseSql(name: string): string {
 }
 
 export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
-  { quoteIdentifier, quoteLiteral, accountAt },
+  {
+    quoteIdentifier,
+    quoteLiteral,
+    accountAt,
+    extraPrivileges: [
+      ["DELETE HISTORY", "Delete_history_priv"],
+      ["SHOW CREATE ROUTINE", "Show_create_routine_priv"],
+    ],
+  },
   MANAGED_DOCKER_NETWORK_HOST,
 );
 

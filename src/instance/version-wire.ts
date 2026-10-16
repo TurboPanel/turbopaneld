@@ -78,6 +78,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-login-limits-v1",
   "managed-permissions-read-v1",
   "managed-owner-role-v1",
+  "managed-data-only-readwrite-v1",
   "managed-database-owner-v1",
 ] as const;
 
@@ -234,6 +235,19 @@ export const MANAGED_LOGIN_LIMITS_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_OWNER_ROLE_FEATURE: DaemonWireFeature =
   "managed-owner-role-v1";
+
+/**
+ * This daemon gives a MySQL or MariaDB read/write login data changes only
+ * (no creating, altering or dropping tables, indexes, views, routines,
+ * triggers or events), keeps `GRANT OPTION` for the Database admin login, and
+ * tightens logins made under the older, wider grant on their next apply. The
+ * control plane gives a new MySQL or MariaDB read/write login only to a
+ * primary that lists this feature (else 409
+ * `managed_readwrite_needs_daemon_update`): an older daemon would leave it able
+ * to change the shape of the database.
+ */
+export const MANAGED_DATA_ONLY_READWRITE_FEATURE: DaemonWireFeature =
+  "managed-data-only-readwrite-v1";
 
 /**
  * This daemon honours `ownerLogin` on a Postgres database (a login the

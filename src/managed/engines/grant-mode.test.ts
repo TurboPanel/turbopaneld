@@ -21,11 +21,15 @@ import type {
 
 const test = Deno.test.bind(Deno);
 
-/** Captured from trunk before the grant-mode branches existed. */
+/**
+ * Captured from trunk before the grant-mode branches existed; the MySQL and
+ * MariaDB hashes were recaptured when read/write became data-only (the
+ * level SQL changed on purpose; the Postgres hash is unchanged).
+ */
 const GOLDEN: Record<string, string> = {
   __MARIADB__:
-    "6f02baf9d2f1e4f4ebb6155e740d970341909d0d24155539c87def40089657ef",
-  __MYSQL__: "ca708e4081dad384b5ed7c4093c70bed7e8400d649b7c61d6da9369b77555bf0",
+    "84b71e2043d6b7565c0da3fb885e3206a1dc585a63617f980ca9d1329b9c5431",
+  __MYSQL__: "2795b61057d05b529380cf108471f36d3b61aa1ad737e1778efa44ae75b72a7c",
   __POSTGRES__:
     "d5357cfaad5de77daffd3a65b5e665c2a7db6913f943fee11963f0b6ab1db4cf",
 };

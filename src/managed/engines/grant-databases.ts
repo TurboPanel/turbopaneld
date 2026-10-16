@@ -4,17 +4,45 @@ import type { ManagedDatabasePrivilege } from "./mysql-sql.ts";
 
 function asPrivilege(value: string): ManagedDatabasePrivilege | null {
   // The Database admin login holds `ALL` on its databases with the grant
-  // option and nothing global: exactly what `owner` grants here. It never
-  // gets CREATE USER, SET_ANY_DEFINER or SET USER (those are global).
-  if (value === "admin") return "owner";
-  if (value === "owner" || value === "read-write" || value === "read-only") {
+  // option and nothing global. It never gets CREATE USER, SET_ANY_DEFINER or
+  // SET USER (those are global). The migration login (`owner`) has the same
+  // rights without the grant option.
+  if (
+    value === "admin" || value === "owner" || value === "read-write" ||
+    value === "read-only"
+  ) {
     return value;
   }
   return null;
 }
 
+const LEVEL_RANK: Record<ManagedDatabasePrivilege, number> = {
+  "read-only": 0,
+  "read-write": 1,
+  owner: 2,
+  admin: 3,
+};
+
 /**
- * Grant every recognised privilege on every database, one statement at a
+ * The one level a login holds on each database: the strongest it lists. Each
+ * level grants its own set and revokes the rest, so two levels written in a
+ * row would undo each other.
+ */
+function strongestPrivilege(
+  privileges: readonly string[],
+): ManagedDatabasePrivilege | null {
+  let best: ManagedDatabasePrivilege | null = null;
+  for (const value of privileges) {
+    const level = asPrivilege(value);
+    if (level && (best === null || LEVEL_RANK[level] > LEVEL_RANK[best])) {
+      best = level;
+    }
+  }
+  return best;
+}
+
+/**
+ * Grant the strongest recognised level on every database, one statement at a
  * time and in order (the first failure stops the run). Each statement is the
  * wildcard-account grant plus one grant per client source host.
  *
@@ -43,9 +71,8 @@ export function grantDatabasePrivileges(options: {
   run: (sql: string) => Promise<unknown>;
 }): Promise<void> {
   const { username, hosts, grantSql, revokePlainSql, run } = options;
-  const known = options.privileges
-    .map(asPrivilege)
-    .filter((p): p is ManagedDatabasePrivilege => p !== null);
+  const strongest = strongestPrivilege(options.privileges);
+  const known = strongest === null ? [] : [strongest];
   const steps = options.databases.flatMap((database) => [
     ...known.map((privilege) => ({ database, privilege })),
     ...(known.length > 0 && revokePlainSql && hasGrantWildcard(database)
