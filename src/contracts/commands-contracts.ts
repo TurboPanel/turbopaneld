@@ -2120,7 +2120,18 @@ export type ProxySqlUserPayload = {
   defaultDatabase?: string;
   /** Absent means `read-write` (control-plane skew). */
   connectionRole?: ProxySqlConnectionRolePayload;
+  /**
+   * Root logins only: the other-server addresses (and this server's own public
+   * addresses) the root login may be used from, as plain IPv4/IPv6 addresses.
+   * Present — even empty — means "limit this root login to the server itself,
+   * its containers and these addresses"; the daemon adds the host-local
+   * sources itself. Absent (an older control plane) means no limit, as before.
+   */
+  allowedSources?: string[];
 };
+
+/** Most addresses one root login may list. */
+export const MAX_PROXYSQL_ALLOWED_SOURCES = 1024;
 
 /** Must stay in sync with the instance canonical `MANAGED_INGRESS_PORT_MIN/MAX`. */
 const MANAGED_INGRESS_PORT_MIN = 1024;
@@ -8761,7 +8772,25 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.connectionRole = value.connectionRole;
   }
+  if (value.allowedSources !== undefined) {
+    user.allowedSources = parseProxySqlAllowedSources(value.allowedSources);
+  }
   return user;
+}
+
+function parseProxySqlAllowedSources(value: unknown): string[] {
+  if (
+    !Array.isArray(value) || value.length > MAX_PROXYSQL_ALLOWED_SOURCES ||
+    value.some((entry) =>
+      typeof entry !== "string" || entry.length === 0 || entry.length > 45 ||
+      !/^[0-9a-fA-F:.]+$/.test(entry)
+    )
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile user allowedSources",
+    );
+  }
+  return [...value];
 }
 
 function isValidHostgroupId(value: unknown): value is number {

@@ -702,6 +702,54 @@ test("assertNoFrontendUserConflict throws on duplicate username", () => {
   );
 });
 
+test("assertNoFrontendUserConflict allows one name on a pgsql and a mysql cluster, and both users render", () => {
+  const desired: ProxySqlDesiredState = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        managedId: "pg",
+        users: [{ username: "shared", role: "user", password: "p1" }],
+      }),
+      clusterDesired({
+        managedId: "my",
+        engine: "mysql",
+        protocolPort: 13306,
+        users: [{ username: "shared", role: "user", password: "p2" }],
+      }),
+    ],
+  };
+  assertNoFrontendUserConflict(desired);
+  const cnf = renderProxySqlConfig(desired);
+  assertStringIncludes(cnf, "pgsql_users");
+  assertStringIncludes(cnf, "mysql_users");
+  assertStringIncludes(cnf, 'password="p1"');
+  assertStringIncludes(cnf, 'password="p2"');
+});
+
+test("assertNoFrontendUserConflict still rejects one name on a mysql and a mariadb cluster", () => {
+  assertThrows(
+    () =>
+      assertNoFrontendUserConflict({
+        bindAddresses: ["0.0.0.0"],
+        clusters: [
+          clusterDesired({
+            managedId: "my",
+            engine: "mysql",
+            protocolPort: 13306,
+            users: [{ username: "shared", role: "user", password: "p1" }],
+          }),
+          clusterDesired({
+            managedId: "maria",
+            engine: "mariadb",
+            protocolPort: 13306,
+            users: [{ username: "shared", role: "user", password: "p2" }],
+          }),
+        ],
+      }),
+    ManagedFrontendUserConflictError,
+  );
+});
+
 test("renderProxySqlConfig emits binding-user frontend password", () => {
   const boundCred = ["fe", "bound", "fixture"].join("-");
   const cnf = renderProxySqlConfig({
