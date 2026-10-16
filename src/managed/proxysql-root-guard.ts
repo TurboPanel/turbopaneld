@@ -42,7 +42,7 @@ const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
 function parseIpv4(value: string): number[] | null {
   const match = IPV4_RE.exec(value);
   if (!match) return null;
-  const octets = match.slice(1).map((part) => Number(part));
+  const octets = match.slice(1).map(Number);
   if (octets.some((octet) => octet > 255)) return null;
   // Reject leading zeros ("010") — ambiguous octal in some parsers.
   if (match.slice(1).some((part) => part.length > 1 && part.startsWith("0"))) {
@@ -51,24 +51,26 @@ function parseIpv4(value: string): number[] | null {
   return octets;
 }
 
+/** Hex groups of one side of an IPv6 literal ("" is none), or null. */
+function hexGroups(part: string): number[] | null {
+  if (part === "") return [];
+  const groups: number[] = [];
+  for (const piece of part.split(":")) {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(piece)) return null;
+    groups.push(Number.parseInt(piece, 16));
+  }
+  return groups;
+}
+
 /** Eight 16-bit groups of an IPv6 literal, or null. No zone ids, no v4 tail. */
 function parseIpv6(value: string): number[] | null {
   if (!/^[0-9a-fA-F:]+$/.test(value) || !value.includes(":")) return null;
   const halves = value.split("::");
   if (halves.length > 2) return null;
-  const toGroups = (part: string): number[] | null => {
-    if (part === "") return [];
-    const groups: number[] = [];
-    for (const piece of part.split(":")) {
-      if (!/^[0-9a-fA-F]{1,4}$/.test(piece)) return null;
-      groups.push(parseInt(piece, 16));
-    }
-    return groups;
-  };
-  const head = toGroups(halves[0]!);
+  const head = hexGroups(halves[0]!);
   if (head === null) return null;
   if (halves.length === 1) return head.length === 8 ? head : null;
-  const tail = toGroups(halves[1]!);
+  const tail = hexGroups(halves[1]!);
   if (tail === null || head.length + tail.length > 7) return null;
   return [
     ...head,
@@ -138,25 +140,24 @@ function ipv4SubnetPatterns(octets: number[], prefix: number): string[] {
 
 function ipv6SubnetPatterns(groups: number[], prefix: number): string[] {
   if (prefix < 16 || prefix > 128) return [];
+  if (prefix === 128) return [formatIpv6(groups)];
   const boundary = Math.ceil(prefix / 16) * 16;
   const count = 2 ** (boundary - prefix);
   if (count > MAX_PATTERNS_PER_SUBNET) return [];
-  const fixedGroups = boundary / 16;
-  if (prefix === 128) return [formatIpv6(groups)];
-  const last = fixedGroups - 1;
+  const last = boundary / 16 - 1;
   const mask = 16 - (prefix - last * 16);
   const base = groups[last]! & (0xffff << mask) & 0xffff;
   const patterns: string[] = [];
   for (let i = 0; i < count; i++) {
     const parts = [...groups.slice(0, last), base + i];
-    // A prefix inside the last group (/113 to /127) lists whole addresses.
-    if (fixedGroups === 8) {
+    if (boundary === 128) {
+      // A prefix inside the last group (/113 to /127) lists whole addresses.
       patterns.push(formatIpv6(parts));
       continue;
     }
     // Zero groups inside the fixed part change where the client's text form
     // puts its `::`, so the prefix would not match. Skip rather than guess.
-    if (parts.some((part) => part === 0)) return [];
+    if (parts.includes(0)) return [];
     patterns.push(`${parts.map((part) => part.toString(16)).join(":")}:%`);
   }
   return patterns;

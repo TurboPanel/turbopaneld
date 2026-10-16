@@ -1488,25 +1488,9 @@ function renderAdminQueryRuleStatements(
   // Root source guards first: ProxySQL runs the lowest rule id first and a
   // guarded root login's pass rules end evaluation (`apply=1`), so its
   // read-split rules below are never shadowed by a later id.
-  for (const cluster of clusters) {
-    if (!clusterMatchesFamily(cluster, family)) continue;
-    const readSplit = clusterEmitsReadSplitRules(cluster)
-      ? cluster.readerHostgroup
-      : null;
-    for (const user of cluster.users) {
-      if (!isGuardedRootUser(user)) continue;
-      const sources = mergeRootSources(
-        user.allowedSources ?? [],
-        localRootSources,
-      );
-      const hostgroup = user.connectionRole === "read-only" ? null : readSplit;
-      for (
-        const rule of rootGuardRulesForUser(user.username, sources, hostgroup)
-      ) {
-        statements.push(renderAdminGuardRule(table, ruleId, rule));
-        ruleId += 1;
-      }
-    }
+  for (const rule of rootGuardRules(family, clusters, localRootSources)) {
+    statements.push(renderAdminGuardRule(table, ruleId, rule));
+    ruleId += 1;
   }
   for (const cluster of clusters) {
     if (!clusterMatchesFamily(cluster, family)) continue;
@@ -1526,6 +1510,30 @@ function renderAdminQueryRuleStatements(
     `SAVE ${upper} QUERY RULES TO DISK`,
   );
   return statements;
+}
+
+/** Every guard rule, in evaluation order, for the guarded root logins of one family. */
+function rootGuardRules(
+  family: "mysql" | "pgsql",
+  clusters: readonly ProxySqlClusterDesired[],
+  localRootSources: readonly string[],
+): RootGuardRule[] {
+  const rules: RootGuardRule[] = [];
+  for (const cluster of clusters) {
+    if (!clusterMatchesFamily(cluster, family)) continue;
+    const readSplit = clusterEmitsReadSplitRules(cluster)
+      ? cluster.readerHostgroup
+      : null;
+    for (const user of cluster.users.filter(isGuardedRootUser)) {
+      const sources = mergeRootSources(
+        user.allowedSources ?? [],
+        localRootSources,
+      );
+      const hostgroup = user.connectionRole === "read-only" ? null : readSplit;
+      rules.push(...rootGuardRulesForUser(user.username, sources, hostgroup));
+    }
+  }
+  return rules;
 }
 
 function renderAdminGuardRule(
