@@ -399,3 +399,14 @@ test("postgres: a read-only login never takes a database over", async () => {
   );
   assertEquals(inputs.join("\n").includes(`OWNER TO "viewer"`), false);
 });
+
+test("postgres: a database already owned by its chosen login is not reported as another owner", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("app", true));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "shop", action: "create", ownerRole: true, ownerLogin: "app" },
+  ]);
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes("CREATE DATABASE"), false);
+  assertEquals(sql.includes("ALTER DATABASE"), false);
+  assertEquals(sql.includes(`CREATE ROLE "tp_shop_owner" NOLOGIN`), true);
+});

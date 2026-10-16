@@ -605,6 +605,7 @@ async function reconcileDatabaseAccess(
 async function createOwnerRoleDatabase(
   ctx: ManagedEngineContext,
   name: string,
+  ownerLogin?: string,
 ): Promise<void> {
   if (name.length > OWNER_ROLE_MAX_DATABASE_NAME) {
     throw new Error(
@@ -618,7 +619,7 @@ async function createOwnerRoleDatabase(
     await runPsql(ctx, createDatabaseSql(name, names.owner));
     return;
   }
-  if (existing[0]![0] === names.owner) {
+  if (existing[0]![0] === names.owner || existing[0]![0] === ownerLogin) {
     await runPsql(ctx, ensureOwnerRolesSql(name));
     return;
   }
@@ -1343,7 +1344,7 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const applied: string[] = [];
     await forEachSequential(ops, async (op) => {
       if (op.action === "create" && op.ownerRole === true) {
-        await createOwnerRoleDatabase(ctx, op.name);
+        await createOwnerRoleDatabase(ctx, op.name, op.ownerLogin);
       } else if (op.action === "create") {
         // CREATE DATABASE cannot run inside PL/pgSQL; check then create.
         const existing = await parsePsqlRows(ctx, databaseExistsSql(op.name));
