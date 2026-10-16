@@ -380,6 +380,20 @@ export function grantDatabaseSql(
 }
 
 /**
+ * The only database-level right the panel keeps for a login the site owner
+ * manages by hand: the right to connect. It adds that one right and never
+ * revokes anything, so grants made by hand stay as they are.
+ */
+export function grantConnectOnlySql(
+  database: string,
+  username: string,
+): string {
+  return `GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${
+    quoteIdentifier(username)
+  };`;
+}
+
+/**
  * Create a per-login schema where read-write logins can create objects.
  * The schema is owned by the login and they have full CREATE rights within it.
  * Run inside the database where the read-write login needs CREATE capability.

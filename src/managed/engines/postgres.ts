@@ -28,6 +28,7 @@ import {
   enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
   ensureReadWriteLoginSchemaSql,
+  grantConnectOnlySql,
   grantDatabaseSql,
   isInRecoverySql,
   isWritablePrimarySql,
@@ -284,19 +285,30 @@ type UserAccess = {
 /** Every SQL user with a recognised level and its de-duplicated databases. */
 function userAccessList(
   credentials: readonly ManagedApplyCredential[],
-): { granted: UserAccess[]; usernames: Map<string, string[]> } {
+): {
+  granted: UserAccess[];
+  usernames: Map<string, string[]>;
+  selfManaged: { username: string; databases: string[] }[];
+} {
   const granted: UserAccess[] = [];
   const usernames = new Map<string, string[]>();
+  const selfManaged: { username: string; databases: string[] }[] = [];
   for (const credential of credentials) {
     if (credential.role !== "user") continue;
     const databases = [...new Set(credential.databases)];
+    if (credential.grantMode === "self") {
+      // Managed by hand: only the right to connect is the panel's; nothing
+      // below the database is revoked, reset or re-granted.
+      selfManaged.push({ username: credential.username, databases });
+      continue;
+    }
     usernames.set(credential.username, databases);
     const level = strongestPrivilege(credential.privileges ?? []);
     if (level !== null) {
       granted.push({ username: credential.username, level, databases });
     }
   }
-  return { granted, usernames };
+  return { granted, usernames, selfManaged };
 }
 
 /** Who may create, write and read inside one database. */
@@ -342,7 +354,7 @@ async function reconcileDatabaseAccess(
   ctx: ManagedEngineContext,
   credentials: readonly ManagedApplyCredential[],
 ): Promise<void> {
-  const { granted, usernames } = userAccessList(credentials);
+  const { granted, usernames, selfManaged } = userAccessList(credentials);
   const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
     c.username
   );
@@ -365,10 +377,20 @@ async function reconcileDatabaseAccess(
         runPsql(ctx, grantDatabaseSql(database, entry.username, entry.level)),
     ));
 
+  await forEachSequential(selfManaged, (entry) =>
+    forEachSequential(
+      entry.databases,
+      (database) => runPsql(ctx, grantConnectOnlySql(database, entry.username)),
+    ));
+
   // After the explicit grants, so no login that holds one is ever without it.
   await runPsql(ctx, revokePublicDatabaseAccessSql());
 
-  const databases = [...new Set(granted.flatMap((entry) => entry.databases))];
+  const databases = [
+    ...new Set(
+      [...granted, ...selfManaged].flatMap((entry) => entry.databases),
+    ),
+  ];
   await forEachSequential(databases, async (database) => {
     // Create per-login schemas for read-write logins in each database.
     const readWriteLogins = granted
