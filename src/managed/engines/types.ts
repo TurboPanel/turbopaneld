@@ -20,6 +20,15 @@ export type ManagedEngineExec = (
   input?: string,
 ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
 
+/** Extra, optional facts for `applyCredentials`; absent = today's behaviour. */
+export type ManagedApplyCredentialsOptions = {
+  /**
+   * Postgres: databases the control plane made with an owner role. The engine
+   * checks each really belongs to its owner role before treating it as one.
+   */
+  ownerRoleDatabases?: readonly string[];
+};
+
 export type ManagedEngineContext = {
   containerId: string;
   composeServiceName: string;
@@ -70,6 +79,7 @@ export type ManagedEngineRuntime = {
   applyCredentials(
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],
+    options?: ManagedApplyCredentialsOptions,
   ): Promise<string[]>;
   /**
    * Optional: host-wide ProxySQL health-check principal (from `monitor.cnf`).

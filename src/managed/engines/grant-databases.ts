@@ -2,6 +2,10 @@ import { forEachSequential } from "../../util/sequential.ts";
 import type { ManagedDatabasePrivilege } from "./mysql-sql.ts";
 
 function asPrivilege(value: string): ManagedDatabasePrivilege | null {
+  // The Database admin login holds `ALL` on its databases with the grant
+  // option and nothing global: exactly what `owner` grants here. It never
+  // gets CREATE USER, SET_ANY_DEFINER or SET USER (those are global).
+  if (value === "admin") return "owner";
   if (value === "owner" || value === "read-write" || value === "read-only") {
     return value;
   }
@@ -40,4 +44,20 @@ export function grantDatabasePrivileges(options: {
       ].join("\n"),
     );
   });
+}
+
+/**
+ * Databases the panel writes grants for. A login the site owner manages by
+ * hand gets none, except the Database admin login: its rights are what makes
+ * it the admin, so the panel keeps them whatever the mode says.
+ */
+export function grantableDatabases(credential: {
+  databases: readonly string[];
+  privileges?: readonly string[];
+  grantMode?: string;
+}): readonly string[] {
+  if (credential.grantMode !== "self") return credential.databases;
+  return (credential.privileges ?? []).includes("admin")
+    ? credential.databases
+    : [];
 }

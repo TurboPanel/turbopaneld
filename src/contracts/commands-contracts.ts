@@ -1758,6 +1758,13 @@ export type ManagedApplyCredential = {
 export type ManagedApplyDatabaseOp = {
   name: string;
   action: "create" | "drop";
+  /**
+   * Postgres only. A new database made with an owner role: the daemon creates
+   * three roles that cannot log in (`tp_<name>_owner`, `_rw`, `_ro`) and the
+   * database belongs to the owner role. Absent means today's behaviour.
+   * Never converts a database that already exists with another owner.
+   */
+  ownerRole?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -7127,9 +7134,15 @@ function parseManagedApplyDatabases(
     ) {
       throw new TypeError("Invalid managed.apply databases entry");
     }
+    if (entry.ownerRole !== undefined && typeof entry.ownerRole !== "boolean") {
+      throw new TypeError(
+        "Invalid managed.apply databases entry: ownerRole must be true or false",
+      );
+    }
     databases.push({
       name: entry.name,
       action: entry.action as ManagedApplyDatabaseOp["action"],
+      ...(entry.ownerRole === true ? { ownerRole: true } : {}),
     });
   }
   return databases;
