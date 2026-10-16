@@ -168,10 +168,17 @@ function revokeExcessSql(
   // definer has lost TRIGGER on the table, which would stop every write to it.
   // So TRIGGER stays on a login that still defines a trigger in this database;
   // it goes when those triggers are moved to the migration login.
+  const definer = quoteLiteral(username + "@" + host);
   const triggerDefinedBy =
     `SELECT 1 FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ${
       quoteLiteral(database)
-    } AND DEFINER = ${quoteLiteral(`${username}@${host}`)}`;
+    } AND DEFINER = ${definer}`;
+  const held = (name: string, column: string): string => {
+    const test = column === "Trigger_priv"
+      ? `${column} = 'Y' AND NOT EXISTS (${triggerDefinedBy})`
+      : `${column} = 'Y'`;
+    return `IF(${test}, ${quoteLiteral(name)}, NULL)`;
+  };
   const statements: string[] = [];
   const addRevokeStep = (variable: string, list: string, prefix: string) => {
     statements.push(
@@ -187,15 +194,8 @@ function revokeExcessSql(
   if (revoked.length > 0) {
     addRevokeStep(
       "tp_excess",
-      `CONCAT_WS(', ', ${
-        revoked.map(([name, column]) =>
-          column === "Trigger_priv"
-            ? `IF(${column} = 'Y' AND NOT EXISTS (${triggerDefinedBy}), ${
-              quoteLiteral(name)
-            }, NULL)`
-            : `IF(${column} = 'Y', ${quoteLiteral(name)}, NULL)`
-        ).join(", ")
-      })`,
+      "CONCAT_WS(', ', " + revoked.map(([n, c]) => held(n, c)).join(", ") +
+        ")",
       "REVOKE ",
     );
   }
