@@ -1514,10 +1514,12 @@ export function buildProxySqlAdminStatements(
       "SAVE PGSQL VARIABLES TO DISK",
     );
   }
-  statements.push(...renderServerVersionStatements(desired.clusters));
-  // Last, so a rotated Organization CA leaf reaches the client listeners
-  // without a container restart.
-  statements.push(PROXYSQL_RELOAD_TLS_STATEMENT);
+  statements.push(
+    ...renderServerVersionStatements(desired.clusters),
+    // Last, so a rotated Organization CA leaf reaches the client listeners
+    // without a container restart.
+    PROXYSQL_RELOAD_TLS_STATEMENT,
+  );
   return statements;
 }
 
