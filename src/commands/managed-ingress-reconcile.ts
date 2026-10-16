@@ -79,6 +79,7 @@ import {
   staticConfigSectionChanged,
   writeProxySqlConfigAtomic,
 } from "../managed/proxysql.ts";
+import { collectLocalRootSources } from "../managed/proxysql-root-guard.ts";
 import { materializeProxySqlTlsMaterial } from "../managed/tls.ts";
 import {
   proxysqlAdminCnfPath,
@@ -152,6 +153,9 @@ function desiredStateFromPayload(
           : {}),
         ...(user.connectionRole !== undefined
           ? { connectionRole: user.connectionRole }
+          : {}),
+        ...(user.allowedSources !== undefined
+          ? { allowedSources: [...user.allowedSources] }
           : {}),
       })),
       ...(cluster.autoReadSplit !== undefined
@@ -305,6 +309,14 @@ async function ensureProxySqlComposeUp(
     throw new Error(retry.stderr || up.stderr || "proxysql compose up failed");
   }
   throw new Error(up.stderr || "proxysql compose up failed");
+}
+
+function desiredHasGuardedRoot(desired: ProxySqlDesiredState): boolean {
+  return desired.clusters.some((cluster) =>
+    cluster.users.some((user) =>
+      user.role === "root" && user.allowedSources !== undefined
+    )
+  );
 }
 
 function collectAppliedUsers(desired: ProxySqlDesiredState): string[] {
@@ -941,6 +953,11 @@ async function reconcileManagedIngress(
 
   const statements = buildProxySqlAdminStatements(desired, {
     monitor: monitorCredentials,
+    // Read after the stack and its networks are settled, on every reconcile,
+    // so a recreated Docker network's new subnet is picked up here.
+    ...(desiredHasGuardedRoot(desired)
+      ? { localRootSources: await collectLocalRootSources(containerName, run) }
+      : {}),
   });
   await applyProxySqlAdminStatements(statements, {
     runDocker: run,
