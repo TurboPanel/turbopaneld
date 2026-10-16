@@ -43,18 +43,28 @@ export function revokePlainPatternGrantSql(
   host: string,
 ): string {
   const { quoteLiteral } = quoting;
-  const revoke = `REVOKE ALL PRIVILEGES, GRANT OPTION ON ${
-    quoting.quoteIdentifier(database)
-  }.* FROM ${quoting.accountAt(username, host)}`;
+  const target = `${quoting.quoteIdentifier(database)}.* FROM ${
+    quoting.accountAt(username, host)
+  }`;
+  // `ALL PRIVILEGES, GRANT OPTION` does not parse with an `ON` clause, so the
+  // two revokes are separate, and each re-checks that the row is still there
+  // (a `REVOKE` of a grant that is gone is an error).
   return [
-    `SET @tp_plain_grant = (SELECT COUNT(*) FROM mysql.db WHERE Db = ${
-      quoteLiteral(database)
-    } AND User = ${quoteLiteral(username)} AND Host = ${quoteLiteral(host)});`,
-    `SET @tp_plain_revoke = IF(@tp_plain_grant > 0, ${
-      quoteLiteral(revoke)
-    }, 'DO 0');`,
-    "PREPARE tp_plain_revoke FROM @tp_plain_revoke;",
-    "EXECUTE tp_plain_revoke;",
-    "DEALLOCATE PREPARE tp_plain_revoke;",
-  ].join("\n");
+    `REVOKE ALL PRIVILEGES ON ${target}`,
+    `REVOKE GRANT OPTION ON ${target}`,
+  ].map((revoke) =>
+    [
+      `SET @tp_plain_grant = (SELECT COUNT(*) FROM mysql.db WHERE Db = ${
+        quoteLiteral(database)
+      } AND User = ${quoteLiteral(username)} AND Host = ${
+        quoteLiteral(host)
+      });`,
+      `SET @tp_plain_revoke = IF(@tp_plain_grant > 0, ${
+        quoteLiteral(revoke)
+      }, 'DO 0');`,
+      "PREPARE tp_plain_revoke FROM @tp_plain_revoke;",
+      "EXECUTE tp_plain_revoke;",
+      "DEALLOCATE PREPARE tp_plain_revoke;",
+    ].join("\n")
+  ).join("\n");
 }

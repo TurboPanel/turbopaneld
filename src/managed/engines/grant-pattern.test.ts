@@ -52,7 +52,15 @@ for (
     assert(sql.includes("User = 'u1' AND Host = '10.0.0.5'"), sql);
     assert(sql.includes("IF(@tp_plain_grant > 0"), sql);
     // The revoke targets the plain row, never the escaped one.
-    assert(sql.includes("ON `wp_site`.* FROM `u1`@\\'10.0.0.5\\'"), sql);
+    assert(
+      sql.includes(
+        "REVOKE ALL PRIVILEGES ON `wp_site`.* FROM `u1`@\\'10.0.0.5\\'",
+      ),
+      sql,
+    );
+    assert(sql.includes("REVOKE GRANT OPTION ON `wp_site`.* FROM"), sql);
+    // `ALL PRIVILEGES, GRANT OPTION ON db.*` does not parse.
+    assert(!sql.includes("PRIVILEGES, GRANT OPTION"), sql);
     assert(!sql.includes("wp\\_site"), sql);
   });
 }
@@ -101,7 +109,7 @@ for (
     assert(grantAt >= 0 && revokeAt > grantAt, sql);
     // One revoke per account host (managed network + the client host), only
     // for the database whose name is a pattern.
-    assertEquals(sql.split("PREPARE tp_plain_revoke FROM").length - 1, 2);
+    assertEquals(sql.split("PREPARE tp_plain_revoke FROM").length - 1, 4);
     assertEquals(sql.includes("Db = 'appdb'"), false);
     // The last grant on wp_site comes before its first revoke.
     assert(
