@@ -8823,7 +8823,9 @@ function parseProxySqlAllowedSources(value: unknown): string[] {
     value.some((entry) =>
       typeof entry !== "string" || entry.length === 0 || entry.length > 45 ||
       !/^[0-9a-fA-F:.]+%?$/.test(entry) ||
-      (entry.endsWith("%") && !/[.:]/.test(entry))
+      (entry.endsWith("%") &&
+        (!/^[0-9a-fA-F]{1,4}[.:](?:[0-9a-fA-F:.]*[.:])?%$/.test(entry) ||
+          entry.includes("::")))
     )
   ) {
     throw new TypeError(

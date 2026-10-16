@@ -1700,6 +1700,9 @@ test("managed.ingress.reconcile app-login limits are optional and validated", ()
       { maxConnections: "5" },
       { allowedSources: ["%"] },
       { allowedSources: ["10.%.1"] },
+      { allowedSources: ["203.0.1%"] },
+      { allowedSources: [":%"] },
+      { allowedSources: ["::%"] },
     ]
   ) {
     assertThrows(() => user(bad), TypeError);

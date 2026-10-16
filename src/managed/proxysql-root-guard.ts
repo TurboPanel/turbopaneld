@@ -270,7 +270,7 @@ export function mergeRootSources(
   for (const value of [...sent, ...local]) {
     const trimmed = value.trim();
     if (trimmed.endsWith("%")) {
-      merged.add(trimmed);
+      merged.add(trimmed.toLowerCase());
       continue;
     }
     const normalized = normalizeClientAddress(trimmed);
