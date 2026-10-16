@@ -145,7 +145,7 @@ for (
       privileges: ["owner", "admin"],
     });
     assert(admin.includes("WITH GRANT OPTION;"), admin);
-    assert(!admin.includes("REVOKE GRANT OPTION"), admin);
+    assert(!admin.includes("tp_excess"), admin);
   });
 
   test(`${name}: read-write is granted, then the wider old rights are taken back, on every host row`, async () => {

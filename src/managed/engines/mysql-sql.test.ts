@@ -242,7 +242,7 @@ test("read-write grants data changes only and revokes the rest", () => {
     const kept = grant.slice(6, grant.indexOf(" ON ")).split(", ");
     assertEquals(kept.includes(name), false, name);
     assertEquals(
-      revoke.includes(`IF(${column} = 'Y', '${name}', NULL)`),
+      revoke.includes(`IF(${column} = 'Y'`) && revoke.includes(`'${name}'`),
       true,
       name,
     );
@@ -252,6 +252,13 @@ test("read-write grants data changes only and revokes the rest", () => {
   assertEquals(revoke.includes("Execute_priv"), false);
   assertEquals(revoke.includes("Grant_priv = 'Y', 'GRANT OPTION'"), true);
   assertEquals(revoke.includes("DO 0"), true);
+  // A login that still defines a trigger keeps TRIGGER: the trigger would
+  // otherwise fail every write to its table (error 1142).
+  assertStringIncludes(
+    revoke,
+    "IF(Trigger_priv = 'Y' AND NOT EXISTS (SELECT 1 FROM information_schema.TRIGGERS " +
+      "WHERE TRIGGER_SCHEMA = 'appdb' AND DEFINER = 'app@",
+  );
 });
 
 test("read-only grants SELECT and SHOW VIEW and no EXECUTE", () => {

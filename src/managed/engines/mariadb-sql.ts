@@ -122,7 +122,10 @@ export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
     quoteIdentifier,
     quoteLiteral,
     accountAt,
-    extraPrivileges: [["DELETE HISTORY", "Delete_history_priv"]],
+    extraPrivileges: [
+      ["DELETE HISTORY", "Delete_history_priv"],
+      ["SHOW CREATE ROUTINE", "Show_create_routine_priv"],
+    ],
   },
   MANAGED_DOCKER_NETWORK_HOST,
 );

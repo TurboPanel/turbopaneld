@@ -153,6 +153,7 @@ const LEVEL_PRIVILEGES: Record<
 function revokeExcessSql(
   quoting: GrantQuoting,
   schema: string,
+  database: string,
   username: string,
   host: string,
   revoked: ReadonlyArray<readonly [string, string]>,
@@ -163,6 +164,14 @@ function revokeExcessSql(
     quoteLiteral(username)
   } AND Host = ${quoteLiteral(host)}`;
   const tail = ` ON \`${schema}\`.* FROM ${quoting.accountAt(username, host)}`;
+  // A trigger fires with its definer's rights and fails (error 1142) once the
+  // definer has lost TRIGGER on the table, which would stop every write to it.
+  // So TRIGGER stays on a login that still defines a trigger in this database;
+  // it goes when those triggers are moved to the migration login.
+  const triggerDefinedBy =
+    `SELECT 1 FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ${
+      quoteLiteral(database)
+    } AND DEFINER = ${quoteLiteral(`${username}@${host}`)}`;
   const statements: string[] = [];
   const run = (variable: string, list: string, prefix: string) => {
     statements.push(
@@ -180,7 +189,11 @@ function revokeExcessSql(
       "tp_excess",
       `CONCAT_WS(', ', ${
         revoked.map(([name, column]) =>
-          `IF(${column} = 'Y', ${quoteLiteral(name)}, NULL)`
+          column === "Trigger_priv"
+            ? `IF(${column} = 'Y' AND NOT EXISTS (${triggerDefinedBy}), ${
+              quoteLiteral(name)
+            }, NULL)`
+            : `IF(${column} = 'Y', ${quoteLiteral(name)}, NULL)`
         ).join(", ")
       })`,
       "REVOKE ",
@@ -217,6 +230,7 @@ export function grantOnDatabaseSql(
     revokeExcessSql(
       quoting,
       schema,
+      database,
       username,
       host,
       [
@@ -231,7 +245,7 @@ export function grantOnDatabaseSql(
     case "owner":
       return [
         `GRANT ALL PRIVILEGES ON ${db}.* TO ${account};`,
-        revokeExcessSql(quoting, schema, username, host, [], true),
+        revokeExcessSql(quoting, schema, database, username, host, [], true),
       ].join("\n");
     case "read-write":
     case "read-only": {

@@ -73,6 +73,16 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
     grantDatabaseSql("db", "u", "owner").includes("Delete_history_priv"),
     false,
   );
+  assertEquals(
+    grantDatabaseSql("db", "u", "read-only").includes(
+      "Show_create_routine_priv",
+    ),
+    true,
+  );
+  assertEquals(
+    grantDatabaseSql("db", "u", "admin").includes("tp_excess"),
+    false,
+  );
   const repl = ensureReplicationAccountSql("tp_repl", "x", ["203.0.113.5"]);
   assertEquals(repl.includes("`tp_repl`@'203.0.113.5'"), true);
   // Server-side TLS enforcement, independent of what the standby requests.

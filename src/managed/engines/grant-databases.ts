@@ -42,7 +42,7 @@ function strongestPrivilege(
 }
 
 /**
- * Grant every recognised privilege on every database, one statement at a
+ * Grant the strongest recognised level on every database, one statement at a
  * time and in order (the first failure stops the run). Each statement is the
  * wildcard-account grant plus one grant per client source host.
  *
