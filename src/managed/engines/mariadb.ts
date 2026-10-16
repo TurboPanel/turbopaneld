@@ -79,8 +79,11 @@ import type {
   ManagedEngineContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedPermissionsEngineReport,
+  ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
+import { readMysqlFamilyPermissions } from "./mysql-permissions.ts";
 import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
@@ -261,9 +264,11 @@ async function runMariadb(
   }
 }
 
+/** `raw`: `-r`, so backslashes in names (`\_`) are printed as the server sends them. */
 async function runMariadbQuery(
   ctx: ManagedEngineContext,
   sql: string,
+  raw = false,
 ): Promise<string> {
   const result = await execMariadb(
     ctx,
@@ -274,6 +279,7 @@ async function runMariadbQuery(
       ctx.rootUsername,
       "-N",
       "-B",
+      ...(raw ? ["-r"] : []),
       "-e",
       sql,
     ],
@@ -806,6 +812,17 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     } catch {
       return undefined;
     }
+  },
+
+  readPermissions(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+  ): Promise<ManagedPermissionsEngineReport> {
+    return readMysqlFamilyPermissions(
+      "mariadb",
+      request,
+      (sql) => runMariadbQuery(ctx, sql, true),
+    );
   },
 
   async applyCredentials(

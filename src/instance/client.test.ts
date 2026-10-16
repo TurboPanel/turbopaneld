@@ -3540,6 +3540,17 @@ it({
             engine: "redis",
             at: new Date().toISOString(),
           });
+          // An engine with no permissions reader: `ok: false` on the request
+          // id, without touching Docker.
+          socket.receive({
+            type: "managed-permissions-request",
+            id: "perms-1",
+            managedId: "00000000-0000-4000-8000-000000000001",
+            engine: "redis",
+            logins: ["app_user"],
+            databases: [],
+            at: new Date().toISOString(),
+          });
           socket.receive({
             type: "fabric-paths-request",
             id: "fabric-1",
@@ -3626,6 +3637,22 @@ it({
           assertEquals(healthFrame?.id, "health-1");
           assertEquals(healthFrame?.ok, false);
           assertEquals(typeof healthFrame?.error, "string");
+          await waitFor(
+            "managed-permissions-result",
+            () =>
+              lastFrameOfType(socket, "managed-permissions-result")
+                ? true
+                : undefined,
+          );
+          const permissionsFrame = lastFrameOfType(
+            socket,
+            "managed-permissions-result",
+          ) as
+            | { id?: string; ok?: boolean; error?: unknown }
+            | undefined;
+          assertEquals(permissionsFrame?.id, "perms-1");
+          assertEquals(permissionsFrame?.ok, false);
+          assertEquals(typeof permissionsFrame?.error, "string");
           await waitFor(
             "fabric-paths-result",
             () =>

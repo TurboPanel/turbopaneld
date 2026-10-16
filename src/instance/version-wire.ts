@@ -75,6 +75,7 @@ export const DAEMON_WIRE_FEATURES = [
   "site-db-bindings-v1",
   "deno-native-apps-v1",
   "managed-ingress-ipv6-v1",
+  "managed-permissions-read-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -93,6 +94,15 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
  * the request only to a daemon that lists this feature.
  */
 export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
+
+/**
+ * This daemon answers `managed-permissions-request` with
+ * `managed-permissions-result`: what the named logins may do right now, read
+ * from the engine (read only). The control plane asks only a daemon that lists
+ * this feature.
+ */
+export const MANAGED_PERMISSIONS_READ_FEATURE: DaemonWireFeature =
+  "managed-permissions-read-v1";
 
 /**
  * This daemon pushes `managed-health-report` (every local replica's fresh

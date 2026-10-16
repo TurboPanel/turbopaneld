@@ -11,6 +11,7 @@ import {
   MANAGED_HEALTH_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
   MANAGED_INGRESS_IPV6_FEATURE,
+  MANAGED_PERMISSIONS_READ_FEATURE,
   MANAGED_REPLICA_FRESHNESS_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
@@ -142,6 +143,15 @@ test("managed-health-v1 is advertised on the wire and raised no floor", () => {
     true,
   );
   // A new wire message is feature-gated; it never moves the version floor.
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-permissions-read-v1 is advertised last and raised no floor", () => {
+  assertEquals(
+    MANAGED_PERMISSIONS_READ_FEATURE,
+    "managed-permissions-read-v1",
+  );
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), MANAGED_PERMISSIONS_READ_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

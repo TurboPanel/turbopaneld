@@ -11,6 +11,7 @@ import type {
   ManagedBackupArtifactExtension,
   ManagedEngineCode,
 } from "../../contracts/commands-contracts.ts";
+import type { ObservedLogin } from "../../contracts/cell-messages.ts";
 import type { ManagedEngineCensus } from "./census.ts";
 
 export type { ManagedEngineCensus } from "./census.ts";
@@ -41,6 +42,21 @@ export type ManagedEngineContext = {
   clientSourceHosts?: readonly string[];
 };
 
+/** What `readPermissions` is asked for (already validated by the caller). */
+export type ManagedPermissionsReadRequest = {
+  /** Applied engine usernames, unique, at most 50. */
+  logins: readonly string[];
+  /** Postgres: databases whose objects to read. MySQL / MariaDB ignore it. */
+  databases: readonly string[];
+};
+
+/** One engine's answer; the caller stamps `engine` / `observedAt` and caps it. */
+export type ManagedPermissionsEngineReport = {
+  serverVersion?: string;
+  databasesRead?: string[];
+  logins: ObservedLogin[];
+};
+
 export type ManagedEngineRuntime = {
   engine: ManagedEngineCode;
   containerUser: string;
@@ -67,6 +83,15 @@ export type ManagedEngineRuntime = {
    * not is `{ healthy: true }` with `null` connections.
    */
   readCensus?(ctx: ManagedEngineContext): Promise<ManagedEngineCensus>;
+  /**
+   * Optional, read only: what each login may do right now, in the engine's
+   * own words (`managed-permissions-request`). Runs SELECT / SHOW statements
+   * as the engine root over the container socket and never changes anything.
+   */
+  readPermissions?(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+  ): Promise<ManagedPermissionsEngineReport>;
   applyCredentials(
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],
