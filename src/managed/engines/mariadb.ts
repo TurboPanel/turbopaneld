@@ -61,6 +61,7 @@ import {
   quoteLiteral,
   reassertReplicaPrivilegeGuardSql,
   resetReplicaGtidStateSql,
+  revokePlainDatabaseGrantSql,
   showReplicaStatusSql,
   startReplicaSql,
   versionSql,
@@ -375,6 +376,7 @@ async function applyOneCredential(
     username: credential.username,
     hosts: ctx.clientSourceHosts ?? [],
     grantSql: grantDatabaseSql,
+    revokePlainSql: revokePlainDatabaseGrantSql,
     run: (sql) => runMariadb(ctx, sql),
   });
   await runMariadb(ctx, "FLUSH PRIVILEGES;");

@@ -5,6 +5,7 @@
  * (`MASTER_USE_GTID=slave_pos` / `gtid_slave_pos` vs `SOURCE_AUTO_POSITION=1`).
  */
 
+import { grantSqlFor } from "./grant-pattern.ts";
 import {
   type FollowSourceDialect,
   renderFollowSourceSql,
@@ -112,31 +113,10 @@ export function dropDatabaseSql(name: string): string {
   return `DROP DATABASE IF EXISTS ${db};`;
 }
 
-export function grantDatabaseSql(
-  database: string,
-  username: string,
-  privilege: ManagedDatabasePrivilege,
-  host: string = MANAGED_DOCKER_NETWORK_HOST,
-): string {
-  const db = quoteIdentifier(database);
-  const account = accountAt(username, host);
-  switch (privilege) {
-    case "owner":
-      return `GRANT ALL PRIVILEGES ON ${db}.* TO ${account} WITH GRANT OPTION;`;
-    case "read-write":
-      return (
-        `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, ` +
-        `CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, ` +
-        `CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON ${db}.* TO ${account};`
-      );
-    case "read-only":
-      return `GRANT SELECT, SHOW VIEW ON ${db}.* TO ${account};`;
-    default: {
-      const _exhaustive: never = privilege;
-      throw new Error(`unsupported privilege: ${_exhaustive}`);
-    }
-  }
-}
+export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
+  { quoteIdentifier, quoteLiteral, accountAt },
+  MANAGED_DOCKER_NETWORK_HOST,
+);
 
 export function grantRootSql(
   username: string,
