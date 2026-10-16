@@ -142,13 +142,18 @@ function ipv6SubnetPatterns(groups: number[], prefix: number): string[] {
   const count = 2 ** (boundary - prefix);
   if (count > MAX_PATTERNS_PER_SUBNET) return [];
   const fixedGroups = boundary / 16;
-  if (fixedGroups === 8) return [formatIpv6(groups)];
+  if (prefix === 128) return [formatIpv6(groups)];
   const last = fixedGroups - 1;
   const mask = 16 - (prefix - last * 16);
   const base = groups[last]! & (0xffff << mask) & 0xffff;
   const patterns: string[] = [];
   for (let i = 0; i < count; i++) {
     const parts = [...groups.slice(0, last), base + i];
+    // A prefix inside the last group (/113 to /127) lists whole addresses.
+    if (fixedGroups === 8) {
+      patterns.push(formatIpv6(parts));
+      continue;
+    }
     // Zero groups inside the fixed part change where the client's text form
     // puts its `::`, so the prefix would not match. Skip rather than guess.
     if (parts.some((part) => part === 0)) return [];

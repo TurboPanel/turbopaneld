@@ -82,6 +82,12 @@ test("subnetToClientAddrPatterns writes IPv6 prefixes on 16-bit group boundaries
   assertEquals(subnetToClientAddrPatterns("fd12:3456:789a:1::5/128"), [
     "fd12:3456:789a:1::5",
   ]);
+  assertEquals(subnetToClientAddrPatterns("fd12:3456:789a:1::/126"), [
+    "fd12:3456:789a:1::",
+    "fd12:3456:789a:1::1",
+    "fd12:3456:789a:1::2",
+    "fd12:3456:789a:1::3",
+  ]);
   // A zero group in the fixed part changes where the client text puts `::`.
   assertEquals(subnetToClientAddrPatterns("fd12:0:0:1::/64"), []);
   assertEquals(subnetToClientAddrPatterns("fd00::/8"), []);
