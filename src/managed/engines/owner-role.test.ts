@@ -410,3 +410,50 @@ test("postgres: a database already owned by its chosen login is not reported as 
   assertEquals(sql.includes("ALTER DATABASE"), false);
   assertEquals(sql.includes(`CREATE ROLE "tp_shop_owner" NOLOGIN`), true);
 });
+
+test("postgres: a database with an owner role and a login owner stays an owner-role database when the choice is left out", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("app", true));
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("migrate", ["owner"])],
+    { ownerRoleDatabases: ["shop"] },
+  );
+  const sql = inputs.join("\n");
+  assertEquals(sql.includes(`OWNER TO "migrate"`), false);
+  assertEquals(sql.includes(`"tp_shop_owner" TO "migrate"`), true);
+  assertEquals(sql.includes("AND r.rolname NOT IN ('postgres'"), true);
+});
+
+test("postgres: a platform role named as owner is ignored", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("root", true));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "shop", action: "create", ownerRole: true, ownerLogin: "root" },
+  ]);
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("app", ["read-write"])],
+    { ownerRoleDatabases: ["shop"], ownerLogins: { shop: "root" } },
+  );
+  assertEquals(inputs.join("\n").includes(`OWNER TO "root"`), false);
+});
+
+test("postgres: the engine's own databases are never handed to an owner role", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("root", true));
+  await postgresManagedEngineRuntime.applyDatabases!(ctx, [
+    { name: "template1", action: "create", ownerRole: true },
+  ]);
+  assertEquals(inputs.join("\n").includes("ALTER DATABASE"), false);
+});
+
+test("postgres: an owner login that no longer qualifies hands the database back to the owner role", async () => {
+  const { ctx, inputs } = harness(chosenOwnerAnswers("app", true));
+  await postgresManagedEngineRuntime.applyCredentials(
+    ctx,
+    [cred("app", ["read-only"])],
+    { ownerRoleDatabases: ["shop"], ownerLogins: { shop: "app" } },
+  );
+  assertEquals(
+    inputs.join("\n").includes(`OWNER TO "tp_shop_owner"`),
+    true,
+  );
+});

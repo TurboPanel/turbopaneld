@@ -58,6 +58,7 @@ export function databaseOwnerSql(name: string): string {
 export function ownerRoleDatabasesAmongSql(
   names: readonly string[],
   ownerLogins: Readonly<Record<string, string>> = {},
+  platformRoles: readonly string[] = [],
 ): string {
   const list = names.map((name) => quoteLiteral(name)).join(", ");
   // A database whose owner is a login the customer chose is still the
@@ -67,11 +68,21 @@ export function ownerRoleDatabasesAmongSql(
     .map(([database, login]) =>
       `(${quoteLiteral(database)}, ${quoteLiteral(login)})`
     );
+  // A database that has its owner role and is owned by a login is the
+  // panel's whichever login that is, so an apply that leaves the choice out
+  // can never send it down the path for ordinary databases.
+  const notPlatform = [
+    "'postgres'",
+    ...platformRoles.map((r) => quoteLiteral(r)),
+  ]
+    .join(", ");
+  const byLogin =
+    `(EXISTS (SELECT 1 FROM pg_catalog.pg_roles o WHERE o.rolname = 'tp_' || d.datname || '_owner') AND r.rolname NOT IN (${notPlatform}))`;
   const owner = chosen.length === 0
-    ? `r.rolname = 'tp_' || d.datname || '_owner'`
+    ? `(r.rolname = 'tp_' || d.datname || '_owner' OR ${byLogin})`
     : `(r.rolname = 'tp_' || d.datname || '_owner' OR (d.datname, r.rolname) IN (${
       chosen.join(", ")
-    }))`;
+    }) OR ${byLogin})`;
   return [
     `SELECT d.datname FROM pg_catalog.pg_database d`,
     `JOIN pg_catalog.pg_roles r ON r.oid = d.datdba`,
@@ -100,7 +111,11 @@ export function databaseIsEmptySql(): string {
     `JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE p.oid >= 16384 AND ${userSchema})`,
     `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type t WHERE t.oid >= 16384`,
     `AND t.typtype IN ('e', 'd', 'r', 'm'))`,
-    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e WHERE e.extname <> 'plpgsql'))::text;`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e WHERE e.extname <> 'plpgsql')`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_largeobject_metadata)`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_publication)`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger)`,
+    `AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_foreign_server))::text;`,
   ].join(" ");
 }
 

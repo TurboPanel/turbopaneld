@@ -411,13 +411,30 @@ async function reconcileDatabaseAccess(
         .flatMap((c) => c.databases),
     ]),
   ];
+  const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
+    c.username
+  );
   // A login the customer chose as owner takes the database over once the
-  // login exists (the databases are made first, the logins after).
-  const loginOwned = await adoptChosenOwners(ctx, ownerLogins, granted);
+  // login exists (the databases are made first, the logins after). A platform
+  // role is never an owner, whatever the request says.
+  ownerLogins = Object.fromEntries(
+    Object.entries(ownerLogins).filter(([, login]) =>
+      !isPlatformRole(ctx, login, rootUsernames)
+    ),
+  );
+  const loginOwned = await adoptChosenOwners(
+    ctx,
+    ownerLogins,
+    granted,
+    rootUsernames,
+  );
   const ownerRoleDbs = new Set(
     probe.length === 0 ? [] : (await parsePsqlRows(
       ctx,
-      ownerRoleDatabasesAmongSql(probe, ownerLogins),
+      ownerRoleDatabasesAmongSql(probe, ownerLogins, [
+        ctx.rootUsername,
+        ...rootUsernames,
+      ]),
     )).flatMap((row) => row[0] === undefined ? [] : [row[0]]),
   );
   // Databases that are not owner-role databases have no owner role for a
@@ -433,9 +450,6 @@ async function reconcileDatabaseAccess(
     }];
   });
   const objectGranted = [...granted, ...adminFallback];
-  const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
-    c.username
-  );
 
   await forEachSequential([...usernames], async ([username, databases]) => {
     const level = granted.find((entry) => entry.username === username)?.level;
@@ -599,8 +613,9 @@ async function reconcileDatabaseAccess(
  * Create a database that belongs to its owner role: the three roles first,
  * then `CREATE DATABASE ... OWNER`. A database that already exists with that
  * owner only has its roles re-checked. One that exists with any other owner
- * is left exactly as it is: moving it onto an owner role (reassigning what it
- * holds) is an explicit action, never part of apply.
+ * is left exactly as it is, except the cluster's own first database while it
+ * is still empty (see below): moving a database that holds data onto an owner
+ * role is an explicit action, never part of apply.
  */
 async function createOwnerRoleDatabase(
   ctx: ManagedEngineContext,
@@ -619,7 +634,11 @@ async function createOwnerRoleDatabase(
     await runPsql(ctx, createDatabaseSql(name, names.owner));
     return;
   }
-  if (existing[0]![0] === names.owner || existing[0]![0] === ownerLogin) {
+  if (
+    existing[0]![0] === names.owner ||
+    (ownerLogin !== undefined && !isPlatformRole(ctx, ownerLogin) &&
+      existing[0]![0] === ownerLogin)
+  ) {
     await runPsql(ctx, ensureOwnerRolesSql(name));
     return;
   }
@@ -627,7 +646,7 @@ async function createOwnerRoleDatabase(
   // for the platform admin. While it still holds nothing it moves onto its
   // owner role; once anything is in it, it is left exactly as it is.
   if (
-    existing[0]![0] === ctx.rootUsername &&
+    existing[0]![0] === ctx.rootUsername && !RESERVED_DATABASES.has(name) &&
     await databaseIsEmpty(ctx, name)
   ) {
     await runPsql(ctx, ensureOwnerRolesSql(name));
@@ -640,6 +659,20 @@ async function createOwnerRoleDatabase(
       sanitizeForLog(name)
     } already exists with another owner; keeping it as it is`,
   );
+}
+
+/** Databases the engine itself needs; never handed to an owner role. */
+const RESERVED_DATABASES = new Set(["postgres", "template0", "template1"]);
+
+/** A role that is the platform's (never a customer's database owner). */
+function isPlatformRole(
+  ctx: ManagedEngineContext,
+  name: string,
+  rootUsernames: readonly string[] = [],
+): boolean {
+  return name === ctx.rootUsername || name === "postgres" ||
+    name.startsWith("tp_") || name.startsWith("pg_") ||
+    rootUsernames.includes(name);
 }
 
 /** Whether `database` holds nothing a person made (see `databaseIsEmptySql`). */
@@ -663,19 +696,30 @@ async function adoptChosenOwners(
   ctx: ManagedEngineContext,
   ownerLogins: Readonly<Record<string, string>>,
   granted: readonly UserAccess[],
+  rootUsernames: readonly string[],
 ): Promise<Map<string, string>> {
   const owned = new Map<string, string>();
   await forEachSequential(Object.entries(ownerLogins), async ([db, login]) => {
+    if (
+      isPlatformRole(ctx, login, rootUsernames) || RESERVED_DATABASES.has(db)
+    ) {
+      return;
+    }
     const entry = granted.find((g) => g.username === login);
+    const rows = await parsePsqlRows(ctx, databaseOwnerSql(db));
+    const current = rows[0]?.[0];
+    if (current === undefined) return;
     if (
       entry === undefined || entry.level === "read-only" ||
       !entry.databases.includes(db)
     ) {
+      // A login that no longer qualifies must not keep owning the database:
+      // it goes back to its owner role.
+      if (current === login && entry !== undefined) {
+        await runPsql(ctx, moveDatabaseOwnerSql(db, ownerRoleNames(db).owner));
+      }
       return;
     }
-    const rows = await parsePsqlRows(ctx, databaseOwnerSql(db));
-    const current = rows[0]?.[0];
-    if (current === undefined) return;
     if (current !== login) {
       const mine = current === ownerRoleNames(db).owner;
       const platformOwned = current === ctx.rootUsername &&
