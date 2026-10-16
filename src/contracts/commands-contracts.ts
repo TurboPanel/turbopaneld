@@ -2107,6 +2107,11 @@ export type ProxySqlUserPayload = {
   defaultDatabase?: string;
   /** Absent means `read-write` (control-plane skew). */
   connectionRole?: ProxySqlConnectionRolePayload;
+  /**
+   * Login used by a database tool: always routed to the primary, never given
+   * read/write split rules. Absent means false (control-plane skew).
+   */
+  tool?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `MANAGED_INGRESS_PORT_MIN/MAX`. */
@@ -8736,6 +8741,12 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
       );
     }
     user.connectionRole = value.connectionRole;
+  }
+  if (value.tool !== undefined) {
+    if (typeof value.tool !== "boolean") {
+      throw new TypeError("Invalid managed.ingress.reconcile user tool");
+    }
+    user.tool = value.tool;
   }
   return user;
 }

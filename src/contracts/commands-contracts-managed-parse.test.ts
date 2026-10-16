@@ -1582,3 +1582,23 @@ test("parseManagedHaReconcilePayload rejects leftover identity raft cluster and 
     "Invalid managed.ha.failover result",
   );
 });
+
+test("parseManagedIngressReconcilePayload: user tool flag is optional (version skew) and must be a boolean", () => {
+  const withTool = (extra: Record<string, unknown>) =>
+    parseManagedIngressReconcilePayload({
+      ...VALID_INGRESS,
+      clusters: [{
+        ...VALID_INGRESS.clusters[0],
+        users: [{ ...VALID_INGRESS.clusters[0].users[0], ...extra }],
+      }],
+    }).clusters[0]!.users[0]!;
+  // An older control plane sends no field.
+  assertEquals("tool" in withTool({}), false);
+  assertEquals(withTool({ tool: true }).tool, true);
+  assertEquals(withTool({ tool: false }).tool, false);
+  assertThrows(
+    () => withTool({ tool: "yes" }),
+    TypeError,
+    "Invalid managed.ingress.reconcile user tool",
+  );
+});

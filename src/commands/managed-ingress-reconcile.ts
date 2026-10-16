@@ -153,6 +153,7 @@ function desiredStateFromPayload(
         ...(user.connectionRole !== undefined
           ? { connectionRole: user.connectionRole }
           : {}),
+        ...(user.tool === true ? { tool: true } : {}),
       })),
       ...(cluster.autoReadSplit !== undefined
         ? { autoReadSplit: cluster.autoReadSplit }

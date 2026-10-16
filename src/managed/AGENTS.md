@@ -55,6 +55,8 @@ Orchestrator topology **login** is one derived account per organization (`tp_top
 
 Orchestrator self-heal: `restart: always` does not bring back a container that was killed by hand, so the stack stays down until the next apply/`managed.ha.reconcile`. While the compose file exists, `ManagedHaObserver` (`../instance/ha-observe.ts`) polls every 15 s and, before the API poll, calls `reviveStoppedOrchestratorContainer`: `compose start` only after two consecutive polls still list an exited/dead/created container. Stop, restart, and apply set an in-process busy-until marker around their compose mutation (cleared in `finally`), and a busy or live/absent observation resets the stopped streak. Completed checks are cooled down for 60 s. This closes the mid-`compose down` / recreate window without losing self-heal for a container killed by hand.
 
+**Routing by login kind** (`managed.ingress.reconcile` user `connectionRole` and optional `tool`): a `read-only` login defaults to the reader hostgroup only when the cluster has a read-eligible replica; on a single server it defaults to the writer (the primary), because its grants, not its route, keep it read-only. A `tool` login (used by a database tool) always defaults to the primary and never gets a read/write split rule. `fast_forward` is not used anywhere. Absent `tool` means false.
+
 ## State tree
 
 ```

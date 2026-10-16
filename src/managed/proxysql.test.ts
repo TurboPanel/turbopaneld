@@ -2235,3 +2235,80 @@ test("buildProxySqlDrainStatements and buildProxySqlUndrainStatements toggle bac
     true,
   );
 });
+
+test("a read-only login on a single server routes to the primary", () => {
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        users: [{
+          username: "app_ro",
+          role: "user",
+          password: "p2",
+          connectionRole: "read-only",
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(
+    cnf,
+    'username="app_ro" password="p2" default_hostgroup=0',
+  );
+});
+
+test("a tool login goes to the primary and gets no read split rule, even with a reader and autoReadSplit", () => {
+  const input = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        autoReadSplit: true,
+        backends: PRIMARY_AND_READER_BACKENDS,
+        users: [
+          { username: "app", role: "user" as const, password: "p1" },
+          {
+            username: "gui",
+            role: "user" as const,
+            password: "p3",
+            tool: true,
+          },
+          {
+            username: "gui_ro",
+            role: "user" as const,
+            password: "p4",
+            connectionRole: "read-only" as const,
+            tool: true,
+          },
+        ],
+      }),
+    ],
+  };
+  const cnf = renderProxySqlConfig(input);
+  assertStringIncludes(
+    cnf,
+    'username="gui" password="p3" default_hostgroup=0',
+  );
+  assertStringIncludes(
+    cnf,
+    'username="gui_ro" password="p4" default_hostgroup=0',
+  );
+  assertStringIncludes(cnf, 'username="app" match_pattern="^SELECT"');
+  assertEquals(cnf.includes('username="gui" match_pattern'), false);
+  assertEquals(cnf.includes('username="gui_ro" match_pattern'), false);
+  assertEquals(cnf.includes("fast_forward"), false);
+  const admin = buildProxySqlAdminStatements(input).join("\n");
+  assertStringIncludes(admin, "'gui','p3',0,");
+});
+
+test("a tool flag of false changes nothing", () => {
+  const base = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [clusterDesired({
+      autoReadSplit: true,
+      backends: PRIMARY_AND_READER_BACKENDS,
+      users: [{ username: "app", role: "user" as const, password: "p" }],
+    })],
+  };
+  const withFlag = structuredClone(base);
+  (withFlag.clusters[0]!.users[0] as { tool?: boolean }).tool = false;
+  assertEquals(renderProxySqlConfig(withFlag), renderProxySqlConfig(base));
+});
