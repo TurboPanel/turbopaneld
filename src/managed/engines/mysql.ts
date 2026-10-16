@@ -18,7 +18,10 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
-import { grantDatabasePrivileges } from "./grant-databases.ts";
+import {
+  grantableDatabases,
+  grantDatabasePrivileges,
+} from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
   switchoverCaughtErrorDetail,
@@ -59,6 +62,7 @@ import {
   quoteLiteral,
   replicaFreshnessSql,
   resetReplicaGtidStateSql,
+  revokePlainDatabaseGrantSql,
   showReplicaStatusSql,
   startReplicaSql,
   versionSql,
@@ -81,8 +85,12 @@ import type {
   ManagedEngineContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
+  ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
+import { readMysqlFamilyPermissions } from "./mysql-permissions.ts";
 import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
@@ -401,12 +409,15 @@ async function applyOneCredential(
     ),
   );
 
+  // A login the site owner manages by hand keeps its account and password
+  // but never has its grants written or reset here.
   await grantDatabasePrivileges({
-    databases: credential.databases,
+    databases: grantableDatabases(credential),
     privileges: credential.privileges ?? [],
     username: credential.username,
     hosts: ctx.clientSourceHosts ?? [],
     grantSql: grantDatabaseSql,
+    revokePlainSql: revokePlainDatabaseGrantSql,
     run: (sql) => runMysql(ctx, sql),
   });
   await runMysql(ctx, "FLUSH PRIVILEGES;");
@@ -836,6 +847,19 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     } catch {
       return undefined;
     }
+  },
+
+  readPermissions(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
+  ): Promise<ManagedPermissionsEngineReport> {
+    return readMysqlFamilyPermissions(
+      "mysql",
+      request,
+      (sql) => runMysqlQuery(ctx, sql),
+      clock,
+    );
   },
 
   async applyCredentials(

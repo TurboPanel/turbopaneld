@@ -468,7 +468,7 @@ test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface
   // compose-level publish is private-only (null) or a narrow public IP —
   // sibling containers on the managed network dial this internal
   // address, which is unrelated to whether/where compose publishes to the
-  // host. See `CONTAINER_LISTEN_ADDRESS` in proxysql.ts.
+  // host. See `desiredProxySqlListenerInterfaces` in proxysql.ts.
   const privateCnf = renderProxySqlConfig({
     bindAddresses: [],
     clusters: [clusterDesired()],
@@ -610,6 +610,27 @@ test("readPublishedBindAddressesFromCompose recovers every scope's address in or
   });
 });
 
+test("external access on a server with IPv6 publishes both wildcards and reads them back", () => {
+  const ports = { pgsql: 18432, mysql: 18306 };
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["0.0.0.0", "::"],
+    [],
+    ports,
+    MANAGED_NETWORK,
+  );
+  assertStringIncludes(compose, '- "0.0.0.0:18432:18432"');
+  assertStringIncludes(compose, '- "0.0.0.0:18306:18306"');
+  assertStringIncludes(compose, '- "[::]:18432:18432"');
+  assertStringIncludes(compose, '- "[::]:18306:18306"');
+  // Self-heal must keep the IPv6 publish, unbracketed, and the family order.
+  assertEquals(readPublishedBindAddressesFromCompose(compose), [
+    "0.0.0.0",
+    "::",
+  ]);
+  assertEquals(readPublishedListenerPortsFromCompose(compose), ports);
+});
+
 test("readCurrentProxySqlBindAddresses returns [] when the compose file has never been written", async () => {
   const { createTempLayout } = await import("../testing/temp-layout.ts");
   const { resolveLayout } = await import("../paths/layout.ts");
@@ -673,6 +694,54 @@ test("assertNoFrontendUserConflict throws on duplicate username", () => {
           }),
           clusterDesired({
             managedId: "b",
+            users: [{ username: "shared", role: "user", password: "p2" }],
+          }),
+        ],
+      }),
+    ManagedFrontendUserConflictError,
+  );
+});
+
+test("assertNoFrontendUserConflict allows one name on a pgsql and a mysql cluster, and both users render", () => {
+  const desired: ProxySqlDesiredState = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        managedId: "pg",
+        users: [{ username: "shared", role: "user", password: "p1" }],
+      }),
+      clusterDesired({
+        managedId: "my",
+        engine: "mysql",
+        protocolPort: 13306,
+        users: [{ username: "shared", role: "user", password: "p2" }],
+      }),
+    ],
+  };
+  assertNoFrontendUserConflict(desired);
+  const cnf = renderProxySqlConfig(desired);
+  assertStringIncludes(cnf, "pgsql_users");
+  assertStringIncludes(cnf, "mysql_users");
+  assertStringIncludes(cnf, 'password="p1"');
+  assertStringIncludes(cnf, 'password="p2"');
+});
+
+test("assertNoFrontendUserConflict still rejects one name on a mysql and a mariadb cluster", () => {
+  assertThrows(
+    () =>
+      assertNoFrontendUserConflict({
+        bindAddresses: ["0.0.0.0"],
+        clusters: [
+          clusterDesired({
+            managedId: "my",
+            engine: "mysql",
+            protocolPort: 13306,
+            users: [{ username: "shared", role: "user", password: "p1" }],
+          }),
+          clusterDesired({
+            managedId: "maria",
+            engine: "mariadb",
+            protocolPort: 13306,
             users: [{ username: "shared", role: "user", password: "p2" }],
           }),
         ],
@@ -1220,8 +1289,9 @@ test("staticConfigSectionChanged ignores dynamic user/server changes and the pub
   });
   assertEquals(staticConfigSectionChanged(a, b), false);
 
-  // The compose-level publish bind is no longer reflected in the cnf's
-  // `interfaces=` line at all (see `CONTAINER_LISTEN_ADDRESS`) — it is a
+  // An IPv4 publish bind is not reflected in the cnf's `interfaces=` line
+  // (see `desiredProxySqlListenerInterfaces`; only an IPv6 publish adds
+  // `[::]`) — it is a
   // pure compose `ports:` concern now, detected separately in the
   // `managed.ingress.reconcile` handler via
   // `readPublishedBindAddressesFromCompose`, not via the static cnf section.
@@ -1556,6 +1626,35 @@ test("port preflight only probes ports the current frontend does not already hol
     probe,
   );
   assertEquals(probed, [15432, 13306]);
+});
+
+test("port preflight skips held ports when the IPv6 wildcard is added", async () => {
+  const probed: string[] = [];
+  const probe = (host: string, port: number) => {
+    probed.push(`${host}:${port}`);
+    return Promise.resolve(true);
+  };
+  // Turning IPv6 on keeps the ports: ProxySQL already holds them on 0.0.0.0.
+  await assertManagedIngressPortsBindable(
+    ["0.0.0.0", "::"],
+    { pgsql: 15432, mysql: 13306 },
+    { pgsql: 15432, mysql: 13306 },
+    probe,
+  );
+  assertEquals(probed, []);
+
+  await assertManagedIngressPortsBindable(
+    ["0.0.0.0", "::"],
+    { pgsql: 15432, mysql: 13306 },
+    null,
+    probe,
+  );
+  assertEquals(probed, [
+    "0.0.0.0:15432",
+    "0.0.0.0:13306",
+    ":::15432",
+    ":::13306",
+  ]);
 });
 
 test("port preflight skips probing entirely when the frontend is not published", async () => {
@@ -2183,4 +2282,81 @@ test("buildProxySqlDrainStatements and buildProxySqlUndrainStatements toggle bac
     escaped[0]?.includes("hostname='db''''host'"),
     true,
   );
+});
+
+test("a read-only login on a single server routes to the primary", () => {
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        users: [{
+          username: "app_ro",
+          role: "user",
+          password: "p2",
+          connectionRole: "read-only",
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(
+    cnf,
+    'username="app_ro" password="p2" default_hostgroup=0',
+  );
+});
+
+test("a tool login goes to the primary and gets no read split rule, even with a reader and autoReadSplit", () => {
+  const input = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        autoReadSplit: true,
+        backends: PRIMARY_AND_READER_BACKENDS,
+        users: [
+          { username: "app", role: "user" as const, password: "p1" },
+          {
+            username: "gui",
+            role: "user" as const,
+            password: "p3",
+            tool: true,
+          },
+          {
+            username: "gui_ro",
+            role: "user" as const,
+            password: "p4",
+            connectionRole: "read-only" as const,
+            tool: true,
+          },
+        ],
+      }),
+    ],
+  };
+  const cnf = renderProxySqlConfig(input);
+  assertStringIncludes(
+    cnf,
+    'username="gui" password="p3" default_hostgroup=0',
+  );
+  assertStringIncludes(
+    cnf,
+    'username="gui_ro" password="p4" default_hostgroup=0',
+  );
+  assertStringIncludes(cnf, 'username="app" match_pattern="^SELECT"');
+  assertEquals(cnf.includes('username="gui" match_pattern'), false);
+  assertEquals(cnf.includes('username="gui_ro" match_pattern'), false);
+  assertEquals(cnf.includes("fast_forward"), false);
+  const admin = buildProxySqlAdminStatements(input).join("\n");
+  assertStringIncludes(admin, "'gui','p3',0,");
+});
+
+test("a tool flag of false changes nothing", () => {
+  const base = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [clusterDesired({
+      autoReadSplit: true,
+      backends: PRIMARY_AND_READER_BACKENDS,
+      users: [{ username: "app", role: "user" as const, password: "p" }],
+    })],
+  };
+  const withFlag = structuredClone(base);
+  (withFlag.clusters[0]!.users[0] as { tool?: boolean }).tool = false;
+  assertEquals(renderProxySqlConfig(withFlag), renderProxySqlConfig(base));
 });

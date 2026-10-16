@@ -269,5 +269,42 @@
       { "name": "ok", "required": true, "type": "boolean" },
       { "name": "type", "required": true, "type": "'backup-run-report-result'" }
     ]
+  },
+  "ManagedPermissionsRequestMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "databases", "required": true, "type": "string[]" },
+      { "name": "engine", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "logins", "required": true, "type": "string[]" },
+      { "name": "managedId", "required": true, "type": "string" },
+      {
+        "name": "type",
+        "required": true,
+        "type": "'managed-permissions-request'"
+      }
+    ]
+  },
+  "ManagedPermissionsResultMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "ok", "required": true, "type": "boolean" },
+      {
+        "name": "permissions",
+        "required": false,
+        "type": "ManagedPermissionsObserved"
+      },
+      {
+        "name": "type",
+        "required": true,
+        "type": "'managed-permissions-result'"
+      }
+    ]
   }
 }

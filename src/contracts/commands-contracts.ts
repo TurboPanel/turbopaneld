@@ -1731,12 +1731,25 @@ export type ManagedApplyExposure = {
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
+export const MANAGED_GRANT_MODES = ["preset", "recipe", "self"] as const;
+
+export type ManagedGrantMode = (typeof MANAGED_GRANT_MODES)[number];
+
 export type ManagedApplyCredential = {
   principalId: string;
   username: string;
   role: "root" | "user" | "replication";
   databases: string[];
   privileges?: string[];
+  /**
+   * How the daemon treats this login's permissions. Absent, `preset` and
+   * `recipe` all mean today's behaviour (the daemon sets the permissions from
+   * `privileges` on every apply; recipes are not built yet, so `recipe` acts
+   * like `preset` here). `self` means the site owner manages permissions by
+   * hand: the daemon keeps the login, password and database connect right and
+   * never resets or revokes anything below the database.
+   */
+  grantMode?: ManagedGrantMode;
   /** Daemon-recipient sealed password (`tpdaemon.…`). */
   password: string;
 };
@@ -1745,6 +1758,22 @@ export type ManagedApplyCredential = {
 export type ManagedApplyDatabaseOp = {
   name: string;
   action: "create" | "drop";
+  /**
+   * Postgres only. A new database made with an owner role: the daemon creates
+   * three roles that cannot log in (`tp_<name>_owner`, `_rw`, `_ro`) and the
+   * database belongs to the owner role. Absent means today's behaviour.
+   * Never converts a database that already exists with another owner.
+   */
+  ownerRole?: boolean;
+  /**
+   * Postgres only, with `ownerRole`. The applied username of a login that owns
+   * the database instead of the no-login owner role being the only owner. The
+   * three roles are still made and still own what is created; the login owns
+   * the database and works through the owner role. Moved onto the login once
+   * the login exists, only when the database is the panel's own or still empty.
+   * Needs `managed-database-owner-v1`.
+   */
+  ownerLogin?: string;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -2107,7 +2136,31 @@ export type ProxySqlUserPayload = {
   defaultDatabase?: string;
   /** Absent means `read-write` (control-plane skew). */
   connectionRole?: ProxySqlConnectionRolePayload;
+  /**
+   * Login used by a database tool: always routed to the primary, never given
+   * read/write split rules. Absent means false (control-plane skew).
+   */
+  tool?: boolean;
+  /**
+   * Where this login may be used from: plain IPv4/IPv6 addresses or a
+   * trailing-`%` prefix such as `203.0.113.%` or `2001:db8:1:%`. Present —
+   * even empty — limits the login to these places (a root login also always
+   * keeps the server itself, its containers and its own listed addresses; the
+   * daemon adds the host-local sources itself). Absent (an older control
+   * plane) means no limit, as before.
+   */
+  allowedSources?: string[];
+  /** App logins with `allowedSources`: also allow the server itself and its containers. */
+  allowLocalSources?: boolean;
+  /** Most simultaneous connections for this login. Absent = no per-login cap. */
+  maxConnections?: number;
 };
+
+/** Largest per-login connection cap the wire accepts. */
+export const MAX_PROXYSQL_LOGIN_CONNECTIONS = 100_000;
+
+/** Most addresses one root login may list. */
+export const MAX_PROXYSQL_ALLOWED_SOURCES = 1024;
 
 /** Must stay in sync with the instance canonical `MANAGED_INGRESS_PORT_MIN/MAX`. */
 const MANAGED_INGRESS_PORT_MIN = 1024;
@@ -2155,6 +2208,11 @@ export type ManagedIngressListenerPortsPayload = {
 export type ProxySqlClusterPayload = {
   managedId: string;
   engine: string;
+  /**
+   * Engine release series (`18`, `9.7`, `11.8`). ProxySQL reports it to
+   * clients as the server version; absent from an older control plane.
+   */
+  engineVersion?: string;
   protocolPort: number;
   /**
    * Protocol module this cluster is served by. Explicit because a configurable
@@ -2185,10 +2243,11 @@ export type ManagedIngressReconcilePayload = {
    */
   managedNetwork: string;
   /**
-   * Every host address the client listeners publish on. The instance sends one
-   * entry, from the server's single "allow external access to the databases on
-   * this server" setting: `127.0.0.1` (off) or `0.0.0.0` (on). Absent or empty
-   * means no host publish at all.
+   * Every host address the client listeners publish on, from the server's
+   * single "allow external access to the databases on this server" setting:
+   * `127.0.0.1` (off), or `0.0.0.0` (on) plus `::` when the server has IPv6 and
+   * this daemon lists `managed-ingress-ipv6-v1`. Absent or empty means no host
+   * publish at all.
    */
   bindAddresses?: string[];
   /**
@@ -6982,6 +7041,14 @@ function parseManagedApplyCredentialEntry(
     throw new TypeError("Invalid managed.apply credentials entry");
   }
   const privileges = parseManagedCredentialPrivileges(entry.privileges);
+  if (
+    entry.grantMode !== undefined &&
+    !(MANAGED_GRANT_MODES as readonly unknown[]).includes(entry.grantMode)
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply credentials entry: grantMode must be preset, recipe or self",
+    );
+  }
   return {
     principalId: entry.principalId,
     username: entry.username,
@@ -6989,6 +7056,9 @@ function parseManagedApplyCredentialEntry(
     databases: parseManagedCredentialDatabases(entry.databases),
     password: entry.password,
     ...(privileges === undefined ? {} : { privileges }),
+    ...(entry.grantMode === undefined
+      ? {}
+      : { grantMode: entry.grantMode as ManagedGrantMode }),
   };
 }
 
@@ -7052,6 +7122,23 @@ function parseManagedTopologyUser(
   return parseManagedSealedCredential(value, `Invalid ${label} topologyUser`);
 }
 
+/** `ownerLogin` of a database op: a login name, only on a create with `ownerRole`. */
+function parseManagedDatabaseOwnerLogin(
+  entry: Record<string, unknown>,
+): string | undefined {
+  const value = entry.ownerLogin;
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" || !isSafeIdentifier(value) ||
+    entry.ownerRole !== true || entry.action !== "create"
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: ownerLogin must be a login name on a created database with ownerRole",
+    );
+  }
+  return value;
+}
+
 function parseManagedApplyDatabases(
   value: unknown,
 ): ManagedApplyDatabaseOp[] | undefined {
@@ -7073,9 +7160,17 @@ function parseManagedApplyDatabases(
     ) {
       throw new TypeError("Invalid managed.apply databases entry");
     }
+    if (entry.ownerRole !== undefined && typeof entry.ownerRole !== "boolean") {
+      throw new TypeError(
+        "Invalid managed.apply databases entry: ownerRole must be true or false",
+      );
+    }
+    const ownerLogin = parseManagedDatabaseOwnerLogin(entry);
     databases.push({
       name: entry.name,
       action: entry.action as ManagedApplyDatabaseOp["action"],
+      ...(entry.ownerRole === true ? { ownerRole: true } : {}),
+      ...(ownerLogin === undefined ? {} : { ownerLogin }),
     });
   }
   return databases;
@@ -8731,7 +8826,62 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.connectionRole = value.connectionRole;
   }
+  if (value.tool !== undefined) {
+    if (typeof value.tool !== "boolean") {
+      throw new TypeError("Invalid managed.ingress.reconcile user tool");
+    }
+    user.tool = value.tool;
+  }
+  parseProxySqlUserLimits(value, user);
   return user;
+}
+
+/** Optional source limit and connection cap of a login (absent = no limit). */
+function parseProxySqlUserLimits(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
+  if (value.allowedSources !== undefined) {
+    user.allowedSources = parseProxySqlAllowedSources(value.allowedSources);
+  }
+  if (value.allowLocalSources !== undefined) {
+    if (typeof value.allowLocalSources !== "boolean") {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user allowLocalSources",
+      );
+    }
+    user.allowLocalSources = value.allowLocalSources;
+  }
+  const cap = value.maxConnections;
+  if (cap !== undefined) {
+    if (
+      typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 ||
+      cap > MAX_PROXYSQL_LOGIN_CONNECTIONS
+    ) {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user maxConnections",
+      );
+    }
+    user.maxConnections = cap;
+  }
+}
+
+function parseProxySqlAllowedSources(value: unknown): string[] {
+  if (
+    !Array.isArray(value) || value.length > MAX_PROXYSQL_ALLOWED_SOURCES ||
+    value.some((entry) =>
+      typeof entry !== "string" || entry.length === 0 || entry.length > 45 ||
+      !/^[0-9a-fA-F:.]+%?$/.test(entry) ||
+      (entry.endsWith("%") &&
+        (!/^[0-9a-fA-F]{1,4}[.:](?:[0-9a-fA-F:.]*[.:])?%$/.test(entry) ||
+          entry.includes("::")))
+    )
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile user allowedSources",
+    );
+  }
+  return [...value];
 }
 
 function isValidHostgroupId(value: unknown): value is number {
@@ -8741,6 +8891,17 @@ function isValidHostgroupId(value: unknown): value is number {
     value >= 0 &&
     value <= 65_535
   );
+}
+
+/**
+ * Engine release series as the instance sends it: `18`, `9.7`, `11.8`. Must
+ * stay in sync with the instance's `MANAGED_INGRESS_ENGINE_VERSION_RE`
+ * (`src/contracts/commands/schemas.ts`).
+ */
+const PROXYSQL_ENGINE_VERSION_RE = /^\d{1,4}(?:\.\d{1,4}){0,2}$/;
+
+export function isProxySqlEngineVersion(value: unknown): value is string {
+  return typeof value === "string" && PROXYSQL_ENGINE_VERSION_RE.test(value);
 }
 
 function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
@@ -8778,6 +8939,14 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
   if (value.family !== undefined && !isManagedIngressFamily(value.family)) {
     throw new TypeError("Invalid managed.ingress.reconcile cluster family");
   }
+  if (
+    value.engineVersion !== undefined &&
+    !isProxySqlEngineVersion(value.engineVersion)
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile cluster engineVersion",
+    );
+  }
   const cluster: ProxySqlClusterPayload = {
     managedId: value.managedId,
     engine: value.engine,
@@ -8788,6 +8957,9 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
     users: value.users.map(parseProxySqlUserPayload),
   };
   if (value.family !== undefined) cluster.family = value.family;
+  if (value.engineVersion !== undefined) {
+    cluster.engineVersion = value.engineVersion;
+  }
   if (value.autoReadSplit !== undefined) {
     cluster.autoReadSplit = value.autoReadSplit;
   }

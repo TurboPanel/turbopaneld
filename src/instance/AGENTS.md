@@ -86,6 +86,35 @@ additive and no floor moved. A replica's `member.replication` also carries
 `lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
 control plane ignores them.
 
+**Managed owner role (`managed-owner-role-v1`).** No message: it only says
+this daemon honours `ownerRole` on a Postgres database and the Database admin
+login. The control plane records an owner role, and accepts an admin login,
+only for a primary that lists it (else 409
+`managed_owner_role_needs_daemon_update`).
+
+**Data-only read/write (`managed-data-only-readwrite-v1`).** No message: it
+says this daemon grants a MySQL or MariaDB `read-write` login data changes
+only, and the `owner` (migration) login everything in its database without
+`GRANT OPTION` (the Database admin login keeps it). The control plane gives a
+new MySQL or MariaDB `read-write` login only to a primary that lists it (else
+409 `managed_readwrite_needs_daemon_update`).
+
+**Managed database owner (`managed-database-owner-v1`).** No message: it
+says this daemon honours `databases[].ownerLogin` on a Postgres create, moves
+a cluster's own, still empty first database onto its owner role, and gives a
+Database admin login on a database without an owner role the read-write rights.
+The control plane sends those only to a primary that lists it (else 409
+`managed_database_owner_needs_daemon_update` for a chosen login owner).
+
+**Managed permissions read (`managed-permissions-read-v1`).** Same shape as
+on-demand health: a control plane that sees the feature may send
+`managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,
+`databases` up to 100, Postgres only) and gets `managed-permissions-result`
+(`ok`, `permissions` or `error`) on the same id.
+`InstanceClient.#readManagedPermissionsAsync` hands it to
+`readManagedPermissions` (`src/managed/permissions-read.ts`), which always
+answers. Read only, no command row, no outbox; the answer stays under 100 KB.
+
 **Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
 (`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
 (all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends

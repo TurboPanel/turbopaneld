@@ -215,6 +215,13 @@ export function restoreReadWriteLoginSchemasSql(): string {
     "DO $tp_rw_schemas$",
     "DECLARE r record;",
     "BEGIN",
+    // A database that belongs to its owner role has no per-login schemas.
+    "  IF EXISTS (SELECT 1 FROM pg_catalog.pg_database d",
+    "               JOIN pg_catalog.pg_roles o ON o.oid = d.datdba",
+    "              WHERE d.datname = pg_catalog.current_database()",
+    "                AND o.rolname = 'tp_' || d.datname || '_owner') THEN",
+    "    RETURN;",
+    "  END IF;",
     "  FOR r IN",
     "    SELECT rol.rolname",
     "      FROM pg_catalog.pg_roles rol",
@@ -377,6 +384,20 @@ export function grantDatabaseSql(
     `$turbopanel$;`,
   );
   return lines.join("\n");
+}
+
+/**
+ * The only database-level right the panel keeps for a login the site owner
+ * manages by hand: the right to connect. It adds that one right and never
+ * revokes anything, so grants made by hand stay as they are.
+ */
+export function grantConnectOnlySql(
+  database: string,
+  username: string,
+): string {
+  return `GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${
+    quoteIdentifier(username)
+  };`;
 }
 
 /**
@@ -680,7 +701,7 @@ function existingObjectSql(
  * already does not): same end state on every series. Writes only while the
  * PUBLIC entry still holds CREATE.
  */
-function closePublicSchemaSql(): string {
+export function closePublicSchemaSql(): string {
   return [
     `DO $turbopanel$`,
     `BEGIN`,
