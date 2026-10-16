@@ -2126,14 +2126,22 @@ export type ProxySqlUserPayload = {
    */
   tool?: boolean;
   /**
-   * Root logins only: the other-server addresses (and this server's own public
-   * addresses) the root login may be used from, as plain IPv4/IPv6 addresses.
-   * Present — even empty — means "limit this root login to the server itself,
-   * its containers and these addresses"; the daemon adds the host-local
-   * sources itself. Absent (an older control plane) means no limit, as before.
+   * Where this login may be used from: plain IPv4/IPv6 addresses or a
+   * trailing-`%` prefix such as `203.0.113.%` or `2001:db8:1:%`. Present —
+   * even empty — limits the login to these places (a root login also always
+   * keeps the server itself, its containers and its own listed addresses; the
+   * daemon adds the host-local sources itself). Absent (an older control
+   * plane) means no limit, as before.
    */
   allowedSources?: string[];
+  /** App logins with `allowedSources`: also allow the server itself and its containers. */
+  allowLocalSources?: boolean;
+  /** Most simultaneous connections for this login. Absent = no per-login cap. */
+  maxConnections?: number;
 };
+
+/** Largest per-login connection cap the wire accepts. */
+export const MAX_PROXYSQL_LOGIN_CONNECTIONS = 100_000;
 
 /** Most addresses one root login may list. */
 export const MAX_PROXYSQL_ALLOWED_SOURCES = 1024;
@@ -8786,6 +8794,26 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
   if (value.allowedSources !== undefined) {
     user.allowedSources = parseProxySqlAllowedSources(value.allowedSources);
   }
+  if (value.allowLocalSources !== undefined) {
+    if (typeof value.allowLocalSources !== "boolean") {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user allowLocalSources",
+      );
+    }
+    user.allowLocalSources = value.allowLocalSources;
+  }
+  if (value.maxConnections !== undefined) {
+    if (
+      !Number.isInteger(value.maxConnections) ||
+      (value.maxConnections as number) < 1 ||
+      (value.maxConnections as number) > MAX_PROXYSQL_LOGIN_CONNECTIONS
+    ) {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user maxConnections",
+      );
+    }
+    user.maxConnections = value.maxConnections as number;
+  }
   return user;
 }
 
@@ -8794,7 +8822,8 @@ function parseProxySqlAllowedSources(value: unknown): string[] {
     !Array.isArray(value) || value.length > MAX_PROXYSQL_ALLOWED_SOURCES ||
     value.some((entry) =>
       typeof entry !== "string" || entry.length === 0 || entry.length > 45 ||
-      !/^[0-9a-fA-F:.]+$/.test(entry)
+      !/^[0-9a-fA-F:.]+%?$/.test(entry) ||
+      (entry.endsWith("%") && !/[.:]/.test(entry))
     )
   ) {
     throw new TypeError(

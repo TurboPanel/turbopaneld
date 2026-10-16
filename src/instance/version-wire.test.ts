@@ -11,6 +11,7 @@ import {
   MANAGED_HEALTH_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
   MANAGED_INGRESS_IPV6_FEATURE,
+  MANAGED_LOGIN_LIMITS_FEATURE,
   MANAGED_REPLICA_FRESHNESS_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
@@ -215,6 +216,17 @@ test("managed-ingress-ipv6-v1 is advertised on the wire and raised no floor", ()
   assertEquals(
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(
       MANAGED_INGRESS_IPV6_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-login-limits-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(MANAGED_LOGIN_LIMITS_FEATURE, "managed-login-limits-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_LOGIN_LIMITS_FEATURE,
     ),
     true,
   );
