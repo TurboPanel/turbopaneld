@@ -18,7 +18,10 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
-import { grantDatabasePrivileges } from "./grant-databases.ts";
+import {
+  grantableDatabases,
+  grantDatabasePrivileges,
+} from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
   switchoverCaughtErrorDetail,
@@ -404,7 +407,7 @@ async function applyOneCredential(
   // A login the site owner manages by hand keeps its account and password
   // but never has its grants written or reset here.
   await grantDatabasePrivileges({
-    databases: credential.grantMode === "self" ? [] : credential.databases,
+    databases: grantableDatabases(credential),
     privileges: credential.privileges ?? [],
     username: credential.username,
     hosts: ctx.clientSourceHosts ?? [],

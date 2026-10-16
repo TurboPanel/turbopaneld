@@ -215,6 +215,13 @@ export function restoreReadWriteLoginSchemasSql(): string {
     "DO $tp_rw_schemas$",
     "DECLARE r record;",
     "BEGIN",
+    // A database that belongs to its owner role has no per-login schemas.
+    "  IF EXISTS (SELECT 1 FROM pg_catalog.pg_database d",
+    "               JOIN pg_catalog.pg_roles o ON o.oid = d.datdba",
+    "              WHERE d.datname = pg_catalog.current_database()",
+    "                AND o.rolname = 'tp_' || d.datname || '_owner') THEN",
+    "    RETURN;",
+    "  END IF;",
     "  FOR r IN",
     "    SELECT rol.rolname",
     "      FROM pg_catalog.pg_roles rol",
@@ -694,7 +701,7 @@ function existingObjectSql(
  * already does not): same end state on every series. Writes only while the
  * PUBLIC entry still holds CREATE.
  */
-function closePublicSchemaSql(): string {
+export function closePublicSchemaSql(): string {
   return [
     `DO $turbopanel$`,
     `BEGIN`,

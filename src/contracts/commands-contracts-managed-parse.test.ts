@@ -1621,6 +1621,33 @@ test("parseManagedApplyPayload: credential grantMode is optional (version skew) 
   );
 });
 
+test("parseManagedApplyPayload: databases[].ownerRole is optional (version skew) and a boolean", () => {
+  const withOp = (extra: Record<string, unknown>) =>
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      databases: [{ name: "shop", action: "create", ...extra }],
+    }).databases![0]!;
+  assertEquals("ownerRole" in withOp({}), false);
+  assertEquals(withOp({ ownerRole: true }).ownerRole, true);
+  assertEquals("ownerRole" in withOp({ ownerRole: false }), false);
+  assertThrows(
+    () => withOp({ ownerRole: "yes" }),
+    TypeError,
+    "ownerRole must be true or false",
+  );
+});
+
+test("parseManagedApplyPayload: the admin privilege parses like any other name", () => {
+  const credential = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    credentials: [{
+      ...VALID_MANAGED_APPLY.credentials[0],
+      privileges: ["admin"],
+    }],
+  }).credentials[0]!;
+  assertEquals(credential.privileges, ["admin"]);
+});
+
 test("managed.ingress.reconcile root allowedSources is optional and validated", () => {
   const withSources = (allowedSources: unknown) => ({
     ...VALID_INGRESS,
