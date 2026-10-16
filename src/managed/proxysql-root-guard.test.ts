@@ -23,8 +23,8 @@ const test = Deno.test.bind(Deno);
 test("normalizeClientAddress keeps IPv4 and writes IPv6 in the compressed form ProxySQL shows", () => {
   assertEquals(normalizeClientAddress("45.32.200.170"), "45.32.200.170");
   assertEquals(
-    normalizeClientAddress("2001:19F0:6402:0D92:5400:06FF:FEDE:2A17"),
-    "2001:19f0:6402:d92:5400:6ff:fede:2a17",
+    normalizeClientAddress("2001:DB8:0:0D92:5400:06FF:FEDE:2A17"),
+    "2001:db8:0:d92:5400:6ff:fede:2a17",
   );
   assertEquals(normalizeClientAddress("0:0:0:0:0:0:0:1"), "::1");
   assertEquals(
