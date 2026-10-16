@@ -6,6 +6,10 @@
  */
 
 import {
+  quoteGrantSchema,
+  revokePlainPatternGrantSql,
+} from "./grant-pattern.ts";
+import {
   type FollowSourceDialect,
   renderFollowSourceSql,
 } from "./follow-source-sql.ts";
@@ -118,7 +122,7 @@ export function grantDatabaseSql(
   privilege: ManagedDatabasePrivilege,
   host: string = MANAGED_DOCKER_NETWORK_HOST,
 ): string {
-  const db = quoteIdentifier(database);
+  const db = quoteGrantSchema(GRANT_QUOTING, database);
   const account = accountAt(username, host);
   switch (privilege) {
     case "owner":
@@ -136,6 +140,21 @@ export function grantDatabaseSql(
       throw new Error(`unsupported privilege: ${_exhaustive}`);
     }
   }
+}
+
+const GRANT_QUOTING = { quoteIdentifier, quoteLiteral, accountAt };
+
+/**
+ * Removes the plain-name (pattern) grant that earlier versions wrote for a
+ * database name holding `_` or `%`; see `grant-pattern.ts`. Run it only after
+ * {@link grantDatabaseSql} has granted on the escaped name.
+ */
+export function revokePlainDatabaseGrantSql(
+  database: string,
+  username: string,
+  host: string = MANAGED_DOCKER_NETWORK_HOST,
+): string {
+  return revokePlainPatternGrantSql(GRANT_QUOTING, database, username, host);
 }
 
 export function grantRootSql(
