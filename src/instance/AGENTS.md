@@ -86,6 +86,12 @@ additive and no floor moved. A replica's `member.replication` also carries
 `lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
 control plane ignores them.
 
+**Managed owner role (`managed-owner-role-v1`).** No message: it only says
+this daemon honours `ownerRole` on a Postgres database and the Database admin
+login. The control plane records an owner role, and accepts an admin login,
+only for a primary that lists it (else 409
+`managed_owner_role_needs_daemon_update`).
+
 **Managed permissions read (`managed-permissions-read-v1`).** Same shape as
 on-demand health: a control plane that sees the feature may send
 `managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,

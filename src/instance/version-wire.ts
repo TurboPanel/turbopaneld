@@ -77,6 +77,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-ingress-ipv6-v1",
   "managed-login-limits-v1",
   "managed-permissions-read-v1",
+  "managed-owner-role-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -222,6 +223,16 @@ export const MANAGED_INGRESS_IPV6_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_LOGIN_LIMITS_FEATURE: DaemonWireFeature =
   "managed-login-limits-v1";
+
+/**
+ * This daemon honours `ownerRole` on a Postgres database (it makes the
+ * database's owner role and keeps the catalog from handing ownership away) and
+ * the Database admin login built on it. The control plane records an owner
+ * role, and accepts an admin login, only for a primary that lists this
+ * feature: an older daemon would ignore both and leave a plain database.
+ */
+export const MANAGED_OWNER_ROLE_FEATURE: DaemonWireFeature =
+  "managed-owner-role-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =
