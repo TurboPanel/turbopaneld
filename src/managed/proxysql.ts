@@ -181,11 +181,9 @@ export type ProxySqlBackendDesired = {
 
 /**
  * Which hostgroup a frontend login defaults to. `read-write` reaches the
- * current primary; `read-only` reaches read-eligible replicas only. The
- * instance refuses to *create* a `read-only` login for a cluster with no
- * read-eligible member, but an operator may later clear read eligibility on
- * every replica — such a login then has no ONLINE reader backend, which is the
- * honest outcome rather than silently falling back to the primary.
+ * current primary; `read-only` reaches read-eligible replicas when there are
+ * any, and the primary otherwise (a single server): what it may do is set by
+ * its grants, not by where it connects. A `tool` login always uses the primary.
  */
 export type ProxySqlConnectionRole = "read-write" | "read-only";
 
@@ -197,6 +195,8 @@ export type ProxySqlUserDesired = {
   defaultDatabase?: string;
   /** Absent means `read-write`. */
   connectionRole?: ProxySqlConnectionRole;
+  /** Database-tool login: primary only, no read/write split rules. */
+  tool?: boolean;
 };
 
 export type ProxySqlClusterDesired = {
@@ -1056,7 +1056,10 @@ function userDefaultHostgroup(
   cluster: ProxySqlClusterDesired,
   user: ProxySqlUserDesired,
 ): number {
-  return user.connectionRole === "read-only"
+  // A read-only login uses the readers when there are any; on a single server
+  // it uses the primary (its grants, not its route, keep it read-only).
+  return user.connectionRole === "read-only" && user.tool !== true &&
+      clusterHasReadEligibleReplica(cluster)
     ? cluster.readerHostgroup
     : cluster.writerHostgroup;
 }
@@ -1120,7 +1123,7 @@ function sortedReadSplitUsernames(
   cluster: ProxySqlClusterDesired,
 ): string[] {
   return cluster.users
-    .filter((user) => user.connectionRole !== "read-only")
+    .filter((user) => user.connectionRole !== "read-only" && user.tool !== true)
     .map((user) => user.username)
     .sort((a, b) => a.localeCompare(b));
 }

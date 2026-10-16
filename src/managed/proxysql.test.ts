@@ -2235,3 +2235,80 @@ test("buildProxySqlDrainStatements and buildProxySqlUndrainStatements toggle bac
     true,
   );
 });
+
+test("a read-only login on a single server routes to the primary", () => {
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        users: [{
+          username: "app_ro",
+          role: "user",
+          password: "s3cret-ro",
+          connectionRole: "read-only",
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(
+    cnf,
+    'username="app_ro" password="s3cret-ro" default_hostgroup=0',
+  );
+});
+
+test("a tool login goes to the primary and gets no read split rule, even with a reader and autoReadSplit", () => {
+  const input = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        autoReadSplit: true,
+        backends: PRIMARY_AND_READER_BACKENDS,
+        users: [
+          { username: "app", role: "user" as const, password: "s3cret-app" },
+          {
+            username: "gui",
+            role: "user" as const,
+            password: "s3cret-gui",
+            tool: true,
+          },
+          {
+            username: "gui_ro",
+            role: "user" as const,
+            password: "s3cret-gro",
+            connectionRole: "read-only" as const,
+            tool: true,
+          },
+        ],
+      }),
+    ],
+  };
+  const cnf = renderProxySqlConfig(input);
+  assertStringIncludes(
+    cnf,
+    'username="gui" password="s3cret-gui" default_hostgroup=0',
+  );
+  assertStringIncludes(
+    cnf,
+    'username="gui_ro" password="s3cret-gro" default_hostgroup=0',
+  );
+  assertStringIncludes(cnf, 'username="app" match_pattern="^SELECT"');
+  assertEquals(cnf.includes('username="gui" match_pattern'), false);
+  assertEquals(cnf.includes('username="gui_ro" match_pattern'), false);
+  assertEquals(cnf.includes("fast_forward"), false);
+  const admin = buildProxySqlAdminStatements(input).join("\n");
+  assertStringIncludes(admin, "'gui','s3cret-gui',0,");
+});
+
+test("a tool flag of false changes nothing", () => {
+  const base = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [clusterDesired({
+      autoReadSplit: true,
+      backends: PRIMARY_AND_READER_BACKENDS,
+      users: [{ username: "app", role: "user" as const, password: "p" }],
+    })],
+  };
+  const withFlag = structuredClone(base);
+  (withFlag.clusters[0]!.users[0] as { tool?: boolean }).tool = false;
+  assertEquals(renderProxySqlConfig(withFlag), renderProxySqlConfig(base));
+});
