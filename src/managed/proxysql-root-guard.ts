@@ -26,6 +26,10 @@ type RunDockerFn = (args: string[]) => Promise<DockerCliResult>;
 export const ROOT_GUARD_ERROR_MESSAGE =
   "This login is not allowed from this address. The root login only works from the server itself, its containers and your other servers. Use a different login for tools on other computers.";
 
+/** Plain-words error a refused query gets on an app login with a source limit. */
+export const LOGIN_GUARD_ERROR_MESSAGE =
+  "This login is not allowed from this address. It only works from the places its owner chose. Ask the owner to allow this address, or connect from an allowed place.";
+
 const DOCKER_RESOURCE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$/;
 
 /** Most patterns one subnet may expand to; larger subnets are skipped. */
@@ -266,7 +270,7 @@ export function mergeRootSources(
   for (const value of [...sent, ...local]) {
     const trimmed = value.trim();
     if (trimmed.endsWith("%")) {
-      merged.add(trimmed);
+      merged.add(trimmed.toLowerCase());
       continue;
     }
     const normalized = normalizeClientAddress(trimmed);
@@ -285,6 +289,7 @@ export function rootGuardRulesForUser(
   username: string,
   sources: readonly string[],
   readSplitHostgroup: number | null,
+  errorMsg: string = ROOT_GUARD_ERROR_MESSAGE,
 ): RootGuardRule[] {
   const rules: RootGuardRule[] = [];
   for (const clientAddr of sources) {
@@ -298,6 +303,6 @@ export function rootGuardRulesForUser(
     }
     rules.push({ username, clientAddr });
   }
-  rules.push({ username, errorMsg: ROOT_GUARD_ERROR_MESSAGE });
+  rules.push({ username, errorMsg });
   return rules;
 }

@@ -1621,6 +1621,33 @@ test("parseManagedApplyPayload: credential grantMode is optional (version skew) 
   );
 });
 
+test("parseManagedApplyPayload: databases[].ownerRole is optional (version skew) and a boolean", () => {
+  const withOp = (extra: Record<string, unknown>) =>
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      databases: [{ name: "shop", action: "create", ...extra }],
+    }).databases![0]!;
+  assertEquals("ownerRole" in withOp({}), false);
+  assertEquals(withOp({ ownerRole: true }).ownerRole, true);
+  assertEquals("ownerRole" in withOp({ ownerRole: false }), false);
+  assertThrows(
+    () => withOp({ ownerRole: "yes" }),
+    TypeError,
+    "ownerRole must be true or false",
+  );
+});
+
+test("parseManagedApplyPayload: the admin privilege parses like any other name", () => {
+  const credential = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    credentials: [{
+      ...VALID_MANAGED_APPLY.credentials[0],
+      privileges: ["admin"],
+    }],
+  }).credentials[0]!;
+  assertEquals(credential.privileges, ["admin"]);
+});
+
 test("managed.ingress.reconcile root allowedSources is optional and validated", () => {
   const withSources = (allowedSources: unknown) => ({
     ...VALID_INGRESS,
@@ -1656,5 +1683,55 @@ test("managed.ingress.reconcile root allowedSources is optional and validated", 
       TypeError,
       "Invalid managed.ingress.reconcile user allowedSources",
     );
+  }
+});
+
+test("managed.ingress.reconcile app-login limits are optional and validated", () => {
+  const withFields = (fields: Record<string, unknown>) => ({
+    ...VALID_INGRESS,
+    clusters: [{
+      ...VALID_INGRESS.clusters[0],
+      users: [{
+        ...VALID_INGRESS.clusters[0].users[0],
+        role: "user",
+        ...fields,
+      }],
+    }],
+  });
+  const user = (fields: Record<string, unknown>) =>
+    parseManagedIngressReconcilePayload(withFields(fields)).clusters[0]!
+      .users[0]!;
+  const parsed = user({
+    allowedSources: ["203.0.113.%", "2001:db8:1:%", "198.51.100.7"],
+    allowLocalSources: true,
+    maxConnections: 5,
+  });
+  assertEquals(parsed.allowedSources, [
+    "203.0.113.%",
+    "2001:db8:1:%",
+    "198.51.100.7",
+  ]);
+  assertEquals(parsed.allowLocalSources, true);
+  assertEquals(parsed.maxConnections, 5);
+  // An older control plane sends none of them.
+  const plain = parseManagedIngressReconcilePayload(VALID_INGRESS).clusters[0]!
+    .users[0]!;
+  assertEquals(plain.allowLocalSources, undefined);
+  assertEquals(plain.maxConnections, undefined);
+  for (
+    const bad of [
+      { allowLocalSources: "yes" },
+      { maxConnections: 0 },
+      { maxConnections: 1.5 },
+      { maxConnections: 100_001 },
+      { maxConnections: "5" },
+      { allowedSources: ["%"] },
+      { allowedSources: ["10.%.1"] },
+      { allowedSources: ["203.0.1%"] },
+      { allowedSources: [":%"] },
+      { allowedSources: ["::%"] },
+    ]
+  ) {
+    assertThrows(() => user(bad), TypeError);
   }
 });
