@@ -1,0 +1,1025 @@
+{
+  "version": 1,
+  "readme": [
+    "Shared rules and test vectors for server folder names. This file is identical in the control plane and the daemon; check:contract-drift compares the two byte for byte.",
+    "rules: the data both src/contracts/directory-names.ts files must match (a test in each repo checks it).",
+    "owner: shape is the rule in this file; valid also refuses the host account names each repo keeps in its own list (root, admin, ftp, git).",
+    "defaultNames: the folder name built from a domain. ascii is the Punycode form (null when the input is not a domain), name is the default (null when ascii is null). When the name is cut, the 8 hash characters are the start of the SHA-256 of ascii exactly as typed after lowercasing, with a leading *. still in place.",
+    "collisionSuffix: base plus -n for n from 2 to 99, the base cut so the whole name stays within 63 characters. firstFree: the first free name, null when -99 is also taken.",
+    "folderRefs: host is the path under /srv/users. badFolderRefs must all be refused."
+  ],
+  "rules": {
+    "ownerNameRe": "^[a-z_][a-z0-9_-]{0,27}$",
+    "ownerNameMaxLength": 28,
+    "environmentNameRe": "^[a-z0-9][a-z0-9_-]{0,31}$",
+    "environmentNameMaxLength": 32,
+    "folderNameRe": "^[a-z0-9]([a-z0-9._-]{0,61}[a-z0-9])?$",
+    "folderNameMaxLength": 63,
+    "projectSlugRe": "^[a-z0-9][a-z0-9-]{0,39}$",
+    "projectSlugMaxLength": 40,
+    "pathIdRe": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    "tableNameRe": "^[a-z]+$",
+    "commonScope": "common",
+    "reservedScopeNames": [
+      "common",
+      "home",
+      "tmp",
+      "services",
+      "volumes",
+      "data",
+      "sites",
+      "backup",
+      "backups",
+      "logs",
+      "cache",
+      "run",
+      "var",
+      "etc",
+      "bin",
+      "root",
+      "public",
+      "releases",
+      "current",
+      "shared",
+      "lost-found",
+      "tmp-staging"
+    ],
+    "ownerReservedPrefixes": ["tp", "systemd-"],
+    "ownerReservedSuffix": "-grp",
+    "defaultNameCutLength": 54,
+    "defaultNameHashLength": 8,
+    "collisionSuffixMin": 2,
+    "collisionSuffixMax": 99
+  },
+  "owner": [
+    {
+      "value": "alice",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "a",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "_svc",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "a-b",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "a_b",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "user1",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "Alice",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "1abc",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "-a",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "a-",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "a--b",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "a b",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "a.b",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "tp",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "tpfoo",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "systemd-x",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "systemd",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "foo-grp",
+      "shape": false,
+      "valid": false
+    },
+    {
+      "value": "grp",
+      "shape": true,
+      "valid": true
+    },
+    {
+      "value": "root",
+      "shape": true,
+      "valid": false
+    },
+    {
+      "value": "admin",
+      "shape": true,
+      "valid": false
+    },
+    {
+      "value": "www-data",
+      "shape": true,
+      "valid": false
+    },
+    {
+      "value": "ftp",
+      "shape": true,
+      "valid": false
+    },
+    {
+      "value": "git",
+      "shape": true,
+      "valid": false
+    }
+  ],
+  "environment": [
+    {
+      "value": "production",
+      "valid": true
+    },
+    {
+      "value": "staging",
+      "valid": true
+    },
+    {
+      "value": "dev",
+      "valid": true
+    },
+    {
+      "value": "a",
+      "valid": true
+    },
+    {
+      "value": "0",
+      "valid": true
+    },
+    {
+      "value": "a_b",
+      "valid": true
+    },
+    {
+      "value": "a-b",
+      "valid": true
+    },
+    {
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "valid": true
+    },
+    {
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "valid": false
+    },
+    {
+      "value": "",
+      "valid": false
+    },
+    {
+      "value": "Production",
+      "valid": false
+    },
+    {
+      "value": "-a",
+      "valid": false
+    },
+    {
+      "value": "_a",
+      "valid": false
+    },
+    {
+      "value": "a b",
+      "valid": false
+    },
+    {
+      "value": "a.b",
+      "valid": false
+    },
+    {
+      "value": "my env",
+      "valid": false
+    },
+    {
+      "value": "common",
+      "valid": false
+    },
+    {
+      "value": "home",
+      "valid": false
+    },
+    {
+      "value": "tmp",
+      "valid": false
+    },
+    {
+      "value": "services",
+      "valid": false
+    },
+    {
+      "value": "volumes",
+      "valid": false
+    },
+    {
+      "value": "data",
+      "valid": false
+    },
+    {
+      "value": "sites",
+      "valid": false
+    },
+    {
+      "value": "backup",
+      "valid": false
+    },
+    {
+      "value": "backups",
+      "valid": false
+    },
+    {
+      "value": "logs",
+      "valid": false
+    },
+    {
+      "value": "cache",
+      "valid": false
+    },
+    {
+      "value": "run",
+      "valid": false
+    },
+    {
+      "value": "var",
+      "valid": false
+    },
+    {
+      "value": "etc",
+      "valid": false
+    },
+    {
+      "value": "bin",
+      "valid": false
+    },
+    {
+      "value": "root",
+      "valid": false
+    },
+    {
+      "value": "public",
+      "valid": false
+    },
+    {
+      "value": "releases",
+      "valid": false
+    },
+    {
+      "value": "current",
+      "valid": false
+    },
+    {
+      "value": "shared",
+      "valid": false
+    },
+    {
+      "value": "lost-found",
+      "valid": false
+    },
+    {
+      "value": "tmp-staging",
+      "valid": false
+    },
+    {
+      "value": ".hidden",
+      "valid": false
+    }
+  ],
+  "scope": [
+    {
+      "value": "common",
+      "valid": true
+    },
+    {
+      "value": "production",
+      "valid": true
+    },
+    {
+      "value": "Common",
+      "valid": false
+    },
+    {
+      "value": "home",
+      "valid": false
+    },
+    {
+      "value": "",
+      "valid": false
+    },
+    {
+      "value": "a/b",
+      "valid": false
+    }
+  ],
+  "folderName": [
+    {
+      "value": "example.com",
+      "valid": true
+    },
+    {
+      "value": "a",
+      "valid": true
+    },
+    {
+      "value": "a.b",
+      "valid": true
+    },
+    {
+      "value": "a_b",
+      "valid": true
+    },
+    {
+      "value": "a-b",
+      "valid": true
+    },
+    {
+      "value": "xn--bcher-kva.example",
+      "valid": true
+    },
+    {
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "valid": true
+    },
+    {
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "valid": false
+    },
+    {
+      "value": "",
+      "valid": false
+    },
+    {
+      "value": "Example.com",
+      "valid": false
+    },
+    {
+      "value": ".a",
+      "valid": false
+    },
+    {
+      "value": "a.",
+      "valid": false
+    },
+    {
+      "value": "-a",
+      "valid": false
+    },
+    {
+      "value": "a-",
+      "valid": false
+    },
+    {
+      "value": "_a",
+      "valid": false
+    },
+    {
+      "value": "a_",
+      "valid": false
+    },
+    {
+      "value": "a..b",
+      "valid": false
+    },
+    {
+      "value": "a...b",
+      "valid": false
+    },
+    {
+      "value": "a/b",
+      "valid": false
+    },
+    {
+      "value": "a b",
+      "valid": false
+    },
+    {
+      "value": "a.b.c",
+      "valid": true
+    },
+    {
+      "value": "1.2.3.4",
+      "valid": true
+    },
+    {
+      "value": "wildcard.example.com",
+      "valid": true
+    },
+    {
+      "value": "*.example.com",
+      "valid": false
+    },
+    {
+      "value": "..",
+      "valid": false
+    },
+    {
+      "value": ".turbopanel-hosting",
+      "valid": false
+    }
+  ],
+  "projectSlug": [
+    {
+      "value": "my-project",
+      "valid": true
+    },
+    {
+      "value": "a",
+      "valid": true
+    },
+    {
+      "value": "a1",
+      "valid": true
+    },
+    {
+      "value": "0a",
+      "valid": true
+    },
+    {
+      "value": "a_b",
+      "valid": false
+    },
+    {
+      "value": "a-b",
+      "valid": true
+    },
+    {
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "valid": true
+    },
+    {
+      "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "valid": false
+    },
+    {
+      "value": "",
+      "valid": false
+    },
+    {
+      "value": "My",
+      "valid": false
+    },
+    {
+      "value": "-a",
+      "valid": false
+    },
+    {
+      "value": "a b",
+      "valid": false
+    }
+  ],
+  "pathId": [
+    {
+      "value": "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      "valid": true
+    },
+    {
+      "value": "019E0A1B-7C3D-7A52-9B4E-3F1A2C5D6E70",
+      "valid": false
+    },
+    {
+      "value": "abc",
+      "valid": false
+    },
+    {
+      "value": "",
+      "valid": false
+    },
+    {
+      "value": "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e700",
+      "valid": false
+    },
+    {
+      "value": "019e0a1b7c3d7a529b4e3f1a2c5d6e70",
+      "valid": false
+    },
+    {
+      "value": "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7g",
+      "valid": false
+    }
+  ],
+  "tableName": [
+    {
+      "value": "folder",
+      "valid": true
+    },
+    {
+      "value": "placement",
+      "valid": true
+    },
+    {
+      "value": "tenancy",
+      "valid": true
+    },
+    {
+      "value": "storage_copy",
+      "valid": false
+    },
+    {
+      "value": "storage-copy",
+      "valid": false
+    },
+    {
+      "value": "storageCopy",
+      "valid": false
+    },
+    {
+      "value": "folder2",
+      "valid": false
+    },
+    {
+      "value": "Folder",
+      "valid": false
+    },
+    {
+      "value": "",
+      "valid": false
+    },
+    {
+      "value": "a",
+      "valid": true
+    }
+  ],
+  "sha256": [
+    {
+      "input": "",
+      "hex": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "input": "abc",
+      "hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hex": "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hex": "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
+    },
+    {
+      "input": "é",
+      "hex": "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c"
+    }
+  ],
+  "defaultNames": [
+    {
+      "input": "Example.COM",
+      "ascii": "example.com",
+      "name": "example.com"
+    },
+    {
+      "input": "example.com.",
+      "ascii": "example.com",
+      "name": "example.com"
+    },
+    {
+      "input": "  blog.Example.com ",
+      "ascii": "blog.example.com",
+      "name": "blog.example.com"
+    },
+    {
+      "input": "*.Example.com",
+      "ascii": "*.example.com",
+      "name": "wildcard.example.com"
+    },
+    {
+      "input": "bücher.example",
+      "ascii": "xn--bcher-kva.example",
+      "name": "xn--bcher-kva.example"
+    },
+    {
+      "input": "日本.example",
+      "ascii": "xn--wgv71a.example",
+      "name": "xn--wgv71a.example"
+    },
+    {
+      "input": "xn--bcher-kva.example",
+      "ascii": "xn--bcher-kva.example",
+      "name": "xn--bcher-kva.example"
+    },
+    {
+      "input": "my_site.example.com",
+      "ascii": "my_site.example.com",
+      "name": "my_site.example.com"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.example.com",
+      "ascii": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.example.com",
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbb-6e92da66"
+    },
+    {
+      "input": "very-long-subdomain-name-for-a-blog-about-cooking-and-baking.example-company-name.co.uk",
+      "ascii": "very-long-subdomain-name-for-a-blog-about-cooking-and-baking.example-company-name.co.uk",
+      "name": "very-long-subdomain-name-for-a-blog-about-cooking-and-de99b393"
+    },
+    {
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+      "ascii": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-fd04fc82"
+    },
+    {
+      "input": "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.example.org",
+      "ascii": "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.example.org",
+      "name": "a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s.t.u.v.w.x.y.z.example.org"
+    },
+    {
+      "input": "-lead.example.com",
+      "ascii": "-lead.example.com",
+      "name": "lead.example.com-15ffbaaa"
+    },
+    {
+      "input": "example",
+      "ascii": "example",
+      "name": "example"
+    },
+    {
+      "input": "localhost",
+      "ascii": "localhost",
+      "name": "localhost"
+    },
+    {
+      "input": "1.2.3.4",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "exa mple.com",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "a..b.com",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": ".",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "*.",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "*.*.example.com",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "http://x.com",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "x.com/path",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "example.com:80",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "0x7f.0x1",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "0x7f.0x0.0x0.0x1",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "example.com。",
+      "ascii": "example.com",
+      "name": "example.com"
+    },
+    {
+      "input": "a。。b",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+      "ascii": "*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+      "name": "wildcard.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-f6272f9e"
+    },
+    {
+      "input": "a.com",
+      "ascii": "a.com",
+      "name": "a.com"
+    }
+  ],
+  "collisionSuffix": [
+    {
+      "base": "example.com",
+      "n": 2,
+      "name": "example.com-2"
+    },
+    {
+      "base": "example.com",
+      "n": 99,
+      "name": "example.com-99"
+    },
+    {
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "n": 2,
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-2"
+    },
+    {
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "n": 99,
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-99"
+    },
+    {
+      "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-",
+      "n": 10,
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-10"
+    },
+    {
+      "base": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.-x",
+      "n": 3,
+      "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-3"
+    },
+    {
+      "base": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.-",
+      "n": 2,
+      "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx-2"
+    }
+  ],
+  "badCollisionSuffix": [
+    {
+      "base": "example.com",
+      "n": 1
+    },
+    {
+      "base": "example.com",
+      "n": 100
+    },
+    {
+      "base": "example.com",
+      "n": 2.5
+    }
+  ],
+  "firstFree": [
+    {
+      "base": "example.com",
+      "taken": [],
+      "takenThrough": 0,
+      "result": "example.com"
+    },
+    {
+      "base": "example.com",
+      "taken": ["example.com"],
+      "takenThrough": 0,
+      "result": "example.com-2"
+    },
+    {
+      "base": "example.com",
+      "taken": ["example.com", "example.com-3"],
+      "takenThrough": 0,
+      "result": "example.com-2"
+    },
+    {
+      "base": "example.com",
+      "taken": ["example.com"],
+      "takenThrough": 3,
+      "result": "example.com-4"
+    },
+    {
+      "base": "example.com",
+      "taken": ["example.com"],
+      "takenThrough": 98,
+      "result": "example.com-99"
+    },
+    {
+      "base": "example.com",
+      "taken": ["example.com"],
+      "takenThrough": 99,
+      "result": null
+    }
+  ],
+  "folderRefs": [
+    {
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "service",
+        "slug": "example.com"
+      },
+      "jail": "/production/services/example.com",
+      "host": "/srv/users/alice/production/services/example.com"
+    },
+    {
+      "ref": {
+        "owner": "alice",
+        "scope": "common",
+        "kind": "volume",
+        "slug": "uploads"
+      },
+      "jail": "/common/volumes/uploads",
+      "host": "/srv/users/alice/common/volumes/uploads"
+    },
+    {
+      "ref": {
+        "owner": "_svc",
+        "scope": "staging",
+        "kind": "volume",
+        "slug": "a"
+      },
+      "jail": "/staging/volumes/a",
+      "host": "/srv/users/_svc/staging/volumes/a"
+    },
+    {
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "service",
+        "slug": "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"
+      },
+      "jail": "/production/services/019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      "host": "/srv/users/alice/production/services/019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"
+    }
+  ],
+  "badFolderRefs": [
+    {
+      "why": "uppercase owner",
+      "ref": {
+        "owner": "Alice",
+        "scope": "production",
+        "kind": "service",
+        "slug": "x"
+      }
+    },
+    {
+      "why": "host account name is not checked here but a tp prefix is",
+      "ref": {
+        "owner": "tpuser",
+        "scope": "production",
+        "kind": "service",
+        "slug": "x"
+      }
+    },
+    {
+      "why": "reserved scope",
+      "ref": {
+        "owner": "alice",
+        "scope": "home",
+        "kind": "service",
+        "slug": "x"
+      }
+    },
+    {
+      "why": "scope with slash",
+      "ref": {
+        "owner": "alice",
+        "scope": "a/b",
+        "kind": "service",
+        "slug": "x"
+      }
+    },
+    {
+      "why": "dotdot slug",
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "service",
+        "slug": ".."
+      }
+    },
+    {
+      "why": "slug with slash",
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "volume",
+        "slug": "a/b"
+      }
+    },
+    {
+      "why": "dot edge slug",
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "volume",
+        "slug": ".a"
+      }
+    },
+    {
+      "why": "unknown kind",
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "database",
+        "slug": "x"
+      }
+    },
+    {
+      "why": "missing kind",
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "slug": "x"
+      }
+    },
+    {
+      "why": "extra field",
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "volume",
+        "slug": "x",
+        "path": "/etc"
+      }
+    },
+    {
+      "why": "missing slug",
+      "ref": {
+        "owner": "alice",
+        "scope": "production",
+        "kind": "volume"
+      }
+    },
+    {
+      "why": "not an object",
+      "ref": "alice/production/x"
+    },
+    {
+      "why": "array",
+      "ref": ["alice", "production", "volume", "x"]
+    },
+    {
+      "why": "null",
+      "ref": null
+    }
+  ]
+}

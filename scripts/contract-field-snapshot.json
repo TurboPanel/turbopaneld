@@ -306,5 +306,24 @@
         "type": "'managed-permissions-result'"
       }
     ]
+  },
+  "FolderRef": {
+    "instance": "src/contracts/directory-names.ts",
+    "daemon": "src/contracts/directory-names.ts",
+    "fields": [
+      { "name": "kind", "required": true, "type": "'service' | 'volume'" },
+      { "name": "owner", "required": true, "type": "string" },
+      { "name": "scope", "required": true, "type": "string" },
+      { "name": "slug", "required": true, "type": "string" }
+    ]
+  },
+  "FolderRefParts": {
+    "instance": "src/contracts/directory-names.ts",
+    "daemon": "src/contracts/directory-names.ts",
+    "fields": [
+      { "name": "owner", "required": true, "type": "string" },
+      { "name": "scope", "required": true, "type": "string" },
+      { "name": "slug", "required": true, "type": "string" }
+    ]
   }
 }

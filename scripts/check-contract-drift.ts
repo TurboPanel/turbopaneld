@@ -268,6 +268,18 @@ async function checkReportedIp(tp: string, td: string): Promise<void> {
   );
 }
 
+async function checkLayoutVectors(tp: string, td: string): Promise<void> {
+  const left = requireText(
+    await readRel(tp, "src/contracts/layout-vectors.json"),
+    "layout-vectors.json missing on the instance",
+  );
+  const right = requireText(
+    await readRel(td, "src/contracts/layout-vectors.json"),
+    "layout-vectors.json missing on the daemon",
+  );
+  if (left !== right) fail("layout-vectors.json drifted between checkouts");
+}
+
 async function checkSlotMapping(tp: string, td: string): Promise<void> {
   const slotLeftTypes = requireText(
     await readRel(tp, "src/contracts/topology-types.ts"),
@@ -1069,10 +1081,11 @@ export async function runContractDriftCheck(
   await checkUpdateChannels(tp, td);
   await checkReportedIp(tp, td);
   await checkSlotMapping(tp, td);
+  await checkLayoutVectors(tp, td);
   await checkExpandOnly(tp, td);
 
   console.log(
-    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, expand-only fields agree.",
+    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, folder name vectors, expand-only fields agree.",
   );
   return "ok";
 }
