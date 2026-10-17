@@ -1150,3 +1150,61 @@ test("promoteRelease refuses a staged link into shared before publish runs", asy
     assertEquals(argv.some((args) => args.includes("publish")), false);
   });
 });
+
+test("a release in a service folder is staged and published with components and ids", async () => {
+  await withTempRelease(async (root) => {
+    const folder = { owner: "appuser", scope: "production", slug: "shop.test" };
+    const publishId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+    const SERVICE = "0192a8f4-3c1e-7a52-9b0d-000000000001";
+    const RELEASE = "0192a8f4-3c1e-7a52-9b0d-000000000002";
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      {
+        username: "appuser",
+        serviceId: SERVICE,
+        releaseId: RELEASE,
+        folder,
+        publishId,
+      },
+    );
+    const workingDir = join(root, "checkout");
+    await Deno.mkdir(workingDir, { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "index.html"), "built");
+    const argv: string[][] = [];
+    const originalMkdir = Deno.mkdir;
+    Deno.mkdir = ((...args: Parameters<typeof Deno.mkdir>) => {
+      if (String(args[0]) === paths.releaseDir) {
+        return Promise.reject(denied("mkdir"));
+      }
+      return originalMkdir.apply(Deno, args);
+    }) as typeof Deno.mkdir;
+    try {
+      const staged = await stageRelease({
+        paths,
+        username: "appuser",
+        workingDir,
+        runFn: async (_command, args) => {
+          argv.push([...args]);
+          if (args.includes("publish-open")) {
+            await originalMkdir(paths.stagingDir, { recursive: true });
+          }
+          return SUDO_OK;
+        },
+      });
+      assertEquals(argv, [[
+        "-n",
+        "publish-open",
+        "appuser",
+        "production",
+        "shop.test",
+        SERVICE,
+        RELEASE,
+        publishId,
+      ]]);
+      assertEquals(staged, { dir: paths.stagingDir, viaPublish: true });
+      assertEquals(paths.stagingDir, join(root, ".tp-staging", publishId));
+    } finally {
+      Deno.mkdir = originalMkdir;
+    }
+  });
+});

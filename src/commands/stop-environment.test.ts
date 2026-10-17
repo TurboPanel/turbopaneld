@@ -892,3 +892,138 @@ test({
     }
   },
 });
+
+/** Run a stop against a temp host tree; `rm` through the runner really removes. */
+async function stopWithFolders(
+  siteReleases: Array<Record<string, unknown>> | undefined,
+  fail: (path: string) => boolean = () => false,
+): Promise<
+  { result: Awaited<ReturnType<typeof handleEnvironmentStop>>; root: string }
+> {
+  const root = await Deno.makeTempDir({ prefix: "tp-stop-folders-" });
+  const names = [
+    "TURBOPANEL_STATE_DIR",
+    "TURBOPANEL_CONFIG_DIR",
+    "TURBOPANEL_PRINCIPAL_HOME_ROOT",
+  ];
+  const previous = names.map((name) => [name, Deno.env.get(name)] as const);
+  Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+  Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", join(root, "srv", "users"));
+  try {
+    const home = join(root, "srv", "users", "alice", "production");
+    await Deno.mkdir(join(home, "services", "example.com", "shared"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      join(home, "services", "example.com", "shared", "upload.bin"),
+      "x",
+    );
+    await Deno.mkdir(join(home, "volumes", "uploads"), { recursive: true });
+    const result = await handleEnvironmentStop(
+      {
+        environmentId: "envfolder1",
+        projectId: "proj-1",
+        projectName: "tp-demo-envfolder",
+        ...(siteReleases === undefined ? {} : { siteReleases }),
+      } as never,
+      new Date().toISOString(),
+      {
+        runPrivileged: async (_command, args) => {
+          const path = args.at(-1) ?? "";
+          if (args.includes("rm") && !fail(path)) {
+            await Deno.remove(path, { recursive: true });
+            return { success: true, stdout: "", stderr: "" };
+          }
+          return { success: false, stdout: "", stderr: "device busy" };
+        },
+      },
+    );
+    return { result, root };
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, value);
+    }
+  }
+}
+
+const SERVICE_FOLDER = {
+  serviceId: "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",
+  username: "alice",
+  folder: { owner: "alice", scope: "production", slug: "example.com" },
+};
+
+Deno.test({
+  name:
+    "handleEnvironmentStop with no site releases keeps every service and volume folder, uploads included",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const { result, root } = await stopWithFolders(undefined);
+    try {
+      assertEquals(result.folders, undefined);
+      const home = join(root, "srv", "users", "alice", "production");
+      await Deno.stat(
+        join(home, "services", "example.com", "shared", "upload.bin"),
+      );
+      await Deno.stat(join(home, "volumes", "uploads"));
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "handleEnvironmentStop removes a named service folder only, and reports it gone",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const { result, root } = await stopWithFolders([SERVICE_FOLDER]);
+    try {
+      assertEquals(result.folders, [{
+        owner: "alice",
+        scope: "production",
+        kind: "service",
+        slug: "example.com",
+        removed: true,
+      }]);
+      const home = join(root, "srv", "users", "alice", "production");
+      await assertRejects(
+        () => Deno.stat(join(home, "services", "example.com")),
+        Deno.errors.NotFound,
+      );
+      // The volume next to it is not the stop's to remove.
+      await Deno.stat(join(home, "volumes", "uploads"));
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "handleEnvironmentStop reports a folder that would not go as not removed",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const { result, root } = await stopWithFolders(
+      [SERVICE_FOLDER],
+      (path) => path.endsWith("example.com"),
+    );
+    try {
+      assertEquals(result.folders?.map((f) => f.removed), [false]);
+      await Deno.stat(
+        join(
+          root,
+          "srv",
+          "users",
+          "alice",
+          "production",
+          "services",
+          "example.com",
+        ),
+      );
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

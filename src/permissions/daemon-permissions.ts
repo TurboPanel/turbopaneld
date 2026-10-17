@@ -28,6 +28,7 @@ import {
   UV_VERSION,
 } from "../orchestration/assets.ts";
 import {
+  BUILD_SIBLING_DIR,
   PROD_BACKUP_DIR_DEFAULT,
   PROD_BIN_DIR_DEFAULT,
   PROD_CONFIG_DIR_DEFAULT,
@@ -45,7 +46,7 @@ const VENDOR = PROD_RUNTIME_DIR_DEFAULT;
  * creates `work/<id>`, clones into it, and reads and removes it once
  * `tp-host build-return` has handed it back.
  */
-const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
+const BUILD_SANDBOX_ROOT = BUILD_SIBLING_DIR;
 const PRINCIPAL_HOME_ROOT = "/srv/users";
 /**
  * The Docker gate's socket directory (`orchestration/roles/docker-gate`):

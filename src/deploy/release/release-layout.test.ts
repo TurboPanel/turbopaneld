@@ -173,9 +173,7 @@ test("resolveDaemonReleasePaths uses the release-records root", () => {
     join(
       "/var/lib/tp",
       RELEASE_RECORDS_DIRNAME,
-      "sites",
       "svc-1",
-      "releases",
       "rel-1",
     ),
   );
@@ -350,4 +348,58 @@ test({
     assertEquals(result.success, true);
     assertEquals(result.stdout, "hello-release");
   },
+});
+
+test("resolveReleasePaths puts a release in its service folder and names the publish", () => {
+  const paths = resolveReleasePaths(
+    { principalHomeRoot: "/srv/users", daemonStateDir: "/var/lib/tp" },
+    {
+      username: "alice",
+      serviceId: "0192a8f4-3c1e-7a52-9b0d-000000000001",
+      releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000002",
+      folder: { owner: "alice", scope: "production", slug: "example.com" },
+      publishId: "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",
+    },
+  );
+  const root = "/srv/users/alice/production/services/example.com";
+  assertEquals(paths.siteDir, root);
+  assertEquals(paths.releasesDir, `${root}/releases`);
+  assertEquals(
+    paths.releaseDir,
+    `${root}/releases/0192a8f4-3c1e-7a52-9b0d-000000000002`,
+  );
+  assertEquals(paths.currentLink, `${root}/current`);
+  assertEquals(paths.sharedDir, `${root}/shared`);
+  assertEquals(paths.principalHome, "/srv/users/alice");
+  assertEquals(
+    paths.stagingDir,
+    "/srv/users/.tp-staging/0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",
+  );
+  assertEquals(paths.publish, {
+    folder: { owner: "alice", scope: "production", slug: "example.com" },
+    serviceId: "0192a8f4-3c1e-7a52-9b0d-000000000001",
+    releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000002",
+    publishId: "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",
+  });
+});
+
+test("resolveReleasePaths gives each folder release its own staging leaf and the older tree none", () => {
+  const layout = { principalHomeRoot: "/srv/users", daemonStateDir: "/s" };
+  const params = {
+    username: "alice",
+    serviceId: "0192a8f4-3c1e-7a52-9b0d-000000000001",
+    releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000002",
+    folder: { owner: "alice", scope: "production", slug: "shop" },
+  };
+  const a = resolveReleasePaths(layout, params);
+  const b = resolveReleasePaths(layout, params);
+  assertEquals(a.stagingDir === b.stagingDir, false);
+  const older = resolveReleasePaths(layout, {
+    username: "alice",
+    serviceId: "svc-1",
+    releaseId: "rel-1",
+  });
+  assertEquals(older.publish, undefined);
+  assertEquals(older.stagingDir, "/srv/users/.tp-staging/alice.svc-1.rel-1");
+  assertEquals(older.siteDir, "/srv/users/alice/sites/svc-1");
 });

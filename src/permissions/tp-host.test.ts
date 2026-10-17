@@ -3151,7 +3151,7 @@ async function newLayoutAlice(host: Host, groups: string[] = []) {
   );
 }
 
-const SWITCH = "etc/ssh/turbopanel-sftp-chroot";
+const SWITCH = "etc/ssh/turbopanel/sftp-chroot";
 
 test("sftp-chroot switches on only when every tpsftp member is on the new layout", async () => {
   await withHost(async (host) => {
@@ -3252,6 +3252,21 @@ test("sftp-chroot accepts only check, on, off and status", async () => {
   });
 });
 
+test("no generic verb touches the hosting Caddy or Docker gate state folders", async () => {
+  await withHost(async (host) => {
+    for (const name of ["hosting-caddy", "docker-gate"]) {
+      const dir = host.path(`var/lib/turbopanel/${name}`);
+      await Deno.mkdir(dir, { recursive: true });
+      const file = `${dir}/probe`;
+      await Deno.writeTextFile(file, "x");
+      await refused(host, ["rm", "-f", "--", file]);
+      await refused(host, ["cat", "--", file]);
+      await refused(host, ["mkdir", "-p", "--", `${dir}/inner`]);
+      await refused(host, ["chown", "tp:tp", "--", file]);
+    }
+  });
+});
+
 test("only sftp-chroot on and off can write or remove the switch", async () => {
   await withHost(async (host) => {
     const sw = host.path(SWITCH);
@@ -3337,7 +3352,7 @@ test("cert-dates prints only notAfter dates, skips internal certs, symlinks and 
       group + `tpedge:x:${Deno.gid}:\n`,
     );
     const certs = host.path(
-      "var/lib/turbopanel-hosting-caddy/data/caddy/certificates",
+      "var/lib/turbopanel/hosting-caddy/data/caddy/certificates",
     );
     await selfSignedCert(
       join(certs, "acme-v02.api.letsencrypt.org-directory", "shop.example.com"),

@@ -45,6 +45,7 @@ import type {
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
+import { ensureAssetFolder } from "../asset-folders.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { DeployCancelToken } from "../deploy-cancel.ts";
 import { join } from "@std/path";
@@ -92,6 +93,7 @@ import {
 import {
   effectiveReleaseServiceId,
   resolveReleaseServiceId,
+  serviceFolderFromPayload,
 } from "./release-service-id.ts";
 import { pruneReleases } from "./retention.ts";
 import { PENDING_RECORD_MARKER } from "./release-health.ts";
@@ -827,11 +829,20 @@ async function buildNativeRelease(
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
 
-  await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
-    paths,
-    username,
-    deps.runFn,
-  );
+  if (paths.publish) {
+    // The folder, its `releases/`, `shared/` and `logs/`, and the record of its
+    // components; a changed folder for a known service is refused here.
+    await ensureAssetFolder(layout, serviceId, {
+      ...paths.publish.folder,
+      kind: "service",
+    }, deps.runFn);
+  } else {
+    await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
+      paths,
+      username,
+      deps.runFn,
+    );
+  }
   await resetReleaseScratchDir(paths);
   let work: BuildWork | null = null;
   try {
@@ -1177,11 +1188,13 @@ async function applyOneRelease(
   // A rollback addresses the tree it is rolling back *to*, not the id the
   // control plane would have allocated for a fresh build.
   const targetReleaseId = entry.rollbackToReleaseId ?? entry.releaseId;
+  const folder = serviceFolderFromPayload(payload, serviceId);
   const principalPaths = principal
     ? resolveReleasePaths(layout, {
       username: principal.username,
       serviceId,
       releaseId: targetReleaseId,
+      ...(folder === undefined ? {} : { folder }),
     })
     : null;
   // Railpack history is always daemon-owned, principal or not: one service must

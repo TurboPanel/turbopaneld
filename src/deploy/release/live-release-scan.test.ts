@@ -261,3 +261,49 @@ test("readReleaseLinkScanReport reads the recorded scan and tolerates its absenc
     await Deno.remove(state, { recursive: true });
   }
 });
+
+test("scanLiveReleaseLinks walks service folders in every scope beside the older trees", async () => {
+  await withLayout(async (layout) => {
+    const homes = layout.principalHomeRoot;
+    // An older tree and a scope tree, one escaping link in each.
+    await site(homes, "alice", "wp", { "public/up": "../shared/up" });
+    const folder = join(
+      homes,
+      "alice",
+      "production",
+      "services",
+      "example.com",
+    );
+    const release = join(folder, "releases", "r1");
+    await Deno.mkdir(join(release, "public"), { recursive: true });
+    await Deno.mkdir(join(folder, "shared"), { recursive: true });
+    await Deno.symlink("../../shared", join(release, "shared"));
+    await Deno.symlink("../../../x", join(release, "public", "bad"));
+    await Deno.symlink("releases/r1", join(folder, "current"));
+    // The owner's own folders and an empty scope are skipped.
+    await Deno.mkdir(join(homes, "alice", "home"));
+    await Deno.mkdir(join(homes, "alice", "tmp"));
+    await Deno.mkdir(join(homes, "alice", "common", "volumes", "data"), {
+      recursive: true,
+    });
+
+    const findings = await scanLiveReleaseLinks(layout, noRoot);
+    assertEquals(
+      findings.map((f) => [f.username, f.serviceId, f.releaseId]),
+      [["alice", "wp", "r1"], ["alice", "production/example.com", "r1"]],
+    );
+    assertStringIncludes(
+      findings[1]!.links.join(","),
+      "public/bad",
+    );
+  });
+});
+
+test("scanLiveReleaseLinks does not walk the staging folder beside the owners", async () => {
+  await withLayout(async (layout) => {
+    await Deno.mkdir(join(layout.principalHomeRoot, ".tp-staging", "x"), {
+      recursive: true,
+    });
+    assertEquals(await scanLiveReleaseLinks(layout, noRoot), []);
+  });
+});

@@ -1902,10 +1902,10 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
     assertEquals(lines.includes(line), true, line);
   }
   assertMatch(defaults, /apache_service_user:\s*tpapache\n/, "service user");
-  // Top level: never inside the tp-owned /var/log/turbopanel or /run/turbopanel.
+  // Logs sit with every other engine's, in /var/log/turbopanel/apache.
   assertMatch(
     defaults,
-    /apache_logs_directory:\s*turbopanel-apache\n/,
+    /apache_logs_directory:\s*turbopanel\/apache\n/,
     "logs directory",
   );
   assertMatch(

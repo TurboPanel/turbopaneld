@@ -11,6 +11,7 @@
  */
 
 import {
+  BACKUP_ROOT,
   DEFAULT_INGRESS_SOCKET_DIR,
   DEFAULT_PLATFORM_ROOTS,
   isIngressContainer,
@@ -60,7 +61,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
     "/root",
     "/boot",
     "/opt/turbopanel",
-    "/backup",
+    BACKUP_ROOT,
   ],
   dockerSockets: ["/var/run/docker.sock", "/run/docker.sock"],
   capAllowlist: [],
@@ -309,13 +310,37 @@ function within(path: string, root: string): boolean {
 
 /** Directories of `<home>/` a container may bind: the owner's own data. */
 const PRINCIPAL_DATA_AREAS = new Set(["data", "tmp"]);
+/** Names under `<home>/` that are never a scope folder. */
+const PRINCIPAL_NOT_SCOPES = new Set([
+  "home",
+  "tmp",
+  "services",
+  "volumes",
+  "data",
+  "sites",
+  "backup",
+  "backups",
+  "logs",
+  "cache",
+  "run",
+  "var",
+  "etc",
+  "bin",
+  "root",
+  "public",
+  "releases",
+  "current",
+  "shared",
+  "lost-found",
+  "tmp-staging",
+]);
 /** Per-site directories (`sites/<serviceId>/<name>`) a container may bind. */
 const PRINCIPAL_SITE_AREAS = new Set(["shared", "webroot", "releases"]);
 
 /**
  * Below a principal home root only the places the home layout makes for
  * containers: the owner's `data/` and `tmp/`, path storage under
- * `volumes/<id>`, and per site `shared/`, `webroot/` and the root-owned
+ * `<scope>/volumes/<name>` (and `volumes/<id>` in the older tree), and per site `shared/`, `webroot/` and the root-owned
  * `releases/`. Everything else (the home itself, `home/`, `.tp-staging`, a
  * site's hosting config, `sites/` as a whole) is outside. `resolved` is
  * already symlink-resolved, so a link out of an allowed place lands on its
@@ -332,6 +357,12 @@ function principalViolation(
   const allowed = owner !== undefined && !owner.startsWith(".") && (
     PRINCIPAL_DATA_AREAS.has(area ?? "") ||
     (area === "volumes" && tail.length >= 1) ||
+    // The scope tree: `<owner>/<scope>/volumes/<name>`. Never a service
+    // folder (`<scope>/services/…`): releases are sealed code and `shared/` is
+    // the web side's state, so containers get their data through volumes.
+    (tail[0] === "volumes" && tail.length >= 2 &&
+      !PRINCIPAL_NOT_SCOPES.has(area ?? "") &&
+      /^[a-z0-9][a-z0-9_-]{0,31}$/.test(area ?? "")) ||
     (area === "sites" && tail.length >= 2 &&
       PRINCIPAL_SITE_AREAS.has(tail[1]))
   );
