@@ -355,8 +355,8 @@ test("resolveReleasePaths puts a release in its service folder and names the pub
     { principalHomeRoot: "/srv/users", daemonStateDir: "/var/lib/tp" },
     {
       username: "alice",
-      serviceId: "svc-1",
-      releaseId: "rel-1",
+      serviceId: "0192a8f4-3c1e-7a52-9b0d-000000000001",
+      releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000002",
       folder: { owner: "alice", scope: "production", slug: "example.com" },
       publishId: "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",
     },
@@ -364,7 +364,10 @@ test("resolveReleasePaths puts a release in its service folder and names the pub
   const root = "/srv/users/alice/production/services/example.com";
   assertEquals(paths.siteDir, root);
   assertEquals(paths.releasesDir, `${root}/releases`);
-  assertEquals(paths.releaseDir, `${root}/releases/rel-1`);
+  assertEquals(
+    paths.releaseDir,
+    `${root}/releases/0192a8f4-3c1e-7a52-9b0d-000000000002`,
+  );
   assertEquals(paths.currentLink, `${root}/current`);
   assertEquals(paths.sharedDir, `${root}/shared`);
   assertEquals(paths.principalHome, "/srv/users/alice");
@@ -374,8 +377,8 @@ test("resolveReleasePaths puts a release in its service folder and names the pub
   );
   assertEquals(paths.publish, {
     folder: { owner: "alice", scope: "production", slug: "example.com" },
-    serviceId: "svc-1",
-    releaseId: "rel-1",
+    serviceId: "0192a8f4-3c1e-7a52-9b0d-000000000001",
+    releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000002",
     publishId: "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",
   });
 });
@@ -384,8 +387,8 @@ test("resolveReleasePaths gives each folder release its own staging leaf and the
   const layout = { principalHomeRoot: "/srv/users", daemonStateDir: "/s" };
   const params = {
     username: "alice",
-    serviceId: "svc-1",
-    releaseId: "rel-1",
+    serviceId: "0192a8f4-3c1e-7a52-9b0d-000000000001",
+    releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000002",
     folder: { owner: "alice", scope: "production", slug: "shop" },
   };
   const a = resolveReleasePaths(layout, params);

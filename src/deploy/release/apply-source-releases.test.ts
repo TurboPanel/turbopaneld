@@ -362,7 +362,7 @@ test("applySourceReleases builds a service with a folder inside it, publishing b
       const paths = resolveReleasePaths(layout, {
         username: "appuser",
         serviceId,
-        releaseId: "rel-new",
+        releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000099",
         folder,
       });
       await mkdirReleaseTree(paths);
@@ -382,7 +382,7 @@ test("applySourceReleases builds a service with a folder inside it, publishing b
           sourceMaterial: [
             baseSource({
               composeServiceName: "web",
-              releaseId: "rel-new",
+              releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000099",
               releaseServiceId: serviceId,
               principal: {
                 principalId: "pr-1",
@@ -434,7 +434,7 @@ test("applySourceReleases builds a service with a folder inside it, publishing b
               version: 1,
               serviceId,
               composeServiceName: "web",
-              releaseId: "rel-new",
+              releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000099",
               sourceId: "src-1",
               commitSha: "resolved-commit",
               ref: "main",
@@ -457,7 +457,7 @@ test("applySourceReleases builds a service with a folder inside it, publishing b
       assertEquals(seen[0]?.publish, {
         folder,
         serviceId,
-        releaseId: "rel-new",
+        releaseId: "0192a8f4-3c1e-7a52-9b0d-000000000099",
         publishId: seen[0]?.publish?.publishId ?? "",
       });
       assertEquals(
@@ -469,7 +469,7 @@ test("applySourceReleases builds a service with a folder inside it, publishing b
           "services",
           "shop.test",
           "releases",
-          "rel-new",
+          "0192a8f4-3c1e-7a52-9b0d-000000000099",
         ),
       );
       // The folder is made through the one install seam, scope tree first.

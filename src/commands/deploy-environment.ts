@@ -1534,10 +1534,12 @@ export function ownedVolumeRoots(
       entry.sourcePath !== undefined &&
       normalize(entry.sourcePath) === entry.sourcePath &&
       entry.sourcePath.startsWith(`${layout.principalHomeRoot}/`) &&
-      entry.sourcePath.slice(layout.principalHomeRoot.length + 1).split(
-          "/",
-        )[1] ===
-        "volumes"
+      (() => {
+        const steps = entry.sourcePath.slice(
+          layout.principalHomeRoot.length + 1,
+        ).split("/");
+        return steps.length >= 3 && steps[1] === "volumes";
+      })()
     ) {
       // The older per-owner volume path: only `<home root>/<owner>/volumes/…`.
       roots.push(entry.sourcePath);

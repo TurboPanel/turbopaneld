@@ -36,6 +36,7 @@
  */
 
 import { dirname, join } from "@std/path";
+import { isPathId } from "../../contracts/directory-names.ts";
 import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -167,12 +168,19 @@ export function resolveReleasePaths(
     releaseId: string;
     /** The service folder; without it the older per-service tree is used. */
     folder?: FolderRefParts;
-    /** The staging leaf's name for a folder release; a fresh UUID when absent. */
+    /** The staging leaf's name for a folder release; a fresh UUID when absent (keep the one `paths` object from open to publish). */
     publishId?: string;
   },
 ): ReleasePaths {
   const serviceId = assertSafeServiceId(params.serviceId);
   const releaseId = assertSafeReleaseId(params.releaseId);
+  if (params.folder !== undefined) {
+    // tp-host takes only canonical ids for a folder release; fail before the
+    // build rather than at publish.
+    for (const id of [serviceId, releaseId]) {
+      if (!isPathId(id)) throw new Error(`unsafe folder release id: ${id}`);
+    }
+  }
   const tree = serviceTree(layout, {
     serviceId,
     username: params.username,
