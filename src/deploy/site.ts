@@ -1400,7 +1400,7 @@ const OLS_NAME_ESCAPE_RE = /[^A-Za-z0-9]/g;
 function escapeOlsNamePart(part: string): string {
   return part.replaceAll(
     OLS_NAME_ESCAPE_RE,
-    (char) => `_${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
+    (char) => `_${char.codePointAt(0)?.toString(16).padStart(2, "0")}`,
   );
 }
 
