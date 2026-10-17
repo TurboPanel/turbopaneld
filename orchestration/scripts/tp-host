@@ -2180,6 +2180,8 @@ tp_verb_mv() {
   tp_path_class "$1" >/dev/null || tp_die "refusing path $1"
   tp_refuse_root_entry "$1"
   tp_refuse_root_entry "$2"
+  ! tp_home_scaffold "$1" && ! tp_home_scaffold "$2" ||
+    tp_die "refusing to move a scope, services or volumes folder"
   tp_pin_parent "$1" || tp_die "no such directory for $1"
   # Both names live in the pinned directory (checked above); PIN_NAME is the
   # source's, so the destination's last component is taken from $2.
@@ -2636,12 +2638,12 @@ tp_sftp_service_check() {
   _ssk_uid="$3"
   tp_sftp_sealed_dir "$_ssk_user" "$_ssk_dir"
   [ -d "$_ssk_dir" ] && [ ! -L "$_ssk_dir" ] || return 0
-  for _ssk_entry in "$_ssk_dir"/* "$_ssk_dir"/.turbopanel-hosting; do
+  for _ssk_entry in "$_ssk_dir"/* "$_ssk_dir"/.[!.]* "$_ssk_dir"/..?*; do
     [ -e "$_ssk_entry" ] || [ -L "$_ssk_entry" ] || continue
     case "${_ssk_entry##*/}" in
       releases) tp_sftp_sealed_dir "$_ssk_user" "$_ssk_entry" ;;
       .turbopanel-hosting) tp_sftp_sealed_dir "$_ssk_user" "$_ssk_entry" ;;
-      current)
+      current|current.tmp.*)
         if [ ! -L "$_ssk_entry" ] || [ "$(stat -c '%u' -- "$_ssk_entry")" != "$ROOT_UID" ]; then
           echo "$_ssk_user: $_ssk_entry is not a root-owned link"
         fi
@@ -2654,8 +2656,8 @@ tp_sftp_service_check() {
 
 # The scope tree of one home: <scope>/{services,volumes}/<name>. Every folder
 # down to a service is root's and sealed; the owner writes only public/,
-# shared/, logs/ and the volume folders themselves. The older home/data/tmp and
-# sites/volumes entries are not looked at here.
+# shared/, logs/ and the volume folders themselves. The older sites/ and
+# volumes/ must be sealed; home, data and tmp are the owner's.
 tp_sftp_scope_check() {
   _sk_user="$1"
   _sk_home="$2"
@@ -2663,7 +2665,12 @@ tp_sftp_scope_check() {
   for _sk_scope in "$_sk_home"/*; do
     [ -e "$_sk_scope" ] || [ -L "$_sk_scope" ] || continue
     case "${_sk_scope##*/}" in
-      home|tmp|data|sites|volumes) continue ;;
+      home|tmp|data) continue ;;
+      sites|volumes)
+        # The older folders: root's, as they always were.
+        tp_sftp_sealed_dir "$_sk_user" "$_sk_scope"
+        continue
+        ;;
     esac
     if ! tp_scope_ok "${_sk_scope##*/}"; then
       echo "$_sk_user: $_sk_scope is not a scope folder"
@@ -3255,8 +3262,10 @@ tp_retire_refs_check() {
   if [ -d "./$1/sites" ] && [ -n "$(ls -A -- "./$1/sites")" ]; then
     tp_die "principal-remove: $1 still has site trees under $R_PRINCIPALS/$1/sites"
   fi
-  for _rs_dir in "./$1"/*/services; do
-    [ -d "$_rs_dir" ] && [ ! -L "$_rs_dir" ] || continue
+  for _rs_scope in "./$1"/*; do
+    tp_scope_ok "${_rs_scope##*/}" || continue
+    _rs_dir="$_rs_scope/services"
+    [ -d "$_rs_dir" ] && [ ! -L "$_rs_dir" ] && [ ! -L "$_rs_scope" ] || continue
     if [ -n "$(ls -A -- "$_rs_dir")" ]; then
       tp_die "principal-remove: $1 still has service folders under $R_PRINCIPALS/${_rs_dir#./}"
     fi

@@ -9,7 +9,6 @@ import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 import {
   type FolderRefParts,
   folderRefParts,
-  isValidOwnerName,
   parseFolderRefParts,
 } from "./directory-names.ts";
 
@@ -4406,13 +4405,18 @@ function isValidPrincipalShellPath(value: string): boolean {
   return ALLOWED_PRINCIPAL_SHELLS.has(value);
 }
 
+const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 /**
- * A site owner's Linux user: the shared owner rule (lowercase, up to 28, no
- * `tp`/`systemd-` prefix, no `-grp` suffix). The host's own account names are
- * refused where the account is created (`ensure-principal.ts`).
+ * Longest site owner's Linux user name; its group carries the same name.
+ * Keep in sync with `MAX_PRINCIPAL_USERNAME_LENGTH` in ensure-principal.ts.
  */
+const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
+
 function isValidPrincipalUsername(value: unknown): value is string {
-  return isValidOwnerName(value);
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_PRINCIPAL_USERNAME_LENGTH &&
+    PRINCIPAL_USERNAME_RE.test(value);
 }
 
 function parseOptionalPrincipalId(
@@ -4538,7 +4542,7 @@ const PASSWORD_HASH_RE =
  *
  * Written out rather than imported: this module is a zero-import leaf that
  * mirrors instance contracts, the same way `ALLOWED_PRINCIPAL_SHELLS` and
- * `isValidOwnerName` above it are mirrored. Keep in sync with
+ * `PRINCIPAL_USERNAME_RE` above it are mirrored. Keep in sync with
  * `ALLOWED_SSH_KEY_TYPES` in `../../deploy/ssh/key-types.ts`, whose
  * `isCanonicalSshPublicKey` is the second gate this one feeds — a drift test
  * lives in `../../deploy/ssh/apply.test.ts`.

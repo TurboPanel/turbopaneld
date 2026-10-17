@@ -554,15 +554,18 @@ test("the SFTP check refuses links, strays and bad names in the tree", async () 
   });
 });
 
-test("the SFTP check ignores the older home, data, tmp, sites and volumes entries", async () => {
+test("the SFTP check leaves the owner's home, data and tmp alone and seals the older sites and volumes", async () => {
   await withHost(async (host) => {
     await jailedAlice(host);
     for (const name of ["data", "tmp", "sites", "volumes"]) {
       await Deno.mkdir(host.path(`${HOME}/${name}`), { recursive: true });
     }
-    await Deno.chmod(host.path(`${HOME}/sites`), 0o770);
     const check = await host.run(["sftp-chroot", "check"]);
     assertEquals(check.code, 0, check.stdout + check.stderr);
+    await Deno.chmod(host.path(`${HOME}/sites`), 0o770);
+    const open = await host.run(["sftp-chroot", "check"]);
+    assertEquals(open.code === 0, false);
+    assertStringIncludes(open.stdout, `${HOME}/sites is not a root-owned`);
   });
 });
 
@@ -589,5 +592,44 @@ test("new owner names follow the tightened rule", async () => {
       ]);
       assertEquals(result.code === 0, ok, name);
     }
+  });
+});
+
+test("principal-remove ignores an owner's own folders named services", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path(`${HOME}/home/services/x`), { recursive: true });
+    await Deno.mkdir(host.path(`${HOME}/tmp/services/x`), { recursive: true });
+    const result = await host.run(["principal-remove", "alice"]);
+    assertEquals(result.stderr.includes("service folders"), false);
+  });
+});
+
+test("mv leaves the scope, services and volumes folders in place", async () => {
+  await withHost(async (host) => {
+    await buildService(host);
+    for (
+      const [from, to] of [
+        [`${HOME}/production`, `${HOME}/staging`],
+        [`${HOME}/production/services`, `${HOME}/production/services2`],
+        [`${HOME}/production/volumes`, `${HOME}/production/volumes2`],
+      ]
+    ) {
+      await refused(host, ["mv", "-T", host.path(from), host.path(to)]);
+    }
+  });
+});
+
+test("the SFTP check accepts a current link left mid-swap and flags a hidden entry", async () => {
+  await withHost(async (host) => {
+    await jailedAlice(host);
+    await Deno.symlink(
+      `releases/${RELEASE_ID}`,
+      host.path(`${SERVICE}/current.tmp.${PUBLISH_ID}`),
+    );
+    const ok = await host.run(["sftp-chroot", "check"]);
+    assertEquals(ok.code, 0, ok.stdout);
+    await Deno.writeTextFile(host.path(`${SERVICE}/.hidden`), "x");
+    const bad = await host.run(["sftp-chroot", "check"]);
+    assertStringIncludes(bad.stdout, ".hidden is not part of a service folder");
   });
 });

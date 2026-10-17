@@ -112,6 +112,14 @@ const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
 const PRINCIPAL_STRUCTURAL_DIRS = ["sites", "volumes"] as const;
 
 /**
+ * What an account that already exists may be called. A name for a new account
+ * must also pass the shared owner rule ({@link assertNewOwnerName}); accounts
+ * made before it was tightened keep working.
+ */
+const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
+
+/**
  * sha512-crypt only — the one format the control plane emits. Anchored and
  * colon/newline-free by construction, so a value that passes cannot smuggle a
  * second `/etc/shadow` field through `chpasswd -e`. Keep in sync with the wire
@@ -221,13 +229,24 @@ function assertSafeAbsolutePath(value: string, label: string): string {
   return value;
 }
 
+/** A name for an account about to be created: the shared owner rule (lowercase, up to 28, no `tp` prefix and so on). */
+function assertNewOwnerName(username: string): void {
+  if (!isValidOwnerName(username)) {
+    throw new Error(`Invalid principal username: ${username}`);
+  }
+}
+
 function assertSafePrincipalUsername(username: string): string {
   if (isReservedPrincipalUsername(username)) {
     throw new Error(
       `The name ${username.trim()} is reserved for the host's own accounts, so it cannot be a site owner's Linux user. Pick another name.`,
     );
   }
-  if (!isValidOwnerName(username)) {
+  if (
+    username.length === 0 ||
+    username.length > MAX_PRINCIPAL_USERNAME_LENGTH ||
+    !PRINCIPAL_USERNAME_RE.test(username)
+  ) {
     throw new Error(`Invalid principal username: ${username}`);
   }
   return username;
@@ -478,6 +497,7 @@ async function ensurePrincipalGroup(
     return;
   }
   const account = await principalAccount(principal.username, runFn);
+  if (!account) assertNewOwnerName(principal.username);
   if (account) {
     if (
       await renameLegacyPrincipalGroup(principal, groupName, account, runFn)

@@ -535,7 +535,7 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   // Release records and release build scratch (release-layout.ts).
   { name: "release-records", mode: "0750" },
   { name: "release-build", mode: "0700" },
-  // One small record per asset folder: its owner, scope, kind and slug as first created (folder-record.ts).
+  // One small record per asset folder: its owner, scope, kind and slug as first created (asset-folders.ts).
   { name: "folders", mode: "0750" },
   // Scratch HOME and temp for the daemon's `ansible-playbook --version` probe.
   { name: "ansible", mode: "0750" },

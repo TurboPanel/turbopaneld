@@ -43,7 +43,11 @@ for (
       Error,
       "principal username",
     );
-    assertEquals(calls.length, 0);
+    // Nothing is created for a refused name.
+    assertEquals(
+      calls.some((c) => c.includes("groupadd") || c.includes("useradd")),
+      false,
+    );
   });
 }
 

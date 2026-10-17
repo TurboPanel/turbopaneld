@@ -249,7 +249,9 @@ export async function ensureAssetFolder(
   runFn?: RunFn,
 ): Promise<string> {
   const checked = parseFolderRef(ref);
-  await assertFolderUnchanged(layout, assetId, checked);
+  // The record goes first: a crash after it leaves a record with no folder
+  // (harmless, the next call makes the folder), never a folder with no record.
+  await recordAssetFolder(layout, assetId, checked);
   const parts = {
     owner: checked.owner,
     scope: checked.scope,
@@ -259,6 +261,5 @@ export async function ensureAssetFolder(
   const folder = kind === "service"
     ? await ensureServiceFolder(layout, parts, runFn)
     : await ensureVolumeFolder(layout, parts, runFn);
-  await recordAssetFolder(layout, assetId, checked);
   return folder;
 }
