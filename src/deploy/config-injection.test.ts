@@ -25,6 +25,7 @@ import {
   apacheSiteConfig,
   caddySiteConfig,
   nginxSiteConfig,
+  openlitespeedEnvLine,
   openlitespeedVhostConfig,
   phpAdminValues,
   phpFpmPoolAdminDirectives,
@@ -343,6 +344,58 @@ test("nginx fastcgi_param drops a hostile value, refuses a bad name, and escapes
   assertEquals(
     nginxWithEnv({ V: 'a";}#{' }).includes('fastcgi_param V "a\\";}#{";'),
     true,
+  );
+});
+
+function olsWithEnv(webEnv: Record<string, string>): string {
+  return openlitespeedVhostConfig({
+    processorName: "php_x",
+    mode: "lsphp-detached",
+    socket: "/run/turbopanel-php-x/php.sock",
+    children: 10,
+    lockedValues: [],
+    composeServiceName: "phpapp",
+    webEnv,
+  });
+}
+
+test("OpenLiteSpeed env drops a hostile value, refuses a bad name", () => {
+  for (
+    const ch of [
+      "\n",
+      "\r",
+      "\0",
+      "\u0085",
+      "\u2028",
+      "\u2029",
+      "$",
+      "{",
+      "}",
+      "<",
+      ">",
+      "#",
+    ]
+  ) {
+    const conf = olsWithEnv({
+      TOKEN: `x${ch}env                       PATH=/tmp`,
+      KEEP: "ok",
+    });
+    assertEquals(conf.includes("TOKEN"), false);
+    assertEquals(conf.includes("PATH=/tmp"), false);
+    assertEquals(conf.includes("env                       KEEP=ok"), true);
+  }
+  for (const key of ["A\nB", "A B", "A}", "1A", ""]) {
+    assertThrows(
+      () => olsWithEnv({ [key]: "x" }),
+      Error,
+      "sites.phpapp.webEnv must be a letter",
+    );
+  }
+  assertEquals(olsWithEnv({ BIG: "x".repeat(4097) }).includes("BIG"), false);
+  assertThrows(
+    () => openlitespeedEnvLine("phpapp", "TOKEN", "x$y"),
+    Error,
+    "sites.phpapp.webEnv.TOKEN must not contain",
   );
 });
 

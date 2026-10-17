@@ -441,19 +441,21 @@ apps run out of. See the Git-backed releases section.
 under `<configDir>/openlitespeed/sites/` on each apply/remove (no
 `sites-enabled` convention). PHP context lives inside the per-site
 `vhosts/<name>/vhconf.conf` and fragment that removal already deletes, so
-`removeOpenLiteSpeedSites` needs no PHP-specific step. `web.env`
-hints remain unapplied for OLS (see **Site variables** below).
+`removeOpenLiteSpeedSites` needs no PHP-specific step. Site variables for OLS
+PHP land on the vhost processor (see **Site variables** below).
 
 **Site variables (`sites[].webEnv`, `sites[].webSecretEnv`).** Runtime variables
-set on a PHP site's hostings reach PHP as FastCGI parameters, so `getenv()` and
-`$_SERVER` see them: site Caddy `php_fastcgi { env }`, Apache `SetEnv`
-(mod_proxy_fcgi forwards it), nginx `fastcgi_param` after the shared parameter
-set and before the pinned `SCRIPT_FILENAME` / `PATH_INFO`. Not yet delivered:
-OpenLiteSpeed, and `$_ENV` in every mode (FastCGI parameters never fill it;
-`variables_order` is `GPCS`). Secret variables travel sealed: the control plane
-sends each as a `tpdaemon` envelope in `sites[].webSecretEnv`, and
-`resolveSiteSecretEnv` (`site/site-secret-env.ts`, called from
-`handleEnvironmentDeploy` before the site apply, the only caller of
+set on a PHP site's hostings reach PHP as FastCGI / LSAPI environment, so
+`getenv()` and `$_SERVER` see them: site Caddy `php_fastcgi { env }`, Apache
+`SetEnv` (mod_proxy_fcgi forwards it), nginx `fastcgi_param` after the shared
+parameter set and before the pinned `SCRIPT_FILENAME` / `PATH_INFO`,
+OpenLiteSpeed processor `env NAME=value` on the per-vhost `extprocessor`
+(FastCGI, php-fpm and detached lsphp — OLS does not start PHP, but still sends
+these on each request). Not yet delivered: `$_ENV` in every mode (FastCGI
+parameters never fill it; `variables_order` is `GPCS`). Secret variables travel
+sealed: the control plane sends each as a `tpdaemon` envelope in
+`sites[].webSecretEnv`, and `resolveSiteSecretEnv` (`site/site-secret-env.ts`,
+called from `handleEnvironmentDeploy` before the site apply, the only caller of
 `applySites`) decrypts them through the `secrets/decrypt` seam (so they join the
 transcript redaction deny-set) and folds them into `webEnv`. The plaintext then
 lives only in the engine's own config (`root:<engine group>` `0640`) and the
@@ -462,30 +464,32 @@ and environment into every hosting, so nginx **drops and names** (never prints
 the value) a variable it cannot carry rather than failing the deploy: a value
 holding `$` (nginx expands `$name` inside quotes, with no escape), a value that
 is not one line, and a name nginx or PHP sets itself (`SCRIPT_FILENAME`,
-`REMOTE_ADDR`, `HTTP_*`, ...). A name that is not an environment variable name
-is still refused. `PHP_VALUE` and `PHP_ADMIN_VALUE` (any case) are reserved on
-every engine: PHP-FPM reads them from the FastCGI request as ini overrides, so
-`resolveSiteSecretEnv` drops them (plain or sealed, before decrypting) and names
-them in the log; the control plane drops them first.
+`REMOTE_ADDR`, `HTTP_*`, ...). OpenLiteSpeed likewise drops a value holding `$`
+(it expands `$VH_ROOT`), a brace, `<`, `>` or `#`. A name that is not an
+environment variable name is still refused. `PHP_VALUE` and `PHP_ADMIN_VALUE`
+(any case) are reserved on every engine: PHP-FPM reads them from the FastCGI
+request as ini overrides, so `resolveSiteSecretEnv` drops them (plain or sealed,
+before decrypting) and names them in the log; the control plane drops them
+first.
 
 **Managed database bindings (`site-db-bindings-v1`).** A site bound to a managed
 database carries `sites[].requiredEnv` (the connection variables it cannot run
 without) and `sites[].dbCa` (`{ variables, pem }`). `planSiteWebEnv` runs before
 anything is written: every variable the site's engine cannot carry is **left out
-and named** in the command log and in `warnings[]` on the deploy result (Apache
-and Caddy now do what nginx always did; a bad *name* is still refused), but a
-name in `requiredEnv` that is left out or missing stops the deploy with a
-plain-words error, and so does `requiredEnv` on an OpenLiteSpeed site (it gets
-no variables at all). `dbCa.pem` is a public CA bundle, certificate blocks only
-(checked at parse). It lands as `<siteRoot>/.turbopanel-hosting/managed-ca.pem`
-through the same `sudo -n install` call as `hosting.env` (owner's Linux user,
-`0400`, directory `root:root` `0711`), and every name in `dbCa.variables` is set
-to that path, so a multi-line certificate never enters the web server's
-environment. A site with `dbCa` and no owning Linux user is refused. Native
-apps are unchanged: their environment file carries a multi-line value as is.
+and named** in the command log and in `warnings[]` on the deploy result (Apache,
+Caddy and OpenLiteSpeed now do what nginx always did; a bad *name* is still
+refused), but a name in `requiredEnv` that is left out or missing stops the
+deploy with a plain-words error. `dbCa.pem` is a public CA
+bundle, certificate blocks only (checked at parse). It lands as
+`<siteRoot>/.turbopanel-hosting/managed-ca.pem` through the same `sudo -n
+install` call as `hosting.env` (owner's Linux user, `0400`, directory
+`root:root` `0711`), and every name in `dbCa.variables` is set to that path, so
+a multi-line certificate never enters the web server's environment. A site with
+`dbCa` and no owning Linux user is refused. Native apps are unchanged: their
+environment file carries a multi-line value as is.
 
-Future seams (not MVP): multi-version PHP side-by-side, OLS `web.env`,
-swarm-style replicas, ACME issuance on the daemon. TurboFabric **is** the
+Future seams (not MVP): multi-version PHP side-by-side, swarm-style replicas,
+ACME issuance on the daemon. TurboFabric **is** the
 single org mesh (`server.fabric.reconcile` — see `src/commands/fabric.ts`
 and `../../orchestration/AGENTS.md`). `{ enabled: false }` is a teardown; the
 daemon owns apply (no Ansible apply playbook).
