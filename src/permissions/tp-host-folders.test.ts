@@ -42,7 +42,8 @@ const vectors = JSON.parse(
 
 test("the root helper refuses every host account name the daemon does", async () => {
   const script = await Deno.readTextFile(TP_HOST_SCRIPT);
-  const listed = script.match(/TP_RESERVED_NAMES="([^"]*)"/)?.[1] ?? "";
+  const listed = (script.match(/TP_RESERVED_NAMES="([^"]*)"/)?.[1] ?? "") +
+    " " + (script.match(/TP_RESERVED_NEW_NAMES="([^"]*)"/)?.[1] ?? "");
   const names = new Set(listed.split(/\s+/).filter(Boolean));
   const missing = [...RESERVED_PRINCIPAL_USERNAMES].filter((name) =>
     !name.startsWith("tp") && !names.has(name)
@@ -631,5 +632,29 @@ test("the SFTP check accepts a current link left mid-swap and flags a hidden ent
     await Deno.writeTextFile(host.path(`${SERVICE}/.hidden`), "x");
     const bad = await host.run(["sftp-chroot", "check"]);
     assertStringIncludes(bad.stdout, ".hidden is not part of a service folder");
+  });
+});
+
+test("an existing account with a name only new owners are barred from keeps working", async () => {
+  await withHost(async (host) => {
+    const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+    await Deno.writeTextFile(
+      host.path("etc/passwd"),
+      passwd + `git:x:15009:15009::${host.prefix}/srv/users/git:/bin/bash\n`,
+    );
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(host.path("etc/group"), group + "git:x:15009:\n");
+    await Deno.mkdir(host.path("srv/users/git/svc/releases"), {
+      recursive: true,
+    });
+    const opened = await host.run([
+      "publish-open",
+      "git",
+      "svc",
+      "r1",
+    ]);
+    assertEquals(opened.code, 0, opened.stderr);
+    // A new account of that name is still refused.
+    await refused(host, ["groupadd", "-g", "15500", "git"]);
   });
 });
