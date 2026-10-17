@@ -389,7 +389,12 @@ export function domainToAscii(input: string): string | null {
   } catch {
     return null;
   }
-  if (host.length === 0 || host.length > 253) return null;
+  if (host.endsWith(".")) host = host.slice(0, -1);
+  if (host.split(".").some((label) => label.length === 0)) return null;
+  // The URL parser also reads 0x7f.1 and 2130706433 as addresses; refuse any result that is one.
+  if (
+    host.length === 0 || host.length > 253 || /^[0-9]+(\.[0-9]+){3}$/.test(host)
+  ) return null;
   return (wildcard ? "*." : "") + host.toLowerCase();
 }
 

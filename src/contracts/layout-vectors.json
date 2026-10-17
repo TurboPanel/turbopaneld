@@ -749,6 +749,26 @@
       "name": null
     },
     {
+      "input": "0x7f.0x1",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "0x7f.0x0.0x0.0x1",
+      "ascii": null,
+      "name": null
+    },
+    {
+      "input": "example.com。",
+      "ascii": "example.com",
+      "name": "example.com"
+    },
+    {
+      "input": "a。。b",
+      "ascii": null,
+      "name": null
+    },
+    {
       "input": "*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
       "ascii": "*.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
       "name": "wildcard.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-f6272f9e"
