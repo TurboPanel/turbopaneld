@@ -195,7 +195,7 @@ asked for was pruned on this host" is exactly what the operator needs told.
 **A rollback trusts only the daemon's own release record.** Every successful
 promote — native or Railpack — leaves a copy of its manifest under the
 daemon-owned `<daemonStateDir>/release-records/` root
-(`resolveDaemonReleasePaths`); for the native lane it is written **before** the
+(`<serviceId>/<releaseId>/`, `resolveDaemonReleasePaths`); for the native lane it is written **before** the
 promote, under a `.pending` marker, so a write failure fails the deploy with
 `current` untouched, and the marker is cleared only once the seal and swap have
 succeeded (a failed promote removes the record). Only a record without the
@@ -428,7 +428,7 @@ re-validated on the way out — the manifest is read back from disk, so it is no
 trusted to name a safe path. A service that is still sourced keeps its tree even
 if its principal changed: reclaiming it would delete live `shared/` state.
 Once a tree is gone, the daemon's records for that service
-(`<daemonStateDir>/release-records/sites/<serviceId>`) are removed too, without
+(`<daemonStateDir>/release-records/<serviceId>`) are removed too, without
 privilege (the daemon owns them); a tree that could not be removed keeps its
 records. Best-effort per entry, like the rest of retention.
 

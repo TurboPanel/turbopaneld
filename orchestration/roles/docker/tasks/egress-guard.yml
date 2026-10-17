@@ -2,17 +2,9 @@
 # Always-on DOCKER-USER / INPUT egress block for container-side interfaces
 # (audit P1-4). Included from tasks/main.yml. Installs a root-owned script and
 # a oneshot unit that re-applies it after every docker.service (re)start, and
-# applies it now. It never restarts dockerd. Switching the var off removes the
+# applies it now (the script sits in the install's lib folder, which the
+# daemon-layout role already owns). It never restarts dockerd. Switching the var off removes the
 # unit, the script and the TP-EGRESS chain again.
-
-- name: Install the egress block script directory
-  ansible.builtin.file:
-    path: "{{ turbopanel_docker_egress_script | dirname }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0750"
-  when: turbopanel_docker_egress_guard | bool
 
 - name: Install the egress block script
   ansible.builtin.copy:

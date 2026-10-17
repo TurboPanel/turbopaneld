@@ -513,9 +513,9 @@ export type CopyBackupSource = {
 /**
  * Must stay in sync with the instance canonical `storage.backup` shape.
  * `create` archives the copy (live, no pause) into
- * `<backupDir>/copies/<copyId>/<backupId>.tar.gz`; `delete` removes an
+ * `<backupDir>/volumes/<copyId>/<backupId>.tar.gz`; `delete` removes an
  * artifact, and `policyId` locates one a scheduled run made
- * (`<backupDir>/copies/<copyId>/policy-<policyId>/…`).
+ * (`<backupDir>/volumes/<copyId>/policy-<policyId>/…`).
  */
 export type StorageBackupPayload = CopyBackupSource & {
   action: "create" | "delete";

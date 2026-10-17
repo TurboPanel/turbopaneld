@@ -91,9 +91,9 @@ async function makeTestLayout(): Promise<
     },
     { skipDiscovery: true, forceMode: "production" },
   );
-  // The hosting unit's state folder (`/var/lib/turbopanel-hosting-caddy`),
-  // which systemd creates when the unit starts.
-  await Deno.mkdir(`${root}/turbopanel-hosting-caddy`);
+  // The hosting unit's state folder (`<state>/hosting-caddy`), which systemd
+  // creates when the unit starts.
+  await Deno.mkdir(`${root}/state/hosting-caddy`, { recursive: true });
   return { layout, cleanup: () => Deno.remove(root, { recursive: true }) };
 }
 
@@ -1856,7 +1856,7 @@ test("guardHostingCaddySites leaves a loadable set alone and reloads only after 
 
 test("validation needs the hosting unit's state folder: a never-started unit is started once first", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const state = join(dirname(layout.stateDir), "turbopanel-hosting-caddy");
+  const state = join(layout.stateDir, "hosting-caddy");
   await Deno.remove(state);
   const calls: string[][] = [];
   const restore = setIngressHostCommandForTest((_command, args) => {

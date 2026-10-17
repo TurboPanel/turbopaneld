@@ -173,9 +173,7 @@ test("resolveDaemonReleasePaths uses the release-records root", () => {
     join(
       "/var/lib/tp",
       RELEASE_RECORDS_DIRNAME,
-      "sites",
       "svc-1",
-      "releases",
       "rel-1",
     ),
   );

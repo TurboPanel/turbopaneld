@@ -27,15 +27,6 @@
     group: "{{ turbopanel_group }}"
     mode: "0770"
 
-- name: Ensure Orchestrator data directory exists
-  ansible.builtin.file:
-    path: "{{ orchestrator_data_dir }}"
-    follow: false
-    state: directory
-    owner: root
-    group: "{{ turbopanel_group }}"
-    mode: "0770"
-
 # `api.cnf` and `raft.cnf` are organization-wide secrets derived on the control
 # plane and materialized by `managed.ha.reconcile` — not per-host Ansible RNG.
 

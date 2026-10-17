@@ -11,6 +11,7 @@
  */
 
 import {
+  BACKUP_ROOT,
   DEFAULT_INGRESS_SOCKET_DIR,
   DEFAULT_PLATFORM_ROOTS,
   isIngressContainer,
@@ -60,7 +61,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
     "/root",
     "/boot",
     "/opt/turbopanel",
-    "/backup",
+    BACKUP_ROOT,
   ],
   dockerSockets: ["/var/run/docker.sock", "/run/docker.sock"],
   capAllowlist: [],

@@ -88,11 +88,11 @@ Backup restore skips per-login schemas on an owner-role database; a restored tab
 │       └── ca.pem         # 0640
 
 # Backups are NOT under this tree since v6 — they live at
-# <backupDir>/<managedId>/ (LayoutPaths.backupDir, /backup by default,
+# <backupDir>/managed/<managedId>/ (LayoutPaths.backupDir, /backup by default,
 # TURBOPANEL_BACKUP_DIR to override) so an operator can mount separate storage
 # for them without moving the engine's own state:
 #
-# /backup/<managedId>/          # 0750; artifacts written 0600 by the daemon user itself
+# /backup/managed/<managedId>/  # 0750; artifacts written 0600 by the daemon user itself
 # ├── <backupId>.<ext>          # manual backups; <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
 # └── policy-<policyId>/        # one dir per scheduled policy (managedBackupArtifactDir)
 #     └── <backupId>.<ext>      # pruned only within its own policy dir
@@ -705,7 +705,7 @@ While a host is off the control plane may promote a replica, but Docker
 restarts engines (`restart: unless-stopped`) before this daemon runs, so a
 stale primary can accept writes again within seconds of boot.
 
-- **Detect** (`host-boot.ts`): `<stateDir>/managed/host-boot.json` holds the
+- **Detect** (`host-boot.ts`): `<stateDir>/system/host-boot.json` holds the
   kernel `boot_id` of the last run, plus a `cleanShutdownAt` stamp written on
   SIGTERM/SIGINT (`entry/run.ts`). A different `boot_id` with no stamp is an
   *unclean* boot (power cut, kernel panic, `reboot -f`); with the stamp it is a

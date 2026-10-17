@@ -578,7 +578,7 @@ any UI pin — each must carry a valid signature by the pinned release key, and
 an unsigned one is refused like an invalid one (`preflight_manifest`) — and requires `turbopanel-database` to be
 running (`preflight_backup` via `docker inspect`). An overlapping
 `instance-update` is `preflight_in_progress`. `instance-backup.yml` then
-writes `<backupDir>/control-plane/<upgradeId>/` (`pg_dump -Fc` inside the
+writes `<backupDir>/panel/<upgradeId>/` (`pg_dump -Fc` inside the
 database container, an `/etc/turbopanel` tarball, and `meta.json` with the
 migration-history fingerprint) and keeps the newest three. When the rendered
 Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`

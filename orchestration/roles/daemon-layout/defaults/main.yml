@@ -5,8 +5,6 @@
 # Root tasks may act on a leaf itself, never on anything inside it.
 turbopanel_daemon_config_leaves:
   - { name: docker, mode: "0750" }
-  - { name: proxysql, mode: "0750" }
-  - { name: orchestrator, mode: "0750" }
   - { name: node-apps, mode: "0750" }
   - { name: hosting, mode: "0750" }
 turbopanel_daemon_state_leaves:

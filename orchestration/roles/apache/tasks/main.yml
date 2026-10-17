@@ -193,15 +193,13 @@
   when: _apache_unit.changed # noqa: no-handler
   changed_when: true
 
-# Logs and the pidfile now live in the unit's own LogsDirectory= and
-# RuntimeDirectory=. The old paths inside the tp-owned trees go.
-- name: Remove the old Apache log and pidfile directories
+# The pidfile lives in the unit's own RuntimeDirectory=; logs are the unit's
+# LogsDirectory= (/var/log/turbopanel/apache). The old pidfile folder inside the
+# tp-owned run tree goes.
+- name: Remove the old Apache pidfile directory
   ansible.builtin.file:
-    path: "{{ item }}"
+    path: "{{ turbopanel_run_dir }}/apache"
     state: absent
-  loop:
-    - "{{ turbopanel_log_dir }}/apache"
-    - "{{ turbopanel_run_dir }}/apache"
 
 - name: Stop and disable leftover distro apache2 unit when present
   ansible.builtin.systemd:

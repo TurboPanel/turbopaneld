@@ -3073,7 +3073,7 @@ test("removeSites warns and keeps the aggregate when an OLS fragment cannot be r
     );
     // The aggregate still names this vhost, so its vhconf must survive too.
     await rootFs.stat(
-      join(olsDir, "vhosts", `tp_${environmentId}_static`, "vhconf.conf"),
+      join(olsDir, "vhosts", `tp_${environmentId}__static`, "vhconf.conf"),
     );
   } finally {
     await cleanup();
@@ -3096,7 +3096,7 @@ test("removeSites drops an OLS vhost dir only after the aggregate stops naming i
     );
     const aggregate = teardown.indexOf(join(olsDir, "httpd_config.conf"));
     const vhostRm = teardown.indexOf(
-      join(olsDir, "vhosts", `tp_${environmentId}_static`),
+      join(olsDir, "vhosts", `tp_${environmentId}__static`),
     );
     assert(fragmentRm >= 0 && aggregate > fragmentRm, teardown.join("\n"));
     assert(vhostRm > aggregate, teardown.join("\n"));
@@ -3345,8 +3345,8 @@ test("OpenLiteSpeed apply and removal work when the daemon cannot enter its conf
       restore();
     }
     const aggregate = await rootFs.readTextFile(mainConfig);
-    assertStringIncludes(aggregate, "tp_envolsb_static");
-    assertEquals(aggregate.includes("tp_envolsa_static"), false);
+    assertStringIncludes(aggregate, "tp_envolsb__static");
+    assertEquals(aggregate.includes("tp_envolsa__static"), false);
     assertEquals(await listConfigDirEntries(join(olsDir, "sites")), [
       "tp-envolsb-static.conf",
     ]);
@@ -3872,7 +3872,7 @@ async function olsVhconf(h: PerSitePhpHarness, service = "shop") {
       h.layout.configDir,
       "openlitespeed",
       "vhosts",
-      `tp_envphp_${service}`,
+      `tp_envphp__${service}`,
       "vhconf.conf",
     ),
   );
@@ -3921,7 +3921,7 @@ test("per-site PHP on OpenLiteSpeed: fastcgi and fpm reach the owner's runtime t
       assertStringIncludes(vhost, "autoStart                 0");
       assertStringIncludes(
         vhost,
-        "add                       fcgi:php_tp_envphp_shop php",
+        "add                       fcgi:php_tp_envphp__shop php",
       );
       const fragment = await Deno.readTextFile(
         join(
@@ -4005,7 +4005,7 @@ test("detached lsphp on OpenLiteSpeed: systemd runs the vendored lsphp as the ow
     assertStringIncludes(vhost, "autoStart                 0");
     assertStringIncludes(
       vhost,
-      "add                       lsapi:php_tp_envphp_shop php",
+      "add                       lsapi:php_tp_envphp__shop php",
     );
     // #283's script-source deny rules sit beside the handler, and the locked
     // limits go to lsphp as admin values.

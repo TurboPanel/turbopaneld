@@ -49,7 +49,12 @@ const EXEMPT: Record<string, string> = {
   "state/update-rollback.json": "written by the root update guard",
   "state/instance-acme": "control plane (state root not sealed co-located)",
   "state/openlitespeed": "root role (openlitespeed)",
-  "state/proxysql": "root-written by the managed-engine playbooks",
+  "state/hosting-caddy":
+    "the hosting Caddy unit's StateDirectory, owned by tpedge; the daemon only reads the validation folder in it",
+  "config/proxysql":
+    "root role (proxysql): root:tp 0770, the role alone sets its mode",
+  "config/orchestrator":
+    "root role (orchestrator): root:tp 0770, the role alone sets its mode",
   // A leaf on a daemon-only host (daemon-layout makes it when no control
   // plane is installed); co-located, instance-launch owns it for the instance
   // user (2770) and daemon-layout leaves it alone.

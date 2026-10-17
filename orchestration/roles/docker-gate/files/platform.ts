@@ -45,15 +45,20 @@ export type PlatformRoots = {
   writable: readonly string[];
 };
 
+/**
+ * The backup root. The gate ships alone, so it cannot import the daemon's
+ * layout module; a test keeps this equal to `BACKUP_ROOT` in `src/paths/layout.ts`.
+ */
+export const BACKUP_ROOT = "/backup";
+
 export const DEFAULT_PLATFORM_ROOTS: PlatformRoots = {
   readOnly: [
     "/etc/turbopanel/proxysql",
     "/etc/turbopanel/orchestrator",
     // Backup artifacts: the restore helper binds one archive read-only.
-    "/backup",
+    BACKUP_ROOT,
   ],
   writable: [
-    "/var/lib/turbopanel/proxysql",
     "/var/lib/turbopanel/orchestrator",
     "/var/lib/turbopanel/managed",
   ],

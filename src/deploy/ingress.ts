@@ -1,4 +1,4 @@
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -792,12 +792,15 @@ export function serviceTraefikCompose(
 }
 
 /**
- * The hosting unit's systemd `StateDirectory=`: `/var/lib/<name>`, created
- * and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account, the
- * internal CA and every leaf certificate. Top level on purpose: never inside
- * the `tp`-owned state tree, so `tp` cannot swap it out from under Caddy.
+ * The hosting unit's systemd `StateDirectory=`: `/var/lib/turbopanel/hosting-caddy`,
+ * created and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account,
+ * the internal CA and every leaf certificate. The state root is root's and the
+ * daemon owns only its listed leaves, so `tp` cannot swap this folder out from
+ * under Caddy. systemd leaves an existing parent alone and gives only the inner
+ * folder to the unit's user; the account reaches it through an access entry on
+ * the state root (hosting-caddy role), not through group `tp`.
  */
-export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel-hosting-caddy";
+export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel/hosting-caddy";
 
 /**
  * Bounded shutdown for the hosting Caddy. Without it Caddy waits forever for
@@ -2090,9 +2093,9 @@ function withHostingSitesLock<T>(work: () => Promise<T>): Promise<T> {
 const HOSTING_CANDIDATE_SITES_DIR = "sites.next";
 const HOSTING_CANDIDATE_CADDYFILE = "Caddyfile.next";
 
-/** `/var/lib/turbopanel-hosting-caddy`: the unit's `StateDirectory=`. */
+/** `<state>/hosting-caddy`: the unit's `StateDirectory=`. */
 function hostingCaddyStateRoot(layout: LayoutPaths): string {
-  return join(dirname(layout.stateDir), HOSTING_CADDY_STATE_DIRECTORY);
+  return join(layout.stateDir, "hosting-caddy");
 }
 
 /**

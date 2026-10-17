@@ -1394,21 +1394,30 @@ export function apacheSiteConfig(
 `;
 }
 
-const OLS_NAME_UNSAFE_RE = /\W/g;
+const OLS_NAME_ESCAPE_RE = /[^A-Za-z0-9]/g;
+
+/** Letters and digits stay; every other character becomes `_` plus two hex digits. */
+function escapeOlsNamePart(part: string): string {
+  return part.replaceAll(
+    OLS_NAME_ESCAPE_RE,
+    (char) => `_${char.charCodeAt(0).toString(16).padStart(2, "0")}`,
+  );
+}
 
 /**
  * OpenLiteSpeed `virtualHost`/`listener` names accept only word characters in
- * practice; derive a stable one from the environment + compose service name
- * (both already validated as safe ids/roots upstream).
+ * practice. The name is built so that two different (environment, service)
+ * pairs can never share one: letters and digits stay as they are, every other
+ * character (including `_` and `-`) becomes `_` plus two hex digits, and the
+ * two parts are joined with `__`, which an escaped part can never contain.
  */
 export function openlitespeedSiteName(
   environmentId: string,
   composeServiceName: string,
 ): string {
-  return `tp_${environmentId}_${composeServiceName}`.replaceAll(
-    OLS_NAME_UNSAFE_RE,
-    "_",
-  );
+  return `tp_${escapeOlsNamePart(environmentId)}__${
+    escapeOlsNamePart(composeServiceName)
+  }`;
 }
 
 /** Vendored `lsphp` for one PHP series (`vendor/lsphp/<series>/current/`). */

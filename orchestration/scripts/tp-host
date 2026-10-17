@@ -88,6 +88,12 @@ if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
   _conf_root="$(sed -n 's/^principal_home_root=\(\/[A-Za-z0-9._\/-]*\)$/\1/p' "$_self_dir/tp-host.conf" | head -1)"
   [ -n "$_conf_root" ] && R_PRINCIPALS="$P$_conf_root"
 fi
+# The backup root the same way: recorded root-side, one name for it here.
+R_BACKUP="$P/backup"
+if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
+  _conf_backup="$(sed -n 's/^backup_dir=\(\/[A-Za-z0-9._\/-]*\)$/\1/p' "$_self_dir/tp-host.conf" | head -1)"
+  [ -n "$_conf_backup" ] && R_BACKUP="$P$_conf_backup"
+fi
 # Release staging (publish-open / publish): on the homes' filesystem, so a
 # sealed release reaches releases/<id> by rename. The dot keeps it apart from
 # every principal name (tp_new_name_ok refuses one).
@@ -110,7 +116,7 @@ HOSTING_CADDY_USER="tpedge"
 # accessGroups: sftp, shell, password, principal); a test keeps them in step.
 SSHD_MATCH_GROUPS="tpsftp tpshell tppasswd tpprincipal"
 HOSTING_CADDY_CAP="CAP_NET_BIND_SERVICE"
-HOSTING_CADDY_STATE="turbopanel-hosting-caddy"
+HOSTING_CADDY_STATE="turbopanel/hosting-caddy"
 # Its admin API is a unix socket in /run/<this> (0700, tpedge), never loopback
 # TCP: a tenant process can dial loopback and load a config that reads every
 # TLS key tpedge can (audit P0-1). Kept in step with ingress.ts.
@@ -193,6 +199,18 @@ tp_path_class() {
   case "$_pc" in
     "$R_APPENV"|"$R_APPENV"/*) return 1 ;;
   esac
+  # State that belongs to an engine account or to a root service, though it sits
+  # in the state tree: the hosting Caddy's store (tpedge) and the Docker gate's
+  # (root). No generic verb may name either.
+  case "$_pc" in
+    "$R_STATE"/hosting-caddy|"$R_STATE"/hosting-caddy/*) return 1 ;;
+    "$R_STATE"/docker-gate|"$R_STATE"/docker-gate/*) return 1 ;;
+  esac
+  # The SFTP jail switch sits in the SSH folder beside the key files but is
+  # written only by `sftp-chroot on` (after its check) and `off`.
+  case "$_pc" in
+    "$R_SSHKEYS"/sftp-chroot) return 1 ;;
+  esac
   # The shared php-fpm master runs as root and reads its main config and every
   # conf.d/*.ini at start (`extension=` loads code into it). Only Ansible writes
   # those; the daemon keeps just pools/*.conf here.
@@ -274,7 +292,7 @@ tp_is_root_path() {
 # Keep these two lists in step with layout.ts (pinned by tp-host.test.ts).
 tp_daemon_leaf_name() {
   case "$1" in
-    "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
+    "$R_CONFIG"/docker|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
     "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
   esac
   return 1
@@ -1226,7 +1244,7 @@ tp_app_envfile_ok() {
 # The hosting Caddy unit, beyond the account checks in tp_unit_ok: the vendored
 # Caddy against the hosting config, exactly CAP_NET_BIND_SERVICE in both the
 # bounding and the ambient set (a missing bounding set would keep every
-# capability bounded), its store in its own top-level StateDirectory, only
+# capability bounded), its store in its own StateDirectory (turbopanel/hosting-caddy), only
 # the environment that points Caddy at that store, and reloads through the
 # admin unix socket in its own 0700 RuntimeDirectory (never a TCP address).
 # Read from the file the awk pass above already shape-checked; every repeated
@@ -1295,7 +1313,7 @@ tp_backup_unit_id() {
 # thing: exec the root-owned <install>/lib/tp-backup-run wrapper for the policy
 # id in its own name, with the daemon env file. No slice, no Environment=, no
 # reload, no second exec; low priority only. The account already has every
-# capability a backup uses (Docker, /backup), so this grants nothing new.
+# capability a backup uses (Docker, the backup root), so this grants nothing new.
 #
 # Read straight from the file the awk pass above already shape-checked (keys
 # start in column one, known directives only, no continuations); a repeated
@@ -2572,7 +2590,7 @@ tp_verb_sshd() {
 # resolves it, so the daemon renders the same root the check validated.
 SFTP_GROUP="tpsftp"
 SHELL_GROUP="tpshell"
-SFTP_CHROOT_SWITCH="$P/etc/ssh/turbopanel-sftp-chroot"
+SFTP_CHROOT_SWITCH="$P/etc/ssh/turbopanel/sftp-chroot"
 SFTP_START_DIR="/home"
 
 # A directory sshd accepts as part of a chroot path.
@@ -3804,7 +3822,7 @@ tp_verb_build_run() {
   # systemd-resolved's varlink socket (nss-resolve) and the system bus would
   # resolve, and talk, through the host instead of the build's resolv.conf.
   for _br_hide in "$R_CONFIG" "$R_STATE" "$R_LOG" "$R_RUN" "$R_PRINCIPALS" "$P/srv" \
-    "$P/backup" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
+    "$R_BACKUP" "$P/run/docker.sock" "$P/var/run/docker.sock" "$P/run/containerd" \
     "$P/run/turbopanel-gate" "$P/var/lib/docker" "$P/etc/ssh" "$P/etc/wireguard" \
     "$P/run/systemd/resolve/io.systemd.Resolve" "$P/run/dbus/system_bus_socket"; do
     set -- "$@" -p InaccessiblePaths="-$_br_hide"

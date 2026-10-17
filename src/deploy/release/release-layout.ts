@@ -42,7 +42,6 @@ import { forEachSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   principalHomePath,
-  RELEASE_STAGING_DIRNAME,
   releaseStagingDir,
   siteCurrentSymlink,
   siteReleasesDir,
@@ -75,9 +74,8 @@ export const RELEASE_METADATA_DIRNAME = ".turbopanel";
  * and no runtime user ever reads one, so it needs no principal home — and
  * requiring one would mean refusing to build a container service just because
  * nobody assigned it a Unix account it would never use. Its manifest instead
- * lands under `<daemonStateDir>/release-records/sites/<serviceId>/releases/…`,
- * which is the same shape {@link resolveReleasePaths} produces so retention and
- * the manifest readers stay lane-agnostic.
+ * lands under `<daemonStateDir>/release-records/<serviceId>/<releaseId>/`: one
+ * folder per service, one per release, nothing else in the tree.
  *
  * A Railpack service keeps its history here whether or not it has a principal
  * — one service should not move its history between two roots depending on an
@@ -178,13 +176,17 @@ export function resolveReleasePaths(
 }
 
 /**
- * {@link resolveReleasePaths} against the daemon-owned release-history root.
+ * The paths of one release record under the daemon-owned release-history root:
+ * `<daemonStateDir>/release-records/<serviceId>/<releaseId>`.
  *
- * Same path shape, no principal home and no privileged ownership: every
- * directory here is created by the daemon user with {@link
+ * Same fields as {@link resolveReleasePaths} so retention and the manifest
+ * readers stay lane-agnostic, but no principal home and no privileged
+ * ownership: every directory here is created by the daemon user with {@link
  * ensureDaemonReleaseRecordDir}. It holds release *records* (manifests) only —
  * anything a runtime user reads belongs in the principal home, under the
- * root-owned ownership rules this module documents.
+ * root-owned ownership rules this module documents. A record has no `current`
+ * link, no `shared` folder and nothing staged: it is written in place, so those
+ * fields name paths that are never created.
  */
 export function resolveDaemonReleasePaths(
   layout: Pick<LayoutPaths, "daemonStateDir">,
@@ -193,14 +195,16 @@ export function resolveDaemonReleasePaths(
   const serviceId = assertSafeServiceId(params.serviceId);
   const releaseId = assertSafeReleaseId(params.releaseId);
   const recordsHome = join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME);
+  const serviceDir = join(recordsHome, serviceId);
+  const releaseDir = join(serviceDir, releaseId);
   return {
     principalHome: recordsHome,
-    sitesDir: join(recordsHome, "sites"),
-    siteDir: siteRoot(recordsHome, serviceId),
-    releasesDir: siteReleasesDir(recordsHome, serviceId),
-    releaseDir: join(siteReleasesDir(recordsHome, serviceId), releaseId),
-    currentLink: siteCurrentSymlink(recordsHome, serviceId),
-    sharedDir: siteSharedDir(recordsHome, serviceId),
+    sitesDir: recordsHome,
+    siteDir: serviceDir,
+    releasesDir: serviceDir,
+    releaseDir,
+    currentLink: join(serviceDir, "current"),
+    sharedDir: join(serviceDir, "shared"),
     scratchDir: join(
       layout.daemonStateDir,
       RELEASE_SCRATCH_DIRNAME,
@@ -208,7 +212,7 @@ export function resolveDaemonReleasePaths(
       releaseId,
     ),
     // Never staged: a release record has no tree to publish.
-    stagingDir: join(recordsHome, RELEASE_STAGING_DIRNAME, releaseId),
+    stagingDir: releaseDir,
   };
 }
 
@@ -226,9 +230,7 @@ export async function ensureDaemonReleaseRecordDir(
   // Outermost first, one at a time.
   await forEachSequential([
     paths.principalHome,
-    paths.sitesDir,
     paths.siteDir,
-    paths.releasesDir,
     paths.releaseDir,
   ], async (dir) => {
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
