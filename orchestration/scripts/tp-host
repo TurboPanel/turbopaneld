@@ -2963,7 +2963,11 @@ dialout dip disk floppy fuse incus incus-admin input kmem kvm libvirt
 libvirt-qemu lpadmin lxd messagebus microk8s netdev operator plugdev polkitd
 render sambashare sasl sgx shadow src ssl-cert staff sudo tape tty users utmp
 video voice wheel bluetooth gpio i2c nopasswdlogin rdma scanner syslog
-systemd-journal tss uuidd vboxusers wireshark"
+systemd-journal tss uuidd vboxusers wireshark
+ftp sftp git www httpd apache nginx ubuntu debian pi vagrant ec2-user ssm-user
+opc postfix dovecot vmail clamav opendkim mongodb mariadb memcache
+elasticsearch openldap unbound chrony ntp lightdm gdm pulse rtkit colord
+geoclue saned dnsmasq landscape lxc"
 
 # Every sudoers file: /etc/sudoers, /etc/sudoers.d, and whatever files or
 # directories /etc/sudoers pulls in with @include/@includedir (or the older
@@ -4096,7 +4100,8 @@ tp_verb_site_usage() {
 # and refuses what the shared rules refuse (a test feeds it the shared vectors).
 tp_verb_asset_path() {
   [ $# -eq 4 ] || tp_die "asset-path: only asset-path OWNER SCOPE service|volume SLUG"
-  tp_owner_shape_ok "$1" || tp_die "asset-path: refusing owner $1"
+  tp_owner_shape_ok "$1" && ! tp_reserved_name "$1" ||
+    tp_die "asset-path: refusing owner $1"
   tp_scope_ok "$2" || tp_die "asset-path: refusing scope $2"
   case "$3" in
     service) _ap_kind=services ;;
