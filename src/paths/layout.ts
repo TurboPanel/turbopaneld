@@ -1125,6 +1125,10 @@ export async function assertNoSymlinkComponents(
       if (info.isSymlink) throw new FolderSymlinkError(current);
     } catch (err) {
       if (err instanceof Deno.errors.NotFound) return;
+      // An owner's folder is root's and closed to the daemon account, which
+      // cannot look further. tp-host walks the same path pinned and refuses a
+      // link in any component, so what the daemon cannot see is checked there.
+      if (err instanceof Deno.errors.PermissionDenied) return;
       throw err;
     }
   }

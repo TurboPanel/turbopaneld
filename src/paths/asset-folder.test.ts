@@ -146,3 +146,21 @@ test("assertNoSymlinkComponents accepts missing and plain paths, refuses a link"
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("assertNoSymlinkComponents leaves what the daemon account cannot look into to the root helper", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(join(root, "alice"));
+    await Deno.chmod(join(root, "alice"), 0o000);
+    const closed = (await Deno.stat(join(root, "alice"))).mode! & 0o777;
+    if (closed === 0 && Deno.uid() !== 0) {
+      await assertNoSymlinkComponents(
+        root,
+        join(root, "alice/production/services/example.com"),
+      );
+    }
+  } finally {
+    await Deno.chmod(join(root, "alice"), 0o700).catch(() => undefined);
+    await Deno.remove(root, { recursive: true });
+  }
+});

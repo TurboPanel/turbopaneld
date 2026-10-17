@@ -298,3 +298,12 @@ test("scanLiveReleaseLinks walks service folders in every scope beside the older
     );
   });
 });
+
+test("scanLiveReleaseLinks does not walk the staging folder beside the owners", async () => {
+  await withLayout(async (layout) => {
+    await Deno.mkdir(join(layout.principalHomeRoot, ".tp-staging", "x"), {
+      recursive: true,
+    });
+    assertEquals(await scanLiveReleaseLinks(layout, noRoot), []);
+  });
+});

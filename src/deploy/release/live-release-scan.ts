@@ -24,7 +24,10 @@
  * recorded before they carried one — the very releases this looks for.
  */
 import { join } from "@std/path";
-import { isValidScope } from "../../contracts/directory-names.ts";
+import {
+  isValidOwnerName,
+  isValidScope,
+} from "../../contracts/directory-names.ts";
 import { writeDaemonFile } from "../../permissions/daemon-files.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import {
@@ -133,7 +136,10 @@ export async function scanLiveReleaseLinks(
   runFn: RunFn = runPrivileged,
 ): Promise<ReleaseLinkFinding[]> {
   const findings: ReleaseLinkFinding[] = [];
-  const users = await listDirNames(layout.principalHomeRoot, runFn);
+  // Entries that are not a site owner's folder (`.tp-staging`) are not walked.
+  const users = (await listDirNames(layout.principalHomeRoot, runFn)).filter(
+    (name) => isValidOwnerName(name),
+  );
   await forEachSequential(users, async (username) => {
     let services: string[];
     try {
