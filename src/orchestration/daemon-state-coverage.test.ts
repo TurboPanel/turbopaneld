@@ -51,10 +51,6 @@ const EXEMPT: Record<string, string> = {
   "state/openlitespeed": "root role (openlitespeed)",
   "state/hosting-caddy":
     "the hosting Caddy unit's StateDirectory, owned by tpedge; the daemon only reads the validation folder in it",
-  "config/proxysql":
-    "root role (proxysql): root:tp 0770, the role alone sets its mode",
-  "config/orchestrator":
-    "root role (orchestrator): root:tp 0770, the role alone sets its mode",
   // A leaf on a daemon-only host (daemon-layout makes it when no control
   // plane is installed); co-located, instance-launch owns it for the instance
   // user (2770) and daemon-layout leaves it alone.

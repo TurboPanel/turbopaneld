@@ -794,11 +794,13 @@ export function serviceTraefikCompose(
 /**
  * The hosting unit's systemd `StateDirectory=`: `/var/lib/turbopanel/hosting-caddy`,
  * created and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account,
- * the internal CA and every leaf certificate. The state root is root's and the
- * daemon owns only its listed leaves, so `tp` cannot swap this folder out from
- * under Caddy. systemd leaves an existing parent alone and gives only the inner
- * folder to the unit's user; the account reaches it through an access entry on
- * the state root (hosting-caddy role), not through group `tp`.
+ * the internal CA and every leaf certificate. On a sealed host the state root
+ * is root's and the daemon owns only its listed leaves, so `tp` cannot swap
+ * this folder out from under Caddy (a host where the control plane runs beside
+ * the daemon keeps a looser state root, where it could). systemd leaves an
+ * existing parent alone and gives only the inner folder to the unit's user; the
+ * account reaches it through an access entry on the state root (hosting-caddy
+ * role), not through group `tp`.
  */
 export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel/hosting-caddy";
 

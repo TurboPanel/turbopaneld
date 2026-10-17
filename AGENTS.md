@@ -156,9 +156,13 @@ state dir, so destroying an engine never leaves an orphan tree on that storage.
 - OpenLiteSpeed virtual host names are `tp_<environment>__<service>` with every
   character other than a letter or digit escaped as `_` and two hex digits, so
   two different pairs can never share a name.
-- `proxysql` and `orchestrator` under the config root belong to their roles
-  (`root:tp 0770`); the daemon-layout role no longer creates them. There is no
-  `<state>/proxysql` folder (ProxySQL keeps its data in a Docker volume).
+- `proxysql` and `orchestrator` under the config root are daemon leaves
+  (`tp:tp 0750`, made by daemon-layout because the daemon writes their compose
+  files before any role has run on a daemon-only host); the proxysql and
+  orchestrator roles now set that same owner and mode instead of `root:tp 0770`,
+  so neither play undoes the other, and work only inside. There is no
+  `<state>/proxysql` folder (ProxySQL keeps its data in a Docker volume) and the
+  orchestrator role no longer re-owns `<state>/orchestrator` (a daemon leaf).
 - `host-boot.json` and the host-wide intent marker live in `<state>/system/`,
   not among the per-database folders.
 

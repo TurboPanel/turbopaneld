@@ -292,7 +292,7 @@ tp_is_root_path() {
 # Keep these two lists in step with layout.ts (pinned by tp-host.test.ts).
 tp_daemon_leaf_name() {
   case "$1" in
-    "$R_CONFIG"/docker|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
+    "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
     "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
   esac
   return 1

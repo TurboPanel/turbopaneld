@@ -3352,7 +3352,7 @@ test("cert-dates prints only notAfter dates, skips internal certs, symlinks and 
       group + `tpedge:x:${Deno.gid}:\n`,
     );
     const certs = host.path(
-      "var/lib/turbopanel-hosting-caddy/data/caddy/certificates",
+      "var/lib/turbopanel/hosting-caddy/data/caddy/certificates",
     );
     await selfSignedCert(
       join(certs, "acme-v02.api.letsencrypt.org-directory", "shop.example.com"),

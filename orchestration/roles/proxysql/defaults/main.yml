@@ -26,4 +26,6 @@ turbopanel_state_dir: /var/lib/turbopanel  # noqa: var-naming[no-role-prefix]
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
   {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
+turbopanel_user: >-  # noqa: var-naming[no-role-prefix]
+  {{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}
 turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]

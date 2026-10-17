@@ -536,6 +536,12 @@ export interface DaemonLeaf {
 
 export const DAEMON_CONFIG_LEAVES: readonly DaemonLeaf[] = [
   { name: "docker", mode: "0750" },
+  // The ProxySQL and orchestrator config folders: the daemon writes their
+  // compose files before any role has run on a daemon-only host, so the
+  // daemon-layout role is their one owner; the proxysql and orchestrator roles
+  // set the same owner and mode (never a second one) and work only inside.
+  { name: "proxysql", mode: "0750" },
+  { name: "orchestrator", mode: "0750" },
   { name: "node-apps", mode: "0750" },
   // The hosting Caddy's config; the hosting-caddy role adds its default ACL.
   { name: "hosting", mode: "0750" },
@@ -642,12 +648,6 @@ export interface RoleMadeFolder {
 }
 
 export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
-  { root: "config", name: "proxysql", madeBy: "proxysql role, root:tp 0770" },
-  {
-    root: "config",
-    name: "orchestrator",
-    madeBy: "orchestrator role, root:tp 0770",
-  },
   { root: "config", name: "tls", madeBy: "hosting-caddy role, tp:tpedge 2750" },
   {
     root: "config",
