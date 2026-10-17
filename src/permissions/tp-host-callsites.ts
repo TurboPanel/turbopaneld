@@ -91,6 +91,11 @@ const HOME = `${P}/srv/users/alice`;
 const SITE = `${HOME}/sites/svc1`;
 const RELEASE = `${SITE}/releases/20260927-120000`;
 const STAGING = `${P}/srv/users/.tp-staging/alice.svc1.20260927-120000`;
+const FOLDER_SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70";
+const FOLDER_RELEASE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71";
+const FOLDER_PUBLISH_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72";
+const FOLDER_SERVICE = `${HOME}/production/services/example.com`;
+const FOLDER_STAGING = `${P}/srv/users/.tp-staging/${FOLDER_PUBLISH_ID}`;
 const STAGED = `${P}/tmp/staged`;
 const SSH_KEYS = `${P}/etc/ssh/turbopanel/authorized_keys`;
 /** A sandboxed build: `work/<id>` holding the clone, the runner installed. */
@@ -1019,6 +1024,40 @@ const SITES: CallSite[] = [
       setup: {
         files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" },
         dirs: [`${SITE}/releases`, `${SITE}/shared`],
+      },
+    },
+  ),
+  tpHost(
+    'src/deploy/release/folder-publish.ts|["-n",verb,ref.owner,ref.scope,ref.slug,ids.serviceId,ids.releaseId,ids.publishId]',
+    {
+      argv: [
+        "publish-open",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        FOLDER_PUBLISH_ID,
+      ],
+    },
+    {
+      argv: [
+        "publish",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        FOLDER_PUBLISH_ID,
+      ],
+      setup: {
+        files: {
+          [`${FOLDER_STAGING}/index.html`]: "<h1>hi</h1>\n",
+        },
+        dirs: [
+          `${FOLDER_SERVICE}/releases`,
+          `${FOLDER_SERVICE}/shared`,
+        ],
       },
     },
   ),

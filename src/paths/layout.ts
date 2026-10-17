@@ -1,4 +1,12 @@
-import { dirname, fromFileUrl, join } from "@std/path";
+import { dirname, fromFileUrl, join, relative } from "@std/path";
+import {
+  folderHostPath,
+  type FolderRef,
+  type FolderRefParts,
+  isPathId,
+  isValidOwnerName,
+  parseFolderRefParts,
+} from "../contracts/directory-names.ts";
 
 export type InstallMode = "development" | "production";
 
@@ -527,6 +535,8 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   // Release records and release build scratch (release-layout.ts).
   { name: "release-records", mode: "0750" },
   { name: "release-build", mode: "0700" },
+  // One small record per asset folder: its owner, scope, kind and slug as first created (asset-folders.ts).
+  { name: "folders", mode: "0750" },
   // Scratch HOME and temp for the daemon's `ansible-playbook --version` probe.
   { name: "ansible", mode: "0750" },
 ];
@@ -691,6 +701,187 @@ export function principalTmpDir(
   username: string,
 ): string {
   return join(principalHomePath(layout, username), "tmp");
+}
+
+// -- Asset folders -------------------------------------------------------------
+//
+// One function turns the four components the control plane sends (owner,
+// scope, kind, slug) into a host path. Everything below is built on it, so no
+// caller assembles a path from pieces. The older `sites/<serviceId>` helpers
+// above stay until the serving code moves over.
+//
+//   <home root>/<owner>/<scope>/services/<slug>/{public,releases,current,shared,logs}
+//   <home root>/<owner>/<scope>/volumes/<slug>
+
+type LayoutHomeRoot = Pick<LayoutPaths, "principalHomeRoot">;
+
+/** Release staging folder name for one publish: a UUID, never parsed back. */
+export function publishStagingDir(
+  layout: LayoutHomeRoot,
+  publishId: string,
+): string {
+  if (!isPathId(publishId)) throw new TypeError("Invalid publish id");
+  return join(layout.principalHomeRoot, RELEASE_STAGING_DIRNAME, publishId);
+}
+
+/** `<home root>/<owner>`: the owner's jail root. */
+export function ownerRoot(layout: LayoutHomeRoot, owner: string): string {
+  if (!isValidOwnerName(owner)) throw new TypeError("Invalid owner name");
+  return join(layout.principalHomeRoot, owner);
+}
+
+/** `<owner root>/<scope>`: an environment name or `common`. */
+export function scopeDir(
+  layout: LayoutHomeRoot,
+  owner: string,
+  scope: string,
+): string {
+  return dirname(assetKindDir(layout, owner, scope, "service"));
+}
+
+/**
+ * The host path of one asset folder, from its components. The reference is
+ * validated (owner, scope and slug rules, no traversal) before any path is
+ * built; anything else throws a `TypeError`.
+ */
+export function assetFolder(layout: LayoutHomeRoot, ref: FolderRef): string {
+  return folderHostPath(layout.principalHomeRoot, ref);
+}
+
+/** `<scope dir>/services` or `<scope dir>/volumes`: the structural folder holding that kind. */
+export function assetKindDir(
+  layout: LayoutHomeRoot,
+  owner: string,
+  scope: string,
+  kind: FolderRef["kind"],
+): string {
+  return dirname(assetFolder(layout, { owner, scope, kind, slug: "x" }));
+}
+
+/** A service folder from the wire form (kind is `service` by position). */
+export function serviceFolder(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return assetFolder(layout, parseFolderRefParts(parts, "service"));
+}
+
+/** A volume folder from the wire form (kind is `volume` by position). */
+export function volumeFolder(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return assetFolder(layout, parseFolderRefParts(parts, "volume"));
+}
+
+/** `<service>/public`: the document root of an uploaded-directory site (owner-writable). */
+export function publicDir(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return join(serviceFolder(layout, parts), "public");
+}
+
+/** `<service>/releases`: immutable published builds (root-owned). */
+export function releasesDir(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return join(serviceFolder(layout, parts), "releases");
+}
+
+/** `<service>/releases/<releaseId>`: one sealed release; the id is a UUID. */
+export function releaseDir(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+  releaseId: string,
+): string {
+  if (!isPathId(releaseId)) throw new TypeError("Invalid release id");
+  return join(releasesDir(layout, parts), releaseId);
+}
+
+/** `<service>/current`: root-owned symlink to the live release, swapped atomically. */
+export function currentLink(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return join(serviceFolder(layout, parts), "current");
+}
+
+/** `<service>/shared`: the writable state that survives a release switch. */
+export function sharedDir(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return join(serviceFolder(layout, parts), "shared");
+}
+
+/** `<service>/logs`: the app's own log files (owner-writable). */
+export function logsDir(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return join(serviceFolder(layout, parts), "logs");
+}
+
+/** `<service>/.turbopanel-hosting`: generated per-site files (root-owned). */
+export function hostingFilesDir(
+  layout: LayoutHomeRoot,
+  parts: FolderRefParts,
+): string {
+  return join(serviceFolder(layout, parts), ".turbopanel-hosting");
+}
+
+/** `<daemon state>/folders`: where the per-asset component records live. */
+export function folderRecordsDir(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): string {
+  return join(layout.daemonStateDir, "folders");
+}
+
+/** `<daemon state>/folders/<assetId>.json`: the components an asset was first created with. */
+export function folderRecordPath(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+  assetId: string,
+): string {
+  if (!isPathId(assetId)) throw new TypeError("Invalid asset id");
+  return join(folderRecordsDir(layout), `${assetId}.json`);
+}
+
+/** Thrown when a folder path runs through a symbolic link. */
+export class FolderSymlinkError extends Error {
+  constructor(path: string) {
+    super(`Refusing ${path}: a component is a symbolic link`);
+    this.name = "FolderSymlinkError";
+  }
+}
+
+/**
+ * Refuse a path whose existing components, below `root`, include a symbolic
+ * link. Components that do not exist yet are fine (the folder is about to be
+ * made). This is the daemon-side twin of tp-host's pinned walk: a layout path
+ * is checked before any code opens it, and the privileged helper checks again.
+ */
+export async function assertNoSymlinkComponents(
+  root: string,
+  path: string,
+): Promise<void> {
+  const rel = relative(root, path);
+  if (rel === "") return;
+  if (rel === ".." || rel.startsWith("../") || rel.startsWith("/")) {
+    throw new TypeError(`Path ${path} is outside ${root}`);
+  }
+  let current = root;
+  for (const part of rel.split("/")) {
+    current = join(current, part);
+    try {
+      const info = await Deno.lstat(current);
+      if (info.isSymlink) throw new FolderSymlinkError(current);
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) return;
+      throw err;
+    }
+  }
 }
 
 /** Host WireGuard private key for interface `tp0`. */

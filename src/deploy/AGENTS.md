@@ -73,7 +73,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    guard on enrolled hosts (`hosting-caddy/tasks/backfill-edge-account.yml`).
    Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
-   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
+   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`; a name must
+   pass the shared owner rule `isValidOwnerName` — lowercase, up to 28, no
+   `tp`/`systemd-` prefix or `-grp` suffix — and not be a host account name).
+   Folders for services and volumes are made by `asset-folders.ts`. Homes live
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`

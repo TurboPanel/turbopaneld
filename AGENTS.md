@@ -897,7 +897,16 @@ it regresses:
   - brings a release into `<home>/sites/<svc>/releases/<id>` only through
     `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
     `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
-    accepts) and `publish <user> <svc> <id>`: it takes the leaf, refuses hard
+    accepts) and `publish <user> <svc> <id>`; the same two verbs also take six
+    words, `<owner> <scope> <slug> <service id> <release id> <publish id>`,
+    for the scope tree (`<home>/<scope>/services/<slug>/releases/<id>`; the
+    leaf is named by the publish id, the lock by the service id, all three
+    lowercase UUIDs). Ownership in a home is checked by position: depth 1 is
+    `home`/`tmp`/`data`, the older `sites`/`volumes`, or a scope folder
+    (root-owned); below a scope only `services` and `volumes`; `rm` leaves
+    scope, `services` and `volumes` folders alone; `asset-path` prints a
+    folder's host path from its components and refuses what the shared
+    name rules refuse; `sftp-chroot check` walks the scope tree. Publish: it takes the leaf, refuses hard
     links, special files and a shipped `shared`, seals it recursively
     (`root:<user>`, no set-id, nothing group/other-writable), refuses a
     symlink that resolves outside it, renames it in through a root-owned chain

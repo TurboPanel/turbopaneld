@@ -9,6 +9,7 @@ import {
   allManagedGroups,
 } from "../runtime/registry.ts";
 import type { PrincipalIdReport } from "../contracts/commands-contracts.ts";
+import { isValidOwnerName } from "../contracts/directory-names.ts";
 import { isReservedPrincipalUsername } from "./reserved-principal-names.ts";
 
 export type PrincipalEnsureSpec = {
@@ -110,7 +111,13 @@ const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
 /** Root-owned directories of the home skeleton the engines traverse. */
 const PRINCIPAL_STRUCTURAL_DIRS = ["sites", "volumes"] as const;
 
+/**
+ * What an account that already exists may be called. A name for a new account
+ * must also pass the shared owner rule ({@link assertNewOwnerName}); accounts
+ * made before it was tightened keep working.
+ */
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 /**
  * sha512-crypt only — the one format the control plane emits. Anchored and
@@ -121,12 +128,6 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
  */
 const PASSWORD_HASH_RE =
   /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
-/**
- * Longest site owner's Linux user name. The group carries the same name, well
- * inside the Linux 32-character limit. Keep in sync with instance
- * `MAX_PRINCIPAL_USERNAME_LENGTH`.
- */
-const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 /**
  * Primary group name created by {@link ensureSystemPrincipals}: the standard
@@ -226,6 +227,13 @@ function assertSafeAbsolutePath(value: string, label: string): string {
     throw new Error(`Invalid principal ${label}: ${value}`);
   }
   return value;
+}
+
+/** A name for an account about to be created: the shared owner rule (lowercase, up to 28, no `tp` prefix and so on). */
+function assertNewOwnerName(username: string): void {
+  if (!isValidOwnerName(username)) {
+    throw new Error(`Invalid principal username: ${username}`);
+  }
 }
 
 function assertSafePrincipalUsername(username: string): string {
@@ -489,6 +497,7 @@ async function ensurePrincipalGroup(
     return;
   }
   const account = await principalAccount(principal.username, runFn);
+  if (!account) assertNewOwnerName(principal.username);
   if (account) {
     if (
       await renameLegacyPrincipalGroup(principal, groupName, account, runFn)
