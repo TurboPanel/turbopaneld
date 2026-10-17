@@ -5,7 +5,6 @@ import {
   type FolderRefParts,
   isPathId,
   isValidOwnerName,
-  parseFolderRef,
   parseFolderRefParts,
 } from "../contracts/directory-names.ts";
 
