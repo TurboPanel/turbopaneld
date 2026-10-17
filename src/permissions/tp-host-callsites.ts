@@ -1542,7 +1542,7 @@ const SITES: CallSite[] = [
   }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","verify"]', {
     argv: ["sftp-chroot", "verify"],
-    setup: file(`${P}/etc/ssh/turbopanel-sftp-chroot`, "on\n"),
+    setup: file(`${P}/etc/ssh/turbopanel/sftp-chroot`, "on\n"),
   }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","check"]', {
     argv: ["sftp-chroot", "check"],

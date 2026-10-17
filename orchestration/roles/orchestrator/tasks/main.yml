@@ -14,22 +14,15 @@
     path: "{{ orchestrator_config_dir }}"
     follow: false
     state: directory
-    owner: root
+    # The same owner and mode the daemon-layout role gives this folder (it is a
+    # daemon leaf), so neither play undoes the other.
+    owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "0770"
+    mode: "0750"
 
 - name: Ensure Orchestrator TLS directory exists
   ansible.builtin.file:
     path: "{{ orchestrator_tls_dir }}"
-    follow: false
-    state: directory
-    owner: root
-    group: "{{ turbopanel_group }}"
-    mode: "0770"
-
-- name: Ensure Orchestrator data directory exists
-  ansible.builtin.file:
-    path: "{{ orchestrator_data_dir }}"
     follow: false
     state: directory
     owner: root

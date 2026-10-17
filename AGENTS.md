@@ -89,7 +89,7 @@ module and CI guard are the only places allowed to reference it.
 | Persistent identity (license, `server.id`, keys, tunnels)         | `/var/lib/turbopanel`                 |
 | Tenant principal homes (`principalHomeRoot`)                      | `/srv/users/<username>`               |
 | Logs                                                              | `/var/log/turbopanel`                 |
-| Managed-engine backups (`backupDir`, one subdir per `managedId`)   | `/backup`                             |
+| Backups (`backupDir`; `managed/`, `volumes/`, `panel/` inside)    | `/backup`                             |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
 **Files at the root of the config and state trees (P1-1).** `/etc/turbopanel`
@@ -118,11 +118,53 @@ recurses or follows links inside a leaf (pinned by
 `/backup` default in development and production: backups are the one artifact
 an operator is expected to point at other storage (a second disk, a NAS mount,
 an attached volume), so `TURBOPANEL_BACKUP_DIR` repoints them without moving
-anything else. Artifacts live at `<backupDir>/<managedId>/` (`managed/engine-paths.ts`'s
-`managedBackupsDir`), written 0600 by the daemon user itself. Repointing the
+anything else. The root is named once (`BACKUP_ROOT` in `src/paths/layout.ts`)
+and holds one folder per kind: `managed/<managedId>/` (`managed/engine-paths.ts`'s
+`managedBackupsDir`), `volumes/<copyId>/` and `panel/` (the control plane's
+upgrade backups at `panel/<upgradeId>/` and its scheduled database dumps at
+`panel/database/`), so an id can never collide with a kind word. Artifacts are
+written 0600 by the daemon user itself. `tp-host` reads the root from
+`backup_dir=` in `lib/tp-host.conf`. Restore intents are state, not backup data:
+`<daemonStateDir>/backup/restore-intents/`. Paths the daemon reports are
+absolute today; `backupRelativePath` / `resolveBackupPath` accept either
+spelling so the control plane can store them relative to the root. Repointing the
 override affects **new** backups only — nothing relocates an existing tree —
 and `managed.destroy` still removes an engine's backup directory along with its
 state dir, so destroying an engine never leaves an orphan tree on that storage.
+
+**Server folders that look odd and are kept on purpose.** The tables in
+`src/paths/layout.ts` (`ROLE_MADE_FOLDERS`, `RUN_FOLDER_UNITS`,
+`BUILD_SIBLING_DIR`) are the one list.
+- `/var/lib/turbopanel-build` is the only sibling of the state root: the
+  throwaway build user is not in group `tp`, so a work folder inside
+  `root:tp 0750` would be unreachable. The hosting Caddy and Docker gate state
+  (`/var/lib/turbopanel/{hosting-caddy,docker-gate}`), the gate cache
+  (`/var/cache/turbopanel/docker-gate`) and the Apache logs
+  (`/var/log/turbopanel/apache`) are nested `StateDirectory=` / `CacheDirectory=`
+  / `LogsDirectory=` folders; the SFTP switch is
+  `/etc/ssh/turbopanel/sftp-chroot` and the egress helper
+  `/opt/turbopanel/lib/docker-egress`. `check:layout` refuses the old names.
+- Run folders stay one per unit at the top of `/run` (`turbopanel-nginx`,
+  `turbopanel-php-<id>`, `tp-publish`, ...): systemd removes them with the unit
+  and the short path keeps a socket inside the 108-byte limit.
+- A native app's variables are staged in `<config>/node-apps/envs/` (daemon-owned)
+  and read from `<config>/node-app-env/` (root-only, made by `tp-host`). The two
+  parents differ on purpose: a daemon-owned parent would let the daemon replace
+  the root-only folder.
+- The hosting Caddy snippets are `<environmentId>.caddy` (one per environment,
+  UUID key, `.caddy` so the site Caddy's `sites/*.conf` glob never matches).
+- OpenLiteSpeed virtual host names are `tp_<environment>__<service>` with every
+  character other than a letter or digit escaped as `_` and two hex digits, so
+  two different pairs can never share a name.
+- `proxysql` and `orchestrator` under the config root are daemon leaves
+  (`tp:tp 0750`, made by daemon-layout because the daemon writes their compose
+  files before any role has run on a daemon-only host); the proxysql and
+  orchestrator roles now set that same owner and mode instead of `root:tp 0770`,
+  so neither play undoes the other, and work only inside. There is no
+  `<state>/proxysql` folder (ProxySQL keeps its data in a Docker volume) and the
+  orchestrator role no longer re-owns `<state>/orchestrator` (a daemon leaf).
+- `host-boot.json` and the host-wide intent marker live in `<state>/system/`,
+  not among the per-database folders.
 
 The **host** allocates UID/GID via `useradd`/`groupadd` from **15001–60000**
 (`-K` on that one command; `/etc/login.defs` is not edited). The control plane
@@ -146,7 +188,7 @@ vs **Organization CA** (two-CA distinction):
 | Daemon env file                  | `/etc/turbopanel/daemon.env`                                                       |
 | Daemon state                     | `/var/lib/turbopanel`                                                              |
 | Logs                             | `/var/log/turbopanel`                                                              |
-| Managed-engine backups           | `/backup`                                                                          |
+| Backups (`managed/`, `volumes/`, `panel/`) | `/backup`                                                                          |
 | Config dir                       | `/etc/turbopanel`                                                                  |
 | Runtime (sockets, `daemon.lock`) | `/run/turbopanel`                                                                  |
 
@@ -606,8 +648,8 @@ controls below do not close:
 2. **Closed: the hosting Caddy no longer runs as root.**
    `turbopanel-hosting-caddy.service` runs as `tpedge` (not in group `tp`)
    with `AmbientCapabilities=`/`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
-   and `NoNewPrivileges=yes`, its certificates in the top-level
-   `StateDirectory=turbopanel-hosting-caddy`. tp-host refuses the unit in any
+   and `NoNewPrivileges=yes`, its certificates in the nested
+   `StateDirectory=turbopanel/hosting-caddy` (`/var/lib/turbopanel/hosting-caddy`). tp-host refuses the unit in any
    other shape. Its Caddyfile is still `tp`-written (`/etc/turbopanel/hosting`,
    read through a per-user ACL), so a hostile config now lands as `tpedge`,
    not root; `stripPrefix` and the other inputs still need validation.
@@ -758,7 +800,7 @@ it regresses:
     the check;
     the hosting-Caddy unit must run as `tpedge:tpedge` with
     `NoNewPrivileges=yes`, exactly `CAP_NET_BIND_SERVICE` in both capability
-    sets, `StateDirectory=turbopanel-hosting-caddy` and only the
+    sets, `StateDirectory=turbopanel/hosting-caddy` and only the
     `HOME`/`XDG_*` environment that points into it, and may only exec the
     vendored Caddy against the hosting Caddyfile; the `turbopanel-backup-` prefix is reserved for
     scheduled backups — a name under it must be exactly
@@ -1142,8 +1184,8 @@ left over while a container cgroup still held them. The summary's unit diff
 also skips names `tp_unit_present` already treats as gone. Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
 the final inventory skips Docker, so the `<id>-in` containers removed with it
 are not reported. Anything else still on disk stays a failure. When the Docker daemon is not answering at the final check, the pre-purge container and network lists are carried forward only if the removal step itself was skipped (`TP_DOCKER_LEFT`); a daemon that is gone after a removal that ran holds nothing, so it is never a false failure. The purge also
-removes `/var/lib/turbopanel-hosting-caddy` (the hosting Caddy's
-`StateDirectory`, beside `/var/lib/turbopanel`, in `TP_OWNED_TREES`),
+removes `/var/cache/turbopanel` (the Docker gate's cache, in `TP_OWNED_TREES`;
+the hosting Caddy's and the gate's state folders sit inside `/var/lib/turbopanel`),
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf`, and the `tpgatebuild` group
 (`TP_OTHER_GROUPS`, matched by exact name because its gid is outside the
 9900 band). The resume marker clears whenever the remaining failures are

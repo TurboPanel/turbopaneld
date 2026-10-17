@@ -210,9 +210,7 @@ async function seedRailpackReleaseManifest(
   const releaseDir = join(
     daemonStateDir,
     "release-records",
-    "sites",
     serviceId,
-    "releases",
     releaseId,
   );
   await writeReleaseManifest(releaseDir, {

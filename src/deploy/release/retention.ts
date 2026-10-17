@@ -267,7 +267,7 @@ export async function reclaimRemovedReleaseTrees(
 }
 
 /**
- * Remove `<daemonStateDir>/release-records/sites/<serviceId>`, the daemon-owned
+ * Remove `<daemonStateDir>/release-records/<serviceId>`, the daemon-owned
  * rollback records of a service whose release tree was reclaimed. The folder
  * belongs to the daemon user, so no privilege is involved. `serviceId` has been
  * through {@link releaseTreesToReclaim}'s segment check. Best-effort: a
@@ -278,10 +278,7 @@ async function removeServiceReleaseRecords(
   serviceId: string,
   onOutput: ReclaimRemovedReleaseTreesParams["onOutput"],
 ): Promise<void> {
-  const dir = siteRoot(
-    join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME),
-    serviceId,
-  );
+  const dir = join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME, serviceId);
   try {
     await Deno.remove(dir, { recursive: true });
   } catch (err) {

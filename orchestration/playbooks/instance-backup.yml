@@ -22,12 +22,13 @@
       ansible.builtin.assert:
         that:
           - turbopanel_upgrade_id is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$')
-        fail_msg: turbopanel_upgrade_id must be one path segment
+          - turbopanel_upgrade_id != 'database'
+        fail_msg: turbopanel_upgrade_id must be one path segment and not the name of the scheduled dumps folder
 
     - name: Set the backup directory for this attempt
       ansible.builtin.set_fact:
-        control_plane_backup_dir: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}"
-        control_plane_backup_parent: "{{ turbopanel_backup_dir }}/control-plane"
+        control_plane_backup_dir: "{{ turbopanel_backup_dir }}/panel/{{ turbopanel_upgrade_id }}"
+        control_plane_backup_parent: "{{ turbopanel_backup_dir }}/panel"
 
     - name: Create the backup directory
       ansible.builtin.file:
@@ -103,7 +104,7 @@
           set -euo pipefail
           parent="{{ control_plane_backup_parent }}"
           keep="{{ control_plane_backup_keep }}"
-          mapfile -t old < <(find "$parent" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n "+$((keep + 1))" | cut -d' ' -f2-)
+          mapfile -t old < <(find "$parent" -mindepth 1 -maxdepth 1 -type d ! -name database -printf '%T@ %p\n' | sort -rn | tail -n "+$((keep + 1))" | cut -d' ' -f2-)
           if [ -n "${old[*]:-}" ]; then
             rm -rf -- "${old[@]}"
           fi

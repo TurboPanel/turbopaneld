@@ -41,7 +41,34 @@ export const PROD_LOG_DIR_DEFAULT = "/var/log/turbopanel";
  * same default in development and production — a dev box that fills `/backup`
  * should fill the same path a production one does.
  */
-export const PROD_BACKUP_DIR_DEFAULT = "/backup";
+export const BACKUP_ROOT = "/backup";
+export const PROD_BACKUP_DIR_DEFAULT = BACKUP_ROOT;
+
+/**
+ * The three folders inside the backup root. Each kind has its own top folder,
+ * so an id can never collide with a kind word.
+ *
+ * - `managed/<managedId>/…` — managed database dumps.
+ * - `volumes/<copyId>/…` — volume archives.
+ * - `panel/<upgradeId>/…` and `panel/database/…` — the control plane's own
+ *   upgrade backups and scheduled database dumps.
+ */
+export const BACKUP_KIND_DIRNAMES = {
+  managed: "managed",
+  volumes: "volumes",
+  panel: "panel",
+} as const;
+export type BackupKind = keyof typeof BACKUP_KIND_DIRNAMES;
+
+/**
+ * The one sibling of `/var/lib/turbopanel` that stays outside it on purpose.
+ * The throwaway build user is not in group `tp` and `/var/lib/turbopanel` is
+ * `root:tp 0750`, so a work folder below it would be unreachable. This one is
+ * `root:tp 0710`: the build user can traverse to its own work folder and
+ * nothing else. Moving it would need an `other:x` entry on the whole state
+ * root.
+ */
+export const BUILD_SIBLING_DIR = "/var/lib/turbopanel-build";
 export const PROD_RUN_DIR_DEFAULT = "/run/turbopanel";
 export const PROD_DAEMON_ROOT_DEFAULT = join(PROD_LIB_DIR_DEFAULT, "daemon");
 /** Production Ansible assets ship under share/orchestration in release installs. */
@@ -127,9 +154,10 @@ export interface LayoutPaths {
   stateDir: string;
   logDir: string;
   /**
-   * Managed-engine backup root (`/backup`), overridable with
-   * `TURBOPANEL_BACKUP_DIR`. Per-engine artifacts live at
-   * `<backupDir>/<managedId>/` — see `managed/engine-paths.ts`'s
+   * Backup root ({@link BACKUP_ROOT}), overridable with
+   * `TURBOPANEL_BACKUP_DIR`. It holds one top folder per kind
+   * ({@link BACKUP_KIND_DIRNAMES}): managed database artifacts live at
+   * `<backupDir>/managed/<managedId>/` — see `managed/engine-paths.ts`'s
    * `managedBackupsDir`. Changing the override only affects *new* backups;
    * nothing relocates an existing tree.
    */
@@ -508,6 +536,10 @@ export interface DaemonLeaf {
 
 export const DAEMON_CONFIG_LEAVES: readonly DaemonLeaf[] = [
   { name: "docker", mode: "0750" },
+  // The ProxySQL and orchestrator config folders: the daemon writes their
+  // compose files before any role has run on a daemon-only host, so the
+  // daemon-layout role is their one owner; the proxysql and orchestrator roles
+  // set the same owner and mode (never a second one) and work only inside.
   { name: "proxysql", mode: "0750" },
   { name: "orchestrator", mode: "0750" },
   { name: "node-apps", mode: "0750" },
@@ -539,6 +571,153 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "folders", mode: "0750" },
   // Scratch HOME and temp for the daemon's `ansible-playbook --version` probe.
   { name: "ansible", mode: "0750" },
+];
+
+/** `<backupDir>/<kind>`: the top folder of one kind of backup. */
+export function backupKindDir(
+  layout: Pick<LayoutPaths, "backupDir">,
+  kind: BackupKind,
+): string {
+  return join(layout.backupDir, BACKUP_KIND_DIRNAMES[kind]);
+}
+
+/** `<backupDir>/panel/database`: the control plane's scheduled database dumps. */
+export function panelDatabaseBackupDir(
+  layout: Pick<LayoutPaths, "backupDir">,
+): string {
+  return join(backupKindDir(layout, "panel"), "database");
+}
+
+/**
+ * `<daemonStateDir>/backup/restore-intents`: crash-recovery notes for volume
+ * restores. State, not backup data, so it stays out of the backup root.
+ */
+export function restoreIntentsDir(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): string {
+  return join(layout.daemonStateDir, "backup", "restore-intents");
+}
+
+/**
+ * A backup path relative to the backup root (`managed/<id>/<file>`). Accepts
+ * either spelling: a path under the root is cut down to its relative part, a
+ * relative path is checked and returned as is. Anything that is neither (outside
+ * the root, `..` components, empty) throws.
+ */
+export function backupRelativePath(
+  layout: Pick<LayoutPaths, "backupDir">,
+  stored: string,
+): string {
+  const root = stripTrailingSlash(layout.backupDir);
+  let relativePath = stored;
+  if (stored.startsWith("/")) {
+    if (!stored.startsWith(`${root}/`)) {
+      throw new Error(`backup path is outside the backup root: ${stored}`);
+    }
+    relativePath = stored.slice(root.length + 1);
+  }
+  const parts = relativePath.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) {
+    throw new Error(`backup path is not a plain relative path: ${stored}`);
+  }
+  return relativePath;
+}
+
+/** The absolute path of a stored backup path, absolute or relative. */
+export function resolveBackupPath(
+  layout: Pick<LayoutPaths, "backupDir">,
+  stored: string,
+): string {
+  return join(layout.backupDir, backupRelativePath(layout, stored));
+}
+
+/**
+ * Folders under the config, state and log roots that a role or a systemd unit
+ * makes, not the daemon (so they are not in the leaf tables above). The daemon
+ * reads some, goes through `tp-host` for others, and never creates any on a
+ * sealed root. One list so the roles, `tp-host` and the guard tests name the
+ * same ones.
+ */
+export interface RoleMadeFolder {
+  /** Which root the folder sits in. */
+  root: "config" | "state" | "log";
+  /** Path relative to that root. */
+  name: string;
+  /** What makes it and who owns it. */
+  madeBy: string;
+}
+
+export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
+  { root: "config", name: "tls", madeBy: "hosting-caddy role, tp:tpedge 2750" },
+  {
+    root: "config",
+    name: "node-app-env",
+    madeBy: "tp-host app-env-install, root:root 0700; the unit reads it",
+  },
+  { root: "config", name: "instance", madeBy: "instance-launch role" },
+  { root: "config", name: "caddy", madeBy: "instance-launch role" },
+  { root: "config", name: "site-caddy", madeBy: "site-caddy role" },
+  { root: "config", name: "nginx", madeBy: "nginx role" },
+  { root: "config", name: "apache", madeBy: "apache role" },
+  { root: "config", name: "openlitespeed", madeBy: "openlitespeed role" },
+  { root: "config", name: "php", madeBy: "php-fpm role" },
+  { root: "config", name: "postgres", madeBy: "system-compose role" },
+  { root: "config", name: "redis", madeBy: "redis role" },
+  { root: "config", name: "rabbitmq", madeBy: "rabbitmq role" },
+  { root: "config", name: "mailpit", madeBy: "mailpit role" },
+  { root: "config", name: "system", madeBy: "system-compose role" },
+  {
+    root: "state",
+    name: "hosting-caddy",
+    madeBy: "the hosting Caddy unit (StateDirectory), tpedge",
+  },
+  {
+    root: "state",
+    name: "docker-gate",
+    madeBy: "the Docker gate unit (StateDirectory), root 0700",
+  },
+  { root: "state", name: "instance", madeBy: "instance-launch role" },
+  { root: "state", name: "instance-acme", madeBy: "instance-launch role" },
+  {
+    root: "state",
+    name: "metrics",
+    madeBy: "daemon-layout or instance-launch",
+  },
+  {
+    root: "state",
+    name: "deno-cache",
+    madeBy:
+      "the Deno cache of the daemon unit and the backup runner (DENO_DIR)",
+  },
+  { root: "state", name: "caddy", madeBy: "instance-launch role" },
+  { root: "state", name: "ui", madeBy: "instance-launch and ui-build roles" },
+  { root: "state", name: "website", madeBy: "instance-launch role" },
+  { root: "state", name: "openlitespeed", madeBy: "openlitespeed role" },
+  { root: "state", name: "nginx", madeBy: "nginx role" },
+  { root: "state", name: "site-caddy", madeBy: "site-caddy role" },
+  {
+    root: "log",
+    name: "apache",
+    madeBy: "the Apache unit (LogsDirectory), tpapache",
+  },
+];
+
+/**
+ * Folders directly under `/run`, one per unit (a unit's `RuntimeDirectory=`).
+ * They stay at the top of `/run` on purpose: the folder is created and removed
+ * with the unit, and the short path keeps a socket inside the 108-byte limit.
+ * Each is tmpfs, so nothing here survives a reboot.
+ */
+export const RUN_FOLDER_UNITS: readonly string[] = [
+  "turbopanel-nginx",
+  "turbopanel-apache",
+  "turbopanel-hosting-caddy",
+  "turbopanel-site-caddy",
+  "turbopanel-gate",
+  "turbopanel-php-<runtimeId>",
+  "turbopanel-build-<buildId>",
+  "tpbuild",
+  "tp-publish",
 ];
 
 /**

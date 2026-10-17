@@ -596,20 +596,16 @@ test("the stock wg-quick template is not ours until tp0 was enabled or started",
   assertEquals(await wgPresent("inactive", "enabled"), "present");
 });
 
-test("the Docker gate stage-1 folders are owned trees and are removed with the other folders", async () => {
+test("the Docker gate folders are owned trees and are removed with the other folders", async () => {
   const source = await Deno.readTextFile(purgePath);
   const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
   const remove = extractFunction(source, "tp_remove_folders_and_shell") ?? "";
-  for (
-    const dir of [
-      "/run/turbopanel-gate",
-      "/var/cache/turbopanel-docker-gate",
-      "/var/lib/turbopanel-docker-gate",
-    ]
-  ) {
+  // The gate's state folder sits inside /var/lib/turbopanel and goes with it.
+  for (const dir of ["/run/turbopanel-gate", "/var/cache/turbopanel"]) {
     assertStringIncludes(trees, dir);
     assertStringIncludes(remove, `tp_safe_rm_tree ${dir}`);
   }
+  assertEquals(trees.includes("turbopanel-docker-gate"), false);
 });
 
 test("the build slice is stopped and its unit file removed although it is not turbopanel*", async () => {
@@ -944,18 +940,12 @@ test("a purge with Docker already removed reports no false container failure", a
   assertStringIncludes(result.stdout, "fail=0");
 });
 
-test("the hosting Caddy state folder is owned, inventoried and removed", async () => {
+test("the hosting Caddy state folder is inside the state tree and goes with it", async () => {
   const source = await Deno.readTextFile(purgePath);
-  const dir = "/var/lib/turbopanel-hosting-caddy";
-  assertStringIncludes(extractConstant(source, "TP_OWNED_TREES") ?? "", dir);
-  assertStringIncludes(
-    extractFunction(source, "tp_remove_folders_and_shell") ?? "",
-    `tp_safe_rm_tree ${dir}`,
-  );
-  assertStringIncludes(
-    extractFunction(source, "tp_inventory_folders") ?? "",
-    dir,
-  );
+  const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
+  assertStringIncludes(trees, " /var/lib/turbopanel ");
+  assertEquals(trees.includes("turbopanel-hosting-caddy"), false);
+  assertEquals(source.includes("/var/lib/turbopanel-hosting-caddy"), false);
 });
 
 test("the Docker gate build group is removed by exact name even though its gid is outside the service band", async () => {

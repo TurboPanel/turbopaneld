@@ -1639,13 +1639,10 @@ tp_inventory_folders() {
   done
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-ansible ""
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-orchestrate ""
-  # The Docker gate's socket directory and Deno transpile cache.
+  # The Docker gate's socket directory and Deno transpile cache. Its state
+  # folder and the hosting Caddy's sit inside /var/lib/turbopanel and go with it.
   tp_add_existing "$TP_TMP/inv.folders_remove" /run/turbopanel-gate ""
-  tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel-docker-gate ""
-  tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-docker-gate ""
-  # The hosting Caddy's StateDirectory. It sits beside /var/lib/turbopanel, not
-  # under it, and is owned by the hosting Caddy account.
-  tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-hosting-caddy ""
+  tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel ""
   for _ifo_path in $TP_CONFIG_DIRS $TP_STATE_DIRS $TP_LOG_DIRS; do
     tp_add_existing "$TP_TMP/inv.folders_keep" "$_ifo_path" ""
   done
@@ -2528,12 +2525,9 @@ tp_remove_host_config() {
   if [ -e /usr/local/bin/php ]; then
     tp_run "remove /usr/local/bin/php" rm -f /usr/local/bin/php || true
   fi
-  # Docker egress block script (docker role). Its unit is removed with the other
-  # turbopanel* units and its TP-EGRESS chain and jumps with the TP-* chains.
-  if [ -e /usr/local/lib/turbopanel/turbopanel-docker-egress ]; then
-    tp_run "remove Docker egress block script" rm -f /usr/local/lib/turbopanel/turbopanel-docker-egress || true
-    rmdir /usr/local/lib/turbopanel 2>/dev/null || true
-  fi
+  # The Docker egress block script (docker role) sits in /opt/turbopanel/lib
+  # and goes with the install. Its unit is removed with the other turbopanel*
+  # units and its TP-EGRESS chain and jumps with the TP-* chains.
   tp_remove_statoverrides
 }
 
@@ -2628,9 +2622,7 @@ tp_remove_folders_and_shell() {
   tp_safe_rm_tree /tmp/turbopanel-ansible
   tp_safe_rm_tree /tmp/turbopanel-orchestrate
   tp_safe_rm_tree /run/turbopanel-gate
-  tp_safe_rm_tree /var/cache/turbopanel-docker-gate
-  tp_safe_rm_tree /var/lib/turbopanel-docker-gate
-  tp_safe_rm_tree /var/lib/turbopanel-hosting-caddy
+  tp_safe_rm_tree /var/cache/turbopanel
   tp_safe_rm_tree /root/.ansible
   tp_strip_shell_rcs
 }
@@ -3850,7 +3842,7 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # Every tree this script may delete: what TurboPanel creates, plus Docker's
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /var/lib/turbopanel-hosting-caddy /run/turbopanel-gate /var/cache/turbopanel-docker-gate /var/lib/turbopanel-docker-gate /var/lib/turbopanel-build"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge

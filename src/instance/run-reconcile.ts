@@ -7,6 +7,7 @@ import { statfs } from "node:fs/promises";
 import { ORCHESTRATE_HELPER } from "../orchestration/assets.ts";
 import { playbooksNeedRootHelper } from "../orchestration/privileged.ts";
 import {
+  backupKindDir,
   detectInstallMode,
   type InstallMode,
   readEnv,
@@ -1304,7 +1305,7 @@ function controlPlaneRecoveryDetail(options: {
     `sudo -n ${ORCHESTRATE_HELPER} update-instance --channel ${options.channel}${pin} --no-start`;
   const rollback =
     `sudo -n ${ORCHESTRATE_HELPER} playbook -i localhost, -c local -e turbopanel_upgrade_id=${options.upgradeId} instance-rollback.yml`;
-  const backup = `${options.backupDir}/control-plane/${options.upgradeId}`;
+  const backup = `${backupKindDir(options, "panel")}/${options.upgradeId}`;
   return `${
     controlPlaneRecoveryLead(options.reason)
   } The automatic rollback did not restore a healthy control plane. Check first whether the control plane is answering (for example, open the panel); if it is, do nothing. Only if it is not: backup ${backup}. Retry the rollback: ${rollback}. Or reinstall the previous build: ${reinstall}`;

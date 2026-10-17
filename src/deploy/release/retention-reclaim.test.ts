@@ -112,9 +112,9 @@ test("reclaimRemovedReleaseTrees removes the whole tree through the privileged r
 test("reclaimRemovedReleaseTrees removes the service's daemon records, and only that service's", async () => {
   const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-records-" });
   try {
-    const sites = join(stateDir, "release-records", "sites");
+    const sites = join(stateDir, "release-records");
     for (const id of [REMOVED.serviceId, KEPT.serviceId]) {
-      await Deno.mkdir(join(sites, id, "releases", "rel-1"), {
+      await Deno.mkdir(join(sites, id, "rel-1"), {
         recursive: true,
       });
     }

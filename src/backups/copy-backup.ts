@@ -14,8 +14,8 @@
  * - The archive streams straight to `<artifact>.part` (0600), is checksummed,
  *   renamed into place and pruned exactly like a managed-engine dump.
  *
- * Artifacts: `<backupDir>/copies/<copyId>/<backupId>.tar.gz` for a manual
- * backup, `<backupDir>/copies/<copyId>/policy-<policyId>/…` for a scheduled
+ * Artifacts: `<backupDir>/volumes/<copyId>/<backupId>.tar.gz` for a manual
+ * backup, `<backupDir>/volumes/<copyId>/policy-<policyId>/…` for a scheduled
  * one (its retention prunes only that directory).
  */
 
@@ -26,7 +26,7 @@ import {
   type CopyBackupSource,
   isSafeCopyHostPath,
 } from "../contracts/commands-contracts.ts";
-import type { LayoutPaths } from "../paths/layout.ts";
+import { backupKindDir, type LayoutPaths } from "../paths/layout.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -90,14 +90,14 @@ function assertSafeId(label: string, value: string): void {
   }
 }
 
-/** `<backupDir>/copies/<copyId>`, plus `policy-<policyId>` for a scheduled backup. */
+/** `<backupDir>/volumes/<copyId>`, plus `policy-<policyId>` for a scheduled backup. */
 export function copyBackupArtifactDir(
   layout: Pick<LayoutPaths, "backupDir">,
   copyId: string,
   policyId?: string,
 ): string {
   assertSafeId("copyId", copyId);
-  const copyDir = join(layout.backupDir, "copies", copyId);
+  const copyDir = join(backupKindDir(layout, "volumes"), copyId);
   if (policyId === undefined) return copyDir;
   assertSafeId("policyId", policyId);
   return join(copyDir, `policy-${policyId}`);

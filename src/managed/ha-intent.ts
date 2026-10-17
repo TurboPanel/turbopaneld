@@ -19,7 +19,7 @@
  * `managed.lifecycle` treats a missing state dir as an idempotent no-op.
  */
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { CommandType } from "../contracts/commands-contracts.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
@@ -138,7 +138,15 @@ export const HOST_WIDE_COMMAND_INTENT_KINDS: Readonly<
 
 const memory = new Map<string, ManagedIntent | "cleared">();
 
+/**
+ * The marker file for one managed database, or for the whole host
+ * ({@link HOST_WIDE_INTENT_ID}). The host-wide marker is not a database id, so
+ * it lives in the `system` folder instead of among the per-database files.
+ */
 export function managedIntentPath(stateDir: string, managedId: string): string {
+  if (managedId === HOST_WIDE_INTENT_ID) {
+    return join(stateDir, "system", "host-intent.json");
+  }
   return join(stateDir, "managed-intent", `${managedId}.json`);
 }
 
@@ -205,9 +213,10 @@ export async function recordManagedIntent(
   };
   memory.set(managedId, intent);
   try {
-    await Deno.mkdir(join(stateDir, "managed-intent"), { recursive: true });
+    const markerPath = managedIntentPath(stateDir, managedId);
+    await Deno.mkdir(dirname(markerPath), { recursive: true });
     await writeFileAtomic(
-      managedIntentPath(stateDir, managedId),
+      markerPath,
       `${JSON.stringify(intent)}\n`,
     );
   } catch (err) {
