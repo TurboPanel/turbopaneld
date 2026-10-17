@@ -6,6 +6,11 @@
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
 import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
+import {
+  type FolderRefParts,
+  folderRefParts,
+  parseFolderRefParts,
+} from "./directory-names.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -776,6 +781,12 @@ export type EnvironmentDeployStorageMaterial = {
   name: string;
   provider: "docker" | "path";
   sourcePath?: string;
+  /**
+   * The volume's folder under its site owner's tree, as components. Replaces
+   * `sourcePath` for owned volumes once the daemon resolves folders itself;
+   * until then both may be present and `sourcePath` stays authoritative.
+   */
+  folder?: FolderRefParts;
   /**
    * On-host Docker volume name. Required when `provider` is `docker`.
    */
@@ -1596,7 +1607,7 @@ export type EnvironmentStopPayload = {
    * detail. Like `fabricNetworks`, the instance has already dropped the rows
    * that named these, so the payload is the only remaining copy for this host.
    */
-  siteReleases?: Array<{ serviceId: string; username: string }>;
+  siteReleases?: StopSiteRelease[];
   /**
    * Principals no project, site or app on this host uses once this delete
    * commits: the daemon retires each through `tp-host principal-remove`
@@ -4341,6 +4352,11 @@ function parseStorageMaterial(
   if (typeof value.sourcePath === "string") {
     material.sourcePath = value.sourcePath;
   }
+  if (value.folder !== undefined) {
+    material.folder = folderRefParts(
+      parseFolderRefParts(value.folder, "volume"),
+    );
+  }
   if (typeof value.principalId === "string") {
     material.principalId = value.principalId;
   }
@@ -6216,13 +6232,22 @@ export function parseEnvironmentDeployPayload(
   };
 }
 
+/**
+ * One service release tree to reclaim on stop. `folder` names the service's folder as
+ * components; it is optional until the daemon resolves folders itself, and `username` stays
+ * until then.
+ */
+export type StopSiteRelease = {
+  serviceId: string;
+  username: string;
+  folder?: FolderRefParts;
+};
+
 /** Same charset the release layout enforces before any path join. */
 const STOP_SITE_RELEASE_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const STOP_SITE_RELEASE_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,27}$/;
 
-function parseStopSiteRelease(
-  value: unknown,
-): { serviceId: string; username: string } {
+function parseStopSiteRelease(value: unknown): StopSiteRelease {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment.stop siteReleases entry");
   }
@@ -6238,7 +6263,16 @@ function parseStopSiteRelease(
   ) {
     throw new TypeError("Invalid environment.stop siteReleases username");
   }
-  return { serviceId: value.serviceId, username: value.username };
+  const release: StopSiteRelease = {
+    serviceId: value.serviceId,
+    username: value.username,
+  };
+  if (value.folder !== undefined) {
+    release.folder = folderRefParts(
+      parseFolderRefParts(value.folder, "service"),
+    );
+  }
+  return release;
 }
 
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */
