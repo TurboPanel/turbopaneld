@@ -812,6 +812,42 @@ Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned
 **never** `traefik.enable`. A missing `turbopanel-system` compose file is
 authoritative absence (`null`).
 
+## Volume folders and who owns the files in them
+
+A volume with a `folder` on `storageMaterial[]` is `<owner>/<scope>/volumes/<name>`
+(`materializeStorageEntries` makes it through `ensureAssetFolder`: the record of
+its components, then `<owner>:<owner> 0750` on the folder itself). Nothing
+below the folder is ever re-owned: no recursive chown, and never to root.
+
+How ownership inside a volume is handled when the container's user is not the
+site owner's Linux user:
+
+- **No `user:` in the compose file.** The daemon runs the container as the
+  owner's own `uid:gid` (read from the account on the host), so files it writes
+  belong to the owner and the owner sees them over SFTP and in backups.
+- **A `user:` in the compose file** (any user, `root` included). The compose
+  file is never refused and the daemon does not rewrite it. The container runs
+  as that user, and files it creates keep that user's ids. The volume root is
+  `<owner>:<owner> 0750`, so a declared user that is neither the owner nor root
+  cannot read or write it: that container fails at runtime with a permission
+  error, and the answer is to set `user:` to the owner's ids or use a named
+  Docker volume. (A file ACL on the volume root for such a user is a possible
+  later step; it would still never chown.) `root` in the container can write
+  and its files stay root's; the owner can still delete or rename anything in
+  their own folder (a directory's write permission decides that), but cannot
+  change the contents or modes of a file owned by another uid.
+- **A named Docker volume** (provider `docker`) is outside this tree and is not
+  touched; it stays the way to run an image that insists on a fixed user.
+- One container cannot mount volumes of two site owners with defaulted users;
+  that deploy fails with a plain message.
+
+Bind sources are allowed only inside the volume folders this deploy was sent
+(`ownerTree` in `compose-host-paths.ts`, mirrored by the Docker gate): a service
+folder (`releases/` is sealed code, `shared/` is the web side's state), another
+owner's folder and a sibling volume are refused even when host-level features
+are approved, and a link left inside a volume must still resolve inside it.
+Container paths and volume subpaths are shape-checked (`assertMountShape`).
+
 ## Native Node/Next runtime
 
 Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next services

@@ -10,8 +10,8 @@
  *   the daemon copies the build into it, `publish` seals it into
  *   `<service>/releases/<releaseId>` and swaps `current`.
  *
- * Nothing calls these yet: the serving code switches to them in a later
- * change, and the older three-word form keeps working until then.
+ * A release in a service folder is published through these; the older
+ * three-word form stays for a service with no folder.
  */
 
 import {
@@ -30,7 +30,7 @@ export type FolderPublishIds = {
   publishId: string;
 };
 
-async function runFolderPublishVerb(
+export async function runFolderPublishVerb(
   verb: "publish-open" | "publish",
   parts: FolderRefParts,
   ids: FolderPublishIds,

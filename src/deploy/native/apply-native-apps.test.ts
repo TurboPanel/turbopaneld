@@ -2520,3 +2520,37 @@ test("removing an environment's apps also removes their variables copies", async
     await host.cleanup();
   }
 });
+
+test("nativeAppBindingsFromPayload carries the service folder of the sourced service", () => {
+  const folder = { owner: USERNAME, scope: "production", slug: "api" };
+  const payload = {
+    environmentId: ENVIRONMENT_ID,
+    projectId: "p1",
+    organizationId: "o1",
+    projectName: "proj",
+    composeFiles: [],
+    hostings: [],
+    sourceMaterial: [{
+      sourceId: "s1",
+      composeServiceName: "web",
+      releaseServiceId: "svc-web",
+      provider: "github",
+      cloneUrl: "https://example.test/repo.git",
+      ref: "main",
+      commitSha: "abc",
+      releaseId: "rel-new",
+      principal: { principalId: "pr1", username: USERNAME },
+      build: { kind: "native", startCommand: "node server.js" },
+    }],
+    serviceFolders: [{ serviceId: "svc-web", folder }],
+  } as unknown as Parameters<typeof nativeAppBindingsFromPayload>[0];
+  assertEquals(
+    nativeAppBindingsFromPayload(payload).get("web")?.folder,
+    folder,
+  );
+  assertEquals(
+    nativeAppBindingsFromPayload({ ...payload, serviceFolders: [] }).get("web")
+      ?.folder,
+    undefined,
+  );
+});

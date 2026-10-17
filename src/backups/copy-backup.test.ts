@@ -167,6 +167,43 @@ test("resolveCopyMount accepts a tenant directory and the default storage path",
   );
 });
 
+test("resolveCopyMount accepts a volume folder in the scope tree and no other folder of the owner", () => {
+  for (
+    const hostPath of [
+      "/srv/users/shop/production/volumes/uploads",
+      "/srv/users/shop/common/volumes/uploads/sub/dir",
+    ]
+  ) {
+    assertEquals(
+      resolveCopyMount(FIXED_LAYOUT, {
+        copyId: COPY,
+        copyProvider: "path",
+        hostPath,
+        ownerUsername: "shop",
+      }),
+      { type: "bind", path: hostPath },
+    );
+  }
+  for (
+    const hostPath of [
+      "/srv/users/shop/production/services/site/shared",
+      "/srv/users/shop/production/volumes",
+      "/srv/users/shop/home/volumes/x",
+      "/srv/users/shop/Production/volumes/x",
+      "/srv/users/other/production/volumes/uploads",
+    ]
+  ) {
+    assertThrows(() =>
+      resolveCopyMount(FIXED_LAYOUT, {
+        copyId: COPY,
+        copyProvider: "path",
+        hostPath,
+        ownerUsername: "shop",
+      })
+    );
+  }
+});
+
 test("resolveCopyMount refuses host paths outside the allowed roots", () => {
   for (
     const hostPath of [

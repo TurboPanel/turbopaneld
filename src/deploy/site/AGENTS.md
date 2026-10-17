@@ -543,6 +543,19 @@ listener.
 
 ## Managed-directory sites
 
+**Where it lives.** With a service folder (`serviceFolders[]` on the deploy) the
+uploaded folder is `<service folder>/public/` and a release is
+`<service folder>/current/`; without one, the older `sites/<serviceId>/webroot/`
+and `current/`. `serviceTree` (`src/paths/layout.ts`) answers both, and
+`siteWritableDirs` names what site code may write (`shared/`, `logs/`, and the
+uploaded folder for this lane) for the PHP unit, cron and `open_basedir`.
+`public/` is made here, `<owner>:<engine group> 0750` (the folder itself, its
+`releases/`, `shared/` and `logs/` come from `ensureAssetFolder`). The default
+root name `public` means `public/` itself in the folder tree (an uploaded
+folder is already the web root); any other `root` is a folder inside it. The
+site Caddy mounts `public/` and `releases/` `nosymfollow`
+(`tp-site-caddy-run roots` reads both shapes).
+
 A site's content comes from one of two lanes, named by `sourceKind` on the wire
 and never inferred:
 

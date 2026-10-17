@@ -57,6 +57,7 @@ import {
   SITE_NGINX_APPLY_PLAYBOOK,
   SITE_OPENLITESPEED_APPLY_PLAYBOOK,
 } from "../orchestration/assets.ts";
+import type { FolderRefParts } from "../contracts/directory-names.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { readOsRelease } from "../host/os-release.ts";
 import {
@@ -67,14 +68,7 @@ import {
   isAllowedExtension,
   unsupportedPhpSeriesMessage,
 } from "../runtime/registry.ts";
-import {
-  principalHomePath,
-  siteCurrentSymlink,
-  siteReleasesDir,
-  siteRoot,
-  siteSharedDir,
-  siteWebrootDir,
-} from "../paths/layout.ts";
+import { principalHomePath, serviceTree } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
 import { currentReleaseDirExists } from "./release/promote.ts";
 import {
@@ -84,6 +78,7 @@ import {
   safeEnvValue,
   safePhpIniValue,
 } from "../contracts/config-values.ts";
+import { ensureAssetFolder } from "./asset-folders.ts";
 import {
   ensureDirectoryWithOwner,
   ensureEngineGroupMembership,
@@ -190,6 +185,8 @@ export type SiteApplySpec = EnvironmentDeploySite;
 export type SiteRelease = {
   serviceId: string;
   username: string;
+  /** The service folder when the control plane sent one; else the older tree. */
+  folder?: FolderRefParts;
 };
 
 /** Compose service name → its release tree, for the sites in one deploy. */
@@ -209,6 +206,8 @@ export type SiteReleaseBindings = ReadonlyMap<
 export type SiteManagedDirectory = {
   serviceId: string;
   username: string;
+  /** The service folder when the control plane sent one; else the older tree. */
+  folder?: FolderRefParts;
 };
 
 /** Compose service name → its principal-owned webroot. */
@@ -364,22 +363,45 @@ export function siteDir(
  * and must not be mistaken for shipped payload.
  */
 export function siteMetadataDir(
-  principalHome: string,
-  serviceId: string,
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  owner: SiteRelease,
 ): string {
-  return join(siteRoot(principalHome, serviceId), ".turbopanel-hosting");
+  return serviceTree(layout, owner).hostingDir;
 }
+
+/**
+ * What a site's own code may write inside its service folder: `shared/` and
+ * `logs/` (when the tree has one), plus the uploaded folder for a
+ * managed-directory site. Used by the PHP unit, the cron job and `open_basedir`
+ * so they cannot disagree.
+ */
+export function siteWritableDirs(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  owner: SiteRelease,
+  uploaded: boolean,
+): string[] {
+  const tree = serviceTree(layout, owner);
+  return [
+    ...(uploaded ? [tree.publicDir] : []),
+    tree.sharedDir,
+    ...(tree.logsDir === null ? [] : [tree.logsDir]),
+  ];
+}
+
+/** The root every site gets when its compose block names none. */
+const DEFAULT_SITE_ROOT = "public";
 
 /**
  * Where this site is served from.
  *
- * Release-backed: `<principalHome>/sites/<serviceId>/current/<root>` — the
- * `current` segment is a stable *name*, so a promote never invalidates a
- * generated vhost.
+ * Release-backed: `<service folder>/current/<root>` — the `current` segment
+ * is a stable *name*, so a promote never invalidates a generated vhost.
  *
- * Managed-directory: `<principalHome>/sites/<serviceId>/webroot/<root>`, owned
- * by the principal so it can be filled over SFTP. A sibling of `current`, so a
- * site that later connects a repository keeps the same parent tree.
+ * Managed-directory: `<service folder>/public` (with a folder; the default root
+ * `public` means that folder, any other root is inside it), or
+ * `<principalHome>/sites/<serviceId>/webroot/<root>` without one. Owned by the
+ * principal so it can be filled over SFTP. A sibling of `current`, so a site
+ * that later connects a repository keeps the same parent tree.
  *
  * Otherwise the daemon-owned tree, unchanged — that is what a site with no
  * principal and no source still gets.
@@ -392,22 +414,15 @@ export function resolveSiteDocumentRoot(
   managed?: SiteManagedDirectory,
 ): string {
   if (release) {
-    return join(
-      siteCurrentSymlink(
-        principalHomePath(layout, release.username),
-        release.serviceId,
-      ),
-      site.root,
-    );
+    return join(serviceTree(layout, release).currentLink, site.root);
   }
   if (managed) {
-    return join(
-      siteWebrootDir(
-        principalHomePath(layout, managed.username),
-        managed.serviceId,
-      ),
-      site.root,
-    );
+    const tree = serviceTree(layout, managed);
+    // The uploaded folder is `public/` itself, so the default root name
+    // `public` means that folder; any other root is a folder inside it.
+    return tree.folder && site.root === DEFAULT_SITE_ROOT
+      ? tree.publicDir
+      : join(tree.publicDir, site.root);
   }
   return join(
     siteDir(layout, environmentId, site.composeServiceName),
@@ -1110,10 +1125,7 @@ export function releasePhpOpenBasedir(
 ): string[] {
   return [
     documentRoot,
-    siteSharedDir(
-      principalHomePath(layout, release.username),
-      release.serviceId,
-    ),
+    serviceTree(layout, release).sharedDir,
     PHP_OPEN_BASEDIR_TMP,
   ];
 }
@@ -1726,7 +1738,7 @@ export const SITE_DB_CA_FILE_NAME = "managed-ca.pem";
 export function withDbCaVariables(
   layout: LayoutPaths,
   site: SiteApplySpec,
-  owner: { username: string; serviceId: string } | undefined,
+  owner: SiteRelease | undefined,
 ): SiteApplySpec {
   if (!site.dbCa) return site;
   if (!owner) {
@@ -1735,7 +1747,7 @@ export function withDbCaVariables(
     );
   }
   const path = join(
-    siteMetadataDir(principalHomePath(layout, owner.username), owner.serviceId),
+    siteMetadataDir(layout, owner),
     SITE_DB_CA_FILE_NAME,
   );
   const webEnv = { ...site.webEnv };
@@ -1817,10 +1829,7 @@ async function writeReleaseHostingWebMetadata(
   const files = hostingWebMetadataFiles(site);
   if (files.length === 0) return;
 
-  const metaDir = siteMetadataDir(
-    principalHomePath(layout, release.username),
-    release.serviceId,
-  );
+  const metaDir = siteMetadataDir(layout, release);
   const mkdir = await run(
     "sudo",
     hostSudoArgs([
@@ -1956,11 +1965,11 @@ async function releaseDocumentRootStat(
     if (err instanceof Deno.errors.NotFound) return null;
     if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
   }
-  const home = principalHomePath(layout, release.username);
+  const tree = serviceTree(layout, release);
   const isDirectory = await currentReleaseDirExists(
     {
-      currentLink: siteCurrentSymlink(home, release.serviceId),
-      releasesDir: siteReleasesDir(home, release.serviceId),
+      currentLink: tree.currentLink,
+      releasesDir: tree.releasesDir,
     },
     site.root,
     run,
@@ -3037,10 +3046,7 @@ function sitePhpAdminOpts(
     return {
       openBasedir: [
         paths.documentRoot,
-        siteSharedDir(
-          principalHomePath(layout, paths.managed.username),
-          paths.managed.serviceId,
-        ),
+        serviceTree(layout, paths.managed).sharedDir,
         PHP_OPEN_BASEDIR_TMP,
       ],
     };
@@ -3161,15 +3167,14 @@ function sitePhpWritablePaths(
   paths: SitePaths,
 ): string[] {
   if (paths.release) {
-    const home = principalHomePath(layout, paths.release.username);
-    return [`-${siteSharedDir(home, paths.release.serviceId)}`];
+    return siteWritableDirs(layout, paths.release, false).map((dir) =>
+      `-${dir}`
+    );
   }
   if (paths.managed) {
-    const home = principalHomePath(layout, paths.managed.username);
-    return [
-      `-${siteWebrootDir(home, paths.managed.serviceId)}`,
-      `-${siteSharedDir(home, paths.managed.serviceId)}`,
-    ];
+    return siteWritableDirs(layout, paths.managed, true).map((dir) =>
+      `-${dir}`
+    );
   }
   return [];
 }
@@ -3466,20 +3471,36 @@ async function ensureManagedDirectory(
   managed: SiteManagedDirectory,
   documentRoot: string,
 ): Promise<void> {
-  const principalHome = principalHomePath(layout, managed.username);
+  const tree = serviceTree(layout, managed);
   const owner = `${managed.username}:${resolveSiteOwnership(site).group}`;
-  await ensureDirectoryWithOwner(
-    siteRoot(principalHome, managed.serviceId),
-    "0750",
-    `root:${principalUnixGroupName(managed.username)}`,
-    run,
-  );
+  if (managed.folder !== undefined) {
+    // The folder, its `releases/`, `shared/` and `logs/` and the record of its
+    // components; `public/` and the document root below carry the engine group.
+    await ensureAssetFolder(layout, managed.serviceId, {
+      ...managed.folder,
+      kind: "service",
+    }, run);
+  } else {
+    await ensureDirectoryWithOwner(
+      tree.root,
+      "0750",
+      `root:${principalUnixGroupName(managed.username)}`,
+      run,
+    );
+  }
   // Parent before child: the directories are created in this order.
-  await forEachSequential([
-    siteWebrootDir(principalHome, managed.serviceId),
-    siteSharedDir(principalHome, managed.serviceId),
-    documentRoot,
-  ], (dir) => ensureDirectoryWithOwner(dir, "0750", owner, run));
+  await forEachSequential(
+    [...new Set([tree.publicDir, tree.sharedDir, documentRoot])],
+    (dir) =>
+      ensureDirectoryWithOwner(
+        dir,
+        "0750",
+        dir === tree.sharedDir && tree.folder
+          ? `${managed.username}:${principalUnixGroupName(managed.username)}`
+          : owner,
+        run,
+      ),
+  );
   await seedManagedIndexHtml(site, documentRoot, owner);
 }
 
@@ -3590,15 +3611,9 @@ function siteCaddyMountDirs(
     const release = releaseBindings?.get(site.composeServiceName);
     const managed = managedBindings?.get(site.composeServiceName);
     if (release) {
-      dirs.add(siteReleasesDir(
-        principalHomePath(layout, release.username),
-        release.serviceId,
-      ));
+      dirs.add(serviceTree(layout, release).releasesDir);
     } else if (managed) {
-      dirs.add(siteWebrootDir(
-        principalHomePath(layout, managed.username),
-        managed.serviceId,
-      ));
+      dirs.add(serviceTree(layout, managed).publicDir);
     }
   }
   return [...dirs];
@@ -3656,10 +3671,7 @@ async function applyOneSite(
     // so the directory the tenant uploads into has to exist before the vhost
     // that serves it does.
     await ensureManagedDirectory(layout, site, managed, documentRoot);
-    await writeReleaseHostingWebMetadata(layout, environmentId, site, {
-      serviceId: managed.serviceId,
-      username: managed.username,
-    });
+    await writeReleaseHostingWebMetadata(layout, environmentId, site, managed);
     restartEngines = await ensureEnginesCanReadPrincipalTree(
       site,
       managed.username,

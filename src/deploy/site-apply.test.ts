@@ -4841,3 +4841,175 @@ test("an OpenLiteSpeed site directory keeps the engine, and a failed removal nev
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// The scope tree: a service folder with `public/`, `shared/` and `logs/`.
+// ---------------------------------------------------------------------------
+
+const FOLDER_SERVICE_ID = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+
+const folderBinding: SiteManagedDirectory = {
+  serviceId: FOLDER_SERVICE_ID,
+  username: RELEASE_USERNAME,
+  folder: { owner: RELEASE_USERNAME, scope: "production", slug: "example.com" },
+};
+
+function serviceFolderRoot(layout: LayoutPaths): string {
+  return join(
+    layout.principalHomeRoot,
+    RELEASE_USERNAME,
+    "production",
+    "services",
+    "example.com",
+  );
+}
+
+test("a managed-directory site in a service folder serves from public/", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const result = await applySites(layout, "envmd", [managedSite], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: new Map([["www", folderBinding]]),
+    });
+    assertEquals(result.applied, ["www"]);
+
+    // The default root name `public` is the uploaded folder itself.
+    const publicDir = join(serviceFolderRoot(layout), "public");
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
+    );
+    assertStringIncludes(conf, `root ${publicDir};`);
+    assertEquals(conf.includes("/public/public"), false);
+
+    // The folder, its sealed `releases/` and the two leaves exist, and the
+    // older `sites/` tree is not touched.
+    for (const name of ["public", "releases", "shared", "logs"]) {
+      await Deno.stat(join(serviceFolderRoot(layout), name));
+    }
+    await assertRejects(
+      () =>
+        Deno.stat(join(layout.principalHomeRoot, RELEASE_USERNAME, "sites")),
+      Deno.errors.NotFound,
+    );
+
+    // `public/` is the owner's with the engine group; the folder is root's.
+    const mkdir = (path: string) =>
+      mock.calls.find((c) =>
+        c.args.includes("install") && c.args.includes("-d") &&
+        c.args.at(-1) === path
+      );
+    const pub = mkdir(publicDir);
+    assert(pub);
+    assertEquals(pub.args[pub.args.indexOf("-o") + 1], RELEASE_USERNAME);
+    assertEquals(pub.args[pub.args.indexOf("-g") + 1], "tpnginx");
+    const folderMkdir = mkdir(serviceFolderRoot(layout));
+    assert(folderMkdir);
+    assertEquals(folderMkdir.args[folderMkdir.args.indexOf("-o") + 1], "root");
+    const shared = mkdir(join(serviceFolderRoot(layout), "shared"));
+    assert(shared);
+    assertEquals(shared.args[shared.args.indexOf("-g") + 1], RELEASE_GROUP);
+
+    // The components this asset was first created with are on record.
+    const record = JSON.parse(
+      await Deno.readTextFile(
+        join(layout.daemonStateDir, "folders", `${FOLDER_SERVICE_ID}.json`),
+      ),
+    );
+    assertEquals(record.slug, "example.com");
+    assertEquals(record.kind, "service");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a managed-directory root other than public is a folder inside public/", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(
+      layout,
+      "envmd",
+      [{ ...managedSite, root: "dist" }],
+      {
+        run,
+        runPlaybook,
+        managedDirectoryBindings: new Map([["www", folderBinding]]),
+      },
+    );
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
+    );
+    assertStringIncludes(
+      conf,
+      `root ${join(serviceFolderRoot(layout), "public", "dist")};`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a managed-directory PHP pool in a service folder is confined to public/ and shared/", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpapache: ["tpapache"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const site: SiteApplySpec = {
+      ...apachePhpSite,
+      sourceKind: "managed-directory",
+      principal: { principalId: "pr-1", username: RELEASE_USERNAME },
+    };
+    await applySites(layout, "envmd", [site], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: new Map([["phpapp", folderBinding]]),
+    });
+    const pool = await Deno.readTextFile(
+      join(layout.configDir, "php", "8.4", "pools", "tp-envmd-phpapp.conf"),
+    );
+    assertStringIncludes(pool, join(serviceFolderRoot(layout), "public"));
+    assertStringIncludes(pool, join(serviceFolderRoot(layout), "shared"));
+    assertEquals(pool.includes("/sites/"), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a folder that belongs to another owner stops the site before any folder is made", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "envmd", [managedSite], {
+          run: withGroupMembership(mock.run, { tpnginx: ["tpnginx"] }),
+          runPlaybook,
+          managedDirectoryBindings: new Map([[
+            "www",
+            {
+              ...folderBinding,
+              folder: { ...folderBinding.folder!, owner: "mallory" },
+            },
+          ]]),
+        }),
+      Error,
+      "does not match",
+    );
+    assertEquals(
+      mock.calls.some((c) =>
+        c.args.includes("install") &&
+        String(c.args.at(-1)).startsWith(layout.principalHomeRoot)
+      ),
+      false,
+    );
+  } finally {
+    await cleanup();
+  }
+});

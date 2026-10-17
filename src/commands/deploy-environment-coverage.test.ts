@@ -2217,3 +2217,22 @@ test("siteCronWritableDirs: shared/ for a release, webroot/ and shared/ for a ma
   ]);
   assertEquals(siteCronWritableDirs(layout, undefined, undefined), []);
 });
+
+test("siteCronWritableDirs: a service folder adds logs/, and the uploaded folder is public/", () => {
+  const layout = { principalHomeRoot: "/srv/users" };
+  const site = {
+    serviceId: "svc1",
+    username: "alice",
+    folder: { owner: "alice", scope: "production", slug: "example.com" },
+  };
+  const root = "/srv/users/alice/production/services/example.com";
+  assertEquals(siteCronWritableDirs(layout, site, undefined), [
+    `${root}/shared`,
+    `${root}/logs`,
+  ]);
+  assertEquals(siteCronWritableDirs(layout, undefined, site), [
+    `${root}/public`,
+    `${root}/shared`,
+    `${root}/logs`,
+  ]);
+});

@@ -774,6 +774,12 @@ export type EnvironmentDeployStorageMount = {
   readOnly?: boolean;
 };
 
+/** One service's folder under its site owner's tree. */
+export type EnvironmentDeployServiceFolder = {
+  serviceId: string;
+  folder: FolderRefParts;
+};
+
 export type EnvironmentDeployStorageMaterial = {
   storageId: string;
   locationId: string;
@@ -1493,6 +1499,13 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   envFile?: string;
   secretPlan?: EnvironmentDeploySecretPlanEntry[];
   storageMaterial?: EnvironmentDeployStorageMaterial[];
+  /**
+   * The folder of every service this deploy runs on the host (a site, a native
+   * app or a Git-backed source), as components. The service id is the same
+   * value the release tree, units and hosting use. A service with no entry
+   * keeps the older per-service tree.
+   */
+  serviceFolders?: EnvironmentDeployServiceFolder[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -1623,6 +1636,21 @@ export type EnvironmentStopResult = {
   summary: string;
   /** Authoritative empty report so the instance clears container pins. */
   containers: EnvironmentDeployContainer[];
+  /**
+   * What happened to each service folder the stop was told to reclaim. Only
+   * present when the payload carried `siteReleases` with a `folder`; `removed`
+   * is true once the folder is gone from the host (or was never there).
+   */
+  folders?: EnvironmentStopFolderState[];
+};
+
+/** One reclaimed (or not) service folder, by its components. */
+export type EnvironmentStopFolderState = {
+  owner: string;
+  scope: string;
+  kind: "service";
+  slug: string;
+  removed: boolean;
 };
 
 /** Must stay in sync with the instance canonical `environment.lifecycle` action set. */
@@ -4309,6 +4337,20 @@ function parseStorageMount(value: unknown): EnvironmentDeployStorageMount {
   return mount;
 }
 
+function parseServiceFolder(value: unknown): EnvironmentDeployServiceFolder {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy serviceFolders entry");
+  }
+  const serviceId = parseNonEmptyString(value, "serviceId");
+  if (!STOP_SITE_RELEASE_SERVICE_ID_RE.test(serviceId)) {
+    throw new TypeError("Invalid environment deploy serviceFolders serviceId");
+  }
+  return {
+    serviceId,
+    folder: folderRefParts(parseFolderRefParts(value.folder, "service")),
+  };
+}
+
 function parseStorageMaterial(
   value: unknown,
 ): EnvironmentDeployStorageMaterial {
@@ -6210,6 +6252,11 @@ export function parseEnvironmentDeployPayload(
         value.storageMaterial,
         "storageMaterial",
         parseStorageMaterial,
+      ),
+      serviceFolders: parseOptionalMaterialArray(
+        value.serviceFolders,
+        "serviceFolders",
+        parseServiceFolder,
       ),
       principalMaterial: parseOptionalMaterialArray(
         value.principalMaterial,
