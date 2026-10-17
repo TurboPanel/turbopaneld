@@ -379,6 +379,19 @@ async function principalAccount(
 }
 
 /**
+ * The numeric user and group ids of an existing account, or `null` when the
+ * account is not there. The ids a container is run as when it mounts the
+ * account's volume folder.
+ */
+export async function lookupPrincipalIds(
+  username: string,
+  runFn: RunFn = runDefault,
+): Promise<{ uid: number; gid: number } | null> {
+  const account = await principalAccount(username, runFn);
+  return account === null ? null : { uid: account.uid, gid: account.gid };
+}
+
+/**
  * An existing group's gid must match an explicit override and otherwise sit in
  * the principal band: a group outside it was not made for a site owner (or
  * predates the current floor), and tp-host would refuse it on first use.

@@ -18,7 +18,8 @@
  * `<daemonStateDir>/release-link-scan.json`; redeploying the site publishes a
  * release the publish-time checks have vetted.
  *
- * Every site is walked as `<homes>/<user>/sites/<service>/current`, not from
+ * Every site is walked as `<homes>/<user>/<scope>/services/<name>/current`
+ * (and `<homes>/<user>/sites/<service>/current` in the older tree), not from
  * the deployment manifests, which do not name the principal for releases
  * recorded before they carried one — the very releases this looks for.
  */
@@ -28,8 +29,7 @@ import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import {
   type LayoutPaths,
   principalHomePath,
-  siteCurrentSymlink,
-  siteReleasesDir,
+  serviceTree,
 } from "../../paths/layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
@@ -93,20 +93,24 @@ async function scanSite(
   username: string,
   serviceId: string,
   runFn: RunFn,
+  folder?: { scope: string; slug: string },
 ): Promise<ReleaseLinkFinding | null> {
   let releaseId: string | null = null;
   try {
-    const home = principalHomePath(layout, username);
-    const service = assertSafeServiceId(serviceId);
+    // A folder is named by its components, so the listing's name is the slug.
+    const tree = serviceTree(layout, {
+      serviceId: folder === undefined ? assertSafeServiceId(serviceId) : "x",
+      username,
+      ...(folder === undefined ? {} : {
+        folder: { owner: username, scope: folder.scope, slug: folder.slug },
+      }),
+    });
     releaseId = await readCurrentReleaseId(
-      { currentLink: siteCurrentSymlink(home, service) },
+      { currentLink: tree.currentLink },
       runFn,
     );
     if (releaseId === null) return null;
-    const releaseDir = join(
-      siteReleasesDir(home, service),
-      assertSafeReleaseId(releaseId),
-    );
+    const releaseDir = join(tree.releasesDir, assertSafeReleaseId(releaseId));
     const links = linksLeavingReleaseLexically(
       await listReleaseLinks(releaseDir, runFn),
     );
@@ -150,12 +154,77 @@ export async function scanLiveReleaseLinks(
       const finding = await scanSite(layout, username, serviceId, runFn);
       if (finding) findings.push(finding);
     });
+    await scanScopes(layout, username, runFn, findings);
   });
   return findings;
 }
 
+/** Folders of the scope tree: every `<owner>/<scope>/services/<name>`. */
+async function scanScopes(
+  layout: ScanLayout,
+  username: string,
+  runFn: RunFn,
+  findings: ReleaseLinkFinding[],
+): Promise<void> {
+  const home = principalHomePath(layout, username);
+  let scopes: string[];
+  try {
+    scopes = (await listDirNames(home, runFn)).filter((name) =>
+      !OWNER_OWN_ENTRIES.has(name)
+    );
+  } catch (err) {
+    findings.push({
+      username,
+      serviceId: "",
+      releaseId: null,
+      links: [],
+      error: errorText(err),
+    });
+    return;
+  }
+  await forEachSequential(scopes, async (scope) => {
+    let names: string[];
+    try {
+      names = await listDirNames(join(home, scope, "services"), runFn);
+    } catch (err) {
+      findings.push({
+        username,
+        serviceId: `${scope}/`,
+        releaseId: null,
+        links: [],
+        error: errorText(err),
+      });
+      return;
+    }
+    await forEachSequential(names, async (slug) => {
+      const finding = await scanSite(
+        layout,
+        username,
+        `${scope}/${slug}`,
+        runFn,
+        {
+          scope,
+          slug,
+        },
+      );
+      if (finding) findings.push(finding);
+    });
+  });
+}
+
+/** Entries of an owner's folder that are not scope folders. */
+const OWNER_OWN_ENTRIES: ReadonlySet<string> = new Set([
+  "home",
+  "tmp",
+  "sites",
+  "volumes",
+  "data",
+]);
+
 function describeFinding(finding: ReleaseLinkFinding): string {
-  const site = `${finding.username}/sites/${finding.serviceId}`;
+  const site = finding.serviceId.includes("/")
+    ? `${finding.username}/${finding.serviceId.replace("/", "/services/")}`
+    : `${finding.username}/sites/${finding.serviceId}`;
   if (finding.error !== undefined) {
     return `could not check the live release of ${site}: ${finding.error}`;
   }

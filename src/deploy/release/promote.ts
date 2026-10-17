@@ -98,15 +98,28 @@ function isMissingPrivilegedPathError(stderr: string): boolean {
  */
 async function runPublishVerb(
   verb: "publish-open" | "publish",
-  paths: Pick<ReleasePaths, "siteDir" | "releaseDir">,
+  paths: Pick<ReleasePaths, "siteDir" | "releaseDir" | "publish">,
   username: string,
   runFn: RunFn,
 ): Promise<void> {
-  const serviceId = basename(paths.siteDir);
-  const releaseId = basename(paths.releaseDir);
+  // A release in a service folder names it by components and ids (six words);
+  // the older tree names it by owner, service and release (three).
+  const ref = paths.publish;
+  const serviceId = ref?.serviceId ?? basename(paths.siteDir);
+  const releaseId = ref?.releaseId ?? basename(paths.releaseDir);
+  const args = ref
+    ? [
+      ref.folder.owner,
+      ref.folder.scope,
+      ref.folder.slug,
+      serviceId,
+      releaseId,
+      ref.publishId,
+    ]
+    : [username, serviceId, releaseId];
   const result = await runFn(
     "sudo",
-    hostSudoArgs(["-n", verb, username, serviceId, releaseId]),
+    hostSudoArgs(["-n", verb, ...args]),
   );
   if (!result.success) {
     throw new Error(

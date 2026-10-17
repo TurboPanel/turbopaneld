@@ -31,13 +31,16 @@ import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
   RELEASE_RECORDS_DIRNAME,
+  RELEASE_SCRATCH_DIRNAME,
   type ReleasePaths,
   removePublishedRelease,
   runPrivileged,
 } from "./release-layout.ts";
 import { readCurrentReleaseId } from "./promote.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
-import { principalHomePath, siteRoot } from "../../paths/layout.ts";
+import { serviceTree } from "../../paths/layout.ts";
+import { removeFolderRecord } from "../asset-folders.ts";
 
 /** Published releases kept per service, in addition to `current`. */
 export const DEFAULT_RELEASE_RETENTION = 5;
@@ -150,10 +153,14 @@ export async function pruneReleases(
   return removed;
 }
 
-/** One release tree on disk: `<principalHomeRoot>/<username>/sites/<serviceId>`. */
+/**
+ * One release tree on disk: its service folder when it has one, else
+ * `<principalHomeRoot>/<username>/sites/<serviceId>`.
+ */
 export type ReleaseTreeRef = {
   serviceId: string;
   username: string;
+  folder?: FolderRefParts;
 };
 
 /**
@@ -230,63 +237,97 @@ export async function reclaimRemovedReleaseTrees(
   const runFn = params.runFn ?? runPrivileged;
   const removed: string[] = [];
   await forEachSequential(doomed, async (ref) => {
-    const path = siteRoot(
-      principalHomePath(
-        { principalHomeRoot: params.layout.principalHomeRoot },
-        ref.username,
-      ),
-      ref.serviceId,
+    const path = await reclaimServiceTree(
+      params.layout,
+      ref,
+      runFn,
+      params.onOutput,
     );
-    try {
-      const result = await runFn(
-        "sudo",
-        hostSudoArgs(["-n", "rm", "-rf", "--", path]),
-      );
-      if (!result.success) {
-        params.onOutput?.(
-          "stderr",
-          `release tree reclaim could not remove ${path}: ${result.stderr}`,
-        );
-        return;
-      }
-      removed.push(path);
-      await removeServiceReleaseRecords(
-        params.layout,
-        ref.serviceId,
-        params.onOutput,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      params.onOutput?.(
-        "stderr",
-        `release tree reclaim could not remove ${path}: ${message}`,
-      );
-    }
+    if (path !== null) removed.push(path);
   });
   return removed;
 }
 
 /**
- * Remove `<daemonStateDir>/release-records/<serviceId>`, the daemon-owned
- * rollback records of a service whose release tree was reclaimed. The folder
- * belongs to the daemon user, so no privilege is involved. `serviceId` has been
- * through {@link releaseTreesToReclaim}'s segment check. Best-effort: a
- * leftover record only fails a later rollback cleanly.
+ * Remove one service's whole tree: its folder (or `sites/<serviceId>`), the
+ * record of the folder's components, and the daemon's own release records and
+ * build scratch for the service. Returns the removed path, or `null` when the
+ * tree could not be removed (the reason goes to `onOutput`; nothing throws).
+ * The records and the folder record are kept when the tree stays, so a later
+ * attempt finds the same state.
  */
-async function removeServiceReleaseRecords(
+export async function reclaimServiceTree(
+  layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">,
+  ref: ReleaseTreeRef,
+  runFn: RunFn,
+  onOutput?: ReclaimRemovedReleaseTreesParams["onOutput"],
+): Promise<string | null> {
+  let path: string;
+  try {
+    path = serviceTree(layout, ref).root;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `release tree reclaim skipped ${ref.serviceId}: ${message}`,
+    );
+    return null;
+  }
+  try {
+    const result = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "rm", "-rf", "--", path]),
+    );
+    if (!result.success) {
+      onOutput?.(
+        "stderr",
+        `release tree reclaim could not remove ${path}: ${result.stderr}`,
+      );
+      return null;
+    }
+    if (ref.folder !== undefined) {
+      await removeFolderRecord(layout, ref.serviceId);
+    }
+    await removeServiceStateDirs(layout, ref.serviceId, onOutput);
+    return path;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `release tree reclaim could not remove ${path}: ${message}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Remove `<daemonStateDir>/release-records/<serviceId>` (the daemon-owned
+ * rollback records of a service whose release tree was reclaimed) and
+ * `<daemonStateDir>/release-build/<serviceId>` (build scratch). Both belong to
+ * the daemon user, so no privilege is involved. `serviceId` has been through
+ * {@link releaseTreesToReclaim}'s segment check or the folder rules.
+ * Best-effort: a leftover record only fails a later rollback cleanly.
+ */
+async function removeServiceStateDirs(
   layout: Pick<LayoutPaths, "daemonStateDir">,
   serviceId: string,
   onOutput: ReclaimRemovedReleaseTreesParams["onOutput"],
 ): Promise<void> {
-  const dir = join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME, serviceId);
-  try {
-    await Deno.remove(dir, { recursive: true });
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
-    const message = err instanceof Error ? err.message : String(err);
-    onOutput?.(
-      "stderr",
-      `release record reclaim could not remove ${dir}: ${message}`,
-    );
+  for (
+    const dir of [
+      join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME, serviceId),
+      join(layout.daemonStateDir, RELEASE_SCRATCH_DIRNAME, serviceId),
+    ]
+  ) {
+    try {
+      await Deno.remove(dir, { recursive: true });
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) continue;
+      const message = err instanceof Error ? err.message : String(err);
+      onOutput?.(
+        "stderr",
+        `release record reclaim could not remove ${dir}: ${message}`,
+      );
+    }
   }
 }

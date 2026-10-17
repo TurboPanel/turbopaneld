@@ -96,7 +96,11 @@ import {
   serviceIngressProject,
   syncTcpUdpIngressEntries,
 } from "../deploy/ingress.ts";
-import { materializeStorageEntries } from "../deploy/materialize-storage.ts";
+import {
+  materializeStorageEntries,
+  resolveVolumeOwnerIds,
+  type VolumeOwnerIds,
+} from "../deploy/materialize-storage.ts";
 import {
   type DecryptSecretsFn,
   hostnameTlsMap,
@@ -125,6 +129,7 @@ import {
   resolveSiteDocumentRoot,
   type SiteManagedDirectory,
   type SiteRelease,
+  siteWritableDirs,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
@@ -138,7 +143,10 @@ import {
   applySourceReleases,
   resolveReleaseServiceId,
 } from "../deploy/release/apply-source-releases.ts";
-import { effectiveReleaseServiceId } from "../deploy/release/release-service-id.ts";
+import {
+  effectiveReleaseServiceId,
+  serviceFolderFromPayload,
+} from "../deploy/release/release-service-id.ts";
 import {
   applyNativeAppServices,
   type ApplyNativeAppsOpts,
@@ -204,11 +212,9 @@ import {
 } from "../contracts/commands-contracts.ts";
 import {
   type LayoutPaths,
-  principalHomePath,
   resolveLayout,
-  siteCurrentSymlink,
-  siteSharedDir,
-  siteWebrootDir,
+  serviceTree,
+  volumeFolder,
 } from "../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -893,10 +899,12 @@ function releasesForManifest(
     const commitSha = result?.commitSha ?? entry.commitSha;
     const commitMessage = result?.commitMessage ?? entry.commitMessage;
     const commitAuthor = result?.commitAuthor ?? entry.commitAuthor;
+    const serviceId = result?.serviceId ??
+      resolveReleaseServiceId(payload, entry.composeServiceName);
+    const folder = serviceFolderFromPayload(payload, serviceId);
     out.push({
       composeServiceName: entry.composeServiceName,
-      serviceId: result?.serviceId ??
-        resolveReleaseServiceId(payload, entry.composeServiceName),
+      serviceId,
       // A rollback's live release is the one it promoted, not the id the
       // control plane would have allocated for a fresh build.
       releaseId: result?.releaseId ?? entry.rollbackToReleaseId ??
@@ -907,6 +915,7 @@ function releasesForManifest(
       ...(commitAuthor === undefined ? {} : { commitAuthor }),
       ...(entry.ref.length > 0 ? { ref: entry.ref } : {}),
       ...(entry.principal ? { username: entry.principal.username } : {}),
+      ...(entry.principal && folder !== undefined ? { folder } : {}),
     });
   }
   return out;
@@ -998,16 +1007,27 @@ async function deployReleaseBindings(
     })),
   );
   for (const row of resolved) {
-    bindings.set(row.composeServiceName, {
-      serviceId: row.serviceId,
-      username: row.username,
-    });
+    bindings.set(row.composeServiceName, bindingFor(payload, row));
   }
   return bindings;
 }
 
+/** A service's binding: its ids, plus its folder when the payload carries one. */
+function bindingFor(
+  payload: EnvironmentDeployPayload,
+  row: { serviceId: string; username: string },
+): SiteRelease {
+  const folder = serviceFolderFromPayload(payload, row.serviceId);
+  return {
+    serviceId: row.serviceId,
+    username: row.username,
+    ...(folder === undefined ? {} : { folder }),
+  };
+}
+
 /**
- * Compose service name → the principal-owned `webroot/` it serves from.
+ * Compose service name → the principal-owned upload folder it serves from
+ * (`public/`, or `webroot/` in the older tree).
  *
  * Same `serviceId` rule as {@link deployReleaseBindings} on purpose, so
  * `sites/<serviceId>/webroot/` and `sites/<serviceId>/current` are siblings and
@@ -1051,10 +1071,7 @@ async function deployManagedDirectoryBindings(
     })),
   );
   for (const row of resolved) {
-    bindings.set(row.composeServiceName, {
-      serviceId: row.serviceId,
-      username: row.username,
-    });
+    bindings.set(row.composeServiceName, bindingFor(payload, row));
   }
   return bindings;
 }
@@ -1218,7 +1235,11 @@ async function previousReleaseTrees(
   const out: ReleaseTreeRef[] = [];
   for (const release of manifest?.releases ?? []) {
     if (!release.username) continue;
-    out.push({ serviceId: release.serviceId, username: release.username });
+    out.push({
+      serviceId: release.serviceId,
+      username: release.username,
+      ...(release.folder === undefined ? {} : { folder: release.folder }),
+    });
   }
   return out;
 }
@@ -1322,31 +1343,31 @@ async function persistComposeEnvFile(
  * the ones it had just installed.
  */
 /**
- * What a site's cron job may write besides the principal's `home/`, `data/`
- * and `tmp/`: `shared/` in the release lane, `webroot/` and `shared/` in the
- * managed lane, nothing for a tree outside the principal's home.
+ * What a site's cron job may write besides the principal's `home/` and `tmp/`:
+ * `shared/` and `logs/` in the release lane, `public/` too in the managed lane
+ * (`webroot/` and `shared/` in the older tree), nothing for a tree outside the
+ * principal's home.
  */
 export function siteCronWritableDirs(
   layout: Pick<LayoutPaths, "principalHomeRoot">,
   release: SiteRelease | undefined,
   managed: SiteManagedDirectory | undefined,
 ): string[] {
-  if (release) {
-    return [
-      siteSharedDir(
-        principalHomePath(layout, release.username),
-        release.serviceId,
-      ),
-    ];
-  }
-  if (managed) {
-    const home = principalHomePath(layout, managed.username);
-    return [
-      siteWebrootDir(home, managed.serviceId),
-      siteSharedDir(home, managed.serviceId),
-    ];
-  }
+  if (release) return siteWritableDirs(layout, release, false);
+  if (managed) return siteWritableDirs(layout, managed, true);
   return [];
+}
+
+/** A native app's tree reference: its service id and owner, plus its folder. */
+function nativeRef(
+  app: EnvironmentDeployNativeAppService,
+  binding: Pick<SiteRelease, "username" | "folder">,
+): SiteRelease {
+  return {
+    serviceId: app.serviceId,
+    username: binding.username,
+    ...(binding.folder === undefined ? {} : { folder: binding.folder }),
+  };
 }
 
 async function applyDeployCronJobs(
@@ -1394,16 +1415,13 @@ async function applyDeployCronJobs(
       // The release `current` symlink, exactly what the app's own unit uses as
       // `WorkingDirectory` — a job and the application it belongs to must not
       // disagree about which tree is live.
-      workingDirectory: siteCurrentSymlink(
-        principalHomePath(layout, binding.username),
-        app.serviceId,
+      workingDirectory:
+        serviceTree(layout, nativeRef(app, binding)).currentLink,
+      siteWritableDirs: siteWritableDirs(
+        layout,
+        nativeRef(app, binding),
+        false,
       ),
-      siteWritableDirs: [
-        siteSharedDir(
-          principalHomePath(layout, binding.username),
-          app.serviceId,
-        ),
-      ],
       username: binding.username,
       jobs: app.cron,
     });
@@ -1498,12 +1516,33 @@ async function applyDeployNativeApps(
   );
 }
 
+/**
+ * The folders under the site owners' tree this deploy may bind from: each
+ * volume folder it was sent, and the older per-owner `sourcePath` of a volume
+ * the control plane has not given a folder yet.
+ */
+export function ownedVolumeRoots(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  payload: Pick<EnvironmentDeployPayload, "storageMaterial">,
+): string[] {
+  const roots: string[] = [];
+  for (const entry of payload.storageMaterial ?? []) {
+    if (entry.folder !== undefined) {
+      roots.push(volumeFolder(layout, entry.folder));
+    } else if (entry.sourcePath !== undefined) {
+      roots.push(entry.sourcePath);
+    }
+  }
+  return roots;
+}
+
 function buildDaemonOverlayFragment(
   parsedPayload: EnvironmentDeployPayload,
   containerHostings: EnvironmentDeployHosting[],
   sites: EnvironmentDeploySite[],
   mountPaths: Map<string, string>,
   resolved: Awaited<ReturnType<typeof resolveComposeModel>>,
+  volumeOwnerIds?: VolumeOwnerIds,
 ): ReturnType<typeof mergeComposeOverlayFragments> {
   const storageMaterial = parsedPayload.storageMaterial ?? [];
 
@@ -1511,6 +1550,7 @@ function buildDaemonOverlayFragment(
     storageMaterial,
     mountPaths,
     resolved,
+    volumeOwnerIds,
   );
 
   const siteFragment = sites.length > 0
@@ -1947,6 +1987,10 @@ async function deployContainerServices(
         deploymentDir,
         stageDir,
         hostLevelApproved: parsedPayload.hostLevelApproved === true,
+        ownerTree: {
+          homeRoot: layout.principalHomeRoot,
+          volumes: ownedVolumeRoots(layout, parsedPayload),
+        },
         priorWritableMounts: await priorWritableMounts(
           parsedPayload.projectName,
           deploymentDir,
@@ -1961,6 +2005,10 @@ async function deployContainerServices(
       sites,
       mountPaths,
       resolved,
+      await resolveVolumeOwnerIds(
+        parsedPayload.storageMaterial ?? [],
+        parsedPayload.principalMaterial,
+      ),
     );
     yaml = applySecretFilePaths(
       mergeOverlayIntoComposeYaml(yaml, fragment),

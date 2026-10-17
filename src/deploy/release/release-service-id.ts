@@ -28,6 +28,7 @@ import type {
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   principalHomePath,
@@ -42,6 +43,19 @@ import { releasePathExists } from "./promote.ts";
  * on the wire (`nativeAppServices[].serviceId` uses the same rule).
  */
 export const RELEASE_TREE_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
+
+/**
+ * The folder the control plane planned for a service, when the payload names
+ * one. A service with a folder uses the scope tree and has no older tree to
+ * migrate from.
+ */
+export function serviceFolderFromPayload(
+  payload: Pick<EnvironmentDeployPayload, "serviceFolders">,
+  serviceId: string,
+): FolderRefParts | undefined {
+  return payload.serviceFolders?.find((entry) => entry.serviceId === serviceId)
+    ?.folder;
+}
 
 export function findDeploySourceEntry(
   payload: EnvironmentDeployPayload,
@@ -112,6 +126,10 @@ export async function effectiveReleaseServiceId(
 ): Promise<string> {
   const canonical = resolveReleaseServiceId(payload, composeServiceName);
   if (!principal || canonical === composeServiceName) return canonical;
+  // A planned folder is a tree this host has never seen under another name.
+  if (serviceFolderFromPayload(payload, canonical) !== undefined) {
+    return canonical;
+  }
 
   const home = principalHomePath(layout, principal.username);
   if (await treeHasPublishedRelease(home, canonical, runFn)) {

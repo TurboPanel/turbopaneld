@@ -316,7 +316,7 @@ const PRINCIPAL_SITE_AREAS = new Set(["shared", "webroot", "releases"]);
 /**
  * Below a principal home root only the places the home layout makes for
  * containers: the owner's `data/` and `tmp/`, path storage under
- * `volumes/<id>`, and per site `shared/`, `webroot/` and the root-owned
+ * `<scope>/volumes/<name>` (and `volumes/<id>` in the older tree), and per site `shared/`, `webroot/` and the root-owned
  * `releases/`. Everything else (the home itself, `home/`, `.tp-staging`, a
  * site's hosting config, `sites/` as a whole) is outside. `resolved` is
  * already symlink-resolved, so a link out of an allowed place lands on its
@@ -333,6 +333,11 @@ function principalViolation(
   const allowed = owner !== undefined && !owner.startsWith(".") && (
     PRINCIPAL_DATA_AREAS.has(area ?? "") ||
     (area === "volumes" && tail.length >= 1) ||
+    // The scope tree: `<owner>/<scope>/volumes/<name>`. Never a service
+    // folder (`<scope>/services/…`): releases are sealed code and `shared/` is
+    // the web side's state, so containers get their data through volumes.
+    (tail[0] === "volumes" && tail.length >= 2 &&
+      !(area ?? "").startsWith(".")) ||
     (area === "sites" && tail.length >= 2 &&
       PRINCIPAL_SITE_AREAS.has(tail[1]))
   );

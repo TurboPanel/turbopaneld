@@ -7,6 +7,11 @@
 
 import { basename, join } from "@std/path";
 import {
+  type FolderRefParts,
+  folderRefParts,
+  parseFolderRefParts,
+} from "../contracts/directory-names.ts";
+import {
   type DeploymentGeneration,
   type DeploymentPrevious,
   parseGenerations,
@@ -181,6 +186,13 @@ export type DeploymentManifestRelease = {
    * (those never had a tree published), so readers must treat it as optional.
    */
   username?: string;
+  /**
+   * The service folder the release tree lives in, as components. Recorded for
+   * the same reason as `username`: a later deploy can still find and reclaim
+   * the folder of a service removed from the compose. Absent for a service
+   * that used the older tree.
+   */
+  folder?: FolderRefParts;
 };
 
 /**
@@ -374,6 +386,15 @@ function parseManifestRelease(
   }
   if (typeof record.username === "string" && record.username.length > 0) {
     entry.username = record.username;
+  }
+  if (record.folder !== undefined) {
+    try {
+      entry.folder = folderRefParts(
+        parseFolderRefParts(record.folder, "service"),
+      );
+    } catch {
+      // A folder that no longer passes the rules is not trusted as a path.
+    }
   }
   return entry;
 }

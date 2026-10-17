@@ -39,9 +39,13 @@ variable the build command can inherit — the env carries only the *paths*, and
 `checkout.ts` and `build.ts` both spawn with `clearEnv` and an explicit
 allow-list.
 
-**Layout** (path helpers live in `src/paths/layout.ts` — `siteRoot`,
-`siteReleasesDir`, `siteCurrentSymlink`, `siteSharedDir` — so the site
-serving change in the next phase addresses the same tree without restating it):
+**Layout.** A service with a `folder` on the deploy payload (`serviceFolders[]`)
+lives in the scope tree below. A service without one keeps the older per-service
+tree further down, until the control plane sends a folder for every service.
+`serviceTree(layout, { serviceId, username, folder? })` in `src/paths/layout.ts`
+returns every path of either shape (`root`, `publicDir`, `releasesDir`,
+`currentLink`, `sharedDir`, `logsDir`, `hostingDir`); every consumer reads that
+one object and none tests which shape it has. The older tree:
 
 ```
 <principalHomeRoot>/.tp-staging/                 root:tp 0710 (publish-open)
@@ -57,8 +61,7 @@ serving change in the next phase addresses the same tree without restating it):
     .turbopanel-hosting/  root:root 0711  (hosting.env / php.json: <username>:root 0400)
 ```
 
-**The scope tree** (what the serving code moves to; the tree above stays
-until it does). One function, `assetFolder` in `src/paths/layout.ts`, turns
+**The scope tree.** One function, `assetFolder` in `src/paths/layout.ts`, turns
 `{ owner, scope, kind, slug }` into a host path, and the daemon never builds
 one another way. `src/deploy/asset-folders.ts` makes the folders and keeps the
 per-asset record; `folder-publish.ts` runs the six-word publish verbs:
@@ -78,6 +81,18 @@ per-asset record; `folder-publish.ts` runs the six-word publish verbs:
     volumes/<slug>/                              <owner>:<owner> 0750
 <stateDir>/folders/<assetId>.json                tp 0640  first-created components
 ```
+
+The release engine resolves a folder release with `resolveReleasePaths(…,
+{ folder })`: `ReleasePaths.publish` then holds the components and the three
+ids, and `promote.ts` runs `publish-open` / `publish` with the six words
+(owner, scope, slug, service id, release id, publish id). The staging leaf is
+named by a fresh publish id, so nothing parses a name back. A folder release
+makes its folders with `ensureAssetFolder` (record first, then the folders);
+`ensureReleaseTree` is only for the older tree. Deleting a service
+(`reclaimServiceTree`, also used by `environment.stop` for the entries it is
+sent) removes the folder through tp-host, then its record, its
+`release-records/<serviceId>` and its `release-build/<serviceId>`. A plain stop
+sends no `siteReleases`, so it removes none of this.
 
 Every parent is root's, so an owner empties a leaf but cannot rename or remove
 a scope, `services`, `volumes`, service or volume folder. A command that names

@@ -349,6 +349,163 @@ test("applySourceReleases promotes native releases with injected checkout/build/
   });
 });
 
+test("applySourceReleases builds a service with a folder inside it, publishing by components", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+      const folder = {
+        owner: "appuser",
+        scope: "production",
+        slug: "shop.test",
+      };
+      const paths = resolveReleasePaths(layout, {
+        username: "appuser",
+        serviceId,
+        releaseId: "rel-new",
+        folder,
+      });
+      await mkdirReleaseTree(paths);
+
+      const calls: string[][] = [];
+      const seen: Array<typeof paths> = [];
+      const log = fakeLogSink();
+      const applied = await applySourceReleases(
+        layout,
+        basePayload({
+          hostings: [{
+            hostingId: "host-native",
+            composeServiceName: "web",
+            serviceId,
+            hostnames: ["app.example.com"],
+          }],
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "web",
+              releaseId: "rel-new",
+              releaseServiceId: serviceId,
+              principal: {
+                principalId: "pr-1",
+                username: "appuser",
+                uid: 2000,
+                gid: 2001,
+              },
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "web",
+            serviceId,
+            listenPort: 3000,
+            framework: "next",
+          }],
+          serviceFolders: [{ serviceId, folder }],
+        }),
+        {
+          logSink: log.sink,
+          runFn: (command, args) => {
+            calls.push([command, ...args]);
+            return Promise.resolve({ success: true, stdout: "", stderr: "" });
+          },
+          decryptSecrets: undefined,
+          now: () => "2026-01-01T00:00:00.000Z",
+          ensureReleaseTreeFn: () => {
+            throw new Error("the older tree must not be made");
+          },
+          checkoutReleaseFn: async (params) => {
+            const workingDir = join(params.scratchDir, "source");
+            await Deno.mkdir(workingDir, { recursive: true });
+            await Deno.writeTextFile(join(workingDir, "index.html"), "built");
+            return { workingDir, commitSha: "resolved-commit" };
+          },
+          runReleaseBuildFn: () => Promise.resolve(),
+          prepareNativeAppBuildOutputFn: () =>
+            Promise.resolve({
+              standaloneOutput: true,
+              staticExport: false,
+              outputDirectory: undefined,
+            }),
+          promoteReleaseFn: async (params) => {
+            seen.push(params.paths);
+            await Deno.writeTextFile(
+              join(params.paths.releaseDir, "index.html"),
+              "published",
+            );
+            await writeReleaseManifest(params.paths.releaseDir, {
+              version: 1,
+              serviceId,
+              composeServiceName: "web",
+              releaseId: "rel-new",
+              sourceId: "src-1",
+              commitSha: "resolved-commit",
+              ref: "main",
+              promotedAt: "2026-01-01T00:00:00.000Z",
+              standaloneOutput: true,
+              staticExport: false,
+            });
+            await swapCurrentSymlink(params.paths);
+            return params.paths.releaseDir;
+          },
+          pruneReleasesFn: () => {
+            calls.push(["prune"]);
+            return Promise.resolve(["rel-old"]);
+          },
+        },
+      );
+
+      assertEquals(applied.length, 1);
+      assertEquals(applied[0]?.serviceId, serviceId);
+      assertEquals(seen[0]?.publish, {
+        folder,
+        serviceId,
+        releaseId: "rel-new",
+        publishId: seen[0]?.publish?.publishId ?? "",
+      });
+      assertEquals(
+        seen[0]?.releaseDir,
+        join(
+          layout.principalHomeRoot,
+          "appuser",
+          "production",
+          "services",
+          "shop.test",
+          "releases",
+          "rel-new",
+        ),
+      );
+      // The folder is made through the one install seam, scope tree first.
+      const made = calls.filter((c) => c.includes("install")).map((c) =>
+        c.at(-1)
+      );
+      assertEquals(
+        made[0],
+        join(layout.principalHomeRoot, "appuser", "production"),
+      );
+      assertEquals(
+        made.includes(
+          join(
+            layout.principalHomeRoot,
+            "appuser",
+            "production",
+            "services",
+            "shop.test",
+            "logs",
+          ),
+        ),
+        true,
+      );
+      // And the components it was first made with are on record.
+      const record = JSON.parse(
+        await Deno.readTextFile(
+          join(layout.daemonStateDir, "folders", `${serviceId}.json`),
+        ),
+      );
+      assertEquals(record.slug, "shop.test");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
 test("applySourceReleases removes scratch dir after a failed native promote", async () => {
   await createTempLayout().then(async (fixture) => {
     try {

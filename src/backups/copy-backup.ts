@@ -22,6 +22,11 @@
 import { helperLabelArgs } from "../deploy/labels.ts";
 import { join } from "@std/path";
 import {
+  isValidFolderName,
+  isValidOwnerName,
+  isValidScope,
+} from "../contracts/directory-names.ts";
+import {
   COPY_BACKUP_ARTIFACT_EXTENSION,
   type CopyBackupSource,
   isSafeCopyHostPath,
@@ -131,6 +136,25 @@ function copyHostPath(
   );
 }
 
+/**
+ * Whether `path` is a volume folder of `owner`, or inside one: the older
+ * `<owner>/volumes/<name>` or the scope tree's `<owner>/<scope>/volumes/<name>`.
+ * The scope and the name are checked against the shared folder rules.
+ */
+export function isOwnerVolumePath(
+  principalRoot: string,
+  owner: string | undefined,
+  path: string,
+): boolean {
+  if (!owner || !isValidOwnerName(owner)) return false;
+  const prefix = `${principalRoot}/${owner}/`;
+  if (!path.startsWith(prefix) || path.endsWith("/")) return false;
+  const steps = path.slice(prefix.length).split("/");
+  if (steps[0] === "volumes") return steps.length >= 2;
+  return steps.length >= 3 && steps[1] === "volumes" &&
+    isValidScope(steps[0]) && isValidFolderName(steps[2]);
+}
+
 export function resolveCopyMount(
   layout: LayoutPaths,
   source: CopyBackupSource,
@@ -147,12 +171,8 @@ export function resolveCopyMount(
     throw new Error("the copy has no usable host directory");
   }
   if (source.hostPath) {
-    // An explicit path must be inside the site owner's own volumes directory.
-    const ownerVolumes = `${principalRoot}/${source.ownerUsername}/volumes/`;
-    if (
-      !source.ownerUsername || !path.startsWith(ownerVolumes) ||
-      path.length === ownerVolumes.length
-    ) {
+    // An explicit path must be inside one of the site owner's own volume folders.
+    if (!isOwnerVolumePath(principalRoot, source.ownerUsername, path)) {
       throw new Error(
         `refusing to back up ${path}: it is not inside the site owner's volumes directory`,
       );

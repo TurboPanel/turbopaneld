@@ -14,6 +14,7 @@ import {
 import {
   effectiveReleaseServiceId,
   resolveReleaseServiceId,
+  serviceFolderFromPayload,
 } from "./release-service-id.ts";
 
 /**
@@ -113,5 +114,49 @@ test("effectiveReleaseServiceId keeps legacy compose-key tree until canonical ex
       { username },
     );
     assertEquals(segment, compose);
+  });
+});
+
+test("a service with a planned folder never falls back to an older tree", async () => {
+  await createTempLayout().then(async (fixture) => {
+    const layout = resolveLayout({
+      ...fixture.env,
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: join(
+        fixture.dirs.stateDir,
+        "principal-homes",
+      ),
+    });
+    const home = principalHomePath(layout, "appuser");
+    // The older tree is there and published, as in the case above.
+    await Deno.mkdir(join(siteReleasesDir(home, "app"), "rel-old"), {
+      recursive: true,
+    });
+    await Deno.symlink(
+      join("releases", "rel-old"),
+      siteCurrentSymlink(home, "app"),
+    );
+    const payload = basePayload({
+      sourceMaterial: [
+        baseSource({
+          composeServiceName: "app",
+          releaseServiceId: "svc-env-uuid",
+        }),
+      ],
+      serviceFolders: [{
+        serviceId: "svc-env-uuid",
+        folder: { owner: "appuser", scope: "production", slug: "app" },
+      }],
+    });
+    assertEquals(
+      await effectiveReleaseServiceId(payload, "app", layout, {
+        username: "appuser",
+      }),
+      "svc-env-uuid",
+    );
+    assertEquals(
+      serviceFolderFromPayload(payload, "svc-env-uuid"),
+      { owner: "appuser", scope: "production", slug: "app" },
+    );
+    assertEquals(serviceFolderFromPayload(payload, "other"), undefined);
   });
 });

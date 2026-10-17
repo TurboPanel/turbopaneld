@@ -1027,6 +1027,73 @@ export function folderRecordPath(
   return join(folderRecordsDir(layout), `${assetId}.json`);
 }
 
+/** What names one service's tree: its id, its owner, and its folder when the control plane sent one. */
+export type ServiceRef = {
+  serviceId: string;
+  username: string;
+  folder?: FolderRefParts;
+};
+
+/**
+ * Every path of one service's tree.
+ *
+ * With a `folder` the paths come from the scope tree (`<service>/public`,
+ * `releases`, `current`, `shared`, `logs`, `.turbopanel-hosting`). Without one
+ * the older per-service tree is used (`sites/<serviceId>/webroot`, no `logs`),
+ * so a control plane that does not send folders yet keeps working. That older
+ * branch is the only place the two shapes meet: callers read this object and
+ * never test which shape they have.
+ */
+export type ServiceTree = {
+  /** The service folder (`sites/<serviceId>` for the older tree). */
+  root: string;
+  /** The uploaded-directory document root (`webroot` for the older tree). */
+  publicDir: string;
+  releasesDir: string;
+  currentLink: string;
+  sharedDir: string;
+  /** The app's own log files; the older tree has none. */
+  logsDir: string | null;
+  /** Generated per-site files, root-owned. */
+  hostingDir: string;
+  /** True when the paths come from a folder reference. */
+  folder: boolean;
+};
+
+export function serviceTree(
+  layout: LayoutHomeRoot,
+  ref: ServiceRef,
+): ServiceTree {
+  if (ref.folder !== undefined) {
+    if (ref.folder.owner !== ref.username) {
+      throw new TypeError("Service folder owner does not match the owner");
+    }
+    const parts = ref.folder;
+    return {
+      root: serviceFolder(layout, parts),
+      publicDir: publicDir(layout, parts),
+      releasesDir: releasesDir(layout, parts),
+      currentLink: currentLink(layout, parts),
+      sharedDir: sharedDir(layout, parts),
+      logsDir: logsDir(layout, parts),
+      hostingDir: hostingFilesDir(layout, parts),
+      folder: true,
+    };
+  }
+  const home = principalHomePath(layout, ref.username);
+  const root = siteRoot(home, ref.serviceId);
+  return {
+    root,
+    publicDir: siteWebrootDir(home, ref.serviceId),
+    releasesDir: siteReleasesDir(home, ref.serviceId),
+    currentLink: siteCurrentSymlink(home, ref.serviceId),
+    sharedDir: siteSharedDir(home, ref.serviceId),
+    logsDir: null,
+    hostingDir: join(root, ".turbopanel-hosting"),
+    folder: false,
+  };
+}
+
 /** Thrown when a folder path runs through a symbolic link. */
 export class FolderSymlinkError extends Error {
   constructor(path: string) {

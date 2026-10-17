@@ -6,9 +6,12 @@ import type {
   EnvironmentDeployStorageMaterial,
 } from "../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
+import { ensureAssetFolder } from "./asset-folders.ts";
 import {
   ensureDirectoryOwnedByPrincipal,
+  lookupPrincipalIds,
   principalUnixGroupName,
+  type RunFn,
 } from "./ensure-principal.ts";
 import { runDocker } from "./docker-cli.ts";
 import { directoryExists } from "../permissions/privileged-read.ts";
@@ -200,6 +203,31 @@ function assertSourcePathConfined(
   }
 }
 
+/**
+ * A volume folder (`<owner>/<scope>/volumes/<name>`): checked against the
+ * record of its first components, then created `<owner>:<owner> 0750`. Only
+ * the folder itself is given to the owner, never anything inside it: files a
+ * container writes keep the user id the container ran as.
+ */
+async function materializeVolumeFolder(
+  layout: LayoutPaths,
+  entry: EnvironmentDeployStorageMaterial,
+  ownership: EnvironmentDeployPrincipalMaterial | undefined,
+): Promise<string> {
+  if (entry.folder === undefined) {
+    throw new Error(`storage ${entry.storageId} has no folder`);
+  }
+  if (!ownership || ownership.username !== entry.folder.owner) {
+    throw new Error(
+      `storage ${entry.storageId}: its folder belongs to ${entry.folder.owner}, who is not the site owner this deploy names for it`,
+    );
+  }
+  return await ensureAssetFolder(layout, entry.storageId, {
+    ...entry.folder,
+    kind: "volume",
+  });
+}
+
 async function materializeHostPathEntry(
   layout: LayoutPaths,
   baseDir: string,
@@ -207,6 +235,9 @@ async function materializeHostPathEntry(
   ownership: EnvironmentDeployPrincipalMaterial | undefined,
   fileContent: string,
 ): Promise<string> {
+  if (entry.folder !== undefined && entry.kind === "directory") {
+    return await materializeVolumeFolder(layout, entry, ownership);
+  }
   assertSourcePathConfined(layout, entry, ownership);
   let hostPath = entry.sourcePath ?? baseDir;
 
@@ -339,4 +370,53 @@ export function storageHostPath(
     locationId,
     "data",
   );
+}
+
+/** The user and group ids a container runs as to write into an owner's volume. */
+export type VolumeOwnerIds = ReadonlyMap<
+  string,
+  { uid: number; gid: number }
+>;
+
+/**
+ * Ids of the site owner behind each volume folder, by storage id. A container
+ * that mounts the folder is run as these ids (unless its own compose file
+ * names a user), so what it writes belongs to the owner the SFTP login and the
+ * backups see. The ids come from the deploy's principal material when it names
+ * them, else from the account on this host.
+ */
+export async function resolveVolumeOwnerIds(
+  entries: readonly EnvironmentDeployStorageMaterial[],
+  principals: readonly EnvironmentDeployPrincipalMaterial[] | undefined,
+  runFn?: RunFn,
+): Promise<VolumeOwnerIds> {
+  const byId = principalById(
+    principals as EnvironmentDeployPrincipalMaterial[],
+  );
+  const owners = new Map<string, { uid: number; gid: number }>();
+  const out = new Map<string, { uid: number; gid: number }>();
+  for (const entry of entries) {
+    if (entry.folder === undefined || entry.kind !== "directory") continue;
+    const owner = entry.folder.owner;
+    let ids = owners.get(owner);
+    if (ids === undefined) {
+      // The account on this host is the truth; the deploy's own ids only
+      // stand in before the account exists.
+      const material = entry.principalId
+        ? byId.get(entry.principalId)
+        : undefined;
+      ids = await lookupPrincipalIds(owner, runFn) ??
+        (material?.uid !== undefined && material.gid !== undefined
+          ? { uid: material.uid, gid: material.gid }
+          : undefined);
+      if (ids === undefined) {
+        throw new Error(
+          `storage ${entry.storageId}: the site owner ${owner} has no account on this host yet`,
+        );
+      }
+      owners.set(owner, ids);
+    }
+    out.set(entry.storageId, ids);
+  }
+  return out;
 }

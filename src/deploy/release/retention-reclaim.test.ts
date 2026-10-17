@@ -219,3 +219,95 @@ test("reclaimRemovedReleaseTrees stringifies a non-Error runner failure", async 
   assertEquals(removed, []);
   assertEquals(lines[0]?.includes("sudo exploded"), true);
 });
+
+const FOLDER_SERVICE = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+const IN_FOLDER: ReleaseTreeRef = {
+  serviceId: FOLDER_SERVICE,
+  username: "alice",
+  folder: { owner: "alice", scope: "production", slug: "example.com" },
+};
+
+test("reclaimRemovedReleaseTrees removes a service folder, its record and its daemon state", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-folder-" });
+  try {
+    for (const dir of ["release-records", "release-build", "folders"]) {
+      await Deno.mkdir(join(stateDir, dir), { recursive: true });
+    }
+    await Deno.mkdir(join(stateDir, "release-records", FOLDER_SERVICE));
+    await Deno.mkdir(join(stateDir, "release-build", FOLDER_SERVICE));
+    await Deno.mkdir(join(stateDir, "release-build", "other"));
+    await Deno.writeTextFile(
+      join(stateDir, "folders", `${FOLDER_SERVICE}.json`),
+      "{}",
+    );
+    const { run, calls } = captureRun();
+    const removed = await reclaimRemovedReleaseTrees({
+      layout: { ...LAYOUT, daemonStateDir: stateDir },
+      previous: [IN_FOLDER],
+      currentServiceIds: new Set(),
+      runFn: run,
+    });
+    const folder = "/srv/users/alice/production/services/example.com";
+    assertEquals(removed, [folder]);
+    assertEquals(calls.map((c) => c.args), [["-n", "rm", "-rf", "--", folder]]);
+    assertEquals(
+      (await Array.fromAsync(Deno.readDir(join(stateDir, "folders")))).length,
+      0,
+    );
+    assertEquals(
+      (await Array.fromAsync(Deno.readDir(join(stateDir, "release-records"))))
+        .length,
+      0,
+    );
+    assertEquals(
+      (await Array.fromAsync(Deno.readDir(join(stateDir, "release-build"))))
+        .map((e) => e.name),
+      ["other"],
+    );
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("reclaimRemovedReleaseTrees keeps the records of a folder that would not go", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-kept-" });
+  try {
+    await Deno.mkdir(join(stateDir, "folders"));
+    await Deno.writeTextFile(
+      join(stateDir, "folders", `${FOLDER_SERVICE}.json`),
+      "{}",
+    );
+    const { run } = captureRun(false);
+    const out: string[] = [];
+    const removed = await reclaimRemovedReleaseTrees({
+      layout: { ...LAYOUT, daemonStateDir: stateDir },
+      previous: [IN_FOLDER],
+      currentServiceIds: new Set(),
+      runFn: run,
+      onOutput: (_stream, line) => out.push(line),
+    });
+    assertEquals(removed, []);
+    assertEquals(out.length, 1);
+    await Deno.stat(join(stateDir, "folders", `${FOLDER_SERVICE}.json`));
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("reclaimRemovedReleaseTrees skips a folder that breaks the rules instead of removing a path", async () => {
+  const { run, calls } = captureRun();
+  const out: string[] = [];
+  const removed = await reclaimRemovedReleaseTrees({
+    layout: LAYOUT,
+    previous: [{
+      ...IN_FOLDER,
+      folder: { owner: "alice", scope: "home", slug: "x" },
+    }],
+    currentServiceIds: new Set(),
+    runFn: run,
+    onOutput: (_stream, line) => out.push(line),
+  });
+  assertEquals(removed, []);
+  assertEquals(calls, []);
+  assertEquals(out.length, 1);
+});

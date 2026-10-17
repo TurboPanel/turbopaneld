@@ -693,3 +693,40 @@ test("a recorded server.js start renders the same unit as no recorded start", ()
     } node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 4100\n`,
   );
 });
+
+test("nativeAppUnitContent runs out of the service folder and may write its shared/ and logs/", () => {
+  const folder = {
+    owner: "appuser",
+    scope: "production",
+    slug: "api.example.com",
+  };
+  const root = "/srv/users/appuser/production/services/api.example.com";
+  const content = nativeAppUnitContent({
+    layout,
+    app,
+    username: "appuser",
+    folder,
+    environmentId: "env-1",
+    startCommand: "node server.mjs",
+  });
+  assertStringIncludes(content, `WorkingDirectory=${root}/current`);
+  assertStringIncludes(content, `ReadWritePaths=${root}/shared ${root}/logs`);
+  assertStringIncludes(
+    content,
+    `Environment=XDG_CACHE_HOME=${root}/shared/.cache`,
+  );
+  assertStringIncludes(content, "Environment=HOME=/srv/users/appuser/home");
+  assertEquals(content.includes("/sites/"), false);
+});
+
+test("nativeAppUnitContent keeps the older tree without a folder", () => {
+  const content = nativeAppUnitContent({
+    layout,
+    app,
+    username: "appuser",
+    environmentId: "env-1",
+  });
+  const root = "/srv/users/appuser/sites/svc-native-1";
+  assertStringIncludes(content, `WorkingDirectory=${root}/current`);
+  assertStringIncludes(content, `ReadWritePaths=${root}/shared\n`);
+});

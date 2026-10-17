@@ -15,14 +15,13 @@ import {
   safeConfigLine,
   safeConfigToken,
 } from "../../contracts/config-values.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   principalDataDir,
-  principalHomePath,
   principalTmpDir,
   principalUserHome,
-  siteCurrentSymlink,
-  siteSharedDir,
+  serviceTree,
 } from "../../paths/layout.ts";
 import {
   resolveNativeAppRuntimeStartCommand,
@@ -641,6 +640,8 @@ export type NativeAppUnitOpts = {
   >;
   app: EnvironmentDeployNativeAppService;
   username: string;
+  /** The service folder when the control plane sent one; else the older tree. */
+  folder?: FolderRefParts;
   environmentId: string;
   /** Resolved from `sourceMaterial[].build.startCommand`, when the author set one. */
   startCommand?: string;
@@ -683,9 +684,13 @@ export type NativeAppUnitOpts = {
  */
 export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const { app, username } = opts;
-  const home = principalHomePath(opts.layout, username);
-  const workingDir = siteCurrentSymlink(home, app.serviceId);
-  const sharedDir = siteSharedDir(home, app.serviceId);
+  const tree = serviceTree(opts.layout, {
+    serviceId: app.serviceId,
+    username,
+    ...(opts.folder === undefined ? {} : { folder: opts.folder }),
+  });
+  const workingDir = tree.currentLink;
+  const sharedDir = tree.sharedDir;
   const group = principalUnixGroupName(username);
   const target = nativeAppRuntimeTarget(opts.layout, app);
   const nodeBinDir = target.binDir;
@@ -782,7 +787,9 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     "AmbientCapabilities=",
     // Its own site's shared/: nothing else (not the owner's home/, data/ or
     // tmp/). Under ProtectSystem=strict every other path stays read-only.
-    `ReadWritePaths=${sharedDir}`,
+    `ReadWritePaths=${
+      [sharedDir, ...(tree.logsDir === null ? [] : [tree.logsDir])].join(" ")
+    }`,
   ];
 
   if (app.resources?.cpus !== undefined) {
