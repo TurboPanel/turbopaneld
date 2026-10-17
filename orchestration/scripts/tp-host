@@ -275,7 +275,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/ansible) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
   esac
   return 1
 }
@@ -573,13 +573,138 @@ tp_home_rel() {
   esac
 }
 
+# --- folder names -------------------------------------------------------------
+# The rules of src/contracts/directory-names.ts, in shell. This helper may be
+# tighter than the daemon and the control plane, never looser; a test runs the
+# shared vectors (src/contracts/layout-vectors.json) through asset-path.
+
+# Names an environment may not take (RESERVED_SCOPE_NAMES). `common` is a scope
+# of its own, not an environment.
+TP_RESERVED_SCOPES=" common home tmp services volumes data sites backup backups logs cache run var etc bin root public releases current shared lost-found tmp-staging "
+
+# A site owner's Linux user: lowercase, up to 28, no `tp` or `systemd-` prefix,
+# no `-grp` suffix, no trailing or doubled dash. The host's own account names
+# are a separate list (tp_reserved_name).
+tp_owner_shape_ok() {
+  case "$1" in
+    ''|[!a-z_]*|*[!a-z0-9_-]*|*-|*--*|*-grp|tp*|systemd-*) return 1 ;;
+  esac
+  [ "${#1}" -le 28 ]
+}
+
+tp_environment_name_ok() {
+  case "$1" in
+    ''|[!a-z0-9]*|*[!a-z0-9_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 32 ] || return 1
+  case "$TP_RESERVED_SCOPES" in
+    *" $1 "*) return 1 ;;
+  esac
+  return 0
+}
+
+# A scope folder: `common` or an environment name.
+tp_scope_ok() {
+  [ "$1" = "common" ] || tp_environment_name_ok "$1"
+}
+
+# A service or volume folder name: letters, digits, dot, underscore, dash;
+# starts and ends with a letter or digit; never `..`; up to 63.
+tp_folder_name_ok() {
+  case "$1" in
+    ''|[!a-z0-9]*|*[!a-z0-9._-]*|*[!a-z0-9]|*..*) return 1 ;;
+  esac
+  [ "${#1}" -le 63 ]
+}
+
+# A lowercase canonical UUID: every id that forms a path, a lock or a staging name.
+tp_uuid_ok() {
+  case "$1" in
+    ????????-????-????-????-????????????) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$1" |
+    LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+# The folder a path below a scope names, split. REL is the path relative to the
+# home: `<scope>/services/<slug>[/<below>]`. Sets _sv_scope, _sv_slug and
+# _sv_below (empty for the service folder itself); fails for anything else.
+tp_service_rel() {
+  _sv_scope="${1%%/*}"
+  tp_scope_ok "$_sv_scope" || return 1
+  [ "$_sv_scope" != "$1" ] || return 1
+  _sv_rest="${1#*/}"
+  case "$_sv_rest" in
+    services/?*) ;;
+    *) return 1 ;;
+  esac
+  _sv_rest="${_sv_rest#services/}"
+  _sv_slug="${_sv_rest%%/*}"
+  tp_folder_name_ok "$_sv_slug" || return 1
+  _sv_below=""
+  [ "$_sv_slug" = "$_sv_rest" ] || _sv_below="${_sv_rest#*/}"
+  return 0
+}
+
+# A root-owned folder of the scope tree: <scope>, <scope>/services,
+# <scope>/volumes, a service folder, its releases/ and one release.
+tp_scope_structural() {
+  _ss_scope="${1%%/*}"
+  tp_scope_ok "$_ss_scope" || return 1
+  [ "$_ss_scope" != "$1" ] || return 0
+  case "${1#*/}" in
+    services|volumes) return 0 ;;
+  esac
+  tp_service_rel "$1" || return 1
+  case "$_sv_below" in
+    ''|releases) return 0 ;;
+    releases/*/*) return 1 ;;
+    releases/?*) return 0 ;;
+  esac
+  return 1
+}
+
+# Where in a home a path may sit when something is created or re-owned there.
+# Depth 1 is home, data, tmp, the older sites and volumes, or a scope folder;
+# below a scope only services/ and volumes/; below those a folder name; below
+# a service folder only its fixed entries. Deeper is inside an owner leaf.
+tp_home_shape_ok() {
+  [ "$1" != "$R_PRINCIPALS" ] || return 0
+  _sh_owner="$(tp_home_owner_of "$1")" || return 0
+  [ "$_sh_owner" != ".tp-staging" ] || return 0
+  _sh_rel="$(tp_home_rel "$1")" || return 0
+  _sh_top="${_sh_rel%%/*}"
+  case "$_sh_top" in
+    ''|home|data|tmp|sites|volumes) return 0 ;;
+  esac
+  tp_scope_ok "$_sh_top" || return 1
+  [ "$_sh_top" != "$_sh_rel" ] || return 0
+  _sh_rest="${_sh_rel#*/}"
+  case "$_sh_rest" in
+    services|volumes) return 0 ;;
+    services/*|volumes/*) ;;
+    *) return 1 ;;
+  esac
+  _sh_kind="${_sh_rest%%/*}"
+  _sh_rest="${_sh_rest#*/}"
+  _sh_name="${_sh_rest%%/*}"
+  tp_folder_name_ok "$_sh_name" || return 1
+  [ "$_sh_name" != "$_sh_rest" ] || return 0
+  [ "$_sh_kind" = "services" ] || return 0
+  case "${_sh_rest#*/}" in
+    releases|releases/*|current|shared|shared/*|public|public/*|logs|logs/*|.turbopanel-hosting|.turbopanel-hosting/*) return 0 ;;
+  esac
+  return 1
+}
+
 # A root-owned directory of a home's skeleton.
 tp_home_structural() {
   _hs_rel="$(tp_home_rel "$1")" || return 1
   case "$_hs_rel" in
     ''|sites|volumes) return 0 ;;
     sites/*) ;;
-    *) return 1 ;;
+    *) tp_scope_structural "$_hs_rel"; return ;;
   esac
   _hs_rest="${_hs_rel#sites/}"
   _hs_rest="${_hs_rest#*/}"
@@ -588,6 +713,19 @@ tp_home_structural() {
     releases) return 0 ;;
     releases/*/*) return 1 ;;
     releases/?*) return 0 ;;
+  esac
+  return 1
+}
+
+# The scaffolding the daemon never removes: scope folders and the services/
+# and volumes/ folders in them (the owner cannot, they are root's).
+tp_home_scaffold() {
+  _sc_rel="$(tp_home_rel "$1")" || return 1
+  _sc_scope="${_sc_rel%%/*}"
+  tp_scope_ok "$_sc_scope" || return 1
+  [ "$_sc_scope" != "$_sc_rel" ] || return 0
+  case "${_sc_rel#*/}" in
+    services|volumes) return 0 ;;
   esac
   return 1
 }
@@ -637,9 +775,15 @@ tp_dir_sealed_at() {
 
 # A release directory (or anything in one) appears only through publish.
 tp_release_path() {
-  case "$(tp_home_rel "$1" || true)" in
+  _rp_rel="$(tp_home_rel "$1" || true)"
+  case "$_rp_rel" in
     sites/*/releases/?*) return 0 ;;
   esac
+  if tp_service_rel "$_rp_rel"; then
+    case "$_sv_below" in
+      releases/?*) return 0 ;;
+    esac
+  fi
   return 1
 }
 
@@ -647,10 +791,7 @@ tp_release_path() {
 # root would walk the tenant leaves below it (shared/, webroot/, home/, …).
 tp_home_recursion_ok() {
   tp_home_structural "$1" || return 0
-  case "$(tp_home_rel "$1")" in
-    sites/*/releases/?*) return 0 ;;
-  esac
-  return 1
+  tp_release_path "$1"
 }
 
 # Who may own PATH: inside a principal's home, that principal (or root / a
@@ -662,6 +803,7 @@ tp_owner_ok() {
   _oo_group="$3"
   _oo_class="$(tp_path_class "$_oo_path")" || return 1
   if [ "$_oo_class" = "principal" ]; then
+    tp_home_shape_ok "$_oo_path" || return 1
     tp_home_owner_ok "$_oo_path" "$_oo_owner" "$_oo_group" || return 1
   fi
   if [ -n "$_oo_owner" ]; then
@@ -2067,6 +2209,8 @@ tp_verb_rm() {
   tp_refuse_root_entry "$1"
   # A principal home itself is removed by the uninstaller, never by the daemon.
   [ "${1%/*}" = "$R_PRINCIPALS" ] && tp_die "refusing to remove a principal home"
+  ! tp_home_scaffold "$1" ||
+    tp_die "refusing to remove $1: a scope, services or volumes folder"
   tp_pin_parent "$1" || return 0
   if [ -n "$_rm_recursive" ]; then
     rm -rf -- "./$PIN_NAME"
@@ -2469,6 +2613,89 @@ tp_sftp_members() {
   fi | awk -F: -v g="$_sf_gid" '$4 == g { print $1 }'
 }
 
+# PATH is a root-owned directory closed to group and world writes (sshd and the
+# owner both depend on it), reported as USER's finding when it is not.
+tp_sftp_sealed_dir() {
+  tp_chroot_dir_ok "$2" ||
+    echo "$1: $2 is not a root-owned directory closed to group and world writes"
+}
+
+# PATH is a real directory (not a link) that USER's uid owns.
+tp_sftp_owner_leaf() {
+  if [ ! -d "$2" ] || [ -L "$2" ] || [ "$(stat -c '%u' -- "$2")" != "$3" ]; then
+    echo "$1: $2 is not a directory the owner owns"
+  fi
+}
+
+# One service folder of the scope tree: its releases/ and hosting files are
+# root's, `current` is a root-owned link, and only public/, shared/ and logs/
+# belong to the owner. Anything else in it is a finding.
+tp_sftp_service_check() {
+  _ssk_user="$1"
+  _ssk_dir="$2"
+  _ssk_uid="$3"
+  tp_sftp_sealed_dir "$_ssk_user" "$_ssk_dir"
+  [ -d "$_ssk_dir" ] && [ ! -L "$_ssk_dir" ] || return 0
+  for _ssk_entry in "$_ssk_dir"/* "$_ssk_dir"/.turbopanel-hosting; do
+    [ -e "$_ssk_entry" ] || [ -L "$_ssk_entry" ] || continue
+    case "${_ssk_entry##*/}" in
+      releases) tp_sftp_sealed_dir "$_ssk_user" "$_ssk_entry" ;;
+      .turbopanel-hosting) tp_sftp_sealed_dir "$_ssk_user" "$_ssk_entry" ;;
+      current)
+        if [ ! -L "$_ssk_entry" ] || [ "$(stat -c '%u' -- "$_ssk_entry")" != "$ROOT_UID" ]; then
+          echo "$_ssk_user: $_ssk_entry is not a root-owned link"
+        fi
+        ;;
+      public|shared|logs) tp_sftp_owner_leaf "$_ssk_user" "$_ssk_entry" "$_ssk_uid" ;;
+      *) echo "$_ssk_user: $_ssk_entry is not part of a service folder" ;;
+    esac
+  done
+}
+
+# The scope tree of one home: <scope>/{services,volumes}/<name>. Every folder
+# down to a service is root's and sealed; the owner writes only public/,
+# shared/, logs/ and the volume folders themselves. The older home/data/tmp and
+# sites/volumes entries are not looked at here.
+tp_sftp_scope_check() {
+  _sk_user="$1"
+  _sk_home="$2"
+  _sk_uid="$3"
+  for _sk_scope in "$_sk_home"/*; do
+    [ -e "$_sk_scope" ] || [ -L "$_sk_scope" ] || continue
+    case "${_sk_scope##*/}" in
+      home|tmp|data|sites|volumes) continue ;;
+    esac
+    if ! tp_scope_ok "${_sk_scope##*/}"; then
+      echo "$_sk_user: $_sk_scope is not a scope folder"
+      continue
+    fi
+    tp_sftp_sealed_dir "$_sk_user" "$_sk_scope"
+    [ -d "$_sk_scope" ] && [ ! -L "$_sk_scope" ] || continue
+    for _sk_kind in services volumes; do
+      [ -e "$_sk_scope/$_sk_kind" ] || [ -L "$_sk_scope/$_sk_kind" ] || continue
+      tp_sftp_sealed_dir "$_sk_user" "$_sk_scope/$_sk_kind"
+      [ -d "$_sk_scope/$_sk_kind" ] && [ ! -L "$_sk_scope/$_sk_kind" ] || continue
+      for _sk_asset in "$_sk_scope/$_sk_kind"/*; do
+        [ -e "$_sk_asset" ] || [ -L "$_sk_asset" ] || continue
+        if ! tp_folder_name_ok "${_sk_asset##*/}"; then
+          echo "$_sk_user: $_sk_asset is not a valid folder name"
+        elif [ "$_sk_kind" = "services" ]; then
+          tp_sftp_service_check "$_sk_user" "$_sk_asset" "$_sk_uid"
+        else
+          tp_sftp_owner_leaf "$_sk_user" "$_sk_asset" "$_sk_uid"
+        fi
+      done
+    done
+    for _sk_entry in "$_sk_scope"/*; do
+      [ -e "$_sk_entry" ] || [ -L "$_sk_entry" ] || continue
+      case "${_sk_entry##*/}" in
+        services|volumes) ;;
+        *) echo "$_sk_user: $_sk_entry is not part of a scope folder" ;;
+      esac
+    done
+  done
+}
+
 # One member: a principal on the new layout, and in the files-only level only.
 tp_sftp_member_check() {
   _sm_user="$1"
@@ -2489,6 +2716,7 @@ tp_sftp_member_check() {
   fi
   tp_principal_home_ok "$(tp_getent passwd "$_sm_user" | cut -d: -f6)" "$_sm_user" ||
     echo "$_sm_user: passwd home is not $_sm_home/home"
+  tp_sftp_scope_check "$_sm_user" "$_sm_home" "$_sm_uid"
   if tp_group_members "$SHELL_GROUP" | grep -qx -- "$_sm_user"; then
     echo "$_sm_user: in both $SFTP_GROUP and $SHELL_GROUP; the jail would leave it no shell"
   fi
@@ -2795,10 +3023,7 @@ tp_new_name_ok() {
   # Never <name>-grp: that is an older site owner's group name (groupmod
   # renames it). Never all digits: getent would read it as an id.
   case "$1" in *[!0-9]*) ;; *) return 1 ;; esac
-  case "$1" in
-    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*|*-grp) return 1 ;;
-  esac
-  [ "${#1}" -le 32 ] || return 1
+  tp_owner_shape_ok "$1" || return 1
   ! tp_reserved_name "$1" || return 1
   # Its slice must not be one of the platform's (tp_principal_slice).
   tp_principal_slice "$1" >/dev/null || return 1
@@ -3026,6 +3251,12 @@ tp_retire_refs_check() {
   if [ -d "./$1/sites" ] && [ -n "$(ls -A -- "./$1/sites")" ]; then
     tp_die "principal-remove: $1 still has site trees under $R_PRINCIPALS/$1/sites"
   fi
+  for _rs_dir in "./$1"/*/services; do
+    [ -d "$_rs_dir" ] && [ ! -L "$_rs_dir" ] || continue
+    if [ -n "$(ls -A -- "$_rs_dir")" ]; then
+      tp_die "principal-remove: $1 still has service folders under $R_PRINCIPALS/${_rs_dir#./}"
+    fi
+  done
 }
 
 # The account is a principal this script created: ids in the band, its own
@@ -3859,6 +4090,23 @@ tp_verb_site_usage() {
   done
 }
 
+# --- asset folder names ----------------------------------------------------------
+# asset-path OWNER SCOPE KIND SLUG prints the host path of one asset folder and
+# changes nothing. It is the shell twin of assetFolder() in src/paths/layout.ts
+# and refuses what the shared rules refuse (a test feeds it the shared vectors).
+tp_verb_asset_path() {
+  [ $# -eq 4 ] || tp_die "asset-path: only asset-path OWNER SCOPE service|volume SLUG"
+  tp_owner_shape_ok "$1" || tp_die "asset-path: refusing owner $1"
+  tp_scope_ok "$2" || tp_die "asset-path: refusing scope $2"
+  case "$3" in
+    service) _ap_kind=services ;;
+    volume) _ap_kind=volumes ;;
+    *) tp_die "asset-path: refusing kind $3" ;;
+  esac
+  tp_folder_name_ok "$4" || tp_die "asset-path: refusing folder name $4"
+  printf '%s\n' "$R_PRINCIPALS/$1/$2/$_ap_kind/$4"
+}
+
 # --- release publish -----------------------------------------------------------
 # A release reaches <home>/sites/<svc>/releases/<id> only through here.
 #
@@ -3875,6 +4123,17 @@ tp_verb_site_usage() {
 #                          the shared link, drops the top to 0550 and swaps
 #                          current.
 #
+# The same two verbs take the new layout when given six words:
+#
+#   publish-open OWNER SCOPE SLUG SERVICE-ID RELEASE-ID PUBLISH-ID
+#   publish      OWNER SCOPE SLUG SERVICE-ID RELEASE-ID PUBLISH-ID
+#
+# The release goes to <home>/<scope>/services/<slug>/releases/<release id>
+# through the root-owned chain home, scope, services, service, releases. The
+# staging leaf is named by the PUBLISH-ID alone (a UUID: nothing is parsed back
+# out of a name), the lock by the SERVICE-ID, and the three ids must be
+# lowercase UUIDs. The three-word form stays until the serving code moves.
+#
 # Root never reads a name another account can still change: the copy is the
 # caller's, and every check runs on the frozen, root-owned tree. The principal
 # cannot reach the staging area at all.
@@ -3890,9 +4149,18 @@ tp_release_id_ok() {
   [ "${#1}" -le 64 ]
 }
 
-# Sets PUB_USER, PUB_ID, PUB_NAME, PUB_LEAF and PUB_SITE.
+# Sets PUB_USER, PUB_ID, PUB_NAME, PUB_LEAF, PUB_SITE, PUB_LOCK (the lock file's
+# name) and PUB_CHAIN (the directories to enter, outermost first).
 tp_publish_args() {
-  [ $# -eq 3 ] || tp_die "$_verb: only $_verb PRINCIPAL SERVICE-ID RELEASE-ID"
+  case $# in
+    3) tp_publish_args_old "$@" ;;
+    6) tp_publish_args_folder "$@" ;;
+    *) tp_die "$_verb: only $_verb PRINCIPAL SERVICE-ID RELEASE-ID or $_verb OWNER SCOPE SLUG SERVICE-ID RELEASE-ID PUBLISH-ID" ;;
+  esac
+  PUB_LEAF="$R_STAGING/$PUB_NAME"
+}
+
+tp_publish_args_old() {
   tp_is_principal "$1" || tp_die "$_verb: $1 is not a principal"
   tp_principal_own_group "$1" || tp_die "$_verb: $1 has no group of its own"
   tp_release_id_ok "$2" || tp_die "$_verb: refusing service id $2"
@@ -3900,8 +4168,26 @@ tp_publish_args() {
   PUB_USER="$1"
   PUB_ID="$3"
   PUB_NAME="$1.$2.$3"
-  PUB_LEAF="$R_STAGING/$PUB_NAME"
+  PUB_LOCK="$PUB_NAME"
   PUB_SITE="$R_PRINCIPALS/$1/sites/$2"
+  PUB_CHAIN="$R_PRINCIPALS/$1 $R_PRINCIPALS/$1/sites $PUB_SITE $PUB_SITE/releases"
+}
+
+tp_publish_args_folder() {
+  tp_owner_shape_ok "$1" || tp_die "$_verb: refusing owner $1"
+  tp_is_principal "$1" || tp_die "$_verb: $1 is not a principal"
+  tp_principal_own_group "$1" || tp_die "$_verb: $1 has no group of its own"
+  tp_scope_ok "$2" || tp_die "$_verb: refusing scope $2"
+  tp_folder_name_ok "$3" || tp_die "$_verb: refusing folder name $3"
+  tp_uuid_ok "$4" || tp_die "$_verb: refusing service id $4"
+  tp_uuid_ok "$5" || tp_die "$_verb: refusing release id $5"
+  tp_uuid_ok "$6" || tp_die "$_verb: refusing publish id $6"
+  PUB_USER="$1"
+  PUB_ID="$5"
+  PUB_NAME="$6"
+  PUB_LOCK="$4"
+  PUB_SITE="$R_PRINCIPALS/$1/$2/services/$3"
+  PUB_CHAIN="$R_PRINCIPALS/$1 $R_PRINCIPALS/$1/$2 $R_PRINCIPALS/$1/$2/services $PUB_SITE $PUB_SITE/releases"
 }
 
 # Enter the staging area, creating (or repairing) it root:<caller group> 0710:
@@ -3925,9 +4211,9 @@ tp_publish_lock() {
   [ -d "$_lk_dir" ] && [ ! -L "$_lk_dir" ] &&
     [ "$(stat -c '%u %a' "$_lk_dir")" = "$ROOT_UID 700" ] ||
     tp_die "refusing lock directory $_lk_dir"
-  exec 8>>"$_lk_dir/$PUB_NAME.lock"
+  exec 8>>"$_lk_dir/$PUB_LOCK.lock"
   flock -w "$PUBLISH_LOCK_WAIT_SEC" 8 ||
-    tp_die "$_verb: $PUB_NAME is held by another publish"
+    tp_die "$_verb: $PUB_LOCK is held by another publish"
 }
 
 tp_verb_publish_open() {
@@ -3935,7 +4221,7 @@ tp_verb_publish_open() {
   tp_publish_lock
   tp_staging_pin
   # Leaves no publish came back for (a daemon that died mid-deploy).
-  find . -mindepth 1 -maxdepth 1 -type d -name '?*.?*.?*' -mmin +"$PUBLISH_STALE_MIN" \
+  find . -mindepth 1 -maxdepth 1 -type d -mmin +"$PUBLISH_STALE_MIN" \
     -exec rm -rf -- {} +
   # A leaf a dead publish left behind is root's or the caller's: start clean.
   rm -rf -- "./$PUB_NAME"
@@ -3997,10 +4283,9 @@ tp_publish_links() {
 }
 
 # Enter releases/ through a chain root owns and nobody else can write: the
-# home, sites/, sites/<svc>/ and releases/.
+# home, (sites/ or the scope and its services/), the service and releases/.
 tp_publish_pin_releases() {
-  for _pr in "$R_PRINCIPALS/$PUB_USER" "$R_PRINCIPALS/$PUB_USER/sites" \
-    "$PUB_SITE" "$PUB_SITE/releases"; do
+  for _pr in $PUB_CHAIN; do
     tp_pin_dir "$_pr" || tp_die "publish: no directory $_pr"
     tp_dir_sealed_at . ||
       tp_die "publish: refusing $_pr: not sealed (root-owned, not group- or world-writable)"
@@ -4267,6 +4552,7 @@ case "$_verb" in
   build-return) tp_verb_build_return "$@" ;;
   build-watch) tp_verb_build_watch "$@" ;;
   build-handover) tp_verb_build_handover "$@" ;;
+  asset-path) tp_verb_asset_path "$@" ;;
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
