@@ -1,7 +1,7 @@
 /**
  * Did this host just come back from a power cut or crash?
  *
- * The daemon keeps one small record, `<stateDir>/managed/host-boot.json`:
+ * The daemon keeps one small record, `<stateDir>/system/host-boot.json`:
  * the kernel's `boot_id` of the boot it last ran on, and a stamp it writes
  * only on a clean shutdown (SIGTERM / SIGINT). At start it compares:
  *

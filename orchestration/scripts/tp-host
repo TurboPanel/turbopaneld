@@ -3827,6 +3827,10 @@ tp_verb_build_run() {
     "$P/run/systemd/resolve/io.systemd.Resolve" "$P/run/dbus/system_bus_socket"; do
     set -- "$@" -p InaccessiblePaths="-$_br_hide"
   done
+  # A moved backup root hides the default place too, in case backups remain there.
+  if [ "$R_BACKUP" != "$P/backup" ]; then
+    set -- "$@" -p InaccessiblePaths="-$P/backup"
+  fi
   set -- "$@" -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
     -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectHostname=yes \
     -p LockPersonality=yes -p RestrictRealtime=yes -p RestrictNamespaces=yes \

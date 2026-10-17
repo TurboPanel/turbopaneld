@@ -89,7 +89,7 @@ narrowed at runtime; narrowing them would take a second compiled binary.
   `BackupRunReportMessage`), mode 0640, written as `.<runId>.json.tmp` then
   renamed. Readers skip dot-prefixed names. The reporter deletes a file only
   after the control plane acks it.
-- Artifacts: `<backupDir>/<managedId>/policy-<policyId>/<backupId>.<ext>`
+- Artifacts: `<backupDir>/managed/<managedId>/policy-<policyId>/<backupId>.<ext>`
   (`managed/engine-paths.ts`), pruned to the policy's `retentionKeep` within
   that directory only. Storage copies: `<backupDir>/volumes/<copyId>/<backupId>.tar.gz`
   (manual) and `<backupDir>/volumes/<copyId>/policy-<policyId>/…` (scheduled).

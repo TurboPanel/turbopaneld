@@ -6,6 +6,13 @@
 # daemon-layout role already owns). It never restarts dockerd. Switching the var off removes the
 # unit, the script and the TP-EGRESS chain again.
 
+# Created only if missing (no owner or mode): the daemon-layout role owns it.
+- name: Ensure the install lib folder exists for the egress block script
+  ansible.builtin.file:
+    path: "{{ turbopanel_docker_egress_script | dirname }}"
+    state: directory
+  when: turbopanel_docker_egress_guard | bool
+
 - name: Install the egress block script
   ansible.builtin.copy:
     src: turbopanel-docker-egress
