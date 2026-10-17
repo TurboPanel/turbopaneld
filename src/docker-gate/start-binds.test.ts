@@ -76,6 +76,9 @@ test("the site owner's data places bind, nothing else under their home does", as
     "/srv/users/alice/production/services/example.com/releases/r1",
     "/srv/users/alice/production/services/example.com/public",
     "/srv/users/alice/.hidden/volumes/uploads",
+    "/srv/users/alice/home/volumes/x",
+    "/srv/users/alice/sites/volumes/x/.turbopanel-hosting",
+    "/srv/users/alice/Prod/volumes/x",
     "/srv/users/.tp-staging/alice.s1.r1/data",
     "/srv/users/alice/datax",
   ];

@@ -30,6 +30,7 @@ import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import {
+  assertSafeServiceId,
   RELEASE_RECORDS_DIRNAME,
   RELEASE_SCRATCH_DIRNAME,
   type ReleasePaths,
@@ -264,6 +265,7 @@ export async function reclaimServiceTree(
 ): Promise<string | null> {
   let path: string;
   try {
+    assertSafeServiceId(ref.serviceId);
     path = serviceTree(layout, ref).root;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -285,11 +287,6 @@ export async function reclaimServiceTree(
       );
       return null;
     }
-    if (ref.folder !== undefined) {
-      await removeFolderRecord(layout, ref.serviceId);
-    }
-    await removeServiceStateDirs(layout, ref.serviceId, onOutput);
-    return path;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     onOutput?.(
@@ -298,6 +295,21 @@ export async function reclaimServiceTree(
     );
     return null;
   }
+  // The folder is gone: a failure tidying the records is logged, not reported
+  // as a folder that stayed.
+  try {
+    if (ref.folder !== undefined) {
+      await removeFolderRecord(layout, ref.serviceId);
+    }
+    await removeServiceStateDirs(layout, ref.serviceId, onOutput);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `release records for ${ref.serviceId} could not be removed: ${message}`,
+    );
+  }
+  return path;
 }
 
 /**

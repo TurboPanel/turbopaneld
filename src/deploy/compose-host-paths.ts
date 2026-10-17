@@ -567,9 +567,11 @@ async function ownerTreeOutcome(
       `${label} cannot be resolved on this host (${(err as Error).message})`,
     );
   }
-  return isWithin(real, realVolume) ? { kind: "accepted" } : finding(
-    `${label} resolves through a symlink to ${real}, outside its volume folder`,
-  );
+  return isWithin(real, realVolume)
+    ? { kind: "checked", checked: { entry, real } }
+    : finding(
+      `${label} resolves through a symlink to ${real}, outside its volume folder`,
+    );
 }
 
 /**

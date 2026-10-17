@@ -17,6 +17,7 @@ import {
   materializeStorageEntries,
   resolveVolumeOwnerIds,
 } from "./materialize-storage.ts";
+import { ownedVolumeRoots } from "../commands/deploy-environment.ts";
 import type { RunFn } from "./ensure-principal.ts";
 
 const test = Deno.test.bind(Deno);
@@ -363,4 +364,58 @@ test("an older volume path the control plane named stays allowed", () =>
     const older = join(f.home, "alice", "volumes", "st1");
     await Deno.mkdir(older, { recursive: true });
     await confine(f, older, false, [older]);
+  }));
+
+test("only a path volume under the owner's volumes folder widens the bind allowlist", () => {
+  const layout = { principalHomeRoot: "/srv/users" };
+  const roots = ownedVolumeRoots(layout, {
+    storageMaterial: [
+      volume(),
+      volume({ folder: undefined, sourcePath: "/srv/users/bob/volumes/a" }),
+      volume({
+        folder: undefined,
+        sourcePath: "/srv/users/bob/sites/x/releases",
+      }),
+      volume({
+        folder: undefined,
+        provider: "docker",
+        sourcePath: "/srv/users/bob/volumes/b",
+      }),
+      volume({
+        folder: undefined,
+        sourcePath: "/srv/users/bob/volumes/../sites/x",
+      }),
+    ],
+  });
+  assertEquals(roots, [
+    "/srv/users/alice/production/volumes/uploads",
+    "/srv/users/bob/volumes/a",
+  ]);
+});
+
+test("two binds, one inside the other, are refused as a nested writable bind", () =>
+  withTree(async (f) => {
+    const own = join(f.home, "alice", "production", "volumes", "uploads");
+    await Deno.mkdir(join(own, "sub"));
+    const scan = collectResolvedHostPaths({
+      services: {
+        web: {
+          volumes: [
+            { type: "bind", source: own, target: "/a" },
+            { type: "bind", source: join(own, "sub"), target: "/b" },
+          ],
+        },
+      },
+    });
+    await assertRejects(
+      () =>
+        assertComposeHostPathsConfined([scan], {
+          deploymentDir: f.dir,
+          stageDir: f.stage,
+          hostLevelApproved: false,
+          ownerTree: { homeRoot: f.home, volumes: [own] },
+        }),
+      ComposeHostPathError,
+      "writable bind",
+    );
   }));

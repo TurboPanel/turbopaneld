@@ -8,7 +8,7 @@ import {
   type DeployCancelToken,
 } from "../deploy/deploy-cancel.ts";
 import { encodeHex } from "@std/encoding/hex";
-import { join } from "@std/path";
+import { join, normalize } from "@std/path";
 import {
   composeFileArgs,
   DEPLOYMENT_MANIFEST_FILENAME,
@@ -1529,7 +1529,17 @@ export function ownedVolumeRoots(
   for (const entry of payload.storageMaterial ?? []) {
     if (entry.folder !== undefined) {
       roots.push(volumeFolder(layout, entry.folder));
-    } else if (entry.sourcePath !== undefined) {
+    } else if (
+      entry.provider === "path" && entry.kind === "directory" &&
+      entry.sourcePath !== undefined &&
+      normalize(entry.sourcePath) === entry.sourcePath &&
+      entry.sourcePath.startsWith(`${layout.principalHomeRoot}/`) &&
+      entry.sourcePath.slice(layout.principalHomeRoot.length + 1).split(
+          "/",
+        )[1] ===
+        "volumes"
+    ) {
+      // The older per-owner volume path: only `<home root>/<owner>/volumes/…`.
       roots.push(entry.sourcePath);
     }
   }

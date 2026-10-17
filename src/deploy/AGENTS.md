@@ -826,12 +826,16 @@ site owner's Linux user:
   owner's own `uid:gid` (read from the account on the host), so files it writes
   belong to the owner and the owner sees them over SFTP and in backups.
 - **A `user:` in the compose file** (any user, `root` included). The compose
-  file is never refused for it and the daemon does not rewrite it. The
-  container runs as that user, and files it creates keep that user's ids. The
-  owner can still read what group and other bits allow, and can delete or
-  rename anything in their own folder (a directory's write permission decides
-  that), but cannot change the contents or modes of a file owned by another
-  uid. The volume root stays the owner's, so the owner can always empty it.
+  file is never refused and the daemon does not rewrite it. The container runs
+  as that user, and files it creates keep that user's ids. The volume root is
+  `<owner>:<owner> 0750`, so a declared user that is neither the owner nor root
+  cannot read or write it: that container fails at runtime with a permission
+  error, and the answer is to set `user:` to the owner's ids or use a named
+  Docker volume. (A file ACL on the volume root for such a user is a possible
+  later step; it would still never chown.) `root` in the container can write
+  and its files stay root's; the owner can still delete or rename anything in
+  their own folder (a directory's write permission decides that), but cannot
+  change the contents or modes of a file owned by another uid.
 - **A named Docker volume** (provider `docker`) is outside this tree and is not
   touched; it stays the way to run an image that insists on a fixed user.
 - One container cannot mount volumes of two site owners with defaulted users;

@@ -310,6 +310,15 @@ function within(path: string, root: string): boolean {
 
 /** Directories of `<home>/` a container may bind: the owner's own data. */
 const PRINCIPAL_DATA_AREAS = new Set(["data", "tmp"]);
+/** Names under `<home>/` that are never a scope folder. */
+const PRINCIPAL_NOT_SCOPES = new Set([
+  "home",
+  "tmp",
+  "data",
+  "sites",
+  "volumes",
+  "services",
+]);
 /** Per-site directories (`sites/<serviceId>/<name>`) a container may bind. */
 const PRINCIPAL_SITE_AREAS = new Set(["shared", "webroot", "releases"]);
 
@@ -337,7 +346,8 @@ function principalViolation(
     // folder (`<scope>/services/…`): releases are sealed code and `shared/` is
     // the web side's state, so containers get their data through volumes.
     (tail[0] === "volumes" && tail.length >= 2 &&
-      !(area ?? "").startsWith(".")) ||
+      !PRINCIPAL_NOT_SCOPES.has(area ?? "") &&
+      /^[a-z0-9][a-z0-9_-]*$/.test(area ?? "")) ||
     (area === "sites" && tail.length >= 2 &&
       PRINCIPAL_SITE_AREAS.has(tail[1]))
   );

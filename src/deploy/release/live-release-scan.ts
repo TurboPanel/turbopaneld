@@ -24,6 +24,7 @@
  * recorded before they carried one — the very releases this looks for.
  */
 import { join } from "@std/path";
+import { isValidScope } from "../../contracts/directory-names.ts";
 import { writeDaemonFile } from "../../permissions/daemon-files.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import {
@@ -170,7 +171,7 @@ async function scanScopes(
   let scopes: string[];
   try {
     scopes = (await listDirNames(home, runFn)).filter((name) =>
-      !OWNER_OWN_ENTRIES.has(name)
+      !OWNER_OWN_ENTRIES.has(name) && isValidScope(name)
     );
   } catch (err) {
     findings.push({
