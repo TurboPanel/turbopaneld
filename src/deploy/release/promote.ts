@@ -39,6 +39,7 @@ import {
   relative as relativePath,
 } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { runFolderPublishVerb } from "./folder-publish.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
@@ -102,24 +103,27 @@ async function runPublishVerb(
   username: string,
   runFn: RunFn,
 ): Promise<void> {
-  // A release in a service folder names it by components and ids (six words);
-  // the older tree names it by owner, service and release (three).
-  const ref = paths.publish;
-  const serviceId = ref?.serviceId ?? basename(paths.siteDir);
-  const releaseId = ref?.releaseId ?? basename(paths.releaseDir);
-  const args = ref
-    ? [
-      ref.folder.owner,
-      ref.folder.scope,
-      ref.folder.slug,
-      serviceId,
-      releaseId,
-      ref.publishId,
-    ]
-    : [username, serviceId, releaseId];
+  // A release in a service folder names it by components and ids (six words,
+  // `./folder-publish.ts`); the older tree names it by owner, service and
+  // release (three).
+  if (paths.publish) {
+    await runFolderPublishVerb(
+      verb,
+      paths.publish.folder,
+      {
+        serviceId: paths.publish.serviceId,
+        releaseId: paths.publish.releaseId,
+        publishId: paths.publish.publishId,
+      },
+      runFn,
+    );
+    return;
+  }
+  const serviceId = basename(paths.siteDir);
+  const releaseId = basename(paths.releaseDir);
   const result = await runFn(
     "sudo",
-    hostSudoArgs(["-n", verb, ...args]),
+    hostSudoArgs(["-n", verb, username, serviceId, releaseId]),
   );
   if (!result.success) {
     throw new Error(

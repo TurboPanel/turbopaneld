@@ -306,10 +306,6 @@ const SITES: CallSite[] = [
   tpHost('src/commands/reboot.ts|["-n","systemctl","reboot"]', {
     argv: ["systemctl", "reboot"],
   }),
-  tpHost('src/commands/stop-environment.ts|["-n","rm","-rf","--",path]', {
-    argv: ["rm", "-rf", "--", SITE],
-    setup: dir(SITE),
-  }),
   tpHost(
     'src/commands/stop-environment.ts|["-n","rm","-rf","--",deploymentDir]',
     {
@@ -1144,10 +1140,15 @@ const SITES: CallSite[] = [
     argv: ["ls", "-1t", "--", `${SITE}/releases`],
     setup: dir(RELEASE),
   }),
-  tpHost('src/deploy/release/retention.ts|["-n","rm","-rf","--",path]', {
-    argv: ["rm", "-rf", "--", RELEASE],
-    setup: dir(RELEASE),
-  }),
+  // A service's whole tree: the older per-service tree or its service folder.
+  tpHost(
+    'src/deploy/release/retention.ts|["-n","rm","-rf","--",path]',
+    { argv: ["rm", "-rf", "--", SITE], setup: dir(RELEASE) },
+    {
+      argv: ["rm", "-rf", "--", FOLDER_SERVICE],
+      setup: dir(`${FOLDER_SERVICE}/releases`, `${FOLDER_SERVICE}/shared`),
+    },
+  ),
 
   // --- sites ----------------------------------------------------------------
   tpHost(

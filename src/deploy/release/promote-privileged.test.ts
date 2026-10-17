@@ -1155,12 +1155,14 @@ test("a release in a service folder is staged and published with components and 
   await withTempRelease(async (root) => {
     const folder = { owner: "appuser", scope: "production", slug: "shop.test" };
     const publishId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+    const SERVICE = "0192a8f4-3c1e-7a52-9b0d-000000000001";
+    const RELEASE = "0192a8f4-3c1e-7a52-9b0d-000000000002";
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
       {
         username: "appuser",
-        serviceId: "svc-1",
-        releaseId: "rel-1",
+        serviceId: SERVICE,
+        releaseId: RELEASE,
         folder,
         publishId,
       },
@@ -1195,8 +1197,8 @@ test("a release in a service folder is staged and published with components and 
         "appuser",
         "production",
         "shop.test",
-        "svc-1",
-        "rel-1",
+        SERVICE,
+        RELEASE,
         publishId,
       ]]);
       assertEquals(staged, { dir: paths.stagingDir, viaPublish: true });
