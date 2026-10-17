@@ -57,6 +57,34 @@ serving change in the next phase addresses the same tree without restating it):
     .turbopanel-hosting/  root:root 0711  (hosting.env / php.json: <username>:root 0400)
 ```
 
+**The scope tree** (what the serving code moves to; the tree above stays
+until it does). One function, `assetFolder` in `src/paths/layout.ts`, turns
+`{ owner, scope, kind, slug }` into a host path, and the daemon never builds
+one another way. `src/deploy/asset-folders.ts` makes the folders and keeps the
+per-asset record; `folder-publish.ts` runs the six-word publish verbs:
+
+```
+<principalHomeRoot>/.tp-staging/<publishId>/     tp 0700 until tp-host publish (a UUID)
+<principalHomeRoot>/<owner>/                     root:<owner> 0750  jail root
+  home/  tmp/                                    <owner>:<owner> 0700
+  <scope>/                                       root:<owner> 0750  environment name or common
+    services/                                    root:<owner> 0750
+      <slug>/                                    root:<owner> 0750
+        public/                                  <owner>:<engine group> 0750  (serving code)
+        releases/<releaseId>/                    root:<owner>, top 0550
+        current -> releases/<releaseId>          root-owned link
+        shared/  logs/                           <owner>:<owner> 0750
+        .turbopanel-hosting/                     root:root 0711
+    volumes/<slug>/                              <owner>:<owner> 0750
+<stateDir>/folders/<assetId>.json                tp 0640  first-created components
+```
+
+Every parent is root's, so an owner empties a leaf but cannot rename or remove
+a scope, `services`, `volumes`, service or volume folder. A command that names
+a known asset with other components fails `folder_changed` before any path is
+touched. Services are keyed by UUID everywhere a system needs a key (lock,
+staging name, unit); the slug is only the folder the owner sees.
+
 Every published release carries a relative **`shared` symlink** at its root
 (tp-host `publish`, or `linkReleaseSharedDir` where the daemon owns the
 tree), so `current/shared` is a stable

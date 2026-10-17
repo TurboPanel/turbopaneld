@@ -42,6 +42,7 @@
  * {@link RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES}.
  */
 
+import { isValidOwnerName } from "../contracts/directory-names.ts";
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
@@ -175,7 +176,6 @@ import { SYSTEMD_UNIT_DIR } from "./native/unit.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
-const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
 export type SiteApplySpec = EnvironmentDeploySite;
@@ -282,7 +282,7 @@ export function resolveSiteOwnership(
   const engineUser = siteEngineUnixUser(site.engine);
   const principal = site.principal;
   if (!principal) return { user: engineUser, group: engineUser };
-  if (!PRINCIPAL_USERNAME_RE.test(principal.username)) {
+  if (!isValidOwnerName(principal.username)) {
     throw new Error(
       `site principal username is unsafe: ${principal.username}`,
     );

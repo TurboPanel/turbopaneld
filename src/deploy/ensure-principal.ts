@@ -9,6 +9,7 @@ import {
   allManagedGroups,
 } from "../runtime/registry.ts";
 import type { PrincipalIdReport } from "../contracts/commands-contracts.ts";
+import { isValidOwnerName } from "../contracts/directory-names.ts";
 import { isReservedPrincipalUsername } from "./reserved-principal-names.ts";
 
 export type PrincipalEnsureSpec = {
@@ -110,8 +111,6 @@ const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
 /** Root-owned directories of the home skeleton the engines traverse. */
 const PRINCIPAL_STRUCTURAL_DIRS = ["sites", "volumes"] as const;
 
-const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
-
 /**
  * sha512-crypt only — the one format the control plane emits. Anchored and
  * colon/newline-free by construction, so a value that passes cannot smuggle a
@@ -121,12 +120,6 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
  */
 const PASSWORD_HASH_RE =
   /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
-/**
- * Longest site owner's Linux user name. The group carries the same name, well
- * inside the Linux 32-character limit. Keep in sync with instance
- * `MAX_PRINCIPAL_USERNAME_LENGTH`.
- */
-const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 /**
  * Primary group name created by {@link ensureSystemPrincipals}: the standard
@@ -234,11 +227,7 @@ function assertSafePrincipalUsername(username: string): string {
       `The name ${username.trim()} is reserved for the host's own accounts, so it cannot be a site owner's Linux user. Pick another name.`,
     );
   }
-  if (
-    username.length === 0 ||
-    username.length > MAX_PRINCIPAL_USERNAME_LENGTH ||
-    !PRINCIPAL_USERNAME_RE.test(username)
-  ) {
+  if (!isValidOwnerName(username)) {
     throw new Error(`Invalid principal username: ${username}`);
   }
   return username;
