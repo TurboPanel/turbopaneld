@@ -49,30 +49,11 @@ export const TABLE_NAME_RE = /^[a-z]+$/;
  * folders; the rest stay free so a future folder beside `home` and `tmp`
  * never needs a rename and old names cannot return with an old meaning.
  */
-export const RESERVED_SCOPE_NAMES: readonly string[] = [
-  "common",
-  "home",
-  "tmp",
-  "services",
-  "volumes",
-  "data",
-  "sites",
-  "backup",
-  "backups",
-  "logs",
-  "cache",
-  "run",
-  "var",
-  "etc",
-  "bin",
-  "root",
-  "public",
-  "releases",
-  "current",
-  "shared",
-  "lost-found",
-  "tmp-staging",
-];
+export const RESERVED_SCOPE_NAMES: readonly string[] =
+  "common home tmp services volumes data sites backup backups logs cache run var etc bin root public releases current shared lost-found tmp-staging"
+    .split(
+      " ",
+    );
 
 /** Owner names may not start with this (the TurboPanel service accounts). */
 export const OWNER_RESERVED_PREFIXES: readonly string[] = ["tp", "systemd-"];
