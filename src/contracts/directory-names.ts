@@ -316,25 +316,25 @@ function sha256Block(h: number[], w: number[]): void {
       (w[i - 15] >>> 3);
     const s1 = rotateRight(w[i - 2], 17) ^ rotateRight(w[i - 2], 19) ^
       (w[i - 2] >>> 10);
-    w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+    w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
   }
   let [a, b, c, d, e, f, g, hh] = h;
   for (let i = 0; i < 64; i += 1) {
     const s1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
-    const t1 = (hh + s1 + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) | 0;
+    const t1 = (hh + s1 + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) >>> 0;
     const s0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
-    const t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+    const t2 = (s0 + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
     hh = g;
     g = f;
     f = e;
-    e = (d + t1) | 0;
+    e = (d + t1) >>> 0;
     d = c;
     c = b;
     b = a;
-    a = (t1 + t2) | 0;
+    a = (t1 + t2) >>> 0;
   }
   const next = [a, b, c, d, e, f, g, hh];
-  for (let i = 0; i < 8; i += 1) h[i] = (h[i] + next[i]) | 0;
+  for (let i = 0; i < 8; i += 1) h[i] = (h[i] + next[i]) >>> 0;
 }
 
 /** SHA-256 of an ASCII or UTF-8 string, as lowercase hex. Synchronous so a form can use it. */
@@ -382,7 +382,7 @@ export function domainToAscii(input: string): string | null {
   const labels = rest.split(".");
   if (labels.some((label) => label.length === 0)) return null;
   // A final all-digit label reads as an address, not a name.
-  if (/^[0-9]+$/.test(labels[labels.length - 1])) return null;
+  if (/^\d+$/.test(labels.at(-1) ?? "")) return null;
   let host: string;
   try {
     host = new URL(`http://${rest}`).hostname;
@@ -392,9 +392,9 @@ export function domainToAscii(input: string): string | null {
   if (host.endsWith(".")) host = host.slice(0, -1);
   if (host.split(".").some((label) => label.length === 0)) return null;
   // The URL parser also reads 0x7f.1 and 2130706433 as addresses; refuse any result that is one.
-  if (
-    host.length === 0 || host.length > 253 || /^[0-9]+(\.[0-9]+){3}$/.test(host)
-  ) return null;
+  if (host.length === 0 || host.length > 253 || /^\d+(\.\d+){3}$/.test(host)) {
+    return null;
+  }
   return (wildcard ? "*." : "") + host.toLowerCase();
 }
 
