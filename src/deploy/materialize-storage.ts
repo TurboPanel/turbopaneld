@@ -217,7 +217,7 @@ async function materializeVolumeFolder(
   if (entry.folder === undefined) {
     throw new Error(`storage ${entry.storageId} has no folder`);
   }
-  if (!ownership || ownership.username !== entry.folder.owner) {
+  if (ownership?.username !== entry.folder.owner) {
     throw new Error(
       `storage ${entry.storageId}: its folder belongs to ${entry.folder.owner}, who is not the site owner this deploy names for it`,
     );
@@ -395,9 +395,11 @@ export async function resolveVolumeOwnerIds(
   );
   const owners = new Map<string, { uid: number; gid: number }>();
   const out = new Map<string, { uid: number; gid: number }>();
-  for (const entry of entries) {
-    if (entry.folder === undefined || entry.kind !== "directory") continue;
-    const owner = entry.folder.owner;
+  const wanted = entries.filter((entry) =>
+    entry.folder !== undefined && entry.kind === "directory"
+  );
+  await forEachSequential(wanted, async (entry) => {
+    const owner = entry.folder!.owner;
     let ids = owners.get(owner);
     if (ids === undefined) {
       // The account on this host is the truth; the deploy's own ids only
@@ -417,6 +419,6 @@ export async function resolveVolumeOwnerIds(
       owners.set(owner, ids);
     }
     out.set(entry.storageId, ids);
-  }
+  });
   return out;
 }

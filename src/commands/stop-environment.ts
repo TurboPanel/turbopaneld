@@ -435,8 +435,17 @@ export async function handleEnvironmentStop(
     "commands",
     `environment.stop completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
+  return stopResult(parsedPayload.projectName, summary, folders);
+}
+
+/** The stop result; `folders` is present only when folders were named. */
+function stopResult(
+  projectName: string,
+  summary: string,
+  folders: EnvironmentStopFolderState[],
+): EnvironmentStopResult {
   return {
-    projectName: parsedPayload.projectName,
+    projectName,
     summary,
     containers: [],
     ...(folders.length > 0 ? { folders } : {}),

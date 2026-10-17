@@ -325,21 +325,19 @@ async function removeServiceStateDirs(
   serviceId: string,
   onOutput: ReclaimRemovedReleaseTreesParams["onOutput"],
 ): Promise<void> {
-  for (
-    const dir of [
-      join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME, serviceId),
-      join(layout.daemonStateDir, RELEASE_SCRATCH_DIRNAME, serviceId),
-    ]
-  ) {
+  await forEachSequential([
+    join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME, serviceId),
+    join(layout.daemonStateDir, RELEASE_SCRATCH_DIRNAME, serviceId),
+  ], async (dir) => {
     try {
       await Deno.remove(dir, { recursive: true });
     } catch (err) {
-      if (err instanceof Deno.errors.NotFound) continue;
+      if (err instanceof Deno.errors.NotFound) return;
       const message = err instanceof Error ? err.message : String(err);
       onOutput?.(
         "stderr",
         `release record reclaim could not remove ${dir}: ${message}`,
       );
     }
-  }
+  });
 }
