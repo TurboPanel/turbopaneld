@@ -1291,7 +1291,13 @@ async function reclaimRemovedServiceReleaseTrees(
   for (const path of removed) {
     logSink.onLine("stdout", `reclaimed removed service release tree ${path}`);
   }
-  const kept = keptServiceFolders(previous, currentServiceIds).map((
+  // A service the control plane still names a folder for this deploy is in use,
+  // whether or not it has a source; only one that is gone from the payload is kept.
+  const namedNow = new Set([
+    ...currentServiceIds,
+    ...(payload.serviceFolders ?? []).map((entry) => entry.serviceId),
+  ]);
+  const kept = keptServiceFolders(previous, namedNow).map((
     folder,
   ) => ({ ...folder, kind: "service" as const }));
   for (const folder of kept) {

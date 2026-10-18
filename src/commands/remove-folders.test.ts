@@ -152,10 +152,13 @@ test("server.folders.remove reports a folder that stayed, with the reason, and g
       );
       assertEquals(failed.folders.map((f) => f.removed), [false, true]);
       assertEquals(
-        failed.folders[0]?.reason?.startsWith("The folder was not removed:"),
+        failed.folders[0]?.reason?.startsWith("The server could not"),
         true,
       );
-      assertEquals(failed.folders[0]?.reason?.includes("device busy"), true);
+      assertEquals(
+        failed.folders[0]?.reason,
+        "The server could not remove the folder; see the server log.",
+      );
       assertEquals(failed.folders[1]?.reason, undefined);
       assertEquals(failed.summary, "Removed 1 of 2 folder(s)");
     }, (path) => path.endsWith("/uploads"));
@@ -182,8 +185,8 @@ test("server.folders.remove refuses a reference whose record names another folde
     assertEquals(result.folders[0]?.removed, false);
     assertEquals(host.calls, []);
     assertEquals(
-      result.folders[0]?.reason?.includes("folder_changed"),
-      true,
+      result.folders[0]?.reason,
+      "The folder belongs to another service or volume, so it was left alone.",
     );
   });
 });
@@ -285,5 +288,22 @@ test("server.folders.remove removes a folder that has no record and no id", asyn
     );
     assertEquals(result.folders[0]?.removed, true);
     assertEquals(host.calls.length, 1);
+  });
+});
+
+test("server.folders.remove leaves a new asset's folder alone when a late command names a deleted one", async () => {
+  await withTree(async (host) => {
+    // The deleted asset's record is gone; a new asset took the same components.
+    await Deno.writeTextFile(
+      join(host.layout.daemonStateDir, "folders", `${SERVICE}.json`),
+      JSON.stringify({ ...UPLOADS, kind: "volume", created: "" }),
+    );
+    const result = await handleFoldersRemove(
+      { folders: [{ kind: "volume", assetId: ASSET, folder: UPLOADS }] },
+      "2026-01-01T00:00:00.000Z",
+      { resolveLayout: () => host.layout, runPrivileged: host.run },
+    );
+    assertEquals(result.folders[0]?.removed, false);
+    assertEquals(host.calls, []);
   });
 });

@@ -4193,15 +4193,17 @@ tp_verb_site_usage() {
 TP_FOLDER_LIST_SECONDS=60
 
 tp_folder_list_scope() {
-  _fl_owner="$1"
-  _fl_scope="$2"
-  for _fl_kind in services volumes; do
-    [ -d "$_fl_scope/$_fl_kind" ] && [ ! -L "$_fl_scope/$_fl_kind" ] || continue
-    for _fl_dir in "$_fl_scope/$_fl_kind"/*; do
-      [ -d "$_fl_dir" ] && [ ! -L "$_fl_dir" ] || continue
-      _fl_name="${_fl_dir##*/}"
-      tp_folder_name_ok "$_fl_name" || continue
-      printf '%s %s %s %s\n' "$_fl_owner" "$_fl_scope" "${_fl_kind%s}" "$_fl_name"
+  # Own variable names: sh has no `local`, and the caller's loop variables
+  # (owner, scope) must survive this call.
+  _fs_owner="$1"
+  _fs_scope="$2"
+  for _fs_kind in services volumes; do
+    [ -d "$_fs_scope/$_fs_kind" ] && [ ! -L "$_fs_scope/$_fs_kind" ] || continue
+    for _fs_dir in "$_fs_scope/$_fs_kind"/*; do
+      [ -d "$_fs_dir" ] && [ ! -L "$_fs_dir" ] || continue
+      _fs_name="${_fs_dir##*/}"
+      tp_folder_name_ok "$_fs_name" || continue
+      printf '%s %s %s %s\n' "$_fs_owner" "$_fs_scope" "${_fs_kind%s}" "$_fs_name"
     done
   done
 }
@@ -4210,21 +4212,26 @@ tp_verb_folder_list() {
   [ "$#" -eq 0 ] || tp_die "folder-list: takes no arguments"
   tp_pin_dir "$R_PRINCIPALS" 2>/dev/null || return 0
   _fl_started="$(date +%s)"
+  _fl_incomplete=""
   for _fl_home in ./*; do
     [ -d "$_fl_home" ] && [ ! -L "$_fl_home" ] || continue
     _fl_name="${_fl_home#./}"
     tp_owner_shape_ok "$_fl_name" || continue
+    # The time budget is checked between owners; running out ends the walk
+    # without `complete`.
     [ "$(($(date +%s) - _fl_started))" -lt "$TP_FOLDER_LIST_SECONDS" ] || return 0
     (
-      tp_pin_dir "$R_PRINCIPALS/$_fl_name" 2>/dev/null || exit 0
+      # An owner home that cannot be entered makes the whole listing unfinished.
+      tp_pin_dir "$R_PRINCIPALS/$_fl_name" 2>/dev/null || exit 1
       for _fl_scope_dir in ./*; do
         [ -d "$_fl_scope_dir" ] && [ ! -L "$_fl_scope_dir" ] || continue
         _fl_scope="${_fl_scope_dir#./}"
         tp_scope_ok "$_fl_scope" || continue
         tp_folder_list_scope "$_fl_name" "$_fl_scope"
       done
-    ) || true
+    ) || _fl_incomplete=1
   done
+  [ -z "$_fl_incomplete" ] || return 0
   printf 'complete\n'
 }
 

@@ -1013,16 +1013,7 @@ Deno.test({
       assertEquals(result.folders?.map((f) => f.removed), [false]);
       assertEquals(
         result.folders?.[0]?.reason,
-        "The folder was not removed: release tree reclaim could not remove " +
-          join(
-            root,
-            "srv",
-            "users",
-            "alice",
-            "production",
-            "services",
-            "example.com",
-          ) + ": device busy",
+        "The server could not remove the folder; see the server log.",
       );
       await Deno.stat(
         join(

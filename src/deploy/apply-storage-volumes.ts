@@ -267,6 +267,9 @@ export function declaredVolumeUsers(
       }
       const uid = numericComposeUser(declared);
       if (uid === null) {
+        const namedKey = `${entry.storageId}:${name}`;
+        if (seen.has(namedKey)) continue;
+        seen.add(namedKey);
         named.push({
           storageId: entry.storageId,
           composeServiceName: name,

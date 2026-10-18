@@ -22,9 +22,14 @@ import type {
   FoldersRemovePayload,
   FoldersRemoveResult,
 } from "../contracts/commands-contracts.ts";
-import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
-  assertFolderUnchanged,
+  assertNoSymlinkComponents,
+  assetFolder,
+  type LayoutPaths,
+  resolveLayout,
+} from "../paths/layout.ts";
+import {
+  assertFolderRemovableBy,
   findAssetIdByFolder,
 } from "../deploy/asset-folders.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
@@ -74,7 +79,11 @@ async function removeOne(
     // The record check a volume gets applies here too, so a wrong reference
     // never removes another service's folder.
     try {
-      await assertFolderUnchanged(layout, assetId, ref);
+      await assertFolderRemovableBy(layout, assetId, ref);
+      await assertNoSymlinkComponents(
+        layout.principalHomeRoot,
+        assetFolder(layout, ref),
+      );
     } catch (err) {
       onOutput("stderr", err instanceof Error ? err.message : String(err));
       return { ...state, removed: false, reason: removalFailureReason(lines) };

@@ -836,7 +836,8 @@ site owner's Linux user:
   a later mode change on the folder drops it. Only the volume root gets it:
   nothing inside is touched, nothing is re-owned (no chown, never to root), and
   files already in the folder keep the access they had; the default entry means
-  files the container creates later stay open to that uid. A declared user
+  files the container creates later stay open to that uid. The uid is whatever the compose file declares; the owner already chose
+  that container, so the host does not check it against other accounts. A declared user
   given by **name** cannot be mapped to an id on the host (the names live in
   the image), so it gets no entry and the deploy log says so; use the numeric
   uid to have one. On a filesystem without access lists `setfacl` fails; the

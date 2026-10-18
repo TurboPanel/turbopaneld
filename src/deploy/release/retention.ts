@@ -48,7 +48,10 @@ import {
   assetFolder,
   serviceTree,
 } from "../../paths/layout.ts";
-import { assertFolderUnchanged, removeFolderRecord } from "../asset-folders.ts";
+import {
+  assertFolderRemovableBy,
+  removeFolderRecord,
+} from "../asset-folders.ts";
 
 /** Published releases kept per service, in addition to `current`. */
 export const DEFAULT_RELEASE_RETENTION = 5;
@@ -319,15 +322,25 @@ export async function reclaimServiceTree(
   return path;
 }
 
-const REMOVAL_REASON_MAX_LENGTH = 300;
-
-/** The last thing a failed folder removal said, as a short plain sentence for the panel. */
+/**
+ * Why a folder removal failed, as one plain sentence for the panel. The raw
+ * line (which can carry host paths) stays in the daemon log.
+ */
 export function removalFailureReason(lines: readonly string[]): string {
-  const last = lines[lines.length - 1]?.trim();
-  const detail = last && last.length > 0
-    ? last.slice(0, REMOVAL_REASON_MAX_LENGTH)
-    : "the root helper refused it";
-  return `The folder was not removed: ${detail}`;
+  const text = lines.join(" ");
+  if (text.includes("folder_changed")) {
+    return "The folder belongs to another service or volume, so it was left alone.";
+  }
+  if (text.includes("symbolic link")) {
+    return "A link was found in the folder's path, so it was left alone.";
+  }
+  if (text.includes("refusing")) {
+    return "The server refused to remove this folder.";
+  }
+  if (text.includes("skipped")) {
+    return "The folder reference was not valid, so nothing was removed.";
+  }
+  return "The server could not remove the folder; see the server log.";
 }
 
 /**
@@ -384,7 +397,7 @@ export async function reclaimAssetFolder(
   try {
     path = assetFolder(layout, ref);
     if (assetId !== undefined) {
-      await assertFolderUnchanged(layout, assetId, ref);
+      await assertFolderRemovableBy(layout, assetId, ref);
     }
     await assertNoSymlinkComponents(layout.principalHomeRoot, path);
   } catch (err) {

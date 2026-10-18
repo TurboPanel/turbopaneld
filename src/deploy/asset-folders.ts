@@ -224,6 +224,24 @@ export async function assertFolderUnchanged(
 }
 
 /**
+ * Before a folder is removed on behalf of `assetId`: its record must not name
+ * other components (`assertFolderUnchanged`), and no other asset's record may
+ * own these components. A late command for a deleted asset therefore cannot
+ * remove the folder of a new asset that took the same name.
+ */
+export async function assertFolderRemovableBy(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+  assetId: string,
+  ref: FolderRef,
+): Promise<void> {
+  await assertFolderUnchanged(layout, assetId, ref);
+  const owner = await findAssetIdByFolder(layout, ref);
+  if (owner !== null && owner !== assetId) {
+    throw new FolderChangedError(assetId);
+  }
+}
+
+/**
  * Check the reference against the asset's record and write the record when
  * there is none. Returns whether it was newly written. Call before creating
  * the folder so a refused change touches nothing.

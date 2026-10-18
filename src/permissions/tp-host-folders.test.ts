@@ -678,11 +678,20 @@ test("folder-list prints the well-formed asset folders and ends with complete", 
       host.path(`${HOME}/production/volumes/escape`),
     );
     await Deno.writeTextFile(host.path(`${HOME}/production/volumes/file`), "x");
+    // A second scope of the same owner, and a second owner, keep their own names.
+    await Deno.mkdir(host.path(`${HOME}/staging/volumes/second`), {
+      recursive: true,
+    });
+    await Deno.mkdir(host.path("srv/users/bob/common/services/site"), {
+      recursive: true,
+    });
     const result = await host.run(["folder-list"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(result.stdout.trim().split("\n"), [
       "alice production service example.com",
       "alice production volume uploads",
+      "alice staging volume second",
+      "bob common service site",
       "complete",
     ]);
   });
@@ -753,5 +762,24 @@ test("setfacl refuses a volume folder that is a link", async () => {
       "--",
       link,
     ]);
+  });
+});
+
+test("folder-list does not say complete when an owner's home cannot be walked", async () => {
+  await withHost(async (host) => {
+    await buildService(host);
+    // A link in place of an owner's home is skipped as not a home, but a home
+    // that is a link below a symlinked root cannot be pinned: simulate by
+    // replacing the home root's child with an unreadable directory.
+    const bad = host.path("srv/users/bob");
+    await Deno.mkdir(bad, { recursive: true });
+    await Deno.chmod(bad, 0o000);
+    try {
+      const result = await host.run(["folder-list"]);
+      if (Deno.uid() === 0) return; // root can enter anything
+      assertEquals(result.stdout.includes("complete"), false);
+    } finally {
+      await Deno.chmod(bad, 0o700);
+    }
   });
 });
