@@ -245,6 +245,21 @@ export function numericComposeUser(declared: unknown): number | null {
  * given by name is returned in `named` so the caller can say it was not
  * handled. A compose file is never refused for any of this.
  */
+/** The container services that mount one owner-folder volume, with the user each declares. */
+function declaredMountUsers(
+  entry: EnvironmentDeployStorageMaterial,
+  resolved: ResolvedComposeModel,
+): Array<{ name: string; declared: unknown }> {
+  const out: Array<{ name: string; declared: unknown }> = [];
+  for (const mount of entry.mounts) {
+    const name = mount.composeServiceName;
+    const declared = name ? resolved.services[name]?.user : undefined;
+    const none = declared === undefined || declared === null || declared === "";
+    if (name && !none) out.push({ name, declared });
+  }
+  return out;
+}
+
 export function declaredVolumeUsers(
   entries: readonly EnvironmentDeployStorageMaterial[],
   resolved: ResolvedComposeModel,
@@ -258,29 +273,25 @@ export function declaredVolumeUsers(
     seen.add(key);
     return true;
   };
-  for (const entry of entries) {
-    const owner = ownerIds?.get(entry.storageId);
-    if (entry.folder === undefined || entry.kind !== "directory" || !owner) {
-      continue;
-    }
-    for (const mount of entry.mounts) {
-      const name = mount.composeServiceName;
-      const declared = name ? resolved.services[name]?.user : undefined;
-      if (!name || declared === undefined || declared === null) continue;
-      if (declared === "") continue;
+  const volumes = entries.filter((entry) =>
+    entry.folder !== undefined && entry.kind === "directory" &&
+    ownerIds?.has(entry.storageId)
+  );
+  for (const entry of volumes) {
+    const ownerUid = ownerIds?.get(entry.storageId)?.uid;
+    for (const { name, declared } of declaredMountUsers(entry, resolved)) {
       const uid = numericComposeUser(declared);
-      if (uid === null) {
-        if (once(`${entry.storageId}:${name}`)) {
-          named.push({
-            storageId: entry.storageId,
-            composeServiceName: name,
-            user: typeof declared === "string"
-              ? declared
-              : JSON.stringify(declared),
-          });
-        }
+      if (uid === null && once(`${entry.storageId}:${name}`)) {
+        named.push({
+          storageId: entry.storageId,
+          composeServiceName: name,
+          user: typeof declared === "string"
+            ? declared
+            : JSON.stringify(declared),
+        });
       } else if (
-        uid !== 0 && uid !== owner.uid && once(`${entry.storageId}:${uid}`)
+        uid !== null && uid !== 0 && uid !== ownerUid &&
+        once(`${entry.storageId}:${uid}`)
       ) {
         users.push({ storageId: entry.storageId, uid });
       }
