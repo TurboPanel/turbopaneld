@@ -26,10 +26,12 @@
  */
 
 import { dirname, join } from "@std/path";
+import type { ReportedFolder } from "../contracts/commands-contracts.ts";
 import {
   type FolderKind,
   type FolderRef,
   type FolderRefParts,
+  isPathId,
   parseFolderRef,
   parseFolderRefParts,
 } from "../contracts/directory-names.ts";
@@ -38,12 +40,14 @@ import {
   assetFolder,
   assetKindDir,
   folderRecordPath,
+  folderRecordsDir,
   type LayoutPaths,
   logsDir,
   releasesDir,
   scopeDir,
   sharedDir,
 } from "../paths/layout.ts";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
   ensureDirectoryWithOwner,
@@ -184,6 +188,29 @@ export async function readFolderRecord(
   };
 }
 
+/**
+ * The id of the asset whose record names these components, when the caller
+ * does not know it (the panel's row for a deleted asset has lost its id). The
+ * records are small files named by asset id; a folder with no record has no id.
+ */
+export async function findAssetIdByFolder(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+  ref: FolderRef,
+): Promise<string | null> {
+  const wanted = parseFolderRef(ref);
+  try {
+    for await (const entry of Deno.readDir(folderRecordsDir(layout))) {
+      const match = /^(.+)\.json$/.exec(entry.name);
+      if (!entry.isFile || !match || !isPathId(match[1])) continue;
+      const record = await readFolderRecord(layout, match[1]).catch(() => null);
+      if (record !== null && sameComponents(record, wanted)) return match[1];
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return null;
+}
+
 /** Refuse a reference that differs from the asset's record. A missing record passes. */
 export async function assertFolderUnchanged(
   layout: Pick<LayoutPaths, "daemonStateDir">,
@@ -262,4 +289,41 @@ export async function ensureAssetFolder(
     ? await ensureServiceFolder(layout, parts, runFn)
     : await ensureVolumeFolder(layout, parts, runFn);
   return folder;
+}
+
+/**
+ * Every asset folder on the host, by its four components, from one
+ * `tp-host folder-list` call (owner homes are root's, so the daemon cannot list
+ * them). `null` when the listing is unavailable or was cut short: the helper
+ * ends a whole walk with `complete`, and a listing without it says nothing
+ * about any folder. A line that does not pass the shared folder rules is
+ * dropped. The list only reports; nothing is ever removed because of it.
+ */
+export async function listAssetFolders(
+  runFn: RunFn,
+): Promise<ReportedFolder[] | null> {
+  let stdout: string;
+  try {
+    const result = await runFn("sudo", hostSudoArgs(["-n", "folder-list"]));
+    if (!result.success) return null;
+    stdout = result.stdout;
+  } catch {
+    return null;
+  }
+  const lines = stdout.split("\n").map((line) => line.trim()).filter((line) =>
+    line.length > 0
+  );
+  if (lines[lines.length - 1] !== "complete") return null;
+  const folders: ReportedFolder[] = [];
+  for (const line of lines.slice(0, -1)) {
+    const [owner, scope, kind, slug, ...extra] = line.split(" ");
+    if (extra.length > 0) continue;
+    try {
+      const ref = parseFolderRef({ owner, scope, kind, slug });
+      folders.push({ ...ref, present: true });
+    } catch {
+      // Not a folder the rules would have made: not ours to report.
+    }
+  }
+  return folders;
 }

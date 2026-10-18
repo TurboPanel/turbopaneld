@@ -303,6 +303,23 @@ const SITES: CallSite[] = [
   tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
     argv: ["site-usage"],
   }),
+  tpHost('src/deploy/asset-folders.ts|["-n","folder-list"]', {
+    argv: ["folder-list"],
+  }),
+  // A container's declared uid on a volume folder: access and default entry, one folder.
+  tpHost(
+    'src/deploy/volume-access.ts|["-n","setfacl","-m",spec,"--",path]',
+    {
+      argv: [
+        "setfacl",
+        "-m",
+        "u:1000:rwx,d:u:1000:rwx",
+        "--",
+        `${HOME}/production/volumes/uploads`,
+      ],
+      setup: dir(`${HOME}/production/volumes/uploads`),
+    },
+  ),
   tpHost('src/commands/reboot.ts|["-n","systemctl","reboot"]', {
     argv: ["systemctl", "reboot"],
   }),

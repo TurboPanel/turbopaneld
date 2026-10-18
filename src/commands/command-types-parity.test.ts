@@ -4,11 +4,13 @@ import {
   type CommandAckMessage,
   type CommandDispatchMessage,
   type CommandOutcomeMessage,
+  FOLDERS_REMOVE_MAX,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
   parseFabricReconcilePayload,
   parseFabricReconcileResult,
+  parseFoldersRemovePayload,
   parseManagedApplyPayload,
   parseManagedApplyResult,
   parseManagedBackupPayload,
@@ -57,6 +59,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -3376,4 +3379,71 @@ Deno.test("environment.deploy payload parses the sequential strategy fields", ()
   ) {
     assertThrows(() => parseEnvironmentDeployPayload({ ...base, ...bad }));
   }
+});
+
+const REMOVE_ASSET = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+
+test("server.folders.remove payload parser round-trips and refuses bad entries", () => {
+  const folder = { owner: "alice", scope: "production", slug: "uploads" };
+  assertEquals(
+    parseFoldersRemovePayload({
+      folders: [
+        { kind: "volume", folder },
+        { kind: "volume", folder, assetId: REMOVE_ASSET },
+        {
+          kind: "service",
+          assetId: REMOVE_ASSET,
+          folder: { ...folder, slug: "example.com" },
+        },
+      ],
+    }),
+    {
+      folders: [
+        { kind: "volume", folder },
+        { kind: "volume", folder, assetId: REMOVE_ASSET },
+        {
+          kind: "service",
+          assetId: REMOVE_ASSET,
+          folder: { ...folder, slug: "example.com" },
+        },
+      ],
+    },
+  );
+  for (
+    const bad of [
+      null,
+      {},
+      { folders: [] },
+      { folders: "x" },
+      { folders: [{ kind: "other", folder }] },
+      { folders: [{ kind: "volume" }] },
+      { folders: [{ kind: "volume", folder, assetId: "../x" }] },
+      { folders: [{ kind: "volume", folder, assetId: 7 }] },
+      {
+        folders: [{ kind: "volume", folder: { ...folder, scope: "volumes" } }],
+      },
+      { folders: [{ kind: "volume", folder: { ...folder, slug: "../x" } }] },
+      { folders: [{ kind: "volume", folder: { ...folder, owner: "Alice" } }] },
+      // A path is never a reference.
+      { folders: [{ kind: "volume", folder: { ...folder, path: "/etc" } }] },
+    ]
+  ) {
+    assertThrows(
+      () => parseFoldersRemovePayload(bad),
+      TypeError,
+      undefined,
+      JSON.stringify(bad),
+    );
+  }
+  assertThrows(
+    () =>
+      parseFoldersRemovePayload({
+        folders: Array.from({ length: FOLDERS_REMOVE_MAX + 1 }, () => ({
+          kind: "volume",
+          folder,
+        })),
+      }),
+    TypeError,
+    "1 to 100",
+  );
 });

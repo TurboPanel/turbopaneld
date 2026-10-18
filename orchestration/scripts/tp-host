@@ -2475,13 +2475,56 @@ tp_setfacl_acme_socket() {
   tp_run setfacl -P -m "u:$HOSTING_CADDY_USER:rw" -- "$PIN_NAME"
 }
 
+# A container that declares its own user (a number other than the site owner's)
+# cannot write the owner's volume folder, which is the owner's 0750. The folder
+# gets an access entry and a default entry for that one uid, on the folder
+# itself only: nothing inside is touched and nothing is re-owned. The exact
+# shape `u:<uid>:rwx,d:u:<uid>:rwx` on `<home>/<scope>/volumes/<name>`; the uid
+# is a plain number, never root.
+tp_setfacl_volume_root() {
+  _sv_spec="$1"
+  _sv_dir="$2"
+  _sv_uid="${_sv_spec#u:}"
+  _sv_uid="${_sv_uid%%:*}"
+  case "$_sv_uid" in
+    ''|0*|*[!0-9]*) tp_die "setfacl: refusing user $_sv_uid" ;;
+  esac
+  [ "${#_sv_uid}" -le 10 ] && [ "$_sv_uid" -le 4294967294 ] ||
+    tp_die "setfacl: refusing user $_sv_uid"
+  [ "$_sv_spec" = "u:$_sv_uid:rwx,d:u:$_sv_uid:rwx" ] ||
+    tp_die "setfacl: only u:UID:rwx,d:u:UID:rwx on a volume folder"
+  tp_require_class "$_sv_dir" principal
+  _sv_rel="$(tp_home_rel "$_sv_dir")" || tp_die "setfacl: refusing $_sv_dir"
+  _sv_scope="${_sv_rel%%/*}"
+  _sv_rest="${_sv_rel#*/}"
+  [ "$_sv_scope" != "$_sv_rel" ] && tp_scope_ok "$_sv_scope" ||
+    tp_die "setfacl: refusing $_sv_dir"
+  case "$_sv_rest" in
+    volumes/?*) ;;
+    *) tp_die "setfacl: only a volume folder" ;;
+  esac
+  _sv_slug="${_sv_rest#volumes/}"
+  case "$_sv_slug" in
+    */*) tp_die "setfacl: only a volume folder" ;;
+  esac
+  tp_folder_name_ok "$_sv_slug" || tp_die "setfacl: refusing folder name $_sv_slug"
+  tp_pin_parent "$_sv_dir" || tp_die "no such directory ${_sv_dir%/*}"
+  [ -d "$PIN_NAME" ] && [ ! -L "$PIN_NAME" ] ||
+    tp_die "setfacl: $_sv_dir is not a folder"
+  tp_run setfacl -P -m "$_sv_spec" -- "$PIN_NAME"
+}
+
 tp_verb_setfacl() {
   if [ "$#" -eq 4 ] && [ "$1" = "-P" ] && [ "$2" = "-m" ] &&
     [ "$3" = "u:$HOSTING_CADDY_USER:rw" ]; then
     tp_setfacl_acme_socket "$4"
     return
   fi
-  [ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "o::x" ] || tp_die "setfacl: only -m o::x PATH or -P -m u:$HOSTING_CADDY_USER:rw SOCKET"
+  if [ "$#" -eq 4 ] && [ "$1" = "-m" ] && [ "$3" = "--" ]; then
+    tp_setfacl_volume_root "$2" "$4"
+    return
+  fi
+  [ "$#" -eq 3 ] && [ "$1" = "-m" ] && [ "$2" = "o::x" ] || tp_die "setfacl: only -m o::x PATH, -P -m u:$HOSTING_CADDY_USER:rw SOCKET or -m u:UID:rwx,d:u:UID:rwx -- VOLUME"
   [ "$3" = "$R_PRINCIPALS" ] || tp_die "setfacl: only the principal home root"
   tp_pin_dir "$3" || tp_die "no such directory $3"
   tp_run setfacl -m o::x .
@@ -4137,6 +4180,54 @@ tp_verb_site_usage() {
   done
 }
 
+# The asset folders on the host: `<owner> <scope> service|volume <name>` per
+# line, from `<home>/<scope>/{services,volumes}/<name>`. Names only; no file
+# name or content below a folder is read. Owner homes and their scope tree are
+# root's, so the daemon account cannot list them. Only names that pass the
+# shared folder rules are printed and a link is never followed (each directory
+# is pinned with `cd -P`, a link in place of a directory is skipped), so a
+# folder the rules would not have made never appears. Read-only, and a time
+# budget stops the walk on a host with very many folders. The last line is
+# `complete` only when every owner was walked, so a caller never mistakes a
+# cut-off listing for the whole host.
+TP_FOLDER_LIST_SECONDS=60
+
+tp_folder_list_scope() {
+  _fl_owner="$1"
+  _fl_scope="$2"
+  for _fl_kind in services volumes; do
+    [ -d "$_fl_scope/$_fl_kind" ] && [ ! -L "$_fl_scope/$_fl_kind" ] || continue
+    for _fl_dir in "$_fl_scope/$_fl_kind"/*; do
+      [ -d "$_fl_dir" ] && [ ! -L "$_fl_dir" ] || continue
+      _fl_name="${_fl_dir##*/}"
+      tp_folder_name_ok "$_fl_name" || continue
+      printf '%s %s %s %s\n' "$_fl_owner" "$_fl_scope" "${_fl_kind%s}" "$_fl_name"
+    done
+  done
+}
+
+tp_verb_folder_list() {
+  [ "$#" -eq 0 ] || tp_die "folder-list: takes no arguments"
+  tp_pin_dir "$R_PRINCIPALS" 2>/dev/null || return 0
+  _fl_started="$(date +%s)"
+  for _fl_home in ./*; do
+    [ -d "$_fl_home" ] && [ ! -L "$_fl_home" ] || continue
+    _fl_name="${_fl_home#./}"
+    tp_owner_shape_ok "$_fl_name" || continue
+    [ "$(($(date +%s) - _fl_started))" -lt "$TP_FOLDER_LIST_SECONDS" ] || return 0
+    (
+      tp_pin_dir "$R_PRINCIPALS/$_fl_name" 2>/dev/null || exit 0
+      for _fl_scope_dir in ./*; do
+        [ -d "$_fl_scope_dir" ] && [ ! -L "$_fl_scope_dir" ] || continue
+        _fl_scope="${_fl_scope_dir#./}"
+        tp_scope_ok "$_fl_scope" || continue
+        tp_folder_list_scope "$_fl_name" "$_fl_scope"
+      done
+    ) || true
+  done
+  printf 'complete\n'
+}
+
 # --- asset folder names ----------------------------------------------------------
 # asset-path OWNER SCOPE KIND SLUG prints the host path of one asset folder and
 # changes nothing. It is the shell twin of assetFolder() in src/paths/layout.ts
@@ -4601,6 +4692,7 @@ case "$_verb" in
   build-watch) tp_verb_build_watch "$@" ;;
   build-handover) tp_verb_build_handover "$@" ;;
   asset-path) tp_verb_asset_path "$@" ;;
+  folder-list) tp_verb_folder_list "$@" ;;
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;

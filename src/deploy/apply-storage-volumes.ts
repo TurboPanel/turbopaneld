@@ -210,3 +210,76 @@ export function buildStorageVolumesFragment(
   if (Object.keys(topVolumes).length > 0) fragment.volumes = topVolumes;
   return fragment;
 }
+
+/** A numeric user a container declares, other than the owner's, and the volume it mounts. */
+export type DeclaredVolumeUser = {
+  storageId: string;
+  uid: number;
+};
+
+/** Why a declared user could not be given access, in plain words. */
+export type UndeclaredVolumeUser = {
+  storageId: string;
+  composeServiceName: string;
+  user: string;
+};
+
+/**
+ * The uid a compose `user:` names, when it is a number (`1000` or `1000:1000`).
+ * A name (`app`) lives in the image's own account list, which the host cannot
+ * read, so it cannot be turned into an id here.
+ */
+export function numericComposeUser(declared: unknown): number | null {
+  const text = typeof declared === "number" ? String(declared) : declared;
+  if (typeof text !== "string") return null;
+  const uid = text.split(":")[0] ?? "";
+  if (!/^[0-9]{1,10}$/.test(uid)) return null;
+  const value = Number(uid);
+  return Number.isSafeInteger(value) && value <= 4294967294 ? value : null;
+}
+
+/**
+ * Containers that mount an owner's volume folder under a declared user other
+ * than the owner's, from the compose file the owner wrote. Each distinct uid
+ * per volume is returned once; root (uid 0) needs no entry. A declared user
+ * given by name is returned in `named` so the caller can say it was not
+ * handled. A compose file is never refused for any of this.
+ */
+export function declaredVolumeUsers(
+  entries: readonly EnvironmentDeployStorageMaterial[],
+  resolved: ResolvedComposeModel,
+  ownerIds: VolumeOwnerIds | undefined,
+): { users: DeclaredVolumeUser[]; named: UndeclaredVolumeUser[] } {
+  const users: DeclaredVolumeUser[] = [];
+  const named: UndeclaredVolumeUser[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const owner = ownerIds?.get(entry.storageId);
+    if (entry.folder === undefined || entry.kind !== "directory" || !owner) {
+      continue;
+    }
+    for (const mount of entry.mounts) {
+      const name = mount.composeServiceName;
+      if (!name) continue;
+      const declared = resolved.services[name]?.user;
+      if (declared === undefined || declared === null || declared === "") {
+        continue;
+      }
+      const uid = numericComposeUser(declared);
+      if (uid === null) {
+        named.push({
+          storageId: entry.storageId,
+          composeServiceName: name,
+          user: String(declared),
+        });
+        continue;
+      }
+      if (uid === 0 || uid === owner.uid) continue;
+      const key = `${entry.storageId}:${uid}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      users.push({ storageId: entry.storageId, uid });
+    }
+  }
+  return { users, named };
+}

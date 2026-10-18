@@ -38,10 +38,17 @@ import {
   runPrivileged,
 } from "./release-layout.ts";
 import { readCurrentReleaseId } from "./promote.ts";
-import type { FolderRefParts } from "../../contracts/directory-names.ts";
+import type {
+  FolderRef,
+  FolderRefParts,
+} from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
-import { serviceTree } from "../../paths/layout.ts";
-import { removeFolderRecord } from "../asset-folders.ts";
+import {
+  assertNoSymlinkComponents,
+  assetFolder,
+  serviceTree,
+} from "../../paths/layout.ts";
+import { assertFolderUnchanged, removeFolderRecord } from "../asset-folders.ts";
 
 /** Published releases kept per service, in addition to `current`. */
 export const DEFAULT_RELEASE_RETENTION = 5;
@@ -205,6 +212,21 @@ export function releaseTreesToReclaim(
   return out;
 }
 
+/**
+ * Service folders whose service is no longer sourced: kept in place and
+ * reported, so the control plane can mark them orphans.
+ */
+export function keptServiceFolders(
+  previous: readonly ReleaseTreeRef[],
+  currentServiceIds: ReadonlySet<string>,
+): FolderRefParts[] {
+  const kept: FolderRefParts[] = [];
+  for (const ref of releaseTreesToReclaim(previous, currentServiceIds)) {
+    if (ref.folder !== undefined) kept.push(ref.folder);
+  }
+  return kept;
+}
+
 export type ReclaimRemovedReleaseTreesParams = {
   layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">;
   /** Release rows the previous deploy recorded in `deployment.json`. */
@@ -216,7 +238,8 @@ export type ReclaimRemovedReleaseTreesParams = {
 };
 
 /**
- * Remove the whole release tree for every service that lost its source.
+ * Remove the whole older per-service release tree for every service that lost
+ * its source. A service folder is kept ({@link keptServiceFolders}).
  *
  * The tree is root-owned by design, so removal goes through the same privileged
  * runner sealing and per-release pruning use. Once a tree is gone, the
@@ -229,10 +252,13 @@ export type ReclaimRemovedReleaseTreesParams = {
 export async function reclaimRemovedReleaseTrees(
   params: ReclaimRemovedReleaseTreesParams,
 ): Promise<string[]> {
+  // A service folder is never reclaimed here: a service that leaves the compose
+  // file keeps its files, and only an explicit delete removes them
+  // (`server.folders.remove`). Only the older per-service tree is.
   const doomed = releaseTreesToReclaim(
     params.previous,
     params.currentServiceIds,
-  );
+  ).filter((ref) => ref.folder === undefined);
   if (doomed.length === 0) return [];
 
   const runFn = params.runFn ?? runPrivileged;
@@ -275,26 +301,7 @@ export async function reclaimServiceTree(
     );
     return null;
   }
-  try {
-    const result = await runFn(
-      "sudo",
-      hostSudoArgs(["-n", "rm", "-rf", "--", path]),
-    );
-    if (!result.success) {
-      onOutput?.(
-        "stderr",
-        `release tree reclaim could not remove ${path}: ${result.stderr}`,
-      );
-      return null;
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    onOutput?.(
-      "stderr",
-      `release tree reclaim could not remove ${path}: ${message}`,
-    );
-    return null;
-  }
+  if (!await removeTreeWithHelper(path, runFn, onOutput)) return null;
   // The folder is gone: a failure tidying the records is logged, not reported
   // as a folder that stayed.
   try {
@@ -308,6 +315,94 @@ export async function reclaimServiceTree(
       "stderr",
       `release records for ${ref.serviceId} could not be removed: ${message}`,
     );
+  }
+  return path;
+}
+
+const REMOVAL_REASON_MAX_LENGTH = 300;
+
+/** The last thing a failed folder removal said, as a short plain sentence for the panel. */
+export function removalFailureReason(lines: readonly string[]): string {
+  const last = lines[lines.length - 1]?.trim();
+  const detail = last && last.length > 0
+    ? last.slice(0, REMOVAL_REASON_MAX_LENGTH)
+    : "the root helper refused it";
+  return `The folder was not removed: ${detail}`;
+}
+
+/**
+ * `rm -rf` one folder through the root helper, which refuses a scope,
+ * `services` or `volumes` folder, pins the parent and never follows a link.
+ * Returns whether the folder is gone; the reason goes to `onOutput` and
+ * nothing throws.
+ */
+async function removeTreeWithHelper(
+  path: string,
+  runFn: RunFn,
+  onOutput?: ReclaimRemovedReleaseTreesParams["onOutput"],
+): Promise<boolean> {
+  try {
+    const result = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "rm", "-rf", "--", path]),
+    );
+    if (!result.success) {
+      onOutput?.(
+        "stderr",
+        `release tree reclaim could not remove ${path}: ${result.stderr}`,
+      );
+      return false;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `release tree reclaim could not remove ${path}: ${message}`,
+    );
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Remove one asset folder (`<owner>/<scope>/{services,volumes}/<name>`) and the
+ * record of its components, with no daemon state beyond that record. The same
+ * helper and the same safety as a whole service tree: structural folders are
+ * refused, a link is never followed, and nothing inside is re-owned. Returns
+ * the removed path, or `null` when the folder stayed (the reason goes to
+ * `onOutput`; nothing throws). The record is kept when the folder stays, so a
+ * later attempt finds the same state.
+ */
+export async function reclaimAssetFolder(
+  layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">,
+  ref: FolderRef,
+  assetId: string | undefined,
+  runFn: RunFn,
+  onOutput?: ReclaimRemovedReleaseTreesParams["onOutput"],
+): Promise<string | null> {
+  let path: string;
+  try {
+    path = assetFolder(layout, ref);
+    if (assetId !== undefined) {
+      await assertFolderUnchanged(layout, assetId, ref);
+    }
+    await assertNoSymlinkComponents(layout.principalHomeRoot, path);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.("stderr", `${ref.kind} folder reclaim skipped: ${message}`);
+    return null;
+  }
+  if (!await removeTreeWithHelper(path, runFn, onOutput)) return null;
+  if (assetId !== undefined) {
+    try {
+      await removeFolderRecord(layout, assetId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      onOutput?.(
+        "stderr",
+        `folder record for ${assetId} could not be removed: ${message}`,
+      );
+    }
   }
   return path;
 }

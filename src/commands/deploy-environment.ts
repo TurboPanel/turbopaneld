@@ -1,4 +1,8 @@
-import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
+import {
+  buildStorageVolumesFragment,
+  declaredVolumeUsers,
+} from "../deploy/apply-storage-volumes.ts";
+import { applyVolumeAccess } from "../deploy/volume-access.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
@@ -9,6 +13,7 @@ import {
 } from "../deploy/deploy-cancel.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join, normalize } from "@std/path";
+import type { FolderRefParts } from "../contracts/directory-names.ts";
 import {
   composeFileArgs,
   DEPLOYMENT_MANIFEST_FILENAME,
@@ -155,6 +160,7 @@ import {
   nativeAppBindingsFromPayload,
 } from "../deploy/native/apply-native-apps.ts";
 import {
+  keptServiceFolders,
   reclaimRemovedReleaseTrees,
   type ReleaseTreeRef,
 } from "../deploy/release/retention.ts";
@@ -207,6 +213,8 @@ import {
   type EnvironmentDeployServiceHook,
   type EnvironmentDeploySite,
   type EnvironmentDeploySource,
+  type EnvironmentDeployStorageMaterial,
+  type KeptFolder,
   parseEnvironmentDeployPayload,
   type PrincipalIdReport,
 } from "../contracts/commands-contracts.ts";
@@ -731,7 +739,11 @@ async function ensureDeployPrincipals(
   );
 
   await applyDeploySshAccess(principalMaterial);
-  return await reportPrincipalIds(principalMaterial);
+  return await reportPrincipalIds(
+    principalMaterial,
+    undefined,
+    layout.principalHomeRoot,
+  );
 }
 
 /**
@@ -1245,8 +1257,13 @@ async function previousReleaseTrees(
 }
 
 /**
- * Reclaim `<principalHome>/sites/<serviceId>` for every service that had a
- * release tree last deploy and no longer declares a source.
+ * Reclaim the older `<principalHome>/sites/<serviceId>` tree of every service
+ * that had a release tree last deploy and no longer declares a source, and
+ * report the service folders that stay.
+ *
+ * A service that leaves the compose file keeps its folder, whatever is in it:
+ * only an explicit delete (`server.folders.remove`) removes files. The kept
+ * folders go back in the result so the control plane can mark them orphans.
  *
  * Runs after the release engine so a tree this deploy is still publishing into
  * is never a candidate, and before the manifest is rewritten — once
@@ -1260,19 +1277,30 @@ async function reclaimRemovedServiceReleaseTrees(
   deploymentDir: string,
   logSink: CommandOutputSink,
   runFn: RunFn,
-): Promise<void> {
+): Promise<KeptFolder[]> {
   const previous = await previousReleaseTrees(deploymentDir);
-  if (previous.length === 0) return;
+  if (previous.length === 0) return [];
+  const currentServiceIds = currentReleaseServiceIds(payload, applied);
   const removed = await reclaimRemovedReleaseTrees({
     layout,
     previous,
-    currentServiceIds: currentReleaseServiceIds(payload, applied),
+    currentServiceIds,
     runFn,
     onOutput: (stream, line) => logSink.onLine(stream, line),
   });
   for (const path of removed) {
     logSink.onLine("stdout", `reclaimed removed service release tree ${path}`);
   }
+  const kept = keptServiceFolders(previous, currentServiceIds).map((
+    folder,
+  ) => ({ ...folder, kind: "service" as const }));
+  for (const folder of kept) {
+    logSink.onLine(
+      "stdout",
+      `kept the folder of a service that left the compose file: ${folder.scope}/services/${folder.slug}`,
+    );
+  }
+  return kept;
 }
 
 async function buildDeploymentManifest(
@@ -1548,6 +1576,34 @@ export function ownedVolumeRoots(
   return roots;
 }
 
+/**
+ * A container whose compose file names a numeric user other than the site
+ * owner's gets an access entry on the volume folder for that uid. Never fails
+ * the deploy: see `deploy/volume-access.ts`.
+ */
+async function grantDeclaredVolumeUsers(
+  layout: LayoutPaths,
+  entries: readonly EnvironmentDeployStorageMaterial[],
+  resolved: Awaited<ReturnType<typeof resolveComposeModel>>,
+  ownerIds: VolumeOwnerIds,
+  runtime: { logSink: CommandOutputSink; runPrivileged: RunFn },
+): Promise<void> {
+  const { users, named } = declaredVolumeUsers(entries, resolved, ownerIds);
+  if (users.length === 0 && named.length === 0) return;
+  const folders = new Map<string, FolderRefParts>();
+  for (const entry of entries) {
+    if (entry.folder !== undefined) folders.set(entry.storageId, entry.folder);
+  }
+  await applyVolumeAccess(
+    layout,
+    folders,
+    users,
+    named,
+    runtime.runPrivileged,
+    (line) => runtime.logSink.onLine("stdout", line),
+  );
+}
+
 function buildDaemonOverlayFragment(
   parsedPayload: EnvironmentDeployPayload,
   containerHostings: EnvironmentDeployHosting[],
@@ -1604,6 +1660,8 @@ type DeployContainerServicesInput = {
     defaultMtu: number,
   ) => Promise<void>;
   cancel?: DeployCancelToken;
+  /** Privileged runner for the volume access entries; defaults to the root helper. */
+  runPrivileged?: RunFn;
 };
 
 /**
@@ -1928,6 +1986,7 @@ async function deployContainerServices(
     logSink,
     decryptSecrets,
   } = input;
+  const runPrivileged = input.runPrivileged ?? defaultRunPrivileged;
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
   const cancel = input.cancel;
@@ -2011,16 +2070,24 @@ async function deployContainerServices(
       },
     );
 
+    const volumeOwnerIds = await resolveVolumeOwnerIds(
+      parsedPayload.storageMaterial ?? [],
+      parsedPayload.principalMaterial,
+    );
+    await grantDeclaredVolumeUsers(
+      layout,
+      parsedPayload.storageMaterial ?? [],
+      resolved,
+      volumeOwnerIds,
+      { logSink, runPrivileged },
+    );
     const fragment = buildDaemonOverlayFragment(
       parsedPayload,
       containerHostings,
       sites,
       mountPaths,
       resolved,
-      await resolveVolumeOwnerIds(
-        parsedPayload.storageMaterial ?? [],
-        parsedPayload.principalMaterial,
-      ),
+      volumeOwnerIds,
     );
     yaml = applySecretFilePaths(
       mergeOverlayIntoComposeYaml(yaml, fragment),
@@ -2266,6 +2333,8 @@ export function shapeEnvironmentDeployResult(input: {
   warnings?: readonly string[];
   /** The uid/gid each ensured account has on this host. */
   principals?: readonly PrincipalIdReport[];
+  /** Service folders left in place because their service left the compose file. */
+  keptFolders?: readonly KeptFolder[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -2296,6 +2365,9 @@ export function shapeEnvironmentDeployResult(input: {
       : {}),
     ...(input.principals && input.principals.length > 0
       ? { principals: [...input.principals] }
+      : {}),
+    ...(input.keptFolders && input.keptFolders.length > 0
+      ? { keptFolders: [...input.keptFolders] }
       : {}),
   };
 }
@@ -2695,7 +2767,7 @@ async function deployEnvironmentHolding(
   }
   // Whole-tree cleanup for services that lost their source since last deploy —
   // per-release retention only ever walks services still being published.
-  await reclaimRemovedServiceReleaseTrees(
+  const keptFolders = await reclaimRemovedServiceReleaseTrees(
     layout,
     parsedPayload,
     appliedReleases,
@@ -2827,6 +2899,7 @@ async function deployEnvironmentHolding(
     decryptSecrets: runtime.decryptSecrets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
+    runPrivileged: runtime.runPrivileged,
     ...(cancel === undefined ? {} : { cancel }),
   });
 
@@ -2867,5 +2940,6 @@ async function deployEnvironmentHolding(
     siteApps,
     warnings: siteWarnings,
     principals: principalIdReports,
+    keptFolders,
   });
 }

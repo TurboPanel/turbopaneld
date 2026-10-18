@@ -9,7 +9,10 @@ import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
 import {
+  keptServiceFolders,
+  reclaimAssetFolder,
   reclaimRemovedReleaseTrees,
+  reclaimServiceTree,
   type ReleaseTreeRef,
   releaseTreesToReclaim,
 } from "./retention.ts";
@@ -227,7 +230,7 @@ const IN_FOLDER: ReleaseTreeRef = {
   folder: { owner: "alice", scope: "production", slug: "example.com" },
 };
 
-test("reclaimRemovedReleaseTrees removes a service folder, its record and its daemon state", async () => {
+test("reclaimServiceTree removes a service folder, its record and its daemon state", async () => {
   const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-folder-" });
   try {
     for (const dir of ["release-records", "release-build", "folders"]) {
@@ -241,14 +244,13 @@ test("reclaimRemovedReleaseTrees removes a service folder, its record and its da
       "{}",
     );
     const { run, calls } = captureRun();
-    const removed = await reclaimRemovedReleaseTrees({
-      layout: { ...LAYOUT, daemonStateDir: stateDir },
-      previous: [IN_FOLDER],
-      currentServiceIds: new Set(),
-      runFn: run,
-    });
+    const removed = await reclaimServiceTree(
+      { ...LAYOUT, daemonStateDir: stateDir },
+      IN_FOLDER,
+      run,
+    );
     const folder = "/srv/users/alice/production/services/example.com";
-    assertEquals(removed, [folder]);
+    assertEquals(removed, folder);
     assertEquals(calls.map((c) => c.args), [["-n", "rm", "-rf", "--", folder]]);
     assertEquals(
       (await Array.fromAsync(Deno.readDir(join(stateDir, "folders")))).length,
@@ -269,7 +271,7 @@ test("reclaimRemovedReleaseTrees removes a service folder, its record and its da
   }
 });
 
-test("reclaimRemovedReleaseTrees keeps the records of a folder that would not go", async () => {
+test("reclaimServiceTree keeps the records of a folder that would not go", async () => {
   const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-kept-" });
   try {
     await Deno.mkdir(join(stateDir, "folders"));
@@ -279,14 +281,13 @@ test("reclaimRemovedReleaseTrees keeps the records of a folder that would not go
     );
     const { run } = captureRun(false);
     const out: string[] = [];
-    const removed = await reclaimRemovedReleaseTrees({
-      layout: { ...LAYOUT, daemonStateDir: stateDir },
-      previous: [IN_FOLDER],
-      currentServiceIds: new Set(),
-      runFn: run,
-      onOutput: (_stream, line) => out.push(line),
-    });
-    assertEquals(removed, []);
+    const removed = await reclaimServiceTree(
+      { ...LAYOUT, daemonStateDir: stateDir },
+      IN_FOLDER,
+      run,
+      (_stream, line) => out.push(line),
+    );
+    assertEquals(removed, null);
     assertEquals(out.length, 1);
     await Deno.stat(join(stateDir, "folders", `${FOLDER_SERVICE}.json`));
   } finally {
@@ -294,20 +295,152 @@ test("reclaimRemovedReleaseTrees keeps the records of a folder that would not go
   }
 });
 
-test("reclaimRemovedReleaseTrees skips a folder that breaks the rules instead of removing a path", async () => {
+test("reclaimServiceTree skips a folder that breaks the rules instead of removing a path", async () => {
   const { run, calls } = captureRun();
   const out: string[] = [];
-  const removed = await reclaimRemovedReleaseTrees({
-    layout: LAYOUT,
-    previous: [{
+  const removed = await reclaimServiceTree(
+    LAYOUT,
+    {
       ...IN_FOLDER,
       folder: { owner: "alice", scope: "home", slug: "x" },
-    }],
-    currentServiceIds: new Set(),
-    runFn: run,
-    onOutput: (_stream, line) => out.push(line),
-  });
-  assertEquals(removed, []);
+    },
+    run,
+    (_stream, line) => out.push(line),
+  );
+  assertEquals(removed, null);
   assertEquals(calls, []);
   assertEquals(out.length, 1);
+});
+
+test("a service that left the compose file keeps its folder and is reported", async () => {
+  const { run, calls } = captureRun();
+  const gone = new Set<string>();
+  assertEquals(
+    await reclaimRemovedReleaseTrees({
+      layout: LAYOUT,
+      previous: [IN_FOLDER, REMOVED],
+      currentServiceIds: gone,
+      runFn: run,
+    }),
+    [removedPath(REMOVED)],
+  );
+  // Only the older per-service tree was removed; the folder was not touched.
+  assertEquals(calls.map((c) => c.args.at(-1)), [removedPath(REMOVED)]);
+  assertEquals(keptServiceFolders([IN_FOLDER, REMOVED], gone), [
+    IN_FOLDER.folder,
+  ]);
+  assertEquals(
+    keptServiceFolders([IN_FOLDER], new Set([FOLDER_SERVICE])),
+    [],
+  );
+});
+
+const VOLUME_ASSET = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c99";
+const VOLUME = {
+  owner: "alice",
+  scope: "production",
+  kind: "volume" as const,
+  slug: "uploads",
+};
+const VOLUME_PATH = "/srv/users/alice/production/volumes/uploads";
+
+test("reclaimAssetFolder removes the folder through the helper and forgets its record", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-volume-" });
+  try {
+    await Deno.mkdir(join(stateDir, "folders"));
+    const record = join(stateDir, "folders", `${VOLUME_ASSET}.json`);
+    await Deno.writeTextFile(
+      record,
+      JSON.stringify({ ...VOLUME, kind: "volume", created: "" }),
+    );
+    const { run, calls } = captureRun();
+    const removed = await reclaimAssetFolder(
+      { ...LAYOUT, daemonStateDir: stateDir },
+      VOLUME,
+      VOLUME_ASSET,
+      run,
+    );
+    assertEquals(removed, VOLUME_PATH);
+    assertEquals(calls.map((c) => c.args), [[
+      "-n",
+      "rm",
+      "-rf",
+      "--",
+      VOLUME_PATH,
+    ]]);
+    await Deno.stat(record).then(
+      () => {
+        throw new Error("record survived");
+      },
+      () => {},
+    );
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("reclaimAssetFolder refuses a reference that belongs to another asset", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-volume-" });
+  try {
+    await Deno.mkdir(join(stateDir, "folders"));
+    await Deno.writeTextFile(
+      join(stateDir, "folders", `${VOLUME_ASSET}.json`),
+      JSON.stringify({
+        owner: "alice",
+        scope: "production",
+        kind: "volume",
+        slug: "other",
+        created: "",
+      }),
+    );
+    const { run, calls } = captureRun();
+    const out: string[] = [];
+    const removed = await reclaimAssetFolder(
+      { ...LAYOUT, daemonStateDir: stateDir },
+      VOLUME,
+      VOLUME_ASSET,
+      run,
+      (_stream, line) => out.push(line),
+    );
+    assertEquals(removed, null);
+    assertEquals(calls, []);
+    assertEquals(out[0]?.includes("folder_changed"), true);
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("reclaimAssetFolder keeps its record when the helper refuses", async () => {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-volume-" });
+  try {
+    await Deno.mkdir(join(stateDir, "folders"));
+    const record = join(stateDir, "folders", `${VOLUME_ASSET}.json`);
+    await Deno.writeTextFile(
+      record,
+      JSON.stringify({ ...VOLUME, kind: "volume", created: "" }),
+    );
+    const { run } = captureRun(false);
+    const removed = await reclaimAssetFolder(
+      { ...LAYOUT, daemonStateDir: stateDir },
+      VOLUME,
+      VOLUME_ASSET,
+      run,
+    );
+    assertEquals(removed, null);
+    await Deno.stat(record);
+  } finally {
+    await Deno.remove(stateDir, { recursive: true });
+  }
+});
+
+test("reclaimAssetFolder refuses a scope that is not an environment name", async () => {
+  const { run, calls } = captureRun();
+  const removed = await reclaimAssetFolder(
+    LAYOUT,
+    { ...VOLUME, scope: "volumes" },
+    undefined,
+    run,
+  );
+  assertEquals(removed, null);
+  assertEquals(calls, []);
 });
