@@ -233,7 +233,7 @@ export function numericComposeUser(declared: unknown): number | null {
   const text = typeof declared === "number" ? String(declared) : declared;
   if (typeof text !== "string") return null;
   const uid = text.split(":")[0] ?? "";
-  if (!/^[0-9]{1,10}$/.test(uid)) return null;
+  if (!/^\d{1,10}$/.test(uid)) return null;
   const value = Number(uid);
   return Number.isSafeInteger(value) && value <= 4294967294 ? value : null;
 }
@@ -253,6 +253,11 @@ export function declaredVolumeUsers(
   const users: DeclaredVolumeUser[] = [];
   const named: UndeclaredVolumeUser[] = [];
   const seen = new Set<string>();
+  const once = (key: string): boolean => {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  };
   for (const entry of entries) {
     const owner = ownerIds?.get(entry.storageId);
     if (entry.folder === undefined || entry.kind !== "directory" || !owner) {
@@ -260,28 +265,25 @@ export function declaredVolumeUsers(
     }
     for (const mount of entry.mounts) {
       const name = mount.composeServiceName;
-      if (!name) continue;
-      const declared = resolved.services[name]?.user;
-      if (declared === undefined || declared === null || declared === "") {
-        continue;
-      }
+      const declared = name ? resolved.services[name]?.user : undefined;
+      if (!name || declared === undefined || declared === null) continue;
+      if (declared === "") continue;
       const uid = numericComposeUser(declared);
       if (uid === null) {
-        const namedKey = `${entry.storageId}:${name}`;
-        if (seen.has(namedKey)) continue;
-        seen.add(namedKey);
-        named.push({
-          storageId: entry.storageId,
-          composeServiceName: name,
-          user: String(declared),
-        });
-        continue;
+        if (once(`${entry.storageId}:${name}`)) {
+          named.push({
+            storageId: entry.storageId,
+            composeServiceName: name,
+            user: typeof declared === "string"
+              ? declared
+              : JSON.stringify(declared),
+          });
+        }
+      } else if (
+        uid !== 0 && uid !== owner.uid && once(`${entry.storageId}:${uid}`)
+      ) {
+        users.push({ storageId: entry.storageId, uid });
       }
-      if (uid === 0 || uid === owner.uid) continue;
-      const key = `${entry.storageId}:${uid}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      users.push({ storageId: entry.storageId, uid });
     }
   }
   return { users, named };

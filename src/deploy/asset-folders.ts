@@ -331,7 +331,7 @@ export async function listAssetFolders(
   const lines = stdout.split("\n").map((line) => line.trim()).filter((line) =>
     line.length > 0
   );
-  if (lines[lines.length - 1] !== "complete") return null;
+  if (lines.at(-1) !== "complete") return null;
   const folders: ReportedFolder[] = [];
   for (const line of lines.slice(0, -1)) {
     const [owner, scope, kind, slug, ...extra] = line.split(" ");
