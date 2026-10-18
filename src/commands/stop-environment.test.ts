@@ -1011,6 +1011,10 @@ Deno.test({
     );
     try {
       assertEquals(result.folders?.map((f) => f.removed), [false]);
+      assertEquals(
+        result.folders?.[0]?.reason,
+        "The server could not remove the folder; see the server log.",
+      );
       await Deno.stat(
         join(
           root,

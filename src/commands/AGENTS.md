@@ -30,6 +30,13 @@ Root context: `../../AGENTS.md`. Transport: `../instance/AGENTS.md`.
   become durable only when `server.firewall.confirm` (`firewall-confirm.ts`)
   names the result's digest in time, and a root timer undoes them otherwise.
   Refusals are `applied: false` + a warning, not a failed command.
+- `server.folders.remove` (`remove-folders.ts`) removes the folders of assets
+  the panel has deleted, by components, and reports each (`removed`, `reason`).
+  See `src/deploy/release/AGENTS.md` ("Explicit folder removal").
+- `server.principals.reconcile` also reports `folders[]` (every asset folder
+  found by `tp-host folder-list`; omitted, with a warning, when the listing
+  could not be completed) and each account's `home`. Nothing is removed because
+  of it; the control plane compares it with its own record.
 - Deploy / lifecycle / stop / system.reconcile / managed.* /
   `server.fabric.reconcile` / `server.sensors.drivetemp.enable` sit in the
   sibling modules next to `command-router.ts`. Remaining

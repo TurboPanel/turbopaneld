@@ -9,6 +9,7 @@ import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 import {
   type FolderRefParts,
   folderRefParts,
+  isPathId,
   parseFolderRefParts,
 } from "./directory-names.ts";
 
@@ -24,6 +25,7 @@ export const COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -135,6 +137,12 @@ export type PrincipalIdReport = {
   principalId: string;
   uid: number;
   gid: number;
+  /**
+   * The account's directory on this host (`<home root>/<name>`), reported by
+   * the daemon because it owns the root. Additive: older control planes ignore
+   * it.
+   */
+  home?: string;
 };
 
 /**
@@ -190,8 +198,73 @@ export type PrincipalsReconcileResult = {
    * ignore it.
    */
   principals?: PrincipalIdReport[];
+  /**
+   * Every asset folder found on the host by listing each owner's scopes and
+   * their `services` and `volumes` folders, so the control plane can mark a
+   * folder it expects as missing and record one it does not know as an
+   * orphan. Omitted when the listing failed or ran out of time (the reason is
+   * in `warnings`): its absence says nothing about any folder. Nothing is ever
+   * deleted because of this list. Additive: older control planes ignore it.
+   */
+  folders?: ReportedFolder[];
   warnings: string[];
 };
+
+/** One asset folder found on the host, by its four components. */
+export type ReportedFolder = {
+  owner: string;
+  scope: string;
+  kind: "service" | "volume";
+  slug: string;
+  present: boolean;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.folders.remove` shape.
+ *
+ * Remove asset folders the panel has deleted the asset of. This is the only
+ * way a volume folder leaves the host: stopping an environment keeps volumes,
+ * and a service that leaves the compose file keeps its folder. Each entry names
+ * the folder by its four components, never by a path.
+ */
+export type FoldersRemovePayload = {
+  folders: FolderRemoval[];
+};
+
+/** One folder to remove. */
+export type FolderRemoval = {
+  kind: "service" | "volume";
+  /**
+   * The service or volume id, when the panel still has it (a deleted asset's
+   * row has lost it, and the host finds it from its own record of the folder).
+   * Checked against that record, so a wrong reference cannot remove another
+   * asset's folder; also names the records that go with a service folder.
+   */
+  assetId?: string;
+  folder: FolderRefParts;
+};
+
+/** Must stay in sync with the instance canonical `server.folders.remove` shape. */
+export type FoldersRemoveResult = {
+  summary: string;
+  /** One entry per requested folder, in request order. */
+  folders: FolderRemovalState[];
+};
+
+/** What happened to one requested folder. */
+export type FolderRemovalState = {
+  owner: string;
+  scope: string;
+  kind: "service" | "volume";
+  slug: string;
+  /** True once the folder is gone from the host (or was never there). */
+  removed: boolean;
+  /** Why the folder stayed, in plain words. Present only when `removed` is false. */
+  reason?: string;
+};
+
+/** Most folders one `server.folders.remove` may name. */
+export const FOLDERS_REMOVE_MAX = 100;
 
 /**
  * Must stay in sync with the instance canonical `server.firewall.reconcile`
@@ -1598,6 +1671,21 @@ export type EnvironmentDeployResult = {
    * ignore it.
    */
   principals?: PrincipalIdReport[];
+  /**
+   * Service folders left in place because their service is no longer in the
+   * compose file. A service that leaves the file keeps its files; only an
+   * explicit delete (`server.folders.remove`) removes them. The control plane
+   * marks each one an orphan. Omitted when there were none. Additive.
+   */
+  keptFolders?: KeptFolder[];
+};
+
+/** A service folder a deploy left in place, by its components. */
+export type KeptFolder = {
+  owner: string;
+  scope: string;
+  kind: "service";
+  slug: string;
 };
 
 export type EnvironmentStopPayload = {
@@ -1651,6 +1739,8 @@ export type EnvironmentStopFolderState = {
   kind: "service";
   slug: string;
   removed: boolean;
+  /** Why the folder stayed, in plain words. Present only when `removed` is false. */
+  reason?: string;
 };
 
 /** Must stay in sync with the instance canonical `environment.lifecycle` action set. */
@@ -6320,6 +6410,41 @@ function parseStopSiteRelease(value: unknown): StopSiteRelease {
     );
   }
   return release;
+}
+
+/** Parse `server.folders.remove`. */
+export function parseFoldersRemovePayload(
+  value: unknown,
+): FoldersRemovePayload {
+  if (!isRecord(value) || !Array.isArray(value.folders)) {
+    throw new TypeError("Invalid folders remove payload");
+  }
+  if (value.folders.length === 0 || value.folders.length > FOLDERS_REMOVE_MAX) {
+    throw new TypeError(
+      `folders must name 1 to ${FOLDERS_REMOVE_MAX} folders`,
+    );
+  }
+  return { folders: value.folders.map(parseFolderRemoval) };
+}
+
+function parseFolderRemoval(value: unknown): FolderRemoval {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid folders remove entry");
+  }
+  if (value.kind !== "service" && value.kind !== "volume") {
+    throw new TypeError("Invalid folders remove kind");
+  }
+  const entry: FolderRemoval = {
+    kind: value.kind,
+    folder: folderRefParts(parseFolderRefParts(value.folder, value.kind)),
+  };
+  if (value.assetId !== undefined) {
+    if (typeof value.assetId !== "string" || !isPathId(value.assetId)) {
+      throw new TypeError("Invalid folders remove assetId");
+    }
+    entry.assetId = value.assetId;
+  }
+  return entry;
 }
 
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */

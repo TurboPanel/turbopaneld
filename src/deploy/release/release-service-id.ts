@@ -57,6 +57,39 @@ export function serviceFolderFromPayload(
     ?.folder;
 }
 
+/**
+ * The folder planned for a compose service, found through whichever id names
+ * it. The release engine keys a tree by `sourceMaterial[].releaseServiceId`
+ * and a native unit by `nativeAppServices[].serviceId`; both are the service's
+ * UUID, but a payload that differs between the two must still resolve one
+ * folder, so the unit and the release it runs always agree. The release id is
+ * tried first, then the ids the other lists carry for the same compose service.
+ */
+export function serviceFolderForCompose(
+  payload: EnvironmentDeployPayload,
+  composeServiceName: string,
+): FolderRefParts | undefined {
+  const ids = [
+    resolveReleaseServiceId(payload, composeServiceName),
+    ...[
+      payload.nativeAppServices,
+      payload.hostings,
+      payload.ingressServices,
+    ].flatMap((rows) =>
+      (rows ?? [])
+        .filter((row) =>
+          row.composeServiceName === composeServiceName && row.serviceId
+        )
+        .map((row) => row.serviceId as string)
+    ),
+  ];
+  for (const id of ids) {
+    const folder = serviceFolderFromPayload(payload, id);
+    if (folder !== undefined) return folder;
+  }
+  return undefined;
+}
+
 export function findDeploySourceEntry(
   payload: EnvironmentDeployPayload,
   composeServiceName: string,

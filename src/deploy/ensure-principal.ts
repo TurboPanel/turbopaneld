@@ -935,6 +935,7 @@ async function assertRequestedIdsFree(
 export async function reportPrincipalIds(
   principals: ReadonlyArray<{ principalId: string; username: string }>,
   runFn: RunFn = runDefault,
+  homeRoot?: string,
 ): Promise<PrincipalIdReport[]> {
   const reports: PrincipalIdReport[] = [];
   await forEachSequential(principals, async (principal) => {
@@ -946,6 +947,11 @@ export async function reportPrincipalIds(
         principalId: principal.principalId,
         uid: account.uid,
         gid: account.gid,
+        // Where the account's tree is on this host, from the daemon's own root
+        // rather than a guess made by the control plane.
+        ...(homeRoot === undefined
+          ? {}
+          : { home: join(homeRoot, principal.username) }),
       });
     }
   });

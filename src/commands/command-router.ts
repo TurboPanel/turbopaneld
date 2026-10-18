@@ -18,6 +18,7 @@ import {
   parseFabricReconcilePayload,
   parseFirewallConfirmPayload,
   parseFirewallReconcilePayload,
+  parseFoldersRemovePayload,
   parseHostnamePayload,
   parseManagedApplyPayload,
   parseManagedBackupPayload,
@@ -73,6 +74,7 @@ import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
+import { handleFoldersRemove } from "./remove-folders.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
@@ -125,6 +127,7 @@ export type CommandRouterHandlerOverrides = {
   handleFirewallReconcile?: typeof handleFirewallReconcile;
   handleFirewallConfirm?: typeof handleFirewallConfirm;
   handleBackupsReconcile?: typeof handleBackupsReconcile;
+  handleFoldersRemove?: typeof handleFoldersRemove;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -335,6 +338,16 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleBackupsReconcile",
           handleBackupsReconcile,
+        )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.folders.remove": {
+        const payload = parseFoldersRemovePayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleFoldersRemove",
+          handleFoldersRemove,
         )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();

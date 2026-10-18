@@ -36,7 +36,10 @@ import {
 } from "../paths/layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
-import { reclaimServiceTree } from "../deploy/release/retention.ts";
+import {
+  reclaimServiceTree,
+  removalFailureReason,
+} from "../deploy/release/retention.ts";
 import {
   actOnEarlierContainers,
   earlierRecordedProjects,
@@ -102,7 +105,9 @@ async function removeEnvironmentSiteReleases(
 ): Promise<EnvironmentStopFolderState[]> {
   const states: EnvironmentStopFolderState[] = [];
   await forEachSequential(siteReleases, async (entry) => {
+    const lines: string[] = [];
     const path = await reclaimServiceTree(layout, entry, runFn, (_, line) => {
+      lines.push(line);
       logWarn(
         "commands",
         `environment.stop site release reclaim env=${environmentId}: ${line}`,
@@ -115,6 +120,7 @@ async function removeEnvironmentSiteReleases(
         kind: "service",
         slug: entry.folder.slug,
         removed: path !== null,
+        ...(path === null ? { reason: removalFailureReason(lines) } : {}),
       });
     }
   });
