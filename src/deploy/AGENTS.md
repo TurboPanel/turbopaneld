@@ -829,13 +829,23 @@ site owner's Linux user:
   file is never refused and the daemon does not rewrite it. The container runs
   as that user, and files it creates keep that user's ids. The volume root is
   `<owner>:<owner> 0750`, so a declared user that is neither the owner nor root
-  cannot read or write it: that container fails at runtime with a permission
-  error, and the answer is to set `user:` to the owner's ids or use a named
-  Docker volume. (A file ACL on the volume root for such a user is a possible
-  later step; it would still never chown.) `root` in the container can write
-  and its files stay root's; the owner can still delete or rename anything in
-  their own folder (a directory's write permission decides that), but cannot
-  change the contents or modes of a file owned by another uid.
+  would not be able to read or write it. For a **numeric** declared user
+  (`999` or `999:999`) the daemon therefore gives that one uid an access entry
+  and a default entry on the volume root (`setfacl -m u:<uid>:rwx,d:u:<uid>:rwx`
+  through `tp-host setfacl`, `deploy/volume-access.ts`), on every deploy because
+  a later mode change on the folder drops it. Only the volume root gets it:
+  nothing inside is touched, nothing is re-owned (no chown, never to root), and
+  files already in the folder keep the access they had; the default entry means
+  files the container creates later stay open to that uid. The uid is whatever the compose file declares; the owner already chose
+  that container, so the host does not check it against other accounts. A declared user
+  given by **name** cannot be mapped to an id on the host (the names live in
+  the image), so it gets no entry and the deploy log says so; use the numeric
+  uid to have one. On a filesystem without access lists `setfacl` fails; the
+  deploy goes on and logs plainly that the container may not be able to write
+  the folder (run it as the owner's ids or use a named Docker volume). `root` in
+  the container can write and its files stay root's; the owner can still delete
+  or rename anything in their own folder (a directory's write permission decides
+  that), but cannot change the contents or modes of a file owned by another uid.
 - **A named Docker volume** (provider `docker`) is outside this tree and is not
   touched; it stays the way to run an image that insists on a fixed user.
 - One container cannot mount volumes of two site owners with defaulted users;

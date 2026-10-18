@@ -658,3 +658,132 @@ test("an existing account with a name only new owners are barred from keeps work
     await refused(host, ["groupadd", "-g", "15500", "git"]);
   });
 });
+
+async function buildVolume(host: Host, slug: string): Promise<string> {
+  const rel = `${HOME}/production/volumes/${slug}`;
+  const made = await installDir(host, rel, "0750", "alice", "alice");
+  assertEquals(made.code, 0, made.stderr);
+  return host.path(rel);
+}
+
+test("folder-list prints the well-formed asset folders and ends with complete", async () => {
+  await withHost(async (host) => {
+    await buildService(host);
+    await buildVolume(host, "uploads");
+    // None of these is a folder the rules would have made.
+    await Deno.mkdir(host.path(`${HOME}/production/volumes/Bad_Name`));
+    await Deno.mkdir(host.path(`${HOME}/home/volumes/x`), { recursive: true });
+    await Deno.symlink(
+      host.path("outside"),
+      host.path(`${HOME}/production/volumes/escape`),
+    );
+    await Deno.writeTextFile(host.path(`${HOME}/production/volumes/file`), "x");
+    // A second scope of the same owner, and a second owner, keep their own names.
+    await Deno.mkdir(host.path(`${HOME}/staging/volumes/second`), {
+      recursive: true,
+    });
+    await Deno.mkdir(host.path("srv/users/bob/common/services/site"), {
+      recursive: true,
+    });
+    const result = await host.run(["folder-list"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout.trim().split("\n"), [
+      "alice production service example.com",
+      "alice production volume uploads",
+      "alice staging volume second",
+      "bob common service site",
+      "complete",
+    ]);
+  });
+});
+
+test("folder-list on a host with no owners says complete and nothing else", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["folder-list"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout.trim(), "complete");
+  });
+});
+
+test("folder-list takes no arguments", async () => {
+  await withHost(async (host) => {
+    await refused(host, ["folder-list", "/etc"]);
+  });
+});
+
+test("setfacl gives one uid access to a volume folder and nothing else", async () => {
+  await withHost(async (host) => {
+    await buildService(host);
+    const volume = await buildVolume(host, "uploads");
+    const spec = "u:1000:rwx,d:u:1000:rwx";
+    const ok = await host.run(["setfacl", "-m", spec, "--", volume]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertStringIncludes(
+      ok.stdout,
+      `EXEC [setfacl] [-P] [-m] [${spec}] [--] [uploads]`,
+    );
+    const refusals: Array<[string[], string]> = [
+      [["-m", "u:0:rwx,d:u:0:rwx", "--", volume], "root"],
+      [["-m", "u:01000:rwx,d:u:01000:rwx", "--", volume], "leading zero"],
+      [["-m", "u:1000:rwx,d:u:1001:rwx", "--", volume], "two uids"],
+      [["-m", "u:1000:rw,d:u:1000:rw", "--", volume], "no execute"],
+      [["-m", "u:1000:rwx", "--", volume], "no default entry"],
+      [["-m", "g:1000:rwx,d:g:1000:rwx", "--", volume], "a group"],
+      [["-m", "u:4294967295:rwx,d:u:4294967295:rwx", "--", volume], "too big"],
+      [["-m", "u:app:rwx,d:u:app:rwx", "--", volume], "a name"],
+      [["-m", `${spec},o::rwx`, "--", volume], "extra entry"],
+      [["-m", spec, "--", host.path(SERVICE)], "a service folder"],
+      [
+        ["-m", spec, "--", host.path(`${HOME}/production/volumes`)],
+        "the kind folder",
+      ],
+      [["-m", spec, "--", host.path(`${HOME}/production`)], "the scope folder"],
+      [["-m", spec, "--", `${volume}/inner`], "inside a volume"],
+      [["-m", spec, "--", host.path("etc")], "outside the owner tree"],
+      [["-R", "-m", spec, "--", volume], "recursive"],
+      [["-m", spec, volume], "no separator"],
+    ];
+    for (const [args, why] of refusals) {
+      const stderr = await refused(host, ["setfacl", ...args]);
+      assertEquals(stderr.length > 0, true, why);
+    }
+  });
+});
+
+test("setfacl refuses a volume folder that is a link", async () => {
+  await withHost(async (host) => {
+    await buildService(host);
+    const link = host.path(`${HOME}/production/volumes/escape`);
+    await Deno.symlink(host.path("outside"), link);
+    await refused(host, [
+      "setfacl",
+      "-m",
+      "u:1000:rwx,d:u:1000:rwx",
+      "--",
+      link,
+    ]);
+  });
+});
+
+test("folder-list does not say complete when an owner's home cannot be walked", async () => {
+  await withHost(async (host) => {
+    await buildService(host);
+    // An owner home the helper cannot enter (a root helper can enter anything,
+    // so there is nothing to check when running as root).
+    const bad = host.path("srv/users/bob");
+    await Deno.mkdir(bad, { recursive: true });
+    await Deno.chmod(bad, 0o000);
+    try {
+      if (Deno.uid() === 0) return;
+      const result = await host.run(["folder-list"]);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(result.stdout.includes("complete"), false);
+      assertStringIncludes(
+        result.stdout,
+        "alice production service example.com",
+      );
+    } finally {
+      await Deno.chmod(bad, 0o700);
+    }
+  });
+});

@@ -7,6 +7,7 @@ import {
   ensureServiceFolder,
   ensureVolumeFolder,
   FolderChangedError,
+  listAssetFolders,
   readFolderRecord,
   recordAssetFolder,
   removeFolderRecord,
@@ -238,4 +239,68 @@ test("ensureAssetFolder picks the folders by kind and writes the record", async 
       TypeError,
     );
   });
+});
+
+const listRun = (stdout: string, success = true): RunFn => () =>
+  Promise.resolve({ success, stdout, stderr: "" });
+
+test("listAssetFolders reads the helper's complete listing", async () => {
+  assertEquals(
+    await listAssetFolders(listRun(
+      "alice production service example.com\nalice common volume shared\ncomplete\n",
+    )),
+    [
+      {
+        owner: "alice",
+        scope: "production",
+        kind: "service",
+        slug: "example.com",
+        present: true,
+      },
+      {
+        owner: "alice",
+        scope: "common",
+        kind: "volume",
+        slug: "shared",
+        present: true,
+      },
+    ],
+  );
+  assertEquals(await listAssetFolders(listRun("complete\n")), []);
+});
+
+test("listAssetFolders says nothing when the listing was cut short or failed", async () => {
+  // No closing line: the walk may have stopped early, so no folder is reported.
+  assertEquals(
+    await listAssetFolders(listRun("alice production volume uploads\n")),
+    null,
+  );
+  assertEquals(await listAssetFolders(listRun("", false)), null);
+  assertEquals(
+    await listAssetFolders(() => Promise.reject(new Error("no sudo"))),
+    null,
+  );
+});
+
+test("listAssetFolders drops lines that are not folders the rules would make", async () => {
+  assertEquals(
+    await listAssetFolders(listRun(
+      [
+        "alice production volume ok",
+        "alice volumes volume reserved-scope",
+        "Alice production volume bad-owner",
+        "alice production other kind",
+        "alice production volume too many fields",
+        "alice production volume ..",
+        "complete",
+      ].join("\n"),
+    )),
+    [{
+      owner: "alice",
+      scope: "production",
+      kind: "volume",
+      slug: "ok",
+      present: true,
+    }],
+  );
 });

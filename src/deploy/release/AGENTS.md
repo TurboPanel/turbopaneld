@@ -426,26 +426,40 @@ the newest N. A rollback re-points `current` at an older release; pruning it for
 being old would delete the running application. Removal is best-effort per
 entry — retention must never fail a deploy that already promoted.
 
-**Whole-tree reclaim for removed services** — per-service pruning only ever walks
-services the current deploy is still publishing, so a service dropped from the
-compose (or one that merely lost its `x-turbopanel.source` binding) would leave
-its `releases/`, `current`, and `shared/` behind forever. `deployment.json`
-`releases[]` is the host's durable record of what the *previous* deploy
-published, which is why each row also carries the owning **`username`** — once
-the payload stops naming the service there is nothing left to derive its
-principal home from. `deploy-environment.ts` diffs those rows against the
-`serviceId`s the payload still sources and hands the difference to
-`reclaimRemovedReleaseTrees` (`retention.ts`), which `rm -rf`s the whole tree
-through the same privileged runner sealing uses. It runs **after**
-`applySourceReleases` (so a tree this deploy is publishing into is never a
-candidate) and **before** the new manifest is written. Path segments are
-re-validated on the way out — the manifest is read back from disk, so it is not
-trusted to name a safe path. A service that is still sourced keeps its tree even
-if its principal changed: reclaiming it would delete live `shared/` state.
-Once a tree is gone, the daemon's records for that service
-(`<daemonStateDir>/release-records/<serviceId>`) are removed too, without
+**Removed services and their folders** — per-service pruning only ever walks
+services the current deploy is still publishing. `deployment.json` `releases[]`
+is the host's durable record of what the *previous* deploy published, which is
+why each row also carries the owning **`username`** (and `folder`) — once the
+payload stops naming the service there is nothing left to derive its principal
+home from. `deploy-environment.ts` diffs those rows against the `serviceId`s the
+payload still sources. **A service that leaves the compose file keeps its
+folder.** Only an explicit delete removes files (`server.folders.remove`, or the
+`siteReleases` an `environment.stop` carries for a delete): the deploy leaves
+the folder alone and reports it in the result's `keptFolders[]`
+(`keptServiceFolders`), and the control plane marks it an orphan. Only the older
+per-service tree (`<home>/sites/<serviceId>`, no folder) is still reclaimed
+here by `reclaimRemovedReleaseTrees` (`retention.ts`) through the same
+privileged runner sealing uses; that branch goes with the other old-tree
+fallbacks. The step runs **after** `applySourceReleases` (so a tree this deploy
+is publishing into is never a candidate) and **before** the new manifest is
+written. Path segments are re-validated on the way out — the manifest is read
+back from disk, so it is not trusted to name a safe path. A service that is
+still sourced keeps its tree even if its principal changed: reclaiming it would
+delete live `shared/` state. When a tree is removed, the daemon's records for
+that service (`<daemonStateDir>/release-records/<serviceId>`) go too, without
 privilege (the daemon owns them); a tree that could not be removed keeps its
 records. Best-effort per entry, like the rest of retention.
+
+**Explicit folder removal** — `server.folders.remove` (`commands/remove-folders.ts`)
+names folders by their four components (never a path), up to 100 per command.
+A volume folder goes through `reclaimAssetFolder`, a service folder through
+`reclaimServiceTree` (or `reclaimAssetFolder` when no id is known): both `sudo -n rm -rf` one folder via tp-host, which
+refuses a scope, `services` or `volumes` folder, pins the parent and never
+follows a link; nothing inside is re-owned. A reference whose record
+(`<state>/folders/<assetId>.json`) names other components is refused before any
+path is touched (`folder_changed`), and the record goes only with a folder that
+is gone. The result lists every requested folder with `removed` and, when it
+stayed, a plain `reason`; one folder that stays never stops the rest.
 
 **Sites now serve out of `current`.** `deploy-environment.ts`
 builds a `composeServiceName → { serviceId, username }` map from

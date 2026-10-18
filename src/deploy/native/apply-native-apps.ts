@@ -57,10 +57,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
-import {
-  resolveReleaseServiceId,
-  serviceFolderFromPayload,
-} from "../release/release-service-id.ts";
+import { serviceFolderForCompose } from "../release/release-service-id.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
 import {
@@ -1257,10 +1254,7 @@ export function nativeAppBindingsFromPayload(
       entry.composeServiceName,
       definedFields({
         username: principal.username,
-        folder: serviceFolderFromPayload(
-          payload,
-          resolveReleaseServiceId(payload, entry.composeServiceName),
-        ),
+        folder: serviceFolderForCompose(payload, entry.composeServiceName),
         previousReleaseId: previous,
         startCommand: entry.build.startCommand,
         releaseId: applied?.releaseId,

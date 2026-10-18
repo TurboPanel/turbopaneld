@@ -14,6 +14,7 @@ import {
 import {
   effectiveReleaseServiceId,
   resolveReleaseServiceId,
+  serviceFolderForCompose,
   serviceFolderFromPayload,
 } from "./release-service-id.ts";
 
@@ -159,4 +160,50 @@ test("a service with a planned folder never falls back to an older tree", async 
     );
     assertEquals(serviceFolderFromPayload(payload, "other"), undefined);
   });
+});
+
+test("serviceFolderForCompose finds the folder through the release id or the native app's id", () => {
+  const folder = { owner: "alice", scope: "production", slug: "api" };
+  const releaseId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c01";
+  const appId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c02";
+  const native = (serviceId: string) => ({
+    composeServiceName: "web",
+    serviceId,
+  });
+  // The folder is keyed by the id the release is named by.
+  assertEquals(
+    serviceFolderForCompose(
+      basePayload({
+        sourceMaterial: [baseSource({ releaseServiceId: releaseId })],
+        nativeAppServices: [native(appId)],
+        serviceFolders: [{ serviceId: releaseId, folder }],
+      } as Partial<EnvironmentDeployPayload>),
+      "web",
+    ),
+    folder,
+  );
+  // The folder is keyed by the id the unit is named by.
+  assertEquals(
+    serviceFolderForCompose(
+      basePayload({
+        sourceMaterial: [baseSource({ releaseServiceId: releaseId })],
+        nativeAppServices: [native(appId)],
+        serviceFolders: [{ serviceId: appId, folder }],
+      } as Partial<EnvironmentDeployPayload>),
+      "web",
+    ),
+    folder,
+  );
+  // No folder for either id, or another compose service: none.
+  assertEquals(
+    serviceFolderForCompose(
+      basePayload({
+        sourceMaterial: [baseSource({ releaseServiceId: releaseId })],
+        nativeAppServices: [native(appId)],
+        serviceFolders: [{ serviceId: "other", folder }],
+      } as Partial<EnvironmentDeployPayload>),
+      "web",
+    ),
+    undefined,
+  );
 });

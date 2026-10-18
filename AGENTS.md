@@ -948,7 +948,12 @@ it regresses:
     (root-owned); below a scope only `services` and `volumes`; `rm` leaves
     scope, `services` and `volumes` folders alone; `asset-path` prints a
     folder's host path from its components and refuses what the shared
-    name rules refuse; `sftp-chroot check` walks the scope tree. Publish: it takes the leaf, refuses hard
+    name rules refuse; `folder-list` prints every well-formed asset folder
+    (`<owner> <scope> service|volume <name>`, names only, links skipped) and
+    ends with `complete` only when the whole walk finished; `setfacl -m
+    u:<uid>:rwx,d:u:<uid>:rwx -- <volume folder>` gives one numeric uid (never
+    0) an access and a default entry on a volume folder root and nothing else;
+    `sftp-chroot check` walks the scope tree. Publish: it takes the leaf, refuses hard
     links, special files and a shipped `shared`, seals it recursively
     (`root:<user>`, no set-id, nothing group/other-writable), refuses a
     symlink that resolves outside it, renames it in through a root-owned chain

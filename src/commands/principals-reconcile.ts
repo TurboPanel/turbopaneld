@@ -38,10 +38,12 @@ import {
   type RetirePrincipalsResult,
 } from "../deploy/retire-principals.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
+import { listAssetFolders } from "../deploy/asset-folders.ts";
 import type {
   PrincipalIdReport,
   PrincipalsReconcilePayload,
   PrincipalsReconcileResult,
+  ReportedFolder,
 } from "../contracts/commands-contracts.ts";
 
 export type PrincipalsReconcileDeps = {
@@ -54,7 +56,11 @@ export type PrincipalsReconcileDeps = {
   ) => Promise<RetirePrincipalsResult>;
   reportPrincipalIds?: (
     principals: ReadonlyArray<{ principalId: string; username: string }>,
+    runFn?: RunFn,
+    homeRoot?: string,
   ) => Promise<PrincipalIdReport[]>;
+  /** Every asset folder on the host, or `null` when it cannot be listed; test seam. */
+  listAssetFolders?: (runFn: RunFn) => Promise<ReportedFolder[] | null>;
   ensureSystemPrincipals?: (
     layout: LayoutPaths,
     principals: PrincipalEnsureSpec[],
@@ -100,6 +106,8 @@ export async function handlePrincipalsReconcile(
 
   const idReports = await (deps.reportPrincipalIds ?? reportPrincipalIds)(
     payload.principals,
+    undefined,
+    layout.principalHomeRoot,
   );
 
   // An empty set is almost always a control plane that lost track of this
@@ -136,6 +144,13 @@ export async function handlePrincipalsReconcile(
     )
     : undefined;
 
+  // What is on disk, so the panel can notice a folder it expects is gone or one
+  // it does not know about. Never deletes anything, and a listing that could
+  // not be completed is left out rather than reported short.
+  const folders = await (deps.listAssetFolders ?? listAssetFolders)(
+    deps.runPrivileged ?? runPrivileged,
+  );
+
   logInfo(
     "command",
     `principals reconciled: ${payload.principals.length} accounts, ${ssh.changedPrincipals.length} key files updated, ${ssh.removedPrincipals.length} removed, ${
@@ -153,8 +168,10 @@ export async function handlePrincipalsReconcile(
       ? {}
       : { principalsRetired: retirement.retired }),
     ...(idReports.length === 0 ? {} : { principals: idReports }),
+    ...(folders === null ? {} : { folders }),
     warnings: [
       ...(groupWarnings ?? []),
+      ...(folders === null ? [FOLDER_LIST_UNAVAILABLE_WARNING] : []),
       ...ssh.warnings,
       ...(prune ? [] : [EMPTY_SET_KEPT_WARNING]),
       ...(retirement?.failed ?? []).map((entry) =>
@@ -163,6 +180,10 @@ export async function handlePrincipalsReconcile(
     ],
   };
 }
+
+/** Surfaced when the folder listing could not be completed (the result then carries no `folders`). */
+export const FOLDER_LIST_UNAVAILABLE_WARNING =
+  "the folders on this server could not be listed this time; nothing was concluded about them";
 
 /** Surfaced in the command result so the panel can see nothing was pruned. */
 export const EMPTY_SET_KEPT_WARNING =
