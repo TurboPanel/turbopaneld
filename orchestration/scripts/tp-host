@@ -2495,19 +2495,19 @@ tp_setfacl_volume_root() {
     tp_die "setfacl: only u:UID:rwx,d:u:UID:rwx on a volume folder"
   tp_require_class "$_sv_dir" principal
   _sv_rel="$(tp_home_rel "$_sv_dir")" || tp_die "setfacl: refusing $_sv_dir"
-  _sv_scope="${_sv_rel%%/*}"
-  _sv_rest="${_sv_rel#*/}"
-  [ "$_sv_scope" != "$_sv_rel" ] && tp_scope_ok "$_sv_scope" ||
+  _sf_scope="${_sv_rel%%/*}"
+  _sf_rest="${_sv_rel#*/}"
+  [ "$_sf_scope" != "$_sv_rel" ] && tp_scope_ok "$_sf_scope" ||
     tp_die "setfacl: refusing $_sv_dir"
-  case "$_sv_rest" in
+  case "$_sf_rest" in
     volumes/?*) ;;
     *) tp_die "setfacl: only a volume folder" ;;
   esac
-  _sv_slug="${_sv_rest#volumes/}"
-  case "$_sv_slug" in
+  _sf_slug="${_sf_rest#volumes/}"
+  case "$_sf_slug" in
     */*) tp_die "setfacl: only a volume folder" ;;
   esac
-  tp_folder_name_ok "$_sv_slug" || tp_die "setfacl: refusing folder name $_sv_slug"
+  tp_folder_name_ok "$_sf_slug" || tp_die "setfacl: refusing folder name $_sf_slug"
   tp_pin_parent "$_sv_dir" || tp_die "no such directory ${_sv_dir%/*}"
   [ -d "$PIN_NAME" ] && [ ! -L "$PIN_NAME" ] ||
     tp_die "setfacl: $_sv_dir is not a folder"

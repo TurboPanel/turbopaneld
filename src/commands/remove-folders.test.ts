@@ -307,3 +307,24 @@ test("server.folders.remove leaves a new asset's folder alone when a late comman
     assertEquals(host.calls, []);
   });
 });
+
+test("server.folders.remove leaves a folder alone when its records cannot be read", async () => {
+  await withTree(async (host) => {
+    // A record that is not valid JSON might be the one that owns this folder.
+    await Deno.writeTextFile(
+      join(host.layout.daemonStateDir, "folders", `${ASSET}.json`),
+      "not json",
+    );
+    const result = await handleFoldersRemove(
+      { folders: [{ kind: "volume", folder: UPLOADS }] },
+      "2026-01-01T00:00:00.000Z",
+      { resolveLayout: () => host.layout, runPrivileged: host.run },
+    );
+    assertEquals(result.folders[0]?.removed, false);
+    assertEquals(host.calls, []);
+    assertEquals(
+      result.folders[0]?.reason,
+      "The server could not read its records of this folder, so it was left alone.",
+    );
+  });
+});

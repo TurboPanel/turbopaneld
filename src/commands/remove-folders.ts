@@ -70,8 +70,14 @@ async function removeOne(
   // folder's components still knows it.
   let assetId = entry.assetId;
   if (assetId === undefined) {
-    assetId = (await findAssetIdByFolder(layout, ref).catch(() => null)) ??
-      undefined;
+    try {
+      assetId = (await findAssetIdByFolder(layout, ref)) ?? undefined;
+    } catch (err) {
+      // A record that cannot be read might be the one that owns this folder:
+      // leave the folder alone rather than guess.
+      onOutput("stderr", `folder records unreadable: ${String(err)}`);
+      return { ...state, removed: false, reason: removalFailureReason(lines) };
+    }
   }
   let path: string | null;
   if (entry.kind === "service" && assetId !== undefined) {

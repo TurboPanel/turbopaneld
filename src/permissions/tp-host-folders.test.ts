@@ -768,16 +768,20 @@ test("setfacl refuses a volume folder that is a link", async () => {
 test("folder-list does not say complete when an owner's home cannot be walked", async () => {
   await withHost(async (host) => {
     await buildService(host);
-    // A link in place of an owner's home is skipped as not a home, but a home
-    // that is a link below a symlinked root cannot be pinned: simulate by
-    // replacing the home root's child with an unreadable directory.
+    // An owner home the helper cannot enter (a root helper can enter anything,
+    // so there is nothing to check when running as root).
     const bad = host.path("srv/users/bob");
     await Deno.mkdir(bad, { recursive: true });
     await Deno.chmod(bad, 0o000);
     try {
+      if (Deno.uid() === 0) return;
       const result = await host.run(["folder-list"]);
-      if (Deno.uid() === 0) return; // root can enter anything
+      assertEquals(result.code, 0, result.stderr);
       assertEquals(result.stdout.includes("complete"), false);
+      assertStringIncludes(
+        result.stdout,
+        "alice production service example.com",
+      );
     } finally {
       await Deno.chmod(bad, 0o700);
     }

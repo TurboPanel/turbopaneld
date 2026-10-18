@@ -202,7 +202,7 @@ export async function findAssetIdByFolder(
     for await (const entry of Deno.readDir(folderRecordsDir(layout))) {
       const match = /^(.+)\.json$/.exec(entry.name);
       if (!entry.isFile || !match || !isPathId(match[1])) continue;
-      const record = await readFolderRecord(layout, match[1]).catch(() => null);
+      const record = await readFolderRecord(layout, match[1]);
       if (record !== null && sameComponents(record, wanted)) return match[1];
     }
   } catch (err) {
