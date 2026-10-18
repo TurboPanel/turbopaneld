@@ -328,6 +328,9 @@ export async function reclaimServiceTree(
  */
 export function removalFailureReason(lines: readonly string[]): string {
   const text = lines.join(" ");
+  if (text.includes("unreadable")) {
+    return "The server could not read its records of this folder, so it was left alone.";
+  }
   if (text.includes("folder_changed")) {
     return "The folder belongs to another service or volume, so it was left alone.";
   }
@@ -336,9 +339,6 @@ export function removalFailureReason(lines: readonly string[]): string {
   }
   if (text.includes("refusing")) {
     return "The server refused to remove this folder.";
-  }
-  if (text.includes("unreadable")) {
-    return "The server could not read its records of this folder, so it was left alone.";
   }
   if (text.includes("skipped")) {
     return "The folder reference was not valid, so nothing was removed.";
