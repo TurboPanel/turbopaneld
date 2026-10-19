@@ -381,7 +381,15 @@ test({
 
     // The tree is root-owned by design, so removal cannot use Deno.remove.
     const removed: string[] = [];
-    const siteDir = join(root, "srv", "users", "appuser", "sites", "svc-1");
+    const siteDir = join(
+      root,
+      "srv",
+      "users",
+      "appuser",
+      "production",
+      "services",
+      "svc-1",
+    );
     await Deno.mkdir(join(siteDir, "releases", "rel-1"), { recursive: true });
 
     try {
@@ -390,7 +398,11 @@ test({
           environmentId: "envrel0001",
           projectId: "proj-1",
           projectName: "tp-demo-envrel000",
-          siteReleases: [{ serviceId: "svc-1", username: "appuser" }],
+          siteReleases: [{
+            serviceId: "svc-1",
+            username: "appuser",
+            folder: { owner: "appuser", scope: "production", slug: "svc-1" },
+          }],
         },
         new Date().toISOString(),
         {
@@ -443,8 +455,16 @@ test({
           projectId: "proj-1",
           projectName: "tp-demo-envrel000",
           siteReleases: [
-            { serviceId: "svc-1", username: "appuser" },
-            { serviceId: "svc-2", username: "appuser" },
+            {
+              serviceId: "svc-1",
+              username: "appuser",
+              folder: { owner: "appuser", scope: "production", slug: "svc-1" },
+            },
+            {
+              serviceId: "svc-2",
+              username: "appuser",
+              folder: { owner: "appuser", scope: "production", slug: "svc-2" },
+            },
           ],
         },
         new Date().toISOString(),
@@ -497,7 +517,11 @@ test({
           environmentId: "envret0001",
           projectId: "proj-1",
           projectName: "tp-demo-envret000",
-          siteReleases: [{ serviceId: "svc-1", username: "appuser" }],
+          siteReleases: [{
+            serviceId: "svc-1",
+            username: "appuser",
+            folder: { owner: "appuser", scope: "production", slug: "svc-1" },
+          }],
           retirePrincipals: [{ username: "appuser" }, { username: "held" }],
         },
         new Date().toISOString(),
@@ -524,7 +548,17 @@ test({
         },
       );
       assertEquals(privileged, [
-        `-- ${join(root, "srv", "users", "appuser", "sites", "svc-1")}`,
+        `-- ${
+          join(
+            root,
+            "srv",
+            "users",
+            "appuser",
+            "production",
+            "services",
+            "svc-1",
+          )
+        }`,
         "principal-remove appuser",
         "principal-remove held",
       ]);
@@ -565,7 +599,11 @@ test({
           environmentId: "envrel0003",
           projectId: "proj-1",
           projectName: "tp-demo-envrel000",
-          siteReleases: [{ serviceId: "svc-1", username: "appuser" }],
+          siteReleases: [{
+            serviceId: "svc-1",
+            username: "appuser",
+            folder: { owner: "appuser", scope: "production", slug: "svc-1" },
+          }],
         },
         new Date().toISOString(),
         {

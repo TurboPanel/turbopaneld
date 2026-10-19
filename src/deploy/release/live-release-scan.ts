@@ -18,8 +18,7 @@
  * `<daemonStateDir>/release-link-scan.json`; redeploying the site publishes a
  * release the publish-time checks have vetted.
  *
- * Every site is walked as `<homes>/<user>/<scope>/services/<name>/current`
- * (and `<homes>/<user>/sites/<service>/current` in the older tree), not from
+ * Every site is walked as `<homes>/<user>/<scope>/services/<name>/current`, not from
  * the deployment manifests, which do not name the principal for releases
  * recorded before they carried one — the very releases this looks for.
  */
@@ -38,11 +37,7 @@ import {
 import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { readCurrentReleaseId } from "./promote.ts";
-import {
-  assertSafeReleaseId,
-  assertSafeServiceId,
-  runPrivileged,
-} from "./release-layout.ts";
+import { assertSafeReleaseId, runPrivileged } from "./release-layout.ts";
 import {
   linksLeavingReleaseLexically,
   listReleaseLinks,
@@ -97,17 +92,15 @@ async function scanSite(
   username: string,
   serviceId: string,
   runFn: RunFn,
-  folder?: { scope: string; slug: string },
+  folder: { scope: string; slug: string },
 ): Promise<ReleaseLinkFinding | null> {
   let releaseId: string | null = null;
   try {
     // A folder is named by its components, so the listing's name is the slug.
     const tree = serviceTree(layout, {
-      serviceId: folder === undefined ? assertSafeServiceId(serviceId) : "x",
+      serviceId: "x",
       username,
-      ...(folder === undefined ? {} : {
-        folder: { owner: username, scope: folder.scope, slug: folder.slug },
-      }),
+      folder: { owner: username, scope: folder.scope, slug: folder.slug },
     });
     releaseId = await readCurrentReleaseId(
       { currentLink: tree.currentLink },
@@ -141,26 +134,6 @@ export async function scanLiveReleaseLinks(
     (name) => isValidOwnerName(name),
   );
   await forEachSequential(users, async (username) => {
-    let services: string[];
-    try {
-      services = await listDirNames(
-        join(principalHomePath(layout, username), "sites"),
-        runFn,
-      );
-    } catch (err) {
-      findings.push({
-        username,
-        serviceId: "",
-        releaseId: null,
-        links: [],
-        error: errorText(err),
-      });
-      return;
-    }
-    await forEachSequential(services, async (serviceId) => {
-      const finding = await scanSite(layout, username, serviceId, runFn);
-      if (finding) findings.push(finding);
-    });
     await scanScopes(layout, username, runFn, findings);
   });
   return findings;
@@ -231,7 +204,7 @@ const OWNER_OWN_ENTRIES: ReadonlySet<string> = new Set([
 function describeFinding(finding: ReleaseLinkFinding): string {
   const site = finding.serviceId.includes("/")
     ? `${finding.username}/${finding.serviceId.replace("/", "/services/")}`
-    : `${finding.username}/sites/${finding.serviceId}`;
+    : finding.username;
   if (finding.error !== undefined) {
     return `could not check the live release of ${site}: ${finding.error}`;
   }

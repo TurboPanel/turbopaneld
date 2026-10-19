@@ -16,6 +16,9 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+const FOLDER = { owner: "appuser", scope: "production", slug: "example.com" };
+const PUBLISH_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72";
+
 /** Host-free `sudo -n …` seam — chown/chmod are no-ops in a temp tree. */
 const runOk: RunFn = () =>
   Promise.resolve({ success: true, stdout: "", stderr: "" });
@@ -23,7 +26,13 @@ const runOk: RunFn = () =>
 test("linkReleaseSharedDir points at the site's shared dir by relative path", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-release-shared-" });
   try {
-    const releaseDir = join(root, "sites", "svc-1", "releases", "rel-1");
+    const releaseDir = join(
+      root,
+      "sites",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      "releases",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     await Deno.mkdir(releaseDir, { recursive: true });
     await linkReleaseSharedDir(releaseDir);
 
@@ -41,7 +50,11 @@ test("linkReleaseSharedDir points at the site's shared dir by relative path", as
 test("linkReleaseSharedDir replaces an entry the build emitted", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-release-shared-" });
   try {
-    const releaseDir = join(root, "releases", "rel-1");
+    const releaseDir = join(
+      root,
+      "releases",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     await Deno.mkdir(join(releaseDir, "shared"), { recursive: true });
     await Deno.writeTextFile(join(releaseDir, "shared", "stale.txt"), "x");
 
@@ -61,7 +74,13 @@ test("promoteRelease resolves current/shared to the site shared dir", async () =
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releaseDir, { recursive: true });
     await Deno.mkdir(paths.sharedDir, { recursive: true });
@@ -96,7 +115,13 @@ test("promoteRelease leaves current untouched when the probe rejects", async () 
   try {
     const first = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(first.releaseDir, { recursive: true });
     await Deno.mkdir(first.sharedDir, { recursive: true });
@@ -113,7 +138,13 @@ test("promoteRelease leaves current untouched when the probe rejects", async () 
 
     const second = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-2" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e73",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(second.releaseDir, { recursive: true });
     await Deno.writeTextFile(join(workingDir, "index.html"), "v2");
@@ -130,7 +161,7 @@ test("promoteRelease leaves current untouched when the probe rejects", async () 
     // The failed promote is indistinguishable from one that never ran.
     assertEquals(
       await Deno.readLink(first.currentLink),
-      join("releases", "rel-1"),
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
     );
     assertEquals(
       await Deno.readTextFile(join(first.currentLink, "index.html")),

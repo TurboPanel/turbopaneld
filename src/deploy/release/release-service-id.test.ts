@@ -1,18 +1,9 @@
-import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { assertEquals, assertThrows } from "@std/assert";
 import type {
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
-import { createTempLayout } from "../../testing/temp-layout.ts";
 import {
-  principalHomePath,
-  resolveLayout,
-  siteCurrentSymlink,
-  siteReleasesDir,
-} from "../../paths/layout.ts";
-import {
-  effectiveReleaseServiceId,
   resolveReleaseServiceId,
   serviceFolderForCompose,
   serviceFolderFromPayload,
@@ -75,91 +66,39 @@ test("resolveReleaseServiceId uses hosting serviceId when no release or native r
   assertEquals(resolveReleaseServiceId(payload, "web"), "svc-hosting-legacy");
 });
 
-test("effectiveReleaseServiceId keeps legacy compose-key tree until canonical exists", async () => {
-  await createTempLayout().then(async (fixture) => {
-    const principalHomeRoot = join(fixture.dirs.stateDir, "principal-homes");
-    const layout = resolveLayout({
-      ...fixture.env,
-      TURBOPANEL_PRINCIPAL_HOME_ROOT: principalHomeRoot,
-    });
-    const username = "appuser";
-    const home = principalHomePath(layout, username);
-    const canonical = "svc-env-uuid";
-    const compose = "app";
-    const legacyRelease = join(siteReleasesDir(home, compose), "rel-legacy");
-    await Deno.mkdir(legacyRelease, { recursive: true });
-    await Deno.symlink(
-      join("releases", "rel-legacy"),
-      siteCurrentSymlink(home, compose),
-    );
-
-    const payload = basePayload({
-      sourceMaterial: [
-        baseSource({
-          composeServiceName: compose,
-          releaseServiceId: canonical,
-          principal: {
-            principalId: "p1",
-            username,
-            uid: 15001,
-            gid: 15002,
-          },
-        }),
-      ],
-    });
-
-    const segment = await effectiveReleaseServiceId(
-      payload,
-      compose,
-      layout,
-      { username },
-    );
-    assertEquals(segment, compose);
+test("a service folder comes from the planned serviceFolders entry", () => {
+  const folder = { owner: "appuser", scope: "production", slug: "app" };
+  const payload = basePayload({
+    sourceMaterial: [
+      baseSource({
+        composeServiceName: "app",
+        releaseServiceId: "svc-env-uuid",
+      }),
+    ],
+    serviceFolders: [{ serviceId: "svc-env-uuid", folder }],
   });
+  assertEquals(serviceFolderFromPayload(payload, "svc-env-uuid"), folder);
 });
 
-test("a service with a planned folder never falls back to an older tree", async () => {
-  await createTempLayout().then(async (fixture) => {
-    const layout = resolveLayout({
-      ...fixture.env,
-      TURBOPANEL_PRINCIPAL_HOME_ROOT: join(
-        fixture.dirs.stateDir,
-        "principal-homes",
-      ),
-    });
-    const home = principalHomePath(layout, "appuser");
-    // The older tree is there and published, as in the case above.
-    await Deno.mkdir(join(siteReleasesDir(home, "app"), "rel-old"), {
-      recursive: true,
-    });
-    await Deno.symlink(
-      join("releases", "rel-old"),
-      siteCurrentSymlink(home, "app"),
-    );
-    const payload = basePayload({
-      sourceMaterial: [
-        baseSource({
-          composeServiceName: "app",
-          releaseServiceId: "svc-env-uuid",
-        }),
-      ],
-      serviceFolders: [{
-        serviceId: "svc-env-uuid",
-        folder: { owner: "appuser", scope: "production", slug: "app" },
-      }],
-    });
-    assertEquals(
-      await effectiveReleaseServiceId(payload, "app", layout, {
-        username: "appuser",
+test("a service with no serviceFolders entry is refused, not served from another tree", () => {
+  const payload = basePayload({
+    sourceMaterial: [
+      baseSource({
+        composeServiceName: "app",
+        releaseServiceId: "svc-env-uuid",
       }),
-      "svc-env-uuid",
-    );
-    assertEquals(
-      serviceFolderFromPayload(payload, "svc-env-uuid"),
-      { owner: "appuser", scope: "production", slug: "app" },
-    );
-    assertEquals(serviceFolderFromPayload(payload, "other"), undefined);
+    ],
   });
+  assertThrows(
+    () => serviceFolderFromPayload(payload, "svc-env-uuid"),
+    Error,
+    "no serviceFolders entry",
+  );
+  assertThrows(
+    () => serviceFolderForCompose(payload, "app"),
+    Error,
+    "no serviceFolders entry",
+  );
 });
 
 test("serviceFolderForCompose finds the folder through the release id or the native app's id", () => {
@@ -194,16 +133,18 @@ test("serviceFolderForCompose finds the folder through the release id or the nat
     ),
     folder,
   );
-  // No folder for either id, or another compose service: none.
-  assertEquals(
-    serviceFolderForCompose(
-      basePayload({
-        sourceMaterial: [baseSource({ releaseServiceId: releaseId })],
-        nativeAppServices: [native(appId)],
-        serviceFolders: [{ serviceId: "other", folder }],
-      } as Partial<EnvironmentDeployPayload>),
-      "web",
-    ),
-    undefined,
+  // No folder for either id, or another compose service: refused.
+  assertThrows(
+    () =>
+      serviceFolderForCompose(
+        basePayload({
+          sourceMaterial: [baseSource({ releaseServiceId: releaseId })],
+          nativeAppServices: [native(appId)],
+          serviceFolders: [{ serviceId: "other", folder }],
+        } as Partial<EnvironmentDeployPayload>),
+        "web",
+      ),
+    Error,
+    "no serviceFolders entry",
   );
 });

@@ -29,7 +29,7 @@ async function site(
   links: Readonly<Record<string, string>>,
   current: string | null = "releases/r1",
 ): Promise<void> {
-  const siteDir = join(homes, user, "sites", service);
+  const siteDir = join(homes, user, "production", "services", service);
   const release = join(siteDir, "releases", "r1");
   await Deno.mkdir(join(release, "public"), { recursive: true });
   await Deno.mkdir(join(siteDir, "shared"), { recursive: true });
@@ -74,7 +74,7 @@ test("scanLiveReleaseLinks reports only live releases with escaping links", asyn
 
     assertEquals(await scanLiveReleaseLinks(layout, noRoot), [{
       username: "alice",
-      serviceId: "wp",
+      serviceId: "production/wp",
       releaseId: "r1",
       links: ["public/uploads -> ../shared/uploads (reaches into shared/)"],
     }]);
@@ -85,7 +85,7 @@ test("scanLiveReleaseLinks reports a site it cannot check instead of failing", a
   await withLayout(async (layout) => {
     await site(layout.principalHomeRoot, "alice", "web", {}, "releases/..");
     const [finding] = await scanLiveReleaseLinks(layout, noRoot);
-    assertEquals(finding.serviceId, "web");
+    assertEquals(finding.serviceId, "production/web");
     assertEquals(finding.links, []);
     assertStringIncludes(finding.error ?? "", "..");
   });
@@ -98,7 +98,9 @@ test("scanLiveReleaseLinks lists what the daemon cannot read as root", async () 
       calls.push([...args]);
       const listing: Record<string, string> = {
         [layout.principalHomeRoot]: "alice\n",
-        [join(layout.principalHomeRoot, "alice", "sites")]: "web\n",
+        [join(layout.principalHomeRoot, "alice")]: "production\n",
+        [join(layout.principalHomeRoot, "alice", "production", "services")]:
+          "web\n",
       };
       const dir = args.at(-1) ?? "";
       if (args.includes("readlink")) {
@@ -152,7 +154,7 @@ test("reportLiveReleaseLinks warns per finding and records the scan", async () =
       now: () => "2026-10-03T00:00:00.000Z",
     });
     assertEquals(warnings.length, 1);
-    assertStringIncludes(warnings[0], "alice/sites/wp");
+    assertStringIncludes(warnings[0], "alice/production/services/wp");
     assertStringIncludes(warnings[0], "public/x -> ../shared/evil");
     const path = join(layout.daemonStateDir, RELEASE_LINK_SCAN_FILENAME);
     const record = JSON.parse(await Deno.readTextFile(path));
@@ -262,15 +264,15 @@ test("readReleaseLinkScanReport reads the recorded scan and tolerates its absenc
   }
 });
 
-test("scanLiveReleaseLinks walks service folders in every scope beside the older trees", async () => {
+test("scanLiveReleaseLinks walks service folders in every scope", async () => {
   await withLayout(async (layout) => {
     const homes = layout.principalHomeRoot;
-    // An older tree and a scope tree, one escaping link in each.
+    // Two scopes, one escaping link in each.
     await site(homes, "alice", "wp", { "public/up": "../shared/up" });
     const folder = join(
       homes,
       "alice",
-      "production",
+      "staging",
       "services",
       "example.com",
     );
@@ -287,10 +289,16 @@ test("scanLiveReleaseLinks walks service folders in every scope beside the older
       recursive: true,
     });
 
-    const findings = await scanLiveReleaseLinks(layout, noRoot);
+    const findings = (await scanLiveReleaseLinks(layout, noRoot)).sort((a, b) =>
+      a.serviceId.localeCompare(b.serviceId)
+    );
     assertEquals(
       findings.map((f) => [f.username, f.serviceId, f.releaseId]),
-      [["alice", "wp", "r1"], ["alice", "production/example.com", "r1"]],
+      [["alice", "production/wp", "r1"], [
+        "alice",
+        "staging/example.com",
+        "r1",
+      ]],
     );
     assertStringIncludes(
       findings[1]!.links.join(","),

@@ -7,12 +7,9 @@
  * older release, and deleting that release for being old would delete the
  * running application.
  *
- * **Across services** — reclaim the whole `<principalHome>/sites/<serviceId>`
- * tree for a service that no longer has a source at all. Per-service pruning
- * only ever walks services the current deploy is still publishing, so without
- * this a service dropped from the compose (or one that lost its
- * `x-turbopanel.source` binding) would leave its releases, `current`, and
- * `shared/` on disk forever. The "previously deployed" side comes from the
+ * **Across services** — a service that no longer has a source at all keeps its
+ * folder in place; {@link keptServiceFolders} reports it so the control plane
+ * can mark it an orphan. The "previously deployed" side comes from the
  * `releases[]` rows in the environment's own `deployment.json`, which is the
  * host's durable record of what it published last time.
  *
@@ -164,14 +161,11 @@ export async function pruneReleases(
   return removed;
 }
 
-/**
- * One release tree on disk: its service folder when it has one, else
- * `<principalHomeRoot>/<username>/sites/<serviceId>`.
- */
+/** One release tree on disk: its service folder. */
 export type ReleaseTreeRef = {
   serviceId: string;
   username: string;
-  folder?: FolderRefParts;
+  folder: FolderRefParts;
 };
 
 /**
@@ -193,10 +187,8 @@ function isSafeReleaseTreeRef(ref: ReleaseTreeRef): boolean {
  * Trees whose service is no longer sourced at all.
  *
  * Keyed on `serviceId` alone, deliberately: a service that is *still* sourced
- * keeps its tree even if its owning principal changed, because reclaiming it
- * would delete the live `shared/` state of a service the deploy is still
- * publishing. Only disappearing from the source set reclaims the tree.
- * Unsafe segments are dropped rather than repaired.
+ * is in use even if its owning principal changed. Unsafe segments are dropped
+ * rather than repaired.
  */
 export function releaseTreesToReclaim(
   previous: readonly ReleaseTreeRef[],
@@ -225,61 +217,19 @@ export function keptServiceFolders(
 ): FolderRefParts[] {
   const kept: FolderRefParts[] = [];
   for (const ref of releaseTreesToReclaim(previous, currentServiceIds)) {
-    if (ref.folder !== undefined) kept.push(ref.folder);
+    kept.push(ref.folder);
   }
   return kept;
 }
 
-export type ReclaimRemovedReleaseTreesParams = {
-  layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">;
-  /** Release rows the previous deploy recorded in `deployment.json`. */
-  previous: readonly ReleaseTreeRef[];
-  /** `serviceId`s this deploy still carries a `sourceMaterial[]` entry for. */
-  currentServiceIds: ReadonlySet<string>;
-  runFn?: RunFn;
-  onOutput?: (stream: "stdout" | "stderr", line: string) => void;
-};
+/** Where a reclaim reports why a folder stayed; nothing throws. */
+export type ReclaimOutput = (
+  stream: "stdout" | "stderr",
+  line: string,
+) => void;
 
 /**
- * Remove the whole older per-service release tree for every service that lost
- * its source. A service folder is kept ({@link keptServiceFolders}).
- *
- * The tree is root-owned by design, so removal goes through the same privileged
- * runner sealing and per-release pruning use. Once a tree is gone, the
- * daemon's rollback records for that service go with it
- * ({@link removeServiceReleaseRecords}): a record outlives its tree nowhere.
- * Best-effort per entry, for the same reason retention is: a leftover directory
- * must never fail a deploy that has already promoted. Returns the tree paths
- * actually removed.
- */
-export async function reclaimRemovedReleaseTrees(
-  params: ReclaimRemovedReleaseTreesParams,
-): Promise<string[]> {
-  // A service folder is never reclaimed here: a service that leaves the compose
-  // file keeps its files, and only an explicit delete removes them
-  // (`server.folders.remove`). Only the older per-service tree is.
-  const doomed = releaseTreesToReclaim(
-    params.previous,
-    params.currentServiceIds,
-  ).filter((ref) => ref.folder === undefined);
-  if (doomed.length === 0) return [];
-
-  const runFn = params.runFn ?? runPrivileged;
-  const removed: string[] = [];
-  await forEachSequential(doomed, async (ref) => {
-    const path = await reclaimServiceTree(
-      params.layout,
-      ref,
-      runFn,
-      params.onOutput,
-    );
-    if (path !== null) removed.push(path);
-  });
-  return removed;
-}
-
-/**
- * Remove one service's whole tree: its folder (or `sites/<serviceId>`), the
+ * Remove one service's whole tree: its folder, the
  * record of the folder's components, and the daemon's own release records and
  * build scratch for the service. Returns the removed path, or `null` when the
  * tree could not be removed (the reason goes to `onOutput`; nothing throws).
@@ -290,7 +240,7 @@ export async function reclaimServiceTree(
   layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">,
   ref: ReleaseTreeRef,
   runFn: RunFn,
-  onOutput?: ReclaimRemovedReleaseTreesParams["onOutput"],
+  onOutput?: ReclaimOutput | undefined,
 ): Promise<string | null> {
   let path: string;
   try {
@@ -308,9 +258,7 @@ export async function reclaimServiceTree(
   // The folder is gone: a failure tidying the records is logged, not reported
   // as a folder that stayed.
   try {
-    if (ref.folder !== undefined) {
-      await removeFolderRecord(layout, ref.serviceId);
-    }
+    await removeFolderRecord(layout, ref.serviceId);
     await removeServiceStateDirs(layout, ref.serviceId, onOutput);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -355,7 +303,7 @@ export function removalFailureReason(lines: readonly string[]): string {
 async function removeTreeWithHelper(
   path: string,
   runFn: RunFn,
-  onOutput?: ReclaimRemovedReleaseTreesParams["onOutput"],
+  onOutput?: ReclaimOutput | undefined,
 ): Promise<boolean> {
   try {
     const result = await runFn(
@@ -394,7 +342,7 @@ export async function reclaimAssetFolder(
   ref: FolderRef,
   assetId: string | undefined,
   runFn: RunFn,
-  onOutput?: ReclaimRemovedReleaseTreesParams["onOutput"],
+  onOutput?: ReclaimOutput | undefined,
 ): Promise<string | null> {
   let path: string;
   try {
@@ -434,7 +382,7 @@ export async function reclaimAssetFolder(
 async function removeServiceStateDirs(
   layout: Pick<LayoutPaths, "daemonStateDir">,
   serviceId: string,
-  onOutput: ReclaimRemovedReleaseTreesParams["onOutput"],
+  onOutput: ReclaimOutput | undefined,
 ): Promise<void> {
   await forEachSequential([
     join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME, serviceId),

@@ -83,8 +83,8 @@ export type EnvironmentStopHandlerDeps = {
 
 /**
  * Reclaim the tree of every service the payload names: its service folder
- * (`<owner>/<scope>/services/<name>`), or `<principalHome>/sites/<serviceId>`
- * for an entry with no folder, plus the daemon's records of the service.
+ * (`<owner>/<scope>/services/<name>`), plus the daemon's records of the service.
+ * An entry with no folder names nothing on this host and is skipped.
  *
  * Only a delete (or a server leaving the environment) sends `siteReleases`; a
  * plain stop sends none, so every folder, including `shared/` uploads, stays.
@@ -105,24 +105,35 @@ async function removeEnvironmentSiteReleases(
 ): Promise<EnvironmentStopFolderState[]> {
   const states: EnvironmentStopFolderState[] = [];
   await forEachSequential(siteReleases, async (entry) => {
-    const lines: string[] = [];
-    const path = await reclaimServiceTree(layout, entry, runFn, (_, line) => {
-      lines.push(line);
+    const folder = entry.folder;
+    if (folder === undefined) {
       logWarn(
         "commands",
-        `environment.stop site release reclaim env=${environmentId}: ${line}`,
+        `environment.stop site release reclaim env=${environmentId}: ${entry.serviceId} has no folder, skipped`,
       );
-    });
-    if (entry.folder !== undefined) {
-      states.push({
-        owner: entry.folder.owner,
-        scope: entry.folder.scope,
-        kind: "service",
-        slug: entry.folder.slug,
-        removed: path !== null,
-        ...(path === null ? { reason: removalFailureReason(lines) } : {}),
-      });
+      return;
     }
+    const lines: string[] = [];
+    const path = await reclaimServiceTree(
+      layout,
+      { ...entry, folder },
+      runFn,
+      (_, line) => {
+        lines.push(line);
+        logWarn(
+          "commands",
+          `environment.stop site release reclaim env=${environmentId}: ${line}`,
+        );
+      },
+    );
+    states.push({
+      owner: folder.owner,
+      scope: folder.scope,
+      kind: "service",
+      slug: folder.slug,
+      removed: path !== null,
+      ...(path === null ? { reason: removalFailureReason(lines) } : {}),
+    });
   });
   return states;
 }

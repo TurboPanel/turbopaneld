@@ -626,9 +626,7 @@ const SITES: CallSite[] = [
     installDir("0750", "root:root", `${P}/srv/users`),
     installDir("0750", "root:alice", HOME, `${P}/srv/users`),
     installDir("0700", "alice:alice", `${HOME}/home`, HOME),
-    installDir("0700", "alice:alice", `${HOME}/data`, HOME),
     installDir("0700", "alice:alice", `${HOME}/tmp`, HOME),
-    installDir("0750", "root:alice", `${HOME}/sites`, HOME),
     // Managed lane (site.ts) and release lane (release-layout.ts).
     installDir("0750", "root:alice", SITE, `${HOME}/sites`),
     installDir("0750", "alice:tpnginx", `${SITE}/webroot`, SITE),
@@ -968,6 +966,7 @@ const SITES: CallSite[] = [
             framework: "node",
           },
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "api" },
           environmentId: "env1",
         }),
       ),
@@ -1037,17 +1036,6 @@ const SITES: CallSite[] = [
   tpHost(
     'src/deploy/release/build-sandbox.ts|["-n","systemctl","stop",`turbopanel-build-${work.buildId}.service`],MANAGED',
     { argv: ["systemctl", "stop", `turbopanel-build-${BUILD_ID}.service`] },
-  ),
-  tpHost(
-    'src/deploy/release/promote.ts|["-n",verb,username,serviceId,releaseId]',
-    { argv: ["publish-open", "alice", "svc1", "20260927-120000"] },
-    {
-      argv: ["publish", "alice", "svc1", "20260927-120000"],
-      setup: {
-        files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" },
-        dirs: [`${SITE}/releases`, `${SITE}/shared`],
-      },
-    },
   ),
   tpHost(
     'src/deploy/release/folder-publish.ts|["-n",verb,ref.owner,ref.scope,ref.slug,ids.serviceId,ids.releaseId,ids.publishId]',

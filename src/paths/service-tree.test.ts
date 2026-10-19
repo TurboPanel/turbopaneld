@@ -21,22 +21,6 @@ test("serviceTree builds every path from the folder", () => {
     sharedDir: `${root}/shared`,
     logsDir: `${root}/logs`,
     hostingDir: `${root}/.turbopanel-hosting`,
-    folder: true,
-  });
-});
-
-test("serviceTree keeps the older per-service tree without a folder", () => {
-  const tree = serviceTree(layout, { serviceId: "svc-1", username: "alice" });
-  const root = "/srv/users/alice/sites/svc-1";
-  assertEquals(tree, {
-    root,
-    publicDir: `${root}/webroot`,
-    releasesDir: `${root}/releases`,
-    currentLink: `${root}/current`,
-    sharedDir: `${root}/shared`,
-    logsDir: null,
-    hostingDir: `${root}/.turbopanel-hosting`,
-    folder: false,
   });
 });
 

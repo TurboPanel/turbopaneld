@@ -26,6 +26,29 @@ import { stageRelease, type StageReleaseParams } from "./promote.ts";
  */
 const test = Deno.test.bind(Deno);
 
+/** The service folder the control plane plans for a service in these fixtures. */
+function folderOf(serviceId: string, owner = "appuser") {
+  return { owner, scope: "production", slug: serviceId };
+}
+
+/**
+ * Stand-in for the privileged runner: `install -d` makes the folder for real
+ * (under the temp layout), everything else succeeds.
+ */
+function folderRun(
+  _command: string,
+  args: string[],
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
+  if (args.includes("install") && args.includes("-d")) {
+    try {
+      Deno.mkdirSync(args[args.length - 1], { recursive: true });
+    } catch {
+      // Outside the temp layout (a default layout): nothing to make.
+    }
+  }
+  return Promise.resolve({ success: true, stdout: "", stderr: "" });
+}
+
 const PROJECT = "01a0e39d-0418-7852-bc47-bc2f8422d404";
 /** The site owner's Linux user the payload's principal names. */
 const OWNER = "appuser";
@@ -46,14 +69,18 @@ function payload(
     hostings: [{
       hostingId: "host-1",
       composeServiceName: "web",
-      serviceId: "svc1",
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000fe",
       hostnames: ["app.example.com"],
     }],
     nativeAppServices: [{
       composeServiceName: "web",
-      serviceId: "svc1",
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000fe",
       listenPort: 3000,
       framework: "next",
+    }],
+    serviceFolders: [{
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000fe",
+      folder: folderOf("019e0a1b-7c3d-7a52-9b4e-3f1a2c0000fe"),
     }],
     sourceMaterial: [{
       sourceId: "src-1",
@@ -62,7 +89,7 @@ function payload(
       cloneUrl: "https://github.com/example/repo.git",
       ref: "main",
       commitSha: "abc123",
-      releaseId: "rel-1",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000001",
       principal: {
         principalId: "pr-1",
         username: "appuser",
@@ -107,10 +134,12 @@ async function withSandboxRoot(
       finalize: () => Promise.resolve(),
     },
     decryptSecrets: undefined,
-    runFn,
+    runFn: (command, args) => {
+      folderRun(command, args);
+      return runFn(command, args);
+    },
     sandboxedBuilds: true,
     buildSandboxRoot: root,
-    ensureReleaseTreeFn: () => Promise.resolve(),
     checkoutReleaseFn: async (params) => {
       seen.checkoutDir = params.checkoutDir;
       const workingDir = params.checkoutDir ??
@@ -456,7 +485,7 @@ test("an image build's prepare step runs in the sandbox, in the site owner's sli
         payload({
           build: { kind: "railpack" },
           principal: undefined,
-          releaseId: "rel-2",
+          releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000002",
         }),
         lane,
       );

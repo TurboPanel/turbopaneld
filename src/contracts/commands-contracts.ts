@@ -869,9 +869,8 @@ export type EnvironmentDeployStorageMaterial = {
   provider: "docker" | "path";
   sourcePath?: string;
   /**
-   * The volume's folder under its site owner's tree, as components. Replaces
-   * `sourcePath` for owned volumes once the daemon resolves folders itself;
-   * until then both may be present and `sourcePath` stays authoritative.
+   * The volume's folder under its site owner's tree, as components. The only
+   * place an owned volume lives; a `sourcePath` without a folder is refused.
    */
   folder?: FolderRefParts;
   /**
@@ -1583,8 +1582,9 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   /**
    * The folder of every service this deploy runs on the host (a site, a native
    * app or a Git-backed source), as components. The service id is the same
-   * value the release tree, units and hosting use. A service with no entry
-   * keeps the older per-service tree.
+   * value the release tree, units and hosting use. The control plane always
+   * sends it (an empty list when nothing runs on the host); a host-run service
+   * with no entry is refused. Kept optional on the wire for compatibility.
    */
   serviceFolders?: EnvironmentDeployServiceFolder[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];

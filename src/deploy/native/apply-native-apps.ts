@@ -121,8 +121,8 @@ export type NativeAppSleepFn = (ms: number) => Promise<void>;
  */
 export type NativeAppRelease = {
   username: string;
-  /** The service folder when the control plane sent one; else the older tree. */
-  folder?: FolderRefParts;
+  /** The service folder the control plane planned for the app. */
+  folder: FolderRefParts;
   /** Release `current` pointed at before this deploy, for rollback. */
   previousReleaseId?: string | null;
   /** `x-turbopanel.source.startCommand`, when the author declared one. */
@@ -548,7 +548,7 @@ async function rollbackNativeApp(
       username: binding.username,
       serviceId: app.serviceId,
       releaseId: params.previousReleaseId,
-      ...(binding.folder === undefined ? {} : { folder: binding.folder }),
+      folder: binding.folder,
     });
     await swapCurrentSymlink(paths);
     const changed = await params.prepared.reinstallUnit?.(params.start);
@@ -684,7 +684,7 @@ async function installNativeAppUnit(
       layout,
       app,
       username: binding.username,
-      ...(binding.folder === undefined ? {} : { folder: binding.folder }),
+      folder: binding.folder,
       environmentId: params.environmentId,
       environmentFile: params.environmentFile,
       ...(binding.startCommand === undefined

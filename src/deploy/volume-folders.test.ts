@@ -366,7 +366,7 @@ test("an older volume path the control plane named stays allowed", () =>
     await confine(f, older, false, [older]);
   }));
 
-test("only a path volume under the owner's volumes folder widens the bind allowlist", () => {
+test("only a volume with a folder widens the bind allowlist", () => {
   const layout = { principalHomeRoot: "/srv/users" };
   const roots = ownedVolumeRoots(layout, {
     storageMaterial: [
@@ -374,23 +374,12 @@ test("only a path volume under the owner's volumes folder widens the bind allowl
       volume({ folder: undefined, sourcePath: "/srv/users/bob/volumes/a" }),
       volume({
         folder: undefined,
-        sourcePath: "/srv/users/bob/sites/x/releases",
-      }),
-      volume({
-        folder: undefined,
         provider: "docker",
         sourcePath: "/srv/users/bob/volumes/b",
       }),
-      volume({
-        folder: undefined,
-        sourcePath: "/srv/users/bob/volumes/../sites/x",
-      }),
     ],
   });
-  assertEquals(roots, [
-    "/srv/users/alice/production/volumes/uploads",
-    "/srv/users/bob/volumes/a",
-  ]);
+  assertEquals(roots, ["/srv/users/alice/production/volumes/uploads"]);
 });
 
 test("two binds, one inside the other, are refused as a nested writable bind", () =>

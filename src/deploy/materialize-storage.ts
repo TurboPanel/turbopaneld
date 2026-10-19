@@ -1,4 +1,4 @@
-import { dirname, join, normalize } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type {
@@ -9,7 +9,6 @@ import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import { ensureAssetFolder } from "./asset-folders.ts";
 import {
   ensureDirectoryOwnedByPrincipal,
-  ensureDirectoryWithOwner,
   lookupPrincipalIds,
   principalUnixGroupName,
   type RunFn,
@@ -175,33 +174,17 @@ async function materializeDockerVolume(
 }
 
 /**
- * A path copy the instance names with `sourcePath` is only ever a directory
- * inside the volumes directory of the site owner's Linux user it is assigned
- * to (`<home root>/<username>/volumes/<name>`). The path must already be
- * normalized: no `.` or `..` segments, doubled or trailing slashes. Anything
- * else (another site owner's home, a system directory, no site owner at all)
- * is refused before the daemon creates, re-owns or bind-mounts it.
+ * A path copy lives only in its volume folder (`<owner>/<scope>/volumes/<name>`),
+ * named by `folder`. A `sourcePath` with no folder names nothing the daemon will
+ * create, re-own or bind-mount, so the deploy is refused.
  */
-function assertSourcePathConfined(
-  layout: LayoutPaths,
+function assertHasFolderForSourcePath(
   entry: EnvironmentDeployStorageMaterial,
-  ownership: EnvironmentDeployPrincipalMaterial | undefined,
 ): void {
-  const sourcePath = entry.sourcePath;
-  if (sourcePath === undefined) return;
-  const volumesRoot = ownership
-    ? join(layout.principalHomeRoot, ownership.username, "volumes")
-    : undefined;
-  if (
-    !volumesRoot ||
-    normalize(sourcePath) !== sourcePath ||
-    sourcePath.endsWith("/") ||
-    !sourcePath.startsWith(`${volumesRoot}/`)
-  ) {
-    throw new Error(
-      `storage ${entry.storageId}: source path ${sourcePath} is outside its site owner's volumes directory`,
-    );
-  }
+  if (entry.sourcePath === undefined) return;
+  throw new Error(
+    `storage ${entry.storageId}: a path copy needs the folder the control plane plans for it (sent source path ${entry.sourcePath} without one)`,
+  );
 }
 
 /**
@@ -239,19 +222,11 @@ async function materializeHostPathEntry(
   if (entry.folder !== undefined && entry.kind === "directory") {
     return await materializeVolumeFolder(layout, entry, ownership);
   }
-  assertSourcePathConfined(layout, entry, ownership);
-  let hostPath = entry.sourcePath ?? baseDir;
+  assertHasFolderForSourcePath(entry);
+  let hostPath = baseDir;
 
   if (entry.kind === "directory") {
     if (ownership) {
-      // The older per-owner path sits in `<home>/volumes`, which the home
-      // skeleton no longer makes for every owner: it is made here, for this
-      // path only, root-owned like the rest of the skeleton.
-      await ensureDirectoryWithOwner(
-        join(layout.principalHomeRoot, ownership.username, "volumes"),
-        "0750",
-        `root:${principalUnixGroupName(ownership.username)}`,
-      );
       await ensureDirectoryOwnedByPrincipal(
         hostPath,
         ownership.username,

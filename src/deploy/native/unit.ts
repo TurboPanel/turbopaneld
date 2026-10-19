@@ -18,7 +18,6 @@ import {
 import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
-  principalDataDir,
   principalTmpDir,
   principalUserHome,
   serviceTree,
@@ -251,7 +250,7 @@ export function principalUnitEnvironment(
 
 /**
  * The one `ReadWritePaths=` line for a cron job: the site directories it may
- * write, then the principal's `home/`, `data/` and `tmp/`. Never the home
+ * write, then the principal's `home/` and `tmp/`. Never the home
  * root: under `ProtectSystem=strict` everything else stays read-only, whatever
  * the file modes say. A Node app gets only its site's `shared/` instead.
  *
@@ -269,7 +268,6 @@ export function principalReadWritePaths(
     [
       ...siteDirs,
       principalUserHome(layout, username),
-      principalDataDir(layout, username),
       principalTmpDir(layout, username),
     ].join(" ")
   }`;
@@ -640,8 +638,8 @@ export type NativeAppUnitOpts = {
   >;
   app: EnvironmentDeployNativeAppService;
   username: string;
-  /** The service folder when the control plane sent one; else the older tree. */
-  folder?: FolderRefParts;
+  /** The service folder the control plane planned for the app. */
+  folder: FolderRefParts;
   environmentId: string;
   /** Resolved from `sourceMaterial[].build.startCommand`, when the author set one. */
   startCommand?: string;
@@ -687,7 +685,7 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const tree = serviceTree(opts.layout, {
     serviceId: app.serviceId,
     username,
-    ...(opts.folder === undefined ? {} : { folder: opts.folder }),
+    folder: opts.folder,
   });
   const workingDir = tree.currentLink;
   const sharedDir = tree.sharedDir;
@@ -785,11 +783,9 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
-    // Its own site's shared/: nothing else (not the owner's home/, data/ or
+    // Its own site's shared/: nothing else (not the owner's home/ or
     // tmp/). Under ProtectSystem=strict every other path stays read-only.
-    `ReadWritePaths=${
-      [sharedDir, ...(tree.logsDir === null ? [] : [tree.logsDir])].join(" ")
-    }`,
+    `ReadWritePaths=${[sharedDir, tree.logsDir].join(" ")}`,
   ];
 
   if (app.resources?.cpus !== undefined) {
