@@ -441,8 +441,40 @@ export type SiteValidationTarget = Readonly<{
   url: string;
 }>;
 
-/** Attempts per endpoint before a reload is declared a failure. */
+/** Attempts per endpoint that answer with an HTTP 5xx before a reload is declared a failure. */
 const VALIDATION_ATTEMPTS = 3;
+
+/**
+ * Pauses between probes that could not connect at all, in milliseconds. A web
+ * server that was just installed and started for the first time takes a few
+ * seconds before it listens, so refusing a connection is waited out, with the
+ * last pause repeated, for about 25 seconds in all.
+ */
+const CONNECT_RETRY_DELAYS_MS: readonly number[] = [
+  250,
+  500,
+  1000,
+  1000,
+  1000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+];
+
+export type ValidateSiteEndpointsOptions = Readonly<{
+  /** Pause between probes; replaced in tests. */
+  sleep?: (ms: number) => Promise<void>;
+}>;
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Prove the reloaded engine still serves every site it owns.
@@ -452,6 +484,11 @@ const VALIDATION_ATTEMPTS = 3;
  * is the engine that came back refusing connections or failing every request
  * because the config it was just handed is wrong in a way `-t` cannot see.
  *
+ * A connection that cannot be made is retried for several seconds before it
+ * counts as a failure: the first site on a host starts its web server for the
+ * first time, and that server is not listening the moment `systemctl` returns.
+ * An HTTP 5xx is a real answer and is retried only a few times.
+ *
  * The probe runs through the injected `run` seam (`curl`, already a host
  * prerequisite for the vendoring playbooks) so an apply stays testable without
  * a live listener.
@@ -460,11 +497,15 @@ export async function validateSiteEndpoints(
   run: SiteRunFn,
   label: string,
   targets: readonly SiteValidationTarget[],
+  options: ValidateSiteEndpointsOptions = {},
 ): Promise<void> {
+  const sleep = options.sleep ?? defaultSleep;
   for (const target of targets) {
     let failure = "no response";
     let answered = false;
-    for (let attempt = 0; attempt < VALIDATION_ATTEMPTS; attempt += 1) {
+    let connectFailures = 0;
+    let badAnswers = 0;
+    while (!answered) {
       const probe = await run("curl", [
         "-sS",
         "-o",
@@ -475,16 +516,23 @@ export async function validateSiteEndpoints(
         "5",
         target.url,
       ]);
-      if (!probe.success) {
-        failure = probe.stderr || "request failed";
+      if (probe.success) {
+        const status = Number.parseInt(probe.stdout.trim(), 10);
+        if (Number.isFinite(status) && status > 0 && status < 500) {
+          answered = true;
+          break;
+        }
+        failure = `HTTP ${probe.stdout.trim() || "?"}`;
+        badAnswers += 1;
+        if (badAnswers >= VALIDATION_ATTEMPTS) break;
+        await sleep(CONNECT_RETRY_DELAYS_MS[0]!);
         continue;
       }
-      const status = Number.parseInt(probe.stdout.trim(), 10);
-      if (Number.isFinite(status) && status > 0 && status < 500) {
-        answered = true;
-        break;
-      }
-      failure = `HTTP ${probe.stdout.trim() || "?"}`;
+      failure = probe.stderr || "request failed";
+      const pause = CONNECT_RETRY_DELAYS_MS[connectFailures];
+      connectFailures += 1;
+      if (pause === undefined) break;
+      await sleep(pause);
     }
     if (!answered) {
       throw new Error(
