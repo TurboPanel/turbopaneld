@@ -157,7 +157,6 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
     `0700 -o appuser -g appuser ${defaultHome}/data`,
     `0700 -o appuser -g appuser ${defaultHome}/tmp`,
     `0750 -o root -g appuser ${defaultHome}/sites`,
-    `0750 -o root -g appuser ${defaultHome}/volumes`,
   ]);
   // The account is created before its tenant directories are chowned to it.
   const useraddAt = calls.findIndex((c) => c.args.includes("useradd"));

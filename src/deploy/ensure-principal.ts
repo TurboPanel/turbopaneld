@@ -108,8 +108,12 @@ export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
 
 /** The principal's own directories in its home, `0700` and tenant-owned. */
 const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
-/** Root-owned directories of the home skeleton the engines traverse. */
-const PRINCIPAL_STRUCTURAL_DIRS = ["sites", "volumes"] as const;
+/**
+ * Root-owned directories of the home skeleton the engines traverse. Volumes are
+ * not here: a volume lives in its scope folder (`<owner>/<scope>/volumes/<name>`,
+ * made with the folder), and no top-level `volumes` is made for it.
+ */
+const PRINCIPAL_STRUCTURAL_DIRS = ["sites"] as const;
 
 /**
  * What an account that already exists may be called. A name for a new account
@@ -803,7 +807,7 @@ export async function ensurePrincipalPassword(
  *
  *   <home>                   root:<grp> 0750
  *   <home>/home|data|tmp     <user>:<grp> 0700  (home/ is the passwd home)
- *   <home>/sites, volumes    root:<grp> 0750
+ *   <home>/sites             root:<grp> 0750
  *
  * The group bit lets the engines (members of `<grp>`) reach `sites/`; other
  * principals get nothing. Parent before child: tp-host refuses a tenant or

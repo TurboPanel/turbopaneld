@@ -629,7 +629,6 @@ const SITES: CallSite[] = [
     installDir("0700", "alice:alice", `${HOME}/data`, HOME),
     installDir("0700", "alice:alice", `${HOME}/tmp`, HOME),
     installDir("0750", "root:alice", `${HOME}/sites`, HOME),
-    installDir("0750", "root:alice", `${HOME}/volumes`, HOME),
     // Managed lane (site.ts) and release lane (release-layout.ts).
     installDir("0750", "root:alice", SITE, `${HOME}/sites`),
     installDir("0750", "alice:tpnginx", `${SITE}/webroot`, SITE),
