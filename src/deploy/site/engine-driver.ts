@@ -52,7 +52,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logWarn } from "../../util/logger.ts";
-import { forEachSequential } from "../../util/sequential.ts";
+import { forEachSequential, repeatSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 
 /** Engines that can serve a site. */
@@ -516,46 +516,85 @@ export async function validateSiteEndpoints(
   options: ValidateSiteEndpointsOptions = {},
 ): Promise<void> {
   const sleep = options.sleep ?? defaultSleep;
-  for (const target of targets) {
-    let failure = "no response";
-    let answered = false;
-    let connectFailures = 0;
-    let badAnswers = 0;
-    while (!answered) {
-      const probe = await run("curl", [
-        "-sS",
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{http_code}",
-        "--max-time",
-        "5",
-        target.url,
-      ]);
-      if (probe.success) {
-        const status = Number.parseInt(probe.stdout.trim(), 10);
-        if (Number.isFinite(status) && status > 0 && status < 500) {
-          answered = true;
-          break;
-        }
-        failure = `HTTP ${probe.stdout.trim() || "?"}`;
-        badAnswers += 1;
-        if (badAnswers >= VALIDATION_ATTEMPTS) break;
-        await sleep(SERVER_ERROR_RETRY_PAUSE_MS);
-        continue;
-      }
-      failure = probe.stderr || "request failed";
-      const pause = CONNECT_RETRY_DELAYS_MS[connectFailures];
-      connectFailures += 1;
-      if (pause === undefined) break;
-      await sleep(pause);
-    }
-    if (!answered) {
+  await forEachSequential(targets, async (target) => {
+    const failure = await waitForEndpoint(run, target.url, sleep);
+    if (failure !== null) {
       throw new Error(
         `${label} did not serve ${target.label} at ${target.url} after reload: ${failure}`,
       );
     }
+  });
+}
+
+/** One probe of a loopback URL: it answered, or why it did not. */
+type EndpointProbe =
+  | Readonly<{ answered: true }>
+  | Readonly<{ answered: false; failure: string; connected: boolean }>;
+
+async function probeEndpoint(
+  run: SiteRunFn,
+  url: string,
+): Promise<EndpointProbe> {
+  const probe = await run("curl", [
+    "-sS",
+    "-o",
+    "/dev/null",
+    "-w",
+    "%{http_code}",
+    "--max-time",
+    "5",
+    url,
+  ]);
+  if (!probe.success) {
+    return {
+      answered: false,
+      failure: probe.stderr || "request failed",
+      connected: false,
+    };
   }
+  const status = Number.parseInt(probe.stdout.trim(), 10);
+  if (Number.isFinite(status) && status > 0 && status < 500) {
+    return { answered: true };
+  }
+  return {
+    answered: false,
+    failure: `HTTP ${probe.stdout.trim() || "?"}`,
+    connected: true,
+  };
+}
+
+/**
+ * Probe `url` until it answers, or the retries for its kind of failure run out.
+ * Returns `null` once it answered, else the last failure.
+ */
+async function waitForEndpoint(
+  run: SiteRunFn,
+  url: string,
+  sleep: (ms: number) => Promise<void>,
+): Promise<string | null> {
+  let failure: string | null = "no response";
+  let connectFailures = 0;
+  let badAnswers = 0;
+  await repeatSequential(async () => {
+    const probe = await probeEndpoint(run, url);
+    if (probe.answered) {
+      failure = null;
+      return false;
+    }
+    failure = probe.failure;
+    let pause: number | undefined = SERVER_ERROR_RETRY_PAUSE_MS;
+    if (probe.connected) {
+      badAnswers += 1;
+      if (badAnswers >= VALIDATION_ATTEMPTS) return false;
+    } else {
+      pause = CONNECT_RETRY_DELAYS_MS[connectFailures];
+      connectFailures += 1;
+    }
+    if (pause === undefined) return false;
+    await sleep(pause);
+    return true;
+  });
+  return failure;
 }
 
 /** One engine's render → stage → swap → test → reload behavior. */
