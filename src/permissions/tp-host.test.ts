@@ -3319,6 +3319,56 @@ test("sftp-chroot off writes the marker before it removes the switch", async () 
   });
 });
 
+test("an off that lands while auto's layout check runs still wins", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    // Hold auto after its layout check passed and before it writes the switch
+    // (tp-host's test mode pauses there while the pause file exists). `off`
+    // then writes its marker and finds no switch to remove.
+    const pause = host.path("tmp/pause-sftp-auto");
+    const paused = host.path("tmp/paused-sftp-auto");
+    await Deno.writeTextFile(pause, "");
+    const auto = host.run(["sftp-chroot", "auto"]);
+    for (let i = 0; i < 200; i++) {
+      if (await Deno.stat(paused).then(() => true, () => false)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assertEquals(await Deno.stat(paused).then(() => true, () => false), true);
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code, 0, off.stderr);
+    await Deno.remove(pause);
+    const result = await auto;
+    assertEquals(result.code, 0, result.stderr);
+    // auto wrote the switch, then saw the marker and took it back.
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+  });
+});
+
+test("sftp-chroot off still works when the SSH folder is missing", async () => {
+  await withHost(async (host) => {
+    await Deno.remove(host.path("etc/ssh/turbopanel"), { recursive: true });
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code, 0, off.stderr);
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+    assertEquals(
+      (await Deno.stat(host.path("etc/ssh/turbopanel"))).mode! & 0o777,
+      0o750,
+    );
+    // Remembered: auto leaves it alone.
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sftp-chroot off and auto-revert are no-ops on a host with no SSH server folder", async () => {
+  await withHost(async (host) => {
+    await Deno.remove(host.path("etc/ssh"), { recursive: true });
+    assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "auto-revert"])).code, 0);
+  });
+});
+
 test("sftp-chroot auto-revert removes the switch without remembering an off", async () => {
   await withHost(async (host) => {
     await newLayoutAlice(host);
