@@ -34,6 +34,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "journalctl",
   "sshd",
   "sftp-chroot",
+  "sshd-config",
   "ss",
   "sysctl",
   "iptables",

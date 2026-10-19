@@ -52,6 +52,8 @@ export type CallSiteSetup = {
   dirs?: string[];
   /** Files to create, `path → contents`. */
   files?: Record<string, string>;
+  /** Modes to set on existing paths once created, `path → mode`. */
+  modes?: Record<string, number>;
   /** Symlinks to create, `[target, path]`. */
   links?: Array<[string, string]>;
   /** `/etc/group` lines to add. */
@@ -271,6 +273,11 @@ const file = (path: string, contents = "x\n"): CallSiteSetup => ({
   files: { [path]: contents },
 });
 const dir = (...paths: string[]): CallSiteSetup => ({ dirs: paths });
+/** The jail-ready new layout: alice's home root is closed to everyone else. */
+const jailReadyAlice: CallSiteSetup = {
+  dirs: [`${P}/srv/users/alice/home`],
+  modes: { [`${P}/srv/users/alice`]: 0o750 },
+};
 
 /** `install -d -m MODE -o USER -g GROUP PATH`, under an existing `parent`. */
 function installDir(
@@ -1558,6 +1565,19 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","status"]', {
     argv: ["sftp-chroot", "status"],
   }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","auto"]', {
+    argv: ["sftp-chroot", "auto"],
+    // alice is in tpsftp; on the new layout the check is clean.
+    setup: jailReadyAlice,
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","auto-revert"]', {
+    argv: ["sftp-chroot", "auto-revert"],
+    setup: file(`${P}/etc/ssh/turbopanel/sftp-chroot`, "on\n"),
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sshd-config"]', {
+    argv: ["sshd-config"],
+    setup: file(`${P}/etc/ssh/sshd_config`, "Port 22\n"),
+  }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","verify"]', {
     argv: ["sftp-chroot", "verify"],
     setup: file(`${P}/etc/ssh/turbopanel/sftp-chroot`, "on\n"),
@@ -1565,7 +1585,7 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","check"]', {
     argv: ["sftp-chroot", "check"],
     // alice is in tpsftp; on the new layout the check is clean.
-    setup: dir(`${P}/srv/users/alice/home`),
+    setup: jailReadyAlice,
   }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sshd","-t"]', {
     argv: ["sshd", "-t"],

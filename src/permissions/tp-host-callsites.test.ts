@@ -330,6 +330,9 @@ async function prepare(
     await Deno.mkdir(dirname(at(prefix, file)), { recursive: true });
     await Deno.writeTextFile(at(prefix, file), at(prefix, contents));
   }
+  for (const [path, mode] of Object.entries(setup?.modes ?? {})) {
+    await Deno.chmod(at(prefix, path), mode);
+  }
   if (setup?.groups !== undefined) {
     const groupFile = join(prefix, "etc/group");
     await Deno.writeTextFile(groupFile, `${setup.groups.join("\n")}\n`, {
