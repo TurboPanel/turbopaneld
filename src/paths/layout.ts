@@ -745,79 +745,13 @@ export function commandLogSpoolDir(
 }
 
 /**
- * Per-service release tree root: `<principalHomeRoot>/<username>/sites/<serviceId>`.
- *
- * Generic on purpose — the Git-backed release engine and the site
- * serving path both address the same tree, so neither hardcodes the layout.
- * Under it: `releases/<releaseId>` (immutable published builds), `current`
- * (symlink to the live release), and `shared` (writable state that survives a
- * promote).
- */
-export function siteRoot(principalHome: string, serviceId: string): string {
-  return join(principalHome, "sites", serviceId);
-}
-
-/** `<siteRoot>/releases` — one immutable directory per published release. */
-export function siteReleasesDir(
-  principalHome: string,
-  serviceId: string,
-): string {
-  return join(siteRoot(principalHome, serviceId), "releases");
-}
-
-/**
- * `<siteRoot>/current` — symlink to the live release. Swapped atomically by a
- * `rename()` over a freshly created symlink; never rewritten in place.
- */
-export function siteCurrentSymlink(
-  principalHome: string,
-  serviceId: string,
-): string {
-  return join(siteRoot(principalHome, serviceId), "current");
-}
-
-/**
- * `<siteRoot>/webroot` — the document root of a **managed-directory** site.
- *
- * A deliberate sibling of `releases/` and `current`, so connecting a repository
- * to an existing site later is a field flip rather than a move: the parent tree
- * is already the right one, and a release simply starts being published beside
- * the directory instead of into it.
- *
- * **Names the concession.** This directory is principal-*writable*, which gives
- * up the immutable-release property — the tree the engine executes is writable
- * by the account running it, which is exactly what release confinement exists
- * to prevent. That is the correct trade for a WordPress site (the application
- * writes to itself by design) and the wrong one for a built application, which
- * is why it is an explicit `sourceKind` and never inferred. `open_basedir`
- * still confines the site to its own tree.
- */
-export function siteWebrootDir(
-  principalHome: string,
-  serviceId: string,
-): string {
-  return join(siteRoot(principalHome, serviceId), "webroot");
-}
-
-/**
- * `<siteRoot>/shared` — writable state (uploads, caches, logs) shared across
- * releases. The only writable path in the tree once a release is published.
- */
-export function siteSharedDir(
-  principalHome: string,
-  serviceId: string,
-): string {
-  return join(siteRoot(principalHome, serviceId), "shared");
-}
-
-/**
  * Principal home for `username` under the layout's principal home root.
  *
- * `root:<username> 0750`, like `sites/` and `volumes/` inside it: a
+ * `root:<username> 0750`, like every scope folder inside it: a
  * directory's owner can rename its entries, so every directory holding a
  * root-owned path is root's. The principal writes only into the leaves —
- * {@link principalUserHome}, {@link principalDataDir}, {@link principalTmpDir}
- * and each site's `shared/` / `webroot/`. tp-host enforces the owners and
+ * {@link principalUserHome}, {@link principalTmpDir} and each service's
+ * `public/`, `shared/` and `logs/`, and each volume folder. tp-host enforces the owners and
  * modes.
  */
 export function principalHomePath(
@@ -860,18 +794,6 @@ export function principalUserHome(
 }
 
 /**
- * `<home>/data` — private persistent data not tied to one site (SQLite
- * files, state shared by the principal's services). Never served.
- * `<username>:<username> 0700`.
- */
-export function principalDataDir(
-  layout: Pick<LayoutPaths, "principalHomeRoot">,
-  username: string,
-): string {
-  return join(principalHomePath(layout, username), "data");
-}
-
-/**
  * `<home>/tmp` — the principal's own `TMPDIR`, off the shared `/tmp`.
  * `<username>:<username> 0700`.
  */
@@ -886,8 +808,7 @@ export function principalTmpDir(
 //
 // One function turns the four components the control plane sends (owner,
 // scope, kind, slug) into a host path. Everything below is built on it, so no
-// caller assembles a path from pieces. The older `sites/<serviceId>` helpers
-// above stay until the serving code moves over.
+// caller assembles a path from pieces.
 //
 //   <home root>/<owner>/<scope>/services/<slug>/{public,releases,current,shared,logs}
 //   <home root>/<owner>/<scope>/volumes/<slug>
@@ -1027,70 +948,48 @@ export function folderRecordPath(
   return join(folderRecordsDir(layout), `${assetId}.json`);
 }
 
-/** What names one service's tree: its id, its owner, and its folder when the control plane sent one. */
+/** What names one service's tree: its id, its owner, and the folder the control plane planned for it. */
 export type ServiceRef = {
   serviceId: string;
   username: string;
-  folder?: FolderRefParts;
+  folder: FolderRefParts;
 };
 
 /**
- * Every path of one service's tree.
- *
- * With a `folder` the paths come from the scope tree (`<service>/public`,
- * `releases`, `current`, `shared`, `logs`, `.turbopanel-hosting`). Without one
- * the older per-service tree is used (`sites/<serviceId>/webroot`, no `logs`),
- * so a control plane that does not send folders yet keeps working. That older
- * branch is the only place the two shapes meet: callers read this object and
- * never test which shape they have.
+ * Every path of one service's tree, from its folder:
+ * `<service>/public`, `releases`, `current`, `shared`, `logs` and
+ * `.turbopanel-hosting`.
  */
 export type ServiceTree = {
-  /** The service folder (`sites/<serviceId>` for the older tree). */
+  /** The service folder. */
   root: string;
-  /** The uploaded-directory document root (`webroot` for the older tree). */
+  /** The uploaded-directory document root. */
   publicDir: string;
   releasesDir: string;
   currentLink: string;
   sharedDir: string;
-  /** The app's own log files; the older tree has none. */
-  logsDir: string | null;
+  /** The app's own log files. */
+  logsDir: string;
   /** Generated per-site files, root-owned. */
   hostingDir: string;
-  /** True when the paths come from a folder reference. */
-  folder: boolean;
 };
 
 export function serviceTree(
   layout: LayoutHomeRoot,
   ref: ServiceRef,
 ): ServiceTree {
-  if (ref.folder !== undefined) {
-    if (ref.folder.owner !== ref.username) {
-      throw new TypeError("Service folder owner does not match the owner");
-    }
-    const parts = ref.folder;
-    return {
-      root: serviceFolder(layout, parts),
-      publicDir: publicDir(layout, parts),
-      releasesDir: releasesDir(layout, parts),
-      currentLink: currentLink(layout, parts),
-      sharedDir: sharedDir(layout, parts),
-      logsDir: logsDir(layout, parts),
-      hostingDir: hostingFilesDir(layout, parts),
-      folder: true,
-    };
+  if (ref.folder.owner !== ref.username) {
+    throw new TypeError("Service folder owner does not match the owner");
   }
-  const home = principalHomePath(layout, ref.username);
-  const root = siteRoot(home, ref.serviceId);
+  const parts = ref.folder;
   return {
-    root,
-    publicDir: siteWebrootDir(home, ref.serviceId),
-    releasesDir: siteReleasesDir(home, ref.serviceId),
-    currentLink: siteCurrentSymlink(home, ref.serviceId),
-    sharedDir: siteSharedDir(home, ref.serviceId),
-    logsDir: null,
-    hostingDir: join(root, ".turbopanel-hosting"),
-    folder: false,
+    root: serviceFolder(layout, parts),
+    publicDir: publicDir(layout, parts),
+    releasesDir: releasesDir(layout, parts),
+    currentLink: currentLink(layout, parts),
+    sharedDir: sharedDir(layout, parts),
+    logsDir: logsDir(layout, parts),
+    hostingDir: hostingFilesDir(layout, parts),
   };
 }
 

@@ -242,6 +242,7 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         nativeAppUnitContent({
           layout,
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "web" },
           environmentId: "env1",
           app: {
             serviceId: "svc1",
@@ -257,6 +258,7 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         nativeAppUnitContent({
           layout,
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "web" },
           environmentId: "env1",
           environmentFile: true,
           nativeStart: { kind: "deno-file", path: "src/main.ts" },
@@ -470,6 +472,7 @@ test("a native app unit may load its own variables file and no other", async () 
       nativeAppUnitContent({
         layout,
         username: "alice",
+        folder: { owner: "alice", scope: "production", slug: "web" },
         environmentId: "env1",
         environmentFile: true,
         app: {

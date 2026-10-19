@@ -24,7 +24,7 @@
  * **Release-backed sites.** When the deploy carries a `sourceMaterial[]` entry
  * for a compose service, that service's document root resolves inside the Git
  * release tree instead of the daemon-owned state dir:
- * `<principalHome>/sites/<serviceId>/current/<root>`. `current` is a stable
+ * `<service folder>/current/<root>`. `current` is a stable
  * name, so the generated vhost content never changes across releases — only the
  * (already atomic) promote changes what it points at. The release tree is
  * root-owned `0550` by design, so nothing here creates, populates, or chowns it:
@@ -185,8 +185,8 @@ export type SiteApplySpec = EnvironmentDeploySite;
 export type SiteRelease = {
   serviceId: string;
   username: string;
-  /** The service folder when the control plane sent one; else the older tree. */
-  folder?: FolderRefParts;
+  /** The service folder the control plane planned. */
+  folder: FolderRefParts;
 };
 
 /** Compose service name → its release tree, for the sites in one deploy. */
@@ -199,15 +199,15 @@ export type SiteReleaseBindings = ReadonlyMap<
  * The principal-owned tree a **managed-directory** site serves from.
  *
  * Deliberately the same shape as {@link SiteRelease} and resolved by the same
- * caller with the same `serviceId` rule, so `sites/<serviceId>/webroot/` and
- * `sites/<serviceId>/current` are siblings. That is what makes connecting a
+ * caller with the same `serviceId` rule, so `<service folder>/public/` and
+ * `<service folder>/current` are siblings. That is what makes connecting a
  * repository to an existing site a field flip rather than a move.
  */
 export type SiteManagedDirectory = {
   serviceId: string;
   username: string;
-  /** The service folder when the control plane sent one; else the older tree. */
-  folder?: FolderRefParts;
+  /** The service folder the control plane planned. */
+  folder: FolderRefParts;
 };
 
 /** Compose service name → its principal-owned webroot. */
@@ -371,7 +371,7 @@ export function siteMetadataDir(
 
 /**
  * What a site's own code may write inside its service folder: `shared/` and
- * `logs/` (when the tree has one), plus the uploaded folder for a
+ * `logs/`, plus the uploaded folder for a
  * managed-directory site. Used by the PHP unit, the cron job and `open_basedir`
  * so they cannot disagree.
  */
@@ -384,7 +384,7 @@ export function siteWritableDirs(
   return [
     ...(uploaded ? [tree.publicDir] : []),
     tree.sharedDir,
-    ...(tree.logsDir === null ? [] : [tree.logsDir]),
+    tree.logsDir,
   ];
 }
 
@@ -397,9 +397,8 @@ const DEFAULT_SITE_ROOT = "public";
  * Release-backed: `<service folder>/current/<root>` — the `current` segment
  * is a stable *name*, so a promote never invalidates a generated vhost.
  *
- * Managed-directory: `<service folder>/public` (with a folder; the default root
- * `public` means that folder, any other root is inside it), or
- * `<principalHome>/sites/<serviceId>/webroot/<root>` without one. Owned by the
+ * Managed-directory: `<service folder>/public` (the default root `public`
+ * means that folder, any other root is inside it). Owned by the
  * principal so it can be filled over SFTP. A sibling of `current`, so a site
  * that later connects a repository keeps the same parent tree.
  *
@@ -420,7 +419,7 @@ export function resolveSiteDocumentRoot(
     const tree = serviceTree(layout, managed);
     // The uploaded folder is `public/` itself, so the default root name
     // `public` means that folder; any other root is a folder inside it.
-    return tree.folder && site.root === DEFAULT_SITE_ROOT
+    return site.root === DEFAULT_SITE_ROOT
       ? tree.publicDir
       : join(tree.publicDir, site.root);
   }
@@ -3448,13 +3447,12 @@ async function userSupplementaryGroups(user: string): Promise<Set<string>> {
 /**
  * Create a managed-directory site's tree.
  *
- * `sites/<serviceId>/` is root-owned, group `<username>`, `0750` — the same
+ * The service folder is root-owned, group `<username>`, `0750` — the same
  * shape as the release lane: the tenant cannot rename what sits in it, and the
  * serving engine traverses it through its membership of the principal's group.
- * The leaves below it (`webroot/`, `shared/`, the document root) are the
+ * The leaves below it (`public/`, `shared/`, the document root) are the
  * principal's, `0750` with the engine's group: the owner writes, the engine
- * reads, nothing else can traverse in. `install -d` also *repairs*, so a tree
- * left by an earlier layout converges on the next deploy.
+ * reads, nothing else can traverse in.
  *
  * `shared/` is created alongside because `open_basedir` names it — a PHP app
  * that writes uploads or caches outside the document root has one place to put
@@ -3473,21 +3471,12 @@ async function ensureManagedDirectory(
 ): Promise<void> {
   const tree = serviceTree(layout, managed);
   const owner = `${managed.username}:${resolveSiteOwnership(site).group}`;
-  if (managed.folder !== undefined) {
-    // The folder, its `releases/`, `shared/` and `logs/` and the record of its
-    // components; `public/` and the document root below carry the engine group.
-    await ensureAssetFolder(layout, managed.serviceId, {
-      ...managed.folder,
-      kind: "service",
-    }, run);
-  } else {
-    await ensureDirectoryWithOwner(
-      tree.root,
-      "0750",
-      `root:${principalUnixGroupName(managed.username)}`,
-      run,
-    );
-  }
+  // The folder, its `releases/`, `shared/` and `logs/` and the record of its
+  // components; `public/` and the document root below carry the engine group.
+  await ensureAssetFolder(layout, managed.serviceId, {
+    ...managed.folder,
+    kind: "service",
+  }, run);
   // Parent before child: the directories are created in this order.
   await forEachSequential(
     [...new Set([tree.publicDir, tree.sharedDir, documentRoot])],
@@ -3495,7 +3484,7 @@ async function ensureManagedDirectory(
       ensureDirectoryWithOwner(
         dir,
         "0750",
-        dir === tree.sharedDir && tree.folder
+        dir === tree.sharedDir
           ? `${managed.username}:${principalUnixGroupName(managed.username)}`
           : owner,
         run,

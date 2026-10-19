@@ -1,8 +1,6 @@
 /**
- * Host-free coverage for whole-tree reclaim: a service that had a release tree,
- * then lost its source, must not leave `<principalHome>/sites/<serviceId>`
- * behind. Per-release retention only ever walks services still being deployed,
- * so this is the only path that reclaims a *removed* one.
+ * Host-free coverage for whole-tree reclaim: removing one service folder, and
+ * telling which folders a deploy keeps when their service lost its source.
  */
 
 import { assertEquals } from "@std/assert";
@@ -11,7 +9,6 @@ import type { RunFn } from "../ensure-principal.ts";
 import {
   keptServiceFolders,
   reclaimAssetFolder,
-  reclaimRemovedReleaseTrees,
   reclaimServiceTree,
   type ReleaseTreeRef,
   releaseTreesToReclaim,
@@ -46,12 +43,21 @@ const LAYOUT = {
   principalHomeRoot: "/srv/users",
   daemonStateDir: "/nonexistent/tp-state",
 };
-const KEPT: ReleaseTreeRef = { serviceId: "svc-kept", username: "appuser" };
-const REMOVED: ReleaseTreeRef = { serviceId: "svc-gone", username: "appuser" };
-
-function removedPath(ref: ReleaseTreeRef): string {
-  return join(LAYOUT.principalHomeRoot, ref.username, "sites", ref.serviceId);
-}
+const folderOf = (slug: string) => ({
+  owner: "appuser",
+  scope: "production",
+  slug,
+});
+const KEPT: ReleaseTreeRef = {
+  serviceId: "svc-kept",
+  username: "appuser",
+  folder: folderOf("kept"),
+};
+const REMOVED: ReleaseTreeRef = {
+  serviceId: "svc-gone",
+  username: "appuser",
+  folder: folderOf("gone"),
+};
 
 test("releaseTreesToReclaim keeps every service the deploy still sources", () => {
   assertEquals(
@@ -64,11 +70,10 @@ test("releaseTreesToReclaim keeps every service the deploy still sources", () =>
 });
 
 test("releaseTreesToReclaim keeps a still-sourced service whose principal changed", () => {
-  // Reclaiming it would delete the live `shared/` state of a service this very
-  // deploy is publishing into. Only losing the source reclaims the tree.
+  // A service this very deploy still sources is in use, whoever owns it.
   assertEquals(
     releaseTreesToReclaim(
-      [{ serviceId: KEPT.serviceId, username: "olduser" }],
+      [{ ...KEPT, username: "olduser" }],
       new Set([KEPT.serviceId]),
     ),
     [],
@@ -79,9 +84,9 @@ test("releaseTreesToReclaim drops unsafe path segments and duplicates", () => {
   assertEquals(
     releaseTreesToReclaim(
       [
-        { serviceId: "..", username: "appuser" },
-        { serviceId: "svc/../..", username: "appuser" },
-        { serviceId: "svc-gone", username: ".." },
+        { ...REMOVED, serviceId: ".." },
+        { ...REMOVED, serviceId: "svc/../.." },
+        { ...REMOVED, username: ".." },
         REMOVED,
         REMOVED,
       ],
@@ -89,138 +94,6 @@ test("releaseTreesToReclaim drops unsafe path segments and duplicates", () => {
     ),
     [REMOVED],
   );
-});
-
-test("reclaimRemovedReleaseTrees removes the whole tree through the privileged runner", async () => {
-  const { run, calls } = captureRun();
-  const removed = await reclaimRemovedReleaseTrees({
-    layout: LAYOUT,
-    previous: [KEPT, REMOVED],
-    currentServiceIds: new Set([KEPT.serviceId]),
-    runFn: run,
-  });
-
-  assertEquals(removed, [removedPath(REMOVED)]);
-  assertEquals(calls.length, 1);
-  assertEquals(calls[0]?.command, "sudo");
-  assertEquals(calls[0]?.args, [
-    "-n",
-    "rm",
-    "-rf",
-    "--",
-    removedPath(REMOVED),
-  ]);
-});
-
-test("reclaimRemovedReleaseTrees removes the service's daemon records, and only that service's", async () => {
-  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-records-" });
-  try {
-    const sites = join(stateDir, "release-records");
-    for (const id of [REMOVED.serviceId, KEPT.serviceId]) {
-      await Deno.mkdir(join(sites, id, "rel-1"), {
-        recursive: true,
-      });
-    }
-    const { run } = captureRun();
-    await reclaimRemovedReleaseTrees({
-      layout: { ...LAYOUT, daemonStateDir: stateDir },
-      previous: [KEPT, REMOVED],
-      currentServiceIds: new Set([KEPT.serviceId]),
-      runFn: run,
-    });
-    const left = (await Array.fromAsync(Deno.readDir(sites))).map((e) =>
-      e.name
-    );
-    assertEquals(left, [KEPT.serviceId]);
-  } finally {
-    await Deno.remove(stateDir, { recursive: true });
-  }
-});
-
-test("reclaimRemovedReleaseTrees keeps the records of a tree it could not remove", async () => {
-  const stateDir = await Deno.makeTempDir({ prefix: "tp-reclaim-records-" });
-  try {
-    const dir = join(
-      stateDir,
-      "release-records",
-      "sites",
-      REMOVED.serviceId,
-      "releases",
-      "rel-1",
-    );
-    await Deno.mkdir(dir, { recursive: true });
-    const { run } = captureRun(false);
-    await reclaimRemovedReleaseTrees({
-      layout: { ...LAYOUT, daemonStateDir: stateDir },
-      previous: [REMOVED],
-      currentServiceIds: new Set<string>(),
-      runFn: run,
-    });
-    assertEquals((await Deno.stat(dir)).isDirectory, true);
-  } finally {
-    await Deno.remove(stateDir, { recursive: true });
-  }
-});
-
-test("reclaimRemovedReleaseTrees is a no-op when every service is still sourced", async () => {
-  const { run, calls } = captureRun();
-  assertEquals(
-    await reclaimRemovedReleaseTrees({
-      layout: LAYOUT,
-      previous: [KEPT],
-      currentServiceIds: new Set([KEPT.serviceId]),
-      runFn: run,
-    }),
-    [],
-  );
-  assertEquals(calls.length, 0);
-});
-
-test("reclaimRemovedReleaseTrees reports a stubborn tree instead of failing", async () => {
-  const { run } = captureRun(false);
-  const lines: string[] = [];
-  const removed = await reclaimRemovedReleaseTrees({
-    layout: LAYOUT,
-    previous: [REMOVED],
-    currentServiceIds: new Set<string>(),
-    runFn: run,
-    onOutput: (_stream, line) => lines.push(line),
-  });
-
-  // Best-effort, like the rest of retention: a leftover directory must never
-  // fail a deploy that already promoted.
-  assertEquals(removed, []);
-  assertEquals(lines.length, 1);
-  assertEquals(
-    lines[0]?.includes(`could not remove ${removedPath(REMOVED)}`),
-    true,
-  );
-});
-
-test("reclaimRemovedReleaseTrees survives a runner that throws", async () => {
-  const lines: string[] = [];
-  const removed = await reclaimRemovedReleaseTrees({
-    layout: LAYOUT,
-    previous: [REMOVED],
-    currentServiceIds: new Set<string>(),
-    runFn: () => Promise.reject(new Error("sudo unavailable")),
-    onOutput: (_stream, line) => lines.push(line),
-  });
-  assertEquals(removed, []);
-  assertEquals(lines[0]?.includes("sudo unavailable"), true);
-});
-
-test("reclaimRemovedReleaseTrees stringifies a non-Error runner failure", async () => {
-  const lines: string[] = [];
-  const removed = await reclaimRemovedReleaseTrees({
-    layout: LAYOUT,
-    previous: [REMOVED],
-    currentServiceIds: new Set<string>(),
-    runFn: () => Promise.reject("sudo exploded"),
-    onOutput: (_stream, line) => lines.push(line),
-  });
-  assertEquals(removed, []);
-  assertEquals(lines[0]?.includes("sudo exploded"), true);
 });
 
 const FOLDER_SERVICE = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
@@ -312,22 +185,11 @@ test("reclaimServiceTree skips a folder that breaks the rules instead of removin
   assertEquals(out.length, 1);
 });
 
-test("a service that left the compose file keeps its folder and is reported", async () => {
-  const { run, calls } = captureRun();
+test("a service that left the compose file keeps its folder and is reported", () => {
   const gone = new Set<string>();
-  assertEquals(
-    await reclaimRemovedReleaseTrees({
-      layout: LAYOUT,
-      previous: [IN_FOLDER, REMOVED],
-      currentServiceIds: gone,
-      runFn: run,
-    }),
-    [removedPath(REMOVED)],
-  );
-  // Only the older per-service tree was removed; the folder was not touched.
-  assertEquals(calls.map((c) => c.args.at(-1)), [removedPath(REMOVED)]);
   assertEquals(keptServiceFolders([IN_FOLDER, REMOVED], gone), [
     IN_FOLDER.folder,
+    REMOVED.folder,
   ]);
   assertEquals(
     keptServiceFolders([IN_FOLDER], new Set([FOLDER_SERVICE])),

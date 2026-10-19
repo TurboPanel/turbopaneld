@@ -759,12 +759,19 @@ test("applySites rejects unsafe document root", async () => {
 // ---------------------------------------------------------------------------
 
 const RELEASE_USERNAME = "appuser";
-const RELEASE_SERVICE_ID = "svc-1";
+const RELEASE_SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70";
 const RELEASE_GROUP = `${RELEASE_USERNAME}`;
+
+const RELEASE_FOLDER = {
+  owner: RELEASE_USERNAME,
+  scope: "production",
+  slug: "example.com",
+};
 
 const releaseBinding: SiteRelease = {
   serviceId: RELEASE_SERVICE_ID,
   username: RELEASE_USERNAME,
+  folder: RELEASE_FOLDER,
 };
 
 function releaseBindingsFor(
@@ -779,8 +786,9 @@ function siteTreeRoot(layout: LayoutPaths): string {
   return join(
     layout.principalHomeRoot,
     RELEASE_USERNAME,
-    "sites",
-    RELEASE_SERVICE_ID,
+    "production",
+    "services",
+    "example.com",
   );
 }
 
@@ -1982,6 +1990,7 @@ test("applySites fails when openlitespeed -t rejects the config", async () => {
 const managedBinding: SiteManagedDirectory = {
   serviceId: RELEASE_SERVICE_ID,
   username: RELEASE_USERNAME,
+  folder: RELEASE_FOLDER,
 };
 
 function managedBindingsFor(
@@ -1999,7 +2008,7 @@ const managedSite: SiteApplySpec = {
   },
 };
 
-test("a managed-directory site serves from a principal-owned webroot", async () => {
+test("a managed-directory site serves from a principal-owned public folder", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
@@ -2012,15 +2021,15 @@ test("a managed-directory site serves from a principal-owned webroot", async () 
     });
     assertEquals(result.applied, ["www"]);
 
-    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const webroot = join(siteTreeRoot(layout), "public");
     const conf = await Deno.readTextFile(
       join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
     );
     assertStringIncludes(conf, `root ${webroot};`);
 
-    // `webroot/` is a sibling of `current` and `releases/`, so connecting a
+    // `public/` is a sibling of `current` and `releases/`, so connecting a
     // repository later is a field flip rather than a move.
-    await Deno.stat(join(siteTreeRoot(layout), "webroot"));
+    await Deno.stat(join(siteTreeRoot(layout), "public"));
     await Deno.stat(join(siteTreeRoot(layout), "shared"));
 
     // Owned by the principal, group the engine, so the tenant writes and the
@@ -2076,7 +2085,7 @@ test("the placeholder is seeded only into an empty document root", async () => {
       managedDirectoryBindings: managedBindingsFor("www"),
     });
 
-    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const webroot = join(siteTreeRoot(layout), "public");
     const indexPath = join(webroot, "index.html");
     assertStringIncludes(await Deno.readTextFile(indexPath), "TurboPanel site");
 
@@ -2138,7 +2147,7 @@ test("a managed-directory PHP pool is confined by open_basedir", async () => {
     const pool = await Deno.readTextFile(
       join(layout.configDir, "php", "8.4", "pools", "tp-envmd-phpapp.conf"),
     );
-    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const webroot = join(siteTreeRoot(layout), "public");
     // A managed directory is writable by the account running it, which is
     // exactly why it must not also be able to read the rest of the filesystem.
     assertStringIncludes(pool, `open_basedir`);
@@ -2464,7 +2473,7 @@ function siteCaddyRestarts(
 
 test("a managed-directory Caddy site restarts the site Caddy until its web root is mounted nosymfollow, after the web root exists", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const webroot = join(siteTreeRoot(layout), "webroot");
+  const webroot = join(siteTreeRoot(layout), "public");
   const mock = createSiteRunMock({ afterRestart: [webroot] });
   // Already in the owner's group: only the mount rule can ask for a restart.
   const run = withGroupMembership(mock.run, {
@@ -2494,7 +2503,7 @@ test("a managed-directory Caddy site restarts the site Caddy until its web root 
 
 test("a Caddy site whose directory is already mounted is only reloaded", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const webroot = join(siteTreeRoot(layout), "webroot");
+  const webroot = join(siteTreeRoot(layout), "public");
   const mock = createSiteRunMock({
     before: [webroot],
     afterRestart: [webroot],

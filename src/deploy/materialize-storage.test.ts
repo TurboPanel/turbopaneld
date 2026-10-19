@@ -364,12 +364,7 @@ test("materializeStorageEntries chowns directory and file copies for a linked pr
   } as unknown as typeof Deno.Command;
   try {
     await withTempLayout(async (layout) => {
-      const ownedDir = join(
-        layout.principalHomeRoot,
-        "siteuser",
-        "volumes",
-        "owned-data",
-      );
+      const ownedDir = storageHostPath(layout, "org-1", "stor-dir", "loc-dir");
       const paths = await materializeStorageEntries(
         layout,
         "org-1",
@@ -382,7 +377,6 @@ test("materializeStorageEntries chowns directory and file copies for a linked pr
             provider: "path",
             serverId: "srv",
             principalId: "pr-1",
-            sourcePath: ownedDir,
             mounts: [],
           },
           {
@@ -537,7 +531,7 @@ test("a file copy name cannot leave its location", async () => {
   });
 });
 
-test("a path copy's source must sit in its own site owner's volumes directory", async () => {
+test("a path copy with a source path and no folder is refused", async () => {
   await withTempLayout(async (layout) => {
     const home = layout.principalHomeRoot;
     const owner = [{ principalId: "pr-1", username: "siteuser" }];
@@ -545,18 +539,14 @@ test("a path copy's source must sit in its own site owner's volumes directory", 
       ...unownedDirectory(sourcePath),
       principalId: "pr-1",
     });
-    const refused = [
-      "/etc",
-      "/",
-      join(home, "victim", "volumes", "data"),
-      join(home, "siteuser", "home"),
-      join(home, "siteuser", "volumes"),
-      `${join(home, "siteuser", "volumes")}/../../victim/volumes/x`,
-      `${join(home, "siteuser", "volumes", "data")}/`,
-      `${join(home, "siteuser", "volumes")}//data`,
-      `${join(home, "siteuser", "volumes-evil", "data")}`,
-    ];
-    for (const sourcePath of refused) {
+    for (
+      const sourcePath of [
+        "/etc",
+        "/",
+        join(home, "siteuser", "volumes", "data"),
+        join(home, "victim", "volumes", "data"),
+      ]
+    ) {
       await assertRejects(
         () =>
           materializeStorageEntries(
@@ -566,16 +556,16 @@ test("a path copy's source must sit in its own site owner's volumes directory", 
             owner,
           ),
         Error,
-        "outside its site owner's volumes directory",
+        "needs the folder the control plane plans for it",
         sourcePath,
       );
     }
-    // No site owner to confine it to: refused rather than mounted as is.
+    // No site owner at all: refused rather than mounted as is.
     await assertRejects(
       () =>
         materializeStorageEntries(layout, "org-1", [unownedDirectory("/etc")]),
       Error,
-      "outside its site owner's volumes directory",
+      "needs the folder the control plane plans for it",
     );
     // The same refusal holds for a file copy that names a source path.
     await assertRejects(
@@ -584,65 +574,7 @@ test("a path copy's source must sit in its own site owner's volumes directory", 
           { ...fileEntry("a.txt"), sourcePath: "/etc" },
         ]),
       Error,
-      "outside its site owner's volumes directory",
+      "needs the folder the control plane plans for it",
     );
   });
-});
-
-test("an owner's older volume path makes its volumes parent itself, root-owned", async () => {
-  const original = Deno.Command;
-  const installs: string[] = [];
-  Deno.Command = class {
-    constructor(_command: string, options?: { args?: string[] }) {
-      const args = options?.args ?? [];
-      if (args.includes("install")) {
-        installs.push(args.slice(args.indexOf("install") + 1).join(" "));
-      }
-    }
-    spawn() {
-      return {
-        stdin: {
-          getWriter: () => ({
-            write: () => Promise.resolve(),
-            close: () => Promise.resolve(),
-          }),
-        },
-        output: () =>
-          Promise.resolve({
-            success: true,
-            stdout: new Uint8Array(),
-            stderr: new Uint8Array(),
-          }),
-      };
-    }
-  } as unknown as typeof Deno.Command;
-  try {
-    await withTempLayout(async (layout) => {
-      const volumes = join(layout.principalHomeRoot, "siteuser", "volumes");
-      await materializeStorageEntries(
-        layout,
-        "org-1",
-        [{
-          storageId: "stor-dir",
-          locationId: "loc-dir",
-          kind: "directory",
-          name: "data",
-          provider: "path",
-          serverId: "srv",
-          principalId: "pr-1",
-          sourcePath: join(volumes, "owned-data"),
-          mounts: [],
-        }],
-        [{ principalId: "pr-1", username: "siteuser" }],
-      );
-      const parent = installs.findIndex((line) => line.endsWith(` ${volumes}`));
-      const leaf = installs.findIndex((line) =>
-        line.endsWith(` ${join(volumes, "owned-data")}`)
-      );
-      assertEquals(parent >= 0 && leaf > parent, true, installs.join("\n"));
-      assertEquals(installs[parent]!.includes("-o root"), true);
-    });
-  } finally {
-    Deno.Command = original;
-  }
 });

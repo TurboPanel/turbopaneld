@@ -1987,39 +1987,6 @@ const PERMISSIONS = { env: true, read: true, write: true, run: true };
 
 test({
   name:
-    "handleEnvironmentDeploy reclaims a dropped release while keeping a still-sourced service id",
-  permissions: PERMISSIONS,
-  fn: async () => {
-    await deployWithDroppedRelease({
-      composeServiceName: "gone",
-      serviceId: "svc-gone",
-      releaseId: "rel-1",
-      sourceId: "src-old",
-      commitSha: "a".repeat(40),
-      username: "appuser",
-    }, ({ principalHomeRoot, sudoCalls, lines, result }) => {
-      assertEquals(
-        sudoCalls[0]?.args.includes(join(
-          principalHomeRoot,
-          "appuser",
-          "sites",
-          "svc-gone",
-        )),
-        true,
-      );
-      assertEquals(
-        lines.some((line) =>
-          line.startsWith("reclaimed removed service release tree ")
-        ),
-        true,
-      );
-      assertEquals(result.keptFolders, undefined);
-    });
-  },
-});
-
-test({
-  name:
     "handleEnvironmentDeploy keeps the folder of a service that left the compose file and reports it",
   permissions: PERMISSIONS,
   fn: async () => {
@@ -2291,13 +2258,19 @@ test({
 
 test("siteCronWritableDirs: shared/ for a release, webroot/ and shared/ for a managed tree, nothing otherwise", () => {
   const layout = { principalHomeRoot: "/srv/users" };
-  const site = { serviceId: "svc1", username: "alice" };
+  const site = {
+    serviceId: "svc1",
+    username: "alice",
+    folder: { owner: "alice", scope: "production", slug: "svc1" },
+  };
   assertEquals(siteCronWritableDirs(layout, site, undefined), [
-    "/srv/users/alice/sites/svc1/shared",
+    "/srv/users/alice/production/services/svc1/shared",
+    "/srv/users/alice/production/services/svc1/logs",
   ]);
   assertEquals(siteCronWritableDirs(layout, undefined, site), [
-    "/srv/users/alice/sites/svc1/webroot",
-    "/srv/users/alice/sites/svc1/shared",
+    "/srv/users/alice/production/services/svc1/public",
+    "/srv/users/alice/production/services/svc1/shared",
+    "/srv/users/alice/production/services/svc1/logs",
   ]);
   assertEquals(siteCronWritableDirs(layout, undefined, undefined), []);
 });

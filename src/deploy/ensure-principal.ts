@@ -107,14 +107,7 @@ export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
 ];
 
 /** The principal's own directories in its home, `0700` and tenant-owned. */
-const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
-/**
- * Root-owned directories of the home skeleton the engines traverse. Volumes are
- * not here: a volume lives in its scope folder (`<owner>/<scope>/volumes/<name>`,
- * made with the folder), and no top-level `volumes` is made for it.
- */
-const PRINCIPAL_STRUCTURAL_DIRS = ["sites"] as const;
-
+const PRINCIPAL_TENANT_DIRS = ["home", "tmp"] as const;
 /**
  * What an account that already exists may be called. A name for a new account
  * must also pass the shared owner rule ({@link assertNewOwnerName}); accounts
@@ -806,12 +799,11 @@ export async function ensurePrincipalPassword(
  * does not own them). The principal writes only into its own leaves.
  *
  *   <home>                   root:<grp> 0750
- *   <home>/home|data|tmp     <user>:<grp> 0700  (home/ is the passwd home)
- *   <home>/sites             root:<grp> 0750
+ *   <home>/home|tmp          <user>:<grp> 0700  (home/ is the passwd home)
  *
- * The group bit lets the engines (members of `<grp>`) reach `sites/`; other
- * principals get nothing. Parent before child: tp-host refuses a tenant or
- * structural directory whose parent is not root-owned and sealed.
+ * Scope folders (`<home>/<scope>/services|volumes/…`) are made with the first
+ * asset in them, not here. Parent before child: tp-host refuses a tenant
+ * directory whose parent is not root-owned and sealed.
  */
 async function ensurePrincipalHomeTree(
   home: string,
@@ -827,11 +819,6 @@ async function ensurePrincipalHomeTree(
       join(home, name),
       "0700",
       tenant,
-    ]),
-    ...PRINCIPAL_STRUCTURAL_DIRS.map((name): [string, string, string] => [
-      join(home, name),
-      "0750",
-      structural,
     ]),
   ], ([path, mode, owner]) => ensureDir(path, mode, owner, runFn));
 }

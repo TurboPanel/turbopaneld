@@ -39,27 +39,12 @@ variable the build command can inherit — the env carries only the *paths*, and
 `checkout.ts` and `build.ts` both spawn with `clearEnv` and an explicit
 allow-list.
 
-**Layout.** A service with a `folder` on the deploy payload (`serviceFolders[]`)
-lives in the scope tree below. A service without one keeps the older per-service
-tree further down, until the control plane sends a folder for every service.
-`serviceTree(layout, { serviceId, username, folder? })` in `src/paths/layout.ts`
-returns every path of either shape (`root`, `publicDir`, `releasesDir`,
-`currentLink`, `sharedDir`, `logsDir`, `hostingDir`); every consumer reads that
-one object and none tests which shape it has. The older tree:
-
-```
-<principalHomeRoot>/.tp-staging/                 root:tp 0710 (publish-open)
-  <username>.<serviceId>.<releaseId>/            tp 0700 until tp-host publish
-<principalHomeRoot>/<username>/sites/            root:<username> 0750
-  <serviceId>/                                   root:<username> 0750
-    releases/                                    root:<username> 0750
-      <releaseId>/        root:<username>, top 0550, nothing g/o-writable
-      <releaseId>/.turbopanel/release.json        per-release manifest
-      <releaseId>/shared -> ../../shared              relative convenience link
-    current -> releases/<releaseId>
-    shared/               <username>:<username> 0750
-    .turbopanel-hosting/  root:root 0711  (hosting.env / php.json: <username>:root 0400)
-```
+**Layout.** Every service that runs on the host has a `folder` on the deploy
+payload (`serviceFolders[]`); the control plane always sends it, and a payload
+without an entry for such a service is refused with a plain error.
+`serviceTree(layout, { serviceId, username, folder })` in `src/paths/layout.ts`
+returns every path (`root`, `publicDir`, `releasesDir`, `currentLink`,
+`sharedDir`, `logsDir`, `hostingDir`); every consumer reads that one object.
 
 **The scope tree.** One function, `assetFolder` in `src/paths/layout.ts`, turns
 `{ owner, scope, kind, slug }` into a host path, and the daemon never builds
@@ -88,7 +73,7 @@ ids, and `promote.ts` runs `publish-open` / `publish` with the six words
 (owner, scope, slug, service id, release id, publish id). The staging leaf is
 named by a fresh publish id, so nothing parses a name back. A folder release
 makes its folders with `ensureAssetFolder` (record first, then the folders);
-`ensureReleaseTree` is only for the older tree. Deleting a service
+Deleting a service
 (`reclaimServiceTree`, also used by `environment.stop` for the entries it is
 sent) removes the folder through tp-host, then its record, its
 `release-records/<serviceId>` and its `release-build/<serviceId>`. A plain stop
@@ -150,7 +135,7 @@ foreign one.
 
 **Live releases are scanned at daemon start** (`live-release-scan.ts`, from
 `runDaemon` once orchestration is ready, in the background). Every
-`<homes>/<user>/sites/<service>/current` is followed and its release checked the
+`<homes>/<user>/<scope>/services/<name>/current` is followed and its release checked the
 same lexical way — walked from the homes root, not the deployment manifests,
 which do not name the principal for older releases. It **reports only**: each
 hit is a `release` warning in the daemon log and an entry in
@@ -166,7 +151,7 @@ list).
 
 A published release is **read-only to the runtime user** on purpose: an app
 process that can rewrite its own code turns any RCE into persistence. That is an
-*ownership* rule, not only a mode: `sites/<serviceId>` and `releases/` are
+*ownership* rule, not only a mode: the service folder and `releases/` are
 root-owned too, so the principal cannot create, rename, or unlink inside them —
 it could otherwise plant a release directory or repoint `current` regardless of
 how tight each published release is. `shared/` is the one principal-owned,
@@ -199,7 +184,7 @@ the control plane, not guessed on the host.
 the ordinary `environment.deploy` payload, so compose apply, ingress, TLS,
 retention, `deployment.json`, and the native / site promote hooks all
 keep working unchanged, and the generation-supersede rule still applies. That
-branch skips `ensureReleaseTree`, the scratch dir, checkout, and build entirely
+branch skips the folder creation, the scratch dir, checkout, and build entirely
 and calls `promoteExistingRelease` (verify the tree exists — and, where the
 daemon account can stat it, that it is sealed at `0550` → optional health probe
 → `swapCurrentSymlink`) instead of `promoteRelease`. Only the `release-promote`
@@ -253,7 +238,7 @@ sockets, devices and a shipped `shared`, seals it
 re-checks that nothing is left foreign-owned, set-id or group/other-writable,
 resolves every symlink physically (`realpath -m`) and refuses one that lands
 outside the leaf (so the two-link `s1/s2/up → ../..` + `s1/s2/s3/x → ../up/..`
-chain is caught), requires the home, `sites/`, `sites/<svc>/` and `releases/`
+chain is caught), requires the home, the scope, `services/`, the service folder and `releases/`
 to be root-owned and not group/other-writable, the leaf and `releases/` to
 share `st_dev`, and `releases/<id>` not to exist, then `mv -T`s the leaf into
 place, links `shared → ../../shared`, drops the top to `0550` and swaps
@@ -436,11 +421,7 @@ payload still sources. **A service that leaves the compose file keeps its
 folder.** Only an explicit delete removes files (`server.folders.remove`, or the
 `siteReleases` an `environment.stop` carries for a delete): the deploy leaves
 the folder alone and reports it in the result's `keptFolders[]`
-(`keptServiceFolders`), and the control plane marks it an orphan. Only the older
-per-service tree (`<home>/sites/<serviceId>`, no folder) is still reclaimed
-here by `reclaimRemovedReleaseTrees` (`retention.ts`) through the same
-privileged runner sealing uses; that branch goes with the other old-tree
-fallbacks. The step runs **after** `applySourceReleases` (so a tree this deploy
+(`keptServiceFolders`), and the control plane marks it an orphan. The step runs **after** `applySourceReleases` (so a tree this deploy
 is publishing into is never a candidate) and **before** the new manifest is
 written. Path segments are re-validated on the way out — the manifest is read
 back from disk, so it is not trusted to name a safe path. A service that is
@@ -474,8 +455,8 @@ has to point the document root at `current`. Process supervision from
 Native Node/Next runtime section.
 
 **Release-tree cleanup is generic, not site-specific.**
-`environment.stop` carries `siteReleases[]` (`{ serviceId, username }`) and
-removes `<principalHome>/sites/<serviceId>` recursively through the privileged
+`environment.stop` carries `siteReleases[]` (`{ serviceId, username, folder }`) and
+removes the service folder recursively through the privileged
 runner — the tree is root-owned, so the daemon cannot unlink it itself. Removal
 is best-effort per entry and never fails the stop, matching the fabric-network
 and tcp/udp reclaim in the same handler. The control plane captures the list

@@ -5,8 +5,6 @@ import {
   assertSafeReleaseId,
   assertSafeServiceId,
   ensureDaemonReleaseRecordDir,
-  ensureReleaseTree,
-  RELEASE_DIR_MODE,
   RELEASE_PUBLISHED_MODE,
   RELEASE_RECORDS_DIRNAME,
   removePublishedRelease,
@@ -37,91 +35,23 @@ function captureRun(): { run: RunFn; calls: Call[] } {
   return { run, calls };
 }
 
-/** `sudo -n install -d -m <mode> -o <user> -g <group> <path>` → the parts. */
-function installCall(
-  calls: readonly Call[],
-  path: string,
-): { mode: string; owner: string; group: string } | null {
-  for (const call of calls) {
-    if (call.command !== "sudo") continue;
-    if (!call.args.includes("install") || !call.args.includes("-d")) continue;
-    if (call.args[call.args.length - 1] !== path) continue;
-    return {
-      mode: call.args[call.args.indexOf("-m") + 1] ?? "",
-      owner: call.args[call.args.indexOf("-o") + 1] ?? "",
-      group: call.args[call.args.indexOf("-g") + 1] ?? "",
-    };
-  }
-  return null;
-}
+const SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70";
+const RELEASE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71";
+const PUBLISH_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72";
+const FOLDER = { owner: "appuser", scope: "production", slug: "example.com" };
 
 function stubPaths(root: string) {
   return resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: `${root}/state` },
-    { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    {
+      username: "appuser",
+      serviceId: SERVICE_ID,
+      releaseId: RELEASE_ID,
+      folder: FOLDER,
+      publishId: PUBLISH_ID,
+    },
   );
 }
-
-test("ensureReleaseTree makes the immutable tree root-owned", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-release-tree-" });
-  const paths = stubPaths(root);
-  const { run, calls } = captureRun();
-  try {
-    await ensureReleaseTree(paths, "appuser", run);
-
-    for (const dir of [paths.sitesDir, paths.siteDir, paths.releasesDir]) {
-      assertEquals(installCall(calls, dir), {
-        mode: RELEASE_DIR_MODE,
-        owner: "root",
-        group: "appuser",
-      });
-    }
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("ensureReleaseTree never pre-creates the release directory", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-release-staging-" });
-  const paths = stubPaths(root);
-  const { run, calls } = captureRun();
-  try {
-    await ensureReleaseTree(paths, "appuser", run);
-
-    // Only tp-host `publish` brings releases/<id> into existence, sealed.
-    assertEquals(installCall(calls, paths.releaseDir), null);
-    assertEquals(
-      calls.some((call) => call.args.includes(paths.releaseDir)),
-      false,
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
-
-test("ensureReleaseTree hands shared/ to the principal", async () => {
-  const root = await Deno.makeTempDir({ prefix: "tp-release-shared-" });
-  const paths = stubPaths(root);
-  const { run, calls } = captureRun();
-  try {
-    await ensureReleaseTree(paths, "appuser", run);
-
-    // `shared/` is the one writable path: created (or repaired) as the
-    // principal, never as root.
-    const chown = calls.find((call) =>
-      call.command === "sudo" && call.args.includes("chown") &&
-      call.args[call.args.length - 1] === paths.sharedDir
-    );
-    const install = installCall(calls, paths.sharedDir);
-    assertEquals(
-      chown?.args.includes("appuser:appuser") ??
-        install?.owner === "appuser",
-      true,
-    );
-  } finally {
-    await Deno.remove(root, { recursive: true });
-  }
-});
 
 test("assertSafeReleaseId and assertSafeServiceId reject path-like ids", () => {
   assertEquals(assertSafeReleaseId("rel-1"), "rel-1");
@@ -142,21 +72,49 @@ test("assertSafeReleaseId and assertSafeServiceId reject path-like ids", () => {
 test("resolveReleasePaths puts scratch under daemon state, not the principal home", () => {
   const paths = resolveReleasePaths(
     { principalHomeRoot: "/srv/users", daemonStateDir: "/var/lib/tp" },
-    { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    {
+      username: "appuser",
+      serviceId: SERVICE_ID,
+      releaseId: RELEASE_ID,
+      folder: FOLDER,
+      publishId: PUBLISH_ID,
+    },
   );
+  const siteDir = "/srv/users/appuser/production/services/example.com";
   assertEquals(paths.principalHome, "/srv/users/appuser");
-  assertEquals(paths.siteDir, "/srv/users/appuser/sites/svc-1");
+  assertEquals(paths.siteDir, siteDir);
+  assertEquals(paths.sitesDir, "/srv/users/appuser/production/services");
+  assertEquals(paths.releaseDir, `${siteDir}/releases/${RELEASE_ID}`);
   assertEquals(
-    paths.releaseDir,
-    "/srv/users/appuser/sites/svc-1/releases/rel-1",
+    paths.scratchDir,
+    `/var/lib/tp/release-build/${SERVICE_ID}/${RELEASE_ID}`,
   );
-  assertEquals(paths.scratchDir, "/var/lib/tp/release-build/svc-1/rel-1");
   assertEquals(paths.scratchDir.startsWith(paths.principalHome), false);
-  assertEquals(
-    paths.stagingDir,
-    "/srv/users/.tp-staging/appuser.svc-1.rel-1",
-  );
+  assertEquals(paths.stagingDir, `/srv/users/.tp-staging/${PUBLISH_ID}`);
   assertEquals(paths.stagingDir.startsWith(paths.principalHome), false);
+  assertEquals(paths.publish, {
+    folder: FOLDER,
+    serviceId: SERVICE_ID,
+    releaseId: RELEASE_ID,
+    publishId: PUBLISH_ID,
+  });
+});
+
+test("resolveReleasePaths refuses ids that are not canonical", () => {
+  assertThrows(
+    () =>
+      resolveReleasePaths(
+        { principalHomeRoot: "/srv/users", daemonStateDir: "/var/lib/tp" },
+        {
+          username: "appuser",
+          serviceId: "svc-1",
+          releaseId: RELEASE_ID,
+          folder: FOLDER,
+        },
+      ),
+    Error,
+    "unsafe folder release id",
+  );
 });
 
 test("resolveDaemonReleasePaths uses the release-records root", () => {
@@ -383,7 +341,7 @@ test("resolveReleasePaths puts a release in its service folder and names the pub
   });
 });
 
-test("resolveReleasePaths gives each folder release its own staging leaf and the older tree none", () => {
+test("resolveReleasePaths gives each release its own staging leaf", () => {
   const layout = { principalHomeRoot: "/srv/users", daemonStateDir: "/s" };
   const params = {
     username: "alice",
@@ -394,12 +352,4 @@ test("resolveReleasePaths gives each folder release its own staging leaf and the
   const a = resolveReleasePaths(layout, params);
   const b = resolveReleasePaths(layout, params);
   assertEquals(a.stagingDir === b.stagingDir, false);
-  const older = resolveReleasePaths(layout, {
-    username: "alice",
-    serviceId: "svc-1",
-    releaseId: "rel-1",
-  });
-  assertEquals(older.publish, undefined);
-  assertEquals(older.stagingDir, "/srv/users/.tp-staging/alice.svc-1.rel-1");
-  assertEquals(older.siteDir, "/srv/users/alice/sites/svc-1");
 });

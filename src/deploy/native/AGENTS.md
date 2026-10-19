@@ -70,8 +70,7 @@ uses, and the same reasoning: a candidate is staged under
 the installed unit through a privileged `cmp -s` (the daemon is not root and
 `/etc/systemd/system` is, so a direct read would report "changed" every deploy),
 and installed only on a real difference. `WorkingDirectory` points at the
-`current` **symlink** (of the service folder when the deploy sent one, else the
-older `sites/<serviceId>` tree: `serviceTree` answers both) — never at a
+`current` **symlink** of the service folder (`serviceTree`) — never at a
 release directory, which is exactly what
 makes the unit text byte-identical across promotes, so an ordinary redeploy
 writes nothing, reloads nothing, and only restarts.

@@ -40,6 +40,13 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+/** The service folder the control plane plans for the fixture app. */
+const folderFor = (owner: string) => ({
+  owner,
+  scope: "production",
+  slug: "svc-native-1",
+});
+
 const layout = resolveLayout(
   {
     TURBOPANEL_RUNTIMES_DIR: "/opt/turbopanel/vendor",
@@ -198,17 +205,18 @@ test("nativeAppUnitContent points WorkingDirectory at current and applies limits
       resources: { cpus: 2, memoryBytes: 512_000_000 },
     },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
     startCommand: "node server.mjs",
   });
 
   assertStringIncludes(
     content,
-    "WorkingDirectory=/srv/users/appuser/sites/svc-native-1/current",
+    "WorkingDirectory=/srv/users/appuser/production/services/svc-native-1/current",
   );
   assertStringIncludes(
     content,
-    "ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared",
+    "ReadWritePaths=/srv/users/appuser/production/services/svc-native-1/shared",
   );
   assertStringIncludes(content, "User=appuser");
   assertStringIncludes(content, "Group=appuser");
@@ -227,6 +235,7 @@ test("nativeAppUnitContent prefixes PATH with the vendored tenant Node bin", () 
     layout,
     app: { ...app, nodeVersion: "22" },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
     startCommand: "pnpm start",
   });
@@ -236,11 +245,11 @@ test("nativeAppUnitContent prefixes PATH with the vendored tenant Node bin", () 
   );
   assertStringIncludes(
     content,
-    "Environment=XDG_CACHE_HOME=/srv/users/appuser/sites/svc-native-1/shared/.cache",
+    "Environment=XDG_CACHE_HOME=/srv/users/appuser/production/services/svc-native-1/shared/.cache",
   );
   assertStringIncludes(
     content,
-    "Environment=COREPACK_HOME=/srv/users/appuser/sites/svc-native-1/shared/.corepack",
+    "Environment=COREPACK_HOME=/srv/users/appuser/production/services/svc-native-1/shared/.corepack",
   );
   assertStringIncludes(
     content,
@@ -257,6 +266,7 @@ test("nativeAppUnitContent defaults ExecStart to vendored node when no startComm
     layout,
     app: { ...app, nodeVersion: "22" },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   assertStringIncludes(
@@ -270,6 +280,7 @@ test("nativeAppUnitContent sets NODE_ENV from appMode and defaults to production
     layout,
     app: { ...app, appMode: "development" },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   assertStringIncludes(dev, "Environment=NODE_ENV=development");
@@ -278,6 +289,7 @@ test("nativeAppUnitContent sets NODE_ENV from appMode and defaults to production
     layout,
     app,
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   assertStringIncludes(prod, "Environment=NODE_ENV=production");
@@ -288,6 +300,7 @@ test("nativeAppUnitContent threads startupFile into ExecStart", () => {
     layout,
     app: { ...app, nodeVersion: "22", startupFile: "dist/index.js" },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   assertStringIncludes(
@@ -316,6 +329,7 @@ test("an app with no restart_policy keeps the historical supervision lines", () 
     layout,
     app,
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   assertStringIncludes(content, "\nRestart=on-failure\n");
@@ -345,6 +359,7 @@ test("an authored restart_policy becomes the unit's supervision directives", () 
       },
     },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   assertStringIncludes(content, "\nRestart=always\n");
@@ -361,6 +376,7 @@ test("restart condition none disables restarting without touching the backoff", 
     layout,
     app: { ...app, restartPolicy: { condition: "none" } },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   assertStringIncludes(content, "\nRestart=no\n");
@@ -387,6 +403,7 @@ test("authored deploy.labels are preserved on the generated unit", () => {
     layout,
     app: { ...app, serviceLabels: { "com.example.team": "platform" } },
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   const unitSection = content.slice(0, content.indexOf("[Service]"));
@@ -396,11 +413,12 @@ test("authored deploy.labels are preserved on the generated unit", () => {
   );
 });
 
-test("a native app writes only its own site's shared/, not the owner's home/, data/ or tmp/", () => {
+test("a native app writes only its own site's shared/, not the owner's home/ or tmp/", () => {
   const content = nativeAppUnitContent({
     layout,
     app,
     username: "appuser",
+    folder: folderFor("appuser"),
     environmentId: "env-1",
   });
   const lines = content.split("\n");
@@ -413,9 +431,11 @@ test("a native app writes only its own site's shared/, not the owner's home/, da
   assertStringIncludes(content, "PrivateTmp=yes\n");
   assertEquals(
     lines.filter((line) => line.startsWith("ReadWritePaths=")),
-    ["ReadWritePaths=/srv/users/appuser/sites/svc-native-1/shared"],
+    [
+      "ReadWritePaths=/srv/users/appuser/production/services/svc-native-1/shared /srv/users/appuser/production/services/svc-native-1/logs",
+    ],
   );
-  for (const dir of ["home", "data", "tmp"]) {
+  for (const dir of ["home", "tmp"]) {
     assertEquals(
       lines.some((line) =>
         line.startsWith("ReadWritePaths=") &&
@@ -428,7 +448,13 @@ test("a native app writes only its own site's shared/, not the owner's home/, da
 });
 
 test("a unit loads an environment file only when the app has variables", () => {
-  const user = { layout, app, username: "alice", environmentId: "env-1" };
+  const user = {
+    layout,
+    app,
+    username: "alice",
+    folder: folderFor("alice"),
+    environmentId: "env-1",
+  };
   const without = nativeAppUnitContent(user);
   assertEquals(without.includes("EnvironmentFile"), false);
   // Asking explicitly for no file is the same text as not asking, so shipping
@@ -478,6 +504,7 @@ test("the platform-owned names are exactly the Environment= keys the units set",
     layout,
     app,
     username: "alice",
+    folder: folderFor("alice"),
     environmentId: "env-1",
     environmentFile: true,
   });
@@ -485,6 +512,7 @@ test("the platform-owned names are exactly the Environment= keys the units set",
     layout,
     app: denoApp,
     username: "alice",
+    folder: folderFor("alice"),
     environmentId: "env-1",
     environmentFile: true,
   });
@@ -503,6 +531,7 @@ test("a Deno app's unit runs the vendored Deno, with its cache and loopback bind
     layout,
     app: { ...denoApp, denoVersion: "2.9.7" },
     username: "alice",
+    folder: folderFor("alice"),
     environmentId: "env-1",
     nativeStart: { kind: "deno-task" },
   });
@@ -535,7 +564,7 @@ test("a Deno app's unit runs the vendored Deno, with its cache and loopback bind
     assertStringIncludes(unit, `${line}\n`);
   }
   const shared = unit.split("\n").find((l) => l.startsWith("ReadWritePaths="));
-  assertEquals(shared?.endsWith("/shared"), true);
+  assertEquals(shared?.endsWith("/logs"), true);
 });
 
 test("the Node unit is untouched by the Deno runtime", () => {
@@ -543,6 +572,7 @@ test("the Node unit is untouched by the Deno runtime", () => {
     layout,
     app,
     username: "alice",
+    folder: folderFor("alice"),
     environmentId: "env-1",
   });
   assertEquals(unit.includes("DENO"), false);
@@ -621,6 +651,7 @@ test("every native app binds loopback under both HOST and HOSTNAME", () => {
     layout,
     app,
     username: "alice",
+    folder: folderFor("alice"),
     environmentId: "env-1",
   });
   // Next.js (standalone server.js) reads HOSTNAME; without it the app binds
@@ -678,7 +709,13 @@ test("resolveExecStart: author's command, then startupFile, then the detected st
 });
 
 test("a recorded server.js start renders the same unit as no recorded start", () => {
-  const base = { layout, app, username: "alice", environmentId: "env-1" };
+  const base = {
+    layout,
+    app,
+    username: "alice",
+    folder: folderFor("alice"),
+    environmentId: "env-1",
+  };
   assertEquals(
     nativeAppUnitContent({
       ...base,
@@ -717,16 +754,4 @@ test("nativeAppUnitContent runs out of the service folder and may write its shar
   );
   assertStringIncludes(content, "Environment=HOME=/srv/users/appuser/home");
   assertEquals(content.includes("/sites/"), false);
-});
-
-test("nativeAppUnitContent keeps the older tree without a folder", () => {
-  const content = nativeAppUnitContent({
-    layout,
-    app,
-    username: "appuser",
-    environmentId: "env-1",
-  });
-  const root = "/srv/users/appuser/sites/svc-native-1";
-  assertStringIncludes(content, `WorkingDirectory=${root}/current`);
-  assertStringIncludes(content, `ReadWritePaths=${root}/shared\n`);
 });
