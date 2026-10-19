@@ -304,6 +304,9 @@ const SITES: CallSite[] = [
   tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
     argv: ["cert-dates"],
   }),
+  tpHost('src/deploy/acme-export.ts|["-n","cert-export",hostname]', {
+    argv: ["cert-export", "shop.example.com"],
+  }),
   tpHost('src/deploy/site.ts|["-n","site-caddy-mounts"]', {
     argv: ["site-caddy-mounts"],
   }),
