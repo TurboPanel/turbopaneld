@@ -1042,7 +1042,8 @@ tp_quiet_runtime_notes_abort() {
   kill "${_qrn_pid:-0}" 2>/dev/null || true
   rm -rf "${_qrn_dir:-}"
   trap - INT TERM HUP
-  exit "$1"
+  _qrn_status="$1"
+  exit "$_qrn_status"
 }
 
 # The address other machines reach this host on, for the setup wizard link.
@@ -1057,6 +1058,7 @@ tp_host_address() {
     for _tha_candidate in $(hostname -I 2>/dev/null); do
       case "$_tha_candidate" in
         127.* | 169.254.* | 172.17.* | ::1 | [Ff][Ee]8* | [Ff][Ee]9* | [Ff][Ee][Aa]* | [Ff][Ee][Bb]*) continue ;;
+        *) ;;
       esac
       _tha="$_tha_candidate"
       break
