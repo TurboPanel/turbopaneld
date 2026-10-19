@@ -121,6 +121,62 @@ test("a volume another service mounts as a different user is skipped", () => {
   assertEquals(same.targets.map((t) => t.composeServiceName), ["db"]);
 });
 
+test("the volume of a plain compose file, as the control plane sends it, is selected once", () => {
+  // The canary shape: the authored key is replaced by the storage id and pinned
+  // with `name`; the daemon's overlay adds a long-form duplicate mount.
+  const id = "01a15611-eee5-7af5-988a-917c1a5d3a6a";
+  const plan = namedVolumeOwnerTargets(
+    {
+      store: {
+        user: "30002:30002",
+        volumes: [vol(id, "/vol")],
+      },
+    },
+    {
+      store: {
+        image: "busybox:1.36",
+        volumes: [
+          vol(id, "/vol", { volume: {} }),
+          {
+            type: "bind",
+            source: "/srv/users/o/production/volumes/b",
+            target: "/bind",
+          },
+        ],
+      },
+    },
+    { [id]: { name: id } },
+    "proj",
+    new Set([id]),
+  );
+  assertEquals(plan.skipped, []);
+  assertEquals(
+    plan.targets.map((t) => [t.composeServiceName, t.target, t.user]),
+    [
+      ["store", "/vol", "30002:30002"],
+    ],
+  );
+});
+
+test("a volume the platform created is not external to it, an authored external one still is", () => {
+  const id = "01a15611-eee5-7af5-988a-917c1a5d3a6a";
+  const services = {
+    store: { image: "busybox:1.36", volumes: [vol(id, "/vol")] },
+  };
+  const overlay = { store: { user: "30002:30002" } };
+  const external = { [id]: { name: id, external: true } };
+  assertEquals(
+    namedVolumeOwnerTargets(overlay, services, external, "p", new Set([id]))
+      .targets.length,
+    1,
+  );
+  assertEquals(
+    namedVolumeOwnerTargets(overlay, services, external, "p", new Set())
+      .targets.length,
+    0,
+  );
+});
+
 const target = {
   composeServiceName: "web",
   user: OWNER,
@@ -181,7 +237,10 @@ test("each target is chowned once through the service's own image, never pulling
     "--entrypoint",
   ]);
   assertEquals(runs[0]!.slice(-3), ["web", OWNER, "/a"]);
-  assertEquals(lines, []);
+  assertEquals(lines, [
+    `gave /a of web to ${OWNER}`,
+    `gave /b of web to ${OWNER}`,
+  ]);
 });
 
 test("a failed chown only logs, and the next target still runs", async () => {
@@ -196,7 +255,8 @@ test("a failed chown only logs, and the next target still runs", async () => {
     }, lines),
   );
   assertEquals(runs, 2);
-  assertEquals(lines.length, 1);
+  assertEquals(lines.length, 2);
+  assertEquals(lines[1], `gave /b of web to ${OWNER}`);
 });
 
 test("a missing image only logs: a registry image is pulled once, a built one never", async () => {
