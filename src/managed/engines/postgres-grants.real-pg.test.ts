@@ -172,7 +172,8 @@ async function snapshot(session: Session): Promise<string> {
             (SELECT xmin::text FROM pg_namespace WHERE nspname = 'public') || '/' ||
             (SELECT xmin::text FROM pg_namespace WHERE nspname = 'rw') || '/' ||
             (SELECT string_agg(xmin::text, ',' ORDER BY relname) FROM pg_class
-              WHERE relname IN ('orders', 'orders_id_seq', 'rw_made'));`,
+              WHERE relname IN ('orders', 'orders_id_seq', 'rw_made')) || '/' ||
+            (SELECT COALESCE(string_agg(defaclobjtype::text || defaclacl::text, ';' ORDER BY oid), '') FROM pg_default_acl);`,
     "appdb",
   );
 }
@@ -651,7 +652,9 @@ for (const series of SERIES) {
         await applyAgain();
         await proveLogins(session, applyAgain, major);
 
-        // A repeated apply rewrites no ACL: the catalog rows are untouched.
+        // A repeated apply rewrites no ACL: the catalog rows are untouched. Default privileges are
+        // compared by content: ALTER DEFAULT PRIVILEGES always rewrites its catalog row, so the
+        // row version says nothing, but the access list in it must not move.
         await applyAgain();
         const before = await snapshot(session);
         await applyAgain();
@@ -824,8 +827,9 @@ for (const series of SERIES) {
         // A repeated apply rewrites no ACL.
         const aclRows = () =>
           session.value(
-            `SELECT string_agg(xmin::text, ',' ORDER BY relname) FROM pg_class
-              WHERE relname IN ('parent', 'child', 'second', 'later', 'after_fix')`,
+            `SELECT (SELECT string_agg(xmin::text, ',' ORDER BY relname) FROM pg_class
+              WHERE relname IN ('parent', 'child', 'second', 'later', 'after_fix')) || '/' ||
+             (SELECT COALESCE(string_agg(defaclobjtype::text || defaclacl::text, ';' ORDER BY oid), '') FROM pg_default_acl)`,
             "shop",
           );
         await apply();
