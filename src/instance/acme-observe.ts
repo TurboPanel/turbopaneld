@@ -27,8 +27,14 @@ import type { CertificateCaptureOutcome } from "../deploy/acme-capture.ts";
 
 const ACME_OBSERVE_MS = 60_000;
 const MIN_CONSECUTIVE_FAILURES = 2;
-/** After a capture that could not finish, wait this long before asking again. */
+/**
+ * After a capture that could not finish, wait this long before asking again;
+ * each further miss doubles the wait up to {@link CAPTURE_RETRY_MAX_MS}, so a
+ * permanent refusal (bad token, a server never placed here) settles at one
+ * question every few hours instead of one every tick.
+ */
 const CAPTURE_RETRY_MS = 10 * 60_000;
+const CAPTURE_RETRY_MAX_MS = 6 * 60 * 60_000;
 
 export type AcmeIssuanceEventMessage = {
   type: "acme-issuance-event";
@@ -71,6 +77,8 @@ type HostState = {
   capturedNotAfter?: string;
   /** Do not try a capture again before this time (ms since the epoch). */
   captureRetryAt?: number;
+  /** Captures in a row that could not finish; sets the length of the wait. */
+  captureMisses?: number;
 };
 
 export class AcmeIssuanceObserver {
@@ -179,7 +187,7 @@ export class AcmeIssuanceObserver {
   /**
    * Give the control plane the pair for a certificate it has not been given
    * yet. A pair that is not ready, a control plane without the feature, or a
-   * failed call is tried again after {@link CAPTURE_RETRY_MS}, never in a
+   * failed call is tried again after {@link CAPTURE_RETRY_MS} (doubling up to a cap), never in a
    * tight loop and never as a failure of the issuance event itself.
    */
   async #captureIssued(
@@ -198,6 +206,7 @@ export class AcmeIssuanceObserver {
       if (outcome === "done") {
         state.capturedNotAfter = notAfter;
         delete state.captureRetryAt;
+        delete state.captureMisses;
         return;
       }
     } catch (err) {
@@ -207,7 +216,12 @@ export class AcmeIssuanceObserver {
         sanitizeForLog(err),
       );
     }
-    state.captureRetryAt = now + CAPTURE_RETRY_MS;
+    const misses = (state.captureMisses ?? 0) + 1;
+    state.captureMisses = misses;
+    state.captureRetryAt = now + Math.min(
+      CAPTURE_RETRY_MS * 2 ** (misses - 1),
+      CAPTURE_RETRY_MAX_MS,
+    );
   }
 
   #observeFailure(
