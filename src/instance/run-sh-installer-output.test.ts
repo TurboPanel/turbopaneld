@@ -86,22 +86,22 @@ test("tp_quiet_runtime_notes does not wait for a process left running, and leave
   try {
     const marker = join(dir, "survived");
     const res = await shell(FILTER, [
-      // The leftover process keeps the command's stderr for 3 seconds, then
+      // The leftover process keeps the command's stderr for 5 seconds, then
       // writes a note, a real message and a marker file.
       `tp_leaves_one() {`,
-      `  ( sleep 3; echo "${NOTE_NVIDIA}" >&2; echo "late message" >&2; echo ok > "${marker}" ) >/dev/null &`,
+      `  ( sleep 5; echo "${NOTE_NVIDIA}" >&2; echo "late message" >&2; echo ok > "${marker}" ) >/dev/null &`,
       `}`,
       `start=$(date +%s)`,
       `tp_quiet_runtime_notes tp_leaves_one`,
       `end=$(date +%s)`,
       `echo "waited=$((end - start))"`,
       // Outlive the leftover process so its late write has happened.
-      `sleep 3`,
+      `sleep 4`,
     ]);
     assertEquals(res.code, 0);
     const waited = Number(/waited=(\d+)/.exec(res.stdout)?.[1] ?? "99");
     assertEquals(
-      waited <= 2,
+      waited <= 3,
       true,
       `waited ${waited}s for the leftover process`,
     );
