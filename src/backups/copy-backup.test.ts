@@ -204,6 +204,47 @@ test("resolveCopyMount accepts a volume folder in the scope tree and no other fo
   }
 });
 
+test("resolveCopyMount builds a volume folder's directory from its parts and ignores hostPath beside it", () => {
+  const folder = { owner: "shop", scope: "production", slug: "uploads" };
+  const expected = {
+    type: "bind" as const,
+    path: "/srv/users/shop/production/volumes/uploads",
+  };
+  assertEquals(
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder,
+    }),
+    expected,
+  );
+  assertEquals(
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder,
+      hostPath: "/srv/users/shop/volumes/old",
+      ownerUsername: "shop",
+    }),
+    expected,
+  );
+  assertEquals(
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder: { ...folder, scope: "common" },
+    }),
+    { type: "bind", path: "/srv/users/shop/common/volumes/uploads" },
+  );
+  assertThrows(() =>
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder: { ...folder, slug: ".." },
+    })
+  );
+});
+
 test("resolveCopyMount refuses host paths outside the allowed roots", () => {
   for (
     const hostPath of [

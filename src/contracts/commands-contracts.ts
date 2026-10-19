@@ -552,6 +552,8 @@ export type BackupPolicyWireEntry = {
   composeProject?: string;
   organizationId?: string;
   storageId?: string;
+  /** A path copy: the volume's folder by its parts; the host builds the directory from it. */
+  folder?: FolderRefParts;
   onCalendar: string;
   retentionKeep: number;
   enabled: boolean;
@@ -581,6 +583,12 @@ export type CopyBackupSource = {
   composeProject?: string;
   organizationId?: string;
   storageId?: string;
+  /**
+   * A path copy: the volume's folder by its parts. The host builds the
+   * directory from it and ignores `hostPath`, which may ride beside it for a
+   * host that did not know the field.
+   */
+  folder?: FolderRefParts;
 };
 
 /**
@@ -8598,6 +8606,7 @@ const MAX_COPY_HOST_PATH_LENGTH = 1024;
 /** One path segment: no `/`, no `,` (the path lands in a `docker --mount` value), no shell metacharacters. */
 const COPY_HOST_PATH_SEGMENT_RE = /^[\w.@+-]+$/;
 const COPY_SOURCE_FIELDS = [
+  "folder",
   "volumeName",
   "hostPath",
   "ownerUsername",
@@ -8635,6 +8644,22 @@ function parsePathCopySource(
 ): void {
   if (raw.volumeName !== undefined) {
     throw new Error("A path copy source cannot name a volume");
+  }
+  if (raw.folder !== undefined) {
+    const ref = folderRefParts(parseFolderRefParts(raw.folder, "volume"));
+    if (raw.ownerUsername !== undefined && raw.ownerUsername !== ref.owner) {
+      throw new Error(
+        "A path copy source folder must belong to its ownerUsername",
+      );
+    }
+    if (
+      raw.organizationId !== undefined || raw.storageId !== undefined ||
+      raw.composeProject !== undefined
+    ) {
+      throw new Error("Invalid path copy source folder");
+    }
+    source.folder = ref;
+    if (raw.hostPath === undefined) return;
   }
   if (raw.hostPath !== undefined) {
     if (
@@ -8693,7 +8718,7 @@ export function parseCopyBackupSource(
   }
   if (
     raw.hostPath !== undefined || raw.organizationId !== undefined ||
-    raw.ownerUsername !== undefined
+    raw.ownerUsername !== undefined || raw.folder !== undefined
   ) {
     throw new Error("A docker copy source cannot name a host path");
   }

@@ -96,6 +96,11 @@ narrowed at runtime; narrowing them would take a second compiled binary.
 
 ## Storage copies
 
+- A `path` copy names its source either by `folder` (the volume folder's owner, scope and
+  name; the host builds `<principalRoot>/<owner>/<scope>/volumes/<name>` from the shared
+  folder rules and ignores `hostPath` when both come) or, from a control plane that does
+  not send it yet, by `hostPath` + `ownerUsername`. The symlink guard starts at the owner's
+  tree in both cases (`copyPathBase`).
 - A copy archive is a live gzipped tar (no pause, no stop) written by a
   throwaway helper container, never by the daemon reading tenant files:
   `COPY_BACKUP_HELPER_IMAGE` (alpine pinned by its multi-arch index digest),
