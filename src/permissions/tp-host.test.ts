@@ -3793,7 +3793,7 @@ test("site-caddy-mounts lists only the nosymfollow mounts under the home root, a
 
 test("site-usage prints home and site sizes only, never follows a symlink and takes no arguments", async () => {
   await withHost(async (host) => {
-    const sites = host.path("srv/users/alice/sites");
+    const sites = host.path("srv/users/alice/production/services");
     await Deno.mkdir(join(sites, "web"), { recursive: true });
     await Deno.writeFile(join(sites, "web", "blob"), new Uint8Array(200_000));
     await Deno.mkdir(join(sites, "tiny"), { recursive: true });
@@ -3805,16 +3805,47 @@ test("site-usage prints home and site sizes only, never follows a symlink and ta
     );
     await Deno.symlink(host.path("outside/big"), join(sites, "escape"));
     await Deno.symlink(host.path("outside"), host.path("srv/users/mallory"));
+    // A scope that is a link, and a folder an older layout used, are never read.
+    await Deno.mkdir(host.path("outside/services/leak"), { recursive: true });
+    await Deno.writeTextFile(host.path("outside/services/leak/f"), "x");
+    await Deno.symlink(
+      host.path("outside"),
+      host.path("srv/users/alice/staging"),
+    );
+    await Deno.mkdir(host.path("srv/users/alice/sites/old"), {
+      recursive: true,
+    });
     const result = await host.run(["site-usage"]);
     assertEquals(result.code, 0, result.stderr);
     const rows = result.stdout.trim().split("\n").map((l) => l.split(" "));
     const bytes = (kind: string, name: string) =>
       Number(rows.find((r) => r[0] === kind && r[2] === name)?.[1]);
-    assertEquals(bytes("site", "web") >= 200_000, true, result.stdout);
-    assertEquals(bytes("site", "web") < 400_000, true, result.stdout);
-    assertEquals(bytes("home", "alice") >= bytes("site", "web"), true);
-    assertEquals(rows.some((r) => r[2] === "escape"), false, result.stdout);
+    assertEquals(
+      bytes("site", "production/web") >= 200_000,
+      true,
+      result.stdout,
+    );
+    assertEquals(
+      bytes("site", "production/web") < 400_000,
+      true,
+      result.stdout,
+    );
+    assertEquals(
+      bytes("home", "alice") >= bytes("site", "production/web"),
+      true,
+    );
+    assertEquals(
+      rows.some((r) => r[2] === "production/escape"),
+      false,
+      result.stdout,
+    );
     assertEquals(rows.some((r) => r[2] === "mallory"), false, result.stdout);
+    assertEquals(
+      rows.some((r) => r[2]?.includes("leak")),
+      false,
+      result.stdout,
+    );
+    assertEquals(rows.some((r) => r[2]?.includes("old")), false, result.stdout);
     assertEquals(
       rows.every((r) => r.length === 3 && /^\d+$/.test(r[1]!)),
       true,
@@ -3825,7 +3856,7 @@ test("site-usage prints home and site sizes only, never follows a symlink and ta
       1,
     );
     assertEquals(
-      rows.filter((r) => r[0] === "site" && r[2] === "web").length,
+      rows.filter((r) => r[0] === "site" && r[2] === "production/web").length,
       1,
     );
     const script = await Deno.readTextFile(

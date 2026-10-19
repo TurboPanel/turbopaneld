@@ -359,11 +359,15 @@ test("a link left inside a volume cannot lead a bind out of it", () =>
     assertEquals(err.message.includes("outside its volume folder"), true);
   }));
 
-test("an older volume path the control plane named stays allowed", () =>
+test("a path under a home that is not this deploy's volume folder is refused, even if it looks like a volume", () =>
   withTree(async (f) => {
-    const older = join(f.home, "alice", "volumes", "st1");
-    await Deno.mkdir(older, { recursive: true });
-    await confine(f, older, false, [older]);
+    const own = join(f.home, "alice", "production", "volumes", "uploads");
+    const unnamed = join(f.home, "alice", "volumes", "st1");
+    await Deno.mkdir(unnamed, { recursive: true });
+    await assertRejects(
+      () => confine(f, unnamed, true, [own]),
+      ComposeHostPathError,
+    );
   }));
 
 test("only a volume with a folder widens the bind allowlist", () => {

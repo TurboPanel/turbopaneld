@@ -1278,9 +1278,9 @@ export type EnvironmentDeployNativeAppVariable = {
  * carry `credentialUsername`, the basic-auth user to answer with; it is opaque
  * here, so no provider-specific rule leaks into the daemon.
  *
- * `releaseId` becomes a directory name under
- * `<principalHome>/sites/<serviceId>/releases/`, so it is validated as a safe
- * id (no path separators).
+ * `releaseId` becomes a directory name under the service's `releases/` folder
+ * (`<principalHome>/<scope>/services/<name>/releases/`), so it is validated as
+ * a safe id (no path separators).
  */
 /**
  * Auth shape of a clone credential. Mirrors instance
@@ -1709,7 +1709,7 @@ export type EnvironmentStopPayload = {
    */
   fabricNetworks?: string[];
   /**
-   * Per-service release trees (`<principalHome>/sites/<serviceId>`) to reclaim.
+   * Per-service folders (`<principalHome>/<scope>/services/<name>`) to reclaim.
    *
    * Generic on purpose — this is the same tree the Git release engine publishes
    * into and native apps run out of, not a site

@@ -46,7 +46,7 @@ export function serviceFolderFromPayload(
   )?.folder;
   if (folder === undefined) {
     throw new Error(
-      `deploy payload has no serviceFolders entry for service ${serviceId}; the control plane must send a folder for every host-run service`,
+      `Service ${serviceId} has no folder planned on this server; redeploy from the panel`,
     );
   }
   return folder;
@@ -85,7 +85,7 @@ export function serviceFolderForCompose(
     if (folder !== undefined) return folder;
   }
   throw new Error(
-    `deploy payload has no serviceFolders entry for service ${composeServiceName}; the control plane must send a folder for every host-run service`,
+    `Service ${composeServiceName} has no folder planned on this server; redeploy from the panel`,
   );
 }
 

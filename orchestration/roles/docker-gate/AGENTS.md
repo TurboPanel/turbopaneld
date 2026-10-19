@@ -78,9 +78,9 @@ refuses (`body-unparseable` with `empty`, `invalid-utf8`, `invalid-json`,
 (symlinks followed root-side, dangling ones included, `..` refused) under
 `/srv/users` must be one of the places the principal home layout gives
 containers (`policy.ts` `principalViolation`, config `principalRoots`):
-`<user>/data` and `<user>/tmp`, `<user>/volumes/<id>` (path storage),
-`<user>/sites/<site>/shared`, `.../webroot` and the root-owned
-`.../releases`. Everything else under a home (`home/`, the home or `sites/`
+`<user>/tmp`, `<user>/<scope>/volumes/<name>` (path storage),
+`<user>/<scope>/services/<name>/shared`, `.../webroot` and the root-owned
+`.../releases`. Everything else under a home (`home/`, the home or a scope
 as a whole, a site's `.turbopanel-hosting`, `.tp-staging`) is a
 `bind-principal-path` finding. Outside `/srv/users` the older rules stand
 (root-owned bind roots such as `<state>/storage`, the deny list). The gate does

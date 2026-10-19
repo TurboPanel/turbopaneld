@@ -118,7 +118,7 @@ member; a failed `auto` is a warning too, never a failed reconcile. With the
 switch on, the
 `tpsftp` block gets `ChrootDirectory <root>/%u` and
 `ForceCommand internal-sftp -d /home`: the jail is the root-owned principal
-home, the session starts in `home/`, and `sites/` is visible read-only. `%u`,
+home, the session starts in `home/`, and the scope folders (`<scope>/services`, `<scope>/volumes`) are visible read-only. `%u`,
 not `%h`, because the passwd home is `home/` one level down. The switch is
 `/etc/ssh/turbopanel/sftp-chroot`, outside every tp-host tree, so no generic
 verb can write or remove it: only `tp-host sftp-chroot on` (which refuses

@@ -69,7 +69,7 @@ test("a site with an owner and no planned folder is refused", () => {
         new Map(),
       ),
     Error,
-    "no serviceFolders entry",
+    "has no folder planned on this server",
   );
 });
 
