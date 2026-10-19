@@ -156,6 +156,7 @@ exit 0
     "tp_colocated_control_plane_host",
     ...REFRESH_FILE_HELPERS,
     "tp_quiet_runtime_notes",
+    "tp_quiet_runtime_notes_abort",
     "tp_run_colocated_daemon_refresh",
   ].map((name) => extractShellFunction(source, name)).join("\n");
   const script = [
@@ -544,6 +545,7 @@ async function runRefresh(
     `tp_daemon_js_fallback_path() { printf '%s' "${stub}.js"; }`,
     ...REFRESH_FILE_HELPERS.map((name) => extractShellFunction(source, name)),
     extractShellFunction(source, "tp_quiet_runtime_notes"),
+    extractShellFunction(source, "tp_quiet_runtime_notes_abort"),
     extractShellFunction(source, "tp_run_colocated_daemon_refresh"),
     INSTALL_AS_USER,
     "tp_run_colocated_daemon_refresh",

@@ -1016,29 +1016,57 @@ tp_quiet_runtime_notes() {
   grep --line-buffered -v -E "^Info Failed to resolve '[^']+' for allow-run: cannot find binary path\$" \
     <"$_qrn_dir/stderr" >&2 &
   _qrn_pid=$!
+  # An interrupt still has to stop the filter and remove the scratch folder.
+  # EXIT is left alone: the main script keeps its own EXIT trap.
+  trap 'tp_quiet_runtime_notes_abort 130' INT
+  trap 'tp_quiet_runtime_notes_abort 143' TERM
+  trap 'tp_quiet_runtime_notes_abort 129' HUP
   _qrn_rc=0
   "$@" 2>"$_qrn_dir/stderr" || _qrn_rc=$?
-  # The filter ends once nothing holds the pipe open. A process the command
-  # left running with this stderr would keep it open, so wait a moment, then
-  # stop the filter rather than hang the install.
+  trap - INT TERM HUP
+  # The filter ends once nothing holds the pipe open. Give it a moment to
+  # drain. A process the command left running keeps the pipe open, so do not
+  # wait for it and do not close the pipe under it (its next write would
+  # fail): the filter stays up and keeps filtering for as long as that process
+  # lives, and only the folder entry is removed (the open pipe stays valid).
   _qrn_wait=0
   while kill -0 "$_qrn_pid" 2>/dev/null && [ "$_qrn_wait" -lt 20 ]; do
     sleep 0.1
     _qrn_wait=$((_qrn_wait + 1))
   done
-  kill "$_qrn_pid" 2>/dev/null || true
-  wait "$_qrn_pid" 2>/dev/null || true
   rm -rf "$_qrn_dir"
   return "$_qrn_rc"
+}
+
+tp_quiet_runtime_notes_abort() {
+  kill "${_qrn_pid:-0}" 2>/dev/null || true
+  rm -rf "${_qrn_dir:-}"
+  trap - INT TERM HUP
+  exit "$1"
 }
 
 # The address other machines reach this host on, for the setup wizard link.
 tp_host_address() {
   _tha="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.][0-9.]*\).*/\1/p' | head -n 1)"
   if [ -z "$_tha" ]; then
-    _tha="$(hostname -I 2>/dev/null | cut -d ' ' -f 1)"
+    _tha="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | sed -n 's/.* src \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | head -n 1)"
   fi
-  printf '%s' "$_tha"
+  if [ -z "$_tha" ]; then
+    # No default route to ask: take the first address that another machine
+    # could reach (not loopback, link-local or the default Docker bridge).
+    for _tha_candidate in $(hostname -I 2>/dev/null); do
+      case "$_tha_candidate" in
+        127.* | 169.254.* | 172.17.* | ::1 | [Ff][Ee]8* | [Ff][Ee]9* | [Ff][Ee][Aa]* | [Ff][Ee][Bb]*) continue ;;
+      esac
+      _tha="$_tha_candidate"
+      break
+    done
+  fi
+  # A bare IPv6 address has to be in brackets inside a URL.
+  case "$_tha" in
+    *:*) printf '[%s]' "$_tha" ;;
+    *) printf '%s' "$_tha" ;;
+  esac
 }
 
 DAEMON_SERVICE_NAME="turbopaneld.service"
@@ -1826,20 +1854,20 @@ tp_run_instance_install() {
   fi
 
   tp_print_step "▸" "Finding the control plane release (channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
-  tp_fetch_repo_manifest turbopanel || { rm -rf "$_work"; return 1; }
+  tp_fetch_repo_manifest turbopanel || { tp_print_error "Could not find the control plane release"; rm -rf "$_work"; return 1; }
   _instance_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
   _instance_commit="$(tp_manifest_field "$_repo_manifest_compact" "commit")"
   tp_print_ok "Control plane release found (v${_instance_version:-?}, commit $(printf '%.8s' "${_instance_commit:-unknown}"))"
   tp_print_step "▸" "Downloading control plane package (${_linux_arch})…"
-  tp_download_repo_artifact "instance-${_linux_arch}" "$_work/instance.tar.zst" || { rm -rf "$_work"; return 1; }
+  tp_download_repo_artifact "instance-${_linux_arch}" "$_work/instance.tar.zst" || { tp_print_error "Could not download the control plane package"; rm -rf "$_work"; return 1; }
   tp_print_ok "Control plane package verified (SHA-256 ok)"
 
   tp_print_step "▸" "Finding the web app release…"
-  tp_fetch_repo_manifest ui || { rm -rf "$_work"; return 1; }
+  tp_fetch_repo_manifest ui || { tp_print_error "Could not find the web app release"; rm -rf "$_work"; return 1; }
   _ui_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
   tp_print_ok "Web app release found (v${_ui_version:-?})"
   tp_print_step "▸" "Downloading UI export…"
-  tp_download_repo_artifact ui "$_work/ui.tar.gz" || { rm -rf "$_work"; return 1; }
+  tp_download_repo_artifact ui "$_work/ui.tar.gz" || { tp_print_error "Could not download the web app"; rm -rf "$_work"; return 1; }
   tp_print_ok "UI export verified (SHA-256 ok)"
 
   tp_print_step "▸" "Unpacking under $INSTALL_ROOT…"
@@ -1862,6 +1890,7 @@ tp_run_instance_install() {
   # --no-overwrite-dir: the archive carries bin/ and lib/ directory entries;
   # never let them re-own or re-mode the shared install dirs (root:tp 0750).
   if ! zstd -d -q -c "$_work/instance.tar.zst" | tar -x --no-same-owner --no-overwrite-dir -C "$INSTALL_ROOT"; then
+    tp_print_error "Could not unpack the control plane package"
     if [ "$_skip_daemon" = true ]; then
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
@@ -1878,6 +1907,7 @@ tp_run_instance_install() {
     rm -rf "$_ui_dir.new"
     mkdir -p "$_ui_dir.new"
     if ! tar -xzf "$_work/ui.tar.gz" --no-same-owner --no-overwrite-dir -C "$_ui_dir.new"; then
+      tp_print_error "Could not unpack the web app"
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       rm -rf "$_work"
@@ -1885,6 +1915,7 @@ tp_run_instance_install() {
     fi
     rm -rf "$_ui_dir"
     if ! mv "$_ui_dir.new" "$_ui_dir"; then
+      tp_print_error "Could not put the web app in place"
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       rm -rf "$_work"
@@ -1911,6 +1942,7 @@ tp_run_instance_install() {
   done
   if [ "$_skip_daemon" = true ]; then
     if ! chmod 0755 "$INSTALL_ROOT/bin/turbopanel" || ! chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"; then
+      tp_print_error "Could not set permissions on the control plane files"
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       return 1
