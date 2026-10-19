@@ -2862,19 +2862,13 @@ tp_verb_sftp_chroot() {
       printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
       tp_sftp_chroot_clear_off_mark
       ;;
-    off)
-      # Marker first, switch second: a concurrent `auto` between the two steps
-      # must find the marker, or it would turn the jail straight back on.
-      printf 'off\n' | tp_put_file "$SFTP_CHROOT_OFF_MARK" 0644 root root
-      tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
-      rm -f -- "./$PIN_NAME"
-      ;;
+    off) tp_sftp_chroot_set_off ;;
     auto-revert)
       # Undo an automatic switch-on that sshd then refused, without the
       # explicit-off marker: the next reconcile may try again once whatever
-      # sshd objected to is fixed. Only ever removes the switch.
-      tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
-      rm -f -- "./$PIN_NAME"
+      # sshd objected to is fixed. Only ever removes the switch; with no
+      # folder there is no switch to remove.
+      tp_sftp_chroot_remove_switch
       ;;
     auto)
       # The default for a new host: jail on once the layout check is clean.
@@ -2883,15 +2877,53 @@ tp_verb_sftp_chroot() {
       # stderr) while any member is still off the layout; the next reconcile
       # tries again. Never fails the caller for a finding.
       tp_sftp_chroot_is_on && return 0
-      if [ -f "$SFTP_CHROOT_OFF_MARK" ] && [ ! -L "$SFTP_CHROOT_OFF_MARK" ]; then
-        return 0
-      fi
+      if tp_sftp_chroot_off_marked; then return 0; fi
       if tp_sftp_chroot_check >&2; then
+        [ -z "$TP_TEST" ] || tp_test_pause sftp-auto
         printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
+        # An `off` that wrote its marker while the check ran found no switch
+        # to remove. Look again now that ours is written: either that `off`
+        # sees the switch (it removes it after the marker) or we see its
+        # marker here, so an explicit off always wins.
+        if tp_sftp_chroot_off_marked; then tp_sftp_chroot_remove_switch; fi
       fi
       ;;
     *) tp_die "sftp-chroot: only check, verify, on, off, auto, auto-revert or status" ;;
   esac
+}
+
+# Test mode only: hold here while $P/tmp/pause-NAME exists, saying so in
+# $P/tmp/paused-NAME, so a test can interleave another verb at this exact step.
+tp_test_pause() {
+  [ -e "$P/tmp/pause-$1" ] || return 0
+  : > "$P/tmp/paused-$1"
+  _tp_waited=0
+  while [ -e "$P/tmp/pause-$1" ] && [ "$_tp_waited" -lt 200 ]; do
+    sleep 0.05
+    _tp_waited=$((_tp_waited + 1))
+  done
+}
+
+tp_sftp_chroot_off_marked() {
+  [ -f "$SFTP_CHROOT_OFF_MARK" ] && [ ! -L "$SFTP_CHROOT_OFF_MARK" ]
+}
+
+# Remove the switch; an absent switch or folder is fine.
+tp_sftp_chroot_remove_switch() {
+  tp_pin_parent "$SFTP_CHROOT_SWITCH" || return 0
+  rm -f -- "./$PIN_NAME"
+}
+
+# The rollback, never refused. Marker first, switch second: a concurrent `auto`
+# that has not written the switch yet must find the marker, and one that wrote
+# it first has it removed here. The folder is created (root:root 0750, like the
+# rest of it) when absent; with no SSH server folder at all nothing can be
+# jailed, so there is nothing to remember and nothing to refuse.
+tp_sftp_chroot_set_off() {
+  [ -d "${R_SSHKEYS%/*}" ] || return 0
+  [ -d "$R_SSHKEYS" ] || tp_mkdir_pinned "$R_SSHKEYS" 0750
+  printf 'off\n' | tp_put_file "$SFTP_CHROOT_OFF_MARK" 0644 root root
+  tp_sftp_chroot_remove_switch
 }
 
 # Remove the explicit-off marker; absent is fine.

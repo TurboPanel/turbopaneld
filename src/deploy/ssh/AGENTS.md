@@ -99,8 +99,13 @@ auto`, which runs the layout check and turns the switch on when it is clean
 switch is already on or when an administrator ran `sftp-chroot off` — `off`
 leaves a root-only marker (`sftp-chroot-off`, as unreachable to generic verbs
 as the switch) that only an explicit `on` clears, so the rollback sticks; the
-marker is written **before** the switch is removed, so a concurrent `auto`
-cannot slip in between. If sshd refuses the jailed drop-in right after `auto`
+marker is written **before** the switch is removed, and `auto` looks for the
+marker again right after it writes the switch (its layout check takes time), so
+whichever of the two runs last, an explicit off wins: either `off` finds the
+switch and removes it, or `auto` finds the marker and takes the switch back.
+`off` is never refused: it creates the SSH folder (root:root 0750) if it is
+missing, and on a host with no SSH server folder at all it does nothing, since
+nothing can be jailed there. If sshd refuses the jailed drop-in right after `auto`
 turned the switch on (`-t`, forwarding or `sftp-chroot verify`), the daemon runs
 `sftp-chroot auto-revert` — switch off, **no** marker, so a later reconcile may
 try again — warns with the reason, and applies the unjailed drop-in in the same
