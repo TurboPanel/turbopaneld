@@ -989,6 +989,88 @@ tp_print_error() {
   fi
 }
 
+# An indented, dimmed follow-up line under the step above it.
+tp_print_detail() {
+  _msg="$1"
+  if [ -t 1 ]; then
+    printf '\033[90m   %s\033[0m\n' "$_msg"
+  else
+    printf '   %s\n' "$_msg"
+  fi
+}
+
+# Run "$@" with the runtime's start-up notes about optional tools left out of
+# stderr. Before the first install the tools the daemon checks for (graphics
+# card, WireGuard, ACLs, git, Docker) are not on the host yet, and the runtime
+# says so with one "Info Failed to resolve '<tool>' for allow-run: cannot find
+# binary path" line per tool. That is a check, not a problem, and it reads like
+# an error. Only those exact lines are dropped; every other stderr line, stdout
+# (still a terminal) and the exit status pass through unchanged.
+tp_quiet_runtime_notes() {
+  _qrn_dir="$(mktemp -d)" || { "$@"; return $?; }
+  if ! mkfifo "$_qrn_dir/stderr"; then
+    rm -rf "$_qrn_dir"
+    "$@"
+    return $?
+  fi
+  grep --line-buffered -v -E "^Info Failed to resolve '[^']+' for allow-run: cannot find binary path\$" \
+    <"$_qrn_dir/stderr" >&2 &
+  _qrn_pid=$!
+  # An interrupt still has to stop the filter and remove the scratch folder.
+  # EXIT is left alone: the main script keeps its own EXIT trap.
+  trap 'tp_quiet_runtime_notes_abort 130' INT
+  trap 'tp_quiet_runtime_notes_abort 143' TERM
+  trap 'tp_quiet_runtime_notes_abort 129' HUP
+  _qrn_rc=0
+  "$@" 2>"$_qrn_dir/stderr" || _qrn_rc=$?
+  trap - INT TERM HUP
+  # The filter ends once nothing holds the pipe open. Give it a moment to
+  # drain. A process the command left running keeps the pipe open, so do not
+  # wait for it and do not close the pipe under it (its next write would
+  # fail): the filter stays up and keeps filtering for as long as that process
+  # lives, and only the folder entry is removed (the open pipe stays valid).
+  _qrn_wait=0
+  while kill -0 "$_qrn_pid" 2>/dev/null && [ "$_qrn_wait" -lt 20 ]; do
+    sleep 0.1
+    _qrn_wait=$((_qrn_wait + 1))
+  done
+  rm -rf "$_qrn_dir"
+  return "$_qrn_rc"
+}
+
+tp_quiet_runtime_notes_abort() {
+  kill "${_qrn_pid:-0}" 2>/dev/null || true
+  rm -rf "${_qrn_dir:-}"
+  trap - INT TERM HUP
+  _qrn_status="$1"
+  exit "$_qrn_status"
+}
+
+# The address other machines reach this host on, for the setup wizard link.
+tp_host_address() {
+  _tha="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.][0-9.]*\).*/\1/p' | head -n 1)"
+  if [ -z "$_tha" ]; then
+    _tha="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | sed -n 's/.* src \([0-9a-fA-F:][0-9a-fA-F:]*\).*/\1/p' | head -n 1)"
+  fi
+  if [ -z "$_tha" ]; then
+    # No default route to ask: take the first address that another machine
+    # could reach (not loopback, link-local or the default Docker bridge).
+    for _tha_candidate in $(hostname -I 2>/dev/null); do
+      case "$_tha_candidate" in
+        127.* | 169.254.* | 172.17.* | ::1 | [Ff][Ee]8* | [Ff][Ee]9* | [Ff][Ee][Aa]* | [Ff][Ee][Bb]*) continue ;;
+        *) ;;
+      esac
+      _tha="$_tha_candidate"
+      break
+    done
+  fi
+  # A bare IPv6 address has to be in brackets inside a URL.
+  case "$_tha" in
+    *:*) printf '[%s]' "$_tha" ;;
+    *) printf '%s' "$_tha" ;;
+  esac
+}
+
 DAEMON_SERVICE_NAME="turbopaneld.service"
 UPDATE_GUARD_TIMER="turbopaneld-update-guard.timer"
 PROGRESS_MARKERS=false
@@ -1773,21 +1855,21 @@ tp_run_instance_install() {
     tp_emit_update_stage downloading
   fi
 
-  tp_print_step "▸" "Fetching control plane release manifest (TurboPanel/turbopanel, channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
-  tp_fetch_repo_manifest turbopanel || { rm -rf "$_work"; return 1; }
+  tp_print_step "▸" "Finding the control plane release (channel ${TURBOPANEL_UPDATE_CHANNEL:-release})…"
+  tp_fetch_repo_manifest turbopanel || { tp_print_error "Could not find the control plane release"; rm -rf "$_work"; return 1; }
   _instance_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
   _instance_commit="$(tp_manifest_field "$_repo_manifest_compact" "commit")"
-  tp_print_step "  " "Instance: v${_instance_version:-?} (${_instance_commit:-unknown})"
+  tp_print_ok "Control plane release found (v${_instance_version:-?}, commit $(printf '%.8s' "${_instance_commit:-unknown}"))"
   tp_print_step "▸" "Downloading control plane package (${_linux_arch})…"
-  tp_download_repo_artifact "instance-${_linux_arch}" "$_work/instance.tar.zst" || { rm -rf "$_work"; return 1; }
+  tp_download_repo_artifact "instance-${_linux_arch}" "$_work/instance.tar.zst" || { tp_print_error "Could not download the control plane package"; rm -rf "$_work"; return 1; }
   tp_print_ok "Control plane package verified (SHA-256 ok)"
 
-  tp_print_step "▸" "Fetching UI release manifest (TurboPanel/ui)…"
-  tp_fetch_repo_manifest ui || { rm -rf "$_work"; return 1; }
+  tp_print_step "▸" "Finding the web app release…"
+  tp_fetch_repo_manifest ui || { tp_print_error "Could not find the web app release"; rm -rf "$_work"; return 1; }
   _ui_version="$(tp_manifest_field "$_repo_manifest_compact" "version")"
-  tp_print_step "  " "UI: v${_ui_version:-?}"
+  tp_print_ok "Web app release found (v${_ui_version:-?})"
   tp_print_step "▸" "Downloading UI export…"
-  tp_download_repo_artifact ui "$_work/ui.tar.gz" || { rm -rf "$_work"; return 1; }
+  tp_download_repo_artifact ui "$_work/ui.tar.gz" || { tp_print_error "Could not download the web app"; rm -rf "$_work"; return 1; }
   tp_print_ok "UI export verified (SHA-256 ok)"
 
   tp_print_step "▸" "Unpacking under $INSTALL_ROOT…"
@@ -1810,6 +1892,7 @@ tp_run_instance_install() {
   # --no-overwrite-dir: the archive carries bin/ and lib/ directory entries;
   # never let them re-own or re-mode the shared install dirs (root:tp 0750).
   if ! zstd -d -q -c "$_work/instance.tar.zst" | tar -x --no-same-owner --no-overwrite-dir -C "$INSTALL_ROOT"; then
+    tp_print_error "Could not unpack the control plane package"
     if [ "$_skip_daemon" = true ]; then
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
@@ -1826,6 +1909,7 @@ tp_run_instance_install() {
     rm -rf "$_ui_dir.new"
     mkdir -p "$_ui_dir.new"
     if ! tar -xzf "$_work/ui.tar.gz" --no-same-owner --no-overwrite-dir -C "$_ui_dir.new"; then
+      tp_print_error "Could not unpack the web app"
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       rm -rf "$_work"
@@ -1833,6 +1917,7 @@ tp_run_instance_install() {
     fi
     rm -rf "$_ui_dir"
     if ! mv "$_ui_dir.new" "$_ui_dir"; then
+      tp_print_error "Could not put the web app in place"
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       rm -rf "$_work"
@@ -1859,6 +1944,7 @@ tp_run_instance_install() {
   done
   if [ "$_skip_daemon" = true ]; then
     if ! chmod 0755 "$INSTALL_ROOT/bin/turbopanel" || ! chmod 0644 "$INSTALL_ROOT/lib/libduckdb.so"; then
+      tp_print_error "Could not set permissions on the control plane files"
       tp_restore_instance_prev
       tp_clear_instance_swap_marker
       return 1
@@ -1897,12 +1983,11 @@ tp_run_instance_install() {
     printf 'turbopanel_daemon_state_dir: %s\n' "$STATE_DIR"
     printf 'turbopanel_daemon_env_file: %s\n' "$ENV_FILE"
   } > "$_vars"
-  tp_print_step "▸" "Provisioning the self-hosted control plane (Postgres, Redis, RabbitMQ, Docker, certs, units, Caddy, co-located daemon)…"
   _rc=0
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
-    "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
+    tp_quiet_runtime_notes "$(tp_daemon_binary_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
   else
-    HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
+    tp_quiet_runtime_notes env HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --playbook instance-install.yml --vars-file "$_vars" || _rc=$?
   fi
   rm -f "$_vars"
   rm -rf /tmp/turbopanel-ansible /root/.ansible
@@ -1917,7 +2002,11 @@ tp_run_instance_install() {
     tp_print_error "Could not write $(tp_control_plane_refresh_file)"
     return 1
   fi
-  tp_print_ok "Self-hosted control plane installed — open the wizard URL printed above (https://<this host>:8443/install); this host's daemon enrols itself once the wizard has issued the first license"
+  tp_print_ok "TurboPanel is installed on this host"
+  _wizard_host="$(tp_host_address)"
+  tp_print_detail "Next: finish setup in the wizard at https://${_wizard_host:-<this host>}:8443/install"
+  tp_print_detail "Your browser will warn about the certificate until the wizard has finished (it is self-signed)."
+  tp_print_detail "This host's daemon connects by itself once the wizard has issued the first license."
   return 0
 }
 
@@ -2087,12 +2176,11 @@ tp_run_colocated_daemon_refresh() {
       printf 'turbopanel_ui_manifest_url: "%s"\n' "$_ui_pin"
     fi
   } > "$_vars"
-  tp_print_step "▸" "Refreshing the co-located daemon (socket mode; control plane, web app, and database unchanged)…"
   _rc=0
   if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
-    "$(tp_daemon_binary_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
+    tp_quiet_runtime_notes "$(tp_daemon_binary_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
   else
-    HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
+    tp_quiet_runtime_notes env HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --playbook daemon-colocated-refresh.yml --vars-file "$_vars" || _rc=$?
   fi
   rm -f "$_vars"
   rm -rf /tmp/turbopanel-ansible /root/.ansible 2>/dev/null || true
@@ -2100,7 +2188,6 @@ tp_run_colocated_daemon_refresh() {
     tp_print_error "Co-located daemon refresh failed"
     return "$_rc"
   fi
-  tp_print_ok "Co-located daemon refreshed"
   return 0
 }
 
@@ -2653,15 +2740,17 @@ if [ -n "$MANIFEST_URL" ]; then
 else
   tp_print_ok "Release manifest resolved (channel ${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}, arch ${_linux_arch:-unknown})"
 fi
-tp_print_step "  " "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
-tp_print_step "  " "JS bundle (if needed): $_js_fallback_artifact_url"
-tp_print_step "  " "Commit: ${_manifest_commit:-unknown}"
+tp_print_detail "Commit $(printf '%.8s' "${_manifest_commit:-unknown}")"
+if [ -n "${TURBOPANEL_INSTALL_VERBOSE:-}" ]; then
+  tp_print_detail "Binary (${_linux_arch:-unknown}): $_binary_artifact_url"
+  tp_print_detail "JS bundle (if needed): $_js_fallback_artifact_url"
+fi
 if [ "$INSTANCE_INSTALL" = true ]; then
-  tp_print_step "  " "Control plane: this host (self-hosted install)"
+  tp_print_detail "Control plane: this host (self-hosted install)"
 elif [ "$_colocated_daemon_refresh" = true ]; then
-  tp_print_step "  " "Control plane: this host (co-located socket)"
+  tp_print_detail "Control plane: this host (co-located socket)"
 else
-  tp_print_step "  " "Control plane: $HOST_URL"
+  tp_print_detail "Control plane: $HOST_URL"
 fi
 
 mkdir -p "$CONFIG_DIR"
@@ -2803,9 +2892,9 @@ else
 fi
 
 if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
-  "$(tp_daemon_binary_path)" bootstrap-orchestration
+  tp_quiet_runtime_notes "$(tp_daemon_binary_path)" bootstrap-orchestration
 else
-  HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
+  tp_quiet_runtime_notes env HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" bootstrap-orchestration
   # Warm the JS module cache so first start is fast/offline.
   HOME="$INSTALL_ROOT" "$DENO_BIN" cache "$(tp_daemon_js_fallback_path)" >/dev/null 2>&1 || true
 fi
@@ -2894,12 +2983,12 @@ trap 'rm -f "$VARS_FILE"' EXIT
 } > "$VARS_FILE"
 
 if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then
-  if ! "$(tp_daemon_binary_path)" run-installer --vars-file "$VARS_FILE"; then
+  if ! tp_quiet_runtime_notes "$(tp_daemon_binary_path)" run-installer --vars-file "$VARS_FILE"; then
     rm -rf /tmp/turbopanel-ansible /root/.ansible
     exit 1
   fi
 else
-  if ! HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --vars-file "$VARS_FILE"; then
+  if ! tp_quiet_runtime_notes env HOME="$INSTALL_ROOT" "$DENO_BIN" run $TP_INSTALLER_DENO_PERMISSIONS "$(tp_daemon_js_fallback_path)" run-installer --vars-file "$VARS_FILE"; then
     rm -rf /tmp/turbopanel-ansible /root/.ansible
     exit 1
   fi
