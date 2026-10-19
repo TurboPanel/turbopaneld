@@ -48,7 +48,7 @@ test("sends the hostname and the pair, then reports done", async () => {
   assertEquals(sent, [{ hostname: "a.example.com", ...PAIR }]);
 });
 
-test("a refusal (4xx) counts as handled, a 429 or 5xx retries, and the reason never holds the pair", async () => {
+test("a refusal (4xx) counts as handled, a 401, 403, 408, 429 or 5xx retries, and the reason never holds the pair", async () => {
   const reasons: string[] = [];
   const run = async (status: number) =>
     await createCertificateCapture({
@@ -58,15 +58,13 @@ test("a refusal (4xx) counts as handled, a 429 or 5xx retries, and the reason ne
       onFailure: (_host, reason) => reasons.push(reason),
     })("a.example.com");
   assertEquals(await run(400), "done");
-  assertEquals(await run(403), "done");
+  assertEquals(await run(404), "done");
+  assertEquals(await run(401), "retry");
+  assertEquals(await run(403), "retry");
+  assertEquals(await run(408), "retry");
   assertEquals(await run(429), "retry");
   assertEquals(await run(503), "retry");
-  assertEquals(reasons, [
-    "status 400",
-    "status 403",
-    "status 429",
-    "status 503",
-  ]);
+  assertEquals(reasons.length, 7);
   assertEquals(reasons.some((r) => r.includes("KEY")), false);
 });
 

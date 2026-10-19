@@ -16,6 +16,14 @@ import {
  * `retry`: not yet — the pair is not on disk, the control plane has not
  * advertised the feature, or the call failed; the observer asks again later.
  */
+/** 4xx answers that say nothing about the pair itself. */
+const RETRYABLE_CLIENT_STATUSES: ReadonlySet<number> = new Set([
+  401,
+  403,
+  408,
+  429,
+]);
+
 export type CertificateCaptureOutcome = "done" | "retry";
 
 export type CertificateCaptureDeps = {
@@ -55,9 +63,11 @@ export function createCertificateCapture(
       );
       // A 4xx means the control plane looked at the pair and refused it
       // (not placed here, names do not match): asking again changes nothing
-      // until the next renewal, so it counts as handled. 429 and 5xx retry.
+      // until the next renewal, so it counts as handled. The statuses that
+      // describe the moment and not the pair (401 and 403 while the token or
+      // the server's placement settles, 408, 429) and every 5xx retry.
       return status !== undefined && status >= 400 && status < 500 &&
-          status !== 429
+          !RETRYABLE_CLIENT_STATUSES.has(status)
         ? "done"
         : "retry";
     }
