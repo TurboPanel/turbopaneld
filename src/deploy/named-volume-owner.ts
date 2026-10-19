@@ -78,7 +78,7 @@ export function namedVolumeOwnerTargets(
       ...namedVolumeTargets(resolvedServices[name]),
       ...namedVolumeTargets(overlay),
     ]);
-    for (const target of [...targets].sort()) {
+    for (const target of [...targets].sort((a, b) => a.localeCompare(b))) {
       out.push({ composeServiceName: name, user, target });
     }
   }
