@@ -445,10 +445,25 @@ export type SiteValidationTarget = Readonly<{
 const VALIDATION_ATTEMPTS = 3;
 
 /**
- * Pauses between probes that could not connect at all, in milliseconds. A web
- * server that was just installed and started for the first time takes a few
- * seconds before it listens, so refusing a connection is waited out, with the
- * last pause repeated, for about 25 seconds in all.
+ * Pause after an HTTP 5xx answer before probing again, in milliseconds. A 5xx
+ * is a real answer, so it gets the short pause and only {@link VALIDATION_ATTEMPTS}
+ * tries; the pause is deliberate (the old loop had none), because an engine can
+ * answer 502 for a moment while the app behind it finishes starting.
+ */
+const SERVER_ERROR_RETRY_PAUSE_MS = 250;
+
+/**
+ * Pauses between probes that could not connect at all, in milliseconds, one per
+ * retry (15 retries, 16 probes in all). A web server that was just installed
+ * and started for the first time takes a few seconds before it listens, so
+ * refusing a connection is waited out. The pauses add up to 23.75 seconds.
+ *
+ * Worst case for one endpoint: 16 probes that each run into curl's
+ * `--max-time 5`, about 80 seconds, plus the pauses, about 104 seconds. The
+ * control plane gives an `environment.deploy` command 600 seconds, so one
+ * endpoint cannot spend the whole budget. The wait is not abortable: the probe
+ * runs through the `run` seam, which has no cancel hook, and a cancelled deploy
+ * simply finishes this step first.
  */
 const CONNECT_RETRY_DELAYS_MS: readonly number[] = [
   250,
@@ -484,9 +499,10 @@ const defaultSleep = (ms: number): Promise<void> =>
  * is the engine that came back refusing connections or failing every request
  * because the config it was just handed is wrong in a way `-t` cannot see.
  *
- * A connection that cannot be made is retried for several seconds before it
- * counts as a failure: the first site on a host starts its web server for the
- * first time, and that server is not listening the moment `systemctl` returns.
+ * A connection that cannot be made is retried, with growing pauses that add up
+ * to about 24 seconds, before it counts as a failure: the first site on a host
+ * starts its web server for the first time, and that server is not listening
+ * the moment `systemctl` returns.
  * An HTTP 5xx is a real answer and is retried only a few times.
  *
  * The probe runs through the injected `run` seam (`curl`, already a host
@@ -525,7 +541,7 @@ export async function validateSiteEndpoints(
         failure = `HTTP ${probe.stdout.trim() || "?"}`;
         badAnswers += 1;
         if (badAnswers >= VALIDATION_ATTEMPTS) break;
-        await sleep(CONNECT_RETRY_DELAYS_MS[0]!);
+        await sleep(SERVER_ERROR_RETRY_PAUSE_MS);
         continue;
       }
       failure = probe.stderr || "request failed";
