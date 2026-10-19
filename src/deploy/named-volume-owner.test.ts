@@ -60,7 +60,16 @@ test("a service with no daemon-set user, or a non-numeric one, is left alone", (
 });
 
 test("root as uid or gid is refused", () => {
-  for (const user of ["0:30001", "30001:0", "0:0"]) {
+  for (
+    const user of [
+      "0:30001",
+      "30001:0",
+      "0:0",
+      "00:1000",
+      "1000:000",
+      "01:1000",
+    ]
+  ) {
     assertEquals(
       namedVolumeOwnerTargets({ web: { user } }, resolved, {}).targets,
       [],

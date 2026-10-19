@@ -63,6 +63,8 @@ export type NamedVolumeOwnerPlan = {
 };
 
 const NUMERIC_USER_RE = /^(\d{1,10}):(\d{1,10})$/;
+/** The largest uid or gid Linux accepts (4294967295 is reserved). */
+const MAX_ID = 4294967294;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -105,11 +107,21 @@ function userText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/** `uid:gid` when both are numeric and neither is root; otherwise `null`. */
+/**
+ * `uid:gid` when both are canonical decimal numbers (no sign, no leading zero)
+ * and neither is root; otherwise `null`. The numbers are compared as numbers,
+ * so `00:1000` and `1000:000` are refused like `0:0`.
+ */
 function ownerUser(value: unknown): string | null {
   const match = NUMERIC_USER_RE.exec(userText(value));
-  if (match === null || match[1] === "0" || match[2] === "0") return null;
-  return userText(value);
+  if (match === null) return null;
+  const [uidText, gidText] = [match[1]!, match[2]!];
+  const uid = Number(uidText);
+  const gid = Number(gidText);
+  const canonical = String(uid) === uidText && String(gid) === gidText;
+  if (!canonical || uid === 0 || gid === 0) return null;
+  if (uid > MAX_ID || gid > MAX_ID) return null;
+  return `${uid}:${gid}`;
 }
 
 /** The user a service runs as: the daemon's overlay user, else the one its compose file declares. */

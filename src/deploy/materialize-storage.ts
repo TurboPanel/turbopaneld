@@ -9,6 +9,7 @@ import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import { ensureAssetFolder } from "./asset-folders.ts";
 import {
   ensureDirectoryOwnedByPrincipal,
+  ensureDirectoryWithOwner,
   lookupPrincipalIds,
   principalUnixGroupName,
   type RunFn,
@@ -243,6 +244,14 @@ async function materializeHostPathEntry(
 
   if (entry.kind === "directory") {
     if (ownership) {
+      // The older per-owner path sits in `<home>/volumes`, which the home
+      // skeleton no longer makes for every owner: it is made here, for this
+      // path only, root-owned like the rest of the skeleton.
+      await ensureDirectoryWithOwner(
+        join(layout.principalHomeRoot, ownership.username, "volumes"),
+        "0750",
+        `root:${principalUnixGroupName(ownership.username)}`,
+      );
       await ensureDirectoryOwnedByPrincipal(
         hostPath,
         ownership.username,
