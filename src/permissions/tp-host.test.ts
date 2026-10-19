@@ -3722,6 +3722,27 @@ test("cert-export takes exactly one plain lowercase hostname", async () => {
   });
 });
 
+test("cert-export prefers the most recently written pair when two issuers hold one", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    const older = join(
+      certs,
+      "acme-v02.api.letsencrypt.org-directory",
+      "shop.example.com",
+    );
+    const newer = join(certs, "other-issuer", "shop.example.com");
+    await selfSignedCert(older, "shop.example.com", 30);
+    await Deno.utime(join(older, "shop.example.com.crt"), 1_000_000, 1_000_000);
+    await selfSignedCert(newer, "shop.example.com", 60);
+    const result = await host.run(["cert-export", "shop.example.com"]);
+    assertEquals(result.code, 0, result.stderr);
+    const newerKey = await Deno.readTextFile(
+      join(newer, "shop.example.com.key"),
+    );
+    assertStringIncludes(result.stdout, newerKey.trim());
+  });
+});
+
 test("cert-export prints nothing when the hosting Caddy has issued no certificates", async () => {
   await withHost(async (host) => {
     const result = await host.run(["cert-export", "shop.example.com"]);

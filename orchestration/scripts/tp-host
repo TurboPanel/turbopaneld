@@ -4225,7 +4225,7 @@ tp_verb_cert_export() {
     [ -d "$_ce_issuer/$_ce_host" ] && [ ! -L "$_ce_issuer/$_ce_host" ] || continue
     [ -f "$_ce_crt" ] && [ ! -L "$_ce_crt" ] || continue
     [ -f "$_ce_key" ] && [ ! -L "$_ce_key" ] || continue
-    if [ -z "$_ce_best" ] || [ "$_ce_crt" -nt "$_ce_best" ]; then
+    if [ -z "$_ce_best" ] || [ -n "$(find "$_ce_crt" -newer "$_ce_best" -print 2>/dev/null)" ]; then
       _ce_best="$_ce_crt"
     fi
   done
