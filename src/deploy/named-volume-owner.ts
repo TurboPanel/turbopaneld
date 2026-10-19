@@ -146,6 +146,7 @@ export function namedVolumeOwnerTargets(
   resolvedServices: ServiceMap,
   topLevelVolumes: Record<string, unknown> | undefined,
   projectName = "project",
+  platformVolumeNames: ReadonlySet<string> = new Set(),
 ): NamedVolumeOwnerPlan {
   const overlay = overlayServices ?? {};
   const plan: NamedVolumeOwnerPlan = { targets: [], skipped: [] };
@@ -165,7 +166,7 @@ export function namedVolumeOwnerTargets(
     for (const mount of mounts) {
       const reason = skipReason(
         { name, user, mount },
-        { overlay, resolvedServices, topLevelVolumes },
+        { overlay, resolvedServices, topLevelVolumes, platformVolumeNames },
       );
       if (reason !== null) {
         plan.skipped.push({
@@ -209,12 +210,21 @@ function skipReason(
     overlay: ServiceMap;
     resolvedServices: ServiceMap;
     topLevelVolumes: Record<string, unknown> | undefined;
+    platformVolumeNames: ReadonlySet<string>;
   },
 ): string | null {
   const { name, user, mount } = mounting;
   const declared = context.topLevelVolumes?.[mount.source];
   if (isRecord(declared) && declared.external === true) {
-    return "the volume is external, so something else owns it";
+    // The platform marks the volumes it created itself `external` so Compose
+    // does not invent a second one; those are ours to give. Only a volume the
+    // compose file's author declared external belongs to something else.
+    const platformName = typeof declared.name === "string"
+      ? declared.name
+      : mount.source;
+    if (!context.platformVolumeNames.has(platformName)) {
+      return "the volume is external, so something else owns it";
+    }
   }
   if (mount.readOnly) return "the mount is read-only";
   const shared = Object.keys(context.resolvedServices).some((other) =>
@@ -272,7 +282,9 @@ export async function ensureNamedVolumeOwners(
         entry.user,
         entry.target,
       ]);
-      if (!result.success) {
+      if (result.success) {
+        options.log(`gave ${label} to ${entry.user}`);
+      } else {
         options.log(
           `could not give ${label} to ${entry.user}; the container may not be able to write that volume (${
             firstLine(result.stderr)

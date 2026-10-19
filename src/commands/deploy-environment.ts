@@ -2199,6 +2199,13 @@ async function deployContainerServices(
           | Record<string, unknown>
           | undefined,
         parsedPayload.projectName,
+        new Set(
+          (parsedPayload.storageMaterial ?? []).flatMap((entry) =>
+            entry.provider === "docker" && entry.volumeName
+              ? [entry.volumeName]
+              : []
+          ),
+        ),
       ),
       {
         projectName: parsedPayload.projectName,
