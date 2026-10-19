@@ -313,7 +313,7 @@ test("an unfinished capture waits ten minutes, then tries again", async () => {
   now += 10 * 60_000;
   await observer.poll();
   assertEquals(calls, 2);
-  now += 10 * 60_000;
+  now += 20 * 60_000;
   await observer.poll();
   assertEquals(calls, 3);
   now += 60 * 60_000;
@@ -354,4 +354,48 @@ test("without a capture function the observer behaves as before", async () => {
   });
   await observer.poll();
   assertEquals(sent.length, 1);
+});
+
+test("a capture that keeps failing waits longer each time and stops at six hours", async () => {
+  let now = 1_000_000;
+  let calls = 0;
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    nowMs: () => now,
+    send: () => {},
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve({
+        hostname,
+        ok: true,
+        notAfter: "2026-12-01T00:00:00.000Z",
+      }),
+    capture: () => {
+      calls += 1;
+      return Promise.resolve("retry");
+    },
+  });
+  const MIN = 60_000;
+  await observer.poll();
+  assertEquals(calls, 1);
+  // Waits: 10, 20, 40 minutes, then it doubles up to 6 hours.
+  for (const [wait, expected] of [[10, 2], [20, 3], [40, 4]] as const) {
+    now += wait * MIN - 1;
+    await observer.poll();
+    assertEquals(calls, expected - 1, `still waiting ${wait} minutes`);
+    now += 1;
+    await observer.poll();
+    assertEquals(calls, expected, `asks again after ${wait} minutes`);
+  }
+  for (let i = 0; i < 6; i += 1) {
+    now += 6 * 60 * MIN;
+    await observer.poll();
+  }
+  const before = calls;
+  now += 6 * 60 * MIN - 1;
+  await observer.poll();
+  assertEquals(calls, before, "never waits longer than six hours");
+  now += 1;
+  await observer.poll();
+  assertEquals(calls, before + 1);
 });
