@@ -195,7 +195,7 @@ test("readOnlySessionDefaultSql sets or clears the read-only default per databas
   );
 });
 
-test("reconcileDatabaseObjectsSql gives writers exactly five table privileges and readers only SELECT, now and for later tables", () => {
+test("reconcileDatabaseObjectsSql gives owners six table privileges, read-write logins four and readers only SELECT, now and for later tables", () => {
   const sql = reconcileDatabaseObjectsSql({
     creators: ["postgres", "own", "rw"],
     owners: ["own"],
@@ -206,9 +206,20 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   assertEquals(sql.includes("nspname !~ '^pg_'"), true);
   assertEquals(
     sql.includes(
-      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLE %s TO "rw"`,
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %s TO "rw"`,
     ),
     true,
+  );
+  assertEquals(
+    sql.includes(
+      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLE %s TO "own"`,
+    ),
+    true,
+  );
+  // A read-write login never holds TRUNCATE or REFERENCES, on existing or later tables.
+  assertEquals(
+    /GRANT[^;\n]*(TRUNCATE|REFERENCES)[^;\n]*TO "rw"/.test(sql),
+    false,
   );
   assertEquals(
     sql.includes(`GRANT USAGE, SELECT, UPDATE ON SEQUENCE %s TO "rw"`),
@@ -222,7 +233,7 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   // Later objects, from every creator, to everyone else.
   assertEquals(
     sql.includes(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLES TO "rw";',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "rw";',
     ),
     true,
   );
