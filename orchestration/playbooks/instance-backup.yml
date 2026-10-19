@@ -69,7 +69,19 @@
         cmd: |
           set -euo pipefail
           archive="{{ control_plane_backup_dir }}/etc-turbopanel.tar.gz"
-          tar czf "$archive" -C / etc/turbopanel
+          # The root secret keyring (.instance_secrets) and the env file
+          # rendered from it (runtime.dev-vars) stay out: this folder also
+          # holds the database dump, and a dump that sits beside the secret
+          # that opens its sealed values is no longer protected by it.
+          # A rollback never reads this archive (it restores the binaries and
+          # the database and leaves /etc/turbopanel as it is), so the live
+          # files keep serving; a later instance-launch converge re-renders
+          # runtime.dev-vars from .instance_secrets. The keyring's own backup
+          # is the opt-in escrow (turbopanel_instance_secret_escrow_path).
+          tar czf "$archive" -C / \
+            --exclude=etc/turbopanel/instance/.instance_secrets \
+            --exclude=etc/turbopanel/instance/runtime.dev-vars \
+            etc/turbopanel
           chown root:"{{ turbopanel_group }}" "$archive"
           chmod 0640 "$archive"
         executable: /bin/bash

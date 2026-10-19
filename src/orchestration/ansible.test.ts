@@ -2881,3 +2881,46 @@ test("principal-access creates every SSH access group the registry defines", asy
     );
   }
 });
+
+test("the pre-update snapshot keeps the root secret out of the archive that sits beside the database dump", async () => {
+  const root = new URL("../../orchestration/", import.meta.url);
+  const backup = await Deno.readTextFile(
+    new URL("playbooks/instance-backup.yml", root),
+  );
+  const tar = backup.slice(backup.indexOf("tar czf"));
+  assert(
+    tar.includes("--exclude=etc/turbopanel/instance/.instance_secrets"),
+    "the secret keyring is excluded from etc-turbopanel.tar.gz",
+  );
+  assert(
+    tar.includes("--exclude=etc/turbopanel/instance/runtime.dev-vars"),
+    "runtime.dev-vars (carries TURBOPANEL_SECRETS) is excluded",
+  );
+  // The exclusions must come before the path they filter.
+  assert(
+    tar.indexOf("--exclude=") < tar.indexOf("etc/turbopanel\n"),
+    "excludes precede the archived path",
+  );
+
+  // Rollback restores binaries and the database only; it never reads the
+  // archive, so excluding these files cannot break it.
+  const rollback = await Deno.readTextFile(
+    new URL("playbooks/instance-rollback.yml", root),
+  );
+  assert(!rollback.includes("etc-turbopanel"), "rollback ignores the archive");
+  assert(
+    !rollback.includes("runtime.dev-vars") &&
+      !rollback.includes(".instance_secrets"),
+    "rollback leaves the live secret files alone",
+  );
+
+  // Any converge re-renders runtime.dev-vars from the keyring that stays on disk.
+  const tasks = await Deno.readTextFile(
+    new URL("roles/instance-launch/tasks/main.yml", root),
+  );
+  assert(
+    tasks.includes("src: instance-deno.dev-vars.j2") &&
+      tasks.includes("turbopanel_instance_secrets is defined"),
+    "instance-launch renders runtime.dev-vars from the slurped keyring",
+  );
+});
