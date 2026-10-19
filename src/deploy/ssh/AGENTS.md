@@ -98,7 +98,16 @@ auto`, which runs the layout check and turns the switch on when it is clean
 (a host with no `tpsftp` member yet is clean). `auto` does nothing when the
 switch is already on or when an administrator ran `sftp-chroot off` — `off`
 leaves a root-only marker (`sftp-chroot-off`, as unreachable to generic verbs
-as the switch) that only an explicit `on` clears, so the rollback sticks. A
+as the switch) that only an explicit `on` clears, so the rollback sticks; the
+marker is written **before** the switch is removed, so a concurrent `auto`
+cannot slip in between. If sshd refuses the jailed drop-in right after `auto`
+turned the switch on (`-t`, forwarding or `sftp-chroot verify`), the daemon runs
+`sftp-chroot auto-revert` — switch off, **no** marker, so a later reconcile may
+try again — warns with the reason, and applies the unjailed drop-in in the same
+run; leaving the switch on would fail every later reconcile the same way and
+stop key changes applying. A jail the administrator already had on is never
+reverted. `check` also requires each jail root to be `root:<owner>` mode 0750:
+the owner's group is what lets the session walk in, and nobody else can enter. A
 finding keeps the jail off and comes back as a reconcile warning naming the
 member; a failed `auto` is a warning too, never a failed reconcile. With the
 switch on, the

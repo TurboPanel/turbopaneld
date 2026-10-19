@@ -3303,6 +3303,75 @@ test("sftp-chroot off is remembered: auto never overrides it, on clears it", asy
   });
 });
 
+test("sftp-chroot off writes the marker before it removes the switch", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    // A directory where the switch should be makes the removal fail, so the
+    // marker is on disk only if it was written first. A concurrent `auto`
+    // between the two steps then cannot turn the jail back on.
+    await Deno.mkdir(host.path(SWITCH));
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code === 0, false);
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+    const auto = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(auto.code, 0, auto.stderr);
+    assertEquals((await Deno.stat(host.path(SWITCH))).isDirectory, true);
+  });
+});
+
+test("sftp-chroot auto-revert removes the switch without remembering an off", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals(
+      (await host.run(["sftp-chroot", "status"])).stdout.startsWith("on "),
+      true,
+    );
+    const revert = await host.run(["sftp-chroot", "auto-revert"]);
+    assertEquals(revert.code, 0, revert.stderr);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    await Deno.stat(host.path(OFF_MARK)).then(
+      () => {
+        throw new Error("auto-revert wrote the explicit-off marker");
+      },
+      () => {},
+    );
+    // The next automatic attempt may switch it on again.
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+  });
+});
+
+test("sftp-chroot refuses a jail root that others can enter", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    await Deno.chmod(host.path("srv/users/alice"), 0o755);
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "must be group alice with mode 0750");
+    assertStringIncludes(
+      await refused(host, ["sftp-chroot", "on"]),
+      "refusing to switch on",
+    );
+    // auto leaves the jail off and names the finding.
+    const auto = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(auto.code, 0, auto.stderr);
+    assertStringIncludes(auto.stderr, "mode 0750");
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sshd-config refuses a symlinked file", async () => {
+  await withHost(async (host) => {
+    await Deno.writeTextFile(host.path("etc/ssh/real_config"), "Port 22\n");
+    await Deno.symlink(
+      host.path("etc/ssh/real_config"),
+      host.path("etc/ssh/sshd_config"),
+    );
+    await refused(host, ["sshd-config"]);
+  });
+});
+
 test("no generic verb can write, read or remove the off marker", async () => {
   await withHost(async (host) => {
     const mark = host.path(OFF_MARK);

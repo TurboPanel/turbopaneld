@@ -78,6 +78,9 @@ type Host = {
   /** What `tp-host sftp-chroot auto` answers, and whether it switches on. */
   sftpAuto: RunResult;
   sftpAutoTurnsOn: boolean;
+  /** What `tp-host sftp-chroot auto-revert` answers, and how often it ran. */
+  sftpRevert: RunResult;
+  autoReverts: number;
   /** What `tp-host sshd-config` prints (the unreadable administrator file). */
   sshdConfigViaHost: string | null;
   /** `getent group` lines the fake answers with, by group name. */
@@ -132,6 +135,8 @@ async function makeHost(
     sftpVerify: ok(),
     sftpAuto: ok(),
     sftpAutoTurnsOn: false,
+    sftpRevert: ok(),
+    autoReverts: 0,
     sshdConfigViaHost: null,
     groups: new Map(),
     effective: new Map(),
@@ -155,6 +160,11 @@ async function makeHost(
         : ok(host.sshdConfigViaHost);
     }
     if (tool === "sftp-chroot") {
+      if (tail[0] === "auto-revert") {
+        host.autoReverts += 1;
+        if (host.sftpRevert.success) host.sftpStatus = ok("off");
+        return host.sftpRevert;
+      }
       if (tail[0] === "auto") {
         if (host.sftpAuto.success && host.sftpAutoTurnsOn) {
           host.sftpStatus = ok("on /srv/users");
@@ -1157,6 +1167,56 @@ test("a failed automatic switch-on is a warning, not a failed reconcile", async 
     );
     // The drop-in is still written, so keys and the shell split still work.
     assert((await appliedDirectives(host)).length > 0);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail that sshd refuses right after the automatic switch-on is turned back off, and the drop-in still applies", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpAutoTurnsOn = true;
+    host.sftpVerify = fail("alice is not jailed");
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, false);
+    assertEquals(host.autoReverts, 1);
+    assertStringIncludes(
+      result.warnings.join("\n"),
+      "turned on automatically, but sshd would not accept it",
+    );
+    assertStringIncludes(result.warnings.join("\n"), "alice is not jailed");
+    const directives = await appliedDirectives(host);
+    assert(!directives.some((line) => line.startsWith("ChrootDirectory")));
+    // Not the explicit off: tp-host's `off` (which remembers) is never called.
+    assert(!sftpCalls(host).includes("off"));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail that cannot be turned back off after sshd refused it fails the reconcile loudly", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpAutoTurnsOn = true;
+    host.sftpVerify = fail("alice is not jailed");
+    host.sftpRevert = fail("sudo: no tty");
+    await assertRejects(
+      () => applyJailed(host),
+      Error,
+      "could not be turned back off",
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail an administrator already had on is never turned off because sshd refused it", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    host.sftpVerify = fail("alice is not jailed");
+    await assertRejects(() => applyJailed(host), Error, "would not jail");
+    assertEquals(host.autoReverts, 0);
   } finally {
     await host.cleanup();
   }

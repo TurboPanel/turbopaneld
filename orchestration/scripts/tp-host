@@ -2777,6 +2777,12 @@ tp_sftp_member_check() {
   _sm_home="$R_PRINCIPALS/$_sm_user"
   tp_chroot_dir_ok "$_sm_home" ||
     echo "$_sm_user: $_sm_home is not a root-owned directory closed to group and world writes"
+  # The jail root is root:<owner> 0750: the owner's group is what lets the
+  # session walk into it, and nobody else can list or enter it.
+  _sm_gid="$(tp_gid_of_group "$_sm_user")"
+  [ -z "$TP_TEST" ] || _sm_gid="$CALLER_GID"
+  [ "$(stat -c '%a %g' -- "$_sm_home" 2>/dev/null)" = "750 $_sm_gid" ] ||
+    echo "$_sm_user: $_sm_home must be group $_sm_user with mode 0750 so only the owner's group can enter it"
   # The tenant directory belongs to the principal (to the caller in test mode,
   # which owns every file there, as ROOT_UID does for the root-owned ones).
   _sm_uid="$(tp_uid_of "$_sm_user")"
@@ -2836,7 +2842,7 @@ tp_sftp_chroot_verify() {
 }
 
 tp_verb_sftp_chroot() {
-  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, verify, on, off, auto or status"
+  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, verify, on, off, auto, auto-revert or status"
   case "$1" in
     status)
       if tp_sftp_chroot_is_on; then
@@ -2857,9 +2863,18 @@ tp_verb_sftp_chroot() {
       tp_sftp_chroot_clear_off_mark
       ;;
     off)
+      # Marker first, switch second: a concurrent `auto` between the two steps
+      # must find the marker, or it would turn the jail straight back on.
+      printf 'off\n' | tp_put_file "$SFTP_CHROOT_OFF_MARK" 0644 root root
       tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
       rm -f -- "./$PIN_NAME"
-      printf 'off\n' | tp_put_file "$SFTP_CHROOT_OFF_MARK" 0644 root root
+      ;;
+    auto-revert)
+      # Undo an automatic switch-on that sshd then refused, without the
+      # explicit-off marker: the next reconcile may try again once whatever
+      # sshd objected to is fixed. Only ever removes the switch.
+      tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
+      rm -f -- "./$PIN_NAME"
       ;;
     auto)
       # The default for a new host: jail on once the layout check is clean.
@@ -2875,7 +2890,7 @@ tp_verb_sftp_chroot() {
         printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
       fi
       ;;
-    *) tp_die "sftp-chroot: only check, verify, on, off, auto or status" ;;
+    *) tp_die "sftp-chroot: only check, verify, on, off, auto, auto-revert or status" ;;
   esac
 }
 
@@ -2893,8 +2908,10 @@ tp_sftp_chroot_clear_off_mark() {
 SSHD_MAIN_CONFIG="$P/etc/ssh/sshd_config"
 tp_verb_sshd_config() {
   [ "$#" -eq 0 ] || tp_die "sshd-config: takes no arguments"
-  [ -f "$SSHD_MAIN_CONFIG" ] || tp_die "sshd-config: no such file"
-  cat -- "$SSHD_MAIN_CONFIG"
+  # Pinned open: a symlink in the path, or a link in place of the file, is
+  # refused rather than followed.
+  tp_open_verified "$SSHD_MAIN_CONFIG" || tp_die "sshd-config: no such file"
+  cat <&3
 }
 
 tp_verb_ss() {
