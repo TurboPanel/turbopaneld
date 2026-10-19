@@ -1066,6 +1066,10 @@ export async function deployManagedDirectoryBindings(
   // A site that asks for a directory gets one. A site that asks for nothing and
   // has no release still gets the folder the control plane planned for it, so
   // its files live in the scope tree and not in the daemon-owned sites tree.
+  // A site that was served from the older tree moves to the folder on its next
+  // deploy with nothing carried over, on purpose: every server is wiped before
+  // the release that brings this layout, so there is no existing directory to
+  // migrate, and the older tree is only a fallback for a plan with no folder.
   const sites = (payload.sites ?? []).filter(
     (
       site,
@@ -2191,6 +2195,10 @@ async function deployContainerServices(
           | Record<string, Record<string, unknown>>
           | undefined,
         resolved.services as Record<string, Record<string, unknown>>,
+        (resolved.document?.volumes ?? undefined) as
+          | Record<string, unknown>
+          | undefined,
+        parsedPayload.projectName,
       ),
       {
         projectName: parsedPayload.projectName,
