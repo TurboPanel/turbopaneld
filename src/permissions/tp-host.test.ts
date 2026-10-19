@@ -3570,6 +3570,116 @@ test("cert-dates prints nothing when the hosting Caddy has issued no certificate
   });
 });
 
+async function withTpedge(
+  host: { path: (p: string) => string },
+): Promise<string> {
+  const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+  await Deno.writeTextFile(
+    host.path("etc/passwd"),
+    passwd + `tpedge:x:${Deno.uid}:${Deno.gid}::/nonexistent:/bin/false\n`,
+  );
+  const group = await Deno.readTextFile(host.path("etc/group"));
+  await Deno.writeTextFile(
+    host.path("etc/group"),
+    group + `tpedge:x:${Deno.gid}:\n`,
+  );
+  return host.path("var/lib/turbopanel/hosting-caddy/data/caddy/certificates");
+}
+
+test("cert-export prints the chain then the key of ONE hostname and nothing else", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    const le = "acme-v02.api.letsencrypt.org-directory";
+    await selfSignedCert(
+      join(certs, le, "shop.example.com"),
+      "shop.example.com",
+      30,
+    );
+    await selfSignedCert(
+      join(certs, le, "other.example.com"),
+      "other.example.com",
+      30,
+    );
+    const result = await host.run(["cert-export", "shop.example.com"]);
+    assertEquals(result.code, 0, result.stderr);
+    const out = result.stdout;
+    assertEquals(
+      out.indexOf("BEGIN CERTIFICATE") < out.indexOf("PRIVATE KEY"),
+      true,
+    );
+    assertEquals(out.match(/BEGIN CERTIFICATE/g)?.length, 1);
+    assertEquals(out.match(/PRIVATE KEY-----/g)?.length, 2);
+    const shopKey = await Deno.readTextFile(
+      join(certs, le, "shop.example.com", "shop.example.com.key"),
+    );
+    const otherKey = await Deno.readTextFile(
+      join(certs, le, "other.example.com", "other.example.com.key"),
+    );
+    assertStringIncludes(out, shopKey.trim());
+    assertEquals(out.includes(otherKey.trim()), false);
+    assertEquals(result.stderr.includes("PRIVATE"), false);
+  });
+});
+
+test("cert-export skips the internal issuer, staging issuers and symlinks, and prints nothing for them", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    await selfSignedCert(
+      join(certs, "local", "intranet.test"),
+      "intranet.test",
+      10,
+    );
+    await selfSignedCert(
+      join(
+        certs,
+        "acme-staging-v02.api.letsencrypt.org-directory",
+        "stage.example.com",
+      ),
+      "stage.example.com",
+      10,
+    );
+    const le = join(certs, "acme-v02.api.letsencrypt.org-directory");
+    await Deno.mkdir(le, { recursive: true });
+    await Deno.symlink(host.path("outside"), join(le, "linked.example.com"));
+    for (
+      const name of [
+        "intranet.test",
+        "stage.example.com",
+        "linked.example.com",
+        "missing.example.com",
+      ]
+    ) {
+      const result = await host.run(["cert-export", name]);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(result.stdout, "", name);
+    }
+  });
+});
+
+test("cert-export takes exactly one plain lowercase hostname", async () => {
+  await withHost(async (host) => {
+    await withTpedge(host);
+    await refused(host, ["cert-export"]);
+    await refused(host, ["cert-export", "a.example.com", "b.example.com"]);
+    await refused(host, ["cert-export", "*.example.com"]);
+    await refused(host, ["cert-export", "../etc"]);
+    await refused(host, ["cert-export", "A.Example.com"]);
+    await refused(host, ["cert-export", "a/b.example.com"]);
+    await refused(host, ["cert-export", ".example.com"]);
+    await refused(host, ["cert-export", "a..example.com"]);
+    await refused(host, ["cert-export", "-a.example.com"]);
+    await refused(host, ["cert-export", `${"a".repeat(250)}.com`]);
+  });
+});
+
+test("cert-export prints nothing when the hosting Caddy has issued no certificates", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["cert-export", "shop.example.com"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, "");
+  });
+});
+
 test("site-caddy-mounts lists only the nosymfollow mounts under the home root, and nothing when the unit is down", async () => {
   await withHost(async (host) => {
     // No unit, no answer.

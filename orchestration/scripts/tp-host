@@ -4156,6 +4156,55 @@ tp_verb_cert_dates() {
   done
 }
 
+# The certificate chain and private key the hosting Caddy issued for ONE
+# hostname, printed (chain first, then key) for the daemon to send to the
+# control plane, which stores them sealed. This is a deliberate, narrow
+# widening of what the daemon can read: the tree belongs to tpedge (0700) and
+# the daemon cannot list or read it otherwise.
+#   - exactly one argument, a lowercase plain hostname (no wildcard, no path);
+#   - only `<issuer>/<host>/<host>.crt|.key` regular files (a symlink is not
+#     `-f`/`-d` here), never the internal CA's `local` issuer, never a
+#     staging issuer;
+#   - each file is opened as tpedge, not as root;
+#   - both files are read before anything is printed, so a half pair is never
+#     emitted; nothing is written to disk or to stderr.
+# Prints nothing and exits 0 when there is no usable pair.
+tp_verb_cert_export() {
+  [ "$#" -eq 1 ] || tp_die "cert-export: takes exactly one hostname"
+  _ce_host="$1"
+  case "$_ce_host" in
+    *[!a-z0-9.-]*) tp_die "cert-export: refusing hostname" ;;
+  esac
+  tp_hostname_ok "$_ce_host" || tp_die "cert-export: refusing hostname"
+  _ce_root="$P/var/lib/$HOSTING_CADDY_STATE/data/caddy/certificates"
+  tp_pin_dir "$_ce_root" || return 0
+  _ce_uid="$(tp_uid_of "$HOSTING_CADDY_USER")" || return 0
+  _ce_gid="$(tp_gid_of_group "$HOSTING_CADDY_USER")" || return 0
+  [ -n "$_ce_uid" ] && [ -n "$_ce_gid" ] || return 0
+  _ce_best=""
+  for _ce_issuer in ./*; do
+    [ -d "$_ce_issuer" ] && [ ! -L "$_ce_issuer" ] || continue
+    _ce_name="${_ce_issuer#./}"
+    case "$_ce_name" in
+      local|*staging*|*[!A-Za-z0-9._-]*) continue ;;
+    esac
+    _ce_crt="$_ce_issuer/$_ce_host/$_ce_host.crt"
+    _ce_key="$_ce_issuer/$_ce_host/$_ce_host.key"
+    [ -d "$_ce_issuer/$_ce_host" ] && [ ! -L "$_ce_issuer/$_ce_host" ] || continue
+    [ -f "$_ce_crt" ] && [ ! -L "$_ce_crt" ] || continue
+    [ -f "$_ce_key" ] && [ ! -L "$_ce_key" ] || continue
+    if [ -z "$_ce_best" ] || [ "$_ce_crt" -nt "$_ce_best" ]; then
+      _ce_best="$_ce_crt"
+    fi
+  done
+  [ -n "$_ce_best" ] || return 0
+  _ce_chain="$(tp_as "$_ce_uid" "$_ce_gid" cat -- "$_ce_best" 2>/dev/null)" || return 0
+  _ce_priv="$(tp_as "$_ce_uid" "$_ce_gid" cat -- "${_ce_best%.crt}.key" 2>/dev/null)" || return 0
+  [ -n "$_ce_chain" ] && [ -n "$_ce_priv" ] || return 0
+  printf '%s\n' "$_ce_chain"
+  printf '%s\n' "$_ce_priv"
+}
+
 # Allocated sizes of every principal home and of every site directory
 # (`<home>/sites/<id>`), for the metrics collector: homes are root-owned
 # 0750 root:<principal>, so the daemon account cannot walk them. Sizes and
@@ -4759,6 +4808,7 @@ case "$_verb" in
   publish) tp_verb_publish "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
   cert-dates) tp_verb_cert_dates "$@" ;;
+  cert-export) tp_verb_cert_export "$@" ;;
   site-usage) tp_verb_site_usage "$@" ;;
   site-caddy-mounts) tp_verb_site_caddy_mounts "$@" ;;
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;

@@ -23,9 +23,12 @@ import {
   type AcmeProbeResult,
   probeAcmeHostname,
 } from "../deploy/acme-probe.ts";
+import type { CertificateCaptureOutcome } from "../deploy/acme-capture.ts";
 
 const ACME_OBSERVE_MS = 60_000;
 const MIN_CONSECUTIVE_FAILURES = 2;
+/** After a capture that could not finish, wait this long before asking again. */
+const CAPTURE_RETRY_MS = 10 * 60_000;
 
 export type AcmeIssuanceEventMessage = {
   type: "acme-issuance-event";
@@ -47,6 +50,14 @@ export type AcmeIssuanceObserverOptions = {
   probe?: (hostname: string) => Promise<AcmeProbeResult>;
   /** Test seam — defaults to {@link resolveLayout} from process env. */
   layout?: LayoutPaths;
+  /**
+   * Hand the pair Caddy issued for a hostname to the control plane. Called
+   * after a good probe whose expiry has not been captured yet (a first
+   * sighting, a daemon restart, a renewal). Omitted when capture is off.
+   */
+  capture?: (hostname: string) => Promise<CertificateCaptureOutcome>;
+  /** Test seam — milliseconds since the epoch for the capture retry wait. */
+  nowMs?: () => number;
 };
 
 type HostState = {
@@ -56,6 +67,10 @@ type HostState = {
   consecutiveFailures: number;
   /** Expiry last reported with an ok event, to spot a renewal. */
   lastNotAfter?: string;
+  /** Expiry whose pair the control plane has already been given. */
+  capturedNotAfter?: string;
+  /** Do not try a capture again before this time (ms since the epoch). */
+  captureRetryAt?: number;
 };
 
 export class AcmeIssuanceObserver {
@@ -65,6 +80,10 @@ export class AcmeIssuanceObserver {
   readonly #listHostnames: () => Promise<string[]>;
   readonly #probe: (hostname: string) => Promise<AcmeProbeResult>;
   readonly #layout: LayoutPaths | undefined;
+  readonly #capture:
+    | ((hostname: string) => Promise<CertificateCaptureOutcome>)
+    | undefined;
+  readonly #nowMs: () => number;
   readonly #state = new Map<string, HostState>();
   #timer: ReturnType<typeof setInterval> | undefined;
 
@@ -73,6 +92,8 @@ export class AcmeIssuanceObserver {
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#send = options.send;
     this.#layout = options.layout;
+    this.#capture = options.capture;
+    this.#nowMs = options.nowMs ?? (() => Date.now());
     this.#listHostnames = options.listHostnames ??
       (() => readAcmeModeHostnames(this.#resolveLayout()));
     this.#probe = options.probe ?? ((hostname) => probeAcmeHostname(hostname));
@@ -121,6 +142,7 @@ export class AcmeIssuanceObserver {
     this.#state.set(hostname, state);
     if (result.ok) {
       this.#observeOk(hostname, state, result.notAfter);
+      await this.#captureIssued(hostname, state, result.notAfter);
     } else {
       this.#observeFailure(hostname, state, result.errorMessage);
     }
@@ -152,6 +174,40 @@ export class AcmeIssuanceObserver {
       at: this.#now(),
     });
     logInfo("deploy", `acme-issuance-event ok hostname=${hostname}`);
+  }
+
+  /**
+   * Give the control plane the pair for a certificate it has not been given
+   * yet. A pair that is not ready, a control plane without the feature, or a
+   * failed call is tried again after {@link CAPTURE_RETRY_MS}, never in a
+   * tight loop and never as a failure of the issuance event itself.
+   */
+  async #captureIssued(
+    hostname: string,
+    state: HostState,
+    notAfter: string | undefined,
+  ): Promise<void> {
+    if (this.#capture === undefined || notAfter === undefined) return;
+    if (state.capturedNotAfter === notAfter) return;
+    const now = this.#nowMs();
+    if (state.captureRetryAt !== undefined && now < state.captureRetryAt) {
+      return;
+    }
+    try {
+      const outcome = await this.#capture(hostname);
+      if (outcome === "done") {
+        state.capturedNotAfter = notAfter;
+        delete state.captureRetryAt;
+        return;
+      }
+    } catch (err) {
+      logWarn(
+        "deploy",
+        `acme certificate capture failed hostname=${hostname}:`,
+        sanitizeForLog(err),
+      );
+    }
+    state.captureRetryAt = now + CAPTURE_RETRY_MS;
   }
 
   #observeFailure(

@@ -262,3 +262,96 @@ test("a recovery carries notAfter, a failure never does", async () => {
     [true, "2026-12-01T00:00:00.000Z"],
   ]);
 });
+
+test("captures the issued pair once per expiry, again on a renewal", async () => {
+  const captured: string[] = [];
+  let notAfter = "2026-12-01T00:00:00.000Z";
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    send: () => {},
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve({ hostname, ok: true, notAfter }),
+    capture: (hostname) => {
+      captured.push(`${hostname}@${notAfter}`);
+      return Promise.resolve("done");
+    },
+  });
+  await observer.poll();
+  await observer.poll();
+  notAfter = "2027-03-01T00:00:00.000Z";
+  await observer.poll();
+  await observer.poll();
+  assertEquals(captured, [
+    "a.example.com@2026-12-01T00:00:00.000Z",
+    "a.example.com@2027-03-01T00:00:00.000Z",
+  ]);
+});
+
+test("an unfinished capture waits ten minutes, then tries again", async () => {
+  let now = 1_000_000;
+  let calls = 0;
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    nowMs: () => now,
+    send: () => {},
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve({
+        hostname,
+        ok: true,
+        notAfter: "2026-12-01T00:00:00.000Z",
+      }),
+    capture: () => {
+      calls += 1;
+      return Promise.resolve(calls < 3 ? "retry" : "done");
+    },
+  });
+  await observer.poll();
+  await observer.poll();
+  assertEquals(calls, 1, "no second try inside the wait");
+  now += 10 * 60_000;
+  await observer.poll();
+  assertEquals(calls, 2);
+  now += 10 * 60_000;
+  await observer.poll();
+  assertEquals(calls, 3);
+  now += 60 * 60_000;
+  await observer.poll();
+  assertEquals(calls, 3, "done means done until the expiry moves");
+});
+
+test("a throwing capture never breaks the poll or the issuance event", async () => {
+  const sent: AcmeIssuanceEventMessage[] = [];
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    send: (message) => sent.push(message),
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve({
+        hostname,
+        ok: true,
+        notAfter: "2026-12-01T00:00:00.000Z",
+      }),
+    capture: () => Promise.reject(new Error("boom")),
+  });
+  await observer.poll();
+  assertEquals(sent.length, 1);
+});
+
+test("without a capture function the observer behaves as before", async () => {
+  const sent: AcmeIssuanceEventMessage[] = [];
+  const observer = new AcmeIssuanceObserver({
+    now: () => "2026-09-16T00:00:00.000Z",
+    send: (message) => sent.push(message),
+    listHostnames: () => Promise.resolve(["a.example.com"]),
+    probe: (hostname): Promise<AcmeProbeResult> =>
+      Promise.resolve({
+        hostname,
+        ok: true,
+        notAfter: "2026-12-01T00:00:00.000Z",
+      }),
+  });
+  await observer.poll();
+  assertEquals(sent.length, 1);
+});
