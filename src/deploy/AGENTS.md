@@ -846,8 +846,14 @@ site owner's Linux user:
   the container can write and its files stay root's; the owner can still delete
   or rename anything in their own folder (a directory's write permission decides
   that), but cannot change the contents or modes of a file owned by another uid.
-- **A named Docker volume** (provider `docker`) is outside this tree and is not
-  touched; it stays the way to run an image that insists on a fixed user.
+- **A named Docker volume** (provider `docker`) is outside this tree and its
+  contents are not touched; it stays the way to run an image that insists on a
+  fixed user. One exception, for a service the daemon itself runs as the owner
+  (it mounts the owner's volume folder and names no `user:`): Docker creates
+  the volume `root:root 0755`, which that container could not write, so before
+  `compose up` each such mount path gets one non-recursive `chown <uid>:<gid>`
+  through the service's own image (`deploy/named-volume-owner.ts`). A user the
+  compose file declares is never changed, and a failure only logs a line.
 - One container cannot mount volumes of two site owners with defaulted users;
   that deploy fails with a plain message.
 

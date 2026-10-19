@@ -588,3 +588,61 @@ test("a path copy's source must sit in its own site owner's volumes directory", 
     );
   });
 });
+
+test("an owner's older volume path makes its volumes parent itself, root-owned", async () => {
+  const original = Deno.Command;
+  const installs: string[] = [];
+  Deno.Command = class {
+    constructor(_command: string, options?: { args?: string[] }) {
+      const args = options?.args ?? [];
+      if (args.includes("install")) {
+        installs.push(args.slice(args.indexOf("install") + 1).join(" "));
+      }
+    }
+    spawn() {
+      return {
+        stdin: {
+          getWriter: () => ({
+            write: () => Promise.resolve(),
+            close: () => Promise.resolve(),
+          }),
+        },
+        output: () =>
+          Promise.resolve({
+            success: true,
+            stdout: new Uint8Array(),
+            stderr: new Uint8Array(),
+          }),
+      };
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await withTempLayout(async (layout) => {
+      const volumes = join(layout.principalHomeRoot, "siteuser", "volumes");
+      await materializeStorageEntries(
+        layout,
+        "org-1",
+        [{
+          storageId: "stor-dir",
+          locationId: "loc-dir",
+          kind: "directory",
+          name: "data",
+          provider: "path",
+          serverId: "srv",
+          principalId: "pr-1",
+          sourcePath: join(volumes, "owned-data"),
+          mounts: [],
+        }],
+        [{ principalId: "pr-1", username: "siteuser" }],
+      );
+      const parent = installs.findIndex((line) => line.endsWith(` ${volumes}`));
+      const leaf = installs.findIndex((line) =>
+        line.endsWith(` ${join(volumes, "owned-data")}`)
+      );
+      assertEquals(parent >= 0 && leaf > parent, true, installs.join("\n"));
+      assertEquals(installs[parent]!.includes("-o root"), true);
+    });
+  } finally {
+    Deno.Command = original;
+  }
+});

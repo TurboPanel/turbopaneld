@@ -3,6 +3,10 @@ import {
   declaredVolumeUsers,
 } from "../deploy/apply-storage-volumes.ts";
 import { applyVolumeAccess } from "../deploy/volume-access.ts";
+import {
+  ensureNamedVolumeOwners,
+  namedVolumeOwnerTargets,
+} from "../deploy/named-volume-owner.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
@@ -1052,26 +1056,35 @@ function bindingFor(
  * branch first for that reason; the entry is dropped here so the two never
  * disagree about which lane a site is on.
  */
-async function deployManagedDirectoryBindings(
+export async function deployManagedDirectoryBindings(
   payload: EnvironmentDeployPayload,
   releaseBindings: ReadonlyMap<string, SiteRelease>,
   layout: LayoutPaths,
   runFn: RunFn,
 ): Promise<Map<string, SiteManagedDirectory>> {
   const bindings = new Map<string, SiteManagedDirectory>();
+  // A site that asks for a directory gets one. A site that asks for nothing and
+  // has no release still gets the folder the control plane planned for it, so
+  // its files live in the scope tree and not in the daemon-owned sites tree.
+  // A site that was served from the older tree moves to the folder on its next
+  // deploy with nothing carried over, on purpose: every server is wiped before
+  // the release that brings this layout, so there is no existing directory to
+  // migrate, and the older tree is only a fallback for a plan with no folder.
   const sites = (payload.sites ?? []).filter(
     (
       site,
     ): site is typeof site & {
       principal: NonNullable<typeof site.principal>;
     } =>
-      site.sourceKind === "managed-directory" &&
+      (site.sourceKind === "managed-directory" ||
+        site.sourceKind === undefined) &&
       !releaseBindings.has(site.composeServiceName) &&
       site.principal !== undefined,
   );
   const resolved = await Promise.all(
     sites.map(async (site) => ({
       composeServiceName: site.composeServiceName,
+      requested: site.sourceKind === "managed-directory",
       serviceId: await effectiveReleaseServiceId(
         payload,
         site.composeServiceName,
@@ -1083,6 +1096,8 @@ async function deployManagedDirectoryBindings(
     })),
   );
   for (const row of resolved) {
+    const planned = serviceFolderFromPayload(payload, row.serviceId);
+    if (!row.requested && planned === undefined) continue;
     bindings.set(row.composeServiceName, bindingFor(payload, row));
   }
   return bindings;
@@ -2170,6 +2185,27 @@ async function deployContainerServices(
       parsedPayload.projectName,
       run,
       { environmentId: parsedPayload.environmentId, deploymentDir },
+    );
+
+    // A container run as the site owner must be able to write the named
+    // volumes it mounts too: Docker makes those root-owned.
+    await ensureNamedVolumeOwners(
+      namedVolumeOwnerTargets(
+        fragment.services as
+          | Record<string, Record<string, unknown>>
+          | undefined,
+        resolved.services as Record<string, Record<string, unknown>>,
+        (resolved.document?.volumes ?? undefined) as
+          | Record<string, unknown>
+          | undefined,
+        parsedPayload.projectName,
+      ),
+      {
+        projectName: parsedPayload.projectName,
+        composePaths: chain,
+        run,
+        log: (line) => logSink.onLine("stdout", line),
+      },
     );
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
