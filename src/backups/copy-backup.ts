@@ -22,6 +22,7 @@
 import { helperLabelArgs } from "../deploy/labels.ts";
 import { join } from "@std/path";
 import {
+  folderHostPath,
   isValidFolderName,
   isValidOwnerName,
   isValidScope,
@@ -32,7 +33,6 @@ import {
   isSafeCopyHostPath,
 } from "../contracts/commands-contracts.ts";
 import { backupKindDir, type LayoutPaths } from "../paths/layout.ts";
-import { folderHostPath } from "../contracts/directory-names.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
