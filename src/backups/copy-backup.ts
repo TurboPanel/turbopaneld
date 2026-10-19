@@ -32,6 +32,7 @@ import {
   isSafeCopyHostPath,
 } from "../contracts/commands-contracts.ts";
 import { backupKindDir, type LayoutPaths } from "../paths/layout.ts";
+import { folderHostPath } from "../contracts/directory-names.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -165,6 +166,13 @@ export function resolveCopyMount(
       throw new Error("a docker copy source needs a volume name");
     }
     return { type: "volume", name: source.volumeName };
+  }
+  if (source.folder) {
+    // The folder's parts were validated by the shared rules; the path is built from them.
+    return {
+      type: "bind",
+      path: folderHostPath(principalRoot, { ...source.folder, kind: "volume" }),
+    };
   }
   const path = copyHostPath(layout, source);
   if (!path || !isSafeCopyHostPath(path)) {
