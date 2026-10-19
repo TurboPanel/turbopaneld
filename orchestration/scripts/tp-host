@@ -209,7 +209,7 @@ tp_path_class() {
   # The SFTP jail switch sits in the SSH folder beside the key files but is
   # written only by `sftp-chroot on` (after its check) and `off`.
   case "$_pc" in
-    "$R_SSHKEYS"/sftp-chroot) return 1 ;;
+    "$R_SSHKEYS"/sftp-chroot|"$R_SSHKEYS"/sftp-chroot-off) return 1 ;;
   esac
   # The shared php-fpm master runs as root and reads its main config and every
   # conf.d/*.ini at start (`extension=` loads code into it). Only Ansible writes
@@ -2634,6 +2634,9 @@ tp_verb_sshd() {
 SFTP_GROUP="tpsftp"
 SHELL_GROUP="tpshell"
 SFTP_CHROOT_SWITCH="$P/etc/ssh/turbopanel/sftp-chroot"
+# Written by `off` (and removed by `on`) so a host an administrator turned the
+# jail off on stays off: `auto` never overrides an explicit off.
+SFTP_CHROOT_OFF_MARK="$P/etc/ssh/turbopanel/sftp-chroot-off"
 SFTP_START_DIR="/home"
 
 # A directory sshd accepts as part of a chroot path.
@@ -2833,7 +2836,7 @@ tp_sftp_chroot_verify() {
 }
 
 tp_verb_sftp_chroot() {
-  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, verify, on, off or status"
+  [ "$#" -eq 1 ] || tp_die "sftp-chroot: only check, verify, on, off, auto or status"
   case "$1" in
     status)
       if tp_sftp_chroot_is_on; then
@@ -2851,13 +2854,47 @@ tp_verb_sftp_chroot() {
       tp_sftp_chroot_check >&2 ||
         tp_die "sftp-chroot: refusing to switch on until every $SFTP_GROUP member is on the new home layout"
       printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
+      tp_sftp_chroot_clear_off_mark
       ;;
     off)
       tp_pin_parent "$SFTP_CHROOT_SWITCH" || tp_die "no such directory for $SFTP_CHROOT_SWITCH"
       rm -f -- "./$PIN_NAME"
+      printf 'off\n' | tp_put_file "$SFTP_CHROOT_OFF_MARK" 0644 root root
       ;;
-    *) tp_die "sftp-chroot: only check, verify, on, off or status" ;;
+    auto)
+      # The default for a new host: jail on once the layout check is clean.
+      # Does nothing when the switch is already on or an administrator turned
+      # it off on purpose, and leaves the jail off (with the findings on
+      # stderr) while any member is still off the layout; the next reconcile
+      # tries again. Never fails the caller for a finding.
+      tp_sftp_chroot_is_on && return 0
+      if [ -f "$SFTP_CHROOT_OFF_MARK" ] && [ ! -L "$SFTP_CHROOT_OFF_MARK" ]; then
+        return 0
+      fi
+      if tp_sftp_chroot_check >&2; then
+        printf 'on\n' | tp_put_file "$SFTP_CHROOT_SWITCH" 0644 root root
+      fi
+      ;;
+    *) tp_die "sftp-chroot: only check, verify, on, off, auto or status" ;;
   esac
+}
+
+# Remove the explicit-off marker; absent is fine.
+tp_sftp_chroot_clear_off_mark() {
+  tp_pin_parent "$SFTP_CHROOT_OFF_MARK" || return 0
+  rm -f -- "./$PIN_NAME"
+}
+
+# The administrator's sshd_config, byte for byte and nothing else. On a
+# stock image it is `root:root 0600`, which the daemon cannot read, and the
+# generic `cat` serves only TurboPanel's own trees. The daemon needs it only to
+# see whether the drop-in directory is included and to warn about allowlists;
+# it never edits the file.
+SSHD_MAIN_CONFIG="$P/etc/ssh/sshd_config"
+tp_verb_sshd_config() {
+  [ "$#" -eq 0 ] || tp_die "sshd-config: takes no arguments"
+  [ -f "$SSHD_MAIN_CONFIG" ] || tp_die "sshd-config: no such file"
+  cat -- "$SSHD_MAIN_CONFIG"
 }
 
 tp_verb_ss() {
@@ -4679,6 +4716,7 @@ case "$_verb" in
   journalctl) tp_verb_journalctl "$@" ;;
   sshd) tp_verb_sshd "$@" ;;
   sftp-chroot) tp_verb_sftp_chroot "$@" ;;
+  sshd-config) tp_verb_sshd_config "$@" ;;
   ss) tp_verb_ss "$@" ;;
   sysctl) tp_verb_sysctl "$@" ;;
   iptables|ip6tables|iptables-restore|ip6tables-restore|iptables-save|ip6tables-save)

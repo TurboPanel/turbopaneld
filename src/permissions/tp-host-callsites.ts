@@ -1558,6 +1558,15 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","status"]', {
     argv: ["sftp-chroot", "status"],
   }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","auto"]', {
+    argv: ["sftp-chroot", "auto"],
+    // alice is in tpsftp; on the new layout the check is clean.
+    setup: dir(`${P}/srv/users/alice/home`),
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sshd-config"]', {
+    argv: ["sshd-config"],
+    setup: file(`${P}/etc/ssh/sshd_config`, "Port 22\n"),
+  }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","verify"]', {
     argv: ["sftp-chroot", "verify"],
     setup: file(`${P}/etc/ssh/turbopanel/sftp-chroot`, "on\n"),
