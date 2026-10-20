@@ -2374,7 +2374,8 @@ async function takeOverStaleHostnames(
       })),
     );
   } catch (err) {
-    for (const restore of restores) await restore();
+    // One manifest that cannot be put back must not stop the others.
+    await forEachSequential(restores, (restore) => restore().catch(() => {}));
     throw err;
   }
   for (const step of steps.filter((entry) => entry.empty)) {

@@ -1021,7 +1021,7 @@ export async function runRailpackBuild(
       "stderr",
       `build variable ${
         JSON.stringify(name)
-      } was not passed to the build: this name is reserved for the build host itself`,
+      } was not passed to the build: the build tools do not accept this name from a site (it is reserved or changes how the build host itself runs)`,
     );
   }
   const planPath = join(params.scratchDir, RAILPACK_PLAN_FILENAME);
