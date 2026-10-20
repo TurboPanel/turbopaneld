@@ -556,7 +556,7 @@ test("a path copy with a source path and no folder is refused", async () => {
             owner,
           ),
         Error,
-        "needs the folder the control plane plans for it",
+        "needs a folder planned on this server",
         sourcePath,
       );
     }
@@ -565,7 +565,7 @@ test("a path copy with a source path and no folder is refused", async () => {
       () =>
         materializeStorageEntries(layout, "org-1", [unownedDirectory("/etc")]),
       Error,
-      "needs the folder the control plane plans for it",
+      "needs a folder planned on this server",
     );
     // The same refusal holds for a file copy that names a source path.
     await assertRejects(
@@ -574,7 +574,7 @@ test("a path copy with a source path and no folder is refused", async () => {
           { ...fileEntry("a.txt"), sourcePath: "/etc" },
         ]),
       Error,
-      "needs the folder the control plane plans for it",
+      "needs a folder planned on this server",
     );
   });
 });

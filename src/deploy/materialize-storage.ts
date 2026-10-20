@@ -185,7 +185,7 @@ function assertHasFolderForSourcePath(
 ): void {
   if (entry.sourcePath === undefined) return;
   throw new Error(
-    `storage ${entry.storageId}: a path copy needs the folder the control plane plans for it (sent source path ${entry.sourcePath} without one)`,
+    `storage ${entry.storageId}: a path copy needs a folder planned on this server, but source path ${entry.sourcePath} came without one; redeploy from the panel`,
   );
 }
 

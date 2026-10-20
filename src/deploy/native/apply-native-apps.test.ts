@@ -2820,6 +2820,6 @@ test("nativeAppBindingsFromPayload carries the service folder of the sourced ser
   assertThrows(
     () => nativeAppBindingsFromPayload({ ...payload, serviceFolders: [] }),
     Error,
-    "no serviceFolders entry",
+    "has no folder planned on this server",
   );
 });

@@ -92,12 +92,12 @@ test("a service with no serviceFolders entry is refused, not served from another
   assertThrows(
     () => serviceFolderFromPayload(payload, "svc-env-uuid"),
     Error,
-    "no serviceFolders entry",
+    "has no folder planned on this server",
   );
   assertThrows(
     () => serviceFolderForCompose(payload, "app"),
     Error,
-    "no serviceFolders entry",
+    "has no folder planned on this server",
   );
 });
 
@@ -188,6 +188,6 @@ test("serviceFolderForCompose finds the folder through the release id or the nat
         "web",
       ),
     Error,
-    "no serviceFolders entry",
+    "has no folder planned on this server",
   );
 });

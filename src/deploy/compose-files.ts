@@ -156,7 +156,7 @@ export type DeploymentManifestRelease = {
   composeServiceName: string;
   /** TurboPanel service UUID, or the compose key when the payload named none. */
   serviceId: string;
-  /** Release directory name under `sites/<serviceId>/releases/`. */
+  /** Release directory name under the service folder's `releases/`. */
   releaseId: string;
   /** `source` row the release was resolved from. */
   sourceId: string;
@@ -176,7 +176,7 @@ export type DeploymentManifestRelease = {
   ref?: string;
   /**
    * Principal the release tree lives under
-   * (`<principalHomeRoot>/<username>/sites/<serviceId>`).
+   * (`<principalHomeRoot>/<username>/<scope>/services/<name>`).
    *
    * Recorded so a **later** deploy can still address the tree of a service that
    * has since been removed from the compose: once the payload no longer carries
