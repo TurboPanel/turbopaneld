@@ -141,6 +141,78 @@ test("mount paths must stay inside the container and the volume", () => {
   );
 });
 
+// -- a named Docker volume linked to a site owner ------------------------------
+
+function dockerVolume(
+  overrides: Partial<EnvironmentDeployStorageMaterial> = {},
+): EnvironmentDeployStorageMaterial {
+  return {
+    storageId: STORAGE_ID,
+    locationId: "loc-1",
+    kind: "volume",
+    name: "vol1",
+    provider: "docker",
+    serverId: "srv",
+    principalId: "pr-1",
+    volumeName: STORAGE_ID,
+    mounts: [{ composeServiceName: "web", destinationPath: "/vol" }],
+    ...overrides,
+  };
+}
+
+test("a container that mounts a named volume linked to an owner runs as the owner's ids", () => {
+  const fragment = buildStorageVolumesFragment(
+    [dockerVolume()],
+    new Map(),
+    resolvedWith(),
+    ids,
+  );
+  assertEquals(fragment.services?.web?.user, "15007:15007");
+  // A volume with no owner, or a service that names its own user, is untouched.
+  assertEquals(
+    buildStorageVolumesFragment(
+      [dockerVolume({ principalId: undefined })],
+      new Map(),
+      resolvedWith(),
+      new Map(),
+    ).services?.web?.user,
+    undefined,
+  );
+  assertEquals(
+    buildStorageVolumesFragment(
+      [dockerVolume()],
+      new Map(),
+      resolvedWith("999"),
+      ids,
+    ).services?.web?.user,
+    undefined,
+  );
+});
+
+test("the ids of the owner behind a linked named volume come from its principal", async () => {
+  const lookup: RunFn = () =>
+    Promise.resolve({ success: false, stdout: "", stderr: "" });
+  const linked = await resolveVolumeOwnerIds(
+    [dockerVolume()],
+    [{ principalId: "pr-1", username: "alice", uid: 15007, gid: 15007 }],
+    lookup,
+  );
+  assertEquals(linked.get(STORAGE_ID), { uid: 15007, gid: 15007 });
+  // A named volume with no owner, or one whose principal is not in the deploy, has no ids.
+  assertEquals(
+    (await resolveVolumeOwnerIds([dockerVolume()], [], lookup)).size,
+    0,
+  );
+  assertEquals(
+    (await resolveVolumeOwnerIds(
+      [dockerVolume({ principalId: undefined })],
+      [{ principalId: "pr-1", username: "alice", uid: 1, gid: 1 }],
+      lookup,
+    )).size,
+    0,
+  );
+});
+
 // -- ids of the owner ----------------------------------------------------------
 
 test("the owner's ids come from the host account, else from the deploy", async () => {

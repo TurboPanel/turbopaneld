@@ -594,6 +594,50 @@ test("removeSites removes nginx/apache/ols configs via mocked sudo", async () =>
   }
 });
 
+test("removeSites with a keep set removes only the sites that left", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const environmentId = "envkeep";
+  const conf = (engine: string, service: string) =>
+    join(
+      layout.configDir,
+      engine,
+      "sites",
+      `tp-${environmentId}-${service}.conf`,
+    );
+  try {
+    await applySites(
+      layout,
+      environmentId,
+      [nginxSite, apachePhpSite, olsSite],
+      { run, runPlaybook },
+    );
+
+    await removeSites(layout, environmentId, { run }, new Set(["www"]));
+
+    // The site still in the compose file keeps its vhost.
+    assertEquals((await Deno.stat(conf("nginx", "www"))).isFile, true);
+    // The ones that left lose theirs, pool and OpenLiteSpeed fragment included.
+    for (
+      const path of [
+        conf("apache", "phpapp"),
+        join(
+          layout.configDir,
+          "php",
+          "pools",
+          `tp-${environmentId}-phpapp.conf`,
+        ),
+        conf("openlitespeed", "static"),
+      ]
+    ) {
+      await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
 test("applySites rejects unsafe environmentId", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();

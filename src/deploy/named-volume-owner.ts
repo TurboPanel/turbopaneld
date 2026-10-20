@@ -135,11 +135,14 @@ function effectiveUser(
 }
 
 /**
- * The named-volume mounts to give to a user. Only a service the daemon itself
- * set a numeric, non-root `user` for (the overlay's `user`, written when the
- * service mounts the owner's folder volume) is considered: a user the compose
- * file declared is the owner's own choice and is left alone. `topLevelVolumes`
- * is the compose file's own `volumes:` map, before the daemon rewrites it.
+ * The named-volume mounts to give to a user. A mount is considered when its
+ * service runs as the site owner, in one of two ways: the daemon itself set a
+ * numeric, non-root `user` for it (the overlay's `user`, written when the
+ * service mounts one of the owner's volumes), or the compose file declares
+ * exactly the uid of the owner the volume is linked to (`volumeOwners`, volume
+ * name to the owner's `uid:gid`). Any other declared user is the owner's own
+ * choice and is left alone. `topLevelVolumes` is the compose file's own
+ * `volumes:` map, before the daemon rewrites it.
  */
 export function namedVolumeOwnerTargets(
   overlayServices: ServiceMap | undefined,
@@ -147,13 +150,18 @@ export function namedVolumeOwnerTargets(
   topLevelVolumes: Record<string, unknown> | undefined,
   projectName = "project",
   platformVolumeNames: ReadonlySet<string> = new Set(),
+  volumeOwners: ReadonlyMap<string, string> = new Map(),
 ): NamedVolumeOwnerPlan {
   const overlay = overlayServices ?? {};
   const plan: NamedVolumeOwnerPlan = { targets: [], skipped: [] };
   const claimed = new Set<string>();
-  for (const name of Object.keys(overlay).sort((a, b) => a.localeCompare(b))) {
-    const user = ownerUser(overlay[name]?.user);
-    if (user === null) continue;
+  const names = new Set([
+    ...Object.keys(overlay),
+    ...Object.keys(resolvedServices),
+  ]);
+  for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
+    const daemonUser = ownerUser(overlay[name]?.user);
+    const declared = userText(resolvedServices[name]?.user);
     const { image, buildOnly } = serviceImage(
       resolvedServices[name],
       projectName,
@@ -164,6 +172,12 @@ export function namedVolumeOwnerTargets(
       ...volumeMounts(overlay[name]),
     ];
     for (const mount of mounts) {
+      const user = daemonUser ??
+        declaredOwnerUser(
+          declared,
+          mountOwner(mount, topLevelVolumes, volumeOwners),
+        );
+      if (user === null) continue;
       const reason = skipReason(
         { name, user, mount },
         { overlay, resolvedServices, topLevelVolumes, platformVolumeNames },
@@ -189,6 +203,75 @@ export function namedVolumeOwnerTargets(
     }
   }
   return plan;
+}
+
+/** The owner a mounted volume is linked to, as `uid:gid`, by the volume's key or its pinned name. */
+function mountOwner(
+  mount: VolumeMount,
+  topLevelVolumes: Record<string, unknown> | undefined,
+  volumeOwners: ReadonlyMap<string, string>,
+): string | undefined {
+  const declared = topLevelVolumes?.[mount.source];
+  const pinned = isRecord(declared) && typeof declared.name === "string"
+    ? declared.name
+    : undefined;
+  return volumeOwners.get(mount.source) ??
+    (pinned === undefined ? undefined : volumeOwners.get(pinned));
+}
+
+/** The owner's `uid:gid` when the compose file declares exactly the owner's uid; otherwise `null`. */
+function declaredOwnerUser(
+  declared: string,
+  owner: string | undefined,
+): string | null {
+  const ownerIds = owner === undefined ? null : ownerUser(owner);
+  if (ownerIds === null || declared === "") return null;
+  return uidOf(declared) === uidOf(ownerIds) ? ownerIds : null;
+}
+
+function uidOf(user: string): string {
+  return user.split(":")[0] ?? "";
+}
+
+/**
+ * A bind mount whose source sits inside the deployment folder (a relative
+ * `./files` in the compose file) belongs to the platform, not to the site
+ * owner: nothing here can hand it to the owner without reaching into the
+ * deployment folder, and Docker makes a missing one `root:root 0755`. A
+ * container that runs as a numeric non-root user cannot write it. The compose
+ * file is never refused for this (it may be read-only data, or the container
+ * may run as root); the deploy log says plainly where to put data the container
+ * writes instead.
+ */
+export function deploymentBindWarnings(
+  overlayServices: ServiceMap | undefined,
+  resolvedServices: ServiceMap,
+  deploymentDirs: readonly string[],
+): string[] {
+  const overlay = overlayServices ?? {};
+  const lines: string[] = [];
+  for (
+    const name of Object.keys(resolvedServices).sort((a, b) =>
+      a.localeCompare(b)
+    )
+  ) {
+    const user = effectiveUser(name, overlay, resolvedServices);
+    const uid = uidOf(user);
+    if (!/^[1-9]\d*$/.test(uid)) continue;
+    const volumes = resolvedServices[name]?.volumes;
+    if (!Array.isArray(volumes)) continue;
+    for (const entry of volumes) {
+      if (!isRecord(entry) || entry.type !== "bind") continue;
+      const { source, target, read_only: readOnly } = entry;
+      if (typeof source !== "string" || typeof target !== "string") continue;
+      if (readOnly === true) continue;
+      if (!deploymentDirs.some((dir) => source.startsWith(`${dir}/`))) continue;
+      lines.push(
+        `${target} of ${name} is a folder inside the deployment folder, which the platform owns; a container running as ${user} cannot write it. Keep data the container writes in a volume folder of the site owner instead`,
+      );
+    }
+  }
+  return lines;
 }
 
 function serviceImage(
@@ -232,7 +315,8 @@ function skipReason(
     volumeMounts(context.resolvedServices[other]).some((m) =>
       m.source === mount.source
     ) &&
-    effectiveUser(other, context.overlay, context.resolvedServices) !== user
+    uidOf(effectiveUser(other, context.overlay, context.resolvedServices)) !==
+      uidOf(user)
   );
   return shared
     ? "another service that runs as a different user mounts the volume"

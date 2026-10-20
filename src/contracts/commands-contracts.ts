@@ -858,6 +858,12 @@ export type EnvironmentDeployStorageMount = {
 /** One service's folder under its site owner's tree. */
 export type EnvironmentDeployServiceFolder = {
   serviceId: string;
+  /**
+   * The compose service the folder belongs to. It lets the host tie a site or
+   * app with no hostname, source or native app to its service id, which no
+   * other list carries for it.
+   */
+  composeServiceName?: string;
   folder: FolderRefParts;
 };
 
@@ -4443,8 +4449,19 @@ function parseServiceFolder(value: unknown): EnvironmentDeployServiceFolder {
   if (!STOP_SITE_RELEASE_SERVICE_ID_RE.test(serviceId)) {
     throw new TypeError("Invalid environment deploy serviceFolders serviceId");
   }
+  const composeServiceName = value.composeServiceName;
+  if (
+    composeServiceName !== undefined &&
+    (typeof composeServiceName !== "string" ||
+      !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(composeServiceName))
+  ) {
+    throw new TypeError(
+      "Invalid environment deploy serviceFolders composeServiceName",
+    );
+  }
   return {
     serviceId,
+    ...(composeServiceName === undefined ? {} : { composeServiceName }),
     folder: folderRefParts(parseFolderRefParts(value.folder, "service")),
   };
 }

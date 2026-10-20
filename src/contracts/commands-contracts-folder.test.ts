@@ -121,11 +121,24 @@ test("keeps the service folders of a deploy and refuses a bad one", () => {
     [{ serviceId: "svc-1", folder }],
   );
   assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      serviceFolders: [{
+        serviceId: "svc-1",
+        composeServiceName: "phpsite",
+        folder,
+      }],
+    }).serviceFolders,
+    [{ serviceId: "svc-1", composeServiceName: "phpsite", folder }],
+  );
+  assertEquals(
     parseEnvironmentDeployPayload(DEPLOY_BASE).serviceFolders,
     undefined,
   );
   for (
     const bad of [
+      { serviceId: "svc-1", composeServiceName: "a/b", folder },
+      { serviceId: "svc-1", composeServiceName: 7, folder },
       { serviceId: "svc-1", folder: { ...folder, slug: ".." } },
       { serviceId: "svc-1", folder: { ...folder, scope: "home" } },
       { serviceId: "svc-1", folder: { ...folder, path: "/etc" } },

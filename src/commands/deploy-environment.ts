@@ -4,6 +4,7 @@ import {
 } from "../deploy/apply-storage-volumes.ts";
 import { applyVolumeAccess } from "../deploy/volume-access.ts";
 import {
+  deploymentBindWarnings,
   ensureNamedVolumeOwners,
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
@@ -135,6 +136,7 @@ import {
   ensureSiteEngines,
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
+  removeSites,
   resolveSiteDocumentRoot,
   type SiteManagedDirectory,
   type SiteRelease,
@@ -1442,12 +1444,30 @@ async function applyDeploySites(
   releaseBindings: ReadonlyMap<string, SiteRelease>,
   managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>,
 ): Promise<void> {
-  if (sites.length === 0) return;
-  await applySites(layout, environmentId, sites, {
-    dockerBindAddress,
-    releaseBindings,
-    managedDirectoryBindings,
-  });
+  if (sites.length > 0) {
+    await applySites(layout, environmentId, sites, {
+      dockerBindAddress,
+      releaseBindings,
+      managedDirectoryBindings,
+    });
+  }
+  // A site that left the compose file keeps no vhost, pool or runtime: what
+  // this deploy applied is what stays. Its folder stays too, as an orphan.
+  try {
+    await removeSites(
+      layout,
+      environmentId,
+      undefined,
+      new Set(sites.map((site) => site.composeServiceName)),
+    );
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `sites that left the compose file could not be removed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 /**
@@ -2118,6 +2138,17 @@ async function deployContainerServices(
 
     // A container run as the site owner must be able to write the named
     // volumes it mounts too: Docker makes those root-owned.
+    for (
+      const line of deploymentBindWarnings(
+        fragment.services as
+          | Record<string, Record<string, unknown>>
+          | undefined,
+        resolved.services as Record<string, Record<string, unknown>>,
+        [stageDir, deploymentDir],
+      )
+    ) {
+      logSink.onLine("stdout", line);
+    }
     await ensureNamedVolumeOwners(
       namedVolumeOwnerTargets(
         fragment.services as
@@ -2134,6 +2165,15 @@ async function deployContainerServices(
               ? [entry.volumeName]
               : []
           ),
+        ),
+        new Map(
+          (parsedPayload.storageMaterial ?? []).flatMap((entry) => {
+            const ids = volumeOwnerIds.get(entry.storageId);
+            return entry.provider === "docker" && entry.volumeName &&
+                ids !== undefined
+              ? [[entry.volumeName, `${ids.uid}:${ids.gid}`] as const]
+              : [];
+          }),
         ),
       ),
       {

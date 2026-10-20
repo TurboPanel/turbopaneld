@@ -848,12 +848,18 @@ site owner's Linux user:
   that), but cannot change the contents or modes of a file owned by another uid.
 - **A named Docker volume** (provider `docker`) is outside this tree and its
   contents are not touched; it stays the way to run an image that insists on a
-  fixed user. One exception, for a service the daemon itself runs as the owner
-  (it mounts the owner's volume folder and names no `user:`): Docker creates
-  the volume `root:root 0755`, which that container could not write, so before
-  `compose up` each such mount path gets one non-recursive `chown <uid>:<gid>`
-  through the service's own image (`deploy/named-volume-owner.ts`). A user the
-  compose file declares is never changed, and a failure only logs a line.
+  fixed user. A volume linked to a site owner (a principal on its storage row)
+  is that owner's, like the owner's folders: a container that mounts it and
+  names no `user:` runs as the owner. Docker creates the volume `root:root
+  0755`, which that container could not write, so before `compose up` each such
+  mount path gets one non-recursive `chown <uid>:<gid>` through the service's
+  own image (`deploy/named-volume-owner.ts`). It applies when the daemon set the
+  user, or when the compose file declares exactly the owner's uid; any other
+  declared user is never changed. Nothing inside the volume is touched, so files
+  an earlier root run left there stay root's. A bind whose source is inside the
+  deployment folder (a relative `./files`) belongs to the platform, not the
+  owner; a container running as a numeric user cannot write it, and the deploy
+  log says so and points to a volume folder (the compose file is not refused).
 - One container cannot mount volumes of two site owners with defaulted users;
   that deploy fails with a plain message.
 

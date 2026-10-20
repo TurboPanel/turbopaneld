@@ -110,6 +110,7 @@ function applyDockerVolumeEntry(
   entry: EnvironmentDeployStorageMaterial,
   mountPaths: Map<string, string>,
   resolved: ResolvedComposeModel,
+  ownerIds: VolumeOwnerIds | undefined,
 ): void {
   const volumeName = entry.volumeName && entry.volumeName.length > 0
     ? entry.volumeName
@@ -126,6 +127,9 @@ function applyDockerVolumeEntry(
   // the payload has no mount rows.
   if (entry.mounts.length === 0) return;
   applyMounts(services, entry, volumeName, "volume", resolved);
+  // A volume linked to a site owner is that owner's: a container that names no
+  // user of its own runs as the owner, like it does for the owner's folders.
+  applyVolumeUser(services, entry, resolved, ownerIds);
 }
 
 /**
@@ -144,7 +148,12 @@ function applyVolumeUser(
   ownerIds: VolumeOwnerIds | undefined,
 ): void {
   const ids = ownerIds?.get(entry.storageId);
-  if (entry.folder === undefined || ids === undefined) return;
+  // An owner's folder, or a named Docker volume linked to the owner; a bind on
+  // the older per-owner path has neither.
+  if (
+    ids === undefined ||
+    (entry.folder === undefined && entry.provider !== "docker")
+  ) return;
   const user = `${ids.uid}:${ids.gid}`;
   for (const mount of entry.mounts) {
     const name = mount.composeServiceName;
@@ -199,6 +208,7 @@ export function buildStorageVolumesFragment(
         entry,
         mountPaths,
         resolved,
+        ownerIds,
       );
     } else {
       applyBindMountEntry(services, entry, mountPaths, resolved, ownerIds);

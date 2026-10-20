@@ -101,6 +101,24 @@ test("a service with no serviceFolders entry is refused, not served from another
   );
 });
 
+test("a site with no hostname, source or native unit is found through its folder entry", () => {
+  const folder = { owner: "alice", scope: "production", slug: "phpsite" };
+  const serviceId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c09";
+  const payload = basePayload({
+    hostings: [],
+    serviceFolders: [{ serviceId, composeServiceName: "phpsite", folder }],
+  });
+  assertEquals(resolveReleaseServiceId(payload, "phpsite"), serviceId);
+  assertEquals(serviceFolderForCompose(payload, "phpsite"), folder);
+  // A folder entry that names another service does not serve this one.
+  assertEquals(resolveReleaseServiceId(payload, "other"), "other");
+  assertThrows(
+    () => serviceFolderForCompose(payload, "other"),
+    Error,
+    "no serviceFolders entry",
+  );
+});
+
 test("serviceFolderForCompose finds the folder through the release id or the native app's id", () => {
   const folder = { owner: "alice", scope: "production", slug: "api" };
   const releaseId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c01";

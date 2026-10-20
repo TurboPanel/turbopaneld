@@ -362,6 +362,15 @@ export type VolumeOwnerIds = ReadonlyMap<
   { uid: number; gid: number }
 >;
 
+/** The site owner an entry belongs to: its folder's owner, else the account its principal names. */
+function ownerNameOf(
+  entry: EnvironmentDeployStorageMaterial,
+  byId: Map<string, EnvironmentDeployPrincipalMaterial>,
+): string | undefined {
+  if (entry.folder !== undefined) return entry.folder.owner;
+  return entry.principalId ? byId.get(entry.principalId)?.username : undefined;
+}
+
 /**
  * Ids of the site owner behind each volume folder, by storage id. A container
  * that mounts the folder is run as these ids (unless its own compose file
@@ -379,11 +388,13 @@ export async function resolveVolumeOwnerIds(
   );
   const owners = new Map<string, { uid: number; gid: number }>();
   const out = new Map<string, { uid: number; gid: number }>();
+  // The owner's folders, and the named Docker volumes linked to a site owner.
   const wanted = entries.filter((entry) =>
-    entry.folder !== undefined && entry.kind === "directory"
+    (entry.folder !== undefined && entry.kind === "directory") ||
+    (entry.provider === "docker" && ownerNameOf(entry, byId) !== undefined)
   );
   await forEachSequential(wanted, async (entry) => {
-    const owner = entry.folder!.owner;
+    const owner = ownerNameOf(entry, byId)!;
     let ids = owners.get(owner);
     if (ids === undefined) {
       // The account on this host is the truth; the deploy's own ids only

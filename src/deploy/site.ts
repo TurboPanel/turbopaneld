@@ -2168,6 +2168,11 @@ function stripConfSuffix(name: string): string {
   return name.endsWith(".conf") ? name.slice(0, -".conf".length) : name;
 }
 
+/** The compose service a config file name (after its prefix) belongs to, staging leftovers included. */
+function confServiceName(rest: string): string {
+  return rest.replace(/\.conf(\.[A-Za-z0-9]+)?$/, "");
+}
+
 /**
  * Entry names of a root-owned engine config dir, listed through tp-host (the
  * daemon cannot enter it). `null` when the dir does not exist.
@@ -2210,9 +2215,11 @@ async function removePrefixedConfFiles(
   dir: string,
   prefix: string,
   label: string,
+  keep?: ReadonlySet<string>,
 ): Promise<string[]> {
   const names = (await listEngineConfigDir(dir) ?? []).filter((name) =>
-    name.startsWith(prefix)
+    name.startsWith(prefix) &&
+    !(keep?.has(confServiceName(name.slice(prefix.length))) ?? false)
   );
   const removed: string[] = [];
   await forEachSequential(names, async (name) => {
@@ -4169,12 +4176,18 @@ async function removePhpFpmEngineSites(
   layout: LayoutPaths,
   environmentId: string,
   engine: PhpFpmEngine,
+  keep?: ReadonlySet<string>,
 ): Promise<RemovedSites> {
   const prefix = `tp-${environmentId}-`;
   const sitesDir = engine === "caddy"
     ? join(siteCaddyConfigDir(layout), "sites")
     : join(layout.configDir, engine, "sites");
-  const removedNames = await removePrefixedConfFiles(sitesDir, prefix, engine);
+  const removedNames = await removePrefixedConfFiles(
+    sitesDir,
+    prefix,
+    engine,
+    keep,
+  );
   const services = removedNames.map((name) =>
     stripConfSuffix(name.slice(prefix.length))
   );
@@ -4190,6 +4203,7 @@ async function removePhpFpmEngineSites(
       poolsDir,
       prefix,
       `php-fpm ${series} pool`,
+      keep,
     )).length;
     if (removed > 0) touchedSeries.add(series);
     poolsRemoved += removed;
@@ -4451,6 +4465,7 @@ async function disableIdleOpenLiteSpeed(
 async function removeOpenLiteSpeedSites(
   layout: LayoutPaths,
   environmentId: string,
+  keep?: ReadonlySet<string>,
 ): Promise<number> {
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, "openlitespeed", "sites");
@@ -4459,6 +4474,7 @@ async function removeOpenLiteSpeedSites(
     sitesDir,
     prefix,
     "OpenLiteSpeed",
+    keep,
   );
   if (removedFragments.length === 0) return 0;
 
@@ -4483,11 +4499,17 @@ async function tryReloadAfterSiteRemoval(
   }
 }
 
-/** Remove nginx/apache/OpenLiteSpeed site configs for an environment (best-effort reload). */
+/**
+ * Remove nginx/apache/OpenLiteSpeed/Caddy site configs for an environment
+ * (best-effort reload). With `keep`, only the sites of services not named in it
+ * go: a deploy passes the sites it just applied, so the vhost, pool and runtime
+ * of a site that left the compose file are removed and nothing else is.
+ */
 export async function removeSites(
   layout: LayoutPaths,
   environmentId: string,
   deps?: RemoveSiteDeps,
+  keep?: ReadonlySet<string>,
 ): Promise<void> {
   await withSiteIo(resolveSiteIo(deps), async () => {
     assertSafeId(environmentId, "environmentId");
@@ -4495,20 +4517,24 @@ export async function removeSites(
       layout,
       environmentId,
       "caddy",
+      keep,
     );
     const nginxRemoved = await removePhpFpmEngineSites(
       layout,
       environmentId,
       "nginx",
+      keep,
     );
     const apacheRemoved = await removePhpFpmEngineSites(
       layout,
       environmentId,
       "apache",
+      keep,
     );
     const openlitespeedRemoved = await removeOpenLiteSpeedSites(
       layout,
       environmentId,
+      keep,
     );
 
     // php-fpm first, so no engine config-tests against a socket whose pool has

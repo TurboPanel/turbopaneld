@@ -84,6 +84,10 @@ export function serviceFolderForCompose(
     )?.folder;
     if (folder !== undefined) return folder;
   }
+  const named = payload.serviceFolders?.find((entry) =>
+    entry.composeServiceName === composeServiceName
+  )?.folder;
+  if (named !== undefined) return named;
   throw new Error(
     `deploy payload has no serviceFolders entry for service ${composeServiceName}; the control plane must send a folder for every host-run service`,
   );
@@ -127,6 +131,13 @@ export function resolveReleaseServiceId(
     (row) => row.composeServiceName === composeServiceName && row.serviceId,
   );
   if (ingress?.serviceId) return ingress.serviceId;
+
+  // A site or app with no hostname, source or native unit appears in none of
+  // those lists; its folder entry names it.
+  const folder = payload.serviceFolders?.find((entry) =>
+    entry.composeServiceName === composeServiceName
+  );
+  if (folder !== undefined) return folder.serviceId;
 
   return composeServiceName;
 }
