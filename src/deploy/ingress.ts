@@ -36,6 +36,7 @@ import {
   type EnsureHostingCaddyDeps,
   grantHostingCaddyRead,
   HOSTING_CADDY_USER,
+  hostingCaddyReady,
 } from "./ensure-hosting-caddy.ts";
 import {
   assertSafeIngressIdentity,
@@ -336,7 +337,11 @@ export function setIngressHostCommandForTest(
 ): () => void {
   const previous = hostCommandOverride;
   const previousBeforeValidate = ensureBeforeValidateOverride;
+  const previousReady = hostingCaddyReadyOverride;
   hostCommandOverride = fn;
+  if (fn !== undefined && hostingCaddyReadyOverride === undefined) {
+    hostingCaddyReadyOverride = () => Promise.resolve(true);
+  }
   if (
     fn !== undefined &&
     ensureBeforeValidateOverride === undefined &&
@@ -347,6 +352,22 @@ export function setIngressHostCommandForTest(
   return () => {
     hostCommandOverride = previous;
     ensureBeforeValidateOverride = previousBeforeValidate;
+    hostingCaddyReadyOverride = previousReady;
+  };
+}
+
+let hostingCaddyReadyOverride:
+  | ((layout: LayoutPaths) => Promise<boolean>)
+  | undefined;
+
+/** Test-only: stub the "is hosting Caddy in place" check. Returns a restore. */
+export function setHostingCaddyReadyForTest(
+  fn?: (layout: LayoutPaths) => Promise<boolean>,
+): () => void {
+  const previous = hostingCaddyReadyOverride;
+  hostingCaddyReadyOverride = fn;
+  return () => {
+    hostingCaddyReadyOverride = previous;
   };
 }
 
@@ -2199,6 +2220,11 @@ async function hostingCandidateRefusal(
     ]),
   );
   if (test.success) return null;
+  if (/unknown user/i.test(test.stderr)) {
+    throw new Error(
+      `the hosting Caddy account (${HOSTING_CADDY_USER}) is missing on this host, so host setup has not run. Run host setup on this host, then deploy again.`,
+    );
+  }
   // sudo itself refusing is a host that was not finished updating, not a bad
   // snippet: say so, and never let it read as "every snippet is bad".
   if (
@@ -2554,6 +2580,13 @@ async function validateHostingCaddyCandidate(
       hostingCaddyValidateNeedsEdgeRuntime(contents, others, siteFile)
     ) {
       await ensureHostingCaddyRuntimeBeforeValidate(layout);
+    } else if (
+      !await (hostingCaddyReadyOverride ?? hostingCaddyReady)(layout)
+    ) {
+      // Nothing needs Caddy and the hosting Caddy account and binary do not
+      // exist yet (host setup never ran): there is nothing to judge, and
+      // validating would run as an account that is not there.
+      return;
     }
     await Promise.all(
       others.map((name) =>

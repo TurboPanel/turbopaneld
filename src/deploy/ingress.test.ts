@@ -45,6 +45,7 @@ import {
   removeHostingCaddySite,
   removeServiceIngress,
   removeTcpUdpIngressEntries,
+  resetHostingCaddyRuntimeEnsuredForDeploy,
   rewriteHostingCaddySites,
   serviceIngressComposePath,
   serviceIngressDir,
@@ -52,6 +53,7 @@ import {
   serviceIngressUsesSocketProxy,
   serviceTraefikCompose,
   setEnsureHostingCaddyRuntimeForTest,
+  setHostingCaddyReadyForTest,
   setIngressHostCommandForTest,
   siteSnippet,
   snippetSiteAddresses,
@@ -1576,6 +1578,99 @@ test("rewriteHostingCaddySites skips edge runtime when nothing needs Caddy", asy
   } finally {
     restoreHost();
     restoreEnsure();
+    await cleanup();
+  }
+});
+
+const noHostnamesPayload = () => ({
+  ...hostingPayload("env-tcp", "unused.example.com"),
+  hostings: [{
+    hostingId: "h1",
+    serviceId: "s1",
+    composeServiceName: "db",
+    hostnames: [],
+    protocol: "tcp" as const,
+    ports: [{ published: 5432, target: 5432 }],
+  }],
+});
+
+test("rewriteHostingCaddySites skips validation when nothing needs Caddy and it is not set up", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const sudoCalls: string[][] = [];
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    sudoCalls.push(args);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  const restoreReady = setHostingCaddyReadyForTest(() =>
+    Promise.resolve(false)
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      noHostnamesPayload(),
+      undefined,
+      noGrant,
+    );
+    assertEquals(sudoCalls.some((args) => args.includes("validate")), false);
+  } finally {
+    restoreReady();
+    restoreHost();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites validates empty content as before when Caddy is set up", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let validated = 0;
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    if (args.includes("validate")) validated += 1;
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  const restoreReady = setHostingCaddyReadyForTest(() => Promise.resolve(true));
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      noHostnamesPayload(),
+      undefined,
+      noGrant,
+    );
+    assertEquals(validated > 0, true);
+  } finally {
+    restoreReady();
+    restoreHost();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites names a missing hosting Caddy account plainly", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restoreHost = setIngressHostCommandForTest((_command, args) =>
+    Promise.resolve(
+      args.includes("validate")
+        ? { success: false, stderr: "sudo: unknown user tpedge" }
+        : { success: true, stderr: "" },
+    )
+  );
+  try {
+    const err = await assertRejects(() =>
+      rewriteHostingCaddySites(
+        layout,
+        hostingPayload("env-a", "a.example.com"),
+        undefined,
+        noGrant,
+      )
+    );
+    assertEquals(
+      String((err as Error).message).includes("hosting Caddy account"),
+      true,
+    );
+    assertEquals(
+      String((err as Error).message).includes("no snippet was judged"),
+      false,
+    );
+  } finally {
+    resetHostingCaddyRuntimeEnsuredForDeploy();
+    restoreHost();
     await cleanup();
   }
 });
