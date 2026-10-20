@@ -1600,6 +1600,13 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * nothing: a site missing from `sites` is never read as removed.
    */
   removedSites?: string[];
+  /**
+   * The control plane holds every hostname in `hostings` unique (no other
+   * hosting it knows of has one). A host config of another environment that
+   * still names one is then a leftover of a hosting deleted or moved there, and
+   * the host takes the name over instead of refusing this deploy.
+   */
+  exclusiveHostnames?: boolean;
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -6416,6 +6423,10 @@ export function parseEnvironmentDeployPayload(
       ),
       serviceFolders: parseServiceFolders(value.serviceFolders),
       removedSites: parseRemovedSites(value.removedSites),
+      exclusiveHostnames: parseOptionalBoolean(
+        value.exclusiveHostnames,
+        "exclusiveHostnames",
+      ),
       principalMaterial: parseOptionalMaterialArray(
         value.principalMaterial,
         "principalMaterial",

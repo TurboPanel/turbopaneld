@@ -44,6 +44,7 @@ import {
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
   removeServiceIngress,
+  removeSnippetSites,
   removeTcpUdpIngressEntries,
   rewriteHostingCaddySites,
   serviceIngressComposePath,
@@ -4416,6 +4417,137 @@ test("assertHostingNamesFree refuses a www name another environment serves, befo
       hostings: [wwwHosting(["example.com"])],
     });
   } finally {
+    await cleanup();
+  }
+});
+
+test("removeSnippetSites takes out only the blocks of the named hostnames", () => {
+  const keep = siteSnippet({ hostname: "keep.example.com", tlsDir: "/tls" });
+  const drop = siteSnippet({ hostname: "drop.example.com", tlsDir: "/tls" });
+  const multi = siteSnippet({
+    hostname: "multi.example.com",
+    tlsDir: "/tls",
+    routes: [
+      {
+        upstream: { kind: "http", host: "127.0.0.1", port: 18001 },
+        pathPrefix: "/api",
+      },
+      { upstream: { kind: "http", host: "127.0.0.1", port: 18002 } },
+    ],
+  });
+  const all = [keep, drop, multi].join("\n");
+  const out = removeSnippetSites(all, new Set(["drop.example.com"]));
+  assertEquals(out.removed, ["drop.example.com"]);
+  assertEquals(snippetSiteAddresses(out.contents), [
+    ...snippetSiteAddresses(keep),
+    ...snippetSiteAddresses(multi),
+  ]);
+  assertEquals(out.contents.includes("drop.example.com"), false);
+  // A multi-route block with nested braces comes out whole.
+  const gone = removeSnippetSites(all, new Set(["multi.example.com"]));
+  assertEquals(gone.removed, ["multi.example.com"]);
+  assertEquals(snippetSiteAddresses(gone.contents), [
+    ...snippetSiteAddresses(keep),
+    ...snippetSiteAddresses(drop),
+  ]);
+  assertEquals(gone.contents.includes("18001"), false);
+  // Nothing named, nothing changes.
+  assertEquals(removeSnippetSites(all, new Set(["other.example.com"])), {
+    contents: all,
+    removed: [],
+  });
+});
+
+test("assertHostingNamesFree takes a name over from a leftover only when the control plane says the names are exclusive", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    const other = join(sitesDir, "env-other.caddy");
+    const kept = siteSnippet({
+      hostname: "kept.example.com",
+      tlsDir: layout.tlsDir,
+    });
+    await Deno.writeTextFile(
+      other,
+      [
+        siteSnippet({ hostname: "example.com", tlsDir: layout.tlsDir }),
+        kept,
+      ].join("\n"),
+    );
+    const payload = {
+      ...WWW_BASE_PAYLOAD,
+      hostings: [wwwHosting(["example.com"])],
+    };
+
+    // Without the assertion it is refused, as before, and nothing is touched.
+    await assertRejects(
+      () => assertHostingNamesFree(layout, payload),
+      Error,
+      "example.com is already served by another environment on this server",
+    );
+    assertEquals(
+      (await Deno.readTextFile(other)).includes("example.com {"),
+      true,
+    );
+
+    // With it, only that name leaves the other environment's snippet, and Caddy reloads.
+    await assertHostingNamesFree(layout, {
+      ...payload,
+      exclusiveHostnames: true,
+    });
+    assertEquals(snippetSiteAddresses(await Deno.readTextFile(other)), [
+      ...snippetSiteAddresses(kept),
+    ]);
+    assertEquals(calls.some((args) => args.includes("reload")), true);
+    // A second check finds the name free.
+    await assertHostingNamesFree(layout, payload);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a takeover removes the leftover snippet when it had nothing else, and never touches a name the payload does not serve", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    const only = join(sitesDir, "env-only.caddy");
+    const bystander = join(sitesDir, "env-bystander.caddy");
+    const own = join(sitesDir, "env-www-1.caddy");
+    const bystanderContent = siteSnippet({
+      hostname: "bystander.example.com",
+      tlsDir: layout.tlsDir,
+    });
+    const ownContent = siteSnippet({
+      hostname: "example.com",
+      tlsDir: layout.tlsDir,
+    });
+    await Deno.writeTextFile(
+      only,
+      siteSnippet({ hostname: "example.com", tlsDir: layout.tlsDir }),
+    );
+    await Deno.writeTextFile(bystander, bystanderContent);
+    await Deno.writeTextFile(own, ownContent);
+    await assertHostingNamesFree(layout, {
+      ...WWW_BASE_PAYLOAD,
+      hostings: [wwwHosting(["example.com"])],
+      exclusiveHostnames: true,
+    });
+    await assertRejects(() => Deno.stat(only), Deno.errors.NotFound);
+    assertEquals(await Deno.readTextFile(bystander), bystanderContent);
+    assertEquals(await Deno.readTextFile(own), ownContent);
+  } finally {
+    restore();
     await cleanup();
   }
 });

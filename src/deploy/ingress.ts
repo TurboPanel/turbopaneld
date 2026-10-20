@@ -2226,11 +2226,67 @@ export function snippetSiteAddresses(contents: string): string[] {
 }
 
 /**
- * Before any container starts: refuse a deploy that would answer on a name
- * another environment's live site already answers on on this server. A www
- * choice adds names the panel's uniqueness check may not have seen, and the
- * shared Traefik would otherwise route that name to this environment's
- * containers even though Caddy later refuses the duplicate site.
+ * The top-level site blocks of `hostnames` taken out of one snippet, the rest
+ * left as it was. A block is the `name {` / `http://name {` line the daemon
+ * wrote (column 0) up to the `}` at column 0; the blank line after a removed
+ * block goes with it.
+ */
+export function removeSnippetSites(
+  contents: string,
+  hostnames: ReadonlySet<string>,
+): { contents: string; removed: string[] } {
+  const kept: string[] = [];
+  const removed = new Set<string>();
+  let dropping = false;
+  let afterDropped = false;
+  for (const line of contents.split("\n")) {
+    if (dropping) {
+      if (line === "}") {
+        dropping = false;
+        afterDropped = true;
+      }
+      continue;
+    }
+    if (afterDropped && line.length === 0) {
+      afterDropped = false;
+      continue;
+    }
+    afterDropped = false;
+    if (line.length > 0 && !line.startsWith(" ") && line.endsWith(" {")) {
+      const address = line.slice(0, -2).trim();
+      const name = address.startsWith("http://")
+        ? address.slice("http://".length)
+        : address;
+      if (hostnames.has(name)) {
+        removed.add(name);
+        dropping = true;
+        continue;
+      }
+    }
+    kept.push(line);
+  }
+  return { contents: kept.join("\n"), removed: [...removed].sort() };
+}
+
+/**
+ * Before any container starts: a deploy that would answer on a name another
+ * environment's live site already answers on, on this server.
+ *
+ * Normally that is refused: a www choice adds names the panel's uniqueness
+ * check may not have seen, and the shared Traefik would otherwise route the
+ * name to this environment's containers even though Caddy later refuses the
+ * duplicate site.
+ *
+ * When the control plane says the hostnames are exclusive
+ * (`exclusiveHostnames`: every name in `hostings` is held by no other hosting
+ * it knows of), the other environment's config naming one is a leftover from a
+ * hosting that was deleted or moved there without that environment being
+ * deployed again. The names are then taken over: only the site blocks for those
+ * names are removed from the other environment's snippet (the rest of it, and
+ * that environment's containers, are untouched, and its next deploy writes its
+ * own snippet again), and Caddy is reloaded. Nothing else of another
+ * environment is ever changed, and a name this payload does not serve is never
+ * taken.
  */
 export async function assertHostingNamesFree(
   layout: LayoutPaths,
@@ -2260,13 +2316,76 @@ export async function assertHostingNamesFree(
   const contents = await Promise.all(
     others.map((name) => Deno.readTextFile(join(sitesDir, name))),
   );
-  const taken = contents.flatMap(snippetSiteAddresses).find((name) =>
-    wanted.has(name)
-  );
-  if (taken !== undefined) {
+  const held = new Map<string, string[]>();
+  others.forEach((file, index) => {
+    const taken = snippetSiteAddresses(contents[index]!).filter((name) =>
+      wanted.has(name)
+    );
+    if (taken.length > 0) held.set(file, [...new Set(taken)]);
+  });
+  if (held.size === 0) return;
+  if (payload.exclusiveHostnames !== true) {
+    const taken = [...held.values()][0]![0]!;
     throw new Error(
       `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
     );
+  }
+  await withHostingSitesLock(() => takeOverStaleHostnames(layout, held));
+}
+
+/** Remove the named site blocks from each other environment's snippet; see {@link assertHostingNamesFree}. */
+async function takeOverStaleHostnames(
+  layout: LayoutPaths,
+  held: ReadonlyMap<string, readonly string[]>,
+): Promise<void> {
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  for (const [file, hostnames] of held) {
+    const path = join(sitesDir, file);
+    // Read again under the lock: another deploy may have rewritten it since.
+    const current = await Deno.readTextFile(path);
+    const { contents, removed } = removeSnippetSites(
+      current,
+      new Set(hostnames),
+    );
+    if (removed.length === 0) continue;
+    const environmentId = file.slice(0, -".caddy".length);
+    logInfo(
+      "deploy",
+      `took over ${
+        removed.join(", ")
+      } from the hosting config of environment ${environmentId}: its hosting was removed or moved there and that environment has not been deployed since`,
+    );
+    if (snippetSiteAddresses(contents).length === 0) {
+      await removeHostingCaddySiteLocked(layout, environmentId);
+      continue;
+    }
+    await activateHostingSite(path, contents);
+    await dropAcmeHostnames(layout, environmentId, removed);
+  }
+}
+
+/** Forget names in an environment's ACME hostname manifest, so the observer stops polling them. */
+async function dropAcmeHostnames(
+  layout: LayoutPaths,
+  environmentId: string,
+  removed: readonly string[],
+): Promise<void> {
+  const path = acmeHostnamesManifestPath(layout, environmentId);
+  try {
+    const listed = JSON.parse(await Deno.readTextFile(path)) as unknown;
+    if (!Array.isArray(listed)) return;
+    const gone = new Set(removed);
+    const next = listed.filter((name) => !gone.has(String(name)));
+    if (next.length !== listed.length) {
+      await Deno.writeTextFile(path, JSON.stringify(next), { mode: 0o640 });
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logWarn(
+        "deploy",
+        `ACME hostname manifest of ${environmentId} kept: ${err}`,
+      );
+    }
   }
 }
 
