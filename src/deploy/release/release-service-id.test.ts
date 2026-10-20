@@ -119,6 +119,31 @@ test("a site with no hostname, source or native unit is found through its folder
   );
 });
 
+test("two folder entries naming the same compose service are refused", () => {
+  const folder = { owner: "alice", scope: "production", slug: "phpsite" };
+  const payload = basePayload({
+    hostings: [],
+    serviceFolders: [
+      { serviceId: "svc-a", composeServiceName: "phpsite", folder },
+      {
+        serviceId: "svc-b",
+        composeServiceName: "phpsite",
+        folder: { ...folder, slug: "other" },
+      },
+    ],
+  });
+  assertThrows(
+    () => resolveReleaseServiceId(payload, "phpsite"),
+    Error,
+    "more than one serviceFolders entry",
+  );
+  assertThrows(
+    () => serviceFolderForCompose(payload, "phpsite"),
+    Error,
+    "more than one serviceFolders entry",
+  );
+});
+
 test("serviceFolderForCompose finds the folder through the release id or the native app's id", () => {
   const folder = { owner: "alice", scope: "production", slug: "api" };
   const releaseId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c01";

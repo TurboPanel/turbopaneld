@@ -2168,10 +2168,23 @@ function stripConfSuffix(name: string): string {
   return name.endsWith(".conf") ? name.slice(0, -".conf".length) : name;
 }
 
-/** The compose service a config file name (after its prefix) belongs to, staging leftovers included. */
-function confServiceName(rest: string): string {
-  return rest.replace(/\.conf(\.[A-Za-z0-9]+)?$/, "");
+/**
+ * The compose service a config file name (after its prefix) belongs to. A
+ * staging leftover (`.tpnew`, `.tpprev`) is stripped first and then the `.conf`
+ * suffix, each once, so a service whose own name ends in `.conf` keeps it.
+ */
+export function confServiceName(rest: string): string {
+  let name = rest;
+  for (const suffix of STAGING_SUFFIXES) {
+    if (name.endsWith(suffix)) {
+      name = name.slice(0, -suffix.length);
+      break;
+    }
+  }
+  return stripConfSuffix(name);
 }
+
+const STAGING_SUFFIXES = [".tpnew", ".tpprev"] as const;
 
 /**
  * Entry names of a root-owned engine config dir, listed through tp-host (the
@@ -2215,11 +2228,12 @@ async function removePrefixedConfFiles(
   dir: string,
   prefix: string,
   label: string,
-  keep?: ReadonlySet<string>,
+  only?: ReadonlySet<string>,
 ): Promise<string[]> {
   const names = (await listEngineConfigDir(dir) ?? []).filter((name) =>
     name.startsWith(prefix) &&
-    !(keep?.has(confServiceName(name.slice(prefix.length))) ?? false)
+    (only === undefined ||
+      only.has(confServiceName(name.slice(prefix.length))))
   );
   const removed: string[] = [];
   await forEachSequential(names, async (name) => {
@@ -4176,7 +4190,7 @@ async function removePhpFpmEngineSites(
   layout: LayoutPaths,
   environmentId: string,
   engine: PhpFpmEngine,
-  keep?: ReadonlySet<string>,
+  only?: ReadonlySet<string>,
 ): Promise<RemovedSites> {
   const prefix = `tp-${environmentId}-`;
   const sitesDir = engine === "caddy"
@@ -4186,7 +4200,7 @@ async function removePhpFpmEngineSites(
     sitesDir,
     prefix,
     engine,
-    keep,
+    only,
   );
   const services = removedNames.map((name) =>
     stripConfSuffix(name.slice(prefix.length))
@@ -4203,7 +4217,7 @@ async function removePhpFpmEngineSites(
       poolsDir,
       prefix,
       `php-fpm ${series} pool`,
-      keep,
+      only,
     )).length;
     if (removed > 0) touchedSeries.add(series);
     poolsRemoved += removed;
@@ -4465,7 +4479,7 @@ async function disableIdleOpenLiteSpeed(
 async function removeOpenLiteSpeedSites(
   layout: LayoutPaths,
   environmentId: string,
-  keep?: ReadonlySet<string>,
+  only?: ReadonlySet<string>,
 ): Promise<number> {
   const prefix = `tp-${environmentId}-`;
   const sitesDir = join(layout.configDir, "openlitespeed", "sites");
@@ -4474,7 +4488,7 @@ async function removeOpenLiteSpeedSites(
     sitesDir,
     prefix,
     "OpenLiteSpeed",
-    keep,
+    only,
   );
   if (removedFragments.length === 0) return 0;
 
@@ -4499,17 +4513,11 @@ async function tryReloadAfterSiteRemoval(
   }
 }
 
-/**
- * Remove nginx/apache/OpenLiteSpeed/Caddy site configs for an environment
- * (best-effort reload). With `keep`, only the sites of services not named in it
- * go: a deploy passes the sites it just applied, so the vhost, pool and runtime
- * of a site that left the compose file are removed and nothing else is.
- */
+/** Remove nginx/apache/OpenLiteSpeed site configs for an environment (best-effort reload). */
 export async function removeSites(
   layout: LayoutPaths,
   environmentId: string,
   deps?: RemoveSiteDeps,
-  keep?: ReadonlySet<string>,
 ): Promise<void> {
   await withSiteIo(resolveSiteIo(deps), async () => {
     assertSafeId(environmentId, "environmentId");
@@ -4517,24 +4525,20 @@ export async function removeSites(
       layout,
       environmentId,
       "caddy",
-      keep,
     );
     const nginxRemoved = await removePhpFpmEngineSites(
       layout,
       environmentId,
       "nginx",
-      keep,
     );
     const apacheRemoved = await removePhpFpmEngineSites(
       layout,
       environmentId,
       "apache",
-      keep,
     );
     const openlitespeedRemoved = await removeOpenLiteSpeedSites(
       layout,
       environmentId,
-      keep,
     );
 
     // php-fpm first, so no engine config-tests against a socket whose pool has
@@ -4588,6 +4592,119 @@ export async function removeSites(
     await pruneUnusedSoftware(layout);
   });
 }
+
+/**
+ * Remove only the named sites of one environment: each one's vhost on every
+ * engine, its php-fpm pool and its per-site PHP runtime, then reload the
+ * engines and php-fpm series that lost something (best effort, a failed reload
+ * is logged and never fails the deploy that asked).
+ *
+ * The control plane names the sites that left the compose file. Nothing is ever
+ * inferred from a site being absent from a payload, and nothing outside the
+ * named services of this environment is touched: no host-wide sweep of orphaned
+ * runtimes, no idle-series disable and no software prune. Those belong to the
+ * whole-environment removal ({@link removeSites}), which runs when the
+ * environment itself goes. Names that fail the compose service name rules are
+ * refused before anything is removed.
+ */
+export async function removeNamedSites(
+  layout: LayoutPaths,
+  environmentId: string,
+  services: readonly string[],
+  deps?: RemoveSiteDeps,
+): Promise<string[]> {
+  return await withSiteIo(resolveSiteIo(deps), async () => {
+    assertSafeId(environmentId, "environmentId");
+    for (const name of services) {
+      if (!REMOVED_SITE_NAME_RE.test(name) || name === "." || name === "..") {
+        throw new Error(
+          `site name ${
+            JSON.stringify(name)
+          } is not a valid compose service name`,
+        );
+      }
+    }
+    const only = new Set(services);
+    if (only.size === 0) return [];
+    const caddyRemoved = await removePhpFpmEngineSites(
+      layout,
+      environmentId,
+      "caddy",
+      only,
+    );
+    const nginxRemoved = await removePhpFpmEngineSites(
+      layout,
+      environmentId,
+      "nginx",
+      only,
+    );
+    const apacheRemoved = await removePhpFpmEngineSites(
+      layout,
+      environmentId,
+      "apache",
+      only,
+    );
+    const openlitespeedRemoved = await removeOpenLiteSpeedSites(
+      layout,
+      environmentId,
+      only,
+    );
+
+    const touchedSeries = new Set<string>([
+      ...caddyRemoved.touchedSeries,
+      ...nginxRemoved.touchedSeries,
+      ...apacheRemoved.touchedSeries,
+    ]);
+    // php-fpm first, so no engine config-tests against a socket whose pool has just gone.
+    await forEachSequential(
+      [...touchedSeries].sort((a, b) =>
+        a.localeCompare(b, undefined, { numeric: true })
+      ),
+      (series) =>
+        tryReloadAfterSiteRemoval(
+          `php-fpm ${series}`,
+          () => reloadPhpFpm(layout, series),
+        ),
+    );
+    await forEachSequential(
+      [
+        ["caddy", caddyRemoved.sitesRemoved],
+        ["nginx", nginxRemoved.sitesRemoved],
+        ["apache", apacheRemoved.sitesRemoved],
+        ["openlitespeed", openlitespeedRemoved],
+      ] as const,
+      async ([engine, removed]) => {
+        if (removed === 0) return;
+        const driver = SITE_ENGINE_DRIVERS[engine];
+        await tryReloadAfterSiteRemoval(
+          driver.label,
+          () => driver.reload(run, layout, false),
+        );
+      },
+    );
+    // Only the runtimes the named services own; an unreferenced one is not ours to judge.
+    const listing = await listSitePhpUnits(sitePhpIo());
+    if (listing.size > 0) {
+      const keys = [...only].map((service) =>
+        sitePhpKey(environmentId, service)
+      );
+      const ids = [...listing.keys()].filter((id) =>
+        keys.some((key) => isSitePhpRuntimeOf(id, key))
+      );
+      if (ids.length > 0) {
+        await removeSitePhpRuntimes(
+          sitePhpIo(),
+          layout.configDir,
+          ids,
+          listing,
+        );
+      }
+    }
+    return [...only].sort((a, b) => a.localeCompare(b));
+  });
+}
+
+const REMOVED_SITE_NAME_RE = /^[A-Za-z0-9._-]+$/;
 
 /**
  * Remove the per-site PHP runtimes of the given services of one environment,

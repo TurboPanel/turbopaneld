@@ -136,7 +136,7 @@ import {
   ensureSiteEngines,
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
-  removeSites,
+  removeNamedSites,
   resolveSiteDocumentRoot,
   type SiteManagedDirectory,
   type SiteRelease,
@@ -1444,22 +1444,43 @@ async function applyDeploySites(
   releaseBindings: ReadonlyMap<string, SiteRelease>,
   managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>,
 ): Promise<void> {
-  if (sites.length > 0) {
-    await applySites(layout, environmentId, sites, {
-      dockerBindAddress,
-      releaseBindings,
-      managedDirectoryBindings,
-    });
-  }
-  // A site that left the compose file keeps no vhost, pool or runtime: what
-  // this deploy applied is what stays. Its folder stays too, as an orphan.
+  if (sites.length === 0) return;
+  await applySites(layout, environmentId, sites, {
+    dockerBindAddress,
+    releaseBindings,
+    managedDirectoryBindings,
+  });
+}
+
+/**
+ * Remove the vhost, pool and runtime of the sites the control plane says left
+ * the compose file (`removedSites[]`). Only what is named goes, and a name that
+ * is also a site of this deploy never does. A payload that names none (an older
+ * control plane, a transient or partial payload) removes nothing: absence from
+ * `sites[]` is never read as a deletion.
+ *
+ * Runs once everything else in the deploy has succeeded, so a deploy that fails
+ * part way never leaves the old vhosts gone. A failed removal is logged and
+ * does not fail a deploy that has already been published; the next deploy
+ * names the site again. The folder of a removed site stays, as an orphan.
+ */
+export async function removeLeftSites(
+  layout: LayoutPaths,
+  payload: Pick<
+    EnvironmentDeployPayload,
+    "environmentId" | "sites" | "removedSites"
+  >,
+  removeNamed: typeof removeNamedSites = removeNamedSites,
+): Promise<string[]> {
+  const current = new Set(
+    (payload.sites ?? []).map((site) => site.composeServiceName),
+  );
+  const names = (payload.removedSites ?? []).filter((name) =>
+    !current.has(name)
+  );
+  if (names.length === 0) return [];
   try {
-    await removeSites(
-      layout,
-      environmentId,
-      undefined,
-      new Set(sites.map((site) => site.composeServiceName)),
-    );
+    return await removeNamed(layout, payload.environmentId, names);
   } catch (err) {
     logWarn(
       "deploy",
@@ -1467,6 +1488,7 @@ async function applyDeploySites(
         err instanceof Error ? err.message : String(err)
       }`,
     );
+    return [];
   }
 }
 
@@ -2043,6 +2065,8 @@ async function deployContainerServices(
     const volumeOwnerIds = await resolveVolumeOwnerIds(
       parsedPayload.storageMaterial ?? [],
       parsedPayload.principalMaterial,
+      undefined,
+      (line) => logSink.onLine("stdout", line),
     );
     await grantDeclaredVolumeUsers(
       layout,
@@ -2923,6 +2947,10 @@ async function deployEnvironmentHolding(
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
   runtime.progress.done("certificates");
+
+  // Last of the changes to the host: the containers are up and the new sites
+  // are serving, so a deploy that failed earlier never left an old vhost gone.
+  await removeLeftSites(layout, parsedPayload);
 
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({

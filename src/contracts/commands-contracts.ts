@@ -1593,6 +1593,13 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * with no entry is refused. Kept optional on the wire for compatibility.
    */
   serviceFolders?: EnvironmentDeployServiceFolder[];
+  /**
+   * Compose service names of sites that left the compose file. The host removes
+   * the vhost, php-fpm pool and per-site runtime of exactly these, in this
+   * environment, after the deploy has succeeded. Absent or empty removes
+   * nothing: a site missing from `sites` is never read as removed.
+   */
+  removedSites?: string[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -4441,6 +4448,45 @@ function parseStorageMount(value: unknown): EnvironmentDeployStorageMount {
   return mount;
 }
 
+/** The folder of each host-run service. Two entries may not name the same compose service. */
+function parseServiceFolders(
+  value: unknown,
+): EnvironmentDeployServiceFolder[] | undefined {
+  const entries = parseOptionalMaterialArray(
+    value,
+    "serviceFolders",
+    parseServiceFolder,
+  );
+  const named = new Set<string>();
+  for (const entry of entries ?? []) {
+    if (entry.composeServiceName === undefined) continue;
+    if (named.has(entry.composeServiceName)) {
+      throw new TypeError(
+        `serviceFolders names the service ${entry.composeServiceName} twice`,
+      );
+    }
+    named.add(entry.composeServiceName);
+  }
+  return entries;
+}
+
+/** The sites that left the compose file: an array of compose service names, or absent. */
+function parseRemovedSites(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("removedSites must be an array");
+  }
+  return value.map((name) => {
+    if (
+      typeof name !== "string" || name === "." || name === ".." ||
+      !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(name)
+    ) {
+      throw new TypeError("removedSites must hold compose service names");
+    }
+    return name;
+  });
+}
+
 function parseServiceFolder(value: unknown): EnvironmentDeployServiceFolder {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment deploy serviceFolders entry");
@@ -6368,11 +6414,8 @@ export function parseEnvironmentDeployPayload(
         "storageMaterial",
         parseStorageMaterial,
       ),
-      serviceFolders: parseOptionalMaterialArray(
-        value.serviceFolders,
-        "serviceFolders",
-        parseServiceFolder,
-      ),
+      serviceFolders: parseServiceFolders(value.serviceFolders),
+      removedSites: parseRemovedSites(value.removedSites),
       principalMaterial: parseOptionalMaterialArray(
         value.principalMaterial,
         "principalMaterial",

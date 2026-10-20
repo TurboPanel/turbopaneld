@@ -1,7 +1,10 @@
 import type { EnvironmentDeployStorageMaterial } from "../contracts/commands-contracts.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
-import type { VolumeOwnerIds } from "./materialize-storage.ts";
+import {
+  assertOwnerIdsInBand,
+  type VolumeOwnerIds,
+} from "./materialize-storage.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -154,6 +157,9 @@ function applyVolumeUser(
     ids === undefined ||
     (entry.folder === undefined && entry.provider !== "docker")
   ) return;
+  // A second line of defence: whatever produced the ids, a container is never
+  // run as root or as an account outside the site owner band.
+  assertOwnerIdsInBand(entry.storageId, entry.folder?.owner ?? entry.name, ids);
   const user = `${ids.uid}:${ids.gid}`;
   for (const mount of entry.mounts) {
     const name = mount.composeServiceName;
