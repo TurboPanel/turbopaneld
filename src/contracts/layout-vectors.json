@@ -42,7 +42,8 @@
       "current",
       "shared",
       "lost-found",
-      "tmp-staging"
+      "tmp-staging",
+      "base"
     ],
     "ownerReservedPrefixes": ["tp", "systemd-"],
     "ownerReservedSuffix": "-grp",
@@ -342,6 +343,14 @@
       "valid": false
     },
     {
+      "value": "base",
+      "valid": false
+    },
+    {
+      "value": "Base",
+      "valid": false
+    },
+    {
       "value": ".hidden",
       "valid": false
     }
@@ -361,6 +370,10 @@
     },
     {
       "value": "home",
+      "valid": false
+    },
+    {
+      "value": "base",
       "valid": false
     },
     {

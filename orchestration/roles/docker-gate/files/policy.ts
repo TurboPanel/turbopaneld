@@ -333,6 +333,7 @@ const PRINCIPAL_NOT_SCOPES = new Set([
   "shared",
   "lost-found",
   "tmp-staging",
+  "base",
 ]);
 /** Per-site directories (`sites/<serviceId>/<name>`) a container may bind. */
 const PRINCIPAL_SITE_AREAS = new Set(["shared", "webroot", "releases"]);
