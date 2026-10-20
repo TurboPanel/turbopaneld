@@ -10,6 +10,8 @@ import { ensureAssetFolder } from "./asset-folders.ts";
 import {
   ensureDirectoryOwnedByPrincipal,
   lookupPrincipalIds,
+  PRINCIPAL_ID_MAX,
+  PRINCIPAL_ID_MIN,
   principalUnixGroupName,
   type RunFn,
 } from "./ensure-principal.ts";
@@ -362,28 +364,67 @@ export type VolumeOwnerIds = ReadonlyMap<
   { uid: number; gid: number }
 >;
 
+/** The site owner an entry belongs to: its folder's owner, else the account its principal names. */
+function ownerNameOf(
+  entry: EnvironmentDeployStorageMaterial,
+  byId: Map<string, EnvironmentDeployPrincipalMaterial>,
+): string | undefined {
+  if (entry.folder !== undefined) return entry.folder.owner;
+  return entry.principalId ? byId.get(entry.principalId)?.username : undefined;
+}
+
 /**
- * Ids of the site owner behind each volume folder, by storage id. A container
- * that mounts the folder is run as these ids (unless its own compose file
- * names a user), so what it writes belongs to the owner the SFTP login and the
- * backups see. The ids come from the deploy's principal material when it names
- * them, else from the account on this host.
+ * A container is run as these ids, so they must belong to a site owner's
+ * account: inside the band the host gives site owners (never root, never a
+ * system account such as one a package made, which a site owner's name could
+ * otherwise be matched to). Refused with a plain message.
+ */
+export function assertOwnerIdsInBand(
+  storageId: string,
+  owner: string,
+  ids: { uid: number; gid: number },
+): void {
+  const inBand = (id: number) =>
+    Number.isInteger(id) && id >= PRINCIPAL_ID_MIN && id <= PRINCIPAL_ID_MAX;
+  if (!inBand(ids.uid) || !inBand(ids.gid)) {
+    throw new Error(
+      `storage ${storageId}: the account ${owner} has uid ${ids.uid} and gid ${ids.gid}, outside the range used for site owners (${PRINCIPAL_ID_MIN} to ${PRINCIPAL_ID_MAX}), so containers will not be run as it`,
+    );
+  }
+}
+
+/**
+ * Ids of the site owner behind each volume folder and each named Docker volume
+ * linked to an owner, by storage id. A container that mounts one is run as
+ * these ids (unless its own compose file names a user), so what it writes
+ * belongs to the owner the SFTP login and the backups see. The ids come from
+ * the account on this host, else from the deploy's principal material, and
+ * must sit in the site owner band ({@link assertOwnerIdsInBand}).
+ *
+ * An owner with no account on this host yet fails the deploy for a folder (the
+ * folder cannot be made for nobody). For a linked named volume it only skips
+ * that volume's owner setup, with a line to `onSkip`: the volume still works for
+ * a container that runs as its image's own user, so a missing account should
+ * not block a deploy that does not need it.
  */
 export async function resolveVolumeOwnerIds(
   entries: readonly EnvironmentDeployStorageMaterial[],
   principals: readonly EnvironmentDeployPrincipalMaterial[] | undefined,
   runFn?: RunFn,
+  onSkip?: (line: string) => void,
 ): Promise<VolumeOwnerIds> {
   const byId = principalById(
     principals as EnvironmentDeployPrincipalMaterial[],
   );
   const owners = new Map<string, { uid: number; gid: number }>();
   const out = new Map<string, { uid: number; gid: number }>();
+  // The owner's folders, and the named Docker volumes linked to a site owner.
   const wanted = entries.filter((entry) =>
-    entry.folder !== undefined && entry.kind === "directory"
+    (entry.folder !== undefined && entry.kind === "directory") ||
+    (entry.provider === "docker" && ownerNameOf(entry, byId) !== undefined)
   );
   await forEachSequential(wanted, async (entry) => {
-    const owner = entry.folder!.owner;
+    const owner = ownerNameOf(entry, byId)!;
     let ids = owners.get(owner);
     if (ids === undefined) {
       // The account on this host is the truth; the deploy's own ids only
@@ -396,10 +437,17 @@ export async function resolveVolumeOwnerIds(
           ? { uid: material.uid, gid: material.gid }
           : undefined);
       if (ids === undefined) {
+        if (entry.folder === undefined) {
+          onSkip?.(
+            `the volume ${entry.name} is linked to ${owner}, who has no account on this host yet; its containers are not run as the owner`,
+          );
+          return;
+        }
         throw new Error(
           `storage ${entry.storageId}: the site owner ${owner} has no account on this host yet`,
         );
       }
+      assertOwnerIdsInBand(entry.storageId, owner, ids);
       owners.set(owner, ids);
     }
     out.set(entry.storageId, ids);

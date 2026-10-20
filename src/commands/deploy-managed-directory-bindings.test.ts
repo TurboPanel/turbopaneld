@@ -92,3 +92,19 @@ test("a site that has a release stays on the release lane", () => {
   );
   assertEquals(bindings.size, 0);
 });
+
+test("a site with no hostname is served from its folder, found by the service name", () => {
+  const bindings = deployManagedDirectoryBindings(
+    payload({
+      hostings: [],
+      serviceFolders: [{
+        serviceId: SERVICE_ID,
+        composeServiceName: "php",
+        folder: { owner: "owner", scope: "prod", slug: "php" },
+      }],
+    }),
+    new Map(),
+  );
+  assertEquals(bindings.get("php")?.serviceId, SERVICE_ID);
+  assertEquals(bindings.get("php")?.folder?.slug, "php");
+});

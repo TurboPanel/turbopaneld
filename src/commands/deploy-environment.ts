@@ -4,6 +4,7 @@ import {
 } from "../deploy/apply-storage-volumes.ts";
 import { applyVolumeAccess } from "../deploy/volume-access.ts";
 import {
+  deploymentBindWarnings,
   ensureNamedVolumeOwners,
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
@@ -135,6 +136,7 @@ import {
   ensureSiteEngines,
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
+  removeNamedSites,
   resolveSiteDocumentRoot,
   type SiteManagedDirectory,
   type SiteRelease,
@@ -1451,6 +1453,46 @@ async function applyDeploySites(
 }
 
 /**
+ * Remove the vhost, pool and runtime of the sites the control plane says left
+ * the compose file (`removedSites[]`). Only what is named goes, and a name that
+ * is also a site of this deploy never does. A payload that names none (an older
+ * control plane, a transient or partial payload) removes nothing: absence from
+ * `sites[]` is never read as a deletion.
+ *
+ * Runs once everything else in the deploy has succeeded, so a deploy that fails
+ * part way never leaves the old vhosts gone. A failed removal is logged and
+ * does not fail a deploy that has already been published; the next deploy
+ * names the site again. The folder of a removed site stays, as an orphan.
+ */
+export async function removeLeftSites(
+  layout: LayoutPaths,
+  payload: Pick<
+    EnvironmentDeployPayload,
+    "environmentId" | "sites" | "removedSites"
+  >,
+  removeNamed: typeof removeNamedSites = removeNamedSites,
+): Promise<string[]> {
+  const current = new Set(
+    (payload.sites ?? []).map((site) => site.composeServiceName),
+  );
+  const names = (payload.removedSites ?? []).filter((name) =>
+    !current.has(name)
+  );
+  if (names.length === 0) return [];
+  try {
+    return await removeNamed(layout, payload.environmentId, names);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `sites that left the compose file could not be removed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return [];
+  }
+}
+
+/**
  * Supervise this deploy's native (`serviceKind: node`) apps.
  *
  * Runs after `applySourceReleases` and the site apply, for the same
@@ -2023,6 +2065,8 @@ async function deployContainerServices(
     const volumeOwnerIds = await resolveVolumeOwnerIds(
       parsedPayload.storageMaterial ?? [],
       parsedPayload.principalMaterial,
+      undefined,
+      (line) => logSink.onLine("stdout", line),
     );
     await grantDeclaredVolumeUsers(
       layout,
@@ -2118,6 +2162,17 @@ async function deployContainerServices(
 
     // A container run as the site owner must be able to write the named
     // volumes it mounts too: Docker makes those root-owned.
+    for (
+      const line of deploymentBindWarnings(
+        fragment.services as
+          | Record<string, Record<string, unknown>>
+          | undefined,
+        resolved.services as Record<string, Record<string, unknown>>,
+        [stageDir, deploymentDir],
+      )
+    ) {
+      logSink.onLine("stdout", line);
+    }
     await ensureNamedVolumeOwners(
       namedVolumeOwnerTargets(
         fragment.services as
@@ -2134,6 +2189,15 @@ async function deployContainerServices(
               ? [entry.volumeName]
               : []
           ),
+        ),
+        new Map(
+          (parsedPayload.storageMaterial ?? []).flatMap((entry) => {
+            const ids = volumeOwnerIds.get(entry.storageId);
+            return entry.provider === "docker" && entry.volumeName &&
+                ids !== undefined
+              ? [[entry.volumeName, `${ids.uid}:${ids.gid}`] as const]
+              : [];
+          }),
         ),
       ),
       {
@@ -2883,6 +2947,10 @@ async function deployEnvironmentHolding(
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
   runtime.progress.done("certificates");
+
+  // Last of the changes to the host: the containers are up and the new sites
+  // are serving, so a deploy that failed earlier never left an old vhost gone.
+  await removeLeftSites(layout, parsedPayload);
 
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({

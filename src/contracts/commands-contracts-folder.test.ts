@@ -121,11 +121,24 @@ test("keeps the service folders of a deploy and refuses a bad one", () => {
     [{ serviceId: "svc-1", folder }],
   );
   assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      serviceFolders: [{
+        serviceId: "svc-1",
+        composeServiceName: "phpsite",
+        folder,
+      }],
+    }).serviceFolders,
+    [{ serviceId: "svc-1", composeServiceName: "phpsite", folder }],
+  );
+  assertEquals(
     parseEnvironmentDeployPayload(DEPLOY_BASE).serviceFolders,
     undefined,
   );
   for (
     const bad of [
+      { serviceId: "svc-1", composeServiceName: "a/b", folder },
+      { serviceId: "svc-1", composeServiceName: 7, folder },
       { serviceId: "svc-1", folder: { ...folder, slug: ".." } },
       { serviceId: "svc-1", folder: { ...folder, scope: "home" } },
       { serviceId: "svc-1", folder: { ...folder, path: "/etc" } },
@@ -142,4 +155,56 @@ test("keeps the service folders of a deploy and refuses a bad one", () => {
       TypeError,
     );
   }
+});
+
+test("keeps the sites that left the compose file and refuses a malformed list", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      removedSites: ["plain", "old.site"],
+    })
+      .removedSites,
+    ["plain", "old.site"],
+  );
+  assertEquals(
+    parseEnvironmentDeployPayload({ ...DEPLOY_BASE, removedSites: [] })
+      .removedSites,
+    [],
+  );
+  assertEquals(
+    parseEnvironmentDeployPayload(DEPLOY_BASE).removedSites,
+    undefined,
+  );
+  for (
+    const bad of ["plain", { 0: "plain" }, ["a/b"], [".."], [7], [""], [
+      "ok",
+      null,
+    ]]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({ ...DEPLOY_BASE, removedSites: bad }),
+      TypeError,
+    );
+  }
+});
+
+test("two service folder entries may not name the same compose service", () => {
+  const folder = { owner: "alice", scope: "production", slug: "a" };
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...DEPLOY_BASE,
+        serviceFolders: [
+          { serviceId: "svc-1", composeServiceName: "web", folder },
+          {
+            serviceId: "svc-2",
+            composeServiceName: "web",
+            folder: { ...folder, slug: "b" },
+          },
+        ],
+      }),
+    TypeError,
+    "twice",
+  );
 });

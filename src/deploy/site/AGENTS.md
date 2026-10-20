@@ -541,6 +541,19 @@ probe on `127.0.0.1` fails. The post-apply probe is still status-only: this
 check, not the probe, is what keeps one tenant's domain off another's
 listener.
 
+## Sites that left the compose file
+
+The control plane names them in `removedSites[]` on the deploy (absent or empty
+removes nothing; a site missing from `sites[]` is never read as removed). After
+everything else in the deploy has succeeded, `removeLeftSites` hands the names
+that are not also in `sites[]` to `removeNamedSites`, which removes exactly
+those sites' vhost on every engine, php-fpm pool and per-site PHP runtime, in
+this environment only, and reloads the engines that lost one. It runs no
+host-wide sweep, no idle-series disable and no software prune: those belong to
+the whole-environment removal (`removeSites`, on stop and delete). A failed
+removal is logged and does not fail the deploy; the folder of the site stays as
+an orphan.
+
 ## Managed-directory sites
 
 **Where it lives.** The service folder (`serviceFolders[]` on the deploy, always

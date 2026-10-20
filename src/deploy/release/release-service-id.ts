@@ -60,6 +60,25 @@ export function serviceFolderFromPayload(
  * folder, so the unit and the release it runs always agree. The release id is
  * tried first, then the ids the other lists carry for the same compose service.
  */
+/**
+ * The folder entry that names a compose service, if any. Two entries naming the
+ * same service are refused: which folder the site belongs in would be a guess.
+ */
+function serviceFolderEntryByName(
+  payload: Pick<EnvironmentDeployPayload, "serviceFolders">,
+  composeServiceName: string,
+): { serviceId: string; folder: FolderRefParts } | undefined {
+  const found = (payload.serviceFolders ?? []).filter((entry) =>
+    entry.composeServiceName === composeServiceName
+  );
+  if (found.length > 1) {
+    throw new Error(
+      `deploy payload names the service ${composeServiceName} in more than one serviceFolders entry`,
+    );
+  }
+  return found[0];
+}
+
 export function serviceFolderForCompose(
   payload: EnvironmentDeployPayload,
   composeServiceName: string,
@@ -84,6 +103,8 @@ export function serviceFolderForCompose(
     )?.folder;
     if (folder !== undefined) return folder;
   }
+  const named = serviceFolderEntryByName(payload, composeServiceName)?.folder;
+  if (named !== undefined) return named;
   throw new Error(
     `deploy payload has no serviceFolders entry for service ${composeServiceName}; the control plane must send a folder for every host-run service`,
   );
@@ -127,6 +148,11 @@ export function resolveReleaseServiceId(
     (row) => row.composeServiceName === composeServiceName && row.serviceId,
   );
   if (ingress?.serviceId) return ingress.serviceId;
+
+  // A site or app with no hostname, source or native unit appears in none of
+  // those lists; its folder entry names it.
+  const folder = serviceFolderEntryByName(payload, composeServiceName);
+  if (folder !== undefined) return folder.serviceId;
 
   return composeServiceName;
 }

@@ -9,7 +9,9 @@ import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   applySites,
+  confServiceName,
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
+  removeNamedSites,
   removeSites,
   resolveSiteEngineNeeds,
   type SiteApplySpec,
@@ -592,6 +594,121 @@ test("removeSites removes nginx/apache/ols configs via mocked sudo", async () =>
   } finally {
     await cleanup();
   }
+});
+
+/** Every file under the config dir whose name is `tp-<env>-<service>.conf*`, vhosts and pools alike. */
+async function siteConfFiles(
+  layout: LayoutPaths,
+  environmentId: string,
+  service: string,
+): Promise<string[]> {
+  const found: string[] = [];
+  const prefix = `tp-${environmentId}-${service}.conf`;
+  const walk = async (dir: string): Promise<void> => {
+    try {
+      for await (const entry of Deno.readDir(dir)) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory) await walk(path);
+        else if (entry.name.startsWith(prefix)) found.push(path);
+      }
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  };
+  await walk(layout.configDir);
+  return found;
+}
+
+test("removeNamedSites removes only the named sites of this environment and nothing host-wide", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(
+      layout,
+      "envA",
+      [nginxSite, apachePhpSite, olsSite],
+      { run, runPlaybook },
+    );
+    await applySites(
+      layout,
+      "envB",
+      [
+        { ...nginxSite, listenPort: 18190 },
+        { ...apachePhpSite, listenPort: 18191 },
+        { ...olsSite, listenPort: 18192 },
+      ],
+      { run, runPlaybook },
+    );
+    const before = {
+      aWww: await siteConfFiles(layout, "envA", "www"),
+      aPhp: await siteConfFiles(layout, "envA", "phpapp"),
+      aStatic: await siteConfFiles(layout, "envA", "static"),
+      bWww: await siteConfFiles(layout, "envB", "www"),
+      bPhp: await siteConfFiles(layout, "envB", "phpapp"),
+      bStatic: await siteConfFiles(layout, "envB", "static"),
+    };
+    for (const files of Object.values(before)) {
+      assertEquals(files.length > 0, true);
+    }
+
+    calls.length = 0;
+    const removed = await removeNamedSites(
+      layout,
+      "envA",
+      ["static", "phpapp"],
+      { run },
+    );
+    assertEquals(removed, ["phpapp", "static"]);
+
+    // The named sites of this environment are gone: vhost, pool and fragment.
+    assertEquals(await siteConfFiles(layout, "envA", "phpapp"), []);
+    assertEquals(await siteConfFiles(layout, "envA", "static"), []);
+    // The site not named, and every site of the other environment, stay.
+    assertEquals(await siteConfFiles(layout, "envA", "www"), before.aWww);
+    assertEquals(await siteConfFiles(layout, "envB", "www"), before.bWww);
+    assertEquals(await siteConfFiles(layout, "envB", "phpapp"), before.bPhp);
+    assertEquals(await siteConfFiles(layout, "envB", "static"), before.bStatic);
+    // No software is disabled or removed by this path.
+    assertEquals(
+      calls.some((call) =>
+        call.args.includes("disable") || call.args.includes("uninstall")
+      ),
+      false,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeNamedSites with no names, or an unsafe name, removes nothing", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envN", [nginxSite], { run, runPlaybook });
+    const path = join(layout.configDir, "nginx", "sites", "tp-envN-www.conf");
+    assertEquals(await removeNamedSites(layout, "envN", [], { run }), []);
+    for (const bad of ["../www", "a/b", "", ".", ".."]) {
+      await assertRejects(
+        () => removeNamedSites(layout, "envN", ["www", bad], { run }),
+        Error,
+        "not a valid compose service name",
+        bad,
+      );
+    }
+    assertEquals((await Deno.stat(path)).isFile, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a config name is keyed to its service, even when the service name ends in .conf", () => {
+  assertEquals(confServiceName("www.conf"), "www");
+  assertEquals(confServiceName("a.conf.conf"), "a.conf");
+  assertEquals(confServiceName("www.conf.tpnew"), "www");
+  assertEquals(confServiceName("a.conf.conf.tpprev"), "a.conf");
+  assertEquals(confServiceName("web.tpnew.conf"), "web.tpnew");
 });
 
 test("applySites rejects unsafe environmentId", async () => {

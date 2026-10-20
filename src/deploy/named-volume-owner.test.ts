@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import {
+  deploymentBindWarnings,
   ensureNamedVolumeOwners,
   type NamedVolumeOwnerPlan,
   namedVolumeOwnerTargets,
@@ -174,6 +175,68 @@ test("a volume the platform created is not external to it, an authored external 
     namedVolumeOwnerTargets(overlay, services, external, "p", new Set())
       .targets.length,
     0,
+  );
+});
+
+test("a declared user equal to the owner's uid is given the volume, any other declared user is not", () => {
+  const id = "01a15611-eee5-7af5-988a-917c1a5d3a6a";
+  const withUser = (user: string) => ({
+    store: { image: "busybox:1.36", user, volumes: [vol(id, "/vol")] },
+  });
+  const owners = new Map([[id, "30001:30001"]]);
+  const pick = (user: string) =>
+    namedVolumeOwnerTargets(
+      undefined,
+      withUser(user),
+      { [id]: { name: id } },
+      "p",
+      new Set([id]),
+      owners,
+    ).targets.map((t) => t.user);
+  assertEquals(pick("30001:30001"), ["30001:30001"]);
+  assertEquals(pick("30001"), ["30001:30001"]);
+  assertEquals(pick("999"), []);
+  assertEquals(pick("0"), []);
+  assertEquals(pick(""), []);
+  // A volume with no linked owner is never given on a declared user's say-so.
+  assertEquals(
+    namedVolumeOwnerTargets(undefined, withUser("30001"), {}, "p").targets,
+    [],
+  );
+});
+
+test("a bind inside the deployment folder is warned about for a container running as another user", () => {
+  const dirs = ["/var/lib/turbopanel/deployments/env/x"];
+  const services = {
+    web: {
+      user: "30001:30001",
+      volumes: [
+        { type: "bind", source: `${dirs[0]}/files`, target: "/files" },
+        {
+          type: "bind",
+          source: `${dirs[0]}/ro`,
+          target: "/ro",
+          read_only: true,
+        },
+        { type: "bind", source: "/srv/users/o/p/volumes/b", target: "/b" },
+      ],
+    },
+    root: {
+      volumes: [{ type: "bind", source: `${dirs[0]}/r`, target: "/r" }],
+    },
+  };
+  const lines = deploymentBindWarnings(undefined, services, dirs);
+  assertEquals(lines.length, 1);
+  assertEquals(lines[0]!.startsWith("/files of web"), true);
+  assertEquals(lines[0]!.includes("30001:30001"), true);
+  // The user the daemon set counts too.
+  assertEquals(
+    deploymentBindWarnings(
+      { root: { user: "30002:30002" } },
+      services,
+      dirs,
+    ).length,
+    2,
   );
 });
 
