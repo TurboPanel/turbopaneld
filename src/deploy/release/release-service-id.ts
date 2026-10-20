@@ -46,7 +46,7 @@ export function serviceFolderFromPayload(
   )?.folder;
   if (folder === undefined) {
     throw new Error(
-      `Service ${serviceId} has no folder planned on this server; redeploy from the panel`,
+      `Service ${serviceId} has no folder planned on this server; redeploy from the panel (no serviceFolders entry)`,
     );
   }
   return folder;
@@ -85,7 +85,7 @@ export function serviceFolderForCompose(
     if (folder !== undefined) return folder;
   }
   throw new Error(
-    `Service ${composeServiceName} has no folder planned on this server; redeploy from the panel`,
+    `Service ${composeServiceName} has no folder planned on this server; redeploy from the panel (no serviceFolders entry)`,
   );
 }
 

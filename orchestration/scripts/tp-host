@@ -4237,14 +4237,14 @@ tp_verb_cert_export() {
   printf '%s\n' "$_ce_priv"
 }
 
-# Allocated sizes of every principal home and of every service folder
-# (`<home>/<scope>/services/<name>`), for the metrics collector: homes are
-# root-owned 0750 root:<principal>, so the daemon account cannot walk them.
-# Sizes and directory names only, `home <bytes> <name>` / `site <bytes>
-# <scope>/<name>`; no file name or content is printed. Nothing follows a symlink: each directory is
+# Allocated sizes of every principal home and of every site directory
+# (`<home>/sites/<id>`), for the metrics collector: homes are root-owned
+# 0750 root:<principal>, so the daemon account cannot walk them. Sizes and
+# directory names only, `home <bytes> <name>` / `site <bytes> <id>`; no file
+# name or content is printed. Nothing follows a symlink: each directory is
 # pinned with `cd -P`, and `du -P` never follows one.
-# One bounded walk per home: `du -d 3` reports the home itself (depth 0) and
-# every directory three levels down, which includes `<scope>/services/<name>`, so no file is
+# One bounded walk per home: `du -d 2` reports the home itself (depth 0) and
+# every directory two levels down, which includes `sites/<id>`, so no file is
 # visited twice. Idle I/O class and lowest CPU priority where the tools exist,
 # a hard per-home limit, and a time budget for the whole verb so a home with
 # millions of files cannot hold root busy: a home that times out is skipped.
@@ -4253,9 +4253,9 @@ TP_SITE_USAGE_TOTAL_SECONDS=600
 
 tp_site_usage_walk() {
   if command -v ionice >/dev/null 2>&1; then
-    set -- ionice -c3 nice -n 19 du -kxP -d 3 -- .
+    set -- ionice -c3 nice -n 19 du -kxP -d 2 -- .
   else
-    set -- nice -n 19 du -kxP -d 3 -- .
+    set -- nice -n 19 du -kxP -d 2 -- .
   fi
   if command -v timeout >/dev/null 2>&1; then
     timeout -k 5 "$TP_SITE_USAGE_HOME_SECONDS" "$@" 2>/dev/null
@@ -4264,23 +4264,18 @@ tp_site_usage_walk() {
   fi
 }
 
-# Reads `du` rows from stdin, prints the home row first, then each service
-# folder row. A scope or folder name that fails the shared folder rules is
-# left out.
+# Reads `du` rows from stdin, prints the home row first, then each site row.
 tp_site_usage_rows() {
   _sr_name="$1"
   _sr_rows="$(cat)"
   _sr_home="$(printf '%s\n' "$_sr_rows" | awk -F'\t' '$2 == "." { print $1; exit }')"
   case "$_sr_home" in ''|*[!0-9]*) return 1 ;; esac
   printf 'home %s %s\n' "$((_sr_home * 1024))" "$_sr_name"
-  printf '%s\n' "$_sr_rows" | awk -F'\t' '$2 ~ /^\.\/[^\/]+\/services\/[^\/]+$/ { print $1 "\t" substr($2, 3) }' |
-    while IFS="$(printf '\t')" read -r _sr_kib _sr_rel; do
+  printf '%s\n' "$_sr_rows" | awk -F'\t' '$2 ~ /^\.\/sites\/[^\/]+$/ { print $1 "\t" substr($2, 9) }' |
+    while IFS="$(printf '\t')" read -r _sr_kib _sr_id; do
       case "$_sr_kib" in ''|*[!0-9]*) continue ;; esac
-      _sr_scope="${_sr_rel%%/*}"
-      _sr_svc="${_sr_rel##*/}"
-      tp_scope_ok "$_sr_scope" || continue
-      tp_folder_name_ok "$_sr_svc" || continue
-      printf 'site %s %s/%s\n' "$((_sr_kib * 1024))" "$_sr_scope" "$_sr_svc"
+      tp_name_shape_ok "$_sr_id" || continue
+      printf 'site %s %s\n' "$((_sr_kib * 1024))" "$_sr_id"
     done
 }
 
