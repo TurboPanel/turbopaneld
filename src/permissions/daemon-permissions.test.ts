@@ -209,6 +209,26 @@ test("deno.json compile tasks and the JS ExecStart render the same daemon contra
   }
 });
 
+test("every compile task bakes --quiet so absent optional tools are not logged as Info lines", async () => {
+  // The runtime prints "Info Failed to resolve '<tool>' for allow-run" at
+  // start-up for each listed program missing on the host. Compiling with
+  // --quiet bakes the error-only log level into the binary; real errors and
+  // uncaught exceptions still reach stderr. The run-mode ExecStart lines
+  // already pass --quiet.
+  const invocations = await productionInvocations();
+  for (
+    const name of [
+      "deno.json compile",
+      "deno.json compile:linux-amd64",
+      "deno.json compile:linux-arm64",
+    ]
+  ) {
+    const found = invocations.find((entry) => entry.source === name);
+    if (!found) throw new TypeError(`missing invocation ${name}`);
+    assertEquals(found.flags.includes("--quiet"), true, name);
+  }
+});
+
 /** True when `path` is `grant` itself or sits beneath it. */
 function covers(grants: readonly string[], path: string): boolean {
   return grants.some((grant) => path === grant || path.startsWith(`${grant}/`));
