@@ -208,3 +208,38 @@ test("two service folder entries may not name the same compose service", () => {
     "twice",
   );
 });
+
+test("takeoverHostnames entries name the hostname and the environment that held it", () => {
+  const entry = { hostname: "example.com", fromEnvironmentId: "env-old_1" };
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      takeoverHostnames: [entry],
+    })
+      .takeoverHostnames,
+    [entry],
+  );
+  assertEquals(
+    parseEnvironmentDeployPayload(DEPLOY_BASE).takeoverHostnames,
+    undefined,
+  );
+  for (
+    const bad of [
+      ["example.com"],
+      [{ hostname: "Example.com", fromEnvironmentId: "e" }],
+      [{ hostname: "example.com" }],
+      [{ hostname: "example.com", fromEnvironmentId: "../x" }],
+      [{ hostname: "example.com", fromEnvironmentId: "" }],
+      "example.com",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          takeoverHostnames: bad,
+        }),
+      TypeError,
+    );
+  }
+});

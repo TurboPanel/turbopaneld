@@ -3,6 +3,7 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import { withTempLayout } from "../../testing/temp-layout.ts";
 import {
+  droppedRailpackEnvNames,
   ensureBuildkitRailpack,
   type EnsureBuildkitRailpackDeps,
   RAILPACK_FRONTEND_IMAGE,
@@ -874,4 +875,33 @@ test("the Railpack tools get tenant build.env without any name that loads code o
   assertEquals(env.HOME, "/work");
   assertEquals(env.PATH === "/checkout/bin", false);
   assertEquals(env.CI, "1");
+});
+
+test("the names the Railpack lane drops are listed, by name only, and include tool config families", () => {
+  const dropped = droppedRailpackEnvNames({
+    kind: "railpack",
+    env: {
+      NEXT_PUBLIC_SITE_URL: "https://example.test",
+      GOFLAGS: "-toolexec=/x",
+      MISE_CONFIG_DIR: "/x",
+      ASDF_DATA_DIR: "/x",
+      npm_config_registry: "https://x.test",
+      BUNDLE_GEMFILE: "/x",
+      PIP_INDEX_URL: "https://x.test",
+      LD_PRELOAD: "/x",
+    },
+  });
+  assertEquals(dropped, [
+    "ASDF_DATA_DIR",
+    "BUNDLE_GEMFILE",
+    "GOFLAGS",
+    "LD_PRELOAD",
+    "MISE_CONFIG_DIR",
+    "PIP_INDEX_URL",
+    "npm_config_registry",
+  ]);
+  assertEquals(
+    droppedRailpackEnvNames({ kind: "railpack", env: { OK_NAME: "1" } }),
+    [],
+  );
 });

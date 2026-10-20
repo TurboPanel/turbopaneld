@@ -44,7 +44,6 @@ import {
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
   removeServiceIngress,
-  removeSnippetSites,
   removeTcpUdpIngressEntries,
   rewriteHostingCaddySites,
   serviceIngressComposePath,
@@ -4421,43 +4420,6 @@ test("assertHostingNamesFree refuses a www name another environment serves, befo
   }
 });
 
-test("removeSnippetSites takes out only the blocks of the named hostnames", () => {
-  const keep = siteSnippet({ hostname: "keep.example.com", tlsDir: "/tls" });
-  const drop = siteSnippet({ hostname: "drop.example.com", tlsDir: "/tls" });
-  const multi = siteSnippet({
-    hostname: "multi.example.com",
-    tlsDir: "/tls",
-    routes: [
-      {
-        upstream: { kind: "http", host: "127.0.0.1", port: 18001 },
-        pathPrefix: "/api",
-      },
-      { upstream: { kind: "http", host: "127.0.0.1", port: 18002 } },
-    ],
-  });
-  const all = [keep, drop, multi].join("\n");
-  const out = removeSnippetSites(all, new Set(["drop.example.com"]));
-  assertEquals(out.removed, ["drop.example.com"]);
-  assertEquals(snippetSiteAddresses(out.contents), [
-    ...snippetSiteAddresses(keep),
-    ...snippetSiteAddresses(multi),
-  ]);
-  assertEquals(out.contents.includes("drop.example.com"), false);
-  // A multi-route block with nested braces comes out whole.
-  const gone = removeSnippetSites(all, new Set(["multi.example.com"]));
-  assertEquals(gone.removed, ["multi.example.com"]);
-  assertEquals(snippetSiteAddresses(gone.contents), [
-    ...snippetSiteAddresses(keep),
-    ...snippetSiteAddresses(drop),
-  ]);
-  assertEquals(gone.contents.includes("18001"), false);
-  // Nothing named, nothing changes.
-  assertEquals(removeSnippetSites(all, new Set(["other.example.com"])), {
-    contents: all,
-    removed: [],
-  });
-});
-
 const TAKEOVER_BASE = {
   ...WWW_BASE_PAYLOAD,
   hostings: [wwwHosting(["example.com"])],
@@ -4467,7 +4429,18 @@ function tlsFor(layout: { tlsDir: string }, hostname: string): string {
   return siteSnippet({ hostname, tlsDir: layout.tlsDir });
 }
 
-test("assertHostingNamesFree takes a name over from a leftover only when the control plane lists it", async () => {
+const from = (hostname: string, fromEnvironmentId: string) => ({
+  hostname,
+  fromEnvironmentId,
+});
+
+async function sitesDirOf(layout: { configDir: string }): Promise<string> {
+  const dir = join(layout.configDir, "hosting", "sites");
+  await Deno.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+test("a takeover happens only from the environment the control plane names for that hostname", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[][] = [];
   const restore = setIngressHostCommandForTest((_command, args) => {
@@ -4475,9 +4448,8 @@ test("assertHostingNamesFree takes a name over from a leftover only when the con
     return Promise.resolve({ success: true, stderr: "" });
   });
   try {
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    await Deno.mkdir(sitesDir, { recursive: true });
-    const other = join(sitesDir, "env-other.caddy");
+    const sitesDir = await sitesDirOf(layout);
+    const other = join(sitesDir, "env-old.caddy");
     const kept = tlsFor(layout, "kept.example.com");
     await Deno.writeTextFile(
       other,
@@ -4485,9 +4457,16 @@ test("assertHostingNamesFree takes a name over from a leftover only when the con
     );
     const before = await Deno.readTextFile(other);
 
-    // Not listed (an older control plane, or another organization still holds it):
-    // refused as before, and nothing is touched.
-    for (const takeoverHostnames of [undefined, [], ["kept.example.com"]]) {
+    // Not named, named for another environment, or an older control plane: refused,
+    // nothing touched.
+    for (
+      const takeoverHostnames of [
+        undefined,
+        [],
+        [from("example.com", "env-someone-else")],
+        [from("kept.example.com", "env-old")],
+      ]
+    ) {
       await assertRejects(
         () =>
           assertHostingNamesFree(layout, {
@@ -4501,10 +4480,10 @@ test("assertHostingNamesFree takes a name over from a leftover only when the con
     assertEquals(await Deno.readTextFile(other), before);
     assertEquals(calls, []);
 
-    // Listed: only that name leaves the other environment's snippet, and Caddy reloads.
+    // Named for exactly that environment: only the name leaves its snippet, and Caddy reloads.
     await assertHostingNamesFree(layout, {
       ...TAKEOVER_BASE,
-      takeoverHostnames: ["example.com"],
+      takeoverHostnames: [from("example.com", "env-old")],
     });
     assertEquals(snippetSiteAddresses(await Deno.readTextFile(other)), [
       ...snippetSiteAddresses(kept),
@@ -4517,14 +4496,51 @@ test("assertHostingNamesFree takes a name over from a leftover only when the con
   }
 });
 
+test("a name that another environment's snippet also holds is refused, whatever the first one says", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const old = join(sitesDir, "env-old.caddy");
+    const live = join(sitesDir, "env-live.caddy");
+    await Deno.writeTextFile(old, tlsFor(layout, "example.com"));
+    // Another organization's environment that was deployed in between.
+    await Deno.writeTextFile(live, tlsFor(layout, "example.com"));
+    await assertRejects(
+      () =>
+        assertHostingNamesFree(layout, {
+          ...TAKEOVER_BASE,
+          takeoverHostnames: [from("example.com", "env-old")],
+        }),
+      Error,
+      "example.com is already served by another environment on this server",
+    );
+    assertEquals(
+      [...new Set(snippetSiteAddresses(await Deno.readTextFile(old)))],
+      ["example.com"],
+    );
+    assertEquals(
+      [...new Set(snippetSiteAddresses(await Deno.readTextFile(live)))],
+      ["example.com"],
+    );
+    assertEquals(calls, []);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
 test("a takeover removes a leftover with nothing else, and never touches a bystander or the environment's own file", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest(() =>
     Promise.resolve({ success: true, stderr: "" })
   );
   try {
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    await Deno.mkdir(sitesDir, { recursive: true });
+    const sitesDir = await sitesDirOf(layout);
     const only = join(sitesDir, "env-only.caddy");
     const bystander = join(sitesDir, "env-bystander.caddy");
     const own = join(sitesDir, "env-www-1.caddy");
@@ -4539,7 +4555,7 @@ test("a takeover removes a leftover with nothing else, and never touches a bysta
     );
     await assertHostingNamesFree(layout, {
       ...TAKEOVER_BASE,
-      takeoverHostnames: ["example.com"],
+      takeoverHostnames: [from("example.com", "env-only")],
     });
     await assertRejects(() => Deno.stat(only), Deno.errors.NotFound);
     await assertRejects(
@@ -4554,39 +4570,32 @@ test("a takeover removes a leftover with nothing else, and never touches a bysta
   }
 });
 
-test("a takeover handles a site line that lists several addresses", async () => {
+test("a file that still has an import or a global block is rewritten, never deleted", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest(() =>
     Promise.resolve({ success: true, stderr: "" })
   );
   try {
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    await Deno.mkdir(sitesDir, { recursive: true });
-    const other = join(sitesDir, "env-multi.caddy");
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-keep.caddy");
     await Deno.writeTextFile(
-      other,
-      "example.com, kept.example.com {\n  reverse_proxy 127.0.0.1:1\n}\n",
-    );
-    // Both held names are listed: the block goes whole.
-    assertEquals(
-      snippetSiteAddresses(await Deno.readTextFile(other)),
-      ["example.com", "kept.example.com"],
+      file,
+      `import shared-settings\n\n${tlsFor(layout, "example.com")}`,
     );
     await assertHostingNamesFree(layout, {
       ...TAKEOVER_BASE,
-      takeoverHostnames: ["example.com"],
+      takeoverHostnames: [from("example.com", "env-keep")],
     });
-    // Only the named address leaves the line; the other keeps its block.
-    const after = await Deno.readTextFile(other);
-    assertEquals(snippetSiteAddresses(after), ["kept.example.com"]);
-    assertStringIncludes(after, "reverse_proxy 127.0.0.1:1");
+    const after = await Deno.readTextFile(file);
+    assertStringIncludes(after, "import shared-settings");
+    assertEquals(snippetSiteAddresses(after), []);
   } finally {
     restore();
     await cleanup();
   }
 });
 
-test("a name the parser cannot find in the file that holds it fails the deploy before anything is written", async () => {
+test("a file the reader cannot place, that mentions the name, is refused and left alone", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[][] = [];
   const restore = setIngressHostCommandForTest((_command, args) => {
@@ -4594,42 +4603,59 @@ test("a name the parser cannot find in the file that holds it fails the deploy b
     return Promise.resolve({ success: true, stderr: "" });
   });
   try {
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    await Deno.mkdir(sitesDir, { recursive: true });
-    const first = join(sitesDir, "env-a.caddy");
-    const second = join(sitesDir, "env-b.caddy");
-    await Deno.writeTextFile(first, tlsFor(layout, "example.com"));
-    await Deno.writeTextFile(second, tlsFor(layout, "www.example.com"));
-    // `www.example.com` is held but not listed: the whole takeover is refused, first file included.
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-odd.caddy");
+    // The brace is on the next line: not a shape the daemon writes or reads.
+    const odd = "example.com\n{\n  respond 200\n}\n";
+    await Deno.writeTextFile(file, odd);
     await assertRejects(
       () =>
         assertHostingNamesFree(layout, {
           ...TAKEOVER_BASE,
-          hostings: [wwwHosting(["example.com"], "both")],
-          takeoverHostnames: ["example.com"],
+          takeoverHostnames: [from("example.com", "env-odd")],
         }),
       Error,
-      "www.example.com is already served by another environment",
+      "example.com is already served by another environment on this server",
     );
-    assertEquals(
-      [...new Set(snippetSiteAddresses(await Deno.readTextFile(first)))],
-      ["example.com"],
-    );
+    assertEquals(await Deno.readTextFile(file), odd);
     assertEquals(calls, []);
+    // The same oddity in a file that does not mention the name does not matter.
+    await Deno.writeTextFile(file, "other.test\n{\n  respond 200\n}\n");
+    await assertHostingNamesFree(layout, TAKEOVER_BASE);
   } finally {
     restore();
     await cleanup();
   }
 });
 
-test("a takeover rewrites one leftover and removes another when the control plane lists both names", async () => {
+test("a takeover folds the case and the spelling of the hostnames it compares", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest(() =>
     Promise.resolve({ success: true, stderr: "" })
   );
   try {
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    await Deno.mkdir(sitesDir, { recursive: true });
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-old.caddy");
+    await Deno.writeTextFile(file, tlsFor(layout, "xn--bcher-kva.example"));
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      hostings: [wwwHosting(["Bücher.Example"])],
+      takeoverHostnames: [from("xn--bcher-kva.example", "env-old")],
+    });
+    assertEquals(await Deno.stat(file).catch(() => null), null);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a takeover includes the www redirect names a hosting owns, each from its own environment", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    const sitesDir = await sitesDirOf(layout);
     const rewritten = join(sitesDir, "env-a.caddy");
     const removed = join(sitesDir, "env-b.caddy");
     await Deno.writeTextFile(
@@ -4642,7 +4668,10 @@ test("a takeover rewrites one leftover and removes another when the control plan
     await assertHostingNamesFree(layout, {
       ...TAKEOVER_BASE,
       hostings: [wwwHosting(["example.com"], "both")],
-      takeoverHostnames: ["example.com", "www.example.com"],
+      takeoverHostnames: [
+        from("example.com", "env-a"),
+        from("www.example.com", "env-b"),
+      ],
     });
     assertEquals(
       snippetSiteAddresses(await Deno.readTextFile(rewritten)),
@@ -4655,52 +4684,97 @@ test("a takeover rewrites one leftover and removes another when the control plan
   }
 });
 
-test("a reload Caddy refuses during a takeover puts the snippet and the ACME manifest back and fails the deploy", async () => {
+test("with two leftovers a refused reload puts both snippets and both manifests back, after one reload", async () => {
   const { layout, cleanup } = await makeTestLayout();
   let reloads = 0;
   const restore = setIngressHostCommandForTest((_command, args) => {
     if (args.includes("reload")) {
       reloads += 1;
-      // The first reload is the takeover's; the restore after it succeeds.
+      // The first reload is the takeover's; the one after the restore succeeds.
       return Promise.resolve(
         reloads === 1
           ? { success: false, stderr: "caddy: bad config" }
           : { success: true, stderr: "" },
       );
     }
-    // is-active: Caddy is running, so the refusal is a real one.
     return Promise.resolve({ success: true, stderr: "" });
   });
   try {
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    await Deno.mkdir(sitesDir, { recursive: true });
-    const other = join(sitesDir, "env-other.caddy");
-    const manifest = join(sitesDir, "env-other.acme-hostnames.json");
-    await Deno.writeTextFile(other, tlsFor(layout, "example.com"));
+    const sitesDir = await sitesDirOf(layout);
+    const first = join(sitesDir, "env-a.caddy");
+    const second = join(sitesDir, "env-b.caddy");
+    const firstManifest = join(sitesDir, "env-a.acme-hostnames.json");
+    const secondManifest = join(sitesDir, "env-b.acme-hostnames.json");
     await Deno.writeTextFile(
-      manifest,
+      first,
+      [tlsFor(layout, "example.com"), tlsFor(layout, "stay.test")].join("\n"),
+    );
+    await Deno.writeTextFile(second, tlsFor(layout, "www.example.com"));
+    await Deno.writeTextFile(
+      firstManifest,
       JSON.stringify(["example.com", "x.test"]),
     );
-    const before = await Deno.readTextFile(other);
+    await Deno.writeTextFile(
+      secondManifest,
+      JSON.stringify(["www.example.com"]),
+    );
+    const before = [
+      await Deno.readTextFile(first),
+      await Deno.readTextFile(second),
+    ];
     await assertRejects(
       () =>
         assertHostingNamesFree(layout, {
           ...TAKEOVER_BASE,
-          takeoverHostnames: ["example.com"],
+          hostings: [wwwHosting(["example.com"], "both")],
+          takeoverHostnames: [
+            from("example.com", "env-a"),
+            from("www.example.com", "env-b"),
+          ],
         }),
       Error,
       "did not reload",
     );
-    assertEquals(await Deno.readTextFile(other), before);
-    assertEquals(JSON.parse(await Deno.readTextFile(manifest)), [
+    assertEquals(await Deno.readTextFile(first), before[0]);
+    assertEquals(await Deno.readTextFile(second), before[1]);
+    assertEquals(JSON.parse(await Deno.readTextFile(firstManifest)), [
       "example.com",
       "x.test",
     ]);
-    // No half-written copy is left beside the manifest.
+    assertEquals(JSON.parse(await Deno.readTextFile(secondManifest)), [
+      "www.example.com",
+    ]);
+    // One reload for both files, one more after putting them back.
+    assertEquals(reloads, 2);
     assertEquals(
       [...Deno.readDirSync(sitesDir)].some((e) => e.name.endsWith(".tpnew")),
       false,
     );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a name the control plane lists that the file does not hold changes nothing", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-old.caddy");
+    await Deno.writeTextFile(file, tlsFor(layout, "elsewhere.test"));
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      takeoverHostnames: [from("example.com", "env-old")],
+    });
+    assertEquals(snippetSiteAddresses(await Deno.readTextFile(file)), [
+      ...snippetSiteAddresses(tlsFor(layout, "elsewhere.test")),
+    ]);
+    assertEquals(calls, []);
   } finally {
     restore();
     await cleanup();
@@ -4713,8 +4787,7 @@ test("the ACME manifest of a leftover loses only the names taken over", async ()
     Promise.resolve({ success: true, stderr: "" })
   );
   try {
-    const sitesDir = join(layout.configDir, "hosting", "sites");
-    await Deno.mkdir(sitesDir, { recursive: true });
+    const sitesDir = await sitesDirOf(layout);
     await Deno.writeTextFile(
       join(sitesDir, "env-other.caddy"),
       [tlsFor(layout, "example.com"), tlsFor(layout, "keep.test")].join("\n"),
@@ -4726,7 +4799,7 @@ test("the ACME manifest of a leftover loses only the names taken over", async ()
     );
     await assertHostingNamesFree(layout, {
       ...TAKEOVER_BASE,
-      takeoverHostnames: ["example.com"],
+      takeoverHostnames: [from("example.com", "env-other")],
     });
     assertEquals(JSON.parse(await Deno.readTextFile(manifest)), ["keep.test"]);
   } finally {

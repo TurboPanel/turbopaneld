@@ -856,6 +856,13 @@ export type EnvironmentDeployStorageMount = {
 };
 
 /** One service's folder under its site owner's tree. */
+/** A hostname and the environment whose host config it is taken over from. */
+export type EnvironmentDeployTakeover = {
+  /** Folded: lowercase, `xn--` for an international name. */
+  hostname: string;
+  fromEnvironmentId: string;
+};
+
 export type EnvironmentDeployServiceFolder = {
   serviceId: string;
   /**
@@ -1601,14 +1608,13 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   removedSites?: string[];
   /**
-   * Hostnames of this deploy's hostings for which the control plane found no
-   * other live hosting on this server (any organization, any environment) that
-   * still holds them. A host config of another environment that still names one
-   * is a leftover of a hosting deleted or moved there, and the host takes only
-   * these names over instead of refusing the deploy. Absent or empty: refuse,
-   * as an older control plane does.
+   * Hostnames of this deploy's hostings the control plane can prove were last
+   * held, on this server, by a named other environment of the same organization
+   * that no longer has a hosting for them (deleted, or moved). The host takes a
+   * listed name over only from that environment's own snippet, and refuses if
+   * any other environment's snippet also holds it. Absent or empty: refuse.
    */
-  takeoverHostnames?: string[];
+  takeoverHostnames?: EnvironmentDeployTakeover[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -4479,20 +4485,34 @@ function parseServiceFolders(
   return entries;
 }
 
-/** Hostnames the control plane allows the host to take over: lowercase names, or absent. */
-function parseTakeoverHostnames(value: unknown): string[] | undefined {
+/** The takeovers the control plane vouches for: a lowercase hostname and the environment it comes from, or absent. */
+function parseTakeoverHostnames(
+  value: unknown,
+): EnvironmentDeployTakeover[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
     throw new TypeError("takeoverHostnames must be an array");
   }
-  return value.map((name) => {
+  return value.map((entry) => {
+    if (!isRecord(entry)) {
+      throw new TypeError("takeoverHostnames must hold hostname entries");
+    }
+    const { hostname, fromEnvironmentId } = entry;
     if (
-      typeof name !== "string" || name.length > 253 ||
-      !/^[a-z0-9*][a-z0-9.*-]*$/.test(name)
+      typeof hostname !== "string" || hostname.length > 253 ||
+      !/^[a-z0-9*][a-z0-9.*-]*$/.test(hostname)
     ) {
       throw new TypeError("takeoverHostnames must hold lowercase hostnames");
     }
-    return name;
+    if (
+      typeof fromEnvironmentId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(fromEnvironmentId)
+    ) {
+      throw new TypeError(
+        "takeoverHostnames must name the environment a hostname comes from",
+      );
+    }
+    return { hostname, fromEnvironmentId };
   });
 }
 
