@@ -2287,7 +2287,7 @@ async function namesHeldByOthers(
   wanted: ReadonlySet<string>,
 ): Promise<Map<string, string[]>> {
   const held = new Map<string, string[]>();
-  for (const file of files) {
+  await forEachSequential(files, async (file) => {
     const contents = await Deno.readTextFile(join(sitesDir, file));
     const parsed = parseSnippet(contents);
     if (parsed.uninterpretable) {
@@ -2299,7 +2299,7 @@ async function namesHeldByOthers(
       wanted.has(name)
     );
     if (taken.length > 0) held.set(file, [...new Set(taken)]);
-  }
+  });
   return held;
 }
 
@@ -2333,7 +2333,7 @@ async function takeOverStaleHostnames(
 ): Promise<void> {
   const sitesDir = join(layout.configDir, "hosting", "sites");
   const steps: TakeoverStep[] = [];
-  for (const [file, hostnames] of held) {
+  await forEachSequential(held, async ([file, hostnames]) => {
     const path = join(sitesDir, file);
     // Read again under the lock: another deploy may have rewritten it since.
     const trimmed = trimSnippetSites(
@@ -2351,10 +2351,10 @@ async function takeOverStaleHostnames(
       removed: trimmed.removed,
       empty: trimmed.sitesLeft === 0 && !trimmed.otherLeft,
     });
-  }
+  });
   const restores: Array<() => Promise<void>> = [];
   try {
-    for (const step of steps) {
+    await forEachSequential(steps, async (step) => {
       logInfo(
         "deploy",
         `took over ${
@@ -2366,7 +2366,7 @@ async function takeOverStaleHostnames(
       restores.push(
         await dropAcmeHostnames(layout, step.environmentId, step.removed),
       );
-    }
+    });
     await activateHostingSites(
       steps.map((step) => ({
         live: step.path,
@@ -2378,14 +2378,17 @@ async function takeOverStaleHostnames(
     await forEachSequential(restores, (restore) => restore().catch(() => {}));
     throw err;
   }
-  for (const step of steps.filter((entry) => entry.empty)) {
-    // Caddy no longer serves anything from it (the empty file loaded): tidy up.
-    await Deno.remove(step.path).catch(() => {});
-    await Deno.remove(`${step.path}.quarantined`).catch(() => {});
-    await Deno.remove(
-      acmeHostnamesManifestPath(layout, step.environmentId),
-    ).catch(() => {});
-  }
+  // Caddy no longer serves anything from these (the empty files loaded): tidy up.
+  await forEachSequential(
+    steps.filter((entry) => entry.empty),
+    async (step) => {
+      await Deno.remove(step.path).catch(() => {});
+      await Deno.remove(`${step.path}.quarantined`).catch(() => {});
+      await Deno.remove(
+        acmeHostnamesManifestPath(layout, step.environmentId),
+      ).catch(() => {});
+    },
+  );
 }
 
 /** Write a file by renaming a finished copy over it, so a crash leaves the old or the new, never half. */
@@ -2705,14 +2708,25 @@ async function swapInHostingSite(
   return { live, previous, hadPrevious };
 }
 
+async function dropPreviousSnippets(
+  swapped: readonly SwappedSite[],
+): Promise<void> {
+  await forEachSequential(
+    swapped,
+    (site) => Deno.remove(site.previous).catch(() => {}),
+  );
+}
+
 async function restoreSwappedSites(
   swapped: readonly SwappedSite[],
 ): Promise<void> {
-  for (const site of swapped) {
-    await (site.hadPrevious
-      ? restorePreviousHostingSite(site.live, site.previous)
-      : dropNewHostingSite(site.live));
-  }
+  await forEachSequential(
+    swapped,
+    (site) =>
+      site.hadPrevious
+        ? restorePreviousHostingSite(site.live, site.previous)
+        : dropNewHostingSite(site.live),
+  );
 }
 
 /**
@@ -2727,23 +2741,22 @@ async function activateHostingSites(
 ): Promise<void> {
   const swapped: SwappedSite[] = [];
   try {
-    for (const site of sites) {
+    await forEachSequential(sites, async (site) => {
       swapped.push(await swapInHostingSite(site.live, site.contents));
-    }
+    });
   } catch (err) {
     await restoreSwappedSites(swapped);
-    for (const site of sites) {
-      await Deno.remove(`${site.live}.tpnew`).catch(() => {});
-    }
+    await forEachSequential(
+      sites,
+      (site) => Deno.remove(`${site.live}.tpnew`).catch(() => {}),
+    );
     throw err;
   }
 
   const reloadArgs = hostSudoArgs(["-n", "systemctl", "reload", CADDY_SERVICE]);
   const reload = await run("sudo", reloadArgs);
   if (reload.success) {
-    for (const site of swapped) {
-      await Deno.remove(site.previous).catch(() => {});
-    }
+    await dropPreviousSnippets(swapped);
     return;
   }
   const active = await run(
@@ -2752,9 +2765,7 @@ async function activateHostingSites(
   );
   if (!active.success) {
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
-    for (const site of swapped) {
-      await Deno.remove(site.previous).catch(() => {});
-    }
+    await dropPreviousSnippets(swapped);
     return;
   }
   await restoreSwappedSites(swapped);

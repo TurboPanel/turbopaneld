@@ -178,7 +178,7 @@ export function droppedRailpackEnvNames(
 ): string[] {
   return Object.keys(build.env ?? {}).filter((key) =>
     !railpackToolAcceptsEnvKey(key)
-  ).sort();
+  ).sort((a, b) => a.localeCompare(b));
 }
 
 const decoder = new TextDecoder();

@@ -897,8 +897,8 @@ test("the names the Railpack lane drops are listed, by name only, and include to
     "GOFLAGS",
     "LD_PRELOAD",
     "MISE_CONFIG_DIR",
-    "PIP_INDEX_URL",
     "npm_config_registry",
+    "PIP_INDEX_URL",
   ]);
   assertEquals(
     droppedRailpackEnvNames({ kind: "railpack", env: { OK_NAME: "1" } }),

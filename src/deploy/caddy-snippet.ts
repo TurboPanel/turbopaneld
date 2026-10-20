@@ -252,7 +252,7 @@ export function trimSnippetSites(
   }
   return {
     contents: out.join("\n"),
-    removed: [...removed].sort(),
+    removed: [...removed].sort((a, b) => a.localeCompare(b)),
     sitesLeft,
     otherLeft,
     uninterpretable: parsed.uninterpretable,

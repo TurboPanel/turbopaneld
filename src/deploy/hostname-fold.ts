@@ -7,7 +7,9 @@
  */
 export function foldHostname(name: string): string {
   const lowered = name.trim().toLowerCase();
-  if ([...lowered].every((ch) => ch.charCodeAt(0) < 128)) return lowered;
+  if ([...lowered].every((ch) => (ch.codePointAt(0) ?? 0) < 128)) {
+    return lowered;
+  }
   const wildcard = lowered.startsWith("*.");
   const host = wildcard ? lowered.slice(2) : lowered;
   try {
