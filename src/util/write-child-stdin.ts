@@ -1,3 +1,5 @@
+import { describeUnknown } from "./describe-unknown.ts";
+
 /**
  * Hand text to a spawned child's piped stdin, tolerating a child that has
  * already exited.
@@ -39,8 +41,7 @@ export async function writeChildStdin(
 /** True for the errors a write to a pipe whose reader has gone produces. */
 export function isClosedPipeError(err: unknown): boolean {
   if (err instanceof Deno.errors.BrokenPipe) return true;
-  const message = (err instanceof Error ? err.message : String(err))
-    .toLowerCase();
+  const message = describeUnknown(err).toLowerCase();
   return message.includes("broken pipe") ||
     message.includes("epipe") ||
     message.includes("writable stream is closed");
