@@ -2208,28 +2208,46 @@ async function hostingCandidateRefusal(
 }
 
 /**
- * The site addresses one snippet answers on: every top-level `name {` /
- * `http://name {` line the daemon itself wrote (`siteSnippet`).
+ * The address tokens of one site line (`a.com, b.com {` is two), as written, or
+ * `null` when the line does not open a top-level site block. A line the daemon
+ * wrote has one address; a hand-edited file may list several.
+ */
+function siteLineAddresses(line: string): string[] | null {
+  if (line.length === 0 || line.startsWith(" ") || !line.endsWith(" {")) {
+    return null;
+  }
+  const tokens = line.slice(0, -2).split(/[,\s]+/).filter((token) =>
+    token.length > 0
+  );
+  return tokens.length > 0 ? tokens : null;
+}
+
+/** A site address without its scheme: `http://name` and `https://name` are `name`. */
+function addressHostname(token: string): string {
+  return token.replace(/^https?:\/\//, "");
+}
+
+/**
+ * The site addresses one snippet answers on: every address on every top-level
+ * `name {` / `http://name {` line (a line may list several, separated by
+ * commas or spaces).
  */
 export function snippetSiteAddresses(contents: string): string[] {
   const names: string[] = [];
   for (const line of contents.split("\n")) {
-    if (line.length === 0 || line.startsWith(" ") || !line.endsWith(" {")) {
-      continue;
-    }
-    const address = line.slice(0, -2).trim();
-    names.push(
-      address.startsWith("http://") ? address.slice("http://".length) : address,
-    );
+    const tokens = siteLineAddresses(line);
+    if (tokens === null) continue;
+    for (const token of tokens) names.push(addressHostname(token));
   }
   return names;
 }
 
 /**
  * The top-level site blocks of `hostnames` taken out of one snippet, the rest
- * left as it was. A block is the `name {` / `http://name {` line the daemon
- * wrote (column 0) up to the `}` at column 0; the blank line after a removed
- * block goes with it.
+ * left as it was. A block is the `name {` / `http://name {` line (column 0) up
+ * to the `}` at column 0; the blank line after a removed block goes with it. A
+ * line that lists several addresses keeps the ones not named: the block goes
+ * only when none is left.
  */
 export function removeSnippetSites(
   contents: string,
@@ -2252,14 +2270,20 @@ export function removeSnippetSites(
       continue;
     }
     afterDropped = false;
-    if (line.length > 0 && !line.startsWith(" ") && line.endsWith(" {")) {
-      const address = line.slice(0, -2).trim();
-      const name = address.startsWith("http://")
-        ? address.slice("http://".length)
-        : address;
-      if (hostnames.has(name)) {
+    const tokens = siteLineAddresses(line);
+    if (tokens !== null) {
+      const remaining = tokens.filter((token) => {
+        const name = addressHostname(token);
+        if (!hostnames.has(name)) return true;
         removed.add(name);
+        return false;
+      });
+      if (remaining.length === 0) {
         dropping = true;
+        continue;
+      }
+      if (remaining.length < tokens.length) {
+        kept.push(`${remaining.join(", ")} {`);
         continue;
       }
     }
@@ -2272,21 +2296,21 @@ export function removeSnippetSites(
  * Before any container starts: a deploy that would answer on a name another
  * environment's live site already answers on, on this server.
  *
- * Normally that is refused: a www choice adds names the panel's uniqueness
- * check may not have seen, and the shared Traefik would otherwise route the
- * name to this environment's containers even though Caddy later refuses the
- * duplicate site.
+ * Normally that is refused: the panel's uniqueness check is per organization, a
+ * www choice adds names it may not have seen, and the shared Traefik would
+ * otherwise route the name to this environment's containers even though Caddy
+ * later refuses the duplicate site.
  *
- * When the control plane says the hostnames are exclusive
- * (`exclusiveHostnames`: every name in `hostings` is held by no other hosting
- * it knows of), the other environment's config naming one is a leftover from a
- * hosting that was deleted or moved there without that environment being
- * deployed again. The names are then taken over: only the site blocks for those
- * names are removed from the other environment's snippet (the rest of it, and
+ * `takeoverHostnames` is the control plane's word that, for these names only, it
+ * found no other live hosting on this server (any organization, any
+ * environment) that still holds them: the other environment's config naming one
+ * is a leftover from a hosting deleted or moved there without that environment
+ * being deployed since. Those names are taken over: only the site blocks for
+ * them are removed from the other environment's snippet (the rest of it, and
  * that environment's containers, are untouched, and its next deploy writes its
- * own snippet again), and Caddy is reloaded. Nothing else of another
- * environment is ever changed, and a name this payload does not serve is never
- * taken.
+ * own snippet again), and Caddy is reloaded. A conflict on any name not in the
+ * list is refused as before, before anything is changed; nothing else of
+ * another environment is ever changed.
  */
 export async function assertHostingNamesFree(
   layout: LayoutPaths,
@@ -2316,6 +2340,9 @@ export async function assertHostingNamesFree(
   const contents = await Promise.all(
     others.map((name) => Deno.readTextFile(join(sitesDir, name))),
   );
+  const mayTake = new Set(
+    (payload.takeoverHostnames ?? []).filter((name) => wanted.has(name)),
+  );
   const held = new Map<string, string[]>();
   others.forEach((file, index) => {
     const taken = snippetSiteAddresses(contents[index]!).filter((name) =>
@@ -2323,22 +2350,42 @@ export async function assertHostingNamesFree(
     );
     if (taken.length > 0) held.set(file, [...new Set(taken)]);
   });
-  if (held.size === 0) return;
-  if (payload.exclusiveHostnames !== true) {
-    const taken = [...held.values()][0]![0]!;
-    throw new Error(
-      `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
-    );
+  for (const taken of [...held.values()].flat()) {
+    if (!mayTake.has(taken)) throw hostnameTakenError(taken);
   }
+  if (held.size === 0) return;
   await withHostingSitesLock(() => takeOverStaleHostnames(layout, held));
 }
 
-/** Remove the named site blocks from each other environment's snippet; see {@link assertHostingNamesFree}. */
+function hostnameTakenError(taken: string): Error {
+  return new Error(
+    `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
+  );
+}
+
+/** One leftover snippet and what taking its names over will write. */
+type TakeoverStep = {
+  path: string;
+  environmentId: string;
+  contents: string;
+  removed: string[];
+  /** No site is left in the snippet. */
+  empty: boolean;
+};
+
+/**
+ * Remove the named site blocks from each other environment's snippet; see
+ * {@link assertHostingNamesFree}. Everything is worked out first, and nothing
+ * is written unless every named block was found (one the parser cannot match
+ * would otherwise leave Caddy to fail later with a duplicate site). A reload
+ * Caddy refuses puts that snippet back and fails the deploy.
+ */
 async function takeOverStaleHostnames(
   layout: LayoutPaths,
   held: ReadonlyMap<string, readonly string[]>,
 ): Promise<void> {
   const sitesDir = join(layout.configDir, "hosting", "sites");
+  const steps: TakeoverStep[] = [];
   for (const [file, hostnames] of held) {
     const path = join(sitesDir, file);
     // Read again under the lock: another deploy may have rewritten it since.
@@ -2347,38 +2394,72 @@ async function takeOverStaleHostnames(
       current,
       new Set(hostnames),
     );
-    if (removed.length === 0) continue;
-    const environmentId = file.slice(0, -".caddy".length);
-    logInfo(
-      "deploy",
-      `took over ${
-        removed.join(", ")
-      } from the hosting config of environment ${environmentId}: its hosting was removed or moved there and that environment has not been deployed since`,
-    );
-    if (snippetSiteAddresses(contents).length === 0) {
-      await removeHostingCaddySiteLocked(layout, environmentId);
-      continue;
-    }
-    await activateHostingSite(path, contents);
-    await dropAcmeHostnames(layout, environmentId, removed);
+    const missed = hostnames.find((name) => !removed.includes(name));
+    if (missed !== undefined) throw hostnameTakenError(missed);
+    steps.push({
+      path,
+      environmentId: file.slice(0, -".caddy".length),
+      contents,
+      removed,
+      empty: snippetSiteAddresses(contents).length === 0,
+    });
+  }
+  for (const step of steps) await applyTakeoverStep(layout, step);
+}
+
+async function applyTakeoverStep(
+  layout: LayoutPaths,
+  step: TakeoverStep,
+): Promise<void> {
+  logInfo(
+    "deploy",
+    `took over ${
+      step.removed.join(", ")
+    } from the hosting config of environment ${step.environmentId}: its hosting was removed or moved there and that environment has not been deployed since`,
+  );
+  // The manifest first, so a crash never leaves the observer polling a name
+  // this snippet no longer serves; put back if the reload is refused.
+  const restoreManifest = await dropAcmeHostnames(
+    layout,
+    step.environmentId,
+    step.removed,
+  );
+  try {
+    await activateHostingSite(step.path, step.empty ? "" : step.contents);
+  } catch (err) {
+    await restoreManifest();
+    throw err;
+  }
+  if (step.empty) {
+    // Caddy no longer serves anything from it (the empty file loaded): tidy up.
+    await Deno.remove(step.path).catch(() => {});
+    await Deno.remove(`${step.path}.quarantined`).catch(() => {});
+    await Deno.remove(
+      acmeHostnamesManifestPath(layout, step.environmentId),
+    ).catch(() => {});
   }
 }
 
-/** Forget names in an environment's ACME hostname manifest, so the observer stops polling them. */
+/** Write a file by renaming a finished copy over it, so a crash leaves the old or the new, never half. */
+async function writeFileAtomic(path: string, text: string): Promise<void> {
+  const next = `${path}.tpnew`;
+  await Deno.writeTextFile(next, text, { mode: 0o640 });
+  await Deno.rename(next, path);
+}
+
+/**
+ * Forget names in an environment's ACME hostname manifest, so the observer
+ * stops polling them. Returns a function that puts the manifest back as it was.
+ */
 async function dropAcmeHostnames(
   layout: LayoutPaths,
   environmentId: string,
   removed: readonly string[],
-): Promise<void> {
+): Promise<() => Promise<void>> {
   const path = acmeHostnamesManifestPath(layout, environmentId);
+  let original: string;
   try {
-    const listed = JSON.parse(await Deno.readTextFile(path)) as unknown;
-    if (!Array.isArray(listed)) return;
-    const gone = new Set(removed);
-    const next = listed.filter((name) => !gone.has(String(name)));
-    if (next.length !== listed.length) {
-      await Deno.writeTextFile(path, JSON.stringify(next), { mode: 0o640 });
-    }
+    original = await Deno.readTextFile(path);
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
       logWarn(
@@ -2386,7 +2467,24 @@ async function dropAcmeHostnames(
         `ACME hostname manifest of ${environmentId} kept: ${err}`,
       );
     }
+    return () => Promise.resolve();
   }
+  try {
+    const listed = JSON.parse(original) as unknown;
+    if (!Array.isArray(listed)) return () => Promise.resolve();
+    const gone = new Set(removed);
+    const next = listed.filter((name) => !gone.has(String(name)));
+    if (next.length !== listed.length) {
+      await writeFileAtomic(path, JSON.stringify(next));
+    }
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `ACME hostname manifest of ${environmentId} kept: ${err}`,
+    );
+    return () => Promise.resolve();
+  }
+  return () => writeFileAtomic(path, original);
 }
 
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {

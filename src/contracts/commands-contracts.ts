@@ -1601,12 +1601,14 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   removedSites?: string[];
   /**
-   * The control plane holds every hostname in `hostings` unique (no other
-   * hosting it knows of has one). A host config of another environment that
-   * still names one is then a leftover of a hosting deleted or moved there, and
-   * the host takes the name over instead of refusing this deploy.
+   * Hostnames of this deploy's hostings for which the control plane found no
+   * other live hosting on this server (any organization, any environment) that
+   * still holds them. A host config of another environment that still names one
+   * is a leftover of a hosting deleted or moved there, and the host takes only
+   * these names over instead of refusing the deploy. Absent or empty: refuse,
+   * as an older control plane does.
    */
-  exclusiveHostnames?: boolean;
+  takeoverHostnames?: string[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -4477,6 +4479,23 @@ function parseServiceFolders(
   return entries;
 }
 
+/** Hostnames the control plane allows the host to take over: lowercase names, or absent. */
+function parseTakeoverHostnames(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("takeoverHostnames must be an array");
+  }
+  return value.map((name) => {
+    if (
+      typeof name !== "string" || name.length > 253 ||
+      !/^[a-z0-9*][a-z0-9.*-]*$/.test(name)
+    ) {
+      throw new TypeError("takeoverHostnames must hold lowercase hostnames");
+    }
+    return name;
+  });
+}
+
 /** The sites that left the compose file: an array of compose service names, or absent. */
 function parseRemovedSites(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
@@ -6423,10 +6442,7 @@ export function parseEnvironmentDeployPayload(
       ),
       serviceFolders: parseServiceFolders(value.serviceFolders),
       removedSites: parseRemovedSites(value.removedSites),
-      exclusiveHostnames: parseOptionalBoolean(
-        value.exclusiveHostnames,
-        "exclusiveHostnames",
-      ),
+      takeoverHostnames: parseTakeoverHostnames(value.takeoverHostnames),
       principalMaterial: parseOptionalMaterialArray(
         value.principalMaterial,
         "principalMaterial",

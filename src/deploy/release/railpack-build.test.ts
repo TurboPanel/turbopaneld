@@ -14,6 +14,7 @@ import {
   railpackFrontendDigestPath,
   railpackFrontendLayoutDir,
   railpackImageTag,
+  railpackToolEnvironment,
 } from "./railpack-build.ts";
 
 /**
@@ -825,4 +826,52 @@ test({
       );
     });
   },
+});
+
+test("the Railpack tools get tenant build.env without any name that loads code or is the sandbox", () => {
+  const env = railpackToolEnvironment({
+    kind: "railpack",
+    env: {
+      NEXT_PUBLIC_SITE_URL: "https://example.test",
+      LD_AUDIT: "/checkout/evil.so",
+      LD_PRELOAD: "/checkout/evil.so",
+      LD_DEBUG_OUTPUT: "/tmp/x",
+      NODE_OPTIONS: "--require /checkout/evil.js",
+      PYTHONSTARTUP: "/checkout/evil.py",
+      JAVA_TOOL_OPTIONS: "-javaagent:/checkout/evil.jar",
+      DOCKER_HOST: "tcp://evil:2375",
+      PATH: "/checkout/bin",
+      HOME: "/checkout",
+      GIT_SSH_COMMAND: "ssh -i /evil",
+      BASH_ENV: "/checkout/evil.sh",
+      "BAD NAME": "x",
+      "1BAD": "x",
+      "A-B": "x",
+      "": "x",
+    },
+  }, "/work");
+  assertEquals(env.NEXT_PUBLIC_SITE_URL, "https://example.test");
+  for (
+    const refused of [
+      "LD_AUDIT",
+      "LD_PRELOAD",
+      "LD_DEBUG_OUTPUT",
+      "NODE_OPTIONS",
+      "PYTHONSTARTUP",
+      "JAVA_TOOL_OPTIONS",
+      "DOCKER_HOST",
+      "GIT_SSH_COMMAND",
+      "BASH_ENV",
+      "BAD NAME",
+      "1BAD",
+      "A-B",
+      "",
+    ]
+  ) {
+    assertEquals(refused in env, false, refused);
+  }
+  // The daemon's own PATH and the work tree HOME stay what they were.
+  assertEquals(env.HOME, "/work");
+  assertEquals(env.PATH === "/checkout/bin", false);
+  assertEquals(env.CI, "1");
 });
