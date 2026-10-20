@@ -1221,6 +1221,11 @@ const SITES: CallSite[] = [
     { argv: ["systemctl", "is-active", "--quiet", "turbopanel-apache"] },
   ),
   tpHost(
+    'src/deploy/site.ts|["-n","systemctl","is-active","--quiet",unit]',
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-nginx"] },
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-apache"] },
+  ),
+  tpHost(
     'src/deploy/site.ts|["-n","systemctl","reload",driver.unit]',
     { argv: ["systemctl", "reload", "turbopanel-nginx"] },
     { argv: ["systemctl", "reload", "turbopanel-apache"] },

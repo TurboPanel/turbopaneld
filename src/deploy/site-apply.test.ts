@@ -681,6 +681,50 @@ test("removeNamedSites removes only the named sites of this environment and noth
   }
 });
 
+test("removeNamedSites reloads a running engine even when no file was left, and never starts a stopped one", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envR", [nginxSite], { run, runPlaybook });
+    // A removal whose reload failed earlier: the file is gone, the engine still serves it.
+    for (const path of await siteConfFiles(layout, "envR", "www")) {
+      await Deno.remove(path);
+    }
+
+    // apache is stopped; every other unit is running.
+    const apacheStopped: SiteRunFn = (command, args) =>
+      command === "sudo" && args.includes("is-active") &&
+        args.includes("turbopanel-apache")
+        ? Promise.resolve(fail("inactive"))
+        : run(command, args);
+    calls.length = 0;
+    const removed = await removeNamedSites(layout, "envR", ["www"], {
+      run: apacheStopped,
+    });
+    assertEquals(removed, ["www"]);
+
+    const reloaded = (unit: string) =>
+      calls.some((call) =>
+        call.args.includes("systemctl") && call.args.includes("reload") &&
+        call.args.includes(unit)
+      );
+    assertEquals(reloaded("turbopanel-nginx"), true);
+    assertEquals(reloaded("turbopanel-apache"), false);
+    // A stopped engine is not started either.
+    assertEquals(
+      calls.some((call) =>
+        call.args.includes("turbopanel-apache") &&
+        (call.args.includes("start") || call.args.includes("restart") ||
+          call.args.includes("--now"))
+      ),
+      false,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("removeNamedSites with no names, or an unsafe name, removes nothing", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();

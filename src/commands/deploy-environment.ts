@@ -1455,26 +1455,28 @@ async function applyDeploySites(
 /**
  * Remove the vhost, pool and runtime of the sites the control plane says left
  * the compose file (`removedSites[]`). Only what is named goes, and a name that
- * is also a site of this deploy never does. A payload that names none (an older
- * control plane, a transient or partial payload) removes nothing: absence from
- * `sites[]` is never read as a deletion.
+ * is also a site or a native app of this deploy never does. A payload that
+ * names none (an older control plane, a transient or partial payload) removes
+ * nothing: absence from `sites[]` is never read as a deletion.
  *
  * Runs once everything else in the deploy has succeeded, so a deploy that fails
  * part way never leaves the old vhosts gone. A failed removal is logged and
- * does not fail a deploy that has already been published; the next deploy
- * names the site again. The folder of a removed site stays, as an orphan.
+ * does not fail a deploy that has already been published; whether a later
+ * deploy names the site again is the control plane's choice. The folder of a
+ * removed site stays, as an orphan.
  */
 export async function removeLeftSites(
   layout: LayoutPaths,
   payload: Pick<
     EnvironmentDeployPayload,
-    "environmentId" | "sites" | "removedSites"
+    "environmentId" | "sites" | "nativeAppServices" | "removedSites"
   >,
   removeNamed: typeof removeNamedSites = removeNamedSites,
 ): Promise<string[]> {
-  const current = new Set(
-    (payload.sites ?? []).map((site) => site.composeServiceName),
-  );
+  const current = new Set([
+    ...(payload.sites ?? []).map((site) => site.composeServiceName),
+    ...(payload.nativeAppServices ?? []).map((app) => app.composeServiceName),
+  ]);
   const names = (payload.removedSites ?? []).filter((name) =>
     !current.has(name)
   );
@@ -2948,10 +2950,6 @@ async function deployEnvironmentHolding(
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
   runtime.progress.done("certificates");
 
-  // Last of the changes to the host: the containers are up and the new sites
-  // are serving, so a deploy that failed earlier never left an old vhost gone.
-  await removeLeftSites(layout, parsedPayload);
-
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({
     hasContainers,
@@ -2962,6 +2960,14 @@ async function deployEnvironmentHolding(
     layout,
     run: runtime.run,
   });
+
+  // Last of the changes to the host, after the health phase: the containers
+  // are up, the health gates have passed (they run inside the publish above;
+  // collecting the containers here only reports them) and the new sites are
+  // serving, so a deploy that failed earlier never leaves an old vhost gone.
+  // A failure from here on is only the report being built, and the vhosts of a
+  // site that has left the compose file are not needed by the new version.
+  await removeLeftSites(layout, parsedPayload);
 
   logInfo(
     "commands",

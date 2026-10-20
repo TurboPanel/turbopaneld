@@ -4674,8 +4674,12 @@ export async function removeNamedSites(
         ["openlitespeed", openlitespeedRemoved],
       ] as const,
       async ([engine, removed]) => {
-        if (removed === 0) return;
         const driver = SITE_ENGINE_DRIVERS[engine];
+        // An engine that lost a file reloads. One that did not is reloaded too
+        // while it is running, so a reload that failed on an earlier deploy
+        // (the files already gone, the engine still serving them) is retried.
+        // A stopped engine is never started by this.
+        if (removed === 0 && !await engineIsRunning(driver.unit)) return;
         await tryReloadAfterSiteRemoval(
           driver.label,
           () => driver.reload(run, layout, false),
@@ -4705,6 +4709,15 @@ export async function removeNamedSites(
 }
 
 const REMOVED_SITE_NAME_RE = /^[A-Za-z0-9._-]+$/;
+
+/** Whether a systemd unit is active; a unit that is stopped or missing is not. */
+async function engineIsRunning(unit: string): Promise<boolean> {
+  const active = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "is-active", "--quiet", unit]),
+  );
+  return active.success;
+}
 
 /**
  * Remove the per-site PHP runtimes of the given services of one environment,

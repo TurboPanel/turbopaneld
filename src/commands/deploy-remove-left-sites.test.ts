@@ -72,6 +72,23 @@ test("only the named sites of this environment are removed, and never one the de
   assertEquals(calls, [{ environmentId: "env", names: ["plain", "old"] }]);
 });
 
+test("a native app of this deploy is never removed either", async () => {
+  const { calls, removeNamed } = recorder();
+  const removed = await removeLeftSites(
+    layout,
+    {
+      environmentId: "env",
+      nativeAppServices: [
+        { composeServiceName: "app" } as never,
+      ],
+      removedSites: ["app", "plain"],
+    },
+    removeNamed as never,
+  );
+  assertEquals(removed, ["plain"]);
+  assertEquals(calls, [{ environmentId: "env", names: ["plain"] }]);
+});
+
 test("a failed removal is logged and does not fail the deploy", async () => {
   const removed = await removeLeftSites(
     layout,
@@ -79,4 +96,17 @@ test("a failed removal is logged and does not fail the deploy", async () => {
     (() => Promise.reject(new Error("tp-host refused"))) as never,
   );
   assertEquals(removed, []);
+});
+
+test("the removal is the last change the deploy makes, after the containers are collected", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./deploy-environment.ts", import.meta.url),
+  );
+  const collected = source.indexOf("await collectEnvironmentDeployContainers(");
+  const removal = source.indexOf(
+    "await removeLeftSites(layout, parsedPayload)",
+  );
+  const published = source.indexOf("await publishDeployedCompose(");
+  assertEquals(published > 0 && collected > published, true);
+  assertEquals(removal > collected, true);
 });
