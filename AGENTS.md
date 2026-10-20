@@ -709,7 +709,9 @@ it regresses:
   `--allow-env`. Bumping
   `UV_VERSION` / `ANSIBLE_CORE_VERSION` / `CLOUDFLARED_VERSION` changes the
   rendered `--allow-run` paths: re-render (see the test failure) and commit
-  all copies. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
+  all copies. The compile tasks pass `--quiet` so the binary does not print an
+  `Info Failed to resolve '<tool>' for allow-run` line for every listed tool the
+  host lacks; errors still print and the allow-run list is unchanged. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
   because a scoped `--allow-ffi` resolves bare names against the cwd.
 - **Two writes `--allow-write` never covers** — `src/permissions/scoped-writes.ts`.
   Deno refuses *every* write (`writeFile`, `copyFile`, `chmod`, `rename`,
