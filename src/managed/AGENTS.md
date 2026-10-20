@@ -68,6 +68,8 @@ Orchestrator self-heal: `restart: always` does not bring back a container that w
 
 **Postgres owner role per database and the Database admin login** (`databases[].ownerRole` on a `managed.apply` create/drop op, and the `admin` entry in a credential's `privileges`; both optional, absent = today's behaviour). A database made with `ownerRole` gets three roles that cannot log in, `tp_<db>_owner`, `_rw` and `_ro` (`postgres-owner-role-sql.ts`; the `tp_` prefix is reserved for logins by the control plane; database names are at most 54 characters), and `CREATE DATABASE ... OWNER tp_<db>_owner`. A database that already exists with another owner is left exactly as it is: moving a database that holds data onto an owner role is a separate explicit action that does not exist yet (only an empty first database is moved, see below). `applyCredentials` takes an optional `{ ownerRoleDatabases }` (the flagged names) and checks the catalog that each really belongs to its owner role; with none flagged nothing extra runs and the SQL is byte-identical to before (`grant-mode.test.ts` hashes). On an owner-role database the per-login machinery is replaced: a login with `owner` becomes a member of the owner role with `INHERIT FALSE, SET TRUE` (Postgres 16+; on 15 a plain grant plus role-wide `NOINHERIT`) and gets `ALTER ROLE ... IN DATABASE ... SET role = owner role`, so tables it creates from any tool belong to the owner role; `read-write` / `read-only` become inheriting members of `_rw` / `_ro`; default privileges for objects created by the owner role, the platform admin and the exposed root login grant the groups data access, and objects that already exist are healed. A login no longer on the database loses the memberships and gets `RESET role` (otherwise it could not connect). The Database admin login (`admin`) is a member of the owner role with `INHERIT TRUE, SET TRUE`, the same session default, and `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`; on a database without an owner role it gets the read-write rights (see Chosen database owner below). Its rights are the panel's whatever `grantMode` says. On MySQL/MariaDB `admin` grants `ALL PRIVILEGES ON <db>.* ... WITH GRANT OPTION` on the login's listed databases (`owner` is the same without the grant option), never anything global (no `CREATE USER`, `SET_ANY_DEFINER`, `SET USER`, `*.*`). Dropping a flagged database drops its three roles (best effort). **Chosen database owner (`managed-database-owner-v1`).** `databases[].ownerLogin` (Postgres create with `ownerRole`, the applied username of a login) makes that login the database's owner. The roles are still made first and `CREATE DATABASE` still names `tp_<db>_owner`, because the login may not exist yet; `applyCredentials` (given `{ ownerRoleDatabases, ownerLogins }`) then runs `adoptChosenOwners` before the catalog check: the database moves onto the login (`ALTER DATABASE ... OWNER TO`) only when it is still owned by `tp_<db>_owner` or is the platform admin's and empty (`databaseIsEmptySql`: nothing a person made), the login is a preset-mode, non-read-only login listed on it, and otherwise is left exactly as it is. The catalog check then accepts the recorded login as the owner as well as `tp_<db>_owner`. The login works through the owner role like a Database admin (`INHERIT TRUE, SET TRUE`, `role` session default), so what it creates belongs to `tp_<db>_owner` and the rw/ro groups see it; default privileges also cover objects it creates under its own name. Never the platform admin or root login. The first database of a new cluster is made by the engine's first start for the platform admin: `createOwnerRoleDatabase` moves it onto its owner role while it is empty, and leaves it alone once anything is in it. `dropUsers` first hands every owner-role database the dropped login owns back to its `tp_<db>_owner` (`ownerLoginReturnSql`), so deleting a login never gives a database to the platform admin. A Database admin login on a database that has no owner role gets the read-write rights there (CONNECT and TEMPORARY, data access to what exists and what is created later, no ownership, no grant option, no membership in a platform role) instead of CONNECT only; the control plane says so in plain words. Changing an existing database's owner is not an apply step.
 
+**Postgres read-write is data only, like MySQL and MariaDB.** `read-write` (the plain login or the `_rw` group) holds SELECT, INSERT, UPDATE and DELETE on tables and USAGE, SELECT and UPDATE on sequences. TRUNCATE and REFERENCES belong to the `owner` (migration) level only, on both the owner-role path (`postgres-owner-role-sql.ts`) and the older per-login path (`postgres-sql.ts`). Every apply also takes both away from a read-write login or group that an earlier release gave them, on existing tables and in the default privileges for later ones, and writes nothing when they are already gone (`postgres-grants.real-pg.test.ts` runs both paths on real Postgres 16 and 18, including a repeated apply that rewrites no ACL).
+
 Backup restore skips per-login schemas on an owner-role database; a restored table is owned by the platform admin until fixed.
 
 ## State tree
@@ -88,11 +90,11 @@ Backup restore skips per-login schemas on an owner-role database; a restored tab
 │       └── ca.pem         # 0640
 
 # Backups are NOT under this tree since v6 — they live at
-# <backupDir>/<managedId>/ (LayoutPaths.backupDir, /backup by default,
+# <backupDir>/managed/<managedId>/ (LayoutPaths.backupDir, /backup by default,
 # TURBOPANEL_BACKUP_DIR to override) so an operator can mount separate storage
 # for them without moving the engine's own state:
 #
-# /backup/<managedId>/          # 0750; artifacts written 0600 by the daemon user itself
+# /backup/managed/<managedId>/  # 0750; artifacts written 0600 by the daemon user itself
 # ├── <backupId>.<ext>          # manual backups; <ext> from MANAGED_BACKUP_ARTIFACT_EXTENSIONS (dump | sql)
 # └── policy-<policyId>/        # one dir per scheduled policy (managedBackupArtifactDir)
 #     └── <backupId>.<ext>      # pruned only within its own policy dir
@@ -555,7 +557,7 @@ ProxySQL to enforce. Canonical policy:
    - **`.part` cleanup on failure.** Partial artifacts must never look complete.
    - **Prune by retention, one directory at a time.** After create, keep the
      newest `retentionKeep` artifacts **in the artifact's own directory**;
-     omit retention → no prune. Manual backups prune `<backupDir>/<managedId>/`
+     omit retention → no prune. Manual backups prune `<backupDir>/managed/<managedId>/`
      (files only, so never a `policy-*` subdirectory); a scheduled backup
      prunes only its `policy-<policyId>/` directory, so an hourly keep-24
      policy never deletes a daily or manual backup.
@@ -564,7 +566,7 @@ ProxySQL to enforce. Canonical policy:
      `handleManagedBackup` / `handleManagedRestore` validate the command
      payload and call them. Scheduled runs call the same core with a
      `policyId`. The core re-checks every id it builds a path from.
-   - **`managed.destroy` removes `<backupDir>/<managedId>/`** alongside the
+   - **`managed.destroy` removes `<backupDir>/managed/<managedId>/`** alongside the
      managed state dir. Backups moved out of the managed tree in v6, so
      removing the state dir no longer takes them with it — destroy removes both
      explicitly rather than leaving an orphan tree on the backup storage.
@@ -705,7 +707,7 @@ While a host is off the control plane may promote a replica, but Docker
 restarts engines (`restart: unless-stopped`) before this daemon runs, so a
 stale primary can accept writes again within seconds of boot.
 
-- **Detect** (`host-boot.ts`): `<stateDir>/managed/host-boot.json` holds the
+- **Detect** (`host-boot.ts`): `<stateDir>/system/host-boot.json` holds the
   kernel `boot_id` of the last run, plus a `cleanShutdownAt` stamp written on
   SIGTERM/SIGINT (`entry/run.ts`). A different `boot_id` with no stamp is an
   *unclean* boot (power cut, kernel panic, `reboot -f`); with the stamp it is a

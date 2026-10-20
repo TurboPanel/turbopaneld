@@ -22,12 +22,13 @@
       ansible.builtin.assert:
         that:
           - turbopanel_upgrade_id is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$')
-        fail_msg: turbopanel_upgrade_id must be one path segment
+          - turbopanel_upgrade_id != 'database'
+        fail_msg: turbopanel_upgrade_id must be one path segment and not the name of the scheduled dumps folder
 
     - name: Set the backup directory for this attempt
       ansible.builtin.set_fact:
-        control_plane_backup_dir: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}"
-        control_plane_backup_parent: "{{ turbopanel_backup_dir }}/control-plane"
+        control_plane_backup_dir: "{{ turbopanel_backup_dir }}/panel/{{ turbopanel_upgrade_id }}"
+        control_plane_backup_parent: "{{ turbopanel_backup_dir }}/panel"
 
     - name: Create the backup directory
       ansible.builtin.file:
@@ -68,7 +69,19 @@
         cmd: |
           set -euo pipefail
           archive="{{ control_plane_backup_dir }}/etc-turbopanel.tar.gz"
-          tar czf "$archive" -C / etc/turbopanel
+          # The root secret keyring (.instance_secrets) and the env file
+          # rendered from it (runtime.dev-vars) stay out: this folder also
+          # holds the database dump, and a dump that sits beside the secret
+          # that opens its sealed values is no longer protected by it.
+          # A rollback never reads this archive (it restores the binaries and
+          # the database and leaves /etc/turbopanel as it is), so the live
+          # files keep serving; a later instance-launch converge re-renders
+          # runtime.dev-vars from .instance_secrets. The keyring's own backup
+          # is the opt-in escrow (turbopanel_instance_secret_escrow_path).
+          tar czf "$archive" -C / \
+            --exclude=etc/turbopanel/instance/.instance_secrets \
+            --exclude=etc/turbopanel/instance/runtime.dev-vars \
+            etc/turbopanel
           chown root:"{{ turbopanel_group }}" "$archive"
           chmod 0640 "$archive"
         executable: /bin/bash
@@ -103,7 +116,7 @@
           set -euo pipefail
           parent="{{ control_plane_backup_parent }}"
           keep="{{ control_plane_backup_keep }}"
-          mapfile -t old < <(find "$parent" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n "+$((keep + 1))" | cut -d' ' -f2-)
+          mapfile -t old < <(find "$parent" -mindepth 1 -maxdepth 1 -type d ! -name database -printf '%T@ %p\n' | sort -rn | tail -n "+$((keep + 1))" | cut -d' ' -f2-)
           if [ -n "${old[*]:-}" ]; then
             rm -rf -- "${old[@]}"
           fi

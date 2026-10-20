@@ -146,6 +146,7 @@ import {
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
+import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
@@ -153,6 +154,7 @@ import {
   MANAGED_HA_PROBE_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
   resolveDaemonCapabilities,
+  TLS_CAPTURE_FEATURE,
 } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
@@ -1590,6 +1592,23 @@ export class InstanceClient {
         if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
         this.#ws.send(JSON.stringify(message));
       },
+      capture: createCertificateCapture({
+        supported: () =>
+          this.#apiClient !== undefined &&
+          this.instanceSupports(TLS_CAPTURE_FEATURE),
+        report: (input) => {
+          const api = this.#apiClient;
+          if (api === undefined) {
+            return Promise.reject(new Error("control plane client not ready"));
+          }
+          return api.reportIssuedCertificate(input);
+        },
+        onFailure: (hostname, reason) =>
+          logWarn(
+            "deploy",
+            `acme certificate capture not accepted hostname=${hostname}: ${reason}`,
+          ),
+      }),
     });
   }
 

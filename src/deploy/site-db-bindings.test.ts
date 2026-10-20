@@ -137,7 +137,11 @@ test("OpenLiteSpeed gets no variables, so a bound site there is refused", () => 
 });
 
 const layout = resolveLayout();
-const owner = { username: "wpowner", serviceId: "svc-wp" };
+const owner = {
+  username: "wpowner",
+  serviceId: "svc-wp",
+  folder: { owner: "wpowner", scope: "production", slug: "svc-wp" },
+};
 
 test("dbCa becomes a path variable in the owner's hosting folder and a 0400 file", () => {
   const spec = site("apache", DB_ENV, {
@@ -145,7 +149,10 @@ test("dbCa becomes a path variable in the owner's hosting folder and a 0400 file
   });
   const withPath = withDbCaVariables(layout, spec, owner);
   const path = withPath.webEnv?.DATABASE_CA_FILE ?? "";
-  assertStringIncludes(path, "/wpowner/sites/svc-wp/.turbopanel-hosting/");
+  assertStringIncludes(
+    path,
+    "/wpowner/production/services/svc-wp/.turbopanel-hosting/",
+  );
   assertEquals(path.endsWith(`/${SITE_DB_CA_FILE_NAME}`), true);
   assertEquals(path.includes("\n"), false);
   const files = hostingWebMetadataFiles(spec);

@@ -23,7 +23,6 @@ import {
   proxysqlComposePath,
   proxysqlConfigDir,
   proxysqlConfigPath,
-  proxysqlDataDir,
   proxysqlMonitorCnfPath,
   proxysqlProject,
   proxysqlTlsDir,
@@ -162,7 +161,6 @@ test("proxysql and managed path helpers join under config/state", () => {
     "/etc/turbopanel/proxysql/proxysql.cnf",
   );
   assertEquals(proxysqlTlsDir(LAYOUT), "/etc/turbopanel/proxysql/tls");
-  assertEquals(proxysqlDataDir(LAYOUT), "/var/lib/turbopanel/proxysql");
   assertEquals(
     proxysqlAdminCnfPath(LAYOUT),
     "/etc/turbopanel/proxysql/admin.cnf",
@@ -324,10 +322,10 @@ test("managedBackupsDir and managedBackupArtifactPath", () => {
   // `<backupDir>/<managedId>`, never under `<stateDir>/managed/<id>`: an
   // operator points `TURBOPANEL_BACKUP_DIR` at separate storage without
   // moving the engine's own state tree with it.
-  assertEquals(managedBackupsDir(LAYOUT, "abc"), "/backup/abc");
+  assertEquals(managedBackupsDir(LAYOUT, "abc"), "/backup/managed/abc");
   assertEquals(
     managedBackupArtifactPath(LAYOUT, "abc", "bk_1", "dump"),
-    "/backup/abc/bk_1.dump",
+    "/backup/managed/abc/bk_1.dump",
   );
   assertThrows(
     () => managedBackupArtifactPath(LAYOUT, "abc", "../escape", "dump"),
@@ -342,14 +340,14 @@ test("managedBackupsDir and managedBackupArtifactPath", () => {
 });
 
 test("managedBackupArtifactDir: manual backups stay in the engine dir, scheduled ones get policy-<id>", () => {
-  assertEquals(managedBackupArtifactDir(LAYOUT, "abc"), "/backup/abc");
+  assertEquals(managedBackupArtifactDir(LAYOUT, "abc"), "/backup/managed/abc");
   assertEquals(
     managedBackupArtifactDir(LAYOUT, "abc", "p1"),
-    "/backup/abc/policy-p1",
+    "/backup/managed/abc/policy-p1",
   );
   assertEquals(
     managedBackupArtifactPath(LAYOUT, "abc", "bk_1", "dump", "p1"),
-    "/backup/abc/policy-p1/bk_1.dump",
+    "/backup/managed/abc/policy-p1/bk_1.dump",
   );
   for (const bad of ["../escape", "a/b", "p.1", ""]) {
     assertThrows(

@@ -757,6 +757,7 @@ async function dispatchWithStubHandler(
     | "handleEnvironmentLifecycle"
     | "handlePrincipalsReconcile"
     | "handleBackupsReconcile"
+    | "handleFoldersRemove"
     | "handleManagedApply"
     | "handleManagedLifecycle"
     | "handleManagedDestroy"
@@ -1158,6 +1159,29 @@ test({
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.policiesApplied, 0);
     assertEquals(result.unitsRemoved, []);
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch routes server.folders.remove through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const folder = { owner: "alice", scope: "production", slug: "uploads" };
+    const outcome = await dispatchWithStubHandler(
+      "server.folders.remove",
+      { folders: [{ kind: "volume", folder }] },
+      {
+        summary: "Removed 1 of 1 folder(s)",
+        folders: [{ ...folder, kind: "volume", removed: true }],
+      },
+      "handleFoldersRemove",
+    );
+    assertEquals(outcome.ok, true);
+    assertEquals(
+      (outcome.result as { summary: string }).summary,
+      "Removed 1 of 1 folder(s)",
+    );
   },
 });
 

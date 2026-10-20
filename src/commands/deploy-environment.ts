@@ -1,4 +1,13 @@
-import { buildStorageVolumesFragment } from "../deploy/apply-storage-volumes.ts";
+import {
+  buildStorageVolumesFragment,
+  declaredVolumeUsers,
+} from "../deploy/apply-storage-volumes.ts";
+import { applyVolumeAccess } from "../deploy/volume-access.ts";
+import {
+  deploymentBindWarnings,
+  ensureNamedVolumeOwners,
+  namedVolumeOwnerTargets,
+} from "../deploy/named-volume-owner.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
@@ -9,6 +18,7 @@ import {
 } from "../deploy/deploy-cancel.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
+import type { FolderRefParts } from "../contracts/directory-names.ts";
 import {
   composeFileArgs,
   DEPLOYMENT_MANIFEST_FILENAME,
@@ -96,7 +106,11 @@ import {
   serviceIngressProject,
   syncTcpUdpIngressEntries,
 } from "../deploy/ingress.ts";
-import { materializeStorageEntries } from "../deploy/materialize-storage.ts";
+import {
+  materializeStorageEntries,
+  resolveVolumeOwnerIds,
+  type VolumeOwnerIds,
+} from "../deploy/materialize-storage.ts";
 import {
   type DecryptSecretsFn,
   hostnameTlsMap,
@@ -122,9 +136,11 @@ import {
   ensureSiteEngines,
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
+  removeNamedSites,
   resolveSiteDocumentRoot,
   type SiteManagedDirectory,
   type SiteRelease,
+  siteWritableDirs,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
@@ -138,7 +154,9 @@ import {
   applySourceReleases,
   resolveReleaseServiceId,
 } from "../deploy/release/apply-source-releases.ts";
-import { effectiveReleaseServiceId } from "../deploy/release/release-service-id.ts";
+import {
+  serviceFolderFromPayload,
+} from "../deploy/release/release-service-id.ts";
 import {
   applyNativeAppServices,
   type ApplyNativeAppsOpts,
@@ -147,7 +165,7 @@ import {
   nativeAppBindingsFromPayload,
 } from "../deploy/native/apply-native-apps.ts";
 import {
-  reclaimRemovedReleaseTrees,
+  keptServiceFolders,
   type ReleaseTreeRef,
 } from "../deploy/release/retention.ts";
 import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
@@ -199,16 +217,16 @@ import {
   type EnvironmentDeployServiceHook,
   type EnvironmentDeploySite,
   type EnvironmentDeploySource,
+  type EnvironmentDeployStorageMaterial,
+  type KeptFolder,
   parseEnvironmentDeployPayload,
   type PrincipalIdReport,
 } from "../contracts/commands-contracts.ts";
 import {
   type LayoutPaths,
-  principalHomePath,
   resolveLayout,
-  siteCurrentSymlink,
-  siteSharedDir,
-  siteWebrootDir,
+  serviceTree,
+  volumeFolder,
 } from "../paths/layout.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -725,7 +743,11 @@ async function ensureDeployPrincipals(
   );
 
   await applyDeploySshAccess(principalMaterial);
-  return await reportPrincipalIds(principalMaterial);
+  return await reportPrincipalIds(
+    principalMaterial,
+    undefined,
+    layout.principalHomeRoot,
+  );
 }
 
 /**
@@ -867,8 +889,7 @@ function serviceIdsForManifest(
  * cannot say what code it is running once the control plane is unreachable.
  *
  * `serviceId` is resolved the same way the release engine resolves the release
- * directory segment ({@link effectiveReleaseServiceId} when the release engine
- * ran, else {@link resolveReleaseServiceId}), so the recorded identity
+ * directory segment ({@link resolveReleaseServiceId}), so the recorded identity
  * addresses the tree that was actually published.
  *
  * **The commit comes from the release engine, not the payload, whenever the
@@ -893,10 +914,14 @@ function releasesForManifest(
     const commitSha = result?.commitSha ?? entry.commitSha;
     const commitMessage = result?.commitMessage ?? entry.commitMessage;
     const commitAuthor = result?.commitAuthor ?? entry.commitAuthor;
+    const serviceId = result?.serviceId ??
+      resolveReleaseServiceId(payload, entry.composeServiceName);
+    const folder = entry.principal
+      ? serviceFolderFromPayload(payload, serviceId)
+      : undefined;
     out.push({
       composeServiceName: entry.composeServiceName,
-      serviceId: result?.serviceId ??
-        resolveReleaseServiceId(payload, entry.composeServiceName),
+      serviceId,
       // A rollback's live release is the one it promoted, not the id the
       // control plane would have allocated for a fresh build.
       releaseId: result?.releaseId ?? entry.rollbackToReleaseId ??
@@ -906,7 +931,9 @@ function releasesForManifest(
       ...(commitMessage === undefined ? {} : { commitMessage }),
       ...(commitAuthor === undefined ? {} : { commitAuthor }),
       ...(entry.ref.length > 0 ? { ref: entry.ref } : {}),
-      ...(entry.principal ? { username: entry.principal.username } : {}),
+      ...(entry.principal && folder
+        ? { username: entry.principal.username, folder }
+        : {}),
     });
   }
   return out;
@@ -966,52 +993,45 @@ function deployResultReleases(
  * Built from `sourceMaterial[]` on **every** deploy, not only when a release was
  * freshly promoted: a redeploy that does not touch the source still has to point
  * the document root at `current`, or the site would silently fall back to the
- * empty daemon-owned tree. `serviceId` uses {@link effectiveReleaseServiceId}
- * so legacy `sites/<compose>/` trees stay aligned with promote/bindings/vhosts.
- * Entries with no principal are skipped for the same reason the release engine
+ * empty daemon-owned tree. Entries with no principal are skipped for the same reason the release engine
  * skips them — there is no home to serve out of.
  */
-async function deployReleaseBindings(
+function deployReleaseBindings(
   payload: EnvironmentDeployPayload,
-  layout: LayoutPaths,
-  runFn: RunFn,
-): Promise<Map<string, SiteRelease>> {
+): Map<string, SiteRelease> {
   const bindings = new Map<string, SiteRelease>();
-  const entries = (payload.sourceMaterial ?? []).filter(
-    (
-      entry,
-    ): entry is typeof entry & {
-      principal: NonNullable<typeof entry.principal>;
-    } => entry.principal !== undefined,
-  );
-  const resolved = await Promise.all(
-    entries.map(async (entry) => ({
-      composeServiceName: entry.composeServiceName,
-      serviceId: await effectiveReleaseServiceId(
-        payload,
-        entry.composeServiceName,
-        layout,
-        entry.principal,
-        runFn,
-      ),
-      username: entry.principal.username,
-    })),
-  );
-  for (const row of resolved) {
-    bindings.set(row.composeServiceName, {
-      serviceId: row.serviceId,
-      username: row.username,
-    });
+  for (const entry of payload.sourceMaterial ?? []) {
+    if (entry.principal === undefined) continue;
+    bindings.set(
+      entry.composeServiceName,
+      bindingFor(payload, {
+        serviceId: resolveReleaseServiceId(payload, entry.composeServiceName),
+        username: entry.principal.username,
+      }),
+    );
   }
   return bindings;
 }
 
+/** A service's binding: its ids and the folder the payload plans for it (refused when absent). */
+function bindingFor(
+  payload: EnvironmentDeployPayload,
+  row: { serviceId: string; username: string },
+): SiteRelease {
+  return {
+    serviceId: row.serviceId,
+    username: row.username,
+    folder: serviceFolderFromPayload(payload, row.serviceId),
+  };
+}
+
 /**
- * Compose service name → the principal-owned `webroot/` it serves from.
+ * Compose service name → the principal-owned upload folder it serves from
+ * (`public/`).
  *
  * Same `serviceId` rule as {@link deployReleaseBindings} on purpose, so
- * `sites/<serviceId>/webroot/` and `sites/<serviceId>/current` are siblings and
- * connecting a repository later is a field flip rather than a move.
+ * `public/` and `current` are siblings and connecting a repository later is a
+ * field flip rather than a move.
  *
  * A site that carries **both** a release and `sourceKind: managed-directory` is
  * not a mixed state to reconcile: the release wins, because a promoted tree is
@@ -1020,41 +1040,28 @@ async function deployReleaseBindings(
  * branch first for that reason; the entry is dropped here so the two never
  * disagree about which lane a site is on.
  */
-async function deployManagedDirectoryBindings(
+export function deployManagedDirectoryBindings(
   payload: EnvironmentDeployPayload,
   releaseBindings: ReadonlyMap<string, SiteRelease>,
-  layout: LayoutPaths,
-  runFn: RunFn,
-): Promise<Map<string, SiteManagedDirectory>> {
+): Map<string, SiteManagedDirectory> {
   const bindings = new Map<string, SiteManagedDirectory>();
-  const sites = (payload.sites ?? []).filter(
-    (
-      site,
-    ): site is typeof site & {
-      principal: NonNullable<typeof site.principal>;
-    } =>
-      site.sourceKind === "managed-directory" &&
-      !releaseBindings.has(site.composeServiceName) &&
-      site.principal !== undefined,
-  );
-  const resolved = await Promise.all(
-    sites.map(async (site) => ({
-      composeServiceName: site.composeServiceName,
-      serviceId: await effectiveReleaseServiceId(
-        payload,
-        site.composeServiceName,
-        layout,
-        site.principal,
-        runFn,
-      ),
-      username: site.principal.username,
-    })),
-  );
-  for (const row of resolved) {
-    bindings.set(row.composeServiceName, {
-      serviceId: row.serviceId,
-      username: row.username,
-    });
+  // A site with an owner and no release gets the folder the control plane
+  // planned for it, so its files live in the scope tree. Sites with no owner
+  // stay in the daemon-owned tree.
+  for (const site of payload.sites ?? []) {
+    if (
+      (site.sourceKind !== "managed-directory" &&
+        site.sourceKind !== undefined) ||
+      releaseBindings.has(site.composeServiceName) ||
+      site.principal === undefined
+    ) continue;
+    bindings.set(
+      site.composeServiceName,
+      bindingFor(payload, {
+        serviceId: resolveReleaseServiceId(payload, site.composeServiceName),
+        username: site.principal.username,
+      }),
+    );
   }
   return bindings;
 }
@@ -1175,8 +1182,7 @@ export function resolveHostNativeLanes(
 /**
  * `serviceId`s this payload still carries a `sourceMaterial[]` entry for.
  *
- * Uses the segments the release engine just applied when present, and keeps the
- * legacy compose-key name as an alias while migration can still serve there.
+ * Uses the segments the release engine just applied when present.
  */
 function currentReleaseServiceIds(
   payload: EnvironmentDeployPayload,
@@ -1195,9 +1201,6 @@ function currentReleaseServiceIds(
       canonical;
     ids.add(effective);
     ids.add(canonical);
-    if (entry.composeServiceName !== canonical) {
-      ids.add(entry.composeServiceName);
-    }
   }
   return ids;
 }
@@ -1209,7 +1212,7 @@ function currentReleaseServiceIds(
  * This is the only durable record of a service that has since been dropped from
  * the compose: the payload in hand describes what the environment looks like
  * now, so a removed service is by definition absent from it. Rows with no
- * recorded principal are skipped — those never had a tree published.
+ * recorded principal or folder are skipped — those never had a tree published.
  */
 async function previousReleaseTrees(
   deploymentDir: string,
@@ -1217,41 +1220,54 @@ async function previousReleaseTrees(
   const manifest = await readDeploymentManifest(deploymentDir);
   const out: ReleaseTreeRef[] = [];
   for (const release of manifest?.releases ?? []) {
-    if (!release.username) continue;
-    out.push({ serviceId: release.serviceId, username: release.username });
+    if (!release.username || release.folder === undefined) continue;
+    out.push({
+      serviceId: release.serviceId,
+      username: release.username,
+      folder: release.folder,
+    });
   }
   return out;
 }
 
 /**
- * Reclaim `<principalHome>/sites/<serviceId>` for every service that had a
- * release tree last deploy and no longer declares a source.
+ * Report the service folders of every service that had a release tree last
+ * deploy and no longer declares a source.
+ *
+ * A service that leaves the compose file keeps its folder, whatever is in it:
+ * only an explicit delete (`server.folders.remove`) removes files. The kept
+ * folders go back in the result so the control plane can mark them orphans.
  *
  * Runs after the release engine so a tree this deploy is still publishing into
  * is never a candidate, and before the manifest is rewritten — once
  * `deployment.json` carries the new `releases[]`, the removed service is gone
  * from the host's record too.
  */
-async function reclaimRemovedServiceReleaseTrees(
-  layout: LayoutPaths,
+async function keptFoldersOfRemovedServices(
   payload: EnvironmentDeployPayload,
   applied: readonly AppliedRelease[],
   deploymentDir: string,
   logSink: CommandOutputSink,
-  runFn: RunFn,
-): Promise<void> {
+): Promise<KeptFolder[]> {
   const previous = await previousReleaseTrees(deploymentDir);
-  if (previous.length === 0) return;
-  const removed = await reclaimRemovedReleaseTrees({
-    layout,
-    previous,
-    currentServiceIds: currentReleaseServiceIds(payload, applied),
-    runFn,
-    onOutput: (stream, line) => logSink.onLine(stream, line),
-  });
-  for (const path of removed) {
-    logSink.onLine("stdout", `reclaimed removed service release tree ${path}`);
+  if (previous.length === 0) return [];
+  const currentServiceIds = currentReleaseServiceIds(payload, applied);
+  // A service the control plane still names a folder for this deploy is in use,
+  // whether or not it has a source; only one that is gone from the payload is kept.
+  const namedNow = new Set([
+    ...currentServiceIds,
+    ...(payload.serviceFolders ?? []).map((entry) => entry.serviceId),
+  ]);
+  const kept = keptServiceFolders(previous, namedNow).map((
+    folder,
+  ) => ({ ...folder, kind: "service" as const }));
+  for (const folder of kept) {
+    logSink.onLine(
+      "stdout",
+      `kept the folder of a service that left the compose file: ${folder.scope}/services/${folder.slug}`,
+    );
   }
+  return kept;
 }
 
 async function buildDeploymentManifest(
@@ -1322,31 +1338,31 @@ async function persistComposeEnvFile(
  * the ones it had just installed.
  */
 /**
- * What a site's cron job may write besides the principal's `home/`, `data/`
- * and `tmp/`: `shared/` in the release lane, `webroot/` and `shared/` in the
- * managed lane, nothing for a tree outside the principal's home.
+ * What a site's cron job may write besides the principal's `home/` and `tmp/`:
+ * `shared/` and `logs/` in the release lane, `public/` too in the managed lane
+ * (`webroot/` and `shared/` in the older tree), nothing for a tree outside the
+ * principal's home.
  */
 export function siteCronWritableDirs(
   layout: Pick<LayoutPaths, "principalHomeRoot">,
   release: SiteRelease | undefined,
   managed: SiteManagedDirectory | undefined,
 ): string[] {
-  if (release) {
-    return [
-      siteSharedDir(
-        principalHomePath(layout, release.username),
-        release.serviceId,
-      ),
-    ];
-  }
-  if (managed) {
-    const home = principalHomePath(layout, managed.username);
-    return [
-      siteWebrootDir(home, managed.serviceId),
-      siteSharedDir(home, managed.serviceId),
-    ];
-  }
+  if (release) return siteWritableDirs(layout, release, false);
+  if (managed) return siteWritableDirs(layout, managed, true);
   return [];
+}
+
+/** A native app's tree reference: its service id and owner, plus its folder. */
+function nativeRef(
+  app: EnvironmentDeployNativeAppService,
+  binding: Pick<SiteRelease, "username" | "folder">,
+): SiteRelease {
+  return {
+    serviceId: app.serviceId,
+    username: binding.username,
+    folder: binding.folder,
+  };
 }
 
 async function applyDeployCronJobs(
@@ -1394,16 +1410,13 @@ async function applyDeployCronJobs(
       // The release `current` symlink, exactly what the app's own unit uses as
       // `WorkingDirectory` — a job and the application it belongs to must not
       // disagree about which tree is live.
-      workingDirectory: siteCurrentSymlink(
-        principalHomePath(layout, binding.username),
-        app.serviceId,
+      workingDirectory:
+        serviceTree(layout, nativeRef(app, binding)).currentLink,
+      siteWritableDirs: siteWritableDirs(
+        layout,
+        nativeRef(app, binding),
+        false,
       ),
-      siteWritableDirs: [
-        siteSharedDir(
-          principalHomePath(layout, binding.username),
-          app.serviceId,
-        ),
-      ],
       username: binding.username,
       jobs: app.cron,
     });
@@ -1437,6 +1450,48 @@ async function applyDeploySites(
     releaseBindings,
     managedDirectoryBindings,
   });
+}
+
+/**
+ * Remove the vhost, pool and runtime of the sites the control plane says left
+ * the compose file (`removedSites[]`). Only what is named goes, and a name that
+ * is also a site or a native app of this deploy never does. A payload that
+ * names none (an older control plane, a transient or partial payload) removes
+ * nothing: absence from `sites[]` is never read as a deletion.
+ *
+ * Runs once everything else in the deploy has succeeded, so a deploy that fails
+ * part way never leaves the old vhosts gone. A failed removal is logged and
+ * does not fail a deploy that has already been published; whether a later
+ * deploy names the site again is the control plane's choice. The folder of a
+ * removed site stays, as an orphan.
+ */
+export async function removeLeftSites(
+  layout: LayoutPaths,
+  payload: Pick<
+    EnvironmentDeployPayload,
+    "environmentId" | "sites" | "nativeAppServices" | "removedSites"
+  >,
+  removeNamed: typeof removeNamedSites = removeNamedSites,
+): Promise<string[]> {
+  const current = new Set([
+    ...(payload.sites ?? []).map((site) => site.composeServiceName),
+    ...(payload.nativeAppServices ?? []).map((app) => app.composeServiceName),
+  ]);
+  const names = (payload.removedSites ?? []).filter((name) =>
+    !current.has(name)
+  );
+  if (names.length === 0) return [];
+  try {
+    return await removeNamed(layout, payload.environmentId, names);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `sites that left the compose file could not be removed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return [];
+  }
 }
 
 /**
@@ -1498,12 +1553,58 @@ async function applyDeployNativeApps(
   );
 }
 
+/**
+ * The folders under the site owners' tree this deploy may bind from: each
+ * volume folder it was sent.
+ */
+export function ownedVolumeRoots(
+  layout: Pick<LayoutPaths, "principalHomeRoot">,
+  payload: Pick<EnvironmentDeployPayload, "storageMaterial">,
+): string[] {
+  const roots: string[] = [];
+  for (const entry of payload.storageMaterial ?? []) {
+    if (entry.folder !== undefined) {
+      roots.push(volumeFolder(layout, entry.folder));
+    }
+  }
+  return roots;
+}
+
+/**
+ * A container whose compose file names a numeric user other than the site
+ * owner's gets an access entry on the volume folder for that uid. Never fails
+ * the deploy: see `deploy/volume-access.ts`.
+ */
+async function grantDeclaredVolumeUsers(
+  layout: LayoutPaths,
+  entries: readonly EnvironmentDeployStorageMaterial[],
+  resolved: Awaited<ReturnType<typeof resolveComposeModel>>,
+  ownerIds: VolumeOwnerIds,
+  runtime: { logSink: CommandOutputSink; runPrivileged: RunFn },
+): Promise<void> {
+  const { users, named } = declaredVolumeUsers(entries, resolved, ownerIds);
+  if (users.length === 0 && named.length === 0) return;
+  const folders = new Map<string, FolderRefParts>();
+  for (const entry of entries) {
+    if (entry.folder !== undefined) folders.set(entry.storageId, entry.folder);
+  }
+  await applyVolumeAccess(
+    layout,
+    folders,
+    users,
+    named,
+    runtime.runPrivileged,
+    (line) => runtime.logSink.onLine("stdout", line),
+  );
+}
+
 function buildDaemonOverlayFragment(
   parsedPayload: EnvironmentDeployPayload,
   containerHostings: EnvironmentDeployHosting[],
   sites: EnvironmentDeploySite[],
   mountPaths: Map<string, string>,
   resolved: Awaited<ReturnType<typeof resolveComposeModel>>,
+  volumeOwnerIds?: VolumeOwnerIds,
 ): ReturnType<typeof mergeComposeOverlayFragments> {
   const storageMaterial = parsedPayload.storageMaterial ?? [];
 
@@ -1511,6 +1612,7 @@ function buildDaemonOverlayFragment(
     storageMaterial,
     mountPaths,
     resolved,
+    volumeOwnerIds,
   );
 
   const siteFragment = sites.length > 0
@@ -1552,6 +1654,8 @@ type DeployContainerServicesInput = {
     defaultMtu: number,
   ) => Promise<void>;
   cancel?: DeployCancelToken;
+  /** Privileged runner for the volume access entries; defaults to the root helper. */
+  runPrivileged?: RunFn;
 };
 
 /**
@@ -1876,6 +1980,7 @@ async function deployContainerServices(
     logSink,
     decryptSecrets,
   } = input;
+  const runPrivileged = input.runPrivileged ?? defaultRunPrivileged;
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
   const cancel = input.cancel;
@@ -1947,6 +2052,10 @@ async function deployContainerServices(
         deploymentDir,
         stageDir,
         hostLevelApproved: parsedPayload.hostLevelApproved === true,
+        ownerTree: {
+          homeRoot: layout.principalHomeRoot,
+          volumes: ownedVolumeRoots(layout, parsedPayload),
+        },
         priorWritableMounts: await priorWritableMounts(
           parsedPayload.projectName,
           deploymentDir,
@@ -1955,12 +2064,26 @@ async function deployContainerServices(
       },
     );
 
+    const volumeOwnerIds = await resolveVolumeOwnerIds(
+      parsedPayload.storageMaterial ?? [],
+      parsedPayload.principalMaterial,
+      undefined,
+      (line) => logSink.onLine("stdout", line),
+    );
+    await grantDeclaredVolumeUsers(
+      layout,
+      parsedPayload.storageMaterial ?? [],
+      resolved,
+      volumeOwnerIds,
+      { logSink, runPrivileged },
+    );
     const fragment = buildDaemonOverlayFragment(
       parsedPayload,
       containerHostings,
       sites,
       mountPaths,
       resolved,
+      volumeOwnerIds,
     );
     yaml = applySecretFilePaths(
       mergeOverlayIntoComposeYaml(yaml, fragment),
@@ -2037,6 +2160,54 @@ async function deployContainerServices(
       parsedPayload.projectName,
       run,
       { environmentId: parsedPayload.environmentId, deploymentDir },
+    );
+
+    // A container run as the site owner must be able to write the named
+    // volumes it mounts too: Docker makes those root-owned.
+    for (
+      const line of deploymentBindWarnings(
+        fragment.services as
+          | Record<string, Record<string, unknown>>
+          | undefined,
+        resolved.services as Record<string, Record<string, unknown>>,
+        [stageDir, deploymentDir],
+      )
+    ) {
+      logSink.onLine("stdout", line);
+    }
+    await ensureNamedVolumeOwners(
+      namedVolumeOwnerTargets(
+        fragment.services as
+          | Record<string, Record<string, unknown>>
+          | undefined,
+        resolved.services as Record<string, Record<string, unknown>>,
+        (resolved.document?.volumes ?? undefined) as
+          | Record<string, unknown>
+          | undefined,
+        parsedPayload.projectName,
+        new Set(
+          (parsedPayload.storageMaterial ?? []).flatMap((entry) =>
+            entry.provider === "docker" && entry.volumeName
+              ? [entry.volumeName]
+              : []
+          ),
+        ),
+        new Map(
+          (parsedPayload.storageMaterial ?? []).flatMap((entry) => {
+            const ids = volumeOwnerIds.get(entry.storageId);
+            return entry.provider === "docker" && entry.volumeName &&
+                ids !== undefined
+              ? [[entry.volumeName, `${ids.uid}:${ids.gid}`] as const]
+              : [];
+          }),
+        ),
+      ),
+      {
+        projectName: parsedPayload.projectName,
+        composePaths: chain,
+        run,
+        log: (line) => logSink.onLine("stdout", line),
+      },
     );
 
     const serviceHooks = parsedPayload.serviceHooks ?? [];
@@ -2206,6 +2377,8 @@ export function shapeEnvironmentDeployResult(input: {
   warnings?: readonly string[];
   /** The uid/gid each ensured account has on this host. */
   principals?: readonly PrincipalIdReport[];
+  /** Service folders left in place because their service left the compose file. */
+  keptFolders?: readonly KeptFolder[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -2236,6 +2409,9 @@ export function shapeEnvironmentDeployResult(input: {
       : {}),
     ...(input.principals && input.principals.length > 0
       ? { principals: [...input.principals] }
+      : {}),
+    ...(input.keptFolders && input.keptFolders.length > 0
+      ? { keptFolders: [...input.keptFolders] }
       : {}),
   };
 }
@@ -2635,13 +2811,11 @@ async function deployEnvironmentHolding(
   }
   // Whole-tree cleanup for services that lost their source since last deploy —
   // per-release retention only ever walks services still being published.
-  await reclaimRemovedServiceReleaseTrees(
-    layout,
+  const keptFolders = await keptFoldersOfRemovedServices(
     parsedPayload,
     appliedReleases,
     deploymentDir,
     runtime.logSink,
-    runtime.runPrivileged,
   );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
 
@@ -2664,16 +2838,10 @@ async function deployEnvironmentHolding(
     runtime.logSink.onLine("stderr", warning);
   }
 
-  const siteReleaseBindings = await deployReleaseBindings(
-    parsedPayload,
-    layout,
-    runtime.runPrivileged,
-  );
-  const siteManagedBindings = await deployManagedDirectoryBindings(
+  const siteReleaseBindings = deployReleaseBindings(parsedPayload);
+  const siteManagedBindings = deployManagedDirectoryBindings(
     parsedPayload,
     siteReleaseBindings,
-    layout,
-    runtime.runPrivileged,
   );
   const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
     nativeAppServices,
@@ -2767,6 +2935,7 @@ async function deployEnvironmentHolding(
     decryptSecrets: runtime.decryptSecrets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
+    runPrivileged: runtime.runPrivileged,
     ...(cancel === undefined ? {} : { cancel }),
   });
 
@@ -2792,6 +2961,14 @@ async function deployEnvironmentHolding(
     run: runtime.run,
   });
 
+  // Last of the changes to the host, after the health phase: the containers
+  // are up, the health gates have passed (they run inside the publish above;
+  // collecting the containers here only reports them) and the new sites are
+  // serving, so a deploy that failed earlier never leaves an old vhost gone.
+  // A failure from here on is only the report being built, and the vhosts of a
+  // site that has left the compose file are not needed by the new version.
+  await removeLeftSites(layout, parsedPayload);
+
   logInfo(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
@@ -2807,5 +2984,6 @@ async function deployEnvironmentHolding(
     siteApps,
     warnings: siteWarnings,
     principals: principalIdReports,
+    keptFolders,
   });
 }

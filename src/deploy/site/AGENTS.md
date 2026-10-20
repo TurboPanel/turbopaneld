@@ -140,7 +140,7 @@ Docker Compose. The daemon:
    site (`Type=notify`, `listen.acl_users = tpnginx|tpapache`). Both use
    `/run/turbopanel-php-<id>/php.sock`, the owner's `tmp/` on `/tmp`
    (sessions, uploads), `ProtectSystem=strict` with writes only to `tmp/`
-   and the site's `shared/` (and `webroot/` for a managed directory), and
+   and the site's `shared/` and `logs/` (and `public/` for a managed directory), and
    `-c <configDir>/php/sites/<id>/php.ini` — which replaces the packaged
    php.ini, so it carries the production baseline itself, with a 128 MB
    opcache per runtime and `validate_permission`/`validate_root` on. Apache
@@ -296,7 +296,7 @@ packaged binary against `/etc/turbopanel/php/php-fpm.conf` and the same
 
 **Release-backed sites (`sourceMaterial[]`).** When the deploy carries a Git
 source for a site compose service, that site's document root resolves
-to `<principalHome>/sites/<serviceId>/current/<root>` instead of the daemon-owned
+to `<service folder>/current/<root>` instead of the daemon-owned
 state dir. `current` is a stable *name*, so the generated vhost content is
 byte-identical across releases — only the (already atomic) promote changes what
 it points at. That stability is **enforced, not just intended**: the
@@ -333,8 +333,8 @@ root-owned `0550` by design:
   always follows symlinks, and `tpcaddysite` sits in every owner's group, so the
   unit starts through `orchestration/scripts/tp-site-caddy-run`
   (`ExecStart=+`): in a private mount namespace it bind-mounts, read-only with
-  `nosymfollow` (Linux 5.10+), each managed `…/sites/<id>/webroot` and each
-  release-backed `…/sites/<id>/releases` named by a fragment's `root *` line,
+  `nosymfollow` (Linux 5.10+), each managed `…/services/<name>/public` and each
+  release-backed `…/services/<name>/releases` named by a fragment's `root *` line,
   then drops to `tpcaddysite` with no capabilities. The platform's own `current`
   link sits outside the mount and is still followed; every link *inside* a
   release (including a second hop through `shared/`) is not. The mounts exist
@@ -541,21 +541,46 @@ probe on `127.0.0.1` fails. The post-apply probe is still status-only: this
 check, not the probe, is what keeps one tenant's domain off another's
 listener.
 
+## Sites that left the compose file
+
+The control plane names them in `removedSites[]` on the deploy (absent or empty
+removes nothing; a site missing from `sites[]` is never read as removed). After
+everything else in the deploy has succeeded, `removeLeftSites` hands the names
+that are not also in `sites[]` to `removeNamedSites`, which removes exactly
+those sites' vhost on every engine, php-fpm pool and per-site PHP runtime, in
+this environment only, and reloads the engines that lost one. It runs no
+host-wide sweep, no idle-series disable and no software prune: those belong to
+the whole-environment removal (`removeSites`, on stop and delete). A failed
+removal is logged and does not fail the deploy; the folder of the site stays as
+an orphan.
+
 ## Managed-directory sites
+
+**Where it lives.** The service folder (`serviceFolders[]` on the deploy, always
+sent) holds the uploaded folder `<service folder>/public/` and a release at
+`<service folder>/current/`. `serviceTree` (`src/paths/layout.ts`) answers, and
+`siteWritableDirs` names what site code may write (`shared/`, `logs/`, and the
+uploaded folder for this lane) for the PHP unit, cron and `open_basedir`.
+`public/` is made here, `<owner>:<engine group> 0750` (the folder itself, its
+`releases/`, `shared/` and `logs/` come from `ensureAssetFolder`). The default
+root name `public` means `public/` itself in the folder tree (an uploaded
+folder is already the web root); any other `root` is a folder inside it. The
+site Caddy mounts `public/` and `releases/` `nosymfollow`
+(`tp-site-caddy-run roots` reads both shapes).
 
 A site's content comes from one of two lanes, named by `sourceKind` on the wire
 and never inferred:
 
 - **`release`** (the default, and every site's behavior before this existed) —
   a Git-backed immutable tree the release engine publishes into
-  `sites/<serviceId>/current`. `applyOneSite` **asserts** it and never creates
+  `<service folder>/current`. `applyOneSite` **asserts** it and never creates
   it: silently seeding a placeholder would publish "TurboPanel site is ready"
   over what the operator believes is their application.
-- **`managed-directory`** — a principal-writable `sites/<serviceId>/webroot/`
+- **`managed-directory`** — a principal-writable `<service folder>/public/`
   the tenant fills over SFTP. Created here, because there is no release engine
   on this lane and the directory has to exist before the vhost that serves it.
 
-`webroot/` is a deliberate **sibling** of `releases/` and `current`, and both
+`public/` is a deliberate **sibling** of `releases/` and `current`, and both
 lanes resolve `serviceId` through the same `resolveReleaseServiceId`. That is
 what makes connecting a repository to an existing site a field flip rather than
 a move.

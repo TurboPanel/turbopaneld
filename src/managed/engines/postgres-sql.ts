@@ -286,11 +286,16 @@ export function dropDatabaseSql(name: string): string {
 const DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
 const READ_WRITE_DATABASE_PRIVILEGES = ["CONNECT", "TEMPORARY"] as const;
 const READ_ONLY_DATABASE_PRIVILEGES = ["CONNECT"] as const;
+/** Read-write logins change data only: no TRUNCATE, no REFERENCES (same as MySQL and MariaDB). */
 const WRITER_TABLE_PRIVILEGES = [
   "SELECT",
   "INSERT",
   "UPDATE",
   "DELETE",
+] as const;
+/** Owner logins (the migration level) also empty tables and add foreign keys. */
+const OWNER_TABLE_PRIVILEGES = [
+  ...WRITER_TABLE_PRIVILEGES,
   "TRUNCATE",
   "REFERENCES",
 ] as const;
@@ -559,7 +564,9 @@ function defaultPrivilegeSql(
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON TABLES FROM ${role};`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON SEQUENCES FROM ${role};`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
-        WRITER_TABLE_PRIVILEGES.join(", ")
+        (owners.includes(name)
+          ? OWNER_TABLE_PRIVILEGES
+          : WRITER_TABLE_PRIVILEGES).join(", ")
       } ON TABLES TO ${role};`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
         WRITER_SEQUENCE_PRIVILEGES.join(", ")
@@ -682,7 +689,14 @@ function existingObjectSql(
           : WRITER_SCHEMA_PRIVILEGES,
         true,
       ),
-      exactObjectAclSql(table, name, WRITER_TABLE_PRIVILEGES, true),
+      exactObjectAclSql(
+        table,
+        name,
+        owners.includes(name)
+          ? OWNER_TABLE_PRIVILEGES
+          : WRITER_TABLE_PRIVILEGES,
+        true,
+      ),
       exactObjectAclSql(sequence, name, WRITER_SEQUENCE_PRIVILEGES, true),
     );
   }
@@ -721,10 +735,13 @@ export function closePublicSchemaSql(): string {
  * each database's own catalog). Covers every schema that is not a system
  * schema, existing objects now and objects made later by any creator.
  *
- * - writers (owner, read-write): SELECT, INSERT, UPDATE, DELETE, TRUNCATE and
- *   REFERENCES on tables (REFERENCES lets a migration add a foreign key to a
- *   table another login owns; it cannot run code); USAGE, SELECT and UPDATE on
- *   sequences; USAGE and CREATE on schemas. Never TRIGGER or MAINTAIN: a login that may add a
+ * - owner logins (the migration level): SELECT, INSERT, UPDATE, DELETE,
+ *   TRUNCATE and REFERENCES on tables (REFERENCES lets a migration add a
+ *   foreign key to a table another login owns; it cannot run code); USAGE,
+ *   SELECT and UPDATE on sequences; USAGE and CREATE on schemas.
+ * - read-write logins: SELECT, INSERT, UPDATE and DELETE on tables (data
+ *   changes only, so a read-write login cannot empty a table, the same as on
+ *   MySQL and MariaDB); the same sequence rights; USAGE on schemas. Never TRIGGER or MAINTAIN: a login that may add a
  *   trigger to a table runs code as whoever writes that table, the owner
  *   login included. Version-neutral (no privilege is named for revoking), so
  *   it applies unchanged on every supported Postgres series.

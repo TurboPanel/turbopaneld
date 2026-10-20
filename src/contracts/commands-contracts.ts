@@ -6,6 +6,12 @@
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
 import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
+import {
+  type FolderRefParts,
+  folderRefParts,
+  isPathId,
+  parseFolderRefParts,
+} from "./directory-names.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -19,6 +25,7 @@ export const COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -130,6 +137,12 @@ export type PrincipalIdReport = {
   principalId: string;
   uid: number;
   gid: number;
+  /**
+   * The account's directory on this host (`<home root>/<name>`), reported by
+   * the daemon because it owns the root. Additive: older control planes ignore
+   * it.
+   */
+  home?: string;
 };
 
 /**
@@ -185,8 +198,73 @@ export type PrincipalsReconcileResult = {
    * ignore it.
    */
   principals?: PrincipalIdReport[];
+  /**
+   * Every asset folder found on the host by listing each owner's scopes and
+   * their `services` and `volumes` folders, so the control plane can mark a
+   * folder it expects as missing and record one it does not know as an
+   * orphan. Omitted when the listing failed or ran out of time (the reason is
+   * in `warnings`): its absence says nothing about any folder. Nothing is ever
+   * deleted because of this list. Additive: older control planes ignore it.
+   */
+  folders?: ReportedFolder[];
   warnings: string[];
 };
+
+/** One asset folder found on the host, by its four components. */
+export type ReportedFolder = {
+  owner: string;
+  scope: string;
+  kind: "service" | "volume";
+  slug: string;
+  present: boolean;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.folders.remove` shape.
+ *
+ * Remove asset folders the panel has deleted the asset of. This is the only
+ * way a volume folder leaves the host: stopping an environment keeps volumes,
+ * and a service that leaves the compose file keeps its folder. Each entry names
+ * the folder by its four components, never by a path.
+ */
+export type FoldersRemovePayload = {
+  folders: FolderRemoval[];
+};
+
+/** One folder to remove. */
+export type FolderRemoval = {
+  kind: "service" | "volume";
+  /**
+   * The service or volume id, when the panel still has it (a deleted asset's
+   * row has lost it, and the host finds it from its own record of the folder).
+   * Checked against that record, so a wrong reference cannot remove another
+   * asset's folder; also names the records that go with a service folder.
+   */
+  assetId?: string;
+  folder: FolderRefParts;
+};
+
+/** Must stay in sync with the instance canonical `server.folders.remove` shape. */
+export type FoldersRemoveResult = {
+  summary: string;
+  /** One entry per requested folder, in request order. */
+  folders: FolderRemovalState[];
+};
+
+/** What happened to one requested folder. */
+export type FolderRemovalState = {
+  owner: string;
+  scope: string;
+  kind: "service" | "volume";
+  slug: string;
+  /** True once the folder is gone from the host (or was never there). */
+  removed: boolean;
+  /** Why the folder stayed, in plain words. Present only when `removed` is false. */
+  reason?: string;
+};
+
+/** Most folders one `server.folders.remove` may name. */
+export const FOLDERS_REMOVE_MAX = 100;
 
 /**
  * Must stay in sync with the instance canonical `server.firewall.reconcile`
@@ -474,6 +552,8 @@ export type BackupPolicyWireEntry = {
   composeProject?: string;
   organizationId?: string;
   storageId?: string;
+  /** A path copy: the volume's folder by its parts; the host builds the directory from it. */
+  folder?: FolderRefParts;
   onCalendar: string;
   retentionKeep: number;
   enabled: boolean;
@@ -503,14 +583,20 @@ export type CopyBackupSource = {
   composeProject?: string;
   organizationId?: string;
   storageId?: string;
+  /**
+   * A path copy: the volume's folder by its parts. The host builds the
+   * directory from it and ignores `hostPath`, which may ride beside it for a
+   * host that did not know the field.
+   */
+  folder?: FolderRefParts;
 };
 
 /**
  * Must stay in sync with the instance canonical `storage.backup` shape.
  * `create` archives the copy (live, no pause) into
- * `<backupDir>/copies/<copyId>/<backupId>.tar.gz`; `delete` removes an
+ * `<backupDir>/volumes/<copyId>/<backupId>.tar.gz`; `delete` removes an
  * artifact, and `policyId` locates one a scheduled run made
- * (`<backupDir>/copies/<copyId>/policy-<policyId>/…`).
+ * (`<backupDir>/volumes/<copyId>/policy-<policyId>/…`).
  */
 export type StorageBackupPayload = CopyBackupSource & {
   action: "create" | "delete";
@@ -769,6 +855,25 @@ export type EnvironmentDeployStorageMount = {
   readOnly?: boolean;
 };
 
+/** One service's folder under its site owner's tree. */
+/** A hostname and the environment whose host config it is taken over from. */
+export type EnvironmentDeployTakeover = {
+  /** Folded: lowercase, `xn--` for an international name. */
+  hostname: string;
+  fromEnvironmentId: string;
+};
+
+export type EnvironmentDeployServiceFolder = {
+  serviceId: string;
+  /**
+   * The compose service the folder belongs to. It lets the host tie a site or
+   * app with no hostname, source or native app to its service id, which no
+   * other list carries for it.
+   */
+  composeServiceName?: string;
+  folder: FolderRefParts;
+};
+
 export type EnvironmentDeployStorageMaterial = {
   storageId: string;
   locationId: string;
@@ -776,6 +881,11 @@ export type EnvironmentDeployStorageMaterial = {
   name: string;
   provider: "docker" | "path";
   sourcePath?: string;
+  /**
+   * The volume's folder under its site owner's tree, as components. The only
+   * place an owned volume lives; a `sourcePath` without a folder is refused.
+   */
+  folder?: FolderRefParts;
   /**
    * On-host Docker volume name. Required when `provider` is `docker`.
    */
@@ -1181,9 +1291,9 @@ export type EnvironmentDeployNativeAppVariable = {
  * carry `credentialUsername`, the basic-auth user to answer with; it is opaque
  * here, so no provider-specific rule leaks into the daemon.
  *
- * `releaseId` becomes a directory name under
- * `<principalHome>/sites/<serviceId>/releases/`, so it is validated as a safe
- * id (no path separators).
+ * `releaseId` becomes a directory name under the service's `releases/` folder
+ * (`<principalHome>/<scope>/services/<name>/releases/`), so it is validated as
+ * a safe id (no path separators).
  */
 /**
  * Auth shape of a clone credential. Mirrors instance
@@ -1482,6 +1592,29 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   envFile?: string;
   secretPlan?: EnvironmentDeploySecretPlanEntry[];
   storageMaterial?: EnvironmentDeployStorageMaterial[];
+  /**
+   * The folder of every service this deploy runs on the host (a site, a native
+   * app or a Git-backed source), as components. The service id is the same
+   * value the release tree, units and hosting use. The control plane always
+   * sends it (an empty list when nothing runs on the host); a host-run service
+   * with no entry is refused. Kept optional on the wire for compatibility.
+   */
+  serviceFolders?: EnvironmentDeployServiceFolder[];
+  /**
+   * Compose service names of sites that left the compose file. The host removes
+   * the vhost, php-fpm pool and per-site runtime of exactly these, in this
+   * environment, after the deploy has succeeded. Absent or empty removes
+   * nothing: a site missing from `sites` is never read as removed.
+   */
+  removedSites?: string[];
+  /**
+   * Hostnames of this deploy's hostings the control plane can prove were last
+   * held, on this server, by a named other environment of the same organization
+   * that no longer has a hosting for them (deleted, or moved). The host takes a
+   * listed name over only from that environment's own snippet, and refuses if
+   * any other environment's snippet also holds it. Absent or empty: refuse.
+   */
+  takeoverHostnames?: EnvironmentDeployTakeover[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -1574,6 +1707,21 @@ export type EnvironmentDeployResult = {
    * ignore it.
    */
   principals?: PrincipalIdReport[];
+  /**
+   * Service folders left in place because their service is no longer in the
+   * compose file. A service that leaves the file keeps its files; only an
+   * explicit delete (`server.folders.remove`) removes them. The control plane
+   * marks each one an orphan. Omitted when there were none. Additive.
+   */
+  keptFolders?: KeptFolder[];
+};
+
+/** A service folder a deploy left in place, by its components. */
+export type KeptFolder = {
+  owner: string;
+  scope: string;
+  kind: "service";
+  slug: string;
 };
 
 export type EnvironmentStopPayload = {
@@ -1589,14 +1737,14 @@ export type EnvironmentStopPayload = {
    */
   fabricNetworks?: string[];
   /**
-   * Per-service release trees (`<principalHome>/sites/<serviceId>`) to reclaim.
+   * Per-service folders (`<principalHome>/<scope>/services/<name>`) to reclaim.
    *
    * Generic on purpose — this is the same tree the Git release engine publishes
    * into and native apps run out of, not a site
    * detail. Like `fabricNetworks`, the instance has already dropped the rows
    * that named these, so the payload is the only remaining copy for this host.
    */
-  siteReleases?: Array<{ serviceId: string; username: string }>;
+  siteReleases?: StopSiteRelease[];
   /**
    * Principals no project, site or app on this host uses once this delete
    * commits: the daemon retires each through `tp-host principal-remove`
@@ -1612,6 +1760,23 @@ export type EnvironmentStopResult = {
   summary: string;
   /** Authoritative empty report so the instance clears container pins. */
   containers: EnvironmentDeployContainer[];
+  /**
+   * What happened to each service folder the stop was told to reclaim. Only
+   * present when the payload carried `siteReleases` with a `folder`; `removed`
+   * is true once the folder is gone from the host (or was never there).
+   */
+  folders?: EnvironmentStopFolderState[];
+};
+
+/** One reclaimed (or not) service folder, by its components. */
+export type EnvironmentStopFolderState = {
+  owner: string;
+  scope: string;
+  kind: "service";
+  slug: string;
+  removed: boolean;
+  /** Why the folder stayed, in plain words. Present only when `removed` is false. */
+  reason?: string;
 };
 
 /** Must stay in sync with the instance canonical `environment.lifecycle` action set. */
@@ -4298,6 +4463,101 @@ function parseStorageMount(value: unknown): EnvironmentDeployStorageMount {
   return mount;
 }
 
+/** The folder of each host-run service. Two entries may not name the same compose service. */
+function parseServiceFolders(
+  value: unknown,
+): EnvironmentDeployServiceFolder[] | undefined {
+  const entries = parseOptionalMaterialArray(
+    value,
+    "serviceFolders",
+    parseServiceFolder,
+  );
+  const named = new Set<string>();
+  for (const entry of entries ?? []) {
+    if (entry.composeServiceName === undefined) continue;
+    if (named.has(entry.composeServiceName)) {
+      throw new TypeError(
+        `serviceFolders names the service ${entry.composeServiceName} twice`,
+      );
+    }
+    named.add(entry.composeServiceName);
+  }
+  return entries;
+}
+
+/** The takeovers the control plane vouches for: a lowercase hostname and the environment it comes from, or absent. */
+function parseTakeoverHostnames(
+  value: unknown,
+): EnvironmentDeployTakeover[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("takeoverHostnames must be an array");
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) {
+      throw new TypeError("takeoverHostnames must hold hostname entries");
+    }
+    const { hostname, fromEnvironmentId } = entry;
+    if (
+      typeof hostname !== "string" || hostname.length > 253 ||
+      !/^[a-z0-9*][a-z0-9.*-]*$/.test(hostname)
+    ) {
+      throw new TypeError("takeoverHostnames must hold lowercase hostnames");
+    }
+    if (
+      typeof fromEnvironmentId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(fromEnvironmentId)
+    ) {
+      throw new TypeError(
+        "takeoverHostnames must name the environment a hostname comes from",
+      );
+    }
+    return { hostname, fromEnvironmentId };
+  });
+}
+
+/** The sites that left the compose file: an array of compose service names, or absent. */
+function parseRemovedSites(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("removedSites must be an array");
+  }
+  return value.map((name) => {
+    if (
+      typeof name !== "string" || name === "." || name === ".." ||
+      !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(name)
+    ) {
+      throw new TypeError("removedSites must hold compose service names");
+    }
+    return name;
+  });
+}
+
+function parseServiceFolder(value: unknown): EnvironmentDeployServiceFolder {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy serviceFolders entry");
+  }
+  const serviceId = parseNonEmptyString(value, "serviceId");
+  if (!STOP_SITE_RELEASE_SERVICE_ID_RE.test(serviceId)) {
+    throw new TypeError("Invalid environment deploy serviceFolders serviceId");
+  }
+  const composeServiceName = value.composeServiceName;
+  if (
+    composeServiceName !== undefined &&
+    (typeof composeServiceName !== "string" ||
+      !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(composeServiceName))
+  ) {
+    throw new TypeError(
+      "Invalid environment deploy serviceFolders composeServiceName",
+    );
+  }
+  return {
+    serviceId,
+    ...(composeServiceName === undefined ? {} : { composeServiceName }),
+    folder: folderRefParts(parseFolderRefParts(value.folder, "service")),
+  };
+}
+
 function parseStorageMaterial(
   value: unknown,
 ): EnvironmentDeployStorageMaterial {
@@ -4340,6 +4600,11 @@ function parseStorageMaterial(
   }
   if (typeof value.sourcePath === "string") {
     material.sourcePath = value.sourcePath;
+  }
+  if (value.folder !== undefined) {
+    material.folder = folderRefParts(
+      parseFolderRefParts(value.folder, "volume"),
+    );
   }
   if (typeof value.principalId === "string") {
     material.principalId = value.principalId;
@@ -6195,6 +6460,9 @@ export function parseEnvironmentDeployPayload(
         "storageMaterial",
         parseStorageMaterial,
       ),
+      serviceFolders: parseServiceFolders(value.serviceFolders),
+      removedSites: parseRemovedSites(value.removedSites),
+      takeoverHostnames: parseTakeoverHostnames(value.takeoverHostnames),
       principalMaterial: parseOptionalMaterialArray(
         value.principalMaterial,
         "principalMaterial",
@@ -6216,13 +6484,22 @@ export function parseEnvironmentDeployPayload(
   };
 }
 
+/**
+ * One service release tree to reclaim on stop. `folder` names the service's folder as
+ * components; it is optional until the daemon resolves folders itself, and `username` stays
+ * until then.
+ */
+export type StopSiteRelease = {
+  serviceId: string;
+  username: string;
+  folder?: FolderRefParts;
+};
+
 /** Same charset the release layout enforces before any path join. */
 const STOP_SITE_RELEASE_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const STOP_SITE_RELEASE_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,27}$/;
 
-function parseStopSiteRelease(
-  value: unknown,
-): { serviceId: string; username: string } {
+function parseStopSiteRelease(value: unknown): StopSiteRelease {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment.stop siteReleases entry");
   }
@@ -6238,7 +6515,51 @@ function parseStopSiteRelease(
   ) {
     throw new TypeError("Invalid environment.stop siteReleases username");
   }
-  return { serviceId: value.serviceId, username: value.username };
+  const release: StopSiteRelease = {
+    serviceId: value.serviceId,
+    username: value.username,
+  };
+  if (value.folder !== undefined) {
+    release.folder = folderRefParts(
+      parseFolderRefParts(value.folder, "service"),
+    );
+  }
+  return release;
+}
+
+/** Parse `server.folders.remove`. */
+export function parseFoldersRemovePayload(
+  value: unknown,
+): FoldersRemovePayload {
+  if (!isRecord(value) || !Array.isArray(value.folders)) {
+    throw new TypeError("Invalid folders remove payload");
+  }
+  if (value.folders.length === 0 || value.folders.length > FOLDERS_REMOVE_MAX) {
+    throw new TypeError(
+      `folders must name 1 to ${FOLDERS_REMOVE_MAX} folders`,
+    );
+  }
+  return { folders: value.folders.map(parseFolderRemoval) };
+}
+
+function parseFolderRemoval(value: unknown): FolderRemoval {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid folders remove entry");
+  }
+  if (value.kind !== "service" && value.kind !== "volume") {
+    throw new TypeError("Invalid folders remove kind");
+  }
+  const entry: FolderRemoval = {
+    kind: value.kind,
+    folder: folderRefParts(parseFolderRefParts(value.folder, value.kind)),
+  };
+  if (value.assetId !== undefined) {
+    if (typeof value.assetId !== "string" || !isPathId(value.assetId)) {
+      throw new TypeError("Invalid folders remove assetId");
+    }
+    entry.assetId = value.assetId;
+  }
+  return entry;
 }
 
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */
@@ -8392,6 +8713,7 @@ const MAX_COPY_HOST_PATH_LENGTH = 1024;
 /** One path segment: no `/`, no `,` (the path lands in a `docker --mount` value), no shell metacharacters. */
 const COPY_HOST_PATH_SEGMENT_RE = /^[\w.@+-]+$/;
 const COPY_SOURCE_FIELDS = [
+  "folder",
   "volumeName",
   "hostPath",
   "ownerUsername",
@@ -8429,6 +8751,22 @@ function parsePathCopySource(
 ): void {
   if (raw.volumeName !== undefined) {
     throw new Error("A path copy source cannot name a volume");
+  }
+  if (raw.folder !== undefined) {
+    const ref = folderRefParts(parseFolderRefParts(raw.folder, "volume"));
+    if (raw.ownerUsername !== undefined && raw.ownerUsername !== ref.owner) {
+      throw new Error(
+        "A path copy source folder must belong to its ownerUsername",
+      );
+    }
+    if (
+      raw.organizationId !== undefined || raw.storageId !== undefined ||
+      raw.composeProject !== undefined
+    ) {
+      throw new Error("Invalid path copy source folder");
+    }
+    source.folder = ref;
+    if (raw.hostPath === undefined) return;
   }
   if (raw.hostPath !== undefined) {
     if (
@@ -8487,7 +8825,7 @@ export function parseCopyBackupSource(
   }
   if (
     raw.hostPath !== undefined || raw.organizationId !== undefined ||
-    raw.ownerUsername !== undefined
+    raw.ownerUsername !== undefined || raw.folder !== undefined
   ) {
     throw new Error("A docker copy source cannot name a host path");
   }

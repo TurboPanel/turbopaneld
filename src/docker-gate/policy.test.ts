@@ -293,6 +293,8 @@ test("forbidden host trees, and everything outside the allowed roots", async () 
     ["/backup/engine", "bind-forbidden-path"],
     ["/var/lib/turbopanel", "bind-outside-roots"],
     ["/var/lib/turbopanel/secrets", "bind-outside-roots"],
+    // base is a reserved scope name: an old base environment loses its volume binds.
+    ["/srv/users/alice/base/volumes/data", "bind-principal-path"],
     ["/srv/usersx", "bind-outside-roots"],
     ["/srv", "bind-outside-roots"],
     ["/home/someone", "bind-outside-roots"],
@@ -311,6 +313,7 @@ test("the allowed roots, and named volumes, pass", async () => {
     const source of [
       "/srv/users/alice/data/app/data",
       "/srv/users/alice/tmp",
+      "/srv/users/alice/production/volumes/data",
       "/var/lib/turbopanel/storage",
       "/var/lib/turbopanel/storage/vol-1",
       "named-volume",

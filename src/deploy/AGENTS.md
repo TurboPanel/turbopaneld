@@ -73,14 +73,17 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    guard on enrolled hosts (`hosting-caddy/tasks/backfill-edge-account.yml`).
    Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
-   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
+   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`; a name must
+   pass the shared owner rule `isValidOwnerName` — lowercase, up to 28, no
+   `tp`/`systemd-` prefix or `-grp` suffix — and not be a host account name).
+   Folders for services and volumes are made by `asset-folders.ts`. Homes live
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
-   would let a tenant `ls` every account). The home itself, `sites/` and
-   `volumes/` are `0750` **root**:`<username>` (an owner can rename its
+   would let a tenant `ls` every account). The home itself and each scope folder
+   (an environment slug, or `common`) are `0750` **root**:`<username>` (an owner can rename its
    entries, so nothing root writes into may sit in a tenant-owned directory);
-   `home/` (the passwd home, `useradd -d <root>/<username>/home`), `data/` and
+   `home/` (the passwd home, `useradd -d <root>/<username>/home`) and
    `tmp/` are `0700` `username:<username>`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
@@ -809,6 +812,64 @@ Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned
 **never** `traefik.enable`. A missing `turbopanel-system` compose file is
 authoritative absence (`null`).
 
+## Volume folders and who owns the files in them
+
+A volume with a `folder` on `storageMaterial[]` is `<owner>/<scope>/volumes/<name>`
+(`materializeStorageEntries` makes it through `ensureAssetFolder`: the record of
+its components, then `<owner>:<owner> 0750` on the folder itself). Nothing
+below the folder is ever re-owned: no recursive chown, and never to root.
+
+How ownership inside a volume is handled when the container's user is not the
+site owner's Linux user:
+
+- **No `user:` in the compose file.** The daemon runs the container as the
+  owner's own `uid:gid` (read from the account on the host), so files it writes
+  belong to the owner and the owner sees them over SFTP and in backups.
+- **A `user:` in the compose file** (any user, `root` included). The compose
+  file is never refused and the daemon does not rewrite it. The container runs
+  as that user, and files it creates keep that user's ids. The volume root is
+  `<owner>:<owner> 0750`, so a declared user that is neither the owner nor root
+  would not be able to read or write it. For a **numeric** declared user
+  (`999` or `999:999`) the daemon therefore gives that one uid an access entry
+  and a default entry on the volume root (`setfacl -m u:<uid>:rwx,d:u:<uid>:rwx`
+  through `tp-host setfacl`, `deploy/volume-access.ts`), on every deploy because
+  a later mode change on the folder drops it. Only the volume root gets it:
+  nothing inside is touched, nothing is re-owned (no chown, never to root), and
+  files already in the folder keep the access they had; the default entry means
+  files the container creates later stay open to that uid. The uid is whatever the compose file declares; the owner already chose
+  that container, so the host does not check it against other accounts. A declared user
+  given by **name** cannot be mapped to an id on the host (the names live in
+  the image), so it gets no entry and the deploy log says so; use the numeric
+  uid to have one. On a filesystem without access lists `setfacl` fails; the
+  deploy goes on and logs plainly that the container may not be able to write
+  the folder (run it as the owner's ids or use a named Docker volume). `root` in
+  the container can write and its files stay root's; the owner can still delete
+  or rename anything in their own folder (a directory's write permission decides
+  that), but cannot change the contents or modes of a file owned by another uid.
+- **A named Docker volume** (provider `docker`) is outside this tree and its
+  contents are not touched; it stays the way to run an image that insists on a
+  fixed user. A volume linked to a site owner (a principal on its storage row)
+  is that owner's, like the owner's folders: a container that mounts it and
+  names no `user:` runs as the owner. Docker creates the volume `root:root
+  0755`, which that container could not write, so before `compose up` each such
+  mount path gets one non-recursive `chown <uid>:<gid>` through the service's
+  own image (`deploy/named-volume-owner.ts`). It applies when the daemon set the
+  user, or when the compose file declares exactly the owner's uid; any other
+  declared user is never changed. Nothing inside the volume is touched, so files
+  an earlier root run left there stay root's. A bind whose source is inside the
+  deployment folder (a relative `./files`) belongs to the platform, not the
+  owner; a container running as a numeric user cannot write it, and the deploy
+  log says so and points to a volume folder (the compose file is not refused).
+- One container cannot mount volumes of two site owners with defaulted users;
+  that deploy fails with a plain message.
+
+Bind sources are allowed only inside the volume folders this deploy was sent
+(`ownerTree` in `compose-host-paths.ts`, mirrored by the Docker gate): a service
+folder (`releases/` is sealed code, `shared/` is the web side's state), another
+owner's folder and a sibling volume are refused even when host-level features
+are approved, and a link left inside a volume must still resolve inside it.
+Container paths and volume subpaths are shape-checked (`assertMountShape`).
+
 ## Native Node/Next runtime
 
 Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next services
@@ -949,3 +1010,7 @@ switch, so a cancel during the second service's build answers `too_late`; the
 unsandboxed (development) build kills its shell, not necessarily grandchildren; a
 cancel behind another build waiting for the single build slot takes effect when the
 slot frees.
+
+## Hostname takeover (`takeoverHostnames`)
+
+`environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.

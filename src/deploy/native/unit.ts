@@ -15,14 +15,12 @@ import {
   safeConfigLine,
   safeConfigToken,
 } from "../../contracts/config-values.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
-  principalDataDir,
-  principalHomePath,
   principalTmpDir,
   principalUserHome,
-  siteCurrentSymlink,
-  siteSharedDir,
+  serviceTree,
 } from "../../paths/layout.ts";
 import {
   resolveNativeAppRuntimeStartCommand,
@@ -252,7 +250,7 @@ export function principalUnitEnvironment(
 
 /**
  * The one `ReadWritePaths=` line for a cron job: the site directories it may
- * write, then the principal's `home/`, `data/` and `tmp/`. Never the home
+ * write, then the principal's `home/` and `tmp/`. Never the home
  * root: under `ProtectSystem=strict` everything else stays read-only, whatever
  * the file modes say. A Node app gets only its site's `shared/` instead.
  *
@@ -270,7 +268,6 @@ export function principalReadWritePaths(
     [
       ...siteDirs,
       principalUserHome(layout, username),
-      principalDataDir(layout, username),
       principalTmpDir(layout, username),
     ].join(" ")
   }`;
@@ -641,6 +638,8 @@ export type NativeAppUnitOpts = {
   >;
   app: EnvironmentDeployNativeAppService;
   username: string;
+  /** The service folder the control plane planned for the app. */
+  folder: FolderRefParts;
   environmentId: string;
   /** Resolved from `sourceMaterial[].build.startCommand`, when the author set one. */
   startCommand?: string;
@@ -683,9 +682,13 @@ export type NativeAppUnitOpts = {
  */
 export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const { app, username } = opts;
-  const home = principalHomePath(opts.layout, username);
-  const workingDir = siteCurrentSymlink(home, app.serviceId);
-  const sharedDir = siteSharedDir(home, app.serviceId);
+  const tree = serviceTree(opts.layout, {
+    serviceId: app.serviceId,
+    username,
+    folder: opts.folder,
+  });
+  const workingDir = tree.currentLink;
+  const sharedDir = tree.sharedDir;
   const group = principalUnixGroupName(username);
   const target = nativeAppRuntimeTarget(opts.layout, app);
   const nodeBinDir = target.binDir;
@@ -780,9 +783,9 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
-    // Its own site's shared/: nothing else (not the owner's home/, data/ or
+    // Its own site's shared/: nothing else (not the owner's home/ or
     // tmp/). Under ProtectSystem=strict every other path stays read-only.
-    `ReadWritePaths=${sharedDir}`,
+    `ReadWritePaths=${[sharedDir, tree.logsDir].join(" ")}`,
   ];
 
   if (app.resources?.cpus !== undefined) {

@@ -25,6 +25,7 @@ import {
   resolveInstanceSupport,
   SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
+  TLS_CAPTURE_FEATURE,
 } from "./version-wire.ts";
 
 /**
@@ -182,9 +183,18 @@ test("managed-data-only-readwrite-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("managed-database-owner-v1 is advertised last and raised no floor", () => {
+test("managed-database-owner-v1 is advertised and raised no floor", () => {
   assertEquals(MANAGED_DATABASE_OWNER_FEATURE, "managed-database-owner-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), MANAGED_DATABASE_OWNER_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(MANAGED_DATABASE_OWNER_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("tls-capture-v1 is advertised last and raised no floor", () => {
+  assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TLS_CAPTURE_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

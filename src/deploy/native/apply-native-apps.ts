@@ -38,6 +38,7 @@ import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   devOwnershipPlaybookExtraArgs,
@@ -56,6 +57,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
+import { serviceFolderForCompose } from "../release/release-service-id.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
 import {
@@ -119,6 +121,8 @@ export type NativeAppSleepFn = (ms: number) => Promise<void>;
  */
 export type NativeAppRelease = {
   username: string;
+  /** The service folder the control plane planned for the app. */
+  folder: FolderRefParts;
   /** Release `current` pointed at before this deploy, for rollback. */
   previousReleaseId?: string | null;
   /** `x-turbopanel.source.startCommand`, when the author declared one. */
@@ -544,6 +548,7 @@ async function rollbackNativeApp(
       username: binding.username,
       serviceId: app.serviceId,
       releaseId: params.previousReleaseId,
+      folder: binding.folder,
     });
     await swapCurrentSymlink(paths);
     const changed = await params.prepared.reinstallUnit?.(params.start);
@@ -679,6 +684,7 @@ async function installNativeAppUnit(
       layout,
       app,
       username: binding.username,
+      folder: binding.folder,
       environmentId: params.environmentId,
       environmentFile: params.environmentFile,
       ...(binding.startCommand === undefined
@@ -1248,6 +1254,7 @@ export function nativeAppBindingsFromPayload(
       entry.composeServiceName,
       definedFields({
         username: principal.username,
+        folder: serviceFolderForCompose(payload, entry.composeServiceName),
         previousReleaseId: previous,
         startCommand: entry.build.startCommand,
         releaseId: applied?.releaseId,

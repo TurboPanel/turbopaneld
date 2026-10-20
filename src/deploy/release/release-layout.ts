@@ -3,17 +3,17 @@
  *
  * ```
  * <principalHomeRoot>/.tp-staging/                 root:tp 0710
- *   <username>.<serviceId>.<releaseId>/            tp 0700 while the daemon copies
- * <principalHomeRoot>/<username>/sites/            root:<username> 0750
- *   <serviceId>/                                   root:<username> 0750
- *     releases/                                    root:<username> 0750
+ *   <publishId>/                                   tp 0700 while the daemon copies
+ * <principalHomeRoot>/<owner>/<scope>/services/    root:<owner> 0750
+ *   <name>/                                        root:<owner> 0750
+ *     releases/                                    root:<owner> 0750
  *       <releaseId>/  root:<username>, 0550 top, nothing g/o-writable
  *     current -> releases/<releaseId>
  *     shared/         <username>:<username> 0750  (the one writable path)
  * ```
  *
  * **Ownership is the security property, not just the mode.** Everything on the
- * immutable side — `sites/<serviceId>`, `releases/`, and each release inside it
+ * immutable side — the service folder, `releases/`, and each release inside it
  * — is **root-owned**, group `<username>`: the runtime user gets `r-x` so it
  * can traverse to `current` and read what it is running, and nothing more. A
  * principal-owned `releases/` would leave the app process able to rewrite the
@@ -28,33 +28,24 @@
  * place (`./promote.ts`). tp-host refuses to create anything under
  * `releases/<releaseId>` any other way.
  *
- * Path shapes come from `src/paths/layout.ts` (`siteRoot` / `siteReleasesDir` /
- * `siteCurrentSymlink` / `siteSharedDir`) so the next phase's site
- * serving change addresses exactly the same tree. Directory creation goes
- * through `ensureDirectoryWithOwner` / `ensureDirectoryOwnedByPrincipal` — the
- * one `sudo -n install -d` seam in `../ensure-principal.ts`. This module never
- * invents a second privileged mkdir helper.
+ * Path shapes come from `src/paths/layout.ts` (`serviceTree`) so the site
+ * serving code addresses exactly the same tree. The folder and its
+ * root-owned parents are made by `../asset-folders.ts` (`ensureAssetFolder`);
+ * this module never invents a second privileged mkdir helper.
  */
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
+import { isPathId } from "../../contracts/directory-names.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
-  principalHomePath,
-  RELEASE_STAGING_DIRNAME,
-  releaseStagingDir,
-  siteCurrentSymlink,
-  siteReleasesDir,
-  siteRoot,
-  siteSharedDir,
+  ownerRoot,
+  publishStagingDir,
+  serviceTree,
 } from "../../paths/layout.ts";
-import {
-  ensureDirectoryOwnedByPrincipal,
-  ensureDirectoryWithOwner,
-  principalUnixGroupName,
-  type RunFn,
-} from "../ensure-principal.ts";
+import { principalUnixGroupName, type RunFn } from "../ensure-principal.ts";
 
 /** Scratch root for ephemeral checkouts — never inside the release tree. */
 export const RELEASE_SCRATCH_DIRNAME = "release-build";
@@ -75,9 +66,8 @@ export const RELEASE_METADATA_DIRNAME = ".turbopanel";
  * and no runtime user ever reads one, so it needs no principal home — and
  * requiring one would mean refusing to build a container service just because
  * nobody assigned it a Unix account it would never use. Its manifest instead
- * lands under `<daemonStateDir>/release-records/sites/<serviceId>/releases/…`,
- * which is the same shape {@link resolveReleasePaths} produces so retention and
- * the manifest readers stay lane-agnostic.
+ * lands under `<daemonStateDir>/release-records/<serviceId>/<releaseId>/`: one
+ * folder per service, one per release, nothing else in the tree.
  *
  * A Railpack service keeps its history here whether or not it has a principal
  * — one service should not move its history between two roots depending on an
@@ -98,11 +88,6 @@ export const RELEASE_DIR_MODE = "0750";
 export const RELEASE_PUBLISHED_MODE = 0o550;
 export const RELEASE_SHARED_MODE = "0750";
 
-/** Owner of every immutable path in the tree (`root:<username>`). */
-function releaseRootOwner(username: string): string {
-  return `root:${principalUnixGroupName(username)}`;
-}
-
 /** Same id rule the wire parser enforces — defense in depth before any path join. */
 const RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
@@ -121,9 +106,22 @@ export function assertSafeServiceId(serviceId: string): string {
   return serviceId;
 }
 
+/**
+ * What the six-word tp-host publish needs: the folder's components and the
+ * three ids. Absent on a daemon-owned release record, which publishes no tree.
+ */
+export type ReleasePublishRef = {
+  folder: FolderRefParts;
+  serviceId: string;
+  releaseId: string;
+  publishId: string;
+};
+
 export type ReleasePaths = {
+  /** Set when the release lives in a service folder (every principal release). */
+  publish?: ReleasePublishRef;
   principalHome: string;
-  /** `<principalHome>/sites` — parent of every per-service site tree. */
+  /** The folder that holds the service folder (`<scope>/services`). */
   sitesDir: string;
   siteDir: string;
   releasesDir: string;
@@ -150,41 +148,61 @@ export type ReleasePaths = {
  */
 export function resolveReleasePaths(
   layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">,
-  params: { username: string; serviceId: string; releaseId: string },
+  params: {
+    username: string;
+    serviceId: string;
+    releaseId: string;
+    /** The service folder the control plane planned. */
+    folder: FolderRefParts;
+    /** The staging leaf's name; a fresh UUID when absent (keep the one `paths` object from open to publish). */
+    publishId?: string;
+  },
 ): ReleasePaths {
   const serviceId = assertSafeServiceId(params.serviceId);
   const releaseId = assertSafeReleaseId(params.releaseId);
-  const principalHome = principalHomePath(layout, params.username);
+  // tp-host takes only canonical ids for a folder release; fail before the
+  // build rather than at publish.
+  for (const id of [serviceId, releaseId]) {
+    if (!isPathId(id)) throw new Error(`unsafe folder release id: ${id}`);
+  }
+  const tree = serviceTree(layout, {
+    serviceId,
+    username: params.username,
+    folder: params.folder,
+  });
+  const scratchDir = join(
+    layout.daemonStateDir,
+    RELEASE_SCRATCH_DIRNAME,
+    serviceId,
+    releaseId,
+  );
+  const publishId = params.publishId ?? crypto.randomUUID();
   return {
-    principalHome,
-    sitesDir: join(principalHome, "sites"),
-    siteDir: siteRoot(principalHome, serviceId),
-    releasesDir: siteReleasesDir(principalHome, serviceId),
-    releaseDir: join(siteReleasesDir(principalHome, serviceId), releaseId),
-    currentLink: siteCurrentSymlink(principalHome, serviceId),
-    sharedDir: siteSharedDir(principalHome, serviceId),
-    scratchDir: join(
-      layout.daemonStateDir,
-      RELEASE_SCRATCH_DIRNAME,
-      serviceId,
-      releaseId,
-    ),
-    stagingDir: releaseStagingDir(layout, {
-      username: params.username,
-      serviceId,
-      releaseId,
-    }),
+    publish: { folder: params.folder, serviceId, releaseId, publishId },
+    siteDir: tree.root,
+    releasesDir: tree.releasesDir,
+    releaseDir: join(tree.releasesDir, releaseId),
+    currentLink: tree.currentLink,
+    sharedDir: tree.sharedDir,
+    scratchDir,
+    principalHome: ownerRoot(layout, params.username),
+    sitesDir: dirname(tree.root),
+    stagingDir: publishStagingDir(layout, publishId),
   };
 }
 
 /**
- * {@link resolveReleasePaths} against the daemon-owned release-history root.
+ * The paths of one release record under the daemon-owned release-history root:
+ * `<daemonStateDir>/release-records/<serviceId>/<releaseId>`.
  *
- * Same path shape, no principal home and no privileged ownership: every
- * directory here is created by the daemon user with {@link
+ * Same fields as {@link resolveReleasePaths} so retention and the manifest
+ * readers stay lane-agnostic, but no principal home and no privileged
+ * ownership: every directory here is created by the daemon user with {@link
  * ensureDaemonReleaseRecordDir}. It holds release *records* (manifests) only —
  * anything a runtime user reads belongs in the principal home, under the
- * root-owned ownership rules this module documents.
+ * root-owned ownership rules this module documents. A record has no `current`
+ * link, no `shared` folder and nothing staged: it is written in place, so those
+ * fields name paths that are never created.
  */
 export function resolveDaemonReleasePaths(
   layout: Pick<LayoutPaths, "daemonStateDir">,
@@ -193,14 +211,16 @@ export function resolveDaemonReleasePaths(
   const serviceId = assertSafeServiceId(params.serviceId);
   const releaseId = assertSafeReleaseId(params.releaseId);
   const recordsHome = join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME);
+  const serviceDir = join(recordsHome, serviceId);
+  const releaseDir = join(serviceDir, releaseId);
   return {
     principalHome: recordsHome,
-    sitesDir: join(recordsHome, "sites"),
-    siteDir: siteRoot(recordsHome, serviceId),
-    releasesDir: siteReleasesDir(recordsHome, serviceId),
-    releaseDir: join(siteReleasesDir(recordsHome, serviceId), releaseId),
-    currentLink: siteCurrentSymlink(recordsHome, serviceId),
-    sharedDir: siteSharedDir(recordsHome, serviceId),
+    sitesDir: recordsHome,
+    siteDir: serviceDir,
+    releasesDir: serviceDir,
+    releaseDir,
+    currentLink: join(serviceDir, "current"),
+    sharedDir: join(serviceDir, "shared"),
     scratchDir: join(
       layout.daemonStateDir,
       RELEASE_SCRATCH_DIRNAME,
@@ -208,7 +228,7 @@ export function resolveDaemonReleasePaths(
       releaseId,
     ),
     // Never staged: a release record has no tree to publish.
-    stagingDir: join(recordsHome, RELEASE_STAGING_DIRNAME, releaseId),
+    stagingDir: releaseDir,
   };
 }
 
@@ -216,7 +236,7 @@ export function resolveDaemonReleasePaths(
  * Create the daemon-owned release-record directories for one release.
  *
  * Unprivileged on purpose — there is no principal, no `sudo`, and nothing here
- * is ever executed or served, so {@link ensureReleaseTree}'s ownership dance
+ * is ever executed or served, so the privileged ownership dance of a folder release
  * has nothing to protect. `shared/` is not created: a lane that publishes no
  * tree has no cross-release writable state.
  */
@@ -226,50 +246,11 @@ export async function ensureDaemonReleaseRecordDir(
   // Outermost first, one at a time.
   await forEachSequential([
     paths.principalHome,
-    paths.sitesDir,
     paths.siteDir,
-    paths.releasesDir,
     paths.releaseDir,
   ], async (dir) => {
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
   });
-}
-
-/**
- * Create `sites/<serviceId>/{releases,shared}`, each with the ownership its
- * role requires.
- *
- * - `sites/`, `sites/<serviceId>/`, `releases/` — **root-owned**, group
- *   `<username>`, {@link RELEASE_DIR_MODE}. The runtime user may traverse
- *   and read; it may not create, rename, or unlink anything, so it can neither
- *   plant a release nor repoint `current`.
- * - `shared/` — principal-owned and writable: the one path an app may write
- *   that survives a promote.
- *
- * `releases/<releaseId>/` is not created here: it appears only when a sealed
- * release is renamed into place (`./promote.ts`).
- *
- * `install -d` repairs as well as creates, so a tree laid down by the earlier
- * principal-owned layout converges to this one on the next deploy.
- */
-export async function ensureReleaseTree(
-  paths: ReleasePaths,
-  username: string,
-  runFn?: RunFn,
-): Promise<void> {
-  const group = principalUnixGroupName(username);
-  const owner = releaseRootOwner(username);
-  // Parent before child, one at a time.
-  await forEachSequential(
-    [paths.sitesDir, paths.siteDir, paths.releasesDir],
-    (dir) => ensureDirectoryWithOwner(dir, RELEASE_DIR_MODE, owner, runFn),
-  );
-  await ensureDirectoryOwnedByPrincipal(
-    paths.sharedDir,
-    username,
-    group,
-    runFn,
-  );
 }
 
 /**

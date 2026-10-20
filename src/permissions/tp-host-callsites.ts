@@ -52,6 +52,8 @@ export type CallSiteSetup = {
   dirs?: string[];
   /** Files to create, `path → contents`. */
   files?: Record<string, string>;
+  /** Modes to set on existing paths once created, `path → mode`. */
+  modes?: Record<string, number>;
   /** Symlinks to create, `[target, path]`. */
   links?: Array<[string, string]>;
   /** `/etc/group` lines to add. */
@@ -91,6 +93,11 @@ const HOME = `${P}/srv/users/alice`;
 const SITE = `${HOME}/sites/svc1`;
 const RELEASE = `${SITE}/releases/20260927-120000`;
 const STAGING = `${P}/srv/users/.tp-staging/alice.svc1.20260927-120000`;
+const FOLDER_SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70";
+const FOLDER_RELEASE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71";
+const FOLDER_PUBLISH_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72";
+const FOLDER_SERVICE = `${HOME}/production/services/example.com`;
+const FOLDER_STAGING = `${P}/srv/users/.tp-staging/${FOLDER_PUBLISH_ID}`;
 const STAGED = `${P}/tmp/staged`;
 const SSH_KEYS = `${P}/etc/ssh/turbopanel/authorized_keys`;
 /** A sandboxed build: `work/<id>` holding the clone, the runner installed. */
@@ -266,6 +273,11 @@ const file = (path: string, contents = "x\n"): CallSiteSetup => ({
   files: { [path]: contents },
 });
 const dir = (...paths: string[]): CallSiteSetup => ({ dirs: paths });
+/** The jail-ready new layout: alice's home root is closed to everyone else. */
+const jailReadyAlice: CallSiteSetup = {
+  dirs: [`${P}/srv/users/alice/home`],
+  modes: { [`${P}/srv/users/alice`]: 0o750 },
+};
 
 /** `install -d -m MODE -o USER -g GROUP PATH`, under an existing `parent`. */
 function installDir(
@@ -292,18 +304,34 @@ const SITES: CallSite[] = [
   tpHost('src/metrics/collector/tls-expiry.ts|["-n","cert-dates"]', {
     argv: ["cert-dates"],
   }),
+  tpHost('src/deploy/acme-export.ts|["-n","cert-export",hostname]', {
+    argv: ["cert-export", "shop.example.com"],
+  }),
   tpHost('src/deploy/site.ts|["-n","site-caddy-mounts"]', {
     argv: ["site-caddy-mounts"],
   }),
   tpHost('src/metrics/collector/site-usage.ts|["-n","site-usage"]', {
     argv: ["site-usage"],
   }),
+  tpHost('src/deploy/asset-folders.ts|["-n","folder-list"]', {
+    argv: ["folder-list"],
+  }),
+  // A container's declared uid on a volume folder: access and default entry, one folder.
+  tpHost(
+    'src/deploy/volume-access.ts|["-n","setfacl","-m",spec,"--",path]',
+    {
+      argv: [
+        "setfacl",
+        "-m",
+        "u:1000:rwx,d:u:1000:rwx",
+        "--",
+        `${HOME}/production/volumes/uploads`,
+      ],
+      setup: dir(`${HOME}/production/volumes/uploads`),
+    },
+  ),
   tpHost('src/commands/reboot.ts|["-n","systemctl","reboot"]', {
     argv: ["systemctl", "reboot"],
-  }),
-  tpHost('src/commands/stop-environment.ts|["-n","rm","-rf","--",path]', {
-    argv: ["rm", "-rf", "--", SITE],
-    setup: dir(SITE),
   }),
   tpHost(
     'src/commands/stop-environment.ts|["-n","rm","-rf","--",deploymentDir]',
@@ -598,10 +626,7 @@ const SITES: CallSite[] = [
     installDir("0750", "root:root", `${P}/srv/users`),
     installDir("0750", "root:alice", HOME, `${P}/srv/users`),
     installDir("0700", "alice:alice", `${HOME}/home`, HOME),
-    installDir("0700", "alice:alice", `${HOME}/data`, HOME),
     installDir("0700", "alice:alice", `${HOME}/tmp`, HOME),
-    installDir("0750", "root:alice", `${HOME}/sites`, HOME),
-    installDir("0750", "root:alice", `${HOME}/volumes`, HOME),
     // Managed lane (site.ts) and release lane (release-layout.ts).
     installDir("0750", "root:alice", SITE, `${HOME}/sites`),
     installDir("0750", "alice:tpnginx", `${SITE}/webroot`, SITE),
@@ -941,6 +966,7 @@ const SITES: CallSite[] = [
             framework: "node",
           },
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "api" },
           environmentId: "env1",
         }),
       ),
@@ -1012,13 +1038,36 @@ const SITES: CallSite[] = [
     { argv: ["systemctl", "stop", `turbopanel-build-${BUILD_ID}.service`] },
   ),
   tpHost(
-    'src/deploy/release/promote.ts|["-n",verb,username,serviceId,releaseId]',
-    { argv: ["publish-open", "alice", "svc1", "20260927-120000"] },
+    'src/deploy/release/folder-publish.ts|["-n",verb,ref.owner,ref.scope,ref.slug,ids.serviceId,ids.releaseId,ids.publishId]',
     {
-      argv: ["publish", "alice", "svc1", "20260927-120000"],
+      argv: [
+        "publish-open",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        FOLDER_PUBLISH_ID,
+      ],
+    },
+    {
+      argv: [
+        "publish",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        FOLDER_PUBLISH_ID,
+      ],
       setup: {
-        files: { [`${STAGING}/index.html`]: "<h1>hi</h1>\n" },
-        dirs: [`${SITE}/releases`, `${SITE}/shared`],
+        files: {
+          [`${FOLDER_STAGING}/index.html`]: "<h1>hi</h1>\n",
+        },
+        dirs: [
+          `${FOLDER_SERVICE}/releases`,
+          `${FOLDER_SERVICE}/shared`,
+        ],
       },
     },
   ),
@@ -1105,10 +1154,15 @@ const SITES: CallSite[] = [
     argv: ["ls", "-1t", "--", `${SITE}/releases`],
     setup: dir(RELEASE),
   }),
-  tpHost('src/deploy/release/retention.ts|["-n","rm","-rf","--",path]', {
-    argv: ["rm", "-rf", "--", RELEASE],
-    setup: dir(RELEASE),
-  }),
+  // A service's whole tree: the older per-service tree or its service folder.
+  tpHost(
+    'src/deploy/release/retention.ts|["-n","rm","-rf","--",path]',
+    { argv: ["rm", "-rf", "--", SITE], setup: dir(RELEASE) },
+    {
+      argv: ["rm", "-rf", "--", FOLDER_SERVICE],
+      setup: dir(`${FOLDER_SERVICE}/releases`, `${FOLDER_SERVICE}/shared`),
+    },
+  ),
 
   // --- sites ----------------------------------------------------------------
   tpHost(
@@ -1163,6 +1217,11 @@ const SITES: CallSite[] = [
   ),
   tpHost(
     'src/deploy/site.ts|["-n","systemctl","is-active","--quiet",driver.unit]',
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-nginx"] },
+    { argv: ["systemctl", "is-active", "--quiet", "turbopanel-apache"] },
+  ),
+  tpHost(
+    'src/deploy/site.ts|["-n","systemctl","is-active","--quiet",unit]',
     { argv: ["systemctl", "is-active", "--quiet", "turbopanel-nginx"] },
     { argv: ["systemctl", "is-active", "--quiet", "turbopanel-apache"] },
   ),
@@ -1501,14 +1560,27 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","status"]', {
     argv: ["sftp-chroot", "status"],
   }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","auto"]', {
+    argv: ["sftp-chroot", "auto"],
+    // alice is in tpsftp; on the new layout the check is clean.
+    setup: jailReadyAlice,
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","auto-revert"]', {
+    argv: ["sftp-chroot", "auto-revert"],
+    setup: file(`${P}/etc/ssh/turbopanel/sftp-chroot`, "on\n"),
+  }),
+  tpHost('src/deploy/ssh/apply.ts|["-n","sshd-config"]', {
+    argv: ["sshd-config"],
+    setup: file(`${P}/etc/ssh/sshd_config`, "Port 22\n"),
+  }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","verify"]', {
     argv: ["sftp-chroot", "verify"],
-    setup: file(`${P}/etc/ssh/turbopanel-sftp-chroot`, "on\n"),
+    setup: file(`${P}/etc/ssh/turbopanel/sftp-chroot`, "on\n"),
   }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sftp-chroot","check"]', {
     argv: ["sftp-chroot", "check"],
     // alice is in tpsftp; on the new layout the check is clean.
-    setup: dir(`${P}/srv/users/alice/home`),
+    setup: jailReadyAlice,
   }),
   tpHost('src/deploy/ssh/apply.ts|["-n","sshd","-t"]', {
     argv: ["sshd", "-t"],

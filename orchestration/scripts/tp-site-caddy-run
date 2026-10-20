@@ -7,7 +7,9 @@
 # owner could link from their own web root to a file that another owner keeps
 # in a group-readable place and have Caddy serve it. Here the Caddy process
 # runs in a private mount namespace where every managed web root
-# (`.../sites/<id>/webroot`) and every release tree (`.../sites/<id>/releases`)
+# (`.../services/<name>/public`) and every release tree
+# (`.../services/<name>/releases`; `.../sites/<id>/webroot` and `.../releases`
+# in the older tree)
 # is bind-mounted read-only with `nosymfollow` (Linux 5.10+), so a link inside
 # one is never followed. Nothing else on the host sees these mounts: the site
 # owner's own PHP, apps and shell still follow their own links. The platform's
@@ -39,6 +41,9 @@ tp_die() {
 # characters tp-host allows:
 #   .../sites/<serviceId>/webroot[/...]  -> .../sites/<serviceId>/webroot
 #   .../sites/<serviceId>/current[/...]  -> .../sites/<serviceId>/releases
+#   .../services/<name>/public[/...]     -> .../services/<name>/public
+#   .../services/<name>/current[/...]    -> .../services/<name>/releases
+# (the first two are the older per-service tree; <name> may hold dots)
 # `current` itself is the platform's own link and stays outside the mount; the
 # release it names is under `releases/`, so no link inside a release is followed.
 tp_roots() {
@@ -51,7 +56,7 @@ tp_roots() {
       */../* | */.. | *//*) continue ;;
     esac
     # Two plain expressions rather than one alternation, which BSD sed lacks.
-    _w="$(printf '%s\n' "$_p" | sed -n 's/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/webroot\(\/.*\)\{0,1\}$/\1\/webroot/p;s/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/current\(\/.*\)\{0,1\}$/\1\/releases/p')"
+    _w="$(printf '%s\n' "$_p" | sed -n 's/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/webroot\(\/.*\)\{0,1\}$/\1\/webroot/p;s/^\(\/.*\/sites\/[A-Za-z0-9_-][A-Za-z0-9_-]*\)\/current\(\/.*\)\{0,1\}$/\1\/releases/p;s/^\(\/.*\/services\/[A-Za-z0-9][A-Za-z0-9._-]*\)\/public\(\/.*\)\{0,1\}$/\1\/public/p;s/^\(\/.*\/services\/[A-Za-z0-9][A-Za-z0-9._-]*\)\/current\(\/.*\)\{0,1\}$/\1\/releases/p')"
     [ -n "$_w" ] && printf '%s\n' "$_w"
   done | sort -u
 }
@@ -71,9 +76,10 @@ tp_inner() {
   for _w in $_list; do
     # A web root that is not there yet serves nothing; one that is a link or
     # moved is refused outright. That cannot be caused by a site owner:
-    # `sites/<id>/` is root:<owner group> 0750 (tp-host refuses to re-own it
-    # and `src/deploy/site-apply.test.ts` pins root as its owner), so the owner
-    # can neither rename nor replace `webroot`, and `releases/` is root's too.
+    # the service folder (`sites/<id>/` in the older tree) is root:<owner group>
+    # 0750 (tp-host refuses to re-own it and `src/deploy/site-apply.test.ts`
+    # pins root as its owner), so the owner can neither rename nor replace
+    # `public` (`webroot`), and `releases/` is root's too.
     # Only root could produce this state, and then stopping is the safe answer.
     [ -e "$_w" ] || [ -L "$_w" ] || continue
     [ -d "$_w" ] && [ ! -L "$_w" ] || tp_die "$_w is not a plain directory"

@@ -695,7 +695,7 @@ test("boot reconcile keeps what an OpenLiteSpeed vhconf names and sweeps lsd orp
 });
 
 test("boot reconcile does nothing when an OpenLiteSpeed vhconf cannot be read", async () => {
-  const vhconf = "/etc/tp/openlitespeed/vhosts/tp_e_a/vhconf.conf";
+  const vhconf = "/etc/tp/openlitespeed/vhosts/tp_e__a/vhconf.conf";
   const io = orphanIo({
     units: ["turbopanel-php-gone-lsd84.service"],
     vhosts: { [vhconf]: "" },

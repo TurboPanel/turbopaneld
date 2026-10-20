@@ -70,7 +70,8 @@ uses, and the same reasoning: a candidate is staged under
 the installed unit through a privileged `cmp -s` (the daemon is not root and
 `/etc/systemd/system` is, so a direct read would report "changed" every deploy),
 and installed only on a real difference. `WorkingDirectory` points at the
-`current` **symlink**, never at a release directory — which is exactly what
+`current` **symlink** of the service folder (`serviceTree`) — never at a
+release directory, which is exactly what
 makes the unit text byte-identical across promotes, so an ordinary redeploy
 writes nothing, reloads nothing, and only restarts.
 
@@ -86,8 +87,9 @@ from what is actually installed.
 `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
 `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`,
 `LockPersonality=yes`, and an **empty** `CapabilityBoundingSet=` /
-`AmbientCapabilities=`. The only writable path is the site's own `shared/`
-(`ReadWritePaths=<shared>`): a Node app writes only its own site folder, never
+`AmbientCapabilities=`. The only writable paths are the site's own `shared/`
+and, for a service with a folder, its `logs/` (`ReadWritePaths=<shared> <logs>`):
+a Node app writes only its own site folder, never
 the principal's `home/`, `data/` or `tmp/` (an owner decision; cron jobs, by
 contrast, get those three through `principalReadWritePaths`). `HOME=<home>/home`
 stays read-only to the app, and `TMPDIR=/tmp` is the unit's private `/tmp`.
