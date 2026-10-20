@@ -1,3 +1,4 @@
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 /**
  * Host command runner for the firewall module (`iptables`, `ip6tables`, their
@@ -119,17 +120,11 @@ async function spawnCommand(
       ),
     }).spawn();
     if (hasStdin) {
-      const writer = child.stdin.getWriter();
-      try {
-        const payload = options!.stdin!;
-        await writer.write(
-          new TextEncoder().encode(
-            payload.endsWith("\n") ? payload : `${payload}\n`,
-          ),
-        );
-      } finally {
-        await writer.close();
-      }
+      const payload = options!.stdin!;
+      await writeChildStdin(
+        child.stdin,
+        payload.endsWith("\n") ? payload : `${payload}\n`,
+      );
     }
     const output = await child.output();
     return {

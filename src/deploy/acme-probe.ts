@@ -22,6 +22,7 @@
 
 import { clipKeepingEnd } from "../util/error-line.ts";
 import { errorText } from "../util/logger.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 export type AcmeProbeResult =
   | { hostname: string; ok: true; notAfter?: string }
@@ -129,9 +130,7 @@ async function runOpenssl(
   if (input) {
     const stdin = child.stdin;
     if (!stdin) throw new TypeError("openssl stdin was not piped");
-    const writer = stdin.getWriter();
-    await writer.write(input);
-    await writer.close();
+    await writeChildStdin(stdin, input);
   }
   const result = await child.output();
   return { code: result.code, stdout: new TextDecoder().decode(result.stdout) };

@@ -9,6 +9,7 @@ import { DAEMON_ROOT } from "./assets.ts";
 import { DOCKER_GATE_SOCKET_DIR } from "../permissions/daemon-permissions.ts";
 import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
 import { GATE_ENV_KEYS } from "../../orchestration/roles/docker-gate/files/main.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -156,17 +157,14 @@ async function renderUnit(overrides: Partial<UnitVars> = {}): Promise<string> {
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  const writer = child.stdin.getWriter();
-  await writer.write(
-    new TextEncoder().encode(
-      JSON.stringify({
-        dir: join(ROLE, "templates"),
-        template: "turbopanel-docker-gate.service.j2",
-        vars: { ...DEFAULT_VARS, ...overrides },
-      }),
-    ),
+  await writeChildStdin(
+    child.stdin,
+    JSON.stringify({
+      dir: join(ROLE, "templates"),
+      template: "turbopanel-docker-gate.service.j2",
+      vars: { ...DEFAULT_VARS, ...overrides },
+    }),
   );
-  await writer.close();
   const { success, stdout, stderr } = await child.output();
   assert(success, `render failed: ${new TextDecoder().decode(stderr)}`);
   return JSON.parse(new TextDecoder().decode(stdout));

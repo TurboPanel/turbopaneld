@@ -36,6 +36,7 @@ import {
   renderInstanceAcmeIssuerConfig,
   renderInstanceAcmeSettings,
 } from "./instance-acme-issuer.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 export const INSTANCE_ACME_HTTP01_SITE = "00-instance-acme-http01.caddy";
 
@@ -225,9 +226,7 @@ async function defaultCommand(
   if (stdin !== undefined) {
     const pipe = child.stdin;
     if (!pipe) throw new TypeError(`${program} stdin was not piped`);
-    const writer = pipe.getWriter();
-    await writer.write(new TextEncoder().encode(stdin));
-    await writer.close();
+    await writeChildStdin(pipe, stdin);
   }
   const result = await child.output();
   const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);

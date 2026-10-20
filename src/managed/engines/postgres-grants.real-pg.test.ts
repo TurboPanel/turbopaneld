@@ -5,6 +5,7 @@ import { ensureOwnerRolesSql } from "./postgres-owner-role-sql.ts";
 import { createDatabaseSql } from "./postgres-sql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
 import type { ManagedEngineContext } from "./types.ts";
+import { writeChildStdin } from "../../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -47,9 +48,7 @@ async function docker(args: string[], input?: string): Promise<Run> {
       stderr: "piped",
     }).spawn();
     if (input !== undefined) {
-      const writer = child.stdin.getWriter();
-      await writer.write(new TextEncoder().encode(input));
-      await writer.close();
+      await writeChildStdin(child.stdin, input);
     }
     const out = await child.output();
     return {

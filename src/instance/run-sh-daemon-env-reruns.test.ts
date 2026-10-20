@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -289,16 +290,15 @@ async function renderDaemonEnv(
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  const writer = child.stdin.getWriter();
-  await writer.write(
-    new TextEncoder().encode(JSON.stringify({
+  await writeChildStdin(
+    child.stdin,
+    JSON.stringify({
       defaults: join(ORCHESTRATION, "roles/daemon-config/defaults/main.yml"),
       playbook: join(ORCHESTRATION, "playbooks", playbook),
       template: join(ORCHESTRATION, "roles/daemon-config/templates/dotenv.j2"),
       extra,
-    })),
+    }),
   );
-  await writer.close();
   const { success, stdout, stderr } = await child.output();
   assert(success, `render failed: ${new TextDecoder().decode(stderr)}`);
   const values = new Map<string, string>();

@@ -44,6 +44,7 @@ import {
   type InstanceConfig,
   stripTrailingSlashes,
 } from "./sockets.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
 export const CDN_RUN_SCRIPT = "https://turbopanel.sh";
@@ -606,9 +607,7 @@ async function writeHelperStdin(
   stdin: WritableStream<Uint8Array>,
   text: string,
 ): Promise<void> {
-  const writer = stdin.getWriter();
-  await writer.write(new TextEncoder().encode(text));
-  await writer.close();
+  await writeChildStdin(stdin, text);
 }
 
 /**
@@ -712,9 +711,7 @@ async function runReconcileCommand(
 ): Promise<void> {
   const child = command.spawn();
   if (options.stdin !== undefined) {
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(options.stdin));
-    await writer.close();
+    await writeChildStdin(child.stdin, options.stdin);
   }
   const [stdoutText, stderrText, status] = await Promise.all([
     consumeReconcileStdout(child.stdout, options.onStage),

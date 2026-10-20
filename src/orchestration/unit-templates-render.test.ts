@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { join, relative } from "@std/path";
 import { DAEMON_ROOT } from "./assets.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -135,9 +136,7 @@ async function renderAll(
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  const writer = child.stdin.getWriter();
-  await writer.write(new TextEncoder().encode(JSON.stringify(templates)));
-  await writer.close();
+  await writeChildStdin(child.stdin, JSON.stringify(templates));
   const { success, stdout, stderr } = await child.output();
   assert(success, `render failed: ${new TextDecoder().decode(stderr)}`);
   return JSON.parse(new TextDecoder().decode(stdout));

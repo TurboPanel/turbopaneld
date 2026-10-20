@@ -17,6 +17,7 @@ import {
   unsignedManifestBypass,
   verifyManifestSignature,
 } from "./signing.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -99,11 +100,7 @@ test("canonical bytes match run.sh's python3 canonicaliser byte-for-byte", async
     // No python3 on this host — the parity check runs where run.sh does.
     return;
   }
-  const writer = child.stdin.getWriter();
-  await writer.write(
-    new TextEncoder().encode(JSON.stringify(manifest, null, 2) + "\n"),
-  );
-  await writer.close();
+  await writeChildStdin(child.stdin, JSON.stringify(manifest, null, 2) + "\n");
   const python = await child.output();
   assertEquals(python.success, true, new TextDecoder().decode(python.stderr));
   assertEquals(

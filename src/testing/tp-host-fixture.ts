@@ -6,6 +6,7 @@
  */
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 const repo = join(dirname(fromFileUrl(import.meta.url)), "../..");
 export const TP_HOST_SCRIPT = join(repo, "orchestration/scripts/tp-host");
@@ -103,9 +104,7 @@ export async function makeHost(): Promise<Host> {
         stderr: "piped",
       }).spawn();
       if (stdin !== undefined) {
-        const writer = child.stdin.getWriter();
-        await writer.write(new TextEncoder().encode(stdin));
-        await writer.close();
+        await writeChildStdin(child.stdin, stdin);
       }
       const out = await child.output();
       return {

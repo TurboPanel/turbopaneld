@@ -22,6 +22,7 @@ import {
 } from "./image-prepare-sandbox.ts";
 import { readPlanVersion, runRailpackBuild } from "./railpack-build.ts";
 import { UnsafeTreeError } from "./safe-copy.ts";
+import { writeChildStdin } from "../../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -67,9 +68,7 @@ function runnerSeam(seen: SandboxedBuildParams[]) {
       stdout: "piped",
       stderr: "piped",
     }).spawn();
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(params.spec));
-    await writer.close();
+    await writeChildStdin(child.stdin, params.spec);
     const out = await child.output();
     if (!out.success) {
       throw new Error(new TextDecoder().decode(out.stderr));

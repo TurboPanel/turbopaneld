@@ -11,6 +11,7 @@ import {
 import type { PrincipalIdReport } from "../contracts/commands-contracts.ts";
 import { isValidOwnerName } from "../contracts/directory-names.ts";
 import { isReservedPrincipalUsername } from "./reserved-principal-names.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 export type PrincipalEnsureSpec = {
   principalId: string;
@@ -199,9 +200,7 @@ async function runDefault(
     stderr: "piped",
   }).spawn();
   if (stdin !== undefined) {
-    const writer = spawned.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(stdin));
-    await writer.close();
+    await writeChildStdin(spawned.stdin, stdin);
   }
   const result = await spawned.output();
   return {

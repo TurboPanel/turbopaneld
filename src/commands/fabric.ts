@@ -15,6 +15,7 @@
  * a PSK. `TP-FORWARD` accepts same-subnet bridge traffic and bidirectional
  * local-bridge ↔ remote peer prefix (non-/32) forwarding.
  */
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 import { encodeHex } from "@std/encoding/hex";
 import { fabricAllowedIpsPolicyError } from "./fabric-allowed-ips.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
@@ -218,13 +219,10 @@ async function spawnCommand(
         : {}),
     }).spawn();
     if (hasStdin) {
-      const writer = child.stdin.getWriter();
-      try {
-        const payload = stdin.endsWith("\n") ? stdin : `${stdin}\n`;
-        await writer.write(new TextEncoder().encode(payload));
-      } finally {
-        await writer.close();
-      }
+      await writeChildStdin(
+        child.stdin,
+        stdin.endsWith("\n") ? stdin : `${stdin}\n`,
+      );
     }
     const output = await child.output();
     return {

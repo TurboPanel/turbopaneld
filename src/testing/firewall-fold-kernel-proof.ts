@@ -34,6 +34,7 @@ import {
   resolveManagedPublicAllowedSources,
 } from "../managed/firewall.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 type Scenario = "exact" | "missing-consumer";
 
@@ -110,9 +111,7 @@ async function sh(
     stderr: "piped",
   }).spawn();
   if (stdin !== undefined) {
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(stdin));
-    await writer.close();
+    await writeChildStdin(child.stdin, stdin);
   }
   const out = await child.output();
   const text = new TextDecoder().decode(out.stdout);

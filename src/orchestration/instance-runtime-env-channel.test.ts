@@ -2,6 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import { encodeBase64 } from "@std/encoding/base64";
 import { join } from "@std/path";
 import { DAEMON_ROOT } from "./assets.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Owner decision: every component follows the channel it was installed from;
@@ -86,11 +87,7 @@ async function render(
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  const writer = child.stdin.getWriter();
-  await writer.write(
-    new TextEncoder().encode(JSON.stringify({ source, vars })),
-  );
-  await writer.close();
+  await writeChildStdin(child.stdin, JSON.stringify({ source, vars }));
   const { success, stdout, stderr } = await child.output();
   assert(success, `render failed: ${new TextDecoder().decode(stderr)}`);
   return new TextDecoder().decode(stdout);

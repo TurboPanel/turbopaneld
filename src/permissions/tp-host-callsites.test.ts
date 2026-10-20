@@ -25,6 +25,7 @@ import {
   type SudoSample,
   type TpHostSample,
 } from "./tp-host-callsites.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -302,9 +303,7 @@ async function makeHost(): Promise<Host> {
         stderr: "piped",
       }).spawn();
       if (stdin !== undefined) {
-        const writer = child.stdin.getWriter();
-        await writer.write(new TextEncoder().encode(stdin));
-        await writer.close();
+        await writeChildStdin(child.stdin, stdin);
       }
       const out = await child.output();
       return {

@@ -40,6 +40,7 @@ import {
   stripPgRestoreTimeoutSetLines,
   strongestPrivilege,
 } from "./postgres-sql.ts";
+import { writeChildStdin } from "../../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -520,9 +521,7 @@ test("PG_RESTORE_TIMEOUT_SET_LINE_SED avoids the GNU-only I flag and matches the
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  const writer = out.stdin.getWriter();
-  await writer.write(new TextEncoder().encode(input));
-  await writer.close();
+  await writeChildStdin(out.stdin, input);
   const result = await out.output();
   assertEquals(result.success, true, new TextDecoder().decode(result.stderr));
   assertEquals(

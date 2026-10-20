@@ -3,6 +3,7 @@ import type { ManagedApplyCredential } from "../../contracts/commands-contracts.
 import { createDatabaseSql } from "./postgres-sql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
 import type { ManagedEngineContext } from "./types.ts";
+import { writeChildStdin } from "../../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}; Sonar typescript:S2187 only
@@ -44,11 +45,10 @@ async function docker(
       stderr: "piped",
     }).spawn();
     if (input !== undefined) {
-      const writer = child.stdin.getWriter();
-      await writer.write(
+      await writeChildStdin(
+        child.stdin,
         typeof input === "string" ? new TextEncoder().encode(input) : input,
       );
-      await writer.close();
     }
     const out = await child.output();
     return {

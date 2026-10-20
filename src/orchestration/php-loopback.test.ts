@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { MYSQL_PORT, PGSQL_PORT } from "../managed/proxysql.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -231,9 +232,7 @@ test("the rendered ruleset passes `nft -c -f` (syntax check, when nft is install
       stdout: "piped",
       stderr: "piped",
     }).spawn();
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(rendered));
-    await writer.close();
+    await writeChildStdin(child.stdin, rendered);
     const out = await child.output();
     const err = new TextDecoder().decode(out.stderr);
     // A host that forbids netlink to this user cannot check: not a syntax error.

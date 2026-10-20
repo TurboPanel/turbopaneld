@@ -22,6 +22,7 @@ import {
   sweepStaleBuildWork,
   withBuildSlot,
 } from "./build-sandbox.ts";
+import { writeChildStdin } from "../../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test} — Sonar typescript:S2187 only
@@ -241,9 +242,7 @@ test("the rendered spec runs through the real runner: cwd, env, order, stop at f
       stdout: "piped",
       stderr: "piped",
     }).spawn();
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(spec));
-    await writer.close();
+    await writeChildStdin(child.stdin, spec);
     const out = await child.output();
     assertEquals(out.code, 7);
     assertStringIncludes(
