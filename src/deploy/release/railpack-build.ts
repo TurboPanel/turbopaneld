@@ -69,7 +69,8 @@ import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
-import { sandboxBuildEnvironment } from "./build.ts";
+import { isReservedBuildEnvKey, sandboxBuildEnvironment } from "./build.ts";
+import { isSpecEnvName } from "./build-sandbox.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import {
   type ImagePrepareSandbox,
@@ -118,15 +119,67 @@ export const RAILPACK_IMAGE_NAMESPACE = "turbopanel-app";
 const RAILPACK_PLAN_FILENAME = "railpack-plan.json";
 const RAILPACK_FRONTEND_TAR_FILENAME = "railpack-frontend.tar";
 
-/** Environment keys a build may never set — they are the sandbox (see build.ts). */
-const RESERVED_BUILD_ENV_KEYS = new Set([
-  "GIT_ASKPASS",
-  "GIT_SSH_COMMAND",
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "PATH",
-  "HOME",
+/**
+ * Keys that make a language runtime or tool load code from a path the tenant
+ * chooses. The Railpack tools run as the daemon, unsandboxed, so these are
+ * refused here on top of the shared build filter ({@link isReservedBuildEnvKey}).
+ */
+const TOOL_CODE_LOADING_ENV_KEYS = new Set([
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PERL5OPT",
+  "PERL5LIB",
+  "RUBYOPT",
+  "RUBYLIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "BUILDKIT_HOST",
+  // Go toolchain and version-manager settings that choose which program or
+  // config a tool loads.
+  "GOFLAGS",
+  "GOENV",
+  "GOTOOLCHAIN",
+  "GOROOT",
+  "GOPATH",
 ]);
+
+/**
+ * Name prefixes of package-manager and version-manager configuration (mise,
+ * asdf, npm, Bundler, pip). In this lane the variables reach only the host-side
+ * tools (Railpack and the image builder client), never the application's own
+ * build inside the image, so none of these has a legitimate use here: package
+ * manager settings belong in the repository's own files (`.npmrc`, `Gemfile`
+ * config, `pip.conf`), which the image build reads.
+ */
+const TOOL_CONFIG_ENV_PREFIXES = [
+  "DOCKER_",
+  "MISE_",
+  "ASDF_",
+  "npm_config_",
+  "NPM_CONFIG_",
+  "BUNDLE_",
+  "PIP_",
+];
+
+/** Whether a tenant `build.env` key may reach the Railpack tools' environment. */
+export function railpackToolAcceptsEnvKey(key: string): boolean {
+  return isSpecEnvName(key) && !isReservedBuildEnvKey(key) &&
+    !TOOL_CODE_LOADING_ENV_KEYS.has(key) &&
+    !TOOL_CONFIG_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+/** The tenant `build.env` names the Railpack lane leaves out, for the build log. */
+export function droppedRailpackEnvNames(
+  build: EnvironmentDeploySourceBuild,
+): string[] {
+  return Object.keys(build.env ?? {}).filter((key) =>
+    !railpackToolAcceptsEnvKey(key)
+  ).sort((a, b) => a.localeCompare(b));
+}
 
 const decoder = new TextDecoder();
 
@@ -550,7 +603,7 @@ export async function ensureBuildkitRailpack(
 }
 
 /** Minimal, credential-free environment for the vendored build tools. */
-function railpackToolEnvironment(
+export function railpackToolEnvironment(
   build: EnvironmentDeploySourceBuild,
   workingDir: string,
 ): Record<string, string> {
@@ -560,8 +613,10 @@ function railpackToolEnvironment(
     CI: "1",
     NODE_ENV: "production",
   };
+  // The same filter as the native lanes (one place decides what is the
+  // sandbox), plus the names that load code into a tool run as the daemon.
   for (const [key, value] of Object.entries(build.env ?? {})) {
-    if (RESERVED_BUILD_ENV_KEYS.has(key)) continue;
+    if (!railpackToolAcceptsEnvKey(key)) continue;
     env[key] = value;
   }
   return { ...env, ...builderCommandOverrides(build) };
@@ -960,6 +1015,15 @@ export async function runRailpackBuild(
   deps?: RunRailpackBuildDeps,
 ): Promise<RailpackBuildResult> {
   const env = railpackToolEnvironment(params.build, params.workingDir);
+  // Names only, never a value: why a variable the user set has no effect.
+  for (const name of droppedRailpackEnvNames(params.build)) {
+    params.onOutput?.(
+      "stderr",
+      `build variable ${
+        JSON.stringify(name)
+      } was not passed to the build: the build tools do not accept this name from a site (it is reserved or changes how the build host itself runs)`,
+    );
+  }
   const planPath = join(params.scratchDir, RAILPACK_PLAN_FILENAME);
   const runTool = deps?.runTool ?? runToolStreamed;
   const runDocker = deps?.runDocker ?? runDockerStreamed;

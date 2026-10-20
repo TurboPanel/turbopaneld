@@ -14,19 +14,25 @@
  * - The archive streams straight to `<artifact>.part` (0600), is checksummed,
  *   renamed into place and pruned exactly like a managed-engine dump.
  *
- * Artifacts: `<backupDir>/copies/<copyId>/<backupId>.tar.gz` for a manual
- * backup, `<backupDir>/copies/<copyId>/policy-<policyId>/…` for a scheduled
+ * Artifacts: `<backupDir>/volumes/<copyId>/<backupId>.tar.gz` for a manual
+ * backup, `<backupDir>/volumes/<copyId>/policy-<policyId>/…` for a scheduled
  * one (its retention prunes only that directory).
  */
 
 import { helperLabelArgs } from "../deploy/labels.ts";
 import { join } from "@std/path";
 import {
+  folderHostPath,
+  isValidFolderName,
+  isValidOwnerName,
+  isValidScope,
+} from "../contracts/directory-names.ts";
+import {
   COPY_BACKUP_ARTIFACT_EXTENSION,
   type CopyBackupSource,
   isSafeCopyHostPath,
 } from "../contracts/commands-contracts.ts";
-import type { LayoutPaths } from "../paths/layout.ts";
+import { backupKindDir, type LayoutPaths } from "../paths/layout.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -90,14 +96,14 @@ function assertSafeId(label: string, value: string): void {
   }
 }
 
-/** `<backupDir>/copies/<copyId>`, plus `policy-<policyId>` for a scheduled backup. */
+/** `<backupDir>/volumes/<copyId>`, plus `policy-<policyId>` for a scheduled backup. */
 export function copyBackupArtifactDir(
   layout: Pick<LayoutPaths, "backupDir">,
   copyId: string,
   policyId?: string,
 ): string {
   assertSafeId("copyId", copyId);
-  const copyDir = join(layout.backupDir, "copies", copyId);
+  const copyDir = join(backupKindDir(layout, "volumes"), copyId);
   if (policyId === undefined) return copyDir;
   assertSafeId("policyId", policyId);
   return join(copyDir, `policy-${policyId}`);
@@ -131,6 +137,25 @@ function copyHostPath(
   );
 }
 
+/**
+ * Whether `path` is a volume folder of `owner`, or inside one: the older
+ * `<owner>/volumes/<name>` or the scope tree's `<owner>/<scope>/volumes/<name>`.
+ * The scope and the name are checked against the shared folder rules.
+ */
+export function isOwnerVolumePath(
+  principalRoot: string,
+  owner: string | undefined,
+  path: string,
+): boolean {
+  if (!owner || !isValidOwnerName(owner)) return false;
+  const prefix = `${principalRoot}/${owner}/`;
+  if (!path.startsWith(prefix) || path.endsWith("/")) return false;
+  const steps = path.slice(prefix.length).split("/");
+  if (steps[0] === "volumes") return steps.length >= 2;
+  return steps.length >= 3 && steps[1] === "volumes" &&
+    isValidScope(steps[0]) && isValidFolderName(steps[2]);
+}
+
 export function resolveCopyMount(
   layout: LayoutPaths,
   source: CopyBackupSource,
@@ -142,17 +167,20 @@ export function resolveCopyMount(
     }
     return { type: "volume", name: source.volumeName };
   }
+  if (source.folder) {
+    // The folder's parts were validated by the shared rules; the path is built from them.
+    return {
+      type: "bind",
+      path: folderHostPath(principalRoot, { ...source.folder, kind: "volume" }),
+    };
+  }
   const path = copyHostPath(layout, source);
   if (!path || !isSafeCopyHostPath(path)) {
     throw new Error("the copy has no usable host directory");
   }
   if (source.hostPath) {
-    // An explicit path must be inside the site owner's own volumes directory.
-    const ownerVolumes = `${principalRoot}/${source.ownerUsername}/volumes/`;
-    if (
-      !source.ownerUsername || !path.startsWith(ownerVolumes) ||
-      path.length === ownerVolumes.length
-    ) {
+    // An explicit path must be inside one of the site owner's own volume folders.
+    if (!isOwnerVolumePath(principalRoot, source.ownerUsername, path)) {
       throw new Error(
         `refusing to back up ${path}: it is not inside the site owner's volumes directory`,
       );

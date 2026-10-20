@@ -16,32 +16,99 @@
  * service key. Older daemons ignore `releaseServiceId` and keep that same
  * fallback shape, so nothing breaks mid-rollout.
  *
- * **Legacy directories:** a single-environment site may still live under
- * `sites/<composeServiceName>/`. {@link effectiveReleaseServiceId} keeps using
- * that tree while `current` or `releases/` exists there and the canonical UUID
- * tree is still empty, so a running site is not restarted into an empty path.
- * The next promote into the canonical segment, or an explicit reclaim, retires
- * the legacy name.
+ * The folder of every such service comes from `serviceFolders[]`, which the
+ * control plane always sends; a payload without it is refused.
  */
 
 import type {
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
-import type { LayoutPaths } from "../../paths/layout.ts";
-import {
-  principalHomePath,
-  siteCurrentSymlink,
-  siteReleasesDir,
-} from "../../paths/layout.ts";
-import type { RunFn } from "../ensure-principal.ts";
-import { releasePathExists } from "./promote.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 
 /**
  * Charset-safe release-tree segment. Values are environment **service** UUIDs
  * on the wire (`nativeAppServices[].serviceId` uses the same rule).
  */
 export const RELEASE_TREE_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
+
+/**
+ * The folder the control plane planned for a service. The deploy payload must
+ * always carry `serviceFolders`; a service without an entry is refused rather
+ * than served from another tree.
+ */
+export function serviceFolderFromPayload(
+  payload: Pick<EnvironmentDeployPayload, "serviceFolders">,
+  serviceId: string,
+): FolderRefParts {
+  const folder = payload.serviceFolders?.find((entry) =>
+    entry.serviceId === serviceId
+  )?.folder;
+  if (folder === undefined) {
+    throw new Error(
+      `Service ${serviceId} has no folder planned on this server; redeploy from the panel (no serviceFolders entry)`,
+    );
+  }
+  return folder;
+}
+
+/**
+ * The folder planned for a compose service, found through whichever id names
+ * it. The release engine keys a tree by `sourceMaterial[].releaseServiceId`
+ * and a native unit by `nativeAppServices[].serviceId`; both are the service's
+ * UUID, but a payload that differs between the two must still resolve one
+ * folder, so the unit and the release it runs always agree. The release id is
+ * tried first, then the ids the other lists carry for the same compose service.
+ */
+/**
+ * The folder entry that names a compose service, if any. Two entries naming the
+ * same service are refused: which folder the site belongs in would be a guess.
+ */
+function serviceFolderEntryByName(
+  payload: Pick<EnvironmentDeployPayload, "serviceFolders">,
+  composeServiceName: string,
+): { serviceId: string; folder: FolderRefParts } | undefined {
+  const found = (payload.serviceFolders ?? []).filter((entry) =>
+    entry.composeServiceName === composeServiceName
+  );
+  if (found.length > 1) {
+    throw new Error(
+      `deploy payload names the service ${composeServiceName} in more than one serviceFolders entry`,
+    );
+  }
+  return found[0];
+}
+
+export function serviceFolderForCompose(
+  payload: EnvironmentDeployPayload,
+  composeServiceName: string,
+): FolderRefParts {
+  const ids = [
+    resolveReleaseServiceId(payload, composeServiceName),
+    ...[
+      payload.nativeAppServices,
+      payload.hostings,
+      payload.ingressServices,
+    ].flatMap((rows) =>
+      (rows ?? [])
+        .filter((row) =>
+          row.composeServiceName === composeServiceName && row.serviceId
+        )
+        .map((row) => row.serviceId as string)
+    ),
+  ];
+  for (const id of ids) {
+    const folder = payload.serviceFolders?.find((entry) =>
+      entry.serviceId === id
+    )?.folder;
+    if (folder !== undefined) return folder;
+  }
+  const named = serviceFolderEntryByName(payload, composeServiceName)?.folder;
+  if (named !== undefined) return named;
+  throw new Error(
+    `Service ${composeServiceName} has no folder planned on this server; redeploy from the panel (no serviceFolders entry)`,
+  );
+}
 
 export function findDeploySourceEntry(
   payload: EnvironmentDeployPayload,
@@ -82,43 +149,10 @@ export function resolveReleaseServiceId(
   );
   if (ingress?.serviceId) return ingress.serviceId;
 
+  // A site or app with no hostname, source or native unit appears in none of
+  // those lists; its folder entry names it.
+  const folder = serviceFolderEntryByName(payload, composeServiceName);
+  if (folder !== undefined) return folder.serviceId;
+
   return composeServiceName;
-}
-
-async function treeHasPublishedRelease(
-  principalHome: string,
-  segment: string,
-  runFn?: RunFn,
-): Promise<boolean> {
-  const run = runFn;
-  if (
-    await releasePathExists(siteCurrentSymlink(principalHome, segment), run)
-  ) {
-    return true;
-  }
-  return await releasePathExists(siteReleasesDir(principalHome, segment), run);
-}
-
-/**
- * Segment to use for path construction on this host, including legacy
- * `sites/<composeServiceName>/` migration.
- */
-export async function effectiveReleaseServiceId(
-  payload: EnvironmentDeployPayload,
-  composeServiceName: string,
-  layout: LayoutPaths,
-  principal: { username: string } | undefined,
-  runFn?: RunFn,
-): Promise<string> {
-  const canonical = resolveReleaseServiceId(payload, composeServiceName);
-  if (!principal || canonical === composeServiceName) return canonical;
-
-  const home = principalHomePath(layout, principal.username);
-  if (await treeHasPublishedRelease(home, canonical, runFn)) {
-    return canonical;
-  }
-  if (await treeHasPublishedRelease(home, composeServiceName, runFn)) {
-    return composeServiceName;
-  }
-  return canonical;
 }

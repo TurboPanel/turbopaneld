@@ -1730,14 +1730,15 @@ const RECLAIM_RELEASE_ROW = {
   sourceId: "src-1",
   commitSha: "a".repeat(40),
   username: "appuser",
+  folder: { owner: "appuser", scope: "production", slug: "gone.example.com" },
 };
 
 test({
   name:
-    "handleEnvironmentDeploy reclaims the release tree of a service removed from the compose",
+    "handleEnvironmentDeploy leaves the folder of a service removed from the compose in place",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
-    await withReclaimEnv(async ({ stateDir, principalHomeRoot }) => {
+    await withReclaimEnv(async ({ stateDir }) => {
       const environmentId = "envreclaim1";
       const deploymentDir = join(
         stateDir,
@@ -1772,16 +1773,8 @@ test({
         },
       );
 
-      assertEquals(sudo.calls, [{
-        command: "sudo",
-        args: [
-          "-n",
-          "rm",
-          "-rf",
-          "--",
-          join(principalHomeRoot, "appuser", "sites", "svc-gone"),
-        ],
-      }]);
+      // The owner's files stay: only an explicit delete removes a folder.
+      assertEquals(sudo.calls, []);
     });
   },
 });
@@ -2209,7 +2202,11 @@ test({
         {
           bindings: new Map([[
             "web",
-            { username: "appuser", previousReleaseId: null },
+            {
+              username: "appuser",
+              folder: { owner: "appuser", scope: "production", slug: "web" },
+              previousReleaseId: null,
+            },
           ]]),
           run: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
           runPlaybook: () => Promise.resolve(),

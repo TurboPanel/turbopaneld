@@ -205,14 +205,10 @@ export function dropOwnerRolesSql(database: string): string {
   return lines.join("\n");
 }
 
-const WRITER_TABLE_LIST = [
-  "SELECT",
-  "INSERT",
-  "UPDATE",
-  "DELETE",
-  "TRUNCATE",
-  "REFERENCES",
-] as const;
+/** Read-write group: data changes only. TRUNCATE and REFERENCES stay with the owner role. */
+const WRITER_TABLE_LIST = ["SELECT", "INSERT", "UPDATE", "DELETE"] as const;
+const WRITER_REVOKED_LIST = ["TRUNCATE", "REFERENCES"] as const;
+const WRITER_REVOKED = WRITER_REVOKED_LIST.join(", ");
 const WRITER_SEQUENCE_LIST = ["USAGE", "SELECT", "UPDATE"] as const;
 const WRITER_TABLE = WRITER_TABLE_LIST.join(", ");
 const WRITER_SEQUENCE = WRITER_SEQUENCE_LIST.join(", ");
@@ -256,6 +252,16 @@ function healExistingObjectsSql(names: OwnerRoleNames): string {
     `           AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND NOT (${tableOk}) LOOP`,
     `    EXECUTE pg_catalog.format('GRANT ${WRITER_TABLE} ON TABLE %s TO ${rw}', r.obj);`,
     `    EXECUTE pg_catalog.format('GRANT SELECT ON TABLE %s TO ${ro}', r.obj);`,
+    `  END LOOP;`,
+    `  FOR r IN SELECT c.oid::pg_catalog.regclass::text AS obj`,
+    `           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace`,
+    `           WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`,
+    `           AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND (${
+      WRITER_REVOKED_LIST.map((p) =>
+        `pg_catalog.has_table_privilege(${rwLit}, c.oid, '${p}')`
+      ).join(" OR ")
+    }) LOOP`,
+    `    EXECUTE pg_catalog.format('REVOKE ${WRITER_REVOKED} ON TABLE %s FROM ${rw}', r.obj);`,
     `  END LOOP;`,
     `  FOR r IN SELECT c.oid::pg_catalog.regclass::text AS obj`,
     `           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace`,
@@ -308,6 +314,8 @@ export function ownerRoleDatabaseSql(
       quoteIdentifier(creator)
     }`;
     lines.push(
+      // Wipe an earlier default that carried TRUNCATE and REFERENCES.
+      `${from} REVOKE ${WRITER_REVOKED} ON TABLES FROM ${rw};`,
       `${from} GRANT ${WRITER_TABLE} ON TABLES TO ${rw};`,
       `${from} GRANT ${WRITER_SEQUENCE} ON SEQUENCES TO ${rw};`,
       `${from} GRANT USAGE ON SCHEMAS TO ${rw};`,

@@ -31,8 +31,10 @@
     state: present
 
 # Traverse only (no listing) through the root:tp and tp:tp parents. The vendor
-# tree's caddy directories are root:root 0755 already.
-- name: Grant the hosting Caddy traversal of the install, vendor and config roots
+# tree's caddy directories are root:root 0755 already. The state root is here
+# too: the unit's StateDirectory=turbopanel/hosting-caddy lives inside it, and
+# the account is deliberately not in group tp.
+- name: Grant the hosting Caddy traversal of the install, vendor, config and state roots
   ansible.posix.acl:
     path: "{{ item }}"
     etype: user
@@ -43,6 +45,7 @@
     - "{{ turbopanel_install_root }}"
     - "{{ turbopanel_vendor_dir }}"
     - "{{ turbopanel_config_dir }}"
+    - "{{ turbopanel_state_dir }}"
 
 # A co-located control plane on Let's Encrypt has hosting Caddy proxy HTTP-01
 # challenges to <run dir>/instance-acme.sock. Traverse only (no listing) on the
@@ -127,14 +130,6 @@
     group: "{{ hosting_caddy_user }}"
     mode: "2750"
     follow: false
-
-# Certificates and the ACME account now live in the unit's own StateDirectory
-# (/var/lib/turbopanel-hosting-caddy). The old store inside the tp-owned state
-# tree held files root wrote; it is replaced, not migrated.
-- name: Remove the old root-written hosting Caddy store
-  ansible.builtin.file:
-    path: "{{ turbopanel_state_dir }}/hosting-caddy"
-    state: absent
 
 # Ingress guard. Root-owned under <install>/lib, which the daemon cannot write
 # (it can write /etc/turbopanel), so the daemon cannot widen its own guard.

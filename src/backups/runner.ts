@@ -190,6 +190,7 @@ function copySourceOf(entry: BackupPolicyWireEntry): CopyBackupSource {
   if (entry.composeProject) source.composeProject = entry.composeProject;
   if (entry.organizationId) source.organizationId = entry.organizationId;
   if (entry.storageId) source.storageId = entry.storageId;
+  if (entry.folder) source.folder = entry.folder;
   return source;
 }
 

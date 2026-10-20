@@ -45,6 +45,7 @@ import type {
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
+import { ensureAssetFolder } from "../asset-folders.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { DeployCancelToken } from "../deploy-cancel.ts";
 import { join } from "@std/path";
@@ -90,8 +91,8 @@ import {
   releasePathExists,
 } from "./promote.ts";
 import {
-  effectiveReleaseServiceId,
   resolveReleaseServiceId,
+  serviceFolderFromPayload,
 } from "./release-service-id.ts";
 import { pruneReleases } from "./retention.ts";
 import { PENDING_RECORD_MARKER } from "./release-health.ts";
@@ -105,7 +106,6 @@ import {
 } from "./deployment-json.ts";
 import {
   ensureDaemonReleaseRecordDir,
-  ensureReleaseTree,
   type ReleasePaths,
   removeReleaseScratchDir,
   resetReleaseScratchDir,
@@ -255,8 +255,6 @@ export type ApplySourceReleasesDeps = {
   runRailpackBuildFn?: typeof runRailpackBuild;
   /** Test seam — defaults to {@link ensureBuildkitRailpack}. */
   ensureBuildkitRailpackFn?: typeof ensureBuildkitRailpack;
-  /** Test seam — defaults to {@link ensureReleaseTree}. */
-  ensureReleaseTreeFn?: typeof ensureReleaseTree;
   /** Test seam — defaults to {@link ensureDaemonReleaseRecordDir}. */
   ensureDaemonReleaseRecordDirFn?: typeof ensureDaemonReleaseRecordDir;
   /**
@@ -274,7 +272,7 @@ export type ApplySourceReleasesDeps = {
  * Promote an already-published release for one service — the rollback lane.
  *
  * Deliberately *not* a variation threaded through the build path: it must not
- * run `ensureReleaseTree` (which would repair the sealed release directory back
+ * re-create the release tree (which would repair the sealed release directory back
  * to staging mode and hand the runtime user a writable copy of the code it is
  * running), must not touch the scratch dir, and emits no `fetch` / `build`
  * phase lines because neither happened. What it does share is everything after
@@ -827,11 +825,15 @@ async function buildNativeRelease(
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
 
-  await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
-    paths,
-    username,
-    deps.runFn,
-  );
+  if (!paths.publish) {
+    throw new Error(`release for service ${serviceId} has no service folder`);
+  }
+  // The folder, its `releases/`, `shared/` and `logs/`, and the record of its
+  // components; a changed folder for a known service is refused here.
+  await ensureAssetFolder(layout, serviceId, {
+    ...paths.publish.folder,
+    kind: "service",
+  }, deps.runFn);
   await resetReleaseScratchDir(paths);
   let work: BuildWork | null = null;
   try {
@@ -1165,15 +1167,7 @@ async function applyOneRelease(
     return null;
   }
 
-  const serviceId = principal
-    ? await effectiveReleaseServiceId(
-      payload,
-      entry.composeServiceName,
-      layout,
-      principal,
-      deps.runFn ?? runPrivileged,
-    )
-    : resolveReleaseServiceId(payload, entry.composeServiceName);
+  const serviceId = resolveReleaseServiceId(payload, entry.composeServiceName);
   // A rollback addresses the tree it is rolling back *to*, not the id the
   // control plane would have allocated for a fresh build.
   const targetReleaseId = entry.rollbackToReleaseId ?? entry.releaseId;
@@ -1182,6 +1176,7 @@ async function applyOneRelease(
       username: principal.username,
       serviceId,
       releaseId: targetReleaseId,
+      folder: serviceFolderFromPayload(payload, serviceId),
     })
     : null;
   // Railpack history is always daemon-owned, principal or not: one service must

@@ -968,3 +968,14 @@ test("a successful promote or failover stops suppressing the probe after a minut
     }
   });
 });
+
+test("the host-wide marker lives in the system folder, not among the database markers", () => {
+  assertEquals(
+    managedIntentPath("/var/lib/turbopanel", HOST_WIDE_INTENT_ID),
+    "/var/lib/turbopanel/system/host-intent.json",
+  );
+  assertEquals(
+    managedIntentPath("/var/lib/turbopanel", "abc"),
+    "/var/lib/turbopanel/managed-intent/abc.json",
+  );
+});

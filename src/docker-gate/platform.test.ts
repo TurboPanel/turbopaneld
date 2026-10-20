@@ -381,9 +381,10 @@ test("helperLabelArgs stamps labels the gate reads as platform", () => {
 
 test("every `docker run` helper in src stamps the shared platform label", async () => {
   const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-  // Compose `run` of a tenant deploy hook and cloudflared's own `run` are not
-  // daemon helper containers.
+  // Compose `run` of a tenant deploy hook or of the one-off volume `chown`, and
+  // cloudflared's own `run`, are not daemon helper containers.
   const exempt = new Set([
+    "deploy/named-volume-owner.ts",
     "deploy/run-deploy-hooks.ts",
     "tunnels/supervisor.ts",
   ]);

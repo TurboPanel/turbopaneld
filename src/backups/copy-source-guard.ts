@@ -235,6 +235,7 @@ export function copyPathBase(
   source: CopyBackupSource,
   principalRoot: string,
 ): string {
+  if (source.folder) return `${principalRoot}/${source.folder.owner}`;
   return source.hostPath && source.ownerUsername
     ? `${principalRoot}/${source.ownerUsername}`
     : join(layout.stateDir, "storage");

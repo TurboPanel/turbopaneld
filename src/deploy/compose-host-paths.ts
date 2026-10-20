@@ -89,6 +89,9 @@ export class ComposeHostPathError extends Error {
 const BUILD_PATH_NOTE =
   "builds may not read outside the project, whatever the organization allows (build_context_outside_project)";
 
+const OWNER_TREE_NOTE =
+  "mount a volume of this environment instead; service folders and other owners' folders are never bind sources";
+
 const HOST_LEVEL_NOTE =
   "host-level Compose features need an organization owner's opt-in and a manager's deploy";
 
@@ -491,6 +494,18 @@ export type ConfinementOptions = {
    * under one of them could be swapped for a symlink in the meantime.
    */
   priorWritableMounts?: readonly string[];
+  /**
+   * The site owners' tree (`<home root>`) and the volume folders this deploy
+   * may bind from it. A source inside the tree is refused unless it is one of
+   * these folders or below one, whatever the control plane approved: a
+   * service folder (`releases/` is sealed code, `shared/` is the web side's
+   * state) and another owner's or another environment's volume are never
+   * bind sources.
+   */
+  ownerTree?: {
+    homeRoot: string;
+    volumes: readonly string[];
+  };
   realPath?: RealPathFn;
 };
 
@@ -519,6 +534,45 @@ const finding = (finding: string): EntryOutcome => ({
   kind: "finding",
   finding,
 });
+
+/**
+ * Rule for a source inside the site owners' tree: only this deploy's own
+ * volume folders, and only while the path really stays inside the folder (a
+ * link the owner left in a volume must not lead a bind elsewhere). `undefined`
+ * when the path is outside the tree and the other rules apply.
+ */
+async function ownerTreeOutcome(
+  entry: HostPathEntry,
+  label: string,
+  staged: string,
+  ctx: ConfinementContext,
+): Promise<EntryOutcome | undefined> {
+  const tree = ctx.opts.ownerTree;
+  if (!tree || !isWithin(staged, normalize(tree.homeRoot))) {
+    return undefined;
+  }
+  const volume = tree.volumes.find((root) => isWithin(staged, root));
+  if (volume === undefined || entry.build) {
+    return finding(
+      `${label} is inside a site owner's folder but is not one of this environment's volumes — ${OWNER_TREE_NOTE}`,
+    );
+  }
+  let real: string;
+  let realVolume: string;
+  try {
+    real = await resolveExistingPrefix(staged, ctx.realPath);
+    realVolume = await resolveExistingPrefix(volume, ctx.realPath);
+  } catch (err) {
+    return finding(
+      `${label} cannot be resolved on this host (${(err as Error).message})`,
+    );
+  }
+  return isWithin(real, realVolume)
+    ? { kind: "checked", checked: { entry, real } }
+    : finding(
+      `${label} resolves through a symlink to ${real}, outside its volume folder`,
+    );
+}
 
 /**
  * Rule: paths that are lexically outside the deployment directory, and the
@@ -588,6 +642,8 @@ async function confineEntry(
   const staged = normalize(
     isAbsolute(entry.path) ? entry.path : resolve(ctx.stageDir, entry.path),
   );
+  const inOwnerTree = await ownerTreeOutcome(entry, label, staged, ctx);
+  if (inOwnerTree) return inOwnerTree;
   const hostLevel = hostLevelOutcome(entry, label, staged, ctx);
   if (hostLevel) return hostLevel;
   const live = join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));

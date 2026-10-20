@@ -32,6 +32,7 @@ import { checkoutRelease, type GitRunner } from "./checkout.ts";
 const test = Deno.test.bind(Deno);
 
 const PROJECT = "01a0e39d-0418-7852-bc47-bc2f8422d404";
+const SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70";
 
 function payload(
   source: Partial<EnvironmentDeploySource> = {},
@@ -45,12 +46,12 @@ function payload(
     hostings: [{
       hostingId: "host-1",
       composeServiceName: "web",
-      serviceId: "svc1",
+      serviceId: SERVICE_ID,
       hostnames: ["app.example.com"],
     }],
     nativeAppServices: [{
       composeServiceName: "web",
-      serviceId: "svc1",
+      serviceId: SERVICE_ID,
       listenPort: 3000,
       framework: "next",
     }],
@@ -61,7 +62,7 @@ function payload(
       cloneUrl: "https://github.com/example/repo.git",
       ref: "main",
       commitSha: "abc123",
-      releaseId: "rel-1",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
       principal: {
         principalId: "pr-1",
         username: "appuser",
@@ -70,6 +71,10 @@ function payload(
       },
       build: { kind: "native", installCommand: "npm ci", buildCommand: "x" },
       ...source,
+    }],
+    serviceFolders: [{
+      serviceId: SERVICE_ID,
+      folder: { owner: "appuser", scope: "production", slug: "web" },
     }],
   };
 }
@@ -94,7 +99,6 @@ function releaseDeps(
     decryptSecrets: undefined,
     runFn: okRun,
     sandboxedBuilds: false,
-    ensureReleaseTreeFn: () => Promise.resolve(),
     checkoutReleaseFn: async (params) => {
       seen.scratchDir = params.scratchDir;
       const workingDir = join(params.scratchDir, "source");
@@ -219,7 +223,7 @@ test("a cancel during the first service never starts the second", async () => {
       ...first,
       sourceId: "src-2",
       composeServiceName: "api",
-      releaseId: "rel-2",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e73",
     }];
     let checkouts = 0;
     const deps = releaseDeps(seen, {
@@ -331,7 +335,7 @@ test("an unsandboxed build is killed by a cancel, quickly, as a cancel", async (
 async function sandboxWork(): Promise<BuildWork> {
   return await resolveBuildWork(
     {
-      serviceId: "svc1",
+      serviceId: SERVICE_ID,
       releaseId: "20260927-120000",
       projectId: PROJECT,
       owner: "alice",

@@ -1,6 +1,10 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "@std/testing/bdd";
-import { buildStorageVolumesFragment } from "./apply-storage-volumes.ts";
+import {
+  buildStorageVolumesFragment,
+  declaredVolumeUsers,
+  numericComposeUser,
+} from "./apply-storage-volumes.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 
 const webResolved: ResolvedComposeModel = {
@@ -242,6 +246,101 @@ describe("buildStorageVolumesFragment", () => {
         ),
       Error,
       "Missing docker volume path for location loc-vol",
+    );
+  });
+});
+
+describe("declaredVolumeUsers", () => {
+  const owner = new Map([["st-1", { uid: 15001, gid: 15001 }]]);
+  const entry = (
+    over: Partial<Parameters<typeof declaredVolumeUsers>[0][number]> = {},
+  ) => ({
+    storageId: "st-1",
+    locationId: "loc-1",
+    kind: "directory" as const,
+    name: "uploads",
+    provider: "path" as const,
+    serverId: "srv",
+    folder: { owner: "alice", scope: "production", slug: "uploads" },
+    mounts: [{ composeServiceName: "db", destinationPath: "/data" }],
+    ...over,
+  });
+  const resolvedWith = (user: unknown): ResolvedComposeModel => ({
+    serviceNames: ["db"],
+    services: { db: { image: "db:1", user } },
+  });
+
+  it("reads a number or uid:gid and ignores a name", () => {
+    assertEquals(numericComposeUser(999), 999);
+    assertEquals(numericComposeUser("999"), 999);
+    assertEquals(numericComposeUser("999:70"), 999);
+    assertEquals(numericComposeUser("postgres"), null);
+    assertEquals(numericComposeUser("postgres:postgres"), null);
+    assertEquals(numericComposeUser(""), null);
+    assertEquals(numericComposeUser("-1"), null);
+    assertEquals(numericComposeUser("99999999999"), null);
+    assertEquals(numericComposeUser(undefined), null);
+  });
+
+  it("returns the declared uid of a container that mounts the volume", () => {
+    assertEquals(
+      declaredVolumeUsers([entry()], resolvedWith("999:999"), owner),
+      { users: [{ storageId: "st-1", uid: 999 }], named: [] },
+    );
+  });
+
+  it("needs no entry for the owner's own uid, root, or no declared user", () => {
+    for (const user of [15001, "15001:15001", 0, "0", undefined, ""]) {
+      assertEquals(
+        declaredVolumeUsers([entry()], resolvedWith(user), owner),
+        { users: [], named: [] },
+        String(user),
+      );
+    }
+  });
+
+  it("lists a named user so the caller can say it was not handled", () => {
+    assertEquals(
+      declaredVolumeUsers([entry()], resolvedWith("postgres"), owner),
+      {
+        users: [],
+        named: [{
+          storageId: "st-1",
+          composeServiceName: "db",
+          user: "postgres",
+        }],
+      },
+    );
+  });
+
+  it("lists a uid once per volume, and skips volumes without an owner folder", () => {
+    const twice = entry({
+      mounts: [
+        { composeServiceName: "db", destinationPath: "/data" },
+        { composeServiceName: "db", destinationPath: "/backup" },
+      ],
+    });
+    assertEquals(
+      declaredVolumeUsers([twice], resolvedWith(999), owner).users.length,
+      1,
+    );
+    assertEquals(
+      declaredVolumeUsers(
+        [entry({ folder: undefined })],
+        resolvedWith(999),
+        owner,
+      )
+        .users,
+      [],
+    );
+    assertEquals(
+      declaredVolumeUsers(
+        [entry({ kind: "volume" as never })],
+        resolvedWith(999),
+        owner,
+      )
+        .users,
+      [],
     );
   });
 });

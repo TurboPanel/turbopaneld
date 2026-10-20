@@ -1,7 +1,13 @@
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import {
+  parseSnippet,
+  snippetSiteAddresses,
+  trimSnippetSites,
+} from "./caddy-snippet.ts";
+import { foldHostname } from "./hostname-fold.ts";
 import { removeStaleNetworkContainers } from "./ingress-stale-network.ts";
 import {
   type EnvironmentDeployContainer,
@@ -792,12 +798,17 @@ export function serviceTraefikCompose(
 }
 
 /**
- * The hosting unit's systemd `StateDirectory=`: `/var/lib/<name>`, created
- * and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account, the
- * internal CA and every leaf certificate. Top level on purpose: never inside
- * the `tp`-owned state tree, so `tp` cannot swap it out from under Caddy.
+ * The hosting unit's systemd `StateDirectory=`: `/var/lib/turbopanel/hosting-caddy`,
+ * created and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account,
+ * the internal CA and every leaf certificate. On a sealed host the state root
+ * is root's and the daemon owns only its listed leaves, so `tp` cannot swap
+ * this folder out from under Caddy (a host where the control plane runs beside
+ * the daemon keeps a looser state root, where it could). systemd leaves an
+ * existing parent alone and gives only the inner folder to the unit's user; the
+ * account reaches it through an access entry on the state root (hosting-caddy
+ * role), not through group `tp`.
  */
-export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel-hosting-caddy";
+export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel/hosting-caddy";
 
 /**
  * Bounded shutdown for the hosting Caddy. Without it Caddy waits forever for
@@ -2090,9 +2101,9 @@ function withHostingSitesLock<T>(work: () => Promise<T>): Promise<T> {
 const HOSTING_CANDIDATE_SITES_DIR = "sites.next";
 const HOSTING_CANDIDATE_CADDYFILE = "Caddyfile.next";
 
-/** `/var/lib/turbopanel-hosting-caddy`: the unit's `StateDirectory=`. */
+/** `<state>/hosting-caddy`: the unit's `StateDirectory=`. */
 function hostingCaddyStateRoot(layout: LayoutPaths): string {
-  return join(dirname(layout.stateDir), HOSTING_CADDY_STATE_DIRECTORY);
+  return join(layout.stateDir, "hosting-caddy");
 }
 
 /**
@@ -2202,30 +2213,27 @@ async function hostingCandidateRefusal(
   return test.stderr || "caddy validate failed";
 }
 
-/**
- * The site addresses one snippet answers on: every top-level `name {` /
- * `http://name {` line the daemon itself wrote (`siteSnippet`).
- */
-export function snippetSiteAddresses(contents: string): string[] {
-  const names: string[] = [];
-  for (const line of contents.split("\n")) {
-    if (line.length === 0 || line.startsWith(" ") || !line.endsWith(" {")) {
-      continue;
-    }
-    const address = line.slice(0, -2).trim();
-    names.push(
-      address.startsWith("http://") ? address.slice("http://".length) : address,
-    );
-  }
-  return names;
-}
+export { snippetSiteAddresses };
 
 /**
- * Before any container starts: refuse a deploy that would answer on a name
- * another environment's live site already answers on on this server. A www
- * choice adds names the panel's uniqueness check may not have seen, and the
- * shared Traefik would otherwise route that name to this environment's
- * containers even though Caddy later refuses the duplicate site.
+ * Before any container starts: a deploy that would answer on a name another
+ * environment's live site already answers on, on this server.
+ *
+ * Normally that is refused: the panel's uniqueness check is per organization, a
+ * www choice adds names it may not have seen, and the shared Traefik would
+ * otherwise route the name to this environment's containers even though Caddy
+ * later refuses the duplicate site.
+ *
+ * `takeoverHostnames` is the control plane's proof, name by name, of who held a
+ * name before: `{ hostname, fromEnvironmentId }` says that environment, of the
+ * same organization as this deploy, was last sent the name for this server and
+ * no longer has a hosting for it. Such a name is taken over only from that
+ * environment's own snippet (`<environmentId>.caddy`). If the name is also held
+ * by any other environment's snippet, or the file that holds it cannot be read
+ * with certainty, the deploy is refused as before and nothing is changed.
+ * Only the site blocks for the listed names are removed; the rest of the file,
+ * and that environment's containers, are untouched, and its next deploy writes
+ * its own snippet again.
  */
 export async function assertHostingNamesFree(
   layout: LayoutPaths,
@@ -2237,7 +2245,8 @@ export async function assertHostingNamesFree(
       .flatMap((hosting) => [
         ...hostingServedNames(hosting),
         ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
-      ]),
+      ])
+      .map(foldHostname),
   );
   if (wanted.size === 0) return;
   const sitesDir = join(layout.configDir, "hosting", "sites");
@@ -2252,17 +2261,181 @@ export async function assertHostingNamesFree(
   const others = names.filter((name) =>
     name !== own && !isDaemonReservedHostingSite(name)
   );
-  const contents = await Promise.all(
-    others.map((name) => Deno.readTextFile(join(sitesDir, name))),
+  const held = await namesHeldByOthers(sitesDir, others, wanted);
+  if (held.size === 0) return;
+  const allowed = new Set(
+    (payload.takeoverHostnames ?? []).map((entry) =>
+      `${entry.fromEnvironmentId}.caddy\u0000${foldHostname(entry.hostname)}`
+    ),
   );
-  const taken = contents.flatMap(snippetSiteAddresses).find((name) =>
-    wanted.has(name)
-  );
-  if (taken !== undefined) {
-    throw new Error(
-      `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
-    );
+  for (const [file, hostnames] of held) {
+    for (const name of hostnames) {
+      if (!allowed.has(`${file}\u0000${name}`)) throw hostnameTakenError(name);
+    }
   }
+  await withHostingSitesLock(() => takeOverStaleHostnames(layout, held));
+}
+
+/**
+ * Which of `wanted` each other snippet answers on. A file that cannot be read
+ * with certainty and mentions a wanted name anywhere is a refusal, not a
+ * guess.
+ */
+async function namesHeldByOthers(
+  sitesDir: string,
+  files: readonly string[],
+  wanted: ReadonlySet<string>,
+): Promise<Map<string, string[]>> {
+  const held = new Map<string, string[]>();
+  await forEachSequential(files, async (file) => {
+    const contents = await Deno.readTextFile(join(sitesDir, file));
+    const parsed = parseSnippet(contents);
+    if (parsed.uninterpretable) {
+      const lowered = contents.toLowerCase();
+      const mentioned = [...wanted].find((name) => lowered.includes(name));
+      if (mentioned !== undefined) throw hostnameTakenError(mentioned);
+    }
+    const taken = snippetSiteAddresses(contents).filter((name) =>
+      wanted.has(name)
+    );
+    if (taken.length > 0) held.set(file, [...new Set(taken)]);
+  });
+  return held;
+}
+
+function hostnameTakenError(taken: string): Error {
+  return new Error(
+    `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
+  );
+}
+
+/** One leftover snippet and what taking its names over will write. */
+type TakeoverStep = {
+  path: string;
+  environmentId: string;
+  contents: string;
+  removed: string[];
+  /** Nothing is left in the file: no site, no import, no global block. */
+  empty: boolean;
+};
+
+/**
+ * Remove the named site blocks from each other environment's snippet; see
+ * {@link assertHostingNamesFree}. Every file is worked out first and nothing is
+ * written unless every named block was found, so one that cannot be placed
+ * never leaves Caddy to fail later with a duplicate site. All the files are
+ * then swapped in and Caddy is reloaded once; if it refuses, every file and
+ * manifest is put back and the deploy fails.
+ */
+async function takeOverStaleHostnames(
+  layout: LayoutPaths,
+  held: ReadonlyMap<string, readonly string[]>,
+): Promise<void> {
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  const steps: TakeoverStep[] = [];
+  await forEachSequential(held, async ([file, hostnames]) => {
+    const path = join(sitesDir, file);
+    // Read again under the lock: another deploy may have rewritten it since.
+    const trimmed = trimSnippetSites(
+      await Deno.readTextFile(path),
+      new Set(hostnames),
+    );
+    const missed = hostnames.find((name) => !trimmed.removed.includes(name));
+    if (missed !== undefined || trimmed.uninterpretable) {
+      throw hostnameTakenError(missed ?? hostnames[0]!);
+    }
+    steps.push({
+      path,
+      environmentId: file.slice(0, -".caddy".length),
+      contents: trimmed.contents,
+      removed: trimmed.removed,
+      empty: trimmed.sitesLeft === 0 && !trimmed.otherLeft,
+    });
+  });
+  const restores: Array<() => Promise<void>> = [];
+  try {
+    await forEachSequential(steps, async (step) => {
+      logInfo(
+        "deploy",
+        `took over ${
+          step.removed.join(", ")
+        } from the hosting config of environment ${step.environmentId}: its hosting was removed or moved there and that environment has not been deployed since`,
+      );
+      // The manifest first, so a crash never leaves the observer polling a
+      // name this snippet no longer serves.
+      restores.push(
+        await dropAcmeHostnames(layout, step.environmentId, step.removed),
+      );
+    });
+    await activateHostingSites(
+      steps.map((step) => ({
+        live: step.path,
+        contents: step.empty ? "" : step.contents,
+      })),
+    );
+  } catch (err) {
+    // One manifest that cannot be put back must not stop the others.
+    await forEachSequential(restores, (restore) => restore().catch(() => {}));
+    throw err;
+  }
+  // Caddy no longer serves anything from these (the empty files loaded): tidy up.
+  await forEachSequential(
+    steps.filter((entry) => entry.empty),
+    async (step) => {
+      await Deno.remove(step.path).catch(() => {});
+      await Deno.remove(`${step.path}.quarantined`).catch(() => {});
+      await Deno.remove(
+        acmeHostnamesManifestPath(layout, step.environmentId),
+      ).catch(() => {});
+    },
+  );
+}
+
+/** Write a file by renaming a finished copy over it, so a crash leaves the old or the new, never half. */
+async function writeFileAtomic(path: string, text: string): Promise<void> {
+  const next = `${path}.tpnew`;
+  await Deno.writeTextFile(next, text, { mode: 0o640 });
+  await Deno.rename(next, path);
+}
+
+/**
+ * Forget names in an environment's ACME hostname manifest, so the observer
+ * stops polling them. Returns a function that puts the manifest back as it was.
+ */
+async function dropAcmeHostnames(
+  layout: LayoutPaths,
+  environmentId: string,
+  removed: readonly string[],
+): Promise<() => Promise<void>> {
+  const path = acmeHostnamesManifestPath(layout, environmentId);
+  let original: string;
+  try {
+    original = await Deno.readTextFile(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logWarn(
+        "deploy",
+        `ACME hostname manifest of ${environmentId} kept: ${err}`,
+      );
+    }
+    return () => Promise.resolve();
+  }
+  try {
+    const listed = JSON.parse(original) as unknown;
+    if (!Array.isArray(listed)) return () => Promise.resolve();
+    const gone = new Set(removed);
+    const next = listed.filter((name) => !gone.has(String(name)));
+    if (next.length !== listed.length) {
+      await writeFileAtomic(path, JSON.stringify(next));
+    }
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `ACME hostname manifest of ${environmentId} kept: ${err}`,
+    );
+    return () => Promise.resolve();
+  }
+  return () => writeFileAtomic(path, original);
 }
 
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {
@@ -2512,16 +2685,13 @@ async function dropNewHostingSite(live: string): Promise<void> {
   await Deno.remove(live).catch(() => {});
 }
 
-/**
- * Swap the validated snippet in (`.tpnew` is outside the `*.caddy` glob, and
- * the rename is atomic), reload, and put the old one back when a running Caddy
- * refuses the reload. A unit that is not running keeps the validated file: it
- * loads it on its next start.
- */
-async function activateHostingSite(
+/** One snippet that has been swapped in, and what is needed to put it back. */
+type SwappedSite = { live: string; previous: string; hadPrevious: boolean };
+
+async function swapInHostingSite(
   live: string,
   contents: string,
-): Promise<void> {
+): Promise<SwappedSite> {
   const next = `${live}.tpnew`;
   const previous = `${live}.tpprev`;
   await Deno.writeTextFile(next, contents, { mode: 0o640 });
@@ -2535,11 +2705,58 @@ async function activateHostingSite(
   await Deno.rename(next, live);
   // A new snippet supersedes one set aside earlier for this environment.
   await Deno.remove(`${live}.quarantined`).catch(() => {});
+  return { live, previous, hadPrevious };
+}
+
+async function dropPreviousSnippets(
+  swapped: readonly SwappedSite[],
+): Promise<void> {
+  await forEachSequential(
+    swapped,
+    (site) => Deno.remove(site.previous).catch(() => {}),
+  );
+}
+
+async function restoreSwappedSites(
+  swapped: readonly SwappedSite[],
+): Promise<void> {
+  await forEachSequential(
+    swapped,
+    (site) =>
+      site.hadPrevious
+        ? restorePreviousHostingSite(site.live, site.previous)
+        : dropNewHostingSite(site.live),
+  );
+}
+
+/**
+ * Swap the validated snippets in (`.tpnew` is outside the `*.caddy` glob, and
+ * the rename is atomic), reload hosting Caddy once, and put every old one back
+ * when a running Caddy refuses the reload. A unit that is not running keeps the
+ * validated files: it loads them on its next start. If a swap itself fails,
+ * those already done are put back before the error is thrown.
+ */
+async function activateHostingSites(
+  sites: readonly { live: string; contents: string }[],
+): Promise<void> {
+  const swapped: SwappedSite[] = [];
+  try {
+    await forEachSequential(sites, async (site) => {
+      swapped.push(await swapInHostingSite(site.live, site.contents));
+    });
+  } catch (err) {
+    await restoreSwappedSites(swapped);
+    await forEachSequential(
+      sites,
+      (site) => Deno.remove(`${site.live}.tpnew`).catch(() => {}),
+    );
+    throw err;
+  }
 
   const reloadArgs = hostSudoArgs(["-n", "systemctl", "reload", CADDY_SERVICE]);
   const reload = await run("sudo", reloadArgs);
   if (reload.success) {
-    await Deno.remove(previous).catch(() => {});
+    await dropPreviousSnippets(swapped);
     return;
   }
   const active = await run(
@@ -2548,17 +2765,17 @@ async function activateHostingSite(
   );
   if (!active.success) {
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
-    await Deno.remove(previous).catch(() => {});
+    await dropPreviousSnippets(swapped);
     return;
   }
-  await (hadPrevious
-    ? restorePreviousHostingSite(live, previous)
-    : dropNewHostingSite(live));
+  await restoreSwappedSites(swapped);
   const again = await run("sudo", reloadArgs);
   if (!again.success) {
     logWarn(
       "deploy",
-      `hosting Caddy reload after restoring ${live} failed: ${again.stderr}`,
+      `hosting Caddy reload after restoring ${
+        swapped.map((site) => site.live).join(", ")
+      } failed: ${again.stderr}`,
     );
   }
   throw new Error(
@@ -2566,6 +2783,10 @@ async function activateHostingSite(
       reload.stderr || "reload failed"
     }`,
   );
+}
+
+function activateHostingSite(live: string, contents: string): Promise<void> {
+  return activateHostingSites([{ live, contents }]);
 }
 
 /**

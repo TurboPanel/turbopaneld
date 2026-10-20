@@ -9,6 +9,7 @@ import {
   allManagedGroups,
 } from "../runtime/registry.ts";
 import type { PrincipalIdReport } from "../contracts/commands-contracts.ts";
+import { isValidOwnerName } from "../contracts/directory-names.ts";
 import { isReservedPrincipalUsername } from "./reserved-principal-names.ts";
 
 export type PrincipalEnsureSpec = {
@@ -106,11 +107,14 @@ export const ALLOWED_PRINCIPAL_SHELLS: readonly string[] = [
 ];
 
 /** The principal's own directories in its home, `0700` and tenant-owned. */
-const PRINCIPAL_TENANT_DIRS = ["home", "data", "tmp"] as const;
-/** Root-owned directories of the home skeleton the engines traverse. */
-const PRINCIPAL_STRUCTURAL_DIRS = ["sites", "volumes"] as const;
-
+const PRINCIPAL_TENANT_DIRS = ["home", "tmp"] as const;
+/**
+ * What an account that already exists may be called. A name for a new account
+ * must also pass the shared owner rule ({@link assertNewOwnerName}); accounts
+ * made before it was tightened keep working.
+ */
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
+const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 /**
  * sha512-crypt only — the one format the control plane emits. Anchored and
@@ -121,12 +125,6 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
  */
 const PASSWORD_HASH_RE =
   /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
-/**
- * Longest site owner's Linux user name. The group carries the same name, well
- * inside the Linux 32-character limit. Keep in sync with instance
- * `MAX_PRINCIPAL_USERNAME_LENGTH`.
- */
-const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
 
 /**
  * Primary group name created by {@link ensureSystemPrincipals}: the standard
@@ -226,6 +224,13 @@ function assertSafeAbsolutePath(value: string, label: string): string {
     throw new Error(`Invalid principal ${label}: ${value}`);
   }
   return value;
+}
+
+/** A name for an account about to be created: the shared owner rule (lowercase, up to 28, no `tp` prefix and so on). */
+function assertNewOwnerName(username: string): void {
+  if (!isValidOwnerName(username)) {
+    throw new Error(`Invalid principal username: ${username}`);
+  }
 }
 
 function assertSafePrincipalUsername(username: string): string {
@@ -371,6 +376,19 @@ async function principalAccount(
 }
 
 /**
+ * The numeric user and group ids of an existing account, or `null` when the
+ * account is not there. The ids a container is run as when it mounts the
+ * account's volume folder.
+ */
+export async function lookupPrincipalIds(
+  username: string,
+  runFn: RunFn = runDefault,
+): Promise<{ uid: number; gid: number } | null> {
+  const account = await principalAccount(username, runFn);
+  return account === null ? null : { uid: account.uid, gid: account.gid };
+}
+
+/**
  * An existing group's gid must match an explicit override and otherwise sit in
  * the principal band: a group outside it was not made for a site owner (or
  * predates the current floor), and tp-host would refuse it on first use.
@@ -489,6 +507,7 @@ async function ensurePrincipalGroup(
     return;
   }
   const account = await principalAccount(principal.username, runFn);
+  if (!account) assertNewOwnerName(principal.username);
   if (account) {
     if (
       await renameLegacyPrincipalGroup(principal, groupName, account, runFn)
@@ -780,12 +799,11 @@ export async function ensurePrincipalPassword(
  * does not own them). The principal writes only into its own leaves.
  *
  *   <home>                   root:<grp> 0750
- *   <home>/home|data|tmp     <user>:<grp> 0700  (home/ is the passwd home)
- *   <home>/sites, volumes    root:<grp> 0750
+ *   <home>/home|tmp          <user>:<grp> 0700  (home/ is the passwd home)
  *
- * The group bit lets the engines (members of `<grp>`) reach `sites/`; other
- * principals get nothing. Parent before child: tp-host refuses a tenant or
- * structural directory whose parent is not root-owned and sealed.
+ * Scope folders (`<home>/<scope>/services|volumes/…`) are made with the first
+ * asset in them, not here. Parent before child: tp-host refuses a tenant
+ * directory whose parent is not root-owned and sealed.
  */
 async function ensurePrincipalHomeTree(
   home: string,
@@ -801,11 +819,6 @@ async function ensurePrincipalHomeTree(
       join(home, name),
       "0700",
       tenant,
-    ]),
-    ...PRINCIPAL_STRUCTURAL_DIRS.map((name): [string, string, string] => [
-      join(home, name),
-      "0750",
-      structural,
     ]),
   ], ([path, mode, owner]) => ensureDir(path, mode, owner, runFn));
 }
@@ -913,6 +926,7 @@ async function assertRequestedIdsFree(
 export async function reportPrincipalIds(
   principals: ReadonlyArray<{ principalId: string; username: string }>,
   runFn: RunFn = runDefault,
+  homeRoot?: string,
 ): Promise<PrincipalIdReport[]> {
   const reports: PrincipalIdReport[] = [];
   await forEachSequential(principals, async (principal) => {
@@ -924,6 +938,11 @@ export async function reportPrincipalIds(
         principalId: principal.principalId,
         uid: account.uid,
         gid: account.gid,
+        // Where the account's tree is on this host, from the daemon's own root
+        // rather than a guess made by the control plane.
+        ...(homeRoot === undefined
+          ? {}
+          : { home: join(homeRoot, principal.username) }),
       });
     }
   });
