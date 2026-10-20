@@ -856,6 +856,13 @@ export type EnvironmentDeployStorageMount = {
 };
 
 /** One service's folder under its site owner's tree. */
+/** A hostname and the environment whose host config it is taken over from. */
+export type EnvironmentDeployTakeover = {
+  /** Folded: lowercase, `xn--` for an international name. */
+  hostname: string;
+  fromEnvironmentId: string;
+};
+
 export type EnvironmentDeployServiceFolder = {
   serviceId: string;
   /**
@@ -1600,6 +1607,14 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * nothing: a site missing from `sites` is never read as removed.
    */
   removedSites?: string[];
+  /**
+   * Hostnames of this deploy's hostings the control plane can prove were last
+   * held, on this server, by a named other environment of the same organization
+   * that no longer has a hosting for them (deleted, or moved). The host takes a
+   * listed name over only from that environment's own snippet, and refuses if
+   * any other environment's snippet also holds it. Absent or empty: refuse.
+   */
+  takeoverHostnames?: EnvironmentDeployTakeover[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -4470,6 +4485,37 @@ function parseServiceFolders(
   return entries;
 }
 
+/** The takeovers the control plane vouches for: a lowercase hostname and the environment it comes from, or absent. */
+function parseTakeoverHostnames(
+  value: unknown,
+): EnvironmentDeployTakeover[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("takeoverHostnames must be an array");
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) {
+      throw new TypeError("takeoverHostnames must hold hostname entries");
+    }
+    const { hostname, fromEnvironmentId } = entry;
+    if (
+      typeof hostname !== "string" || hostname.length > 253 ||
+      !/^[a-z0-9*][a-z0-9.*-]*$/.test(hostname)
+    ) {
+      throw new TypeError("takeoverHostnames must hold lowercase hostnames");
+    }
+    if (
+      typeof fromEnvironmentId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(fromEnvironmentId)
+    ) {
+      throw new TypeError(
+        "takeoverHostnames must name the environment a hostname comes from",
+      );
+    }
+    return { hostname, fromEnvironmentId };
+  });
+}
+
 /** The sites that left the compose file: an array of compose service names, or absent. */
 function parseRemovedSites(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
@@ -6416,6 +6462,7 @@ export function parseEnvironmentDeployPayload(
       ),
       serviceFolders: parseServiceFolders(value.serviceFolders),
       removedSites: parseRemovedSites(value.removedSites),
+      takeoverHostnames: parseTakeoverHostnames(value.takeoverHostnames),
       principalMaterial: parseOptionalMaterialArray(
         value.principalMaterial,
         "principalMaterial",

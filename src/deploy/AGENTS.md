@@ -1010,3 +1010,7 @@ switch, so a cancel during the second service's build answers `too_late`; the
 unsandboxed (development) build kills its shell, not necessarily grandchildren; a
 cancel behind another build waiting for the single build slot takes effect when the
 slot frees.
+
+## Hostname takeover (`takeoverHostnames`)
+
+`environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.
