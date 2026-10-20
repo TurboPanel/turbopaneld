@@ -224,6 +224,7 @@ test("the scope tree refuses what the position rules forbid", async () => {
       // Names: reserved, uppercase, outside the rules, in the wrong place.
       [`${HOME}/services`, "0750", "root", "alice", "reserved scope"],
       [`${HOME}/backup`, "0750", "root", "alice", "reserved scope"],
+      [`${HOME}/base`, "0750", "root", "alice", "reserved scope"],
       [`${HOME}/Staging`, "0750", "root", "alice", "uppercase scope"],
       [
         `${HOME}/production/other`,
