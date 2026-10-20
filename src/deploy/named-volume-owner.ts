@@ -256,22 +256,41 @@ export function deploymentBindWarnings(
     )
   ) {
     const user = effectiveUser(name, overlay, resolvedServices);
-    const uid = uidOf(user);
-    if (!/^[1-9]\d*$/.test(uid)) continue;
-    const volumes = resolvedServices[name]?.volumes;
-    if (!Array.isArray(volumes)) continue;
-    for (const entry of volumes) {
-      if (!isRecord(entry) || entry.type !== "bind") continue;
-      const { source, target, read_only: readOnly } = entry;
-      if (typeof source !== "string" || typeof target !== "string") continue;
-      if (readOnly === true) continue;
-      if (!deploymentDirs.some((dir) => source.startsWith(`${dir}/`))) continue;
+    // Only a numeric, non-root user is warned about: root can write anything.
+    if (!/^[1-9]\d*$/.test(uidOf(user))) continue;
+    for (
+      const target of unwritableDeploymentBinds(
+        resolvedServices[name],
+        deploymentDirs,
+      )
+    ) {
       lines.push(
         `${target} of ${name} is a folder inside the deployment folder, which the platform owns; a container running as ${user} cannot write it. Keep data the container writes in a volume folder of the site owner instead`,
       );
     }
   }
   return lines;
+}
+
+/** Container paths of the writable binds of a service whose source sits inside the deployment folder. */
+function unwritableDeploymentBinds(
+  service: Record<string, unknown> | undefined,
+  deploymentDirs: readonly string[],
+): string[] {
+  const volumes = service?.volumes;
+  if (!Array.isArray(volumes)) return [];
+  const targets: string[] = [];
+  for (const entry of volumes) {
+    if (!isRecord(entry) || entry.type !== "bind" || entry.read_only === true) {
+      continue;
+    }
+    const { source, target } = entry;
+    if (typeof source !== "string" || typeof target !== "string") continue;
+    if (deploymentDirs.some((dir) => source.startsWith(`${dir}/`))) {
+      targets.push(target);
+    }
+  }
+  return targets;
 }
 
 function serviceImage(
