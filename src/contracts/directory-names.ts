@@ -46,11 +46,12 @@ export const TABLE_NAME_RE = /^[a-z]+$/;
 
 /**
  * Names an environment may not take. The first five are the owner's own
- * folders; the rest stay free so a future folder beside `home` and `tmp`
+ * folders; `base` is kept so no environment is confused with the project's
+ * Base; the rest stay free so a future folder beside `home` and `tmp`
  * never needs a rename and old names cannot return with an old meaning.
  */
 export const RESERVED_SCOPE_NAMES: readonly string[] =
-  "common home tmp services volumes data sites backup backups logs cache run var etc bin root public releases current shared lost-found tmp-staging"
+  "common home tmp services volumes data sites backup backups logs cache run var etc bin root public releases current shared lost-found tmp-staging base"
     .split(
       " ",
     );

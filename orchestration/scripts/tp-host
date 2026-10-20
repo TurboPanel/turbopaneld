@@ -598,7 +598,7 @@ tp_home_rel() {
 
 # Names an environment may not take (RESERVED_SCOPE_NAMES). `common` is a scope
 # of its own, not an environment.
-TP_RESERVED_SCOPES=" common home tmp services volumes data sites backup backups logs cache run var etc bin root public releases current shared lost-found tmp-staging "
+TP_RESERVED_SCOPES=" common home tmp services volumes data sites backup backups logs cache run var etc bin root public releases current shared lost-found tmp-staging base "
 
 # A site owner's Linux user: lowercase, up to 28, no `tp` or `systemd-` prefix,
 # no `-grp` suffix, no trailing or doubled dash. The host's own account names
