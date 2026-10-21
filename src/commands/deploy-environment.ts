@@ -163,7 +163,12 @@ import {
   ensureNativeAppRuntime,
   type NativeAppBindings,
   nativeAppBindingsFromPayload,
+  type RuntimeChoice,
 } from "../deploy/native/apply-native-apps.ts";
+import {
+  siteBuildRuntimes,
+  sitesWithReleaseRoots,
+} from "../deploy/release/site-release.ts";
 import {
   keptServiceFolders,
   type ReleaseTreeRef,
@@ -2648,7 +2653,7 @@ async function planDeployProgress(
 async function ensureDeployNativeRuntimes(
   runtime: DeployProgressRuntime,
   plan: readonly PlannedDeployStep[],
-  apps: readonly EnvironmentDeployNativeAppService[],
+  apps: readonly RuntimeChoice[],
   io: Omit<ApplyNativeAppsOpts, "bindings"> | undefined,
 ): Promise<void> {
   const groups = [
@@ -2736,7 +2741,11 @@ async function deployEnvironmentHolding(
   await ensureDeployNativeRuntimes(
     runtime,
     plan,
-    parsedPayload.nativeAppServices ?? [],
+    [
+      ...(parsedPayload.nativeAppServices ?? []),
+      // A site's Git build runs on the default Node too.
+      ...siteBuildRuntimes(parsedPayload),
+    ],
     deps?.nativeAppIo,
   );
   // The web engines and PHP too, so a site's runtime is on disk before
@@ -2795,6 +2804,8 @@ async function deployEnvironmentHolding(
   // releases are built: a `serviceKind: node` service that turned out to be a
   // static export is served as files, not supervised as a process.
   const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
+  // A site that publishes an output folder serves that folder, not `public`.
+  lanes.sites = sitesWithReleaseRoots(parsedPayload, lanes.sites);
   const { nativeAppServices } = lanes;
   // Everything from here on (release trees reclaimed, sites and native apps
   // applied, cron timers swept) changes what is serving. A deploy with none of
