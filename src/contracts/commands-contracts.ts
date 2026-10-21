@@ -6432,7 +6432,7 @@ export function parseEnvironmentDeployPayload(
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
       deployStrategy: parseDeployStrategy(value.deployStrategy),
-      migrations: parseDeployMigrations(value.straightThroughs),
+      migrations: parseDeployMigrations(value.migrations),
       healthTimeoutSeconds: parseDeployHealthTimeout(
         value.healthTimeoutSeconds,
       ),

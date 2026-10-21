@@ -1,7 +1,7 @@
 /**
  * Host-free coverage for the straight-through (`fast_forward=1`) user row of
- * PostgreSQL logins the control plane marks straight through: who gets it, who never does, and that both the
- * cold-start config and the admin statements agree.
+ * PostgreSQL logins: who gets it, who never does, that the cold-start config
+ * and the admin statements agree, and that such a login gets no read-split rule.
  */
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
@@ -111,7 +111,7 @@ test("mysql family never gets fast_forward", () => {
   );
 });
 
-test("switching a login's limit off and on changes the next full rewrite", () => {
+test("a source-limited login's rewrite has no fast_forward, a free one's has it", () => {
   // Users are rewritten wholesale on every apply (DELETE + INSERT), so a
   // change in the desired state is what is applied; there is no per-column diff.
   const render = (u: ProxySqlUserDesired) =>
@@ -127,4 +127,26 @@ test("switching a login's limit off and on changes the next full rewrite", () =>
   assertStringIncludes(free, "fast_forward");
   assertEquals(limited.includes("fast_forward"), false);
   assertStringIncludes(limited, "DELETE FROM pgsql_users");
+});
+
+test("a straight-through login gets no read-split rule; a plain one still does", () => {
+  const c = cluster([
+    user("plain"),
+    user("thru", { straightThrough: true }),
+  ]);
+  c.autoReadSplit = true;
+  c.backends.push({
+    memberId: "mb2",
+    role: "replica",
+    readEligible: true,
+    address: "e2",
+    port: 5432,
+    transport: "local",
+  });
+  const rules = buildProxySqlAdminStatements({
+    bindAddresses: ["0.0.0.0"],
+    clusters: [c],
+  }).filter((s) => s.startsWith("INSERT INTO pgsql_query_rules "));
+  assertEquals(rules.length, 1);
+  assertStringIncludes(rules[0]!, "'plain'");
 });

@@ -1207,7 +1207,9 @@ function sortedReadSplitUsernames(
   return cluster.users
     .filter((user) =>
       user.connectionRole !== "read-only" && user.tool !== true &&
-      !isSourceLimitedUser(user)
+      !isSourceLimitedUser(user) &&
+      !(clusterMatchesFamily(cluster, "pgsql") &&
+        userUsesFastForward("pgsql", user))
     )
     .map((user) => user.username)
     .sort((a, b) => a.localeCompare(b));
