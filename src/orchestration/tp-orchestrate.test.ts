@@ -5,6 +5,7 @@ import {
   tpOrchestrateValidatorSource,
 } from "../testing/tp-orchestrate-validator.ts";
 import * as assets from "./assets.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -383,9 +384,7 @@ async function runUpdateVerb(
       stdout: "piped",
       stderr: "piped",
     }).spawn();
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(options.stdin ?? "abc\n"));
-    await writer.close();
+    await writeChildStdin(child.stdin, options.stdin ?? "abc\n");
     const out = await child.output();
     return {
       status: out.code,
