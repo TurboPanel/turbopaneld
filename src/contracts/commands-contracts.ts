@@ -1719,6 +1719,12 @@ export type EnvironmentDeployResult = {
    * marks each one an orphan. Omitted when there were none. Additive.
    */
   keptFolders?: KeptFolder[];
+  /**
+   * True when the deploy found nothing to change (same sources, variables and
+   * settings as the last finished deploy) and so built and restarted nothing.
+   * Omitted otherwise. Additive: older control planes ignore it.
+   */
+  unchanged?: boolean;
 };
 
 /** A service folder a deploy left in place, by its components. */
@@ -1750,6 +1756,13 @@ export type EnvironmentStopPayload = {
    * that named these, so the payload is the only remaining copy for this host.
    */
   siteReleases?: StopSiteRelease[];
+  /**
+   * Services whose published releases are cleared on a Destroy while the
+   * service folder stays (uploads in `shared/`, logs, the owner's account).
+   * Same entry shape as `siteReleases`; a delete sends `siteReleases` instead,
+   * which removes the whole folder.
+   */
+  releaseCleanup?: StopSiteRelease[];
   /**
    * Principals no project, site or app on this host uses once this delete
    * commits: the daemon retires each through `tp-host principal-remove`
@@ -6624,6 +6637,11 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const releaseCleanup = parseOptionalMaterialArray(
+    value.releaseCleanup,
+    "releaseCleanup",
+    parseStopSiteRelease,
+  );
   const retirePrincipals = parseOptionalMaterialArray(
     value.retirePrincipals,
     "retirePrincipals",
@@ -6636,6 +6654,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(releaseCleanup === undefined ? {} : { releaseCleanup }),
     ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }

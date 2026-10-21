@@ -1071,6 +1071,24 @@ const SITES: CallSite[] = [
       },
     },
   ),
+  tpHost(
+    'src/deploy/unchanged-deploy.ts|["-n","systemctl","is-active","--quiet",unit]',
+    {
+      argv: [
+        "systemctl",
+        "is-active",
+        "--quiet",
+        "turbopanel-hosting-caddy.service",
+      ],
+    },
+  ),
+  tpHost('src/deploy/unchanged-deploy.ts|["-n","test","-e",path]', {
+    argv: ["test", "-e", `${SITE}/current`],
+    setup: {
+      dirs: [RELEASE],
+      links: [["releases/20260927-120000", `${SITE}/current`]],
+    },
+  }),
   tpHost('src/deploy/release/promote.ts|["-n","test","-e",currentLink]', {
     argv: ["test", "-e", `${SITE}/current`],
     setup: {

@@ -11,6 +11,8 @@
  * `environment.stop`.
  */
 
+import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
+import { clearAppliedDeployHash } from "../deploy/applied-deploy-hash.ts";
 import {
   actOnEarlierContainers,
   earlierRecordedProjects,
@@ -207,6 +209,17 @@ export async function handleEnvironmentLifecycle(
 ): Promise<EnvironmentLifecycleResult> {
   const parsedPayload = parseEnvironmentLifecyclePayload(payload);
   assertSafeLifecycleIdentifiers(parsedPayload);
+  return await withKeyedLock(
+    environmentLockKey(parsedPayload.environmentId),
+    () => lifecycleLocked(parsedPayload, daemonReceivedAt, deps),
+  );
+}
+
+async function lifecycleLocked(
+  parsedPayload: EnvironmentLifecyclePayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<EnvironmentLifecycleResult> {
   const run = deps?.runDocker ?? defaultRunDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();
@@ -227,6 +240,10 @@ export async function handleEnvironmentLifecycle(
     );
   }
 
+  // Stop, start and restart change what is running, so the last deploy no
+  // longer describes the host: the next deploy runs in full instead of being
+  // skipped as unchanged.
+  await clearAppliedDeployHash(deploymentDir);
   const manifest = await readDeploymentManifest(deploymentDir);
   if (parsedPayload.action === "start" || parsedPayload.action === "restart") {
     const plan = manifest?.secrets ?? [];

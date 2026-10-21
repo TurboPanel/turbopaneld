@@ -33,13 +33,17 @@ import {
   removeComposeEnvFile,
   removeComposeStageDir,
   resetComposeStageDir,
+  resolveDeployedComposePaths,
   restorePreviousDeployment,
   RUNTIME_COMPOSE_FILENAME,
   writeComposeEnvFile,
   writeComposeFileSecure,
   writeDeploymentManifest,
 } from "../deploy/compose-files.ts";
-import { singleGeneration } from "../deploy/deployment-generations.ts";
+import {
+  projectsForCommand,
+  singleGeneration,
+} from "../deploy/deployment-generations.ts";
 import {
   readPreviousProjects,
   retirePreviousProjects,
@@ -144,6 +148,18 @@ import {
   siteWritableDirs,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
+import {
+  clearAppliedDeployHash,
+  readAppliedDeployHash,
+  writeAppliedDeployHash,
+} from "../deploy/applied-deploy-hash.ts";
+import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
+import {
+  createHostProbe,
+  type HostProbe,
+  hostStillRunsDeploy,
+  usesMutableImageTag,
+} from "../deploy/unchanged-deploy.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
 import {
   applyCronJobs,
@@ -411,6 +427,8 @@ export type EnvironmentDeployDeps = {
    * or a real `ansible-playbook` run.
    */
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
+  /** Test seam: how the host is asked whether a skipped deploy is still running. */
+  hostProbe?: HostProbe;
   /** Test seam — the Ansible runner for the early site engine install. */
   siteIo?: Parameters<typeof ensureSiteEngines>[1];
   /**
@@ -2591,6 +2609,19 @@ export async function handleEnvironmentDeploy(
   deps?: EnvironmentDeployDeps,
 ): Promise<EnvironmentDeployResult> {
   const parsedPayload = parseEnvironmentDeployPayload(payload);
+  // Destroy, stop and lifecycle commands for this environment wait for a
+  // running deploy to finish instead of reclaiming trees under it.
+  return await withKeyedLock(
+    environmentLockKey(parsedPayload.environmentId),
+    () => handleEnvironmentDeployLocked(parsedPayload, daemonReceivedAt, deps),
+  );
+}
+
+async function handleEnvironmentDeployLocked(
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  daemonReceivedAt: string,
+  deps?: EnvironmentDeployDeps,
+): Promise<EnvironmentDeployResult> {
   // A PHP series or a web engine is installed long before the site config that
   // uses it exists (the release builds in between), so no unused-software
   // removal may take one this deploy needs.
@@ -2688,6 +2719,81 @@ async function ensureDeployNativeRuntimes(
   });
 }
 
+/**
+ * The result of a redeploy that changes nothing, or `null` when the deploy has
+ * to run. The control plane's hash is compared with the one recorded when the
+ * last deploy finished; a rebuild-from-scratch request, a deploy with no hash
+ * and a host that lost its compose file always run in full.
+ */
+async function unchangedDeployResult(
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  deploymentDir: string,
+  layout: LayoutPaths,
+  runtime: ReturnType<typeof resolveEnvironmentDeployRuntime>,
+  hostProbe?: HostProbe,
+): Promise<EnvironmentDeployResult | null> {
+  const desired = parsedPayload.desiredHash;
+  if (desired === undefined || parsedPayload.noCache === true) return null;
+  if (await readAppliedDeployHash(deploymentDir) !== desired) return null;
+  const files = resolveDeployComposeFiles(parsedPayload).map((f) => f.content);
+  // The hash cannot see a moved tag, so such a deploy always runs.
+  if (usesMutableImageTag(files)) return null;
+  const hasContainers = composeFilesHaveContainerServices(files);
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+  if (hasContainers && composePaths === null) return null;
+  const projects = hasContainers
+    ? projectsForCommand(
+      await readDeploymentManifest(deploymentDir),
+      parsedPayload.projectName,
+      "live",
+    )
+    : [];
+  let currentLinks: string[];
+  try {
+    currentLinks = currentLinksOf(layout, parsedPayload);
+  } catch {
+    return null;
+  }
+  const probe = hostProbe ?? createHostProbe({
+    layout,
+    composePaths: composePaths ?? [],
+    runDocker: runtime.run,
+    run: runtime.runPrivileged,
+  });
+  const up = await hostStillRunsDeploy({
+    environmentId: parsedPayload.environmentId,
+    projects,
+    nativeServiceIds: (parsedPayload.nativeAppServices ?? []).map((app) =>
+      app.serviceId
+    ),
+    siteNames: (parsedPayload.sites ?? []).map((site) =>
+      site.composeServiceName
+    ),
+    currentLinks,
+  }, probe);
+  if (!up) return null;
+  logInfo(
+    "commands",
+    `environment.deploy nothing changed env=${parsedPayload.environmentId}`,
+  );
+  return {
+    projectName: parsedPayload.projectName,
+    summary:
+      `Nothing changed for environment ${parsedPayload.environmentId}: no build, no restart`,
+    unchanged: true,
+  };
+}
+
+/** `current` link of every release this deploy puts live; `[]` entries that cannot be resolved are kept out of the skip by throwing. */
+function currentLinksOf(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): string[] {
+  return [...deployReleaseBindings(payload).values()].map((binding) =>
+    serviceTree(layout, binding).currentLink
+  );
+}
+
 async function deployEnvironmentHolding(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -2695,6 +2801,22 @@ async function deployEnvironmentHolding(
 ): Promise<EnvironmentDeployResult> {
   assertSafeDeploymentIdentifiers(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
+  const earlyDeploymentDir = environmentDeploymentDir(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  const unchanged = await unchangedDeployResult(
+    parsedPayload,
+    earlyDeploymentDir,
+    layout,
+    resolveEnvironmentDeployRuntime(deps),
+    deps?.hostProbe,
+  );
+  if (unchanged !== null) return unchanged;
+  // From here the deploy will change the host; it counts as applied only once
+  // it has finished.
+  await clearAppliedDeployHash(earlyDeploymentDir);
   resetHostingCaddyRuntimeEnsuredForDeploy();
   const runtime = resolveEnvironmentDeployRuntime(deps);
 
@@ -2736,11 +2858,7 @@ async function deployEnvironmentHolding(
   });
 
   cancel?.throwIfCancelled("while the host was being prepared");
-  const deploymentDir = environmentDeploymentDir(
-    layout,
-    parsedPayload.projectId,
-    parsedPayload.environmentId,
-  );
+  const deploymentDir = earlyDeploymentDir;
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
   // Tenant Node must exist before the Git build: native installs run
@@ -2994,6 +3112,10 @@ async function deployEnvironmentHolding(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
+
+  if (parsedPayload.desiredHash !== undefined) {
+    await writeAppliedDeployHash(earlyDeploymentDir, parsedPayload.desiredHash);
+  }
 
   return shapeEnvironmentDeployResult({
     projectName: parsedPayload.projectName,
