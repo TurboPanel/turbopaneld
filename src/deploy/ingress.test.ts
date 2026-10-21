@@ -22,6 +22,8 @@ import {
   caddyUnit,
   cleanupStaleTcpUdpServiceIngress,
   collectTcpUdpIngressEntries,
+  dockerProxyCompose,
+  dockerProxyComposePath,
   ensureHostingCaddyRuntime,
   ensureHostingIngress,
   ensureServiceIngress,
@@ -30,6 +32,7 @@ import {
   HOSTING_CADDY_ADMIN_SOCKET,
   HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
+  hostingCaddyValidateNeedsEdgeRuntime,
   hostingIngressComposePath,
   hostingIngressDir,
   INGRESS_GATE_SOCKET_DIR,
@@ -44,12 +47,15 @@ import {
   removeHostingCaddySite,
   removeServiceIngress,
   removeTcpUdpIngressEntries,
+  resetHostingCaddyRuntimeEnsuredForDeploy,
   rewriteHostingCaddySites,
   serviceIngressComposePath,
   serviceIngressDir,
   serviceIngressProject,
   serviceIngressUsesSocketProxy,
   serviceTraefikCompose,
+  setEnsureHostingCaddyRuntimeForTest,
+  setHostingCaddyReadyForTest,
   setIngressHostCommandForTest,
   siteSnippet,
   snippetSiteAddresses,
@@ -89,9 +95,9 @@ async function makeTestLayout(): Promise<
     },
     { skipDiscovery: true, forceMode: "production" },
   );
-  // The hosting unit's state folder (`/var/lib/turbopanel-hosting-caddy`),
-  // which systemd creates when the unit starts.
-  await Deno.mkdir(`${root}/turbopanel-hosting-caddy`);
+  // The hosting unit's state folder (`<state>/hosting-caddy`), which systemd
+  // creates when the unit starts.
+  await Deno.mkdir(`${root}/state/hosting-caddy`, { recursive: true });
   return { layout, cleanup: () => Deno.remove(root, { recursive: true }) };
 }
 
@@ -324,10 +330,8 @@ test("traefikCompose with identity emits container_name, system x-turbopanel, an
   assertStringIncludes(compose, "127.0.0.1:7443:7443");
   assertProxyProtocolTrustsOnly(compose, "172.19.0.1");
   assertStringIncludes(compose, "--entrypoints.websecure.http.tls=true");
-  assertStringIncludes(
-    compose,
-    "/var/run/docker.sock:/var/run/docker.sock:ro",
-  );
+  // Traefik mounts no socket; the proxy is a separate project.
+  assertEquals(compose.includes("docker.sock:/"), false);
   assertStringIncludes(compose, `${HOSTING_INGRESS_NETWORK}:`);
   assertStringIncludes(compose, "external: true");
 });
@@ -572,6 +576,46 @@ test("siteSnippet acme mode still emits HTTPS when forceHttps is false", () => {
   assertStringIncludes(snippet, `app.example.com {`);
   assertStringIncludes(snippet, caddyTraefikUpstream("https"));
   assertStringIncludes(snippet, "header_up Host {host}");
+});
+
+const HIDE_HEADER_BLOCK = `  header {
+    -Server
+    -Via
+    -X-Powered-By
+    defer
+  }
+`;
+
+test("siteSnippet strips server names from every block only when asked", () => {
+  const base = { hostname: "app.example.com", tlsDir: TLS_DIR };
+  assertEquals(siteSnippet(base).includes("-Server"), false);
+  const plain = siteSnippet({ ...base, hideWebServerNames: true });
+  assertEquals(plain.split(HIDE_HEADER_BLOCK).length - 1, 2);
+  const http = siteSnippet({
+    ...base,
+    forceHttps: false,
+    bindAddress: "10.0.0.5",
+    hideWebServerNames: true,
+  });
+  assertStringIncludes(http, `  bind 10.0.0.5\n${HIDE_HEADER_BLOCK}`);
+  const multi = siteSnippet({
+    ...base,
+    hideWebServerNames: true,
+    routes: [
+      {
+        pathPrefix: "/api",
+        upstream: { kind: "http", host: "127.0.0.1", port: 18080 },
+      },
+      { upstream: { kind: "traefik" } },
+    ],
+  });
+  assertEquals(multi.split(HIDE_HEADER_BLOCK).length - 1, 2);
+  const redirect = siteSnippet({
+    ...base,
+    redirectTo: "example.com",
+    hideWebServerNames: true,
+  });
+  assertEquals(redirect.split(HIDE_HEADER_BLOCK).length - 1, 2);
 });
 
 test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
@@ -1516,6 +1560,194 @@ function hostingPayload(environmentId: string, hostname: string) {
 
 const noGrant = () => Promise.resolve();
 
+test("hostingCaddyValidateNeedsEdgeRuntime ignores reserved snippets and empty content", () => {
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime("", [], "env.caddy"),
+    false,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime(
+      "",
+      [INSTANCE_ACME_HTTP01_SITE, "00-empty.caddy"],
+      "env.caddy",
+    ),
+    false,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime(
+      "app.example.com {\n}\n",
+      [],
+      "env.caddy",
+    ),
+    true,
+  );
+  assertEquals(
+    hostingCaddyValidateNeedsEdgeRuntime("", ["other-env.caddy"], "env.caddy"),
+    true,
+  );
+});
+
+test("rewriteHostingCaddySites skips edge runtime when nothing needs Caddy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let ensured = 0;
+  const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+    ensured += 1;
+    return Promise.resolve();
+  });
+  const restoreHost = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      {
+        ...hostingPayload("env-tcp", "unused.example.com"),
+        hostings: [{
+          hostingId: "h1",
+          serviceId: "s1",
+          composeServiceName: "db",
+          hostnames: [],
+          protocol: "tcp",
+          ports: [{ published: 5432, target: 5432 }],
+        }],
+      },
+      undefined,
+      noGrant,
+    );
+    assertEquals(ensured, 0);
+  } finally {
+    restoreHost();
+    restoreEnsure();
+    await cleanup();
+  }
+});
+
+const noHostnamesPayload = () => ({
+  ...hostingPayload("env-tcp", "unused.example.com"),
+  hostings: [{
+    hostingId: "h1",
+    serviceId: "s1",
+    composeServiceName: "db",
+    hostnames: [],
+    protocol: "tcp" as const,
+    ports: [{ published: 5432, target: 5432 }],
+  }],
+});
+
+test("rewriteHostingCaddySites skips validation when nothing needs Caddy and it is not set up", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const sudoCalls: string[][] = [];
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    sudoCalls.push(args);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  const restoreReady = setHostingCaddyReadyForTest(() =>
+    Promise.resolve(false)
+  );
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      noHostnamesPayload(),
+      undefined,
+      noGrant,
+    );
+    assertEquals(sudoCalls.some((args) => args.includes("validate")), false);
+  } finally {
+    restoreReady();
+    restoreHost();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites validates empty content as before when Caddy is set up", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let validated = 0;
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    if (args.includes("validate")) validated += 1;
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  const restoreReady = setHostingCaddyReadyForTest(() => Promise.resolve(true));
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      noHostnamesPayload(),
+      undefined,
+      noGrant,
+    );
+    assertEquals(validated > 0, true);
+  } finally {
+    restoreReady();
+    restoreHost();
+    await cleanup();
+  }
+});
+
+test("rewriteHostingCaddySites names a missing hosting Caddy account plainly", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restoreHost = setIngressHostCommandForTest((_command, args) =>
+    Promise.resolve(
+      args.includes("validate")
+        ? { success: false, stderr: "sudo: unknown user tpedge" }
+        : { success: true, stderr: "" },
+    )
+  );
+  try {
+    const err = await assertRejects(() =>
+      rewriteHostingCaddySites(
+        layout,
+        hostingPayload("env-a", "a.example.com"),
+        undefined,
+        noGrant,
+      )
+    );
+    assertEquals(
+      String((err as Error).message).includes("hosting Caddy account"),
+      true,
+    );
+    assertEquals(
+      String((err as Error).message).includes("no snippet was judged"),
+      false,
+    );
+  } finally {
+    resetHostingCaddyRuntimeEnsuredForDeploy();
+    restoreHost();
+    await cleanup();
+  }
+});
+
+test("guardHostingCaddySites ensures hosting Caddy edge before caddy validate", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const events: string[] = [];
+  const restoreEnsure = setEnsureHostingCaddyRuntimeForTest(() => {
+    events.push("ensure-edge-runtime");
+    return Promise.resolve();
+  });
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    if (args.includes("validate")) {
+      events.push("caddy-validate");
+    }
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "a.example.com {\n}\n",
+    );
+    await guardHostingCaddySites(layout, noGrant);
+    const ensureIdx = events.indexOf("ensure-edge-runtime");
+    const validateIdx = events.indexOf("caddy-validate");
+    assertEquals(ensureIdx >= 0, true);
+    assertEquals(validateIdx >= 0, true);
+    assertEquals(ensureIdx < validateIdx, true);
+  } finally {
+    restoreHost();
+    restoreEnsure();
+    await cleanup();
+  }
+});
+
 /**
  * What `caddy validate` says about the staged set, as far as these tests care:
  * a snippet marked BAD does not load, and neither does a hostname served twice
@@ -1759,7 +1991,7 @@ test("guardHostingCaddySites leaves a loadable set alone and reloads only after 
 
 test("validation needs the hosting unit's state folder: a never-started unit is started once first", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const state = join(dirname(layout.stateDir), "turbopanel-hosting-caddy");
+  const state = join(layout.stateDir, "hosting-caddy");
   await Deno.remove(state);
   const calls: string[][] = [];
   const restore = setIngressHostCommandForTest((_command, args) => {
@@ -2673,7 +2905,12 @@ test("ensureServiceIngress throws commandError with empty stderr fallback", asyn
           HOSTING_INGRESS_NETWORK,
           {
             runDocker: (args) => {
-              if (args.includes("up")) {
+              // Only the service Traefik's `up` fails; the proxy's own
+              // project (a separate compose file) comes up fine.
+              if (
+                args.includes("up") &&
+                !args.some((arg) => arg.includes("docker-proxy"))
+              ) {
                 return Promise.resolve({
                   success: false,
                   code: 1,
@@ -3472,12 +3709,11 @@ test("no Traefik sees the Docker socket; only the host's socket proxy does", () 
   for (
     const [label, yaml] of [["shared", shared], ["per-service", perService]]
   ) {
-    const mounts = yaml
-      .split("\n")
-      .filter((line) => line.includes("/var/run/docker.sock"));
-    // Exactly one mount in the shared file — the proxy's — and none at all in
-    // the per-service file, which reaches the host's proxy over the network.
-    assertEquals(mounts.length, label === "shared" ? 1 : 0, `${label} mounts`);
+    // Neither Traefik document mounts the socket (or declares the proxy): both
+    // reach the host's proxy, a separate project, over the network.
+    assertEquals(yaml.includes("/var/run/docker.sock"), false, `${label}`);
+    assertEquals(yaml.includes("docker-socket-proxy:\n"), false, `${label}`);
+    assertEquals(yaml.includes("depends_on"), false, `${label}`);
     assertEquals(
       yaml.includes(
         "--providers.docker.endpoint=tcp://docker-socket-proxy:2375",
@@ -3487,10 +3723,17 @@ test("no Traefik sees the Docker socket; only the host's socket proxy does", () 
     );
   }
 
-  // The proxy answers the two reads a Docker provider needs and nothing else.
-  assertEquals(shared.includes('CONTAINERS: "1"'), true);
-  assertEquals(shared.includes('EVENTS: "1"'), true);
-  assertEquals(shared.includes('POST: "0"'), true);
+  // The proxy answers the two reads a Docker provider needs and nothing else,
+  // and holds the only socket mount on the host.
+  const proxy = dockerProxyCompose(HOSTING_INGRESS_NETWORK);
+  assertEquals(proxy.includes('CONTAINERS: "1"'), true);
+  assertEquals(proxy.includes('EVENTS: "1"'), true);
+  assertEquals(proxy.includes('POST: "0"'), true);
+  assertEquals(
+    proxy.split("\n").filter((line) => line.includes("/var/run/docker.sock"))
+      .length,
+    1,
+  );
 });
 
 // Docker gate stage 3: Traefik on the gate's read-only socket (opt-in).
@@ -3558,16 +3801,18 @@ test("gate mode: the shared Traefik mounts only the read-only socket directory a
   assertEquals(INGRESS_GATE_SOCKET_DIR, "/run/turbopanel-gate/ro");
 });
 
-test("gate mode keeps the socket proxy (without Traefik depending on it) while an older service Traefik still uses it", () => {
-  const yaml = traefikCompose(
-    HOSTING_INGRESS_NETWORK,
-    INGRESS_GATEWAYS,
-    SYSTEM_INGRESS_IDENTITY,
-    { source: "gate", keepSocketProxy: true },
-  );
-  assertStringIncludes(yaml, GATE_ENDPOINT);
-  assertStringIncludes(yaml, "  docker-socket-proxy:");
-  assertEquals(yaml.includes("depends_on"), false);
+test("gate mode renders the same Traefik whether or not an older service Traefik still uses the proxy", () => {
+  const render = (keepSocketProxy: boolean) =>
+    traefikCompose(
+      HOSTING_INGRESS_NETWORK,
+      INGRESS_GATEWAYS,
+      SYSTEM_INGRESS_IDENTITY,
+      { source: "gate", keepSocketProxy },
+    );
+  // The proxy is its own project, so keeping it never changes this document.
+  assertEquals(render(true), render(false));
+  assertStringIncludes(render(true), GATE_ENDPOINT);
+  assertEquals(render(true).includes("docker-socket-proxy"), false);
 });
 
 test("gate mode: a service Traefik mounts the read-only socket directory and keeps its constraint", () => {
@@ -3661,7 +3906,7 @@ test("serviceIngressUsesSocketProxy reads the per-service compose files on disk"
   }
 });
 
-test("ensureHostingIngress in gate mode writes the gate shape and compose removes the orphaned proxy", async () => {
+test("ensureHostingIngress in gate mode writes the gate shape and writes no proxy", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[][] = [];
   try {
@@ -3678,7 +3923,8 @@ test("ensureHostingIngress in gate mode writes the gate shape and compose remove
     assertStringIncludes(compose, GATE_ENDPOINT);
     assertEquals(compose.includes("docker-socket-proxy"), false);
     const up = calls.find((a) => a[0] === "compose" && a.includes("up"));
-    assert(up?.includes("--remove-orphans"), "the old proxy is removed");
+    assert(up?.includes("--remove-orphans"), "orphans are still removed");
+    assertEquals(await exists(dockerProxyComposePath(layout)), false);
   } finally {
     await cleanup();
   }
@@ -3701,7 +3947,7 @@ test("ensureHostingIngress keeps the socket proxy for the anonymous Traefik (no 
   }
 });
 
-test("ensureHostingIngress without the flag keeps the socket proxy", async () => {
+test("ensureHostingIngress without the flag starts the socket proxy as its own project", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
     await ensureHostingIngress(layout, HOSTING_INGRESS_NETWORK, {
@@ -3714,9 +3960,11 @@ test("ensureHostingIngress without the flag keeps the socket proxy", async () =>
       compose,
       "--providers.docker.endpoint=tcp://docker-socket-proxy:2375",
     );
-    assertStringIncludes(
-      compose,
-      "/var/run/docker.sock:/var/run/docker.sock:ro",
+    assertEquals(compose.includes("docker.sock:/"), false);
+    // The proxy is a separate project with its own applied file.
+    assertEquals(
+      await Deno.readTextFile(dockerProxyComposePath(layout)),
+      dockerProxyCompose(HOSTING_INGRESS_NETWORK),
     );
   } finally {
     await cleanup();
@@ -3750,16 +3998,37 @@ test("ensureServiceIngress follows the same switch", async () => {
   }
 });
 
-// Review fixes F1 / F2: the proxy stays until no Traefik really uses it.
+// Review fixes F1 / F2: the proxy stays until no Traefik really uses it. The
+// proxy is its own compose project (`turbopanel-docker-proxy`), applied the
+// same way as the Traefik files.
 
-const PROXY_SERVICE_KEY = "\n  docker-socket-proxy:\n";
+type FakeHost = {
+  /** The proxy's own container is running. */
+  proxyRunning: boolean;
+  /** Container ids of a proxy left in the shared Traefik's project. */
+  legacyIds: string[];
+};
 
-/** Records every docker call; `up` on a path matching `failUp` fails. */
-function recordingDocker(calls: string[][], failUp?: RegExp) {
+const PROXY_PROJECT_FILTER =
+  "label=com.docker.compose.project=turbopanel-docker-proxy";
+
+/**
+ * Records every docker call; `up` on a path matching `failUp` fails. `ps`
+ * answers for the proxy's own project and for a proxy still inside the
+ * shared Traefik's project, from `host`.
+ */
+function recordingDocker(
+  calls: string[][],
+  failUp?: RegExp,
+  host: FakeHost = { proxyRunning: true, legacyIds: [] },
+) {
   return (args: readonly string[]) => {
     calls.push([...args]);
-    // The shared proxy container is running unless a test says otherwise.
-    if (args[0] === "ps") return Promise.resolve(fakeDockerOk("abc123\n"));
+    if (args[0] === "ps") {
+      const own = args.includes(PROXY_PROJECT_FILTER);
+      const ids = own ? (host.proxyRunning ? ["abc123"] : []) : host.legacyIds;
+      return Promise.resolve(fakeDockerOk(ids.map((id) => `${id}\n`).join("")));
+    }
     const isUp = args.includes("up");
     const failing = isUp && failUp !== undefined &&
       args.some((arg) => failUp.test(arg));
@@ -3767,6 +4036,25 @@ function recordingDocker(calls: string[][], failUp?: RegExp) {
       failing ? fakeDockerFail("up failed") : dockerOkFor(args),
     );
   };
+}
+
+/** Which compose project a recorded `up` / `down` call is for. */
+function composeCallKind(args: readonly string[]): string {
+  if (args[0] === "rm") return "rm-legacy";
+  if (args[0] !== "compose") return args[0];
+  const verb = args.includes("up") ? "up" : "down";
+  if (args.includes("turbopanel-docker-proxy")) return `${verb}:proxy`;
+  const file = args[args.indexOf("-f") + 1] ?? "";
+  if (file.includes(join("ingress", "docker-proxy"))) return `${verb}:proxy`;
+  if (file.includes(join("ingress", "traefik"))) return `${verb}:shared`;
+  return `${verb}:service`;
+}
+
+function composeKinds(calls: readonly string[][]): string[] {
+  return calls
+    .filter((a) => a[0] === "compose" || a[0] === "rm")
+    .filter((a) => a.includes("up") || a.includes("down") || a[0] === "rm")
+    .map(composeCallKind);
 }
 
 function deployTcpService(
@@ -3815,7 +4103,7 @@ test("F2: a failed service up keeps the applied compose file, so the proxy stays
     assertStringIncludes(before, "tcp://docker-socket-proxy:2375");
 
     await assertRejects(() =>
-      deployTcpService(layout, true, recordingDocker([], /pending/))
+      deployTcpService(layout, true, recordingDocker([], /services.*pending/))
     );
     assertEquals(await Deno.readTextFile(applied), before);
     assertEquals(await serviceIngressUsesSocketProxy(layout), true);
@@ -3836,7 +4124,7 @@ test("F2: a first service deploy whose up fails still counts as a proxy user", a
   const { layout, cleanup } = await makeTestLayout();
   try {
     await assertRejects(() =>
-      deployTcpService(layout, false, recordingDocker([], /pending/))
+      deployTcpService(layout, false, recordingDocker([], /services.*pending/))
     );
     assertEquals(
       await exists(
@@ -3856,10 +4144,10 @@ test("F2: compose up runs on the pending file and the shared file is replaced on
     await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
     await deployShared(layout, false, recordingDocker([]));
     const before = await Deno.readTextFile(hostingIngressComposePath(layout));
-    assertStringIncludes(before, PROXY_SERVICE_KEY);
+    assertEquals(before.includes(PROXY_SERVICE_KEY), false);
 
     await assertRejects(() =>
-      deployShared(layout, true, recordingDocker([], /pending/))
+      deployShared(layout, true, recordingDocker([], /traefik.*pending/))
     );
     assertEquals(
       await Deno.readTextFile(hostingIngressComposePath(layout)),
@@ -3872,154 +4160,226 @@ test("F2: compose up runs on the pending file and the shared file is replaced on
     assert(up?.some((arg) => arg.endsWith(".pending.yml")), "up on pending");
     const after = await Deno.readTextFile(hostingIngressComposePath(layout));
     assertStringIncludes(after, GATE_ENDPOINT);
-    assertEquals(after.includes(PROXY_SERVICE_KEY), false);
   } finally {
     await cleanup();
   }
 });
 
-test("F1: a service Traefik on the proxy puts the proxy back into a gate-mode shared project first", async () => {
+const PROXY_SERVICE_KEY = "\n  docker-socket-proxy:\n";
+
+test("the proxy comes up before the shared Traefik, and nothing else is touched", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    const calls: string[][] = [];
+    await deployShared(
+      layout,
+      false,
+      recordingDocker(calls, undefined, { proxyRunning: false, legacyIds: [] }),
+    );
+    assertEquals(composeKinds(calls), ["up:proxy", "up:shared"]);
+    assertEquals(
+      await Deno.readTextFile(dockerProxyComposePath(layout)),
+      dockerProxyCompose(HOSTING_INGRESS_NETWORK),
+    );
+    assertEquals(
+      await exists(
+        dockerProxyComposePath(layout).replace(/\.yml$/, ".pending.yml"),
+      ),
+      false,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("upgrade: a host still running the proxy inside the shared project gets the new proxy first, then the Traefik, then the old proxy goes", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    // The old layout: the applied shared file declares the proxy service.
+    const shared = hostingIngressComposePath(layout);
+    await Deno.mkdir(dirname(shared), { recursive: true });
+    await Deno.writeTextFile(
+      shared,
+      `${
+        traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS)
+      }${PROXY_SERVICE_KEY}`,
+    );
+    const calls: string[][] = [];
+    await deployShared(
+      layout,
+      false,
+      recordingDocker(calls, undefined, {
+        proxyRunning: false,
+        legacyIds: ["old1"],
+      }),
+    );
+    assertEquals(composeKinds(calls), [
+      "up:proxy",
+      "up:shared",
+      "rm-legacy",
+    ]);
+    assertEquals(calls.find((a) => a[0] === "rm"), ["rm", "-f", "old1"]);
+    // Traefik keeps the same endpoint name: nothing is repointed.
+    const after = await Deno.readTextFile(shared);
+    assertStringIncludes(
+      after,
+      "--providers.docker.endpoint=tcp://docker-socket-proxy:2375",
+    );
+    assertEquals(after.includes("depends_on"), false);
+    assertEquals(after.includes(PROXY_SERVICE_KEY), false);
+
+    // A second converge is steady: the proxy is running, nothing legacy left.
+    const again: string[][] = [];
+    await deployShared(layout, false, recordingDocker(again));
+    assertEquals(composeKinds(again), ["up:shared"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate mode: the Traefik switches to the gate first, then the proxy project is removed", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await deployShared(layout, false, recordingDocker([]));
+    assertEquals(await exists(dockerProxyComposePath(layout)), true);
+
+    const calls: string[][] = [];
+    await deployShared(layout, true, recordingDocker(calls));
+    assertEquals(composeKinds(calls), ["up:shared", "down:proxy"]);
+    assertEquals(await exists(dockerProxyComposePath(layout)), false);
+
+    // Gone and gate mode again: nothing to remove, no docker call for it.
+    const calm: string[][] = [];
+    await deployShared(
+      layout,
+      true,
+      recordingDocker(calm, undefined, { proxyRunning: false, legacyIds: [] }),
+    );
+    assertEquals(composeKinds(calm), ["up:shared"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("gate mode keeps the proxy project while a service Traefik still points at it", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    await deployTcpService(layout, false, recordingDocker([]));
+    const calls: string[][] = [];
+    await deployShared(layout, true, recordingDocker(calls));
+    assertEquals(composeKinds(calls), ["up:shared"]);
+    assertEquals(await exists(dockerProxyComposePath(layout)), true);
+    const shared = await Deno.readTextFile(hostingIngressComposePath(layout));
+    assertStringIncludes(shared, GATE_ENDPOINT);
+
+    // The service moves to the gate: the next shared apply removes the proxy.
+    await deployTcpService(layout, true, recordingDocker([]));
+    const last: string[][] = [];
+    await deployShared(layout, true, recordingDocker(last));
+    assertEquals(composeKinds(last), ["up:shared", "down:proxy"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a TCP/UDP-only host (no shared Traefik) gets its own proxy before the service Traefik", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const calls: string[][] = [];
+    await deployTcpService(
+      layout,
+      false,
+      recordingDocker(calls, undefined, { proxyRunning: false, legacyIds: [] }),
+    );
+    assertEquals(composeKinds(calls), ["up:proxy", "up:service"]);
+    assertEquals(await exists(hostingIngressComposePath(layout)), false);
+
+    // Steady state: the proxy is applied and running, only the service `up`.
+    const again: string[][] = [];
+    await deployTcpService(layout, false, recordingDocker(again));
+    assertEquals(composeKinds(again), ["up:service"]);
+
+    // Gate mode never touches the proxy.
+    const gate: string[][] = [];
+    await deployTcpService(layout, true, recordingDocker(gate));
+    assertEquals(composeKinds(gate), ["up:service"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a stopped proxy container or a leftover pending proxy file is brought up again", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await deployTcpService(layout, false, recordingDocker([]));
+
+    const stopped: string[][] = [];
+    await deployTcpService(
+      layout,
+      false,
+      recordingDocker(stopped, undefined, {
+        proxyRunning: false,
+        legacyIds: [],
+      }),
+    );
+    assertEquals(composeKinds(stopped), ["up:proxy", "up:service"]);
+
+    await Deno.writeTextFile(
+      dockerProxyComposePath(layout).replace(/\.yml$/, ".pending.yml"),
+      "x",
+    );
+    const leftover: string[][] = [];
+    await deployTcpService(layout, false, recordingDocker(leftover));
+    assertEquals(composeKinds(leftover), ["up:proxy", "up:service"]);
+    assertEquals(
+      await Deno.readTextFile(dockerProxyComposePath(layout)),
+      dockerProxyCompose(HOSTING_INGRESS_NETWORK),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a failed proxy up stops the deploy before any Traefik is touched", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
+    const calls: string[][] = [];
+    await assertRejects(
+      () =>
+        deployShared(
+          layout,
+          false,
+          recordingDocker(calls, /docker-proxy.*pending/, {
+            proxyRunning: false,
+            legacyIds: ["old1"],
+          }),
+        ),
+      Error,
+      "up failed",
+    );
+    assertEquals(composeKinds(calls), ["up:proxy"]);
+    assertEquals(await exists(hostingIngressComposePath(layout)), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a TCP/UDP deploy never re-renders the shared Traefik file", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
     await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
     await deployShared(layout, true, recordingDocker([]));
     const gated = await Deno.readTextFile(hostingIngressComposePath(layout));
-    assertEquals(gated.includes(PROXY_SERVICE_KEY), false);
-
-    // Switch removed: a TCP/UDP-only deploy (no shared HTTP render).
-    const calls: string[][] = [];
-    await deployTcpService(layout, false, recordingDocker(calls));
-    const ups = calls.filter((a) => a.includes("up"));
-    assertEquals(ups.length, 2, "shared up, then the service up");
-    assert(
-      ups[0].some((arg) => arg.includes(join("ingress", "traefik"))),
-      "the shared project comes up first",
-    );
-    assert(ups[1].includes(SERVICE_INGRESS_IDENTITY.serviceId));
-
-    const shared = await Deno.readTextFile(hostingIngressComposePath(layout));
-    assertStringIncludes(shared, PROXY_SERVICE_KEY);
-    // The shared Traefik itself is untouched (still the gate): no recreate.
-    assertStringIncludes(shared, GATE_ENDPOINT);
-    assertEquals(
-      shared,
-      traefikCompose(
-        HOSTING_INGRESS_NETWORK,
-        INGRESS_GATEWAYS,
-        SYSTEM_INGRESS_IDENTITY,
-        {
-          source: "gate",
-          keepSocketProxy: true,
-        },
-      ),
-    );
-  } finally {
-    await cleanup();
-  }
-});
-
-test("F1: no extra shared up when the shared project already has the proxy or does not exist", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  try {
-    const none: string[][] = [];
-    await deployTcpService(layout, false, recordingDocker(none));
-    assertEquals(none.filter((a) => a.includes("up")).length, 1);
-
-    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
-    await deployShared(layout, false, recordingDocker([]));
-    const withProxy: string[][] = [];
-    await deployTcpService(layout, false, recordingDocker(withProxy));
-    assertEquals(withProxy.filter((a) => a.includes("up")).length, 1);
-
-    // Gate mode never touches the shared project.
-    await deployShared(layout, true, recordingDocker([]));
-    const gate: string[][] = [];
-    await deployTcpService(layout, true, recordingDocker(gate));
-    assertEquals(gate.filter((a) => a.includes("up")).length, 1);
-  } finally {
-    await cleanup();
-  }
-});
-
-test("F1: with the descriptor gone, the proxy comes back as the anonymous proxy-mode shared Traefik", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  try {
-    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
-    await deployShared(layout, true, recordingDocker([]));
-    await Deno.remove(join(layout.stateDir, "system", "hosting-ingress.json"));
     await deployTcpService(layout, false, recordingDocker([]));
     assertEquals(
       await Deno.readTextFile(hostingIngressComposePath(layout)),
-      traefikCompose(HOSTING_INGRESS_NETWORK, INGRESS_GATEWAYS),
+      gated,
     );
-  } finally {
-    await cleanup();
-  }
-});
-
-test("a legacy proxy-less shared file (docker.sock mounted directly) is left untouched by a TCP/UDP deploy with the switch off", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  try {
-    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
-    const sharedPath = hostingIngressComposePath(layout);
-    await Deno.mkdir(dirname(sharedPath), { recursive: true });
-    const legacy = [
-      "name: hosting-ingress",
-      "services:",
-      "  traefik:",
-      "    image: traefik:v3",
-      "    volumes:",
-      "      - /var/run/docker.sock:/var/run/docker.sock:ro",
-      "",
-    ].join("\n");
-    await Deno.writeTextFile(sharedPath, legacy);
-
-    const calls: string[][] = [];
-    await deployTcpService(layout, false, recordingDocker(calls));
-    assertEquals(await Deno.readTextFile(sharedPath), legacy);
-    const ups = calls.filter((a) => a.includes("up"));
-    assertEquals(ups.length, 1, "only the service up; shared not recreated");
-    assert(ups[0].includes(SERVICE_INGRESS_IDENTITY.serviceId));
-  } finally {
-    await cleanup();
-  }
-});
-
-test("a leftover shared pending file or a missing proxy container counts as proxy not declared", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  try {
-    await writeSystemComponentDescriptor(layout, SYSTEM_INGRESS_IDENTITY);
-    await deployShared(layout, false, recordingDocker([]));
-    const sharedPath = hostingIngressComposePath(layout);
-    const applied = await Deno.readTextFile(sharedPath);
-    assertStringIncludes(applied, PROXY_SERVICE_KEY);
-
-    // Missing proxy container: the applied file is brought up again.
-    const missing: string[][] = [];
-    const noProxy = (args: readonly string[]) => {
-      missing.push([...args]);
-      return Promise.resolve(fakeDockerOk());
-    };
-    await deployTcpService(layout, false, noProxy);
-    const sharedUps = missing.filter((a) =>
-      a.includes("up") &&
-      a.some((arg) => arg.includes(join("ingress", "traefik")))
-    );
-    assertEquals(sharedUps.length, 1);
-    assertEquals(await Deno.readTextFile(sharedPath), applied);
-
-    // Leftover pending file from a failed shared up, container reported up.
-    await Deno.writeTextFile(sharedPath.replace(/\.yml$/, ".pending.yml"), "x");
-    const leftover: string[][] = [];
-    await deployTcpService(layout, false, recordingDocker(leftover));
-    assertEquals(
-      leftover.filter((a) =>
-        a.includes("up") &&
-        a.some((arg) => arg.includes(join("ingress", "traefik")))
-      ).length,
-      1,
-    );
-    assertEquals(await Deno.readTextFile(sharedPath), applied);
   } finally {
     await cleanup();
   }
@@ -4319,6 +4679,394 @@ test("assertHostingNamesFree refuses a www name another environment serves, befo
       hostings: [wwwHosting(["example.com"])],
     });
   } finally {
+    await cleanup();
+  }
+});
+
+const TAKEOVER_BASE = {
+  ...WWW_BASE_PAYLOAD,
+  hostings: [wwwHosting(["example.com"])],
+};
+
+function tlsFor(layout: { tlsDir: string }, hostname: string): string {
+  return siteSnippet({ hostname, tlsDir: layout.tlsDir });
+}
+
+const from = (hostname: string, fromEnvironmentId: string) => ({
+  hostname,
+  fromEnvironmentId,
+});
+
+async function sitesDirOf(layout: { configDir: string }): Promise<string> {
+  const dir = join(layout.configDir, "hosting", "sites");
+  await Deno.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+test("a takeover happens only from the environment the control plane names for that hostname", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const other = join(sitesDir, "env-old.caddy");
+    const kept = tlsFor(layout, "kept.example.com");
+    await Deno.writeTextFile(
+      other,
+      [tlsFor(layout, "example.com"), kept].join("\n"),
+    );
+    const before = await Deno.readTextFile(other);
+
+    // Not named, named for another environment, or an older control plane: refused,
+    // nothing touched.
+    for (
+      const takeoverHostnames of [
+        undefined,
+        [],
+        [from("example.com", "env-someone-else")],
+        [from("kept.example.com", "env-old")],
+      ]
+    ) {
+      await assertRejects(
+        () =>
+          assertHostingNamesFree(layout, {
+            ...TAKEOVER_BASE,
+            ...(takeoverHostnames === undefined ? {} : { takeoverHostnames }),
+          }),
+        Error,
+        "example.com is already served by another environment on this server",
+      );
+    }
+    assertEquals(await Deno.readTextFile(other), before);
+    assertEquals(calls, []);
+
+    // Named for exactly that environment: only the name leaves its snippet, and Caddy reloads.
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      takeoverHostnames: [from("example.com", "env-old")],
+    });
+    assertEquals(snippetSiteAddresses(await Deno.readTextFile(other)), [
+      ...snippetSiteAddresses(kept),
+    ]);
+    assertEquals(calls.some((args) => args.includes("reload")), true);
+    await assertHostingNamesFree(layout, TAKEOVER_BASE);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a name that another environment's snippet also holds is refused, whatever the first one says", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const old = join(sitesDir, "env-old.caddy");
+    const live = join(sitesDir, "env-live.caddy");
+    await Deno.writeTextFile(old, tlsFor(layout, "example.com"));
+    // Another organization's environment that was deployed in between.
+    await Deno.writeTextFile(live, tlsFor(layout, "example.com"));
+    await assertRejects(
+      () =>
+        assertHostingNamesFree(layout, {
+          ...TAKEOVER_BASE,
+          takeoverHostnames: [from("example.com", "env-old")],
+        }),
+      Error,
+      "example.com is already served by another environment on this server",
+    );
+    assertEquals(
+      [...new Set(snippetSiteAddresses(await Deno.readTextFile(old)))],
+      ["example.com"],
+    );
+    assertEquals(
+      [...new Set(snippetSiteAddresses(await Deno.readTextFile(live)))],
+      ["example.com"],
+    );
+    assertEquals(calls, []);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a takeover removes a leftover with nothing else, and never touches a bystander or the environment's own file", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const only = join(sitesDir, "env-only.caddy");
+    const bystander = join(sitesDir, "env-bystander.caddy");
+    const own = join(sitesDir, "env-www-1.caddy");
+    const bystanderContent = tlsFor(layout, "bystander.example.com");
+    const ownContent = tlsFor(layout, "example.com");
+    await Deno.writeTextFile(only, tlsFor(layout, "example.com"));
+    await Deno.writeTextFile(bystander, bystanderContent);
+    await Deno.writeTextFile(own, ownContent);
+    await Deno.writeTextFile(
+      join(sitesDir, "env-only.acme-hostnames.json"),
+      JSON.stringify(["example.com"]),
+    );
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      takeoverHostnames: [from("example.com", "env-only")],
+    });
+    await assertRejects(() => Deno.stat(only), Deno.errors.NotFound);
+    await assertRejects(
+      () => Deno.stat(join(sitesDir, "env-only.acme-hostnames.json")),
+      Deno.errors.NotFound,
+    );
+    assertEquals(await Deno.readTextFile(bystander), bystanderContent);
+    assertEquals(await Deno.readTextFile(own), ownContent);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a file that still has an import or a global block is rewritten, never deleted", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-keep.caddy");
+    await Deno.writeTextFile(
+      file,
+      `import shared-settings\n\n${tlsFor(layout, "example.com")}`,
+    );
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      takeoverHostnames: [from("example.com", "env-keep")],
+    });
+    const after = await Deno.readTextFile(file);
+    assertStringIncludes(after, "import shared-settings");
+    assertEquals(snippetSiteAddresses(after), []);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a file the reader cannot place, that mentions the name, is refused and left alone", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-odd.caddy");
+    // The brace is on the next line: not a shape the daemon writes or reads.
+    const odd = "example.com\n{\n  respond 200\n}\n";
+    await Deno.writeTextFile(file, odd);
+    await assertRejects(
+      () =>
+        assertHostingNamesFree(layout, {
+          ...TAKEOVER_BASE,
+          takeoverHostnames: [from("example.com", "env-odd")],
+        }),
+      Error,
+      "example.com is already served by another environment on this server",
+    );
+    assertEquals(await Deno.readTextFile(file), odd);
+    assertEquals(calls, []);
+    // The same oddity in a file that does not mention the name does not matter.
+    await Deno.writeTextFile(file, "other.test\n{\n  respond 200\n}\n");
+    await assertHostingNamesFree(layout, TAKEOVER_BASE);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a takeover folds the case and the spelling of the hostnames it compares", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-old.caddy");
+    await Deno.writeTextFile(file, tlsFor(layout, "xn--bcher-kva.example"));
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      hostings: [wwwHosting(["Bücher.Example"])],
+      takeoverHostnames: [from("xn--bcher-kva.example", "env-old")],
+    });
+    assertEquals(await Deno.stat(file).catch(() => null), null);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a takeover includes the www redirect names a hosting owns, each from its own environment", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const rewritten = join(sitesDir, "env-a.caddy");
+    const removed = join(sitesDir, "env-b.caddy");
+    await Deno.writeTextFile(
+      rewritten,
+      [tlsFor(layout, "example.com"), tlsFor(layout, "stay.example.com")].join(
+        "\n",
+      ),
+    );
+    await Deno.writeTextFile(removed, tlsFor(layout, "www.example.com"));
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      hostings: [wwwHosting(["example.com"], "both")],
+      takeoverHostnames: [
+        from("example.com", "env-a"),
+        from("www.example.com", "env-b"),
+      ],
+    });
+    assertEquals(
+      snippetSiteAddresses(await Deno.readTextFile(rewritten)),
+      snippetSiteAddresses(tlsFor(layout, "stay.example.com")),
+    );
+    await assertRejects(() => Deno.stat(removed), Deno.errors.NotFound);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("with two leftovers a refused reload puts both snippets and both manifests back, after one reload", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let reloads = 0;
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    if (args.includes("reload")) {
+      reloads += 1;
+      // The first reload is the takeover's; the one after the restore succeeds.
+      return Promise.resolve(
+        reloads === 1
+          ? { success: false, stderr: "caddy: bad config" }
+          : { success: true, stderr: "" },
+      );
+    }
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const first = join(sitesDir, "env-a.caddy");
+    const second = join(sitesDir, "env-b.caddy");
+    const firstManifest = join(sitesDir, "env-a.acme-hostnames.json");
+    const secondManifest = join(sitesDir, "env-b.acme-hostnames.json");
+    await Deno.writeTextFile(
+      first,
+      [tlsFor(layout, "example.com"), tlsFor(layout, "stay.test")].join("\n"),
+    );
+    await Deno.writeTextFile(second, tlsFor(layout, "www.example.com"));
+    await Deno.writeTextFile(
+      firstManifest,
+      JSON.stringify(["example.com", "x.test"]),
+    );
+    await Deno.writeTextFile(
+      secondManifest,
+      JSON.stringify(["www.example.com"]),
+    );
+    const before = [
+      await Deno.readTextFile(first),
+      await Deno.readTextFile(second),
+    ];
+    await assertRejects(
+      () =>
+        assertHostingNamesFree(layout, {
+          ...TAKEOVER_BASE,
+          hostings: [wwwHosting(["example.com"], "both")],
+          takeoverHostnames: [
+            from("example.com", "env-a"),
+            from("www.example.com", "env-b"),
+          ],
+        }),
+      Error,
+      "did not reload",
+    );
+    assertEquals(await Deno.readTextFile(first), before[0]);
+    assertEquals(await Deno.readTextFile(second), before[1]);
+    assertEquals(JSON.parse(await Deno.readTextFile(firstManifest)), [
+      "example.com",
+      "x.test",
+    ]);
+    assertEquals(JSON.parse(await Deno.readTextFile(secondManifest)), [
+      "www.example.com",
+    ]);
+    // One reload for both files, one more after putting them back.
+    assertEquals(reloads, 2);
+    assertEquals(
+      [...Deno.readDirSync(sitesDir)].some((e) => e.name.endsWith(".tpnew")),
+      false,
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a name the control plane lists that the file does not hold changes nothing", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest((_command, args) => {
+    calls.push([...args]);
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    const file = join(sitesDir, "env-old.caddy");
+    await Deno.writeTextFile(file, tlsFor(layout, "elsewhere.test"));
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      takeoverHostnames: [from("example.com", "env-old")],
+    });
+    assertEquals(snippetSiteAddresses(await Deno.readTextFile(file)), [
+      ...snippetSiteAddresses(tlsFor(layout, "elsewhere.test")),
+    ]);
+    assertEquals(calls, []);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("the ACME manifest of a leftover loses only the names taken over", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(() =>
+    Promise.resolve({ success: true, stderr: "" })
+  );
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    await Deno.writeTextFile(
+      join(sitesDir, "env-other.caddy"),
+      [tlsFor(layout, "example.com"), tlsFor(layout, "keep.test")].join("\n"),
+    );
+    const manifest = join(sitesDir, "env-other.acme-hostnames.json");
+    await Deno.writeTextFile(
+      manifest,
+      JSON.stringify(["example.com", "keep.test"]),
+    );
+    await assertHostingNamesFree(layout, {
+      ...TAKEOVER_BASE,
+      takeoverHostnames: [from("example.com", "env-other")],
+    });
+    assertEquals(JSON.parse(await Deno.readTextFile(manifest)), ["keep.test"]);
+  } finally {
+    restore();
     await cleanup();
   }
 });

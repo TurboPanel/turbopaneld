@@ -156,7 +156,7 @@ test("a group of the user's name that is not the account's primary group is refu
   );
   assertStringIncludes(
     err.message,
-    "refusing to use the existing group appuser",
+    "The name appuser is already used by a group on this host",
   );
   assertEquals(verb(sudoCalls, "groupmod"), undefined);
 });
@@ -197,7 +197,7 @@ test("a user name ending in -grp is refused: it is an older owner's group", asyn
         home: "/srv/users/bob-grp",
       }], run),
     Error,
-    "Invalid principal username",
+    "The name bob-grp is reserved for the host's own accounts, so it cannot be a site owner's Linux user. Pick another name.",
   );
   assertEquals(sudoCalls, []);
 });

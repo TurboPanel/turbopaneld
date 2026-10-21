@@ -54,7 +54,7 @@ function restoreEnv(name: string, prior: string | undefined): void {
  * Points the state, *backup* and run roots at one temp dir.
  *
  * v6 moved backup artifacts out from under `<stateDir>/managed/<id>/backups`
- * to `<backupDir>/<id>` (`TURBOPANEL_BACKUP_DIR`, `/backup` by default), so
+ * to `<backupDir>/managed/<id>` (`TURBOPANEL_BACKUP_DIR`, `/backup` by default), so
  * overriding `TURBOPANEL_STATE_DIR` alone would leave these tests writing to
  * the real `/backup`. The `tmp` handed to each test is the value every
  * override carries, which is why a `{ backupDir: tmp }` layout stub and a

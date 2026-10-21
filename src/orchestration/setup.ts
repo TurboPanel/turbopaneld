@@ -189,12 +189,12 @@ const INSTALLER_STEP_LABELS: Record<
     done: "TurboPanel daemon provisioning complete",
   },
   "instance-install.yml": {
-    running: "Running self-hosted control plane provisioning…",
-    done: "TurboPanel instance provisioning complete",
+    running: "Setting up the control plane on this host…",
+    done: "Control plane set up on this host",
   },
   "daemon-colocated-refresh.yml": {
     running: "Refreshing the co-located daemon…",
-    done: "Co-located daemon refresh complete",
+    done: "Co-located daemon refreshed",
   },
 };
 

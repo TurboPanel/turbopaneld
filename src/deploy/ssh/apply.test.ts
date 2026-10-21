@@ -75,6 +75,14 @@ type Host = {
   sftpStatus: RunResult;
   sftpCheck: RunResult;
   sftpVerify: RunResult;
+  /** What `tp-host sftp-chroot auto` answers, and whether it switches on. */
+  sftpAuto: RunResult;
+  sftpAutoTurnsOn: boolean;
+  /** What `tp-host sftp-chroot auto-revert` answers, and how often it ran. */
+  sftpRevert: RunResult;
+  autoReverts: number;
+  /** What `tp-host sshd-config` prints (the unreadable administrator file). */
+  sshdConfigViaHost: string | null;
   /** `getent group` lines the fake answers with, by group name. */
   groups: Map<string, string>;
   /** `sshd -T -C user=<u>` output by user; absent means a clean answer. */
@@ -125,6 +133,11 @@ async function makeHost(
     sftpStatus: ok("off"),
     sftpCheck: ok(),
     sftpVerify: ok(),
+    sftpAuto: ok(),
+    sftpAutoTurnsOn: false,
+    sftpRevert: ok(),
+    autoReverts: 0,
+    sshdConfigViaHost: null,
     groups: new Map(),
     effective: new Map(),
     run: () => Promise.resolve(ok()),
@@ -141,7 +154,23 @@ async function makeHost(
     const rest = args[0] === "-n" ? args.slice(1) : args;
     const [tool, ...tail] = rest;
 
+    if (tool === "sshd-config") {
+      return host.sshdConfigViaHost === null
+        ? fail("tp-host: refusing")
+        : ok(host.sshdConfigViaHost);
+    }
     if (tool === "sftp-chroot") {
+      if (tail[0] === "auto-revert") {
+        host.autoReverts += 1;
+        if (host.sftpRevert.success) host.sftpStatus = ok("off");
+        return host.sftpRevert;
+      }
+      if (tail[0] === "auto") {
+        if (host.sftpAuto.success && host.sftpAutoTurnsOn) {
+          host.sftpStatus = ok("on /srv/users");
+        }
+        return host.sftpAuto;
+      }
       const answers: Record<string, RunResult> = {
         status: host.sftpStatus,
         check: host.sftpCheck,
@@ -1076,7 +1105,153 @@ test("with the switch off nothing is jailed and no layout check runs", async () 
         "ForceCommand internal-sftp",
       ),
     );
-    assertEquals(sftpCalls(host), ["status"]);
+    // A new host asks tp-host to turn the jail on; here it declines.
+    assertEquals(sftpCalls(host), ["status", "auto", "status"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a new host is jailed: tp-host turns the switch on and the drop-in carries the chroot", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpAutoTurnsOn = true;
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, true);
+    assertEquals(result.warnings, []);
+    assert(
+      blockOf(await appliedDirectives(host), "Match Group tpsftp").includes(
+        "ChrootDirectory /srv/users/%u",
+      ),
+    );
+    assertEquals(sftpCalls(host), [
+      "status",
+      "auto",
+      "status",
+      "check",
+      "verify",
+    ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail that cannot be turned on yet stays off and says why, every reconcile", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpAuto = {
+      success: true,
+      stdout: "",
+      stderr:
+        "alice: /srv/users/alice/home is not a directory the principal owns",
+    };
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, false);
+    assertEquals(result.warnings.length, 1);
+    assertStringIncludes(result.warnings[0], "SFTP chroot is not on yet");
+    assertStringIncludes(result.warnings[0], "alice");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed automatic switch-on is a warning, not a failed reconcile", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpAuto = fail("sudo: a password is required");
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, false);
+    assertStringIncludes(
+      result.warnings.join("\n"),
+      "could not be turned on automatically",
+    );
+    // The drop-in is still written, so keys and the shell split still work.
+    assert((await appliedDirectives(host)).length > 0);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail that sshd refuses right after the automatic switch-on is turned back off, and the drop-in still applies", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpAutoTurnsOn = true;
+    host.sftpVerify = fail("alice is not jailed");
+    const result = await applyJailed(host);
+    assertEquals(result.sftpChroot, false);
+    assertEquals(host.autoReverts, 1);
+    assertStringIncludes(
+      result.warnings.join("\n"),
+      "turned on automatically, but sshd would not accept it",
+    );
+    assertStringIncludes(result.warnings.join("\n"), "alice is not jailed");
+    const directives = await appliedDirectives(host);
+    assert(!directives.some((line) => line.startsWith("ChrootDirectory")));
+    // Not the explicit off: tp-host's `off` (which remembers) is never called.
+    assert(!sftpCalls(host).includes("off"));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail that cannot be turned back off after sshd refused it fails the reconcile loudly", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpAutoTurnsOn = true;
+    host.sftpVerify = fail("alice is not jailed");
+    host.sftpRevert = fail("sudo: no tty");
+    await assertRejects(
+      () => applyJailed(host),
+      Error,
+      "could not be turned back off",
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a jail an administrator already had on is never turned off because sshd refused it", async () => {
+  const host = await makeHost();
+  try {
+    switchOn(host);
+    host.sftpVerify = fail("alice is not jailed");
+    await assertRejects(() => applyJailed(host), Error, "would not jail");
+    assertEquals(host.autoReverts, 0);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a status that cannot be read after the automatic attempt still aborts", async () => {
+  const host = await makeHost();
+  try {
+    host.sftpStatus = fail("sudo: no tty");
+    await assertRejects(() => applyJailed(host), Error, "SFTP chroot switch");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a root-only sshd_config is read through tp-host, not refused", async () => {
+  const host = await makeHost();
+  try {
+    // A stock Debian 13 file is root:root 0600: the daemon's own read fails.
+    await Deno.remove(host.sshdConfigPath);
+    host.sshdConfigViaHost = INCLUDING_SSHD_CONFIG;
+    const result = await applyJailed(host);
+    assertEquals(result.sshdReloaded, true);
+    assert(host.calls.some((call) => call.args.includes("sshd-config")));
+    assert((await appliedDirectives(host)).length > 0);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a root-only sshd_config tp-host cannot print still stops the reconcile", async () => {
+  const host = await makeHost();
+  try {
+    await Deno.remove(host.sshdConfigPath);
+    await assertRejects(() => applyJailed(host), Error, "Could not read");
   } finally {
     await host.cleanup();
   }

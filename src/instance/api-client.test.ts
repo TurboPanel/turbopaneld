@@ -116,6 +116,17 @@ test({
             }),
         ),
       );
+      api.script(
+        "/api/daemon/v1/tls/issued",
+        captureInit(
+          "/api/daemon/v1/tls/issued",
+          captures,
+          () =>
+            new Response(JSON.stringify({ ok: true, stored: true }), {
+              status: 200,
+            }),
+        ),
+      );
 
       const client = new DaemonApiClient({
         config: INSTANCE_CONFIG,
@@ -143,6 +154,12 @@ test({
       await client.getJwks();
       await client.sendHostMetrics({ cpu: 1 });
       await client.decryptSecrets(["tpdaemon.v1.x"]);
+      const issued = await client.reportIssuedCertificate({
+        hostname: "shop.example.com",
+        certificatePem: "CERT",
+        privateKeyPem: "KEY",
+      });
+      assertEquals(issued, { stored: true });
 
       const byPath = Object.fromEntries(
         captures.map((c) => [c.pathSuffix, c]),
@@ -153,6 +170,7 @@ test({
       assertEquals(byPath["/api/daemon/v1/jwks.json"]?.method, "GET");
       assertEquals(byPath["/api/daemon/v1/metrics"]?.method, "POST");
       assertEquals(byPath["/api/daemon/v1/secrets/decrypt"]?.method, "POST");
+      assertEquals(byPath["/api/daemon/v1/tls/issued"]?.method, "POST");
       for (const c of captures) {
         assertEquals(c.contentType, "application/json");
       }

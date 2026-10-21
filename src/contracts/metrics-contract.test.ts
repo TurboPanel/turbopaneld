@@ -23,14 +23,15 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
-test("METRICS_SCHEMA_VERSION is 7 and v6 samples are still accepted on the wire", () => {
-  assertEquals(METRICS_SCHEMA_VERSION, 7);
+test("METRICS_SCHEMA_VERSION is 8 and v6 samples are still accepted on the wire", () => {
+  assertEquals(METRICS_SCHEMA_VERSION, 8);
   assertEquals(METRICS_LEGACY_WIRE_VERSION, 6);
-  assertEquals([...METRICS_WIRE_VERSIONS], [6, 7]);
+  assertEquals([...METRICS_WIRE_VERSIONS], [6, 8]);
   assertEquals(isMetricsWireVersion(6), true);
-  assertEquals(isMetricsWireVersion(7), true);
+  assertEquals(isMetricsWireVersion(8), true);
+  assertEquals(isMetricsWireVersion(7), false);
   assertEquals(isMetricsWireVersion(5), false);
-  assertEquals(isMetricsWireVersion("7"), false);
+  assertEquals(isMetricsWireVersion("8"), false);
 });
 
 test("METRIC_EVENT_KINDS has no duplicates", () => {
@@ -208,16 +209,16 @@ test("buildMetricsSample never coerces missing metrics to 0", () => {
   assertEquals(sample.host.storage.diskReadBytesPerSecond, null);
 });
 
-test("buildMetricsSample accepts a v7-stamped sample and keeps its wire version", () => {
+test("buildMetricsSample accepts a v8-stamped sample and keeps its wire version", () => {
   const input = fixtureInput();
   input.metadata.version = METRICS_SCHEMA_VERSION;
   input.metadata.durable = false;
   const sample = buildMetricsSample(input);
-  assertEquals(sample.metadata.version, 7);
+  assertEquals(sample.metadata.version, 8);
   assertEquals(sample.metadata.durable, false);
 });
 
-test("buildMetricsSample sanitizes the v7 extended section without coercing missing to 0", () => {
+test("buildMetricsSample sanitizes the v8 extended section without coercing missing to 0", () => {
   const input = fixtureInput();
   input.extended = {
     host: {
@@ -262,6 +263,52 @@ test("buildMetricsSample sanitizes the v7 extended section without coercing miss
     model: "Samsung 990",
   }]);
   assertEquals(extended?.gpuText, [{ gpuId: "gpu0", driver: "nvidia 570.1" }]);
+});
+
+test("buildMetricsSample keeps the v8 sizes, drops non-finite ones and caps the per-entity arrays", () => {
+  const input = fixtureInput();
+  input.extended = {
+    sizes: {
+      memoryTotalBytes: 4_294_967_296,
+      swapTotalBytes: Number.NaN,
+      logicalCores: 2,
+    },
+    filesystemSizes: [{
+      filesystemId: "fs:a",
+      totalBytes: 1e9,
+      totalInodes: null,
+    }],
+    gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 17_179_869_184 }],
+    networkSizes: [{ deviceId: "mac:aa", linkSpeedMbps: 1000 }],
+  };
+  const { extended } = buildMetricsSample(input);
+  assertEquals(extended?.networkSizes, [
+    { deviceId: "mac:aa", linkSpeedMbps: 1000 },
+  ]);
+  assertEquals(extended?.sizes, {
+    memoryTotalBytes: 4_294_967_296,
+    swapTotalBytes: null,
+    logicalCores: 2,
+  });
+  assertEquals(extended?.filesystemSizes, [
+    { filesystemId: "fs:a", totalBytes: 1e9, totalInodes: null },
+  ]);
+  assertEquals(extended?.gpuSizes, [
+    { gpuId: "gpu0", memoryTotalBytes: 17_179_869_184 },
+  ]);
+
+  const tooMany = fixtureInput();
+  tooMany.extended = {
+    filesystemSizes: Array.from({ length: 65 }, (_, i) => ({
+      filesystemId: `fs:${i}`,
+      totalBytes: 1,
+    })),
+  };
+  assertThrows(
+    () => buildMetricsSample(tooMany),
+    TypeError,
+    "extended.filesystemSizes",
+  );
 });
 
 test("buildMetricsSample rejects a metadata.version that is not an accepted wire version", () => {
@@ -500,4 +547,21 @@ test({
     assertEquals(sibling.METRIC_EVENT_KINDS, own.METRIC_EVENT_KINDS);
     assertEquals(new Set(Object.keys(sibling)), new Set(Object.keys(own)));
   },
+});
+
+test("buildMetricsSample keeps IRQ pressure as a 0-100 percentage and refuses more than 16 events", () => {
+  const input = fixtureInput();
+  input.extended = { host: { irqPressureFullPercent: 140 } };
+  assertEquals(
+    buildMetricsSample(input).extended?.host?.irqPressureFullPercent,
+    100,
+  );
+  const flood = fixtureInput();
+  flood.events = Array.from({ length: 17 }, (_, i) => ({
+    eventId: `e${i}`,
+    at: flood.metadata.sampledAt,
+    kind: "oom_kill" as const,
+    severity: "warning" as const,
+  }));
+  assertThrows(() => buildMetricsSample(flood), TypeError, "events");
 });

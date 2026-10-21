@@ -68,12 +68,20 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-ha-probe-v1",
   "managed-ha-instance-v1",
   "managed-ha-boot-hold-v1",
-  "metrics-v7",
+  "metrics-v8",
+  "metrics-v8-sizes",
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
   "deploy-cancel-v1",
   "site-db-bindings-v1",
   "deno-native-apps-v1",
+  "managed-ingress-ipv6-v1",
+  "managed-login-limits-v1",
+  "managed-permissions-read-v1",
+  "managed-owner-role-v1",
+  "managed-data-only-readwrite-v1",
+  "managed-database-owner-v1",
+  "tls-capture-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -87,11 +95,28 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
   "sealed-instance-secrets-v1";
 
 /**
+ * This daemon reads the certificate and key Caddy issued for a hostname and
+ * sends them to `POST /api/daemon/v1/tls/issued`, and the control plane stores
+ * them sealed. The daemon sends nothing until the control plane lists this
+ * feature too.
+ */
+export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
+
+/**
  * This daemon answers `managed-health-request` with `managed-health-result`
  * (a fresh replication observation for one member). The control plane sends
  * the request only to a daemon that lists this feature.
  */
 export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
+
+/**
+ * This daemon answers `managed-permissions-request` with
+ * `managed-permissions-result`: what the named logins may do right now, read
+ * from the engine (read only). The control plane asks only a daemon that lists
+ * this feature.
+ */
+export const MANAGED_PERMISSIONS_READ_FEATURE: DaemonWireFeature =
+  "managed-permissions-read-v1";
 
 /**
  * This daemon pushes `managed-health-report` (every local replica's fresh
@@ -141,13 +166,21 @@ export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
   "managed-ha-boot-hold-v1";
 
 /**
- * Metrics schema v7. This daemon can produce v7 samples (`metadata.version`
- * 7: the `extended` section and the `durable` flag). It stamps
+ * Metrics schema v8. This daemon can produce v8 samples (`metadata.version`
+ * 8: the `extended` section and the `durable` flag). It stamps
  * `METRICS_LEGACY_WIRE_VERSION` until the control plane it is attached to
  * lists this feature, so a daemon updated ahead of the control plane keeps
  * sending samples the old control plane accepts.
  */
-export const METRICS_V7_FEATURE: DaemonWireFeature = "metrics-v7";
+export const METRICS_V8_FEATURE: DaemonWireFeature = "metrics-v8";
+
+/**
+ * The control plane accepts the per-sample sizes (`extended.sizes`,
+ * `filesystemSizes`, `gpuSizes`). A control plane that advertises `metrics-v8`
+ * but predates the sizes rejects the unknown `extended` keys, which would
+ * drop every sample, so the daemon sends the sizes only once this is listed.
+ */
+export const METRICS_V8_SIZES_FEATURE: DaemonWireFeature = "metrics-v8-sizes";
 
 /**
  * This daemon deploys sites with `engine: 'nginx+apache'` (nginx in front of
@@ -191,6 +224,59 @@ export const SITE_DB_BINDINGS_FEATURE: DaemonWireFeature =
  */
 export const DENO_NATIVE_APPS_FEATURE: DaemonWireFeature =
   "deno-native-apps-v1";
+
+/**
+ * This daemon publishes the shared database listeners on the IPv6 wildcard
+ * (`::` in `managed.ingress.reconcile` `bindAddresses`, next to `0.0.0.0`) and
+ * reads that publish back on self-heal. The control plane adds `::` only for a
+ * daemon that lists this feature, and only on a server that has IPv6.
+ */
+export const MANAGED_INGRESS_IPV6_FEATURE: DaemonWireFeature =
+  "managed-ingress-ipv6-v1";
+
+/**
+ * This daemon enforces `allowedSources` / `allowLocalSources` and
+ * `maxConnections` on app logins of `managed.ingress.reconcile` (and accepts
+ * `%` prefixes in `allowedSources`). The control plane sends them only to a
+ * daemon that lists this feature: an older daemon would ignore the fields and
+ * leave the login unlimited.
+ */
+export const MANAGED_LOGIN_LIMITS_FEATURE: DaemonWireFeature =
+  "managed-login-limits-v1";
+
+/**
+ * This daemon honours `ownerRole` on a Postgres database (it makes the
+ * database's owner role and keeps the catalog from handing ownership away) and
+ * the Database admin login built on it. The control plane records an owner
+ * role, and accepts an admin login, only for a primary that lists this
+ * feature: an older daemon would ignore both and leave a plain database.
+ */
+export const MANAGED_OWNER_ROLE_FEATURE: DaemonWireFeature =
+  "managed-owner-role-v1";
+
+/**
+ * This daemon gives a MySQL or MariaDB read/write login data changes only
+ * (no creating, altering or dropping tables, indexes, views, routines,
+ * triggers or events), keeps `GRANT OPTION` for the Database admin login, and
+ * tightens logins made under the older, wider grant on their next apply. The
+ * control plane gives a new MySQL or MariaDB read/write login only to a
+ * primary that lists this feature (else 409
+ * `managed_readwrite_needs_daemon_update`): an older daemon would leave it able
+ * to change the shape of the database.
+ */
+export const MANAGED_DATA_ONLY_READWRITE_FEATURE: DaemonWireFeature =
+  "managed-data-only-readwrite-v1";
+
+/**
+ * This daemon honours `ownerLogin` on a Postgres database (a login the
+ * customer picked owns it) and gives the first database of a new cluster, which
+ * the engine's first start makes, an owner role while it is still empty. Also
+ * gives a Database admin login on a database without an owner role the
+ * read-write rights instead of refusing. The control plane sends `ownerLogin`,
+ * and flags a cluster's first database, only for a primary that lists this.
+ */
+export const MANAGED_DATABASE_OWNER_FEATURE: DaemonWireFeature =
+  "managed-database-owner-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

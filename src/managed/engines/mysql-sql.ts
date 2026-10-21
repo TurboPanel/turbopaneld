@@ -6,6 +6,12 @@
  * escapes — {@link quoteLiteral} must escape `\` as well as `'`.
  */
 
+import { grantSqlFor } from "./grant-pattern.ts";
+import {
+  type FollowSourceDialect,
+  renderFollowSourceSql,
+} from "./follow-source-sql.ts";
+
 const ACCOUNT_MAX_LENGTH = 32;
 const SCHEMA_MAX_LENGTH = 64;
 const IDENTIFIER_RE = /^[A-Za-z_]\w*$/;
@@ -18,7 +24,11 @@ const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
  */
 export const MANAGED_DOCKER_NETWORK_HOST = "172.16.0.0/255.240.0.0";
 
-export type ManagedDatabasePrivilege = "owner" | "read-write" | "read-only";
+export type ManagedDatabasePrivilege =
+  | "admin"
+  | "owner"
+  | "read-write"
+  | "read-only";
 
 export function quoteIdentifier(
   value: string,
@@ -118,31 +128,10 @@ export function dropDatabaseSql(name: string): string {
   return `DROP DATABASE IF EXISTS ${db};`;
 }
 
-export function grantDatabaseSql(
-  database: string,
-  username: string,
-  privilege: ManagedDatabasePrivilege,
-  host: string = MANAGED_DOCKER_NETWORK_HOST,
-): string {
-  const db = quoteIdentifier(database);
-  const account = accountAt(username, host);
-  switch (privilege) {
-    case "owner":
-      return `GRANT ALL PRIVILEGES ON ${db}.* TO ${account} WITH GRANT OPTION;`;
-    case "read-write":
-      return (
-        `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, ` +
-        `CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, ` +
-        `CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON ${db}.* TO ${account};`
-      );
-    case "read-only":
-      return `GRANT SELECT, SHOW VIEW ON ${db}.* TO ${account};`;
-    default: {
-      const _exhaustive: never = privilege;
-      throw new Error(`unsupported privilege: ${_exhaustive}`);
-    }
-  }
-}
+export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
+  { quoteIdentifier, quoteLiteral, accountAt },
+  MANAGED_DOCKER_NETWORK_HOST,
+);
 
 export function grantRootSql(
   username: string,
@@ -246,9 +235,36 @@ export function ensureSocketAdminSql(osUser: string = "mysql"): string {
   ].join("\n");
 }
 
+/**
+ * Session-only: keep replica-local statements out of the binary log so they
+ * cannot mint a replica-UUID GTID the primary never executed.
+ */
+export function withoutSessionBinlogSql(sql: string): string {
+  return [
+    "SET SESSION sql_log_bin = 0;",
+    sql.trim(),
+    "SET SESSION sql_log_bin = 1;",
+  ].join("\n");
+}
+
+/**
+ * MySQL 8.4+ replacement for `RESET MASTER`. Clears entrypoint-init GTIDs on
+ * a freshly initdb'd standby before the dump's `SET GTID_PURGED`.
+ */
+export function resetReplicaGtidStateSql(): string {
+  return "RESET BINARY LOGS AND GTIDS;";
+}
+
+/** Replica-local flush — must not be binary-logged. */
+export function flushPrivilegesLocalSql(): string {
+  return withoutSessionBinlogSql("FLUSH PRIVILEGES;");
+}
+
 /** MySQL 8+/9 `INSTALL PLUGIN` — no `IF NOT EXISTS` (that is MariaDB-only). */
 export function installAuthSocketPluginSql(): string {
-  return "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';";
+  return withoutSessionBinlogSql(
+    "INSTALL PLUGIN auth_socket SONAME 'auth_socket.so';",
+  );
 }
 
 export function authSocketPluginPresentSql(): string {
@@ -282,6 +298,20 @@ export function promoteSql(): string {
     "SET GLOBAL super_read_only = OFF;",
     "SET GLOBAL read_only = OFF;",
   ].join("\n");
+}
+
+/** Executed GTID set on a quiesced MySQL primary (what replicas must apply). */
+export function primaryFinalGtidSetSql(): string {
+  return "SELECT @@GLOBAL.gtid_executed AS gtid_set;";
+}
+
+export function waitForExecutedGtidSetSql(
+  gtidSet: string,
+  timeoutSeconds: number,
+): string {
+  return `SELECT WAIT_FOR_EXECUTED_GTID_SET(${
+    quoteLiteral(gtidSet)
+  }, ${timeoutSeconds});`;
 }
 
 export function isWritableSql(): string {
@@ -353,6 +383,22 @@ export function showReplicaStatusSql(): string {
   return "SHOW REPLICA STATUS;";
 }
 
+/** Seconds between IO-thread reconnect attempts (engine default is 60). */
+export const MYSQL_REPLICA_CONNECT_RETRY_SECONDS = 10;
+
+/**
+ * How many reconnects to attempt. MySQL 8.4 / 9.7 default SOURCE_RETRY_COUNT
+ * is 10 (~10 minutes at the 60 s default connect retry) and then leave the
+ * IO thread stopped. At {@link MYSQL_REPLICA_CONNECT_RETRY_SECONDS}, seven
+ * days is `(7 * 86400) / 10` attempts.
+ */
+export const MYSQL_REPLICA_RETRY_COUNT = (7 * 86400) /
+  MYSQL_REPLICA_CONNECT_RETRY_SECONDS;
+
+export function startReplicaSql(): string {
+  return "START REPLICA;";
+}
+
 export function changeReplicationSourceSql(spec: {
   host: string;
   port: number;
@@ -368,9 +414,30 @@ export function changeReplicationSourceSql(spec: {
     "  SOURCE_AUTO_POSITION = 1,",
     "  SOURCE_SSL = 1,",
     "  SOURCE_SSL_CA = '/etc/mysql/tls/ca.crt',",
-    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1;",
-    "START REPLICA;",
+    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1,",
+    `  SOURCE_CONNECT_RETRY = ${MYSQL_REPLICA_CONNECT_RETRY_SECONDS},`,
+    `  SOURCE_RETRY_COUNT = ${MYSQL_REPLICA_RETRY_COUNT};`,
+    startReplicaSql(),
   ].join("\n");
+}
+
+/**
+ * Re-point an already-configured replica after promotion. Host and port
+ * only — user, password, SSL, and auto-position stay as seeded.
+ */
+export const MYSQL_FOLLOW_SOURCE_DIALECT: FollowSourceDialect = {
+  stop: "STOP REPLICA",
+  change: "CHANGE REPLICATION SOURCE TO",
+  hostKey: "SOURCE_HOST",
+  portKey: "SOURCE_PORT",
+  start: "START REPLICA",
+};
+
+export function followReplicationSourceSql(spec: {
+  host: string;
+  port: number;
+}): string {
+  return renderFollowSourceSql(MYSQL_FOLLOW_SOURCE_DIALECT, spec, quoteLiteral);
 }
 
 /**

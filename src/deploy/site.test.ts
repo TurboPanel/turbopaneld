@@ -217,7 +217,7 @@ test("site engines follow a symlink only when its owner matches the target's", (
   const ols = openlitespeedSiteFragment(
     "env",
     { ...site, engine: "openlitespeed" },
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env_site/vhconf.conf",
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env__site/vhconf.conf",
     docroot,
   );
   assertStringIncludes(ols, "allowSymbolLink           2\n");
@@ -558,12 +558,30 @@ test("caddyHttpUpstream only allows loopback hosts", () => {
   );
 });
 
-test("openlitespeedSiteName sanitizes unsafe characters into a stable identifier", () => {
-  assertEquals(openlitespeedSiteName("env1", "site_a"), "tp_env1_site_a");
+test("openlitespeedSiteName keeps letters and digits and escapes everything else", () => {
+  assertEquals(openlitespeedSiteName("env1", "site"), "tp_env1__site");
   assertEquals(
     openlitespeedSiteName("env-1", "site a"),
-    "tp_env_1_site_a",
+    "tp_env_2d1__site_20a",
   );
+});
+
+test("openlitespeedSiteName never gives two different pairs the same name", () => {
+  const pairs: Array<[string, string]> = [
+    ["env", "a-b"],
+    ["env", "a_b"],
+    ["env", "a b"],
+    ["env", "a.b"],
+    ["a_b", "c"],
+    ["a", "b_c"],
+    ["a-b", "c"],
+    ["a", "b-c"],
+    ["a__b", "c"],
+    ["a", "_b_c"],
+  ];
+  const names = pairs.map(([env, svc]) => openlitespeedSiteName(env, svc));
+  assertEquals(new Set(names).size, names.length);
+  for (const name of names) assertEquals(/^[A-Za-z0-9_]+$/.test(name), true);
 });
 
 test("openlitespeedSiteFragment emits loopback listener plus docker bridge when requested", () => {
@@ -575,15 +593,15 @@ test("openlitespeedSiteFragment emits loopback listener plus docker bridge when 
       root: "public",
       listenPort: 18080,
     },
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf",
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf",
     "/var/lib/turbopanel/sites/env1/site/public",
   );
-  assertStringIncludes(fragment, "virtualHost tp_env1_site{");
+  assertStringIncludes(fragment, "virtualHost tp_env1__site{");
   assertStringIncludes(
     fragment,
     "vhRoot                    /var/lib/turbopanel/sites/env1/site/public/",
   );
-  assertStringIncludes(fragment, "listener tp_env1_site_lo{");
+  assertStringIncludes(fragment, "listener tp_env1__site_lo{");
   assertStringIncludes(fragment, "address                   127.0.0.1:18080");
   if (fragment.includes("_dk{")) {
     throw new Error("docker listener must be omitted without a bind address");
@@ -597,11 +615,11 @@ test("openlitespeedSiteFragment emits loopback listener plus docker bridge when 
       root: "public",
       listenPort: 18080,
     },
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf",
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf",
     "/var/lib/turbopanel/sites/env1/site/public",
     "172.17.0.1",
   );
-  assertStringIncludes(withDocker, "listener tp_env1_site_dk{");
+  assertStringIncludes(withDocker, "listener tp_env1__site_dk{");
   assertStringIncludes(withDocker, "address                  172.17.0.1:18080");
 });
 
@@ -692,7 +710,7 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
         root: "public",
         listenPort: 18080,
       },
-      "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf",
+      "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf",
       "/var/lib/turbopanel/sites/env1/site/public",
     );
     const conf = openlitespeedMainConfig(layout, [fragment]);
@@ -710,7 +728,7 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
       conf,
       `swappingDir                       ${layout.stateDir}/openlitespeed/swap`,
     );
-    assertStringIncludes(conf, "virtualHost tp_env1_site{");
+    assertStringIncludes(conf, "virtualHost tp_env1__site{");
   } finally {
     await cleanup();
   }
@@ -899,8 +917,8 @@ test("phpSeriesForDeploy collects every distinct series, sorted", () => {
 });
 
 test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starting it", () => {
-  const processorName = openlitespeedPhpProcessorName("tp_env1_phpapp");
-  assertEquals(processorName, "php_tp_env1_phpapp");
+  const processorName = openlitespeedPhpProcessorName("tp_env1__phpapp");
+  assertEquals(processorName, "php_tp_env1__phpapp");
   const socket = "/run/turbopanel-php-phpapp-0a1b2c3d4e5f-lsd84/php.sock";
   const want = { "lsphp-detached": "lsapi", fastcgi: "fcgi", fpm: "fcgi" };
   for (const [mode, type] of Object.entries(want)) {
@@ -915,7 +933,7 @@ test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starti
       conf,
       "phpIniOverride {\n  php_admin_value memory_limit 256M\n}",
     );
-    assertStringIncludes(conf, "extprocessor php_tp_env1_phpapp{");
+    assertStringIncludes(conf, "extprocessor php_tp_env1__phpapp{");
     assertStringIncludes(conf, `type                      ${type}`);
     assertStringIncludes(conf, `address                   uds://${socket}`);
     // systemd runs PHP as the owner; OpenLiteSpeed only connects.
@@ -923,7 +941,7 @@ test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starti
     assertEquals(conf.includes("\n  env                       "), false);
     assertStringIncludes(
       conf,
-      `add                       ${type}:php_tp_env1_phpapp php`,
+      `add                       ${type}:php_tp_env1__phpapp php`,
     );
     // Without `useServer 0` OLS keeps the server-level `indexFiles index.html`
     // and `/` never reaches index.php.
@@ -1025,7 +1043,7 @@ test("openlitespeedSiteFragment declares no identity OpenLiteSpeed cannot take",
     principal: { principalId: "p-1", username: "siteowner" },
   };
   const vhConf =
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_phpapp/vhconf.conf";
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__phpapp/vhconf.conf";
   const root = "/var/lib/turbopanel/sites/env1/phpapp/public";
   const fragment = openlitespeedSiteFragment("env1", site, vhConf, root, null, {
     php: true,
@@ -1046,7 +1064,7 @@ test("openlitespeedSiteFragment enables scripts only for a PHP site", () => {
     listenPort: 18080,
   };
   const vhConf =
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf";
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf";
   const root = "/var/lib/turbopanel/sites/env1/site/public";
   assertStringIncludes(
     openlitespeedSiteFragment("env1", site, vhConf, root),

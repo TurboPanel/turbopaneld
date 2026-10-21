@@ -257,6 +257,35 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
   assertEquals(env.NODE_OPTIONS, "--max-old-space-size=512");
 });
 
+test("runReleaseBuild runs every build command with the build.env variables in its environment", async () => {
+  await withWorkingDir(async (workingDir) => {
+    const seen: Array<Record<string, string>> = [];
+    await runReleaseBuild({
+      build: {
+        kind: "native",
+        installCommand: "npm ci",
+        buildCommand: "npm run build",
+        env: {
+          NEXT_PUBLIC_SITE_URL: "https://example.test",
+          NODE_ENV: "development",
+        },
+      },
+      workingDir,
+      runCommand: (_command, _cwd, env) => {
+        seen.push(env);
+        return Promise.resolve();
+      },
+    });
+    assertEquals(seen.length, 2);
+    for (const env of seen) {
+      assertEquals(env.NEXT_PUBLIC_SITE_URL, "https://example.test");
+      assertEquals(env.HOME, workingDir);
+    }
+    // No variable the payload did not carry appears in the build environment.
+    assertEquals(seen[0]!.SOME_RUNTIME_ONLY_VARIABLE, undefined);
+  });
+});
+
 test("buildInvocation is a bare sh -c", () => {
   assertEquals(buildInvocation("npm run build"), {
     bin: "sh",

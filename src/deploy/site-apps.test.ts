@@ -55,12 +55,16 @@ test({
         {
           releaseBindings: new Map(),
           managedDirectoryBindings: new Map([
-            ["blog", { serviceId: "svc-blog", username: "alice" }],
+            ["blog", {
+              serviceId: "svc-blog",
+              username: "alice",
+              folder: { owner: "alice", scope: "production", slug: "blog" },
+            }],
           ]),
           run: refuseRun,
           probeFor: (documentRoot) => {
             probedRoots.push(documentRoot);
-            return documentRoot.includes("svc-blog") ? wordpress : plain;
+            return documentRoot.includes("services/blog") ? wordpress : plain;
           },
         },
       );
@@ -73,7 +77,7 @@ test({
       ]);
       // The managed-directory webroot and the daemon-owned tree are what get probed.
       assertEquals(
-        probedRoots[0]?.endsWith(join("svc-blog", "webroot", "public")),
+        probedRoots[0]?.endsWith(join("services", "blog", "public")),
         true,
       );
       assertEquals(probedRoots[1]?.includes("env-1"), true);

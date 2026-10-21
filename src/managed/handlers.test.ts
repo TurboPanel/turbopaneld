@@ -744,7 +744,7 @@ test("handleManagedDestroy removes the backup tree alongside state", async () =>
         managedId,
       );
       await Deno.mkdir(root, { recursive: true });
-      const backups = join(fixture.dirs.backupDir, managedId);
+      const backups = join(fixture.dirs.backupDir, "managed", managedId);
       await Deno.mkdir(backups, { recursive: true });
       await Deno.writeTextFile(join(backups, "bk_1.dump"), "payload");
       const result = await handleManagedDestroy(
@@ -778,7 +778,7 @@ test("handleManagedDestroy throws when the backup directory cannot be removed", 
       prior.set(key, Deno.env.get(key));
       Deno.env.set(key, value);
     }
-    const backups = join(fixture.dirs.backupDir, managedId);
+    const backups = join(fixture.dirs.backupDir, "managed", managedId);
     await Deno.mkdir(backups, { recursive: true });
     const root = managedDir(
       { stateDir: fixture.dirs.stateDir } as Parameters<typeof managedDir>[0],

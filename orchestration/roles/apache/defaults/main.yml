@@ -54,8 +54,10 @@ turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') 
 apache_service_user: tpapache
 apache_service_group: tpapache
 # systemd LogsDirectory= / RuntimeDirectory= names (under /var/log and /run).
-# Top level, owned by the service account: never inside the tp-owned trees.
-apache_logs_directory: turbopanel-apache
+# The logs sit with every other engine's, in /var/log/turbopanel/apache; systemd
+# leaves the existing parent alone and gives the inner folder to the service
+# account.
+apache_logs_directory: turbopanel/apache
 apache_runtime_directory: turbopanel-apache
 
 # FHS mutable paths — config/logs/state stay outside the versioned vendor tree.

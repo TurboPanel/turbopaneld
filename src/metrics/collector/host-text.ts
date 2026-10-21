@@ -1,5 +1,5 @@
 /**
- * v7 free-text host facts (blobs cost nothing, so they ride along on the
+ * v8 free-text host facts (blobs cost nothing, so they ride along on the
  * sample): kernel, OS, virtualisation, cloud provider, failed unit names,
  * RAID state, reboot-required, clock sync, pending updates, PHP series, top
  * CPU / memory process short names, read-only filesystems, SMART verdict per

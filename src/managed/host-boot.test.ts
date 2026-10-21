@@ -86,3 +86,14 @@ test("a stamp from another boot is ignored and an unreadable record is no inform
     assertEquals(await recordHostBoot(layout, at(BOOT_B)), "first");
   });
 });
+
+test("the boot record is a file in the system folder, not among the database folders", () => {
+  assertEquals(
+    hostBootPath(
+      { stateDir: "/var/lib/turbopanel" } as Parameters<
+        typeof hostBootPath
+      >[0],
+    ),
+    "/var/lib/turbopanel/system/host-boot.json",
+  );
+});

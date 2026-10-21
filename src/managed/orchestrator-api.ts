@@ -19,6 +19,8 @@ export type OrchestratorApiDeps = {
   fetch?: OrchestratorHttpFn;
   baseUrl?: string;
   credentials?: OrchestratorApiCredentials;
+  /** Abort the request after this many milliseconds (default: no limit). */
+  timeoutMs?: number;
 };
 
 function basicAuthHeader(creds: OrchestratorApiCredentials): string {
@@ -40,7 +42,11 @@ async function orchestratorGet(
   if (deps.credentials) {
     headers.Authorization = basicAuthHeader(deps.credentials);
   }
-  const response = await fetchFn(`${base}${path}`, { headers });
+  const init: RequestInit = { headers };
+  if (deps.timeoutMs !== undefined) {
+    init.signal = AbortSignal.timeout(deps.timeoutMs);
+  }
+  const response = await fetchFn(`${base}${path}`, init);
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     throw new Error(
@@ -99,6 +105,94 @@ export async function setClusterAlias(
   );
 }
 
+function hostOf(endpoint: string): string | null {
+  try {
+    const url = new URL(
+      endpoint.includes("://") ? endpoint : `http://${endpoint}`,
+    );
+    return url.hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether this Orchestrator node can take write calls (`discover`,
+ * `register-candidate`, `set-cluster-alias`, `recover`) from `/api/raft-status`.
+ *
+ * A follower that does not know a leader answers every write with
+ * `HTTP 500 {"Message":"Unauthorized"}`; one that still holds a `LeaderURI`
+ * from an older leader (restored from its Raft snapshot after a restart)
+ * proxies to that address instead. So it is ready only as the leader, or as a
+ * follower whose `LeaderURI` points at the host of the current `Leader` (the
+ * Raft and HTTP advertise addresses are the same address in our stack).
+ * `null` when the body is not a Raft status (Raft off, or an older image).
+ */
+export function orchestratorRaftReady(status: unknown): boolean | null {
+  if (status === null || typeof status !== "object") return null;
+  const { State, Leader, LeaderURI } = status as Record<string, unknown>;
+  if (typeof State !== "string") return null;
+  if (State === "Leader") return true;
+  if (typeof Leader !== "string" || typeof LeaderURI !== "string") {
+    return false;
+  }
+  const leaderHost = hostOf(Leader);
+  return leaderHost !== null && leaderHost === hostOf(LeaderURI);
+}
+
+export type OrchestratorRaftWaitOptions = {
+  /** Give up after this long (default 45 s; a restarted node measured 25 s). */
+  timeoutMs?: number;
+  /** Pause between polls (default 1 s). */
+  intervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+};
+
+/**
+ * Poll `/api/raft-status` until this node can take writes
+ * ({@link orchestratorRaftReady}). A (re)created stack, or several hosts of
+ * one Raft group recreated together, has no leader for a few seconds, and a
+ * reconcile that registers clusters inside that window fails for every one.
+ * Returns `true` when ready or when readiness cannot be told, `false` on
+ * timeout (the caller goes on; registration then reports its own error).
+ */
+export async function waitForOrchestratorRaftLeader(
+  deps: OrchestratorApiDeps = {},
+  options: OrchestratorRaftWaitOptions = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const intervalMs = options.intervalMs ?? 1_000;
+  const sleep = options.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  const pollDeps: OrchestratorApiDeps = {
+    ...deps,
+    timeoutMs: deps.timeoutMs ?? 5_000,
+  };
+  // One poll per call (no loop): wait, then poll again until the deadline.
+  const poll = async (): Promise<boolean> => {
+    let ready: boolean | null = false;
+    try {
+      ready = orchestratorRaftReady(
+        await orchestratorGet("/api/raft-status", pollDeps),
+      );
+    } catch (err) {
+      // Not listening yet (refused, or the poll timed out): keep polling. An
+      // HTTP error answer means no Raft status to read: go on.
+      if (!(err instanceof TypeError || err instanceof DOMException)) {
+        return true;
+      }
+    }
+    if (ready !== false) return true;
+    if (now() >= deadline) return false;
+    await sleep(intervalMs);
+    return await poll();
+  };
+  return await poll();
+}
+
 export type OrchestratorRecoverTarget = {
   sourceHost: string;
   sourcePort: number;
@@ -126,13 +220,30 @@ export type OrchestratorProblem = {
   problems?: string[];
 };
 
+/**
+ * Analysis codes that mean the primary itself is down, as Percona
+ * Orchestrator 3.2.6 names them (read from the shipped binary). Orchestrator
+ * picks the variant by what it sees of the replicas, so after a `docker kill`
+ * it reports `DeadMasterAndReplicas` when it cannot check the replica either.
+ * `DeadMasterWithoutReplicas` is included: the control plane then refuses a
+ * promote with no replica, which is where that decision belongs.
+ *
+ * Deliberately left out: co-master and intermediate-master codes (TurboPanel
+ * never builds those), `UnreachableMasterWithLaggingReplicas` (replicas still
+ * see the primary), and the old `*Slaves` spellings (absent from 3.2.6).
+ * Explicit names, never a prefix rule, so a new code is not trusted blindly.
+ */
 const DEAD_PRIMARY_PROBLEMS = new Set([
   "DeadMaster",
+  "DeadMasterAndReplicas",
+  "DeadMasterAndSomeReplicas",
+  "DeadMasterWithoutReplicas",
   "DeadPrimary",
   "UnreachableMaster",
   "UnreachablePrimary",
 ]);
 
+/** The one gate for both `/api/problems` and `/api/replication-analysis`. */
 export function isDeadPrimaryProblem(problem: string): boolean {
   return DEAD_PRIMARY_PROBLEMS.has(problem);
 }
@@ -150,16 +261,27 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
+function parseOrchestratorPort(value: unknown): number | undefined {
+  const asNum = optionalNumber(value);
+  if (asNum !== undefined) return asNum;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const port = Number(trimmed);
+  return port >= 1 && port <= 65_535 ? port : undefined;
+}
+
 function parseProblemKey(
   value: unknown,
 ): OrchestratorProblem["key"] | undefined {
   const keyRecord = asRecord(value);
   if (!keyRecord) return undefined;
-  return {
-    hostname: optionalString(keyRecord.Hostname) ??
-      optionalString(keyRecord.hostname),
-    port: optionalNumber(keyRecord.Port) ?? optionalNumber(keyRecord.port),
-  };
+  const hostname = optionalString(keyRecord.Hostname) ??
+    optionalString(keyRecord.hostname);
+  const port = parseOrchestratorPort(keyRecord.Port) ??
+    parseOrchestratorPort(keyRecord.port);
+  if (hostname === undefined && port === undefined) return undefined;
+  return { hostname, port };
 }
 
 function parseProblemNames(value: unknown): string[] | undefined {
@@ -198,4 +320,58 @@ export async function listOrchestratorProblems(
 ): Promise<OrchestratorProblem[]> {
   const value = await orchestratorGet("/api/problems", deps);
   return parseOrchestratorProblems(value);
+}
+
+export type OrchestratorReplicationAnalysis = {
+  clusterAlias?: string;
+  key?: { hostname?: string; port?: number };
+  analysis?: string;
+  isMaster?: boolean;
+};
+
+function parseReplicationAnalysisEntry(
+  entry: unknown,
+): OrchestratorReplicationAnalysis | null {
+  const record = asRecord(entry);
+  if (!record) return null;
+  const parsed: OrchestratorReplicationAnalysis = {};
+  const clusterDetails = asRecord(
+    record.ClusterDetails ?? record.clusterDetails,
+  );
+  const clusterAlias = clusterDetails
+    ? optionalString(clusterDetails.ClusterAlias) ??
+      optionalString(clusterDetails.clusterAlias)
+    : undefined;
+  if (clusterAlias !== undefined) parsed.clusterAlias = clusterAlias;
+  const key = parseProblemKey(
+    record.AnalyzedInstanceKey ?? record.analyzedInstanceKey,
+  );
+  if (key) parsed.key = key;
+  const analysis = optionalString(record.Analysis) ??
+    optionalString(record.analysis);
+  if (analysis !== undefined) parsed.analysis = analysis;
+  const isMaster = record.IsMaster ?? record.isMaster;
+  if (typeof isMaster === "boolean") parsed.isMaster = isMaster;
+  return parsed;
+}
+
+export function parseOrchestratorReplicationAnalysis(
+  value: unknown,
+): OrchestratorReplicationAnalysis[] {
+  const envelope = asRecord(value);
+  const entries = envelope?.Details ?? envelope?.details ?? value;
+  if (!Array.isArray(entries)) return [];
+  const analysis: OrchestratorReplicationAnalysis[] = [];
+  for (const entry of entries) {
+    const parsed = parseReplicationAnalysisEntry(entry);
+    if (parsed) analysis.push(parsed);
+  }
+  return analysis;
+}
+
+export async function listOrchestratorReplicationAnalysis(
+  deps: OrchestratorApiDeps = {},
+): Promise<OrchestratorReplicationAnalysis[]> {
+  const value = await orchestratorGet("/api/replication-analysis", deps);
+  return parseOrchestratorReplicationAnalysis(value);
 }

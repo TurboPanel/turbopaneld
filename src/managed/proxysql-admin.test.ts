@@ -8,10 +8,12 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
+import { dirname, join } from "@std/path";
 import { resolveLayout } from "../paths/layout.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import {
   applyProxySqlAdminStatements,
+  formatMysqlClientCnf,
   loadProxySqlAdminCredentials,
   loadProxySqlMonitorCredentials,
   parseProxySqlAdminCnf,
@@ -21,6 +23,7 @@ import {
   PROXYSQL_MONITOR_USERNAME,
   proxySqlHostPrepPresent,
   readProxySqlRuntimeServers,
+  writeMysqlClientCnfAtomic,
 } from "./proxysql-admin.ts";
 import {
   proxysqlAdminCnfPath,
@@ -272,6 +275,33 @@ test("applyProxySqlAdminStatements redacts password on failure", async () => {
         }),
       Error,
     );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("formatMysqlClientCnf round-trips passwords with # and spaces", () => {
+  const password = ["mon", "pass", "#not-a-comment", "tail"].join(" ");
+  const cnf = formatMysqlClientCnf("tp_monitor", password);
+  const creds = parseProxySqlClientCnf(cnf, "test cnf");
+  assertEquals(creds, { user: "tp_monitor", password });
+});
+
+test("writeMysqlClientCnfAtomic refuses a symlink at the target path", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const target = proxysqlMonitorCnfPath(layout);
+    await Deno.mkdir(dirname(target), { recursive: true });
+    const outside = join(fixture.dirs.stateDir, "outside.cnf");
+    await Deno.writeTextFile(outside, "untouched\n");
+    await Deno.symlink(outside, target);
+    await assertRejects(
+      () => writeMysqlClientCnfAtomic(target, formatMysqlClientCnf("u", "p")),
+      TypeError,
+      "symlink",
+    );
+    assertEquals(await Deno.readTextFile(outside), "untouched\n");
   } finally {
     await fixture.cleanup();
   }

@@ -6,6 +6,7 @@
       { "name": "address", "required": true, "type": "string" },
       { "name": "cidr", "required": false, "type": "string" },
       { "name": "interface", "required": false, "type": "string" },
+      { "name": "link", "required": false, "type": "'down' | 'up'" },
       { "name": "preferred", "required": false, "type": "boolean" },
       { "name": "scope", "required": true, "type": "'private' | 'public'" },
       { "name": "version", "required": true, "type": "4 | 6" }
@@ -95,6 +96,51 @@
       { "name": "upgradeId", "required": false, "type": "string" }
     ]
   },
+  "CommandProgressMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "commandId", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      {
+        "name": "progress",
+        "required": true,
+        "type": "{ current: null | string; steps: Array<{ detail?: string; finishedAt?: string; id: string; label: string; startedAt?: string; state: 'done' | 'failed' | 'pending' | 'ready' | 'running' | 'skipped' }>; updatedAt: string; version: 1 }"
+      },
+      { "name": "type", "required": true, "type": "'command-progress'" }
+    ]
+  },
+  "CommandProgress": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "current", "required": true, "type": "null | string" },
+      {
+        "name": "steps",
+        "required": true,
+        "type": "Array<{ detail?: string; finishedAt?: string; id: string; label: string; startedAt?: string; state: 'done' | 'failed' | 'pending' | 'ready' | 'running' | 'skipped' }>"
+      },
+      { "name": "updatedAt", "required": true, "type": "string" },
+      { "name": "version", "required": true, "type": "1" }
+    ]
+  },
+  "CommandProgressStep": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "detail", "required": false, "type": "string" },
+      { "name": "finishedAt", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "label", "required": true, "type": "string" },
+      { "name": "startedAt", "required": false, "type": "string" },
+      {
+        "name": "state",
+        "required": true,
+        "type": "'done' | 'failed' | 'pending' | 'ready' | 'running' | 'skipped'"
+      }
+    ]
+  },
   "ServiceRunState": {
     "instance": "src/contracts/service-run-state.ts",
     "daemon": "src/contracts/service-run-state.ts",
@@ -145,6 +191,25 @@
         "name": "remoteBuildSourcesApproved",
         "required": false,
         "type": "boolean"
+      }
+    ]
+  },
+  "ManagedLifecyclePayload": {
+    "instance": "src/contracts/commands/schemas.ts",
+    "daemon": "src/contracts/commands-contracts.ts",
+    "fields": [
+      {
+        "name": "action",
+        "required": true,
+        "type": "'restart' | 'start' | 'stop'"
+      },
+      { "name": "demoted", "required": false, "type": "boolean" },
+      { "name": "managedId", "required": true, "type": "string" },
+      { "name": "memberId", "required": false, "type": "string" },
+      {
+        "name": "role",
+        "required": false,
+        "type": "'primary' | 'replica'"
       }
     ]
   },
@@ -203,6 +268,62 @@
       { "name": "id", "required": true, "type": "string" },
       { "name": "ok", "required": true, "type": "boolean" },
       { "name": "type", "required": true, "type": "'backup-run-report-result'" }
+    ]
+  },
+  "ManagedPermissionsRequestMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "databases", "required": true, "type": "string[]" },
+      { "name": "engine", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "logins", "required": true, "type": "string[]" },
+      { "name": "managedId", "required": true, "type": "string" },
+      {
+        "name": "type",
+        "required": true,
+        "type": "'managed-permissions-request'"
+      }
+    ]
+  },
+  "ManagedPermissionsResultMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "ok", "required": true, "type": "boolean" },
+      {
+        "name": "permissions",
+        "required": false,
+        "type": "ManagedPermissionsObserved"
+      },
+      {
+        "name": "type",
+        "required": true,
+        "type": "'managed-permissions-result'"
+      }
+    ]
+  },
+  "FolderRef": {
+    "instance": "src/contracts/directory-names.ts",
+    "daemon": "src/contracts/directory-names.ts",
+    "fields": [
+      { "name": "kind", "required": true, "type": "'service' | 'volume'" },
+      { "name": "owner", "required": true, "type": "string" },
+      { "name": "scope", "required": true, "type": "string" },
+      { "name": "slug", "required": true, "type": "string" }
+    ]
+  },
+  "FolderRefParts": {
+    "instance": "src/contracts/directory-names.ts",
+    "daemon": "src/contracts/directory-names.ts",
+    "fields": [
+      { "name": "owner", "required": true, "type": "string" },
+      { "name": "scope", "required": true, "type": "string" },
+      { "name": "slug", "required": true, "type": "string" }
     ]
   }
 }

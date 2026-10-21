@@ -10,6 +10,9 @@ User={{ nginx_service_user }}
 Group={{ nginx_service_group }}
 RuntimeDirectory={{ nginx_runtime_directory }}
 RuntimeDirectoryMode=0750
+# Keep the pidfile directory after a stop or crash so a config test still
+# finds it; /run is rebuilt on boot and on the next start either way.
+RuntimeDirectoryPreserve=yes
 PIDFile=/run/{{ nginx_runtime_directory }}/nginx.pid
 ExecStart={{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -c {{ turbopanel_config_dir }}/nginx/nginx.conf
 ExecReload={{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -c {{ turbopanel_config_dir }}/nginx/nginx.conf -s reload

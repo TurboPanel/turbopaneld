@@ -302,6 +302,53 @@ export const RUNTIME_ROOT_SCAN_ALLOWLIST = new Set([
   "orchestration/roles/daemon-launch/templates/tp-backup-run.j2",
 ]);
 
+/**
+ * Server folders that used to sit beside the main trees and now live inside
+ * them: the hosting Caddy and Docker gate state (`/var/lib/turbopanel/...`),
+ * the gate cache (`/var/cache/turbopanel/docker-gate`), the Apache logs
+ * (`/var/log/turbopanel/apache`), the SFTP switch (`/etc/ssh/turbopanel/`) and
+ * the egress helper (`/opt/turbopanel/lib/docker-egress`). Only
+ * `/var/lib/turbopanel-build` stays a sibling, on purpose
+ * (`BUILD_SIBLING_DIR`).
+ */
+export const RETIRED_SIBLING_REF =
+  /\/var\/lib\/turbopanel-(hosting-caddy|docker-gate)\b|\/var\/cache\/turbopanel-docker-gate|\/var\/log\/turbopanel-apache|\/etc\/ssh\/turbopanel-sftp-chroot|\/usr\/local\/lib\/turbopanel\/turbopanel-docker-egress/;
+export const RETIRED_SIBLING_SCAN_ALLOWLIST = new Set([
+  "scripts/check-production-layout.ts",
+]);
+
+/**
+ * The backup root is named once, as `BACKUP_ROOT` in `src/paths/layout.ts`.
+ * Everything else reads it from the layout, a role variable or `tp-host.conf`.
+ * The files below carry a pinned copy because they cannot import the layout
+ * module (a shell script, a rendered unit, a standalone gate); each copy is
+ * held equal to the constant by a test or by the role variable that defaults it.
+ */
+export const BACKUP_ROOT_LITERAL = /(?<=^|[\s"'`(=,:])\/backup(?![\w-])/;
+const COMMENT_LINE = /^\s*(\*|\/\/|#|\{#)/;
+export const BACKUP_ROOT_SCAN_ALLOWLIST = new Set([
+  "src/paths/layout.ts",
+  "scripts/check-production-layout.ts",
+  // Scoped Deno grants rendered from src/permissions/daemon-permissions.ts;
+  // src/permissions/daemon-permissions.test.ts pins every copy.
+  "orchestration/roles/daemon-launch/templates/turbopaneld.service.j2",
+  "orchestration/roles/daemon-launch/templates/tp-backup-run.j2",
+  "scripts/run.sh",
+  // Role variable defaults and the playbook variables that default them.
+  "orchestration/roles/turbopanel-user/defaults/main.yml",
+  "orchestration/roles/instance-launch/defaults/main.yml",
+  "orchestration/roles/docker-gate/defaults/main.yml",
+  "orchestration/roles/system-compose/defaults/main.yml",
+  "orchestration/playbooks/instance-backup.yml",
+  "orchestration/playbooks/instance-rollback.yml",
+  // The caller-supplied backup directory is checked against this prefix list.
+  "orchestration/scripts/tp-orchestrate",
+  // The Docker gate ships alone; its copy is pinned to the layout by a test.
+  "orchestration/roles/docker-gate/files/platform.ts",
+  // Host removal names the default root when no other is recorded.
+  "scripts/purge.sh",
+]);
+
 export function collectForbiddenReferenceFailures(
   rel: string,
   text: string,
@@ -367,6 +414,30 @@ export function collectForbiddenReferenceFailures(
           `${rel}:${
             i + 1
           } hardcodes /opt/turbopanel/vendor outside approved layout modules`,
+        );
+      }
+    });
+  }
+
+  if (!isTestFile && !RETIRED_SIBLING_SCAN_ALLOWLIST.has(rel)) {
+    lines.forEach((line, i) => {
+      if (RETIRED_SIBLING_REF.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } names a retired sibling folder (the state, cache, log and switch folders now live inside the main trees)`,
+        );
+      }
+    });
+  }
+
+  if (!isTestFile && !BACKUP_ROOT_SCAN_ALLOWLIST.has(rel)) {
+    lines.forEach((line, i) => {
+      if (!COMMENT_LINE.test(line) && BACKUP_ROOT_LITERAL.test(line)) {
+        failures.push(
+          `${rel}:${
+            i + 1
+          } hardcodes /backup (name it once: BACKUP_ROOT in src/paths/layout.ts)`,
         );
       }
     });

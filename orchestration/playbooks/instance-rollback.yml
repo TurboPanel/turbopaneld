@@ -105,7 +105,7 @@
 
     - name: Load the backup metadata for this attempt
       ansible.builtin.slurp:
-        src: "{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/meta.json"
+        src: "{{ turbopanel_backup_dir }}/panel/{{ turbopanel_upgrade_id }}/meta.json"
       register: backup_meta
 
     - name: Parse the backup metadata
@@ -133,7 +133,7 @@
       ansible.builtin.shell:
         cmd: |
           set -euo pipefail
-          dump="{{ turbopanel_backup_dir }}/control-plane/{{ turbopanel_upgrade_id }}/turbopanel.dump"
+          dump="{{ turbopanel_backup_dir }}/panel/{{ turbopanel_upgrade_id }}/turbopanel.dump"
           if [ ! -f "$dump" ]; then
             echo "migration history changed and $dump is missing" >&2
             exit 1

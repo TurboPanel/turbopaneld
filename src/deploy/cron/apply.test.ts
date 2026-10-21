@@ -656,10 +656,10 @@ test("a job's HOME and TMPDIR are the tenant dirs and the home root stays read-o
     composeServiceName: "blog",
     job,
     username: USERNAME,
-    workingDirectory: "/srv/users/appuser/sites/svc-1/webroot/public",
+    workingDirectory: "/srv/users/appuser/production/services/svc-1/public",
     siteWritableDirs: [
-      "/srv/users/appuser/sites/svc-1/webroot",
-      "/srv/users/appuser/sites/svc-1/shared",
+      "/srv/users/appuser/production/services/svc-1/public",
+      "/srv/users/appuser/production/services/svc-1/shared",
     ],
   });
   const lines = service.split("\n");
@@ -669,9 +669,9 @@ test("a job's HOME and TMPDIR are the tenant dirs and the home root stays read-o
   assertEquals(
     lines.filter((line) => line.startsWith("ReadWritePaths=")),
     [
-      "ReadWritePaths=/srv/users/appuser/sites/svc-1/webroot " +
-      "/srv/users/appuser/sites/svc-1/shared /srv/users/appuser/home " +
-      "/srv/users/appuser/data /srv/users/appuser/tmp",
+      "ReadWritePaths=/srv/users/appuser/production/services/svc-1/public " +
+      "/srv/users/appuser/production/services/svc-1/shared " +
+      "/srv/users/appuser/home /srv/users/appuser/tmp",
     ],
   );
   // The design's checklist: no unit may write the whole (now root-owned) home.

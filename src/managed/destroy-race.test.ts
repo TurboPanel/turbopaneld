@@ -10,6 +10,10 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedApply } from "./apply.ts";
 import { handleManagedDestroy } from "./destroy.ts";
 import {
+  isManagedMemberDemoted,
+  writeManagedDemotedMarker,
+} from "./demoted-marker.ts";
+import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
   writeManagedDestroyedMarker,
@@ -113,6 +117,52 @@ test("apply right after destroy is refused and rebuilds nothing", async () => {
     assertEquals(
       await isManagedMemberDestroyed(stateDir, MANAGED_ID, MEMBER_A),
       true,
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, MANAGED_ID),
+      false,
+    );
+  });
+});
+
+test("destroy clears a demoted marker", async () => {
+  await withEnv(async () => {
+    const layout = resolveLayout(Deno.env.toObject());
+    const root = managedDir(layout, MANAGED_ID);
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      [
+        "services:",
+        "  db:",
+        "    image: postgres:18",
+        "    volumes:",
+        "      - destroy_fence:/var/lib/postgresql",
+        "volumes:",
+        "  destroy_fence:",
+        "    name: destroy_fence",
+        "",
+      ].join("\n"),
+    );
+    await writeManagedDemotedMarker(
+      layout,
+      MANAGED_ID,
+      MEMBER_A,
+      new Date().toISOString(),
+      "postgres",
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, MANAGED_ID),
+      true,
+    );
+    await handleManagedDestroy(
+      { managedId: MANAGED_ID, removeVolumes: false, memberId: MEMBER_A },
+      new Date().toISOString(),
+      { runDocker: quietDocker },
+    );
+    assertEquals(
+      await isManagedMemberDemoted(layout, MANAGED_ID),
+      false,
     );
   });
 });

@@ -1,15 +1,19 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
+  applyFollowedPrimaryConninfoSql,
   connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
   createPhysicalSlotSql,
   createReplicationRoleSql,
+  currentPrimaryConninfoSql,
   databaseExistsSql,
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
+  formatConninfoValue,
   grantDatabaseSql,
   isInRecoverySql,
   listDatabasesForRoleReleaseSql,
@@ -17,6 +21,7 @@ import {
   listManagedSlotsSql,
   MANAGED_SLOT_PREFIX,
   managedSlotRetentionSql,
+  PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -26,9 +31,13 @@ import {
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  restoreReadWriteLoginSchemasSql,
+  restoreResetSql,
   revokePublicDatabaseAccessSql,
   revokeUnlistedDatabasesSql,
+  rewritePrimaryConninfo,
   standbyReplicationStatusSql,
+  stripPgRestoreTimeoutSetLines,
   strongestPrivilege,
 } from "./postgres-sql.ts";
 
@@ -186,7 +195,7 @@ test("readOnlySessionDefaultSql sets or clears the read-only default per databas
   );
 });
 
-test("reconcileDatabaseObjectsSql gives writers exactly five table privileges and readers only SELECT, now and for later tables", () => {
+test("reconcileDatabaseObjectsSql gives owners six table privileges, read-write logins four and readers only SELECT, now and for later tables", () => {
   const sql = reconcileDatabaseObjectsSql({
     creators: ["postgres", "own", "rw"],
     owners: ["own"],
@@ -197,9 +206,20 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   assertEquals(sql.includes("nspname !~ '^pg_'"), true);
   assertEquals(
     sql.includes(
-      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLE %s TO "rw"`,
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %s TO "rw"`,
     ),
     true,
+  );
+  assertEquals(
+    sql.includes(
+      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLE %s TO "own"`,
+    ),
+    true,
+  );
+  // A read-write login never holds TRUNCATE or REFERENCES, on existing or later tables.
+  assertEquals(
+    /GRANT[^;\n]*(TRUNCATE|REFERENCES)[^;\n]*TO "rw"/.test(sql),
+    false,
   );
   assertEquals(
     sql.includes(`GRANT USAGE, SELECT, UPDATE ON SEQUENCE %s TO "rw"`),
@@ -213,7 +233,7 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   // Later objects, from every creator, to everyone else.
   assertEquals(
     sql.includes(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLES TO "rw";',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "rw";',
     ),
     true,
   );
@@ -324,6 +344,40 @@ test("replication SQL builders use quoted identifiers and managed slot prefix", 
   assertEquals(promoteSql().includes("pg_promote"), true);
 });
 
+test("standbyReplicationStatusSql reports 0 lagSeconds when replay has caught the primary", () => {
+  const sql = standbyReplicationStatusSql();
+  const collapsed = sql.replaceAll(/\s+/g, " ");
+  // Caught-up: replay LSN is at or past the primary's last reported WAL end.
+  assertEquals(
+    collapsed.includes(
+      "r.latest_end_lsn IS NOT NULL AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL AND pg_catalog.pg_wal_lsn_diff( r.latest_end_lsn, pg_catalog.pg_last_wal_replay_lsn() ) <= 0",
+    ),
+    true,
+  );
+  // No reported end yet (fresh receiver): never claim zero lag from the
+  // receive position alone.
+  assertEquals(
+    collapsed.includes(
+      "COALESCE(r.latest_end_lsn, pg_catalog.pg_last_wal_receive_lsn())",
+    ),
+    false,
+  );
+  assertEquals(collapsed.includes("THEN 0"), true);
+  // Replay-timestamp clock is only the behind branch, never the sole lag.
+  assertEquals(
+    collapsed.includes(
+      "GREATEST(EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())), 0)",
+    ),
+    true,
+  );
+  assertEquals(
+    collapsed.includes(
+      "WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())) ELSE NULL",
+    ),
+    false,
+  );
+});
+
 test("reload verify SQL treats both restart-required texts as pending, not errors", () => {
   const reload = reloadVerifySql();
   const pending = "(error = 'setting could not be applied' " +
@@ -421,4 +475,128 @@ test("managedSlotRetentionSql reads retained bytes and safe size per managed slo
   assertEquals(sql.includes("safe_wal_size"), true);
   assertEquals(sql.includes("pg_current_wal_lsn()"), true);
   assertEquals(sql.includes("starts_with(slot_name, 'tp_member_')"), true);
+});
+
+test("restoreReadWriteLoginSchemasSql recreates schemas for read-write logins only", () => {
+  const sql = restoreReadWriteLoginSchemasSql();
+  assertStringIncludes(sql, "CREATE SCHEMA %I AUTHORIZATION %I");
+  assertStringIncludes(sql, "'TEMPORARY'");
+  assertStringIncludes(sql, "'CREATE'");
+  assertStringIncludes(sql, "NOT rol.rolsuper");
+});
+
+test("stripPgRestoreTimeoutSetLines removes only lock_timeout and statement_timeout SET lines", () => {
+  const input = [
+    "SET lock_timeout = 0;",
+    "SET statement_timeout = 0;",
+    "SET LOCAL lock_timeout = '30s';",
+    "SET client_encoding = 'UTF8';",
+    "SET standard_conforming_strings = on;",
+    "CREATE TABLE t (id int);",
+    "  SET lock_timeout = 0  ",
+  ].join("\n");
+  const out = stripPgRestoreTimeoutSetLines(input);
+  assertEquals(out.includes("SET LOCAL lock_timeout = '30s';"), true);
+  assertEquals(out.includes("SET lock_timeout = 0"), false);
+  assertEquals(out.includes("statement_timeout = 0"), false);
+  assertEquals(out.includes("client_encoding"), true);
+  assertEquals(out.includes("CREATE TABLE"), true);
+});
+
+test("PG_RESTORE_TIMEOUT_SET_LINE_SED avoids the GNU-only I flag and matches the same lines as stripPgRestoreTimeoutSetLines", async () => {
+  assertEquals(PG_RESTORE_TIMEOUT_SET_LINE_SED.endsWith("/"), true);
+  const input = [
+    "SET lock_timeout = 0;",
+    "set Statement_Timeout = 0;",
+    "  SET lock_timeout = 0  ",
+    "SET LOCAL lock_timeout = '30s';",
+    "SET client_encoding = 'UTF8';",
+    "CREATE TABLE t (id int);",
+    "",
+  ].join("\n");
+  const out = await new Deno.Command("sed", {
+    args: ["-E", `${PG_RESTORE_TIMEOUT_SET_LINE_SED}d`],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const writer = out.stdin.getWriter();
+  await writer.write(new TextEncoder().encode(input));
+  await writer.close();
+  const result = await out.output();
+  assertEquals(result.success, true, new TextDecoder().decode(result.stderr));
+  assertEquals(
+    new TextDecoder().decode(result.stdout),
+    stripPgRestoreTimeoutSetLines(input),
+  );
+});
+
+test("restoreResetSql drops every user schema and recreates only public with its owner and privileges", () => {
+  const sql = restoreResetSql();
+  assertStringIncludes(sql, "SET LOCAL lock_timeout");
+  assertStringIncludes(sql, "DROP SCHEMA %I CASCADE");
+  // System schemas are never touched.
+  assertStringIncludes(sql, "n.nspname !~ '^pg_'");
+  assertStringIncludes(sql, "n.nspname <> 'information_schema'");
+  // Only `public` is recreated: the dump creates every other schema itself.
+  assertStringIncludes(sql, "IF s.name = 'public' THEN");
+  assertStringIncludes(sql, "ALTER SCHEMA %I OWNER TO %s");
+  assertStringIncludes(sql, "aclexplode");
+});
+
+test("rewritePrimaryConninfo updates host port and hostaddr without dropping password", () => {
+  const current =
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+  const next = rewritePrimaryConninfo(current, {
+    host: "10.100.0.4",
+    hostaddr: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(next.includes("host=10.100.0.4"), true);
+  assertEquals(next.includes("hostaddr=10.100.0.4"), true);
+  assertEquals(next.includes("port=45001"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
+  assertEquals(next.includes("10.100.0.5"), false);
+  const sql = applyFollowedPrimaryConninfoSql(next);
+  assertEquals(sql.includes("ALTER SYSTEM SET primary_conninfo"), true);
+  assertEquals(sql.includes("pg_reload_conf"), true);
+  assertEquals(sql.includes("walreceiver"), true);
+  assertEquals(currentPrimaryConninfoSql().includes("primary_conninfo"), true);
+});
+
+test("rewritePrimaryConninfo drops hostaddr when the new dial is a container name", () => {
+  const current =
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+  const next = rewritePrimaryConninfo(current, {
+    host: "svc-1",
+    port: 5432,
+  });
+  assertEquals(next.includes("host=svc-1"), true);
+  assertEquals(next.includes("hostaddr"), false);
+  assertEquals(next.includes("port=5432"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
+});
+
+test("enforceFencedFormerPrimarySql terminates backends and sets cluster read-only", () => {
+  const sql = enforceFencedFormerPrimarySql();
+  assertStringIncludes(sql, "pg_terminate_backend");
+  assertStringIncludes(sql, "backend_type = 'client backend'");
+  assertStringIncludes(sql, "pg_replication_slots");
+  assertStringIncludes(
+    sql,
+    "ALTER SYSTEM SET default_transaction_read_only = on",
+  );
+  assertStringIncludes(sql, "pg_reload_conf");
+  assertStringIncludes(sql, "TRANSACTION READ ONLY");
+  const alterIdx = sql.indexOf("ALTER SYSTEM");
+  const terminateIdx = sql.indexOf("pg_terminate_backend");
+  assertEquals(alterIdx >= 0 && terminateIdx > alterIdx, true);
+});
+
+test("formatConninfoValue quotes empty values and any whitespace", () => {
+  assertEquals(formatConninfoValue(""), "''");
+  assertEquals(formatConninfoValue("plain"), "plain");
+  assertEquals(formatConninfoValue("has space"), "'has space'");
+  assertEquals(formatConninfoValue("has\ttab"), "'has\ttab'");
+  assertEquals(formatConninfoValue("has\nnl"), "'has\nnl'");
 });

@@ -18,6 +18,7 @@ import {
   lookupManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
+import { writeManagedDemotedMarker } from "./demoted-marker.ts";
 import type { ManagedHaMemberRecord } from "./ha-member.ts";
 
 /**
@@ -212,6 +213,42 @@ async function assertRejectsMissing(path: string): Promise<void> {
   }
   assert(missing, `${path} should be gone`);
 }
+
+test("a demoted member is held on boot and never started on local release", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker();
+    const demoted = record({ managedId: REPLICA_ID, role: "replica" });
+    await Deno.mkdir(`${layout.stateDir}/managed/${REPLICA_ID}`, {
+      recursive: true,
+    });
+    await writeManagedDemotedMarker(
+      layout,
+      REPLICA_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    assertEquals(
+      await applyBootHold("unclean", {
+        layout,
+        run: fake.run,
+        listMembers: () => Promise.resolve([demoted]),
+      }),
+      true,
+    );
+    assertEquals(fake.calls, [["compose", "-p", REPLICA_ID, "stop"]]);
+    const [hold] = await listActiveBootHolds(layout);
+    assertEquals(hold?.managedId, REPLICA_ID);
+    await releaseBootHoldLocally(hold!, { layout, run: fake.run }, "test");
+    assertEquals(
+      fake.calls.some((args) => args.at(-1) === "start"),
+      false,
+    );
+    assertEquals((await listActiveBootHolds(layout)).length, 1);
+  });
+});
 
 test("releasing locally clears the marker, removes the file and starts the engine", async () => {
   await withTempLayout(async ({ env }) => {

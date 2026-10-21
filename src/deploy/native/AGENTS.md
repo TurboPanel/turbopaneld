@@ -70,7 +70,8 @@ uses, and the same reasoning: a candidate is staged under
 the installed unit through a privileged `cmp -s` (the daemon is not root and
 `/etc/systemd/system` is, so a direct read would report "changed" every deploy),
 and installed only on a real difference. `WorkingDirectory` points at the
-`current` **symlink**, never at a release directory — which is exactly what
+`current` **symlink** of the service folder (`serviceTree`) — never at a
+release directory, which is exactly what
 makes the unit text byte-identical across promotes, so an ordinary redeploy
 writes nothing, reloads nothing, and only restarts.
 
@@ -86,8 +87,9 @@ from what is actually installed.
 `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
 `ProtectControlGroups=yes`, `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`,
 `LockPersonality=yes`, and an **empty** `CapabilityBoundingSet=` /
-`AmbientCapabilities=`. The only writable path is the site's own `shared/`
-(`ReadWritePaths=<shared>`): a Node app writes only its own site folder, never
+`AmbientCapabilities=`. The only writable paths are the site's own `shared/`
+and, for a service with a folder, its `logs/` (`ReadWritePaths=<shared> <logs>`):
+a Node app writes only its own site folder, never
 the principal's `home/`, `data/` or `tmp/` (an owner decision; cron jobs, by
 contrast, get those three through `principalReadWritePaths`). `HOME=<home>/home`
 stays read-only to the app, and `TMPDIR=/tmp` is the unit's private `/tmp`.
@@ -340,8 +342,12 @@ into it (the layout Next documents) and publishes that subtree, so `server.js`
 lands at the release root and the unit runs `node server.js`. Without
 `output: "standalone"` the whole build tree ships (with a warning) and the app
 runs `next start` on 127.0.0.1. A standalone build with an author start command
-that needs package scripts or `next` (`pnpm start`, `next start`) gets a build
-warning: the standalone tree has neither. An operator-declared
+that needs package scripts or `next` (`pnpm start`, `npm run start -- -p 3000`,
+`next start`), or a start command or startup file that points under
+`.next/standalone/` (the subtree *is* the release, so the path does not
+exist), **fails the build** before anything is
+promoted: the standalone tree has neither, and the error names `node server.js`
+as the fix. An operator-declared
 `outputDirectory` always wins (no fold, no export detection; only the start is
 looked for inside it).
 
@@ -363,7 +369,8 @@ it is required as corroboration, and a build that also emitted
 **Per-app Node version.** `nativeAppServices[].nodeVersion` is a **series**
 ("24", "24.17", "24.17.0"), not necessarily a patch pin. `apply-native-apps.ts`
 collects the distinct series this deploy needs (an app that declared none
-contributes `DEFAULT_NATIVE_APP_NODE_VERSION`) and passes them to the vendoring
+contributes `NEWEST_NATIVE_APP_NODE_VERSION`, the newest series the
+runtime registry offers — there is no separately chosen default) and passes them to the vendoring
 playbook as `-e {"node_app_versions": [...]}`; the role resolves the newest
 upstream release inside each series and points
 `vendor/node-app/<series>/current` at it. The unit's `ExecStart` is

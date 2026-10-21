@@ -16,6 +16,26 @@ import type {
 import type { HardwareProfile } from "../metrics/collector/types.ts";
 import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
 import type { TopologySnapshot } from "./topology-types.ts";
+import type { ManagedPermissionsObserved } from "./managed-permissions-observed.ts";
+export {
+  OBSERVED_LEVELS,
+  OBSERVED_MAX_COLUMNS,
+  OBSERVED_MAX_DATABASES,
+  OBSERVED_MAX_GRANTS_PER_LOGIN,
+  OBSERVED_MAX_LOGINS,
+  OBSERVED_MAX_NAME_CHARS,
+  OBSERVED_MAX_PRIVILEGES,
+} from "./managed-permissions-observed.ts";
+export type {
+  ManagedPermissionsObserved,
+  ObservedAccount,
+  ObservedAttributes,
+  ObservedDefaultGrant,
+  ObservedGrant,
+  ObservedLevel,
+  ObservedLogin,
+  ObservedMembership,
+} from "./managed-permissions-observed.ts";
 
 /**
  * Attach acknowledgement. Twin of `CellAttachVersionMessage` in
@@ -121,6 +141,67 @@ export type UpdateProgressMessage = {
   errorCode?: string;
 };
 
+/** Longest `steps[]` a `command-progress` payload carries. */
+export const COMMAND_PROGRESS_MAX_STEPS = 24;
+export const COMMAND_PROGRESS_MAX_ID_CHARS = 64;
+export const COMMAND_PROGRESS_MAX_LABEL_CHARS = 60;
+export const COMMAND_PROGRESS_MAX_DETAIL_CHARS = 200;
+/** Whole serialised payload, in bytes. */
+export const COMMAND_PROGRESS_MAX_BYTES = 8 * 1024;
+
+export type CommandProgressStepState =
+  /** Already on the server, nothing to do (shown ticked from the start). */
+  | "ready"
+  /** Planned, not started. */
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  /** Never ran because an earlier step failed or the deploy was cancelled. */
+  | "skipped";
+
+/**
+ * One step of a command's plan. Twin of `CommandProgressStep` in
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandProgressStep = {
+  /** Stable id: a kind, optionally `:` and a target (`install-php:8.3`). */
+  id: string;
+  /** Plain words, user facing, no vendor platform names. */
+  label: string;
+  state: CommandProgressStepState;
+  /** ISO 8601. */
+  startedAt?: string;
+  /** ISO 8601. */
+  finishedAt?: string;
+  /** Live ticker text for the running step (the current playbook task). */
+  detail?: string;
+};
+
+export type CommandProgress = {
+  version: 1;
+  /** In execution order. */
+  steps: CommandProgressStep[];
+  /** Id of the running step, or null when none is running. */
+  current: string | null;
+  /** ISO 8601. */
+  updatedAt: string;
+};
+
+/**
+ * Daemon → control plane step plan and live progress of one command.
+ * Fire-and-forget like `update-progress`: a lost message is harmless because
+ * every message carries the whole payload.
+ */
+export type CommandProgressMessage = {
+  type: "command-progress";
+  /** Correlation id, like `update-progress.id`. */
+  id: string;
+  commandId: string;
+  at: string;
+  progress: CommandProgress;
+};
+
 /**
  * One control-plane hostname on `public-urls-update`. For an `uploaded`
  * source the key arrives as `keyEnvelope`, a `tpdaemon` envelope this daemon
@@ -200,6 +281,36 @@ export type BackupRunReportResultMessage = {
   at: string;
 };
 
+/**
+ * Control plane → daemon: read what these logins may do right now (feature
+ * `managed-permissions-read-v1`). Read only: the daemon runs SELECT / SHOW
+ * statements and nothing else. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type ManagedPermissionsRequestMessage = {
+  type: "managed-permissions-request";
+  id: string;
+  managedId: string;
+  engine: string;
+  /** Applied engine usernames (up to {@link OBSERVED_MAX_LOGINS}). */
+  logins: string[];
+  /** Postgres: databases whose objects to read. Ignored for MySQL and MariaDB. */
+  databases: string[];
+  at: string;
+};
+
+/**
+ * Daemon → control plane, on the request's `id`. Always sent: any failure is
+ * `ok: false` with a short `error`. The JSON stays under 100 KB.
+ */
+export type ManagedPermissionsResultMessage = {
+  type: "managed-permissions-result";
+  id: string;
+  ok: boolean;
+  permissions?: ManagedPermissionsObserved;
+  error?: string;
+  at: string;
+};
+
 /** Instance-wide ACME knobs for hostnames whose source is `lets-encrypt`. */
 export type InstanceAcmeWireSettings = {
   contactEmail: string;
@@ -243,6 +354,8 @@ export type DaemonMessage =
     error?: string;
     at: string;
   }
+  | ManagedPermissionsRequestMessage
+  | ManagedPermissionsResultMessage
   | {
     /**
      * Daemon-initiated, fire-and-forget: every managed replica this host runs,
@@ -592,6 +705,7 @@ export type DaemonMessage =
   }
   | InstanceUpdateMessage
   | UpdateProgressMessage
+  | CommandProgressMessage
   | InstanceUpdateResultMessage
   | {
     type: "command-dispatch";

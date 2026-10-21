@@ -69,16 +69,21 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
    runs as is missing (only the playbook can create the account). On-demand like
-   Docker; daemon-converge does not install it. Required for hostname ingress.
+   Docker on deploy; `daemon-converge` backfills tpedge, Caddy, and the ingress
+   guard on enrolled hosts (`hosting-caddy/tasks/backfill-edge-account.yml`).
+   Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
-   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
+   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`; a name must
+   pass the shared owner rule `isValidOwnerName` — lowercase, up to 28, no
+   `tp`/`systemd-` prefix or `-grp` suffix — and not be a host account name).
+   Folders for services and volumes are made by `asset-folders.ts`. Homes live
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
-   would let a tenant `ls` every account). The home itself, `sites/` and
-   `volumes/` are `0750` **root**:`<username>` (an owner can rename its
+   would let a tenant `ls` every account). The home itself and each scope folder
+   (an environment slug, or `common`) are `0750` **root**:`<username>` (an owner can rename its
    entries, so nothing root writes into may sit in a tenant-owned directory);
-   `home/` (the passwd home, `useradd -d <root>/<username>/home`), `data/` and
+   `home/` (the passwd home, `useradd -d <root>/<username>/home`) and
    `tmp/` are `0700` `username:<username>`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
@@ -90,7 +95,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    accounts are adopted and never renumbered. The primary group is the
    standard Debian per-user group: named after the user (`<username>`), gid in
    the same band. Username max length is **28** (keep in sync with instance
-   `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID override is supplied and the
+   `MAX_PRINCIPAL_USERNAME_LENGTH`). A name reserved for the host's own
+   accounts is refused here before useradd/groupadd
+   (`src/deploy/reserved-principal-names.ts`); tp-host's `TP_RESERVED_NAMES`
+   must gain the same new names (owner action: flagged, not done in this
+   change). When a GID override is supplied and the
    group `<username>` already exists with a different numeric GID, ensure fails
    (conflict) instead of silently attaching the principal to that group. An
    existing group `<username>` is adopted only when its gid is in the band and,
@@ -336,11 +345,26 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   `sequence`. The file is the durability source of truth; the in-memory buffer
   is only a batching cache.
 - **Phases** — lines are tagged with the deploy step they belong to: `prepare`,
-  `pull`, `fetch`, `build`, `release-promote`, `pre-deploy`, `compose-up`,
-  `health`, `post-deploy`, plus `hooks`, `managed-apply`, `lifecycle-start` /
-  `lifecycle-stop` / `lifecycle-restart`, and `stop` (`COMMAND_LOG_PHASES` in
-  `src/logs/contracts.ts`). `fetch` / `release-promote` bracket the Git-backed
-  release engine; its build output shares the existing `build` phase.
+  `install-docker`, `install-gateway`, `install-runtime`, `install-web-server`,
+  `install-build-tool`, `pull`, `fetch`, `build`, `release-promote`,
+  `pre-deploy`, `compose-up`, `health`, `post-deploy`, plus `hooks`,
+  `managed-apply`, `lifecycle-start` / `lifecycle-stop` / `lifecycle-restart`,
+  and `stop` (`COMMAND_LOG_PHASES` in `src/logs/contracts.ts`). `fetch` /
+  `release-promote` bracket the Git-backed release engine; its build output
+  shares the existing `build` phase. The `install-*` phases bracket the
+  on-demand playbooks (Docker, gateway, Node / Deno, web engines + PHP, the
+  build tool): each task start is one transcript line, failures carry their
+  message, raw playbook stdout is never streamed.
+- **Step plan** (`src/commands/deploy-progress.ts`, `deploy-progress-plan.ts`)
+  — before `prepare`, the deploy probes what is already on the host (Docker
+  engine, gateway, vendored runtimes, web engine binaries, PHP series, build
+  tool) without installing anything and sends a `command-progress` cell
+  message: the ordered step list (`ready` for what is present, `pending`
+  otherwise), then one message per step transition and a throttled `detail`
+  (≤ 1 per 2 s) while a playbook runs. On failure or cancel a final payload
+  (`running` → `failed` / `skipped`, `pending` → `skipped`) goes out before
+  `command-outcome`. The planner only runs when the router supplied a sender;
+  hermetic callers get the no-op reporter and never probe the host.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
   zero-based and gap-free per command (the first upload is always `seq = 0`),
   and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.
@@ -648,14 +672,84 @@ and `:ro` blocks writes to the socket *file*, not Engine API calls — so a
 remote-code bug in either used to be full Docker control of the host and every
 co-hosted tenant with it.
 
-One `docker-socket-proxy` container per host lives in the shared ingress
-project (`SOCKET_PROXY_COMPOSE_SERVICE_NAME`), holds the only socket mount, and
-answers `CONTAINERS` and `EVENTS` — what a Docker provider reads — with
-everything else, `POST` included, off. The shared HTTP Traefik and every
-per-service raw-TCP/UDP Traefik point at it with
-`--providers.docker.endpoint=tcp://docker-socket-proxy:2375` over the ingress
-network they already join; the per-service files mount nothing at all, so the
-proxy count stays one per host rather than one per service.
+One `docker-socket-proxy` container per host holds the only socket mount. It
+is **its own system component**, not a service of the shared Traefik's project:
+compose project `turbopanel-docker-proxy` (`DOCKER_PROXY_PROJECT`),
+`container_name: turbopanel-docker-proxy` (`DOCKER_PROXY_CONTAINER_NAME`), both
+plain readable names with no allocated id, image
+`tecnativa/docker-socket-proxy:v0.5.0` (HAProxy 3.x; the upstream tag carries a
+`v` since 0.4.0). `dockerProxyCompose(ingressNetwork)` renders it; the applied
+file is `<stateDir>/ingress/docker-proxy/docker-compose.yml`, applied the same
+pending-then-rename way as the Traefik files. It answers `CONTAINERS` and
+`EVENTS` (plus the image's own ping and version defaults) with everything else,
+`POST` included, off; the upgrade to v0.5.0 changed none of those defaults (it
+only added the pause / unpause switches, which are POST and stay off).
+
+**Image pins** (`ingress.ts`): `traefik:v3.7.16` and
+`tecnativa/docker-socket-proxy:v0.5.0`; `PLATFORM_IMAGE_REPOSITORIES`
+(`compose-final-policy.ts`) lists the repositories, and a test keeps both pins
+in step with the rendered documents. Traefik 3.7 needed no flag or compose
+change here; from 3.7.12 it logs one startup warning per entrypoint that does not set
+`http.aliasHeadersStrategy` (the default `keep` is the old behaviour, so none is
+set), and 3.7.13+ answers rootless request targets with 400 and 3.7.15+ rejects
+CONNECT with 501.
+
+**One proxy per host.** A host has exactly one ingress network (the
+`hosting-ingress` descriptor is a single file per server; per-service Traefiks
+join the same network), so one proxy, attached to that network and no other,
+serves every Traefik. It already could list every container on the host, so
+sharing it adds no cross-organization exposure; a proxy per network would only
+add a name to keep unique. The proxy has no published ports, a read-only socket
+mount, and no platform labels on purpose: the Docker gate must keep seeing an
+unlabelled socket bind as a finding until its stage-3 switch removes the proxy.
+
+**How a Traefik finds it.** Unchanged: `--providers.docker.endpoint=
+tcp://docker-socket-proxy:2375` over the ingress network. The compose service
+key is `docker-socket-proxy` and the document also states it as an explicit
+network alias, so the name survives a rename of the service key. Neither
+Traefik document has `depends_on` or the proxy service any more; ordering is
+the apply order below, and Traefik's Docker provider retries a refused or
+unresolved connection with backoff (checked on a real daemon: Traefik started
+before the proxy picks up routes once the proxy appears, with no restart; a
+proxy restart under a running Traefik recovers and new containers are still
+discovered through events). Per-service raw TCP/UDP Traefiks reach the proxy
+the same way and mount nothing.
+
+**Apply order** (`planDockerProxy`, pure, in `docker-proxy-plan.ts`; the shared
+ingress apply in `ensureHostingIngress` runs the steps):
+
+- proxy wanted (shared Traefik on the proxy, or gate mode while a service
+  Traefik file still names it): `start-proxy`, then `up-traefik`, then
+  `retire-legacy` if the old in-project proxy container still exists;
+- proxy not wanted (gate mode, nobody left on it): `up-traefik` first, then
+  `retire-legacy` and `remove-proxy` (`compose -p turbopanel-docker-proxy down`
+  and the compose directory removed), so no Traefik loses its Docker source
+  before it has another.
+
+A TCP/UDP deploy on the proxy (`ensureServiceIngress`) calls the same
+`ensureDockerProxy` (idempotent: skipped when the applied file is current, no
+pending file is left and the container runs), so it no longer needs a shared
+Traefik project to exist.
+
+**Upgrading a host that runs the coupled layout** (proxy as a second service in
+the project named by the ingress network id, container
+`<ingress-id>-docker-socket-proxy-1`). The first converge after the change
+(`system.reconcile` or any deploy that renders the shared ingress):
+
+1. starts `turbopanel-docker-proxy` on the ingress network; for a moment both
+   proxies answer to the alias `docker-socket-proxy` and both read the same
+   socket, so nothing is repointed;
+2. `compose up --remove-orphans` on the Traefik document without the proxy
+   (compose removes the old proxy as an orphan; the Traefik is recreated once,
+   because `depends_on` is gone and the image pin changed, which is a brief
+   refusal on the loopback port that the hosting Caddy retries);
+3. removes any old proxy container still found by its compose labels.
+
+Steady state afterwards touches nothing. If step 1 fails the deploy stops
+before any Traefik is touched and the old proxy keeps serving. Rollback is a
+redeploy of the previous release, which brings the coupled layout back and
+leaves the new proxy to be removed by hand (`docker compose -p
+turbopanel-docker-proxy down`).
 
 **Docker gate stage 3 (per-host switch, off by default).** When the root-owned
 `/opt/turbopanel/lib/docker-gate/ingress-socket.on` and the gate's
@@ -663,29 +757,30 @@ proxy count stays one per host rather than one per service.
 Traefiks instead mount that directory read-only at `/var/run/turbopanel-gate`
 and use `unix:///var/run/turbopanel-gate/docker.sock`: the root-owned gate's
 read-only listener, which answers only ping / version / events / container list
-and inspect. The shared project then drops the proxy service (`--remove-orphans`
-deletes the container) once no per-service compose file on disk still names
+and inspect. The proxy project is then removed (after the Traefik has switched)
+once no per-service compose file on disk still names
 `tcp://docker-socket-proxy:2375` (`serviceIngressUsesSocketProxy`). The
 anonymous shared Traefik (no descriptor, so no ingress label) keeps the proxy.
 Without the switch nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
 
-Both Traefik compose files are applied, not just written: the document goes to
-`docker-compose.pending.yml`, `compose up` runs on it, and only a successful
-`up` renames it over `docker-compose.yml`. So the applied file is what last
-came up, and the proxy check reads reality, not intent (a failed `up` leaves the
-pending file, which also counts as a proxy user: it may have created a
-container). Switch turned off again: a service Traefik that goes back to the
-proxy first puts the proxy back into a gate-mode shared project
-(`ensureSharedSocketProxy`: same gate Traefik plus the proxy, so the shared
-Traefik is not recreated). That covers a TCP/UDP-only deploy, which never
-renders the shared project. A host with no shared project at all has never had
-a proxy (unchanged).
+The Traefik compose files and the proxy's own file are applied, not just
+written: the document goes to `docker-compose.pending.yml`, `compose up` runs on
+it, and only a successful `up` renames it over `docker-compose.yml`. So the
+applied file is what last came up, and the proxy check reads reality, not intent
+(a failed `up` leaves the pending file, which also counts as a proxy user: it
+may have created a container). Switch turned off again: a service Traefik that
+goes back to the proxy brings the proxy project back itself
+(`ensureDockerProxy`), with the shared Traefik untouched.
 
 Proven on a real Docker daemon (2026-09-18): Traefik's own
 `GET /containers/json` succeeds through the proxy, `/images/json`,
 `/networks`, `/volumes`, `/info` and `POST /containers/create` all answer 403,
-and `/var/run/docker.sock` is absent from the Traefik container. `ingress.ts`
-is the only writer of these files; `ingress.test.ts` pins the invariant.
+and `/var/run/docker.sock` is absent from the Traefik container. The split
+layout was re-proven locally on Traefik 3.7.16 and proxy v0.5.0 (reads 200,
+images / networks / volumes / info and every POST 403, route discovery, late
+proxy start, proxy restart, and the upgrade from the coupled layout).
+`ingress.ts` is the only writer of these files; `ingress.test.ts` and
+`docker-proxy.test.ts` pin the invariant.
 
 ## Shared HTTP ingress identity
 
@@ -788,6 +883,64 @@ Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned
 **never** `traefik.enable`. A missing `turbopanel-system` compose file is
 authoritative absence (`null`).
 
+## Volume folders and who owns the files in them
+
+A volume with a `folder` on `storageMaterial[]` is `<owner>/<scope>/volumes/<name>`
+(`materializeStorageEntries` makes it through `ensureAssetFolder`: the record of
+its components, then `<owner>:<owner> 0750` on the folder itself). Nothing
+below the folder is ever re-owned: no recursive chown, and never to root.
+
+How ownership inside a volume is handled when the container's user is not the
+site owner's Linux user:
+
+- **No `user:` in the compose file.** The daemon runs the container as the
+  owner's own `uid:gid` (read from the account on the host), so files it writes
+  belong to the owner and the owner sees them over SFTP and in backups.
+- **A `user:` in the compose file** (any user, `root` included). The compose
+  file is never refused and the daemon does not rewrite it. The container runs
+  as that user, and files it creates keep that user's ids. The volume root is
+  `<owner>:<owner> 0750`, so a declared user that is neither the owner nor root
+  would not be able to read or write it. For a **numeric** declared user
+  (`999` or `999:999`) the daemon therefore gives that one uid an access entry
+  and a default entry on the volume root (`setfacl -m u:<uid>:rwx,d:u:<uid>:rwx`
+  through `tp-host setfacl`, `deploy/volume-access.ts`), on every deploy because
+  a later mode change on the folder drops it. Only the volume root gets it:
+  nothing inside is touched, nothing is re-owned (no chown, never to root), and
+  files already in the folder keep the access they had; the default entry means
+  files the container creates later stay open to that uid. The uid is whatever the compose file declares; the owner already chose
+  that container, so the host does not check it against other accounts. A declared user
+  given by **name** cannot be mapped to an id on the host (the names live in
+  the image), so it gets no entry and the deploy log says so; use the numeric
+  uid to have one. On a filesystem without access lists `setfacl` fails; the
+  deploy goes on and logs plainly that the container may not be able to write
+  the folder (run it as the owner's ids or use a named Docker volume). `root` in
+  the container can write and its files stay root's; the owner can still delete
+  or rename anything in their own folder (a directory's write permission decides
+  that), but cannot change the contents or modes of a file owned by another uid.
+- **A named Docker volume** (provider `docker`) is outside this tree and its
+  contents are not touched; it stays the way to run an image that insists on a
+  fixed user. A volume linked to a site owner (a principal on its storage row)
+  is that owner's, like the owner's folders: a container that mounts it and
+  names no `user:` runs as the owner. Docker creates the volume `root:root
+  0755`, which that container could not write, so before `compose up` each such
+  mount path gets one non-recursive `chown <uid>:<gid>` through the service's
+  own image (`deploy/named-volume-owner.ts`). It applies when the daemon set the
+  user, or when the compose file declares exactly the owner's uid; any other
+  declared user is never changed. Nothing inside the volume is touched, so files
+  an earlier root run left there stay root's. A bind whose source is inside the
+  deployment folder (a relative `./files`) belongs to the platform, not the
+  owner; a container running as a numeric user cannot write it, and the deploy
+  log says so and points to a volume folder (the compose file is not refused).
+- One container cannot mount volumes of two site owners with defaulted users;
+  that deploy fails with a plain message.
+
+Bind sources are allowed only inside the volume folders this deploy was sent
+(`ownerTree` in `compose-host-paths.ts`, mirrored by the Docker gate): a service
+folder (`releases/` is sealed code, `shared/` is the web side's state), another
+owner's folder and a sibling volume are refused even when host-level features
+are approved, and a link left inside a volume must still resolve inside it.
+Container paths and volume subpaths are shape-checked (`assertMountShape`).
+
 ## Native Node/Next runtime
 
 Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next services
@@ -797,6 +950,20 @@ Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next service
 
 Moved to [`site/AGENTS.md`](./site/AGENTS.md) — engine drivers, vhost
 materialization, PHP-FPM wiring, managed-directory sites.
+
+## Hiding web server names (`hideWebServerNames`)
+
+`environment.deploy` carries an optional `hideWebServerNames` (absent = off, so
+an older control plane changes nothing; the control plane sends the effective
+per-server value, on by default). When true: every hosting Caddy site block
+(HTTP, HTTPS, `www` redirects) gets `header { -Server -Via -X-Powered-By defer }`
+(`siteSnippet`; `defer` so the removal runs after the proxy copied the
+upstream's headers, which also covers Traefik-routed containers); each nginx
+vhost gets `server_tokens off`; each Apache vhost gets `ServerSignature Off`
+and `ServerTokens Prod` (server-wide, so written beside the `Listen` lines,
+outside the block). OpenLiteSpeed already runs with `showVersionNumber 0`.
+It applies on the environment's next deploy; there is no fan-out command.
+PHP's `expose_php` stays off in the runtime config; nothing here edits it.
 
 ## The PHP shell dispatcher
 
@@ -929,3 +1096,7 @@ switch, so a cancel during the second service's build answers `too_late`; the
 unsandboxed (development) build kills its shell, not necessarily grandchildren; a
 cancel behind another build waiting for the single build slot takes effect when the
 slot frees.
+
+## Hostname takeover (`takeoverHostnames`)
+
+`environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.
