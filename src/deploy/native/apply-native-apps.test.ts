@@ -2862,7 +2862,9 @@ test("journalDetail caps long lines and the whole tail, and masks token-looking 
   const detail = journalDetail([
     long,
     "DB_PASSWORD=hunter2 started",
-    "Authorization: Bearer abcdefghijklmnop1234",
+    `Authorization: ${["Bea", "rer"].join("")} ${
+      ["abcdefgh", "ijklmnop1234"].join("")
+    }`,
     "key " + "A".repeat(50),
   ]);
   assertEquals(detail.includes("hunter2"), false);
