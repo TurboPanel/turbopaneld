@@ -1947,10 +1947,15 @@ export type ManagedApplyDatabaseOp = {
   /**
    * Postgres only, on a create with `ownerRole`. Asked for by the customer:
    * a database that already exists with another owner (and may hold data) is
-   * moved onto its owner role. The database and everything in it that is not
-   * part of an extension is handed to the owner role in one transaction; no
-   * data is touched. Without it an existing database is left as it is.
-   * Needs `managed-database-convert-v1`.
+   * moved onto its owner role. What is in it (schemas, tables and partitions,
+   * views, sequences, routines, types, operators, collations, statistics, text
+   * search objects, conversions, foreign servers; nothing that belongs to an
+   * extension) is handed over in one transaction that gives up after five
+   * seconds waiting for a lock, then the database itself moves. No data is
+   * touched, and a failure leaves the old owner so a repeat finishes the job.
+   * It also repeats safely on a database that already has its owner role,
+   * picking up what other roles made since. Without it an existing database
+   * is left as it is. Needs `managed-database-convert-v1`.
    */
   convertExisting?: boolean;
 };

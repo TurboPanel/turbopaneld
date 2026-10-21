@@ -109,7 +109,8 @@ The control plane sends those only to a primary that lists it (else 409
 **Managed database convert (`managed-database-convert-v1`).** No message: it
 says this daemon honours `databases[].convertExisting` on a Postgres create
 with `ownerRole`: an existing database (platform admin's or a login's, data
-and all) is handed to its owner role in one transaction, ownership only. The
+and all) is handed to its owner role, ownership only: the objects in one
+transaction with a 5 s lock timeout, then the database itself. The
 control plane sends it only to a primary that lists it.
 
 **Managed permissions read (`managed-permissions-read-v1`).** Same shape as

@@ -191,6 +191,41 @@ for (const series of SERIES) {
         assertEquals(before.success, false);
         assertStringIncludes(before.stderr, "must be owner");
 
+        // Things the platform admin made: partitions and the rarer kinds.
+        await value(`
+          CREATE TABLE public.events (id int, at date) PARTITION BY RANGE (at);
+          CREATE TABLE public.events_2026 PARTITION OF public.events
+            FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+          CREATE TABLE public.pairs (a int, b int);
+          CREATE STATISTICS public.pairs_st ON a, b FROM public.pairs;
+          CREATE FUNCTION public.eq(int, int) RETURNS bool LANGUAGE sql AS 'SELECT $1 = $2';
+          CREATE OPERATOR public.=== (LEFTARG = int, RIGHTARG = int, FUNCTION = public.eq);
+          CREATE COLLATION public.c2 (provider = libc, locale = 'C');
+          CREATE TEXT SEARCH DICTIONARY public.d1 (TEMPLATE = simple);
+          CREATE TEXT SEARCH CONFIGURATION public.c1 (COPY = pg_catalog.english);
+          CREATE CONVERSION public.cv FOR 'LATIN1' TO 'UTF8' FROM iso8859_1_to_utf8;
+          CREATE DOMAIN public.pos AS int CHECK (VALUE > 0);
+          CREATE TYPE public.rng AS RANGE (subtype = int);
+          CREATE FOREIGN DATA WRAPPER w;
+          GRANT USAGE ON FOREIGN DATA WRAPPER w TO PUBLIC;
+          CREATE SERVER srv FOREIGN DATA WRAPPER w;
+          INSERT INTO public.events VALUES (1, '2026-05-05');
+        `);
+        const strays = () =>
+          value(`SELECT count(*) FROM (
+            SELECT relowner o FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r','p','v','m','f','S')
+            UNION ALL SELECT oprowner FROM pg_operator WHERE oprnamespace = 'public'::regnamespace
+            UNION ALL SELECT collowner FROM pg_collation WHERE collnamespace = 'public'::regnamespace
+            UNION ALL SELECT stxowner FROM pg_statistic_ext
+            UNION ALL SELECT cfgowner FROM pg_ts_config WHERE cfgnamespace = 'public'::regnamespace
+            UNION ALL SELECT dictowner FROM pg_ts_dict WHERE dictnamespace = 'public'::regnamespace
+            UNION ALL SELECT conowner FROM pg_conversion WHERE connamespace = 'public'::regnamespace
+            UNION ALL SELECT srvowner FROM pg_foreign_server
+            UNION ALL SELECT proowner FROM pg_proc WHERE pronamespace = 'public'::regnamespace
+            UNION ALL SELECT typowner FROM pg_type WHERE typnamespace = 'public'::regnamespace AND typtype IN ('e','d','r')
+          ) x WHERE o::regrole::text <> 'tp_legacy_owner'`);
+        assertEquals(Number(await strays()) > 15, true);
+
         // Without the request an apply leaves the database exactly as it was.
         await engine.applyDatabases(ctx, [
           { name: "legacy", action: "create", ownerRole: true },
@@ -202,6 +237,47 @@ for (const series of SERIES) {
           ),
           "0",
         );
+
+        // A table that stays locked makes the move fail cleanly after five
+        // seconds, with nothing moved, and a repeat once it is free works.
+        const convert = () =>
+          engine.applyDatabases(ctx, [
+            {
+              name: "legacy",
+              action: "create",
+              ownerRole: true,
+              convertExisting: true,
+            },
+          ]);
+        const blocker = new Deno.Command("docker", {
+          args: [
+            "exec",
+            name,
+            "psql",
+            "-X",
+            "-q",
+            "-U",
+            "postgres",
+            "-d",
+            "legacy",
+            "-c",
+            "BEGIN; LOCK TABLE public.orders; SELECT pg_sleep(9);",
+          ],
+          stdout: "null",
+          stderr: "null",
+        }).spawn();
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        let blocked = false;
+        try {
+          await convert();
+        } catch (error) {
+          blocked = true;
+          assertStringIncludes(String(error), "lock timeout");
+        }
+        assertEquals(blocked, true);
+        assertEquals(await owners(), "mig2");
+        assertEquals(Number(await strays()) > 15, true);
+        await blocker.status;
 
         // With it, ownership moves and no data is lost.
         await engine.applyDatabases(ctx, [
@@ -244,6 +320,21 @@ for (const series of SERIES) {
           `INSERT INTO public.orders (note) VALUES ('x')`,
           "read-only transaction",
         );
+
+        assertEquals(await strays(), "0");
+        assertEquals(
+          await value(
+            `SELECT r.rolname FROM pg_foreign_data_wrapper f JOIN pg_roles r ON r.oid = f.fdwowner WHERE f.fdwname = 'w'`,
+          ),
+          "postgres",
+        );
+        assertEquals(await value(`SELECT count(*) FROM public.events`), "1");
+
+        // Something made later by another role is picked up by the next request.
+        await value(`CREATE TABLE public.later (id int)`);
+        assertEquals(Number(await strays()) > 0, true);
+        await convert();
+        assertEquals(await strays(), "0");
 
         // A repeat of the same apply changes nothing and loses nothing.
         await engine.applyDatabases(ctx, [

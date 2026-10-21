@@ -57,6 +57,7 @@ import {
   strongestPrivilege,
 } from "./postgres-sql.ts";
 import {
+  countObjectsToReassignSql,
   databaseAdminAttributesSql,
   databaseIsEmptySql,
   databaseOwnerSql,
@@ -622,6 +623,13 @@ async function createOwnerRoleDatabase(
     await runPsql(ctx, createDatabaseSql(name, names.owner));
     return;
   }
+  // Asked for by the customer: hand over what is in it even when the database
+  // already belongs to its owner role (or to the chosen login), because things
+  // made since by other roles are not the owner role's yet.
+  if (convertExisting && !RESERVED_DATABASES.has(name)) {
+    await convertDatabaseToOwnerRole(ctx, name);
+    return;
+  }
   if (
     existing[0]![0] === names.owner ||
     (ownerLogin !== undefined && !isPlatformRole(ctx, ownerLogin) &&
@@ -641,21 +649,36 @@ async function createOwnerRoleDatabase(
     await runPsql(ctx, moveDatabaseOwnerSql(name, names.owner));
     return;
   }
-  if (convertExisting && !RESERVED_DATABASES.has(name)) {
-    // Asked for by the customer: a database that exists with another owner
-    // (data and all) moves onto its owner role. Ownership only, one
-    // transaction per step; the database itself moves last, so a failure
-    // leaves it with its old owner and the next apply repeats the whole job.
-    await runPsql(ctx, ensureOwnerRolesSql(name));
-    await runPsql(ctx, reassignDatabaseObjectsSql(names.owner), name);
-    await runPsql(ctx, moveDatabaseOwnerSql(name, names.owner));
-    return;
-  }
   logInfo(
     "managed",
     `postgres database ${
       sanitizeForLog(name)
     } already exists with another owner; keeping it as it is`,
+  );
+}
+
+/**
+ * Move an existing database, data and all, onto its owner role (asked for by
+ * the customer). Ownership only. The objects move in one transaction that
+ * gives up on a lock after five seconds; the database itself moves in a
+ * separate statement after it,
+ * so a failure leaves the old owner and a repeat finishes the job. Safe to
+ * repeat: it only touches what is not the owner role's yet.
+ */
+async function convertDatabaseToOwnerRole(
+  ctx: ManagedEngineContext,
+  name: string,
+): Promise<void> {
+  const owner = ownerRoleNames(name).owner;
+  await runPsql(ctx, ensureOwnerRolesSql(name));
+  const rows = await parsePsqlRows(ctx, countObjectsToReassignSql(owner), name);
+  await runPsql(ctx, reassignDatabaseObjectsSql(owner), name);
+  await runPsql(ctx, moveDatabaseOwnerSql(name, owner));
+  logInfo(
+    "managed",
+    `postgres database ${sanitizeForLog(name)} moved onto its owner role (${
+      rows[0]?.[0] ?? "?"
+    } objects handed over)`,
   );
 }
 
