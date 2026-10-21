@@ -267,6 +267,8 @@ export type BackupRunReportMessage = {
   sizeBytes?: number;
   checksum?: string;
   path?: string;
+  /** The database a managed engine's run dumped; absent for storage copies. */
+  database?: string;
   /** `bk_` ids this run's retention removed from the policy's directory. */
   pruned?: string[];
   /** When the policy's timer next fires, read from systemd after the run. */

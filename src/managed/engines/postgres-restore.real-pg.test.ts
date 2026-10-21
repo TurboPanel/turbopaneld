@@ -1,5 +1,9 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
+import {
+  ensureOwnerRolesSql,
+  handOverPlatformObjectsSql,
+} from "./postgres-owner-role-sql.ts";
 import { createDatabaseSql } from "./postgres-sql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
 import type { ManagedEngineContext } from "./types.ts";
@@ -606,6 +610,367 @@ for (const series of SERIES) {
           ),
           "t",
           "failed restore must not drop post-backup objects",
+        );
+      } finally {
+        await docker(["rm", "-f", name]);
+      }
+    },
+  });
+  test({
+    name:
+      `real Postgres ${series}: restore hands objects to the owner role, drops later tables, and apply repairs ownership`,
+    ignore: !dockerUp,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: async () => {
+      const name = `tp-restore-own-pg${series}-${
+        crypto.randomUUID().slice(0, 8)
+      }`;
+      const started = await docker([
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        name,
+        "-e",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
+        `postgres:${series}`,
+      ]);
+      try {
+        if (!started.success || !(await waitReady(name, 60))) {
+          if (REQUIRE) {
+            throw new Error(
+              `postgres:${series} did not start: ${started.stderr}`,
+            );
+          }
+          console.warn(`skipping real Postgres ${series}: container not ready`);
+          return;
+        }
+        const run = (user: string, sqlText: string, database = "shop") =>
+          docker([
+            "exec",
+            "-i",
+            name,
+            "psql",
+            "-X",
+            "-q",
+            "-t",
+            "-A",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            user,
+            "-d",
+            database,
+          ], sqlText);
+        const sql = async (
+          user: string,
+          sqlText: string,
+          database = "shop",
+        ) => {
+          const out = await run(user, sqlText, database);
+          assertEquals(out.success, true, out.stderr);
+          return out.stdout.trim();
+        };
+        const ctx: ManagedEngineContext = {
+          containerId: name,
+          composeServiceName: "postgres",
+          rootUsername: "postgres",
+          defaultDatabase: "postgres",
+          exec: (argv, input) => docker(["exec", "-i", name, ...argv], input),
+        };
+        const backup = postgresManagedEngineRuntime.backup;
+        if (!backup) throw new TypeError("expected postgres backup support");
+        const login = (username: string, level: string) => ({
+          ...credential(username, [level]),
+          databases: ["shop"],
+        });
+        const logins = [login("migrate", "owner"), login("app", "read-write")];
+        const apply = () =>
+          postgresManagedEngineRuntime.applyCredentials(ctx, logins, {
+            ownerRoleDatabases: ["shop"],
+          });
+        await sql("postgres", ensureOwnerRolesSql("shop"), "postgres");
+        await sql(
+          "postgres",
+          "CREATE DATABASE shop OWNER tp_shop_owner;",
+          "postgres",
+        );
+        await apply();
+        await sql(
+          "migrate",
+          `CREATE TABLE public.a (id serial PRIMARY KEY, v text);
+           INSERT INTO public.a (v) VALUES ('x');`,
+        );
+        const dump = await docker([
+          "exec",
+          "-u",
+          "postgres",
+          name,
+          ...backup.dumpArgv(ctx, { database: "shop" }),
+        ]);
+        assertEquals(dump.success, true, dump.stderr);
+        await sql("migrate", "CREATE TABLE public.later (id int);");
+
+        const restored = await docker(
+          [
+            "exec",
+            "-i",
+            "-u",
+            "0",
+            name,
+            ...backup.restoreArgv(ctx, { database: "shop" }),
+          ],
+          dump.bytes,
+        );
+        assertEquals(restored.success, true, restored.stderr);
+
+        assertEquals(
+          await sql(
+            "postgres",
+            `SELECT tableowner || ',' || (to_regclass('public.later') IS NULL) FROM pg_tables WHERE tablename = 'a';`,
+          ),
+          "tp_shop_owner,true",
+          "restored table belongs to the owner role and the later table is gone",
+        );
+        await sql(
+          "migrate",
+          "ALTER TABLE public.a ADD COLUMN w int; SELECT count(*) FROM public.a;",
+        );
+        assertEquals(await sql("app", "SELECT count(*) FROM public.a;"), "1");
+        await sql("app", "INSERT INTO public.a (v) VALUES ('y');");
+        await sql(
+          "migrate",
+          "ALTER SEQUENCE public.a_id_seq RESTART; CREATE TABLE public.b (id int);",
+        );
+
+        // A database restored by an earlier release is repaired by the next apply.
+        await sql(
+          "postgres",
+          "ALTER TABLE public.a OWNER TO postgres; ALTER SEQUENCE public.a_id_seq OWNER TO postgres;",
+        );
+        assertEquals(
+          (await run("migrate", "ALTER TABLE public.a ADD COLUMN z int;"))
+            .success,
+          false,
+          "the migration login is refused before the repair",
+        );
+        await apply();
+        await sql("migrate", "ALTER TABLE public.a ADD COLUMN z int;");
+        assertEquals(
+          await sql(
+            "postgres",
+            `SELECT c.relowner::regrole::text FROM pg_class c WHERE relname = 'a_id_seq';`,
+          ),
+          "tp_shop_owner",
+        );
+      } finally {
+        await docker(["rm", "-f", name]);
+      }
+    },
+  });
+
+  test({
+    name:
+      `real Postgres ${series}: hand-over leaves extension and other roles' objects, waits at most 5s for a lock, rolls back with the restore, and skips an admin-owned database`,
+    ignore: !dockerUp,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: async () => {
+      const name = `tp-handover-pg${series}-${crypto.randomUUID().slice(0, 8)}`;
+      const started = await docker([
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        name,
+        "-e",
+        "POSTGRES_HOST_AUTH_METHOD=trust",
+        `postgres:${series}`,
+      ]);
+      try {
+        if (!started.success || !(await waitReady(name, 60))) {
+          if (REQUIRE) {
+            throw new Error(
+              `postgres:${series} did not start: ${started.stderr}`,
+            );
+          }
+          console.warn(`skipping real Postgres ${series}: container not ready`);
+          return;
+        }
+        const psqlArgs = (database: string) => [
+          "exec",
+          "-i",
+          name,
+          "psql",
+          "-X",
+          "-q",
+          "-t",
+          "-A",
+          "-v",
+          "ON_ERROR_STOP=1",
+          "-U",
+          "postgres",
+          "-d",
+          database,
+        ];
+        const sql = async (sqlText: string, database = "shop") => {
+          const out = await docker(psqlArgs(database), sqlText);
+          assertEquals(out.success, true, out.stderr);
+          return out.stdout.trim();
+        };
+        const ctx: ManagedEngineContext = {
+          containerId: name,
+          composeServiceName: "postgres",
+          rootUsername: "postgres",
+          defaultDatabase: "postgres",
+          exec: (argv, input) => docker(["exec", "-i", name, ...argv], input),
+        };
+        const backup = postgresManagedEngineRuntime.backup;
+        if (!backup) throw new TypeError("expected postgres backup support");
+        const logins = [{
+          ...credential("migrate", ["owner"]),
+          databases: ["shop"],
+        }];
+        const apply = () =>
+          postgresManagedEngineRuntime.applyCredentials(ctx, logins, {
+            ownerRoleDatabases: ["shop"],
+          });
+        const ownerOf = (relation: string) =>
+          sql(
+            `SELECT relowner::regrole::text FROM pg_class WHERE oid = '${relation}'::regclass;`,
+          );
+
+        await sql(ensureOwnerRolesSql("shop"), "postgres");
+        await sql("CREATE DATABASE shop OWNER tp_shop_owner;", "postgres");
+        await apply();
+        await sql(
+          `CREATE EXTENSION pgcrypto SCHEMA public;
+           CREATE ROLE other LOGIN;
+           GRANT CONNECT ON DATABASE shop TO other;
+           GRANT USAGE, CREATE ON SCHEMA public TO other;
+           CREATE TABLE public.a (id int);
+           ALTER TABLE public.a OWNER TO postgres;`,
+        );
+        assertEquals(
+          (await docker(
+            psqlArgs("shop"),
+            "CREATE TABLE public.theirs (id int);".replace(
+              "CREATE",
+              "SET ROLE other; CREATE",
+            ),
+          )).success,
+          true,
+        );
+
+        // Apply hands the admin's table over; the extension's functions and
+        // the other role's table stay where they are.
+        await apply();
+        assertEquals(await ownerOf("public.a"), "tp_shop_owner");
+        assertEquals(await ownerOf("public.theirs"), "other");
+        assertEquals(
+          await sql(
+            `SELECT proowner::regrole::text FROM pg_proc WHERE proname = 'digest' LIMIT 1;`,
+          ),
+          "postgres",
+          "an extension's functions stay with the extension",
+        );
+
+        // A busy table fails the apply within about 5 s and changes nothing.
+        await sql("ALTER TABLE public.a OWNER TO postgres;");
+        const locker = new Deno.Command("docker", {
+          args: [
+            ...psqlArgs("shop").filter((arg) => arg !== "-q"),
+            "-c",
+            "BEGIN; LOCK TABLE public.a IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(40);",
+          ],
+          stdin: "null",
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn();
+        await delay(1000);
+        const startedAt = Date.now();
+        let message = "";
+        try {
+          await apply();
+        } catch (error) {
+          message = String(error);
+        }
+        const elapsedMs = Date.now() - startedAt;
+        try {
+          locker.kill("SIGTERM");
+        } catch {
+          /* already exited */
+        }
+        await locker.status.catch(() => undefined);
+        // Killing the client leaves the server session holding the lock.
+        await sql(
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%pg_sleep(40)%' AND pid <> pg_backend_pid();",
+        );
+        assertStringIncludes(message, "lock timeout");
+        if (elapsedMs > 20_000) {
+          throw new Error(`apply waited ${elapsedMs}ms for a lock`);
+        }
+        assertEquals(await ownerOf("public.a"), "postgres");
+        await apply();
+        assertEquals(await ownerOf("public.a"), "tp_shop_owner");
+
+        // A hand-over that fails rolls the whole restore back.
+        const dump = await docker([
+          "exec",
+          "-u",
+          "postgres",
+          name,
+          ...backup.dumpArgv(ctx, { database: "shop" }),
+        ]);
+        assertEquals(dump.success, true, dump.stderr);
+        await sql("CREATE TABLE public.made_later (id int);");
+        const argv = backup.restoreArgv(ctx, { database: "shop" });
+        argv[argv.length - 1] = handOverPlatformObjectsSql(
+          "(SELECT 'no_such_role')",
+          "ARRAY[current_user::text]",
+        ) + "\n" + argv[argv.length - 1];
+        const failed = await docker(
+          ["exec", "-i", "-u", "0", name, ...argv],
+          dump.bytes,
+        );
+        assertEquals(failed.success, false);
+        assertStringIncludes(failed.stderr, "database is unchanged");
+        assertEquals(
+          await sql("SELECT to_regclass('public.made_later') IS NOT NULL;"),
+          "t",
+          "a failed hand-over leaves the database as it was",
+        );
+
+        // A database the platform admin owns is restored as before.
+        await sql("CREATE DATABASE plain;", "postgres");
+        await sql("CREATE TABLE public.p (id int);", "plain");
+        const plainDump = await docker([
+          "exec",
+          "-u",
+          "postgres",
+          name,
+          ...backup.dumpArgv(ctx, { database: "plain" }),
+        ]);
+        assertEquals(plainDump.success, true, plainDump.stderr);
+        const plainRestore = await docker(
+          [
+            "exec",
+            "-i",
+            "-u",
+            "0",
+            name,
+            ...backup.restoreArgv(ctx, { database: "plain" }),
+          ],
+          plainDump.bytes,
+        );
+        assertEquals(plainRestore.success, true, plainRestore.stderr);
+        assertEquals(
+          await sql(
+            "SELECT relowner::regrole::text FROM pg_class WHERE oid = 'public.p'::regclass;",
+            "plain",
+          ),
+          "postgres",
         );
       } finally {
         await docker(["rm", "-f", name]);

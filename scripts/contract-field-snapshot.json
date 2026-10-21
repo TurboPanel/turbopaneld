@@ -246,6 +246,7 @@
       { "name": "at", "required": true, "type": "string" },
       { "name": "backupId", "required": false, "type": "string" },
       { "name": "checksum", "required": false, "type": "string" },
+      { "name": "database", "required": false, "type": "string" },
       { "name": "error", "required": false, "type": "string" },
       { "name": "finishedAt", "required": true, "type": "string" },
       { "name": "id", "required": true, "type": "string" },
