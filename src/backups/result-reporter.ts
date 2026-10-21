@@ -120,6 +120,11 @@ function isPrunedList(value: unknown): boolean {
     value.every((entry) => isRunToken(entry));
 }
 
+function isDatabaseName(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0 &&
+    value.length <= MAX_DATABASE_CHARS;
+}
+
 function checkArtifactFields(raw: Record<string, unknown>): string | null {
   if (!isAbsent(raw.backupId) && !isRunToken(raw.backupId)) {
     return "invalid backupId";
@@ -145,12 +150,7 @@ function checkArtifactFields(raw: Record<string, unknown>): string | null {
   ) {
     return "invalid path";
   }
-  const database = raw.database;
-  if (
-    !isAbsent(database) &&
-    !(typeof database === "string" && database.length > 0 &&
-      database.length <= MAX_DATABASE_CHARS)
-  ) {
+  if (!isAbsent(raw.database) && !isDatabaseName(raw.database)) {
     return "invalid database";
   }
   if (!isAbsent(raw.pruned) && !isPrunedList(raw.pruned)) {
