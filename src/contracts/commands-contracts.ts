@@ -2307,6 +2307,12 @@ export type ProxySqlUserPayload = {
    */
   tool?: boolean;
   /**
+   * Connect straight through the front door, no connection sharing (a
+   * PostgreSQL login only). The daemon ignores it for a login with
+   * `allowedSources` and for a root login. Absent means false (control-plane skew).
+   */
+  straightThrough?: boolean;
+  /**
    * Where this login may be used from: plain IPv4/IPv6 addresses or a
    * trailing-`%` prefix such as `203.0.113.%` or `2001:db8:1:%`. Present —
    * even empty — limits the login to these places (a root login also always
@@ -6426,7 +6432,7 @@ export function parseEnvironmentDeployPayload(
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
       deployStrategy: parseDeployStrategy(value.deployStrategy),
-      migrations: parseDeployMigrations(value.migrations),
+      migrations: parseDeployMigrations(value.straightThroughs),
       healthTimeoutSeconds: parseDeployHealthTimeout(
         value.healthTimeoutSeconds,
       ),
@@ -9169,6 +9175,14 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
       throw new TypeError("Invalid managed.ingress.reconcile user tool");
     }
     user.tool = value.tool;
+  }
+  if (value.straightThrough !== undefined) {
+    if (typeof value.straightThrough !== "boolean") {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user straightThrough",
+      );
+    }
+    user.straightThrough = value.straightThrough;
   }
   parseProxySqlUserLimits(value, user);
   return user;
