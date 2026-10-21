@@ -39,6 +39,19 @@ test("formatStandbySeedFailure sanitizes non-empty stderr", () => {
   assertEquals(text.includes("unknown"), false);
 });
 
+test("formatStandbySeedFailure keeps dump and import stderr tails together", () => {
+  const text = formatStandbySeedFailure({
+    stdout: "import note",
+    stderr:
+      "dump_exit=1 import_exit=1\n----- dump stderr -----\nERROR 2013 Lost connection\n----- import stderr -----\nERROR 2013 at line 259",
+  });
+  assertEquals(text.includes("dump_exit=1"), true);
+  assertEquals(text.includes("ERROR 2013 Lost connection"), true);
+  assertEquals(text.includes("at line 259"), true);
+  assertEquals(text.includes("import note"), true);
+  assertEquals(text.includes("unknown"), false);
+});
+
 test("isTransientStandbySeedFailure matches empty output and init-window codes", () => {
   assertEquals(
     isTransientStandbySeedFailure({
@@ -69,6 +82,15 @@ test("isTransientStandbySeedFailure matches empty output and init-window codes",
       success: false,
       stdout: "",
       stderr: "ERROR 2013 (HY000): Lost connection to server during query",
+    }),
+    true,
+  );
+  assertEquals(
+    isTransientStandbySeedFailure({
+      success: false,
+      stdout: "",
+      stderr:
+        "dump_exit=1 import_exit=1\nERROR 2006 (HY000): MySQL server has gone away",
     }),
     true,
   );

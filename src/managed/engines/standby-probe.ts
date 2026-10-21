@@ -218,7 +218,8 @@ export async function waitMysqlFamilyRealServer(options: {
 
 // Client-style `ERROR 1133 (28000) at line 11:` / `ERROR 2013 (HY000):`; a bare
 // number elsewhere in the output (a row count, a port) must not match.
-const TRANSIENT_SEED_ERROR = /\bERROR (?:1133|2002|2013)\b/;
+// 2006 is "server has gone away" — the same lost-dump class as 2013.
+const TRANSIENT_SEED_ERROR = /\bERROR (?:1133|2002|2006|2013)\b/;
 
 /** Empty exec output, or the server went away / grant tables vanished mid-init. */
 export function isTransientStandbySeedFailure(result: {
@@ -242,12 +243,17 @@ export function formatStandbySeedFailure(result: {
   if (stderr.length === 0 && stdout.length === 0) {
     return "the seed command produced no output (the database container may have restarted during the seed)";
   }
-  return sanitizeForLog(stderr || stdout);
+  // Always keep the stderr tail when both streams have text: dump vs import
+  // diagnostics are written to stderr by the seed script.
+  const combined = stderr.length > 0 && stdout.length > 0 && stderr !== stdout
+    ? `${stderr}\n${stdout}`
+    : (stderr || stdout);
+  return sanitizeForLog(combined);
 }
 
 /**
- * Run {@link execStandbySeed}; on a transient empty/1133/2002/2013 failure,
- * wait for the real server and retry the seed once.
+ * Run {@link execStandbySeed}; on a transient empty/1133/2002/2006/2013
+ * failure, wait for the real server and retry the seed once.
  */
 export async function execStandbySeedWithInitRetry(
   ctx: ManagedEngineContext,

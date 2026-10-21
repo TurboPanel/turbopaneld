@@ -84,6 +84,11 @@ test("buildMariadbStandbySeedScript registers trap before writing credentials", 
   // domain conflicts with the dump's SET GLOBAL gtid_slave_pos (error 1948).
   assertEquals(script.includes('"RESET MASTER"'), true);
   assertEquals(script.includes("SET SESSION sql_log_bin=0;"), true);
+  assertEquals(script.includes("--ignore-table=mysql.func"), true);
+  assertEquals(script.includes("dump_exit="), true);
+  assertEquals(script.includes("----- dump stderr -----"), true);
+  assertEquals(script.includes("----- import stderr -----"), true);
+  assertEquals(script.includes("net_write_timeout=3600"), true);
 });
 
 type RecordedExec = { argv: string[]; input?: string };
