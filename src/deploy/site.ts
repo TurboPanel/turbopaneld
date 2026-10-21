@@ -1803,12 +1803,27 @@ export function hostingWebMetadataFiles(
   return files;
 }
 
+/**
+ * The database certificate file a site no longer declares. It is removed when
+ * the site stops linking a managed database, so no stale CA is left behind.
+ */
+export function staleHostingMetadataNames(site: SiteApplySpec): string[] {
+  return site.dbCa === undefined ? [SITE_DB_CA_FILE_NAME] : [];
+}
+
 /** Daemon-owned site tree: metadata lives under `<base>/.turbopanel/`. */
 async function writeHostingWebMetadata(
   siteBase: string,
   site: SiteApplySpec,
 ): Promise<void> {
   const files = hostingWebMetadataFiles(site);
+  for (const name of staleHostingMetadataNames(site)) {
+    try {
+      await Deno.remove(join(siteBase, ".turbopanel", name));
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  }
   if (files.length === 0) return;
 
   const metaDir = join(siteBase, ".turbopanel");
@@ -1847,9 +1862,20 @@ async function writeReleaseHostingWebMetadata(
   release: SiteRelease,
 ): Promise<void> {
   const files = hostingWebMetadataFiles(site);
+  const metaDir = siteMetadataDir(layout, release);
+  for (const name of staleHostingMetadataNames(site)) {
+    const rm = await run(
+      "sudo",
+      hostSudoArgs(["-n", "rm", "-f", join(metaDir, name)]),
+    );
+    if (!rm.success) {
+      throw new Error(
+        rm.stderr || `Failed to remove stale hosting metadata ${name}`,
+      );
+    }
+  }
   if (files.length === 0) return;
 
-  const metaDir = siteMetadataDir(layout, release);
   const mkdir = await run(
     "sudo",
     hostSudoArgs([

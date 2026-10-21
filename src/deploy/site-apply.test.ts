@@ -1414,6 +1414,41 @@ test("applySites skips the php-fpm reload on a release promote", async () => {
   }
 });
 
+test("applySites removes a stale managed-ca.pem once the site stops declaring a database certificate", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
+    const opts = {
+      run,
+      runPlaybook,
+      releaseBindings: releaseBindingsFor("www"),
+    };
+    const caPath = join(
+      siteTreeRoot(layout),
+      ".turbopanel-hosting",
+      "managed-ca.pem",
+    );
+    await applySites(layout, "envca", [
+      {
+        ...nginxSite,
+        dbCa: {
+          variables: ["DB_CA"],
+          pem: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----",
+        },
+      },
+    ], opts);
+    assertStringIncludes(await Deno.readTextFile(caPath), "BEGIN CERTIFICATE");
+
+    await applySites(layout, "envca", [{ ...nginxSite }], opts);
+    await assertRejects(() => Deno.stat(caPath), Deno.errors.NotFound);
+  } finally {
+    await cleanup();
+  }
+});
+
 test("applySites keeps legacy behavior for a source-less site", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
