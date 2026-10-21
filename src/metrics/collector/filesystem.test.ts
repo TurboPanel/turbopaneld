@@ -332,7 +332,7 @@ test("probeRootFilesystemCapacity falls back to a readable path on the root moun
   const capacity = await probeRootFilesystemCapacity(
     [filesystemTopology({ filesystemId: "fs:a", mountpoint: "/" })],
     { statfs: deniedRootStatfs },
-    // /usr is its own filesystem here, so only /etc/os-release is on root.
+    // /usr is its own filesystem here; /etc/hostname is on root.
     mounts,
   );
   assertEquals(capacity, {
@@ -345,7 +345,7 @@ test("probeRootFilesystemCapacity falls back to a readable path on the root moun
 
 test("probeRootFilesystemCapacity does not borrow a path from another filesystem", async () => {
   const mounts = parseProcMounts(
-    "/dev/vda2 / ext4 rw 0 0\n/dev/vdb1 /usr ext4 rw 0 0\n/dev/vdc1 /etc ext4 rw 0 0\n/dev/vdd1 /proc ext4 rw 0 0\n",
+    "/dev/vda2 / ext4 rw 0 0\n/dev/vdb1 /usr ext4 rw 0 0\n/dev/vdc1 /etc ext4 rw 0 0\n",
   );
   const capacity = await probeRootFilesystemCapacity(
     [filesystemTopology({ filesystemId: "fs:a", mountpoint: "/" })],

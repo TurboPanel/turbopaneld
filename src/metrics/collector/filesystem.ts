@@ -10,6 +10,7 @@ import { statfs } from "node:fs/promises";
 
 import type { FilesystemSample } from "../../contracts/metrics-contract.ts";
 import type { FilesystemTopology } from "../../contracts/topology-types.ts";
+import { logWarn } from "../../util/logger.ts";
 import { type MountEntry, mountForPath } from "./mounts.ts";
 import type { StorageProbeResult } from "./types.ts";
 
@@ -83,12 +84,18 @@ export async function probeStorage(
 }
 
 /**
- * Paths the daemon may read that live on the root filesystem when nothing
- * else is mounted over them. The packaged daemon runs with a scoped
+ * Regular files (not symlinks, which statfs would follow elsewhere) the
+ * daemon may read that live on the root filesystem when nothing else is
+ * mounted over them. The packaged daemon runs with a scoped
  * `--allow-read` that does not include `/` itself, so `statfs("/")` is denied
  * there while these are not.
  */
-const ROOT_PROBE_FALLBACKS = ["/usr", "/etc/os-release", "/proc/1/root"];
+const ROOT_PROBE_FALLBACKS = [
+  "/etc/hostname",
+  "/etc/machine-id",
+  "/etc/passwd",
+];
+let warnedRootProbeDenied = false;
 
 /**
  * Probe a mount point's capacity. When `/` itself cannot be probed (denied by
@@ -109,6 +116,13 @@ export async function probeMountCapacity(
     }
     const probe = await probeStorage(path, io);
     if (probe) return probe;
+  }
+  if (!warnedRootProbeDenied) {
+    warnedRootProbeDenied = true;
+    logWarn(
+      "metrics",
+      "root filesystem capacity unavailable: statfs of / and every fallback path failed",
+    );
   }
   return null;
 }
