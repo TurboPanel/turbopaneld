@@ -121,6 +121,12 @@ export type ObservedLogin = {
   defaults: ObservedDefaultGrant[];
   /** True when a limit cut the lists short. */
   truncated?: boolean;
+  /**
+   * MySQL / MariaDB: views, triggers, routines and events that name this login
+   * as their definer, like `view shop.orders_v` (capped; the last entry may be
+   * `and N more`). Absent when there are none or the read was not possible.
+   */
+  definesObjects?: string[];
 };
 
 /** The report: every login asked for, in request order. */
