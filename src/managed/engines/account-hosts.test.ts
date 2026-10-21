@@ -1,8 +1,9 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import {
-  assertNoViewsDefinedBy,
+  assertNoObjectsDefinedBy,
+  definerObjectsSql,
   dropUserOnEveryHost,
-  LoginOwnsViewsError,
+  LoginOwnsObjectsError,
 } from "./account-hosts.ts";
 
 const test = Deno.test.bind(Deno);
@@ -18,8 +19,8 @@ test("dropUserOnEveryHost refuses a login that defines views and names them", as
         quoteLiteral: quote,
         query: (sql) =>
           Promise.resolve(
-            sql.includes("information_schema.VIEWS")
-              ? "shop\torders_v\nshop\tcustomers_v\n"
+            sql.includes("information_schema.TRIGGERS")
+              ? "app_user\tview\tshop\torders_v\napp_user\troutine\tshop\trecalc\n"
               : "%\n",
           ),
         run: (sql) => {
@@ -28,10 +29,10 @@ test("dropUserOnEveryHost refuses a login that defines views and names them", as
         },
         dropAccountSql: () => "DROP USER x;",
       }),
-    LoginOwnsViewsError,
-    "shop.orders_v, shop.customers_v",
+    LoginOwnsObjectsError,
+    "view shop.orders_v, routine shop.recalc",
   );
-  assertEquals((error as LoginOwnsViewsError).views.length, 2);
+  assertEquals((error as LoginOwnsObjectsError).objects.length, 2);
   assertEquals(ran, []);
 });
 
@@ -42,7 +43,7 @@ test("dropUserOnEveryHost drops a login that defines no views", async () => {
     fixedHosts: ["localhost"],
     quoteLiteral: quote,
     query: (sql) =>
-      Promise.resolve(sql.includes("information_schema.VIEWS") ? "" : "%\n"),
+      Promise.resolve(sql.includes("information_schema.TRIGGERS") ? "" : "%\n"),
     run: (sql) => {
       ran.push(sql);
       return Promise.resolve();
@@ -52,17 +53,35 @@ test("dropUserOnEveryHost drops a login that defines no views", async () => {
   assertEquals(ran, ["DROP USER x;"]);
 });
 
-test("assertNoViewsDefinedBy caps a long view list", async () => {
-  const lines = Array.from({ length: 14 }, (_, i) => `db\tv${i}`).join("\n");
+test("assertNoObjectsDefinedBy caps a long view list", async () => {
+  const lines = Array.from({ length: 14 }, (_, i) => `u\tview\tdb\tv${i}`).join(
+    "\n",
+  );
   const error = await assertRejects(
     () =>
-      assertNoViewsDefinedBy({
+      assertNoObjectsDefinedBy({
         username: "u",
         quoteLiteral: quote,
         query: () => Promise.resolve(lines),
       }),
-    LoginOwnsViewsError,
+    LoginOwnsObjectsError,
     "and 4 more",
   );
-  assertEquals((error as LoginOwnsViewsError).views.length, 11);
+  assertEquals((error as LoginOwnsObjectsError).objects.length, 11);
+});
+
+test("assertNoObjectsDefinedBy ignores rows that belong to another login", async () => {
+  await assertNoObjectsDefinedBy({
+    username: "app_user",
+    quoteLiteral: quote,
+    query: () => Promise.resolve("other\tevent\tshop\tnightly\n"),
+  });
+});
+
+test("definerObjectsSql looks at views, triggers, routines and events", () => {
+  const sql = definerObjectsSql(["a", "b"], quote);
+  for (const table of ["VIEWS", "TRIGGERS", "ROUTINES", "EVENTS"]) {
+    assertEquals(sql.includes(`information_schema.${table}`), true);
+  }
+  assertEquals(sql.includes("IN ('a', 'b')"), true);
 });

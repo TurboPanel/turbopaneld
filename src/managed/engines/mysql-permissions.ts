@@ -12,6 +12,11 @@
  * OPTION` are looked for in that tail; no token of it is ever kept.
  */
 
+import {
+  capDefinerObjects,
+  definerObjectsSql,
+  parseDefinerObjects,
+} from "./account-hosts.ts";
 import type {
   ObservedAccount,
   ObservedGrant,
@@ -912,6 +917,38 @@ export function statementLimitSql(flavour: MysqlFamilyFlavour): string {
     : `SET SESSION max_statement_time = ${PERMISSIONS_QUERY_LIMIT_MS / 1000};`;
 }
 
+/**
+ * Name the views, triggers, routines and events each existing login is the
+ * definer of, so the control plane can refuse a delete that would break them.
+ * Best effort: when the query fails or time is short the field stays absent.
+ */
+async function attachDefinerObjects(
+  logins: ObservedLogin[],
+  query: MysqlQuery,
+  deadline: PermissionsReadDeadline,
+): Promise<void> {
+  const existing = logins.filter((entry) => entry.exists);
+  if (existing.length === 0 || !deadline.roomForQuery()) return;
+  try {
+    const found = parseDefinerObjects(
+      await query(
+        definerObjectsSql(
+          existing.map((entry) => entry.username),
+          quoteLiteral,
+        ),
+      ),
+    );
+    for (const entry of existing) {
+      const objects = found.get(entry.username);
+      if (objects && objects.length > 0) {
+        entry.definesObjects = capDefinerObjects(objects);
+      }
+    }
+  } catch {
+    // Left absent: the delete is still checked on the host.
+  }
+}
+
 /** Read the report for MySQL or MariaDB (`flavour` picks the dialect). */
 export async function readMysqlFamilyPermissions(
   flavour: MysqlFamilyFlavour,
@@ -981,5 +1018,6 @@ export async function readMysqlFamilyPermissions(
       skipped.has(username),
     )
   );
+  await attachDefinerObjects(report.logins, query, deadline);
   return report;
 }
