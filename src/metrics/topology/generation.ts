@@ -10,12 +10,13 @@
  * same MAC, a signal's current reading) never touch this fingerprint, so they
  * never bump the generation.
  *
- * Sizes are deliberately NOT part of it. Memory, swap, CPU count and
- * filesystem capacities change with a resize, a balloon or (on some
- * filesystems) every write, and a generation per change would let anyone who
- * can move those numbers grow the history without bound. Every sample carries
- * the sizes it was measured against (`extended.sizes`), so a percentage is
- * taken against the size at that moment and nothing needs a new generation.
+ * Sizes (memory, swap, CPU shape, filesystem capacities) are part of it only
+ * until the control plane advertises `metrics-v8-sizes`. A control plane
+ * without that feature divides live use by the totals of the generation's
+ * first snapshot, so a resize must start a new generation or the old total
+ * sticks. Once it is negotiated every sample carries the sizes it was
+ * measured against (`extended.sizes`), nothing needs a generation for a
+ * resize, and a flood of different sizes cannot grow the history.
  *
  * The persisted file carries the fingerprint (not just the bare generation
  * number) because an override can reassign a slot — flipping which of two
@@ -48,7 +49,40 @@ export type TopologyFingerprint = {
   gpuIds: string[];
   hardwareSignalIds: string[];
   slotMapping: SlotMapping;
+  /**
+   * Machine size, present only while `metrics-v8-sizes` is not negotiated.
+   * Memory and swap totals are compared with a tolerance of
+   * `MEMORY_TOTAL_TOLERANCE_BYTES` (32 MiB): `/proc/meminfo` totals move by a
+   * few KB to a few MB across kernels, boots and balloon, which must never bump
+   * the generation; a real resize is hundreds of MB at least.
+   */
+  sizes?: TopologySizes;
 };
+
+export type TopologySizes = {
+  memoryTotalBytes: number | null;
+  swapTotalBytes: number | null;
+  filesystemCapacities: Array<{
+    filesystemId: string;
+    totalBytes: number | null;
+    totalInodes: number | null;
+  }>;
+  cpuShape: {
+    sockets: number;
+    coresPerSocket: number;
+    threadsPerSocket: number;
+    logicalCores: number;
+  };
+};
+
+export const MEMORY_TOTAL_TOLERANCE_BYTES = 32 * 1024 * 1024;
+
+let sizesNegotiated = false;
+
+/** Set from the control-plane attach: `true` once it advertises `metrics-v8-sizes`. */
+export function setTopologySizesNegotiated(value: boolean): void {
+  sizesNegotiated = value;
+}
 
 export type TopologyGenerationState = {
   generation: number;
@@ -64,8 +98,9 @@ function sortedIds<T>(items: T[], idOf: (item: T) => string): string[] {
 export function computeTopologyFingerprint(
   current: TopologySnapshotInputs,
   overrides: TopologyOverrides,
+  includeSizes = false,
 ): TopologyFingerprint {
-  return {
+  const fingerprint: TopologyFingerprint = {
     networkDeviceIds: sortedIds(current.networks, (n) => n.deviceId),
     filesystemIds: sortedIds(current.filesystems, (fs) => fs.filesystemId),
     serviceBlockDeviceIds: sortedIds(
@@ -76,12 +111,51 @@ export function computeTopologyFingerprint(
     hardwareSignalIds: sortedIds(current.hardwareSignals, (s) => s.signalId),
     slotMapping: computeSlotMapping({ ...current, generation: 0 }, overrides),
   };
+  if (includeSizes) fingerprint.sizes = sizesOf(current);
+  return fingerprint;
+}
+
+function sizesOf(current: TopologySnapshotInputs): TopologySizes {
+  return {
+    memoryTotalBytes: current.memoryTotalBytes,
+    swapTotalBytes: current.swapTotalBytes,
+    filesystemCapacities: current.filesystems
+      .map((fs) => ({
+        filesystemId: fs.filesystemId,
+        totalBytes: fs.totalBytes,
+        totalInodes: fs.totalInodes,
+      }))
+      .sort((a, b) => a.filesystemId.localeCompare(b.filesystemId)),
+    cpuShape: {
+      sockets: current.cpu.sockets,
+      coresPerSocket: current.cpu.coresPerSocket,
+      threadsPerSocket: current.cpu.threadsPerSocket,
+      logicalCores: current.cpu.cores.length,
+    },
+  };
+}
+
+function totalWithinTolerance(a: unknown, b: unknown): boolean {
+  if (a === null || b === null) return a === b;
+  if (typeof a !== "number" || typeof b !== "number") return false;
+  return Math.abs(a - b) <= MEMORY_TOTAL_TOLERANCE_BYTES;
+}
+
+/** `a` may be a record from before sizes were stored: it counts as different. */
+function sizesEqual(a: TopologySizes | undefined, b: TopologySizes): boolean {
+  if (!a) return false;
+  if (!totalWithinTolerance(a.memoryTotalBytes, b.memoryTotalBytes)) {
+    return false;
+  }
+  if (!totalWithinTolerance(a.swapTotalBytes, b.swapTotalBytes)) return false;
+  return JSON.stringify([a.filesystemCapacities, a.cpuShape]) ===
+    JSON.stringify([b.filesystemCapacities, b.cpuShape]);
 }
 
 /**
- * Compares only the fields a fingerprint holds today. A record persisted by an
- * earlier build may carry extra fields (sizes, capacities); they are ignored,
- * so upgrading never bumps the generation.
+ * Compares the identity fields, and the sizes only when `b` (this tick's
+ * fingerprint) carries them, i.e. while `metrics-v8-sizes` is not negotiated.
+ * Extra fields on a persisted record are ignored.
  */
 function fingerprintsEqual(
   a: TopologyFingerprint,
@@ -96,7 +170,8 @@ function fingerprintsEqual(
       f.hardwareSignalIds,
       f.slotMapping,
     ]);
-  return identity(a) === identity(b);
+  if (identity(a) !== identity(b)) return false;
+  return b.sizes === undefined || sizesEqual(a.sizes, b.sizes);
 }
 
 /** Pure comparison: `previous`'s generation is reused when the fingerprint is unchanged, else incremented. `null` (no prior state) starts at `0`. */
@@ -144,6 +219,8 @@ async function writePersistedState(
 export type ResolveTopologyGenerationDeps = {
   daemonStateDir?: string;
   now?: () => string;
+  /** Override the negotiated flag (tests); defaults to {@link setTopologySizesNegotiated}. */
+  sizesNegotiated?: boolean;
 };
 
 /**
@@ -164,7 +241,13 @@ export async function resolveTopologyGeneration(
 
   const [previous, fingerprint] = await Promise.all([
     readPersistedState(path),
-    Promise.resolve(computeTopologyFingerprint(current, overrides)),
+    Promise.resolve(
+      computeTopologyFingerprint(
+        current,
+        overrides,
+        !(deps.sizesNegotiated ?? sizesNegotiated),
+      ),
+    ),
   ]);
 
   const generation = computeTopologyGeneration(previous, fingerprint);
@@ -172,6 +255,15 @@ export async function resolveTopologyGeneration(
     ? previous.appliedAt
     : now();
 
-  await writePersistedState(path, { generation, appliedAt, fingerprint });
+  // On a reused generation keep the stored fingerprint, so tolerated jitter
+  // in the memory totals cannot drift the baseline tick by tick.
+  const stored = previous?.generation === generation && fingerprint.sizes
+    ? previous.fingerprint
+    : fingerprint;
+  await writePersistedState(path, {
+    generation,
+    appliedAt,
+    fingerprint: stored,
+  });
   return generation;
 }

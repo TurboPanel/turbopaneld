@@ -232,7 +232,7 @@ test("resolveTopologyGeneration: a filesystem changing size (a resize, or a data
         await resolveTopologyGeneration(
           withSize(size),
           EMPTY_TOPOLOGY_OVERRIDES,
-          { daemonStateDir },
+          { daemonStateDir, sizesNegotiated: true },
         ),
       );
     }
@@ -269,6 +269,7 @@ const GIB = 1024 * 1024 * 1024;
 async function ticks(
   dir: string,
   readings: TopologySnapshotInputs[],
+  sizesNegotiated = true,
 ): Promise<number[]> {
   const out: number[] = [];
   for (const reading of readings) {
@@ -276,6 +277,7 @@ async function ticks(
     out.push(
       await resolveTopologyGeneration(reading, EMPTY_TOPOLOGY_OVERRIDES, {
         daemonStateDir: dir,
+        sizesNegotiated,
       }),
     );
   }
@@ -302,13 +304,13 @@ function sized(
   });
 }
 
-test("a RAM resize does not start a new generation", async () => {
+test("once sizes are negotiated, a RAM resize does not start a new generation", async () => {
   await withTempStateDir(async (dir) => {
     assertEquals(await ticks(dir, [sized(GIB), sized(4 * GIB)]), [0, 0]);
   });
 });
 
-test("a flood of different memory sizes cannot mint generations", async () => {
+test("once sizes are negotiated, a flood of different memory sizes cannot mint generations", async () => {
   await withTempStateDir(async (dir) => {
     const readings = Array.from(
       { length: 500 },
@@ -319,7 +321,7 @@ test("a flood of different memory sizes cannot mint generations", async () => {
   });
 });
 
-test("a CPU core count change does not start a new generation", async () => {
+test("once sizes are negotiated, a CPU core count change does not start a new generation", async () => {
   await withTempStateDir(async (dir) => {
     assertEquals(await ticks(dir, [sized(GIB, 1), sized(GIB, 2)]), [0, 0]);
   });
@@ -362,5 +364,64 @@ test("an entity change still starts a new generation", async () => {
       }),
     ]);
     assertEquals(gens, [0, 1]);
+  });
+});
+
+test("before sizes are negotiated, a RAM resize starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(
+      await ticks(dir, [sized(GIB), sized(4 * GIB), sized(4 * GIB)], false),
+      [0, 1, 1],
+    );
+  });
+});
+
+test("before sizes are negotiated, a CPU core count change starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(
+      await ticks(dir, [sized(GIB, 1), sized(GIB, 2)], false),
+      [0, 1],
+    );
+  });
+});
+
+test("before sizes are negotiated, a filesystem resize starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    const withSize = (totalBytes: number) =>
+      inputs({
+        filesystems: [{
+          filesystemId: "fs:dev:/dev/sda1",
+          mountpoint: "/",
+          fsType: "ext4",
+          sourceDevice: "/dev/sda1",
+          totalBytes,
+          totalInodes: 6_000_000,
+          roles: ["root"],
+        }],
+      });
+    assertEquals(
+      await ticks(dir, [withSize(100), withSize(200)], false),
+      [0, 1],
+    );
+  });
+});
+
+test("before sizes are negotiated, memory jitter within the tolerance keeps the generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(
+      await ticks(
+        dir,
+        [sized(GIB), sized(GIB + 4096), sized(GIB - 4096)],
+        false,
+      ),
+      [0, 0, 0],
+    );
+  });
+});
+
+test("negotiating sizes after a size-aware record keeps the generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB)], false), [0]);
+    assertEquals(await ticks(dir, [sized(4 * GIB)], true), [0]);
   });
 });

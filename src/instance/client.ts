@@ -53,6 +53,7 @@ import {
 } from "../util/logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
+import { setTopologySizesNegotiated } from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import {
   INSTANCE_VERSION_HEADER,
@@ -725,6 +726,7 @@ export class InstanceClient {
     this.#peerFeaturesKnown = true;
     if (!Array.isArray(features)) {
       this.#peerFeatures = [];
+      setTopologySizesNegotiated(false);
       return;
     }
     const accepted: string[] = [];
@@ -732,6 +734,7 @@ export class InstanceClient {
       if (typeof entry === "string") accepted.push(entry);
     }
     this.#peerFeatures = accepted;
+    setTopologySizesNegotiated(accepted.includes("metrics-v8-sizes"));
   }
 
   #apiClientVersionHook(): {
@@ -1474,6 +1477,7 @@ export class InstanceClient {
       this.#ws = undefined;
       this.#peerFeatures = [];
       this.#peerFeaturesKnown = false;
+      setTopologySizesNegotiated(false);
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();

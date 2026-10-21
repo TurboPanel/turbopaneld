@@ -1263,6 +1263,7 @@ it("the per-sample sizes are sent only once the control plane advertises metrics
               sizes: { memoryTotalBytes: 8e9 },
               filesystemSizes: [{ filesystemId: "fs-a", totalBytes: 1e9 }],
               gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 16e9 }],
+              networkSizes: [{ deviceId: "nic0", linkSpeedMbps: 1000 }],
             };
           }
           return r;
@@ -1277,6 +1278,49 @@ it("the per-sample sizes are sent only once the control plane advertises metrics
     assertEquals("sizes" in extended, sizes);
     assertEquals("filesystemSizes" in extended, sizes);
     assertEquals("gpuSizes" in extended, sizes);
+    assertEquals("networkSizes" in extended, sizes);
+  }
+});
+
+it("the wire ladder follows only metrics-v8 and metrics-v8-sizes", async () => {
+  const cases = [
+    { v8: true, sizes: true, version: 8, extended: true, hasSizes: true },
+    { v8: true, sizes: false, version: 8, extended: true, hasSizes: false },
+    // Sizes without metrics-v8 never reach the wire: stamp 6, no extended.
+    { v8: false, sizes: true, version: 6, extended: false, hasSizes: false },
+    { v8: false, sizes: false, version: 6, extended: false, hasSizes: false },
+  ];
+  for (const c of cases) {
+    const clock = new FakeClock();
+    const sent: unknown[] = [];
+    const scheduler = makeScheduler({
+      clock,
+      durabilityFlag: () => c.v8,
+      sizesFlag: () => c.sizes,
+      collectorFactory: () =>
+        createFakeCollector((sequence) => {
+          const r = supportedSample(sequence);
+          if (r.supported) {
+            r.sample.extended = {
+              docker: { containersRunning: 2 },
+              sizes: { memoryTotalBytes: 8e9 },
+            };
+          }
+          return r;
+        }),
+    });
+    scheduler.attach(capturingSink(sent));
+    await clock.advance(0);
+    const frame = sent[0] as {
+      metadata: { version: number };
+      extended?: Record<string, unknown>;
+    };
+    assertEquals(frame.metadata.version, c.version);
+    assertEquals(frame.extended !== undefined, c.extended);
+    assertEquals(
+      frame.extended !== undefined && "sizes" in frame.extended,
+      c.hasSizes,
+    );
   }
 });
 
