@@ -141,6 +141,54 @@ const mariadbBackupRuntime: ManagedEngineBackupRuntime = {
 
 const MARIADB_SQL_STDIN_MARK = "__TP_SQL__";
 
+export const MARIADB_STANDBY_STREAMING_TIMEOUT_MS = 90_000;
+export const MARIADB_STANDBY_STREAMING_POLL_MS = 3_000;
+
+async function readMariadbStandbyState(
+  ctx: ManagedEngineContext,
+): Promise<string> {
+  try {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    if (!verbose.trim()) return "unknown";
+    return parseShowSlaveStatus(verbose).state;
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * After START SLAVE the IO/SQL threads are not necessarily Yes on the first
+ * read. Apply must not return until they are streaming, otherwise the member
+ * stays `failed`/`unknown` until a later reconcile that may never run.
+ */
+export async function waitMariadbStandbyStreaming(
+  ctx: ManagedEngineContext,
+  options?: {
+    timeoutMs?: number;
+    pollMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+  },
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? MARIADB_STANDBY_STREAMING_TIMEOUT_MS;
+  const pollMs = options?.pollMs ?? MARIADB_STANDBY_STREAMING_POLL_MS;
+  const sleepFn = options?.sleep ?? sleep;
+  const now = options?.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  const poll = async (): Promise<void> => {
+    const state = await readMariadbStandbyState(ctx);
+    if (state === "streaming") return;
+    if (now() >= deadline) {
+      throw new Error(
+        `mariadb configureStandby replica did not start streaming (last state: ${state})`,
+      );
+    }
+    await sleepFn(pollMs);
+    return poll();
+  };
+  await poll();
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -550,7 +598,14 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       "-f",
       `/var/lib/mysql/${STANDBY_MARKER}`,
     ]);
-    if (markerCheck.success) return;
+    if (markerCheck.success) {
+      // skip_slave_start leaves threads down across compose up. A forced
+      // resync that kept the marker (or a stop/start) must still start
+      // replication and wait until health is streaming.
+      await runMariadb(ctx, startReplicaSql());
+      await waitMariadbStandbyStreaming(ctx);
+      return;
+    }
 
     // hostaddr is the private listener IP (must match IP SAN); host is the DNS SAN.
     const primaryHost = resolveMariadbPrimaryConnectHost(spec.primary);
@@ -604,6 +659,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
 
     await runMariadb(ctx, enforceReadOnlySql());
+    await waitMariadbStandbyStreaming(ctx);
 
     const mark = await ctx.exec([
       "sh",

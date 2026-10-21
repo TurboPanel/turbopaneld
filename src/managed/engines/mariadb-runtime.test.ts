@@ -10,6 +10,7 @@ import {
   mariadbManagedEngineRuntime,
   parseShowSlaveStatus,
   resolveMariadbPrimaryConnectHost,
+  waitMariadbStandbyStreaming,
 } from "./mariadb.ts";
 import { changeReplicationSourceSql } from "./mariadb-sql.ts";
 import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
@@ -95,6 +96,20 @@ function recordingExec(): { exec: ManagedEngineExec; calls: RecordedExec[] } {
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   return { exec, calls };
+}
+
+/** Status queries (`mariadb -E`) need a replica row or wait-for-streaming never finishes. */
+function withStreamingStatus(exec: ManagedEngineExec): ManagedEngineExec {
+  return (argv, input) => {
+    if (argv.includes("-E")) {
+      return Promise.resolve({
+        success: true,
+        stdout: HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    return exec(argv, input);
+  };
 }
 
 function buildContext(exec: ManagedEngineExec): ManagedEngineContext {
@@ -371,24 +386,65 @@ test("mariadb bootstrapStandby returns already_standby when marker exists", asyn
   assertEquals(boot, "already_standby");
 });
 
-test("mariadb configureStandby skips when standby marker already exists", async () => {
+test("waitMariadbStandbyStreaming returns once the replica is streaming", async () => {
+  let reads = 0;
+  const exec: ManagedEngineExec = (argv) => {
+    if (argv.includes("-E")) {
+      reads++;
+      return Promise.resolve({
+        success: true,
+        stdout: reads === 1 ? "" : HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await waitMariadbStandbyStreaming(buildContext(exec), {
+    pollMs: 0,
+    sleep: () => Promise.resolve(),
+  });
+  assertEquals(reads >= 2, true);
+});
+
+test("waitMariadbStandbyStreaming throws when replica status stays unknown", async () => {
+  const exec: ManagedEngineExec = () =>
+    Promise.resolve({ success: true, stdout: "", stderr: "" });
+  let n = 0;
+  await assertRejects(
+    () =>
+      waitMariadbStandbyStreaming(buildContext(exec), {
+        timeoutMs: 1,
+        pollMs: 0,
+        sleep: () => Promise.resolve(),
+        now: () => (++n === 1 ? 0 : 10),
+      }),
+    Error,
+    "did not start streaming",
+  );
+});
+
+test("mariadb configureStandby starts replica threads when the marker already exists", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.configureStandby) {
     throw new TypeError("expected mariadb configureStandby");
   }
-  let execCalls = 0;
-  const exec: ManagedEngineExec = (argv) => {
-    execCalls++;
-    if (argv[0] === "test" && argv.includes("-f")) {
-      return Promise.resolve({ success: true, stdout: "", stderr: "" });
-    }
-    return Promise.reject(new TypeError("unexpected exec when marker present"));
-  };
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = withStreamingStatus((argv, input) => {
+    calls.push({ argv: [...argv], input });
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  });
   await replication.configureStandby(
     buildContext(exec),
     standbyReplicationSpec(),
   );
-  assertEquals(execCalls, 1);
+  assertEquals(
+    calls.some((c) => (c.input ?? "").includes("START SLAVE")),
+    true,
+  );
+  assertEquals(
+    calls.some((c) => c.argv.some((part) => part.includes("touch"))),
+    false,
+  );
 });
 
 test("mariadb configureStandby seeds replication and writes marker", async () => {
@@ -404,7 +460,7 @@ test("mariadb configureStandby seeds replication and writes marker", async () =>
     return (await exec(argv, input));
   };
   await replication.configureStandby(
-    buildContext(failingMarker),
+    buildContext(withStreamingStatus(failingMarker)),
     standbyReplicationSpec(),
   );
   assertEquals(calls.some((c) => c.argv[0] === "sh"), true);
@@ -482,7 +538,7 @@ test("mariadb configureStandby retries the seed once after empty output", async 
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await replication.configureStandby(
-    buildContext(exec),
+    buildContext(withStreamingStatus(exec)),
     standbyReplicationSpec(),
   );
   assertEquals(seeds, 2);
@@ -512,7 +568,7 @@ test("mariadb configureStandby retries the seed once after error 1133", async ()
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await replication.configureStandby(
-    buildContext(exec),
+    buildContext(withStreamingStatus(exec)),
     standbyReplicationSpec(),
   );
   assertEquals(seeds, 2);
@@ -942,7 +998,7 @@ test("mariadb configureStandby throws when marker write fails", async () => {
   await assertRejects(
     () =>
       replication.configureStandby!(
-        buildContext(exec),
+        buildContext(withStreamingStatus(exec)),
         standbyReplicationSpec(),
       ),
     Error,
@@ -1191,12 +1247,15 @@ test("mariadb configureStandby dials the DNS SAN when hostaddr is omitted", asyn
     }
     return await exec(argv, input);
   };
-  await replication.configureStandby(buildContext(missingMarker), {
-    username: "tp_repl",
-    password: "repl-pass",
-    primary: { host: "svc-primary", port: 3306 },
-    slotName: "tp_member_2",
-  });
+  await replication.configureStandby(
+    buildContext(withStreamingStatus(missingMarker)),
+    {
+      username: "tp_repl",
+      password: "repl-pass",
+      primary: { host: "svc-primary", port: 3306 },
+      slotName: "tp_member_2",
+    },
+  );
   assertEquals(calls.some((c) => c.input?.includes("host=svc-primary")), true);
   // MariaDB client dialect: never `ssl-mode` (MySQL-only) — use
   // `ssl-verify-server-cert`.
@@ -1324,7 +1383,7 @@ test("mariadb configureStandby retries the seed with the root password when bare
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   await replication.configureStandby(
-    { ...buildContext(exec), socketPassword: "rootpw" },
+    { ...buildContext(withStreamingStatus(exec)), socketPassword: "rootpw" },
     standbyReplicationSpec(),
   );
   assertEquals(seeds.length, 2);
