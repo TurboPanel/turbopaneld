@@ -10,6 +10,7 @@ import { statfs } from "node:fs/promises";
 
 import type { FilesystemSample } from "../../contracts/metrics-contract.ts";
 import type { FilesystemTopology } from "../../contracts/topology-types.ts";
+import { type MountEntry, mountForPath } from "./mounts.ts";
 import type { StorageProbeResult } from "./types.ts";
 
 export type StatfsLike = {
@@ -82,6 +83,37 @@ export async function probeStorage(
 }
 
 /**
+ * Paths the daemon may read that live on the root filesystem when nothing
+ * else is mounted over them. The packaged daemon runs with a scoped
+ * `--allow-read` that does not include `/` itself, so `statfs("/")` is denied
+ * there while these are not.
+ */
+const ROOT_PROBE_FALLBACKS = ["/usr", "/etc/os-release", "/proc/1/root"];
+
+/**
+ * Probe a mount point's capacity. When `/` itself cannot be probed (denied by
+ * the read permission scope), probe a readable path on the same mount instead:
+ * with `mounts`, only a path whose nearest mount is `mountpoint` counts, so a
+ * separate `/usr` filesystem is never mistaken for the root one.
+ */
+export async function probeMountCapacity(
+  mountpoint: string,
+  io?: StatfsIo,
+  mounts?: MountEntry[],
+): Promise<StorageProbeResult> {
+  const direct = await probeStorage(mountpoint, io);
+  if (direct || mountpoint !== "/") return direct;
+  for (const path of ROOT_PROBE_FALLBACKS) {
+    if (mounts && mountForPath(mounts, path)?.mountPoint !== mountpoint) {
+      continue;
+    }
+    const probe = await probeStorage(path, io);
+    if (probe) return probe;
+  }
+  return null;
+}
+
+/**
  * Build one `FilesystemSample` per non-root topology-enumerated filesystem.
  * The root-tagged entry is never included here — its capacity is carried
  * exclusively by `host.storage`'s `rootFilesystemAvailableBytes`/
@@ -143,6 +175,7 @@ export async function buildFilesystemReadings(
 export async function probeRootFilesystemCapacity(
   topology: FilesystemTopology[],
   statfsIo?: StatfsIo,
+  mounts?: MountEntry[],
 ): Promise<
   {
     availableBytes: number | null;
@@ -153,7 +186,7 @@ export async function probeRootFilesystemCapacity(
 > {
   const root = topology.find((fs) => fs.roles.includes("root"));
   if (!root) return null;
-  const probe = await probeStorage(root.mountpoint, statfsIo);
+  const probe = await probeMountCapacity(root.mountpoint, statfsIo, mounts);
   return {
     availableBytes: probe?.availableBytes ?? null,
     freeInodes: probe?.freeInodes ?? null,
