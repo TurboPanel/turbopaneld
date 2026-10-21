@@ -2924,3 +2924,33 @@ test("the pre-update snapshot keeps the root secret out of the archive that sits
     "instance-launch renders runtime.dev-vars from the slurped keyring",
   );
 });
+
+test("the pre-update snapshot holds a restorable full dump of the control-plane database that a rollback can replay", async () => {
+  const root = new URL("../../orchestration/playbooks/", import.meta.url);
+  const backup = await Deno.readTextFile(new URL("instance-backup.yml", root));
+  const dumpAt = backup.indexOf("pg_dump -Fc");
+  assert(dumpAt > 0, "the snapshot dumps in custom format");
+  assert(
+    backup.includes('-U "{{ postgres_user }}" -d "{{ postgres_db }}"'),
+    "the dump covers the whole control-plane database",
+  );
+  assert(
+    backup.includes("set -euo pipefail") &&
+      backup.indexOf("turbopanel.dump.part") < dumpAt &&
+      backup.includes('mv -- "$tmp" "$dest"'),
+    "a failed dump fails the play and never leaves a partial file at the final path",
+  );
+  assert(
+    dumpAt < backup.indexOf("tar czf") &&
+      dumpAt < backup.indexOf("Prune control-plane backups"),
+    "the dump is taken before anything else and before old snapshots are pruned",
+  );
+  const rollback = await Deno.readTextFile(
+    new URL("instance-rollback.yml", root),
+  );
+  assert(
+    rollback.includes("pg_restore --clean --if-exists") &&
+      rollback.includes("turbopanel.dump"),
+    "the rollback replays the same file with pg_restore",
+  );
+});

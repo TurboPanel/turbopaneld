@@ -580,7 +580,10 @@ running (`preflight_backup` via `docker inspect`). An overlapping
 `instance-update` is `preflight_in_progress`. `instance-backup.yml` then
 writes `<backupDir>/panel/<upgradeId>/` (`pg_dump -Fc` inside the
 database container, an `/etc/turbopanel` tarball, and `meta.json` with the
-migration-history fingerprint) and keeps the newest three. When the rendered
+migration-history fingerprint) and keeps the newest three. To restore by hand,
+stop the instance, then run `docker exec -i turbopanel-database pg_restore
+--clean --if-exists -U turbopanel -d turbopanel < <backupDir>/panel/<upgradeId>/turbopanel.dump`
+(the same command `instance-rollback.yml` uses). When the rendered
 Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`
 re-templates it first; that render keeps the `TURBOPANEL_UPDATE_CHANNEL` already
 in runtime.env (only the installer sets the channel). After restart, `waitForInstanceHealth` polls
