@@ -90,10 +90,10 @@ export const INGRESS_GATE_SOCKET_DIR = "/run/turbopanel-gate/ro";
 const INGRESS_GATE_MOUNT = "/var/run/turbopanel-gate";
 const INGRESS_GATE_ENDPOINT = `unix://${INGRESS_GATE_MOUNT}/docker.sock`;
 /**
- * The switch (off by default): a root-owned marker in the gate's own source
+ * The switch (on by default): a root-owned marker in the gate's own source
  * directory (`root:tp 0750`, so the daemon can read it and never create it),
  * written by the docker-gate role when `docker_gate_ingress_socket` is true.
- * It sticks across converges until the role is run with `false`. Without it,
+ * The role writes it on every converge unless run with `false`. Without it,
  * both Traefiks keep the socket proxy exactly as before.
  */
 export const INGRESS_GATE_SWITCH_FILE =

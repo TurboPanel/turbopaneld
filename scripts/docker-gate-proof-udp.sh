@@ -77,6 +77,7 @@ start_backend() {
   _be_name=$1
   docker run -d --name "$_be_name" --network "$NET" \
     --label traefik.enable=true \
+    --label com.turbopanel.system.routed=true \
     --label "com.turbopanel.service=$PROOF_SERVICE" \
     --label com.turbopanel.raw-port=true \
     --label "traefik.udp.routers.$PROOF_SERVICE.entrypoints=udp$PORT" \
