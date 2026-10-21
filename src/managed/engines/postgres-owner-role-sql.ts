@@ -183,13 +183,15 @@ function handoverSteps(owner: string): HandoverStep[] {
     name: string,
     ownerColumn: string,
     sql: string,
-  ): HandoverStep => ({
-    query:
-      `SELECT pg_catalog.format('%I.%I', n.nspname, ${alias}.${name}) AS obj FROM pg_catalog.${catalog} ${alias} JOIN pg_catalog.pg_namespace n ON n.oid = ${alias}.${namespace} WHERE ${userSchema} AND ${
-        notMine(`${alias}.${ownerColumn}`)
-      } AND ${notExtension(catalog, `${alias}.oid`)}`,
-    statement: `pg_catalog.format('${sql} %s OWNER TO %I', r.obj, ${o})`,
-  });
+  ): HandoverStep => {
+    const ownerRef = notMine(alias + "." + ownerColumn);
+    const notOfExtension = notExtension(catalog, alias + ".oid");
+    return {
+      query:
+        `SELECT pg_catalog.format('%I.%I', n.nspname, ${alias}.${name}) AS obj FROM pg_catalog.${catalog} ${alias} JOIN pg_catalog.pg_namespace n ON n.oid = ${alias}.${namespace} WHERE ${userSchema} AND ${ownerRef} AND ${notOfExtension}`,
+      statement: `pg_catalog.format('${sql} %s OWNER TO %I', r.obj, ${o})`,
+    };
+  };
   const relation = (kinds: string, extra = "") => ({
     query:
       `SELECT c.oid::pg_catalog.regclass::text AS obj FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE ${userSchema} AND c.relkind IN (${kinds}) AND ${
