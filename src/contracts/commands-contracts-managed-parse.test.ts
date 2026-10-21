@@ -1603,6 +1603,24 @@ test("parseManagedIngressReconcilePayload: user tool flag is optional (version s
   );
 });
 
+test("parseManagedIngressReconcilePayload: user straightThrough flag is optional (version skew) and must be a boolean", () => {
+  const withStraight = (extra: Record<string, unknown>) =>
+    parseManagedIngressReconcilePayload({
+      ...VALID_INGRESS,
+      clusters: [{
+        ...VALID_INGRESS.clusters[0],
+        users: [{ ...VALID_INGRESS.clusters[0].users[0], ...extra }],
+      }],
+    }).clusters[0]!.users[0]!;
+  assertEquals("straightThrough" in withStraight({}), false);
+  assertEquals(withStraight({ straightThrough: true }).straightThrough, true);
+  assertThrows(
+    () => withStraight({ straightThrough: "yes" }),
+    TypeError,
+    "Invalid managed.ingress.reconcile user straightThrough",
+  );
+});
+
 test("parseManagedApplyPayload: credential grantMode is optional (version skew) and checked", () => {
   const withMode = (extra: Record<string, unknown>) =>
     parseManagedApplyPayload({

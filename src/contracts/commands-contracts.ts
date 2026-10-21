@@ -2307,6 +2307,12 @@ export type ProxySqlUserPayload = {
    */
   tool?: boolean;
   /**
+   * Connect straight through the front door, no connection sharing (a
+   * PostgreSQL login only). The daemon ignores it for a login with
+   * `allowedSources` and for a root login. Absent means false (control-plane skew).
+   */
+  straightThrough?: boolean;
+  /**
    * Where this login may be used from: plain IPv4/IPv6 addresses or a
    * trailing-`%` prefix such as `203.0.113.%` or `2001:db8:1:%`. Present —
    * even empty — limits the login to these places (a root login also always
@@ -9142,6 +9148,17 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     role: value.role,
     password: value.password,
   };
+  parseProxySqlUserRouting(value, user);
+  parseProxySqlUserFlags(value, user);
+  parseProxySqlUserLimits(value, user);
+  return user;
+}
+
+/** Optional default database and connection role of a login. */
+function parseProxySqlUserRouting(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
   if (value.defaultDatabase !== undefined) {
     if (
       typeof value.defaultDatabase !== "string" ||
@@ -9164,14 +9181,21 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.connectionRole = value.connectionRole;
   }
-  if (value.tool !== undefined) {
-    if (typeof value.tool !== "boolean") {
-      throw new TypeError("Invalid managed.ingress.reconcile user tool");
+}
+
+/** Optional boolean flags of a login (`tool`, `straightThrough`); absent = false. */
+function parseProxySqlUserFlags(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
+  for (const key of ["tool", "straightThrough"] as const) {
+    const flag = value[key];
+    if (flag === undefined) continue;
+    if (typeof flag !== "boolean") {
+      throw new TypeError(`Invalid managed.ingress.reconcile user ${key}`);
     }
-    user.tool = value.tool;
+    user[key] = flag;
   }
-  parseProxySqlUserLimits(value, user);
-  return user;
 }
 
 /** Optional source limit and connection cap of a login (absent = no limit). */
