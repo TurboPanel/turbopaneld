@@ -38,6 +38,13 @@ import { definedFields } from "../util/optional-fields.ts";
 
 export const DEPLOY_PROGRESS_DETAIL_INTERVAL_MS = 2000;
 
+/**
+ * While a deploy waits for another build it says so again this often, so the
+ * control plane can tell a deploy that is still queued here from one this
+ * server lost (a restart empties the build line).
+ */
+export const DEPLOY_PROGRESS_WAITING_BEAT_MS = 60_000;
+
 /** A planned step: id + label + whether the host already has it. */
 export type PlannedDeployStep = Pick<CommandProgressStep, "id" | "label"> & {
   state: "ready" | "pending";
@@ -83,8 +90,10 @@ export type DeployStepReporter = {
   /**
    * Tell the control plane whether the deploy is running (`true`: its run
    * deadline counts from now) or waiting for the host (`false`: another build
-   * holds the build slot, nothing counts). Sent at once, and a repeat of the
-   * same state is dropped.
+   * holds the build slot, nothing counts, and the state is repeated every
+   * minute). Each resume after a wait starts a new run segment on the control
+   * plane; time spent waiting is never counted. Sent at once, and a repeat of
+   * the same state is dropped.
    */
   running(active: boolean): void;
   /** The payload as it would be sent now. */
@@ -201,6 +210,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
   #runningSince: string | null | undefined = undefined;
   #lastSentAt = Number.NEGATIVE_INFINITY;
   #flushTimer: unknown = undefined;
+  #beatTimer: unknown = undefined;
 
   constructor(options: DeployStepReporterOptions) {
     this.#id = options.id;
@@ -296,6 +306,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
   }
 
   finish(outcome: DeployProgressOutcome): void {
+    this.#stopWaitingBeat();
     const at = this.#now().toISOString();
     const running = RUNNING_AT_FINISH[outcome];
     let changed = false;
@@ -322,6 +333,23 @@ class DeployStepReporterImpl implements DeployStepReporter {
     ) return;
     this.#runningSince = active ? this.#now().toISOString() : null;
     this.#sendNow();
+    this.#stopWaitingBeat();
+    if (!active) this.#startWaitingBeat();
+  }
+
+  #startWaitingBeat(): void {
+    this.#beatTimer = this.#setTimer(() => {
+      this.#beatTimer = undefined;
+      if (this.#runningSince !== null) return;
+      this.#sendNow();
+      this.#startWaitingBeat();
+    }, DEPLOY_PROGRESS_WAITING_BEAT_MS);
+  }
+
+  #stopWaitingBeat(): void {
+    if (this.#beatTimer === undefined) return;
+    this.#clearTimer(this.#beatTimer);
+    this.#beatTimer = undefined;
   }
 
   snapshot(): CommandProgress {
