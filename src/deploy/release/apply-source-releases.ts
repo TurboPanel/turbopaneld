@@ -95,6 +95,11 @@ import {
   serviceFolderFromPayload,
 } from "./release-service-id.ts";
 import { pruneReleases } from "./retention.ts";
+import {
+  missingSiteRootMessage,
+  releaseSiteRoot,
+  siteForSource,
+} from "./site-release.ts";
 import { PENDING_RECORD_MARKER } from "./release-health.ts";
 import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
@@ -865,6 +870,9 @@ async function buildNativeRelease(
     // release, so a cancelled deploy leaves no record behind.
     deps.cancel?.commit("before the release was switched over");
     logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+    // A site that would have no document root fails here, while `current` still
+    // points at the last good release and nothing of this one is on disk.
+    await assertSiteRootBuilt(payload, entry, nativeOutput, checkout);
     const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
     const manifest: ReleaseManifestV1 = definedFields({
       version: 1,
@@ -953,6 +961,36 @@ async function buildNativeRelease(
 }
 
 /**
+ * For a site, check the folder it serves exists in what is about to be
+ * published, before anything is promoted. Reading it is best-effort: a tree the
+ * daemon cannot read is left to the check that runs after the site is applied.
+ */
+async function assertSiteRootBuilt(
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  nativeOutput: NativeAppBuildOutput,
+  checkout: CheckoutResult,
+): Promise<void> {
+  const site = siteForSource(payload, entry.composeServiceName);
+  if (!site) return;
+  const outputDirectory = entry.build.outputDirectory ??
+    nativeOutput.outputDirectory;
+  const root = releaseSiteRoot(site, outputDirectory);
+  const sourceDir = join(
+    checkout.workingDir,
+    entry.subdirectory ?? "",
+    outputDirectory ?? "",
+    root,
+  );
+  try {
+    if ((await Deno.lstat(sourceDir)).isDirectory) return;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) return;
+  }
+  throw new Error(missingSiteRootMessage(site, root, outputDirectory));
+}
+
+/**
  * The sandbox work tree for a native build, created empty for the clone, or
  * `null` where builds run unsandboxed (a development install).
  */
@@ -1014,7 +1052,7 @@ async function buildNativeTree(
     // the series the app will execute on.
     nativeRuntime: nativeApp
       ? nativeBuildRuntime(layout, nativeApp)
-      : undefined,
+      : siteBuildRuntime(layout, payload, entry),
     sandbox: work
       ? definedFields({
         work,
@@ -1056,7 +1094,10 @@ async function buildNativeTree(
  */
 function nativeBuildRuntime(
   layout: LayoutPaths,
-  nativeApp: EnvironmentDeployNativeAppService,
+  nativeApp: Pick<
+    EnvironmentDeployNativeAppService,
+    "runtime" | "nodeVersion" | "denoVersion" | "appMode"
+  >,
 ): NativeBuildRuntime {
   const target = nativeAppRuntimeTarget(layout, nativeApp);
   return definedFields({
@@ -1064,6 +1105,20 @@ function nativeBuildRuntime(
     nodeBinDir: target.binDir,
     nodeEnv: nativeApp.appMode ?? "production",
   });
+}
+
+/**
+ * A site's build gets the same Node an app without a pinned series gets, so a
+ * static site can run `npm install && npm run build`. Anything else that is not
+ * an app builds with the plain tool path, as before.
+ */
+function siteBuildRuntime(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+): NativeBuildRuntime | undefined {
+  if (!siteForSource(payload, entry.composeServiceName)) return undefined;
+  return nativeBuildRuntime(layout, { runtime: "node" });
 }
 
 /** The author said how the app starts: a start command or a startup file. */
