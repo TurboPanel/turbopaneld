@@ -51,7 +51,7 @@ if (!DOCKER_AVAILABLE) {
 }
 
 for (const engine of ENGINES) {
-  Deno.test({
+  test({
     name:
       `dropping a login that defines a view, routine or trigger is refused on ${engine.image}`,
     ignore: !DOCKER_AVAILABLE,
