@@ -896,6 +896,10 @@ test("parseEnvironmentDeployPayload rejects optional array/boolean/network field
   rejectDeploy({ sites: "all" }, "sites must be an array");
   rejectDeploy({ noCache: "yes" }, "noCache must be a boolean");
   rejectDeploy(
+    { hideWebServerNames: "yes" },
+    "hideWebServerNames must be a boolean",
+  );
+  rejectDeploy(
     { dockerExternalNetworks: "org-net" },
     "dockerExternalNetworks must be an array",
   );
@@ -1060,6 +1064,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
     noCache: true,
+    hideWebServerNames: true,
     dockerExternalNetworks: ["org_net_b", "org_net_a"],
     fabricNetworks: [{
       name: "tpn_mesh01",
@@ -1076,6 +1081,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
     listenerPorts: { postgres: 15432, mysqlFamily: 13306 },
   });
   assertEquals(payload.noCache, true);
+  assertEquals(payload.hideWebServerNames, true);
   assertEquals(payload.dockerExternalNetworks, ["org_net_a", "org_net_b"]);
   assertEquals(payload.fabricNetworks?.[0]?.gateway, "203.0.113.1");
   assertEquals(payload.hostingIngress?.composeServiceName, "traefik");

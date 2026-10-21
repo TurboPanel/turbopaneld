@@ -1443,9 +1443,11 @@ async function applyDeploySites(
   dockerBindAddress: string | null,
   releaseBindings: ReadonlyMap<string, SiteRelease>,
   managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>,
+  hideWebServerNames: boolean,
 ): Promise<void> {
   if (sites.length === 0) return;
   await applySites(layout, environmentId, sites, {
+    hideWebServerNames,
     dockerBindAddress,
     releaseBindings,
     managedDirectoryBindings,
@@ -2861,6 +2863,7 @@ async function deployEnvironmentHolding(
     ),
     siteReleaseBindings,
     siteManagedBindings,
+    parsedPayload.hideWebServerNames === true,
   );
 
   // Read-only: what each site's document root runs (WordPress today), reported

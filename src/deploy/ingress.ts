@@ -1926,7 +1926,34 @@ export type SiteSnippetOptions = Readonly<{
    * on `http://<redirectTo>`, the only site the target then has.
    */
   redirectTo?: string;
+  /**
+   * Strip `Server`, `Via` and `X-Powered-By` from every response (Caddy's own
+   * and whatever the upstream sent), so nothing names the web server.
+   */
+  hideWebServerNames?: boolean;
 }>;
+
+/**
+ * `defer` runs the removal when the response headers are written, after the
+ * reverse proxy has copied the upstream's headers in; without it the upstream's
+ * `Server` and Caddy's own `Via` would survive.
+ */
+const HIDE_WEB_SERVER_NAMES_BLOCK = `  header {
+    -Server
+    -Via
+    -X-Powered-By
+    defer
+  }
+`;
+
+/** The bind line plus, when asked, the header removal that follows it. */
+function siteBlockPreamble(
+  bindAddress: string | undefined,
+  hideWebServerNames: boolean | undefined,
+): string {
+  const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
+  return hideWebServerNames ? bindLine + HIDE_WEB_SERVER_NAMES_BLOCK : bindLine;
+}
 
 /** A name that only redirects, under its own certificate on the HTTPS side. */
 function redirectSiteSnippet(options: SiteSnippetOptions): string {
@@ -1934,7 +1961,7 @@ function redirectSiteSnippet(options: SiteSnippetOptions): string {
   const target = safeConfigToken("hostings[].www", options.redirectTo!);
   const tlsDirective = hostingTlsDirective(tlsMode, tlsId, tlsDir);
   const tlsLine = tlsDirective ? `${tlsDirective}\n` : "";
-  const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
+  const bindLine = siteBlockPreamble(bindAddress, options.hideWebServerNames);
   // Both schemes land on the scheme the target actually serves: HTTPS in one
   // hop normally, plain HTTP when the target has forced HTTPS off (it then has
   // no HTTPS site to land on).
@@ -1961,6 +1988,7 @@ export function siteSnippet(options: SiteSnippetOptions): string {
     upstream = DEFAULT_TRAEFIK_UPSTREAM,
     routes,
     tlsMode,
+    hideWebServerNames,
   } = options;
   const effectiveRoutes: CaddySiteRoute[] = routes?.length
     ? [...routes]
@@ -1972,7 +2000,7 @@ export function siteSnippet(options: SiteSnippetOptions): string {
       single,
     );
     const tlsLine = hostingTlsDirective(tlsMode, tlsId, tlsDir);
-    const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
+    const bindLine = siteBlockPreamble(bindAddress, hideWebServerNames);
     const https = emitHttpsSite(forceHttps, tlsMode);
 
     const httpBlock = https
@@ -1999,7 +2027,7 @@ ${bindLine}${tlsLine}
   }
 
   const tlsLine = hostingTlsDirective(tlsMode, tlsId, tlsDir);
-  const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
+  const bindLine = siteBlockPreamble(bindAddress, hideWebServerNames);
   const httpsHandlers = formatRouteHandlers(effectiveRoutes, "https");
   const httpHandlers = formatRouteHandlers(effectiveRoutes, "http");
   const https = emitHttpsSite(forceHttps, tlsMode);
@@ -3010,6 +3038,7 @@ async function rewriteHostingCaddySitesLocked(
         routes: site.routes,
         tlsMode: site.tlsMode,
         redirectTo: site.redirectTo,
+        hideWebServerNames: payload.hideWebServerNames === true,
       });
     })
     .join("\n");

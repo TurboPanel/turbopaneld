@@ -230,3 +230,38 @@ test("a paired site's tree carries the principal group both engines join", () =>
   assertEquals(siteEngineUnixUser(pairedSite.engine), "tpapache");
   assertEquals(sitePhpRuntimeMode(pairedSite), "fastcgi");
 });
+
+test("hiding web server names turns off nginx tokens and the Apache footer", () => {
+  const hidden: SiteApplySpec = { ...pairedSite, hideWebServerNames: true };
+  const front = nginxSiteConfig(hidden, DOC_ROOT, null, {
+    apacheBackendPort: 18090,
+  });
+  assertStringIncludes(front, "server_tokens off;");
+  assertEquals(frontConfig().includes("server_tokens"), false);
+
+  const backend = apacheSiteConfig(hidden, DOC_ROOT, {
+    phpFpmSocket: SOCKET,
+    behindNginxPort: 18090,
+  });
+  assertStringIncludes(backend, "\nServerTokens Prod\nListen 127.0.0.1:18090");
+  assertStringIncludes(backend, "\n  ServerSignature Off\n");
+  const plain = apacheSiteConfig(pairedSite, DOC_ROOT, {
+    phpFpmSocket: SOCKET,
+    behindNginxPort: 18090,
+  });
+  assertEquals(/ServerTokens|ServerSignature/.test(plain), false);
+
+  const alone = apacheSiteConfig(
+    { ...hidden, engine: "apache" },
+    DOC_ROOT,
+    { phpFpmSocket: SOCKET },
+  );
+  assertStringIncludes(alone, "ServerTokens Prod");
+  const nginxOnly = nginxSiteConfig(
+    { ...hidden, engine: "nginx" },
+    DOC_ROOT,
+    null,
+    { phpFpmSocket: SOCKET },
+  );
+  assertStringIncludes(nginxOnly, "server_name _;\n  server_tokens off;");
+});

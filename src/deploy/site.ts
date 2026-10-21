@@ -173,7 +173,13 @@ const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
-export type SiteApplySpec = EnvironmentDeploySite;
+export type SiteApplySpec = EnvironmentDeploySite & {
+  /**
+   * Set by {@link applySites} from the deploy: render the vhost so the engine
+   * names neither itself nor its version (error-page footers, `Server`).
+   */
+  hideWebServerNames?: boolean;
+};
 
 /**
  * The Git release tree one compose service serves from.
@@ -808,6 +814,11 @@ function nginxDisableSymlinks(releaseBacked: boolean): string {
   disable_symlinks if_not_owner from=$document_root;`;
 }
 
+/** `server_tokens off` drops the version from `Server` and from error pages. */
+function nginxServerTokensLine(site: SiteApplySpec): string {
+  return site.hideWebServerNames ? "\n  server_tokens off;" : "";
+}
+
 export function nginxSiteConfig(
   site: SiteApplySpec,
   documentRoot: string,
@@ -822,7 +833,7 @@ export function nginxSiteConfig(
     return `server {
   listen 127.0.0.1:${site.listenPort};
   listen [::1]:${site.listenPort};${dockerListen}
-  server_name _;
+  server_name _;${nginxServerTokensLine(site)}
   root ${documentRoot};
   ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
 ${nginxApacheLocations(backendPort)}
@@ -849,7 +860,7 @@ ${nginxApacheLocations(backendPort)}
   return `server {
   listen 127.0.0.1:${site.listenPort};
   listen [::1]:${site.listenPort};${dockerListen}
-  server_name _;
+  server_name _;${nginxServerTokensLine(site)}
   root ${documentRoot};
   ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
   index ${indexFiles};
@@ -1336,12 +1347,20 @@ function apacheVhostHead(
   behindNginxPort: number | null,
 ): string {
   const name = site.composeServiceName;
+  // `ServerTokens` is server-wide only (not valid inside a VirtualHost), so it
+  // sits with the `Listen` lines, outside the block. `ServerSignature` is the
+  // error-page and directory-listing footer, which a vhost may set.
+  const hide = site.hideWebServerNames === true;
+  const tokens = hide ? ["ServerTokens Prod"] : [];
+  const signature = hide ? ["  ServerSignature Off"] : [];
   if (behindNginxPort !== null) {
     return [
       `# TurboPanel site ${name} (behind nginx)`,
+      ...tokens,
       `Listen 127.0.0.1:${behindNginxPort}`,
       `<VirtualHost 127.0.0.1:${behindNginxPort}>`,
       "  ServerName localhost",
+      ...signature,
       ...apacheBehindNginxLines(),
     ].join("\n");
   }
@@ -1349,9 +1368,11 @@ function apacheVhostHead(
   if (dockerBindAddress) addrs.push(`${dockerBindAddress}:${site.listenPort}`);
   return [
     `# TurboPanel site ${name}`,
+    ...tokens,
     ...addrs.map((addr) => `Listen ${addr}`),
     `<VirtualHost ${addrs.join(" ")}>`,
     "  ServerName localhost",
+    ...signature,
     ...apacheDotfileDenyLines(),
   ].join("\n");
 }
@@ -2403,6 +2424,8 @@ async function applySiteTreeOwnership(
 }
 
 export type ApplySiteOpts = {
+  /** Render every vhost so the engine names neither itself nor its version. */
+  hideWebServerNames?: boolean;
   /** When set, vhosts also listen on the docker bridge for container reachability. */
   dockerBindAddress?: string | null;
   /**
@@ -4077,7 +4100,10 @@ export async function applySites(
     };
     let reloaded: string[];
     try {
-      await forEachSequential(sites, async (site) => {
+      await forEachSequential(sites, async (declared) => {
+        const site: SiteApplySpec = opts?.hideWebServerNames
+          ? { ...declared, hideWebServerNames: true }
+          : declared;
         const hold = holdSiteRuntime(environmentId, site);
         if (hold) holds.push(hold);
         const result = await applyOneSite(

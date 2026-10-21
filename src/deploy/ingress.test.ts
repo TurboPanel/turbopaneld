@@ -578,6 +578,46 @@ test("siteSnippet acme mode still emits HTTPS when forceHttps is false", () => {
   assertStringIncludes(snippet, "header_up Host {host}");
 });
 
+const HIDE_HEADER_BLOCK = `  header {
+    -Server
+    -Via
+    -X-Powered-By
+    defer
+  }
+`;
+
+test("siteSnippet strips server names from every block only when asked", () => {
+  const base = { hostname: "app.example.com", tlsDir: TLS_DIR };
+  assertEquals(siteSnippet(base).includes("-Server"), false);
+  const plain = siteSnippet({ ...base, hideWebServerNames: true });
+  assertEquals(plain.split(HIDE_HEADER_BLOCK).length - 1, 2);
+  const http = siteSnippet({
+    ...base,
+    forceHttps: false,
+    bindAddress: "10.0.0.5",
+    hideWebServerNames: true,
+  });
+  assertStringIncludes(http, `  bind 10.0.0.5\n${HIDE_HEADER_BLOCK}`);
+  const multi = siteSnippet({
+    ...base,
+    hideWebServerNames: true,
+    routes: [
+      {
+        pathPrefix: "/api",
+        upstream: { kind: "http", host: "127.0.0.1", port: 18080 },
+      },
+      { upstream: { kind: "traefik" } },
+    ],
+  });
+  assertEquals(multi.split(HIDE_HEADER_BLOCK).length - 1, 2);
+  const redirect = siteSnippet({
+    ...base,
+    redirectTo: "example.com",
+    hideWebServerNames: true,
+  });
+  assertEquals(redirect.split(HIDE_HEADER_BLOCK).length - 1, 2);
+});
+
 test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
   const snippet = siteSnippet({
     hostname: "app.example.com",
