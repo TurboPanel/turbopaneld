@@ -1,7 +1,7 @@
 /**
  * Per-home and per-site disk usage, measured by `tp-host site-usage`.
  *
- * Principal homes under `/srv/users` are `root:<principal>-grp` 0750, so the
+ * Principal homes under `/srv/users` are `root:<principal>` 0750, so the
  * daemon account cannot walk them itself. The verb prints sizes and directory
  * names only (`home <bytes> <name>` / `site <bytes> <id>`), never a file name
  * or content. This module parses that and keeps the five largest sites as

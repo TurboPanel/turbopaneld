@@ -1,7 +1,13 @@
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import {
+  parseSnippet,
+  snippetSiteAddresses,
+  trimSnippetSites,
+} from "./caddy-snippet.ts";
+import { foldHostname } from "./hostname-fold.ts";
 import { removeStaleNetworkContainers } from "./ingress-stale-network.ts";
 import {
   type EnvironmentDeployContainer,
@@ -30,6 +36,7 @@ import {
   type EnsureHostingCaddyDeps,
   grantHostingCaddyRead,
   HOSTING_CADDY_USER,
+  hostingCaddyReady,
 } from "./ensure-hosting-caddy.ts";
 import {
   assertSafeIngressIdentity,
@@ -43,8 +50,11 @@ import {
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
 } from "./labels.ts";
+import { type DockerProxyStep, planDockerProxy } from "./docker-proxy-plan.ts";
 import {
   assertSafeSystemIngressIdentity,
+  DOCKER_PROXY_CONTAINER_NAME,
+  DOCKER_PROXY_PROJECT,
   readSystemComponentDescriptor,
   SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
   SOCKET_PROXY_COMPOSE_SERVICE_NAME,
@@ -53,7 +63,7 @@ import {
 } from "./system-component.ts";
 
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
-const TRAEFIK_IMAGE = "traefik:v3.6.6";
+const TRAEFIK_IMAGE = "traefik:v3.7.16";
 /**
  * The only container on the host that sees the Docker socket.
  *
@@ -63,7 +73,7 @@ const TRAEFIK_IMAGE = "traefik:v3.6.6";
  * every co-hosted tenant with it. They now reach Docker through this proxy,
  * which answers only the two read endpoints a Docker provider needs.
  */
-const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:0.3.0";
+const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:v0.5.0";
 const SOCKET_PROXY_PORT = 2375;
 const SOCKET_PROXY_ENDPOINT =
   `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
@@ -93,10 +103,11 @@ export const INGRESS_GATE_SWITCH_FILE =
 export type TraefikDockerSource = "socket-proxy" | "gate";
 
 /**
- * The shared Traefik's Docker access. In gate mode the socket proxy stays in
- * the project only while a service Traefik rendered before the switch still
- * points at it (`keepSocketProxy`); the next render drops it and
- * `--remove-orphans` deletes the container.
+ * The shared Traefik's Docker access. The proxy is its own compose project,
+ * so this only picks the endpoint (it is never rendered into the Traefik
+ * document). In gate mode the proxy stays up only while a service Traefik
+ * rendered before the switch still points at it (`keepSocketProxy`); the next
+ * apply, once the Traefik is on the gate, removes the proxy project.
  */
 export type SharedTraefikDocker =
   | { source: "socket-proxy" }
@@ -329,9 +340,38 @@ export function setIngressHostCommandForTest(
   fn?: IngressHostCommandFn,
 ): () => void {
   const previous = hostCommandOverride;
+  const previousBeforeValidate = ensureBeforeValidateOverride;
+  const previousReady = hostingCaddyReadyOverride;
   hostCommandOverride = fn;
+  if (fn !== undefined && hostingCaddyReadyOverride === undefined) {
+    hostingCaddyReadyOverride = () => Promise.resolve(true);
+  }
+  if (
+    fn !== undefined &&
+    ensureBeforeValidateOverride === undefined &&
+    ensureHostingCaddyRuntimeOverride === undefined
+  ) {
+    ensureBeforeValidateOverride = () => Promise.resolve();
+  }
   return () => {
     hostCommandOverride = previous;
+    ensureBeforeValidateOverride = previousBeforeValidate;
+    hostingCaddyReadyOverride = previousReady;
+  };
+}
+
+let hostingCaddyReadyOverride:
+  | ((layout: LayoutPaths) => Promise<boolean>)
+  | undefined;
+
+/** Test-only: stub the "is hosting Caddy in place" check. Returns a restore. */
+export function setHostingCaddyReadyForTest(
+  fn?: (layout: LayoutPaths) => Promise<boolean>,
+): () => void {
+  const previous = hostingCaddyReadyOverride;
+  hostingCaddyReadyOverride = fn;
+  return () => {
+    hostingCaddyReadyOverride = previous;
   };
 }
 
@@ -579,13 +619,11 @@ export function traefikCompose(
     }`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
   ];
-  const viaProxy = docker.source === "socket-proxy";
-  const dependsLines = viaProxy
-    ? ["    depends_on:", `      - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`]
-    : [];
-  const keepProxy = viaProxy || docker.keepSocketProxy;
-  const proxyLines = keepProxy ? socketProxyServiceLines(ingressNetwork) : [];
-
+  // No `depends_on` and no proxy service: the socket proxy is its own compose
+  // project (see `dockerProxyCompose`), brought up before this document and
+  // reached by service name over the ingress network. Traefik's Docker
+  // provider retries a refused connection, so a proxy that is briefly down
+  // (restart, upgrade) only delays route discovery.
   const lines = [
     `name: ${ingressNetwork}`,
     "",
@@ -638,8 +676,6 @@ export function traefikCompose(
     ...gateVolumeLines(docker.source),
     "    networks:",
     `      - ${ingressNetwork}`,
-    ...dependsLines,
-    ...proxyLines,
     "",
     "networks:",
     `  ${ingressNetwork}:`,
@@ -650,19 +686,38 @@ export function traefikCompose(
 }
 
 /**
- * The host's single Docker-socket proxy, scoped to what a Docker provider
- * actually reads.
+ * The host's single Docker-socket proxy as its own compose document (project
+ * {@link DOCKER_PROXY_PROJECT}, `container_name` {@link
+ * DOCKER_PROXY_CONTAINER_NAME}), scoped to what a Docker provider reads.
  *
  * `CONTAINERS` and `EVENTS` are what Traefik needs to discover routers and
- * follow changes; everything else — `POST` above all, but also images,
- * networks, volumes, exec, and the rest — stays off, which is the proxy's
- * default. So a container that breaks out of Traefik can list containers and
- * watch events, and cannot create, start, mount or exec anything.
+ * follow changes; ping and version are on by the image's own defaults;
+ * everything else — `POST` above all, but also images, networks, volumes,
+ * exec, and the rest — stays off. So a container that breaks out of Traefik
+ * can list containers and watch events, and cannot create, start, mount or
+ * exec anything.
+ *
+ * Endpoint security is unchanged from when this lived inside the Traefik
+ * document: the only container with the Docker socket (read-only bind), no
+ * published ports, joined to the ingress network and no other. The explicit
+ * alias keeps `tcp://docker-socket-proxy:2375` resolving for every Traefik
+ * whatever the service key is later renamed to. No platform labels on
+ * purpose: the Docker gate must keep seeing an unlabelled socket bind as a
+ * finding until its stage-3 switch removes the proxy.
  */
-function socketProxyServiceLines(ingressNetwork: string): string[] {
+export function dockerProxyCompose(ingressNetwork: string): string {
+  assertSafeComposeProjectName(ingressNetwork);
   return [
+    `name: ${DOCKER_PROXY_PROJECT}`,
+    "",
+    "services:",
     `  ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:`,
     `    image: ${SOCKET_PROXY_IMAGE}`,
+    `    container_name: ${DOCKER_PROXY_CONTAINER_NAME}`,
+    "    x-turbopanel:",
+    "      kind: system",
+    "      component: docker-proxy",
+    `      containerName: ${DOCKER_PROXY_CONTAINER_NAME}`,
     "    restart: unless-stopped",
     "    environment:",
     '      CONTAINERS: "1"',
@@ -671,8 +726,23 @@ function socketProxyServiceLines(ingressNetwork: string): string[] {
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     "    networks:",
-    `      - ${ingressNetwork}`,
-  ];
+    `      ${ingressNetwork}:`,
+    "        aliases:",
+    `          - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
+    "",
+    "networks:",
+    `  ${ingressNetwork}:`,
+    "    external: true",
+    "",
+  ].join("\n");
+}
+
+export function dockerProxyDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "ingress", "docker-proxy");
+}
+
+export function dockerProxyComposePath(layout: LayoutPaths): string {
+  return join(dockerProxyDir(layout), "docker-compose.yml");
 }
 
 function assertSafeServiceIngressIdentity(
@@ -783,12 +853,17 @@ export function serviceTraefikCompose(
 }
 
 /**
- * The hosting unit's systemd `StateDirectory=`: `/var/lib/<name>`, created
- * and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account, the
- * internal CA and every leaf certificate. Top level on purpose: never inside
- * the `tp`-owned state tree, so `tp` cannot swap it out from under Caddy.
+ * The hosting unit's systemd `StateDirectory=`: `/var/lib/turbopanel/hosting-caddy`,
+ * created and owned by {@link HOSTING_CADDY_USER}. It holds the ACME account,
+ * the internal CA and every leaf certificate. On a sealed host the state root
+ * is root's and the daemon owns only its listed leaves, so `tp` cannot swap
+ * this folder out from under Caddy (a host where the control plane runs beside
+ * the daemon keeps a looser state root, where it could). systemd leaves an
+ * existing parent alone and gives only the inner folder to the unit's user; the
+ * account reaches it through an access entry on the state root (hosting-caddy
+ * role), not through group `tp`.
  */
-export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel-hosting-caddy";
+export const HOSTING_CADDY_STATE_DIRECTORY = "turbopanel/hosting-caddy";
 
 /**
  * Bounded shutdown for the hosting Caddy. Without it Caddy waits forever for
@@ -961,11 +1036,65 @@ async function installAndStartCaddy(
   return true;
 }
 
+let ensureHostingCaddyRuntimeOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+let ensureBeforeValidateOverride:
+  | ((layout: LayoutPaths) => Promise<void>)
+  | undefined;
+
+/** Coalesces full runtime ensures with {@link ensureDeployIngress} in one deploy. */
+let hostingCaddyRuntimeEnsuredThisDeploy = false;
+
+/** Reset at the start of each `environment.deploy` (tests may call directly). */
+export function resetHostingCaddyRuntimeEnsuredForDeploy(): void {
+  hostingCaddyRuntimeEnsuredThisDeploy = false;
+}
+
+function markHostingCaddyRuntimeEnsuredForDeploy(): void {
+  hostingCaddyRuntimeEnsuredThisDeploy = true;
+}
+
+/**
+ * True when `caddy validate` as {@link HOSTING_CADDY_USER} is required for this
+ * candidate set (tenant HTTP routes or non-reserved snippets already on disk).
+ */
+export function hostingCaddyValidateNeedsEdgeRuntime(
+  siteContent: string,
+  otherSnippetNames: readonly string[],
+  siteFile: string,
+): boolean {
+  if (siteContent.trim().length > 0) return true;
+  return otherSnippetNames
+    .filter((name) => name !== siteFile)
+    .some((name) => !isDaemonReservedHostingSite(name));
+}
+
+/**
+ * Test-only: observe or stub {@link ensureHostingCaddyRuntime}. Returns a
+ * restore function.
+ */
+export function setEnsureHostingCaddyRuntimeForTest(
+  fn?: (layout: LayoutPaths) => Promise<void>,
+): () => void {
+  const previous = ensureHostingCaddyRuntimeOverride;
+  ensureHostingCaddyRuntimeOverride = fn;
+  return () => {
+    ensureHostingCaddyRuntimeOverride = previous;
+  };
+}
+
 /** Ensure hosting Caddy binary, Caddyfile, sites dir, and systemd unit. */
 export async function ensureHostingCaddyRuntime(
   layout: LayoutPaths,
   deps?: EnsureHostingCaddyDeps,
 ): Promise<void> {
+  if (ensureHostingCaddyRuntimeOverride) {
+    await ensureHostingCaddyRuntimeOverride(layout);
+    markHostingCaddyRuntimeEnsuredForDeploy();
+    return;
+  }
   await ensureHostingCaddy(layout, deps);
   const hostingDir = join(layout.configDir, "hosting");
   const sitesDir = join(hostingDir, "sites");
@@ -1001,6 +1130,7 @@ export async function ensureHostingCaddyRuntime(
     await Deno.remove(unitSource).catch(() => {});
     throw new Error("hosting Caddy could not be installed or started");
   }
+  markHostingCaddyRuntimeEnsuredForDeploy();
 }
 
 /** Optional test seams for {@link ensureHostingIngress}. */
@@ -1075,11 +1205,6 @@ export async function serviceIngressUsesSocketProxy(
 async function composeNamesSocketProxy(path: string): Promise<boolean> {
   const yaml = await readTextIfPresent(path);
   return yaml?.includes(SOCKET_PROXY_ENDPOINT) === true;
-}
-
-/** True when a shared compose document runs the socket-proxy service. */
-function declaresSocketProxy(yaml: string): boolean {
-  return yaml.includes(`\n  ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:\n`);
 }
 
 async function loadHostingIngressDescriptor(
@@ -1167,52 +1292,109 @@ function upSharedTraefik(
 }
 
 /**
- * A service Traefik about to use the socket proxy needs it running. After the
- * switch is turned off, a TCP/UDP-only deploy re-renders its Traefik onto the
- * proxy without rendering the shared project, which may still be in gate mode
- * (no proxy). Add the proxy back to it: same gate-mode Traefik plus the proxy
- * service, so compose only starts the proxy and the shared Traefik (every
- * HTTP route) is not recreated. No shared project: nothing to add it to (a
- * TCP/UDP-only host has never had a proxy; unchanged).
+ * Bring up the host's Docker-socket proxy as its own compose project (see
+ * {@link dockerProxyCompose}). Idempotent: nothing runs when the applied file
+ * is already what would be rendered, no failed `up` left a pending file behind
+ * and the container is running. Called before any Traefik that reaches Docker
+ * through the proxy is started or recreated, so the endpoint already answers.
+ *
+ * It needs no shared Traefik project, so a TCP/UDP-only host (no shared HTTP
+ * Traefik) gets its proxy too.
  */
-async function ensureSharedSocketProxy(
+async function ensureDockerProxy(
   layout: LayoutPaths,
   ingressNetwork: string,
   run: RunDockerFn,
 ): Promise<void> {
-  const composePath = hostingIngressComposePath(layout);
-  const applied = await readTextIfPresent(composePath);
-  if (applied === undefined) return;
-  if (declaresSocketProxy(applied)) {
-    // Declared is not running: a leftover pending file (a failed `up` may have
-    // removed the proxy as an orphan) or a missing container means the proxy
-    // is gone. Re-up the applied file as it is; compose only starts the proxy.
-    const trusted = !(await exists(pendingComposePath(composePath))) &&
-      await socketProxyRunning(ingressNetwork, run);
-    if (!trusted) await upSharedTraefik(layout, applied, run);
+  const yaml = dockerProxyCompose(ingressNetwork);
+  const composePath = dockerProxyComposePath(layout);
+  await Deno.mkdir(dockerProxyDir(layout), { recursive: true, mode: 0o750 });
+  const settled = (await readTextIfPresent(composePath)) === yaml &&
+    !(await exists(pendingComposePath(composePath))) &&
+    await dockerProxyRunning(run);
+  if (settled) return;
+  await applyCompose(
+    composePath,
+    yaml,
+    // No `-p`: the document declares its own project through `name:`.
+    (file) => run(["compose", "-f", file, "up", "-d", "--remove-orphans"]),
+    "Starting Docker socket proxy",
+  );
+}
+
+/**
+ * Tear down the proxy's own project and forget its compose file. Soft-fails
+ * (logged, files kept) so the next converge retries; a proxy that lingers is
+ * only an unused read-only endpoint.
+ */
+async function removeDockerProxy(
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<void> {
+  const down = await run([
+    "compose",
+    "-p",
+    DOCKER_PROXY_PROJECT,
+    "down",
+    "--remove-orphans",
+  ]);
+  if (!down.success) {
+    logWarn(
+      "deploy",
+      `docker proxy down soft-failed: ${down.stderr || "compose down failed"}`,
+    );
     return;
   }
-  // A legacy shared file (Traefik on docker.sock directly, no proxy service)
-  // is not ours to recreate from a TCP/UDP deploy: only a file that already
-  // uses the gate endpoint may be re-rendered in gate mode.
-  if (!applied.includes(INGRESS_GATE_ENDPOINT)) return;
-  const descriptor = await loadHostingIngressDescriptor(layout);
-  // No descriptor: the anonymous shape, which is always on the proxy (it has
-  // no ingress label for the gate's allowance), as ensureHostingIngress does.
-  const docker: SharedTraefikDocker = descriptor === undefined
-    ? VIA_SOCKET_PROXY
-    : { source: "gate", keepSocketProxy: true };
-  await upSharedTraefik(
-    layout,
-    traefikCompose(
-      ingressNetwork,
-      await ingressNetworkGateways(ingressNetwork, run),
-      descriptor,
-      docker,
-      !(await legacyHttpContainersPresent(run)),
-    ),
-    run,
+  await Deno.remove(dockerProxyDir(layout), { recursive: true }).catch(
+    (err) => {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    },
   );
+}
+
+/**
+ * Remove the proxy container a host installed before the split still runs
+ * inside the shared Traefik's project. `--remove-orphans` on the Traefik's
+ * `up` normally has done it already; this makes it certain.
+ */
+async function retireLegacyDockerProxy(
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<void> {
+  const ids = await legacyDockerProxyIds(ingressNetwork, run);
+  if (ids.length === 0) return;
+  const removed = await run(["rm", "-f", ...ids]);
+  if (!removed.success) {
+    logWarn(
+      "deploy",
+      `legacy docker proxy removal soft-failed: ${
+        removed.stderr || "docker rm failed"
+      }`,
+    );
+  }
+}
+
+/** Run one planned step of a shared-ingress apply. */
+function runDockerProxyStep(
+  step: DockerProxyStep,
+  ctx: {
+    layout: LayoutPaths;
+    ingressNetwork: string;
+    run: RunDockerFn;
+    sharedYaml: string;
+  },
+): Promise<void> {
+  const { layout, ingressNetwork, run } = ctx;
+  switch (step) {
+    case "start-proxy":
+      return ensureDockerProxy(layout, ingressNetwork, run);
+    case "up-traefik":
+      return upSharedTraefik(layout, ctx.sharedYaml, run);
+    case "retire-legacy":
+      return retireLegacyDockerProxy(ingressNetwork, run);
+    case "remove-proxy":
+      return removeDockerProxy(layout, run);
+  }
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -1225,20 +1407,67 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** True when the shared project's socket-proxy container is running. */
-async function socketProxyRunning(
-  ingressNetwork: string,
+function composeServiceContainerIds(
   run: RunDockerFn,
-): Promise<boolean> {
-  const result = await run([
+  project: string,
+  service: string,
+  all: boolean,
+): Promise<string[]> {
+  return run([
     "ps",
+    ...(all ? ["-a"] : []),
     "-q",
     "--filter",
-    `label=com.docker.compose.project=${ingressNetwork}`,
+    `label=com.docker.compose.project=${project}`,
     "--filter",
-    `label=com.docker.compose.service=${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
-  ]);
-  return result.success && result.stdout.trim() !== "";
+    `label=com.docker.compose.service=${service}`,
+  ]).then((result) =>
+    result.success
+      ? result.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+      : []
+  );
+}
+
+/** True when the proxy's own container is running. */
+async function dockerProxyRunning(run: RunDockerFn): Promise<boolean> {
+  const ids = await composeServiceContainerIds(
+    run,
+    DOCKER_PROXY_PROJECT,
+    SOCKET_PROXY_COMPOSE_SERVICE_NAME,
+    false,
+  );
+  return ids.length > 0;
+}
+
+/**
+ * The proxy container of the old layout: a second service of the shared
+ * Traefik's project (named by the ingress network id), running or stopped.
+ */
+function legacyDockerProxyIds(
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<string[]> {
+  return composeServiceContainerIds(
+    run,
+    ingressNetwork,
+    SOCKET_PROXY_COMPOSE_SERVICE_NAME,
+    true,
+  );
+}
+
+/** True when the proxy's own project has an applied file or a container. */
+async function dockerProxyPresent(
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<boolean> {
+  if (await exists(dockerProxyComposePath(layout))) return true;
+  const ids = await composeServiceContainerIds(
+    run,
+    DOCKER_PROXY_PROJECT,
+    SOCKET_PROXY_COMPOSE_SERVICE_NAME,
+    true,
+  );
+  return ids.length > 0;
 }
 
 /**
@@ -1285,17 +1514,23 @@ export async function ensureHostingIngress(
     descriptor !== undefined,
     deps?.ingressDockerGate ?? (() => ingressDockerGateEnabled()),
   );
-  await upSharedTraefik(
-    layout,
-    traefikCompose(
-      ingressNetwork,
-      gateways,
-      descriptor,
-      docker,
-      !(await legacyHttpContainersPresent(run)),
-    ),
-    run,
+  const sharedYaml = traefikCompose(
+    ingressNetwork,
+    gateways,
+    descriptor,
+    docker,
+    !(await legacyHttpContainersPresent(run)),
   );
+  // The proxy is its own project; its steps are ordered around the Traefik's
+  // `up` (see `planDockerProxy`).
+  const wanted = docker.source === "socket-proxy" || docker.keepSocketProxy;
+  const steps = planDockerProxy({
+    wanted,
+    legacyPresent: (await legacyDockerProxyIds(ingressNetwork, run)).length > 0,
+    ownPresent: wanted ? true : await dockerProxyPresent(layout, run),
+  });
+  const ctx = { layout, ingressNetwork, run, sharedYaml };
+  await forEachSequential(steps, (step) => runDockerProxyStep(step, ctx));
 
   const ensureCaddy = deps?.ensureHostingCaddyRuntime ??
     ensureHostingCaddyRuntime;
@@ -1445,7 +1680,7 @@ export async function ensureServiceIngress(
     ? "gate"
     : "socket-proxy";
   if (docker === "socket-proxy") {
-    await ensureSharedSocketProxy(layout, ingressNetwork, run);
+    await ensureDockerProxy(layout, ingressNetwork, run);
   }
   const project = serviceIngressProject(serviceId);
   await applyCompose(
@@ -2026,9 +2261,9 @@ function withHostingSitesLock<T>(work: () => Promise<T>): Promise<T> {
 const HOSTING_CANDIDATE_SITES_DIR = "sites.next";
 const HOSTING_CANDIDATE_CADDYFILE = "Caddyfile.next";
 
-/** `/var/lib/turbopanel-hosting-caddy`: the unit's `StateDirectory=`. */
+/** `<state>/hosting-caddy`: the unit's `StateDirectory=`. */
 function hostingCaddyStateRoot(layout: LayoutPaths): string {
-  return join(dirname(layout.stateDir), HOSTING_CADDY_STATE_DIRECTORY);
+  return join(layout.stateDir, "hosting-caddy");
 }
 
 /**
@@ -2124,6 +2359,11 @@ async function hostingCandidateRefusal(
     ]),
   );
   if (test.success) return null;
+  if (/unknown user/i.test(test.stderr)) {
+    throw new Error(
+      `the hosting Caddy account (${HOSTING_CADDY_USER}) is missing on this host, so host setup has not run. Run host setup on this host, then deploy again.`,
+    );
+  }
   // sudo itself refusing is a host that was not finished updating, not a bad
   // snippet: say so, and never let it read as "every snippet is bad".
   if (
@@ -2138,30 +2378,27 @@ async function hostingCandidateRefusal(
   return test.stderr || "caddy validate failed";
 }
 
-/**
- * The site addresses one snippet answers on: every top-level `name {` /
- * `http://name {` line the daemon itself wrote (`siteSnippet`).
- */
-export function snippetSiteAddresses(contents: string): string[] {
-  const names: string[] = [];
-  for (const line of contents.split("\n")) {
-    if (line.length === 0 || line.startsWith(" ") || !line.endsWith(" {")) {
-      continue;
-    }
-    const address = line.slice(0, -2).trim();
-    names.push(
-      address.startsWith("http://") ? address.slice("http://".length) : address,
-    );
-  }
-  return names;
-}
+export { snippetSiteAddresses };
 
 /**
- * Before any container starts: refuse a deploy that would answer on a name
- * another environment's live site already answers on on this server. A www
- * choice adds names the panel's uniqueness check may not have seen, and the
- * shared Traefik would otherwise route that name to this environment's
- * containers even though Caddy later refuses the duplicate site.
+ * Before any container starts: a deploy that would answer on a name another
+ * environment's live site already answers on, on this server.
+ *
+ * Normally that is refused: the panel's uniqueness check is per organization, a
+ * www choice adds names it may not have seen, and the shared Traefik would
+ * otherwise route the name to this environment's containers even though Caddy
+ * later refuses the duplicate site.
+ *
+ * `takeoverHostnames` is the control plane's proof, name by name, of who held a
+ * name before: `{ hostname, fromEnvironmentId }` says that environment, of the
+ * same organization as this deploy, was last sent the name for this server and
+ * no longer has a hosting for it. Such a name is taken over only from that
+ * environment's own snippet (`<environmentId>.caddy`). If the name is also held
+ * by any other environment's snippet, or the file that holds it cannot be read
+ * with certainty, the deploy is refused as before and nothing is changed.
+ * Only the site blocks for the listed names are removed; the rest of the file,
+ * and that environment's containers, are untouched, and its next deploy writes
+ * its own snippet again.
  */
 export async function assertHostingNamesFree(
   layout: LayoutPaths,
@@ -2173,7 +2410,8 @@ export async function assertHostingNamesFree(
       .flatMap((hosting) => [
         ...hostingServedNames(hosting),
         ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
-      ]),
+      ])
+      .map(foldHostname),
   );
   if (wanted.size === 0) return;
   const sitesDir = join(layout.configDir, "hosting", "sites");
@@ -2188,17 +2426,181 @@ export async function assertHostingNamesFree(
   const others = names.filter((name) =>
     name !== own && !isDaemonReservedHostingSite(name)
   );
-  const contents = await Promise.all(
-    others.map((name) => Deno.readTextFile(join(sitesDir, name))),
+  const held = await namesHeldByOthers(sitesDir, others, wanted);
+  if (held.size === 0) return;
+  const allowed = new Set(
+    (payload.takeoverHostnames ?? []).map((entry) =>
+      `${entry.fromEnvironmentId}.caddy\u0000${foldHostname(entry.hostname)}`
+    ),
   );
-  const taken = contents.flatMap(snippetSiteAddresses).find((name) =>
-    wanted.has(name)
-  );
-  if (taken !== undefined) {
-    throw new Error(
-      `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
-    );
+  for (const [file, hostnames] of held) {
+    for (const name of hostnames) {
+      if (!allowed.has(`${file}\u0000${name}`)) throw hostnameTakenError(name);
+    }
   }
+  await withHostingSitesLock(() => takeOverStaleHostnames(layout, held));
+}
+
+/**
+ * Which of `wanted` each other snippet answers on. A file that cannot be read
+ * with certainty and mentions a wanted name anywhere is a refusal, not a
+ * guess.
+ */
+async function namesHeldByOthers(
+  sitesDir: string,
+  files: readonly string[],
+  wanted: ReadonlySet<string>,
+): Promise<Map<string, string[]>> {
+  const held = new Map<string, string[]>();
+  await forEachSequential(files, async (file) => {
+    const contents = await Deno.readTextFile(join(sitesDir, file));
+    const parsed = parseSnippet(contents);
+    if (parsed.uninterpretable) {
+      const lowered = contents.toLowerCase();
+      const mentioned = [...wanted].find((name) => lowered.includes(name));
+      if (mentioned !== undefined) throw hostnameTakenError(mentioned);
+    }
+    const taken = snippetSiteAddresses(contents).filter((name) =>
+      wanted.has(name)
+    );
+    if (taken.length > 0) held.set(file, [...new Set(taken)]);
+  });
+  return held;
+}
+
+function hostnameTakenError(taken: string): Error {
+  return new Error(
+    `${taken} is already served by another environment on this server; remove it there (or change this hosting's www choice) before deploying`,
+  );
+}
+
+/** One leftover snippet and what taking its names over will write. */
+type TakeoverStep = {
+  path: string;
+  environmentId: string;
+  contents: string;
+  removed: string[];
+  /** Nothing is left in the file: no site, no import, no global block. */
+  empty: boolean;
+};
+
+/**
+ * Remove the named site blocks from each other environment's snippet; see
+ * {@link assertHostingNamesFree}. Every file is worked out first and nothing is
+ * written unless every named block was found, so one that cannot be placed
+ * never leaves Caddy to fail later with a duplicate site. All the files are
+ * then swapped in and Caddy is reloaded once; if it refuses, every file and
+ * manifest is put back and the deploy fails.
+ */
+async function takeOverStaleHostnames(
+  layout: LayoutPaths,
+  held: ReadonlyMap<string, readonly string[]>,
+): Promise<void> {
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  const steps: TakeoverStep[] = [];
+  await forEachSequential(held, async ([file, hostnames]) => {
+    const path = join(sitesDir, file);
+    // Read again under the lock: another deploy may have rewritten it since.
+    const trimmed = trimSnippetSites(
+      await Deno.readTextFile(path),
+      new Set(hostnames),
+    );
+    const missed = hostnames.find((name) => !trimmed.removed.includes(name));
+    if (missed !== undefined || trimmed.uninterpretable) {
+      throw hostnameTakenError(missed ?? hostnames[0]!);
+    }
+    steps.push({
+      path,
+      environmentId: file.slice(0, -".caddy".length),
+      contents: trimmed.contents,
+      removed: trimmed.removed,
+      empty: trimmed.sitesLeft === 0 && !trimmed.otherLeft,
+    });
+  });
+  const restores: Array<() => Promise<void>> = [];
+  try {
+    await forEachSequential(steps, async (step) => {
+      logInfo(
+        "deploy",
+        `took over ${
+          step.removed.join(", ")
+        } from the hosting config of environment ${step.environmentId}: its hosting was removed or moved there and that environment has not been deployed since`,
+      );
+      // The manifest first, so a crash never leaves the observer polling a
+      // name this snippet no longer serves.
+      restores.push(
+        await dropAcmeHostnames(layout, step.environmentId, step.removed),
+      );
+    });
+    await activateHostingSites(
+      steps.map((step) => ({
+        live: step.path,
+        contents: step.empty ? "" : step.contents,
+      })),
+    );
+  } catch (err) {
+    // One manifest that cannot be put back must not stop the others.
+    await forEachSequential(restores, (restore) => restore().catch(() => {}));
+    throw err;
+  }
+  // Caddy no longer serves anything from these (the empty files loaded): tidy up.
+  await forEachSequential(
+    steps.filter((entry) => entry.empty),
+    async (step) => {
+      await Deno.remove(step.path).catch(() => {});
+      await Deno.remove(`${step.path}.quarantined`).catch(() => {});
+      await Deno.remove(
+        acmeHostnamesManifestPath(layout, step.environmentId),
+      ).catch(() => {});
+    },
+  );
+}
+
+/** Write a file by renaming a finished copy over it, so a crash leaves the old or the new, never half. */
+async function writeFileAtomic(path: string, text: string): Promise<void> {
+  const next = `${path}.tpnew`;
+  await Deno.writeTextFile(next, text, { mode: 0o640 });
+  await Deno.rename(next, path);
+}
+
+/**
+ * Forget names in an environment's ACME hostname manifest, so the observer
+ * stops polling them. Returns a function that puts the manifest back as it was.
+ */
+async function dropAcmeHostnames(
+  layout: LayoutPaths,
+  environmentId: string,
+  removed: readonly string[],
+): Promise<() => Promise<void>> {
+  const path = acmeHostnamesManifestPath(layout, environmentId);
+  let original: string;
+  try {
+    original = await Deno.readTextFile(path);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) {
+      logWarn(
+        "deploy",
+        `ACME hostname manifest of ${environmentId} kept: ${err}`,
+      );
+    }
+    return () => Promise.resolve();
+  }
+  try {
+    const listed = JSON.parse(original) as unknown;
+    if (!Array.isArray(listed)) return () => Promise.resolve();
+    const gone = new Set(removed);
+    const next = listed.filter((name) => !gone.has(String(name)));
+    if (next.length !== listed.length) {
+      await writeFileAtomic(path, JSON.stringify(next));
+    }
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `ACME hostname manifest of ${environmentId} kept: ${err}`,
+    );
+    return () => Promise.resolve();
+  }
+  return () => writeFileAtomic(path, original);
 }
 
 async function liveSnippetNames(sitesDir: string): Promise<string[]> {
@@ -2288,6 +2690,18 @@ async function quarantineHostingSnippets(
  * other environments' files fail on their own, without the new one), that file
  * is set aside and the new snippet is judged again.
  */
+async function ensureHostingCaddyRuntimeBeforeValidate(
+  layout: LayoutPaths,
+): Promise<void> {
+  if (hostingCaddyRuntimeEnsuredThisDeploy) return;
+  if (ensureBeforeValidateOverride && !ensureHostingCaddyRuntimeOverride) {
+    await ensureBeforeValidateOverride(layout);
+    markHostingCaddyRuntimeEnsuredForDeploy();
+    return;
+  }
+  await ensureHostingCaddyRuntime(layout);
+}
+
 async function validateHostingCaddyCandidate(
   layout: LayoutPaths,
   hostingDir: string,
@@ -2301,6 +2715,18 @@ async function validateHostingCaddyCandidate(
     const others = (await liveSnippetNames(sitesDir)).filter((name) =>
       name !== siteFile
     );
+    if (
+      hostingCaddyValidateNeedsEdgeRuntime(contents, others, siteFile)
+    ) {
+      await ensureHostingCaddyRuntimeBeforeValidate(layout);
+    } else if (
+      !await (hostingCaddyReadyOverride ?? hostingCaddyReady)(layout)
+    ) {
+      // Nothing needs Caddy and the hosting Caddy account and binary do not
+      // exist yet (host setup never ran): there is nothing to judge, and
+      // validating would run as an account that is not there.
+      return;
+    }
     await Promise.all(
       others.map((name) =>
         Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
@@ -2377,6 +2803,11 @@ async function guardHostingCaddySitesLocked(
     throw err;
   }
   if (names.length === 0) return [];
+  const substantive = names.filter((name) =>
+    !isDaemonReservedHostingSite(name)
+  );
+  if (substantive.length === 0) return [];
+  await ensureHostingCaddyRuntimeBeforeValidate(layout);
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
     await Promise.all(
@@ -2426,16 +2857,13 @@ async function dropNewHostingSite(live: string): Promise<void> {
   await Deno.remove(live).catch(() => {});
 }
 
-/**
- * Swap the validated snippet in (`.tpnew` is outside the `*.caddy` glob, and
- * the rename is atomic), reload, and put the old one back when a running Caddy
- * refuses the reload. A unit that is not running keeps the validated file: it
- * loads it on its next start.
- */
-async function activateHostingSite(
+/** One snippet that has been swapped in, and what is needed to put it back. */
+type SwappedSite = { live: string; previous: string; hadPrevious: boolean };
+
+async function swapInHostingSite(
   live: string,
   contents: string,
-): Promise<void> {
+): Promise<SwappedSite> {
   const next = `${live}.tpnew`;
   const previous = `${live}.tpprev`;
   await Deno.writeTextFile(next, contents, { mode: 0o640 });
@@ -2449,11 +2877,58 @@ async function activateHostingSite(
   await Deno.rename(next, live);
   // A new snippet supersedes one set aside earlier for this environment.
   await Deno.remove(`${live}.quarantined`).catch(() => {});
+  return { live, previous, hadPrevious };
+}
+
+async function dropPreviousSnippets(
+  swapped: readonly SwappedSite[],
+): Promise<void> {
+  await forEachSequential(
+    swapped,
+    (site) => Deno.remove(site.previous).catch(() => {}),
+  );
+}
+
+async function restoreSwappedSites(
+  swapped: readonly SwappedSite[],
+): Promise<void> {
+  await forEachSequential(
+    swapped,
+    (site) =>
+      site.hadPrevious
+        ? restorePreviousHostingSite(site.live, site.previous)
+        : dropNewHostingSite(site.live),
+  );
+}
+
+/**
+ * Swap the validated snippets in (`.tpnew` is outside the `*.caddy` glob, and
+ * the rename is atomic), reload hosting Caddy once, and put every old one back
+ * when a running Caddy refuses the reload. A unit that is not running keeps the
+ * validated files: it loads them on its next start. If a swap itself fails,
+ * those already done are put back before the error is thrown.
+ */
+async function activateHostingSites(
+  sites: readonly { live: string; contents: string }[],
+): Promise<void> {
+  const swapped: SwappedSite[] = [];
+  try {
+    await forEachSequential(sites, async (site) => {
+      swapped.push(await swapInHostingSite(site.live, site.contents));
+    });
+  } catch (err) {
+    await restoreSwappedSites(swapped);
+    await forEachSequential(
+      sites,
+      (site) => Deno.remove(`${site.live}.tpnew`).catch(() => {}),
+    );
+    throw err;
+  }
 
   const reloadArgs = hostSudoArgs(["-n", "systemctl", "reload", CADDY_SERVICE]);
   const reload = await run("sudo", reloadArgs);
   if (reload.success) {
-    await Deno.remove(previous).catch(() => {});
+    await dropPreviousSnippets(swapped);
     return;
   }
   const active = await run(
@@ -2462,17 +2937,17 @@ async function activateHostingSite(
   );
   if (!active.success) {
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
-    await Deno.remove(previous).catch(() => {});
+    await dropPreviousSnippets(swapped);
     return;
   }
-  await (hadPrevious
-    ? restorePreviousHostingSite(live, previous)
-    : dropNewHostingSite(live));
+  await restoreSwappedSites(swapped);
   const again = await run("sudo", reloadArgs);
   if (!again.success) {
     logWarn(
       "deploy",
-      `hosting Caddy reload after restoring ${live} failed: ${again.stderr}`,
+      `hosting Caddy reload after restoring ${
+        swapped.map((site) => site.live).join(", ")
+      } failed: ${again.stderr}`,
     );
   }
   throw new Error(
@@ -2480,6 +2955,10 @@ async function activateHostingSite(
       reload.stderr || "reload failed"
     }`,
   );
+}
+
+function activateHostingSite(live: string, contents: string): Promise<void> {
+  return activateHostingSites([{ live, contents }]);
 }
 
 /**

@@ -546,6 +546,17 @@ test("parseManagedApplyPayload accepts and validates monitorUsers", () => {
   );
 });
 
+test("parseManagedApplyPayload accepts topologyUser", () => {
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    topologyUser: {
+      username: "tp_topology_abcd12345678",
+      password: TP_ENVELOPE,
+    },
+  });
+  assertEquals(payload.topologyUser?.username, "tp_topology_abcd12345678");
+});
+
 test("parseManagedApplyPayload accepts forceResync and ingressSourceAddresses", () => {
   const payload = parseManagedApplyPayload({
     ...VALID_MANAGED_APPLY,

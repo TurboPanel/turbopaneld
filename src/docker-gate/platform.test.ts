@@ -33,6 +33,7 @@ import {
   LABEL_SYSTEM_COMPONENT as DEPLOY_SYSTEM_COMPONENT,
 } from "../deploy/labels.ts";
 import {
+  DOCKER_PROXY_PROJECT,
   SYSTEM_HOSTING_INGRESS_COMPONENT,
   SYSTEM_MANAGED_HA_COMPONENT,
   SYSTEM_MANAGED_INGRESS_COMPONENT,
@@ -44,6 +45,7 @@ import { ORCHESTRATOR_COMPOSE_SERVICE_NAME } from "../deploy/system-component.ts
 import { orchestratorCompose } from "../managed/orchestrator.ts";
 import { proxysqlCompose } from "../managed/proxysql.ts";
 import {
+  dockerProxyCompose,
   INGRESS_GATE_SOCKET_DIR,
   serviceTraefikCompose,
   traefikCompose,
@@ -293,7 +295,7 @@ test("the same binds from a container without platform labels are findings", asy
   );
 });
 
-test("the ingress socket-proxy service stays a finding until the stage-3 switch drops it", async () => {
+test("the docker socket proxy project stays a finding until the stage-3 switch drops it", async () => {
   const services = servicesOf(traefikCompose("ingress-net", INGRESS_GATEWAYS, {
     component: SYSTEM_HOSTING_INGRESS_COMPONENT,
     serviceId: "00000000-0000-4000-8000-0000000000bb",
@@ -301,12 +303,16 @@ test("the ingress socket-proxy service stays a finding until the stage-3 switch 
     containerName: "00000000-0000-4000-8000-0000000000bb-in",
     role: "ingress",
   }));
-  const proxy = services["docker-socket-proxy"];
+  const proxy = servicesOf(dockerProxyCompose("ingress-net"))[
+    "docker-socket-proxy"
+  ];
   const found = await verdictFor(
-    createBodyFor("/etc/turbopanel/hosting", "ingress-net", proxy),
+    createBodyFor("/etc/turbopanel/hosting", DOCKER_PROXY_PROJECT, proxy),
   );
   assertEquals(found.violations.map((v) => v.rule), ["bind-docker-socket"]);
-  // Traefik itself mounts nothing from the host.
+  // Traefik itself mounts nothing from the host, and its document no longer
+  // carries the proxy.
+  assertEquals(Object.keys(services), ["traefik"]);
   const traefik = createBodyFor(
     "/etc/turbopanel/hosting",
     "ingress-net",
@@ -381,9 +387,10 @@ test("helperLabelArgs stamps labels the gate reads as platform", () => {
 
 test("every `docker run` helper in src stamps the shared platform label", async () => {
   const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-  // Compose `run` of a tenant deploy hook and cloudflared's own `run` are not
-  // daemon helper containers.
+  // Compose `run` of a tenant deploy hook or of the one-off volume `chown`, and
+  // cloudflared's own `run`, are not daemon helper containers.
   const exempt = new Set([
+    "deploy/named-volume-owner.ts",
     "deploy/run-deploy-hooks.ts",
     "tunnels/supervisor.ts",
   ]);

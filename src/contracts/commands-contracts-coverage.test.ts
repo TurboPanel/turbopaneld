@@ -425,12 +425,13 @@ test("parseEnvironmentDeployPayload carries a Deno native app's runtime and deno
     ...DEPLOY_BASE,
     nativeAppServices: [
       { ...base, runtime: "deno", denoVersion: "2.9" },
-      base,
+      { ...base, composeServiceName: "worker", serviceId: "svc-native-2" },
     ],
   });
   assertEquals(payload.nativeAppServices?.[0]?.runtime, "deno");
   assertEquals(payload.nativeAppServices?.[0]?.denoVersion, "2.9");
   // A Node app's wire shape is untouched.
+  assertEquals(payload.nativeAppServices?.[1]?.composeServiceName, "worker");
   assertEquals("runtime" in (payload.nativeAppServices?.[1] ?? {}), false);
   for (const bad of [{ runtime: "bun" }, { denoVersion: "latest" }]) {
     assertThrows(
@@ -673,7 +674,7 @@ test("parseEnvironmentDeployPayload rejects invalid generation replicaCounts and
   );
 });
 
-test("parseEnvironmentDeployPayload round-trips principalMaterial runtimes and sshKeys", () => {
+test("parseEnvironmentDeployPayload ignores a leftover runtimes field and round-trips sshKeys", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
     principalMaterial: [{
@@ -681,16 +682,17 @@ test("parseEnvironmentDeployPayload round-trips principalMaterial runtimes and s
       username: "deploy_user",
       home: "/srv/users/deploy_user",
       shell: "/bin/bash",
+      // A leftover `runtimes` field from an older control plane is ignored.
       runtimes: [{ runtime: "php", series: "8.4" }],
-      accessGroups: ["tpnodeapp"],
+      accessGroups: ["tpshell"],
       sshKeys: [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGEmvBcjT+NvO6sokGNoJ0zA3dr0nhIQhhZ3wP220uFZ",
       ],
     }],
   });
   const principal = payload.principalMaterial?.[0];
-  assertEquals(principal?.runtimes?.[0]?.series, "8.4");
-  assertEquals(principal?.accessGroups, ["tpnodeapp"]);
+  assertEquals("runtimes" in (principal ?? {}), false);
+  assertEquals(principal?.accessGroups, ["tpshell"]);
   assertEquals(principal?.sshKeys?.length, 1);
 });
 
@@ -760,6 +762,45 @@ test("parseEnvironmentLifecyclePayload rejects unknown action", () => {
       }),
     TypeError,
     "Invalid environment lifecycle payload",
+  );
+});
+
+test("parsePrincipalsReconcilePayload carries retirePrincipals and allowEmpty", () => {
+  assertEquals(
+    parsePrincipalsReconcilePayload({
+      principals: [],
+      retirePrincipals: [{ username: "old_user" }],
+      allowEmpty: true,
+    }),
+    {
+      principals: [],
+      retirePrincipals: [{ username: "old_user" }],
+      allowEmpty: true,
+    },
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({
+        principals: [{ principalId: PRINCIPAL_ID, username: "kept" }],
+        retirePrincipals: [{ username: "kept" }],
+      }),
+    Error,
+    "retirePrincipals names kept, which is also in principals",
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({
+        principals: [],
+        retirePrincipals: [{ username: "bad name" }],
+      }),
+    TypeError,
+    "Invalid retirePrincipals entry",
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({ principals: [], allowEmpty: "yes" }),
+    TypeError,
+    "allowEmpty must be a boolean",
   );
 });
 

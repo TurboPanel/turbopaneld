@@ -182,14 +182,14 @@ test("install -d and mkdir -p create directories only below a managed root", asy
       "-o",
       "alice",
       "-g",
-      "alice-grp",
+      "alice",
       dir,
     ]);
     assertEquals(ok.code, 0, ok.stderr);
     assertEquals((await Deno.stat(dir)).isDirectory, true);
     assertStringIncludes(
       ok.stdout,
-      "EXEC [chown] [-h] [--] [alice:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [alice:alice] [.]",
     );
     await refused(host, [
       "install",
@@ -242,6 +242,7 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         nativeAppUnitContent({
           layout,
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "web" },
           environmentId: "env1",
           app: {
             serviceId: "svc1",
@@ -257,6 +258,7 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         nativeAppUnitContent({
           layout,
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "web" },
           environmentId: "env1",
           environmentFile: true,
           nativeStart: { kind: "deno-file", path: "src/main.ts" },
@@ -470,6 +472,7 @@ test("a native app unit may load its own variables file and no other", async () 
       nativeAppUnitContent({
         layout,
         username: "alice",
+        folder: { owner: "alice", scope: "production", slug: "web" },
         environmentId: "env1",
         environmentFile: true,
         app: {
@@ -1107,9 +1110,15 @@ test("scheduled-backup units pass only in their exact shape; tenant units gain n
     const service = backupServiceContent(layout, BACKUP_ID);
     const timer = backupTimerContent(BACKUP_ID, "*-*-* 03:00:00");
 
-    // The daemon's own rendering passes.
+    // The daemon's own rendering passes, including a sub-hourly timer with
+    // its tightened accuracy.
+    const frequentTimer = backupTimerContent(BACKUP_ID, "*-*-* *:0/2:00");
     for (
-      const [name, content] of [[serviceName, service], [timerName, timer]]
+      const [name, content] of [
+        [serviceName, service],
+        [timerName, timer],
+        [timerName, frequentTimer],
+      ]
     ) {
       const result = await installUnit(host, name, content);
       assertEquals(result.code, 0, `${name}: ${result.stderr}`);
@@ -1143,7 +1152,7 @@ test("scheduled-backup units pass only in their exact shape; tenant units gain n
         "a principal instead of the daemon",
         service.replace("User=tp", "User=alice").replace(
           "Group=tp",
-          "Group=alice-grp",
+          "Group=alice",
         ),
       ],
       [
@@ -1299,7 +1308,7 @@ test("numeric owner and group ids resolve to the same accounts the name checks a
     assertEquals(mine.code, 0, mine.stderr);
     assertStringIncludes(
       mine.stdout,
-      "EXEC [chown] [-h] [--] [alice:alice-grp] [./home]",
+      "EXEC [chown] [-h] [--] [alice:alice] [./home]",
     );
 
     const staged = host.path("tmp/staged");
@@ -1342,17 +1351,17 @@ test("rm, chown and chmod stay inside the trees and never follow a symlink", asy
 
     const release = host.path("srv/users/alice/sites/web/releases/r1");
     await Deno.mkdir(release, { recursive: true });
-    const chown = await host.run(["chown", "-R", "root:alice-grp", release]);
+    const chown = await host.run(["chown", "-R", "root:alice", release]);
     assertEquals(chown.code, 0, chown.stderr);
     assertStringIncludes(
       chown.stdout,
-      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice-grp] [./r1]",
+      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice] [./r1]",
     );
     await refused(host, ["chown", "alice", host.path("etc/turbopanel")]);
     await refused(host, ["chown", "-R", "tp", host.path("outside")]);
     await refused(host, [
       "chown",
-      "alice:alice-grp",
+      "alice:alice",
       host.path("var/lib/turbopanel/x"),
     ]);
 
@@ -1480,7 +1489,7 @@ test("accounts: only principals are created or changed, and only into registry g
       "-K",
       "UID_MAX=60000",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -1493,14 +1502,14 @@ test("accounts: only principals are created or changed, and only into registry g
     // charge, which on a host with a 9999 account yields uid 10000/10001.
     assertStringIncludes(
       add.stdout,
-      "EXEC [useradd] [-K] [UID_MIN=15001] [-K] [UID_MAX=60000] [-g] [carol-grp]",
+      "EXEC [useradd] [-K] [UID_MIN=15001] [-K] [UID_MAX=60000] [-g] [carol]",
     );
     const addU = await host.run([
       "useradd",
       "-u",
       "15555",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -1511,7 +1520,7 @@ test("accounts: only principals are created or changed, and only into registry g
     assertEquals(addU.code, 0, addU.stderr);
     assertStringIncludes(
       addU.stdout,
-      "EXEC [useradd] [-u] [15555] [-g] [carol-grp]",
+      "EXEC [useradd] [-u] [15555] [-g] [carol]",
     );
     for (
       const args of [
@@ -1520,7 +1529,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-u",
           "0",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           home,
           "-M",
@@ -1535,7 +1544,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-K",
           "UID_MAX=60000",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           "/root",
           "-M",
@@ -1565,7 +1574,7 @@ test("accounts: only principals are created or changed, and only into registry g
           "-K",
           "UID_MAX=60000",
           "-g",
-          "carol-grp",
+          "carol",
           "-d",
           home,
           "-M",
@@ -1577,18 +1586,24 @@ test("accounts: only principals are created or changed, and only into registry g
         ["usermod", "-aG", "docker", "tp"],
         ["usermod", "-s", "/bin/bash", "root"],
         ["usermod", "-p", "!", "tp"],
-        ["gpasswd", "-d", "alice", "alice-grp"],
+        ["gpasswd", "-d", "alice", "alice"],
         ["getent", "shadow", "--", "root"],
+        // The per-version runtime groups are gone from the registry, so a
+        // principal can no longer be put in one.
+        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpnode24", "alice"],
+        // The registry name is matched literally: `.` is not a wildcard.
+        ["usermod", "-aG", "tps.ell", "alice"],
       ]
     ) {
       await refused(host, args);
     }
     for (
       const args of [
-        ["usermod", "-aG", "tpphp84", "alice"],
+        ["usermod", "-aG", "tpshell", "alice"],
         ["usermod", "-aG", "tpsftp", "alice"],
-        ["usermod", "-aG", "alice-grp", "tpnginx"],
-        ["gpasswd", "-d", "alice", "tpphp84"],
+        ["usermod", "-aG", "alice", "tpnginx"],
+        ["gpasswd", "-d", "alice", "tpshell"],
         ["usermod", "-p", "!", "alice"],
       ]
     ) {
@@ -1728,8 +1743,8 @@ test("tp-host unit metadata is parsed by key and never shifts on an empty field"
   const meta = (u: string, g: string, s: string, n: string) =>
     `user=${u}\ngroup=${g}\nslice=${s}\nnnp=${n}`;
   assertEquals(
-    await parseUnitMeta(meta("a", "a-grp", "a.slice", "yes")),
-    "ok [a] [a-grp] [a.slice] [yes]",
+    await parseUnitMeta(meta("a", "a", "a.slice", "yes")),
+    "ok [a] [a] [a.slice] [yes]",
   );
   // Empty first, middle and last fields stay in place.
   assertEquals(
@@ -1746,8 +1761,8 @@ test("tp-host unit metadata is parsed by key and never shifts on an empty field"
   );
   // The previously shifted case: empty user with the rest populated.
   assertEquals(
-    await parseUnitMeta(meta("", "alice-grp", "turbopanel-alice.slice", "yes")),
-    "ok [] [alice-grp] [turbopanel-alice.slice] [yes]",
+    await parseUnitMeta(meta("", "alice", "turbopanel-alice.slice", "yes")),
+    "ok [] [alice] [turbopanel-alice.slice] [yes]",
   );
   // A value may hold `=` and a literal "-".
   assertEquals(
@@ -1776,7 +1791,7 @@ test("tp-host refuses a tenant unit whose User= is empty", async () => {
     const unit = [
       "[Service]",
       "User=",
-      "Group=alice-grp",
+      "Group=alice",
       "Slice=turbopanel-alice.slice",
       "NoNewPrivileges=yes",
       "ExecStart=/bin/true",
@@ -1809,20 +1824,20 @@ test("principal home: the home root itself is still root:root", async () => {
     const root = host.path("srv/users");
     const ok = await host.run(installDir(root, "0750", "root", "root"));
     assertEquals(ok.code, 0, ok.stderr);
-    await refused(host, installDir(root, "0750", "alice", "alice-grp"));
+    await refused(host, installDir(root, "0750", "alice", "alice"));
   });
 });
 
-test("principal home: the skeleton is root's, never group-writable, and only root:<p>-grp", async () => {
+test("principal home: the skeleton is root's, never group-writable, and only root:<p>", async () => {
   await withHost(async (host) => {
     const home = host.path("srv/users/alice");
     const sealed = await host.run(
-      installDir(home, "0750", "root", "alice-grp"),
+      installDir(home, "0750", "root", "alice"),
     );
     assertEquals(sealed.code, 0, sealed.stderr);
     assertStringIncludes(
       sealed.stdout,
-      "EXEC [chown] [-h] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [root:alice] [.]",
     );
     const structural = [
       home,
@@ -1834,16 +1849,16 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
     ];
     for (const dir of structural) {
       // The tenant owning any of these could rename root's paths below it.
-      await refused(host, installDir(dir, "0750", "alice", "alice-grp"));
+      await refused(host, installDir(dir, "0750", "alice", "alice"));
       await refused(host, installDir(dir, "0750", "15001"));
-      await refused(host, ["chown", "alice:alice-grp", dir]);
+      await refused(host, ["chown", "alice:alice", dir]);
       await refused(host, ["chown", "tpnginx", dir]);
-      // The engines are in alice-grp: group write is the same rename hole.
-      await refused(host, installDir(dir, "0770", "root", "alice-grp"));
-      await refused(host, installDir(dir, "0752", "root", "alice-grp"));
-      await refused(host, installDir(dir, "2750", "root", "alice-grp"));
+      // The engines are in alice: group write is the same rename hole.
+      await refused(host, installDir(dir, "0770", "root", "alice"));
+      await refused(host, installDir(dir, "0752", "root", "alice"));
+      await refused(host, installDir(dir, "2750", "root", "alice"));
       // Another principal's group, or an engine's, never holds the skeleton.
-      await refused(host, installDir(dir, "0750", "root", "carol-grp"));
+      await refused(host, installDir(dir, "0750", "root", "carol"));
       await refused(host, installDir(dir, "0750", "root", "tpnginx"));
     }
     await Deno.mkdir(`${home}/sites/web/releases/r1`, { recursive: true });
@@ -1854,23 +1869,23 @@ test("principal home: the skeleton is root's, never group-writable, and only roo
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
       if (dir.endsWith("/releases/r1")) {
         // A release directory appears only through publish, sealed.
-        await refused(host, installDir(dir, "0750", "root", "alice-grp"));
+        await refused(host, installDir(dir, "0750", "root", "alice"));
         continue;
       }
-      const ok = await host.run(installDir(dir, "0750", "root", "alice-grp"));
+      const ok = await host.run(installDir(dir, "0750", "root", "alice"));
       assertEquals(ok.code, 0, `${dir}: ${ok.stderr}`);
     }
     // Recursion from a skeleton directory would walk the tenant's leaves as
     // root; only a release (all root's) is re-owned in one sweep.
     for (const dir of structural.slice(0, 5)) {
-      await refused(host, ["chown", "-R", "root:alice-grp", dir]);
+      await refused(host, ["chown", "-R", "root:alice", dir]);
       await refused(host, ["chmod", "-R", "0750", dir]);
       await refused(host, setgidDirectoriesFindArgs(dir));
     }
     const seal = await host.run([
       "chown",
       "-R",
-      "root:alice-grp",
+      "root:alice",
       `${home}/sites/web/releases/r1`,
     ]);
     assertEquals(seal.code, 0, seal.stderr);
@@ -1883,22 +1898,22 @@ test("principal home: home/, data/ and tmp/ are the principal's alone, in a seal
     await Deno.chmod(home, 0o750);
     for (const name of ["home", "data", "tmp"]) {
       const dir = `${home}/${name}`;
-      const ok = await host.run(installDir(dir, "0700", "alice", "alice-grp"));
+      const ok = await host.run(installDir(dir, "0700", "alice", "alice"));
       assertEquals(ok.code, 0, ok.stderr);
       assertEquals((await Deno.lstat(dir)).isDirectory, true);
       assertStringIncludes(
         ok.stdout,
-        "EXEC [chown] [-h] [--] [alice:alice-grp] [.]",
+        "EXEC [chown] [-h] [--] [alice:alice] [.]",
       );
-      // 0700: the engine accounts in alice-grp stay out.
-      await refused(host, installDir(dir, "0750", "alice", "alice-grp"));
-      await refused(host, installDir(dir, "0701", "alice", "alice-grp"));
+      // 0700: the engine accounts in alice stay out.
+      await refused(host, installDir(dir, "0750", "alice", "alice"));
+      await refused(host, installDir(dir, "0701", "alice", "alice"));
       await refused(host, ["chmod", "0770", dir]);
       await refused(host, ["chmod", "u=rwX,g=rX,o=", dir]);
       await refused(host, ["chmod", "-R", "u=rwX,g=rX,o=", dir]);
       // Nobody else owns them: not root, an engine, or another principal.
-      await refused(host, installDir(dir, "0700", "tpnginx", "alice-grp"));
-      await refused(host, installDir(dir, "0700", "alice", "carol-grp"));
+      await refused(host, installDir(dir, "0700", "tpnginx", "alice"));
+      await refused(host, installDir(dir, "0700", "alice", "carol"));
       await refused(host, installDir(dir, "0700", "alice", "tpnginx"));
       await refused(host, ["chown", "root", dir]);
     }
@@ -1907,7 +1922,7 @@ test("principal home: home/, data/ and tmp/ are the principal's alone, in a seal
       const leaf of ["sites/web/shared", "sites/web/webroot", "volumes/v1"]
     ) {
       const ok = await host.run(
-        installDir(`${home}/${leaf}`, "0750", "alice", "alice-grp"),
+        installDir(`${home}/${leaf}`, "0750", "alice", "alice"),
       );
       assertEquals(ok.code, 0, `${leaf}: ${ok.stderr}`);
     }
@@ -1924,7 +1939,7 @@ test("principal home: a planted link or an unsealed parent stops the tenant dire
     await Deno.symlink(outside, `${home}/home`);
     await refused(
       host,
-      installDir(`${home}/home`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/home`, "0700", "alice", "alice"),
     );
     assertEquals((await Deno.stat(outside)).mode! & 0o777, 0o755);
     await refused(host, ["chmod", "0700", `${home}/home`]);
@@ -1932,16 +1947,16 @@ test("principal home: a planted link or an unsealed parent stops the tenant dire
     await Deno.chmod(home, 0o770);
     const stderr = await refused(
       host,
-      installDir(`${home}/data`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/data`, "0700", "alice", "alice"),
     );
     assertStringIncludes(stderr, "not sealed");
     await refused(
       host,
-      installDir(`${home}/sites`, "0750", "root", "alice-grp"),
+      installDir(`${home}/sites`, "0750", "root", "alice"),
     );
     await Deno.chmod(home, 0o750);
     const ok = await host.run(
-      installDir(`${home}/data`, "0700", "alice", "alice-grp"),
+      installDir(`${home}/data`, "0700", "alice", "alice"),
     );
     assertEquals(ok.code, 0, ok.stderr);
   });
@@ -1955,7 +1970,7 @@ test("useradd: the passwd home is <root>/<name>/home and nothing else", async ()
       "-u",
       "15003",
       "-g",
-      "carol-grp",
+      "carol",
       "-d",
       home,
       "-M",
@@ -1996,7 +2011,7 @@ async function addPhpAccounts(host: Host) {
   await Deno.writeTextFile(host.path("etc/passwd"), bob, { append: true });
   await Deno.writeTextFile(
     host.path("etc/group"),
-    "bob-grp:x:15002:\ntpapache:x:9991:\ntpols:x:9992:\n",
+    "bob:x:15002:\ntpapache:x:9991:\ntpols:x:9992:\n",
     { append: true },
   );
 }
@@ -2054,7 +2069,7 @@ function phpService(host: Host, mode: PhpMode): string {
     `ExecStart=${phpExec(host, mode)}`,
     ...byMode[mode],
     "User=alice",
-    "Group=alice-grp",
+    "Group=alice",
     "Slice=turbopanel-alice.slice",
     "NoNewPrivileges=yes",
     "CapabilityBoundingSet=",
@@ -2148,7 +2163,7 @@ test("per-site PHP services: a hostile corpus is refused in every mode", async (
       ["runs as another principal", line("User=", "User=bob")],
       ["root group", line("Group=", "Group=root")],
       ["web server group", line("Group=", "Group=tpnginx")],
-      ["another principal's group", line("Group=", "Group=bob-grp")],
+      ["another principal's group", line("Group=", "Group=bob")],
       [
         "another principal's slice",
         line("Slice=", "Slice=turbopanel-bob.slice"),
@@ -2483,7 +2498,7 @@ test("per-site PHP units: only exact names, and the generic tenant shape gains n
     const tenant = [
       "[Service]",
       "User=alice",
-      "Group=alice-grp",
+      "Group=alice",
       "Slice=turbopanel-alice.slice",
       "NoNewPrivileges=yes",
       "ExecStart=/bin/sh -c id",
@@ -2534,7 +2549,7 @@ test("per-site PHP sockets: a hostile corpus is refused", async () => {
       ["owned by a web server", line("SocketUser=", "SocketUser=tpnginx")],
       ["group tp", line("SocketGroup=", "SocketGroup=tp")],
       ["group root", line("SocketGroup=", "SocketGroup=root")],
-      ["the owner's group", line("SocketGroup=", "SocketGroup=alice-grp")],
+      ["the owner's group", line("SocketGroup=", "SocketGroup=alice")],
       [
         "the Caddy site account",
         line("SocketGroup=", "SocketGroup=tpcaddysite"),
@@ -2623,38 +2638,38 @@ async function installPhpConf(
     "-o",
     opts.owner ?? "root",
     "-g",
-    opts.group ?? "alice-grp",
+    opts.group ?? "alice",
     host.path("tmp/conf"),
     `${phpConfDir(host)}/${name}`,
   ]);
 }
 
-test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowlist", async () => {
+test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist", async () => {
   await withPhpHost(async (host) => {
     const dir = phpConfDir(host);
     const mkdir = (
       path: string,
       mode = "0750",
       owner = "root",
-      group = "alice-grp",
+      group = "alice",
     ) =>
       host.run(["install", "-d", "-m", mode, "-o", owner, "-g", group, path]);
     const made = await mkdir(dir);
     assertEquals(made.code, 0, made.stderr);
     assertStringIncludes(
       made.stdout,
-      "EXEC [chown] [-h] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-h] [--] [root:alice] [.]",
     );
     for (
       const [mode, owner, group, path] of [
-        ["0755", "root", "alice-grp", dir],
-        ["0770", "root", "alice-grp", dir],
-        ["0750", "alice", "alice-grp", dir],
-        ["0750", "tp", "alice-grp", dir],
+        ["0755", "root", "alice", dir],
+        ["0770", "root", "alice", dir],
+        ["0750", "alice", "alice", dir],
+        ["0750", "tp", "alice", dir],
         ["0750", "root", "tpnginx", dir],
-        ["0750", "root", "carol-grp", dir],
-        ["0750", "root", "alice-grp", phpConfDir(host, "Shop")],
-        ["0750", "root", "alice-grp", `${dir}/deeper`],
+        ["0750", "root", "carol", dir],
+        ["0750", "root", "alice", phpConfDir(host, "Shop")],
+        ["0750", "root", "alice", `${dir}/deeper`],
         ["0755", "root", "root", host.path("etc/turbopanel/php/sites")],
       ]
     ) {
@@ -2675,7 +2690,7 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       assertEquals(ok.code, 0, `${name}: ${ok.stderr}`);
       assertStringIncludes(
         ok.stdout,
-        "EXEC [chown] [-h] [--] [root:alice-grp] [./f]",
+        "EXEC [chown] [-h] [--] [root:alice] [./f]",
       );
       assertEquals(await Deno.readTextFile(`${dir}/${name}`), content);
       for (
@@ -2737,7 +2752,7 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "extension = /usr/lib/php/x/curl.so",
       "extension = curl.so.so",
       "extension = curlx",
-      "extension = pdo_pgsql",
+      "extension = pdo_sqlite",
       "zend_extension = /usr/lib/php/20240924/opcache.so",
       "zend_extension = xdebug.so",
       "extension_dir = /usr/lib/php/20240924x",
@@ -2767,6 +2782,8 @@ test("per-site PHP config: root:<owner>-grp, 0750/0640, directives on an allowli
       "extension = curl.so",
       "extension = mysqli.so",
       "extension = pdo_mysql",
+      "extension = pgsql.so",
+      "extension = pdo_pgsql",
     ].join("\n");
     const lsphp = await installPhpConf(
       host,
@@ -2858,7 +2875,7 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
       "-o",
       "root",
       "-g",
-      "alice-grp",
+      "alice",
       dir,
     ]);
     assertEquals(
@@ -2882,7 +2899,7 @@ test("per-site PHP config: symlinks, other verbs and the rollout copy", async ()
       const args of [
         ["tee", ini],
         ["chmod", "0666", ini],
-        ["chown", "alice:alice-grp", ini],
+        ["chown", "alice:alice", ini],
         ["chown", "tp", dir],
         ["chmod", "0777", dir],
         ["cp", "-p", "--", ini, `${dir}/php-fpm.conf`],
@@ -3002,7 +3019,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           mode,
           series: "8.4",
           user: "alice",
-          group: "alice-grp",
+          group: "alice",
           home,
           configDir: host.path("etc/turbopanel"),
           libDir: host.path("opt/turbopanel/lib"),
@@ -3018,7 +3035,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           "-o",
           "root",
           "-g",
-          "alice-grp",
+          "alice",
           dir,
         ]);
         assertEquals(made.code, 0, made.stderr);
@@ -3053,7 +3070,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
             "-o",
             "root",
             "-g",
-            "alice-grp",
+            "alice",
             host.path("tmp/conf"),
             `${dir}/${name}`,
           ]);
@@ -3109,7 +3126,7 @@ test("one site is bound to one owner across its service, socket and config", asy
       "-o",
       "root",
       "-g",
-      "bob-grp",
+      "bob",
       phpConfDir(host),
     ]);
   });
@@ -3137,7 +3154,7 @@ async function newLayoutAlice(host: Host, groups: string[] = []) {
   );
 }
 
-const SWITCH = "etc/ssh/turbopanel-sftp-chroot";
+const SWITCH = "etc/ssh/turbopanel/sftp-chroot";
 
 test("sftp-chroot switches on only when every tpsftp member is on the new layout", async () => {
   await withHost(async (host) => {
@@ -3225,7 +3242,237 @@ test("sftp-chroot refuses a member that also holds the shell level", async () =>
   });
 });
 
-test("sftp-chroot accepts only check, on, off and status", async () => {
+const OFF_MARK = "etc/ssh/turbopanel/sftp-chroot-off";
+
+test("sftp-chroot auto turns the jail on for a clean host and does nothing twice", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    const first = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(first.code, 0, first.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+    assertEquals(
+      (await host.run(["sftp-chroot", "status"])).stdout,
+      `on ${host.path("srv/users")}\n`,
+    );
+    const again = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(again.code, 0, again.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+  });
+});
+
+test("sftp-chroot auto turns the jail on for a host with no tpsftp member yet", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+  });
+});
+
+test("sftp-chroot auto leaves the jail off and names the member that stops it", async () => {
+  await withHost(async (host) => {
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(
+      host.path("etc/group"),
+      group.replace("tpsftp:x:9986:", "tpsftp:x:9986:alice"),
+    );
+    const result = await host.run(["sftp-chroot", "auto"]);
+    // A finding is not a failure: the caller reads the status afterwards.
+    assertEquals(result.code, 0, result.stderr);
+    assertStringIncludes(result.stderr, "alice: passwd home is not");
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sftp-chroot off is remembered: auto never overrides it, on clears it", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+
+    const on = await host.run(["sftp-chroot", "on"]);
+    assertEquals(on.code, 0, on.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+    await Deno.stat(host.path(OFF_MARK)).then(
+      () => {
+        throw new Error("the off marker survived an explicit on");
+      },
+      () => {},
+    );
+  });
+});
+
+test("sftp-chroot off writes the marker before it removes the switch", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    // A directory where the switch should be makes the removal fail, so the
+    // marker is on disk only if it was written first. A concurrent `auto`
+    // between the two steps then cannot turn the jail back on.
+    await Deno.mkdir(host.path(SWITCH));
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code === 0, false);
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+    const auto = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(auto.code, 0, auto.stderr);
+    assertEquals((await Deno.stat(host.path(SWITCH))).isDirectory, true);
+  });
+});
+
+test("an off that lands while auto's layout check runs still wins", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    // Hold auto after its layout check passed and before it writes the switch
+    // (tp-host's test mode pauses there while the pause file exists). `off`
+    // then writes its marker and finds no switch to remove.
+    const pause = host.path("tmp/pause-sftp-auto");
+    const paused = host.path("tmp/paused-sftp-auto");
+    await Deno.writeTextFile(pause, "");
+    const auto = host.run(["sftp-chroot", "auto"]);
+    for (let i = 0; i < 200; i++) {
+      if (await Deno.stat(paused).then(() => true, () => false)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assertEquals(await Deno.stat(paused).then(() => true, () => false), true);
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code, 0, off.stderr);
+    await Deno.remove(pause);
+    const result = await auto;
+    assertEquals(result.code, 0, result.stderr);
+    // auto wrote the switch, then saw the marker and took it back.
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+  });
+});
+
+test("sftp-chroot off still works when the SSH folder is missing", async () => {
+  await withHost(async (host) => {
+    await Deno.remove(host.path("etc/ssh/turbopanel"), { recursive: true });
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code, 0, off.stderr);
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+    assertEquals(
+      (await Deno.stat(host.path("etc/ssh/turbopanel"))).mode! & 0o777,
+      0o750,
+    );
+    // Remembered: auto leaves it alone.
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sftp-chroot off and auto-revert are no-ops on a host with no SSH server folder", async () => {
+  await withHost(async (host) => {
+    await Deno.remove(host.path("etc/ssh"), { recursive: true });
+    assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "auto-revert"])).code, 0);
+  });
+});
+
+test("sftp-chroot auto-revert removes the switch without remembering an off", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals(
+      (await host.run(["sftp-chroot", "status"])).stdout.startsWith("on "),
+      true,
+    );
+    const revert = await host.run(["sftp-chroot", "auto-revert"]);
+    assertEquals(revert.code, 0, revert.stderr);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    await Deno.stat(host.path(OFF_MARK)).then(
+      () => {
+        throw new Error("auto-revert wrote the explicit-off marker");
+      },
+      () => {},
+    );
+    // The next automatic attempt may switch it on again.
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+  });
+});
+
+test("sftp-chroot refuses a jail root that others can enter", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    await Deno.chmod(host.path("srv/users/alice"), 0o755);
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "must be group alice with mode 0750");
+    assertStringIncludes(
+      await refused(host, ["sftp-chroot", "on"]),
+      "refusing to switch on",
+    );
+    // auto leaves the jail off and names the finding.
+    const auto = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(auto.code, 0, auto.stderr);
+    assertStringIncludes(auto.stderr, "mode 0750");
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sshd-config refuses a symlinked file", async () => {
+  await withHost(async (host) => {
+    await Deno.writeTextFile(host.path("etc/ssh/real_config"), "Port 22\n");
+    await Deno.symlink(
+      host.path("etc/ssh/real_config"),
+      host.path("etc/ssh/sshd_config"),
+    );
+    await refused(host, ["sshd-config"]);
+  });
+});
+
+test("no generic verb can write, read or remove the off marker", async () => {
+  await withHost(async (host) => {
+    const mark = host.path(OFF_MARK);
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      host.path("tmp/staged"),
+      mark,
+    ]);
+    await refused(host, ["tee", mark], "off\n");
+    await Deno.writeTextFile(mark, "off\n");
+    await refused(host, ["rm", "-f", "--", mark]);
+    await refused(host, ["cat", "--", mark]);
+  });
+});
+
+test("sshd-config prints the administrator's file and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const config = "Include /etc/ssh/sshd_config.d/*.conf\nPort 22\n";
+    await Deno.writeTextFile(host.path("etc/ssh/sshd_config"), config);
+    await Deno.chmod(host.path("etc/ssh/sshd_config"), 0o600);
+    const result = await host.run(["sshd-config"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, config);
+    for (
+      const args of [
+        ["/etc/shadow"],
+        ["--", "/etc/ssh/sshd_config"],
+        ["-f", "/etc/passwd"],
+      ]
+    ) {
+      await refused(host, ["sshd-config", ...args]);
+    }
+  });
+});
+
+test("sshd-config refuses when the file is absent", async () => {
+  await withHost(async (host) => {
+    await refused(host, ["sshd-config"]);
+  });
+});
+
+test("sftp-chroot accepts only check, verify, on, off, auto and status", async () => {
   await withHost(async (host) => {
     for (
       const args of [[], ["enable"], ["on", "now"], ["status", "-v"], [
@@ -3234,6 +3481,21 @@ test("sftp-chroot accepts only check, on, off and status", async () => {
       ]]
     ) {
       await refused(host, ["sftp-chroot", ...args]);
+    }
+  });
+});
+
+test("no generic verb touches the hosting Caddy or Docker gate state folders", async () => {
+  await withHost(async (host) => {
+    for (const name of ["hosting-caddy", "docker-gate"]) {
+      const dir = host.path(`var/lib/turbopanel/${name}`);
+      await Deno.mkdir(dir, { recursive: true });
+      const file = `${dir}/probe`;
+      await Deno.writeTextFile(file, "x");
+      await refused(host, ["rm", "-f", "--", file]);
+      await refused(host, ["cat", "--", file]);
+      await refused(host, ["mkdir", "-p", "--", `${dir}/inner`]);
+      await refused(host, ["chown", "tp:tp", "--", file]);
     }
   });
 });
@@ -3323,7 +3585,7 @@ test("cert-dates prints only notAfter dates, skips internal certs, symlinks and 
       group + `tpedge:x:${Deno.gid}:\n`,
     );
     const certs = host.path(
-      "var/lib/turbopanel-hosting-caddy/data/caddy/certificates",
+      "var/lib/turbopanel/hosting-caddy/data/caddy/certificates",
     );
     await selfSignedCert(
       join(certs, "acme-v02.api.letsencrypt.org-directory", "shop.example.com"),
@@ -3356,6 +3618,137 @@ test("cert-dates prints only notAfter dates, skips internal certs, symlinks and 
 test("cert-dates prints nothing when the hosting Caddy has issued no certificates", async () => {
   await withHost(async (host) => {
     const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, "");
+  });
+});
+
+async function withTpedge(
+  host: { path: (p: string) => string },
+): Promise<string> {
+  const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+  await Deno.writeTextFile(
+    host.path("etc/passwd"),
+    passwd + `tpedge:x:${Deno.uid}:${Deno.gid}::/nonexistent:/bin/false\n`,
+  );
+  const group = await Deno.readTextFile(host.path("etc/group"));
+  await Deno.writeTextFile(
+    host.path("etc/group"),
+    group + `tpedge:x:${Deno.gid}:\n`,
+  );
+  return host.path("var/lib/turbopanel/hosting-caddy/data/caddy/certificates");
+}
+
+test("cert-export prints the chain then the key of ONE hostname and nothing else", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    const le = "acme-v02.api.letsencrypt.org-directory";
+    await selfSignedCert(
+      join(certs, le, "shop.example.com"),
+      "shop.example.com",
+      30,
+    );
+    await selfSignedCert(
+      join(certs, le, "other.example.com"),
+      "other.example.com",
+      30,
+    );
+    const result = await host.run(["cert-export", "shop.example.com"]);
+    assertEquals(result.code, 0, result.stderr);
+    const out = result.stdout;
+    assertEquals(
+      out.indexOf("BEGIN CERTIFICATE") < out.indexOf("PRIVATE KEY"),
+      true,
+    );
+    assertEquals(out.match(/BEGIN CERTIFICATE/g)?.length, 1);
+    assertEquals(out.match(/PRIVATE KEY-----/g)?.length, 2);
+    const shopKey = await Deno.readTextFile(
+      join(certs, le, "shop.example.com", "shop.example.com.key"),
+    );
+    const otherKey = await Deno.readTextFile(
+      join(certs, le, "other.example.com", "other.example.com.key"),
+    );
+    assertStringIncludes(out, shopKey.trim());
+    assertEquals(out.includes(otherKey.trim()), false);
+    assertEquals(result.stderr.includes("PRIVATE"), false);
+  });
+});
+
+test("cert-export skips the internal issuer, staging issuers and symlinks, and prints nothing for them", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    await selfSignedCert(
+      join(certs, "local", "intranet.test"),
+      "intranet.test",
+      10,
+    );
+    await selfSignedCert(
+      join(
+        certs,
+        "acme-staging-v02.api.letsencrypt.org-directory",
+        "stage.example.com",
+      ),
+      "stage.example.com",
+      10,
+    );
+    const le = join(certs, "acme-v02.api.letsencrypt.org-directory");
+    await Deno.mkdir(le, { recursive: true });
+    await Deno.symlink(host.path("outside"), join(le, "linked.example.com"));
+    for (
+      const name of [
+        "intranet.test",
+        "stage.example.com",
+        "linked.example.com",
+        "missing.example.com",
+      ]
+    ) {
+      const result = await host.run(["cert-export", name]);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(result.stdout, "", name);
+    }
+  });
+});
+
+test("cert-export takes exactly one plain lowercase hostname", async () => {
+  await withHost(async (host) => {
+    await withTpedge(host);
+    await refused(host, ["cert-export"]);
+    await refused(host, ["cert-export", "a.example.com", "b.example.com"]);
+    await refused(host, ["cert-export", "*.example.com"]);
+    await refused(host, ["cert-export", "../etc"]);
+    await refused(host, ["cert-export", "A.Example.com"]);
+    await refused(host, ["cert-export", "a/b.example.com"]);
+    await refused(host, ["cert-export", ".example.com"]);
+    await refused(host, ["cert-export", "a..example.com"]);
+    await refused(host, ["cert-export", "-a.example.com"]);
+    await refused(host, ["cert-export", `${"a".repeat(250)}.com`]);
+  });
+});
+
+test("cert-export prefers the most recently written pair when two issuers hold one", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    const older = join(
+      certs,
+      "acme-v02.api.letsencrypt.org-directory",
+      "shop.example.com",
+    );
+    const newer = join(certs, "other-issuer", "shop.example.com");
+    await selfSignedCert(older, "shop.example.com", 30);
+    await Deno.utime(join(older, "shop.example.com.crt"), 1_000_000, 1_000_000);
+    await selfSignedCert(newer, "shop.example.com", 60);
+    const result = await host.run(["cert-export", "shop.example.com"]);
+    assertEquals(result.code, 0, result.stderr);
+    const newerKey = await Deno.readTextFile(
+      join(newer, "shop.example.com.key"),
+    );
+    assertStringIncludes(result.stdout, newerKey.trim());
+  });
+});
+
+test("cert-export prints nothing when the hosting Caddy has issued no certificates", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["cert-export", "shop.example.com"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(result.stdout, "");
   });

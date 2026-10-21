@@ -55,8 +55,8 @@ async function setUpBuildHost(
     );
   }
   const groups = [
-    // Runtime groups in the entitlement band are the build's; anything else
-    // (a look-alike outside the band, a non-series name) is not.
+    // Leftovers of the old per-version runtime groups: a build gets none of
+    // them (every installed runtime is readable by everyone now).
     "tpnodeapp:x:9910:",
     "tpnode24:x:9911:alice",
     "tpnode26:x:9925:",
@@ -194,7 +194,6 @@ function expectedSystemdRun(
     ...[
       "DynamicUser=yes",
       `User=${user}`,
-      "SupplementaryGroups=tpnode24 tpnode26 tpdeno2",
       `WorkingDirectory=${work}`,
       "NoNewPrivileges=yes",
       "CapabilityBoundingSet=",
@@ -659,7 +658,7 @@ test("build-run refuses a symlinked or missing work tree and a loosened build la
   });
 });
 
-test("the build gets runtime groups only: never docker, tp, sudo or a look-alike outside the band", async () => {
+test("the build gets no supplementary group, even with old runtime groups on the host", async () => {
   await withHost(async (host) => {
     await setUpBuildHost(host, {
       groups: ["tpnode30x:x:9930:", "tpnode31:x:999:", "tpdeno2x:x:9942:"],
@@ -667,26 +666,9 @@ test("the build gets runtime groups only: never docker, tp, sudo or a look-alike
     const result = await host.run(["build-run", "b1", "p1", "alice"]);
     assertEquals(result.code, 0, result.stderr);
     const run = execLines(result.stdout).at(-1) ?? "";
-    // The one group list the unit gets (docker and the rest only appear as
-    // InaccessiblePaths= sockets).
-    const groups = run.match(/\[SupplementaryGroups=[^\]]*\]/g);
-    assertEquals(groups, ["[SupplementaryGroups=tpnode24 tpnode26 tpdeno2]"]);
-    assertEquals(run.includes("Group="), false);
-  });
-  await withHost(async (host) => {
-    // A host with no Node or Deno series vendored yet: no supplementary group at all.
-    await setUpBuildHost(host);
-    await Deno.writeTextFile(
-      host.path("etc/group"),
-      (await Deno.readTextFile(host.path("etc/group")))
-        .split("\n")
-        .filter((line) => !/^tp(node|deno)\d+:/.test(line))
-        .join("\n"),
-    );
-    const result = await host.run(["build-run", "b1", "p1", "alice"]);
-    assertEquals(result.code, 0, result.stderr);
-    const run = execLines(result.stdout).at(-1) ?? "";
+    // Docker and the rest only appear as InaccessiblePaths= sockets.
     assertEquals(run.includes("SupplementaryGroups"), false);
+    assertEquals(run.includes("Group="), false);
   });
 });
 
@@ -826,7 +808,7 @@ test("tp cannot install a unit under the build sandbox's transient unit names", 
       [
         "[Service]",
         "User=alice",
-        "Group=alice-grp",
+        "Group=alice",
         "Slice=turbopanel-alice.slice",
         "NoNewPrivileges=yes",
         "ExecStart=/bin/true",
@@ -1081,7 +1063,7 @@ test("a dashed site owner gets a slice of its own, never inside another owner's 
   await withHost(async (host) => {
     await setUpBuildHost(host, {
       accounts: ["web-x:x:15020:15020::/srv/users/web-x:/bin/bash"],
-      groups: ["web-x-grp:x:15020:"],
+      groups: ["web-x:x:15020:"],
     });
     const run = execLines(
       (await host.run(["build-run", "b1", "p1", "web-x"])).stdout,
@@ -1093,7 +1075,7 @@ test("a dashed site owner gets a slice of its own, never inside another owner's 
       [
         "[Service]",
         "User=web-x",
-        "Group=web-x-grp",
+        "Group=web-x",
         `Slice=${slice}`,
         "NoNewPrivileges=yes",
         "ExecStart=/bin/true",
@@ -1120,14 +1102,14 @@ test("no new site owner may take a platform slice's name or an id above the band
   await withHost(async (host) => {
     await Deno.writeTextFile(
       host.path("etc/group"),
-      "containers-grp:x:15020:\ncarol2-grp:x:15021:\n",
+      "containers:x:15020:\ncarol2:x:15021:\n",
       { append: true },
     );
     const useradd = (name: string, ids: string[]) => [
       "useradd",
       ...ids,
       "-g",
-      `${name}-grp`,
+      `${name}`,
       "-d",
       host.path(`srv/users/${name}/home`),
       "-M",
@@ -1140,7 +1122,7 @@ test("no new site owner may take a platform slice's name or an id above the band
     // systemd hands out 61184-65519 to throwaway build users.
     await refused(host, useradd("carol2", ["-u", "61500"]));
     await refused(host, useradd("carol2", ["-u", "60001"]));
-    await refused(host, ["groupadd", "-g", "61500", "dave-grp"]);
+    await refused(host, ["groupadd", "-g", "61500", "dave"]);
     const ok = await host.run(useradd("carol2", ["-u", "60000"]));
     assertEquals(ok.code, 0, ok.stderr);
   });

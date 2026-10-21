@@ -13,19 +13,22 @@
       Invalid tenant Deno series '{{ deno_app_series }}'.
       Expected a major version such as '2'.
 
-- name: Resolve the series entitlement group
-  ansible.builtin.set_fact:
-    deno_app_series_group: "tpdeno{{ deno_app_series }}"
-
-# Ahead of the install: the shell below writes into this directory, and the
-# release tree it extracts inherits the group from it.
-- name: Ensure the tenant Deno series tree is reachable by the runtime group
+- name: Ensure the tenant Deno series tree
   ansible.builtin.file:
     path: "{{ deno_app_root }}/{{ deno_app_series }}"
     state: directory
     owner: root
-    group: "{{ deno_app_series_group }}"
+    group: root
     mode: "0750"
+
+# Traverse without listing, like the tree root: every site owner's Linux user
+# may run every installed series.
+- name: Let every site owner's Linux user traverse the tenant Deno series tree
+  ansible.posix.acl:
+    path: "{{ deno_app_root }}/{{ deno_app_series }}"
+    etype: other
+    permissions: x
+    state: present
 
 # The newest stable release, from the official distribution.
 - name: Fetch the newest stable Deno release
@@ -76,18 +79,7 @@
     DENO_APP_SERIES: "{{ deno_app_series }}"
     DENO_APP_ARCH: "{{ deno_app_arch }}"
     DENO_APP_RESOLVED: "{{ deno_app_resolved_version }}"
-    DENO_APP_GROUP: "{{ deno_app_series_group }}"
     DENO_APP_SERIES_DIR: "{{ deno_app_root }}/{{ deno_app_series }}"
     DENO_APP_DIST_URL: "{{ deno_app_dist_url }}"
   register: _deno_app_install
   changed_when: "'turbopanel-' in _deno_app_install.stdout"
-
-# Supplementary-group changes are not visible to an already-running process, so
-# an unsandboxed (development) build child refreshes groups with
-# `sudo -n -u <self>` after this append. Sandboxed builds get every tpdeno<series>
-# group from tp-host build-run as SupplementaryGroups=.
-- name: Allow the daemon account to execute this tenant Deno series
-  ansible.builtin.user:
-    name: "{{ turbopanel_user }}"
-    groups: "{{ deno_app_series_group }}"
-    append: true

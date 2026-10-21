@@ -130,10 +130,12 @@
           --instance does that.
 
   roles:
+    # Host-base packages first: turbopanel-user sets a traverse ACL, which
+    # needs setfacl (the `acl` package) that minimal Debian images omit.
+    - role: daemon-prereqs
     - role: turbopanel-user
     - role: runtime-sockets
     - role: daemon-logs
-    - role: daemon-prereqs
     - role: rapl-access
     - role: docker
     - role: postgres

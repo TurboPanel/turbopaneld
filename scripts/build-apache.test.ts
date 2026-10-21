@@ -23,6 +23,15 @@ Deno.test("build-apache.sh verifies sources, fixes owners and gates linked libra
     "only trunk publishes",
   );
   assert(script.includes("--disable-http2"), "optional modules are disabled");
+  assert(
+    script.includes('ASSET="apache-httpd-$HTTPD_VER-$ARCH.tar.zst"'),
+    "lower-case apache-httpd-<ver>-<arch>.tar.zst asset",
+  );
+  assert(script.includes("share/licenses"), "ASF LICENSE and NOTICE ship");
+  assert(
+    workflow.includes('gh release edit "$TAG" --draft=false --latest=false'),
+    "publishing never makes the vendor release Latest",
+  );
 });
 
 Deno.test("apache role pins source digests the build script reads", async () => {
@@ -36,4 +45,25 @@ Deno.test("apache role pins source digests the build script reads", async () => 
   }
   const tasks = await read("orchestration/roles/apache/tasks/main.yml");
   assert(tasks.includes("--no-same-owner"), "extract never keeps tar owners");
+});
+
+Deno.test("apache role pins SHA-256 for both architectures of the current version", async () => {
+  const defaults = await read("orchestration/roles/apache/defaults/main.yml");
+  const version = defaults.match(/^apache_version: "(.+)"$/m)?.[1];
+  assert(version, "apache_version is pinned");
+  const versionKey = version.replaceAll(".", String.raw`\.`);
+  const versionBlock = defaults.match(
+    new RegExp(
+      String
+        .raw`^apache_sha256:\n(?:  .+\n)*  "${versionKey}":\n((?:    .+\n)+)`,
+      "m",
+    ),
+  )?.[1];
+  assert(versionBlock, `apache_sha256 has an entry for ${version}`);
+  for (const arch of ["amd64", "arm64"]) {
+    const digest = versionBlock.match(new RegExp(`^    ${arch}: "(.+)"$`, "m"))
+      ?.[1];
+    assert(digest, `${arch} digest for ${version}`);
+    assertMatch(digest, /^[0-9a-f]{64}$/, `${arch} digest is SHA-256`);
+  }
 });

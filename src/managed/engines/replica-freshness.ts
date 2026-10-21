@@ -11,6 +11,8 @@
  * why the control plane also requires a recent streaming observation.
  */
 
+import { parseSqlBool } from "./sql-bool.ts";
+
 /** GTID text longer than this is dropped (and the reading is unknown). */
 export const GTID_MAX_LENGTH = 4096;
 const GTID_TEXT_RE = /^[0-9A-Za-z:\-, ._]*$/;
@@ -102,7 +104,7 @@ export function parseMysqlFreshness(stdout: string): ReplicaFreshness {
   if (received === undefined || executed === undefined) return {};
   // Nothing received since this server started (the set resets on restart)
   // proves nothing about the source: unknown, not "applied".
-  const applied = { "1": true, "0": false }[cols[3]];
+  const applied = parseSqlBool(cols[3]);
   return { ...gtidFields(received, executed, applied), ...mysqlReceipt(cols) };
 }
 

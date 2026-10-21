@@ -1,0 +1,83 @@
+---
+# Everything scoped to ONE engine; looped from main.yml with
+# `loop_var: engine_prune_engine`.
+#
+# A site config is live (`*.conf`), staged or a rollback snapshot (`*.tpnew`,
+# `*.tpprev`): a rollout in progress may swap either back in, so any of them
+# keeps the engine.
+- name: Find site configs ({{ engine_prune_engine }})
+  ansible.builtin.find:
+    paths: "{{ turbopanel_config_dir }}/{{ engine_prune_engine }}/sites"
+    patterns: ["*.conf", "*.tpnew", "*.tpprev"]
+    file_type: any
+    hidden: true
+  register: _engine_prune_sites
+
+# OpenLiteSpeed keeps one directory per site under vhosts/: anything there is a
+# site.
+- name: Find OpenLiteSpeed site directories ({{ engine_prune_engine }})
+  ansible.builtin.find:
+    paths: "{{ turbopanel_config_dir }}/openlitespeed/vhosts"
+    file_type: any
+    hidden: true
+  register: _engine_prune_vhosts
+  when: engine_prune_engine == 'openlitespeed'
+
+- name: Refuse an engine a site still uses ({{ engine_prune_engine }})
+  ansible.builtin.assert:
+    that:
+      - _engine_prune_sites.files | length == 0
+      - _engine_prune_vhosts.files | default([]) | length == 0
+    fail_msg: >-
+      {{ engine_prune_engine }} still has
+      {{ _engine_prune_sites.files | length }} site config(s) and
+      {{ _engine_prune_vhosts.files | default([]) | length }} site
+      directory(ies); not removed.
+
+- name: Stop and disable the engine ({{ engine_prune_engine }})
+  ansible.builtin.systemd:
+    name: "turbopanel-{{ engine_prune_engine }}.service"
+    state: stopped
+    enabled: false
+  failed_when: false
+
+# Never delete a tree a running server still has open.
+- name: Check the engine has stopped ({{ engine_prune_engine }})
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "turbopanel-{{ engine_prune_engine }}.service"
+  register: _engine_prune_active
+  changed_when: false
+  failed_when: _engine_prune_active.stdout | trim in ['active', 'activating', 'deactivating', 'reloading']
+
+- name: Remove the engine's unit file ({{ engine_prune_engine }})
+  ansible.builtin.file:
+    path: "/etc/systemd/system/turbopanel-{{ engine_prune_engine }}.service"
+    state: absent
+  register: _engine_prune_unit
+
+# A unit that had failed stays listed until its failed state is cleared.
+- name: Clear a failed state ({{ engine_prune_engine }})
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - reset-failed
+      - "turbopanel-{{ engine_prune_engine }}.service"
+  register: _engine_prune_reset
+  changed_when: _engine_prune_reset.rc == 0
+  failed_when: false
+
+- name: Reload systemd after the unit went ({{ engine_prune_engine }})
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: _engine_prune_unit is changed
+
+- name: Remove the engine's vendored tree and config ({{ engine_prune_engine }})
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ turbopanel_vendor_dir }}/{{ engine_prune_engine }}"
+    - "{{ turbopanel_config_dir }}/{{ engine_prune_engine }}"

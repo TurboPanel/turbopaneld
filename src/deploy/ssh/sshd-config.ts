@@ -25,7 +25,7 @@ export const SSHD_DROPIN_PATH = `${SSHD_DROPIN_DIR}/60-turbopanel.conf`;
  * `sftp-chroot off` change it. The daemon asks `tp-host sftp-chroot status`,
  * which also names the chroot root it validated.
  */
-export const SFTP_CHROOT_SWITCH_PATH = "/etc/ssh/turbopanel-sftp-chroot";
+export const SFTP_CHROOT_SWITCH_PATH = "/etc/ssh/turbopanel/sftp-chroot";
 
 /** Where a jailed SFTP session starts, relative to its chroot. */
 export const SFTP_CHROOT_START_DIR = "home";

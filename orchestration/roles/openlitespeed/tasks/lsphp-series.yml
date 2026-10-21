@@ -19,7 +19,6 @@
   ansible.builtin.set_fact:
     _lsphp: "{{ _map }}"
     _lsphp_suite: "{{ _suite }}"
-    _lsphp_group: "tpphp{{ lsphp_series | replace('.', '') }}"
     _lsphp_dest: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}/{{ _map.version }}"
     # `<pkg>_<version>-<rev>+<suite>_<arch>.deb`; `-common` is `_all`.
     _lsphp_debs: >-
@@ -49,9 +48,11 @@
     update_cache: true
     cache_valid_time: 3600
 
-- name: Check vendored lsphp binary ({{ lsphp_series }})
+# Keyed on the newest module (not the binary) so a tree vendored before
+# `pgsql` joined the base set is topped up on the next apply.
+- name: Check vendored lsphp binary and its modules ({{ lsphp_series }})
   ansible.builtin.stat:
-    path: "{{ _lsphp_dest }}/bin/lsphp"
+    path: "{{ _lsphp_dest }}/lib/php/ext/pdo_pgsql.so"
   register: _lsphp_pinned
 
 - name: Extract lsphp packages into runtimes directory ({{ lsphp_series }})
@@ -80,9 +81,10 @@
           dpkg-deb -x "$DEB" "{{ _lsphp_tmp.path }}/extract"
         done
         install -d "{{ _lsphp_dest }}"
-        cp -a "{{ _lsphp_tmp.path }}/extract/usr/local/lsws/{{ _lsphp.pkg }}/." "{{ _lsphp_dest }}/"
+        # --remove-destination: a running lsphp binary cannot be overwritten.
+        cp -a --remove-destination "{{ _lsphp_tmp.path }}/extract/usr/local/lsws/{{ _lsphp.pkg }}/." "{{ _lsphp_dest }}/"
       args:
-        creates: "{{ _lsphp_dest }}/bin/lsphp"
+        creates: "{{ _lsphp_dest }}/lib/php/ext/pdo_pgsql.so"
 
   always:
     - name: Remove lsphp temp dir ({{ lsphp_series }})
@@ -90,15 +92,6 @@
         path: "{{ _lsphp_tmp.path }}"
         state: absent
       when: _lsphp_tmp.path is defined
-
-# Entitlement group for this PHP series, shared with php-fpm: one grant means
-# "may execute PHP <series> here", whichever engine serves the site.
-- name: Ensure the PHP entitlement group for lsphp ({{ lsphp_series }})
-  ansible.builtin.include_role:
-    name: runtime-entitlement
-  vars:
-    runtime_entitlement_runtime: php
-    runtime_entitlement_series: ["{{ lsphp_series }}"]
 
 # The binary was built for /usr/local/lsws/<pkg>/, so its compiled php.ini and
 # extension paths do not exist here. PHP also looks for php.ini next to the
@@ -125,7 +118,7 @@
     dest: "{{ _lsphp_dest }}/lib/php/ext"
     state: link
     owner: root
-    group: "{{ _lsphp_group }}"
+    group: root
     force: true
 
 - name: Seed the relocated php.ini from the production template ({{ lsphp_series }})
@@ -134,7 +127,7 @@
     src: "{{ _lsphp_dest }}/lib/php/{{ lsphp_series }}/php.ini-production"
     dest: "{{ _lsphp_dest }}/bin/php.ini"
     owner: root
-    group: "{{ _lsphp_group }}"
+    group: root
     mode: "0640"
     force: false
 
@@ -143,10 +136,16 @@
     path: "{{ _lsphp_dest }}/bin/php.ini"
     marker: "; {mark} TurboPanel relocated lsphp"
     # One line per list item: `extension_dir` first, then the extensions.
+    # Extensions compiled into the series (opcache on 8.5) are not loaded by
+    # name: their .so does not exist and loading it would fail.
     block: >-
       {{
         (['extension_dir = "' ~ _lsphp_ext_dirs.files[0].path ~ '"']
-          + openlitespeed_lsphp_ini_extensions) | join(_lsphp_newline)
+          + (openlitespeed_lsphp_ini_extensions
+             | reject('equalto', 'zend_extension=opcache.so')
+               if 'opcache' in (runtime_registry.runtimes.php.builtinExtensions[lsphp_series] | default([]))
+               else openlitespeed_lsphp_ini_extensions))
+        | join(_lsphp_newline)
       }}
   vars:
     _lsphp_newline: "\n"
@@ -163,31 +162,37 @@
     or ('Loaded Configuration File => ' ~ _lsphp_dest ~ '/bin/php.ini') not in _lsphp_info.stdout
     or 'Zend OPcache' not in _lsphp_info.stdout
     or 'mysqli' not in _lsphp_info.stdout
+    or 'pdo_pgsql' not in _lsphp_info.stdout
 
-# Detached lsphp runs as the site principal from its systemd unit, and tenant
-# principals are deliberately never in `tp`: the series entitlement group
-# (which the daemon grants a site's principal) is the identity that execs it.
-- name: Scope the lsphp tree to its PHP entitlement group ({{ lsphp_series }})
+# Every site owner's Linux user may run every installed PHP series (detached
+# lsphp runs as the site's owner from its systemd unit): the tree is
+# root-owned and never writable but by root. Also repairs a tree an older
+# release grouped to a per-version PHP group.
+- name: Make the lsphp tree root-owned and not group/world writable ({{ lsphp_series }})
   ansible.builtin.file:
     path: "{{ _lsphp_dest }}"
-    owner: root
-    group: "{{ _lsphp_group }}"
-    mode: "0750"
+    state: directory
     recurse: true
-
-- name: Keep the lsphp binary executable by the entitlement group only ({{ lsphp_series }})
-  ansible.builtin.file:
-    path: "{{ _lsphp_dest }}/bin/lsphp"
+    follow: false
     owner: root
-    group: "{{ _lsphp_group }}"
-    mode: "0750"
+    group: root
+    mode: "go-w"
 
-# The parent holds every series, so it belongs to no single series' group.
-- name: Grant the PHP entitlement group traversal of the lsphp tree ({{ lsphp_series }})
+# Readable by everyone through the ACL `other` entry (`X` keeps directories
+# and executables runnable without making every file so), the same way the
+# vendored runtime roots are opened.
+- name: Make the lsphp tree readable and runnable by everyone ({{ lsphp_series }})
   ansible.posix.acl:
-    path: "{{ turbopanel_vendor_dir }}/lsphp"
-    etype: group
-    entity: "{{ _lsphp_group }}"
+    path: "{{ _lsphp_dest }}"
+    etype: other
+    permissions: rX
+    recursive: true
+    state: present
+
+- name: Let every site owner's Linux user traverse to this lsphp series ({{ lsphp_series }})
+  ansible.posix.acl:
+    path: "{{ turbopanel_vendor_dir }}/lsphp/{{ lsphp_series }}"
+    etype: other
     permissions: x
     state: present
 

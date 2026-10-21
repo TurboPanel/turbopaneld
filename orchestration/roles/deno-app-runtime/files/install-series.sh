@@ -1,14 +1,13 @@
 #!/bin/bash
 # Vendors one tenant Deno series. Invoked by vendor-series.yml with env:
-# DENO_APP_SERIES, DENO_APP_ARCH, DENO_APP_RESOLVED, DENO_APP_GROUP,
-# DENO_APP_SERIES_DIR, DENO_APP_DIST_URL. Kept out of the playbook so Ansible
-# does not try to parse shell quotes as Jinja.
+# DENO_APP_SERIES, DENO_APP_ARCH, DENO_APP_RESOLVED, DENO_APP_SERIES_DIR,
+# DENO_APP_DIST_URL. Kept out of the playbook so Ansible does not try to parse
+# shell quotes as Jinja.
 set -euo pipefail
 
 SERIES="${DENO_APP_SERIES:?}"
 ARCH="${DENO_APP_ARCH:?}"
 RESOLVED="${DENO_APP_RESOLVED:?}"
-GROUP="${DENO_APP_GROUP:?}"
 SERIES_DIR="${DENO_APP_SERIES_DIR:?}"
 DIST_URL="${DENO_APP_DIST_URL:?}"
 DEST="${SERIES_DIR}/${RESOLVED}"
@@ -31,10 +30,11 @@ if [[ ! -x "${DEST}/bin/deno" ]]; then
   echo "turbopanel-installed ${SERIES} ${RESOLVED}"
 fi
 
-# Unconditional: a tree vendored before the per-series group still needs its
-# ownership repaired on a skip-install path.
-chown -R "root:${GROUP}" "$DEST"
-chmod -R u=rwX,g=rX,o= "$DEST"
+# Unconditional, so a tree vendored under an old per-version group is repaired
+# on a skip-install path too: root-owned, readable and executable by every
+# site owner's Linux user, never writable by anyone but root.
+chown -R root:root "$DEST"
+chmod -R u=rwX,go=rX "$DEST"
 
 CURRENT="$(readlink "${SERIES_DIR}/current" || true)"
 if [[ "$CURRENT" != "$DEST" ]]; then

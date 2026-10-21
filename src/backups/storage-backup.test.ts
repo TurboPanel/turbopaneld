@@ -97,7 +97,7 @@ test("a manual create archives the copy outside any policy directory", async () 
       NOW.toISOString(),
       deps(layout, calls),
     );
-    const path = join(layout.backupDir, "copies", COPY, "bk_manual.tar.gz");
+    const path = join(layout.backupDir, "volumes", COPY, "bk_manual.tar.gz");
     assertEquals(result.backupId, "bk_manual");
     assertEquals(result.path, path);
     assertEquals(result.sizeBytes, 7);
@@ -161,7 +161,7 @@ test("a delete removes the manual or the policy's artifact and is idempotent", a
   await withLayout(async (layout) => {
     const policyDir = join(
       layout.backupDir,
-      "copies",
+      "volumes",
       COPY,
       `policy-${POLICY}`,
     );

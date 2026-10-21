@@ -467,7 +467,9 @@ Deno.test("normalizeManagedSecretOwnership hands the file over in a locked-down 
   assertEquals(chown.some((a) => a === "/state/managed/x:/managed"), false);
   assertEquals(chown.join(" ").includes("--network none"), true);
   assertEquals(
-    chown.join(" ").includes("--cap-drop ALL --cap-add CHOWN --cap-add FOWNER"),
+    chown.join(" ").includes(
+      "--cap-drop ALL --cap-add CHOWN --cap-add FOWNER --cap-add DAC_READ_SEARCH",
+    ),
     true,
   );
   assertEquals(chown.join(" ").includes("no-new-privileges"), true);

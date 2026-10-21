@@ -14,7 +14,7 @@
  *    writes the release manifest;
  * 3. the health probe runs against the staged tree;
  * 4. tp-host `publish` takes the leaf away from the daemon, seals it
- *    recursively (`root:<username>-grp`, no set-id, nothing group- or
+ *    recursively (`root:<username>`, no set-id, nothing group- or
  *    world-writable), refuses hard links, special files and symlinks that
  *    resolve outside it, renames it to `releases/<releaseId>` (same
  *    filesystem), links `shared`, drops the top to `0550` and renames
@@ -39,6 +39,7 @@ import {
   relative as relativePath,
 } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { runFolderPublishVerb } from "./folder-publish.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
@@ -98,21 +99,24 @@ function isMissingPrivilegedPathError(stderr: string): boolean {
  */
 async function runPublishVerb(
   verb: "publish-open" | "publish",
-  paths: Pick<ReleasePaths, "siteDir" | "releaseDir">,
-  username: string,
+  paths: Pick<ReleasePaths, "publish">,
   runFn: RunFn,
 ): Promise<void> {
-  const serviceId = basename(paths.siteDir);
-  const releaseId = basename(paths.releaseDir);
-  const result = await runFn(
-    "sudo",
-    hostSudoArgs(["-n", verb, username, serviceId, releaseId]),
-  );
-  if (!result.success) {
-    throw new Error(
-      result.stderr || `tp-host ${verb} failed for release ${releaseId}`,
-    );
+  // A release names its folder by components and ids (six words,
+  // `./folder-publish.ts`).
+  if (!paths.publish) {
+    throw new Error(`tp-host ${verb}: the release has no service folder`);
   }
+  await runFolderPublishVerb(
+    verb,
+    paths.publish.folder,
+    {
+      serviceId: paths.publish.serviceId,
+      releaseId: paths.publish.releaseId,
+      publishId: paths.publish.publishId,
+    },
+    runFn,
+  );
 }
 
 function isSudoInvocationError(stderr: string): boolean {
@@ -350,7 +354,6 @@ export async function stageRelease(
   await runPublishVerb(
     "publish-open",
     params.paths,
-    params.username,
     params.runFn ?? runPrivileged,
   );
   await copyContainedTree({
@@ -576,7 +579,7 @@ function assertSealedReleaseDir(stat: Deno.FileInfo, releaseId: string): void {
  * The rollback half of the engine. Nothing is fetched, built, staged, sealed,
  * or re-linked: the target tree was produced by an earlier successful promote,
  * so it already carries its `shared` link, its `.turbopanel/release.json`
- * manifest, and its sealed `root:<username>-grp 0550` ownership. Re-running any
+ * manifest, and its sealed `root:<username> 0550` ownership. Re-running any
  * of those steps would either fail against a read-only tree or quietly rewrite
  * history that a previous deploy recorded.
  *
@@ -690,7 +693,7 @@ async function publishStagedRelease(
   await removeReleaseSharedEntry(stagingDir, runFn);
   await assertStagedLinksStayInRelease(stagingDir, runFn);
   await prepareStagedTree(params, stagingDir, runFn);
-  await runPublishVerb("publish", params.paths, params.username, runFn);
+  await runPublishVerb("publish", params.paths, runFn);
 }
 
 /** The daemon-owned layout: the same steps, run on the release in place. */

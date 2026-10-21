@@ -253,7 +253,7 @@ async function makeHost(): Promise<Host> {
     path("opt/turbopanel/share/orchestration/runtime-registry.json"),
   );
   // The accounts a managed host with web engines has (turbopanel-user,
-  // runtime-entitlement and the engine roles create them), plus one
+  // principal-access and the engine roles create them), plus one
   // principal and the group a new principal's useradd follows.
   await Deno.writeTextFile(
     path("etc/passwd"),
@@ -282,9 +282,9 @@ async function makeHost(): Promise<Host> {
       "tpols:x:9992:",
       "tpcaddysite:x:9993:",
       "tpcaddy:x:9995:",
-      "tpphp84:x:9902:",
+      "tpshell:x:9985:",
       "tpsftp:x:9986:alice",
-      "alice-grp:x:15001:",
+      "alice:x:15001:",
       "",
     ].join("\n"),
   );
@@ -330,9 +330,19 @@ async function prepare(
     await Deno.mkdir(dirname(at(prefix, file)), { recursive: true });
     await Deno.writeTextFile(at(prefix, file), at(prefix, contents));
   }
+  for (const [path, mode] of Object.entries(setup?.modes ?? {})) {
+    await Deno.chmod(at(prefix, path), mode);
+  }
   if (setup?.groups !== undefined) {
     const groupFile = join(prefix, "etc/group");
     await Deno.writeTextFile(groupFile, `${setup.groups.join("\n")}\n`, {
+      append: true,
+    });
+  }
+  if (setup?.passwd !== undefined) {
+    const passwdFile = join(prefix, "etc/passwd");
+    const lines = setup.passwd.map((line) => at(prefix, line));
+    await Deno.writeTextFile(passwdFile, `${lines.join("\n")}\n`, {
       append: true,
     });
   }

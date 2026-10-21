@@ -27,7 +27,7 @@ import { basename, join } from "@std/path";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { BUILD_OUTPUT_LIMITS, pumpLines } from "../../logs/line-stream.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
-import { PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
+import { BUILD_SIBLING_DIR, PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
@@ -36,7 +36,7 @@ import { forEachSequential } from "../../util/sequential.ts";
 import { throwIfAborted } from "../deploy-cancel.ts";
 
 /** The build-user role's tree; tp-host pins the same path. */
-export const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
+export const BUILD_SANDBOX_ROOT = BUILD_SIBLING_DIR;
 
 /**
  * Daemon-side ceiling. The unit's own `RuntimeMaxSec=1800` is the hard bound;

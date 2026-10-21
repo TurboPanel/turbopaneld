@@ -19,7 +19,7 @@
  * `managed.lifecycle` treats a missing state dir as an idempotent no-op.
  */
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { CommandType } from "../contracts/commands-contracts.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
@@ -63,6 +63,14 @@ export const MANAGED_INTENT_MAX_RUNNING_MS = 6 * 60 * 60_000;
 
 /** How long a transient marker suppresses the probe after it was written. */
 export const MANAGED_INTENT_TTL_MS = 10 * 60_000;
+/**
+ * How long a marker suppresses the probe after a SUCCESSFUL promote or
+ * failover command. Those handlers only report success once the new primary
+ * is writable, so the engine is known to be up and the long window above has
+ * nothing left to cover: a primary killed minutes after a switchover is a
+ * real failure and must fail over, not be waved off for another ten.
+ */
+export const MANAGED_INTENT_SETTLED_TTL_MS = 60_000;
 /** Extra quiet time after a transient marker expires before failures count. */
 export const MANAGED_INTENT_GRACE_MS = 30_000;
 
@@ -90,7 +98,11 @@ export const MANAGED_COMMAND_INTENT_KINDS: Readonly<
   "managed.destroy": () => "destroy",
   "managed.promote": () => "promote",
   "managed.restore": () => "restore",
-  "managed.ha.failover": () => "failover",
+  // `repoint` only re-aims a replica (or creates slots on the new primary);
+  // it never stops or restarts an engine, so it must not hold off the
+  // dead-primary probe the way a real failover does.
+  "managed.ha.failover": (payload) =>
+    payload.phase === "repoint" ? null : "failover",
 };
 
 /** Managed command types that never touch an engine container, and why. */
@@ -126,7 +138,15 @@ export const HOST_WIDE_COMMAND_INTENT_KINDS: Readonly<
 
 const memory = new Map<string, ManagedIntent | "cleared">();
 
+/**
+ * The marker file for one managed database, or for the whole host
+ * ({@link HOST_WIDE_INTENT_ID}). The host-wide marker is not a database id, so
+ * it lives in the `system` folder instead of among the per-database files.
+ */
 export function managedIntentPath(stateDir: string, managedId: string): string {
+  if (managedId === HOST_WIDE_INTENT_ID) {
+    return join(stateDir, "system", "host-intent.json");
+  }
   return join(stateDir, "managed-intent", `${managedId}.json`);
 }
 
@@ -176,25 +196,27 @@ export async function recordManagedIntent(
   stateDir: string,
   managedId: string,
   kind: ManagedIntentKind,
-  options: { mode?: ManagedIntentMode; nowMs?: number } = {},
+  options: { mode?: ManagedIntentMode; nowMs?: number; ttlMs?: number } = {},
 ): Promise<ManagedIntent> {
   const nowMs = options.nowMs ?? Date.now();
   const mode = options.mode ?? "transient";
+  const ttlMs = options.ttlMs ?? MANAGED_INTENT_TTL_MS;
   const intent: ManagedIntent = {
     id: crypto.randomUUID(),
     managedId,
     kind,
     setAtMs: nowMs,
-    untilMs: mode === "transient" ? nowMs + MANAGED_INTENT_TTL_MS : null,
+    untilMs: mode === "transient" ? nowMs + ttlMs : null,
     maxUntilMs: mode === "running"
       ? nowMs + MANAGED_INTENT_MAX_RUNNING_MS
       : null,
   };
   memory.set(managedId, intent);
   try {
-    await Deno.mkdir(join(stateDir, "managed-intent"), { recursive: true });
+    const markerPath = managedIntentPath(stateDir, managedId);
+    await Deno.mkdir(dirname(markerPath), { recursive: true });
     await writeFileAtomic(
-      managedIntentPath(stateDir, managedId),
+      markerPath,
       `${JSON.stringify(intent)}\n`,
     );
   } catch (err) {
@@ -339,6 +361,11 @@ const RELEASES_HELD: ReadonlySet<ManagedIntentKind> = new Set<
   ManagedIntentKind
 >(["start", "restart", "apply", "promote", "failover"]);
 
+/** Kinds whose SUCCESS means the engine is verified up (see {@link MANAGED_INTENT_SETTLED_TTL_MS}). */
+const SETTLES_QUICKLY: ReadonlySet<ManagedIntentKind> = new Set<
+  ManagedIntentKind
+>(["promote", "failover"]);
+
 export type ManagedIntentToken = {
   managedId: string;
   kind: ManagedIntentKind;
@@ -372,13 +399,36 @@ export async function beginManagedIntent(
  * After a command ran. Only the command that owns the current marker
  * refreshes it (concurrent commands: the last to finish must not overwrite a
  * newer marker); a successful stop becomes held; a successful start /
- * restart / apply / promote / failover releases a held marker.
+ * restart / apply / promote / failover releases a held marker; a successful
+ * destroy removes the marker (a failed one stays held, and so does a
+ * successful one whose member record could not be removed: `keepHeld`).
  */
 export async function endManagedIntent(
   stateDir: string,
   token: ManagedIntentToken,
   succeeded: boolean,
+  options?: { keepHeld?: boolean },
 ): Promise<void> {
+  if (succeeded && token.kind === "destroy" && options?.keepHeld) {
+    // The destroy worked but the high-availability member record could not be
+    // removed: without a marker the dead-primary probe would read the missing
+    // engine as a dead primary. Keep the held marker until the record is gone.
+    logInfo(
+      "managed",
+      `destroy succeeded managedId=${token.managedId} but the member record remains; intent marker kept`,
+    );
+    return;
+  }
+  if (succeeded && token.kind === "destroy") {
+    // The cluster is gone: nothing is left to guard, and the held marker
+    // would otherwise stay in the state directory for good.
+    await clearManagedIntent(
+      stateDir,
+      token.managedId,
+      "destroy succeeded",
+    );
+    return;
+  }
   const current = await lookupManagedIntent(stateDir, token.managedId);
   if (succeeded && token.kind === "stop") {
     await recordManagedIntent(stateDir, token.managedId, "stop", {
@@ -390,8 +440,11 @@ export async function endManagedIntent(
     );
     return;
   }
+  const ttlMs = succeeded && SETTLES_QUICKLY.has(token.kind)
+    ? MANAGED_INTENT_SETTLED_TTL_MS
+    : undefined;
   if (succeeded && RELEASES_HELD.has(token.kind) && isHeldIntent(current)) {
-    await recordManagedIntent(stateDir, token.managedId, token.kind);
+    await recordManagedIntent(stateDir, token.managedId, token.kind, { ttlMs });
     logInfo(
       "managed",
       `held intent marker released managedId=${token.managedId} by ${token.kind}`,
@@ -401,7 +454,7 @@ export async function endManagedIntent(
   const owned = current.status === "found" && token.ownId !== null &&
     current.intent.id === token.ownId;
   if (!owned || token.kind === "destroy") return;
-  await recordManagedIntent(stateDir, token.managedId, token.kind);
+  await recordManagedIntent(stateDir, token.managedId, token.kind, { ttlMs });
 }
 
 /** Test seam: forget in-memory markers. */

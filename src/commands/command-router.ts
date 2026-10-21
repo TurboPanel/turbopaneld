@@ -18,6 +18,7 @@ import {
   parseFabricReconcilePayload,
   parseFirewallConfirmPayload,
   parseFirewallReconcilePayload,
+  parseFoldersRemovePayload,
   parseHostnamePayload,
   parseManagedApplyPayload,
   parseManagedBackupPayload,
@@ -40,6 +41,10 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
+import {
+  createDeployStepReporter,
+  sendOverOpenSocket,
+} from "./deploy-progress.ts";
 import { handleManagedApply } from "../managed/apply.ts";
 import {
   beginManagedCommandIntent,
@@ -69,6 +74,7 @@ import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
+import { handleFoldersRemove } from "./remove-folders.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
@@ -121,6 +127,7 @@ export type CommandRouterHandlerOverrides = {
   handleFirewallReconcile?: typeof handleFirewallReconcile;
   handleFirewallConfirm?: typeof handleFirewallConfirm;
   handleBackupsReconcile?: typeof handleBackupsReconcile;
+  handleFoldersRemove?: typeof handleFoldersRemove;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -242,6 +249,7 @@ export async function handleCommandDispatch(
     message.payload,
   );
   let commandSucceeded = false;
+  let destroyRecordGone = false;
 
   try {
     let ok: boolean;
@@ -335,6 +343,16 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
+      case "server.folders.remove": {
+        const payload = parseFoldersRemovePayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleFoldersRemove",
+          handleFoldersRemove,
+        )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
       case "server.reboot": {
         parseRebootPayload(message.payload);
         result = await handleReboot(
@@ -350,6 +368,13 @@ export async function handleCommandDispatch(
         // Throws `cancelled: …` when a cancel arrived before this dispatch; the
         // catch below reports it as the command's outcome like any failure.
         const cancel = deployCancels.begin(message.commandId);
+        // Step plan + live progress ride the same socket as the outcome,
+        // fire-and-forget like `update-progress`.
+        const progress = createDeployStepReporter({
+          id: message.id,
+          commandId: message.commandId,
+          send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+        });
         try {
           result = await pickCommandRouterHandler(
             "handleEnvironmentDeploy",
@@ -358,6 +383,7 @@ export async function handleCommandDispatch(
             decryptSecrets: deps?.decryptSecrets,
             logSink,
             cancel,
+            progress,
           });
         } finally {
           deployCancels.end(message.commandId);
@@ -428,7 +454,7 @@ export async function handleCommandDispatch(
         )(payload, daemonReceivedAt, {
           decryptSecrets: deps?.decryptSecrets,
         });
-        await noteManagedDestroySucceeded(payload);
+        destroyRecordGone = await noteManagedDestroySucceeded(payload);
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -574,7 +600,9 @@ export async function handleCommandDispatch(
       daemonRespondedAt,
     });
   } finally {
-    await endManagedCommandIntent(managedIntent, commandSucceeded);
+    await endManagedCommandIntent(managedIntent, commandSucceeded, {
+      keepHeld: managedIntent?.kind === "destroy" && !destroyRecordGone,
+    });
     // Transcript upload is never load-bearing — finalize() never throws.
     await logSink.finalize();
   }

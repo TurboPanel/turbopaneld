@@ -1,0 +1,25 @@
+---
+# Lets every site owner's Linux user reach the vendored runtimes, and removes
+# what the old per-version groups left behind.
+#
+# Every installed PHP, Node or Deno series may be run by every site owner's
+# Linux user (owner decision 2026-10-07): there is no per-version group any
+# more. `/opt/turbopanel` and `vendor/` stay `0750` and get an `other:x` ACL,
+# the same traverse-without-list contract principal-access uses on the home
+# root, so anyone can reach a runtime tree by its path without being able to
+# list what else lives there.
+#
+# Callers set:
+#   runtime_access_dirs: extra directories that also get `other:x`
+#                        (a runtime's own tree root, e.g. vendor/node-app)
+runtime_access_dirs: []
+
+# The old per-version groups: `tpphp<NN>`, `tpnode<N>`, `tpdeno<N>`, always in
+# this gid band. A group is only removed when both the name and the gid match,
+# so nothing an operator created is ever touched.
+runtime_access_legacy_group_pattern: "^tp(php|node|deno)[0-9]+$"
+runtime_access_legacy_gid_min: 9900
+runtime_access_legacy_gid_max: 9979
+
+turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]
+turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"  # noqa: var-naming[no-role-prefix]

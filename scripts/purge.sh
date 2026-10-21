@@ -1001,9 +1001,15 @@ tp_unit_present() {
         *.slice)
           _up_frag=$(systemctl show -p FragmentPath --value "$_up_unit" 2>/dev/null || true)
           _up_act=$(systemctl show -p ActiveState --value "$_up_unit" 2>/dev/null || true)
-          if [ -n "$_up_frag" ]; then
-            return 0
-          fi
+          case $_up_frag in
+            ""|"[unprintable]")
+              ;;
+            *)
+              if [ -f "$_up_frag" ] || [ -L "$_up_frag" ]; then
+                return 0
+              fi
+              ;;
+          esac
           case $_up_act in
             inactive|"") ;;
             *) return 0 ;;
@@ -1048,6 +1054,11 @@ tp_scan_systemctl_units() {
       }
     }')
     [ -n "$_ssu_name" ] || continue
+    # list-units --all keeps naming a stopped slice after its unit file is
+    # gone. That is not a leftover, so count a slice only while it is real.
+    case $_ssu_name in
+      *.slice) tp_unit_present "$_ssu_name" || continue ;;
+    esac
     tp_note_unit "$_ssu_name"
   done < "$_ssu_out"
 }
@@ -1234,6 +1245,39 @@ tp_print_docker_data_root_line() {
   esac
 }
 
+# Managed engine / ingress containers and compose projects use a lowercase UUID
+# (8-4-4-4-12 hex), optionally with a TurboPanel suffix (-ha, -in, or -<n>).
+tp_is_turbopanel_container_name() {
+  _itcn=$1
+  [ -n "$_itcn" ] || return 1
+  printf '%s\n' "$_itcn" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(-ha|-in|-[0-9]+)?$'
+}
+
+tp_is_turbopanel_compose_project() {
+  _itcp=$1
+  [ -n "$_itcp" ] || return 1
+  case $_itcp in
+    turbopanel-system) return 0 ;;
+  esac
+  printf '%s\n' "$_itcp" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+tp_docker_container_name_is_turbopanel() {
+  _dtcn=$1
+  [ -n "$_dtcn" ] || return 1
+  case $_dtcn in
+    turbopanel*|tpn_*) return 0 ;;
+  esac
+  if tp_is_turbopanel_container_name "$_dtcn"; then
+    return 0
+  fi
+  # shellcheck disable=SC2086
+  if tp_list_has_word "$_dtcn" $TP_LEGACY_CONTAINER_NAMES; then
+    return 0
+  fi
+  return 1
+}
+
 tp_docker_consider_row() {
   _dcr_name=$1
   _dcr_role=$2
@@ -1247,16 +1291,15 @@ tp_docker_consider_row() {
   if [ "$_dcr_role" != - ] || [ "$_dcr_component" != - ] || [ "$_dcr_service" != - ]; then
     _dcr_match=true
   fi
-  case $_dcr_name in
-    turbopanel*|tpn_*) _dcr_match=true ;;
-  esac
-  # shellcheck disable=SC2086
-  if tp_list_has_word "$_dcr_name" $TP_LEGACY_CONTAINER_NAMES; then
+  if tp_docker_container_name_is_turbopanel "$_dcr_name"; then
     _dcr_match=true
   fi
-  case $_dcr_project in
-    turbopanel*) _dcr_match=true ;;
+  case $_dcr_component in
+    managed-ha|managed-ingress) _dcr_match=true ;;
   esac
+  if tp_is_turbopanel_compose_project "$_dcr_project"; then
+    _dcr_match=true
+  fi
   if tp_path_under_dirs "$_dcr_work" || tp_path_under_dirs "$_dcr_config"; then
     _dcr_match=true
   fi
@@ -1291,15 +1334,15 @@ tp_docker_collect() {
     }' "$_dc_rows" > "$TP_TMP/docker.tsv"
     while IFS= read -r _dc_line; do
       [ -n "$_dc_line" ] || continue
-      _dc_saved=$IFS
-      IFS='	'
-      set -f
-      # shellcheck disable=SC2086
-      set -- $_dc_line
-      set +f
-      IFS=$_dc_saved
-      [ "$#" -ge 7 ] || continue
-      tp_docker_consider_row "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+      _dc_name=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $1 }')
+      _dc_role=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $2 }')
+      _dc_component=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $3 }')
+      _dc_service=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $4 }')
+      _dc_work=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $5 }')
+      _dc_config=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $6 }')
+      _dc_project=$(printf '%s\n' "$_dc_line" | awk -F '	' '{ print $7 }')
+      [ -n "$_dc_name" ] || continue
+      tp_docker_consider_row "$_dc_name" "$_dc_role" "$_dc_component" "$_dc_service" "$_dc_work" "$_dc_config" "$_dc_project"
     done < "$TP_TMP/docker.tsv"
   else
     tp_print_warn "docker ps label format failed; matching container names only"
@@ -1321,9 +1364,9 @@ tp_docker_collect() {
     case $_dc_net in
       turbopanel*|tpn_*) _dc_take=true ;;
     esac
-    case $_dc_project in
-      turbopanel*) _dc_take=true ;;
-    esac
+    if tp_is_turbopanel_compose_project "$_dc_project"; then
+      _dc_take=true
+    fi
     if [ "$_dc_take" = true ]; then
       tp_file_add "$TP_TMP/work.networks" "$_dc_net"
     fi
@@ -1596,13 +1639,10 @@ tp_inventory_folders() {
   done
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-ansible ""
   tp_add_existing "$TP_TMP/inv.folders_remove" /tmp/turbopanel-orchestrate ""
-  # The Docker gate's socket directory and Deno transpile cache.
+  # The Docker gate's socket directory and Deno transpile cache. Its state
+  # folder and the hosting Caddy's sit inside /var/lib/turbopanel and go with it.
   tp_add_existing "$TP_TMP/inv.folders_remove" /run/turbopanel-gate ""
-  tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel-docker-gate ""
-  tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-docker-gate ""
-  # The hosting Caddy's StateDirectory. It sits beside /var/lib/turbopanel, not
-  # under it, and is owned by the hosting Caddy account.
-  tp_add_existing "$TP_TMP/inv.folders_remove" /var/lib/turbopanel-hosting-caddy ""
+  tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel ""
   for _ifo_path in $TP_CONFIG_DIRS $TP_STATE_DIRS $TP_LOG_DIRS; do
     tp_add_existing "$TP_TMP/inv.folders_keep" "$_ifo_path" ""
   done
@@ -2137,6 +2177,89 @@ tp_remove_units() {
     systemctl reset-failed $_ru_units || true
 }
 
+tp_docker_inventory_container_name() {
+  _dicn=$1
+  case $_dicn in
+    *" (older release)") printf '%s\n' "${_dicn% (older release)}" ;;
+    *) printf '%s\n' "$_dicn" ;;
+  esac
+}
+
+tp_docker_build_removal_list() {
+  : > "$TP_TMP/docker.rm"
+  if ! tp_docker_collect; then
+    return 1
+  fi
+  if [ -s "$TP_TMP/work.containers" ]; then
+    while IFS= read -r _dbr_name; do
+      [ -n "$_dbr_name" ] || continue
+      tp_file_add "$TP_TMP/docker.rm" "$_dbr_name"
+    done < "$TP_TMP/work.containers"
+  fi
+  if [ -f "$TP_TMP/before.containers" ]; then
+    while IFS= read -r _dbr_inv; do
+      [ -n "$_dbr_inv" ] || continue
+      _dbr_inv=$(tp_docker_inventory_container_name "$_dbr_inv")
+      if tp_docker_container_name_is_turbopanel "$_dbr_inv"; then
+        tp_file_add "$TP_TMP/docker.rm" "$_dbr_inv"
+      fi
+    done < "$TP_TMP/before.containers"
+  fi
+  return 0
+}
+
+# One container at a time: log the outcome and keep going even when rm fails.
+tp_docker_remove_one_container() {
+  _droc_name=$1
+  [ -n "$_droc_name" ] || return 0
+  if [ "$DRY_RUN" = true ]; then
+    tp_print_step "·" "[dry-run] would run: docker rm -f ${_droc_name}"
+    printf '%s\n' "docker rm -f ${_droc_name}" >> "$TP_TMP/removed"
+    return 0
+  fi
+  tp_print_step "▸" "docker rm -f ${_droc_name}"
+  tp_log_line "run: docker rm -f ${_droc_name}"
+  if docker rm -f "$_droc_name" >> "$TP_LOG_FILE" 2>&1; then
+    tp_log_line "ok: docker rm -f ${_droc_name}"
+    printf '%s\n' "docker rm -f ${_droc_name}" >> "$TP_TMP/removed"
+    return 0
+  fi
+  tp_log_line "fail: docker rm -f ${_droc_name}"
+  tp_print_warn "docker rm -f ${_droc_name} failed (continuing with other containers)"
+  return 1
+}
+
+tp_remove_docker_containers() {
+  if ! tp_docker_build_removal_list; then
+    return 1
+  fi
+  if [ ! -s "$TP_TMP/docker.rm" ]; then
+    return 0
+  fi
+  while IFS= read -r _rdc_name; do
+    [ -n "$_rdc_name" ] || continue
+    tp_docker_remove_one_container "$_rdc_name" || true
+  done < "$TP_TMP/docker.rm"
+  return 0
+}
+
+tp_finalize_turbopanel_units() {
+  tp_print_step "▸" "Units (after Docker)"
+  if ! tp_has_tool systemctl; then
+    tp_record_skip "systemctl not installed"
+    return 0
+  fi
+  for _ftu_slice in turbopanel.slice turbopanel-containers.slice turbopaneld.slice; do
+    tp_stop_disable_unit "$_ftu_slice"
+  done
+  tp_collect_unit_names
+  tp_stop_units_matching other
+  tp_run "systemctl daemon-reload" systemctl daemon-reload || true
+  # shellcheck disable=SC2086
+  tp_run "clear failed TurboPanel unit state" \
+    systemctl reset-failed turbopanel* turbopaneld* || true
+}
+
 tp_remove_docker() {
   tp_print_step "▸" "Docker containers and networks"
   if ! tp_has_tool docker; then
@@ -2154,16 +2277,13 @@ tp_remove_docker() {
       return 0
     fi
   fi
-  tp_docker_collect || {
+  if ! tp_remove_docker_containers; then
     TP_DOCKER_LEFT=true
     tp_record_fail "list docker containers"
     return 0
-  }
-  if [ -s "$TP_TMP/work.containers" ]; then
-    while IFS= read -r _rd_name; do
-      [ -n "$_rd_name" ] || continue
-      tp_run "docker rm -f $_rd_name" docker rm -f "$_rd_name" || true
-    done < "$TP_TMP/work.containers"
+  fi
+  if [ -s "$TP_TMP/docker.rm" ]; then
+    tp_remove_docker_containers || true
   else
     tp_print_ok "no TurboPanel containers"
   fi
@@ -2405,12 +2525,9 @@ tp_remove_host_config() {
   if [ -e /usr/local/bin/php ]; then
     tp_run "remove /usr/local/bin/php" rm -f /usr/local/bin/php || true
   fi
-  # Docker egress block script (docker role). Its unit is removed with the other
-  # turbopanel* units and its TP-EGRESS chain and jumps with the TP-* chains.
-  if [ -e /usr/local/lib/turbopanel/turbopanel-docker-egress ]; then
-    tp_run "remove Docker egress block script" rm -f /usr/local/lib/turbopanel/turbopanel-docker-egress || true
-    rmdir /usr/local/lib/turbopanel 2>/dev/null || true
-  fi
+  # The Docker egress block script (docker role) sits in /opt/turbopanel/lib
+  # and goes with the install. Its unit is removed with the other turbopanel*
+  # units and its TP-EGRESS chain and jumps with the TP-* chains.
   tp_remove_statoverrides
 }
 
@@ -2505,9 +2622,7 @@ tp_remove_folders_and_shell() {
   tp_safe_rm_tree /tmp/turbopanel-ansible
   tp_safe_rm_tree /tmp/turbopanel-orchestrate
   tp_safe_rm_tree /run/turbopanel-gate
-  tp_safe_rm_tree /var/cache/turbopanel-docker-gate
-  tp_safe_rm_tree /var/lib/turbopanel-docker-gate
-  tp_safe_rm_tree /var/lib/turbopanel-hosting-caddy
+  tp_safe_rm_tree /var/cache/turbopanel
   tp_safe_rm_tree /root/.ansible
   tp_strip_shell_rcs
 }
@@ -3085,6 +3200,7 @@ tp_purge_docker_engine() {
       tp_record_skip "groupdel not installed"
     fi
   fi
+  hash -r 2>/dev/null || true
   if tp_docker_engine_gone; then
     TP_DOCKER_ENGINE_GONE=true
     tp_purge_docker_network_state
@@ -3093,12 +3209,26 @@ tp_purge_docker_engine() {
   fi
 }
 
+# True when an engine package from TP_DOCKER_PACKAGES is still on the host.
+tp_docker_engine_packages_remain() {
+  if ! tp_has_tool dpkg-query; then
+    return 1
+  fi
+  for _depr in $TP_DOCKER_PACKAGES; do
+    if tp_pkg_installed "$_depr"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Docker Engine is gone only when nothing of it remains: no daemon binary
 # (also the snap and rootless ones), no engine package, no active or installed
 # service, and no live socket. Anything uncertain counts as still present.
 # Dry runs change nothing, so they never count as gone.
 tp_docker_engine_gone() {
   [ "$DRY_RUN" = true ] && return 1
+  tp_has_tool docker && return 1
   tp_has_tool dockerd && return 1
   tp_has_tool dockerd-rootless.sh && return 1
   [ -x /snap/bin/docker.dockerd ] && return 1
@@ -3107,7 +3237,7 @@ tp_docker_engine_gone() {
     return 1
   fi
   if tp_has_tool dpkg-query; then
-    for _deg in docker-ce docker.io docker-ce-rootless-extras moby-engine moby-cli; do
+    for _deg in docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io docker-ce-rootless-extras moby-engine moby-cli; do
       if tp_pkg_installed "$_deg"; then
         return 1
       fi
@@ -3255,6 +3385,59 @@ tp_group_has_members() {
   getent passwd | awk -F: -v gid="$_ghm_gid" '$4 == gid { found = 1 } END { exit !found }'
 }
 
+# The gid of group $1 when it exists inside the site owners' band.
+tp_principal_band_gid() {
+  _pbg=$(getent group "$1" 2>/dev/null | head -n 1 | awk -F: '{ print $3; exit }' || true)
+  case "$_pbg" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#_pbg}" -le 10 ] || return 1
+  [ "$_pbg" -ge "$TP_PRINCIPAL_ID_MIN" ] && [ "$_pbg" -le "$TP_PRINCIPAL_ID_MAX" ] || return 1
+  printf '%s\n' "$_pbg"
+}
+
+# True when some account still has gid $1 as its primary group.
+tp_gid_is_primary() {
+  getent passwd | awk -F: -v gid="$1" '$4 == gid { found = 1 } END { exit !found }'
+}
+
+# Remove a site owner's own group: `<name>`, and `<name>-grp` from hosts set
+# up before the group took the owner's name. Only a group inside the band, with
+# a plain name that is not root or tp*, and that no account still has as its
+# primary group. With $3 = orphan (no account was found) a group that still
+# lists any member is kept too. Returns 1 after leaving the home in place.
+tp_purge_principal_groups() {
+  _ppg_name=$1
+  _ppg_home=$2
+  _ppg_mode=$3
+  case "$_ppg_name" in
+    ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 0 ;;
+  esac
+  for _ppg in "$_ppg_name" "${_ppg_name}-grp"; do
+    getent group "$_ppg" >/dev/null 2>&1 || continue
+    if ! _ppg_gid=$(tp_principal_band_gid "$_ppg"); then
+      tp_record_skip "kept group ${_ppg} (its id is outside ${TP_PRINCIPAL_ID_MIN}-${TP_PRINCIPAL_ID_MAX})"
+      continue
+    fi
+    if tp_gid_is_primary "$_ppg_gid"; then
+      tp_principal_leave_home "$_ppg_home" "${_ppg} is still an account's primary group"
+      return 1
+    fi
+    if [ "$_ppg_mode" = orphan ] && tp_group_has_members "$_ppg"; then
+      tp_principal_leave_home "$_ppg_home" "${_ppg} still has members"
+      return 1
+    fi
+    if [ "$DRY_RUN" != true ] && ! tp_has_tool groupdel; then
+      tp_principal_leave_home "$_ppg_home" "groupdel not installed"
+      return 1
+    fi
+    tp_run "groupdel $_ppg" groupdel "$_ppg" || true
+    if [ "$DRY_RUN" != true ] && getent group "$_ppg" >/dev/null 2>&1; then
+      tp_principal_leave_home "$_ppg_home" "${_ppg} still exists"
+      return 1
+    fi
+  done
+  return 0
+}
+
 tp_principal_leave_home() {
   _plh_home=$1
   _plh_why=$2
@@ -3277,18 +3460,7 @@ tp_purge_principal_account() {
       return 0
     fi
   fi
-  _ppa_grp="${_ppa_user}-grp"
-  if getent group "$_ppa_grp" >/dev/null 2>&1; then
-    if [ "$DRY_RUN" != true ] && ! tp_has_tool groupdel; then
-      tp_principal_leave_home "$_ppa_home" "groupdel not installed"
-      return 0
-    fi
-    tp_run "groupdel $_ppa_grp" groupdel "$_ppa_grp" || true
-    if [ "$DRY_RUN" != true ] && getent group "$_ppa_grp" >/dev/null 2>&1; then
-      tp_principal_leave_home "$_ppa_home" "${_ppa_grp} still exists"
-      return 0
-    fi
-  fi
+  tp_purge_principal_groups "$_ppa_user" "$_ppa_home" account || return 0
   _ppa_home=$(tp_normalize_path "$_ppa_home")
   if [ "$_ppa_home" = "$_ppa_root" ]; then
     return 0
@@ -3302,22 +3474,7 @@ tp_purge_principal_orphan() {
   _ppo_name=$(basename "$_ppo_dir")
   [ -n "$_ppo_name" ] || return 0
   [ "$_ppo_name" = lost+found ] && return 0
-  _ppo_grp="${_ppo_name}-grp"
-  if getent group "$_ppo_grp" >/dev/null 2>&1; then
-    if tp_group_has_members "$_ppo_grp"; then
-      tp_principal_leave_home "$_ppo_dir" "${_ppo_grp} still has members"
-      return 0
-    fi
-    if [ "$DRY_RUN" != true ] && ! tp_has_tool groupdel; then
-      tp_principal_leave_home "$_ppo_dir" "groupdel not installed"
-      return 0
-    fi
-    tp_run "groupdel $_ppo_grp" groupdel "$_ppo_grp" || true
-    if [ "$DRY_RUN" != true ] && getent group "$_ppo_grp" >/dev/null 2>&1; then
-      tp_principal_leave_home "$_ppo_dir" "${_ppo_grp} still exists"
-      return 0
-    fi
-  fi
+  tp_purge_principal_groups "$_ppo_name" "$_ppo_dir" orphan || return 0
   _ppo_dir=$(tp_normalize_path "$_ppo_dir")
   if [ "$_ppo_dir" = "$_ppo_root" ]; then
     return 0
@@ -3417,6 +3574,15 @@ tp_report_remaining() {
   : > "$TP_TMP/remain.real"
   while IFS= read -r _rr_line; do
     [ -n "$_rr_line" ] || continue
+    if [ "$_rr_key" = units ]; then
+      _rr_unit=$_rr_line
+      case $_rr_unit in
+        *" (older release)") _rr_unit=${_rr_unit% (older release)} ;;
+      esac
+      if ! tp_unit_present "$_rr_unit"; then
+        continue
+      fi
+    fi
     if [ "$_rr_key" = folders_remove ] || [ "$_rr_key" = folders_keep ] || [ "$_rr_key" = principals ] || [ "$_rr_key" = purge_targets ]; then
       _rr_path=$_rr_line
       case $_rr_path in
@@ -3579,6 +3745,7 @@ tp_main() {
   tp_remove_folders_and_shell
   tp_remove_processes_and_accounts
   tp_purge_hosted_data
+  tp_finalize_turbopanel_units
   TP_INV_QUIET=true
   tp_inventory
   tp_print_summary
@@ -3663,13 +3830,19 @@ TP_OTHER_UNITS="tpbuild.slice"
 # Groups the platform creates outside the 9900-9999 band (the Docker gate's
 # build group, a system gid). Matched by exact name only.
 TP_OTHER_GROUPS="tpgatebuild"
+# Site owners' Linux users and their own groups take ids from this band. A
+# site owner's group carries the owner's own name (`<name>-grp` on hosts set
+# up before 2026-10-07), so outside the band a group of that name is never
+# TurboPanel's and is never removed.
+TP_PRINCIPAL_ID_MIN=15001
+TP_PRINCIPAL_ID_MAX=60000
 TP_LEGACY_CONTAINER_NAMES="turbopanel-database turbopanel-queue"
 TP_LEGACY_OPT_PATHS="runtimes platform share/ansible lib/instance vendor/duckdb share/caddy bin/turbopanel-instance bin/turbopanel-mailer"
 TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # Every tree this script may delete: what TurboPanel creates, plus Docker's
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /var/lib/turbopanel-hosting-caddy /run/turbopanel-gate /var/cache/turbopanel-docker-gate /var/lib/turbopanel-docker-gate /var/lib/turbopanel-build"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge

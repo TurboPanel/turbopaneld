@@ -191,6 +191,8 @@ async function colocatedRefreshVars(
       "tp_refresh_value_ok",
       "tp_load_control_plane_refresh",
       "tp_write_control_plane_refresh",
+      "tp_quiet_runtime_notes",
+      "tp_quiet_runtime_notes_abort",
       "tp_run_colocated_daemon_refresh",
     ].map((name) => shellFunction(source, name)),
     STUBS,

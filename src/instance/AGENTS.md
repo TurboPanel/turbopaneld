@@ -86,6 +86,35 @@ additive and no floor moved. A replica's `member.replication` also carries
 `lastStreaming` (`at`, monotonic `ageMs`, lag); all optional, so an older
 control plane ignores them.
 
+**Managed owner role (`managed-owner-role-v1`).** No message: it only says
+this daemon honours `ownerRole` on a Postgres database and the Database admin
+login. The control plane records an owner role, and accepts an admin login,
+only for a primary that lists it (else 409
+`managed_owner_role_needs_daemon_update`).
+
+**Data-only read/write (`managed-data-only-readwrite-v1`).** No message: it
+says this daemon grants a MySQL or MariaDB `read-write` login data changes
+only, and the `owner` (migration) login everything in its database without
+`GRANT OPTION` (the Database admin login keeps it). The control plane gives a
+new MySQL or MariaDB `read-write` login only to a primary that lists it (else
+409 `managed_readwrite_needs_daemon_update`).
+
+**Managed database owner (`managed-database-owner-v1`).** No message: it
+says this daemon honours `databases[].ownerLogin` on a Postgres create, moves
+a cluster's own, still empty first database onto its owner role, and gives a
+Database admin login on a database without an owner role the read-write rights.
+The control plane sends those only to a primary that lists it (else 409
+`managed_database_owner_needs_daemon_update` for a chosen login owner).
+
+**Managed permissions read (`managed-permissions-read-v1`).** Same shape as
+on-demand health: a control plane that sees the feature may send
+`managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,
+`databases` up to 100, Postgres only) and gets `managed-permissions-result`
+(`ok`, `permissions` or `error`) on the same id.
+`InstanceClient.#readManagedPermissionsAsync` hands it to
+`readManagedPermissions` (`src/managed/permissions-read.ts`), which always
+answers. Read only, no command row, no outbox; the answer stays under 100 KB.
+
 **Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
 (`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
 (all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends
@@ -175,7 +204,9 @@ identifier per hour (one refill every 12 minutes). The tenant
   64-bit Pi OS still reports `ID=debian`).   **Host resources** (static
   capacity under `resources.cpus[]` / `gpus[]` / `memory` / `swap`: per-socket
   `vendorId` / `name` / `cores` / `threads` / `cache` / `speedMhz` / `turboMhz`,
-  GPU identity + memory, `totalBytes`, plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
+  GPU identity + memory, `totalBytes`, optional `memory.pageSizeBytes` (kernel
+  page size in bytes from `getconf PAGESIZE`, Linux only — omitted elsewhere or
+  when unreadable), plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
   + `/sys` (cpufreq, cache, DRM) via `src/host/host-inventory.ts` (process-cached; cpus/gpus/mem/swap on hello only)
   and `collectServerIps()` (`src/host/server-addresses.ts`) as
   `{ address, version, scope, cidr?, interface? }[]` (public + private; `interface`
@@ -417,14 +448,20 @@ installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 daemon does not download or pipe the script itself: it resolves the trust
 regime (`resolveAutomaticUpdateTrust` — public TLS or the
 configured Platform CA; never `curl -k`) and then runs
-`sudo -n tp-orchestrate update --license … [--host …] [--dl-base …]
-[--instance-ca …] [--channel …] [--manifest-url …] --no-start`. The helper
+`sudo -n tp-orchestrate update --license-stdin [--host …] [--dl-base …]
+[--instance-ca …] [--channel …] [--manifest-url …] --no-start`, writing the
+host license as one line to the helper's stdin. The license never goes in
+argv (sudo logs it and any local user can read `/proc/<pid>/cmdline`): the
+helper refuses `--license`, and hands the value to `run.sh` in
+`TURBOPANEL_LICENSE`. A development host sets it at the top of the script it
+pipes through `sudo sh -s`. The helper
 fetches `run.sh` from `turbopanel.sh` (or `<instance>/run.sh` for an HTTPS
 overlay host) and re-validates every flag against the root-pinned
 `/opt/turbopanel/lib/update-origin` that `run.sh` wrote at install, so a
 daemon cannot point root at another origin or control plane. Co-located dev
-still pipes the downloaded script through `sudo sh -s`. Flags (`--license`,
-`--host`, …) remain supported for scripts and sudo re-exec. There is no
+still pipes the downloaded script through `sudo sh -s`. `run.sh` itself
+still takes `--host` and the other flags for scripts and its own sudo
+re-exec. There is no
 separate update binary installed under `/opt/turbopanel/bin/`.
 
 `run.sh --daemon-only` on a host that already has the control-plane binary
@@ -541,7 +578,7 @@ any UI pin — each must carry a valid signature by the pinned release key, and
 an unsigned one is refused like an invalid one (`preflight_manifest`) — and requires `turbopanel-database` to be
 running (`preflight_backup` via `docker inspect`). An overlapping
 `instance-update` is `preflight_in_progress`. `instance-backup.yml` then
-writes `<backupDir>/control-plane/<upgradeId>/` (`pg_dump -Fc` inside the
+writes `<backupDir>/panel/<upgradeId>/` (`pg_dump -Fc` inside the
 database container, an `/etc/turbopanel` tarball, and `meta.json` with the
 migration-history fingerprint) and keeps the newest three. When the rendered
 Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`
@@ -680,9 +717,14 @@ same shape: server-scoped, carries the full desired state, no reply channel. It
 exists because a deploy is the wrong trigger for a **revocation** — removing a
 key must not wait for an unrelated environment to ship — and because a deploy
 payload can never carry the complete set that safe removal requires. It
-subsumes shell and entitlement changes too, so granting a principal PHP 8.4 no
-longer means deploying one of its environments. See `../deploy/ssh/` for the
-host side. `run.sh` still pins
+subsumes shell and SSH access changes too, so changing them no longer means
+deploying one of its environments. An **empty** `principals` prunes no key
+file unless the payload says `allowEmpty: true` (an empty list is far more
+often a control plane that lost track of the server than a host that manages
+nobody). Optional `retirePrincipals[]` names accounts the panel deleted; the
+handler removes them through `tp-host principal-remove` after the surviving
+set is applied, and reports them in `principalsRetired`. See
+`../deploy/ssh/` for the host side. `run.sh` still pins
 `--cacert` first (`tp_fetch_instance_ca`); on HTTP `000` with an existing CA
 it asks again with the **system roots** — a `404` there means the control
 plane moved to public TLS and the stale CA is dropped — and only then retries

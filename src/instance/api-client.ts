@@ -358,6 +358,32 @@ export class DaemonApiClient {
   }
 
   /**
+   * Send the certificate chain and private key Caddy just issued for one
+   * hostname (`POST /api/daemon/v1/tls/issued`). The control plane checks the
+   * pair, seals the key and stores it; nothing here is logged and the request
+   * body never appears in an error. Returns what the control plane decided:
+   * `stored` is false for a pair it recognised but did not need to write
+   * again (the same certificate sent twice).
+   */
+  async reportIssuedCertificate(
+    input: { hostname: string; certificatePem: string; privateKeyPem: string },
+  ): Promise<{ stored: boolean }> {
+    const body = await this.#requestJson<{ ok?: boolean; stored?: unknown }>(
+      "/api/daemon/v1/tls/issued",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          hostname: input.hostname,
+          certificatePem: input.certificatePem,
+          privateKeyPem: input.privateKeyPem,
+        }),
+      },
+      { auth: true },
+    );
+    return { stored: body.stored === true };
+  }
+
+  /**
    * Fetch last-applied secret plans plus tpdaemon envelopes for local
    * deployments. Plaintext never appears in this response.
    */

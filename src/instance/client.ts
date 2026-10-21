@@ -29,6 +29,7 @@ import {
 } from "../deploy/release/read-remote-files.ts";
 import { collectManagedLogs } from "../managed/logs.ts";
 import { probeManagedMemberHealth } from "../managed/health.ts";
+import { readManagedPermissions } from "../managed/permissions-read.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
 import {
@@ -145,6 +146,7 @@ import {
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
+import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
@@ -152,6 +154,7 @@ import {
   MANAGED_HA_PROBE_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
   resolveDaemonCapabilities,
+  TLS_CAPTURE_FEATURE,
 } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
@@ -1524,8 +1527,9 @@ export class InstanceClient {
     if (this.#haObserver) return;
     this.#haObserver = new ManagedHaObserver({
       send: (message) => {
-        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
         this.#ws.send(JSON.stringify(message));
+        return true;
       },
     });
   }
@@ -1588,6 +1592,23 @@ export class InstanceClient {
         if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return;
         this.#ws.send(JSON.stringify(message));
       },
+      capture: createCertificateCapture({
+        supported: () =>
+          this.#apiClient !== undefined &&
+          this.instanceSupports(TLS_CAPTURE_FEATURE),
+        report: (input) => {
+          const api = this.#apiClient;
+          if (api === undefined) {
+            return Promise.reject(new Error("control plane client not ready"));
+          }
+          return api.reportIssuedCertificate(input);
+        },
+        onFailure: (hostname, reason) =>
+          logWarn(
+            "deploy",
+            `acme certificate capture not accepted hostname=${hostname}: ${reason}`,
+          ),
+      }),
     });
   }
 
@@ -1778,6 +1799,9 @@ export class InstanceClient {
         break;
       case "managed-health-request":
         this.#probeManagedHealth(message, ws);
+        break;
+      case "managed-permissions-request":
+        void this.#readManagedPermissionsAsync(message, ws);
         break;
       case "metrics-live-start":
         this.#applyLiveLeaseStart(message, ws);
@@ -2218,12 +2242,11 @@ export class InstanceClient {
     const reconcileCaPath = trust.kind === "platform-ca"
       ? trust.caPath
       : undefined;
-    const licenseArg = encodeLicenseArg(
+    const license = encodeLicenseArg(
       credentials.licenseId,
       credentials.licenseToken,
     );
     const reconcileArgs = buildRunReconcileArgs({
-      licenseArg,
       instanceUrl,
       instanceCaPath: reconcileCaPath,
       insecureTls: false,
@@ -2254,6 +2277,7 @@ export class InstanceClient {
     await clientTestHooks.executeRunReconcile({
       script,
       args: reconcileArgs,
+      license,
       channel: config.channel,
       manifestUrl: manifestForReconcile,
       onStage: (stage) => {
@@ -2763,6 +2787,40 @@ export class InstanceClient {
       id: message.id,
       ok: probe.ok,
       ...(probe.ok ? { member: probe.member } : { error: probe.error }),
+      at: new Date().toISOString(),
+    };
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  async #readManagedPermissionsAsync(
+    message: Extract<DaemonMessage, { type: "managed-permissions-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    // `readManagedPermissions` never throws — a failure is `ok: false`, so
+    // the control plane is answered instead of waiting out its timeout. The
+    // fields are re-checked there: the frame is only JSON.
+    const read = await readManagedPermissions(
+      {
+        managedId: message.managedId,
+        engine: message.engine,
+        logins: message.logins,
+        databases: message.databases,
+      },
+      {},
+      message.id,
+    );
+    if (!read.ok) {
+      logWarn("instance", "managed permissions read failed:", read.error);
+    }
+
+    const result: DaemonMessage = {
+      type: "managed-permissions-result",
+      id: message.id,
+      ok: read.ok,
+      ...(read.ok ? { permissions: read.permissions } : { error: read.error }),
       at: new Date().toISOString(),
     };
 

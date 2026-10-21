@@ -1,7 +1,7 @@
 /**
  * Did this host just come back from a power cut or crash?
  *
- * The daemon keeps one small record, `<stateDir>/managed/host-boot.json`:
+ * The daemon keeps one small record, `<stateDir>/system/host-boot.json`:
  * the kernel's `boot_id` of the boot it last ran on, and a stamp it writes
  * only on a clean shutdown (SIGTERM / SIGINT). At start it compares:
  *
@@ -23,10 +23,9 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
 
 export const PROC_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
-// Under the existing `managed` state leaf (a file there is ignored by the
-// per-cluster listings, which only read directories), so no new first-level
-// state name has to be added to the layout tables.
-const RECORD_DIR = "managed";
+// Under the `system` state leaf, not among the per-database folders of
+// `managed`.
+const RECORD_DIR = "system";
 const RECORD_FILE = "host-boot.json";
 
 export type HostBootRecord = {

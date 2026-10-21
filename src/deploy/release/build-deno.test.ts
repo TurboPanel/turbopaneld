@@ -26,7 +26,6 @@ const DENO_RUNTIME: NativeBuildRuntime = {
   runtime: "deno",
   nodeBinDir: DENO_BIN_DIR,
   nodeEnv: "production",
-  runtimeGroup: "tpdeno2",
 };
 
 async function withWorkingDir(

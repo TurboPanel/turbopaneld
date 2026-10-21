@@ -46,6 +46,18 @@ test("mysql behind: received more than executed is not fully applied", () => {
   assertEquals(out.fullyApplied, false);
 });
 
+test("mysql GTID_SUBSET cell accepts ON/OFF as well as 0/1", () => {
+  assertEquals(
+    parseMysqlFreshness(mysqlRow({ subset: "ON" })).fullyApplied,
+    true,
+  );
+  assertEquals(
+    parseMysqlFreshness(mysqlRow({ exec: `${U1}:1-7`, subset: "OFF" }))
+      .fullyApplied,
+    false,
+  );
+});
+
 test("mysql IO thread stopped: no receipt age, applied state still reported", () => {
   const out = parseMysqlFreshness(mysqlRow({ io: "OFF" }));
   assertEquals(out.fullyApplied, true);

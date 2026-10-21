@@ -106,7 +106,7 @@ test("publish seals every entry, not only the top, and swaps current", async () 
     assertEquals(result.code, 0, result.stderr);
     assertStringIncludes(
       result.stdout,
-      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice-grp] [.]",
+      "EXEC [chown] [-R] [-h] [-P] [--] [root:alice] [.]",
     );
 
     const release = host.path(`${SITE}/releases/r1`);
@@ -274,7 +274,7 @@ test("the staging area and release directories are closed to generic verbs", asy
         ["install", "-d", "-m", "0700", leaf],
         ["mkdir", "-p", "--", join(leaf, "x")],
         ["rm", "-rf", "--", leaf],
-        ["chown", "-R", "root:alice-grp", leaf],
+        ["chown", "-R", "root:alice", leaf],
         ["chmod", "0755", leaf],
         ["ln", "-s", "--", "../../shared", join(leaf, "shared")],
         [
@@ -285,7 +285,7 @@ test("the staging area and release directories are closed to generic verbs", asy
           "-o",
           "root",
           "-g",
-          "alice-grp",
+          "alice",
           release,
         ],
         ["mkdir", "-p", "--", release],

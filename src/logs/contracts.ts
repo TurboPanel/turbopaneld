@@ -36,6 +36,12 @@ export interface CommandOutputEvent {
  */
 export const COMMAND_LOG_PHASES = {
   PREPARE: "prepare",
+  /** On-demand installs during `prepare`, one phase per kind of software. */
+  INSTALL_DOCKER: "install-docker",
+  INSTALL_GATEWAY: "install-gateway",
+  INSTALL_RUNTIME: "install-runtime",
+  INSTALL_WEB_SERVER: "install-web-server",
+  INSTALL_BUILD_TOOL: "install-build-tool",
   PULL: "pull",
   /** Git checkout for a source-backed release (`src/deploy/release/`). */
   FETCH: "fetch",

@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { parse } from "yaml";
 import { DAEMON_ROOT } from "./assets.ts";
@@ -136,7 +136,7 @@ test("every daemon playbook runs build-user unconditionally", async () => {
   }
 });
 
-test("node-app-runtime no longer adds a build account to the series it vendors", async () => {
+test("node-app-runtime adds no account to any group", async () => {
   const defaults = await readYaml<Record<string, unknown>>(
     join(ORCHESTRATION, "roles/node-app-runtime/defaults/main.yml"),
   );
@@ -144,14 +144,8 @@ test("node-app-runtime no longer adds a build account to the series it vendors",
   const tasks = await readYaml<Task[]>(
     join(ORCHESTRATION, "roles/node-app-runtime/tasks/vendor-series.yml"),
   );
-  const users = tasksUsing(tasks, "user").map((task) =>
-    moduleArgs(task, "user").name
-  );
-  // Only the daemon account; a build gets the series groups from tp-host as
-  // SupplementaryGroups=.
-  assertEquals(users, ["{{ turbopanel_user }}"]);
-  const text = await Deno.readTextFile(
-    join(ORCHESTRATION, "roles/node-app-runtime/tasks/vendor-series.yml"),
-  );
-  assertStringIncludes(text, "SupplementaryGroups=");
+  // Every site owner's Linux user, the daemon and a build may run every
+  // installed series: the tree is readable by everyone, so nobody joins a
+  // group for it.
+  assertEquals(tasksUsing(tasks, "user"), []);
 });

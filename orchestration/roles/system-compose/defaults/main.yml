@@ -29,7 +29,7 @@ turbopanel_group: >-  # noqa: var-naming[no-role-prefix]
 # anywhere is the default risk, not an opt-in one. Set to false only if an
 # external mechanism already covers this host.
 postgres_backup_enabled: true
-postgres_backup_dir: "{{ turbopanel_state_dir }}/backup/postgres"
+postgres_backup_dir: "{{ turbopanel_backup_dir | default('/backup') }}/panel/database"
 postgres_backup_oncalendar: "*-*-* 03:00:00"
 postgres_backup_retention_keep: 14
 # Opt-in off-host push (an rsync target, e.g. "user@host:/path/"); empty

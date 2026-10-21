@@ -15,14 +15,12 @@ import {
   safeConfigLine,
   safeConfigToken,
 } from "../../contracts/config-values.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
-  principalDataDir,
-  principalHomePath,
   principalTmpDir,
   principalUserHome,
-  siteCurrentSymlink,
-  siteSharedDir,
+  serviceTree,
 } from "../../paths/layout.ts";
 import {
   resolveNativeAppRuntimeStartCommand,
@@ -34,7 +32,7 @@ import {
   nativeAppStartExec,
 } from "./start-entry.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
-import { entitlementSeries, runtimeGroup } from "../../runtime/registry.ts";
+import { newestSeries, runtimeSeries } from "../../runtime/registry.ts";
 import type {
   EnvironmentDeployNativeAppRestartPolicy,
   EnvironmentDeployNativeAppService,
@@ -61,7 +59,10 @@ export const SYSTEMD_UNIT_DIR = "/etc/systemd/system";
 export const NATIVE_APP_CONFIG_DIRNAME = "node-apps";
 
 /**
- * Node series a native app runs on when the payload declared no `nodeVersion`.
+ * Node series a native app runs on when the payload declared no `nodeVersion`:
+ * the newest series the runtime registry offers. There is no separately chosen
+ * default, so adding a series to the registry moves unpinned apps onto it at
+ * their next deploy (a rollback keeps the series it recorded).
  *
  * A **series**, not a patch pin, for the same reason the wire contract accepts
  * one: the daemon does not choose which patch release a tenant gets, the
@@ -69,7 +70,7 @@ export const NATIVE_APP_CONFIG_DIRNAME = "node-apps";
  * per-series `current` symlink at it. Declaring a patch here would make every
  * upstream security release a daemon change.
  */
-export const DEFAULT_NATIVE_APP_NODE_VERSION = "24";
+export const NEWEST_NATIVE_APP_NODE_VERSION = newestSeries("node");
 
 /**
  * Root of the **tenant** Node tree, kept apart from the instance's own Node.
@@ -87,33 +88,14 @@ export function nativeAppRuntimeRoot(
   return join(layout.runtimesDir, "node-app");
 }
 
-/**
- * Unix group that grants read + traverse on one vendored tenant Node series.
- *
- * Per **series** (`tpnode24`), not one group for the whole tree: a group here
- * means "may execute this runtime series", and the series is what the operator
- * grants. `<vendor>/node-app/<series>/` is `root:<group> 0750`, and
- * `/opt/turbopanel` + `vendor/` stay `tp:tp 0750` with traverse-only ACLs, so a
- * principal can reach its own series without listing either parent or seeing
- * another series it was not granted.
- *
- * Membership is reconciled by `ensurePrincipalManagedGroups` during principal
- * materialization — which runs before any unit is installed, because systemd
- * resolves supplementary groups at `execve` and a unit started too early dies
- * `203/EXEC`.
- */
-export function nativeAppRuntimeGroup(nodeVersion: string): string | undefined {
-  return runtimeGroup("node", nodeVersion);
-}
-
-/** The series one app runs on: its own pin, else {@link DEFAULT_NATIVE_APP_NODE_VERSION}. */
+/** The series one app runs on: its own pin, else {@link NEWEST_NATIVE_APP_NODE_VERSION}. */
 export function resolveNativeAppNodeVersion(
   app: Pick<EnvironmentDeployNativeAppService, "nodeVersion">,
 ): string {
   const declared = app.nodeVersion?.trim();
   return declared && declared.length > 0
     ? declared
-    : DEFAULT_NATIVE_APP_NODE_VERSION;
+    : NEWEST_NATIVE_APP_NODE_VERSION;
 }
 
 /**
@@ -125,7 +107,7 @@ export function resolveNativeAppNodeVersion(
  */
 export function nativeAppNodeBinary(
   layout: Pick<LayoutPaths, "runtimesDir">,
-  nodeVersion: string = DEFAULT_NATIVE_APP_NODE_VERSION,
+  nodeVersion: string = NEWEST_NATIVE_APP_NODE_VERSION,
 ): string {
   return join(nativeAppNodeBinDir(layout, nodeVersion), "node");
 }
@@ -133,7 +115,7 @@ export function nativeAppNodeBinary(
 /** `<runtimesDir>/node-app/<series>/current/bin` — leads native-app unit `PATH`. */
 export function nativeAppNodeBinDir(
   layout: Pick<LayoutPaths, "runtimesDir">,
-  nodeVersion: string = DEFAULT_NATIVE_APP_NODE_VERSION,
+  nodeVersion: string = NEWEST_NATIVE_APP_NODE_VERSION,
 ): string {
   return join(
     nativeAppRuntimeRoot(layout),
@@ -159,8 +141,7 @@ export function nativeAppRuntimeKind(
 
 /**
  * Root of the **tenant** Deno tree: `<runtimesDir>/deno-app/<series>/current`.
- * Beside `node-app/`, never inside it, so each runtime's group and ACL stay its
- * own.
+ * Beside `node-app/`, never inside it.
  */
 export function denoAppRuntimeRoot(
   layout: Pick<LayoutPaths, "runtimesDir">,
@@ -169,18 +150,17 @@ export function denoAppRuntimeRoot(
 }
 
 /**
- * The Deno **series** one app runs on: its `denoVersion` reduced to the exec
- * boundary (`2.9.7` and `2.9` are both `2`), else
- * {@link DEFAULT_NATIVE_APP_DENO_VERSION}. Reduced here because the series is
- * a directory name and a group name, and `deno-app/2.9/` would not be a tree
- * the vendoring role ever creates.
+ * The Deno **series** one app runs on: its `denoVersion` reduced to the major
+ * (`2.9.7` and `2.9` are both `2`), else {@link DEFAULT_NATIVE_APP_DENO_VERSION}.
+ * Reduced here because the series is a directory name, and `deno-app/2.9/`
+ * would not be a tree the vendoring role ever creates.
  */
 export function resolveNativeAppDenoVersion(
   app: Pick<EnvironmentDeployNativeAppService, "denoVersion">,
 ): string {
   const declared = app.denoVersion?.trim();
   return declared && declared.length > 0
-    ? entitlementSeries("deno", declared)
+    ? runtimeSeries("deno", declared)
     : DEFAULT_NATIVE_APP_DENO_VERSION;
 }
 
@@ -191,7 +171,7 @@ export function nativeAppDenoBinDir(
 ): string {
   return join(
     denoAppRuntimeRoot(layout),
-    entitlementSeries("deno", denoSeries),
+    runtimeSeries("deno", denoSeries),
     "current",
     "bin",
   );
@@ -205,16 +185,8 @@ export function nativeAppDenoBinary(
   return join(nativeAppDenoBinDir(layout, denoSeries), "deno");
 }
 
-/** Entitlement group for one vendored Deno series (`tpdeno2`). */
-export function nativeAppDenoRuntimeGroup(
-  denoVersion: string,
-): string | undefined {
-  return runtimeGroup("deno", denoVersion);
-}
-
 /**
- * Binary directory, series and entitlement group of the runtime one app runs
- * on. The one place that decides Node or Deno from the payload, so the unit,
+ * Binary directory and series of the runtime one app runs on. The one place that decides Node or Deno from the payload, so the unit,
  * the build and the vendoring step cannot disagree.
  */
 export function nativeAppRuntimeTarget(
@@ -228,7 +200,6 @@ export function nativeAppRuntimeTarget(
   series: string;
   binDir: string;
   binary: string;
-  group: string | undefined;
 } {
   if (nativeAppRuntimeKind(app) === "deno") {
     const series = resolveNativeAppDenoVersion(app);
@@ -237,7 +208,6 @@ export function nativeAppRuntimeTarget(
       series,
       binDir: nativeAppDenoBinDir(layout, series),
       binary: nativeAppDenoBinary(layout, series),
-      group: nativeAppDenoRuntimeGroup(series),
     };
   }
   const series = resolveNativeAppNodeVersion(app);
@@ -246,7 +216,6 @@ export function nativeAppRuntimeTarget(
     series,
     binDir: nativeAppNodeBinDir(layout, series),
     binary: nativeAppNodeBinary(layout, series),
-    group: nativeAppRuntimeGroup(series),
   };
 }
 
@@ -281,7 +250,7 @@ export function principalUnitEnvironment(
 
 /**
  * The one `ReadWritePaths=` line for a cron job: the site directories it may
- * write, then the principal's `home/`, `data/` and `tmp/`. Never the home
+ * write, then the principal's `home/` and `tmp/`. Never the home
  * root: under `ProtectSystem=strict` everything else stays read-only, whatever
  * the file modes say. A Node app gets only its site's `shared/` instead.
  *
@@ -299,7 +268,6 @@ export function principalReadWritePaths(
     [
       ...siteDirs,
       principalUserHome(layout, username),
-      principalDataDir(layout, username),
       principalTmpDir(layout, username),
     ].join(" ")
   }`;
@@ -670,6 +638,8 @@ export type NativeAppUnitOpts = {
   >;
   app: EnvironmentDeployNativeAppService;
   username: string;
+  /** The service folder the control plane planned for the app. */
+  folder: FolderRefParts;
   environmentId: string;
   /** Resolved from `sourceMaterial[].build.startCommand`, when the author set one. */
   startCommand?: string;
@@ -712,9 +682,13 @@ export type NativeAppUnitOpts = {
  */
 export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
   const { app, username } = opts;
-  const home = principalHomePath(opts.layout, username);
-  const workingDir = siteCurrentSymlink(home, app.serviceId);
-  const sharedDir = siteSharedDir(home, app.serviceId);
+  const tree = serviceTree(opts.layout, {
+    serviceId: app.serviceId,
+    username,
+    folder: opts.folder,
+  });
+  const workingDir = tree.currentLink;
+  const sharedDir = tree.sharedDir;
   const group = principalUnixGroupName(username);
   const target = nativeAppRuntimeTarget(opts.layout, app);
   const nodeBinDir = target.binDir;
@@ -809,9 +783,9 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     "LockPersonality=yes",
     "CapabilityBoundingSet=",
     "AmbientCapabilities=",
-    // Its own site's shared/: nothing else (not the owner's home/, data/ or
+    // Its own site's shared/: nothing else (not the owner's home/ or
     // tmp/). Under ProtectSystem=strict every other path stays read-only.
-    `ReadWritePaths=${sharedDir}`,
+    `ReadWritePaths=${[sharedDir, tree.logsDir].join(" ")}`,
   ];
 
   if (app.resources?.cpus !== undefined) {

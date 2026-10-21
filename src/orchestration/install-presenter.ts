@@ -19,6 +19,28 @@ const STATUS_WINDOW_SIZE = 5;
 /** Buffered sanitized lines revealed only on failure. */
 const DETAIL_TAIL_MAX = 80;
 
+/** Columns assumed when the terminal width cannot be read. */
+const FALLBACK_COLUMNS = 80;
+
+function terminalColumns(): number {
+  try {
+    return Deno.consoleSize().columns;
+  } catch {
+    return FALLBACK_COLUMNS;
+  }
+}
+
+/**
+ * Cut `text` to `max` visible characters, ending in an ellipsis. The rolling
+ * region is erased one logical line at a time, so a line that wraps would
+ * leave a copy of the step header behind on every redraw.
+ */
+export function fitToWidth(text: string, max: number): string {
+  const chars = Array.from(text);
+  if (max < 2 || chars.length <= max) return text;
+  return `${chars.slice(0, max - 1).join("")}…`;
+}
+
 export interface PushStatusOptions {
   /** Show even when {@link shouldDropPresenterLogLine} would drop the line. */
   force?: boolean;
@@ -27,6 +49,7 @@ export interface PushStatusOptions {
 export class InstallPresenter {
   readonly #enc = new TextEncoder();
   readonly #isTTY: boolean;
+  readonly #columns: () => number;
 
   #stepLabel: string | null = null;
   #spinnerFrame = 0;
@@ -38,8 +61,12 @@ export class InstallPresenter {
   #lastPipedLine: string | null = null;
   #active = false;
 
-  constructor(isTTY: boolean = Deno.stdout.isTerminal()) {
+  constructor(
+    isTTY: boolean = Deno.stdout.isTerminal(),
+    columns: () => number = terminalColumns,
+  ) {
     this.#isTTY = isTTY;
+    this.#columns = columns;
   }
 
   beginStep(label: string): void {
@@ -152,18 +179,21 @@ export class InstallPresenter {
     if (!this.#isTTY) {
       return `▸ ${label}`;
     }
+    // "▸ " before the label and " <frame>" after it.
+    const fitted = fitToWidth(label, this.#columns() - 5);
     const frame = animated
       ? ` ${CYAN}${BRAILLE_FRAMES[
         this.#spinnerFrame % BRAILLE_FRAMES.length
       ]!}${RESET}`
       : "";
-    return `${CYAN}▸${RESET} ${label}${frame}`;
+    return `${CYAN}▸${RESET} ${fitted}${frame}`;
   }
 
   #buildTTYLines(): string[] {
     const lines = [this.#formatStepLine(true)];
+    const width = this.#columns() - 3;
     for (const status of this.#statusWindow) {
-      lines.push(`${DIM}  ${status}${RESET}`);
+      lines.push(`${DIM}  ${fitToWidth(status, width)}${RESET}`);
     }
     return lines;
   }

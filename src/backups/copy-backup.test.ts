@@ -167,6 +167,84 @@ test("resolveCopyMount accepts a tenant directory and the default storage path",
   );
 });
 
+test("resolveCopyMount accepts a volume folder in the scope tree and no other folder of the owner", () => {
+  for (
+    const hostPath of [
+      "/srv/users/shop/production/volumes/uploads",
+      "/srv/users/shop/common/volumes/uploads/sub/dir",
+    ]
+  ) {
+    assertEquals(
+      resolveCopyMount(FIXED_LAYOUT, {
+        copyId: COPY,
+        copyProvider: "path",
+        hostPath,
+        ownerUsername: "shop",
+      }),
+      { type: "bind", path: hostPath },
+    );
+  }
+  for (
+    const hostPath of [
+      "/srv/users/shop/production/services/site/shared",
+      "/srv/users/shop/production/volumes",
+      "/srv/users/shop/home/volumes/x",
+      "/srv/users/shop/Production/volumes/x",
+      "/srv/users/other/production/volumes/uploads",
+    ]
+  ) {
+    assertThrows(() =>
+      resolveCopyMount(FIXED_LAYOUT, {
+        copyId: COPY,
+        copyProvider: "path",
+        hostPath,
+        ownerUsername: "shop",
+      })
+    );
+  }
+});
+
+test("resolveCopyMount builds a volume folder's directory from its parts and ignores hostPath beside it", () => {
+  const folder = { owner: "shop", scope: "production", slug: "uploads" };
+  const expected = {
+    type: "bind" as const,
+    path: "/srv/users/shop/production/volumes/uploads",
+  };
+  assertEquals(
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder,
+    }),
+    expected,
+  );
+  assertEquals(
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder,
+      hostPath: "/srv/users/shop/volumes/old",
+      ownerUsername: "shop",
+    }),
+    expected,
+  );
+  assertEquals(
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder: { ...folder, scope: "common" },
+    }),
+    { type: "bind", path: "/srv/users/shop/common/volumes/uploads" },
+  );
+  assertThrows(() =>
+    resolveCopyMount(FIXED_LAYOUT, {
+      copyId: COPY,
+      copyProvider: "path",
+      folder: { ...folder, slug: ".." },
+    })
+  );
+});
+
 test("resolveCopyMount refuses host paths outside the allowed roots", () => {
   for (
     const hostPath of [
@@ -238,7 +316,7 @@ test("artifact paths refuse unsafe ids", () => {
     copyBackupArtifactPath(FIXED_LAYOUT, COPY, "bk", POLICY),
     join(
       FIXED_LAYOUT.backupDir,
-      "copies",
+      "volumes",
       COPY,
       `policy-${POLICY}`,
       "bk.tar.gz",
@@ -267,7 +345,7 @@ test("createCopyBackupArtifact writes a 0600 checksummed archive and prunes its 
     );
     const last = artifacts.at(-1);
     assert(last);
-    const dir = join(layout.backupDir, "copies", COPY, `policy-${POLICY}`);
+    const dir = join(layout.backupDir, "volumes", COPY, `policy-${POLICY}`);
     assertEquals(last.path, join(dir, "bk_3.tar.gz"));
     assertEquals(last.sizeBytes, bytes.length);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -315,7 +393,7 @@ test("a failed archive leaves no artifact and no .part file behind", async () =>
       Error,
       "copy archive failed: tar: short read",
     );
-    assertEquals(await listNames(join(layout.backupDir, "copies", COPY)), []);
+    assertEquals(await listNames(join(layout.backupDir, "volumes", COPY)), []);
   });
 });
 
@@ -426,7 +504,7 @@ test("a failed pull errors clearly and leaves no artifact or directory", async (
     );
     assertEquals(calls.some((args) => args[0] === "run"), false);
     await assertRejects(() =>
-      Deno.stat(join(layout.backupDir, "copies", COPY))
+      Deno.stat(join(layout.backupDir, "volumes", COPY))
     );
   });
 });
@@ -612,7 +690,7 @@ test("an empty archive is kept but never counts as a good copy or prunes the goo
     await run("bk_1", 4096);
     const empty = await run("bk_2", 45);
     assertEquals(empty.pruned, []);
-    const dir = join(layout.backupDir, "copies", COPY);
+    const dir = join(layout.backupDir, "volumes", COPY);
     assertEquals(await listNames(dir), ["bk_1.tar.gz", "bk_2.tar.gz"]);
     // A second empty run still leaves the good one alone.
     assertEquals((await run("bk_3", 45)).pruned, []);

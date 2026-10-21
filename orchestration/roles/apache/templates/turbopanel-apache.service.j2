@@ -9,8 +9,9 @@ Type=forking
 # The whole unit runs as tpapache: no root master. Apache needs no privilege —
 # every site listens on a loopback high port behind the hosting Caddy, and PHP
 # runs elsewhere. systemd creates the log and pidfile directories owned by
-# tpapache. They are top level, outside the tp-owned /var/log/turbopanel and
-# /run/turbopanel, so Apache does not need to be in group tp to reach them.
+# tpapache. The logs sit in /var/log/turbopanel/apache with the other engines'
+# (reached through group tp, which the web service accounts belong to); the
+# pidfile folder is top level in /run.
 User={{ apache_service_user }}
 Group={{ apache_service_group }}
 LogsDirectory={{ apache_logs_directory }}

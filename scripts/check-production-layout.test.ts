@@ -114,6 +114,73 @@ test("isSkippedPath matches Galaxy docker role trees", () => {
   assertEquals(isSkippedPath("src/paths/layout.ts"), false);
 });
 
+test("collectForbiddenReferenceFailures flags a retired sibling folder", () => {
+  const rel = "src/example.ts";
+  const retired = [
+    "/var/lib/turbopanel-hosting-caddy",
+    "/var/lib/turbopanel-docker-gate",
+    "/var/cache/turbopanel-docker-gate",
+    "/var/log/turbopanel-apache",
+    "/etc/ssh/turbopanel-sftp-chroot",
+    "/usr/local/lib/turbopanel/turbopanel-docker-egress",
+  ];
+  for (const path of retired) {
+    assertEquals(
+      collectForbiddenReferenceFailures(rel, `const p = "${path}";`).length,
+      1,
+      path,
+    );
+  }
+  // The build folder is the one sibling that stays, and the new homes are fine.
+  assertEquals(
+    collectForbiddenReferenceFailures(
+      rel,
+      [
+        'const a = "/var/lib/turbopanel-build";',
+        'const b = "/var/lib/turbopanel/hosting-caddy";',
+        'const c = "/var/log/turbopanel/apache";',
+      ].join("\n"),
+    ),
+    [],
+  );
+});
+
+test("collectForbiddenReferenceFailures flags a hardcoded backup root outside the approved files", () => {
+  const rel = "src/example.ts";
+  assertEquals(
+    collectForbiddenReferenceFailures(rel, 'const dir = "/backup";').length,
+    1,
+  );
+  assertEquals(
+    collectForbiddenReferenceFailures(rel, "run --allow-read=/etc,/backup,/srv")
+      .length,
+    1,
+  );
+  // Longer names, state subfolders, comments and approved files do not count.
+  assertEquals(
+    collectForbiddenReferenceFailures(
+      rel,
+      [
+        'const a = join(stateDir, "backup");',
+        "// the backup root is /backup by default",
+        " * `/backup` is the root",
+        'const b = "/var/lib/turbopanel/backup/results";',
+        'const c = "/backups/x";',
+        "const d = `${dir}/backup/results`;",
+      ].join("\n"),
+    ),
+    [],
+  );
+  assertEquals(
+    collectForbiddenReferenceFailures("src/paths/layout.ts", 'x = "/backup";'),
+    [],
+  );
+  assertEquals(
+    collectForbiddenReferenceFailures("src/example.test.ts", 'x = "/backup";'),
+    [],
+  );
+});
+
 test("collectForbiddenReferenceFailures flags each retired path", () => {
   const rel = "src/example.ts";
   const ansibleShare = `share/${"ansible"}/`;
