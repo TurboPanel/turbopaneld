@@ -82,6 +82,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-data-only-readwrite-v1",
   "managed-database-owner-v1",
   "tls-capture-v1",
+  "backup-s3-copy-v1",
 ] as const;
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
@@ -101,6 +102,15 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
  * feature too.
  */
 export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
+
+/**
+ * This daemon copies finished managed backups to an S3-compatible bucket when
+ * a policy or a manual backup names a target, tests a target
+ * (`server.backups.test-target`) and restores from a bucket. The control plane
+ * sends a target only to a daemon that lists this feature, and the daemon sends
+ * `backup-copy-report` only to a control plane that lists it too.
+ */
+export const BACKUP_S3_COPY_FEATURE: DaemonWireFeature = "backup-s3-copy-v1";
 
 /**
  * This daemon answers `managed-health-request` with `managed-health-result`

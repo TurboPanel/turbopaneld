@@ -25,6 +25,7 @@ export const COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.backups.test-target",
   "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",
@@ -557,6 +558,8 @@ export type BackupPolicyWireEntry = {
   onCalendar: string;
   retentionKeep: number;
   enabled: boolean;
+  /** Where to copy each finished `managed` backup (S3-compatible storage). Absent: no copy. */
+  copyTarget?: BackupCopyTargetWire;
 };
 
 /** The storage-copy providers a backup can read: a named Docker volume, or a host directory. */
@@ -8494,6 +8497,8 @@ export type ManagedBackupPayload = {
    * how the file is found. Omitted for a manual backup.
    */
   policyId?: string;
+  /** Copy the new backup here once it is made, and on `delete` remove its copy. */
+  copyTarget?: BackupCopyTargetWire;
 };
 
 /** Must stay in sync with the instance canonical `managed.backup` shape. */
@@ -8524,6 +8529,11 @@ export type ManagedRestorePayload = {
    * file is found. Omitted for a manual backup.
    */
   policyId?: string;
+  /**
+   * Fetch the artifact from this bucket first (it is not on this host). The
+   * download is checked against `checksum` before the engine is touched.
+   */
+  copySource?: { target: BackupCopyTargetWire; key: string };
 };
 
 /** Must stay in sync with the instance canonical `managed.restore` shape. */
@@ -8595,6 +8605,9 @@ export function parseManagedBackupPayload(
       throw new Error("Invalid managed.backup payload policyId");
     }
     payload.policyId = value.policyId;
+  }
+  if (value.copyTarget !== undefined) {
+    payload.copyTarget = parseBackupCopyTarget(value.copyTarget);
   }
   return payload;
 }
@@ -8680,6 +8693,18 @@ export function parseManagedRestorePayload(
     }
     payload.policyId = value.policyId;
   }
+  if (value.copySource !== undefined) {
+    if (
+      !isRecord(value.copySource) || !isString(value.copySource.key) ||
+      !isSafeBucketKey(value.copySource.key)
+    ) {
+      throw new Error("Invalid managed.restore payload copySource");
+    }
+    payload.copySource = {
+      target: parseBackupCopyTarget(value.copySource.target),
+      key: value.copySource.key,
+    };
+  }
   return payload;
 }
 
@@ -8711,6 +8736,103 @@ const BACKUP_POLICY_UUID_RE =
 
 function isCanonicalBackupUuid(value: unknown): value is string {
   return typeof value === "string" && BACKUP_POLICY_UUID_RE.test(value);
+}
+
+/**
+ * An S3-compatible bucket a finished backup is copied to. Must stay in sync
+ * with the instance canonical `BackupCopyTargetWire`. The secret key arrives
+ * only as an envelope sealed to this host's daemon key; it is opened in memory
+ * when a copy runs and never written to disk in the clear.
+ */
+export type BackupCopyTargetWire = {
+  targetId: string;
+  name: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  /** Folder inside the bucket; no leading or trailing slash; may be empty. */
+  prefix: string;
+  pathStyle: boolean;
+  serverSideEncryption: boolean;
+  accessKeyId: string;
+  secretKeyEnvelope: string;
+};
+
+const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+const REGION_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const BUCKET_PREFIX_RE = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
+const ACCESS_KEY_RE = /^[\x21-\x7e]{1,128}$/;
+
+/** A key the control plane wrote: safe characters, no empty or dot segments. */
+export function isSafeBucketKey(key: string): boolean {
+  return key.length > 0 && key.length <= 1024 &&
+    key.split("/").every((part) =>
+      part !== "" && part !== "." && part !== ".." &&
+      /^[A-Za-z0-9._-]+$/.test(part)
+    );
+}
+
+function wireText(value: unknown, field: string, max: number): string {
+  if (typeof value !== "string" || value.length > max) {
+    throw new Error(`Invalid backup copy target ${field}`);
+  }
+  return value;
+}
+
+export function parseBackupCopyTarget(raw: unknown): BackupCopyTargetWire {
+  if (!isRecord(raw) || !isCanonicalBackupUuid(raw.targetId)) {
+    throw new Error("Invalid backup copy target");
+  }
+  const prefix = wireText(raw.prefix ?? "", "prefix", 256);
+  const region = wireText(raw.region, "region", 32);
+  const bucket = wireText(raw.bucket, "bucket", 63);
+  const accessKeyId = wireText(raw.accessKeyId, "accessKeyId", 128);
+  const envelope = wireText(raw.secretKeyEnvelope, "secretKeyEnvelope", 4096);
+  if (
+    typeof raw.pathStyle !== "boolean" ||
+    typeof raw.serverSideEncryption !== "boolean" ||
+    !BUCKET_NAME_RE.test(bucket) || !REGION_RE.test(region) ||
+    (prefix !== "" && !BUCKET_PREFIX_RE.test(prefix)) ||
+    prefix.split("/").includes("..") || !ACCESS_KEY_RE.test(accessKeyId) ||
+    envelope.length === 0
+  ) {
+    throw new Error("Invalid backup copy target");
+  }
+  return {
+    targetId: raw.targetId,
+    name: wireText(raw.name ?? "", "name", 64),
+    endpoint: wireText(raw.endpoint, "endpoint", 512),
+    region,
+    bucket,
+    prefix,
+    pathStyle: raw.pathStyle,
+    serverSideEncryption: raw.serverSideEncryption,
+    accessKeyId,
+    secretKeyEnvelope: envelope,
+  };
+}
+
+/** `server.backups.test-target`: write, read and delete a small object. */
+export type BackupTargetTestPayload = { target: BackupCopyTargetWire };
+
+export type BackupTargetTestStep = {
+  step: "write" | "read" | "delete";
+  ok: boolean;
+  /** A plain reason; never a response body. */
+  error?: string;
+};
+
+export type BackupTargetTestResult = {
+  ok: boolean;
+  steps: BackupTargetTestStep[];
+  error?: string;
+};
+
+export function parseBackupTargetTestPayload(
+  value: unknown,
+): BackupTargetTestPayload {
+  if (!isRecord(value)) throw new Error("Invalid backup target test payload");
+  return { target: parseBackupCopyTarget(value.target) };
 }
 
 const BACKUP_TARGET_KIND_SET = new Set(["managed", "copy"]);
@@ -8920,6 +9042,9 @@ function parseBackupPolicyWireEntry(raw: unknown): BackupPolicyWireEntry {
   ) {
     throw new Error("Invalid backup policy entry");
   }
+  const copyTarget = raw.copyTarget === undefined
+    ? undefined
+    : parseBackupCopyTarget(raw.copyTarget);
   const entry: BackupPolicyWireEntry = {
     policyId: raw.policyId,
     targetKind: raw.targetKind as BackupPolicyWireEntry["targetKind"],
@@ -8928,6 +9053,12 @@ function parseBackupPolicyWireEntry(raw: unknown): BackupPolicyWireEntry {
     enabled: raw.enabled,
   };
   parseBackupPolicyTarget(raw, entry);
+  if (copyTarget) {
+    if (entry.targetKind !== "managed") {
+      throw new Error("Invalid backup policy: only managed backups are copied");
+    }
+    entry.copyTarget = copyTarget;
+  }
   return entry;
 }
 
