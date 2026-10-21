@@ -1572,6 +1572,11 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   noCache?: boolean;
   /**
+   * Hide web server names and versions in responses and default error pages.
+   * Absent reads as off, so an older control plane changes nothing.
+   */
+  hideWebServerNames?: boolean;
+  /**
    * `sequential` stops the previous version, runs migrations, starts the new
    * version, gates on health and rolls back (see `deploy/sequential-deploy.ts`).
    * Absent or `inplace` is the original `compose up -d` deploy. An older
@@ -6431,6 +6436,10 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      hideWebServerNames: parseOptionalBoolean(
+        value.hideWebServerNames,
+        "hideWebServerNames",
+      ),
       deployStrategy: parseDeployStrategy(value.deployStrategy),
       migrations: parseDeployMigrations(value.migrations),
       healthTimeoutSeconds: parseDeployHealthTimeout(
