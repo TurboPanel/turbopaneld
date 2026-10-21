@@ -57,6 +57,7 @@ import {
   strongestPrivilege,
 } from "./postgres-sql.ts";
 import {
+  countObjectsToReassignSql,
   DATABASE_OWNER_SQL,
   databaseAdminAttributesSql,
   databaseIsEmptySql,
@@ -72,6 +73,7 @@ import {
   type OwnerRoleLoginLevel,
   ownerRoleLoginSql,
   ownerRoleNames,
+  reassignDatabaseObjectsSql,
 } from "./postgres-owner-role-sql.ts";
 import {
   DOWN_ENGINE_CENSUS,
@@ -615,6 +617,7 @@ async function createOwnerRoleDatabase(
   ctx: ManagedEngineContext,
   name: string,
   ownerLogin?: string,
+  convertExisting = false,
 ): Promise<void> {
   if (name.length > OWNER_ROLE_MAX_DATABASE_NAME) {
     throw new Error(
@@ -626,6 +629,13 @@ async function createOwnerRoleDatabase(
   if (existing.length === 0) {
     await runPsql(ctx, ensureOwnerRolesSql(name));
     await runPsql(ctx, createDatabaseSql(name, names.owner));
+    return;
+  }
+  // Asked for by the customer: hand over what is in it even when the database
+  // already belongs to its owner role (or to the chosen login), because things
+  // made since by other roles are not the owner role's yet.
+  if (convertExisting && !RESERVED_DATABASES.has(name)) {
+    await convertDatabaseToOwnerRole(ctx, name);
     return;
   }
   if (
@@ -652,6 +662,31 @@ async function createOwnerRoleDatabase(
     `postgres database ${
       sanitizeForLog(name)
     } already exists with another owner; keeping it as it is`,
+  );
+}
+
+/**
+ * Move an existing database, data and all, onto its owner role (asked for by
+ * the customer). Ownership only. The objects move in one transaction that
+ * gives up on a lock after five seconds; the database itself moves in a
+ * separate statement after it,
+ * so a failure leaves the old owner and a repeat finishes the job. Safe to
+ * repeat: it only touches what is not the owner role's yet.
+ */
+async function convertDatabaseToOwnerRole(
+  ctx: ManagedEngineContext,
+  name: string,
+): Promise<void> {
+  const owner = ownerRoleNames(name).owner;
+  await runPsql(ctx, ensureOwnerRolesSql(name));
+  const rows = await parsePsqlRows(ctx, countObjectsToReassignSql(owner), name);
+  await runPsql(ctx, reassignDatabaseObjectsSql(owner), name);
+  await runPsql(ctx, moveDatabaseOwnerSql(name, owner));
+  logInfo(
+    "managed",
+    `postgres database ${sanitizeForLog(name)} moved onto its owner role (${
+      rows[0]?.[0] ?? "?"
+    } objects handed over)`,
   );
 }
 
@@ -1422,7 +1457,12 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const applied: string[] = [];
     await forEachSequential(ops, async (op) => {
       if (op.action === "create" && op.ownerRole === true) {
-        await createOwnerRoleDatabase(ctx, op.name, op.ownerLogin);
+        await createOwnerRoleDatabase(
+          ctx,
+          op.name,
+          op.ownerLogin,
+          op.convertExisting === true,
+        );
       } else if (op.action === "create") {
         // CREATE DATABASE cannot run inside PL/pgSQL; check then create.
         const existing = await parsePsqlRows(ctx, databaseExistsSql(op.name));

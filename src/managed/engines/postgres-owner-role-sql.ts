@@ -12,7 +12,7 @@
  * by the read-write and read-only logins at once. The roles are the panel's:
  * the `tp_` prefix is reserved, so no login can collide with them.
  *
- * Nothing here converts an existing database or reassigns ownership.
+ * An existing database is only converted on request (`reassignDatabaseObjectsSql`).
  */
 
 import {
@@ -157,6 +157,201 @@ export function ownerLoginReturnSql(login: string): string {
     `END`,
     `$turbopanel$;`,
   ].join("\n");
+}
+
+/** One kind of object that moves: the rows that are not the owner role's yet, and the statement for a row. */
+type HandoverStep = { query: string; statement: string };
+
+/**
+ * What moves onto the owner role, one step per kind of object. Each query
+ * lists the objects in a user schema that are not the owner role's and do not
+ * belong to an extension; each statement is a `format()` call over `r`.
+ */
+function handoverSteps(owner: string): HandoverStep[] {
+  const o = quoteLiteral(owner);
+  const userSchema =
+    `n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`;
+  const notMine = (column: string) =>
+    `${column} <> (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ${o})`;
+  const notExtension = (catalog: string, oid: string) =>
+    `NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend e WHERE e.classid = '${catalog}'::pg_catalog.regclass AND e.objid = ${oid} AND e.deptype = 'e')`;
+  // Objects that live in a schema and are named `schema.name`.
+  const named = (
+    catalog: string,
+    alias: string,
+    namespace: string,
+    name: string,
+    ownerColumn: string,
+    sql: string,
+  ): HandoverStep => {
+    const ownerRef = notMine(alias + "." + ownerColumn);
+    const notOfExtension = notExtension(catalog, alias + ".oid");
+    return {
+      query:
+        `SELECT pg_catalog.format('%I.%I', n.nspname, ${alias}.${name}) AS obj FROM pg_catalog.${catalog} ${alias} JOIN pg_catalog.pg_namespace n ON n.oid = ${alias}.${namespace} WHERE ${userSchema} AND ${ownerRef} AND ${notOfExtension}`,
+      statement: `pg_catalog.format('${sql} %s OWNER TO %I', r.obj, ${o})`,
+    };
+  };
+  const relation = (kinds: string, extra = "") => ({
+    query:
+      `SELECT c.oid::pg_catalog.regclass::text AS obj FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE ${userSchema} AND c.relkind IN (${kinds}) AND ${
+        notMine("c.relowner")
+      } AND ${notExtension("pg_class", "c.oid")}${extra}`,
+  });
+  return [
+    {
+      query:
+        `SELECT n.nspname AS obj FROM pg_catalog.pg_namespace n WHERE ${userSchema} AND ${
+          notMine("n.nspowner")
+        } AND n.nspowner <> 'pg_database_owner'::pg_catalog.regrole AND ${
+          notExtension("pg_namespace", "n.oid")
+        }`,
+      statement:
+        `pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', r.obj, ${o})`,
+    },
+    // ALTER TABLE moves views, materialized views, sequences and foreign
+    // tables too, but it does not reach into partitions: those are listed
+    // here as relations of their own. A sequence tied to a column follows its
+    // table, so only free-standing ones get a step.
+    {
+      ...relation("'r', 'p', 'v', 'm', 'f'"),
+      statement: `pg_catalog.format('ALTER TABLE %s OWNER TO %I', r.obj, ${o})`,
+    },
+    {
+      ...relation(
+        "'S'",
+        ` AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_class'::pg_catalog.regclass AND d.objid = c.oid AND d.deptype IN ('a', 'i'))`,
+      ),
+      statement:
+        `pg_catalog.format('ALTER SEQUENCE %s OWNER TO %I', r.obj, ${o})`,
+    },
+    {
+      query:
+        `SELECT p.oid::pg_catalog.regprocedure::text AS obj FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE ${userSchema} AND ${
+          notMine("p.proowner")
+        } AND ${notExtension("pg_proc", "p.oid")}`,
+      statement:
+        `pg_catalog.format('ALTER ROUTINE %s OWNER TO %I', r.obj, ${o})`,
+    },
+    {
+      query:
+        `SELECT t.oid::pg_catalog.regtype::text AS obj, t.typtype AS kind FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE ${userSchema} AND ${
+          notMine("t.typowner")
+        } AND ${
+          notExtension("pg_type", "t.oid")
+        } AND (t.typtype IN ('e', 'd', 'r') OR (t.typtype = 'c' AND EXISTS (SELECT 1 FROM pg_catalog.pg_class k WHERE k.oid = t.typrelid AND k.relkind = 'c')))`,
+      statement:
+        `pg_catalog.format(CASE r.kind WHEN 'd' THEN 'ALTER DOMAIN %s OWNER TO %I' ELSE 'ALTER TYPE %s OWNER TO %I' END, r.obj, ${o})`,
+    },
+    {
+      query:
+        `SELECT x.oid::pg_catalog.regoperator::text AS obj FROM pg_catalog.pg_operator x JOIN pg_catalog.pg_namespace n ON n.oid = x.oprnamespace WHERE ${userSchema} AND ${
+          notMine("x.oprowner")
+        } AND ${notExtension("pg_operator", "x.oid")}`,
+      statement:
+        `pg_catalog.format('ALTER OPERATOR %s OWNER TO %I', r.obj, ${o})`,
+    },
+    named(
+      "pg_collation",
+      "x",
+      "collnamespace",
+      "collname",
+      "collowner",
+      "ALTER COLLATION",
+    ),
+    named(
+      "pg_statistic_ext",
+      "x",
+      "stxnamespace",
+      "stxname",
+      "stxowner",
+      "ALTER STATISTICS",
+    ),
+    named(
+      "pg_ts_config",
+      "x",
+      "cfgnamespace",
+      "cfgname",
+      "cfgowner",
+      "ALTER TEXT SEARCH CONFIGURATION",
+    ),
+    named(
+      "pg_ts_dict",
+      "x",
+      "dictnamespace",
+      "dictname",
+      "dictowner",
+      "ALTER TEXT SEARCH DICTIONARY",
+    ),
+    named(
+      "pg_conversion",
+      "x",
+      "connamespace",
+      "conname",
+      "conowner",
+      "ALTER CONVERSION",
+    ),
+    // A foreign server can only go to a role that may use its wrapper; the
+    // wrapper itself can only be owned by a superuser, so it stays as it is.
+    {
+      query:
+        `SELECT s.srvname AS obj FROM pg_catalog.pg_foreign_server s WHERE ${
+          notMine("s.srvowner")
+        } AND pg_catalog.has_foreign_data_wrapper_privilege(${o}, s.srvfdw, 'USAGE') AND ${
+          notExtension("pg_foreign_server", "s.oid")
+        }`,
+      statement:
+        `pg_catalog.format('ALTER SERVER %I OWNER TO %I', r.obj, ${o})`,
+    },
+  ];
+}
+
+/** How many objects in this database are not yet the owner role's (the same list `reassignDatabaseObjectsSql` moves). */
+export function countObjectsToReassignSql(owner: string): string {
+  const parts = handoverSteps(owner).map((step) =>
+    `(SELECT count(*) FROM (${step.query}) q)`
+  );
+  return `SELECT (${parts.join(" + ")})::text;`;
+}
+
+/**
+ * Run connected to the database: hand everything in it that a person made to
+ * `owner`, whoever owns it now (the platform admin, or logins that each took
+ * the database in turn): schemas, tables (partitions included), views,
+ * materialized views, sequences, foreign tables, routines, types and domains,
+ * operators, collations, extended statistics, text search configurations and
+ * dictionaries, conversions, and foreign servers the owner may use.
+ *
+ * Ownership only: no row, column or grant is changed. This script is one
+ * transaction (it either moves everything or nothing) and gives up after five
+ * seconds of waiting for a lock, so a busy table fails the run cleanly and a
+ * repeat is safe. Moving the database itself is a separate step after it.
+ *
+ * Left alone on purpose: anything that belongs to an extension; objects that
+ * need a superuser or are not part of a database's own data (large objects,
+ * event triggers, publications, subscriptions, languages, foreign data
+ * wrappers); and default privileges (`ALTER DEFAULT PRIVILEGES` entries for
+ * the former owners stay as they are, because no grant is changed and an
+ * owner login creates as the owner role anyway). `REASSIGN OWNED` is not
+ * used: it works on a whole role across every database and cannot touch the
+ * platform admin.
+ */
+export function reassignDatabaseObjectsSql(owner: string): string {
+  const lines = [
+    `DO $turbopanel$`,
+    `DECLARE r record;`,
+    `BEGIN`,
+    `  SET LOCAL lock_timeout = '5s';`,
+  ];
+  for (const step of handoverSteps(owner)) {
+    lines.push(
+      `  FOR r IN ${step.query} LOOP`,
+      `    EXECUTE ${step.statement};`,
+      `  END LOOP;`,
+    );
+  }
+  lines.push(`END`, `$turbopanel$;`);
+  return lines.join("\n");
 }
 
 /** Create the three NOLOGIN roles when missing. Safe to repeat. */

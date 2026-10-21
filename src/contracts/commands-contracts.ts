@@ -1957,6 +1957,20 @@ export type ManagedApplyDatabaseOp = {
    * Needs `managed-database-owner-v1`.
    */
   ownerLogin?: string;
+  /**
+   * Postgres only, on a create with `ownerRole`. Asked for by the customer:
+   * a database that already exists with another owner (and may hold data) is
+   * moved onto its owner role. What is in it (schemas, tables and partitions,
+   * views, sequences, routines, types, operators, collations, statistics, text
+   * search objects, conversions, foreign servers; nothing that belongs to an
+   * extension) is handed over in one transaction that gives up after five
+   * seconds waiting for a lock, then the database itself moves. No data is
+   * touched, and a failure leaves the old owner so a repeat finishes the job.
+   * It also repeats safely on a database that already has its owner role,
+   * picking up what other roles made since. Without it an existing database
+   * is left as it is. Needs `managed-database-convert-v1`.
+   */
+  convertExisting?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -7494,6 +7508,20 @@ function parseManagedDatabaseOwnerLogin(
   return value;
 }
 
+/** `convertExisting` of a database op: true, only on a create with `ownerRole`. */
+function parseManagedDatabaseConvert(
+  entry: Record<string, unknown>,
+): boolean {
+  const value = entry.convertExisting;
+  if (value === undefined) return false;
+  if (value !== true || entry.ownerRole !== true || entry.action !== "create") {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: convertExisting must be true on a created database with ownerRole",
+    );
+  }
+  return true;
+}
+
 function parseManagedApplyDatabases(
   value: unknown,
 ): ManagedApplyDatabaseOp[] | undefined {
@@ -7526,6 +7554,7 @@ function parseManagedApplyDatabases(
       action: entry.action as ManagedApplyDatabaseOp["action"],
       ...(entry.ownerRole === true ? { ownerRole: true } : {}),
       ...(ownerLogin === undefined ? {} : { ownerLogin }),
+      ...(parseManagedDatabaseConvert(entry) ? { convertExisting: true } : {}),
     });
   }
   return databases;
