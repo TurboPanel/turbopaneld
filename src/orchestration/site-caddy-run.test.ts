@@ -142,3 +142,34 @@ test("the launcher mounts nosymfollow and drops every privilege before Caddy", a
   assertStringIncludes(script, "unshare --mount --propagation private");
   assertStringIncludes(script, "--bounding-set=-all --no-new-privs");
 });
+
+test("roots names the public folder and the releases of a service folder, dots in the name included", async () => {
+  const out = await roots({
+    "tp-a.conf": block("/srv/users/u1/production/services/example.com/public"),
+    "tp-b.conf": block(
+      "/srv/users/u1/production/services/example.com/public/dist",
+    ),
+    "tp-c.conf": block(
+      "/srv/users/u1/staging/services/api-2.test.dev/current/public",
+    ),
+    "tp-d.conf": block("/srv/users/u2/common/services/x_y/current"),
+  });
+  assertEquals(out.code, 0);
+  assertEquals(out.lines, [
+    "/srv/users/u1/production/services/example.com/public",
+    "/srv/users/u1/staging/services/api-2.test.dev/releases",
+    "/srv/users/u2/common/services/x_y/releases",
+  ]);
+});
+
+test("roots skips look-alike names in the scope tree and a path that climbs", async () => {
+  const out = await roots({
+    "tp-a.conf": block("/srv/users/u1/production/services/web/publics/x"),
+    "tp-b.conf": block("/srv/users/u1/production/services/web/currently"),
+    "tp-c.conf": block("/srv/users/u1/production/volumes/web/public"),
+    "tp-d.conf": block(
+      "/srv/users/u1/production/services/../services/web/public",
+    ),
+  });
+  assertEquals(out.lines, []);
+});

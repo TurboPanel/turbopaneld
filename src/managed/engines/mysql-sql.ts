@@ -6,6 +6,7 @@
  * escapes — {@link quoteLiteral} must escape `\` as well as `'`.
  */
 
+import { grantSqlFor } from "./grant-pattern.ts";
 import {
   type FollowSourceDialect,
   renderFollowSourceSql,
@@ -23,7 +24,11 @@ const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
  */
 export const MANAGED_DOCKER_NETWORK_HOST = "172.16.0.0/255.240.0.0";
 
-export type ManagedDatabasePrivilege = "owner" | "read-write" | "read-only";
+export type ManagedDatabasePrivilege =
+  | "admin"
+  | "owner"
+  | "read-write"
+  | "read-only";
 
 export function quoteIdentifier(
   value: string,
@@ -123,31 +128,10 @@ export function dropDatabaseSql(name: string): string {
   return `DROP DATABASE IF EXISTS ${db};`;
 }
 
-export function grantDatabaseSql(
-  database: string,
-  username: string,
-  privilege: ManagedDatabasePrivilege,
-  host: string = MANAGED_DOCKER_NETWORK_HOST,
-): string {
-  const db = quoteIdentifier(database);
-  const account = accountAt(username, host);
-  switch (privilege) {
-    case "owner":
-      return `GRANT ALL PRIVILEGES ON ${db}.* TO ${account} WITH GRANT OPTION;`;
-    case "read-write":
-      return (
-        `GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, ` +
-        `CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, ` +
-        `CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON ${db}.* TO ${account};`
-      );
-    case "read-only":
-      return `GRANT SELECT, SHOW VIEW ON ${db}.* TO ${account};`;
-    default: {
-      const _exhaustive: never = privilege;
-      throw new Error(`unsupported privilege: ${_exhaustive}`);
-    }
-  }
-}
+export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
+  { quoteIdentifier, quoteLiteral, accountAt },
+  MANAGED_DOCKER_NETWORK_HOST,
+);
 
 export function grantRootSql(
   username: string,
@@ -316,6 +300,20 @@ export function promoteSql(): string {
   ].join("\n");
 }
 
+/** Executed GTID set on a quiesced MySQL primary (what replicas must apply). */
+export function primaryFinalGtidSetSql(): string {
+  return "SELECT @@GLOBAL.gtid_executed AS gtid_set;";
+}
+
+export function waitForExecutedGtidSetSql(
+  gtidSet: string,
+  timeoutSeconds: number,
+): string {
+  return `SELECT WAIT_FOR_EXECUTED_GTID_SET(${
+    quoteLiteral(gtidSet)
+  }, ${timeoutSeconds});`;
+}
+
 export function isWritableSql(): string {
   return "SELECT @@GLOBAL.read_only, @@GLOBAL.super_read_only;";
 }
@@ -385,6 +383,22 @@ export function showReplicaStatusSql(): string {
   return "SHOW REPLICA STATUS;";
 }
 
+/** Seconds between IO-thread reconnect attempts (engine default is 60). */
+export const MYSQL_REPLICA_CONNECT_RETRY_SECONDS = 10;
+
+/**
+ * How many reconnects to attempt. MySQL 8.4 / 9.7 default SOURCE_RETRY_COUNT
+ * is 10 (~10 minutes at the 60 s default connect retry) and then leave the
+ * IO thread stopped. At {@link MYSQL_REPLICA_CONNECT_RETRY_SECONDS}, seven
+ * days is `(7 * 86400) / 10` attempts.
+ */
+export const MYSQL_REPLICA_RETRY_COUNT = (7 * 86400) /
+  MYSQL_REPLICA_CONNECT_RETRY_SECONDS;
+
+export function startReplicaSql(): string {
+  return "START REPLICA;";
+}
+
 export function changeReplicationSourceSql(spec: {
   host: string;
   port: number;
@@ -400,8 +414,10 @@ export function changeReplicationSourceSql(spec: {
     "  SOURCE_AUTO_POSITION = 1,",
     "  SOURCE_SSL = 1,",
     "  SOURCE_SSL_CA = '/etc/mysql/tls/ca.crt',",
-    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1;",
-    "START REPLICA;",
+    "  SOURCE_SSL_VERIFY_SERVER_CERT = 1,",
+    `  SOURCE_CONNECT_RETRY = ${MYSQL_REPLICA_CONNECT_RETRY_SECONDS},`,
+    `  SOURCE_RETRY_COUNT = ${MYSQL_REPLICA_RETRY_COUNT};`,
+    startReplicaSql(),
   ].join("\n");
 }
 

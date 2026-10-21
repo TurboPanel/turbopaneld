@@ -107,7 +107,8 @@ for (
 }
 
 test("postgres dropUsers handles users in order and stops at the first failure", async () => {
-  // Per user: list databases (empty here, role "absent"), then DROP ROLE.
+  // Per user: give back databases it owns, list databases (empty here, role
+  // "absent"), then DROP ROLE.
   const { ctx, inputs, maxInFlight } = failingContext("user_b");
   await assertRejects(() =>
     postgresManagedEngineRuntime.dropUsers!(ctx, [
@@ -116,10 +117,10 @@ test("postgres dropUsers handles users in order and stops at the first failure",
       "user_c",
     ])
   );
-  assertEquals(inputs.length, 3);
+  assertEquals(inputs.length, 4);
   assertEquals(inputs[0]!.includes("user_a"), true);
-  assertEquals(inputs[1]!.includes("DROP ROLE"), true);
-  assertEquals(inputs[2]!.includes("user_b"), true);
+  assertEquals(inputs[2]!.includes("DROP ROLE"), true);
+  assertEquals(inputs[3]!.includes("user_b"), true);
   assertEquals(inputs.some((input) => input.includes("user_c")), false);
   assertEquals(maxInFlight(), 1);
 });
@@ -145,7 +146,7 @@ for (const [name, engine] of engines) {
     // Postgres also names every listed database in its lock-down statements;
     // fail on the grant itself so the test still checks grant-by-grant order.
     const { ctx, inputs, maxInFlight } = failingContext(
-      name === "postgres" ? 'ON DATABASE "db_b" TO' : "db_b",
+      name === "postgres" ? 'ON DATABASE "dbb" TO' : "dbb",
     );
     await assertRejects(() =>
       engine.applyCredentials(ctx, [{
@@ -153,14 +154,14 @@ for (const [name, engine] of engines) {
         username: "app_user",
         password: ["pw", crypto.randomUUID()].join("-"),
         role: "user",
-        databases: ["db_a", "db_b", "db_c"],
+        databases: ["dba", "dbb", "dbc"],
         privileges: ["read-write"],
       } as ManagedApplyCredential])
     );
     const grants = inputs.filter((input) => /\bGRANT\b/i.test(input));
     assertEquals(grants.length, 2);
-    assertEquals(grants[0]!.includes("db_a"), true);
-    assertEquals(grants[1]!.includes("db_b"), true);
+    assertEquals(grants[0]!.includes("dba"), true);
+    assertEquals(grants[1]!.includes("dbb"), true);
     assertEquals(maxInFlight(), 1);
   });
 }

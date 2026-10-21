@@ -21,6 +21,9 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+const FOLDER = { owner: "appuser", scope: "production", slug: "example.com" };
+const PUBLISH_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72";
+
 test("releasesToPrune keeps the newest N and never drops current", () => {
   const ids = ["r5", "r4", "r3", "r2", "r1", "r0"];
   assertEquals(releasesToPrune(ids, null, 5), ["r0"]);
@@ -36,10 +39,24 @@ test("pruneReleases removes superseded trees through the privileged runner", asy
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "current-rel" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7b",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     // Newest-first is by mtime — create older first, sleep, then newer.
-    for (const id of ["old-a", "old-b", "keep-1", "keep-2", "current-rel"]) {
+    for (
+      const id of [
+        "old-a",
+        "old-b",
+        "keep-1",
+        "keep-2",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7b",
+      ]
+    ) {
       await Deno.mkdir(join(paths.releasesDir, id), { recursive: true });
       await Deno.writeTextFile(join(paths.releasesDir, id, "marker"), id);
       // Bump mtime ordering without relying on sleep: touch via utime when
@@ -51,7 +68,7 @@ test("pruneReleases removes superseded trees through the privileged runner", asy
       );
     }
     await Deno.symlink(
-      join("releases", "current-rel"),
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7b"),
       paths.currentLink,
     );
 
@@ -68,9 +85,17 @@ test("pruneReleases removes superseded trees through the privileged runner", asy
       runFn: run,
     });
     // keep=2 newest + current → prune the rest. Exact set depends on mtime
-    // ordering among keep-* vs old-*; current-rel must never appear.
-    assertEquals(removed.includes("current-rel"), false);
-    assertEquals(removedByRun.every((p) => !p.endsWith("current-rel")), true);
+    // ordering among keep-* vs old-*; 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7b must never appear.
+    assertEquals(
+      removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7b"),
+      false,
+    );
+    assertEquals(
+      removedByRun.every((p) =>
+        !p.endsWith("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7b")
+      ),
+      true,
+    );
     assertEquals(removed.length >= 2, true);
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -82,17 +107,32 @@ test("pruneReleases is best-effort when a release refuses to unlink", async () =
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-new" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
-    for (const id of ["rel-old", "rel-new"]) {
+    for (
+      const id of [
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e78",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77",
+      ]
+    ) {
       await Deno.mkdir(join(paths.releasesDir, id), { recursive: true });
       await Deno.utime(
         join(paths.releasesDir, id),
         Date.now() / 1000,
-        (Date.now() + (id === "rel-new" ? 10 : 1)) / 1000,
+        (Date.now() +
+          (id === "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77" ? 10 : 1)) / 1000,
       );
     }
-    await Deno.symlink(join("releases", "rel-new"), paths.currentLink);
+    await Deno.symlink(
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77"),
+      paths.currentLink,
+    );
 
     const lines: string[] = [];
     const run: RunFn = () =>
@@ -122,11 +162,23 @@ test("pruneReleases skips non-directory entries and surviving files", async () =
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
-    await Deno.mkdir(join(paths.releasesDir, "rel-keep"), { recursive: true });
+    await Deno.mkdir(
+      join(paths.releasesDir, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76"),
+      { recursive: true },
+    );
     await Deno.writeTextFile(join(paths.releasesDir, "notes.txt"), "skip");
-    await Deno.symlink(join("releases", "rel-keep"), paths.currentLink);
+    await Deno.symlink(
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76"),
+      paths.currentLink,
+    );
     const removed = await pruneReleases({
       paths,
       keep: 1,
@@ -143,7 +195,13 @@ test("pruneReleases lists via sudo when the releases dir is unreadable", async (
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     const originalReadDir = Deno.readDir;
@@ -158,15 +216,22 @@ test("pruneReleases lists via sudo when the releases dir is unreadable", async (
           if (args.includes("ls")) {
             return Promise.resolve({
               success: true,
-              stdout: "rel-keep\nrel-old\n",
+              stdout:
+                "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76\n019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e78\n",
               stderr: "",
             });
           }
           return Promise.resolve({ success: true, stdout: "", stderr: "" });
         },
       });
-      assertEquals(removed.includes("rel-old"), true);
-      assertEquals(removed.includes("rel-keep"), false);
+      assertEquals(
+        removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e78"),
+        true,
+      );
+      assertEquals(
+        removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76"),
+        false,
+      );
     } finally {
       Deno.readDir = originalReadDir;
     }
@@ -180,7 +245,13 @@ test("pruneReleases treats a privileged missing list as empty", async () => {
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     const originalReadDir = Deno.readDir;
@@ -211,7 +282,13 @@ test("pruneReleases throws when privileged listing fails for another reason", as
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     const originalReadDir = Deno.readDir;
@@ -246,7 +323,13 @@ test("pruneReleases rethrows a non-PermissionDenied listing error", async () => 
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     const originalReadDir = Deno.readDir;
@@ -277,7 +360,13 @@ test("pruneReleases is a no-op when releases/ is missing", async () => {
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const calls: string[] = [];
     const removed = await pruneReleases({
@@ -299,14 +388,29 @@ test("pruneReleases treats a racing stat as oldest rather than failing", async (
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
-    await Deno.mkdir(join(paths.releasesDir, "rel-keep"), { recursive: true });
-    await Deno.mkdir(join(paths.releasesDir, "rel-ghost"), { recursive: true });
-    await Deno.symlink(join("releases", "rel-keep"), paths.currentLink);
+    await Deno.mkdir(
+      join(paths.releasesDir, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76"),
+      { recursive: true },
+    );
+    await Deno.mkdir(
+      join(paths.releasesDir, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e79"),
+      { recursive: true },
+    );
+    await Deno.symlink(
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76"),
+      paths.currentLink,
+    );
     const originalStat = Deno.stat;
     Deno.stat = ((path: string | URL) => {
-      if (String(path).endsWith("rel-ghost")) {
+      if (String(path).endsWith("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e79")) {
         return Promise.reject(new Deno.errors.NotFound("gone"));
       }
       return originalStat.call(Deno, path);
@@ -317,8 +421,14 @@ test("pruneReleases treats a racing stat as oldest rather than failing", async (
         keep: 1,
         runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
       });
-      assertEquals(removed.includes("rel-ghost"), true);
-      assertEquals(removed.includes("rel-keep"), false);
+      assertEquals(
+        removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e79"),
+        true,
+      );
+      assertEquals(
+        removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76"),
+        false,
+      );
     } finally {
       Deno.stat = originalStat;
     }
@@ -332,7 +442,13 @@ test("pruneReleases treats a privileged not-found listing as empty", async () =>
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     const originalReadDir = Deno.readDir;
@@ -363,7 +479,13 @@ test("pruneReleases ignores blank privileged listing lines", async () => {
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-keep" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     const originalReadDir = Deno.readDir;
@@ -378,15 +500,22 @@ test("pruneReleases ignores blank privileged listing lines", async () => {
           if (args.includes("ls")) {
             return Promise.resolve({
               success: true,
-              stdout: "rel-keep\n\n  \nrel-old\n",
+              stdout:
+                "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76\n\n  \n019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e78\n",
               stderr: "",
             });
           }
           return Promise.resolve({ success: true, stdout: "", stderr: "" });
         },
       });
-      assertEquals(removed.includes("rel-old"), true);
-      assertEquals(removed.includes("rel-keep"), false);
+      assertEquals(
+        removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e78"),
+        true,
+      );
+      assertEquals(
+        removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76"),
+        false,
+      );
     } finally {
       Deno.readDir = originalReadDir;
     }
@@ -400,17 +529,32 @@ test("pruneReleases reports a non-Error unlink failure", async () => {
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-new" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
-    for (const id of ["rel-old", "rel-new"]) {
+    for (
+      const id of [
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e78",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77",
+      ]
+    ) {
       await Deno.mkdir(join(paths.releasesDir, id), { recursive: true });
       await Deno.utime(
         join(paths.releasesDir, id),
         Date.now() / 1000,
-        (Date.now() + (id === "rel-new" ? 10 : 1)) / 1000,
+        (Date.now() +
+          (id === "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77" ? 10 : 1)) / 1000,
       );
     }
-    await Deno.symlink(join("releases", "rel-new"), paths.currentLink);
+    await Deno.symlink(
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e77"),
+      paths.currentLink,
+    );
     const lines: string[] = [];
     const removed = await pruneReleases({
       paths,
@@ -433,7 +577,13 @@ test("pruneReleases keeps the default newest five plus current", async () => {
   try {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-5" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7a",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     for (let i = 0; i < 6; i += 1) {
       const id = `rel-${i}`;
@@ -444,12 +594,18 @@ test("pruneReleases keeps the default newest five plus current", async () => {
         (Date.now() + i) / 1000,
       );
     }
-    await Deno.symlink(join("releases", "rel-5"), paths.currentLink);
+    await Deno.symlink(
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7a"),
+      paths.currentLink,
+    );
     const removed = await pruneReleases({
       paths,
       runFn: () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
     });
-    assertEquals(removed.includes("rel-5"), false);
+    assertEquals(
+      removed.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e7a"),
+      false,
+    );
     assertEquals(removed.length, 1);
   } finally {
     await Deno.remove(root, { recursive: true });

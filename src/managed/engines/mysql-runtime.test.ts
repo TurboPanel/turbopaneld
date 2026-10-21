@@ -3,6 +3,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { topologyPlaintext } from "../../testing/managed-topology-fixtures.ts";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import {
   BINLOG_EXPIRE_LOGS_SECONDS,
@@ -607,6 +608,96 @@ test("mysql configureStandby empty seed failure is not reported as unknown", asy
   assertEquals(err.message.includes("unknown"), false);
 });
 
+test("mysql enforceFencedFormerPrimaryReadOnly sets read_only", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.enforceFencedFormerPrimaryReadOnly) {
+    throw new TypeError("expected mysql enforceFencedFormerPrimaryReadOnly");
+  }
+  let enforced = false;
+  const exec: ManagedEngineExec = (_argv, input) => {
+    const sql = input ?? "";
+    if (sql.includes("read_only")) enforced = true;
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.enforceFencedFormerPrimaryReadOnly(buildContext(exec));
+  assertEquals(enforced, true);
+});
+
+test("mysql isWritableFormerPrimary is false after read_only is on", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.isWritableFormerPrimary) {
+    throw new TypeError("expected mysql isWritableFormerPrimary");
+  }
+  const exec: ManagedEngineExec = (_argv, input) => {
+    const sql = input ?? "";
+    if (sql.includes("@@GLOBAL.read_only")) {
+      return Promise.resolve({ success: true, stdout: "1\t1\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  assertEquals(
+    await replication.isWritableFormerPrimary(buildContext(exec)),
+    false,
+  );
+});
+
+test("mysql quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_executed", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.quiesceFormerPrimaryForSwitchover) {
+    throw new TypeError("expected mysql quiesceFormerPrimaryForSwitchover");
+  }
+  let enforcedReadOnly = false;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("read_only") || sql.includes("super_read_only")) {
+      enforcedReadOnly = true;
+    }
+    if (sql.includes("gtid_executed")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "uuid:1-42\n",
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const gtid = await replication.quiesceFormerPrimaryForSwitchover(
+    buildContext(exec),
+  );
+  assertEquals(enforcedReadOnly, true);
+  assertEquals(gtid, "uuid:1-42");
+});
+
+test("mysql promote runs WAIT_FOR_EXECUTED_GTID_SET when a GTID proof is required", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mysql promote");
+  }
+  let sawWait = false;
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("WAIT_FOR_EXECUTED_GTID_SET")) {
+      sawWait = true;
+      return Promise.resolve({ success: true, stdout: "0\n", stderr: "" });
+    }
+    if (sql.includes("RESET") || sql.includes("SOURCE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "0\t0\n" : "1\t1\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec), {
+    requiredExecutedGtidSet: "uuid:1-50",
+    gtidWaitTimeoutSeconds: 30,
+  });
+  assertEquals(sawWait, true);
+});
+
 test("mysql promote clears read-only and returns when writable", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.promote) {
@@ -683,6 +774,83 @@ test("mysql readHealth parses standby replica status", async () => {
   const health = await replication.readHealth(buildContext(exec), "standby");
   assertEquals(health.state, "streaming");
   assertEquals(health.lagSeconds, 3);
+});
+
+const CONNECTION_LOST_VERTICAL = `
+             Replica_IO_Running: No
+            Replica_SQL_Running: Yes
+                 Source_Host: 203.0.113.10
+                 Source_Port: 3306
+                Last_IO_Errno: 2003
+                Last_IO_Error: Can't connect to server on '203.0.113.10'
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+`;
+
+const APPLIER_ERROR_VERTICAL = `
+             Replica_IO_Running: Yes
+            Replica_SQL_Running: No
+                 Source_Host: 203.0.113.10
+                 Source_Port: 3306
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 1062
+               Last_SQL_Error: Duplicate entry '1' for key 'PRIMARY'
+          Seconds_Behind_Source: NULL
+`;
+
+test("mysql readHealth restarts replica IO after a connection error when the primary is reachable", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mysql readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  let statusReads = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv[0] === "mysqladmin" && argv.includes("--host")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "mysqld is alive",
+        stderr: "",
+      });
+    }
+    if (argv.includes("-E")) {
+      statusReads += 1;
+      return Promise.resolve({
+        success: true,
+        stdout: statusReads === 1 ? CONNECTION_LOST_VERTICAL : HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "streaming");
+  assertEquals(calls.some((c) => c.input === "START REPLICA;"), true);
+});
+
+test("mysql readHealth does not restart through an SQL applier error", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mysql readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv.includes("-E")) {
+      return Promise.resolve({
+        success: true,
+        stdout: APPLIER_ERROR_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "reconnecting");
+  assertEquals(calls.some((c) => c.input === "START REPLICA;"), false);
+  assertEquals(calls.some((c) => c.argv[0] === "mysqladmin"), false);
 });
 
 test("mysql readHealth returns unknown when replica status is empty", async () => {
@@ -905,6 +1073,55 @@ test("mysql applyDatabases drops databases and ensures ProxySQL monitor", async 
   assertEquals(monitorSql.includes("'10.100.0.3'"), true);
   assertEquals(monitorSql.includes("'10.100.0.5'"), true);
   assertEquals(monitorSql.includes("172.16.0.0/255.240.0.0"), true);
+});
+
+test("mysql ensureOrchestratorTopology scopes the account like the monitor account", async () => {
+  const { exec, calls } = recordingExec();
+  await mysqlManagedEngineRuntime.ensureOrchestratorTopology!(
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.3", "10.100.0.5"],
+    },
+    { user: "tp_topology_abcd12345678", password: topologyPlaintext() },
+  );
+  const accountSql =
+    calls.find((c) => c.input?.includes("CREATE USER IF NOT EXISTS"))?.input ??
+      "";
+  assertEquals(accountSql.includes("'10.100.0.3'"), true);
+  assertEquals(accountSql.includes("'10.100.0.5'"), true);
+  assertEquals(accountSql.includes("172.16.0.0/255.240.0.0"), true);
+  assertEquals(accountSql.includes("REQUIRE SSL"), true);
+  // Binlogging stays on: a read-only standby cannot mint the account itself
+  // and receives it from the primary through replication.
+  assertEquals(accountSql.includes("sql_log_bin"), false);
+  assertEquals(
+    calls.some((c) =>
+      c.input?.includes("GRANT SELECT ON mysql.slave_master_info")
+    ),
+    true,
+  );
+});
+
+test("mysql ensureOrchestratorTopology survives a refused replication-table grant", async () => {
+  const calls: string[] = [];
+  const exec: ManagedEngineExec = (_argv, input) => {
+    calls.push(input ?? "");
+    // What a release without that table answers; the account itself is in.
+    const refused = input?.includes("slave_master_info") ?? false;
+    return Promise.resolve({
+      success: !refused,
+      stdout: "",
+      stderr: refused ? "ERROR 1146 (42S02): Table doesn't exist" : "",
+    });
+  };
+  await mysqlManagedEngineRuntime.ensureOrchestratorTopology!(
+    buildContext(exec),
+    { user: "tp_topology_abcd12345678", password: topologyPlaintext() },
+  );
+  assertEquals(
+    calls.some((input) => input.includes("CREATE USER IF NOT EXISTS")),
+    true,
+  );
 });
 
 test("mysql readVersion returns undefined when version query fails", async () => {

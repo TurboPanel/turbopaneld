@@ -51,7 +51,7 @@ fast-path when the binary is present and the service active. The role
   (`src/deploy/docker-networking-state.ts`, synced once per daemon session by
   `syncHostDockerNetworking`), so an on-demand install lands with the right
   pools too.
-- **Always-on egress block** (`tasks/egress-guard.yml`, `files/turbopanel-docker-egress`, unit
+- **Always-on egress block** (`tasks/egress-guard.yml`, `files/turbopanel-docker-egress`, installed as `/opt/turbopanel/lib/docker-egress`, unit
   `turbopanel-docker-egress.service`, var `turbopanel_docker_egress_guard`, default true; audit P1-4): chain `TP-EGRESS`
   hung off `DOCKER-USER` and `INPUT` for traffic entering on `docker0` / `br-+` only. Drops 169.254.0.0/16,
   168.63.129.16, 100.100.100.200 (IPv4) and fe80::/10 (ICMPv6 allowed), fd00:ec2::254 (IPv6), with a DNS (53)
@@ -202,10 +202,11 @@ new release name. A release is never rebuilt on the host as a fallback. Main con
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
 **`turbopanel-apache.service`**, which runs the whole server, master
 included, as `tpapache` (`User=`/`Group=` in the unit, none in
-`httpd.conf`). Logs and the pidfile live in the unit's top-level
-`LogsDirectory=turbopanel-apache` / `RuntimeDirectory=turbopanel-apache`
-(`/var/log/turbopanel-apache`, `/run/turbopanel-apache`), never in the
-`tp`-owned trees. A changed unit restarts a running server (`try-restart`);
+`httpd.conf`). Logs live in the unit's nested
+`LogsDirectory=turbopanel/apache` (`/var/log/turbopanel/apache`, with the other
+engines' logs; systemd leaves the existing parent alone and gives the inner
+folder to `tpapache`) and the pidfile in `RuntimeDirectory=turbopanel-apache`
+(`/run/turbopanel-apache`, removed with the unit). A changed unit restarts a running server (`try-restart`);
 a reload would keep the old master. The daemon's config test is
 `sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,
 pinned in sudoers. Main config includes a
@@ -315,7 +316,7 @@ template fails the play instead of starting that loop.
 
 Control-plane `XDG_DATA_HOME` is `{{ turbopanel_caddy_runtime_dir }}/share`
 (`<state>/caddy/.local/share`). Hosting Caddy uses its own top-level
-`StateDirectory=turbopanel-hosting-caddy` (`/var/lib/turbopanel-hosting-caddy`).
+`StateDirectory=turbopanel/hosting-caddy` (`/var/lib/turbopanel/hosting-caddy`).
 Those stores must not be the same directory.
 
 ### Hosting Caddy account (`hosting-caddy`)
@@ -325,11 +326,19 @@ Those stores must not be the same directory.
 9982), which is deliberately **not** in group `tp`: its only privilege is
 `CAP_NET_BIND_SERVICE` (ambient and bounding), with `NoNewPrivileges=yes`.
 Certificates, the ACME account, the internal CA and Caddy's autosave live in
-the unit's `StateDirectory=turbopanel-hosting-caddy`, which systemd creates
-owned by `tpedge`; the old root-written `<state>/hosting-caddy` store is
-removed, not migrated (the internal CA and ACME account are recreated).
+the unit's nested `StateDirectory=turbopanel/hosting-caddy`
+(`/var/lib/turbopanel/hosting-caddy`). systemd leaves the existing state root
+alone and creates only the inner folder, owned by `tpedge` (checked on a test
+host with systemd 257: a parent that does not exist yet would be made
+`root:root 0755`, an existing one keeps its owner and mode). Because `tpedge` is
+not in group `tp`, the role grants it traverse (`x`) on the state root next to
+the install, vendor and config roots. `tp-host` refuses every generic verb on
+the folder (`tp_path_class`).
 `caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
-whenever the binary **or** the account is missing (`ensureHostingCaddy`). The
+whenever the binary **or** the account is missing (`ensureHostingCaddy`).
+`playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
+when `tpedge`, the vendored Caddy binary, or the ingress guard is missing or
+stale, so enrolled hosts are edge-ready before the first compose deploy. The
 role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on
@@ -527,3 +536,13 @@ on a closed Postgres port.
 ### System services Compose stack (`system-compose`)
 
 Moved to `roles/system-compose/AGENTS.md`.
+
+## Instance restart on a replaced binary
+
+`instance-launch` only ensures `turbopanel-instance` is started, and the
+one-shot installer (`run.sh --instance`) replaces `bin/turbopanel` before that
+play runs. "Read the running instance process" therefore reports `stale` when
+the running process holds a deleted executable or started before the file on
+disk, and "Restart the instance when its binary was replaced under it" notifies
+`Restart turbopanel instance` (handler, end of play). Without it a canary kept
+serving the previous panel build after a successful update.

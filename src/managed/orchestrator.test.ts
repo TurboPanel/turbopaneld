@@ -1,5 +1,6 @@
 import { parse as parseYaml } from "yaml";
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   LABEL_ROLE,
@@ -12,6 +13,7 @@ import {
   type SystemComponentDescriptor,
 } from "../deploy/system-component.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { dirname } from "@std/path";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import {
   ensureOrchestratorStack,
@@ -23,15 +25,19 @@ import {
   loadOrchestratorRaftToken,
   MANAGED_HA_HTTP_PORT,
   MANAGED_HA_RAFT_PORT,
+  materializeOrchestratorApiCredentials,
   ORCHESTRATOR_IMAGE,
   ORCHESTRATOR_TLS_CA_PATH,
   orchestratorCompose,
+  orchestratorFilesDigest,
   orchestratorStackPresent,
   orchestratorTopologyAliases,
+  pickLiveOrConfiguredEngineDial,
   pickPublishedEngineDial,
   readCurrentOrchestratorManagedNetwork,
   readManagedNetworkFromCompose,
   renderOrchestratorConf,
+  resolveOrchestratorMemberDial,
   resolveOrchestratorRegisterHost,
   restartOrchestratorStack,
   reviveStoppedOrchestratorContainer,
@@ -42,7 +48,9 @@ import {
   orchestratorComposePath,
   orchestratorConfigDir,
   orchestratorConfPath,
+  orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
+  orchestratorWaitReadyScriptPath,
 } from "./engine-paths.ts";
 
 /**
@@ -218,6 +226,109 @@ test("resolveOrchestratorRegisterHost inspects a container-name host", async () 
   assertEquals(commands[0]?.[0], "inspect");
 });
 
+test("pickLiveOrConfiguredEngineDial reads a killed container's configured bindings", () => {
+  // Docker 29 output for this format before and after `docker kill`.
+  const running =
+    '{"live":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}';
+  const killed =
+    '{"live":{},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}';
+  const expected = { host: "10.100.0.5", port: 45001 };
+  assertEquals(pickLiveOrConfiguredEngineDial(running, 3306), expected);
+  assertEquals(pickLiveOrConfiguredEngineDial(killed, 3306), expected);
+});
+
+test("pickLiveOrConfiguredEngineDial refuses bindings Orchestrator cannot know", () => {
+  for (
+    const json of [
+      '{"live":{},"configured":{}}',
+      '{"live":null,"configured":null}',
+      '{"live":{},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":""}]}}',
+      '{"live":{},"configured":{"3306/tcp":[{"HostIp":"0.0.0.0","HostPort":"45001"}]}}',
+      '{"live":{},"configured":{"5432/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}',
+      "null",
+      "not-json",
+    ]
+  ) {
+    assertEquals(pickLiveOrConfiguredEngineDial(json, 3306), null, json);
+  }
+});
+
+test("resolveOrchestratorMemberDial inspects live and configured ports", async () => {
+  const commands: string[][] = [];
+  const dial = await resolveOrchestratorMemberDial(
+    { containerName: "db-1", port: 3306 },
+    (args) => {
+      commands.push([...args]);
+      return Promise.resolve({
+        success: true,
+        stdout:
+          '{"live":{},"configured":{"3306/tcp":[{"HostIp":"10.100.0.5","HostPort":"45001"}]}}\n',
+        stderr: "",
+        code: 0,
+      });
+    },
+  );
+  assertEquals(dial, { host: "10.100.0.5", port: 45001 });
+  assertEquals(commands[0]?.[0], "inspect");
+  assertEquals(commands[0]?.at(-1), "db-1");
+  assertEquals(
+    commands[0]?.[2]?.includes(".HostConfig.PortBindings"),
+    true,
+  );
+  assertEquals(
+    commands[0]?.[2]?.includes(".NetworkSettings.Ports"),
+    true,
+  );
+});
+
+test("resolveOrchestratorMemberDial throws when inspect fails or nothing is published", async () => {
+  await assertRejects(
+    () =>
+      resolveOrchestratorMemberDial(
+        { containerName: "db-1", port: 3306 },
+        () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "No such object",
+            code: 1,
+          }),
+      ),
+    Error,
+    "No such object",
+  );
+  await assertRejects(
+    () =>
+      resolveOrchestratorMemberDial(
+        { containerName: "db-1", port: 3306 },
+        () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "",
+            code: 1,
+          }),
+      ),
+    Error,
+    "docker inspect failed",
+  );
+  await assertRejects(
+    () =>
+      resolveOrchestratorMemberDial(
+        { containerName: "db-1", port: 3306 },
+        () =>
+          Promise.resolve({
+            success: true,
+            stdout: '{"live":{},"configured":{}}',
+            stderr: "",
+            code: 0,
+          }),
+      ),
+    Error,
+    "needs a host-published port",
+  );
+});
+
 test("resolveOrchestratorRegisterHost keeps an IP host without inspect", async () => {
   const dial = await resolveOrchestratorRegisterHost(
     { host: "10.100.0.4", port: 45002, containerName: "db-2" },
@@ -377,17 +488,49 @@ test("loadOrchestratorRaftToken reads raft token password", async () => {
   }
 });
 
-test("hostPrepPresent reflects api.cnf presence", async () => {
+test("hostPrepPresent reads the daemon-visible host-prep marker, not libexec wait-ready", async () => {
   const fixture = await createTempLayout();
   try {
     const layout = resolveLayout(fixture.env);
     assertEquals(await hostPrepPresent(layout), false);
     await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
-    await Deno.writeTextFile(
-      orchestratorApiCnfPath(layout),
-      "[client]\nuser=admin\npassword=x\n",
-    );
+    const waitReady = orchestratorWaitReadyScriptPath(layout);
+    await Deno.mkdir(dirname(waitReady), { recursive: true });
+    await Deno.writeTextFile(waitReady, "#!/bin/sh\nexit 0\n");
+    assertEquals(await hostPrepPresent(layout), false);
+    await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
     assertEquals(await hostPrepPresent(layout), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("materializeOrchestratorApiCredentials quotes secrets and refuses symlink targets", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const secret = ["orch", "pass", "#frag", "space tail"].join(" ");
+    await materializeOrchestratorApiCredentials(layout, {
+      user: "orch-admin",
+      password: secret,
+    });
+    const creds = await loadOrchestratorApiCredentials(layout);
+    assertEquals(creds.password, secret);
+    const outside = join(fixture.dirs.stateDir, "outside-secret");
+    await Deno.writeTextFile(outside, "leaked");
+    const apiPath = orchestratorApiCnfPath(layout);
+    await Deno.remove(apiPath);
+    await Deno.symlink(outside, apiPath);
+    await assertRejects(
+      () =>
+        materializeOrchestratorApiCredentials(layout, {
+          user: "orch-admin",
+          password: "next-secret",
+        }),
+      TypeError,
+      "symlink",
+    );
+    assertEquals(await Deno.readTextFile(outside), "leaked");
   } finally {
     await fixture.cleanup();
   }
@@ -604,6 +747,69 @@ test("ensureOrchestratorStack reports no restart when compose and conf are uncha
         NO_WAIT,
       ),
       false,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("orchestratorFilesDigest follows the conf and the CA bundle", async () => {
+  const conf = sampleConf();
+  const gen1 = await orchestratorFilesDigest(conf, "GEN1");
+  assertEquals(await orchestratorFilesDigest(conf, "GEN1"), gen1);
+  assertEquals(gen1 === await orchestratorFilesDigest(conf, "GEN2"), false);
+  assertEquals(gen1 === await orchestratorFilesDigest(conf, null), false);
+  assertEquals(
+    gen1 ===
+      await orchestratorFilesDigest(sampleConf({ raftAuthToken: "t" }), "GEN1"),
+    false,
+  );
+  assertEquals(/^[0-9a-f]{32}$/.test(gen1), true);
+});
+
+function composeDigestLabel(yaml: string): string | undefined {
+  return yaml.match(/tp\.managed\.config-digest: "?([0-9a-f]+)"?/)?.[1];
+}
+
+test("ensureOrchestratorStack stamps the conf and CA digest so compose recreates on a new bundle", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const conf = sampleConf();
+    const caPath = join(layout.configDir, "orchestrator", "tls", "ca.pem");
+    const apply = () =>
+      ensureOrchestratorStack(
+        layout,
+        HA_DESCRIPTOR,
+        BASE_RAFT,
+        MANAGED_NETWORK,
+        conf,
+        fakeRunSuccess(),
+        NO_WAIT,
+      );
+    const label = async () =>
+      composeDigestLabel(
+        await Deno.readTextFile(orchestratorComposePath(layout)),
+      );
+
+    await Deno.mkdir(join(layout.configDir, "orchestrator", "tls"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(caPath, "GEN1");
+    assertEquals(await apply(), true);
+    const first = await label();
+    assertEquals(first, await orchestratorFilesDigest(conf, "GEN1"));
+
+    // The same bundle again: nothing changes, nothing is recreated.
+    assertEquals(await apply(), false);
+    assertEquals(await label(), first);
+
+    // A rotated bundle with the same conf changes the compose file.
+    await Deno.writeTextFile(caPath, "GEN2\nGEN1");
+    assertEquals(await apply(), true);
+    assertEquals(
+      await label(),
+      await orchestratorFilesDigest(conf, "GEN2\nGEN1"),
     );
   } finally {
     await fixture.cleanup();

@@ -1,5 +1,5 @@
 /**
- * Container health and resource reading for the v7 Docker row: running /
+ * Container health and resource reading for the v8 Docker row: running /
  * unhealthy / restarting counts, unexpected exits, container CPU / memory /
  * OOM kills (cgroup v2, see `container-cgroup.ts`) and the Traefik backend
  * health DERIVED from container state — Traefik only reports backend health

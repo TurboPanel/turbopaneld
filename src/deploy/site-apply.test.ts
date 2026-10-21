@@ -9,7 +9,9 @@ import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   applySites,
+  confServiceName,
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
+  removeNamedSites,
   removeSites,
   resolveSiteEngineNeeds,
   type SiteApplySpec,
@@ -594,6 +596,165 @@ test("removeSites removes nginx/apache/ols configs via mocked sudo", async () =>
   }
 });
 
+/** Every file under the config dir whose name is `tp-<env>-<service>.conf*`, vhosts and pools alike. */
+async function siteConfFiles(
+  layout: LayoutPaths,
+  environmentId: string,
+  service: string,
+): Promise<string[]> {
+  const found: string[] = [];
+  const prefix = `tp-${environmentId}-${service}.conf`;
+  const walk = async (dir: string): Promise<void> => {
+    try {
+      for await (const entry of Deno.readDir(dir)) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory) await walk(path);
+        else if (entry.name.startsWith(prefix)) found.push(path);
+      }
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  };
+  await walk(layout.configDir);
+  return found;
+}
+
+test("removeNamedSites removes only the named sites of this environment and nothing host-wide", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(
+      layout,
+      "envA",
+      [nginxSite, apachePhpSite, olsSite],
+      { run, runPlaybook },
+    );
+    await applySites(
+      layout,
+      "envB",
+      [
+        { ...nginxSite, listenPort: 18190 },
+        { ...apachePhpSite, listenPort: 18191 },
+        { ...olsSite, listenPort: 18192 },
+      ],
+      { run, runPlaybook },
+    );
+    const before = {
+      aWww: await siteConfFiles(layout, "envA", "www"),
+      aPhp: await siteConfFiles(layout, "envA", "phpapp"),
+      aStatic: await siteConfFiles(layout, "envA", "static"),
+      bWww: await siteConfFiles(layout, "envB", "www"),
+      bPhp: await siteConfFiles(layout, "envB", "phpapp"),
+      bStatic: await siteConfFiles(layout, "envB", "static"),
+    };
+    for (const files of Object.values(before)) {
+      assertEquals(files.length > 0, true);
+    }
+
+    calls.length = 0;
+    const removed = await removeNamedSites(
+      layout,
+      "envA",
+      ["static", "phpapp"],
+      { run },
+    );
+    assertEquals(removed, ["phpapp", "static"]);
+
+    // The named sites of this environment are gone: vhost, pool and fragment.
+    assertEquals(await siteConfFiles(layout, "envA", "phpapp"), []);
+    assertEquals(await siteConfFiles(layout, "envA", "static"), []);
+    // The site not named, and every site of the other environment, stay.
+    assertEquals(await siteConfFiles(layout, "envA", "www"), before.aWww);
+    assertEquals(await siteConfFiles(layout, "envB", "www"), before.bWww);
+    assertEquals(await siteConfFiles(layout, "envB", "phpapp"), before.bPhp);
+    assertEquals(await siteConfFiles(layout, "envB", "static"), before.bStatic);
+    // No software is disabled or removed by this path.
+    assertEquals(
+      calls.some((call) =>
+        call.args.includes("disable") || call.args.includes("uninstall")
+      ),
+      false,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeNamedSites reloads a running engine even when no file was left, and never starts a stopped one", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envR", [nginxSite], { run, runPlaybook });
+    // A removal whose reload failed earlier: the file is gone, the engine still serves it.
+    for (const path of await siteConfFiles(layout, "envR", "www")) {
+      await Deno.remove(path);
+    }
+
+    // apache is stopped; every other unit is running.
+    const apacheStopped: SiteRunFn = (command, args) =>
+      command === "sudo" && args.includes("is-active") &&
+        args.includes("turbopanel-apache")
+        ? Promise.resolve(fail("inactive"))
+        : run(command, args);
+    calls.length = 0;
+    const removed = await removeNamedSites(layout, "envR", ["www"], {
+      run: apacheStopped,
+    });
+    assertEquals(removed, ["www"]);
+
+    const reloaded = (unit: string) =>
+      calls.some((call) =>
+        call.args.includes("systemctl") && call.args.includes("reload") &&
+        call.args.includes(unit)
+      );
+    assertEquals(reloaded("turbopanel-nginx"), true);
+    assertEquals(reloaded("turbopanel-apache"), false);
+    // A stopped engine is not started either.
+    assertEquals(
+      calls.some((call) =>
+        call.args.includes("turbopanel-apache") &&
+        (call.args.includes("start") || call.args.includes("restart") ||
+          call.args.includes("--now"))
+      ),
+      false,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("removeNamedSites with no names, or an unsafe name, removes nothing", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(layout, "envN", [nginxSite], { run, runPlaybook });
+    const path = join(layout.configDir, "nginx", "sites", "tp-envN-www.conf");
+    assertEquals(await removeNamedSites(layout, "envN", [], { run }), []);
+    for (const bad of ["../www", "a/b", "", ".", ".."]) {
+      await assertRejects(
+        () => removeNamedSites(layout, "envN", ["www", bad], { run }),
+        Error,
+        "not a valid compose service name",
+        bad,
+      );
+    }
+    assertEquals((await Deno.stat(path)).isFile, true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a config name is keyed to its service, even when the service name ends in .conf", () => {
+  assertEquals(confServiceName("www.conf"), "www");
+  assertEquals(confServiceName("a.conf.conf"), "a.conf");
+  assertEquals(confServiceName("www.conf.tpnew"), "www");
+  assertEquals(confServiceName("a.conf.conf.tpprev"), "a.conf");
+  assertEquals(confServiceName("web.tpnew.conf"), "web.tpnew");
+});
+
 test("applySites rejects unsafe environmentId", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
@@ -759,12 +920,19 @@ test("applySites rejects unsafe document root", async () => {
 // ---------------------------------------------------------------------------
 
 const RELEASE_USERNAME = "appuser";
-const RELEASE_SERVICE_ID = "svc-1";
+const RELEASE_SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70";
 const RELEASE_GROUP = `${RELEASE_USERNAME}`;
+
+const RELEASE_FOLDER = {
+  owner: RELEASE_USERNAME,
+  scope: "production",
+  slug: "example.com",
+};
 
 const releaseBinding: SiteRelease = {
   serviceId: RELEASE_SERVICE_ID,
   username: RELEASE_USERNAME,
+  folder: RELEASE_FOLDER,
 };
 
 function releaseBindingsFor(
@@ -779,8 +947,9 @@ function siteTreeRoot(layout: LayoutPaths): string {
   return join(
     layout.principalHomeRoot,
     RELEASE_USERNAME,
-    "sites",
-    RELEASE_SERVICE_ID,
+    "production",
+    "services",
+    "example.com",
   );
 }
 
@@ -1982,6 +2151,7 @@ test("applySites fails when openlitespeed -t rejects the config", async () => {
 const managedBinding: SiteManagedDirectory = {
   serviceId: RELEASE_SERVICE_ID,
   username: RELEASE_USERNAME,
+  folder: RELEASE_FOLDER,
 };
 
 function managedBindingsFor(
@@ -1999,7 +2169,7 @@ const managedSite: SiteApplySpec = {
   },
 };
 
-test("a managed-directory site serves from a principal-owned webroot", async () => {
+test("a managed-directory site serves from a principal-owned public folder", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
@@ -2012,15 +2182,15 @@ test("a managed-directory site serves from a principal-owned webroot", async () 
     });
     assertEquals(result.applied, ["www"]);
 
-    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const webroot = join(siteTreeRoot(layout), "public");
     const conf = await Deno.readTextFile(
       join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
     );
     assertStringIncludes(conf, `root ${webroot};`);
 
-    // `webroot/` is a sibling of `current` and `releases/`, so connecting a
+    // `public/` is a sibling of `current` and `releases/`, so connecting a
     // repository later is a field flip rather than a move.
-    await Deno.stat(join(siteTreeRoot(layout), "webroot"));
+    await Deno.stat(join(siteTreeRoot(layout), "public"));
     await Deno.stat(join(siteTreeRoot(layout), "shared"));
 
     // Owned by the principal, group the engine, so the tenant writes and the
@@ -2076,7 +2246,7 @@ test("the placeholder is seeded only into an empty document root", async () => {
       managedDirectoryBindings: managedBindingsFor("www"),
     });
 
-    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const webroot = join(siteTreeRoot(layout), "public");
     const indexPath = join(webroot, "index.html");
     assertStringIncludes(await Deno.readTextFile(indexPath), "TurboPanel site");
 
@@ -2138,7 +2308,7 @@ test("a managed-directory PHP pool is confined by open_basedir", async () => {
     const pool = await Deno.readTextFile(
       join(layout.configDir, "php", "8.4", "pools", "tp-envmd-phpapp.conf"),
     );
-    const webroot = join(siteTreeRoot(layout), "webroot", "public");
+    const webroot = join(siteTreeRoot(layout), "public");
     // A managed directory is writable by the account running it, which is
     // exactly why it must not also be able to read the rest of the filesystem.
     assertStringIncludes(pool, `open_basedir`);
@@ -2464,7 +2634,7 @@ function siteCaddyRestarts(
 
 test("a managed-directory Caddy site restarts the site Caddy until its web root is mounted nosymfollow, after the web root exists", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const webroot = join(siteTreeRoot(layout), "webroot");
+  const webroot = join(siteTreeRoot(layout), "public");
   const mock = createSiteRunMock({ afterRestart: [webroot] });
   // Already in the owner's group: only the mount rule can ask for a restart.
   const run = withGroupMembership(mock.run, {
@@ -2494,7 +2664,7 @@ test("a managed-directory Caddy site restarts the site Caddy until its web root 
 
 test("a Caddy site whose directory is already mounted is only reloaded", async () => {
   const { layout, cleanup } = await makeTestLayout();
-  const webroot = join(siteTreeRoot(layout), "webroot");
+  const webroot = join(siteTreeRoot(layout), "public");
   const mock = createSiteRunMock({
     before: [webroot],
     afterRestart: [webroot],
@@ -3073,7 +3243,7 @@ test("removeSites warns and keeps the aggregate when an OLS fragment cannot be r
     );
     // The aggregate still names this vhost, so its vhconf must survive too.
     await rootFs.stat(
-      join(olsDir, "vhosts", `tp_${environmentId}_static`, "vhconf.conf"),
+      join(olsDir, "vhosts", `tp_${environmentId}__static`, "vhconf.conf"),
     );
   } finally {
     await cleanup();
@@ -3096,7 +3266,7 @@ test("removeSites drops an OLS vhost dir only after the aggregate stops naming i
     );
     const aggregate = teardown.indexOf(join(olsDir, "httpd_config.conf"));
     const vhostRm = teardown.indexOf(
-      join(olsDir, "vhosts", `tp_${environmentId}_static`),
+      join(olsDir, "vhosts", `tp_${environmentId}__static`),
     );
     assert(fragmentRm >= 0 && aggregate > fragmentRm, teardown.join("\n"));
     assert(vhostRm > aggregate, teardown.join("\n"));
@@ -3345,8 +3515,8 @@ test("OpenLiteSpeed apply and removal work when the daemon cannot enter its conf
       restore();
     }
     const aggregate = await rootFs.readTextFile(mainConfig);
-    assertStringIncludes(aggregate, "tp_envolsb_static");
-    assertEquals(aggregate.includes("tp_envolsa_static"), false);
+    assertStringIncludes(aggregate, "tp_envolsb__static");
+    assertEquals(aggregate.includes("tp_envolsa__static"), false);
     assertEquals(await listConfigDirEntries(join(olsDir, "sites")), [
       "tp-envolsb-static.conf",
     ]);
@@ -3872,7 +4042,7 @@ async function olsVhconf(h: PerSitePhpHarness, service = "shop") {
       h.layout.configDir,
       "openlitespeed",
       "vhosts",
-      `tp_envphp_${service}`,
+      `tp_envphp__${service}`,
       "vhconf.conf",
     ),
   );
@@ -3921,7 +4091,7 @@ test("per-site PHP on OpenLiteSpeed: fastcgi and fpm reach the owner's runtime t
       assertStringIncludes(vhost, "autoStart                 0");
       assertStringIncludes(
         vhost,
-        "add                       fcgi:php_tp_envphp_shop php",
+        "add                       fcgi:php_tp_envphp__shop php",
       );
       const fragment = await Deno.readTextFile(
         join(
@@ -4005,7 +4175,7 @@ test("detached lsphp on OpenLiteSpeed: systemd runs the vendored lsphp as the ow
     assertStringIncludes(vhost, "autoStart                 0");
     assertStringIncludes(
       vhost,
-      "add                       lsapi:php_tp_envphp_shop php",
+      "add                       lsapi:php_tp_envphp__shop php",
     );
     // #283's script-source deny rules sit beside the handler, and the locked
     // limits go to lsphp as admin values.
@@ -4838,6 +5008,178 @@ test("an OpenLiteSpeed site directory keeps the engine, and a failed removal nev
     assertEquals(enginePruneRequests(retry), [["openlitespeed"]]);
   } finally {
     resetPhpSeriesPruneForTests();
+    await cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The scope tree: a service folder with `public/`, `shared/` and `logs/`.
+// ---------------------------------------------------------------------------
+
+const FOLDER_SERVICE_ID = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+
+const folderBinding: SiteManagedDirectory = {
+  serviceId: FOLDER_SERVICE_ID,
+  username: RELEASE_USERNAME,
+  folder: { owner: RELEASE_USERNAME, scope: "production", slug: "example.com" },
+};
+
+function serviceFolderRoot(layout: LayoutPaths): string {
+  return join(
+    layout.principalHomeRoot,
+    RELEASE_USERNAME,
+    "production",
+    "services",
+    "example.com",
+  );
+}
+
+test("a managed-directory site in a service folder serves from public/", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const result = await applySites(layout, "envmd", [managedSite], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: new Map([["www", folderBinding]]),
+    });
+    assertEquals(result.applied, ["www"]);
+
+    // The default root name `public` is the uploaded folder itself.
+    const publicDir = join(serviceFolderRoot(layout), "public");
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
+    );
+    assertStringIncludes(conf, `root ${publicDir};`);
+    assertEquals(conf.includes("/public/public"), false);
+
+    // The folder, its sealed `releases/` and the two leaves exist, and the
+    // older `sites/` tree is not touched.
+    for (const name of ["public", "releases", "shared", "logs"]) {
+      await Deno.stat(join(serviceFolderRoot(layout), name));
+    }
+    await assertRejects(
+      () =>
+        Deno.stat(join(layout.principalHomeRoot, RELEASE_USERNAME, "sites")),
+      Deno.errors.NotFound,
+    );
+
+    // `public/` is the owner's with the engine group; the folder is root's.
+    const mkdir = (path: string) =>
+      mock.calls.find((c) =>
+        c.args.includes("install") && c.args.includes("-d") &&
+        c.args.at(-1) === path
+      );
+    const pub = mkdir(publicDir);
+    assert(pub);
+    assertEquals(pub.args[pub.args.indexOf("-o") + 1], RELEASE_USERNAME);
+    assertEquals(pub.args[pub.args.indexOf("-g") + 1], "tpnginx");
+    const folderMkdir = mkdir(serviceFolderRoot(layout));
+    assert(folderMkdir);
+    assertEquals(folderMkdir.args[folderMkdir.args.indexOf("-o") + 1], "root");
+    const shared = mkdir(join(serviceFolderRoot(layout), "shared"));
+    assert(shared);
+    assertEquals(shared.args[shared.args.indexOf("-g") + 1], RELEASE_GROUP);
+
+    // The components this asset was first created with are on record.
+    const record = JSON.parse(
+      await Deno.readTextFile(
+        join(layout.daemonStateDir, "folders", `${FOLDER_SERVICE_ID}.json`),
+      ),
+    );
+    assertEquals(record.slug, "example.com");
+    assertEquals(record.kind, "service");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a managed-directory root other than public is a folder inside public/", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await applySites(
+      layout,
+      "envmd",
+      [{ ...managedSite, root: "dist" }],
+      {
+        run,
+        runPlaybook,
+        managedDirectoryBindings: new Map([["www", folderBinding]]),
+      },
+    );
+    const conf = await Deno.readTextFile(
+      join(layout.configDir, "nginx", "sites", "tp-envmd-www.conf"),
+    );
+    assertStringIncludes(
+      conf,
+      `root ${join(serviceFolderRoot(layout), "public", "dist")};`,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a managed-directory PHP pool in a service folder is confined to public/ and shared/", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpapache: ["tpapache"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const site: SiteApplySpec = {
+      ...apachePhpSite,
+      sourceKind: "managed-directory",
+      principal: { principalId: "pr-1", username: RELEASE_USERNAME },
+    };
+    await applySites(layout, "envmd", [site], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: new Map([["phpapp", folderBinding]]),
+    });
+    const pool = await Deno.readTextFile(
+      join(layout.configDir, "php", "8.4", "pools", "tp-envmd-phpapp.conf"),
+    );
+    assertStringIncludes(pool, join(serviceFolderRoot(layout), "public"));
+    assertStringIncludes(pool, join(serviceFolderRoot(layout), "shared"));
+    assertEquals(pool.includes("/sites/"), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a folder that belongs to another owner stops the site before any folder is made", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "envmd", [managedSite], {
+          run: withGroupMembership(mock.run, { tpnginx: ["tpnginx"] }),
+          runPlaybook,
+          managedDirectoryBindings: new Map([[
+            "www",
+            {
+              ...folderBinding,
+              folder: { ...folderBinding.folder!, owner: "mallory" },
+            },
+          ]]),
+        }),
+      Error,
+      "does not match",
+    );
+    assertEquals(
+      mock.calls.some((c) =>
+        c.args.includes("install") &&
+        String(c.args.at(-1)).startsWith(layout.principalHomeRoot)
+      ),
+      false,
+    );
+  } finally {
     await cleanup();
   }
 });

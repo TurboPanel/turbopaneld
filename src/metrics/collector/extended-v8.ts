@@ -4,7 +4,7 @@
  * the contract's `extended` section, using exactly the contract's keys. Pure
  * and synchronous. Anything unknown is left out of the section, never sent as
  * `0`. The scheduler strips `extended` (and keeps version 6) unless the
- * control plane negotiated `metrics-v7`.
+ * control plane negotiated `metrics-v8`.
  */
 import type {
   DockerUsageSample,
@@ -136,7 +136,7 @@ export function mergeExtended(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-const OBJECT_SECTIONS = ["host", "docker", "ingress", "text"] as const;
+const OBJECT_SECTIONS = ["host", "docker", "ingress", "text", "sizes"] as const;
 
 function mergePart(out: MetricsExtended, part: MetricsExtended): void {
   for (const key of OBJECT_SECTIONS) {
@@ -149,5 +149,8 @@ function pickArrays(part: MetricsExtended): MetricsExtended {
   const arrays: MetricsExtended = {};
   if (part.blockDeviceText) arrays.blockDeviceText = part.blockDeviceText;
   if (part.gpuText) arrays.gpuText = part.gpuText;
+  if (part.filesystemSizes) arrays.filesystemSizes = part.filesystemSizes;
+  if (part.gpuSizes) arrays.gpuSizes = part.gpuSizes;
+  if (part.networkSizes) arrays.networkSizes = part.networkSizes;
   return arrays;
 }

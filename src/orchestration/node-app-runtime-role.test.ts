@@ -39,7 +39,9 @@ test("deploy vendors the tenant runtimes before joining principals", async () =>
   const src = await Deno.readTextFile(
     join(DAEMON_ROOT, "src/commands/deploy-environment.ts"),
   );
-  const runtime = src.indexOf("await ensureNativeAppRuntime(");
+  // The deploy vendors Node / Deno through its install-step wrapper
+  // (`ensureDeployNativeRuntimes` → `ensureNativeAppRuntime`).
+  const runtime = src.indexOf("await ensureDeployNativeRuntimes(");
   const principals = src.indexOf("await ensureDeployPrincipals(\n    layout,");
   assert(runtime > 0 && principals > 0);
   assertEquals(runtime < principals, true);

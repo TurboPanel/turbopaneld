@@ -4,15 +4,20 @@
 # first merge, which brings this file into live, already works).
 #
 #   1. resolve  the merged PR and the newest rc that has not shipped (from the
-#               tags, never a version file) — that rc's bytes become the release
+#               tags) — that rc's bytes become the release
 #   2. prepare / publish / finalize   the shared promote workflows
 #               (TurboPanel/dev). prepare still waits on the `release`
 #               environment approval: keep it until this path has run once end
 #               to end, then drop it (`approval-environment: ""`).
 #
-# Nothing opens a "Start <next>" PR afterwards: once v<version> exists, the
-# next canary is <version>'s next patch by itself (versions come from tags;
-# minors and majors are started with start-next-version.yml).
+#   3. start-next  once v<version> exists, the tags say the next canary is
+#               <version>'s next patch; the committed version (deno.json,
+#               sonar-project.properties) still says <version>, so every canary
+#               is refused until it moves. This opens the "chore: start
+#               <next>" PR that moves it (Release App token, a signed commit
+#               made through the GitHub API), which merges itself once its
+#               checks pass. Minors and majors are started with
+#               start-next-version.yml.
 #
 # A push to live that is not a merged staging PR (a break-glass promotion, the
 # finalize fast-forward) does nothing. workflow_dispatch re-runs the release
@@ -53,7 +58,7 @@ jobs:
       # The newest rc above the newest release — what staging holds.
       - name: Work out the rc to release from the tags
         id: rc
-        uses: TurboPanel/dev/.github/actions/version@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+        uses: TurboPanel/dev/.github/actions/version@fbb7c467f5d403a577e62864c6c1a6b30be661cd # dev#69
         with:
           mode: release-rc
 
@@ -148,3 +153,59 @@ jobs:
       branch: ${{ needs.prepare.outputs.branch }}
       manifest-filename: ${{ needs.prepare.outputs.manifest-filename }}
     secrets: inherit
+
+  start-next:
+    needs: [prepare, finalize]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Reads the tags; the PR is opened with the Release App token.
+    permissions:
+      contents: read
+    steps:
+      - name: Mint a Release App token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: TurboPanel
+          repositories: turbopaneld
+
+      - name: Work out the next version from the tags
+        id: next
+        uses: TurboPanel/dev/.github/actions/version@fbb7c467f5d403a577e62864c6c1a6b30be661cd # dev#69
+        with:
+          mode: base
+
+      - name: Check the newest release is the one just published
+        env:
+          RELEASED: ${{ needs.prepare.outputs.version }}
+          NEWEST: ${{ steps.next.outputs.release }}
+          NEXT: ${{ steps.next.outputs.base }}
+        run: |
+          set -eu
+          if [ "$NEWEST" != "$RELEASED" ]; then
+            echo "::error::the newest release tag is v${NEWEST}, not v${RELEASED} (just released): open the version PR by hand with node scripts/set-version.mjs <next version>"
+            exit 1
+          fi
+          echo "v${RELEASED} released; trunk builds ${NEXT} next"
+
+      - name: Open the version PR for the next patch
+        id: pr
+        uses: TurboPanel/dev/.github/actions/start-version-pr@fbb7c467f5d403a577e62864c6c1a6b30be661cd # dev#69
+        with:
+          version: ${{ steps.next.outputs.base }}
+          github-token: ${{ steps.app.outputs.token }}
+          reason: It was opened after v${{ needs.prepare.outputs.version }} was released.
+          auto-merge: "true"
+
+      - name: Say where the PR is
+        env:
+          PR_URL: ${{ steps.pr.outputs.pr-url }}
+          NEXT: ${{ steps.next.outputs.base }}
+        run: |
+          if [ -n "$PR_URL" ]; then
+            echo "chore: start ${NEXT}: $PR_URL (it merges itself once its checks pass; canaries build again after that)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "the committed version already says ${NEXT}" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

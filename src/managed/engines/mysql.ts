@@ -7,15 +7,33 @@
  */
 
 import { dropUserOnEveryHost } from "./account-hosts.ts";
+import {
+  ensureOrchestratorTopologyAccountSql,
+  grantOrchestratorReplicationTableSql,
+} from "./orchestrator-topology-sql.ts";
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
-import { sanitizeForLog } from "../../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
-import { grantDatabasePrivileges } from "./grant-databases.ts";
+import {
+  grantableDatabases,
+  grantDatabasePrivileges,
+} from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
+import {
+  switchoverCaughtErrorDetail,
+  switchoverPromoteErrorMessage,
+} from "./switchover-promote-error.ts";
+import { replicationGtidReceivedSql } from "./switchover-gtid-sql.ts";
+import {
+  filterGtidSetForSwitchoverWait,
+  quiesceAndReadPrimaryGtid,
+  SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+  waitForRequiredGtidSet,
+} from "./switchover-gtid.ts";
 import { parseSqlBool } from "./sql-bool.ts";
 import {
   authSocketPluginPresentSql,
@@ -38,14 +56,23 @@ import {
   installAuthSocketPluginSql,
   isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteIdentifier,
   quoteLiteral,
   replicaFreshnessSql,
   resetReplicaGtidStateSql,
+  revokePlainDatabaseGrantSql,
   showReplicaStatusSql,
+  startReplicaSql,
   versionSql,
+  waitForExecutedGtidSetSql,
 } from "./mysql-sql.ts";
+import {
+  healStoppedReplicaIo,
+  replicaPrimaryLooksReachable,
+  replicaPrimaryPingArgv,
+} from "./replica-io-restart.ts";
 import {
   DOWN_ENGINE_CENSUS,
   type ManagedEngineCensus,
@@ -58,8 +85,12 @@ import type {
   ManagedEngineContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
+  ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
+import { readMysqlFamilyPermissions } from "./mysql-permissions.ts";
 import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
@@ -378,12 +409,15 @@ async function applyOneCredential(
     ),
   );
 
+  // A login the site owner manages by hand keeps its account and password
+  // but never has its grants written or reset here.
   await grantDatabasePrivileges({
-    databases: credential.databases,
+    databases: grantableDatabases(credential),
     privileges: credential.privileges ?? [],
     username: credential.username,
     hosts: ctx.clientSourceHosts ?? [],
     grantSql: grantDatabaseSql,
+    revokePlainSql: revokePlainDatabaseGrantSql,
     run: (sql) => runMysql(ctx, sql),
   });
   await runMysql(ctx, "FLUSH PRIVILEGES;");
@@ -617,24 +651,102 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
     }
   },
 
-  async promote(ctx) {
-    await runMysql(ctx, promoteSql());
-    const deadline = Date.now() + 60_000;
-    const writable = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const out = await runMysqlQuery(ctx, isWritableSql());
-      const [readOnly, superReadOnly] = out.trim().split(/\s+/);
-      if (
-        parseSqlBool(readOnly ?? "") === false &&
-        parseSqlBool(superReadOnly ?? "") === false
-      ) {
-        return true;
+  async quiesceFormerPrimaryForSwitchover(ctx) {
+    return await quiesceAndReadPrimaryGtid(
+      () => runMysql(ctx, enforceReadOnlySql()),
+      () => runMysqlQuery(ctx, primaryFinalGtidSetSql()),
+      () => runMysql(ctx, disableReadOnlySql()),
+    );
+  },
+
+  async isWritableFormerPrimary(ctx) {
+    const out = await runMysqlQuery(ctx, isWritableSql());
+    const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+    return parseSqlBool(readOnly ?? "") === false ||
+      parseSqlBool(superReadOnly ?? "") === false;
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runMysql(ctx, enforceReadOnlySql());
+  },
+
+  runAdminScalarQuery(ctx, sql) {
+    return runMysqlQuery(ctx, sql);
+  },
+
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+    if (verbose.trim().length > 0) {
+      throw new Error(
+        "switchover: former primary is a standby; cannot reactivate after abort",
+      );
+    }
+    const out = await runMysqlQuery(ctx, isWritableSql());
+    const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+    if (
+      parseSqlBool(readOnly ?? "") !== true ||
+      parseSqlBool(superReadOnly ?? "") !== true
+    ) {
+      throw new Error(
+        "switchover: former primary is not read_only; promotion may have started",
+      );
+    }
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runMysql(ctx, disableReadOnlySql());
+  },
+
+  async promote(ctx, options) {
+    let promoteStarted = false;
+    try {
+      if (options?.requiredExecutedGtidSet) {
+        const received = await runMysqlQuery(
+          ctx,
+          replicationGtidReceivedSql("mysql"),
+        );
+        const waitSet = filterGtidSetForSwitchoverWait(
+          options.requiredExecutedGtidSet,
+          received,
+        );
+        await waitForRequiredGtidSet(
+          (sql) => runMysqlQuery(ctx, sql),
+          waitForExecutedGtidSetSql,
+          waitSet,
+          options.gtidWaitTimeoutSeconds ??
+            SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+          "mysql",
+        );
       }
-      await sleep(500);
-      return writable();
-    };
-    if (await writable()) return;
-    throw new Error("mysql promote did not become writable within 60s");
+      promoteStarted = true;
+      await runMysql(ctx, promoteSql());
+      const deadline = Date.now() + 60_000;
+      const writable = async (): Promise<boolean> => {
+        if (Date.now() >= deadline) return false;
+        const out = await runMysqlQuery(ctx, isWritableSql());
+        const [readOnly, superReadOnly] = out.trim().split(/\s+/);
+        if (
+          parseSqlBool(readOnly ?? "") === false &&
+          parseSqlBool(superReadOnly ?? "") === false
+        ) {
+          return true;
+        }
+        await sleep(500);
+        return writable();
+      };
+      if (await writable()) return;
+      throw new Error("mysql promote did not become writable within 60s");
+    } catch (error) {
+      if (promoteStarted) {
+        throw new Error(
+          switchoverPromoteErrorMessage(
+            "promote_started",
+            switchoverCaughtErrorDetail(error),
+          ),
+        );
+      }
+      throw error;
+    }
   },
 
   async isStandby(ctx) {
@@ -656,9 +768,29 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       return { state: "primary", observedAt };
     }
     try {
-      const verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
+      let verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
       if (!verbose.trim()) {
         return { state: "unknown", observedAt };
+      }
+      const restarted = await healStoppedReplicaIo({
+        verbose,
+        startSql: startReplicaSql(),
+        logComponent: "managed-mysql",
+        runSql: (sql) => runMysql(ctx, sql),
+        pingPrimary: async (host, port) =>
+          replicaPrimaryLooksReachable(
+            await ctx.exec(
+              replicaPrimaryPingArgv(
+                "mysqladmin",
+                host,
+                port,
+                ctx.rootUsername,
+              ),
+            ),
+          ),
+      });
+      if (restarted) {
+        verbose = await runMysqlStatusQuery(ctx, showReplicaStatusSql());
       }
       const parsed = parseShowReplicaStatus(verbose);
       // Freshness is best effort: a failed read leaves the fields out
@@ -717,6 +849,19 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
     }
   },
 
+  readPermissions(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
+  ): Promise<ManagedPermissionsEngineReport> {
+    return readMysqlFamilyPermissions(
+      "mysql",
+      request,
+      (sql) => runMysqlQuery(ctx, sql),
+      clock,
+    );
+  },
+
   async applyCredentials(
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],
@@ -741,6 +886,37 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
         ctx.clientSourceHosts ?? [],
       ),
     );
+  },
+
+  async ensureOrchestratorTopology(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void> {
+    const hosts = ctx.clientSourceHosts ?? [];
+    await runMysql(
+      ctx,
+      ensureOrchestratorTopologyAccountSql(
+        credentials.user,
+        credentials.password,
+        hosts,
+        "mysql",
+      ),
+    );
+    // Advisory: a table-level grant fails outright on a release that does not
+    // ship `mysql.slave_master_info`, and Orchestrator only warns without it.
+    try {
+      await runMysql(
+        ctx,
+        grantOrchestratorReplicationTableSql(credentials.user, hosts, "mysql"),
+      );
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managed.apply skipped the Orchestrator replication-table grant: ${
+          sanitizeForLog(err instanceof Error ? err.message : String(err))
+        }`,
+      );
+    }
   },
 
   async applyDatabases(

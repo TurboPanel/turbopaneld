@@ -11,7 +11,7 @@ import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
-import { logInfo, sanitizeForLog } from "../../util/logger.ts";
+import { logError, logInfo, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
   applyFollowedPrimaryConninfoSql,
@@ -25,10 +25,13 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
   ensureReadWriteLoginSchemaSql,
+  grantConnectOnlySql,
   grantDatabaseSql,
   isInRecoverySql,
+  isWritablePrimarySql,
   listDatabasesForRoleReleaseSql,
   listLostPhysicalSlotsSql,
   listManagedSlotsSql,
@@ -38,11 +41,13 @@ import {
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
+  reactivateFormerPrimaryAfterSwitchoverAbortSql,
   readOnlySessionDefaultSql,
   reconcileDatabaseObjectsSql,
   recreateLostPhysicalSlotSql,
   releaseRoleObjectsSql,
   reloadVerifySql,
+  resetFencedReadOnlyDefaultSql,
   restoreReadWriteLoginSchemasSql,
   restoreResetSql,
   revokePublicDatabaseAccessSql,
@@ -52,21 +57,41 @@ import {
   strongestPrivilege,
 } from "./postgres-sql.ts";
 import {
+  databaseAdminAttributesSql,
+  databaseIsEmptySql,
+  databaseOwnerSql,
+  dropOwnerRolesSql,
+  ensureOwnerRolesSql,
+  moveDatabaseOwnerSql,
+  OWNER_ROLE_MAX_DATABASE_NAME,
+  ownerLoginReturnSql,
+  ownerRoleDatabasesAmongSql,
+  ownerRoleDatabaseSql,
+  type OwnerRoleLoginLevel,
+  ownerRoleLoginSql,
+  ownerRoleNames,
+} from "./postgres-owner-role-sql.ts";
+import {
   DOWN_ENGINE_CENSUS,
   type ManagedEngineCensus,
   parsePostgresConnectionCensus,
   UNREAD_ENGINE_CENSUS,
 } from "./census.ts";
 import type {
+  ManagedApplyCredentialsOptions,
   ManagedEngineBackupRuntime,
   ManagedEngineBootstrapContext,
   ManagedEngineContext,
   ManagedEngineProbeContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
+  ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
   ManagedSlotRetention,
 } from "./types.ts";
+import { readPostgresPermissions } from "./postgres-permissions.ts";
 import { execSqlWithStdinRetry } from "./sql-stdin.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
 
@@ -81,25 +106,32 @@ function assertSafeDatabaseIdentifier(database: string): string {
 }
 
 /**
- * `$1` root user, `$2` database, `$3` reset SQL. The sentinel line is printed
- * by the server only after `COMMIT` succeeded.
+ * `$1` root user, `$2` database, `$3` reset SQL, `$4` per-login schema SQL.
+ * The sentinel line is printed by the server only after `COMMIT` succeeded;
+ * success needs psql's exit status 0 and that line as the last line of stdout
+ * (dump replay prints other rows, such as `setval` results, before it).
+ * `client_min_messages = warning` keeps the reset's "drop cascades to ..."
+ * notices out of stderr, so a failure reports the real error line.
  */
 const POSTGRES_RESTORE_SCRIPT = [
   "set -eu",
   "set -o pipefail",
   "set +e",
   "out=$({",
-  String.raw`  printf 'BEGIN;\n%s\n' "$3"`,
+  String
+    .raw`  printf 'BEGIN;\nSET LOCAL client_min_messages = warning;\n%s\n' "$3"`,
   `  if pg_restore --no-owner --clean --if-exists -f - | sed -E '${PG_RESTORE_TIMEOUT_SET_LINE_SED}d'; then`,
   String
     .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
   "  fi",
   '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
+  "rc=$?",
   "set -e",
-  'case "$out" in',
-  "  *tp_restore_committed*) ;;",
-  "  *) echo 'restore was not committed; the database is unchanged' >&2; exit 1 ;;",
-  "esac",
+  String.raw`last=$(printf '%s\n' "$out" | tail -n 1)`,
+  'if [ "$rc" -ne 0 ] || [ "$last" != tp_restore_committed ]; then',
+  "  echo 'restore was not committed; the database is unchanged' >&2",
+  "  exit 1",
+  "fi",
 ].join("\n");
 
 const postgresBackupRuntime: ManagedEngineBackupRuntime = {
@@ -162,6 +194,26 @@ export function buildBasebackupConnectionString(primary: {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntilWritablePrimary(
+  ctx: ManagedEngineContext,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const poll = async (): Promise<void> => {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        "switchover: former primary did not become writable after reactivation",
+      );
+    }
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    if (value === "t" || value === "true") return;
+    await sleep(500);
+    return poll();
+  };
+  await poll();
 }
 
 function psqlArgv(
@@ -242,6 +294,16 @@ async function applyOneCredential(
       superuser: false,
     }),
   );
+  if (isDatabaseAdmin(credential)) {
+    // A tool login holds no attribute that reaches beyond its databases.
+    await runPsql(ctx, databaseAdminAttributesSql(credential.username));
+  }
+}
+
+/** The Database admin login: its `privileges` name `admin`. */
+function isDatabaseAdmin(credential: ManagedApplyCredential): boolean {
+  return credential.role === "user" &&
+    (credential.privileges ?? []).includes("admin");
 }
 
 type UserAccess = {
@@ -253,19 +315,37 @@ type UserAccess = {
 /** Every SQL user with a recognised level and its de-duplicated databases. */
 function userAccessList(
   credentials: readonly ManagedApplyCredential[],
-): { granted: UserAccess[]; usernames: Map<string, string[]> } {
+): {
+  granted: UserAccess[];
+  usernames: Map<string, string[]>;
+  selfManaged: { username: string; databases: string[] }[];
+  admins: { username: string; databases: string[] }[];
+} {
   const granted: UserAccess[] = [];
   const usernames = new Map<string, string[]>();
+  const selfManaged: { username: string; databases: string[] }[] = [];
+  const admins: { username: string; databases: string[] }[] = [];
   for (const credential of credentials) {
     if (credential.role !== "user") continue;
     const databases = [...new Set(credential.databases)];
+    if (isDatabaseAdmin(credential)) {
+      // Its rights are fixed by the panel whatever the grant mode says.
+      admins.push({ username: credential.username, databases });
+      continue;
+    }
+    if (credential.grantMode === "self") {
+      // Managed by hand: only the right to connect is the panel's; nothing
+      // below the database is revoked, reset or re-granted.
+      selfManaged.push({ username: credential.username, databases });
+      continue;
+    }
     usernames.set(credential.username, databases);
     const level = strongestPrivilege(credential.privileges ?? []);
     if (level !== null) {
       granted.push({ username: credential.username, level, databases });
     }
   }
-  return { granted, usernames };
+  return { granted, usernames, selfManaged, admins };
 }
 
 /** Who may create, write and read inside one database. */
@@ -310,11 +390,67 @@ function objectAccessFor(
 async function reconcileDatabaseAccess(
   ctx: ManagedEngineContext,
   credentials: readonly ManagedApplyCredential[],
+  ownerRoleCandidates: readonly string[] = [],
+  ownerLogins: Readonly<Record<string, string>> = {},
 ): Promise<void> {
-  const { granted, usernames } = userAccessList(credentials);
+  const { granted, usernames, selfManaged, admins } = userAccessList(
+    credentials,
+  );
+  // Databases that may belong to an owner role: the ones the control plane
+  // flagged, plus every database a migrations or admin login is listed on, so
+  // an apply that arrives without the flag can never hand such a database to a
+  // login. The catalog decides; with none of these nothing extra runs and
+  // every database follows the path below unchanged.
+  const probe = [
+    ...new Set([
+      ...ownerRoleCandidates,
+      ...credentials
+        .filter((c) =>
+          c.role === "user" &&
+          (c.privileges ?? []).some((p) => p === "owner" || p === "admin")
+        )
+        .flatMap((c) => c.databases),
+    ]),
+  ];
   const rootUsernames = credentials.filter((c) => c.role === "root").map((c) =>
     c.username
   );
+  // A login the customer chose as owner takes the database over once the
+  // login exists (the databases are made first, the logins after). A platform
+  // role is never an owner, whatever the request says.
+  ownerLogins = Object.fromEntries(
+    Object.entries(ownerLogins).filter(([, login]) =>
+      !isPlatformRole(ctx, login, rootUsernames)
+    ),
+  );
+  const loginOwned = await adoptChosenOwners(
+    ctx,
+    ownerLogins,
+    granted,
+    rootUsernames,
+  );
+  const ownerRoleDbs = new Set(
+    probe.length === 0 ? [] : (await parsePsqlRows(
+      ctx,
+      ownerRoleDatabasesAmongSql(probe, ownerLogins, [
+        ctx.rootUsername,
+        ...rootUsernames,
+      ]),
+    )).flatMap((row) => row[0] === undefined ? [] : [row[0]]),
+  );
+  // Databases that are not owner-role databases have no owner role for a
+  // Database admin login to work through. It gets the read-write rights there
+  // instead (never ownership, never the platform admin's rights), so adding
+  // the login is never refused.
+  const adminFallback: UserAccess[] = admins.flatMap((entry) => {
+    const here = entry.databases.filter((d) => !ownerRoleDbs.has(d));
+    return here.length === 0 ? [] : [{
+      username: entry.username,
+      level: "read-write" as const,
+      databases: here,
+    }];
+  });
+  const objectGranted = [...granted, ...adminFallback];
 
   await forEachSequential([...usernames], async ([username, databases]) => {
     const level = granted.find((entry) => entry.username === username)?.level;
@@ -327,20 +463,65 @@ async function reconcileDatabaseAccess(
     );
   });
 
+  await forEachSequential(admins, (entry) =>
+    runPsql(
+      ctx,
+      revokeUnlistedDatabasesSql(entry.username, entry.databases),
+    ));
+
   await forEachSequential(granted, (entry) =>
     forEachSequential(
       entry.databases,
       (database) =>
-        runPsql(ctx, grantDatabaseSql(database, entry.username, entry.level)),
+        runPsql(
+          ctx,
+          grantDatabaseSql(
+            database,
+            entry.username,
+            // An owner-role database belongs to its owner role, never to a
+            // login: the migrations login works through the role instead.
+            databaseGrantLevel(
+              ownerRoleDbs.has(database),
+              loginOwned.get(database) === entry.username,
+              entry.level,
+            ),
+          ),
+        ),
+    ));
+
+  // The Database admin login holds the owner role's rights on owner-role
+  // databases, and the read-write rights anywhere else.
+  await forEachSequential(admins, (entry) =>
+    forEachSequential(
+      entry.databases,
+      (database) =>
+        runPsql(
+          ctx,
+          grantDatabaseSql(
+            database,
+            entry.username,
+            "read-write",
+          ),
+        ),
+    ));
+
+  await forEachSequential(selfManaged, (entry) =>
+    forEachSequential(
+      entry.databases,
+      (database) => runPsql(ctx, grantConnectOnlySql(database, entry.username)),
     ));
 
   // After the explicit grants, so no login that holds one is ever without it.
   await runPsql(ctx, revokePublicDatabaseAccessSql());
 
-  const databases = [...new Set(granted.flatMap((entry) => entry.databases))];
+  const databases = [
+    ...new Set(
+      [...objectGranted, ...selfManaged].flatMap((entry) => entry.databases),
+    ),
+  ].filter((database) => !ownerRoleDbs.has(database));
   await forEachSequential(databases, async (database) => {
     // Create per-login schemas for read-write logins in each database.
-    const readWriteLogins = granted
+    const readWriteLogins = objectGranted
       .filter(
         (entry) =>
           entry.databases.includes(database) && entry.level === "read-write",
@@ -352,8 +533,8 @@ async function reconcileDatabaseAccess(
         .join("\n");
       await runPsql(ctx, schemaCreation, database);
     }
-    const access = objectAccessFor(ctx, database, granted, rootUsernames);
-    const sessionDefaults = granted
+    const access = objectAccessFor(ctx, database, objectGranted, rootUsernames);
+    const sessionDefaults = objectGranted
       .filter((entry) => entry.databases.includes(database))
       .map((entry) =>
         readOnlySessionDefaultSql(
@@ -368,15 +549,253 @@ async function reconcileDatabaseAccess(
       database,
     );
   });
+
+  // Owner-role databases: group roles, default privileges, and each login's
+  // membership. Run inside the database (default privileges are per database).
+  await forEachSequential(
+    [...ownerRoleDbs].sort((a, b) => a.localeCompare(b)),
+    async (database) => {
+      const parts = [
+        ownerRoleDatabaseSql(
+          database,
+          [ctx.rootUsername, ...rootUsernames],
+          loginOwned.get(database),
+        ),
+      ];
+      for (const entry of granted) {
+        const listed = entry.databases.includes(database);
+        parts.push(
+          ownerRoleLoginSql(
+            database,
+            entry.username,
+            ownerRoleLoginLevel(
+              listed,
+              loginOwned.get(database) === entry.username,
+              entry.level,
+            ),
+          ),
+        );
+        if (listed) {
+          parts.push(
+            readOnlySessionDefaultSql(
+              database,
+              entry.username,
+              entry.level === "read-only",
+            ),
+          );
+        }
+      }
+      parts.push(...adminOwnerRoleSql(database, admins));
+      for (const username of usernames.keys()) {
+        if (granted.some((entry) => entry.username === username)) continue;
+        parts.push(ownerRoleLoginSql(database, username, null));
+      }
+      await runPsql(ctx, parts.join("\n"), database);
+    },
+  );
+}
+
+/**
+ * Create a database that belongs to its owner role: the three roles first,
+ * then `CREATE DATABASE ... OWNER`. A database that already exists with that
+ * owner only has its roles re-checked. One that exists with any other owner
+ * is left exactly as it is, except the cluster's own first database while it
+ * is still empty (see below): moving a database that holds data onto an owner
+ * role is an explicit action, never part of apply.
+ */
+async function createOwnerRoleDatabase(
+  ctx: ManagedEngineContext,
+  name: string,
+  ownerLogin?: string,
+): Promise<void> {
+  if (name.length > OWNER_ROLE_MAX_DATABASE_NAME) {
+    throw new Error(
+      `database name too long for an owner role (at most ${OWNER_ROLE_MAX_DATABASE_NAME} characters)`,
+    );
+  }
+  const names = ownerRoleNames(name);
+  const existing = await parsePsqlRows(ctx, databaseOwnerSql(name));
+  if (existing.length === 0) {
+    await runPsql(ctx, ensureOwnerRolesSql(name));
+    await runPsql(ctx, createDatabaseSql(name, names.owner));
+    return;
+  }
+  if (
+    existing[0]![0] === names.owner ||
+    (ownerLogin !== undefined && !isPlatformRole(ctx, ownerLogin) &&
+      existing[0]![0] === ownerLogin)
+  ) {
+    await runPsql(ctx, ensureOwnerRolesSql(name));
+    return;
+  }
+  // The first database of a new cluster is made by the engine's first start,
+  // for the platform admin. While it still holds nothing it moves onto its
+  // owner role; once anything is in it, it is left exactly as it is.
+  if (
+    existing[0]![0] === ctx.rootUsername && !RESERVED_DATABASES.has(name) &&
+    await databaseIsEmpty(ctx, name)
+  ) {
+    await runPsql(ctx, ensureOwnerRolesSql(name));
+    await runPsql(ctx, moveDatabaseOwnerSql(name, names.owner));
+    return;
+  }
+  logInfo(
+    "managed",
+    `postgres database ${
+      sanitizeForLog(name)
+    } already exists with another owner; keeping it as it is`,
+  );
+}
+
+/** The database-level right a login gets on a database. */
+function databaseGrantLevel(
+  ownerRoleDatabase: boolean,
+  isChosenOwner: boolean,
+  level: ManagedDatabasePrivilege,
+): ManagedDatabasePrivilege {
+  // An owner-role database belongs to its owner role (or the login chosen to
+  // own it), never to a migrations login: that one works through the role.
+  if (!ownerRoleDatabase) return level;
+  if (isChosenOwner) return "owner";
+  return level === "owner" ? "read-write" : level;
+}
+
+/** What a login is on an owner-role database (`null` = not on it). */
+function ownerRoleLoginLevel(
+  listed: boolean,
+  isChosenOwner: boolean,
+  level: ManagedDatabasePrivilege,
+): OwnerRoleLoginLevel | null {
+  if (!listed) return null;
+  return isChosenOwner ? "admin" : level;
+}
+
+/** The Database admin logins' statements on one owner-role database. */
+function adminOwnerRoleSql(
+  database: string,
+  admins: readonly { username: string; databases: string[] }[],
+): string[] {
+  return admins.flatMap((entry) => {
+    const listed = entry.databases.includes(database);
+    return [
+      // A login that was read-only before keeps no read-only default.
+      ...(listed
+        ? [readOnlySessionDefaultSql(database, entry.username, false)]
+        : []),
+      ownerRoleLoginSql(database, entry.username, listed ? "admin" : null),
+    ];
+  });
+}
+
+/** Databases the engine itself needs; never handed to an owner role. */
+const RESERVED_DATABASES = new Set(["postgres", "template0", "template1"]);
+
+/** A role that is the platform's (never a customer's database owner). */
+function isPlatformRole(
+  ctx: ManagedEngineContext,
+  name: string,
+  rootUsernames: readonly string[] = [],
+): boolean {
+  return name === ctx.rootUsername || name === "postgres" ||
+    name.startsWith("tp_") || name.startsWith("pg_") ||
+    rootUsernames.includes(name);
+}
+
+/** Whether `database` holds nothing a person made (see `databaseIsEmptySql`). */
+async function databaseIsEmpty(
+  ctx: ManagedEngineContext,
+  database: string,
+): Promise<boolean> {
+  const rows = await parsePsqlRows(ctx, databaseIsEmptySql(), database);
+  return rows[0]?.[0] === "true";
+}
+
+/**
+ * Hand each database whose chosen owner is a login to that login, once the
+ * login exists. Only a database that is still the panel's own (owned by its
+ * owner role) or still empty and the platform admin's moves; anything else is
+ * left exactly as it is. Returns the databases that now belong to their
+ * chosen login (database name -> login). A login that is read-only or
+ * managed by hand never takes a database over.
+ */
+async function adoptChosenOwners(
+  ctx: ManagedEngineContext,
+  ownerLogins: Readonly<Record<string, string>>,
+  granted: readonly UserAccess[],
+  rootUsernames: readonly string[],
+): Promise<Map<string, string>> {
+  const owned = new Map<string, string>();
+  await forEachSequential(Object.entries(ownerLogins), async ([db, login]) => {
+    if (
+      isPlatformRole(ctx, login, rootUsernames) || RESERVED_DATABASES.has(db)
+    ) {
+      return;
+    }
+    const entry = granted.find((g) => g.username === login);
+    const rows = await parsePsqlRows(ctx, databaseOwnerSql(db));
+    const current = rows[0]?.[0];
+    if (current === undefined) return;
+    if (
+      entry === undefined || entry.level === "read-only" ||
+      !entry.databases.includes(db)
+    ) {
+      // A login that no longer qualifies must not keep owning the database:
+      // it goes back to its owner role.
+      if (current === login && entry !== undefined) {
+        await runPsql(ctx, moveDatabaseOwnerSql(db, ownerRoleNames(db).owner));
+      }
+      return;
+    }
+    if (current !== login) {
+      const mine = current === ownerRoleNames(db).owner;
+      const platformOwned = current === ctx.rootUsername &&
+        await databaseIsEmpty(ctx, db);
+      if (!mine && !platformOwned) {
+        logInfo(
+          "managed",
+          `postgres database ${
+            sanitizeForLog(db)
+          } has another owner; keeping it as it is`,
+        );
+        return;
+      }
+      await runPsql(ctx, moveDatabaseOwnerSql(db, login));
+    }
+    owned.set(db, login);
+  });
+  return owned;
+}
+
+/** One read-only script in `database`; psql's raw stdout (`-X -q -A -t`). */
+async function queryPsqlJson(
+  ctx: ManagedEngineContext,
+  database: string,
+  sql: string,
+): Promise<string> {
+  const result = await execSqlWithStdinRetry(
+    ctx.exec,
+    [...psqlArgv(ctx, database, "tuples"), "-X", "-q"],
+    sql,
+    { idempotent: true },
+  );
+  if (!result.success) {
+    throw new Error(
+      `psql failed: ${
+        sanitizeForLog(result.stderr || result.stdout || "unknown")
+      }`,
+    );
+  }
+  return result.stdout;
 }
 
 async function parsePsqlRows(
   ctx: ManagedEngineContext,
   sql: string,
+  database: string = ctx.defaultDatabase,
 ): Promise<string[][]> {
   const result = await execSqlWithStdinRetry(
     ctx.exec,
-    psqlArgv(ctx, ctx.defaultDatabase, "rows"),
+    psqlArgv(ctx, database, "rows"),
     sql,
     { idempotent: true },
   );
@@ -621,7 +1040,32 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
     return "seeded";
   },
 
-  async promote(ctx) {
+  async isWritableFormerPrimary(ctx) {
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    return value === "t" || value === "true";
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runPsql(ctx, enforceFencedFormerPrimarySql());
+  },
+
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const rows = await parsePsqlRows(ctx, isWritablePrimarySql());
+    const value = rows[0]?.[0]?.toLowerCase();
+    if (value === "t" || value === "true") {
+      throw new Error(
+        "switchover: former primary is already writable; promotion may have started",
+      );
+    }
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runPsql(ctx, reactivateFormerPrimaryAfterSwitchoverAbortSql());
+    await waitUntilWritablePrimary(ctx, 60_000);
+  },
+
+  async promote(ctx, _options?) {
     await runPsql(ctx, promoteSql());
     const deadline = Date.now() + 60_000;
     const leftRecovery = async (): Promise<boolean> => {
@@ -632,8 +1076,21 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
       await sleep(500);
       return leftRecovery();
     };
-    if (await leftRecovery()) return;
-    throw new Error("pg_promote did not leave recovery within 60s");
+    if (!(await leftRecovery())) {
+      throw new Error("pg_promote did not leave recovery within 60s");
+    }
+    // The engine is already a writable primary here: a failed reset must not
+    // report the promote as failed. A leftover read-only default fails
+    // writes loudly; it is never a second writable primary.
+    try {
+      await runPsql(ctx, resetFencedReadOnlyDefaultSql());
+    } catch (err) {
+      logError(
+        "managed",
+        "postgres promote: could not reset default_transaction_read_only:",
+        sanitizeForLog(err),
+      );
+    }
   },
 
   async isStandby(ctx) {
@@ -904,16 +1361,35 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     return version.length > 0 ? version : undefined;
   },
 
+  readPermissions(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
+  ): Promise<ManagedPermissionsEngineReport> {
+    return readPostgresPermissions(
+      request,
+      ctx.defaultDatabase,
+      (database, sql) => queryPsqlJson(ctx, database, sql),
+      clock,
+    );
+  },
+
   async applyCredentials(
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],
+    options?: ManagedApplyCredentialsOptions,
   ): Promise<string[]> {
     const applied: string[] = [];
     await forEachSequential(credentials, async (credential) => {
       await applyOneCredential(ctx, credential);
       applied.push(credential.username);
     });
-    await reconcileDatabaseAccess(ctx, credentials);
+    await reconcileDatabaseAccess(
+      ctx,
+      credentials,
+      options?.ownerRoleDatabases,
+      options?.ownerLogins,
+    );
     return applied;
   },
 
@@ -937,7 +1413,9 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
   ): Promise<string[]> {
     const applied: string[] = [];
     await forEachSequential(ops, async (op) => {
-      if (op.action === "create") {
+      if (op.action === "create" && op.ownerRole === true) {
+        await createOwnerRoleDatabase(ctx, op.name, op.ownerLogin);
+      } else if (op.action === "create") {
         // CREATE DATABASE cannot run inside PL/pgSQL; check then create.
         const existing = await parsePsqlRows(ctx, databaseExistsSql(op.name));
         if (existing.length === 0) {
@@ -945,6 +1423,10 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
         }
       } else {
         await runPsql(ctx, dropDatabaseSql(op.name));
+        // The owner role's three roles go with their database.
+        if (op.ownerRole === true) {
+          await runPsql(ctx, dropOwnerRolesSql(op.name));
+        }
       }
       applied.push(op.name);
     });
@@ -958,6 +1440,9 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
+      // A database this login owns goes back to its own owner role, never to
+      // the platform admin.
+      await runPsql(ctx, ownerLoginReturnSql(username));
       await releaseRoleObjects(ctx, username);
       await runPsql(ctx, dropRoleSql(username));
       dropped.push(username);

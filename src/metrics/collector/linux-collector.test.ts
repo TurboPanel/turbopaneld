@@ -1360,14 +1360,29 @@ test("LinuxMetricsCollector puts container, TLS, site and host text data in exte
   assertEquals(extended?.text?.topSites, "site-a=700");
 });
 
-test("LinuxMetricsCollector sends only the always-known RAID zeros when nothing else v7 was collected", async () => {
+test("LinuxMetricsCollector sends only the always-known RAID zeros and the sizes when nothing else v8 was collected", async () => {
   const result = await new LinuxMetricsCollector(
     makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
   ).collect({ sequence: 1, nowMs: 1_000_000 });
   if (!result.supported) throw new TypeError("expected a supported sample");
-  assertEquals(result.sample.extended, {
-    host: { mdArraysDegraded: 0, mdArraysResyncing: 0 },
+  assertEquals(result.sample.extended?.host, {
+    mdArraysDegraded: 0,
+    mdArraysResyncing: 0,
   });
+  const { host: _host, sizes: _sizes, filesystemSizes: _fs, ...rest } =
+    result.sample.extended ?? {};
+  assertEquals(rest, {});
+});
+
+test("LinuxMetricsCollector carries this tick's sizes: memory, swap, cores and the root and extra filesystems", async () => {
+  const result = await new LinuxMetricsCollector(
+    makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
+  ).collect({ sequence: 1, nowMs: 1_000_000 });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+  const sizes = result.sample.extended?.sizes;
+  assertEquals(typeof sizes?.memoryTotalBytes, "number");
+  assertEquals((sizes?.memoryTotalBytes ?? 0) > 0, true);
+  assertEquals((sizes?.logicalCores ?? 0) > 0, true);
 });
 
 const HOST_EXTENDED_RAW: RawFixtureMap = {

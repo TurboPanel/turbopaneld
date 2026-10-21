@@ -58,7 +58,14 @@ export type HostResources = {
   cpus?: HostCpuSocket[];
   /** One entry per DRM `cardN`, ordered by N. */
   gpus?: HostGpu[];
-  memory?: { totalBytes?: number };
+  memory?: {
+    totalBytes?: number;
+    /**
+     * Kernel memory page size in bytes (`getconf PAGESIZE`). Linux only;
+     * omitted on other OS or when the value is unreadable / non-positive.
+     */
+    pageSizeBytes?: number;
+  };
   swap?: { totalBytes?: number };
   /** Host interface addresses — nested here on hello / change-detected heartbeat. */
   ips?: ServerReportedIp[];
@@ -85,6 +92,8 @@ export type HostInventoryExtras = {
   eCpus?: string;
   gpus?: HostGpu[];
   virtualizationKind?: string;
+  /** Kernel page size in bytes (`getconf PAGESIZE`); Linux only. */
+  pageSizeBytes?: number;
 };
 
 /**
@@ -115,6 +124,14 @@ export type HostInventoryIo = {
    */
   runLs?: (path: string) => { code: number; stdout: Uint8Array };
   architecture?: string;
+  /**
+   * Optional `getconf PAGESIZE` stdout. When omitted, the production (no-`io`)
+   * path spawns `getconf` on Linux; injected reads never spawn so host-free
+   * tests stay off the real host. Return fixture text, or `undefined` to omit.
+   */
+  getconfPagesize?: () => string | undefined;
+  /** Override `Deno.build.os` so tests can cover the Linux-only gate. */
+  os?: string;
 };
 
 const DEFAULT_PROC_ROOT = "/proc";
@@ -869,6 +886,56 @@ function applyMeminfoToResources(
   }
 }
 
+function parsePageSizeBytes(text: string | undefined): number | undefined {
+  if (text === undefined) return undefined;
+  const value = Number(text.trim());
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    return undefined;
+  }
+  return value;
+}
+
+function spawnGetconfPagesize(): string | undefined {
+  try {
+    const { code, stdout } = new Deno.Command("getconf", {
+      args: ["PAGESIZE"],
+      stdout: "piped",
+      stderr: "null",
+      // Scoped --allow-run=getconf cannot inherit LD_* / DYLD_* (Deno 2.9).
+      clearEnv: true,
+    }).outputSync();
+    if (code !== 0) return undefined;
+    return new TextDecoder().decode(stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+function readMemoryPageSizeBytes(io?: HostInventoryIo): number | undefined {
+  const os = io?.os ?? Deno.build.os;
+  if (os !== "linux") return undefined;
+  if (io?.getconfPagesize) return parsePageSizeBytes(io.getconfPagesize());
+  // Injected inventory never spawns — tests stay host-free unless they
+  // supply `getconfPagesize`. Production (no `io`) reads the live host.
+  if (io) return undefined;
+  return parsePageSizeBytes(spawnGetconfPagesize());
+}
+
+function applyPageSizeToResources(
+  resources: HostResources,
+  pageSizeBytes?: number,
+): void {
+  if (
+    pageSizeBytes === undefined ||
+    !Number.isFinite(pageSizeBytes) ||
+    !Number.isInteger(pageSizeBytes) ||
+    pageSizeBytes <= 0
+  ) {
+    return;
+  }
+  resources.memory = { ...resources.memory, pageSizeBytes };
+}
+
 function hasCpuSocketFields(socket: HostCpuSocket): boolean {
   return Object.keys(socket).length > 0;
 }
@@ -889,6 +956,7 @@ export function hostResourcesFromProc(
     resources.virtualizationKind = extras.virtualizationKind;
   }
   if (memText) applyMeminfoToResources(resources, memText);
+  applyPageSizeToResources(resources, extras?.pageSizeBytes);
   return Object.keys(resources).length > 0 ? resources : undefined;
 }
 
@@ -1186,12 +1254,15 @@ export function readHostResources(
   }
 
   const layout = resolveInventoryLayout(io);
+  const extras = readLiveInventoryExtras(layout);
+  const pageSizeBytes = readMemoryPageSizeBytes(io);
+  if (pageSizeBytes !== undefined) extras.pageSizeBytes = pageSizeBytes;
   const resources = hostResourcesFromProc(
     layout.readTextFile(layout.procStat),
     layout.readTextFile(layout.procMeminfo),
     layout.readTextFile(layout.procCpuinfo),
     layout.architecture,
-    readLiveInventoryExtras(layout),
+    extras,
   );
   if (!io) {
     cached = resources ?? null;

@@ -195,11 +195,7 @@ export async function applyBootHold(
       return;
     }
     if (
-      await isManagedMemberDemoted(
-        deps.layout,
-        member.managedId,
-        member.memberId,
-      )
+      await isManagedMemberDemoted(deps.layout, member.managedId)
     ) {
       toHold.push(member);
     }
@@ -337,11 +333,7 @@ export async function releaseBootHoldLocally(
   reason: string,
 ): Promise<void> {
   if (
-    await isManagedMemberDemoted(
-      deps.layout,
-      record.managedId,
-      record.memberId,
-    )
+    await isManagedMemberDemoted(deps.layout, record.managedId)
   ) {
     logWarn(
       "managed",

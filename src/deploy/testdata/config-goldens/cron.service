@@ -27,4 +27,4 @@ RestrictRealtime=yes
 LockPersonality=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/srv/users/appuser/home /srv/users/appuser/data /srv/users/appuser/tmp
+ReadWritePaths=/srv/users/appuser/home /srv/users/appuser/tmp

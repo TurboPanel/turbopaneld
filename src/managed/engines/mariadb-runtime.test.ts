@@ -3,6 +3,7 @@
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { topologyPlaintext } from "../../testing/managed-topology-fixtures.ts";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import {
   buildMariadbStandbySeedScript,
@@ -543,6 +544,57 @@ test("mariadb configureStandby empty seed failure is not reported as unknown", a
   assertEquals(err.message.includes("unknown"), false);
 });
 
+test("mariadb promote runs MASTER_GTID_WAIT before promotion when a GTID proof is required", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.promote) {
+    throw new TypeError("expected mariadb promote");
+  }
+  let sawWait = false;
+  let writableChecks = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("MASTER_GTID_WAIT")) {
+      sawWait = true;
+      return Promise.resolve({ success: true, stdout: "0\n", stderr: "" });
+    }
+    if (sql.includes("RESET SLAVE")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-e")) {
+      writableChecks++;
+      const stdout = writableChecks >= 2 ? "0\n" : "1\n";
+      return Promise.resolve({ success: true, stdout, stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.promote(buildContext(exec), {
+    requiredExecutedGtidSet: "0-1-100",
+    gtidWaitTimeoutSeconds: 45,
+  });
+  assertEquals(sawWait, true);
+});
+
+test("mariadb quiesceFormerPrimaryForSwitchover enforces read_only and returns gtid_current_pos", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.quiesceFormerPrimaryForSwitchover) {
+    throw new TypeError("expected mariadb quiesceFormerPrimaryForSwitchover");
+  }
+  let enforcedReadOnly = false;
+  const exec: ManagedEngineExec = (argv, input) => {
+    const sql = input ?? argv[argv.indexOf("-e") + 1] ?? "";
+    if (sql.includes("read_only")) enforcedReadOnly = true;
+    if (sql.includes("gtid_current_pos")) {
+      return Promise.resolve({ success: true, stdout: "0-9-42\n", stderr: "" });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const gtid = await replication.quiesceFormerPrimaryForSwitchover(
+    buildContext(exec),
+  );
+  assertEquals(enforcedReadOnly, true);
+  assertEquals(gtid, "0-9-42");
+});
+
 test("mariadb promote clears read-only and returns when writable", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.promote) {
@@ -625,6 +677,83 @@ test("mariadb readHealth parses standby slave status", async () => {
   const health = await replication.readHealth(buildContext(exec), "standby");
   assertEquals(health.state, "streaming");
   assertEquals(health.lagSeconds, 7);
+});
+
+const CONNECTION_LOST_VERTICAL = `
+               Slave_IO_Running: No
+              Slave_SQL_Running: Yes
+                 Master_Host: 203.0.113.10
+                 Master_Port: 3306
+                Last_IO_Errno: 2003
+                Last_IO_Error: Can't connect to server on '203.0.113.10'
+               Last_SQL_Errno: 0
+               Last_SQL_Error:
+`;
+
+test("mariadb readHealth restarts slave IO after a connection error when the primary is reachable", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mariadb readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  let statusReads = 0;
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv[0] === "mariadb-admin" && argv.includes("--host")) {
+      return Promise.resolve({
+        success: true,
+        stdout: "mysqld is alive",
+        stderr: "",
+      });
+    }
+    if (argv.includes("-E")) {
+      statusReads += 1;
+      return Promise.resolve({
+        success: true,
+        stdout: statusReads === 1 ? CONNECTION_LOST_VERTICAL : HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "streaming");
+  assertEquals(calls.some((c) => c.input === "START SLAVE;"), true);
+});
+
+const APPLIER_ERROR_VERTICAL = `
+               Slave_IO_Running: Yes
+              Slave_SQL_Running: No
+                 Master_Host: 203.0.113.10
+                 Master_Port: 3306
+                Last_IO_Errno: 0
+                Last_IO_Error:
+               Last_SQL_Errno: 1062
+               Last_SQL_Error: Duplicate entry '1' for key 'PRIMARY'
+          Seconds_Behind_Master: NULL
+`;
+
+test("mariadb readHealth does not restart through an SQL applier error", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.readHealth) {
+    throw new TypeError("expected mariadb readHealth");
+  }
+  const calls: RecordedExec[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    calls.push({ argv: [...argv], input });
+    if (argv.includes("-E")) {
+      return Promise.resolve({
+        success: true,
+        stdout: APPLIER_ERROR_VERTICAL,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  const health = await replication.readHealth(buildContext(exec), "standby");
+  assertEquals(health.state, "reconnecting");
+  assertEquals(calls.some((c) => c.input === "START SLAVE;"), false);
+  assertEquals(calls.some((c) => c.argv[0] === "mariadb-admin"), false);
 });
 
 test("mariadb readHealth returns unknown when status query fails", async () => {
@@ -1256,4 +1385,96 @@ test("mariadb isStandby is true when SHOW SLAVE STATUS is non-empty", async () =
     Promise.resolve({ success: true, stdout: "\n", stderr: "" });
   assertEquals(await replication.isStandby(buildContext(replica)), true);
   assertEquals(await replication.isStandby(buildContext(primary)), false);
+});
+
+test("mariadb ensureOrchestratorTopology uses the MariaDB grant dialect", async () => {
+  const { exec, calls } = recordingExec();
+  await mariadbManagedEngineRuntime.ensureOrchestratorTopology!(
+    {
+      ...buildContext(exec),
+      clientSourceHosts: ["10.100.0.7"],
+    },
+    { user: "tp_topology_abcd12345678", password: topologyPlaintext() },
+  );
+  const accountSql =
+    calls.find((c) => c.input?.includes("CREATE USER IF NOT EXISTS"))?.input ??
+      "";
+  assertEquals(accountSql.includes("'10.100.0.7'"), true);
+  assertEquals(accountSql.includes("172.16.0.0/255.240.0.0"), true);
+  // MariaDB keeps `REQUIRE` on `GRANT`; only the password re-assert is an
+  // `ALTER USER`, never the TLS binding.
+  assertEquals(accountSql.includes("GRANT USAGE ON *.*"), true);
+  assertEquals(/ALTER USER [^\n]*REQUIRE SSL/.test(accountSql), false);
+  assertEquals(accountSql.includes("sql_log_bin"), false);
+  // MariaDB has no `mysql.slave_master_info`.
+  assertEquals(
+    calls.some((c) =>
+      c.input?.includes("GRANT SELECT ON mysql.gtid_slave_pos")
+    ),
+    true,
+  );
+  assertEquals(
+    calls.some((c) => c.input?.includes("slave_master_info")),
+    false,
+  );
+});
+
+function mariadbFenceExec(
+  readOnly: string,
+  slaveStatus: string,
+): ManagedEngineExec {
+  return (argv, input) => {
+    const sql = `${argv.join(" ")} ${input ?? ""}`;
+    if (sql.includes("SHOW SLAVE STATUS")) {
+      return Promise.resolve({
+        success: true,
+        stdout: slaveStatus,
+        stderr: "",
+      });
+    }
+    return Promise.resolve({ success: true, stdout: readOnly, stderr: "" });
+  };
+}
+
+for (
+  const [label, readOnly, slaveStatus, writable] of [
+    ["read_only off", "0\n", "", true],
+    [
+      "read_only on, no replica config (root keeps READ ONLY ADMIN)",
+      "1\n",
+      "",
+      true,
+    ],
+    [
+      "read_only on and configured as a replica",
+      "1\n",
+      "Slave_IO_State: x\n",
+      false,
+    ],
+  ] as const
+) {
+  test(`mariadb isWritableFormerPrimary: ${label}`, async () => {
+    const replication = mariadbManagedEngineRuntime.replication;
+    if (!replication?.isWritableFormerPrimary) {
+      throw new TypeError("expected mariadb isWritableFormerPrimary");
+    }
+    assertEquals(
+      await replication.isWritableFormerPrimary(
+        buildContext(mariadbFenceExec(readOnly, slaveStatus)),
+      ),
+      writable,
+    );
+  });
+}
+
+test("mariadb isWritableFormerPrimary fails when the engine cannot answer", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.isWritableFormerPrimary) {
+    throw new TypeError("expected mariadb isWritableFormerPrimary");
+  }
+  const down: ManagedEngineExec = () =>
+    Promise.resolve({ success: false, stdout: "", stderr: "no socket" });
+  await assertRejects(() =>
+    replication.isWritableFormerPrimary!(buildContext(down))
+  );
 });

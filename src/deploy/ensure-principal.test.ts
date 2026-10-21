@@ -19,8 +19,11 @@ import {
   ensureSystemPrincipals,
   parseGroupGid,
   parsePasswdHomeShell,
+  PRINCIPAL_ID_TAKEN_MARKER,
   type PrincipalEnsureSpec,
+  PrincipalIdTakenError,
   principalUnixGroupName,
+  reportPrincipalIds,
   resolveManagedGroups,
   type RunFn,
   type RunResult,
@@ -141,7 +144,7 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
   assertEquals(useradd?.args.includes("-u"), false);
 
   // The home is root's (the tenant could otherwise rename what root writes
-  // into); the principal owns only home/, data/ and tmp/. Parent before child.
+  // into); the principal owns only home/ and tmp/. Parent before child.
   const homeInstalls = calls
     .filter((c) =>
       c.command === "sudo" && c.args[1] === "install" &&
@@ -151,10 +154,7 @@ test("ensureSystemPrincipals fresh create without ids uses group name and omits 
   assertEquals(homeInstalls, [
     `0750 -o root -g appuser ${defaultHome}`,
     `0700 -o appuser -g appuser ${defaultHome}/home`,
-    `0700 -o appuser -g appuser ${defaultHome}/data`,
     `0700 -o appuser -g appuser ${defaultHome}/tmp`,
-    `0750 -o root -g appuser ${defaultHome}/sites`,
-    `0750 -o root -g appuser ${defaultHome}/volumes`,
   ]);
   // The account is created before its tenant directories are chowned to it.
   const useraddAt = calls.findIndex((c) => c.args.includes("useradd"));
@@ -323,7 +323,7 @@ test("ensureSystemPrincipals rejects an adopted group below the current UID/GID 
         home: defaultHome,
       }], run),
     Error,
-    "Principal group appuser has gid=10001, below the current PRINCIPAL_ID_MIN=15001 — needs UID/GID migration",
+    "The name appuser is already used by a group on this host with gid=10001, below the current PRINCIPAL_ID_MIN=15001 — needs UID/GID migration",
   );
   assertEquals(
     calls.some((c) => c.command === "getent" && c.args[0] === "passwd"),
@@ -482,7 +482,7 @@ test("ensureSystemPrincipals rejects existing group with mismatched gid override
         shell: "/bin/bash",
       }], run),
     Error,
-    "Principal group appuser already exists with gid=33; expected gid=15001",
+    "The name appuser is already used by a group on this host (gid=33); expected gid=15001",
   );
   assertEquals(
     calls.some((c) => c.command === "sudo" && c.args.includes("useradd")),
@@ -1929,4 +1929,149 @@ test("a uid/gid override must sit in the principal band, never in systemd's thro
       "outside 15001–60000",
     );
   }
+});
+
+test("a requested uid held by another account is refused before anything is created", async () => {
+  const { run, calls } = captureRun({
+    getentPasswd: { success: false, stdout: "", stderr: "" },
+  });
+  const taken: RunFn = (command, args, stdin) =>
+    command === "getent" && args[0] === "passwd" && args[1] === "20001"
+      ? Promise.resolve({
+        success: true,
+        stdout: "other:x:20001:20001::/home/other:/bin/sh",
+        stderr: "",
+      })
+      : run(command, args, stdin);
+  const error = await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        uid: 20001,
+        gid: 20001,
+      }], taken),
+    PrincipalIdTakenError,
+  );
+  assertStringIncludes(error.message, PRINCIPAL_ID_TAKEN_MARKER);
+  assertStringIncludes(error.message, "kind=uid id=20001");
+  assertStringIncludes(error.message, baseSpec.principalId);
+  assertEquals(
+    calls.some((c) =>
+      c.command === "sudo" &&
+      (c.args.includes("useradd") || c.args.includes("groupadd"))
+    ),
+    false,
+  );
+});
+
+test("a requested gid held by another group is refused before anything is created", async () => {
+  const { run } = captureRun({});
+  const taken: RunFn = (command, args, stdin) =>
+    command === "getent" && args[0] === "group" && args[1] === "20001"
+      ? Promise.resolve({
+        success: true,
+        stdout: "other:x:20001:",
+        stderr: "",
+      })
+      : run(command, args, stdin);
+  const error = await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        uid: 20001,
+        gid: 20001,
+      }], taken),
+    PrincipalIdTakenError,
+  );
+  assertStringIncludes(error.message, "kind=gid id=20001");
+});
+
+test("reportPrincipalIds reads back uid and gid and skips missing accounts", async () => {
+  const run: RunFn = (_command, args) =>
+    Promise.resolve(
+      args[1] === "alice"
+        ? {
+          success: true,
+          stdout: "alice:x:20001:20002::/srv/users/alice/home:/bin/sh",
+          stderr: "",
+        }
+        : { success: false, stdout: "", stderr: "" },
+    );
+  assertEquals(
+    await reportPrincipalIds([
+      { principalId: "p1", username: "alice" },
+      { principalId: "p2", username: "ghost" },
+    ], run),
+    [{ principalId: "p1", uid: 20001, gid: 20002 }],
+  );
+});
+
+test("central ids never touch an account that already exists: it is adopted as it is and reported", async () => {
+  const { run, calls } = captureRun({
+    getentGroup: { success: true, stdout: "appuser:x:15004:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:15004:15004::${loginHome}:/usr/sbin/nologin`,
+      stderr: "",
+    },
+  });
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    uid: 30001,
+    gid: 30001,
+    idSource: "central",
+    home: defaultHome,
+  }], run);
+  assertEquals(
+    calls.some((c) =>
+      c.command === "sudo" &&
+      (c.args.includes("useradd") || c.args.includes("groupadd") ||
+        c.args.includes("groupmod") ||
+        (c.args.includes("usermod") && c.args.includes("-u")))
+    ),
+    false,
+  );
+  assertEquals(
+    await reportPrincipalIds([{
+      principalId: baseSpec.principalId,
+      username: "appuser",
+    }], run),
+    [{ principalId: baseSpec.principalId, uid: 15004, gid: 15004 }],
+  );
+});
+
+test("the same ids from an operator are binding and still refuse an existing account", async () => {
+  const { run } = captureRun({
+    getentGroup: { success: true, stdout: "appuser:x:15004:", stderr: "" },
+    getentPasswd: {
+      success: true,
+      stdout: `appuser:x:15004:15004::${loginHome}:/usr/sbin/nologin`,
+      stderr: "",
+    },
+  });
+  await assertRejects(
+    () =>
+      ensureSystemPrincipals(stubLayout(), [{
+        ...baseSpec,
+        uid: 30001,
+        gid: 30001,
+        home: defaultHome,
+      }], run),
+    Error,
+  );
+});
+
+test("central ids create a brand-new account with exactly those ids", async () => {
+  const { run, calls } = captureRun({});
+  await ensureSystemPrincipals(stubLayout(), [{
+    ...baseSpec,
+    uid: 30001,
+    gid: 30001,
+    idSource: "central",
+    home: defaultHome,
+  }], run);
+  const useradd = calls.find((c) =>
+    c.command === "sudo" && c.args.includes("useradd")
+  );
+  assertEquals(useradd?.args.slice(0, 3), ["-n", "useradd", "-u"]);
 });

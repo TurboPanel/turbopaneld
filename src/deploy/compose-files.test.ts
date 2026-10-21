@@ -169,6 +169,53 @@ describe("compose-files", () => {
     }
   });
 
+  it("manifest releases[] round-trip carries the service folder and drops a bad one", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const deploymentDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+      const release = {
+        composeServiceName: "web",
+        serviceId: "svc-1",
+        releaseId: "rel-1",
+        sourceId: "src-1",
+        commitSha: "a".repeat(40),
+        username: "appuser",
+      };
+      const manifest = {
+        version: 2 as const,
+        projectId: "proj-1",
+        environmentId: "env-1",
+        serverId: "srv-1",
+        generation: 4,
+        projectName: "demo",
+        composeSha256: "e".repeat(64),
+        services: {},
+        releases: [{
+          ...release,
+          folder: { owner: "appuser", scope: "production", slug: "shop" },
+        }],
+      };
+      await writeDeploymentManifest(deploymentDir, manifest);
+      assertEquals(await readDeploymentManifest(deploymentDir), manifest);
+      // A recorded folder that no longer passes the rules is not trusted.
+      await writeDeploymentManifest(deploymentDir, {
+        ...manifest,
+        releases: [{
+          ...release,
+          folder: { owner: "appuser", scope: "home", slug: ".." },
+        }],
+      });
+      assertEquals(
+        (await readDeploymentManifest(deploymentDir))?.releases,
+        [release],
+      );
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
   it("manifest releases[] round-trip carries the owning principal", async () => {
     const tmp = await Deno.makeTempDir({ prefix: "tp-" });
     try {

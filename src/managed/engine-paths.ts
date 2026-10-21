@@ -11,7 +11,7 @@ import {
   isManagedBackupArtifactExtension,
   type ManagedApplyPayload,
 } from "../contracts/commands-contracts.ts";
-import type { LayoutPaths } from "../paths/layout.ts";
+import { backupKindDir, type LayoutPaths } from "../paths/layout.ts";
 
 export type { ManagedBackupArtifactExtension } from "../contracts/commands-contracts.ts";
 
@@ -55,10 +55,6 @@ export function proxysqlTlsDir(layout: LayoutPaths): string {
   return join(proxysqlConfigDir(layout), "tls");
 }
 
-export function proxysqlDataDir(layout: LayoutPaths): string {
-  return join(layout.stateDir, "proxysql");
-}
-
 export function proxysqlAdminCnfPath(layout: LayoutPaths): string {
   return join(proxysqlConfigDir(layout), "admin.cnf");
 }
@@ -95,6 +91,16 @@ export function orchestratorApiCnfPath(layout: LayoutPaths): string {
 
 export function orchestratorRaftCnfPath(layout: LayoutPaths): string {
   return join(orchestratorConfigDir(layout), "raft.cnf");
+}
+
+/** Root-only readiness script installed by Ansible for the stack systemd unit. */
+export function orchestratorWaitReadyScriptPath(layout: LayoutPaths): string {
+  return join(layout.home, "libexec", "orchestrator-wait-ready.sh");
+}
+
+/** Written by the `orchestrator` Ansible role after dirs + unit install. */
+export function orchestratorHostPrepMarkerPath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "host-prep.ok");
 }
 
 export function orchestratorTlsDir(layout: LayoutPaths): string {
@@ -169,7 +175,7 @@ export function managedComposeProject(managedId: string): string {
 }
 
 /**
- * `<backupDir>/<managedId>` — the managed engine's backup artifacts, written
+ * `<backupDir>/managed/<managedId>` — the managed engine's backup artifacts, written
  * 0600 by the daemon user itself (never chowned to the container engine user;
  * see `materialize.ts` `normalizeManagedFileOwnership`, which prunes this
  * subtree).
@@ -184,7 +190,7 @@ export function managedBackupsDir(
   layout: LayoutPaths,
   managedId: string,
 ): string {
-  return join(layout.backupDir, managedId);
+  return join(backupKindDir(layout, "managed"), managedId);
 }
 
 /**
@@ -192,7 +198,7 @@ export function managedBackupsDir(
  * retention prune looks at.
  *
  * - Manual backups (no `policyId`): `managedBackupsDir` itself, as always.
- * - Scheduled backups: `<backupDir>/<managedId>/policy-<policyId>`, one
+ * - Scheduled backups: `<backupDir>/managed/<managedId>/policy-<policyId>`, one
  *   directory per policy, so an hourly keep-24 policy never prunes a daily
  *   policy's or a manual backup's artifacts. A manual prune only lists files,
  *   so it never descends into a `policy-*` directory either.

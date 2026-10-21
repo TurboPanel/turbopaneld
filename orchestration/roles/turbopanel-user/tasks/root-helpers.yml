@@ -82,9 +82,11 @@
     remote_src: true
   when: turbopanel_dev_user | default('') | length == 0
 
-- name: Record the principal home root for tp-host
+- name: Record the principal home root and the backup root for tp-host
   ansible.builtin.copy:
-    content: "principal_home_root={{ principal_home_root | default('/srv/users') }}\n"
+    content: |
+      principal_home_root={{ principal_home_root | default('/srv/users') }}
+      backup_dir={{ turbopanel_backup_dir }}
     dest: "{{ turbopanel_install_root }}/lib/tp-host.conf"
     owner: root
     group: "{{ turbopanel_group }}"

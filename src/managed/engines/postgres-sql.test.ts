@@ -11,6 +11,7 @@ import {
   dropDatabaseSql,
   dropPhysicalSlotSql,
   dropRoleSql,
+  enforceFencedFormerPrimarySql,
   ensureProxySqlMonitorRoleSql,
   formatConninfoValue,
   grantDatabaseSql,
@@ -20,6 +21,7 @@ import {
   listManagedSlotsSql,
   MANAGED_SLOT_PREFIX,
   managedSlotRetentionSql,
+  PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
   promoteSql,
   quoteIdentifier,
@@ -193,7 +195,7 @@ test("readOnlySessionDefaultSql sets or clears the read-only default per databas
   );
 });
 
-test("reconcileDatabaseObjectsSql gives writers exactly five table privileges and readers only SELECT, now and for later tables", () => {
+test("reconcileDatabaseObjectsSql gives owners six table privileges, read-write logins four and readers only SELECT, now and for later tables", () => {
   const sql = reconcileDatabaseObjectsSql({
     creators: ["postgres", "own", "rw"],
     owners: ["own"],
@@ -204,9 +206,20 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   assertEquals(sql.includes("nspname !~ '^pg_'"), true);
   assertEquals(
     sql.includes(
-      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLE %s TO "rw"`,
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %s TO "rw"`,
     ),
     true,
+  );
+  assertEquals(
+    sql.includes(
+      `GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLE %s TO "own"`,
+    ),
+    true,
+  );
+  // A read-write login never holds TRUNCATE or REFERENCES, on existing or later tables.
+  assertEquals(
+    /GRANT[^;\n]*(TRUNCATE|REFERENCES)[^;\n]*TO "rw"/.test(sql),
+    false,
   );
   assertEquals(
     sql.includes(`GRANT USAGE, SELECT, UPDATE ON SEQUENCE %s TO "rw"`),
@@ -220,7 +233,7 @@ test("reconcileDatabaseObjectsSql gives writers exactly five table privileges an
   // Later objects, from every creator, to everyone else.
   assertEquals(
     sql.includes(
-      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES ON TABLES TO "rw";',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "own" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "rw";',
     ),
     true,
   );
@@ -490,6 +503,34 @@ test("stripPgRestoreTimeoutSetLines removes only lock_timeout and statement_time
   assertEquals(out.includes("CREATE TABLE"), true);
 });
 
+test("PG_RESTORE_TIMEOUT_SET_LINE_SED avoids the GNU-only I flag and matches the same lines as stripPgRestoreTimeoutSetLines", async () => {
+  assertEquals(PG_RESTORE_TIMEOUT_SET_LINE_SED.endsWith("/"), true);
+  const input = [
+    "SET lock_timeout = 0;",
+    "set Statement_Timeout = 0;",
+    "  SET lock_timeout = 0  ",
+    "SET LOCAL lock_timeout = '30s';",
+    "SET client_encoding = 'UTF8';",
+    "CREATE TABLE t (id int);",
+    "",
+  ].join("\n");
+  const out = await new Deno.Command("sed", {
+    args: ["-E", `${PG_RESTORE_TIMEOUT_SET_LINE_SED}d`],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const writer = out.stdin.getWriter();
+  await writer.write(new TextEncoder().encode(input));
+  await writer.close();
+  const result = await out.output();
+  assertEquals(result.success, true, new TextDecoder().decode(result.stderr));
+  assertEquals(
+    new TextDecoder().decode(result.stdout),
+    stripPgRestoreTimeoutSetLines(input),
+  );
+});
+
 test("restoreResetSql drops every user schema and recreates only public with its owner and privileges", () => {
   const sql = restoreResetSql();
   assertStringIncludes(sql, "SET LOCAL lock_timeout");
@@ -505,7 +546,7 @@ test("restoreResetSql drops every user schema and recreates only public with its
 
 test("rewritePrimaryConninfo updates host port and hostaddr without dropping password", () => {
   const current =
-    "user=tp_repl password=s3cret host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
   const next = rewritePrimaryConninfo(current, {
     host: "10.100.0.4",
     hostaddr: "10.100.0.4",
@@ -514,7 +555,7 @@ test("rewritePrimaryConninfo updates host port and hostaddr without dropping pas
   assertEquals(next.includes("host=10.100.0.4"), true);
   assertEquals(next.includes("hostaddr=10.100.0.4"), true);
   assertEquals(next.includes("port=45001"), true);
-  assertEquals(next.includes("password=s3cret"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
   assertEquals(next.includes("10.100.0.5"), false);
   const sql = applyFollowedPrimaryConninfoSql(next);
   assertEquals(sql.includes("ALTER SYSTEM SET primary_conninfo"), true);
@@ -525,7 +566,7 @@ test("rewritePrimaryConninfo updates host port and hostaddr without dropping pas
 
 test("rewritePrimaryConninfo drops hostaddr when the new dial is a container name", () => {
   const current =
-    "user=tp_repl password=s3cret host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
+    "user=tp_repl password=repl-plain-fixture host=10.100.0.5 hostaddr=10.100.0.5 port=45001 sslmode=verify-full";
   const next = rewritePrimaryConninfo(current, {
     host: "svc-1",
     port: 5432,
@@ -533,7 +574,23 @@ test("rewritePrimaryConninfo drops hostaddr when the new dial is a container nam
   assertEquals(next.includes("host=svc-1"), true);
   assertEquals(next.includes("hostaddr"), false);
   assertEquals(next.includes("port=5432"), true);
-  assertEquals(next.includes("password=s3cret"), true);
+  assertEquals(next.includes("password=repl-plain-fixture"), true);
+});
+
+test("enforceFencedFormerPrimarySql terminates backends and sets cluster read-only", () => {
+  const sql = enforceFencedFormerPrimarySql();
+  assertStringIncludes(sql, "pg_terminate_backend");
+  assertStringIncludes(sql, "backend_type = 'client backend'");
+  assertStringIncludes(sql, "pg_replication_slots");
+  assertStringIncludes(
+    sql,
+    "ALTER SYSTEM SET default_transaction_read_only = on",
+  );
+  assertStringIncludes(sql, "pg_reload_conf");
+  assertStringIncludes(sql, "TRANSACTION READ ONLY");
+  const alterIdx = sql.indexOf("ALTER SYSTEM");
+  const terminateIdx = sql.indexOf("pg_terminate_backend");
+  assertEquals(alterIdx >= 0 && terminateIdx > alterIdx, true);
 });
 
 test("formatConninfoValue quotes empty values and any whitespace", () => {

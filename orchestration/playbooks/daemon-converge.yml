@@ -71,6 +71,14 @@
     - role: docker
       tasks_from: converge-builder
     - role: docker-gate
+    # Orchestrator host prep is normally lazy on managed.ha.reconcile; backfill
+    # host-prep.ok on hosts that already have root-only libexec wait-ready.
+    - role: orchestrator
+      tasks_from: backfill-host-prep-marker.yml
+    # Hosting Caddy edge (tpedge + ingress guard) is normally lazy on deploy;
+    # backfill enrolled/updated hosts before their first compose deploy.
+    - role: hosting-caddy
+      tasks_from: backfill-edge-account.yml
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh

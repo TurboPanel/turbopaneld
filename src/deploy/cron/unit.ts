@@ -182,7 +182,7 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     // `ProtectHome` is deliberately NOT set: the working directory is inside
     // the principal's home, and a job that cannot read the application it was
     // written for is not a job. It writes only the site's own writable dirs and
-    // the principal's home/, data/ and tmp/; the home root is root-owned.
+    // the principal's home/ and tmp/; the home root is root-owned.
     principalReadWritePaths(
       opts.layout,
       opts.username,

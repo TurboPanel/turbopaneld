@@ -3,6 +3,7 @@
  */
 
 import { assertEquals, assertRejects } from "@std/assert";
+import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   ORCHESTRATOR_COMPOSE_SERVICE_NAME,
@@ -15,8 +16,24 @@ import {
   orchestratorComposePath,
   orchestratorConfigDir,
   orchestratorConfPath,
+  orchestratorHostPrepMarkerPath,
   orchestratorRaftCnfPath,
+  orchestratorTlsDir,
 } from "../managed/engine-paths.ts";
+import { parseProxySqlClientCnf } from "../managed/proxysql-admin.ts";
+import {
+  mysqlOrchestratorClientCnf,
+  orchestratorApiPlainEnvelope,
+  orchestratorApiPlaintext,
+  orchestratorApiUsername,
+  orchestratorRaftPlainEnvelope,
+  orchestratorRaftPlaintext,
+  replicationPlainEnvelope,
+  replicationPlaintext,
+  topologyPlainEnvelope,
+  topologyPlaintext,
+  topologyUsername,
+} from "../testing/managed-topology-fixtures.ts";
 import {
   type TempLayoutFixture,
   withTempLayout,
@@ -39,13 +56,15 @@ const STALE_MANAGED_ID = "00000000-0000-4000-8000-000000000002";
 const MEMBER_ID = "00000000-0000-4000-8000-0000000000a1";
 
 function applyLayoutEnv(fixture: TempLayoutFixture): void {
-  Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
-  Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+  for (const [key, value] of Object.entries(fixture.env)) {
+    Deno.env.set(key, value);
+  }
 }
 
-function clearLayoutEnv(): void {
-  Deno.env.delete("TURBOPANEL_STATE_DIR");
-  Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+function clearLayoutEnv(fixture: TempLayoutFixture): void {
+  for (const key of Object.keys(fixture.env)) {
+    Deno.env.delete(key);
+  }
 }
 
 function baseIdentity() {
@@ -83,8 +102,17 @@ function presentPayload(
         promotionRule: "prefer",
       }],
       replicationUsername: "tp_repl",
-      replicationPasswordEnvelope: "tpdaemon.v1.repl-pass",
+      replicationPasswordEnvelope: replicationPlainEnvelope(),
     }],
+    topologyUser: {
+      username: topologyUsername(),
+      password: topologyPlainEnvelope(),
+    },
+    orchestratorApiUser: {
+      username: orchestratorApiUsername(),
+      password: orchestratorApiPlainEnvelope(),
+    },
+    orchestratorRaftToken: orchestratorRaftPlainEnvelope(),
     identity: baseIdentity(),
     ...overrides,
   };
@@ -103,19 +131,33 @@ function teardownPayload(): ManagedHaReconcilePayload {
 
 async function seedOrchestratorHostPrep(
   layout: ReturnType<typeof resolveLayout>,
-  options: { raftToken?: boolean } = {},
 ): Promise<void> {
   await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+  await Deno.writeTextFile(orchestratorHostPrepMarkerPath(layout), "");
+}
+
+/** Legacy on-disk API creds for tests that exercise topology/replication decrypt only. */
+async function seedLegacyOrchestratorApiCnf(
+  layout: ReturnType<typeof resolveLayout>,
+): Promise<void> {
+  await seedOrchestratorHostPrep(layout);
   await Deno.writeTextFile(
     orchestratorApiCnfPath(layout),
-    "[client]\nuser=orch-admin\npassword=orch-secret\n",
+    mysqlOrchestratorClientCnf("orch-admin", "orch-admin-plain"),
   );
-  if (options.raftToken) {
-    await Deno.writeTextFile(
-      orchestratorRaftCnfPath(layout),
-      "[client]\nuser=raft\npassword=raft-token-value\n",
-    );
-  }
+  await Deno.writeTextFile(
+    orchestratorRaftCnfPath(layout),
+    mysqlOrchestratorClientCnf("raft", "raft-auth-plain"),
+  );
+}
+
+function presentPayloadWithoutOrgOrchestratorSecrets(
+  overrides: Partial<ManagedHaReconcilePayload> = {},
+): ManagedHaReconcilePayload {
+  const payload = presentPayload(overrides);
+  delete payload.orchestratorApiUser;
+  delete payload.orchestratorRaftToken;
+  return payload;
 }
 
 function fakeRunSuccess(): (args: string[]) => Promise<DockerCliResult> {
@@ -156,11 +198,12 @@ function decryptSecretsEcho(
   ciphertexts: string[],
 ): Promise<(string | null)[]> {
   return Promise.resolve(
-    ciphertexts.map((c) =>
-      c === "tpdaemon.v1.repl-pass"
-        ? "repl-plaintext"
-        : c.replace(/^tpdaemon\./, "")
-    ),
+    ciphertexts.map((c) => {
+      if (c === replicationPlainEnvelope()) return replicationPlaintext();
+      const prefix = "tpdaemon.v1.";
+      if (c.startsWith(prefix)) return c.slice(prefix.length);
+      return c.replace(/^tpdaemon\./, "");
+    }),
   );
 }
 
@@ -227,7 +270,7 @@ async function reconcileWithTwoMembers(
         registered: out.registeredClusters,
       };
     } finally {
-      clearLayoutEnv();
+      clearLayoutEnv(fixture);
     }
   });
   return result!;
@@ -310,7 +353,7 @@ test({
         assertEquals(result.containers, []);
         assertEquals(dockerArgs.some((args) => args.includes("down")), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -323,7 +366,7 @@ test({
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env);
-      await seedOrchestratorHostPrep(layout, { raftToken: true });
+      await seedOrchestratorHostPrep(layout);
       applyLayoutEnv(fixture);
       const apiCalls: string[] = [];
       const [mysql] = presentPayload().clusters;
@@ -365,7 +408,7 @@ test({
           true,
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -425,7 +468,7 @@ test({
           300,
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -472,7 +515,7 @@ test({
         assertEquals(err.message.includes(STALE_MANAGED_ID), true);
         assertEquals(err.message.includes("HTTP 500"), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -485,7 +528,7 @@ test({
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env);
-      await seedOrchestratorHostPrep(layout, { raftToken: true });
+      await seedOrchestratorHostPrep(layout);
       applyLayoutEnv(fixture);
       const apiCalls: string[] = [];
       try {
@@ -523,9 +566,11 @@ test({
           await Deno.readTextFile(orchestratorConfPath(layout)),
         ) as Record<string, unknown>;
         assertEquals(conf.Recover, false);
-        assertEquals(conf.RaftAuthToken, "raft-token-value");
-        assertEquals(conf.MySQLTopologyUser, "tp_repl");
-        assertEquals(conf.MySQLTopologyPassword, "repl-plaintext");
+        assertEquals(conf.RaftAuthToken, orchestratorRaftPlaintext());
+        assertEquals(conf.HTTPAuthUser, orchestratorApiUsername());
+        assertEquals(conf.HTTPAuthPassword, orchestratorApiPlaintext());
+        assertEquals(conf.MySQLTopologyUser, "tp_topology_111111111111");
+        assertEquals(conf.MySQLTopologyPassword, topologyPlaintext());
         assertEquals(conf.MySQLTopologyUseMutualTLS, true);
         assertEquals("MySQLTopologyUseSSL" in conf, false);
         const compose = await Deno.readTextFile(
@@ -535,7 +580,75 @@ test({
         assertEquals(compose.includes("10.100.0.10:33001:33001"), true);
         assertEquals(compose.includes("restart: always"), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile waits for a Raft leader before registering clusters",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const apiCalls: string[] = [];
+      let statusPolls = 0;
+      try {
+        const result = await handleManagedHaReconcile(
+          presentPayload(),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: decryptSecretsEcho,
+            orchestratorApi: {
+              fetch: (url) => {
+                apiCalls.push(url);
+                if (url.endsWith("/api/raft-status")) {
+                  statusPolls++;
+                  const leader = statusPolls < 3 ? "" : "10.100.0.11:33002";
+                  return Promise.resolve(
+                    Response.json({
+                      State: "Follower",
+                      Leader: leader,
+                      LeaderURI: "http://10.100.0.11:33001",
+                    }),
+                  );
+                }
+                // A follower with no leader refuses every write like this.
+                return Promise.resolve(
+                  statusPolls < 3
+                    ? Response.json(
+                      { Code: "ERROR", Message: "Unauthorized" },
+                      {
+                        status: 500,
+                      },
+                    )
+                    : new Response("", { status: 200 }),
+                );
+              },
+            },
+            raftWait: { sleep: () => Promise.resolve() },
+          },
+        );
+        assertEquals(statusPolls, 3);
+        assertEquals(result.registeredClusters, [MANAGED_ID]);
+        assertEquals(result.failedClusters, []);
+        const firstDiscover = apiCalls.findIndex((url) =>
+          url.includes("/api/discover/")
+        );
+        assertEquals(
+          apiCalls.slice(0, firstDiscover).filter((url) =>
+            url.endsWith("/api/raft-status")
+          ).length,
+          3,
+        );
+      } finally {
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -599,7 +712,7 @@ test({
         );
         assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -670,7 +783,7 @@ test({
         );
         assertEquals(compose.includes(`"db-1:10.100.0.5"`), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -707,14 +820,15 @@ test({
         );
         assertEquals(second.restarted, false);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
 });
 
 test({
-  name: "handleManagedHaReconcile runs host prep when api.cnf is missing",
+  name:
+    "handleManagedHaReconcile runs host prep when host-prep marker is missing",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -737,7 +851,7 @@ test({
         );
         assertEquals(hostPrepCalls, 1);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -782,7 +896,7 @@ test({
         assertEquals(events.includes("host-prep"), true);
         assertEquals(events.indexOf("host-prep") > 0, true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -794,8 +908,8 @@ test({
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = resolveLayout(fixture.env);
-      // Partially prepared host: compose exists but api.cnf does not, so the
-      // old ordering would have started the stack on its way to stopping it.
+      // Partially prepared host: compose exists but host prep is incomplete, so
+      // the old ordering would have started the stack on its way to stopping it.
       await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
       await Deno.writeTextFile(
         orchestratorComposePath(layout),
@@ -823,14 +937,14 @@ test({
         assertEquals(hostPrepCalls, 0);
         assertEquals(dockerArgs.some((args) => args.includes("down")), true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
 });
 
 test({
-  name: "handleManagedHaReconcile skips host prep when api.cnf exists",
+  name: "handleManagedHaReconcile skips host prep when host-prep marker exists",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -854,7 +968,7 @@ test({
         );
         assertEquals(hostPrepCalls, 0);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -885,7 +999,7 @@ test({
         assertEquals(descriptor?.serviceId, SERVICE_ID);
         assertEquals(descriptor?.containerName, `${SERVICE_ID}-ha`);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -920,7 +1034,7 @@ test({
         );
         assertEquals(result.containers, undefined);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -957,7 +1071,37 @@ test({
           "managed.ha.reconcile requires decryptSecrets",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+test({
+  name: "handleManagedHaReconcile rejects an empty decrypted topology password",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedLegacyOrchestratorApiCnf(layout);
+      applyLayoutEnv(fixture);
+      try {
+        await assertRejects(
+          () =>
+            handleManagedHaReconcile(
+              presentPayloadWithoutOrgOrchestratorSecrets(),
+              new Date().toISOString(),
+              {
+                runDocker: fakeRunWithRunningOrchestrator(),
+                ensureDocker: () => Promise.resolve(),
+                decryptSecrets: () => Promise.resolve([""]),
+              },
+            ),
+          Error,
+          "failed to decrypt managed HA topology password",
+        );
+      } finally {
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -965,17 +1109,20 @@ test({
 
 test({
   name:
-    "handleManagedHaReconcile rejects an empty decrypted replication password",
+    "handleManagedHaReconcile rejects an empty decrypted replication password without topologyUser",
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
-      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      const layout = resolveLayout(fixture.env);
+      await seedLegacyOrchestratorApiCnf(layout);
       applyLayoutEnv(fixture);
       try {
         await assertRejects(
           () =>
             handleManagedHaReconcile(
-              presentPayload(),
+              presentPayloadWithoutOrgOrchestratorSecrets({
+                topologyUser: undefined,
+              }),
               new Date().toISOString(),
               {
                 runDocker: fakeRunWithRunningOrchestrator(),
@@ -987,7 +1134,7 @@ test({
           "failed to decrypt managed HA replication password",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1015,7 +1162,7 @@ test({
           "managed.ha.reconcile requires decryptSecrets",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1050,7 +1197,7 @@ test({
           "orchestrator compose up failed",
         );
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1085,7 +1232,109 @@ test({
         );
         assertEquals(result.registeredClusters, [MANAGED_ID]);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+function orgTlsWithCa(caBody: string) {
+  return {
+    certificatePem:
+      "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+    privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+    caCertPem:
+      `-----BEGIN CERTIFICATE-----\n${caBody}\n-----END CERTIFICATE-----\n`,
+  };
+}
+
+function composeDigestLabel(yaml: string): string | undefined {
+  return yaml.match(/tp\.managed\.config-digest: "?([0-9a-f]+)"?/)?.[1];
+}
+
+function failingComposeUp(): (args: string[]) => Promise<DockerCliResult> {
+  const inner = fakeRunWithRunningOrchestrator();
+  return (args) => {
+    if (args.includes("up")) {
+      return Promise.resolve({
+        success: false,
+        stdout: "",
+        stderr: "compose up failed",
+        code: 1,
+      });
+    }
+    return inner(args);
+  };
+}
+
+test({
+  name:
+    "handleManagedHaReconcile puts the CA bundle on the compose file so a new bundle recreates Orchestrator",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const privatePem =
+        "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+      const run = async (
+        caBody: string,
+        runDocker = fakeRunWithRunningOrchestrator(),
+      ) => {
+        const result = await handleManagedHaReconcile(
+          presentPayload({
+            clusters: [],
+            orgTlsMaterial: orgTlsWithCa(caBody),
+          }),
+          new Date().toISOString(),
+          {
+            runDocker,
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: async (ciphertexts: string[]) => {
+              const echoed = await decryptSecretsEcho(ciphertexts);
+              return ciphertexts.map((c, index) =>
+                c === "tpdaemon.v1.server.KEYID.ciphertext"
+                  ? privatePem
+                  : echoed[index]!
+              );
+            },
+            orchestratorApi: {
+              fetch: () => Promise.resolve(new Response("", { status: 200 })),
+            },
+          },
+        );
+        return result.restarted;
+      };
+      const label = async () =>
+        composeDigestLabel(
+          await Deno.readTextFile(orchestratorComposePath(layout)),
+        );
+      try {
+        await run("GEN1");
+        const gen1 = await label();
+        // The same bundle written again: same compose file, no restart.
+        assertEquals(await run("GEN1"), false);
+        assertEquals(await label(), gen1);
+        // A rotated bundle with the same conf: the compose file changes, so
+        // compose recreates the process that read its trust roots at start.
+        assertEquals(await run("GEN2"), true);
+        const gen2 = await label();
+        assertEquals(gen2 === gen1, false);
+        assertEquals(
+          await Deno.readTextFile(join(orchestratorTlsDir(layout), "ca.pem")),
+          orgTlsWithCa("GEN2").caCertPem,
+        );
+        // A reconcile that fails at compose up has already written the new
+        // digest, so the next try's `compose up` still sees a container whose
+        // label is out of date and recreates it.
+        await assertRejects(() => run("GEN3", failingComposeUp()));
+        const gen3 = await label();
+        assertEquals(gen3 === gen2, false);
+        await run("GEN3");
+        assertEquals(await label(), gen3);
+      } finally {
+        clearLayoutEnv(fixture);
       }
     });
   },
@@ -1097,10 +1346,12 @@ test({
   permissions: { env: true, read: true, write: true, run: false },
   fn: async () => {
     await withTempLayout(async (fixture) => {
-      await seedOrchestratorHostPrep(resolveLayout(fixture.env));
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
       applyLayoutEnv(fixture);
       const privatePem =
         "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n";
+      const tlsKeyEnvelope = "tpdaemon.v1.server.KEYID.ciphertext";
       try {
         const result = await handleManagedHaReconcile(
           presentPayload({
@@ -1108,7 +1359,7 @@ test({
             orgTlsMaterial: {
               certificatePem:
                 "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
-              privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+              privateKeyEnvelope: tlsKeyEnvelope,
               caCertPem:
                 "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n",
             },
@@ -1117,8 +1368,12 @@ test({
           {
             runDocker: fakeRunWithRunningOrchestrator(),
             ensureDocker: () => Promise.resolve(),
-            decryptSecrets: (ciphertexts) =>
-              Promise.resolve(ciphertexts.map(() => privatePem)),
+            decryptSecrets: async (ciphertexts) => {
+              const echoed = await decryptSecretsEcho(ciphertexts);
+              return ciphertexts.map((c, index) =>
+                c === tlsKeyEnvelope ? privatePem : echoed[index]!
+              );
+            },
             orchestratorApi: {
               fetch: () => Promise.resolve(new Response("", { status: 200 })),
             },
@@ -1126,7 +1381,115 @@ test({
         );
         assertEquals(result.restarted, true);
       } finally {
-        clearLayoutEnv();
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile rewrites api.cnf when only orchestratorApiUser is in the payload",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedLegacyOrchestratorApiCnf(layout);
+      applyLayoutEnv(fixture);
+      const payload = presentPayload();
+      delete payload.orchestratorRaftToken;
+      try {
+        await handleManagedHaReconcile(payload, new Date().toISOString(), {
+          runDocker: fakeRunWithRunningOrchestrator(),
+          ensureDocker: () => Promise.resolve(),
+          decryptSecrets: decryptSecretsEcho,
+          orchestratorApi: {
+            fetch: () => Promise.resolve(new Response("", { status: 200 })),
+          },
+        });
+        const apiCreds = parseProxySqlClientCnf(
+          await Deno.readTextFile(orchestratorApiCnfPath(layout)),
+          "api.cnf",
+        );
+        assertEquals(apiCreds.user, orchestratorApiUsername());
+        assertEquals(apiCreds.password, orchestratorApiPlaintext());
+        const raftCreds = parseProxySqlClientCnf(
+          await Deno.readTextFile(orchestratorRaftCnfPath(layout)),
+          "raft.cnf",
+        );
+        assertEquals(raftCreds.password, "raft-auth-plain");
+      } finally {
+        clearLayoutEnv(fixture);
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedHaReconcile legacy topology login picks the lowest managedId MySQL cluster",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = resolveLayout(fixture.env);
+      await seedOrchestratorHostPrep(layout);
+      applyLayoutEnv(fixture);
+      const clusterA = {
+        managedId: "00000000-0000-4000-8000-000000000099",
+        clusterAlias: "cluster-a",
+        engine: "mysql" as const,
+        members: [{
+          memberId: MEMBER_ID,
+          role: "primary" as const,
+          replicaClass: null,
+          host: "db-a",
+          port: 3306,
+          promotionRule: "prefer" as const,
+        }],
+        replicationUsername: "tp_repl_a",
+        replicationPasswordEnvelope: "tpdaemon.v1.repl-a",
+      };
+      const clusterB = {
+        managedId: "00000000-0000-4000-8000-000000000001",
+        clusterAlias: "cluster-b",
+        engine: "mysql" as const,
+        members: [{
+          memberId: "00000000-0000-4000-8000-0000000000b2",
+          role: "primary" as const,
+          replicaClass: null,
+          host: "db-b",
+          port: 3306,
+          promotionRule: "prefer" as const,
+        }],
+        replicationUsername: "tp_repl_b",
+        replicationPasswordEnvelope: "tpdaemon.v1.repl-b",
+      };
+      try {
+        await handleManagedHaReconcile(
+          presentPayload({
+            topologyUser: undefined,
+            clusters: [clusterA, clusterB],
+          }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunWithRunningOrchestrator(),
+            ensureDocker: () => Promise.resolve(),
+            decryptSecrets: (ciphertexts) =>
+              Promise.resolve(
+                ciphertexts.map((c) => c.replace(/^tpdaemon\.v1\./, "")),
+              ),
+            orchestratorApi: {
+              fetch: () => Promise.resolve(new Response("", { status: 200 })),
+            },
+          },
+        );
+        const conf = JSON.parse(
+          await Deno.readTextFile(orchestratorConfPath(layout)),
+        ) as Record<string, unknown>;
+        assertEquals(conf.MySQLTopologyUser, "tp_repl_b");
+        assertEquals(conf.MySQLTopologyPassword, "repl-b");
+      } finally {
+        clearLayoutEnv(fixture);
       }
     });
   },

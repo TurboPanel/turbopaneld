@@ -179,9 +179,7 @@ export class ManagedEngineExitGuard {
     const { managedId, memberId } = member;
     if (!(await pathExists(managedDir(this.#layout, managedId)))) return;
 
-    if (
-      await isManagedMemberDemoted(this.#layout, managedId, member.memberId)
-    ) {
+    if (await isManagedMemberDemoted(this.#layout, managedId)) {
       this.#loggedSkip.delete(managedId);
       return;
     }

@@ -43,6 +43,7 @@ import {
   ensureProxySqlIngress,
   inspectProxySqlContainer,
   readCurrentProxySqlBindAddresses,
+  readCurrentProxySqlIpv6Subnet,
   readCurrentProxySqlListenerPorts,
   readCurrentProxySqlManagedNetwork,
   readCurrentProxySqlSegmentAttachments,
@@ -439,6 +440,11 @@ async function ensurePresentProxySql(
   const preservedListenerPorts = await readCurrentProxySqlListenerPorts(
     layout,
   );
+  // And ProxySQL's own IPv6 network exactly as the last reconcile left it:
+  // adding it is `managed.ingress.reconcile`'s job, because that path also
+  // switches ProxySQL's listeners to IPv6 (a network without them would
+  // forward IPv6 clients to a port nothing listens on).
+  const preservedIpv6Subnet = await readCurrentProxySqlIpv6Subnet(layout);
   await ensureProxySqlIngress(
     layout,
     descriptor,
@@ -448,6 +454,7 @@ async function ensurePresentProxySql(
       segmentAttachments: preservedSegments,
       listenerPorts: preservedListenerPorts,
       managedNetwork,
+      ipv6Subnet: preservedIpv6Subnet,
     },
   );
   // Restart only once the compose file we just healed is known to exist —

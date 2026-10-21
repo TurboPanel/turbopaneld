@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -21,7 +21,9 @@ import {
   isWritableSql,
   listNonLocalAccountsSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  masterGtidWaitSql,
   parseGlobalPrivAccountRows,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteAccount,
   quoteIdentifier,
@@ -62,6 +64,25 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
     ),
     true,
   );
+  // Below the migration level, MariaDB's own DELETE HISTORY is taken back too.
+  assertEquals(
+    grantDatabaseSql("db", "u", "read-write").includes("Delete_history_priv"),
+    true,
+  );
+  assertEquals(
+    grantDatabaseSql("db", "u", "owner").includes("Delete_history_priv"),
+    false,
+  );
+  assertEquals(
+    grantDatabaseSql("db", "u", "read-only").includes(
+      "Show_create_routine_priv",
+    ),
+    true,
+  );
+  assertEquals(
+    grantDatabaseSql("db", "u", "admin").includes("tp_excess"),
+    false,
+  );
   const repl = ensureReplicationAccountSql("tp_repl", "x", ["203.0.113.5"]);
   assertEquals(repl.includes("`tp_repl`@'203.0.113.5'"), true);
   // Server-side TLS enforcement, independent of what the standby requests.
@@ -76,9 +97,22 @@ test("privilege and replication dialect is MariaDB-shaped", () => {
     username: "tp_repl",
     password: "s3cret",
   });
-  assertEquals(change.includes("CHANGE MASTER TO"), true);
-  assertEquals(change.includes("MASTER_USE_GTID = slave_pos"), true);
-  assertEquals(change.includes("START SLAVE"), true);
+  for (
+    const expected of [
+      "CHANGE MASTER TO",
+      "  MASTER_HOST = '203.0.113.10',",
+      "  MASTER_PORT = 3306,",
+      "  MASTER_USER = 'tp_repl',",
+      "  MASTER_USE_GTID = slave_pos,",
+      "  MASTER_SSL = 1,",
+      "  MASTER_SSL_CA = '/etc/mysql/tls/ca.crt',",
+      "  MASTER_SSL_VERIFY_SERVER_CERT = 1,",
+      "  MASTER_CONNECT_RETRY = 10;",
+      "START SLAVE;",
+    ]
+  ) {
+    assertStringIncludes(change, expected);
+  }
   assertEquals(change.includes("SOURCE_AUTO_POSITION"), false);
   const follow = followReplicationSourceSql({
     host: "10.100.0.4",
@@ -141,8 +175,12 @@ test("account, privilege, and census SQL builders cover MariaDB hosts", () => {
   assertEquals(create.includes("CREATE USER IF NOT EXISTS"), true);
 
   assertEquals(
-    grantDatabaseSql("appdb", "app", "owner").includes("WITH GRANT OPTION"),
+    grantDatabaseSql("appdb", "app", "admin").includes("WITH GRANT OPTION"),
     true,
+  );
+  assertEquals(
+    grantDatabaseSql("appdb", "app", "owner").includes("WITH GRANT OPTION"),
+    false,
   );
   assertEquals(
     grantDatabaseSql("appdb", "app", "read-only").includes("SELECT, SHOW VIEW"),
@@ -195,6 +233,14 @@ test("account, privilege, and census SQL builders cover MariaDB hosts", () => {
   );
   assertEquals(
     ensureSocketAdminSql("mariadb").includes("`mariadb`@'localhost'"),
+    true,
+  );
+});
+
+test("switchover SQL uses MASTER_GTID_WAIT and gtid_current_pos", () => {
+  assertEquals(primaryFinalGtidSetSql().includes("gtid_current_pos"), true);
+  assertEquals(
+    masterGtidWaitSql("0-1-5", 120).includes("MASTER_GTID_WAIT"),
     true,
   );
 });

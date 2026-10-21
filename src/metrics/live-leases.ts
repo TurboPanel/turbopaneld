@@ -17,7 +17,7 @@ export const LIVE_METRICS_INTERVAL_MS = 10_000;
 /** The one scheduler surface this manager drives. */
 export type LiveLeaseSchedulerLike = {
   setIntervalMs(ms: number): void;
-  /** Present on the real scheduler; `true` under the negotiated v7 wire. */
+  /** Present on the real scheduler; `true` under the negotiated v8 wire. */
   splitsLiveStream?(): boolean;
   /** Run/stop the stream-only sampler beside the baseline timer. */
   setStreamIntervalMs?(ms: number | null): void;
@@ -101,7 +101,7 @@ export class LiveLeaseManager {
   #applyCadence(): void {
     const scheduler = this.#scheduler;
     if (scheduler.splitsLiveStream?.() && scheduler.setStreamIntervalMs) {
-      // v7: the 60 s baseline never pauses and is the only durable sample;
+      // v8: the 60 s baseline never pauses and is the only durable sample;
       // the live cadence is a stream-only sampler beside it.
       scheduler.setIntervalMs(this.#baselineIntervalMs);
       scheduler.setStreamIntervalMs(

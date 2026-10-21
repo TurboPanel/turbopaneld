@@ -449,7 +449,7 @@ test("a destroyed member is not started", async () => {
       layout.stateDir,
       MANAGED_ID,
       MEMBER_ID,
-      "2026-10-08T12:00:00.000Z",
+      new Date().toISOString(),
     );
     const fake = docker();
     const guard = new ManagedEngineExitGuard({
