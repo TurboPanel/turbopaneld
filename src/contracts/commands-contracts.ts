@@ -9148,6 +9148,17 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     role: value.role,
     password: value.password,
   };
+  parseProxySqlUserRouting(value, user);
+  parseProxySqlUserFlags(value, user);
+  parseProxySqlUserLimits(value, user);
+  return user;
+}
+
+/** Optional default database and connection role of a login. */
+function parseProxySqlUserRouting(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
   if (value.defaultDatabase !== undefined) {
     if (
       typeof value.defaultDatabase !== "string" ||
@@ -9170,22 +9181,21 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.connectionRole = value.connectionRole;
   }
-  if (value.tool !== undefined) {
-    if (typeof value.tool !== "boolean") {
-      throw new TypeError("Invalid managed.ingress.reconcile user tool");
+}
+
+/** Optional boolean flags of a login (`tool`, `straightThrough`); absent = false. */
+function parseProxySqlUserFlags(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
+  for (const key of ["tool", "straightThrough"] as const) {
+    const flag = value[key];
+    if (flag === undefined) continue;
+    if (typeof flag !== "boolean") {
+      throw new TypeError(`Invalid managed.ingress.reconcile user ${key}`);
     }
-    user.tool = value.tool;
+    user[key] = flag;
   }
-  if (value.straightThrough !== undefined) {
-    if (typeof value.straightThrough !== "boolean") {
-      throw new TypeError(
-        "Invalid managed.ingress.reconcile user straightThrough",
-      );
-    }
-    user.straightThrough = value.straightThrough;
-  }
-  parseProxySqlUserLimits(value, user);
-  return user;
 }
 
 /** Optional source limit and connection cap of a login (absent = no limit). */

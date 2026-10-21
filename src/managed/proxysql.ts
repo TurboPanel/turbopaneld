@@ -1140,6 +1140,28 @@ function warnIgnoredStraightThrough(
   );
 }
 
+/** One `{ ... }` row of the cold-start user table. */
+function renderUserRow(
+  family: "mysql" | "pgsql",
+  cluster: ProxySqlClusterDesired,
+  user: ProxySqlUserDesired,
+): string {
+  warnIgnoredStraightThrough(family, user);
+  const fastForward = userUsesFastForward(family, user)
+    ? " fast_forward=1"
+    : "";
+  // ProxySQL 3.0.x `pgsql_users` has no default_schema column (MySQL users
+  // still accept it). Only emit the field for mysql family.
+  const defaultSchema = family === "mysql" && user.defaultDatabase
+    ? ` default_schema="${escapeProxySqlConfigString(user.defaultDatabase)}"`
+    : "";
+  const name = escapeProxySqlConfigString(user.username);
+  const password = escapeProxySqlConfigString(user.password);
+  const hostgroup = userDefaultHostgroup(cluster, user);
+  const ssl = cluster.requireTls ? 1 : 0;
+  return `    { username="${name}" password="${password}" default_hostgroup=${hostgroup} active=1 use_ssl=${ssl}${fastForward}${defaultSchema} }`;
+}
+
 function renderUserRows(
   family: "mysql" | "pgsql",
   clusters: readonly ProxySqlClusterDesired[],
@@ -1151,28 +1173,7 @@ function renderUserRows(
     for (const user of cluster.users) {
       if (seen.has(user.username)) continue;
       seen.add(user.username);
-      // ProxySQL 3.0.x `pgsql_users` has no default_schema column (MySQL users
-      // still accept it). Only emit the field for mysql family.
-      const defaultSchema = family === "mysql" && user.defaultDatabase
-        ? ` default_schema="${
-          escapeProxySqlConfigString(user.defaultDatabase)
-        }"`
-        : "";
-      warnIgnoredStraightThrough(family, user);
-      const fastForward = userUsesFastForward(family, user)
-        ? " fast_forward=1"
-        : "";
-      rows.push(
-        `    { username="${
-          escapeProxySqlConfigString(user.username)
-        }" password="${
-          escapeProxySqlConfigString(user.password)
-        }" default_hostgroup=${
-          userDefaultHostgroup(cluster, user)
-        } active=1 use_ssl=${
-          cluster.requireTls ? 1 : 0
-        }${fastForward}${defaultSchema} }`,
-      );
+      rows.push(renderUserRow(family, cluster, user));
     }
   }
   return rows;
