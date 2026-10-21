@@ -331,7 +331,7 @@ registry auth, query strings, request bodies, the approval token itself. An
 2. Platform allowance, ownership observation, signed approval verifier,
    `/grpc` + `/session` proven end to end, still observe.
 3. **This role (added)**: Traefik on a read-only filtered socket behind a
-   per-host switch (off by default); with it on, the tp-created Tecnativa
+   per-host switch (on by default); with it on, the tp-created Tecnativa
    container is removed.
 4. `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`), drops
    the `sudo -u self docker` fallback, **enforce mode**; `tp` still in `docker`.
