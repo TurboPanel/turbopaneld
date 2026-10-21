@@ -57,11 +57,13 @@ import {
   strongestPrivilege,
 } from "./postgres-sql.ts";
 import {
+  DATABASE_OWNER_SQL,
   databaseAdminAttributesSql,
   databaseIsEmptySql,
   databaseOwnerSql,
   dropOwnerRolesSql,
   ensureOwnerRolesSql,
+  handOverPlatformObjectsSql,
   moveDatabaseOwnerSql,
   OWNER_ROLE_MAX_DATABASE_NAME,
   ownerLoginReturnSql,
@@ -165,7 +167,13 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
       ctx.rootUsername,
       db,
       restoreResetSql(),
-      restoreReadWriteLoginSchemasSql(),
+      [
+        restoreReadWriteLoginSchemasSql(),
+        handOverPlatformObjectsSql(
+          DATABASE_OWNER_SQL,
+          "ARRAY[current_user::text]",
+        ),
+      ].join("\n"),
     ];
   },
 };

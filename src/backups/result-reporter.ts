@@ -49,12 +49,16 @@ export type SpooledBackupRunResult = Omit<
   "type" | "id" | "nextRunAt" | "at"
 >;
 
+/** Longest database name sent (Postgres 63, MySQL 64). */
+const MAX_DATABASE_CHARS = 128;
+
 const OPTIONAL_FIELDS = [
   "error",
   "backupId",
   "sizeBytes",
   "checksum",
   "path",
+  "database",
   "pruned",
 ] as const;
 
@@ -140,6 +144,14 @@ function checkArtifactFields(raw: Record<string, unknown>): string | null {
     !(typeof path === "string" && path.length <= MAX_PATH_CHARS)
   ) {
     return "invalid path";
+  }
+  const database = raw.database;
+  if (
+    !isAbsent(database) &&
+    !(typeof database === "string" && database.length > 0 &&
+      database.length <= MAX_DATABASE_CHARS)
+  ) {
+    return "invalid database";
   }
   if (!isAbsent(raw.pruned) && !isPrunedList(raw.pruned)) {
     return "invalid pruned";
