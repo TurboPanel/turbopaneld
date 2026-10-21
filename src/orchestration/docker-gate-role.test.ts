@@ -348,7 +348,7 @@ jinjaTest(
       defaults,
       'docker_gate_ro_run_dir: "{{ docker_gate_run_dir }}/ro"',
     );
-    assertStringIncludes(defaults, 'docker_gate_ingress_socket: ""');
+    assertStringIncludes(defaults, "docker_gate_ingress_socket: true");
     const tasks = await read("tasks/install.yml");
     assertStringIncludes(
       tasks,
@@ -357,7 +357,7 @@ jinjaTest(
   },
 );
 
-test("stage 3: Traefik's switch is root-owned, sticky, and off unless turned on", async () => {
+test("stage 3: Traefik's switch is root-owned, sticky, and on unless turned off", async () => {
   const install = await read("tasks/install.yml");
   const on = install.slice(
     install.indexOf("Turn on Traefik's read-only gate socket"),
@@ -366,7 +366,7 @@ test("stage 3: Traefik's switch is root-owned, sticky, and off unless turned on"
   assertStringIncludes(on, 'dest: "{{ docker_gate_ingress_switch_file }}"');
   assertStringIncludes(on, "owner: root");
   assertStringIncludes(on, 'mode: "0640"');
-  // An empty variable (every update converge) neither writes nor removes it.
+  // An empty variable neither writes nor removes it.
   for (const task of [on, install.slice(install.indexOf("Turn off Traefik"))]) {
     assertStringIncludes(
       task,

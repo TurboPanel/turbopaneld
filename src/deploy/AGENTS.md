@@ -751,7 +751,7 @@ redeploy of the previous release, which brings the coupled layout back and
 leaves the new proxy to be removed by hand (`docker compose -p
 turbopanel-docker-proxy down`).
 
-**Docker gate stage 3 (per-host switch, off by default).** When the root-owned
+**Docker gate stage 3 (per-host switch, on by default).** When the root-owned
 `/opt/turbopanel/lib/docker-gate/ingress-socket.on` and the gate's
 `/run/turbopanel-gate/ro` both exist (`ingressDockerGateEnabled`), both
 Traefiks instead mount that directory read-only at `/var/run/turbopanel-gate`
@@ -761,7 +761,7 @@ and inspect. The proxy project is then removed (after the Traefik has switched)
 once no per-service compose file on disk still names
 `tcp://docker-socket-proxy:2375` (`serviceIngressUsesSocketProxy`). The
 anonymous shared Traefik (no descriptor, so no ingress label) keeps the proxy.
-Without the switch nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
+Without the switch (set `docker_gate_ingress_socket: false`) nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
 
 The Traefik compose files and the proxy's own file are applied, not just
 written: the document goes to `docker-compose.pending.yml`, `compose up` runs on
