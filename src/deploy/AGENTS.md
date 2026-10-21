@@ -761,7 +761,7 @@ and inspect. The proxy project is then removed (after the Traefik has switched)
 once no per-service compose file on disk still names
 `tcp://docker-socket-proxy:2375` (`serviceIngressUsesSocketProxy`). The
 anonymous shared Traefik (no descriptor, so no ingress label) keeps the proxy.
-Without the switch (set `docker_gate_ingress_socket: false`) nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
+A gate install or swap failure on a Docker host now FAILS the converge (it only warned before), and a host where the gate cannot be installed fails every converge until fixed. The host keeps its old ingress wiring: Traefik is not touched until the next ingress apply, and the deploy snapshot and rollback cover the switch file. Without the switch (set `docker_gate_ingress_socket: false`) nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
 
 The Traefik compose files and the proxy's own file are applied, not just
 written: the document goes to `docker-compose.pending.yml`, `compose up` runs on

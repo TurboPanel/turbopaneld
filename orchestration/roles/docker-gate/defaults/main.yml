@@ -27,7 +27,7 @@ docker_gate_socket: "{{ docker_gate_run_dir }}/docker.sock"
 docker_gate_ro_run_dir: "{{ docker_gate_run_dir }}/ro"
 docker_gate_ro_socket: "{{ docker_gate_ro_run_dir }}/docker.sock"
 # Whether the daemon points both Traefiks at the read-only socket instead of
-# the Tecnativa socket-proxy container. On by default: true (the default)
+# the socket proxy image. On by default: true (the default)
 # writes the root-owned switch file on every converge, false removes it, empty
 # leaves it as it is. Set false to keep the socket-proxy container.
 docker_gate_ingress_socket: true
