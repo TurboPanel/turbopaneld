@@ -327,6 +327,8 @@ BuildKit, driven by `tp`, with no per-site-owner limits yet. There is no opt-out
 host. A development install runs the commands as the developer with `clearEnv` and an explicit
 allow-list, and no resource caps.
 
+**Site builds get the same Node.** A site built from a Git source has the default tenant Node (the newest series, as for an app with no pinned series) on its build `PATH`, vendored before the build by the same step as apps. A site that publishes an `outputDirectory` and kept the default `public` root serves the release root (`.`). The folder a site serves is checked before the release is promoted, so a missing folder fails the deploy with `current` untouched and no release directory left behind (`site-release.ts`).
+
 **Native-app builds run on the tenant runtime.** `ensureNativeAppRuntime`
 vendors `vendor/node-app/<series>/current` **before** `applySourceReleases`,
 because the install line (`corepack pnpm install`, …) runs in the Git build —
