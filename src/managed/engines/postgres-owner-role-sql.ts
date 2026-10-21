@@ -12,7 +12,7 @@
  * by the read-write and read-only logins at once. The roles are the panel's:
  * the `tp_` prefix is reserved, so no login can collide with them.
  *
- * Nothing here converts an existing database or reassigns ownership.
+ * An existing database is only converted on request (`reassignDatabaseObjectsSql`).
  */
 
 import {
@@ -154,6 +154,79 @@ export function ownerLoginReturnSql(login: string): string {
     `           AND EXISTS (SELECT 1 FROM pg_catalog.pg_roles o WHERE o.rolname = 'tp_' || d.datname || '_owner') LOOP`,
     `    EXECUTE pg_catalog.format('ALTER DATABASE %I OWNER TO %I', r.datname, 'tp_' || r.datname || '_owner');`,
     `  END LOOP;`,
+    `END`,
+    `$turbopanel$;`,
+  ].join("\n");
+}
+
+/**
+ * Run connected to the database: hand everything in it that a person made to
+ * `owner`, whoever owns it now (the platform admin, or logins that each took
+ * the database in turn). Ownership only: no row, column or grant is changed,
+ * and the whole script is one transaction, so it either finishes or leaves
+ * everything as it was. Objects that belong to an extension, and objects that
+ * already belong to `owner`, are left alone.
+ *
+ * `REASSIGN OWNED` is not used on purpose: it works on a whole role across
+ * every database, and cannot touch the platform admin at all.
+ */
+export function reassignDatabaseObjectsSql(owner: string): string {
+  const o = quoteLiteral(owner);
+  const userSchema =
+    `n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`;
+  const notExtension = (classId: string, oid: string) =>
+    `NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend e WHERE e.classid = '${classId}'::pg_catalog.regclass AND e.objid = ${oid} AND e.deptype = 'e')`;
+  const notMine = (column: string) =>
+    `${column} <> (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = ${o})`;
+  const each = (query: string, statement: string) => [
+    `  FOR r IN ${query} LOOP`,
+    `    EXECUTE ${statement};`,
+    `  END LOOP;`,
+  ];
+  return [
+    `DO $turbopanel$`,
+    `DECLARE r record;`,
+    `BEGIN`,
+    ...each(
+      `SELECT n.nspname AS name FROM pg_catalog.pg_namespace n WHERE ${userSchema} AND ${
+        notMine("n.nspowner")
+      } AND n.nspowner <> 'pg_database_owner'::pg_catalog.regrole AND ${
+        notExtension("pg_namespace", "n.oid")
+      }`,
+      `pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', r.name, ${o})`,
+    ),
+    // ALTER TABLE moves views, materialized views, sequences and foreign
+    // tables too. A sequence tied to a column follows its table.
+    ...each(
+      `SELECT c.oid::pg_catalog.regclass::text AS obj FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE ${userSchema} AND c.relkind IN ('r', 'p', 'v', 'm', 'f') AND ${
+        notMine("c.relowner")
+      } AND ${
+        notExtension("pg_class", "c.oid")
+      } AND NOT c.relispartition ORDER BY c.oid`,
+      `pg_catalog.format('ALTER TABLE %s OWNER TO %I', r.obj, ${o})`,
+    ),
+    ...each(
+      `SELECT c.oid::pg_catalog.regclass::text AS obj FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE ${userSchema} AND c.relkind = 'S' AND ${
+        notMine("c.relowner")
+      } AND ${
+        notExtension("pg_class", "c.oid")
+      } AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_class'::pg_catalog.regclass AND d.objid = c.oid AND d.deptype IN ('a', 'i'))`,
+      `pg_catalog.format('ALTER SEQUENCE %s OWNER TO %I', r.obj, ${o})`,
+    ),
+    ...each(
+      `SELECT p.oid::pg_catalog.regprocedure::text AS obj FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace WHERE ${userSchema} AND ${
+        notMine("p.proowner")
+      } AND ${notExtension("pg_proc", "p.oid")}`,
+      `pg_catalog.format('ALTER ROUTINE %s OWNER TO %I', r.obj, ${o})`,
+    ),
+    ...each(
+      `SELECT t.oid::pg_catalog.regtype::text AS obj, t.typtype AS kind FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace WHERE ${userSchema} AND ${
+        notMine("t.typowner")
+      } AND ${
+        notExtension("pg_type", "t.oid")
+      } AND (t.typtype IN ('e', 'd', 'r') OR (t.typtype = 'c' AND EXISTS (SELECT 1 FROM pg_catalog.pg_class k WHERE k.oid = t.typrelid AND k.relkind = 'c')))`,
+      `pg_catalog.format(CASE r.kind WHEN 'd' THEN 'ALTER DOMAIN %s OWNER TO %I' ELSE 'ALTER TYPE %s OWNER TO %I' END, r.obj, ${o})`,
+    ),
     `END`,
     `$turbopanel$;`,
   ].join("\n");

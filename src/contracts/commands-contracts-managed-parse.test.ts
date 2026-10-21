@@ -1655,6 +1655,28 @@ test("parseManagedApplyPayload: databases[].ownerRole is optional (version skew)
   );
 });
 
+test("parseManagedApplyPayload: databases[].convertExisting is optional, true, and needs ownerRole on a create", () => {
+  const withOp = (extra: Record<string, unknown>, action = "create") =>
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      databases: [{ name: "shop", action, ...extra }],
+    }).databases![0]!;
+  assertEquals("convertExisting" in withOp({ ownerRole: true }), false);
+  assertEquals(
+    withOp({ ownerRole: true, convertExisting: true }).convertExisting,
+    true,
+  );
+  for (
+    const bad of [
+      () => withOp({ convertExisting: true }),
+      () => withOp({ ownerRole: true, convertExisting: false }),
+      () => withOp({ ownerRole: true, convertExisting: true }, "drop"),
+    ]
+  ) {
+    assertThrows(bad, TypeError, "convertExisting must be true");
+  }
+});
+
 test("parseManagedApplyPayload: databases[].ownerLogin is optional, a login name, and needs ownerRole on a create", () => {
   const withOp = (extra: Record<string, unknown>) =>
     parseManagedApplyPayload({

@@ -106,6 +106,12 @@ Database admin login on a database without an owner role the read-write rights.
 The control plane sends those only to a primary that lists it (else 409
 `managed_database_owner_needs_daemon_update` for a chosen login owner).
 
+**Managed database convert (`managed-database-convert-v1`).** No message: it
+says this daemon honours `databases[].convertExisting` on a Postgres create
+with `ownerRole`: an existing database (platform admin's or a login's, data
+and all) is handed to its owner role in one transaction, ownership only. The
+control plane sends it only to a primary that lists it.
+
 **Managed permissions read (`managed-permissions-read-v1`).** Same shape as
 on-demand health: a control plane that sees the feature may send
 `managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,

@@ -1944,6 +1944,15 @@ export type ManagedApplyDatabaseOp = {
    * Needs `managed-database-owner-v1`.
    */
   ownerLogin?: string;
+  /**
+   * Postgres only, on a create with `ownerRole`. Asked for by the customer:
+   * a database that already exists with another owner (and may hold data) is
+   * moved onto its owner role. The database and everything in it that is not
+   * part of an extension is handed to the owner role in one transaction; no
+   * data is touched. Without it an existing database is left as it is.
+   * Needs `managed-database-convert-v1`.
+   */
+  convertExisting?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -7475,6 +7484,20 @@ function parseManagedDatabaseOwnerLogin(
   return value;
 }
 
+/** `convertExisting` of a database op: true, only on a create with `ownerRole`. */
+function parseManagedDatabaseConvert(
+  entry: Record<string, unknown>,
+): boolean {
+  const value = entry.convertExisting;
+  if (value === undefined) return false;
+  if (value !== true || entry.ownerRole !== true || entry.action !== "create") {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: convertExisting must be true on a created database with ownerRole",
+    );
+  }
+  return true;
+}
+
 function parseManagedApplyDatabases(
   value: unknown,
 ): ManagedApplyDatabaseOp[] | undefined {
@@ -7507,6 +7530,7 @@ function parseManagedApplyDatabases(
       action: entry.action as ManagedApplyDatabaseOp["action"],
       ...(entry.ownerRole === true ? { ownerRole: true } : {}),
       ...(ownerLogin === undefined ? {} : { ownerLogin }),
+      ...(parseManagedDatabaseConvert(entry) ? { convertExisting: true } : {}),
     });
   }
   return databases;

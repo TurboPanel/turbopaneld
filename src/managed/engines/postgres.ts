@@ -70,6 +70,7 @@ import {
   type OwnerRoleLoginLevel,
   ownerRoleLoginSql,
   ownerRoleNames,
+  reassignDatabaseObjectsSql,
 } from "./postgres-owner-role-sql.ts";
 import {
   DOWN_ENGINE_CENSUS,
@@ -607,6 +608,7 @@ async function createOwnerRoleDatabase(
   ctx: ManagedEngineContext,
   name: string,
   ownerLogin?: string,
+  convertExisting = false,
 ): Promise<void> {
   if (name.length > OWNER_ROLE_MAX_DATABASE_NAME) {
     throw new Error(
@@ -636,6 +638,16 @@ async function createOwnerRoleDatabase(
     await databaseIsEmpty(ctx, name)
   ) {
     await runPsql(ctx, ensureOwnerRolesSql(name));
+    await runPsql(ctx, moveDatabaseOwnerSql(name, names.owner));
+    return;
+  }
+  if (convertExisting && !RESERVED_DATABASES.has(name)) {
+    // Asked for by the customer: a database that exists with another owner
+    // (data and all) moves onto its owner role. Ownership only, one
+    // transaction per step; the database itself moves last, so a failure
+    // leaves it with its old owner and the next apply repeats the whole job.
+    await runPsql(ctx, ensureOwnerRolesSql(name));
+    await runPsql(ctx, reassignDatabaseObjectsSql(names.owner), name);
     await runPsql(ctx, moveDatabaseOwnerSql(name, names.owner));
     return;
   }
@@ -1414,7 +1426,12 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const applied: string[] = [];
     await forEachSequential(ops, async (op) => {
       if (op.action === "create" && op.ownerRole === true) {
-        await createOwnerRoleDatabase(ctx, op.name, op.ownerLogin);
+        await createOwnerRoleDatabase(
+          ctx,
+          op.name,
+          op.ownerLogin,
+          op.convertExisting === true,
+        );
       } else if (op.action === "create") {
         // CREATE DATABASE cannot run inside PL/pgSQL; check then create.
         const existing = await parsePsqlRows(ctx, databaseExistsSql(op.name));
