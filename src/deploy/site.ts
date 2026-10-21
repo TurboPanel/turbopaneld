@@ -2020,7 +2020,7 @@ async function assertReleaseDocumentRoot(
   );
   if (stat === null) {
     throw new Error(
-      `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
+      `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}"). Set the site's "root" to the folder the build writes, or set "outputDirectory" to it and leave "root" unset`,
     );
   }
   if (stat !== "directory" && !stat.isDirectory) {
