@@ -89,13 +89,20 @@ export type MetricsSchedulerOptions = {
   clearTimeoutFn?: typeof clearTimeout;
   logRateLimitMs?: number;
   /**
-   * `true` once the control plane negotiated the `metrics-v7` wire feature.
+   * `true` once the control plane negotiated the `metrics-v8` wire feature.
    * Then live leases keep the baseline sampler running and the 10 s stream
    * runs beside it on its own collector; each sample carries
    * `metadata.durable` (baseline `true`, stream `false`). Closed (v6) keeps
    * the single-cadence behaviour.
    */
   durabilityFlag?: () => boolean;
+  /**
+   * `true` once the control plane also advertises `metrics-v8-sizes`. Until
+   * then the per-sample sizes are stripped from the v8 `extended` block: a
+   * control plane that predates them rejects the unknown keys and would drop
+   * the whole sample.
+   */
+  sizesFlag?: () => boolean;
   /** Override {@link METRICS_COLLECT_DEADLINE_MS} (tests). */
   collectDeadlineMs?: number;
   onLog?: (level: MetricsLogLevel, message: string) => void;
@@ -146,6 +153,16 @@ export function rebindMetricsScheduler(args: {
   };
 }
 
+/** Remove the per-sample sizes from a sample's `extended` block (the control plane does not know them yet). */
+function stripSizes(sample: unknown): void {
+  const extended = (sample as { extended?: Record<string, unknown> }).extended;
+  if (!extended) return;
+  delete extended.sizes;
+  delete extended.filesystemSizes;
+  delete extended.gpuSizes;
+  delete extended.networkSizes;
+}
+
 export class MetricsScheduler {
   #serverId: string;
   readonly #collectorFactory: () => MetricsCollector;
@@ -160,6 +177,7 @@ export class MetricsScheduler {
   readonly #logRateLimitMs: number;
   readonly #onLog: (level: MetricsLogLevel, message: string) => void;
   readonly #durabilityFlag: () => boolean;
+  readonly #sizesFlag: () => boolean;
 
   #streamCollector: MetricsCollector | undefined;
   #streamTimer: ReturnType<typeof setInterval> | undefined;
@@ -196,6 +214,7 @@ export class MetricsScheduler {
     this.#logRateLimitMs = options.logRateLimitMs ?? METRICS_LOG_RATE_LIMIT_MS;
     this.#onLog = options.onLog ?? defaultOnLog;
     this.#durabilityFlag = options.durabilityFlag ?? (() => false);
+    this.#sizesFlag = options.sizesFlag ?? (() => false);
     this.#collectDeadlineMs = options.collectDeadlineMs ??
       METRICS_COLLECT_DEADLINE_MS;
   }
@@ -331,17 +350,18 @@ export class MetricsScheduler {
 
   #stampDurable<T>(sample: T, durable: boolean): T {
     if (!this.#durabilityFlag()) {
-      // v6 wire: the v7-only `extended` block (free text included) is never sent.
+      // v6 wire: the v8-only `extended` block (free text included) is never sent.
       delete (sample as { extended?: unknown }).extended;
       return sample;
     }
     const metadata = (sample as { metadata?: Record<string, unknown> })
       .metadata;
     if (metadata) {
-      // metrics-v7 negotiated: this is a v7 sample (durable flag, extended).
+      // metrics-v8 negotiated: this is a v8 sample (durable flag, extended).
       metadata.version = METRICS_SCHEMA_VERSION;
       metadata.durable = durable;
     }
+    if (!this.#sizesFlag()) stripSizes(sample);
     return sample;
   }
 

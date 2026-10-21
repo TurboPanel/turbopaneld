@@ -95,17 +95,42 @@ export async function buildFilesystemSamples(
   topology: FilesystemTopology[],
   statfsIo?: StatfsIo,
 ): Promise<FilesystemSample[]> {
+  return (await buildFilesystemReadings(topology, statfsIo)).samples;
+}
+
+/** What one filesystem's `statfs` said about its size this tick (`null` when the probe failed). */
+export type FilesystemSizeReading = {
+  filesystemId: string;
+  totalBytes: number | null;
+  totalInodes: number | null;
+};
+
+/**
+ * {@link buildFilesystemSamples} plus the size each probe reported in the same
+ * `statfs` call, so a percentage can be taken against the size at that moment
+ * without a second probe.
+ */
+export async function buildFilesystemReadings(
+  topology: FilesystemTopology[],
+  statfsIo?: StatfsIo,
+): Promise<{ samples: FilesystemSample[]; sizes: FilesystemSizeReading[] }> {
   const nonRoot = topology.filter((fs) => !fs.roles.includes("root"));
-  return await Promise.all(nonRoot.map(async (fs): Promise<
-    FilesystemSample
-  > => {
-    const probe = await probeStorage(fs.mountpoint, statfsIo);
-    return {
+  const probed = await Promise.all(nonRoot.map(async (fs) => ({
+    fs,
+    probe: await probeStorage(fs.mountpoint, statfsIo),
+  })));
+  return {
+    samples: probed.map(({ fs, probe }): FilesystemSample => ({
       filesystemId: fs.filesystemId,
       availableBytes: probe?.availableBytes ?? null,
       freeInodes: probe?.freeInodes ?? null,
-    };
-  }));
+    })),
+    sizes: probed.map(({ fs, probe }): FilesystemSizeReading => ({
+      filesystemId: fs.filesystemId,
+      totalBytes: probe?.totalBytes ?? null,
+      totalInodes: probe?.totalInodes ?? null,
+    })),
+  };
 }
 
 /**
@@ -119,7 +144,12 @@ export async function probeRootFilesystemCapacity(
   topology: FilesystemTopology[],
   statfsIo?: StatfsIo,
 ): Promise<
-  { availableBytes: number | null; freeInodes: number | null } | null
+  {
+    availableBytes: number | null;
+    freeInodes: number | null;
+    totalBytes: number | null;
+    totalInodes: number | null;
+  } | null
 > {
   const root = topology.find((fs) => fs.roles.includes("root"));
   if (!root) return null;
@@ -127,5 +157,7 @@ export async function probeRootFilesystemCapacity(
   return {
     availableBytes: probe?.availableBytes ?? null,
     freeInodes: probe?.freeInodes ?? null,
+    totalBytes: probe?.totalBytes ?? null,
+    totalInodes: probe?.totalInodes ?? null,
   };
 }

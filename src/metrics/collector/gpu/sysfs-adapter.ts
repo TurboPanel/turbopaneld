@@ -77,6 +77,16 @@ async function readAmdVramUsedBytes(
   return Number.isFinite(bytes) && bytes >= 0 ? bytes : null;
 }
 
+async function readAmdVramTotalBytes(
+  device: GpuDeviceCandidates,
+  io: SensorIo,
+): Promise<number | null> {
+  if (device.chip !== AMD_HWMON_CHIP) return null;
+  const raw = await io.readFile(`${device.path}/device/mem_info_vram_total`);
+  const bytes = Number(raw?.trim());
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : null;
+}
+
 /**
  * True memory temperature: only AMD's distinct `mem` hwmon label (RDNA2+
  * VRAM-junction sensor), never `junction` — that label is the GPU-die
@@ -269,12 +279,14 @@ export class SysfsGpuAdapter implements GpuAdapter {
         utilization,
         memoryUsedBytes,
         memoryActivityPercent,
+        memoryTotalBytes,
       ] = await Promise.all([
         resolveTemperature(device.temperature, undefined, this.#io),
         readGpuPower(device.power, undefined, this.#io),
         readGpuUtilization(device.utilization, undefined, this.#io),
         readAmdVramUsedBytes(device, this.#io),
         readAmdMemoryBusyPercent(device, this.#io),
+        readAmdVramTotalBytes(device, this.#io),
       ]);
 
       const memoryTemperatureCelsius = await readMemoryTemperatureCelsius(
@@ -301,6 +313,7 @@ export class SysfsGpuAdapter implements GpuAdapter {
       return {
         utilizationPercent,
         memoryUsedBytes,
+        memoryTotalBytes,
         memoryActivityPercent,
         temperatureCelsius: temperature.celsius,
         memoryTemperatureCelsius,

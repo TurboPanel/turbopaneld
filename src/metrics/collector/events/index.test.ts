@@ -1,6 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
-import { EventCollectorSet } from "./index.ts";
+import { EventCollectorSet, MAX_EVENTS_PER_DETECT_TICK } from "./index.ts";
 import type { EventDetectContext } from "./types.ts";
 import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
 
@@ -127,7 +127,8 @@ test("EventCollectorSet: caps combined events at MAX_EVENTS_PER_DETECT_TICK", as
   );
   // 200 NICs each transitioning up -> down produce 200 raw nic_link_down
   // events, well over the cap — assert the truncation actually engaged.
-  assertEquals(events.length, 128);
+  assertEquals(events.length, MAX_EVENTS_PER_DETECT_TICK);
+  assertEquals(MAX_EVENTS_PER_DETECT_TICK, 16);
 });
 
 test("EventCollectorSet: eventId is stable across independently rebuilt samples for the same transition", async () => {
