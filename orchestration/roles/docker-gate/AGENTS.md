@@ -160,7 +160,8 @@ these labels itself and the config trees are daemon-writable today. It must
 tighten (and the labels stop being trusted) when route 2b makes the config trees
 root-owned; the label check can then be replaced by an exact-path list.
 Known gaps, left as findings on purpose: the ingress `docker-socket-proxy`
-service mounts the Docker socket until the stage-3 switch is on.
+(its own compose project, `turbopanel-docker-proxy`) mounts the Docker socket
+until the stage-3 switch is on.
 
 **Helper containers.** Every daemon-started throwaway `docker run` (backup tar,
 restore swap, managed-file ownership, engine volume bootstrap) stamps
@@ -266,10 +267,10 @@ switch file AND `/run/turbopanel-gate/ro` exist. Then both Traefiks mount the
 DIRECTORY read-only at `/var/run/turbopanel-gate` (a directory, so a gate
 restart that recreates the socket does not strand Traefik on a dead inode) and
 use `--providers.docker.endpoint=unix:///var/run/turbopanel-gate/docker.sock`.
-The shared ingress project drops the `docker-socket-proxy` service (and
-`--remove-orphans` deletes the Tecnativa container) once no service Traefik
-compose file on disk still names it; until then it keeps the proxy without
-Traefik depending on it. The anonymous shared Traefik (no
+The `turbopanel-docker-proxy` compose project (the Tecnativa container, no
+longer part of the shared Traefik's project) is removed, after the shared
+Traefik has switched, once no service Traefik compose file on disk still
+names it; until then it stays up. The anonymous shared Traefik (no
 `hosting-ingress` descriptor yet, so no `turbopanel.role=ingress` label for the
 allowance) keeps the proxy until it has one. Without the switch both compose
 documents are byte for byte what they were.

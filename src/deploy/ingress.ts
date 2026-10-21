@@ -50,8 +50,11 @@ import {
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
 } from "./labels.ts";
+import { type DockerProxyStep, planDockerProxy } from "./docker-proxy-plan.ts";
 import {
   assertSafeSystemIngressIdentity,
+  DOCKER_PROXY_CONTAINER_NAME,
+  DOCKER_PROXY_PROJECT,
   readSystemComponentDescriptor,
   SHARED_TRAEFIK_COMPOSE_SERVICE_NAME,
   SOCKET_PROXY_COMPOSE_SERVICE_NAME,
@@ -60,7 +63,7 @@ import {
 } from "./system-component.ts";
 
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
-const TRAEFIK_IMAGE = "traefik:v3.6.6";
+const TRAEFIK_IMAGE = "traefik:v3.7.16";
 /**
  * The only container on the host that sees the Docker socket.
  *
@@ -70,7 +73,7 @@ const TRAEFIK_IMAGE = "traefik:v3.6.6";
  * every co-hosted tenant with it. They now reach Docker through this proxy,
  * which answers only the two read endpoints a Docker provider needs.
  */
-const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:0.3.0";
+const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:v0.5.0";
 const SOCKET_PROXY_PORT = 2375;
 const SOCKET_PROXY_ENDPOINT =
   `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
@@ -100,10 +103,11 @@ export const INGRESS_GATE_SWITCH_FILE =
 export type TraefikDockerSource = "socket-proxy" | "gate";
 
 /**
- * The shared Traefik's Docker access. In gate mode the socket proxy stays in
- * the project only while a service Traefik rendered before the switch still
- * points at it (`keepSocketProxy`); the next render drops it and
- * `--remove-orphans` deletes the container.
+ * The shared Traefik's Docker access. The proxy is its own compose project,
+ * so this only picks the endpoint (it is never rendered into the Traefik
+ * document). In gate mode the proxy stays up only while a service Traefik
+ * rendered before the switch still points at it (`keepSocketProxy`); the next
+ * apply, once the Traefik is on the gate, removes the proxy project.
  */
 export type SharedTraefikDocker =
   | { source: "socket-proxy" }
@@ -615,13 +619,11 @@ export function traefikCompose(
     }`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
   ];
-  const viaProxy = docker.source === "socket-proxy";
-  const dependsLines = viaProxy
-    ? ["    depends_on:", `      - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`]
-    : [];
-  const keepProxy = viaProxy || docker.keepSocketProxy;
-  const proxyLines = keepProxy ? socketProxyServiceLines(ingressNetwork) : [];
-
+  // No `depends_on` and no proxy service: the socket proxy is its own compose
+  // project (see `dockerProxyCompose`), brought up before this document and
+  // reached by service name over the ingress network. Traefik's Docker
+  // provider retries a refused connection, so a proxy that is briefly down
+  // (restart, upgrade) only delays route discovery.
   const lines = [
     `name: ${ingressNetwork}`,
     "",
@@ -674,8 +676,6 @@ export function traefikCompose(
     ...gateVolumeLines(docker.source),
     "    networks:",
     `      - ${ingressNetwork}`,
-    ...dependsLines,
-    ...proxyLines,
     "",
     "networks:",
     `  ${ingressNetwork}:`,
@@ -686,19 +686,38 @@ export function traefikCompose(
 }
 
 /**
- * The host's single Docker-socket proxy, scoped to what a Docker provider
- * actually reads.
+ * The host's single Docker-socket proxy as its own compose document (project
+ * {@link DOCKER_PROXY_PROJECT}, `container_name` {@link
+ * DOCKER_PROXY_CONTAINER_NAME}), scoped to what a Docker provider reads.
  *
  * `CONTAINERS` and `EVENTS` are what Traefik needs to discover routers and
- * follow changes; everything else — `POST` above all, but also images,
- * networks, volumes, exec, and the rest — stays off, which is the proxy's
- * default. So a container that breaks out of Traefik can list containers and
- * watch events, and cannot create, start, mount or exec anything.
+ * follow changes; ping and version are on by the image's own defaults;
+ * everything else — `POST` above all, but also images, networks, volumes,
+ * exec, and the rest — stays off. So a container that breaks out of Traefik
+ * can list containers and watch events, and cannot create, start, mount or
+ * exec anything.
+ *
+ * Endpoint security is unchanged from when this lived inside the Traefik
+ * document: the only container with the Docker socket (read-only bind), no
+ * published ports, joined to the ingress network and no other. The explicit
+ * alias keeps `tcp://docker-socket-proxy:2375` resolving for every Traefik
+ * whatever the service key is later renamed to. No platform labels on
+ * purpose: the Docker gate must keep seeing an unlabelled socket bind as a
+ * finding until its stage-3 switch removes the proxy.
  */
-function socketProxyServiceLines(ingressNetwork: string): string[] {
+export function dockerProxyCompose(ingressNetwork: string): string {
+  assertSafeComposeProjectName(ingressNetwork);
   return [
+    `name: ${DOCKER_PROXY_PROJECT}`,
+    "",
+    "services:",
     `  ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:`,
     `    image: ${SOCKET_PROXY_IMAGE}`,
+    `    container_name: ${DOCKER_PROXY_CONTAINER_NAME}`,
+    "    x-turbopanel:",
+    "      kind: system",
+    "      component: docker-proxy",
+    `      containerName: ${DOCKER_PROXY_CONTAINER_NAME}`,
     "    restart: unless-stopped",
     "    environment:",
     '      CONTAINERS: "1"',
@@ -707,8 +726,23 @@ function socketProxyServiceLines(ingressNetwork: string): string[] {
     "    volumes:",
     "      - /var/run/docker.sock:/var/run/docker.sock:ro",
     "    networks:",
-    `      - ${ingressNetwork}`,
-  ];
+    `      ${ingressNetwork}:`,
+    "        aliases:",
+    `          - ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
+    "",
+    "networks:",
+    `  ${ingressNetwork}:`,
+    "    external: true",
+    "",
+  ].join("\n");
+}
+
+export function dockerProxyDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "ingress", "docker-proxy");
+}
+
+export function dockerProxyComposePath(layout: LayoutPaths): string {
+  return join(dockerProxyDir(layout), "docker-compose.yml");
 }
 
 function assertSafeServiceIngressIdentity(
@@ -1173,11 +1207,6 @@ async function composeNamesSocketProxy(path: string): Promise<boolean> {
   return yaml?.includes(SOCKET_PROXY_ENDPOINT) === true;
 }
 
-/** True when a shared compose document runs the socket-proxy service. */
-function declaresSocketProxy(yaml: string): boolean {
-  return yaml.includes(`\n  ${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:\n`);
-}
-
 async function loadHostingIngressDescriptor(
   layout: LayoutPaths,
 ): Promise<SystemComponentDescriptor | undefined> {
@@ -1263,52 +1292,109 @@ function upSharedTraefik(
 }
 
 /**
- * A service Traefik about to use the socket proxy needs it running. After the
- * switch is turned off, a TCP/UDP-only deploy re-renders its Traefik onto the
- * proxy without rendering the shared project, which may still be in gate mode
- * (no proxy). Add the proxy back to it: same gate-mode Traefik plus the proxy
- * service, so compose only starts the proxy and the shared Traefik (every
- * HTTP route) is not recreated. No shared project: nothing to add it to (a
- * TCP/UDP-only host has never had a proxy; unchanged).
+ * Bring up the host's Docker-socket proxy as its own compose project (see
+ * {@link dockerProxyCompose}). Idempotent: nothing runs when the applied file
+ * is already what would be rendered, no failed `up` left a pending file behind
+ * and the container is running. Called before any Traefik that reaches Docker
+ * through the proxy is started or recreated, so the endpoint already answers.
+ *
+ * It needs no shared Traefik project, so a TCP/UDP-only host (no shared HTTP
+ * Traefik) gets its proxy too.
  */
-async function ensureSharedSocketProxy(
+async function ensureDockerProxy(
   layout: LayoutPaths,
   ingressNetwork: string,
   run: RunDockerFn,
 ): Promise<void> {
-  const composePath = hostingIngressComposePath(layout);
-  const applied = await readTextIfPresent(composePath);
-  if (applied === undefined) return;
-  if (declaresSocketProxy(applied)) {
-    // Declared is not running: a leftover pending file (a failed `up` may have
-    // removed the proxy as an orphan) or a missing container means the proxy
-    // is gone. Re-up the applied file as it is; compose only starts the proxy.
-    const trusted = !(await exists(pendingComposePath(composePath))) &&
-      await socketProxyRunning(ingressNetwork, run);
-    if (!trusted) await upSharedTraefik(layout, applied, run);
+  const yaml = dockerProxyCompose(ingressNetwork);
+  const composePath = dockerProxyComposePath(layout);
+  await Deno.mkdir(dockerProxyDir(layout), { recursive: true, mode: 0o750 });
+  const settled = (await readTextIfPresent(composePath)) === yaml &&
+    !(await exists(pendingComposePath(composePath))) &&
+    await dockerProxyRunning(run);
+  if (settled) return;
+  await applyCompose(
+    composePath,
+    yaml,
+    // No `-p`: the document declares its own project through `name:`.
+    (file) => run(["compose", "-f", file, "up", "-d", "--remove-orphans"]),
+    "Starting Docker socket proxy",
+  );
+}
+
+/**
+ * Tear down the proxy's own project and forget its compose file. Soft-fails
+ * (logged, files kept) so the next converge retries; a proxy that lingers is
+ * only an unused read-only endpoint.
+ */
+async function removeDockerProxy(
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<void> {
+  const down = await run([
+    "compose",
+    "-p",
+    DOCKER_PROXY_PROJECT,
+    "down",
+    "--remove-orphans",
+  ]);
+  if (!down.success) {
+    logWarn(
+      "deploy",
+      `docker proxy down soft-failed: ${down.stderr || "compose down failed"}`,
+    );
     return;
   }
-  // A legacy shared file (Traefik on docker.sock directly, no proxy service)
-  // is not ours to recreate from a TCP/UDP deploy: only a file that already
-  // uses the gate endpoint may be re-rendered in gate mode.
-  if (!applied.includes(INGRESS_GATE_ENDPOINT)) return;
-  const descriptor = await loadHostingIngressDescriptor(layout);
-  // No descriptor: the anonymous shape, which is always on the proxy (it has
-  // no ingress label for the gate's allowance), as ensureHostingIngress does.
-  const docker: SharedTraefikDocker = descriptor === undefined
-    ? VIA_SOCKET_PROXY
-    : { source: "gate", keepSocketProxy: true };
-  await upSharedTraefik(
-    layout,
-    traefikCompose(
-      ingressNetwork,
-      await ingressNetworkGateways(ingressNetwork, run),
-      descriptor,
-      docker,
-      !(await legacyHttpContainersPresent(run)),
-    ),
-    run,
+  await Deno.remove(dockerProxyDir(layout), { recursive: true }).catch(
+    (err) => {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    },
   );
+}
+
+/**
+ * Remove the proxy container a host installed before the split still runs
+ * inside the shared Traefik's project. `--remove-orphans` on the Traefik's
+ * `up` normally has done it already; this makes it certain.
+ */
+async function retireLegacyDockerProxy(
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<void> {
+  const ids = await legacyDockerProxyIds(ingressNetwork, run);
+  if (ids.length === 0) return;
+  const removed = await run(["rm", "-f", ...ids]);
+  if (!removed.success) {
+    logWarn(
+      "deploy",
+      `legacy docker proxy removal soft-failed: ${
+        removed.stderr || "docker rm failed"
+      }`,
+    );
+  }
+}
+
+/** Run one planned step of a shared-ingress apply. */
+function runDockerProxyStep(
+  step: DockerProxyStep,
+  ctx: {
+    layout: LayoutPaths;
+    ingressNetwork: string;
+    run: RunDockerFn;
+    sharedYaml: string;
+  },
+): Promise<void> {
+  const { layout, ingressNetwork, run } = ctx;
+  switch (step) {
+    case "start-proxy":
+      return ensureDockerProxy(layout, ingressNetwork, run);
+    case "up-traefik":
+      return upSharedTraefik(layout, ctx.sharedYaml, run);
+    case "retire-legacy":
+      return retireLegacyDockerProxy(ingressNetwork, run);
+    case "remove-proxy":
+      return removeDockerProxy(layout, run);
+  }
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -1321,20 +1407,67 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** True when the shared project's socket-proxy container is running. */
-async function socketProxyRunning(
-  ingressNetwork: string,
+function composeServiceContainerIds(
   run: RunDockerFn,
-): Promise<boolean> {
-  const result = await run([
+  project: string,
+  service: string,
+  all: boolean,
+): Promise<string[]> {
+  return run([
     "ps",
+    ...(all ? ["-a"] : []),
     "-q",
     "--filter",
-    `label=com.docker.compose.project=${ingressNetwork}`,
+    `label=com.docker.compose.project=${project}`,
     "--filter",
-    `label=com.docker.compose.service=${SOCKET_PROXY_COMPOSE_SERVICE_NAME}`,
-  ]);
-  return result.success && result.stdout.trim() !== "";
+    `label=com.docker.compose.service=${service}`,
+  ]).then((result) =>
+    result.success
+      ? result.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+      : []
+  );
+}
+
+/** True when the proxy's own container is running. */
+async function dockerProxyRunning(run: RunDockerFn): Promise<boolean> {
+  const ids = await composeServiceContainerIds(
+    run,
+    DOCKER_PROXY_PROJECT,
+    SOCKET_PROXY_COMPOSE_SERVICE_NAME,
+    false,
+  );
+  return ids.length > 0;
+}
+
+/**
+ * The proxy container of the old layout: a second service of the shared
+ * Traefik's project (named by the ingress network id), running or stopped.
+ */
+function legacyDockerProxyIds(
+  ingressNetwork: string,
+  run: RunDockerFn,
+): Promise<string[]> {
+  return composeServiceContainerIds(
+    run,
+    ingressNetwork,
+    SOCKET_PROXY_COMPOSE_SERVICE_NAME,
+    true,
+  );
+}
+
+/** True when the proxy's own project has an applied file or a container. */
+async function dockerProxyPresent(
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<boolean> {
+  if (await exists(dockerProxyComposePath(layout))) return true;
+  const ids = await composeServiceContainerIds(
+    run,
+    DOCKER_PROXY_PROJECT,
+    SOCKET_PROXY_COMPOSE_SERVICE_NAME,
+    true,
+  );
+  return ids.length > 0;
 }
 
 /**
@@ -1381,17 +1514,23 @@ export async function ensureHostingIngress(
     descriptor !== undefined,
     deps?.ingressDockerGate ?? (() => ingressDockerGateEnabled()),
   );
-  await upSharedTraefik(
-    layout,
-    traefikCompose(
-      ingressNetwork,
-      gateways,
-      descriptor,
-      docker,
-      !(await legacyHttpContainersPresent(run)),
-    ),
-    run,
+  const sharedYaml = traefikCompose(
+    ingressNetwork,
+    gateways,
+    descriptor,
+    docker,
+    !(await legacyHttpContainersPresent(run)),
   );
+  // The proxy is its own project; its steps are ordered around the Traefik's
+  // `up` (see `planDockerProxy`).
+  const wanted = docker.source === "socket-proxy" || docker.keepSocketProxy;
+  const steps = planDockerProxy({
+    wanted,
+    legacyPresent: (await legacyDockerProxyIds(ingressNetwork, run)).length > 0,
+    ownPresent: wanted ? true : await dockerProxyPresent(layout, run),
+  });
+  const ctx = { layout, ingressNetwork, run, sharedYaml };
+  await forEachSequential(steps, (step) => runDockerProxyStep(step, ctx));
 
   const ensureCaddy = deps?.ensureHostingCaddyRuntime ??
     ensureHostingCaddyRuntime;
@@ -1541,7 +1680,7 @@ export async function ensureServiceIngress(
     ? "gate"
     : "socket-proxy";
   if (docker === "socket-proxy") {
-    await ensureSharedSocketProxy(layout, ingressNetwork, run);
+    await ensureDockerProxy(layout, ingressNetwork, run);
   }
   const project = serviceIngressProject(serviceId);
   await applyCompose(

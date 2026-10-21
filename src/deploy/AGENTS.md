@@ -672,14 +672,84 @@ and `:ro` blocks writes to the socket *file*, not Engine API calls — so a
 remote-code bug in either used to be full Docker control of the host and every
 co-hosted tenant with it.
 
-One `docker-socket-proxy` container per host lives in the shared ingress
-project (`SOCKET_PROXY_COMPOSE_SERVICE_NAME`), holds the only socket mount, and
-answers `CONTAINERS` and `EVENTS` — what a Docker provider reads — with
-everything else, `POST` included, off. The shared HTTP Traefik and every
-per-service raw-TCP/UDP Traefik point at it with
-`--providers.docker.endpoint=tcp://docker-socket-proxy:2375` over the ingress
-network they already join; the per-service files mount nothing at all, so the
-proxy count stays one per host rather than one per service.
+One `docker-socket-proxy` container per host holds the only socket mount. It
+is **its own system component**, not a service of the shared Traefik's project:
+compose project `turbopanel-docker-proxy` (`DOCKER_PROXY_PROJECT`),
+`container_name: turbopanel-docker-proxy` (`DOCKER_PROXY_CONTAINER_NAME`), both
+plain readable names with no allocated id, image
+`tecnativa/docker-socket-proxy:v0.5.0` (HAProxy 3.x; the upstream tag carries a
+`v` since 0.4.0). `dockerProxyCompose(ingressNetwork)` renders it; the applied
+file is `<stateDir>/ingress/docker-proxy/docker-compose.yml`, applied the same
+pending-then-rename way as the Traefik files. It answers `CONTAINERS` and
+`EVENTS` (plus the image's own ping and version defaults) with everything else,
+`POST` included, off; the upgrade to v0.5.0 changed none of those defaults (it
+only added the pause / unpause switches, which are POST and stay off).
+
+**Image pins** (`ingress.ts`): `traefik:v3.7.16` and
+`tecnativa/docker-socket-proxy:v0.5.0`; `PLATFORM_IMAGE_REPOSITORIES`
+(`compose-final-policy.ts`) lists the repositories, and a test keeps both pins
+in step with the rendered documents. Traefik 3.7 needed no flag or compose
+change here; from 3.7.12 it logs one startup warning per entrypoint that does not set
+`http.aliasHeadersStrategy` (the default `keep` is the old behaviour, so none is
+set), and 3.7.13+ answers rootless request targets with 400 and 3.7.15+ rejects
+CONNECT with 501.
+
+**One proxy per host.** A host has exactly one ingress network (the
+`hosting-ingress` descriptor is a single file per server; per-service Traefiks
+join the same network), so one proxy, attached to that network and no other,
+serves every Traefik. It already could list every container on the host, so
+sharing it adds no cross-organization exposure; a proxy per network would only
+add a name to keep unique. The proxy has no published ports, a read-only socket
+mount, and no platform labels on purpose: the Docker gate must keep seeing an
+unlabelled socket bind as a finding until its stage-3 switch removes the proxy.
+
+**How a Traefik finds it.** Unchanged: `--providers.docker.endpoint=
+tcp://docker-socket-proxy:2375` over the ingress network. The compose service
+key is `docker-socket-proxy` and the document also states it as an explicit
+network alias, so the name survives a rename of the service key. Neither
+Traefik document has `depends_on` or the proxy service any more; ordering is
+the apply order below, and Traefik's Docker provider retries a refused or
+unresolved connection with backoff (checked on a real daemon: Traefik started
+before the proxy picks up routes once the proxy appears, with no restart; a
+proxy restart under a running Traefik recovers and new containers are still
+discovered through events). Per-service raw TCP/UDP Traefiks reach the proxy
+the same way and mount nothing.
+
+**Apply order** (`planDockerProxy`, pure, in `docker-proxy-plan.ts`; the shared
+ingress apply in `ensureHostingIngress` runs the steps):
+
+- proxy wanted (shared Traefik on the proxy, or gate mode while a service
+  Traefik file still names it): `start-proxy`, then `up-traefik`, then
+  `retire-legacy` if the old in-project proxy container still exists;
+- proxy not wanted (gate mode, nobody left on it): `up-traefik` first, then
+  `retire-legacy` and `remove-proxy` (`compose -p turbopanel-docker-proxy down`
+  and the compose directory removed), so no Traefik loses its Docker source
+  before it has another.
+
+A TCP/UDP deploy on the proxy (`ensureServiceIngress`) calls the same
+`ensureDockerProxy` (idempotent: skipped when the applied file is current, no
+pending file is left and the container runs), so it no longer needs a shared
+Traefik project to exist.
+
+**Upgrading a host that runs the coupled layout** (proxy as a second service in
+the project named by the ingress network id, container
+`<ingress-id>-docker-socket-proxy-1`). The first converge after the change
+(`system.reconcile` or any deploy that renders the shared ingress):
+
+1. starts `turbopanel-docker-proxy` on the ingress network; for a moment both
+   proxies answer to the alias `docker-socket-proxy` and both read the same
+   socket, so nothing is repointed;
+2. `compose up --remove-orphans` on the Traefik document without the proxy
+   (compose removes the old proxy as an orphan; the Traefik is recreated once,
+   because `depends_on` is gone and the image pin changed, which is a brief
+   refusal on the loopback port that the hosting Caddy retries);
+3. removes any old proxy container still found by its compose labels.
+
+Steady state afterwards touches nothing. If step 1 fails the deploy stops
+before any Traefik is touched and the old proxy keeps serving. Rollback is a
+redeploy of the previous release, which brings the coupled layout back and
+leaves the new proxy to be removed by hand (`docker compose -p
+turbopanel-docker-proxy down`).
 
 **Docker gate stage 3 (per-host switch, off by default).** When the root-owned
 `/opt/turbopanel/lib/docker-gate/ingress-socket.on` and the gate's
@@ -687,29 +757,30 @@ proxy count stays one per host rather than one per service.
 Traefiks instead mount that directory read-only at `/var/run/turbopanel-gate`
 and use `unix:///var/run/turbopanel-gate/docker.sock`: the root-owned gate's
 read-only listener, which answers only ping / version / events / container list
-and inspect. The shared project then drops the proxy service (`--remove-orphans`
-deletes the container) once no per-service compose file on disk still names
+and inspect. The proxy project is then removed (after the Traefik has switched)
+once no per-service compose file on disk still names
 `tcp://docker-socket-proxy:2375` (`serviceIngressUsesSocketProxy`). The
 anonymous shared Traefik (no descriptor, so no ingress label) keeps the proxy.
 Without the switch nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
 
-Both Traefik compose files are applied, not just written: the document goes to
-`docker-compose.pending.yml`, `compose up` runs on it, and only a successful
-`up` renames it over `docker-compose.yml`. So the applied file is what last
-came up, and the proxy check reads reality, not intent (a failed `up` leaves the
-pending file, which also counts as a proxy user: it may have created a
-container). Switch turned off again: a service Traefik that goes back to the
-proxy first puts the proxy back into a gate-mode shared project
-(`ensureSharedSocketProxy`: same gate Traefik plus the proxy, so the shared
-Traefik is not recreated). That covers a TCP/UDP-only deploy, which never
-renders the shared project. A host with no shared project at all has never had
-a proxy (unchanged).
+The Traefik compose files and the proxy's own file are applied, not just
+written: the document goes to `docker-compose.pending.yml`, `compose up` runs on
+it, and only a successful `up` renames it over `docker-compose.yml`. So the
+applied file is what last came up, and the proxy check reads reality, not intent
+(a failed `up` leaves the pending file, which also counts as a proxy user: it
+may have created a container). Switch turned off again: a service Traefik that
+goes back to the proxy brings the proxy project back itself
+(`ensureDockerProxy`), with the shared Traefik untouched.
 
 Proven on a real Docker daemon (2026-09-18): Traefik's own
 `GET /containers/json` succeeds through the proxy, `/images/json`,
 `/networks`, `/volumes`, `/info` and `POST /containers/create` all answer 403,
-and `/var/run/docker.sock` is absent from the Traefik container. `ingress.ts`
-is the only writer of these files; `ingress.test.ts` pins the invariant.
+and `/var/run/docker.sock` is absent from the Traefik container. The split
+layout was re-proven locally on Traefik 3.7.16 and proxy v0.5.0 (reads 200,
+images / networks / volumes / info and every POST 403, route discovery, late
+proxy start, proxy restart, and the upgrade from the coupled layout).
+`ingress.ts` is the only writer of these files; `ingress.test.ts` and
+`docker-proxy.test.ts` pin the invariant.
 
 ## Shared HTTP ingress identity
 
