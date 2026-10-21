@@ -27,6 +27,7 @@ import {
 } from "../deploy/ingress.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
+import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
@@ -363,6 +364,17 @@ export async function handleEnvironmentStop(
 ): Promise<EnvironmentStopResult> {
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
+  return await withKeyedLock(
+    environmentLockKey(parsedPayload.environmentId),
+    () => stopEnvironmentLocked(parsedPayload, daemonReceivedAt, deps),
+  );
+}
+
+async function stopEnvironmentLocked(
+  parsedPayload: EnvironmentStopPayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<EnvironmentStopResult> {
   const dockerPresent = await dockerAvailableForStop(deps);
   const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);

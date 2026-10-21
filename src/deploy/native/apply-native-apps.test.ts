@@ -1,3 +1,4 @@
+import { journalDetail } from "./apply-native-apps.ts";
 import {
   assertEquals,
   assertRejects,
@@ -2854,4 +2855,22 @@ test("nativeAppBindingsFromPayload carries the service folder of the sourced ser
     Error,
     "has no folder planned on this server",
   );
+});
+
+test("journalDetail caps long lines and the whole tail, and masks token-looking text", () => {
+  const long = "x".repeat(900);
+  const detail = journalDetail([
+    long,
+    "DB_PASSWORD=hunter2 started",
+    "Authorization: Bearer abcdefghijklmnop1234",
+    "key " + "A".repeat(50),
+  ]);
+  assertEquals(detail.includes("hunter2"), false);
+  assertEquals(detail.includes("abcdefghijklmnop1234"), false);
+  assertEquals(detail.includes("A".repeat(50)), false);
+  assertEquals(detail.includes("x".repeat(400)), false);
+  const many = journalDetail(
+    Array.from({ length: 10 }, () => "y ".repeat(140)),
+  );
+  assertEquals(many.length < 2100, true);
 });

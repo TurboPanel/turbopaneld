@@ -515,6 +515,7 @@ test({
   fn: async () => {
     await withDeployEnv(async () => {
       let failUp = false;
+      let hostUp = true;
       const calls: string[][] = [];
       const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
         calls.push([...args]);
@@ -533,7 +534,31 @@ test({
         return handleEnvironmentDeploy(
           baseComposePayload({ environmentId: "envnoop0001", ...overrides }),
           new Date().toISOString(),
-          { runDocker: fakeRunDocker, ...hermeticDeployDeps },
+          {
+            runDocker: fakeRunDocker,
+            ...hermeticDeployDeps,
+            hostProbe: hostUp
+              ? {
+                composeStates: () =>
+                  Promise.resolve({
+                    expected: ["web"],
+                    containers: [{ service: "web", state: "running" }],
+                  }),
+                unitActive: () => Promise.resolve(true),
+                pathExists: () => Promise.resolve(true),
+                siteConfigNames: () => Promise.resolve([]),
+              }
+              : {
+                composeStates: () =>
+                  Promise.resolve({
+                    expected: ["web"],
+                    containers: [{ service: "web", state: "exited" }],
+                  }),
+                unitActive: () => Promise.resolve(false),
+                pathExists: () => Promise.resolve(false),
+                siteConfigNames: () => Promise.resolve([]),
+              },
+          },
         );
       };
       const ranUp = () => calls.some((argv) => argv.includes("up"));
@@ -546,6 +571,13 @@ test({
       assertEquals(again.unchanged, true);
       assertEquals(again.summary.includes("Nothing changed"), true);
       assertEquals(calls.length, 0);
+
+      // The same hash, but the container died: the deploy must run in full.
+      hostUp = false;
+      const afterCrash = await deploy({ desiredHash: "a".repeat(64) });
+      assertEquals(afterCrash.unchanged, undefined);
+      assertEquals(ranUp(), true);
+      hostUp = true;
 
       const forced = await deploy({
         desiredHash: "a".repeat(64),

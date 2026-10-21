@@ -149,6 +149,14 @@ import {
   readAppliedDeployHash,
   writeAppliedDeployHash,
 } from "../deploy/applied-deploy-hash.ts";
+import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
+import {
+  createHostProbe,
+  type HostProbe,
+  hostStillRunsDeploy,
+  usesMutableImageTag,
+} from "../deploy/unchanged-deploy.ts";
+import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
 import {
   applyCronJobs,
@@ -411,6 +419,8 @@ export type EnvironmentDeployDeps = {
    * or a real `ansible-playbook` run.
    */
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
+  /** Test seam: how the host is asked whether a skipped deploy is still running. */
+  hostProbe?: HostProbe;
   /** Test seam — the Ansible runner for the early site engine install. */
   siteIo?: Parameters<typeof ensureSiteEngines>[1];
   /**
@@ -2591,6 +2601,19 @@ export async function handleEnvironmentDeploy(
   deps?: EnvironmentDeployDeps,
 ): Promise<EnvironmentDeployResult> {
   const parsedPayload = parseEnvironmentDeployPayload(payload);
+  // Destroy, stop and lifecycle commands for this environment wait for a
+  // running deploy to finish instead of reclaiming trees under it.
+  return await withKeyedLock(
+    environmentLockKey(parsedPayload.environmentId),
+    () => handleEnvironmentDeployLocked(parsedPayload, daemonReceivedAt, deps),
+  );
+}
+
+async function handleEnvironmentDeployLocked(
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  daemonReceivedAt: string,
+  deps?: EnvironmentDeployDeps,
+): Promise<EnvironmentDeployResult> {
   // A PHP series or a web engine is installed long before the site config that
   // uses it exists (the release builds in between), so no unused-software
   // removal may take one this deploy needs.
@@ -2691,16 +2714,50 @@ async function ensureDeployNativeRuntimes(
 async function unchangedDeployResult(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   deploymentDir: string,
-  hasContainers: boolean,
+  layout: LayoutPaths,
+  runtime: ReturnType<typeof resolveEnvironmentDeployRuntime>,
+  hostProbe?: HostProbe,
 ): Promise<EnvironmentDeployResult | null> {
   const desired = parsedPayload.desiredHash;
   if (desired === undefined || parsedPayload.noCache === true) return null;
   if (await readAppliedDeployHash(deploymentDir) !== desired) return null;
-  if (
-    hasContainers && await resolveDeployedComposePaths(deploymentDir) === null
-  ) {
+  const files = resolveDeployComposeFiles(parsedPayload).map((f) => f.content);
+  // The hash cannot see a moved tag, so such a deploy always runs.
+  if (usesMutableImageTag(files)) return null;
+  const hasContainers = composeFilesHaveContainerServices(files);
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+  if (hasContainers && composePaths === null) return null;
+  const projects = hasContainers
+    ? projectsForCommand(
+      await readDeploymentManifest(deploymentDir),
+      parsedPayload.projectName,
+      "live",
+    )
+    : [];
+  let currentLinks: string[];
+  try {
+    currentLinks = currentLinksOf(layout, parsedPayload);
+  } catch {
     return null;
   }
+  const probe = hostProbe ?? createHostProbe({
+    layout,
+    composePaths: composePaths ?? [],
+    runDocker: runtime.run,
+    run: runtime.runPrivileged,
+  });
+  const up = await hostStillRunsDeploy({
+    environmentId: parsedPayload.environmentId,
+    projects,
+    nativeServiceIds: (parsedPayload.nativeAppServices ?? []).map((app) =>
+      app.serviceId
+    ),
+    siteNames: (parsedPayload.sites ?? []).map((site) =>
+      site.composeServiceName
+    ),
+    currentLinks,
+  }, probe);
+  if (!up) return null;
   logInfo(
     "commands",
     `environment.deploy nothing changed env=${parsedPayload.environmentId}`,
@@ -2711,6 +2768,16 @@ async function unchangedDeployResult(
       `Nothing changed for environment ${parsedPayload.environmentId}: no build, no restart`,
     unchanged: true,
   };
+}
+
+/** `current` link of every release this deploy puts live; `[]` entries that cannot be resolved are kept out of the skip by throwing. */
+function currentLinksOf(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): string[] {
+  return [...deployReleaseBindings(payload).values()].map((binding) =>
+    serviceTree(layout, binding).currentLink
+  );
 }
 
 async function deployEnvironmentHolding(
@@ -2728,9 +2795,9 @@ async function deployEnvironmentHolding(
   const unchanged = await unchangedDeployResult(
     parsedPayload,
     earlyDeploymentDir,
-    composeFilesHaveContainerServices(
-      resolveDeployComposeFiles(parsedPayload).map((file) => file.content),
-    ),
+    layout,
+    resolveEnvironmentDeployRuntime(deps),
+    deps?.hostProbe,
   );
   if (unchanged !== null) return unchanged;
   // From here the deploy will change the host; it counts as applied only once

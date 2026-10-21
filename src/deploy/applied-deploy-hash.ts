@@ -13,8 +13,19 @@
  */
 
 import { join } from "node:path";
+import { getBuildInfo } from "../build-info.ts";
+import { DAEMON_VERSION } from "../version.ts";
 
 const APPLIED_HASH_FILENAME = "applied-deploy-hash";
+
+/**
+ * The daemon build that wrote the record. A new build may render units, sites
+ * and compose files differently, so a hash recorded by another build never
+ * matches: the first redeploy after a daemon update always runs in full.
+ */
+export function daemonRenderStamp(): string {
+  return `${DAEMON_VERSION}+${getBuildInfo().commit}`;
+}
 
 function appliedHashPath(deploymentDir: string): string {
   return join(deploymentDir, APPLIED_HASH_FILENAME);
@@ -25,9 +36,11 @@ export async function readAppliedDeployHash(
   deploymentDir: string,
 ): Promise<string | null> {
   try {
-    const text = (await Deno.readTextFile(appliedHashPath(deploymentDir)))
-      .trim();
-    return text.length > 0 ? text : null;
+    const [stamp, hash] = (await Deno.readTextFile(
+      appliedHashPath(deploymentDir),
+    )).trim().split("\n");
+    if (stamp !== daemonRenderStamp() || !hash) return null;
+    return hash;
   } catch {
     return null;
   }
@@ -49,7 +62,11 @@ export async function writeAppliedDeployHash(
   deploymentDir: string,
   hash: string,
 ): Promise<void> {
-  await Deno.writeTextFile(appliedHashPath(deploymentDir), `${hash}\n`, {
-    mode: 0o640,
-  });
+  await Deno.writeTextFile(
+    appliedHashPath(deploymentDir),
+    `${daemonRenderStamp()}\n${hash}\n`,
+    {
+      mode: 0o640,
+    },
+  );
 }

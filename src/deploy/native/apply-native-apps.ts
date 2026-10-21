@@ -66,6 +66,7 @@ import {
 } from "../release/release-health.ts";
 import type { ReleaseManifestV1 } from "../release/deployment-json.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
+import { redactUrlSecrets } from "../../util/redact-url-secrets.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { NativeAppStart } from "./start-entry.ts";
@@ -456,10 +457,38 @@ async function emitNativeAppJournal(
   return lines;
 }
 
+/** Longest line, and the whole tail, the deploy error carries from the journal. */
+const ERROR_JOURNAL_LINE_MAX = 300;
+const ERROR_JOURNAL_TOTAL_MAX = 2000;
+
+/**
+ * The scrubber only knows secrets this daemon decrypted, so lines going into
+ * an error text also lose anything that looks like a credential: `key=value`
+ * pairs with a secret-sounding key, bearer tokens and long token-like words.
+ */
+const SECRET_PAIR_RE =
+  /\b([A-Za-z0-9_.-]*(?:pass(?:word|wd)?|secret|token|api[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*)(\s*[=:]\s*)\S+/gi;
+const BEARER_RE = /\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+const LONG_TOKEN_RE = /\b[A-Za-z0-9_-]{40,}\b/g;
+
+export function scrubJournalLine(line: string): string {
+  const masked = redactUrlSecrets(line)
+    .replace(SECRET_PAIR_RE, "$1$2[hidden]")
+    .replace(BEARER_RE, "$1 [hidden]")
+    .replace(LONG_TOKEN_RE, "[hidden]");
+  return masked.length > ERROR_JOURNAL_LINE_MAX
+    ? `${masked.slice(0, ERROR_JOURNAL_LINE_MAX)}...`
+    : masked;
+}
+
 /** The sentence that puts the app's own last output into the deploy error. */
-function journalDetail(lines: readonly string[]): string {
+export function journalDetail(lines: readonly string[]): string {
   if (lines.length === 0) return "";
-  const tail = lines.slice(-NATIVE_APP_ERROR_JOURNAL_LINES).join(" | ");
+  let tail = lines.slice(-NATIVE_APP_ERROR_JOURNAL_LINES).map(scrubJournalLine)
+    .join(" | ");
+  if (tail.length > ERROR_JOURNAL_TOTAL_MAX) {
+    tail = `...${tail.slice(-ERROR_JOURNAL_TOTAL_MAX)}`;
+  }
   return `. Last output from the app: ${tail}`;
 }
 

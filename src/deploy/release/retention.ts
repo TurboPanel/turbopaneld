@@ -53,6 +53,15 @@ import {
 /** Published releases kept per service, in addition to `current`. */
 export const DEFAULT_RELEASE_RETENTION = 5;
 
+/**
+ * A release folder name that is safe to join into a path handed to `rm -rf`:
+ * one plain segment, never `.`/`..`, never a newline or slash. Names read back
+ * from the host (the privileged listing is plain text) are filtered with this.
+ */
+export function isSafeReleaseName(name: string): boolean {
+  return name !== "." && name !== ".." && /^[A-Za-z0-9._-]+$/.test(name);
+}
+
 /** Directory entries under `releases/`, newest-modified first. */
 async function listReleaseIds(
   releasesDir: string,
@@ -80,7 +89,8 @@ async function listReleaseIds(
   }
   return entries
     .toSorted((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name))
-    .map((entry) => entry.name);
+    .map((entry) => entry.name)
+    .filter(isSafeReleaseName);
 }
 
 async function listReleaseIdsPrivileged(
@@ -103,7 +113,7 @@ async function listReleaseIdsPrivileged(
   return result.stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter((name) => name.length > 0);
+    .filter(isSafeReleaseName);
 }
 
 /**

@@ -11,6 +11,7 @@
  * `environment.stop`.
  */
 
+import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
 import { clearAppliedDeployHash } from "../deploy/applied-deploy-hash.ts";
 import {
   actOnEarlierContainers,
@@ -208,6 +209,17 @@ export async function handleEnvironmentLifecycle(
 ): Promise<EnvironmentLifecycleResult> {
   const parsedPayload = parseEnvironmentLifecyclePayload(payload);
   assertSafeLifecycleIdentifiers(parsedPayload);
+  return await withKeyedLock(
+    environmentLockKey(parsedPayload.environmentId),
+    () => lifecycleLocked(parsedPayload, daemonReceivedAt, deps),
+  );
+}
+
+async function lifecycleLocked(
+  parsedPayload: EnvironmentLifecyclePayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<EnvironmentLifecycleResult> {
   const run = deps?.runDocker ?? defaultRunDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
   const logSink = deps?.logSink ?? createNoopCommandOutputSink();

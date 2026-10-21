@@ -388,3 +388,48 @@ test("reclaimServiceReleases reports a release that refuses to go and carries on
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("reclaimServiceReleases never joins an unsafe name from the privileged listing into a removal", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-reclaim-unsafe-" });
+  try {
+    const home = join(root, "srv");
+    const service = join(
+      home,
+      "alice",
+      "production",
+      "services",
+      "example.com",
+    );
+    await Deno.mkdir(join(service, "releases"), { recursive: true });
+    // The folder is unreadable to the daemon in production; the listing then
+    // comes from `sudo ls`, plain text. Force that path with a runner reply.
+    const rm: string[] = [];
+    const run: RunFn = (_command, args) => {
+      if (args.includes("ls")) {
+        return Promise.resolve({
+          success: true,
+          stdout: ["good-1", "..", ".", "../../etc", "ok.2"].join("\n"),
+          stderr: "",
+        });
+      }
+      rm.push(args.at(-1) as string);
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    };
+    await Deno.chmod(join(service, "releases"), 0o000);
+    try {
+      await reclaimServiceReleases(
+        { principalHomeRoot: home, daemonStateDir: join(root, "state") },
+        IN_FOLDER,
+        run,
+      );
+    } finally {
+      await Deno.chmod(join(service, "releases"), 0o700);
+    }
+    assertEquals(
+      rm.filter((p) => p.includes("/releases/")).toSorted(),
+      [join(service, "releases", "good-1"), join(service, "releases", "ok.2")],
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
