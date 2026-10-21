@@ -106,7 +106,7 @@
       {
         "name": "progress",
         "required": true,
-        "type": "{ current: null | string; steps: Array<{ detail?: string; finishedAt?: string; id: string; label: string; startedAt?: string; state: 'done' | 'failed' | 'pending' | 'ready' | 'running' | 'skipped' }>; updatedAt: string; version: 1 }"
+        "type": "{ current: null | string; runningSince?: null | string; steps: Array<{ detail?: string; finishedAt?: string; id: string; label: string; startedAt?: string; state: 'done' | 'failed' | 'pending' | 'ready' | 'running' | 'skipped' }>; updatedAt: string; version: 1 }"
       },
       { "name": "type", "required": true, "type": "'command-progress'" }
     ]
@@ -116,6 +116,7 @@
     "daemon": "src/contracts/cell-messages.ts",
     "fields": [
       { "name": "current", "required": true, "type": "null | string" },
+      { "name": "runningSince", "required": false, "type": "null | string" },
       {
         "name": "steps",
         "required": true,
