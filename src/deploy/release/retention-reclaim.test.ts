@@ -9,6 +9,7 @@ import type { RunFn } from "../ensure-principal.ts";
 import {
   keptServiceFolders,
   reclaimAssetFolder,
+  reclaimServiceReleases,
   reclaimServiceTree,
   type ReleaseTreeRef,
   releaseTreesToReclaim,
@@ -305,4 +306,85 @@ test("reclaimAssetFolder refuses a scope that is not an environment name", async
   );
   assertEquals(removed, null);
   assertEquals(calls, []);
+});
+
+test("reclaimServiceReleases clears releases and records but keeps the folder and shared uploads", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-reclaim-releases-" });
+  try {
+    const stateDir = join(root, "state");
+    const home = join(root, "srv");
+    const service = join(
+      home,
+      "alice",
+      "production",
+      "services",
+      "example.com",
+    );
+    await Deno.mkdir(join(service, "releases", "r1"), { recursive: true });
+    await Deno.mkdir(join(service, "releases", "r2"), { recursive: true });
+    await Deno.mkdir(join(service, "shared"), { recursive: true });
+    await Deno.mkdir(join(stateDir, "release-records", FOLDER_SERVICE), {
+      recursive: true,
+    });
+    const rmPaths: string[] = [];
+    const run: RunFn = async (_command, args) => {
+      const path = args.at(-1) as string;
+      rmPaths.push(path);
+      await Deno.remove(path, { recursive: true }).catch(() => {});
+      return { success: true, stdout: "", stderr: "" };
+    };
+    const removed = await reclaimServiceReleases(
+      { principalHomeRoot: home, daemonStateDir: stateDir },
+      IN_FOLDER,
+      run,
+    );
+    assertEquals(removed, 2);
+    assertEquals(
+      rmPaths.toSorted(),
+      [
+        join(service, "current"),
+        join(service, "releases", "r1"),
+        join(service, "releases", "r2"),
+      ],
+    );
+    await Deno.stat(join(service, "shared"));
+    await Deno.stat(join(service, "releases"));
+    assertEquals(
+      (await Array.fromAsync(Deno.readDir(join(stateDir, "release-records"))))
+        .length,
+      0,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("reclaimServiceReleases reports a release that refuses to go and carries on", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-reclaim-releases-err-" });
+  try {
+    const home = join(root, "srv");
+    const service = join(
+      home,
+      "alice",
+      "production",
+      "services",
+      "example.com",
+    );
+    await Deno.mkdir(join(service, "releases", "r1"), { recursive: true });
+    const { run } = captureRun(false);
+    const out: string[] = [];
+    const removed = await reclaimServiceReleases(
+      { principalHomeRoot: home, daemonStateDir: join(root, "state") },
+      IN_FOLDER,
+      run,
+      (_stream, line) => out.push(line),
+    );
+    assertEquals(removed, 0);
+    assertEquals(
+      out.some((line) => line.includes("could not remove r1")),
+      true,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
 });

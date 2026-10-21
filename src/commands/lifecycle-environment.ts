@@ -11,6 +11,7 @@
  * `environment.stop`.
  */
 
+import { clearAppliedDeployHash } from "../deploy/applied-deploy-hash.ts";
 import {
   actOnEarlierContainers,
   earlierRecordedProjects,
@@ -227,6 +228,10 @@ export async function handleEnvironmentLifecycle(
     );
   }
 
+  // Stop, start and restart change what is running, so the last deploy no
+  // longer describes the host: the next deploy runs in full instead of being
+  // skipped as unchanged.
+  await clearAppliedDeployHash(deploymentDir);
   const manifest = await readDeploymentManifest(deploymentDir);
   if (parsedPayload.action === "start" || parsedPayload.action === "restart") {
     const plan = manifest?.secrets ?? [];

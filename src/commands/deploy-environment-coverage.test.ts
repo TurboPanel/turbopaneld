@@ -509,6 +509,67 @@ test({
 });
 
 test({
+  name:
+    "handleEnvironmentDeploy skips an unchanged redeploy, but not a changed, forced or previously failed one",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      let failUp = false;
+      const calls: string[][] = [];
+      const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+        calls.push([...args]);
+        if (failUp && args.includes("up")) {
+          return Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "boom",
+            code: 1,
+          });
+        }
+        return standardFakeRunDocker()(args);
+      };
+      const deploy = (overrides: Partial<EnvironmentDeployPayload>) => {
+        calls.length = 0;
+        return handleEnvironmentDeploy(
+          baseComposePayload({ environmentId: "envnoop0001", ...overrides }),
+          new Date().toISOString(),
+          { runDocker: fakeRunDocker, ...hermeticDeployDeps },
+        );
+      };
+      const ranUp = () => calls.some((argv) => argv.includes("up"));
+
+      const first = await deploy({ desiredHash: "a".repeat(64) });
+      assertEquals(first.unchanged, undefined);
+      assertEquals(ranUp(), true);
+
+      const again = await deploy({ desiredHash: "a".repeat(64) });
+      assertEquals(again.unchanged, true);
+      assertEquals(again.summary.includes("Nothing changed"), true);
+      assertEquals(calls.length, 0);
+
+      const forced = await deploy({
+        desiredHash: "a".repeat(64),
+        noCache: true,
+      });
+      assertEquals(forced.unchanged, undefined);
+      assertEquals(ranUp(), true);
+
+      const changed = await deploy({ desiredHash: "b".repeat(64) });
+      assertEquals(changed.unchanged, undefined);
+      assertEquals(ranUp(), true);
+
+      failUp = true;
+      await assertRejects(() => deploy({ desiredHash: "c".repeat(64) }));
+      failUp = false;
+      // A failed deploy never counts as applied, not even for the hash before it.
+      const afterFailure = await deploy({ desiredHash: "b".repeat(64) });
+      assertEquals(afterFailure.unchanged, undefined);
+      assertEquals(ranUp(), true);
+    });
+  },
+});
+
+test({
   name: "handleEnvironmentDeploy removes compose .env when envFile is cleared",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {

@@ -33,6 +33,7 @@ import {
   removeComposeEnvFile,
   removeComposeStageDir,
   resetComposeStageDir,
+  resolveDeployedComposePaths,
   restorePreviousDeployment,
   RUNTIME_COMPOSE_FILENAME,
   writeComposeEnvFile,
@@ -143,6 +144,11 @@ import {
   siteWritableDirs,
 } from "../deploy/site.ts";
 import { detectSiteApps } from "../deploy/site-apps.ts";
+import {
+  clearAppliedDeployHash,
+  readAppliedDeployHash,
+  writeAppliedDeployHash,
+} from "../deploy/applied-deploy-hash.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
 import {
   applyCronJobs,
@@ -2676,6 +2682,37 @@ async function ensureDeployNativeRuntimes(
   });
 }
 
+/**
+ * The result of a redeploy that changes nothing, or `null` when the deploy has
+ * to run. The control plane's hash is compared with the one recorded when the
+ * last deploy finished; a rebuild-from-scratch request, a deploy with no hash
+ * and a host that lost its compose file always run in full.
+ */
+async function unchangedDeployResult(
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  deploymentDir: string,
+  hasContainers: boolean,
+): Promise<EnvironmentDeployResult | null> {
+  const desired = parsedPayload.desiredHash;
+  if (desired === undefined || parsedPayload.noCache === true) return null;
+  if (await readAppliedDeployHash(deploymentDir) !== desired) return null;
+  if (
+    hasContainers && await resolveDeployedComposePaths(deploymentDir) === null
+  ) {
+    return null;
+  }
+  logInfo(
+    "commands",
+    `environment.deploy nothing changed env=${parsedPayload.environmentId}`,
+  );
+  return {
+    projectName: parsedPayload.projectName,
+    summary:
+      `Nothing changed for environment ${parsedPayload.environmentId}: no build, no restart`,
+    unchanged: true,
+  };
+}
+
 async function deployEnvironmentHolding(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -2683,6 +2720,22 @@ async function deployEnvironmentHolding(
 ): Promise<EnvironmentDeployResult> {
   assertSafeDeploymentIdentifiers(parsedPayload);
   const layout = resolveLayout(Deno.env.toObject());
+  const earlyDeploymentDir = environmentDeploymentDir(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  const unchanged = await unchangedDeployResult(
+    parsedPayload,
+    earlyDeploymentDir,
+    composeFilesHaveContainerServices(
+      resolveDeployComposeFiles(parsedPayload).map((file) => file.content),
+    ),
+  );
+  if (unchanged !== null) return unchanged;
+  // From here the deploy will change the host; it counts as applied only once
+  // it has finished.
+  await clearAppliedDeployHash(earlyDeploymentDir);
   resetHostingCaddyRuntimeEnsuredForDeploy();
   const runtime = resolveEnvironmentDeployRuntime(deps);
 
@@ -2724,11 +2777,7 @@ async function deployEnvironmentHolding(
   });
 
   cancel?.throwIfCancelled("while the host was being prepared");
-  const deploymentDir = environmentDeploymentDir(
-    layout,
-    parsedPayload.projectId,
-    parsedPayload.environmentId,
-  );
+  const deploymentDir = earlyDeploymentDir;
   await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
 
   // Tenant Node must exist before the Git build: native installs run
@@ -2976,6 +3025,10 @@ async function deployEnvironmentHolding(
     "commands",
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
+
+  if (parsedPayload.desiredHash !== undefined) {
+    await writeAppliedDeployHash(earlyDeploymentDir, parsedPayload.desiredHash);
+  }
 
   return shapeEnvironmentDeployResult({
     projectName: parsedPayload.projectName,

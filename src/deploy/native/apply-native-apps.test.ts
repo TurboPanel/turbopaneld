@@ -849,6 +849,38 @@ test("a failed health probe streams the unit journal into the transcript", async
   }
 });
 
+test("a failed health probe puts the last journal lines in the thrown error", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const run = mock.run;
+  const journal = Array.from({ length: 14 }, (_, i) => `old line ${i}`);
+  journal.push("ReferenceError: require is not defined in ES module scope");
+  mock.run = async (command, args) => {
+    if (args.includes("journalctl")) {
+      mock.calls.push({ command, args: [...args] });
+      return { success: true, stdout: journal.join("\n") + "\n", stderr: "" };
+    }
+    return await run(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+        }),
+      Error,
+    );
+    assertEquals(error.message.includes("did not answer"), true);
+    assertEquals(error.message.includes("require is not defined"), true);
+    assertEquals(error.message.includes("old line 14"), false);
+    assertEquals(error.message.includes("old line 4"), false);
+    assertEquals(error.message.includes("old line 5"), true);
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("lifecycle and removal act on this environment's units only", async () => {
   const host = await makeTestHost();
   try {

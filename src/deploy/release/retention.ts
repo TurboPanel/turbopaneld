@@ -271,6 +271,59 @@ export async function reclaimServiceTree(
 }
 
 /**
+ * Clear what a Destroy built up in one service's tree: every published release,
+ * the `current` link, and the daemon's own release records and build scratch.
+ * The service folder itself, its `shared/` uploads, its logs and the owner's
+ * account stay; deleting the service is what removes the folder.
+ *
+ * Returns the number of releases removed. Best-effort and silent about
+ * failures except through `onOutput`: a Destroy must still tear the rest down.
+ */
+export async function reclaimServiceReleases(
+  layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">,
+  ref: ReleaseTreeRef,
+  runFn: RunFn,
+  onOutput?: ReclaimOutput | undefined,
+): Promise<number> {
+  let tree: ReturnType<typeof serviceTree>;
+  try {
+    assertSafeServiceId(ref.serviceId);
+    tree = serviceTree(layout, ref);
+    await assertNoSymlinkComponents(layout.principalHomeRoot, tree.releasesDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `release cleanup skipped ${ref.serviceId}: ${message}`,
+    );
+    return 0;
+  }
+  let removed = 0;
+  try {
+    const releaseIds = await listReleaseIds(tree.releasesDir, runFn);
+    await forEachSequential(releaseIds, async (releaseId) => {
+      try {
+        await removePublishedRelease(join(tree.releasesDir, releaseId), runFn);
+        removed += 1;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        onOutput?.(
+          "stderr",
+          `release cleanup could not remove ${releaseId}: ${message}`,
+        );
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.("stderr", `release cleanup could not list releases: ${message}`);
+    return removed;
+  }
+  await removeTreeWithHelper(tree.currentLink, runFn, onOutput);
+  await removeServiceStateDirs(layout, ref.serviceId, onOutput);
+  return removed;
+}
+
+/**
  * Why a folder removal failed, as one plain sentence for the panel. The raw
  * line (which can carry host paths) stays in the daemon log.
  */
