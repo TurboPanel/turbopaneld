@@ -119,8 +119,8 @@
     mode: "0750"
 
 # The daemon's switch to the read-only socket for Traefik. Root-owned in the
-# gate's own directory, so the daemon can read it and never write it. Sticky:
-# an empty variable leaves it as it is (its value is checked in main.yml).
+# gate's own directory, so the daemon can read it and never write it. On by
+# default (true); an empty variable leaves it as it is (its value is checked in main.yml).
 # The gate reads the switch at start (a read-only listener that cannot open is
 # fatal while it is on), so flipping it restarts the gate.
 - name: Turn on Traefik's read-only gate socket
