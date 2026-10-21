@@ -5,7 +5,7 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # `deno run main.ts` and the managed JS-fallback ExecStart
 # (`deno run …/bin/turbopaneld.js`). Keep in step with the TP_DENO_VERSION pin
 # in scripts/run.sh.
-deno_version: "2.9.7"
+deno_version: "2.9.8"
 # Upstream SHA-256 of each release zip, keyed by version then by
 # ansible_architecture (dl.deno.land publishes `<asset>.sha256sum` beside the
 # asset). The install task refuses to run when the pinned version has no entry
@@ -14,9 +14,9 @@ deno_version: "2.9.7"
 # TP_DENO_SHA256_* in scripts/run.sh (src/orchestration/assets.test.ts pins
 # both against this table).
 deno_sha256:
-  "2.9.7":
-    x86_64: "c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490"
-    aarch64: "c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511d2f65bbf"
+  "2.9.8":
+    x86_64: "a39762429792913fe762ef0b59c9cba41dbd38195984da99221a193b13d97b40"
+    aarch64: "2664fcd6a58a37676449e5750ef2140cd46c18f2bbc08be0e03cbcb26ca4de22"
 turbopanel_dev_user: ""
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
