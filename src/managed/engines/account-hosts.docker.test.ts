@@ -121,7 +121,7 @@ for (const engine of ENGINES) {
         await assertRejects(
           () => dropUserOnEveryHost(spec("owner_u")),
           LoginOwnsObjectsError,
-          "routine shop.p_x, view shop.t_v",
+          "'routine shop.p_x', 'view shop.t_v'",
         );
         assertEquals(
           (await sql("SELECT COUNT(*) FROM mysql.user WHERE user='owner_u'"))
@@ -138,7 +138,7 @@ for (const engine of ENGINES) {
         await assertRejects(
           () => dropUserOnEveryHost(spec("owner_u")),
           LoginOwnsObjectsError,
-          "routine shop.p_x",
+          "'routine shop.p_x'",
         );
         await sql("DROP PROCEDURE shop.p_x");
         await sql(
@@ -147,7 +147,7 @@ for (const engine of ENGINES) {
         await assertRejects(
           () => dropUserOnEveryHost(spec("owner_u")),
           LoginOwnsObjectsError,
-          "trigger shop.t_bi",
+          "'trigger shop.t_bi'",
         );
         await sql("DROP TRIGGER shop.t_bi");
         await dropUserOnEveryHost(spec("owner_u"));

@@ -30,7 +30,7 @@ test("dropUserOnEveryHost refuses a login that defines views and names them", as
         dropAccountSql: () => "DROP USER x;",
       }),
     LoginOwnsObjectsError,
-    "view shop.orders_v, routine shop.recalc",
+    "'view shop.orders_v', 'routine shop.recalc'",
   );
   assertEquals((error as LoginOwnsObjectsError).objects.length, 2);
   assertEquals(ran, []);

@@ -67,9 +67,9 @@ export function capDefinerObjects(objects: readonly string[]): string[] {
 export class LoginOwnsObjectsError extends Error {
   constructor(readonly username: string, readonly objects: string[]) {
     super(
-      `Cannot delete the SQL login "${username}": it is still the definer of ${
-        objects.join(", ")
-      }. Those stop working once the login is gone, and a view whose definer is gone breaks every later backup. Drop them or recreate them under another login, then delete the login again.`,
+      `The SQL login "${username}" still owns views, routines, triggers or events (${
+        objects.map((object) => `'${object}'`).join(", ")
+      }). Move or drop them first, then delete the login.`,
     );
     this.name = "LoginOwnsObjectsError";
   }
