@@ -882,6 +882,15 @@ async function applyPrincipalSlices(
 }
 
 /**
+ * What picks a runtime and its series: a native app, or a site whose build
+ * needs the default Node (which names no series, so it gets the newest).
+ */
+export type RuntimeChoice = Pick<
+  EnvironmentDeployNativeAppService,
+  "runtime" | "nodeVersion" | "denoVersion"
+>;
+
+/**
  * Every distinct Node series this apply needs, sorted so the playbook argument
  * is stable across deploys (an unstable argument would show up as churn in the
  * transcript for a deploy that changed nothing).
@@ -891,7 +900,7 @@ async function applyPrincipalSlices(
  * instead of being a separate special case on the host.
  */
 export function nativeAppNodeVersions(
-  apps: readonly EnvironmentDeployNativeAppService[],
+  apps: readonly RuntimeChoice[],
 ): string[] {
   const versions = new Set<string>();
   for (const app of apps) {
@@ -904,7 +913,7 @@ export function nativeAppNodeVersions(
 
 /** The Deno series this apply needs, sorted like {@link nativeAppNodeVersions}. */
 export function nativeAppDenoVersions(
-  apps: readonly EnvironmentDeployNativeAppService[],
+  apps: readonly RuntimeChoice[],
 ): string[] {
   const versions = new Set<string>();
   for (const app of apps) {
@@ -934,7 +943,7 @@ export function nativeAppDenoVersions(
  * way round.
  */
 export async function ensureNativeAppRuntime(
-  apps: readonly EnvironmentDeployNativeAppService[],
+  apps: readonly RuntimeChoice[],
   opts?: Pick<ApplyNativeAppsOpts, "runPlaybook" | "onEvent">,
 ): Promise<void> {
   if (apps.length === 0) return;
