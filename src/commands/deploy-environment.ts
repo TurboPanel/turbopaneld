@@ -40,7 +40,10 @@ import {
   writeComposeFileSecure,
   writeDeploymentManifest,
 } from "../deploy/compose-files.ts";
-import { singleGeneration } from "../deploy/deployment-generations.ts";
+import {
+  projectsForCommand,
+  singleGeneration,
+} from "../deploy/deployment-generations.ts";
 import {
   readPreviousProjects,
   retirePreviousProjects,
@@ -156,7 +159,6 @@ import {
   hostStillRunsDeploy,
   usesMutableImageTag,
 } from "../deploy/unchanged-deploy.ts";
-import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { holdPruneKeys } from "../deploy/site/prune-holds.ts";
 import {
   applyCronJobs,

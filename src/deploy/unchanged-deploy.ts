@@ -107,7 +107,7 @@ export async function hostStillRunsDeploy(
   }
 }
 
-const IMAGE_LINE_RE = /^\s*image:\s*["']?([^\s"'#]+)/gm;
+const IMAGE_LINE_RE = /^[ \t]*image:\s*["']?([^\s"'#]+)/gm;
 
 /**
  * An image named without a tag, or by `latest` (or by a variable), can point
@@ -184,15 +184,16 @@ export function createHostProbe(input: {
         join(input.layout.configDir, "apache", "sites"),
         join(input.layout.configDir, "openlitespeed", "sites"),
       ];
-      const names: string[] = [];
-      for (const dir of dirs) {
+      const perDir = await Promise.all(dirs.map(async (dir) => {
+        const found: string[] = [];
         try {
-          for await (const entry of Deno.readDir(dir)) names.push(entry.name);
+          for await (const entry of Deno.readDir(dir)) found.push(entry.name);
         } catch {
           // A folder this host never made has no sites in it.
         }
-      }
-      return names;
+        return found;
+      }));
+      return perDir.flat();
     },
   };
 }

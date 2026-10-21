@@ -467,9 +467,9 @@ const ERROR_JOURNAL_TOTAL_MAX = 2000;
  * pairs with a secret-sounding key, bearer tokens and long token-like words.
  */
 const SECRET_PAIR_RE =
-  /\b([A-Za-z0-9_.-]*(?:pass(?:word|wd)?|secret|token|api[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*)(\s*[=:]\s*)\S+/gi;
-const BEARER_RE = /\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
-const LONG_TOKEN_RE = /\b[A-Za-z0-9_-]{40,}\b/g;
+  /\b([\w.-]*(?:pass|secret|token|(?:api|private)[_-]?key|credential)[\w.-]*)(\s*[=:]\s*)\S+/gi;
+const BEARER_RE = /\b(bearer|basic)\s+[\w.~+/=-]{8,}/gi;
+const LONG_TOKEN_RE = /\b[\w-]{40,}\b/g;
 
 export function scrubJournalLine(line: string): string {
   const masked = redactUrlSecrets(line)
