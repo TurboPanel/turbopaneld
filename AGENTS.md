@@ -212,7 +212,7 @@ service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/assets.ts`) =
-**`2.9.7`**. Keep it in step with `deno_version` in
+**`2.9.8`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
 [TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
