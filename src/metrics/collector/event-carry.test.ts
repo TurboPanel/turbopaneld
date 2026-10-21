@@ -28,6 +28,16 @@ Deno.test("a sample carries at most 16 events, most severe first, and the rest w
   assertEquals(carried.length, events.length - 16);
 });
 
+Deno.test("an event with an unparseable time sorts as the oldest", () => {
+  const bad = { ...event(1, "info"), at: "not a date" } as MetricEvent;
+  const { sent } = takeEventsForSample([
+    event(2, "info"),
+    bad,
+    event(3, "info"),
+  ]);
+  assertEquals(sent.map((e) => e.eventId), ["e1", "e2", "e3"]);
+});
+
 Deno.test("an event storm never grows the carried set past its bound", () => {
   const storm = Array.from({ length: 1000 }, (_, i) => event(i, "info"));
   const { sent, carried } = takeEventsForSample(storm);

@@ -3,6 +3,7 @@ import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   computeTopologyGeneration,
   resolveTopologyGeneration,
+  sizesFeaturesNegotiated,
   topologyGenerationPath,
 } from "./generation.ts";
 import {
@@ -423,5 +424,26 @@ test("negotiating sizes after a size-aware record keeps the generation", async (
   await withTempStateDir(async (dir) => {
     assertEquals(await ticks(dir, [sized(GIB)], false), [0]);
     assertEquals(await ticks(dir, [sized(4 * GIB)], true), [0]);
+  });
+});
+
+test("sizes leave the fingerprint only when both metrics-v8 and metrics-v8-sizes are advertised", () => {
+  assertEquals(
+    sizesFeaturesNegotiated(["metrics-v8", "metrics-v8-sizes"]),
+    true,
+  );
+  assertEquals(sizesFeaturesNegotiated(["metrics-v8-sizes"]), false);
+  assertEquals(sizesFeaturesNegotiated(["metrics-v8"]), false);
+  assertEquals(sizesFeaturesNegotiated([]), false);
+});
+
+test("a reconnect (first resolve before the features are known) keeps the generation, and a later resize still bumps", async () => {
+  await withTempStateDir(async (dir) => {
+    // Stored during a negotiated run: no sizes in the record.
+    assertEquals(await ticks(dir, [sized(GIB)], true), [0]);
+    // Fresh reconnect: the flag is false until the attach frame arrives.
+    assertEquals(await ticks(dir, [sized(GIB)], false), [0]);
+    // The baseline now carries sizes, so a resize while not negotiated bumps.
+    assertEquals(await ticks(dir, [sized(4 * GIB)], false), [1]);
   });
 });

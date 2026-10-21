@@ -169,6 +169,12 @@ const SEVERITY_RANK: Readonly<Record<MetricEvent["severity"], number>> = {
   info: 2,
 };
 
+/** An unparseable `at` counts as the oldest, so the sort order stays consistent. */
+function eventTime(event: MetricEvent): number {
+  const ms = Date.parse(event.at);
+  return Number.isNaN(ms) ? Number.MIN_SAFE_INTEGER : ms;
+}
+
 /**
  * Split pending events into what this sample carries (at most the contract's
  * per-sample cap, most severe first, then oldest) and what waits for the next
@@ -179,7 +185,7 @@ export function takeEventsForSample(
 ): { sent: MetricEvent[]; carried: MetricEvent[] } {
   const ordered = [...events].sort((a, b) =>
     SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] ||
-    Date.parse(a.at) - Date.parse(b.at)
+    eventTime(a) - eventTime(b)
   );
   return {
     sent: ordered.slice(0, MAX_METRIC_EVENTS_PER_SAMPLE),

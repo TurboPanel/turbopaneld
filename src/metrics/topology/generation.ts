@@ -77,6 +77,15 @@ export type TopologySizes = {
 
 export const MEMORY_TOTAL_TOLERANCE_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Sizes reach the wire only with both features (a panel listing the sizes
+ * without `metrics-v8` gets stamp 6 and no sizes), so both gate the fingerprint.
+ */
+export function sizesFeaturesNegotiated(features: readonly string[]): boolean {
+  return features.includes("metrics-v8") &&
+    features.includes("metrics-v8-sizes");
+}
+
 let sizesNegotiated = false;
 
 /** Set from the control-plane attach: `true` once it advertises `metrics-v8-sizes`. */
@@ -141,9 +150,13 @@ function totalWithinTolerance(a: unknown, b: unknown): boolean {
   return Math.abs(a - b) <= MEMORY_TOTAL_TOLERANCE_BYTES;
 }
 
-/** `a` may be a record from before sizes were stored: it counts as different. */
+/**
+ * `a` may carry no sizes (stored while `metrics-v8-sizes` was negotiated, or
+ * by an earlier build): there is nothing to compare, so it counts as equal and
+ * the caller stores a size baseline.
+ */
 function sizesEqual(a: TopologySizes | undefined, b: TopologySizes): boolean {
-  if (!a) return false;
+  if (!a) return true;
   if (!totalWithinTolerance(a.memoryTotalBytes, b.memoryTotalBytes)) {
     return false;
   }
@@ -257,7 +270,8 @@ export async function resolveTopologyGeneration(
 
   // On a reused generation keep the stored fingerprint, so tolerated jitter
   // in the memory totals cannot drift the baseline tick by tick.
-  const stored = previous?.generation === generation && fingerprint.sizes
+  const stored = previous?.generation === generation &&
+      fingerprint.sizes && previous.fingerprint.sizes
     ? previous.fingerprint
     : fingerprint;
   await writePersistedState(path, {

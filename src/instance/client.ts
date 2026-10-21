@@ -53,7 +53,10 @@ import {
 } from "../util/logger.ts";
 import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
-import { setTopologySizesNegotiated } from "../metrics/topology/generation.ts";
+import {
+  setTopologySizesNegotiated,
+  sizesFeaturesNegotiated,
+} from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import {
   INSTANCE_VERSION_HEADER,
@@ -734,7 +737,7 @@ export class InstanceClient {
       if (typeof entry === "string") accepted.push(entry);
     }
     this.#peerFeatures = accepted;
-    setTopologySizesNegotiated(accepted.includes("metrics-v8-sizes"));
+    setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
   }
 
   #apiClientVersionHook(): {
