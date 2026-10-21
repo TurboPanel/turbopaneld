@@ -1601,7 +1601,7 @@ function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
   // is the server-wide `useIpInProxyHeader` in the main config; port and scheme cannot be
   // changed from here.
   const forwardedHttps = phpHandled
-    ? String.raw`
+    ? `
 RewriteCond %{HTTP:X-Forwarded-Proto} =https
 RewriteRule .* - [E=HTTPS:on]`
     : "";

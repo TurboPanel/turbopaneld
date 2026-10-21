@@ -276,7 +276,7 @@ test("nginx tells Apache the visitor's scheme only on a loopback peer's word", (
   const conf = frontConfig();
   assertStringIncludes(
     conf,
-    String.raw`set $tp_fwd_peer "$realip_remote_addr|$http_x_forwarded_proto";`,
+    'set $tp_fwd_peer "$realip_remote_addr|$http_x_forwarded_proto";',
   );
   assertStringIncludes(
     conf,
