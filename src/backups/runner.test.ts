@@ -195,6 +195,17 @@ test("runScheduledBackup dumps the database the policy entry names", async () =>
   assert(!argv.includes("appdb"));
 });
 
+test("runScheduledBackup reports the database it dumped", async () => {
+  await withLayout(async (layout) => {
+    const named = managedPolicy({ database: "defaultdb" });
+    await writeBackupPoliciesFile(layout, { policies: [named] });
+    const deps = { ...fakeDeps(new TextEncoder().encode("x")), layout };
+    const outcome = await runScheduledBackup(named.policyId, deps);
+    assert(outcome.kind === "ran");
+    assertEquals(outcome.result.database, "defaultdb");
+  });
+});
+
 test("runScheduledBackup falls back to the engine default when the entry names no database", async () => {
   const argv = await mariadbDumpArgv({});
   assertEquals(argv.at(-1), "appdb");

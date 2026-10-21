@@ -132,6 +132,8 @@ type ScheduledArtifact = {
   sizeBytes: number;
   checksum: string;
   pruned: string[];
+  /** The database a managed dump was of. */
+  database?: string;
 };
 
 function backUpManagedTarget(
@@ -254,6 +256,7 @@ async function runPolicy(
       checksum: artifact.checksum,
       path: artifact.path,
     };
+    if (artifact.database !== undefined) result.database = artifact.database;
     if (artifact.pruned.length > 0) result.pruned = artifact.pruned;
     return result;
   } catch (err) {

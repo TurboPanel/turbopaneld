@@ -72,7 +72,7 @@ Orchestrator self-heal: `restart: always` does not bring back a container that w
 
 **Postgres read-write is data only, like MySQL and MariaDB.** `read-write` (the plain login or the `_rw` group) holds SELECT, INSERT, UPDATE and DELETE on tables and USAGE, SELECT and UPDATE on sequences. TRUNCATE and REFERENCES belong to the `owner` (migration) level only, on both the owner-role path (`postgres-owner-role-sql.ts`) and the older per-login path (`postgres-sql.ts`). Every apply also takes both away from a read-write login or group that an earlier release gave them, on existing tables and in the default privileges for later ones, and writes nothing when they are already gone (`postgres-grants.real-pg.test.ts` runs both paths on real Postgres 16 and 18, including a repeated apply that rewrites no ACL).
 
-Backup restore skips per-login schemas on an owner-role database; a restored table is owned by the platform admin until fixed.
+Backup restore skips per-login schemas on an owner-role database; a restored table is handed to the owner role in the same transaction.
 
 ## State tree
 
@@ -538,7 +538,19 @@ ProxySQL to enforce. Canonical policy:
      so a truncated dump, a failing statement or a lock timeout (30 s) leaves
      the data untouched. Rows, tables and schemas made after the backup are
      gone. Roles, the database itself and its connect rights are not touched.
-     Restored objects are owned by the platform admin (`--no-owner`), as before.
+     The replay creates objects as the platform admin (`--no-owner`); inside the
+     same transaction `handOverPlatformObjectsSql` then gives them to the
+     database's owner (`tp_<db>_owner`, or the chosen owner login), so a
+     migrations login keeps working on restored tables. A database still owned by
+     the platform admin is left as it is. Every apply of an owner-role database
+     runs the same hand-over for objects the platform admin or root login made,
+     which repairs databases restored by an earlier release. The hand-over covers
+     schemas, tables, views, materialized views, foreign tables, standalone
+     sequences, routines and types; operators, collations, text search
+     configurations and dictionaries, conversions, extended statistics, foreign
+     servers, publications and large objects stay with the platform admin, and
+     objects an extension owns or another role made are never touched. It waits
+     at most 5 s for a lock (a repeat is safe).
      **`pg_restore --clean --if-exists` inside the transaction** drops and
      recreates only objects **named in the archive** (tables, schemas, extensions
      in dumped schemas, publications, event triggers, large objects, …). Anything

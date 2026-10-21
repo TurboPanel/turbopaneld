@@ -419,6 +419,79 @@ function holdsAllSql(
     .join(" AND ");
 }
 
+/** SQL expression: role name of the connected database's owner. */
+export const DATABASE_OWNER_SQL =
+  "(SELECT r.rolname FROM pg_catalog.pg_database d JOIN pg_catalog.pg_roles r ON r.oid = d.datdba WHERE d.datname = pg_catalog.current_database())";
+
+/**
+ * Hand objects the platform admin (or another platform creator) owns in the
+ * connected database to the database's owner role. A restore replays the dump
+ * with `--no-owner`, so everything it creates belongs to the admin running it;
+ * the owner role (and so a migrations login working as it) would then be
+ * refused on its own tables. Run again on every apply it also repairs
+ * databases restored by an earlier release.
+ *
+ * `ownerSql` is a SQL expression for the new owner's role name and `fromSql`
+ * one for a text[] of the roles to take objects from; nothing is moved when
+ * the owner is one of those roles. Schemas, tables, views, materialized views,
+ * foreign tables, standalone sequences, routines and types are covered; the
+ * rest (indexes, owned sequences, table row types) follow their table, and
+ * objects an extension owns stay with the extension.
+ *
+ * Not covered, so they stay with the platform admin: operators, collations,
+ * text search configurations and dictionaries, conversions, extended
+ * statistics, foreign servers and data wrappers, publications and large
+ * objects. The work gives up after 5 seconds waiting for a lock, so a busy
+ * table fails the apply cleanly and a repeat is safe.
+ */
+export function handOverPlatformObjectsSql(
+  ownerSql: string,
+  fromSql: string,
+): string {
+  const user = `n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'`;
+  const mine = (owner: string) =>
+    `pg_catalog.pg_get_userbyid(${owner}) = ANY (f)`;
+  const notExtension = (classId: string, oid: string) =>
+    `NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = '${classId}'::pg_catalog.regclass AND d.objid = ${oid} AND d.deptype = 'e')`;
+  return [
+    `DO $tp_handover$`,
+    `DECLARE o text := ${ownerSql}; f text[] := ${fromSql}; r record;`,
+    `BEGIN`,
+    `  IF o IS NULL OR o = ANY (f) THEN RETURN; END IF;`,
+    `  SET LOCAL lock_timeout = '5s';`,
+    `  FOR r IN SELECT n.nspname AS obj FROM pg_catalog.pg_namespace n`,
+    `           WHERE ${user} AND ${mine("n.nspowner")}`,
+    `           AND ${notExtension("pg_namespace", "n.oid")} LOOP`,
+    `    EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', r.obj, o);`,
+    `  END LOOP;`,
+    `  FOR r IN SELECT c.oid::pg_catalog.regclass::text AS obj, c.relkind AS kind`,
+    `           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace`,
+    `           WHERE ${user} AND ${mine("c.relowner")}`,
+    `           AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S', 'c')`,
+    `           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_class'::pg_catalog.regclass`,
+    `                           AND d.objid = c.oid AND (d.deptype = 'e' OR (c.relkind = 'S' AND d.deptype IN ('a', 'i')))) LOOP`,
+    `    EXECUTE pg_catalog.format(CASE r.kind WHEN 'S' THEN 'ALTER SEQUENCE %s OWNER TO %I' WHEN 'c' THEN 'ALTER TYPE %s OWNER TO %I' ELSE 'ALTER TABLE %s OWNER TO %I' END, r.obj, o);`,
+    `  END LOOP;`,
+    `  FOR r IN SELECT p.oid::pg_catalog.regprocedure::text AS obj FROM pg_catalog.pg_proc p`,
+    `           JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace`,
+    `           WHERE ${user} AND ${mine("p.proowner")} AND ${
+      notExtension("pg_proc", "p.oid")
+    } LOOP`,
+    `    EXECUTE pg_catalog.format('ALTER ROUTINE %s OWNER TO %I', r.obj, o);`,
+    `  END LOOP;`,
+    `  FOR r IN SELECT t.oid::pg_catalog.regtype::text AS obj, t.typtype AS kind FROM pg_catalog.pg_type t`,
+    `           JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace`,
+    `           WHERE ${user} AND ${
+      mine("t.typowner")
+    } AND t.typtype IN ('e', 'd', 'r')`,
+    `           AND ${notExtension("pg_type", "t.oid")} LOOP`,
+    `    EXECUTE pg_catalog.format(CASE r.kind WHEN 'd' THEN 'ALTER DOMAIN %s OWNER TO %I' ELSE 'ALTER TYPE %s OWNER TO %I' END, r.obj, o);`,
+    `  END LOOP;`,
+    `END`,
+    `$tp_handover$;`,
+  ].join("\n");
+}
+
 /** Grant the groups what they miss on objects that already exist. */
 function healExistingObjectsSql(names: OwnerRoleNames): string {
   const rwLit = quoteLiteral(names.rw);
@@ -519,7 +592,15 @@ export function ownerRoleDatabaseSql(
       `${from} GRANT USAGE ON SCHEMAS TO ${ro};`,
     );
   }
-  lines.push(healExistingObjectsSql(names));
+  lines.push(
+    handOverPlatformObjectsSql(
+      DATABASE_OWNER_SQL,
+      `ARRAY[${
+        platformCreators.map((c) => quoteLiteral(c)).join(", ")
+      }]::text[]`,
+    ),
+    healExistingObjectsSql(names),
+  );
   return lines.join("\n");
 }
 

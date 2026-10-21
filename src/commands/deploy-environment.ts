@@ -74,6 +74,7 @@ import {
 } from "../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { ensureBuildkitRailpack } from "../deploy/release/railpack-build.ts";
+import { observeBuildSlot } from "../deploy/release/build-sandbox.ts";
 import { nativeAppRuntimeKind } from "../deploy/native/unit.ts";
 import {
   createNoopDeployStepReporter,
@@ -2597,10 +2598,16 @@ export async function handleEnvironmentDeploy(
     pruneHoldKeysForDeploy(parsedPayload.sites ?? []),
   );
   try {
-    const result = await deployEnvironmentHolding(
-      parsedPayload,
-      daemonReceivedAt,
-      deps,
+    // The control plane's run deadline counts only while this is `true`: it
+    // pauses while the deploy waits for another build to free the host.
+    const progress = deps?.progress;
+    progress?.running(true);
+    const result = await observeBuildSlot(
+      {
+        waiting: () => progress?.running(false),
+        acquired: () => progress?.running(true),
+      },
+      () => deployEnvironmentHolding(parsedPayload, daemonReceivedAt, deps),
     );
     deps?.progress?.finish("succeeded");
     return result;
