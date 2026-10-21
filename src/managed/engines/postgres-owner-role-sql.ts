@@ -242,6 +242,12 @@ export const DATABASE_OWNER_SQL =
  * foreign tables, standalone sequences, routines and types are covered; the
  * rest (indexes, owned sequences, table row types) follow their table, and
  * objects an extension owns stay with the extension.
+ *
+ * Not covered, so they stay with the platform admin: operators, collations,
+ * text search configurations and dictionaries, conversions, extended
+ * statistics, foreign servers and data wrappers, publications and large
+ * objects. The work gives up after 5 seconds waiting for a lock, so a busy
+ * table fails the apply cleanly and a repeat is safe.
  */
 export function handOverPlatformObjectsSql(
   ownerSql: string,
@@ -257,6 +263,7 @@ export function handOverPlatformObjectsSql(
     `DECLARE o text := ${ownerSql}; f text[] := ${fromSql}; r record;`,
     `BEGIN`,
     `  IF o IS NULL OR o = ANY (f) THEN RETURN; END IF;`,
+    `  SET LOCAL lock_timeout = '5s';`,
     `  FOR r IN SELECT n.nspname AS obj FROM pg_catalog.pg_namespace n`,
     `           WHERE ${user} AND ${mine("n.nspowner")}`,
     `           AND ${notExtension("pg_namespace", "n.oid")} LOOP`,

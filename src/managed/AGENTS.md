@@ -544,7 +544,13 @@ ProxySQL to enforce. Canonical policy:
      migrations login keeps working on restored tables. A database still owned by
      the platform admin is left as it is. Every apply of an owner-role database
      runs the same hand-over for objects the platform admin or root login made,
-     which repairs databases restored by an earlier release.
+     which repairs databases restored by an earlier release. The hand-over covers
+     schemas, tables, views, materialized views, foreign tables, standalone
+     sequences, routines and types; operators, collations, text search
+     configurations and dictionaries, conversions, extended statistics, foreign
+     servers, publications and large objects stay with the platform admin, and
+     objects an extension owns or another role made are never touched. It waits
+     at most 5 s for a lock (a repeat is safe).
      **`pg_restore --clean --if-exists` inside the transaction** drops and
      recreates only objects **named in the archive** (tables, schemas, extensions
      in dumped schemas, publications, event triggers, large objects, …). Anything
