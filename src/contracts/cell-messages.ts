@@ -186,6 +186,13 @@ export type CommandProgress = {
   current: string | null;
   /** ISO 8601. */
   updatedAt: string;
+  /**
+   * When the server began actually running this command, or `null` while it
+   * waits for the host (another build holds the single build slot). Absent
+   * from a daemon that does not report it. The control plane starts the
+   * command's run deadline from here, so waiting never counts against it.
+   */
+  runningSince?: string | null;
 };
 
 /**

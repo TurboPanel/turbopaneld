@@ -493,3 +493,29 @@ test("sendOverOpenSocket sends only on an open socket", () => {
   assertEquals(sendOverOpenSocket(open, message), true);
   assertEquals(JSON.parse(frames[0]).type, "echo");
 });
+
+test("running reports when the deploy starts and when it waits for the host", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  assertEquals(h.last().runningSince, undefined);
+  h.reporter.running(true);
+  assertEquals(h.last().runningSince, new Date(1_000_000).toISOString());
+  const count = h.sent.length;
+  h.reporter.running(true);
+  assertEquals(h.sent.length, count);
+  h.advance(5000);
+  h.reporter.running(false);
+  assertEquals(h.last().runningSince, null);
+  h.advance(5000);
+  h.reporter.running(true);
+  assertEquals(h.last().runningSince, new Date(1_010_000).toISOString());
+});
+
+test("a first running(false) reports the deploy as waiting", () => {
+  const h = harness();
+  h.reporter.running(false);
+  assertEquals(h.last().runningSince, null);
+  const count = h.sent.length;
+  h.reporter.running(false);
+  assertEquals(h.sent.length, count);
+});

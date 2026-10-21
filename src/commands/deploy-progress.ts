@@ -80,6 +80,13 @@ export type DeployStepReporter = {
    * `failed` or `skipped` (cancel) and every `pending` step `skipped`.
    */
   finish(outcome: DeployProgressOutcome): void;
+  /**
+   * Tell the control plane whether the deploy is running (`true`: its run
+   * deadline counts from now) or waiting for the host (`false`: another build
+   * holds the build slot, nothing counts). Sent at once, and a repeat of the
+   * same state is dropped.
+   */
+  running(active: boolean): void;
   /** The payload as it would be sent now. */
   snapshot(): CommandProgress;
   /** False for the no-op reporter: nothing is planned or probed for it. */
@@ -190,6 +197,8 @@ class DeployStepReporterImpl implements DeployStepReporter {
   #current: string | null = null;
   /** The phase step a nested install interrupted; `current` returns to it. */
   #resume: string | null = null;
+  /** `undefined` until the first {@link running} call. */
+  #runningSince: string | null | undefined = undefined;
   #lastSentAt = Number.NEGATIVE_INFINITY;
   #flushTimer: unknown = undefined;
 
@@ -305,12 +314,25 @@ class DeployStepReporterImpl implements DeployStepReporter {
     else this.#cancelFlush();
   }
 
+  running(active: boolean): void {
+    if (
+      active
+        ? typeof this.#runningSince === "string"
+        : this.#runningSince === null
+    ) return;
+    this.#runningSince = active ? this.#now().toISOString() : null;
+    this.#sendNow();
+  }
+
   snapshot(): CommandProgress {
     return clampCommandProgress({
       version: 1,
       steps: this.#steps.map(definedStep),
       current: this.#current,
       updatedAt: this.#now().toISOString(),
+      ...(this.#runningSince === undefined
+        ? {}
+        : { runningSince: this.#runningSince }),
     });
   }
 
@@ -413,6 +435,7 @@ export function createNoopDeployStepReporter(): DeployStepReporter {
     detail() {},
     phase() {},
     finish() {},
+    running() {},
     snapshot: () => ({
       version: 1,
       steps: [],
