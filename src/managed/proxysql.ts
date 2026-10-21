@@ -36,7 +36,7 @@ import {
   readComposePsLabels,
 } from "../deploy/compose-ps.ts";
 import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
-import { logInfo } from "../util/logger.ts";
+import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { reservedManagedIngressAddress } from "./ingress-cidr.ts";
@@ -204,6 +204,13 @@ export type ProxySqlUserDesired = {
   connectionRole?: ProxySqlConnectionRole;
   /** Database-tool login: primary only, no read/write split rules. */
   tool?: boolean;
+  /**
+   * Connect straight through, no connection sharing: a PostgreSQL login with
+   * this set and no source limit gets `fast_forward=1`; see
+   * {@link userUsesFastForward}. Not used for the MySQL family. Absent means
+   * false (an older control plane).
+   */
+  straightThrough?: boolean;
   /**
    * Present (even empty) turns the source-address guard on: queries from
    * anywhere but these addresses (exact, or a trailing `%` prefix) plus, for a
@@ -1091,6 +1098,70 @@ function userDefaultHostgroup(
     : cluster.writerHostgroup;
 }
 
+/**
+ * Whether a login's `pgsql_users` row gets `fast_forward=1`, which makes
+ * ProxySQL pass the client's bytes straight to the engine. The control plane
+ * decides per login (`straightThrough`); the same flag is not used for the
+ * MySQL family.
+ *
+ * Why: the Node `postgres` driver (and the migrator built on it) sends a Flush
+ * message after Parse/Describe on every parameterized query, and ProxySQL's
+ * normal PostgreSQL session loop does not implement Flush, so the client gets
+ * "feature not supported". Straight-through mode works with every driver.
+ *
+ * Cost: no connection reuse, no query rules. Query rules are how a source
+ * limit (and the root guard) is enforced, so the flag is ignored for a
+ * source-limited login and for a root login, even when true: the limit would
+ * silently stop working. (System and replication logins never reach this
+ * renderer.)
+ */
+export function userUsesFastForward(
+  family: "mysql" | "pgsql",
+  user: ProxySqlUserDesired,
+): boolean {
+  return family === "pgsql" && user.straightThrough === true &&
+    user.role === "user" && !isSourceLimitedUser(user);
+}
+
+const warnedStraightThrough = new Set<string>();
+
+/** Logs once per login when `straightThrough` is sent for a login that cannot have it. */
+function warnIgnoredStraightThrough(
+  family: "mysql" | "pgsql",
+  user: ProxySqlUserDesired,
+): void {
+  if (family !== "pgsql" || user.straightThrough !== true) return;
+  if (userUsesFastForward(family, user)) return;
+  if (warnedStraightThrough.has(user.username)) return;
+  warnedStraightThrough.add(user.username);
+  logWarn(
+    "proxysql",
+    `straightThrough ignored for login "${user.username}": it has a source limit or is a root login, and straight-through skips the rules that enforce those`,
+  );
+}
+
+/** One `{ ... }` row of the cold-start user table. */
+function renderUserRow(
+  family: "mysql" | "pgsql",
+  cluster: ProxySqlClusterDesired,
+  user: ProxySqlUserDesired,
+): string {
+  warnIgnoredStraightThrough(family, user);
+  const fastForward = userUsesFastForward(family, user)
+    ? " fast_forward=1"
+    : "";
+  // ProxySQL 3.0.x `pgsql_users` has no default_schema column (MySQL users
+  // still accept it). Only emit the field for mysql family.
+  const defaultSchema = family === "mysql" && user.defaultDatabase
+    ? ` default_schema="${escapeProxySqlConfigString(user.defaultDatabase)}"`
+    : "";
+  const name = escapeProxySqlConfigString(user.username);
+  const password = escapeProxySqlConfigString(user.password);
+  const hostgroup = userDefaultHostgroup(cluster, user);
+  const ssl = cluster.requireTls ? 1 : 0;
+  return `    { username="${name}" password="${password}" default_hostgroup=${hostgroup} active=1 use_ssl=${ssl}${fastForward}${defaultSchema} }`;
+}
+
 function renderUserRows(
   family: "mysql" | "pgsql",
   clusters: readonly ProxySqlClusterDesired[],
@@ -1102,22 +1173,7 @@ function renderUserRows(
     for (const user of cluster.users) {
       if (seen.has(user.username)) continue;
       seen.add(user.username);
-      // ProxySQL 3.0.x `pgsql_users` has no default_schema column (MySQL users
-      // still accept it). Only emit the field for mysql family.
-      const defaultSchema = family === "mysql" && user.defaultDatabase
-        ? ` default_schema="${
-          escapeProxySqlConfigString(user.defaultDatabase)
-        }"`
-        : "";
-      rows.push(
-        `    { username="${
-          escapeProxySqlConfigString(user.username)
-        }" password="${
-          escapeProxySqlConfigString(user.password)
-        }" default_hostgroup=${
-          userDefaultHostgroup(cluster, user)
-        } active=1 use_ssl=${cluster.requireTls ? 1 : 0}${defaultSchema} }`,
-      );
+      rows.push(renderUserRow(family, cluster, user));
     }
   }
   return rows;
@@ -1152,7 +1208,9 @@ function sortedReadSplitUsernames(
   return cluster.users
     .filter((user) =>
       user.connectionRole !== "read-only" && user.tool !== true &&
-      !isSourceLimitedUser(user)
+      !isSourceLimitedUser(user) &&
+      !(clusterMatchesFamily(cluster, "pgsql") &&
+        userUsesFastForward("pgsql", user))
     )
     .map((user) => user.username)
     .sort((a, b) => a.localeCompare(b));
@@ -1474,6 +1532,11 @@ function renderAdminUserInsert(
   if (user.maxConnections !== undefined) {
     columns += ",max_connections";
     values += `,${Math.trunc(user.maxConnections)}`;
+  }
+  warnIgnoredStraightThrough(family, user);
+  if (userUsesFastForward(family, user)) {
+    columns += ",fast_forward";
+    values += ",1";
   }
   if (family === "mysql" && user.defaultDatabase) {
     const schema = escapeSqlString(user.defaultDatabase);

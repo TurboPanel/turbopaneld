@@ -157,6 +157,7 @@ function desiredStateFromPayload(
           ? { connectionRole: user.connectionRole }
           : {}),
         ...(user.tool === true ? { tool: true } : {}),
+        ...(user.straightThrough === true ? { straightThrough: true } : {}),
         ...(user.allowedSources !== undefined
           ? { allowedSources: [...user.allowedSources] }
           : {}),
