@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  BACKUP_S3_COPY_FEATURE,
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
@@ -192,9 +193,18 @@ test("managed-database-owner-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("tls-capture-v1 is advertised last and raised no floor", () => {
+test("tls-capture-v1 is advertised and raised no floor", () => {
   assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TLS_CAPTURE_FEATURE);
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(TLS_CAPTURE_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("backup-s3-copy-v1 is advertised last and raised no floor", () => {
+  assertEquals(BACKUP_S3_COPY_FEATURE, "backup-s3-copy-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), BACKUP_S3_COPY_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
