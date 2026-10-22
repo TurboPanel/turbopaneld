@@ -77,7 +77,7 @@
     DEB_SHA256="{{ redis_deb_sha256[redis_deb_arch] }}"
     TMP="$(mktemp -d)"
     DEST="{{ turbopanel_vendor_dir }}/redis/${REDIS_VER}/bin"
-    DEB_URL="https://packages.redis.io/deb/pool/bookworm/r/re/redis-server_${REDIS_VER}-1rl1~bookworm1_${DEB_ARCH}.deb"
+    DEB_URL="https://packages.redis.io/deb/pool/trixie/r/re/redis-server_${REDIS_VER}-1rl1~trixie1_${DEB_ARCH}.deb"
     curl -fsSL -o "$TMP/redis-server.deb" "$DEB_URL"
     echo "${DEB_SHA256}  $TMP/redis-server.deb" | sha256sum -c - >/dev/null 2>&1 || {
       echo "Redis ${REDIS_VER} (${DEB_ARCH}): SHA-256 mismatch, expected ${DEB_SHA256}; refusing to install. To accept a re-published file, update redis_deb_sha256 in orchestration/roles/redis/defaults/main.yml" >&2

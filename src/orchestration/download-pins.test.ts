@@ -74,7 +74,7 @@ const DOWNLOAD_EXCEPTIONS = new Map<string, string>([
 ]);
 
 function taskBlocks(text: string): string[] {
-  return text.split(/\n(?=- name:|    - name:)/);
+  return text.split(/\n(?=(?:- name:| {4}- name:))/);
 }
 
 function roleTaskFiles(): string[] {
@@ -94,6 +94,50 @@ function roleTaskFiles(): string[] {
   }
   return files.sort();
 }
+
+test("nginx and Redis pins name the trixie builds", () => {
+  const nginx = readDefaults("nginx");
+  assert(String(nginx.nginx_deb_version).endsWith("~trixie"));
+  assertEquals(nginx.nginx_deb_dist, "trixie");
+  const redisTasks = Deno.readTextFileSync(
+    join(ROLES, "redis", "tasks", "main.yml"),
+  );
+  assert(
+    redisTasks.includes("pool/trixie/") && redisTasks.includes("~trixie1_"),
+  );
+  assert(!redisTasks.includes("bookworm"));
+});
+
+test("every mismatch message names a pin file that exists", () => {
+  const repo = join(ROLES, "..", "..");
+  const missing: string[] = [];
+  for (const rel of roleTaskFiles()) {
+    const text = Deno.readTextFileSync(join(ROLES, rel));
+    for (const m of text.matchAll(/(orchestration\/roles\/[\w./-]+\.yml)/g)) {
+      try {
+        Deno.statSync(join(repo, m[1]));
+      } catch {
+        missing.push(`${rel}: ${m[1]}`);
+      }
+    }
+  }
+  assertEquals(missing, []);
+  // Every shell download's message must point at a defaults file.
+  for (const rel of roleTaskFiles()) {
+    const text = Deno.readTextFileSync(join(ROLES, rel));
+    for (const block of taskBlocks(text)) {
+      if (
+        /\bcurl\s+-[a-zA-Z]*[fsSL]/.test(block) && /sha256sum\s+-c/.test(block)
+      ) {
+        assert(
+          /update \w+ in orchestration\/roles\/[\w-]+\/defaults\/main\.yml/
+            .test(block),
+          `${rel}: mismatch message does not name its pin file`,
+        );
+      }
+    }
+  }
+});
 
 test("every role download is checked against a pinned SHA-256", () => {
   const offenders: string[] = [];

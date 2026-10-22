@@ -3,16 +3,13 @@
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
 # Pinned nginx.org stable package (extracted with dpkg-deb -x — never apt-installed).
 nginx_version: "1.28.3"
-nginx_deb_version: "1.28.3-1~bookworm"
-# nginx.org still publishes bookworm packages; they run on Debian 13 (trixie).
-nginx_deb_dist: "bookworm"
-# SHA-256 of nginx_<nginx_deb_version>_<arch>.deb (key = nginx_deb_arch). Source:
-# the SHA256 field for each file in nginx.org's signed apt index
-# (packages/debian/dists/bookworm/nginx/binary-<arch>/Packages), equal to the
-# downloaded file. Bump together with nginx_deb_version.
+nginx_deb_version: "1.28.3-1~trixie"
+# The nginx.org build made for Debian 13 (trixie), the only supported release.
+nginx_deb_dist: "trixie"
+# SHA-256 of each .deb, from the nginx.org package index for trixie.
 nginx_deb_sha256:
-  amd64: "ed684ff9b10a05c79097e0947405c0c82c1715579e06efc18d04e9d2199ec157"
-  arm64: "b3c14a51310397b4869be98470dc5c68e3ebca6ccecf1674220be714e0bd5ad8"
+  amd64: "6a562adf5e1a5d1b54d58496d4eb95ee272c04548822736e620731511108a731"
+  arm64: "494d5e36c799725d773584d59cc16ae048d223d415e883d021158a03e6317046"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 

@@ -71,6 +71,11 @@ export type BootHoldRecord = {
  */
 const unsettledHolds = new Set<string>();
 
+/** True while this cluster's hold could not be completed (see above). */
+export function isBootHoldUnsettled(managedId: string): boolean {
+  return unsettledHolds.has(managedId);
+}
+
 export function resetUnsettledBootHoldsForTests(): void {
   unsettledHolds.clear();
 }
