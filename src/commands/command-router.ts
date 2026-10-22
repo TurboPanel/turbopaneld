@@ -255,12 +255,12 @@ export async function handleCommandDispatch(
     return;
   }
 
-  // A new server connects before its boot converge has finished; no command
-  // runs on top of that converge (it was acknowledged above, so it shows as
-  // received while it waits).
-  await bootConvergeSettled();
-
   await markCommandInFlight(message.id);
+  // A new server connects before its boot converge has finished; no command
+  // runs on top of that converge. It was acknowledged above and is marked
+  // running before the wait, so the same command sent again meanwhile is
+  // answered like any running command and never runs twice.
+  await bootConvergeSettled();
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
   // own stop/restart/re-apply/promote/restore/destroy as intent, not a crash.

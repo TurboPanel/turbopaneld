@@ -107,6 +107,53 @@ test({
 
 test({
   name:
+    "a command sent again while it waits for the boot converge runs only once",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    const outbox = await import("./command-outbox.ts");
+    const dir = await Deno.makeTempDir();
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", dir);
+    outbox.resetCommandOutboxForTests();
+    gate.resetBootConvergeForTests();
+    let finish!: (ok: boolean) => void;
+    gate.trackBootConverge(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    try {
+      const mock = new MockWebSocket();
+      const ws = mock as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-gate-twice",
+        commandId: "cmd-gate-twice",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      };
+      const first = handleCommandDispatch(message, ws);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      await handleCommandDispatch(message, ws);
+      finish(true);
+      await first;
+      const types = parseFrames(mock.sentFrames).map((f) => f.type);
+      assertEquals(types.filter((t) => t === "command-outcome").length, 1);
+    } finally {
+      gate.resetBootConvergeForTests();
+      outbox.resetCommandOutboxForTests();
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
     "handleCommandDispatch returns sanitized error for unknown command type",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {
