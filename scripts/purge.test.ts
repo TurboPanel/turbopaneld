@@ -1650,13 +1650,15 @@ test("a re-run on a half-purged host purges the held Docker packages and their l
   await Deno.mkdir(join(units, "sockets.target.wants"));
   await Deno.mkdir(join(units, "docker.service.d"));
   await Deno.symlink(
-    "/lib/systemd/system/docker.service",
+    join(dir, "gone", "docker.service"),
     join(units, "multi-user.target.wants", "docker.service"),
   );
   await Deno.symlink(
-    "/lib/systemd/system/docker.socket",
+    join(dir, "gone", "docker.socket"),
     join(units, "sockets.target.wants", "docker.socket"),
   );
+  // The link targets sit under a directory that does not exist, so they are
+  // dangling on any machine (a CI runner can have the real Docker units).
   // An admin's own containerd unit file is a real file and stays.
   await Deno.writeTextFile(join(units, "containerd.service"), "[Unit]\n");
   const resume = join(dir, "turbopanel-purge");
