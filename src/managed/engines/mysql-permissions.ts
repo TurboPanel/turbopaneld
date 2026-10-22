@@ -920,7 +920,7 @@ export function statementLimitSql(flavour: MysqlFamilyFlavour): string {
 /**
  * Name the views, triggers, routines and events each existing login is the
  * definer of, so the control plane can refuse a delete that would break them.
- * Best effort: when the query fails or time is short the field stays absent.
+ * When the query fails or time is short, the logins are flagged as unread.
  */
 async function attachDefinerObjects(
   logins: ObservedLogin[],
@@ -928,7 +928,11 @@ async function attachDefinerObjects(
   deadline: PermissionsReadDeadline,
 ): Promise<void> {
   const existing = logins.filter((entry) => entry.exists);
-  if (existing.length === 0 || !deadline.roomForQuery()) return;
+  if (existing.length === 0) return;
+  const markUnread = () => {
+    for (const entry of existing) entry.definesObjectsUnread = true;
+  };
+  if (!deadline.roomForQuery()) return markUnread();
   try {
     const found = parseDefinerObjects(
       await query(
@@ -945,7 +949,8 @@ async function attachDefinerObjects(
       }
     }
   } catch {
-    // Left absent: the delete is still checked on the host.
+    // Flagged, so the control plane does not read "absent" as "none".
+    markUnread();
   }
 }
 

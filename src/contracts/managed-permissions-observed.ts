@@ -127,6 +127,11 @@ export type ObservedLogin = {
    * `and N more`). Absent when there are none or the read was not possible.
    */
   definesObjects?: string[];
+  /**
+   * MySQL / MariaDB: true when the daemon could not look up the objects above
+   * (the query failed or time ran out), so an absent list does not mean none.
+   */
+  definesObjectsUnread?: boolean;
 };
 
 /** The report: every login asked for, in request order. */
