@@ -1,0 +1,8 @@
+{
+  "sury-php": {
+    "url": "https://packages.sury.org/php/apt.gpg",
+    "bundled": "sury-php.gpg",
+    "fingerprints": ["15058500A0235D97F5D10063B188E2B695BD4743"],
+    "expires": "2028-02-04"
+  }
+}

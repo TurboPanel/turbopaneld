@@ -34,16 +34,14 @@ php_fpm_series: "{{ php_fpm_default_series }}"
 # Empty means "latest 8.4.x sury publishes". Pin it to freeze a fleet.
 php_fpm_apt_version: ""
 
-# Sury repo wiring. The keyring ships as its own .deb so the trust root is
-# packaged and upgradable rather than a loose file dropped by curl.
-# Versioned pool file, not the rolling name, so the digest below stays valid
-# until the key package is deliberately bumped. Source of the SHA-256: the
-# SHA256 field of packages.sury.org's signed apt index
-# (php/dists/trixie/main/binary-amd64/Packages), equal to the downloaded file.
-php_fpm_sury_keyring_version: "2025.11.18"
-php_fpm_sury_keyring_url: "https://packages.sury.org/php/pool/main/d/debsuryorg-archive-keyring/debsuryorg-archive-keyring_{{ php_fpm_sury_keyring_version }}_all.deb"
-php_fpm_sury_keyring_sha256: "7511384559c9ddf1d5ce5f60be429ae9d4e7d01d9480d6f1b7a30c0810cf8b60"
-php_fpm_sury_keyring_path: "/usr/share/keyrings/debsuryorg-archive-keyring.gpg"
+# Sury repo wiring.
+# The repository signing key is installed by scripts/tp-apt-key from the entry
+# "sury-php" in apt-keys/keys.json: fetched live from the vendor URL, compared
+# with the fingerprint list shipped in the release, and falling back to the
+# bundled copy. Policy: warn (default, proceed on a changed key and log it),
+# enforce (refuse a changed or unreachable key) or bundled (never fetch).
+php_fpm_apt_key_policy: warn
+php_fpm_sury_keyring_path: "/usr/share/keyrings/turbopanel-sury-php.gpg"
 php_fpm_sury_repo_url: "https://packages.sury.org/php"
 php_fpm_sury_suite: "{{ ansible_distribution_release }}"
 

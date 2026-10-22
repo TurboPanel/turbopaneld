@@ -107,6 +107,7 @@ export async function ensureCloudflared(
     bytes,
     expectedSha256 ?? CLOUDFLARED_SHA256[asset] ?? "",
     `cloudflared ${CLOUDFLARED_VERSION} (${asset})`,
+    "CLOUDFLARED_SHA256 in src/orchestration/assets.ts",
   );
 
   await Deno.mkdir(cloudflaredDir(), { recursive: true });

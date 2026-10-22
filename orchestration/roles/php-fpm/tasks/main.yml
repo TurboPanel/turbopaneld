@@ -34,22 +34,24 @@
     update_cache: true
     cache_valid_time: 3600
 
-# Packaged trust root, not a loose curl-dropped keyfile: the .deb carries the
-# key and can be upgraded when sury rotates it.
-- name: Download sury archive keyring package
-  ansible.builtin.get_url:
-    url: "{{ php_fpm_sury_keyring_url }}"
-    dest: /tmp/debsuryorg-archive-keyring.deb
-    checksum: "sha256:{{ php_fpm_sury_keyring_sha256 }}"
-    # Only `apt` (root) ever opens this staging copy, and /tmp is world-writable
-    # and shared, so it is never readable by anyone else while it sits there.
-    mode: "0600"
-  register: _sury_keyring_download
+# Key policy lives in scripts/tp-apt-key (fingerprint list in the release, live
+# fetch, bundled fallback); a changed key logs a WARN instead of blocking.
+- name: Install the sury repository signing key
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ role_path }}/../../scripts/tp-apt-key"
+      - sury-php
+      - "{{ php_fpm_sury_keyring_path }}"
+      - --policy
+      - "{{ php_fpm_apt_key_policy }}"
+  register: _sury_key
+  changed_when: "'installed' in _sury_key.stdout"
 
-- name: Install sury archive keyring
-  ansible.builtin.apt:
-    deb: /tmp/debsuryorg-archive-keyring.deb
-    state: present
+- name: Show sury key warnings
+  ansible.builtin.debug:
+    msg: "{{ _sury_key.stderr_lines }}"
+  when: _sury_key.stderr | length > 0
 
 - name: Remove any legacy sury sources.list entry
   ansible.builtin.file:

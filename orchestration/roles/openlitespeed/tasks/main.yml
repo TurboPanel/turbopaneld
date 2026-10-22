@@ -47,6 +47,8 @@
         url: >-
           https://github.com/litespeedtech/openlitespeed/releases/download/{{ openlitespeed_release_tag }}/{{ openlitespeed_tarball }}
         dest: "{{ _openlitespeed_tmp.path }}/openlitespeed.tgz"
+        # A mismatch means a re-published file: update openlitespeed_sha256 in
+        # orchestration/roles/openlitespeed/defaults/main.yml.
         checksum: "sha256:{{ openlitespeed_sha256[ansible_architecture] }}"
         mode: "0640"
         timeout: 120

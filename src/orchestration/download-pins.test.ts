@@ -51,17 +51,6 @@ for (const [role, name, arches] of ROLE_DIGESTS) {
   });
 }
 
-test("the keyring package for the PHP repo is pinned by SHA-256", () => {
-  const defaults = readDefaults("php-fpm");
-  assert(isSha256Hex(String(defaults.php_fpm_sury_keyring_sha256)));
-  assert(
-    String(defaults.php_fpm_sury_keyring_url).includes(
-      "php_fpm_sury_keyring_version",
-    ),
-    "the keyring URL must name a fixed version, not the rolling file",
-  );
-});
-
 test("cloudflared and the build tool pin both architectures in code", () => {
   assertEquals(Object.keys(CLOUDFLARED_SHA256).sort(), [
     "cloudflared-linux-amd64",

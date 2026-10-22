@@ -43,7 +43,7 @@
     DEB_URL="https://nginx.org/packages/debian/pool/nginx/n/nginx/nginx_${DEB_VER}_${DEB_ARCH}.deb"
     curl -fsSL -o "$TMP/nginx.deb" "$DEB_URL"
     echo "${DEB_SHA256}  $TMP/nginx.deb" | sha256sum -c - >/dev/null 2>&1 || {
-      echo "nginx ${DEB_VER} (${DEB_ARCH}): SHA-256 mismatch, expected ${DEB_SHA256}; refusing to install" >&2
+      echo "nginx ${DEB_VER} (${DEB_ARCH}): SHA-256 mismatch, expected ${DEB_SHA256}; refusing to install. To accept a re-published file, update nginx_deb_sha256 in orchestration/roles/nginx/defaults/main.yml" >&2
       rm -rf "$TMP"
       exit 1
     }
