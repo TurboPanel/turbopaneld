@@ -92,6 +92,13 @@ test("parseEnvironmentDeployPayload rejects non-object and missing hostings", ()
   );
 });
 
+test("parseEnvironmentDeployPayload refuses the reserved fallback hostname", () => {
+  rejectDeploy(
+    { hostings: [hosting({ hostnames: ["unconfigured.invalid"] })] },
+    "must not use the reserved name unconfigured.invalid",
+  );
+});
+
 test("parseEnvironmentDeployPayload rejects hosting field parse errors", () => {
   rejectDeploy({ hostings: [null] }, "Invalid environment deploy hosting");
   rejectDeploy(
