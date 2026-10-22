@@ -664,7 +664,7 @@ test("the gate is never fatal in stage 1, never installed for dev, and is wired 
   const converge = await Deno.readTextFile(
     join(ORCHESTRATION, "playbooks/daemon-converge.yml"),
   );
-  assertStringIncludes(converge, "role: docker-gate");
+  assertStringIncludes(converge, "name: docker-gate");
 });
 
 test("nothing routes through the gate yet: no DOCKER_HOST or socket override is set anywhere", async () => {
