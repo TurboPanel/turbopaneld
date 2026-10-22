@@ -1500,9 +1500,9 @@ test("a Docker Signed-By key outside the apt keyring directories is refused, not
 test("the PHP repository's loose signing key is evidence and is removed with the source", async () => {
   const keys = await Deno.makeTempDir({ prefix: "tp-purge-sury-" });
   const key = join(keys, "turbopanel-sury-php.gpg");
-  const tmpKey = `${key}.tmp`;
+  const fetchedKey = `${key}.fetched`;
   await Deno.writeTextFile(key, "key\n");
-  await Deno.writeTextFile(tmpKey, "key\n");
+  await Deno.writeTextFile(fetchedKey, "key\n");
   const apt = await fakeAptBin();
   const dpkg = await fakeDpkgBin([]);
   const result = await runPurgeSh(
@@ -1514,7 +1514,7 @@ test("the PHP repository's loose signing key is evidence and is removed with the
       "tp_pkg_installed",
     ],
     [
-      `TP_SURY_APT_KEYS="${key} ${tmpKey}"`,
+      `TP_SURY_APT_KEYS="${key} ${fetchedKey}"`,
       "if tp_sury_evidence; then echo evidence=yes; else echo evidence=no; fi",
       "tp_purge_apt_packages",
       'echo "fail=$TP_FAIL_COUNT"',
@@ -1527,5 +1527,9 @@ test("the PHP repository's loose signing key is evidence and is removed with the
   assertStringIncludes(result.stdout, "evidence=yes", result.stderr);
   assertStringIncludes(result.stdout, "fail=0", result.stderr);
   assertEquals(await exists(key), false, "the sury key was left");
-  assertEquals(await exists(tmpKey), false, "the sury temp key was left");
+  assertEquals(
+    await exists(fetchedKey),
+    false,
+    "the sury key download copy was left",
+  );
 });

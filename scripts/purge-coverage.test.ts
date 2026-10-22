@@ -44,20 +44,11 @@ const UNIT_PATHS_NOT_INSTALLED: Record<string, string> = {
   "/etc/systemd/system/php{{": "removed by the role, never installed",
 };
 
-// Every role file that holds a package at a version, and what it holds. The
-// purge passes --allow-change-held-packages, and only for packages on its own
-// list, so each held package must be one of TP_DOCKER_PACKAGES.
-const HELD_PACKAGES: Record<string, string[]> = {
-  "orchestration/roles/docker/tasks/install.yml": [
-    "docker-ce",
-    "docker-ce-cli",
-  ],
-};
-
-// Host files the install changes being reviewed write or wrote on hosts that
-// already exist (the Galaxy role on trunk and older releases, the Docker role
-// that replaces it, and the PHP key under its key policy). Some are not in
-// this tree yet, so the scan cannot see them; purge.sh must still remove them.
+// Host files current and older installs write or wrote: the Galaxy role older
+// releases used, the Docker role that replaced it, the key download copies the
+// repo-key role writes next to each key, and the PHP key under its key policy.
+// Several are computed or gone from the tree, so the scan cannot see them;
+// purge.sh must still remove them.
 const KNOWN_INSTALLED = [
   "/etc/apt/sources.list.d/docker.sources",
   "/etc/apt/sources.list.d/docker.list",
@@ -71,11 +62,11 @@ const KNOWN_INSTALLED = [
   "/etc/apt/sources.list.d/sury-php.sources",
   "/etc/apt/sources.list.d/sury-php.list",
   "/usr/share/keyrings/turbopanel-sury-php.gpg",
-  "/usr/share/keyrings/turbopanel-sury-php.gpg.tmp",
+  "/usr/share/keyrings/turbopanel-sury-php.gpg.fetched",
 ];
 
 const PATH_RE =
-  /\/(?:etc\/apt|usr\/share\/keyrings|etc\/systemd\/system|etc\/docker|etc\/containerd)\/[A-Za-z0-9_.@+-]*(?:\/[A-Za-z0-9_.@+-]+)*({{)?/g;
+  /\/(?:etc\/apt|usr\/share\/keyrings|etc\/systemd\/system|etc\/docker|etc\/containerd)\/[A-Za-z0-9_.@+-]*(?:\/[A-Za-z0-9_.@+-]+)*(\/?{{)?/g;
 
 /** Drops shell/YAML comment lines, trailing ` # ...` comments and Jinja comments. */
 function stripComments(text: string): string {
@@ -146,6 +137,145 @@ function unitName(path: string): string | null {
 
 function unitIsPurged(name: string, extra: string[]): boolean {
   return /^turbopanel/.test(name) || extra.includes(name);
+}
+
+function unquote(value: string): string {
+  return value.trim().replace(/^(["'])(.*)\1$/, "$2");
+}
+
+/**
+ * Role variables that hold lists, from the two YAML shapes roles use: a block
+ * list under `name:` and an inline `[a, b]` list. A scalar becomes one item.
+ */
+function yamlLists(text: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const lines = stripComments(text).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([A-Za-z_]\w*):\s*(.*)$/);
+    if (!m) continue;
+    out.set(m[1], listValue(m[2], lines, i));
+  }
+  return out;
+}
+
+/** The list a `key: value` line at index i holds, block or inline. */
+function listValue(rest: string, lines: string[], i: number): string[] {
+  const value = rest.trim();
+  if (value.startsWith("[")) {
+    return value.replace(/^\[|\]$/g, "").split(",").map(unquote).filter(
+      Boolean,
+    );
+  }
+  if (value !== "") return [unquote(value)];
+  const items: string[] = [];
+  for (let j = i + 1; j < lines.length; j++) {
+    const item = lines[j].match(/^\s*-\s+(.+)$/);
+    if (!item) break;
+    items.push(unquote(item[1]));
+  }
+  return items;
+}
+
+/** Expands `{{ var }}` through role variables; null when it cannot. */
+function resolve(
+  value: string,
+  vars: Map<string, string[]>,
+  depth = 0,
+): string[] | null {
+  const ref = value.match(/^{{\s*([A-Za-z_]\w*)\s*}}$/);
+  if (!ref) return value.includes("{{") ? null : [value];
+  const list = vars.get(ref[1]);
+  if (!list || depth > 4) return null;
+  const out: string[] = [];
+  for (const item of list) {
+    const got = resolve(item, vars, depth + 1);
+    if (got === null) return null;
+    out.push(...got);
+  }
+  return out;
+}
+
+type Held = { packages: string[]; unresolved: string[] };
+
+/**
+ * The packages a role file holds: `dpkg_selections` tasks with
+ * `selection: hold` (name, or `{{ item }}` over its loop) and `apt-mark hold`
+ * commands. Anything that cannot be read back to package names is unresolved.
+ */
+function heldPackages(text: string, vars: Map<string, string[]>): Held {
+  const held: Held = { packages: [], unresolved: [] };
+  const add = (raw: string) => {
+    const got = resolve(unquote(raw), vars);
+    if (got === null) held.unresolved.push(unquote(raw));
+    else held.packages.push(...got);
+  };
+  const code = stripComments(text);
+  for (const task of code.split(/^\s*- name:/m)) {
+    if (!/selection:\s*["']?hold/.test(task)) continue;
+    const name = task.match(/dpkg_selections:\s*\n\s+name:\s*(.+)/);
+    if (!name) {
+      held.unresolved.push("a hold without a dpkg_selections name");
+      continue;
+    }
+    if (!/^{{\s*item\s*}}$/.test(unquote(name[1]))) {
+      add(name[1]);
+      continue;
+    }
+    const lines = task.split("\n");
+    const at = lines.findIndex((l) => /^\s*(loop|with_items):/.test(l));
+    if (at < 0) {
+      held.unresolved.push("{{ item }} without a loop");
+      continue;
+    }
+    const rest = lines[at].replace(/^\s*(loop|with_items):/, "");
+    for (const item of listValue(rest, lines, at)) add(item);
+  }
+  for (const m of code.matchAll(/apt-mark\s+hold\s+([^\n;&|"'`]+)/g)) {
+    for (const word of m[1].match(/{{[^}]*}}|\S+/g) ?? []) add(word);
+  }
+  if (/--set-selections/.test(code)) {
+    held.unresolved.push("dpkg --set-selections");
+  }
+  return held;
+}
+
+/** Holds on packages the purge does not purge despite a hold, as messages. */
+function holdGaps(
+  files: { rel: string; text: string; vars: Map<string, string[]> }[],
+  purged: string[],
+): { gaps: string[]; held: string[] } {
+  const gaps: string[] = [];
+  const held = new Set<string>();
+  for (const { rel, text, vars } of files) {
+    const found = heldPackages(text, vars);
+    for (const pkg of found.packages) {
+      held.add(pkg);
+      if (!purged.includes(pkg)) {
+        gaps.push(`${rel}: holds ${pkg}, which purge.sh never purges`);
+      }
+    }
+    for (const what of found.unresolved) {
+      gaps.push(`${rel}: cannot tell which package is held (${what})`);
+    }
+  }
+  return { gaps: gaps.sort(), held: [...held].sort() };
+}
+
+async function roleVars(rel: string): Promise<Map<string, string[]>> {
+  const role = rel.match(/^orchestration\/roles\/([^/]+)\//);
+  const vars = new Map<string, string[]>();
+  if (!role) return vars;
+  for (const sub of ["defaults/main.yml", "vars/main.yml"]) {
+    try {
+      const text = await Deno.readTextFile(
+        join(repo, "orchestration/roles", role[1], sub),
+      );
+      for (const [k, v] of yamlLists(text)) vars.set(k, v);
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+  }
+  return vars;
 }
 
 type Gap = { file: string; path: string; why: string };
@@ -241,6 +371,18 @@ test("the path scanner skips comments and marks templated paths", () => {
   );
 });
 
+test("a template right after an apt directory is flagged, not read as the directory", () => {
+  assertEquals(
+    hostPaths(
+      [
+        'dest: "/etc/apt/keyrings/{{ foo }}.asc"',
+        "dest: /etc/apt/sources.list.d/{{ foo }}.sources",
+      ].join("\n"),
+    ),
+    ["/etc/apt/keyrings/{{", "/etc/apt/sources.list.d/{{"],
+  );
+});
+
 test("the scan sees the install side it guards", async () => {
   const { seen } = await findGaps();
   // If these vanish the scan stopped reading the roles, and passing means nothing.
@@ -276,25 +418,79 @@ test("the Docker and PHP repository files of current and older installs are remo
   }
 });
 
+test("the hold reader names every held package and flags the rest", () => {
+  const vars = yamlLists(
+    "_docker_versioned_packages:\n  - docker-ce\n  - docker-ce-cli\nother: [nginx]\n",
+  );
+  // docker/tasks/install.yml with the real hold plus holds on packages the
+  // purge never purges.
+  const install = [
+    "- name: Hold Docker at the installed version",
+    "  ansible.builtin.dpkg_selections:",
+    '    name: "{{ item }}"',
+    "    selection: hold",
+    '  loop: "{{ _docker_versioned_packages }}"',
+    "- name: Hold a web server",
+    "  ansible.builtin.dpkg_selections:",
+    "    name: redis-server",
+    "    selection: hold",
+    "- name: Hold more",
+    "  ansible.builtin.dpkg_selections:",
+    '    name: "{{ item }}"',
+    "    selection: hold",
+    "  loop:",
+    "    - containerd.io",
+    '    - "{{ other }}"',
+    "- name: Hold by command",
+    "  ansible.builtin.command: apt-mark hold docker-buildx-plugin {{ unknown_var }}",
+    "# apt-mark hold commented-out",
+  ].join("\n");
+  const docker = [
+    "docker-ce",
+    "docker-ce-cli",
+    "containerd.io",
+    "docker-buildx-plugin",
+  ];
+  const { gaps, held } = holdGaps(
+    [{
+      rel: "orchestration/roles/docker/tasks/install.yml",
+      text: install,
+      vars,
+    }],
+    docker,
+  );
+  assertEquals(held, [
+    "containerd.io",
+    "docker-buildx-plugin",
+    "docker-ce",
+    "docker-ce-cli",
+    "nginx",
+    "redis-server",
+  ]);
+  assertEquals(gaps, [
+    "orchestration/roles/docker/tasks/install.yml: cannot tell which package is held ({{ unknown_var }})",
+    "orchestration/roles/docker/tasks/install.yml: holds nginx, which purge.sh never purges",
+    "orchestration/roles/docker/tasks/install.yml: holds redis-server, which purge.sh never purges",
+  ]);
+});
+
 test("every package a role holds at a version is one the purge purges despite the hold", async () => {
   const code = await purgeCode();
   const docker = shellList(code, "TP_DOCKER_PACKAGES");
-  const holding: string[] = [];
+  const files = [];
   for (const file of await installFiles()) {
-    const text = stripComments(await Deno.readTextFile(file));
-    if (/selection:\s*["']?hold|apt-mark\s+hold|--set-selections/.test(text)) {
-      holding.push(relative(repo, file));
-    }
+    const rel = relative(repo, file);
+    files.push({
+      rel,
+      text: await Deno.readTextFile(file),
+      vars: await roleVars(rel),
+    });
   }
-  const unknown = holding.filter((f) => !(f in HELD_PACKAGES));
-  assertEquals(unknown, [], "list each new hold in HELD_PACKAGES");
-  for (const [file, pkgs] of Object.entries(HELD_PACKAGES)) {
-    for (const pkg of pkgs) {
-      assert(
-        docker.includes(pkg),
-        `${file} holds ${pkg}, which purge.sh never purges`,
-      );
-    }
+  const { gaps, held } = holdGaps(files, docker);
+  assertEquals(gaps, []);
+  // The Docker role holds these; if the reader stops seeing them it is broken.
+  for (const pkg of ["docker-ce", "docker-ce-cli"]) {
+    assert(held.includes(pkg), `the hold reader no longer finds ${pkg}`);
   }
   const purgeLines = code.split("\n").filter((l) => /apt-get purge -y/.test(l));
   assertEquals(purgeLines.length, 1, purgeLines.join("\n"));

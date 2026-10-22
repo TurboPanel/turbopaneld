@@ -3899,11 +3899,12 @@ TP_APT_SOURCES_DIR=/etc/apt/sources.list.d
 # Docker apt sources by name: the Docker role's and the Galaxy role's deb822
 # file, and the one-line files older installs used.
 TP_DOCKER_APT_SOURCES="/etc/apt/sources.list.d/docker.sources /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/download_docker_com_linux_debian.list /etc/apt/sources.list.d/download_docker_com_linux_ubuntu.list /etc/apt/sources.list.d/download_docker_com_linux_raspbian.list"
-# Docker signing keys by name, with the key download's temporary copy.
+# Docker signing keys by name, with the key download's temporary copy (the
+# repo-key role fetches to <key>.fetched and removes it unless interrupted).
 TP_DOCKER_APT_KEYS="/etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.asc.fetched /etc/apt/keyrings/docker.gpg /etc/apt/trusted.gpg.d/docker.asc /etc/apt/trusted.gpg.d/docker.gpg"
 # The PHP repository's signing key when the PHP role installs it as a loose
-# file, with that install's temporary copy.
-TP_SURY_APT_KEYS="/usr/share/keyrings/turbopanel-sury-php.gpg /usr/share/keyrings/turbopanel-sury-php.gpg.tmp"
+# file through the repo-key role, with that role's <key>.fetched download.
+TP_SURY_APT_KEYS="/usr/share/keyrings/turbopanel-sury-php.gpg /usr/share/keyrings/turbopanel-sury-php.gpg.fetched"
 
 if ! tp_is_interactive; then
   tp_print_error "A controlling terminal is required. Nothing was changed."
