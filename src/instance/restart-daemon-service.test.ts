@@ -1,9 +1,13 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   buildDaemonRestartSystemctlArgs,
+  type DaemonRestartReport,
   DEFAULT_DAEMON_UNIT,
+  describeRestartReport,
   resolveDaemonServiceUnit,
   restartDaemonService,
+  restartFailureMessage,
+  toRestartWire,
 } from "./restart-daemon-service.ts";
 
 /**
@@ -68,6 +72,7 @@ test("restartDaemonService runs sudo systemctl enable before restart", async () 
 test("restartDaemonService returns false when restart fails", async () => {
   const ok = await restartDaemonService({
     unit: "turbopaneld.service",
+    retryDelayMs: 0,
     runSystemctl: (args) =>
       Promise.resolve({
         success: args[2] === "enable",
@@ -80,6 +85,7 @@ test("restartDaemonService returns false when restart fails", async () => {
 test("restartDaemonService strips log-injection from unit and stderr", async () => {
   const ok = await restartDaemonService({
     unit: "evil\nunit\tname",
+    retryDelayMs: 0,
     runSystemctl: () =>
       Promise.resolve({
         success: false,
@@ -137,4 +143,186 @@ test("restartDaemonService default runner invokes sudo systemctl", async () => {
   } finally {
     Deno.Command = originalCommand;
   }
+});
+
+function collect(): {
+  reports: DaemonRestartReport[];
+  onReport: (report: DaemonRestartReport) => void;
+} {
+  const reports: DaemonRestartReport[] = [];
+  return { reports, onReport: (report) => reports.push(report) };
+}
+
+test("a restart that works reports ok with one try", async () => {
+  const { reports, onReport } = collect();
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    onReport,
+    runSystemctl: () => Promise.resolve({ success: true, stderr: "" }),
+  });
+  assertEquals(ok, true);
+  assertEquals(reports.length, 1);
+  assertEquals(reports[0].ok, true);
+  assertEquals(reports[0].endedByRestart, false);
+  assertEquals(reports[0].attempts, 1);
+});
+
+test("a nonzero restart is retried once and a second success is ok", async () => {
+  const { reports, onReport } = collect();
+  let restartCalls = 0;
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    retryDelayMs: 0,
+    onReport,
+    runSystemctl: (args) => {
+      if (args[2] === "restart") restartCalls += 1;
+      return Promise.resolve({
+        success: args[2] !== "restart" || restartCalls > 1,
+        stderr: "busy",
+        code: 1,
+      });
+    },
+  });
+  assertEquals(ok, true);
+  assertEquals(restartCalls, 2);
+  assertEquals(reports[0].ok, true);
+  assertEquals(reports[0].attempts, 2);
+});
+
+test("a restart that fails twice reports the exit code, stderr and tries", async () => {
+  const { reports, onReport } = collect();
+  let restartCalls = 0;
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    retryDelayMs: 0,
+    onReport,
+    runSystemctl: (args) => {
+      if (args[2] === "restart") restartCalls += 1;
+      return Promise.resolve(
+        args[2] === "restart"
+          ? { success: false, stderr: "Failed to connect to bus", code: 1 }
+          : { success: true, stderr: "" },
+      );
+    },
+  });
+  assertEquals(ok, false);
+  assertEquals(restartCalls, 2);
+  assertEquals(reports.length, 1);
+  assertEquals(reports[0].ok, false);
+  assertEquals(reports[0].command, "restart");
+  assertEquals(reports[0].exitCode, 1);
+  assertEquals(reports[0].stderr, "Failed to connect to bus");
+  assertEquals(reports[0].attempts, 2);
+  assert(reports[0].elapsedMs >= 0);
+  assertEquals(
+    describeRestartReport({ ...reports[0], elapsedMs: 40 }),
+    "systemctl restart exited 1, stderr: Failed to connect to bus, 2 tries, 40 ms",
+  );
+});
+
+async function assertEndedRestartIsOk(
+  ended: { code: number | null; signal: string | null },
+): Promise<void> {
+  const { reports, onReport } = collect();
+  let restartCalls = 0;
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    retryDelayMs: 0,
+    onReport,
+    runSystemctl: (args) => {
+      if (args[2] !== "restart") {
+        return Promise.resolve({ success: true, stderr: "" });
+      }
+      restartCalls += 1;
+      return Promise.resolve({ success: false, stderr: "", ...ended });
+    },
+  });
+  assertEquals(ok, true);
+  assertEquals(restartCalls, 1);
+  assertEquals(reports[0].endedByRestart, true);
+  assertEquals(reports[0].ok, true);
+}
+
+test("a restart command that exits 143 counts as the restart having happened", async () => {
+  await assertEndedRestartIsOk({ code: 143, signal: null });
+});
+
+test("a restart command ended by SIGTERM counts as the restart having happened", async () => {
+  await assertEndedRestartIsOk({ code: null, signal: "SIGTERM" });
+});
+
+test("restart failure text and wire object stay bounded and plain", () => {
+  const report: DaemonRestartReport = {
+    ok: false,
+    endedByRestart: false,
+    command: "enable",
+    exitCode: null,
+    signal: "SIGKILL",
+    stderr: `line1\nline2${"x".repeat(600)}`,
+    attempts: 2,
+    elapsedMs: 5,
+  };
+  const wire = toRestartWire(report);
+  assertEquals(wire.exitCode, undefined);
+  assertEquals(wire.signal, "SIGKILL");
+  assertEquals(wire.stderr?.length, 500);
+  assert(!wire.stderr?.includes("\n"));
+  assert(
+    restartFailureMessage(report).startsWith(
+      "daemon restart failed after reconcile (systemctl enable ended by SIGKILL",
+    ),
+  );
+  assertEquals(
+    restartFailureMessage(undefined),
+    "daemon restart failed after reconcile",
+  );
+});
+
+test("a killed enable is a real failure: retried once, then reported, and restart never runs", async () => {
+  const { reports, onReport } = collect();
+  const calls: string[] = [];
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    retryDelayMs: 0,
+    onReport,
+    runSystemctl: (args) => {
+      calls.push(args[2]);
+      return Promise.resolve(
+        args[2] === "enable"
+          ? { success: false, stderr: "", code: 143, signal: null }
+          : { success: true, stderr: "" },
+      );
+    },
+  });
+  assertEquals(ok, false);
+  assertEquals(calls, ["enable", "enable"]);
+  assertEquals(reports.length, 1);
+  assertEquals(reports[0].ok, false);
+  assertEquals(reports[0].endedByRestart, false);
+  assertEquals(reports[0].command, "enable");
+  assertEquals(reports[0].exitCode, 143);
+  assertEquals(reports[0].attempts, 2);
+});
+
+test("an enable killed once and then accepted goes on to restart", async () => {
+  const { reports, onReport } = collect();
+  const calls: string[] = [];
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    retryDelayMs: 0,
+    onReport,
+    runSystemctl: (args) => {
+      calls.push(args[2]);
+      const first = args[2] === "enable" && calls.length === 1;
+      return Promise.resolve(
+        first
+          ? { success: false, stderr: "", code: null, signal: "SIGKILL" }
+          : { success: true, stderr: "" },
+      );
+    },
+  });
+  assertEquals(ok, true);
+  assertEquals(calls, ["enable", "enable", "restart"]);
+  assertEquals(reports[0].ok, true);
+  assertEquals(reports[0].attempts, 2);
 });
