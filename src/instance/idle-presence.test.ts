@@ -4,7 +4,9 @@ import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
 import type { ServerReportedIp } from "../host/server-addresses.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
+import type { HostResources } from "../host/host-inventory.ts";
 import {
+  hostCapacityMoved,
   IdlePresence,
   installIdlePresenceProviders,
   jitteredMaxConnectionAgeMs,
@@ -1006,4 +1008,142 @@ test({
     assert(ages.size > 100, "recycle ages must differ per connection");
     assertEquals(jitteredMaxConnectionAgeMs(1_000, () => 0.5), 1_000);
   },
+});
+
+const MIB = 1024 * 1024;
+
+function balloonHost(memTotalBytes: number): HostResources {
+  return {
+    cpus: [{ cores: { total: 2 }, threads: { total: 2 } }],
+    memory: {
+      totalBytes: memTotalBytes,
+      pageSizeBytes: 4096,
+      presentBytes: 2048 * MIB,
+      blockSizeBytes: 128 * MIB,
+    },
+    swap: { totalBytes: 0 },
+    dynamicMemory: { driver: "hv_balloon", totalMoved: 0 },
+  };
+}
+
+function capacityPresence(
+  flag: boolean,
+  readResources: () => HostResources,
+): { presence: IdlePresence; socket: MockWebSocket; restore: () => void } {
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => ({ ...FULL_HOST, resources: readResources() }),
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+    }),
+    readHostResources: readResources,
+  });
+  const idleCheckIntervalMs = 15;
+  const socket = openMockSocket();
+  const presence = new IdlePresence({
+    serverId: "srv-capacity",
+    idleCheckIntervalMs,
+    idleThresholdMs: idleCheckIntervalMs,
+    staleConnectionMs: 60_000,
+    hostCapacityFlag: () => flag,
+  });
+  presence.attach(socket as unknown as WebSocket);
+  return { presence, socket, restore };
+}
+
+test("hostCapacityMoved needs more than 32 MiB, a CPU change or a flag flip", () => {
+  const base = balloonHost(372 * MIB);
+  assertEquals(hostCapacityMoved(base, balloonHost(404 * MIB)), false);
+  assertEquals(hostCapacityMoved(base, balloonHost(405 * MIB)), true);
+  assertEquals(hostCapacityMoved(base, balloonHost(340 * MIB)), false);
+  assertEquals(hostCapacityMoved(base, balloonHost(339 * MIB)), true);
+  const grown = balloonHost(372 * MIB);
+  grown.memory = { ...grown.memory, presentBytes: 4096 * MIB };
+  assertEquals(hostCapacityMoved(base, grown), true);
+  const oneCpuMore = balloonHost(372 * MIB);
+  oneCpuMore.cpus = [{ cores: { total: 3 }, threads: { total: 3 } }];
+  assertEquals(hostCapacityMoved(base, oneCpuMore), true);
+  const settled = balloonHost(372 * MIB);
+  delete settled.dynamicMemory;
+  assertEquals(hostCapacityMoved(base, settled), true);
+  assertEquals(hostCapacityMoved(base, undefined), false);
+  assertEquals(hostCapacityMoved(undefined, base), true);
+});
+
+test("IdlePresence hello carries present memory and dynamic memory", () => {
+  const { presence, socket, restore } = capacityPresence(
+    false,
+    () => balloonHost(372 * MIB),
+  );
+  try {
+    const hello = framesOfType(socket, "hello")[0] as {
+      resources: HostResources;
+    };
+    assertEquals(hello.resources.memory?.totalBytes, 372 * MIB);
+    assertEquals(hello.resources.memory?.presentBytes, 2048 * MIB);
+    assertEquals(hello.resources.memory?.blockSizeBytes, 128 * MIB);
+    assertEquals(hello.resources.dynamicMemory?.driver, "hv_balloon");
+  } finally {
+    presence.detach();
+    restore();
+  }
+});
+
+test("IdlePresence re-sends memory on a heartbeat once it moves past 32 MiB", async () => {
+  let memTotal = 372 * MIB;
+  const { presence, socket, restore } = capacityPresence(
+    true,
+    () => balloonHost(memTotal),
+  );
+  try {
+    memTotal = 403 * MIB;
+    await sleep(40);
+    assertEquals(framesOfType(socket, "heartbeat").length, 0);
+    memTotal = 420 * MIB;
+    await sleep(40);
+    const heartbeats = framesOfType(socket, "heartbeat") as Array<{
+      resources?: HostResources;
+    }>;
+    assertEquals(heartbeats.length, 1);
+    const resources = heartbeats[0].resources;
+    assertExists(resources);
+    assertEquals(resources.memory?.totalBytes, 420 * MIB);
+    assertEquals(resources.memory?.pageSizeBytes, 4096);
+    assertEquals(resources.memory?.presentBytes, 2048 * MIB);
+    assertEquals(resources.swap, { totalBytes: 0 });
+    assertEquals(resources.cpus?.length, 1);
+    assertEquals(resources.dynamicMemory?.driver, "hv_balloon");
+    // Addresses did not move, so the panel keeps the stored list.
+    assertEquals("ips" in resources, false);
+    await sleep(40);
+    assertEquals(framesOfType(socket, "heartbeat").length, 1);
+  } finally {
+    presence.detach();
+    restore();
+  }
+});
+
+test("IdlePresence never sends memory on a heartbeat to an older control plane", async () => {
+  let memTotal = 372 * MIB;
+  const { presence, socket, restore } = capacityPresence(
+    false,
+    () => balloonHost(memTotal),
+  );
+  try {
+    memTotal = 2000 * MIB;
+    await sleep(60);
+    for (const frame of framesOfType(socket, "heartbeat")) {
+      const resources = (frame as { resources?: HostResources }).resources;
+      assertEquals(resources?.memory, undefined);
+      assertEquals(resources?.cpus, undefined);
+    }
+  } finally {
+    presence.detach();
+    restore();
+  }
 });

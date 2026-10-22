@@ -154,6 +154,7 @@ import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
@@ -1652,6 +1653,7 @@ export class InstanceClient {
       onStaleConnection: () => this.#closeActiveSocket(),
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
+      hostCapacityFlag: () => this.instanceSupports(HOST_CAPACITY_FEATURE),
     });
   }
 

@@ -6,6 +6,7 @@ import {
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
+  HOST_CAPACITY_FEATURE,
   instanceUnsupportedReason,
   MANAGED_DATA_ONLY_READWRITE_FEATURE,
   MANAGED_DATABASE_CONVERT_FEATURE,
@@ -201,9 +202,14 @@ test("managed-database-convert-v1 is advertised", () => {
   );
 });
 
-test("tls-capture-v1 is advertised last and raised no floor", () => {
+test("tls-capture-v1 is advertised", () => {
   assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TLS_CAPTURE_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(TLS_CAPTURE_FEATURE), true);
+});
+
+test("host-capacity-v1 is advertised last and raised no floor", () => {
+  assertEquals(HOST_CAPACITY_FEATURE, "host-capacity-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), HOST_CAPACITY_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
