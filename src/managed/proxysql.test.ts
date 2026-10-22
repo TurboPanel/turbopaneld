@@ -1730,6 +1730,118 @@ test("legacy published 5432 compose text differs from current render so compose 
   assertStringIncludes(next, ":15432:15432");
 });
 
+test("three mixed-family clusters and three spanning segments still render valid compose and libconfig", () => {
+  // Live PUT managed-external-access 502'd once a host fronted three clusters
+  // (two local + a bound remote). Compose and proxysql.cnf must stay parseable
+  // at that size: YAML network keys, published binds, and comma-separated
+  // dynamic rows.
+  const segments = [
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000aa",
+      subnet: "10.90.1.0/24",
+    },
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000bb",
+      subnet: "10.90.2.0/24",
+    },
+    {
+      name: "tpn_00000000-0000-4000-8000-0000000000cc",
+      subnet: "10.90.3.0/24",
+    },
+  ];
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["0.0.0.0"],
+    segments,
+    null,
+    MANAGED_NETWORK,
+  );
+  const parsed = parseYaml(compose) as {
+    services: {
+      proxysql: { ports: string[]; networks: Record<string, unknown> };
+    };
+    networks: Record<string, unknown>;
+  };
+  assertEquals(
+    parsed.services.proxysql.ports.includes("0.0.0.0:15432:15432"),
+    true,
+  );
+  assertEquals(
+    parsed.services.proxysql.ports.includes("0.0.0.0:13306:13306"),
+    true,
+  );
+  assertEquals(Object.keys(parsed.networks).length, 4);
+  assertEquals(
+    readSegmentAttachmentsFromCompose(compose).map((row) => row.name),
+    segments.map((row) => row.name).toSorted((a, b) => a.localeCompare(b)),
+  );
+
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        managedId: "m1",
+        writerHostgroup: 0,
+        readerHostgroup: 1,
+        family: "pgsql",
+      }),
+      clusterDesired({
+        managedId: "m2",
+        engine: "mysql",
+        protocolPort: 3306,
+        family: "mysql",
+        writerHostgroup: 2,
+        readerHostgroup: 3,
+        backends: [
+          {
+            memberId: "mb-mysql",
+            role: "primary",
+            readEligible: false,
+            address: "engine-mysql",
+            port: 3306,
+            transport: "local",
+          },
+        ],
+        users: [{
+          username: "app_mysql",
+          role: "user",
+          password: "fixture-value-my",
+        }],
+      }),
+      clusterDesired({
+        managedId: "m3",
+        writerHostgroup: 4,
+        readerHostgroup: 5,
+        backends: [
+          {
+            memberId: "mb-pg2",
+            role: "primary",
+            readEligible: false,
+            address: "engine-pg2",
+            port: 5432,
+            transport: "local",
+          },
+        ],
+        users: [{
+          username: "app_pg2",
+          role: "user",
+          password: "fixture-value-pg2",
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(
+    cnf,
+    '    { hostgroup_id=0 hostname="engine-1" port=5432 use_ssl=1 status="ONLINE" },\n' +
+      '    { hostgroup_id=4 hostname="engine-pg2" port=5432 use_ssl=1 status="ONLINE" }',
+  );
+  assertStringIncludes(
+    cnf,
+    '    { hostgroup_id=2 hostname="engine-mysql" port=3306 use_ssl=1 status="ONLINE" }',
+  );
+  assertEquals(cnf.includes("} ,"), false);
+});
+
 test("proxysqlCompose pins spanning segments to reserved ingress addresses", () => {
   const compose = proxysqlCompose(
     DESCRIPTOR,
