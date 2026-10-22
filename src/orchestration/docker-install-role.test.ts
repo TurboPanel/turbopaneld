@@ -120,6 +120,11 @@ test("the docker role installs Docker itself from the official apt repository", 
     "Refuse to replace a distribution engine that may have containers",
   );
   assertStringIncludes(install, "python3-apt");
+  // The data check must not depend on the docker CLI existing.
+  assertEquals(
+    install.split("_docker_old_containers is skipped or").length - 1,
+    2,
+  );
   assertStringIncludes(install, "install_recommends: false");
   assertStringIncludes(install, "selection: hold");
   assertStringIncludes(install, "Could not reach download.docker.com");

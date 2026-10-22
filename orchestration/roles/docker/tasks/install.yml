@@ -47,6 +47,8 @@
     - _docker_conflicts_installed | default([]) | length > 0
     - _docker_bin.stat.exists
 
+# Also runs when there is no docker CLI at all (the container probe above was
+# skipped): the data directory is looked at directly.
 - name: Look for engine data when the distribution engine is not answering
   ansible.builtin.command:
     argv: [find, /var/lib/docker, -mindepth, "1", -maxdepth, "1"]
@@ -57,7 +59,7 @@
   when:
     - turbopanel_docker_remove_conflicting | bool
     - _docker_conflicts_installed | default([]) | length > 0
-    - (_docker_old_containers.rc | default(0)) != 0
+    - (_docker_old_containers is skipped or (_docker_old_containers.rc | default(0)) != 0)
 
 - name: Refuse to replace a distribution engine that may have containers
   ansible.builtin.fail:
@@ -69,7 +71,7 @@
       recreate its containers, or move /var/lib/docker aside, then run again.
   when:
     - turbopanel_docker_remove_conflicting | bool
-    - (_docker_old_containers.rc | default(0)) != 0
+    - (_docker_old_containers is skipped or (_docker_old_containers.rc | default(0)) != 0)
     - (_docker_old_data.stdout | default('') | trim | length) > 0
 
 - name: Refuse to replace a distribution engine that has containers
