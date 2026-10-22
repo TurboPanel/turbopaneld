@@ -320,6 +320,22 @@ export type ManagedEngineReplicationRuntime = {
     ctx: ManagedEngineContext,
     sql: string,
   ): Promise<string>;
+  /**
+   * Postgres only. Planned switchover: the final write position of a cleanly
+   * stopped primary, read from its stopped data volume. Null unless the
+   * cluster state is `shut down`; the position is where the shutdown record
+   * ends, the same value a caught-up standby reports as its replay position.
+   */
+  readStoppedPrimaryFinalPosition?(
+    ctx: ManagedEngineProbeContext,
+  ): Promise<{ lsn: string; timeline: number } | null>;
+  /**
+   * Postgres only. After `promote`: the position the standby had replayed to
+   * and the timeline it now writes on. Null when unreadable.
+   */
+  readPromotedPosition?(
+    ctx: ManagedEngineContext,
+  ): Promise<{ lsn: string; timeline: number } | null>;
   promote(
     ctx: ManagedEngineContext,
     options?: {

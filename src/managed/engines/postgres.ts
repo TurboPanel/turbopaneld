@@ -39,6 +39,7 @@ import {
   managedSlotRetentionSql,
   PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
+  promotedPositionSql,
   promoteSql,
   quoteIdentifier,
   reactivateFormerPrimaryAfterSwitchoverAbortSql,
@@ -98,6 +99,12 @@ import type {
 import { readPostgresPermissions } from "./postgres-permissions.ts";
 import { execSqlWithStdinRetry } from "./sql-stdin.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
+import {
+  FINAL_POSITION_SCRIPT,
+  FINAL_POSITION_SEPARATOR,
+  type FinalWalPosition,
+  finalWalPositionFromOutput,
+} from "./postgres-wal.ts";
 
 /**
  * Validate `database` with the same identifier guard used by SQL callers
@@ -879,6 +886,57 @@ function probePostgresStandbyData(
 }
 
 /**
+ * Final write position of a cleanly stopped primary, read from its stopped
+ * data volume in a throwaway container (`postgres-wal.ts` says why the end is
+ * computed). Null when the position cannot be proven; never throws for a
+ * missing or unclean data directory.
+ */
+async function readPostgresFinalWalPosition(
+  ctx: ManagedEngineProbeContext,
+): Promise<FinalWalPosition | null> {
+  const result = await ctx.runDocker([
+    "run",
+    "--rm",
+    ...helperLabelArgs("volume-copy"),
+    "--user",
+    ctx.containerUser,
+    "-e",
+    "LC_ALL=C",
+    ...volumeMountArgs(ctx.volumes),
+    "--entrypoint",
+    "sh",
+    ctx.image,
+    "-c",
+    FINAL_POSITION_SCRIPT,
+    "final-position",
+    postgresDataDir(ctx.volumes),
+  ]);
+  if (!result.success) return null;
+  const [controlData, waldump] = result.stdout.split(
+    `\n${FINAL_POSITION_SEPARATOR}\n`,
+  );
+  if (controlData === undefined || waldump === undefined) return null;
+  return finalWalPositionFromOutput(controlData, waldump);
+}
+
+/**
+ * Where a promoted standby stopped replaying and the timeline it now writes
+ * on. Read after the promote: once recovery ended the replay position stays
+ * at the last record applied, so it cannot move under the reading.
+ */
+async function readPostgresPromotedPosition(
+  ctx: ManagedEngineContext,
+): Promise<FinalWalPosition | null> {
+  const rows = await parsePsqlRows(ctx, promotedPositionSql());
+  const lsn = rows[0]?.[0]?.trim() ?? "";
+  const walFile = rows[0]?.[1]?.trim() ?? "";
+  if (!/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(lsn)) return null;
+  if (!/^[0-9A-Fa-f]{8}$/.test(walFile)) return null;
+  const timeline = Number.parseInt(walFile, 16);
+  return timeline > 0 ? { lsn: lsn.toUpperCase(), timeline } : null;
+}
+
+/**
  * Hand a role's objects to the platform admin and strip its privileges in
  * every connectable database, so `DROP ROLE` no longer fails with "some
  * objects depend on it". Ownership moves first (data survives); a role that
@@ -964,6 +1022,10 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
 
   probeStandbyData: probePostgresStandbyData,
+
+  readStoppedPrimaryFinalPosition: readPostgresFinalWalPosition,
+
+  readPromotedPosition: readPostgresPromotedPosition,
 
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
     const volumeArgs = volumeMountArgs(ctx.volumes);
