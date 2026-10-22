@@ -2920,6 +2920,119 @@ async function guardHostingCaddySitesLocked(
   }
 }
 
+/**
+ * The hide-names choice to give the catch-all when no deploy has sent one: the
+ * answer already on disk wins, then what the written sites say (any of them
+ * hides names: yes; sites without it: no), and an unknown answer hides names,
+ * which is the organization default.
+ */
+async function lastKnownHideWebServerNames(
+  sitesDir: string,
+  names: readonly string[],
+): Promise<boolean> {
+  const sites = names.filter((name) => !isDaemonReservedHostingSite(name));
+  if (sites.length === 0) return true;
+  const texts = await Promise.all(
+    sites.map((name) =>
+      readTextIfPresent(join(sitesDir, name)).catch(() => undefined)
+    ),
+  );
+  const readable = texts.filter((text) => text !== undefined);
+  if (readable.length === 0) return true;
+  return readable.some((text) => text.includes(HIDE_WEB_SERVER_NAMES_BLOCK));
+}
+
+/**
+ * At daemon start: make sure a host that already runs hosting Caddy answers
+ * unhosted names (the reserved `sites/00-fallback.caddy` and the Caddyfile's
+ * `default_sni` / `fallback_sni`) without waiting for a deploy to write them.
+ * Nothing happens when this host has no hosting Caddy (not set up, or not
+ * running), when both are already current, or when hosting Caddy refuses the
+ * result: the live files are then left as they were and the reason is thrown.
+ * Returns true when something was changed and Caddy was reloaded.
+ */
+export function ensureHostingFallback(
+  layout: LayoutPaths,
+  grantRead: (hostingDir: string) => Promise<void> = grantHostingCaddyRead,
+): Promise<boolean> {
+  return withHostingSitesLock(() =>
+    ensureHostingFallbackLocked(layout, grantRead)
+  );
+}
+
+async function ensureHostingFallbackLocked(
+  layout: LayoutPaths,
+  grantRead: (hostingDir: string) => Promise<void>,
+): Promise<boolean> {
+  const hostingDir = join(layout.configDir, "hosting");
+  const sitesDir = join(hostingDir, "sites");
+  const caddyfilePath = join(hostingDir, "Caddyfile");
+  // The staged unit is written only by the hosting Caddy setup.
+  if (await readTextIfPresent(join(hostingDir, CADDY_SERVICE)) === undefined) {
+    return false;
+  }
+  if (!await (hostingCaddyReadyOverride ?? hostingCaddyReady)(layout)) {
+    return false;
+  }
+  const running = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "is-active", "--quiet", CADDY_SERVICE]),
+  );
+  if (!running.success) return false;
+
+  const wantCaddyfile = caddyfile(layout.configDir);
+  const liveCaddyfile = await readTextIfPresent(caddyfilePath);
+  const names = await liveSnippetNames(sitesDir).catch((err) => {
+    if (err instanceof Deno.errors.NotFound) return [] as string[];
+    throw err;
+  });
+  const fallbackPath = join(sitesDir, HOSTING_FALLBACK_SITE);
+  const liveFallback = await readTextIfPresent(fallbackPath);
+  if (liveFallback !== undefined && liveCaddyfile === wantCaddyfile) {
+    return false;
+  }
+  const fallback = liveFallback ??
+    hostingFallbackSnippet(await lastKnownHideWebServerNames(sitesDir, names));
+
+  const candidate = await openHostingCandidate(layout, hostingDir);
+  try {
+    const others = names.filter((name) => name !== HOSTING_FALLBACK_SITE);
+    await Promise.all(
+      others.map((name) =>
+        Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
+      ),
+    );
+    await Deno.writeTextFile(
+      join(candidate.sitesDir, HOSTING_FALLBACK_SITE),
+      fallback,
+      { mode: 0o640 },
+    );
+    await grantRead(hostingDir);
+    const refusal = await hostingCandidateRefusal(layout, candidate);
+    if (refusal !== null) {
+      throw new Error(
+        `hosting Caddy refused the unhosted-name answer, left as it was: ${refusal}`,
+      );
+    }
+  } finally {
+    await closeHostingCandidate(candidate);
+  }
+
+  const next = `${caddyfilePath}.tpnew`;
+  await Deno.writeTextFile(next, wantCaddyfile, { mode: 0o640 });
+  await Deno.rename(next, caddyfilePath);
+  try {
+    await activateHostingSites([{ live: fallbackPath, contents: fallback }]);
+  } catch (err) {
+    if (liveCaddyfile !== undefined) {
+      await Deno.writeTextFile(caddyfilePath, liveCaddyfile, { mode: 0o640 });
+    }
+    throw err;
+  }
+  await grantRead(hostingDir);
+  return true;
+}
+
 /** Put the previous snippet back after a failed reload. */
 async function restorePreviousHostingSite(
   live: string,

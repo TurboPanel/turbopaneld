@@ -189,7 +189,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    deployed last. HTTPS shows one fixed internal certificate for the reserved
    name `unconfigured.invalid`, given to every other name by the Caddyfile's
    `default_sni` / `fallback_sni`; no per-name certificates are made, and
-   deploys refuse that name as a hosting hostname)
+   deploys refuse that name as a hosting hostname). The daemon also writes
+   the file and the Caddyfile at start (`ensureHostingFallback`, after the
+   guard) when hosting Caddy is set up and running but has no current copy, so
+   an updated host answers unhosted names before any deploy: it keeps a file a
+   deploy wrote, otherwise takes hide-names from the written sites (hidden when
+   unknown), validates first, and leaves live files alone if Caddy refuses)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved
