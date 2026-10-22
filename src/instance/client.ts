@@ -1160,14 +1160,15 @@ export class InstanceClient {
       logInfo("instance", "license credentials found; enrolling");
       return;
     }
-    logDebug(
-      "instance",
-      kind === "tls-trust"
-        ? `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`
-        : kind === "awaiting-seat"
-        ? `re-checking for a purchased size (${reason})`
-        : `unparking after permanent rejection (${reason}); retrying enrollment`,
-    );
+    let message =
+      `unparking after permanent rejection (${reason}); retrying enrollment`;
+    if (kind === "tls-trust") {
+      message =
+        `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`;
+    } else if (kind === "awaiting-seat") {
+      message = `re-checking for a purchased size (${reason})`;
+    }
+    logDebug("instance", message);
   }
 
   #newWebSocket(jwt: string): WebSocket {
