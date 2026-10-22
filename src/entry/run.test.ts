@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   applyManagedBootHoldAtStart,
+  connectBeforeBootConvergeDefault,
   stopManagedRuntimeGuardsForTests,
 } from "./run.ts";
 import { readServiceRunStates } from "../host/service-run-state.ts";
@@ -765,4 +766,62 @@ test("a host that is already enrolled still converges before it connects", async
   assertEquals(order, ["orchestration", "restore fabric", "connect"]);
   stop();
   await done;
+});
+
+test("the default start-up choice connects first only for an unenrolled host that runs a converge", async () => {
+  const choose = (shouldRunConverge: boolean, enrolled: boolean) =>
+    connectBeforeBootConvergeDefault({
+      shouldRunConverge: () => shouldRunConverge,
+      enrolled: () => Promise.resolve(enrolled),
+    });
+  assertEquals(await choose(true, false), true);
+  assertEquals(await choose(true, true), false);
+  assertEquals(await choose(false, false), false);
+});
+
+test("a failure in the post-converge steps of a first boot is only reported", async () => {
+  const converge = deferred<boolean>();
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    shouldConnectToInstance: () => true,
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => converge.promise,
+    restoreFabricFromPersistedState: () =>
+      Promise.reject(new Error("fabric state unreadable")),
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  converge.resolve(true);
+  await flush();
+  assertEquals(
+    stub.warns.some((line) =>
+      line.includes("post-converge start-up steps failed") &&
+      line.includes("fabric state unreadable")
+    ),
+    true,
+  );
+  stop();
+  await done;
+});
+
+test("a first boot that shuts down mid-converge skips the post-converge steps", async () => {
+  const converge = deferred<boolean>();
+  let restores = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    shouldConnectToInstance: () => true,
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => converge.promise,
+    restoreFabricFromPersistedState: () => {
+      restores += 1;
+      return Promise.resolve();
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  stop();
+  await done;
+  converge.resolve(true);
+  await flush();
+  assertEquals(restores, 0);
 });

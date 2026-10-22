@@ -59,6 +59,13 @@ function shouldInstallDevInstance(): boolean {
  * "development" — stub this to exercise the managed branches.
  */
 export const setupTestHooks = {
+  runDaemonConverge: (): Promise<void> => runDaemonConverge(),
+  bootstrapSteps: (): Array<[string, () => Promise<void>]> => [
+    ["ensureOrchestrationTree", ensureOrchestrationTree],
+    ["ensureUv", ensureUv],
+    ["ensurePython", ensurePython],
+    ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],
+  ],
   detectInstallMode: (): InstallMode => detectInstallMode(Deno.env.toObject()),
 };
 
@@ -147,12 +154,7 @@ export async function bootstrapOrchestrationTools(): Promise<boolean> {
 
   const started = performance.now();
   logInfo("orchestration", "bootstrapping runtime");
-  const steps: Array<[string, () => Promise<void>]> = [
-    ["ensureOrchestrationTree", ensureOrchestrationTree],
-    ["ensureUv", ensureUv],
-    ["ensurePython", ensurePython],
-    ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],
-  ];
+  const steps = setupTestHooks.bootstrapSteps();
   try {
     await forEachSequential(steps, async ([, step]) => {
       await step();
@@ -189,7 +191,7 @@ export async function runBootConverge(): Promise<boolean> {
   }
   const started = performance.now();
   try {
-    await runDaemonConverge();
+    await setupTestHooks.runDaemonConverge();
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
     logInfo("orchestration", `runtime ready in ${elapsed}s`);
     return true;

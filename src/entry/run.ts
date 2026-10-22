@@ -400,9 +400,17 @@ async function afterOrchestration(
  * the one case where the converge is long (a whole new host) and there is no
  * saved state or earlier command that needs it to have finished.
  */
-async function connectBeforeBootConvergeDefault(): Promise<boolean> {
-  if (!shouldRunDaemonConverge()) return false;
-  return !(await hasEnrolledServerId());
+export async function connectBeforeBootConvergeDefault(
+  deps: {
+    shouldRunConverge: () => boolean;
+    enrolled: () => Promise<boolean>;
+  } = {
+    shouldRunConverge: shouldRunDaemonConverge,
+    enrolled: () => hasEnrolledServerId(),
+  },
+): Promise<boolean> {
+  if (!deps.shouldRunConverge()) return false;
+  return !(await deps.enrolled());
 }
 
 /**
