@@ -9,7 +9,8 @@ packages these playbooks install (including Docker Engine from Docker's apt
 repository) remain under their upstream licenses. Pins live in
 `requirements.txt` (Ansible Core / ansible-lint constraints),
 `requirements.lock.txt` (hash-locked CI install set), `requirements.yml`
-(`ansible.posix`).
+(`ansible.posix` version record; the exact tarball ships in `vendor/galaxy/`
+and is installed offline after a SHA-256 check).
 Installing them onto a host is a different licensing event from
 redistributing them. Any TurboPanel-published appliance, VM/OCI image,
 or offline bundle that ships copies must carry the applicable upstream

@@ -13,10 +13,10 @@
 #      unresolvable role, a malformed task list, a bad include. Zero false
 #      positives; every playbook passes today. Playbooks FQCN
 #      `ansible.posix.acl` / `ansible.posix.sysctl`, so this step installs
-#      the pin from orchestration/requirements.yml when the collection is
-#      not already vendored (CI pip-installs requirements.lock.txt).
-#      Docker is installed by the first-party `docker` role, so nothing
-#      else is fetched from Galaxy.
+#      the bundled tarball (orchestration/vendor/galaxy/, offline) when the
+#      collection is not already vendored (CI pip-installs
+#      requirements.lock.txt). Docker is installed by the first-party
+#      `docker` role, so nothing is fetched from Galaxy.
 #   2. `ansible-lint --profile min` -- ansible-lint's most conservative
 #      profile (correctness only, no style). Rules that currently fire on
 #      first-party content are in `warn_list` in .ansible-lint, so they are
@@ -54,8 +54,9 @@ fi
 
 # ansible.cfg collections_path is the FHS vendor tree. CI (pip ansible-core)
 # has none of those dirs, so syntax-check cannot resolve ansible.posix.* until
-# the collection is on ANSIBLE_COLLECTIONS_PATH. Skip Galaxy when converge has
-# already vendored it; install from requirements.yml otherwise (3 attempts).
+# the collection is on ANSIBLE_COLLECTIONS_PATH. Skip the install when converge
+# has already vendored it; otherwise install the bundled tarball offline, at
+# the version requirements.yml records (3 attempts).
 ensure_posix_collection() {
   vendored="$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections"
   if [ -d "$vendored/ansible_collections/ansible/posix" ]; then
@@ -71,6 +72,7 @@ ensure_posix_collection() {
 
   collections_dir="${TMPDIR:-/tmp}/turbopanel-orchestration-collections"
   req="$ROOT/orchestration/requirements.yml"
+  posix_version=$(sed -n 's/^ *version: *"\([^"]*\)".*/\1/p' "$req" | head -n 1)
   stamp_file="$collections_dir/.requirements.sha256"
   req_hash="none"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -92,7 +94,7 @@ ensure_posix_collection() {
   ANSIBLE_COLLECTIONS_PATH="$collections_dir"
   export ANSIBLE_COLLECTIONS_PATH
 
-  echo "    installing ansible.posix from orchestration/requirements.yml"
+  echo "    installing ansible.posix from the bundled tarball"
   rm -rf "$collections_dir"
   mkdir -p "$collections_dir"
   attempt=1
@@ -100,7 +102,7 @@ ensure_posix_collection() {
     # --force: galaxy treats a collection found in any other collections_path
     # as installed and skips -p. CI has no other copy; a guest with a vendor
     # tree we are not using still might.
-    if ansible-galaxy collection install --force -r "$req" -p "$collections_dir" &&
+    if ansible-galaxy collection install --force --offline "$ROOT/orchestration/vendor/galaxy/ansible-posix-$posix_version.tar.gz" -p "$collections_dir" &&
       [ -d "$collections_dir/ansible_collections/ansible/posix" ]; then
       if [ "$req_hash" != "none" ]; then
         printf "%s\n" "$req_hash" > "$stamp_file"
@@ -114,7 +116,7 @@ ensure_posix_collection() {
     sleep 2
     attempt=$((attempt + 1))
   done
-  echo "check-orchestration: failed to install ansible.posix from orchestration/requirements.yml" >&2
+  echo "check-orchestration: failed to install the bundled ansible.posix tarball" >&2
   exit 1
 }
 

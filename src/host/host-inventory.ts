@@ -2,8 +2,11 @@ import { isNoTelemetryDisplay } from "./display-devices.ts";
 import type { ServerReportedIp } from "./server-addresses.ts";
 
 /**
- * Static host capacity facts for hello resources (CPU sockets / GPUs /
- * memory / swap). Loaded once per process — not per-tick metrics.
+ * Host capacity facts for hello resources (CPU sockets / GPUs / memory /
+ * swap). CPU model, caches, GPUs and virtualization are read once per
+ * process. Memory and swap totals, the online CPU set and (on guests with a
+ * balloon or hot-plug driver) present memory are re-read on every call, so a
+ * VM whose host grows or shrinks it is seen within one presence tick.
  */
 
 /** Physical vs efficiency core/thread counts on hybrid CPUs. */
@@ -65,6 +68,14 @@ export type HostResources = {
      * omitted on other OS or when the value is unreadable / non-positive.
      */
     pageSizeBytes?: number;
+    /**
+     * Online memory blocks x `block_size_bytes`. Reported only when a balloon
+     * or hot-plug driver is loaded; bare metal and plain VMs omit it.
+     * `totalBytes` keeps meaning MemTotal.
+     */
+    presentBytes?: number;
+    /** `/sys/devices/system/memory/block_size_bytes`, beside `presentBytes`. */
+    blockSizeBytes?: number;
   };
   swap?: { totalBytes?: number };
   /** Host interface addresses — nested here on hello / change-detected heartbeat. */
@@ -75,6 +86,20 @@ export type HostResources = {
    * `"virtualized"`), or `undefined` when there is no signal either way.
    */
   virtualizationKind?: string;
+  /**
+   * Set only when the host really moves this guest's memory: a balloon or
+   * hot-plug driver is loaded and present memory sits more than 256 MiB above
+   * MemTotal, or MemTotal has moved more than 32 MiB while this process ran;
+   * or the driver is `virtio_mem`. A loaded driver alone does not count.
+   */
+  dynamicMemory?: HostDynamicMemory;
+};
+
+export type HostDynamicMemory = {
+  /** `hv_balloon`, `virtio_balloon`, `vmw_balloon`, `virtio_mem` or `xen_balloon`. */
+  driver: string;
+  /** Highest minus lowest MemTotal seen by this process, in bytes. */
+  totalMoved: number;
 };
 
 /**
@@ -150,6 +175,10 @@ type InventoryLayout = {
   sysCpuLowpower: string;
   sysDmiSysVendor: string;
   sysDmiProductName: string;
+  sysCpuOnline: string;
+  sysMemory: string;
+  sysModule: string;
+  sysXenMemory: string;
   nvidiaGpuInfo: (slot: string) => string;
   readTextFile: (path: string) => string | undefined;
   readDirSync: (path: string) => Iterable<{ name: string }>;
@@ -227,6 +256,10 @@ function resolveInventoryLayout(io?: HostInventoryIo): InventoryLayout {
     sysCpuLowpower: `${sysRoot}/devices/cpu_lowpower/cpus`,
     sysDmiSysVendor: `${sysRoot}/class/dmi/id/sys_vendor`,
     sysDmiProductName: `${sysRoot}/class/dmi/id/product_name`,
+    sysCpuOnline: `${sysRoot}/devices/system/cpu/online`,
+    sysMemory: `${sysRoot}/devices/system/memory`,
+    sysModule: `${sysRoot}/module`,
+    sysXenMemory: `${sysRoot}/devices/system/xen_memory`,
     nvidiaGpuInfo: (slot) =>
       `${procRoot}/driver/nvidia/gpus/${slot}/information`,
     readTextFile: io?.readTextFile ??
@@ -391,8 +424,6 @@ function forEachCpuinfoProcessor(
   }
   flush();
 }
-
-let cached: HostResources | null | undefined;
 
 /** Count online logical CPUs from aggregate `/proc/stat` `cpuN` lines. */
 export function countCpuThreads(statText: string): number {
@@ -940,6 +971,22 @@ function hasCpuSocketFields(socket: HostCpuSocket): boolean {
   return Object.keys(socket).length > 0;
 }
 
+function assembleHostResources(
+  cpus: HostCpuSocket[] | undefined,
+  memText: string | undefined,
+  extras: HostInventoryExtras | undefined,
+): HostResources {
+  const resources: HostResources = {};
+  if (cpus?.some(hasCpuSocketFields)) resources.cpus = cpus;
+  if (extras?.gpus && extras.gpus.length > 0) resources.gpus = extras.gpus;
+  if (extras?.virtualizationKind !== undefined) {
+    resources.virtualizationKind = extras.virtualizationKind;
+  }
+  if (memText) applyMeminfoToResources(resources, memText);
+  applyPageSizeToResources(resources, extras?.pageSizeBytes);
+  return resources;
+}
+
 /** Build resources from raw /proc texts (testable). */
 export function hostResourcesFromProc(
   statText: string | undefined,
@@ -948,15 +995,11 @@ export function hostResourcesFromProc(
   architecture?: string,
   extras?: HostInventoryExtras,
 ): HostResources | undefined {
-  const resources: HostResources = {};
-  const cpus = hostCpusFromProc(statText, cpuinfoText, architecture, extras);
-  if (cpus?.some(hasCpuSocketFields)) resources.cpus = cpus;
-  if (extras?.gpus && extras.gpus.length > 0) resources.gpus = extras.gpus;
-  if (extras?.virtualizationKind !== undefined) {
-    resources.virtualizationKind = extras.virtualizationKind;
-  }
-  if (memText) applyMeminfoToResources(resources, memText);
-  applyPageSizeToResources(resources, extras?.pageSizeBytes);
+  const resources = assembleHostResources(
+    hostCpusFromProc(statText, cpuinfoText, architecture, extras),
+    memText,
+    extras,
+  );
   return Object.keys(resources).length > 0 ? resources : undefined;
 }
 
@@ -1239,38 +1282,241 @@ function readLiveInventoryExtras(layout: InventoryLayout): HostInventoryExtras {
   return extras;
 }
 
+const MIB = 1024 * 1024;
+
 /**
- * Host capacity from `/proc` + `/sys` — process-cached after first successful
- * read. Safe under restricted read permissions (falls back to `cat`).
+ * Present memory this far above MemTotal means the host is holding memory
+ * back from the guest (a balloon is inflated).
+ */
+export const DYNAMIC_MEMORY_GAP_BYTES = 256 * MIB;
+
+/**
+ * The kernel's own memory map and reservations also leave present memory above
+ * MemTotal, and that gap grows with the size of the guest (about 1.5% on 4 KiB
+ * pages). A held-back balloon has to exceed this share of MemTotal as well.
+ */
+export const DYNAMIC_MEMORY_GAP_FRACTION = 0.03;
+
+/**
+ * MemTotal or present memory moving by more than this counts as a real
+ * change; anything smaller is noise (kernel reservations, a partial block).
+ */
+export const HOST_CAPACITY_TOLERANCE_BYTES = 32 * MIB;
+
+/** Balloon / hot-plug drivers, checked in this order under `/sys/module`. */
+const MEMORY_DRIVERS = [
+  "virtio_mem",
+  "hv_balloon",
+  "virtio_balloon",
+  "vmw_balloon",
+] as const;
+const XEN_MEMORY_DRIVER = "xen_balloon";
+const MEMORY_BLOCK = /^memory\d+$/;
+const HEX_DIGITS = /^[0-9a-f]+$/;
+
+function dirHasEntries(layout: InventoryLayout, path: string): boolean {
+  try {
+    return !layout.readDirSync(path)[Symbol.iterator]().next().done;
+  } catch {
+    // Missing or unreadable: treat as absent.
+  }
+  return false;
+}
+
+/** The loaded balloon or hot-plug driver, if any. */
+function detectMemoryDriver(layout: InventoryLayout): string | undefined {
+  for (const name of MEMORY_DRIVERS) {
+    if (dirHasEntries(layout, `${layout.sysModule}/${name}`)) return name;
+  }
+  if (dirHasEntries(layout, layout.sysXenMemory)) return XEN_MEMORY_DRIVER;
+  return undefined;
+}
+
+/** `block_size_bytes` is hex without a `0x` prefix (`8000000` = 128 MiB). */
+export function parseMemoryBlockSize(
+  text: string | undefined,
+): number | undefined {
+  const raw = text?.trim().toLowerCase().replace(/^0x/, "");
+  if (!raw || !HEX_DIGITS.test(raw)) return undefined;
+  const value = Number.parseInt(raw, 16);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function countOnlineMemoryBlocks(layout: InventoryLayout): number {
+  let online = 0;
+  try {
+    for (const entry of layout.readDirSync(layout.sysMemory)) {
+      if (!MEMORY_BLOCK.test(entry.name)) continue;
+      const state = layout.readTextFile(
+        `${layout.sysMemory}/${entry.name}/online`,
+      );
+      if (state?.trim() === "1") online++;
+    }
+  } catch {
+    return 0;
+  }
+  return online;
+}
+
+/**
+ * Decide whether the host really moves this guest's memory. A loaded driver
+ * alone is not enough: most cloud VMs load `virtio_balloon` and never use it.
+ */
+export function dynamicMemoryFromFacts(
+  driver: string | undefined,
+  presentBytes: number | undefined,
+  memTotalBytes: number | undefined,
+  totalMovedBytes: number,
+): HostDynamicMemory | undefined {
+  if (!driver) return undefined;
+  const heldBack = presentBytes !== undefined && memTotalBytes !== undefined &&
+    presentBytes - memTotalBytes >
+      Math.max(
+        DYNAMIC_MEMORY_GAP_BYTES,
+        memTotalBytes * DYNAMIC_MEMORY_GAP_FRACTION,
+      );
+  const moved = totalMovedBytes > HOST_CAPACITY_TOLERANCE_BYTES;
+  if (driver !== "virtio_mem" && !heldBack && !moved) return undefined;
+  return { driver, totalMoved: totalMovedBytes };
+}
+
+/** Facts read once per reader: they do not change while the host runs. */
+type FixedInventoryFacts = {
+  extras: HostInventoryExtras;
+  memoryDriver?: string;
+  blockSizeBytes?: number;
+};
+
+function readFixedInventoryFacts(
+  layout: InventoryLayout,
+  io: HostInventoryIo | undefined,
+): FixedInventoryFacts {
+  const extras = readLiveInventoryExtras(layout);
+  const pageSizeBytes = readMemoryPageSizeBytes(io);
+  if (pageSizeBytes !== undefined) extras.pageSizeBytes = pageSizeBytes;
+  const facts: FixedInventoryFacts = { extras };
+  const memoryDriver = detectMemoryDriver(layout);
+  if (memoryDriver === undefined) return facts;
+  facts.memoryDriver = memoryDriver;
+  const blockSizeBytes = parseMemoryBlockSize(
+    layout.readTextFile(`${layout.sysMemory}/block_size_bytes`),
+  );
+  if (blockSizeBytes !== undefined) facts.blockSizeBytes = blockSizeBytes;
+  return facts;
+}
+
+/**
+ * Reads host capacity, keeping what cannot change (CPU model, caches, GPUs,
+ * virtualization, page size, the memory driver) after the first call. Each
+ * call re-reads MemTotal and SwapTotal, `/sys/devices/system/cpu/online`
+ * (re-parsing `/proc/stat` + `/proc/cpuinfo` only when that list changes) and,
+ * when a balloon or hot-plug driver is loaded, the online memory blocks.
+ */
+export class HostInventoryReader {
+  readonly #io: HostInventoryIo | undefined;
+  readonly #layout: InventoryLayout;
+  #fixed: FixedInventoryFacts | undefined;
+  #cpusRead = false;
+  #cpuOnline: string | undefined;
+  #cpus: HostCpuSocket[] | undefined;
+  #memTotalMin: number | undefined;
+  #memTotalMax: number | undefined;
+
+  constructor(io?: HostInventoryIo) {
+    this.#io = io;
+    this.#layout = resolveInventoryLayout(io);
+  }
+
+  read(): HostResources | undefined {
+    const layout = this.#layout;
+    this.#fixed ??= readFixedInventoryFacts(layout, this.#io);
+    const fixed = this.#fixed;
+    this.#refreshCpus(fixed.extras);
+    const resources = assembleHostResources(
+      this.#cpus,
+      layout.readTextFile(layout.procMeminfo),
+      fixed.extras,
+    );
+    const memTotal = resources.memory?.totalBytes;
+    this.#noteMemTotal(memTotal);
+    if (fixed.memoryDriver !== undefined) {
+      this.#applyPresentMemory(resources, fixed, memTotal);
+    }
+    return Object.keys(resources).length > 0 ? resources : undefined;
+  }
+
+  #refreshCpus(extras: HostInventoryExtras): void {
+    const layout = this.#layout;
+    const online = layout.readTextFile(layout.sysCpuOnline)?.trim();
+    if (
+      this.#cpusRead && (online === undefined || online === this.#cpuOnline)
+    ) {
+      return;
+    }
+    this.#cpusRead = true;
+    this.#cpuOnline = online;
+    this.#cpus = hostCpusFromProc(
+      layout.readTextFile(layout.procStat),
+      layout.readTextFile(layout.procCpuinfo),
+      layout.architecture,
+      extras,
+    );
+  }
+
+  #noteMemTotal(memTotal: number | undefined): void {
+    if (memTotal === undefined) return;
+    this.#memTotalMin = Math.min(this.#memTotalMin ?? memTotal, memTotal);
+    this.#memTotalMax = Math.max(this.#memTotalMax ?? memTotal, memTotal);
+  }
+
+  #applyPresentMemory(
+    resources: HostResources,
+    fixed: FixedInventoryFacts,
+    memTotal: number | undefined,
+  ): void {
+    let presentBytes: number | undefined;
+    if (fixed.blockSizeBytes !== undefined) {
+      const blocks = countOnlineMemoryBlocks(this.#layout);
+      if (blocks > 0) {
+        presentBytes = blocks * fixed.blockSizeBytes;
+        resources.memory = {
+          ...resources.memory,
+          presentBytes,
+          blockSizeBytes: fixed.blockSizeBytes,
+        };
+      }
+    }
+    const totalMoved = (this.#memTotalMax ?? 0) - (this.#memTotalMin ?? 0);
+    const dynamicMemory = dynamicMemoryFromFacts(
+      fixed.memoryDriver,
+      presentBytes,
+      memTotal,
+      totalMoved,
+    );
+    if (dynamicMemory) resources.dynamicMemory = dynamicMemory;
+  }
+}
+
+let processReader: HostInventoryReader | undefined;
+
+/**
+ * Host capacity from `/proc` + `/sys`. The process keeps one
+ * {@link HostInventoryReader}, so fixed facts are read once and memory / CPU
+ * counts are fresh on every call. Safe under restricted read permissions
+ * (falls back to `cat`).
  *
  * Optional `io` remaps proc/sys roots (and nvidia-smi) for host-free tests;
- * injected reads are never written into the process cache.
+ * injected reads use a fresh reader and never touch the process one.
  */
 export function readHostResources(
   io?: HostInventoryIo,
 ): HostResources | undefined {
-  if (!io && cached !== undefined) {
-    return cached ?? undefined;
-  }
-
-  const layout = resolveInventoryLayout(io);
-  const extras = readLiveInventoryExtras(layout);
-  const pageSizeBytes = readMemoryPageSizeBytes(io);
-  if (pageSizeBytes !== undefined) extras.pageSizeBytes = pageSizeBytes;
-  const resources = hostResourcesFromProc(
-    layout.readTextFile(layout.procStat),
-    layout.readTextFile(layout.procMeminfo),
-    layout.readTextFile(layout.procCpuinfo),
-    layout.architecture,
-    extras,
-  );
-  if (!io) {
-    cached = resources ?? null;
-  }
-  return resources;
+  if (io) return new HostInventoryReader(io).read();
+  processReader ??= new HostInventoryReader();
+  return processReader.read();
 }
 
-/** Test helper — clear process cache between fixture cases. */
+/** Test helper — drop the process reader between fixture cases. */
 export function resetHostResourcesCacheForTests(): void {
-  cached = undefined;
+  processReader = undefined;
 }

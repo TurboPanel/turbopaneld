@@ -2,6 +2,7 @@ import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
 import {
   GALAXY_COLLECTIONS_DIR,
+  GALAXY_POSIX_SHA256,
   GALAXY_REQUIREMENTS_FILE,
   PYTHON_VERSION,
   REQUIREMENTS_FILE,
@@ -42,7 +43,9 @@ export async function computeBootstrapStamp(): Promise<string> {
     Deno.readTextFile(REQUIREMENTS_FILE),
     Deno.readTextFile(GALAXY_REQUIREMENTS_FILE),
   ]);
-  return sha256Hex(`${UV_VERSION}\n${PYTHON_VERSION}\n${reqTxt}\n${reqYml}`);
+  return sha256Hex(
+    `${UV_VERSION}\n${PYTHON_VERSION}\n${reqTxt}\n${reqYml}\n${GALAXY_POSIX_SHA256}`,
+  );
 }
 
 export async function readBootstrapStamp(): Promise<string | null> {
