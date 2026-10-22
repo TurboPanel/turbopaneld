@@ -600,6 +600,10 @@ const SITES: CallSite[] = [
       setup: unitSetup(backupTimerContent(BACKUP_POLICY, "*-*-* 03:00:00")),
     },
   ),
+  tpHost('src/deploy/unchanged-deploy.ts|["-n","ls","-A","--",dir]', {
+    argv: ["ls", "-A", "--", `${CONF}/site-caddy/sites`],
+    setup: dir(`${CONF}/site-caddy/sites`),
+  }),
   tpHost('src/deploy/systemd-unit-set.ts|["-n","ls","-1","--",unitDir]', {
     argv: ["ls", "-1", "--", UNITS],
   }),
