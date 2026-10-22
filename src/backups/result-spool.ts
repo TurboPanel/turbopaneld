@@ -15,7 +15,7 @@
  * { "version": 1, "policyId": "…", "runId": "run_…", "startedAt": "…",
  *   "finishedAt": "…", "status": "succeeded" | "failed", "error"?: "…",
  *   "backupId"?: "bk_…", "sizeBytes"?: n, "checksum"?: "<sha256>",
- *   "path"?: "…", "pruned"?: ["bk_…"] }
+ *   "path"?: "…", "database"?: "…", "pruned"?: ["bk_…"] }
  * ```
  */
 
@@ -41,6 +41,7 @@ export type BackupRunResult = Pick<
   | "sizeBytes"
   | "checksum"
   | "path"
+  | "database"
   | "pruned"
 >;
 

@@ -50,6 +50,17 @@ section); link there instead of duplicating DO hibernation detail.
   When adding a new Deno test file, add this alias from the start. Applied to
   every existing Deno test file in this repo and `../turbopanel`.
 
+- **No flaky tests.** A test gives the same result on every run. No unseeded
+  randomness (`crypto.randomUUID`, `Math.random`, random bytes) as input where an
+  assertion or a fake keys on the content, prefix, order or collision of the
+  value: random hex can contain any short letter run (`dbb`, `bad`, `err`) and
+  base64 can contain `+` or `/`, so use a fixed or seeded value. No tight real-time
+  margins (a few-millisecond `setTimeout`, an elapsed-time `>=`): wait with
+  `waitFor` from `src/testing/wait-for.ts` and a generous ceiling, or inject a
+  clock. No wall-clock expectations without a fixed clock (`Date.now()`,
+  `new Date()`, midnight, month and DST edges). No order dependence or shared
+  module state between tests.
+
 ### Ansible style (SonarQube)
 
 - Prefer **`mode: "0640"`** / **`0750"`** with explicit **`owner`** /
@@ -212,7 +223,7 @@ service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/assets.ts`) =
-**`2.9.7`**. Keep it in step with `deno_version` in
+**`2.9.8`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
 [TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev

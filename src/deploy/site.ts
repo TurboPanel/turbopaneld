@@ -122,6 +122,12 @@ import {
 } from "./site/engine-prune.ts";
 import { engineHoldKey, phpSeriesHoldKey } from "./site/prune-holds.ts";
 import {
+  apacheForwardedLines,
+  FORWARDED_TRUSTED_LOOPBACK,
+  nginxForwardedFastcgiLines,
+  nginxForwardedLines,
+} from "./site/forwarded.ts";
+import {
   apacheBehindNginxLines,
   apacheDotfileDenyLines,
   isNginxApacheSite,
@@ -568,6 +574,7 @@ function buildNginxPhpLocation(
     `    fastcgi_pass unix:${phpFpmSocket};`,
     "    fastcgi_index index.php;",
     ...params.map((line) => `    ${line}`),
+    ...nginxForwardedFastcgiLines().map((line) => `    ${line}`),
     ...envLines.map((line) => `    ${line}`),
     "    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;",
     "    fastcgi_param PATH_INFO $fastcgi_path_info;",
@@ -863,6 +870,7 @@ ${nginxApacheLocations(backendPort)}
   server_name _;${nginxServerTokensLine(site)}
   root ${documentRoot};
   ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
+${nginxForwardedLines().join("\n")}
   index ${indexFiles};
 ${nginxDotfileDenyLines().join("\n")}
 
@@ -1373,6 +1381,7 @@ function apacheVhostHead(
     `<VirtualHost ${addrs.join(" ")}>`,
     "  ServerName localhost",
     ...signature,
+    ...apacheForwardedLines(FORWARDED_TRUSTED_LOOPBACK),
     ...apacheDotfileDenyLines(),
   ].join("\n");
 }
@@ -1587,12 +1596,21 @@ function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
   const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
   const denied = phpHandled ? family : `php|${family}`;
   const backups = String.raw`~|\.(bak|old|orig|save|swp|swo|tmp|dist|txt)`;
+  // PHP learns the visitor used HTTPS from the front server's header. This is
+  // last and has no `L`, so it never lets a denied path through. The address
+  // is the server-wide `useIpInProxyHeader` in the main config; port and scheme cannot be
+  // changed from here.
+  const forwardedHttps = phpHandled
+    ? `
+RewriteCond %{HTTP:X-Forwarded-Proto} =https
+RewriteRule .* - [E=HTTPS:on]`
+    : "";
   return String.raw`rewrite {
   enable                    1
   rules                     <<<END_rules
 RewriteRule (^|/)\.(?!well-known(/|$)) - [F,L]
 RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
-RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]
+RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]${forwardedHttps}
 END_rules
 }
 `;
@@ -1691,6 +1709,13 @@ showVersionNumber                 0
 indexFiles                        index.html
 disableWebAdmin                   1
 httpdWorkers                      ${OPENLITESPEED_HTTPD_WORKERS}
+
+# The visitor's address from X-Forwarded-For, taken only from the front server
+# on loopback ("T" marks a trusted peer); a docker bridge peer stays itself.
+useIpInProxyHeader                2
+accessControl {
+        allow                     ALL, ${FORWARDED_TRUSTED_LOOPBACK}T
+}
 
 # OLS refuses a static file without the world-read bit unless told otherwise;
 # site files are principal-owned and shared with tpols by group, never world.
@@ -2020,7 +2045,7 @@ async function assertReleaseDocumentRoot(
   );
   if (stat === null) {
     throw new Error(
-      `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
+      `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}"). Set the site's "root" to the folder the build writes, or set "outputDirectory" to it and leave "root" unset`,
     );
   }
   if (stat !== "directory" && !stat.isDirectory) {

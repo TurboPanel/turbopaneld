@@ -25,6 +25,7 @@ import {
   dockerProxyCompose,
   dockerProxyComposePath,
   ensureHostingCaddyRuntime,
+  ensureHostingFallback,
   ensureHostingIngress,
   ensureServiceIngress,
   formatCaddyPathMatcher,
@@ -33,6 +34,7 @@ import {
   HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
   hostingCaddyValidateNeedsEdgeRuntime,
+  hostingFallbackSnippet,
   hostingIngressComposePath,
   hostingIngressDir,
   INGRESS_GATE_SOCKET_DIR,
@@ -617,6 +619,52 @@ test("siteSnippet strips server names from every block only when asked", () => {
   });
   assertEquals(redirect.split(HIDE_HEADER_BLOCK).length - 1, 2);
 });
+
+test("hostingFallbackSnippet answers unhosted names on 80 and 443 and hides names only when asked", () => {
+  const plain = hostingFallbackSnippet(false);
+  assertEquals(plain.includes("-Server"), false);
+  assertStringIncludes(plain, "http:// {");
+  assertStringIncludes(plain, "https:// {");
+  assertEquals(plain.includes("on_demand"), false);
+  assertEquals(plain.split("tls internal").length - 1, 1);
+  assertStringIncludes(plain, "unconfigured.invalid {\n  tls internal\n");
+  assertEquals(plain.includes("redir"), false);
+  const hidden = hostingFallbackSnippet(true);
+  assertEquals(hidden.split(HIDE_HEADER_BLOCK).length - 1, 3);
+});
+
+test("the Caddyfile hands every unmatched name the one fixed fallback certificate", () => {
+  const config = caddyfile(CONFIG_DIR);
+  assertStringIncludes(config, "default_sni unconfigured.invalid");
+  assertStringIncludes(config, "fallback_sni unconfigured.invalid");
+  assertEquals(config.includes("on_demand"), false);
+});
+
+for (const hide of [true, false]) {
+  test(`rewriteHostingCaddySites writes the catch-all with hide names ${hide}`, async () => {
+    const { layout, cleanup } = await makeTestLayout();
+    const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+    try {
+      await rewriteHostingCaddySites(
+        layout,
+        {
+          ...hostingPayload("env-h", "app.example.com"),
+          hideWebServerNames: hide,
+        },
+        undefined,
+        noGrant,
+      );
+      const fallback = await Deno.readTextFile(
+        join(layout.configDir, "hosting", "sites", "00-fallback.caddy"),
+      );
+      assertEquals(fallback, hostingFallbackSnippet(hide));
+      assertEquals(fallback.includes("-Server"), hide);
+    } finally {
+      restore();
+      await cleanup();
+    }
+  });
+}
 
 test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
   const snippet = siteSnippet({
@@ -1831,7 +1879,11 @@ test("rewriteHostingCaddySites validates the staged set, then activates and relo
     // Nothing is left beside the live glob.
     assertEquals(
       [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
-      ["env-caddy-1.acme-hostnames.json", "env-caddy-1.caddy"],
+      [
+        "00-fallback.caddy",
+        "env-caddy-1.acme-hostnames.json",
+        "env-caddy-1.caddy",
+      ],
     );
     assertEquals(
       [...Deno.readDirSync(hostingDir)].some((e) => e.name.endsWith(".next")),
@@ -1874,7 +1926,7 @@ test("rewriteHostingCaddySites refuses a set the hosting Caddy cannot load and l
     assertEquals(calls.some((a) => a.includes("reload")), false);
     assertEquals(
       [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
-      ["env-a.acme-hostnames.json", "env-a.caddy"],
+      ["00-fallback.caddy", "env-a.acme-hostnames.json", "env-a.caddy"],
     );
     assertEquals(
       await Deno.readTextFile(join(sitesDir, "env-a.caddy")),
@@ -1910,6 +1962,7 @@ test("a stale snippet already on disk is set aside, not allowed to fail every ot
     assertEquals(
       [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
       [
+        "00-fallback.caddy",
         "env-good.caddy",
         "env-new.acme-hostnames.json",
         "env-new.caddy",
@@ -5065,6 +5118,115 @@ test("the ACME manifest of a leftover loses only the names taken over", async ()
       takeoverHostnames: [from("example.com", "env-other")],
     });
     assertEquals(JSON.parse(await Deno.readTextFile(manifest)), ["keep.test"]);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+/** A host where hosting Caddy was set up and runs, with an old Caddyfile. */
+async function startedHostingHost(layout: LayoutPaths): Promise<string> {
+  const hostingDir = join(layout.configDir, "hosting");
+  await Deno.mkdir(join(hostingDir, "sites"), { recursive: true });
+  await Deno.writeTextFile(
+    join(hostingDir, "turbopanel-hosting-caddy.service"),
+    "u",
+  );
+  await Deno.writeTextFile(join(hostingDir, "Caddyfile"), "# old\n");
+  return hostingDir;
+}
+
+test("ensureHostingFallback writes the unhosted-name answer and Caddyfile with no deploy, then is idempotent", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const calls: string[][] = [];
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout, calls));
+  try {
+    const hostingDir = await startedHostingHost(layout);
+    assertEquals(await ensureHostingFallback(layout, noGrant), true);
+    const fallback = await Deno.readTextFile(
+      join(hostingDir, "sites", "00-fallback.caddy"),
+    );
+    // Unknown last choice: names are hidden.
+    assertEquals(fallback, hostingFallbackSnippet(true));
+    assertStringIncludes(
+      await Deno.readTextFile(join(hostingDir, "Caddyfile")),
+      "fallback_sni unconfigured.invalid",
+    );
+    assertEquals(calls.filter((a) => a.includes("reload")).length, 1);
+
+    assertEquals(await ensureHostingFallback(layout, noGrant), false);
+    assertEquals(calls.filter((a) => a.includes("reload")).length, 1);
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("ensureHostingFallback keeps a fallback a deploy wrote and takes the choice from written sites", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  try {
+    const hostingDir = await startedHostingHost(layout);
+    const sitesDir = join(hostingDir, "sites");
+    const own = hostingFallbackSnippet(false);
+    await Deno.writeTextFile(join(sitesDir, "00-fallback.caddy"), own);
+    await ensureHostingFallback(layout, noGrant);
+    assertEquals(
+      await Deno.readTextFile(join(sitesDir, "00-fallback.caddy")),
+      own,
+    );
+
+    await Deno.remove(join(sitesDir, "00-fallback.caddy"));
+    await Deno.writeTextFile(join(hostingDir, "Caddyfile"), "# old\n");
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      siteSnippet({
+        hostname: "a.example.com",
+        tlsDir: layout.tlsDir,
+        tlsMode: "acme",
+        upstream: { kind: "traefik" },
+      }),
+    );
+    await ensureHostingFallback(layout, noGrant);
+    assertEquals(
+      await Deno.readTextFile(join(sitesDir, "00-fallback.caddy")),
+      hostingFallbackSnippet(false),
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("ensureHostingFallback leaves live files untouched when Caddy refuses, and skips hosts without hosting Caddy", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  let refuse = true;
+  const restore = setIngressHostCommandForTest((_c, args) =>
+    Promise.resolve(
+      refuse && args.includes("validate")
+        ? { success: false, stderr: "nope" }
+        : { success: true, stderr: "" },
+    )
+  );
+  try {
+    // No staged unit: a panel-only host.
+    assertEquals(await ensureHostingFallback(layout, noGrant), false);
+
+    const hostingDir = await startedHostingHost(layout);
+    await assertRejects(
+      () => ensureHostingFallback(layout, noGrant),
+      Error,
+      "nope",
+    );
+    assertEquals(
+      await Deno.readTextFile(join(hostingDir, "Caddyfile")),
+      "# old\n",
+    );
+    assertEquals(
+      [...Deno.readDirSync(join(hostingDir, "sites"))].length,
+      0,
+    );
+    refuse = false;
   } finally {
     restore();
     await cleanup();

@@ -33,6 +33,7 @@ import {
 } from "../managed/backup.ts";
 import { managedBackupArtifactDir } from "../managed/engine-paths.ts";
 import {
+  type TargetLockWait,
   withCopyTargetLock,
   withManagedTargetLock,
 } from "../managed/target-lock.ts";
@@ -67,7 +68,21 @@ export type ScheduledBackupDeps = {
   artifact?: ManagedBackupArtifactDeps;
   /** Volume checks and the helper archive stream for copy targets; defaults reach Docker. */
   copy?: CopyBackupDeps;
+  /** Longest a run waits for another backup or restore of the same target (default 30 min); 0 refuses at once. */
+  lockWaitMs?: number;
+  /** Pause between lock attempts (default 500 ms). */
+  lockPollMs?: number;
 };
+
+/** Scheduled runs on one target queue for this long; the unit's own timeout is 6 h. */
+export const DEFAULT_LOCK_WAIT_MS = 30 * 60 * 1000;
+
+function lockWaitOf(deps: ScheduledBackupDeps): TargetLockWait {
+  return {
+    waitMs: deps.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
+    pollMs: deps.lockPollMs,
+  };
+}
 
 export type ScheduledBackupOutcome =
   | { kind: "invalid-policy-id"; message: string }
@@ -132,6 +147,8 @@ type ScheduledArtifact = {
   sizeBytes: number;
   checksum: string;
   pruned: string[];
+  /** The database a managed dump was of. */
+  database?: string;
 };
 
 function backUpManagedTarget(
@@ -172,7 +189,7 @@ function backUpManagedTarget(
       deps.artifact,
     );
     return { ...artifact, backupId };
-  });
+  }, lockWaitOf(deps));
 }
 
 /** The copy-source fields of a (validated) `copy` policy entry. */
@@ -219,7 +236,7 @@ function backUpCopyTarget(
       deps.copy,
     );
     return { ...artifact, backupId };
-  });
+  }, lockWaitOf(deps));
 }
 
 function backUpTarget(
@@ -254,6 +271,7 @@ async function runPolicy(
       checksum: artifact.checksum,
       path: artifact.path,
     };
+    if (artifact.database !== undefined) result.database = artifact.database;
     if (artifact.pruned.length > 0) result.pruned = artifact.pruned;
     return result;
   } catch (err) {

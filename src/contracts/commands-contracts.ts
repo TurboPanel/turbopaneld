@@ -1719,6 +1719,12 @@ export type EnvironmentDeployResult = {
    * marks each one an orphan. Omitted when there were none. Additive.
    */
   keptFolders?: KeptFolder[];
+  /**
+   * True when the deploy found nothing to change (same sources, variables and
+   * settings as the last finished deploy) and so built and restarted nothing.
+   * Omitted otherwise. Additive: older control planes ignore it.
+   */
+  unchanged?: boolean;
 };
 
 /** A service folder a deploy left in place, by its components. */
@@ -1750,6 +1756,13 @@ export type EnvironmentStopPayload = {
    * that named these, so the payload is the only remaining copy for this host.
    */
   siteReleases?: StopSiteRelease[];
+  /**
+   * Services whose published releases are cleared on a Destroy while the
+   * service folder stays (uploads in `shared/`, logs, the owner's account).
+   * Same entry shape as `siteReleases`; a delete sends `siteReleases` instead,
+   * which removes the whole folder.
+   */
+  releaseCleanup?: StopSiteRelease[];
   /**
    * Principals no project, site or app on this host uses once this delete
    * commits: the daemon retires each through `tp-host principal-remove`
@@ -1944,6 +1957,20 @@ export type ManagedApplyDatabaseOp = {
    * Needs `managed-database-owner-v1`.
    */
   ownerLogin?: string;
+  /**
+   * Postgres only, on a create with `ownerRole`. Asked for by the customer:
+   * a database that already exists with another owner (and may hold data) is
+   * moved onto its owner role. What is in it (schemas, tables and partitions,
+   * views, sequences, routines, types, operators, collations, statistics, text
+   * search objects, conversions, foreign servers; nothing that belongs to an
+   * extension) is handed over in one transaction that gives up after five
+   * seconds waiting for a lock, then the database itself moves. No data is
+   * touched, and a failure leaves the old owner so a repeat finishes the job.
+   * It also repeats safely on a database that already has its owner role,
+   * picking up what other roles made since. Without it an existing database
+   * is left as it is. Needs `managed-database-convert-v1`.
+   */
+  convertExisting?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -2623,6 +2650,13 @@ export const HOSTNAME_RE =
 
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
 export const HOSTNAME_MAX_LENGTH = 253;
+
+/**
+ * The name hosting Caddy keeps one fixed internal certificate for, served to
+ * every name nobody hosts. `.invalid` can never be registered; deploys also
+ * refuse it as a hosting name so no customer can claim it.
+ */
+export const HOSTING_FALLBACK_HOSTNAME = "unconfigured.invalid";
 
 const SHELL_METACHAR_RE = /[;|&$`()<>\\"'!*?{}]/;
 
@@ -4133,6 +4167,11 @@ function parseHostingHostnames(value: unknown): string[] {
   for (const hostname of value) {
     if (!isValidHostname(hostname)) {
       throw new TypeError("hostings[].hostnames must contain valid hostnames");
+    }
+    if (hostname === HOSTING_FALLBACK_HOSTNAME) {
+      throw new TypeError(
+        `hostings[].hostnames must not use the reserved name ${HOSTING_FALLBACK_HOSTNAME}`,
+      );
     }
     hostnames.push(hostname);
   }
@@ -6624,6 +6663,11 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const releaseCleanup = parseOptionalMaterialArray(
+    value.releaseCleanup,
+    "releaseCleanup",
+    parseStopSiteRelease,
+  );
   const retirePrincipals = parseOptionalMaterialArray(
     value.retirePrincipals,
     "retirePrincipals",
@@ -6636,6 +6680,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(releaseCleanup === undefined ? {} : { releaseCleanup }),
     ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }
@@ -7475,6 +7520,20 @@ function parseManagedDatabaseOwnerLogin(
   return value;
 }
 
+/** `convertExisting` of a database op: true, only on a create with `ownerRole`. */
+function parseManagedDatabaseConvert(
+  entry: Record<string, unknown>,
+): boolean {
+  const value = entry.convertExisting;
+  if (value === undefined) return false;
+  if (value !== true || entry.ownerRole !== true || entry.action !== "create") {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: convertExisting must be true on a created database with ownerRole",
+    );
+  }
+  return true;
+}
+
 function parseManagedApplyDatabases(
   value: unknown,
 ): ManagedApplyDatabaseOp[] | undefined {
@@ -7507,6 +7566,7 @@ function parseManagedApplyDatabases(
       action: entry.action as ManagedApplyDatabaseOp["action"],
       ...(entry.ownerRole === true ? { ownerRole: true } : {}),
       ...(ownerLogin === undefined ? {} : { ownerLogin }),
+      ...(parseManagedDatabaseConvert(entry) ? { convertExisting: true } : {}),
     });
   }
   return databases;

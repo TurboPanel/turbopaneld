@@ -861,6 +861,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
     const rootFilesystemCapacity = await probeRootFilesystemCapacity(
       snapshot.filesystems,
       statfsIo,
+      whenPresentOr(raw.mountsText, parseProcMounts, []),
     );
     const networks = await buildNetworkDeviceSamples(
       monitoredNetworkDevices(snapshot, overrides),

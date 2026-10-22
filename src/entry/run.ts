@@ -18,7 +18,10 @@ import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
-import { guardHostingCaddySites } from "../deploy/ingress.ts";
+import {
+  ensureHostingFallback,
+  guardHostingCaddySites,
+} from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
 import { DemotedMemberGuard } from "../managed/demoted-guard.ts";
@@ -200,7 +203,10 @@ async function scanLiveReleases(): Promise<void> {
  * (`ingress.ts`), so a stale one does not keep ingress from starting.
  */
 async function guardHostingSites(): Promise<void> {
-  await guardHostingCaddySites(resolveLayout(Deno.env.toObject()));
+  const layout = resolveLayout(Deno.env.toObject());
+  await guardHostingCaddySites(layout);
+  // After the guard, so the check sees only snippets Caddy can load.
+  await ensureHostingFallback(layout);
 }
 
 /**
