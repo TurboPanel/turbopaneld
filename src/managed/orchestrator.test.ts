@@ -1343,3 +1343,42 @@ test("startMissingOrchestratorStack leaves a present or torn-down stack alone", 
     await fixture.cleanup();
   }
 });
+
+test("startMissingOrchestratorStack reports a missing file, a missing network and failed commands", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    assertEquals(
+      await startMissingOrchestratorStack(layout, runRecording([], "")),
+      "absent",
+    );
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(
+      orchestratorComposePath(layout),
+      "services: {}\n",
+    );
+    assertEquals(
+      await startMissingOrchestratorStack(layout, runRecording([], "")),
+      "absent",
+    );
+    await Deno.writeTextFile(orchestratorComposePath(layout), NET_COMPOSE);
+    const failing = (fail: string) => (args: string[]) =>
+      Promise.resolve({
+        success: !args.includes(fail),
+        stdout: "",
+        stderr: "nope",
+      } as DockerCliResult);
+    await assertRejects(
+      () => startMissingOrchestratorStack(layout, failing("ps")),
+      Error,
+      "nope",
+    );
+    await assertRejects(
+      () => startMissingOrchestratorStack(layout, failing("up")),
+      Error,
+      "nope",
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
