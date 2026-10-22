@@ -224,7 +224,7 @@ identifier per hour (one refill every 12 minutes). The tenant
   GPU identity + memory, `totalBytes`, optional `memory.pageSizeBytes` (kernel
   page size in bytes from `getconf PAGESIZE`, Linux only — omitted elsewhere or
   when unreadable), plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
-  + `/sys` (cpufreq, cache, DRM) via `src/host/host-inventory.ts` (process-cached; cpus/gpus/mem/swap on hello only)
+  + `/sys` (cpufreq, cache, DRM, memory blocks) via `src/host/host-inventory.ts` (fixed facts read once; memory, swap and the online CPU set re-read each call; optional `memory.presentBytes` / `memory.blockSizeBytes` / `dynamicMemory` on balloon guests)
   and `collectServerIps()` (`src/host/server-addresses.ts`) as
   `{ address, version, scope, cidr?, interface? }[]` (public + private; `interface`
   is the NIC name). Time sync facts come from
@@ -258,7 +258,13 @@ identifier per hour (one refill every 12 minutes). The tenant
   linkCount, error? }] }`, first 20 sites, no link text); the boot scan runs
   after the first hello, so it normally arrives on a heartbeat. The control
   plane stores it at `server.metadata.releaseLinkScan` and returns it on
-  `GET /api/client/v1/servers`. Do **not** put OS or cpus/gpus/mem/swap on heartbeat. Offline
+  `GET /api/client/v1/servers`. Do **not** put OS or gpus on heartbeat.
+  `resources.{memory,swap,cpus}` (plus `dynamicMemory`) ride a heartbeat only
+  when the control plane lists `host-capacity-v1` and MemTotal or present
+  memory moved by more than 32 MiB, the CPU list changed (re-read only when
+  the online CPU set changes) or the dynamic-memory flag flipped, compared
+  with the last frame that carried them; an older control plane keeps the
+  hello figures. Offline
   self-heal
   (Postgres `connected: false` while the socket is still live) is handled by the
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`

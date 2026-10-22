@@ -85,6 +85,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tls-capture-v1",
   "command-recovery-v1",
   "managed-switchover-final-position-v1",
+  "host-capacity-v1",
   "server-network-check-v1",
 ] as const;
 
@@ -317,6 +318,15 @@ export const MANAGED_DATABASE_OWNER_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_DATABASE_CONVERT_FEATURE: DaemonWireFeature =
   "managed-database-convert-v1";
+
+/**
+ * The control plane merges heartbeat `resources.{memory,swap,cpus}` and the
+ * optional `memory.presentBytes` / `memory.blockSizeBytes` / `dynamicMemory`
+ * fields. This daemon re-sends them on a heartbeat after they move only to a
+ * control plane that lists this feature; hello always carries them, and
+ * `memory.totalBytes` still means MemTotal.
+ */
+export const HOST_CAPACITY_FEATURE: DaemonWireFeature = "host-capacity-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

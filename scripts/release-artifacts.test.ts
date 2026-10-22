@@ -46,6 +46,8 @@ mkdir -p "$WORK/src/binary/opt/turbopanel/bin" \
 printf 'native-bin\n' > "$WORK/src/binary/opt/turbopanel/bin/turbopaneld"
 printf 'js-bundle\n' > "$WORK/src/js/opt/turbopanel/bin/turbopaneld.js"
 printf '[defaults]\n' > "$WORK/src/orch/opt/turbopanel/share/orchestration/ansible.cfg"
+mkdir -p "$WORK/src/orch/opt/turbopanel/share/orchestration/vendor/galaxy"
+printf 'x\n' > "$WORK/src/orch/opt/turbopanel/share/orchestration/vendor/galaxy/ansible-posix-2.2.1.tar.gz"
 printf '%s' "$NOTICE_TEXT" > "$WORK/src/binary/opt/turbopanel/share/THIRD_PARTY_NOTICES.md"
 printf '%s' "$NOTICE_TEXT" > "$WORK/src/js/opt/turbopanel/share/THIRD_PARTY_NOTICES.md"
 printf '%s' "$NOTICE_TEXT" > "$WORK/src/orch/opt/turbopanel/share/THIRD_PARTY_NOTICES.md"
@@ -127,6 +129,8 @@ ROOT='${work}/root'
 PROD="$ROOT/$(tp_prod_home)"
 mkdir -p "$PROD/share/orchestration"
 printf '[defaults]\n' > "$PROD/share/orchestration/ansible.cfg"
+mkdir -p "$PROD/share/orchestration/vendor/galaxy"
+printf 'x\n' > "$PROD/share/orchestration/vendor/galaxy/ansible-posix-2.2.1.tar.gz"
 printf 'notice\n' > "$PROD/share/THIRD_PARTY_NOTICES.md"
 for f in ${extraFiles.map((f) => `'${f}'`).join(" ")}; do
   mkdir -p "$(dirname "$PROD/share/orchestration/$f")"
