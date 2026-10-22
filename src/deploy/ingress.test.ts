@@ -33,6 +33,7 @@ import {
   HOSTING_CADDY_METRICS_ADDR,
   HOSTING_CADDY_RUNTIME_DIRECTORY,
   hostingCaddyValidateNeedsEdgeRuntime,
+  hostingFallbackSnippet,
   hostingIngressComposePath,
   hostingIngressDir,
   INGRESS_GATE_SOCKET_DIR,
@@ -617,6 +618,43 @@ test("siteSnippet strips server names from every block only when asked", () => {
   });
   assertEquals(redirect.split(HIDE_HEADER_BLOCK).length - 1, 2);
 });
+
+test("hostingFallbackSnippet answers unhosted names on 80 and 443 and hides names only when asked", () => {
+  const plain = hostingFallbackSnippet(false);
+  assertEquals(plain.includes("-Server"), false);
+  assertStringIncludes(plain, "http:// {");
+  assertStringIncludes(plain, "https:// {");
+  assertStringIncludes(plain, "tls internal {\n    on_demand\n  }");
+  assertEquals(plain.includes("redir"), false);
+  const hidden = hostingFallbackSnippet(true);
+  assertEquals(hidden.split(HIDE_HEADER_BLOCK).length - 1, 2);
+});
+
+for (const hide of [true, false]) {
+  test(`rewriteHostingCaddySites writes the catch-all with hide names ${hide}`, async () => {
+    const { layout, cleanup } = await makeTestLayout();
+    const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+    try {
+      await rewriteHostingCaddySites(
+        layout,
+        {
+          ...hostingPayload("env-h", "app.example.com"),
+          hideWebServerNames: hide,
+        },
+        undefined,
+        noGrant,
+      );
+      const fallback = await Deno.readTextFile(
+        join(layout.configDir, "hosting", "sites", "00-fallback.caddy"),
+      );
+      assertEquals(fallback, hostingFallbackSnippet(hide));
+      assertEquals(fallback.includes("-Server"), hide);
+    } finally {
+      restore();
+      await cleanup();
+    }
+  });
+}
 
 test("siteSnippet acme mode keeps HTTPS for multi-route forceHttps:false", () => {
   const snippet = siteSnippet({
@@ -1831,7 +1869,11 @@ test("rewriteHostingCaddySites validates the staged set, then activates and relo
     // Nothing is left beside the live glob.
     assertEquals(
       [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
-      ["env-caddy-1.acme-hostnames.json", "env-caddy-1.caddy"],
+      [
+        "00-fallback.caddy",
+        "env-caddy-1.acme-hostnames.json",
+        "env-caddy-1.caddy",
+      ],
     );
     assertEquals(
       [...Deno.readDirSync(hostingDir)].some((e) => e.name.endsWith(".next")),
@@ -1874,7 +1916,7 @@ test("rewriteHostingCaddySites refuses a set the hosting Caddy cannot load and l
     assertEquals(calls.some((a) => a.includes("reload")), false);
     assertEquals(
       [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
-      ["env-a.acme-hostnames.json", "env-a.caddy"],
+      ["00-fallback.caddy", "env-a.acme-hostnames.json", "env-a.caddy"],
     );
     assertEquals(
       await Deno.readTextFile(join(sitesDir, "env-a.caddy")),
@@ -1910,6 +1952,7 @@ test("a stale snippet already on disk is set aside, not allowed to fail every ot
     assertEquals(
       [...Deno.readDirSync(sitesDir)].map((e) => e.name).sort(),
       [
+        "00-fallback.caddy",
         "env-good.caddy",
         "env-new.acme-hostnames.json",
         "env-new.caddy",

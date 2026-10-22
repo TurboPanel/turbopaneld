@@ -181,6 +181,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
+   (every deploy also rewrites the reserved `sites/00-fallback.caddy`: the
+   catch-all `http://` and `https://` blocks that answer names nobody hosts
+   with an empty 200, no redirect, a self-signed certificate on 443, and the
+   same hide-names header block as hosted sites when the setting is on)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved

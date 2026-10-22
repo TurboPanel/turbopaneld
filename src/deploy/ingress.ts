@@ -20,7 +20,10 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
 import { safeConfigToken, safeUrlPath } from "../contracts/config-values.ts";
-import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
+import {
+  HOSTING_FALLBACK_SITE,
+  isDaemonReservedHostingSite,
+} from "./instance-acme-http01.ts";
 import {
   parseComposePsEntries,
   readComposePsContainer,
@@ -1946,6 +1949,32 @@ const HIDE_WEB_SERVER_NAMES_BLOCK = `  header {
   }
 `;
 
+/**
+ * The hosting web server's answer for a name nobody hosts, on :80 and :443.
+ * Ports 80/443 are for hosting, so an unconfigured name is answered here (an
+ * empty 200, no redirect) rather than refused; the HTTPS side presents a
+ * self-signed certificate made on demand so any name gets a handshake. Hosted
+ * names keep their own site blocks, which always win over these catch-alls.
+ * The panel's own address is a different listener and is not affected.
+ */
+export function hostingFallbackSnippet(
+  hideWebServerNames: boolean | undefined,
+): string {
+  const hide = hideWebServerNames ? HIDE_WEB_SERVER_NAMES_BLOCK : "";
+  return `# Names nobody hosts. Rewritten on every deploy.
+http:// {
+${hide}  respond "" 200
+}
+
+https:// {
+  tls internal {
+    on_demand
+  }
+${hide}  respond "" 200
+}
+`;
+}
+
 /** The bind line plus, when asked, the header removal that follows it. */
 function siteBlockPreamble(
   bindAddress: string | undefined,
@@ -2737,6 +2766,7 @@ async function validateHostingCaddyCandidate(
   siteFile: string,
   contents: string,
   grantRead: (hostingDir: string) => Promise<void>,
+  fallbackContents?: string,
 ): Promise<void> {
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
@@ -2760,6 +2790,13 @@ async function validateHostingCaddyCandidate(
         Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
       ),
     );
+    if (fallbackContents !== undefined) {
+      await Deno.writeTextFile(
+        join(candidate.sitesDir, HOSTING_FALLBACK_SITE),
+        fallbackContents,
+        { mode: 0o640 },
+      );
+    }
     await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
@@ -2985,10 +3022,6 @@ async function activateHostingSites(
   );
 }
 
-function activateHostingSite(live: string, contents: string): Promise<void> {
-  return activateHostingSites([{ live, contents }]);
-}
-
 /**
  * Write one environment's hosting snippet. The new snippet is validated as part
  * of the whole set before it touches the live include glob; when a running
@@ -3043,6 +3076,9 @@ async function rewriteHostingCaddySitesLocked(
     })
     .join("\n");
   const siteFile = `${payload.environmentId}.caddy`;
+  const fallbackContent = hostingFallbackSnippet(
+    payload.hideWebServerNames === true,
+  );
   await validateHostingCaddyCandidate(
     layout,
     hostingDir,
@@ -3050,6 +3086,7 @@ async function rewriteHostingCaddySitesLocked(
     siteFile,
     siteContent,
     grantRead,
+    fallbackContent,
   );
 
   if (hostnames.length > 0) {
@@ -3066,7 +3103,10 @@ async function rewriteHostingCaddySitesLocked(
     }
   }
 
-  await activateHostingSite(join(sitesDir, siteFile), siteContent);
+  await activateHostingSites([
+    { live: join(sitesDir, siteFile), contents: siteContent },
+    { live: join(sitesDir, HOSTING_FALLBACK_SITE), contents: fallbackContent },
+  ]);
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
   // environment that moves off acme-mode entirely never leaves a stale entry
