@@ -3,11 +3,13 @@ galaxy_info:
   author: turbopanel
   license: AGPL-3.0
   description: >
-    Install Docker CE via the geerlingguy.docker Galaxy role (official Docker
-    apt repository, deb822 repo format), start the service, and add the
-    tp and co-located dev users to the docker group.
+    Install Docker CE from the official Docker apt repository (deb822 source,
+    pinned signing-key fingerprint), start the service, and add the
+    tp and co-located dev users to the docker group. Debian 13 (trixie) is the
+    only supported OS today (runtime-registry.json); the install tasks also
+    work on Debian 12 and Ubuntu 22.04/24.04 but are not claimed.
   min_ansible_version: "2.20"
   platforms:
     - name: Debian
       versions:
-        - all
+        - trixie

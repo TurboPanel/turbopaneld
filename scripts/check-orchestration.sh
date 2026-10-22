@@ -15,8 +15,8 @@
 #      `ansible.posix.acl` / `ansible.posix.sysctl`, so this step installs
 #      the pin from orchestration/requirements.yml when the collection is
 #      not already vendored (CI pip-installs requirements.lock.txt).
-#      Do not install the deferred Docker Galaxy role — it is on-demand
-#      and is not needed to resolve first-party syntax.
+#      Docker is installed by the first-party `docker` role, so nothing
+#      else is fetched from Galaxy.
 #   2. `ansible-lint --profile min` -- ansible-lint's most conservative
 #      profile (correctness only, no style). Rules that currently fire on
 #      first-party content are in `warn_list` in .ansible-lint, so they are

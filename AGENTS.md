@@ -322,50 +322,37 @@ appears.
 `devOrchestrationAnsibleEnv()` set `ANSIBLE_HOME` to `/tmp/turbopanel-ansible`
 (alongside `ANSIBLE_LOCAL_TEMP` under `vendor/uv/cache/ansible-tmp`). Galaxy
 download cache is disposable scratch — first-party roles live under FHS
-`share/orchestration/roles`; Galaxy collections/roles live under
-`vendor/ansible/galaxy-collections` and `vendor/ansible/galaxy-roles`. Managed
+`share/orchestration/roles`; Galaxy collections live under
+`vendor/ansible/galaxy-collections`. Managed
 `run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
 accidental `/root/.ansible` after install. Runtime orchestration runs as
 `tp` (dev: the current dev user).
 
 **Galaxy content is not committed:** collection pins live in
-`orchestration/requirements.yml` (`ansible.posix`); Docker role pins live in
-`orchestration/requirements-docker.yml` (`geerlingguy.docker`). Bootstrap
+`orchestration/requirements.yml` (`ansible.posix`). Bootstrap
 (`ensureGalaxyCollections`) installs only collections under
 `vendor/ansible/galaxy-collections` — needed for the JSONL callback and
-`ansible.posix.sysctl` on every playbook. The Docker Galaxy role is deferred
-(`ensureGalaxyDockerRole`) until a host actually needs the container runtime
-(`runDockerSetup` / co-located dev converge via
-`scripts/run-orchestration-action.ts` `instance-dev-install` /
-postgres|rabbitmq setup), so fresh daemon installs and pre-Docker
-hosts skip that download. **Install path:** `ensureGalaxyDockerRole` reads the
-version pin from `requirements-docker.yml` and downloads the matching tag via
-**codeload.github.com** (`galaxyDockerRoleCodeloadUrl`) into
-`vendor/ansible/galaxy-roles/geerlingguy.docker` — it does **not** call
-`ansible-galaxy role install`, which resolves classic roles through
-`github.com/.../archive/*.tar.gz` and intermittently fails with edge 503s.
-First-party
-roles (e.g. `docker`, which wraps Galaxy via `include_role`) stay in git;
-Galaxy install trees land under `vendor/ansible/galaxy-roles/` (never the
-checkout `orchestration/roles/` tree — that path is a Vagrant VirtFS mount and
-is not guest-writable). Do not vend them into the repo — Sonar would scan
-third-party `mode: 0644`/`0755` as false vulnerabilities, and release hosts
-reinstall collections at bootstrap and the Docker role on first Docker use.
-Keep leftover checkout copies out of ansible-lint / the Ansible IDE extension:
-`exclude_paths` in repo-root + `orchestration/.ansible-lint`, `files.exclude`
-in `.vscode` / `dev.code-workspace`, and after Galaxy install
-`ensureGalaxyDockerRole` rewrites each present layout's nested `.ansible-lint`
-(`geerlingguy.docker/` and `geerlingguy/docker/`) with a near-total
-`skip_list` (and removes upstream `.yamllint`) so opening files under the role
-— including `tasks/docker-*.yml` — is quiet. Path exclusions only apply to
-discovery, not explicitly opened files.
+`ansible.posix.sysctl` on every playbook. **No Galaxy role is used:** Docker
+Engine is installed by our own `docker` role (`orchestration/roles/docker/tasks/install.yml`,
+shipped in the release package with the rest of `orchestration/roles/`) from
+Docker's official apt repository when a host first needs the container runtime
+(`runDockerSetup` / co-located dev converge / postgres|rabbitmq|proxysql setup),
+so fresh daemon installs and pre-Docker hosts never fetch it and a host with a
+healthy Docker (including an offline one) is left alone. The signing key is
+fetched over HTTPS at install time and refused unless it carries the
+fingerprint pinned in `roles/docker/vars/main.yml`; a release Docker has not
+published packages for yet falls back to the newest published suite.
+Do not vend Galaxy content into the repo — Sonar would scan third-party
+`mode: 0644`/`0755` as false vulnerabilities; release hosts reinstall
+collections at bootstrap. Keep leftover checkout copies (`orchestration/.ansible/`)
+out of ansible-lint / the Ansible IDE extension via `exclude_paths`.
 
 **Upstream licenses:** Ansible Core, `ansible-lint`, the `ansible.posix`
-collection, the `geerlingguy.docker` Galaxy role, and any packages these
+collection, and any packages these
 playbooks install remain under their upstream licenses (pins in
 `orchestration/requirements.txt` (constraints),
 `orchestration/requirements.lock.txt` (CI hash lock),
-`orchestration/requirements.yml`, and `orchestration/requirements-docker.yml`). Installing them on a host is a
+and `orchestration/requirements.yml`). Installing them on a host is a
 different licensing event from redistributing them. Any TurboPanel-published
 appliance, VM/OCI image, or offline bundle that ships copies must carry the
 applicable upstream license, copyright, notice, and source-compliance
@@ -394,7 +381,7 @@ accepts an `--if-needed` flag on `instance-dev-install`. When set, it calls
 `coLocatedInstanceServiceEnabled()` + `emitDevConvergeSkippedIfNeeded()`
 (`src/orchestration/converge-stamp.ts`) and, when the stamp matches, emits a
 single `dev_converge_skipped` JSONL event and exits **before**
-`ensureAnsible` / `ensureGalaxyDockerRole` / the playbook run. Unflagged
+`ensureAnsible` / the playbook run. Unflagged
 invocations (and any flow with `TURBOPANEL_FORCE_CONVERGE=1` set) behave
 exactly as before via `shouldSkipDevConverge()` / `forceConvergeRequested()`.
 The [dev](https://github.com/TurboPanel/dev) console threads this as
@@ -480,7 +467,7 @@ compile toolchain).
   of uncovered history. Sibling `turbopanel` / `ui` also use CI-based analysis;
   `website` still uses Automatic Analysis. Coverage exclusions include
   `**/*.test.ts`, `src/testing/**`, `src/build-info.ts`, `dist/**`,
-  `publish/**`, and the Galaxy Docker role tree.
+  and `publish/**`.
   **`sonar.sources` / `sonar.tests` / `sonar.test.inclusions`** must stay set
   (`src` + `orchestration` + `scripts` + `main.ts`; tests = `**/*.test.ts` and
   `src/testing/**`). The `denoS2187` issue-ignore (`typescript:S2187` on
@@ -558,7 +545,7 @@ that toolchain from `orchestration/requirements.lock.txt` (`pip install
 resolves `ansible.posix.acl` / `ansible.posix.sysctl`: when the collection is
 not already vendored under `$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections`
 (CI has ansible-core from pip and no vendor tree), the script installs the pin
-from `orchestration/requirements.yml` (not `requirements-docker.yml`). Rules that
+from `orchestration/requirements.yml` . Rules that
 still fire on first-party content (`partial-become`, `parser-error`) are in
 `warn_list` in `.ansible-lint` with the reasoning; the full ansible-lint
 profile is deliberately **not** gated (~360 findings, nearly all style).
@@ -997,8 +984,7 @@ it regresses:
   builders and a hostile corpus through the validator lifted verbatim from
   the script (`src/testing/tp-orchestrate-validator.ts`). It rebuilds
   PATH/ANSIBLE_* itself, and keeps Ansible's temp/home in a root-only
-  `/tmp/turbopanel-orchestrate`. `galaxy-docker-role` fetches the pinned
-  geerlingguy.docker role into the root-owned roles dir; `update` fetches
+  `/tmp/turbopanel-orchestrate`. `update` fetches
   `run.sh` (CDN, or an HTTPS overlay host with the canonical
   Platform CA — never `-k`) and runs it with re-validated flags, which is how
   panel-driven daemon updates work now (`executeRunReconcile` →

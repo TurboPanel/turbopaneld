@@ -10,7 +10,7 @@ import {
   resolveDevOrchestrationDir,
   resolveDevOrchestrationLayout,
 } from "./dev-orchestration.ts";
-import { GALAXY_ROLES_DIR } from "./assets.ts";
+import { ORCHESTRATION_ROLES_DIR } from "./assets.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 
 /**
@@ -136,7 +136,7 @@ test("resolveDevOrchestrationLayout wires playbook and role paths", async () => 
       assertEquals(layout.playbookPath, join(devRoot, "playbook.yml"));
       assertEquals(layout.ansibleCfgPath, join(devRoot, "ansible.cfg"));
       assertEquals(layout.devRolesDir, join(devRoot, "roles"));
-      assertEquals(layout.daemonRolesDir, GALAXY_ROLES_DIR);
+      assertEquals(layout.daemonRolesDir, ORCHESTRATION_ROLES_DIR);
     } finally {
       restore();
     }
@@ -156,7 +156,7 @@ test("resolveDevConvergeRoleDir prefers dev overlay for devRoles", async () => {
     );
     assertEquals(
       resolveDevConvergeRoleDir(layout, "shared-role"),
-      join(GALAXY_ROLES_DIR, "shared-role"),
+      join(ORCHESTRATION_ROLES_DIR, "shared-role"),
     );
   });
 });
