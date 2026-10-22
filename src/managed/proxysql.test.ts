@@ -1802,7 +1802,11 @@ test("three mixed-family clusters and three spanning segments still render valid
             transport: "local",
           },
         ],
-        users: [{ username: "app_mysql", role: "user", password: "fixture-value-my" }],
+        users: [{
+          username: "app_mysql",
+          role: "user",
+          password: "fixture-value-my",
+        }],
       }),
       clusterDesired({
         managedId: "m3",
@@ -1818,7 +1822,11 @@ test("three mixed-family clusters and three spanning segments still render valid
             transport: "local",
           },
         ],
-        users: [{ username: "app_pg2", role: "user", password: "fixture-value-pg2" }],
+        users: [{
+          username: "app_pg2",
+          role: "user",
+          password: "fixture-value-pg2",
+        }],
       }),
     ],
   });

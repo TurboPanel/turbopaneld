@@ -320,7 +320,7 @@ test({
               {
                 username: "app_mysql",
                 role: "user",
-                password: "fixture-sealed-my",
+                password: "tpdaemon.v1.fixture-sealed-my",
               },
             ],
           },
@@ -345,7 +345,7 @@ test({
               {
                 username: "app_pg2",
                 role: "user",
-                password: "fixture-sealed-pg2",
+                password: "tpdaemon.v1.fixture-sealed-pg2",
               },
             ],
           },
