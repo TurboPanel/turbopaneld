@@ -42,7 +42,12 @@
     DEST="{{ turbopanel_vendor_dir }}/nginx/${NGINX_VER}"
     DEB_URL="https://nginx.org/packages/debian/pool/nginx/n/nginx/nginx_${DEB_VER}_${DEB_ARCH}.deb"
     curl -fsSL -o "$TMP/nginx.deb" "$DEB_URL"
-    echo "${DEB_SHA256}  $TMP/nginx.deb" | sha256sum -c -
+    GOT="$(sha256sum "$TMP/nginx.deb" | cut -d' ' -f1)"
+    [ "$GOT" = "${DEB_SHA256}" ] || {
+      echo "nginx ${DEB_VER} (${DEB_ARCH}): SHA-256 mismatch, expected ${DEB_SHA256}, got ${GOT}; refusing to install. To accept a re-published file, update nginx_deb_sha256 in orchestration/roles/nginx/defaults/main.yml" >&2
+      rm -rf "$TMP"
+      exit 1
+    }
     dpkg-deb -x "$TMP/nginx.deb" "$TMP/extract"
     install -d "$DEST/sbin"
     install -m 0750 "$TMP/extract/usr/sbin/nginx" "$DEST/sbin/nginx"

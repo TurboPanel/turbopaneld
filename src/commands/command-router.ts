@@ -1,8 +1,11 @@
 import {
+  answerRepeatedDispatch,
   deliverCommandOutcome,
   markCommandInFlight,
+  noteCommandProgress,
+  recoveryEnabled,
 } from "./command-outbox.ts";
-import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { errorText, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
@@ -240,6 +243,17 @@ export async function handleCommandDispatch(
     ws.send(JSON.stringify(ack));
   }
 
+  // The same command sent again (a lost link, a control plane restart) never runs twice.
+  if (answerRepeatedDispatch(ws, message.id)) {
+    logWarn(
+      "commands",
+      `command ${
+        sanitizeForLog(message.id)
+      } was sent again; it is not run a second time`,
+    );
+    return;
+  }
+
   await markCommandInFlight(message.id);
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
@@ -374,6 +388,8 @@ export async function handleCommandDispatch(
           id: message.id,
           commandId: message.commandId,
           send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+          onSnapshot: (snapshot) => noteCommandProgress(message.id, snapshot),
+          keepalive: () => recoveryEnabled(),
         });
         try {
           result = await pickCommandRouterHandler(

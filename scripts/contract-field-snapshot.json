@@ -337,5 +337,22 @@
       { "name": "scope", "required": true, "type": "string" },
       { "name": "slug", "required": true, "type": "string" }
     ]
+  },
+  "CommandRecoveryReport": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "running", "required": true, "type": "Array<string>" },
+      { "name": "unacked", "required": true, "type": "Array<string>" }
+    ]
+  },
+  "CommandOutcomeAckMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "type", "required": true, "type": "'command-outcome-ack'" }
+    ]
   }
 }

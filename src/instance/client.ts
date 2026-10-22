@@ -164,6 +164,7 @@ import { TopologyReporter } from "./topology-reporter.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
+  CommandRecoveryReport,
   DaemonMessage,
   InstanceHostnameWireEntry,
   UpdateProgressStage,
@@ -216,8 +217,18 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
-  /** Runs when a session attaches: delivers held command outcomes. */
-  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
+  /**
+   * Runs when a session attaches: delivers held command outcomes. `peer`
+   * answers whether the control plane advertised a feature.
+   */
+  handleSessionAttach?: (
+    ws: WebSocket,
+    peer: { supports(feature: string): boolean },
+  ) => Promise<void>;
+  /** The control plane stored a command's outcome (`command-outcome-ack`). */
+  handleCommandOutcomeAck?: (id: string) => Promise<void>;
+  /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
+  commandReport?: () => CommandRecoveryReport | undefined;
 };
 
 let commandPorts: CommandPorts = {};
@@ -603,7 +614,10 @@ export class InstanceClient {
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
     const sessionAttach = commandPorts.handleSessionAttach;
     if (sessionAttach) {
-      this.#runSocketHandler("session-attach", sessionAttach(ws));
+      this.#runSocketHandler(
+        "session-attach",
+        sessionAttach(ws, { supports: (f) => this.instanceSupports(f) }),
+      );
     }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
@@ -1652,6 +1666,9 @@ export class InstanceClient {
       onStaleConnection: () => this.#closeActiveSocket(),
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
+      // Running and unconfirmed commands ride on hello / heartbeat.
+      commandReport: () => commandPorts.commandReport?.(),
+      peerSupports: (feature) => this.instanceSupports(feature),
     });
   }
 
@@ -1864,6 +1881,16 @@ export class InstanceClient {
           this.#ensureBackupReporter().handleResult(message),
         );
         break;
+      case "command-outcome-ack": {
+        const acknowledge = commandPorts.handleCommandOutcomeAck;
+        if (acknowledge) {
+          this.#runSocketHandler(
+            "command-outcome-ack",
+            acknowledge(message.id),
+          );
+        }
+        break;
+      }
       case "public-urls-update":
         this.#runSocketHandler(
           "public-urls-update",

@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  COMMAND_RECOVERY_FEATURE,
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
@@ -218,6 +219,11 @@ test("managed-switchover-final-position-v1 is advertised last and raised no floo
     MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
   );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("command-recovery-v1 is advertised", () => {
+  assertEquals(COMMAND_RECOVERY_FEATURE, "command-recovery-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
 });
 
 test("site-engine-nginx-apache-v1 is advertised on the wire", () => {
