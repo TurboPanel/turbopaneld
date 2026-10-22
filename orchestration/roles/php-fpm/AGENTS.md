@@ -14,9 +14,14 @@ OpenLiteSpeed / Caddy) does not. Note this is a *deliberate exception* — do no
 mod_proxy_fcgi. **OpenLiteSpeed's `lsphp` is unaffected** and still vendors from
 `rpms.litespeedtech.com` (see below).
 
-The repo is wired the current way — a packaged trust root
-(`debsuryorg-archive-keyring.deb`) plus a deb822
-`/etc/apt/sources.list.d/sury-php.sources` with an explicit `Signed-By`. No
+The repo is wired the current way — the signing key at
+`/usr/share/keyrings/turbopanel-sury-php.gpg`, installed by the shared
+`repo-key` role (fetched from sury over HTTPS, checked against
+`php_fpm_sury_key_fingerprints`, with `files/sury-php.gpg` as the fallback; a
+changed key warns and never blocks under the default `warn` policy) plus a
+deb822 `/etc/apt/sources.list.d/sury-php.sources` with an explicit `Signed-By`.
+Hosts set up before this keep the old `debsuryorg-archive-keyring` package; it
+is unused and the uninstall script removes it. No
 `apt-key`, no `[signed-by=]` one-liner; both are deprecated. **Sury cannot be
 cleanly removed once enabled** — it also ships replacement builds of libraries
 such as OpenSSL, so dropping the repo breaks the PHP install. Treat it as
