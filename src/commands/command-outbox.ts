@@ -192,8 +192,7 @@ export function noteCommandProgress(
   const now = timers.now();
   const signature = planSignature(progress);
   const previous = lastProgress.get(id);
-  const due = previous === undefined ||
-    previous.signature !== signature ||
+  const due = previous?.signature !== signature ||
     now - previous.writtenAt >= PROGRESS_JOURNAL_INTERVAL_MS;
   if (!due) {
     if (previous) lastProgress.set(id, { ...previous, progress });
@@ -358,15 +357,18 @@ function releasePromoted(progress: CommandProgress): boolean | undefined {
   return start.state === "pending" ? false : undefined;
 }
 
+function releaseNote(releasePromoted: boolean | undefined): string {
+  if (releasePromoted === undefined) return "";
+  return releasePromoted
+    ? "; the new release had been made live"
+    : "; the new release had not been made live";
+}
+
 function interruptedMessage(facts: ReturnType<typeof interruptedFacts>) {
   const step = facts.lastStep
     ? `last step: ${facts.lastStep}`
     : "no step reported";
-  const release = facts.releasePromoted === undefined
-    ? ""
-    : facts.releasePromoted
-    ? "; the new release had been made live"
-    : "; the new release had not been made live";
+  const release = releaseNote(facts.releasePromoted);
   return `The daemon restarted while this command was running (${step}${release}). The host may be partly changed; check it before running again.`;
 }
 
@@ -425,7 +427,11 @@ async function answerOrphans(ws: OutboxSocket): Promise<void> {
       return reply && !journaledOutcome(entries[index], id)
         ? queueWrite(id, () =>
           writeJournalAtomic(
-            entryFor(id, { outcome: reply, journaledAt: reply.at as string }),
+            entryFor(id, {
+              outcome: reply,
+              journaledAt: outcomeTimeIso(reply) ??
+                new Date(timers.now()).toISOString(),
+            }),
           ))
         : Promise.resolve();
     }));
@@ -434,13 +440,24 @@ async function answerOrphans(ws: OutboxSocket): Promise<void> {
   await Promise.all(answered.map(removeJournal));
 }
 
+/** When an outcome message says it was sent, if that is a readable timestamp. */
+function outcomeTimeIso(
+  message: OutcomeMessage | undefined,
+): string | undefined {
+  const at = message?.at;
+  return typeof at === "string" && Number.isFinite(Date.parse(at))
+    ? at
+    : undefined;
+}
+
 /** Drop unconfirmed entries that are too old or beyond the cap, with a warning. */
 async function pruneUnacked(): Promise<void> {
   const cutoff = timers.now() - UNACKED_RETENTION_MS;
   const ids = [...unacked.keys()];
+  // An outcome without a readable time is kept; only the entry cap drops it.
   const stale = ids.filter((id) => {
-    const at = Date.parse(String(unacked.get(id)?.at ?? ""));
-    return Number.isFinite(at) && at < cutoff;
+    const at = outcomeTimeIso(unacked.get(id));
+    return at !== undefined && Date.parse(at) < cutoff;
   });
   const overflow = ids.filter((id) => !stale.includes(id))
     .slice(0, Math.max(0, ids.length - stale.length - UNACKED_MAX_ENTRIES));
@@ -492,7 +509,7 @@ export function commandRecoveryReport(): CommandRecoveryReport | undefined {
 
 /** Resolves when every queued journal write has finished. */
 export async function settleCommandJournalWrites(): Promise<void> {
-  await Promise.all([...writeChains.values()]);
+  await Promise.all(writeChains.values());
 }
 
 /** Test seam: forget held outcomes and running ids; optionally swap the clock and timers. */

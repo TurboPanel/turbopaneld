@@ -73,11 +73,11 @@ class CommandOutputSinkImpl implements CommandOutputSink {
   #allAcked = true;
   #finalized = false;
   /** Every chunk taken from the spool, in order; acked ones stay for a resync. */
-  #chunks: PendingChunk[] = [];
+  readonly #chunks: PendingChunk[] = [];
   /** Index into {@link #chunks} of the first chunk the control plane has not taken. */
   #nextIndex = 0;
   #backlogBytes = 0;
-  #maxBytes: number;
+  readonly #maxBytes: number;
   #retryHandle: unknown;
   readonly #timers: SinkTimers;
 

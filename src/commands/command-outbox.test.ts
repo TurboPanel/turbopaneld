@@ -12,6 +12,7 @@ import {
   resetCommandOutboxForTests,
   settleCommandJournalWrites,
   UNACKED_MAX_ENTRIES,
+  UNACKED_RETENTION_MS,
 } from "./command-outbox.ts";
 import type { CommandProgress } from "../contracts/cell-messages.ts";
 
@@ -385,5 +386,29 @@ test("unconfirmed outcomes beyond the entry cap are dropped oldest first with a 
     const names = await journalNames();
     assertEquals(names.length, UNACKED_MAX_ENTRIES);
     assertEquals(names.includes("cap-0.json"), false);
+  });
+});
+
+test("an unconfirmed outcome past the retention is dropped, one without a readable time is kept", async () => {
+  await withState(async () => {
+    const time = fakeTime();
+    const open = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(open.ws, recovering);
+    const outcomes: Array<[string, unknown]> = [
+      ["old", "2026-10-22T10:00:00.000Z"],
+      ["no-time", { not: "a time" }],
+    ];
+    for (const [id, at] of outcomes) {
+      await markCommandInFlight(id);
+      await deliverCommandOutcome(open.ws, {
+        type: "command-outcome",
+        id,
+        ok: true,
+        at,
+      });
+    }
+    time.advance(UNACKED_RETENTION_MS + 1);
+    await flushCommandOutcomes(open.ws, recovering);
+    assertEquals(await journalNames(), ["no-time.json"]);
   });
 });
