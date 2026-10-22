@@ -157,9 +157,10 @@ async function readMariadbStandbyState(
 }
 
 /**
- * After START SLAVE the IO/SQL threads are not necessarily Yes on the first
- * read. Apply must not return until they are streaming, otherwise the member
- * stays `failed`/`unknown` until a later reconcile that may never run.
+ * After a fresh seed the IO/SQL threads are not necessarily Yes on the first
+ * read. Wait a bounded time for them, but never fail the apply on a slow
+ * stream: the standby marker is already written, so a retry must not reseed.
+ * Returns false when the window ran out; health reads keep reporting after.
  */
 export async function waitMariadbStandbyStreaming(
   ctx: ManagedEngineContext,
@@ -169,24 +170,61 @@ export async function waitMariadbStandbyStreaming(
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
   },
-): Promise<void> {
+): Promise<boolean> {
   const timeoutMs = options?.timeoutMs ?? MARIADB_STANDBY_STREAMING_TIMEOUT_MS;
   const pollMs = options?.pollMs ?? MARIADB_STANDBY_STREAMING_POLL_MS;
   const sleepFn = options?.sleep ?? sleep;
   const now = options?.now ?? Date.now;
   const deadline = now() + timeoutMs;
-  const poll = async (): Promise<void> => {
-    const state = await readMariadbStandbyState(ctx);
-    if (state === "streaming") return;
-    if (now() >= deadline) {
-      throw new Error(
-        `mariadb configureStandby replica did not start streaming (last state: ${state})`,
-      );
-    }
+  const poll = async (): Promise<boolean> => {
+    if (await readMariadbStandbyState(ctx) === "streaming") return true;
+    if (now() >= deadline) return false;
     await sleepFn(pollMs);
     return poll();
   };
-  await poll();
+  return await poll();
+}
+
+/**
+ * `skip_slave_start` keeps the replica threads down after a container
+ * restart, and nothing else starts them until a later health heal. A replica
+ * stopped by hand on a long-running server must stay stopped, so threads are
+ * only started when the server itself is younger than this.
+ */
+export const MARIADB_REPLICA_RESUME_MAX_UPTIME_SECONDS = 300;
+
+export type MariadbExistingStandbyOutcome =
+  | "no_replica"
+  | "running"
+  | "left_stopped"
+  | "started";
+
+/**
+ * Standby marker present: this member was seeded before. Only act on a member
+ * that still has replica configuration (promote runs RESET SLAVE ALL and
+ * leaves the marker, so START SLAVE there is ERROR 1200). Does not wait for
+ * streaming: follow-primary and the health poll own that.
+ */
+export async function resumeExistingMariadbStandby(
+  ctx: ManagedEngineContext,
+  options?: { maxUptimeSeconds?: number },
+): Promise<MariadbExistingStandbyOutcome> {
+  const status = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+  if (!status.trim()) return "no_replica";
+  if (parseShowSlaveStatus(status).state !== "stopped") return "running";
+  const uptime = Number(
+    (await runMariadbQuery(
+      ctx,
+      "SELECT VARIABLE_VALUE FROM " +
+        "information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME='UPTIME';",
+    ))
+      .trim(),
+  );
+  const maxUptime = options?.maxUptimeSeconds ??
+    MARIADB_REPLICA_RESUME_MAX_UPTIME_SECONDS;
+  if (!Number.isFinite(uptime) || uptime > maxUptime) return "left_stopped";
+  await runMariadb(ctx, startReplicaSql());
+  return "started";
 }
 
 function sleep(ms: number): Promise<void> {
@@ -599,11 +637,7 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       `/var/lib/mysql/${STANDBY_MARKER}`,
     ]);
     if (markerCheck.success) {
-      // skip_slave_start leaves threads down across compose up. A forced
-      // resync that kept the marker (or a stop/start) must still start
-      // replication and wait until health is streaming.
-      await runMariadb(ctx, startReplicaSql());
-      await waitMariadbStandbyStreaming(ctx);
+      await resumeExistingMariadbStandby(ctx);
       return;
     }
 
@@ -659,8 +693,9 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
 
     await runMariadb(ctx, enforceReadOnlySql());
-    await waitMariadbStandbyStreaming(ctx);
 
+    // Marker first: once replication is configured the seed is done, and a
+    // retry after a slow stream must not throw the data away and reseed.
     const mark = await ctx.exec([
       "sh",
       "-c",
@@ -671,6 +706,13 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
         `mariadb configureStandby marker failed: ${
           sanitizeForLog(mark.stderr || mark.stdout || "unknown")
         }`,
+      );
+    }
+
+    if (!await waitMariadbStandbyStreaming(ctx)) {
+      logWarn(
+        "managed-mariadb",
+        "standby replica not streaming yet after seed; health polling continues",
       );
     }
   },

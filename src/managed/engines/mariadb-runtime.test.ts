@@ -10,6 +10,7 @@ import {
   mariadbManagedEngineRuntime,
   parseShowSlaveStatus,
   resolveMariadbPrimaryConnectHost,
+  resumeExistingMariadbStandby,
   waitMariadbStandbyStreaming,
 } from "./mariadb.ts";
 import { changeReplicationSourceSql } from "./mariadb-sql.ts";
@@ -386,7 +387,7 @@ test("mariadb bootstrapStandby returns already_standby when marker exists", asyn
   assertEquals(boot, "already_standby");
 });
 
-test("waitMariadbStandbyStreaming returns once the replica is streaming", async () => {
+test("waitMariadbStandbyStreaming returns true once the replica is streaming", async () => {
   let reads = 0;
   const exec: ManagedEngineExec = (argv) => {
     if (argv.includes("-E")) {
@@ -399,40 +400,100 @@ test("waitMariadbStandbyStreaming returns once the replica is streaming", async 
     }
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
-  await waitMariadbStandbyStreaming(buildContext(exec), {
+  const streaming = await waitMariadbStandbyStreaming(buildContext(exec), {
     pollMs: 0,
     sleep: () => Promise.resolve(),
   });
-  assertEquals(reads >= 2, true);
+  assertEquals(streaming, true);
+  assertEquals(reads, 2);
 });
 
-test("waitMariadbStandbyStreaming throws when replica status stays unknown", async () => {
+test("waitMariadbStandbyStreaming returns false instead of throwing on a slow stream", async () => {
   const exec: ManagedEngineExec = () =>
     Promise.resolve({ success: true, stdout: "", stderr: "" });
   let n = 0;
-  await assertRejects(
-    () =>
-      waitMariadbStandbyStreaming(buildContext(exec), {
-        timeoutMs: 1,
-        pollMs: 0,
-        sleep: () => Promise.resolve(),
-        now: () => (++n === 1 ? 0 : 10),
-      }),
-    Error,
-    "did not start streaming",
-  );
+  const streaming = await waitMariadbStandbyStreaming(buildContext(exec), {
+    timeoutMs: 1,
+    pollMs: 0,
+    sleep: () => Promise.resolve(),
+    now: () => (++n === 1 ? 0 : 10),
+  });
+  assertEquals(streaming, false);
 });
 
-test("mariadb configureStandby starts replica threads when the marker already exists", async () => {
+const STOPPED_VERTICAL = `
+*************************** 1. row ***************************
+               Slave_IO_Running: No
+              Slave_SQL_Running: No
+`;
+
+/** Exec double answering the status and uptime queries of the resume path. */
+function resumeExec(
+  status: string,
+  uptime: string,
+  starts: string[],
+): ManagedEngineExec {
+  return (argv, input) => {
+    if (argv.includes("-E")) {
+      return Promise.resolve({ success: true, stdout: status, stderr: "" });
+    }
+    if (input?.includes("START SLAVE")) starts.push(input);
+    const wantsUptime = argv.some((part) => part.includes("UPTIME"));
+    return Promise.resolve({
+      success: true,
+      stdout: wantsUptime ? uptime : "",
+      stderr: "",
+    });
+  };
+}
+
+test("resumeExistingMariadbStandby does nothing without replica configuration", async () => {
+  const starts: string[] = [];
+  const outcome = await resumeExistingMariadbStandby(
+    buildContext(resumeExec("", "5\n", starts)),
+  );
+  assertEquals(outcome, "no_replica");
+  assertEquals(starts.length, 0);
+});
+
+test("resumeExistingMariadbStandby leaves a running replica alone", async () => {
+  const starts: string[] = [];
+  const outcome = await resumeExistingMariadbStandby(
+    buildContext(resumeExec(HEALTHY_VERTICAL, "5\n", starts)),
+  );
+  assertEquals(outcome, "running");
+  assertEquals(starts.length, 0);
+});
+
+test("resumeExistingMariadbStandby starts threads on a freshly started server", async () => {
+  const starts: string[] = [];
+  const outcome = await resumeExistingMariadbStandby(
+    buildContext(resumeExec(STOPPED_VERTICAL, "12\n", starts)),
+  );
+  assertEquals(outcome, "started");
+  assertEquals(starts.length, 1);
+});
+
+test("resumeExistingMariadbStandby does not restart a replica stopped on a long-running server", async () => {
+  const starts: string[] = [];
+  const outcome = await resumeExistingMariadbStandby(
+    buildContext(resumeExec(STOPPED_VERTICAL, "86400\n", starts)),
+  );
+  assertEquals(outcome, "left_stopped");
+  assertEquals(starts.length, 0);
+});
+
+test("mariadb configureStandby with a marker never writes the marker or waits", async () => {
   const replication = mariadbManagedEngineRuntime.replication;
   if (!replication?.configureStandby) {
     throw new TypeError("expected mariadb configureStandby");
   }
   const calls: RecordedExec[] = [];
-  const exec: ManagedEngineExec = withStreamingStatus((argv, input) => {
+  const inner = resumeExec(STOPPED_VERTICAL, "3\n", []);
+  const exec: ManagedEngineExec = (argv, input) => {
     calls.push({ argv: [...argv], input });
-    return Promise.resolve({ success: true, stdout: "", stderr: "" });
-  });
+    return inner(argv, input);
+  };
   await replication.configureStandby(
     buildContext(exec),
     standbyReplicationSpec(),
@@ -445,6 +506,35 @@ test("mariadb configureStandby starts replica threads when the marker already ex
     calls.some((c) => c.argv.some((part) => part.includes("touch"))),
     false,
   );
+});
+
+test("mariadb configureStandby writes the marker before it waits for streaming", async () => {
+  const replication = mariadbManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mariadb configureStandby");
+  }
+  const order: string[] = [];
+  const { exec } = recordingExec();
+  const fresh: ManagedEngineExec = (argv, input) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv.includes("-E")) {
+      order.push("status");
+      return Promise.resolve({
+        success: true,
+        stdout: HEALTHY_VERTICAL,
+        stderr: "",
+      });
+    }
+    if (argv.some((part) => part.includes("touch"))) order.push("marker");
+    return exec(argv, input);
+  };
+  await replication.configureStandby(
+    buildContext(fresh),
+    standbyReplicationSpec(),
+  );
+  assertEquals(order, ["marker", "status"]);
 });
 
 test("mariadb configureStandby seeds replication and writes marker", async () => {
