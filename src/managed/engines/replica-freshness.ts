@@ -105,7 +105,20 @@ export function parseMysqlFreshness(stdout: string): ReplicaFreshness {
   // Nothing received since this server started (the set resets on restart)
   // proves nothing about the source: unknown, not "applied".
   const applied = parseSqlBool(cols[3]);
-  return { ...gtidFields(received, executed, applied), ...mysqlReceipt(cols) };
+  const receipt = mysqlReceipt(cols);
+  const out = { ...gtidFields(received, executed, applied), ...receipt };
+  // A replica that has not queued a transaction since it started (an idle
+  // source after a seed or restart) has an empty received set: everything it
+  // received is applied. That only counts while the IO thread is ON and a
+  // heartbeat or queued transaction was seen recently (`receipt` is set), so a
+  // disconnected replica still reads as unknown.
+  if (
+    received === "" && executed !== "" && applied === true &&
+    out.receiptAgeSeconds !== undefined
+  ) {
+    out.fullyApplied = true;
+  }
+  return out;
 }
 
 /**

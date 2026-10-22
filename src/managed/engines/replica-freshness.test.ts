@@ -80,9 +80,25 @@ test("mysql uses the newer of heartbeat and queued transaction", () => {
   );
 });
 
-test("mysql empty or NULL received set is unknown, never applied", () => {
+test("mysql 9.7 idle replica: empty received set with live receipt is fully applied", () => {
   for (const rcv of ["", "NULL"]) {
     const out = parseMysqlFreshness(mysqlRow({ rcv, subset: "1" }));
+    assertEquals(out.fullyApplied, true);
+    assertEquals("receivedGtid" in out, false);
+    assertEquals(out.executedGtid, `${U1}:1-10`);
+  }
+});
+
+test("mysql empty received set without live receipt is unknown, never applied", () => {
+  for (const rcv of ["", "NULL"]) {
+    const out = parseMysqlFreshness(
+      mysqlRow({ rcv, subset: "1", io: "OFF" }),
+    );
+    assertEquals(out.fullyApplied, undefined);
+    const noAge = parseMysqlFreshness(
+      mysqlRow({ rcv, subset: "1", hb: "NULL", queued: "NULL" }),
+    );
+    assertEquals(noAge.fullyApplied, undefined);
     assertEquals(out.fullyApplied, undefined);
     // Omitted, not "": the control plane rejects a zero-length GTID string.
     assertEquals("receivedGtid" in out, false);
