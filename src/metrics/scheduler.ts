@@ -98,7 +98,7 @@ export type MetricsSchedulerOptions = {
   durabilityFlag?: () => boolean;
   /**
    * `true` once the control plane also advertises `metrics-v8-sizes`. Until
-   * then the per-sample sizes are stripped from the v8 `extended` block: a
+   * then the per-sample sizes are stripped from the wire version 8 `extended` block: a
    * control plane that predates them rejects the unknown keys and would drop
    * the whole sample.
    */
@@ -357,7 +357,7 @@ export class MetricsScheduler {
     const metadata = (sample as { metadata?: Record<string, unknown> })
       .metadata;
     if (metadata) {
-      // metrics-v8 negotiated: this is a v8 sample (durable flag, extended).
+      // metrics-v8 negotiated: this is a wire version 8 sample (durable flag, extended).
       metadata.version = METRICS_SCHEMA_VERSION;
       metadata.durable = durable;
     }

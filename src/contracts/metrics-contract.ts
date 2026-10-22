@@ -24,9 +24,9 @@
 
 /**
  * The schema version the control plane stores (`blob3` on every row, dataset
- * `turbopanel_server_metrics_v8`). A sample on the wire may still be stamped
+ * `turbopanel_server_metrics_v12`). A sample on the wire may still be stamped
  * with an older {@link METRICS_WIRE_VERSIONS} entry; the control plane writes
- * v8 rows for all of them.
+ * v12 rows for all of them.
  */
 export const METRICS_SCHEMA_VERSION = 8 as const;
 
@@ -37,7 +37,7 @@ export const METRICS_SCHEMA_VERSION = 8 as const;
  */
 export const METRICS_LEGACY_WIRE_VERSION = 6 as const;
 
-/** Sample versions the control plane accepts from a daemon during the v6 -> v8 transition. */
+/** Sample versions the control plane accepts from a daemon during the v6 -> wire version 8 transition. */
 export const METRICS_WIRE_VERSIONS = [
   METRICS_LEGACY_WIRE_VERSION,
   METRICS_SCHEMA_VERSION,
@@ -477,13 +477,13 @@ export type DockerUsageSample = {
 };
 
 // ---------------------------------------------------------------------------
-// v8 extension — everything the v8 layout stores that the v6 groups above do
+// Metrics v12 extension (wire version 8) — everything the v12 layout stores that the v6 groups above do
 // not carry. One optional, self-contained section so a v6 daemon's sample
 // stays valid byte for byte: every field is optional, `null` is "unknown",
 // and a missing section reads exactly like a section of nulls.
 // ---------------------------------------------------------------------------
 
-/** Host-wide readings added in v8 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */
+/** Host-wide readings added in v12 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */
 export type ExtendedHostMetrics = {
   /** Processes and threads as a share of the kernel PID limit. */
   pidLimitUsedPercent?: number | null;
@@ -508,7 +508,7 @@ export type ExtendedHostMetrics = {
   mdArraysResyncing?: number | null;
 };
 
-/** Docker health and container totals added in v8 (alongside {@link DockerUsageSample}'s disk breakdown). */
+/** Docker health and container totals added in v12 (alongside {@link DockerUsageSample}'s disk breakdown). */
 export type ExtendedDockerMetrics = {
   containersRunning?: number | null;
   containersUnhealthy?: number | null;
@@ -525,14 +525,14 @@ export type ExtendedDockerMetrics = {
   reclaimableBytes?: number | null;
 };
 
-/** Hosting-Caddy fields added in v8. Totals only: never per-site counts. */
+/** Hosting-Caddy fields added in v12. Totals only: never per-site counts. */
 export type ExtendedIngressMetrics = {
   /** Days until the soonest hosting certificate expires. */
   tlsCertSoonestExpiryDays?: number | null;
 };
 
 /**
- * Host-wide text fields v8 stores in free blobs, in no particular order. Each
+ * Host-wide text fields v12 stores in free blobs, in no particular order. Each
  * is a short human-readable string (process short names and site ids only,
  * never full command lines, domain names, serials or IPs).
  */
@@ -835,9 +835,9 @@ export type MetricsSampleMetadata = {
   topologyGeneration: number;
   bootGeneration: number;
   /**
-   * v8 daemons only. `false` marks a 10 s live-lease sample that feeds the
+   * Wire version 8 daemons only. `false` marks a 10 s live-lease sample that feeds the
    * live overlay and is never stored; the parallel 60 s baseline sample is
-   * `true`. Absent means durable (every v6 sample, and v8 samples outside a
+   * `true`. Absent means durable (every v6 sample, and wire version 8 samples outside a
    * lease), so a v6 daemon's lease samples keep being stored.
    */
   durable?: boolean;
@@ -859,7 +859,7 @@ export type MetricsSample = {
   router?: RouterSample;
   storage?: StorageSample;
   dockerUsage?: DockerUsageSample;
-  /** v8 additions. Absent on a v6 daemon's sample. */
+  /** Wire version 8 additions. Absent on a v6 daemon's sample. */
   extended?: MetricsExtended;
 };
 
