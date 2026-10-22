@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
+import { waitFor } from "../testing/wait-for.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   applyBootHold,
@@ -18,6 +19,7 @@ import {
   lookupManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
+import { writeManagedDemotedMarker } from "./demoted-marker.ts";
 import type { ManagedHaMemberRecord } from "./ha-member.ts";
 
 /**
@@ -213,6 +215,42 @@ async function assertRejectsMissing(path: string): Promise<void> {
   assert(missing, `${path} should be gone`);
 }
 
+test("a demoted member is held on boot and never started on local release", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    const fake = docker();
+    const demoted = record({ managedId: REPLICA_ID, role: "replica" });
+    await Deno.mkdir(`${layout.stateDir}/managed/${REPLICA_ID}`, {
+      recursive: true,
+    });
+    await writeManagedDemotedMarker(
+      layout,
+      REPLICA_ID,
+      MEMBER_ID,
+      "2026-10-08T12:00:00.000Z",
+    );
+    assertEquals(
+      await applyBootHold("unclean", {
+        layout,
+        run: fake.run,
+        listMembers: () => Promise.resolve([demoted]),
+      }),
+      true,
+    );
+    assertEquals(fake.calls, [["compose", "-p", REPLICA_ID, "stop"]]);
+    const [hold] = await listActiveBootHolds(layout);
+    assertEquals(hold?.managedId, REPLICA_ID);
+    await releaseBootHoldLocally(hold!, { layout, run: fake.run }, "test");
+    assertEquals(
+      fake.calls.some((args) => args.at(-1) === "start"),
+      false,
+    );
+    assertEquals((await listActiveBootHolds(layout)).length, 1);
+  });
+});
+
 test("releasing locally clears the marker, removes the file and starts the engine", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
@@ -349,7 +387,7 @@ test("a held engine is re-stopped during the settle window only, and never after
     });
     retry.start(); // arms the window and fires the first tick
     retry.stop();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor("the first retry tick", () => fake.calls.length >= 2);
     assert(fake.calls.length >= 2);
     const inWindow = fake.calls.length;
     clock += 61_000;
@@ -381,7 +419,8 @@ test("a hold released by a command is not re-stopped in the settle window", asyn
     });
     retry.start();
     retry.stop();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Nothing to wait for, so give the first tick ample time to (not) act.
+    await new Promise((resolve) => setTimeout(resolve, 250));
     assertEquals(fake.calls.length, before);
   });
 });

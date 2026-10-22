@@ -381,6 +381,7 @@ test("native unit refuses a multi-line startCommand and a hostile service name",
       layout,
       app,
       username: "appuser",
+      folder: { owner: "appuser", scope: "production", slug: "svc" },
       environmentId: "env-1",
       startCommand,
     });

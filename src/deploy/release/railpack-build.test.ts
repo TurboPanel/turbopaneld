@@ -3,17 +3,20 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import { withTempLayout } from "../../testing/temp-layout.ts";
 import {
+  droppedRailpackEnvNames,
   ensureBuildkitRailpack,
   type EnsureBuildkitRailpackDeps,
   RAILPACK_FRONTEND_IMAGE,
   RAILPACK_FRONTEND_TAG,
   RAILPACK_FRONTEND_VERSION,
+  RAILPACK_SHA256,
   RAILPACK_VERSION,
   railpackAssetName,
   railpackBinaryPath,
   railpackFrontendDigestPath,
   railpackFrontendLayoutDir,
   railpackImageTag,
+  railpackToolEnvironment,
 } from "./railpack-build.ts";
 
 /**
@@ -24,6 +27,9 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+/** SHA-256 of the "fake-tarball" body the curl mock writes. */
+const FAKE_TARBALL_SHA256 =
+  "746e8948ec0a7b6e150cc34446bad2bd0d0e2e3f0bd8f03f0edef7467a38e3b6";
 const VALID_DIGEST = `sha256:${"ab".repeat(32)}`;
 
 async function writeFile(
@@ -308,6 +314,7 @@ test({
       const tools = await ensureBuildkitRailpack(layout, {
         runBuildkitSetup: () => Promise.resolve(),
         resolveArch: () => "amd64",
+        railpackSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands(),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -327,6 +334,7 @@ test({
       const tools = await ensureBuildkitRailpack(layout, {
         runBuildkitSetup: () => Promise.resolve(),
         resolveArch: () => "amd64",
+        railpackSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands(),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -429,6 +437,7 @@ test({
       const tools = await ensureBuildkitRailpack(layout, {
         runBuildkitSetup: () => Promise.reject(new Error("playbook missing")),
         resolveArch: () => "amd64",
+        railpackSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -492,6 +501,7 @@ test({
             runBuildkitSetup: () =>
               Promise.reject(new Error("frontend task: non-zero return code")),
             resolveArch: () => "amd64",
+            railpackSha256: FAKE_TARBALL_SHA256,
             runCommand: mockDownloadCommands({ fail: "railpack-curl" }),
           }),
         Error,
@@ -511,6 +521,7 @@ test({
       const tools = await ensureBuildkitRailpack(layout, {
         runBuildkitSetup: () => Promise.reject("setup blew up"),
         resolveArch: () => "arm64",
+        railpackSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands(),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -529,6 +540,7 @@ test({
       const tools = await ensureBuildkitRailpack(layout, {
         runBuildkitSetup: () => Promise.resolve(),
         resolveArch: () => "amd64",
+        railpackSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -550,6 +562,7 @@ test({
       const record: string[] = [];
       await ensureBuildkitRailpack(layout, {
         runBuildkitSetup: () => Promise.resolve(),
+        railpackSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(
@@ -572,6 +585,7 @@ test({
           ensureBuildkitRailpack(layout, {
             runBuildkitSetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
+            railpackSha256: FAKE_TARBALL_SHA256,
             runCommand: mockDownloadCommands({
               wipeRailpackAfterFrontend: true,
               runtimesDir: layout.runtimesDir,
@@ -607,6 +621,35 @@ test({
         "Unsupported CPU architecture for Railpack builds: riscv64",
       );
     });
+  },
+});
+
+test({
+  name: "ensureBuildkitRailpack refuses a tarball whose SHA-256 is not the pin",
+  permissions: { read: true, write: true, run: ["ln"] },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const layout = layoutOf(fixture.env);
+      await assertRejects(
+        () =>
+          ensureBuildkitRailpack(layout, {
+            runBuildkitSetup: () => Promise.resolve(),
+            resolveArch: () => "amd64",
+            runCommand: mockDownloadCommands(),
+          }),
+        Error,
+        "SHA-256 mismatch",
+      );
+    });
+  },
+});
+
+test({
+  name: "the pinned Railpack digests cover both architectures",
+  fn: () => {
+    for (const arch of ["amd64", "arm64"] as const) {
+      assertEquals(/^[0-9a-f]{64}$/.test(RAILPACK_SHA256[arch]), true);
+    }
   },
 });
 
@@ -653,6 +696,7 @@ test({
             ensureBuildkitRailpack(layout, {
               runBuildkitSetup: () => Promise.resolve(),
               resolveArch: () => "amd64",
+              railpackSha256: FAKE_TARBALL_SHA256,
               runCommand: mockDownloadCommands({
                 fail: c.fail,
                 emptyStderr: c.empty === true,
@@ -688,6 +732,7 @@ test({
             ensureBuildkitRailpack(layout, {
               runBuildkitSetup: () => Promise.resolve(),
               resolveArch: () => "amd64",
+              railpackSha256: FAKE_TARBALL_SHA256,
               runCommand: mockDownloadCommands({ frontendIndex }),
             }),
           Error,
@@ -737,6 +782,7 @@ test({
       try {
         const tools = await ensureBuildkitRailpack(layout, {
           runBuildkitSetup: () => Promise.resolve(),
+          railpackSha256: FAKE_TARBALL_SHA256,
         });
         assertEquals(tools.frontendDigest, VALID_DIGEST);
       } finally {
@@ -819,10 +865,88 @@ test({
           ensureBuildkitRailpack(layout, {
             runBuildkitSetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
+            railpackSha256: FAKE_TARBALL_SHA256,
             runCommand: mockDownloadCommands(),
           }),
         Error,
       );
     });
   },
+});
+
+test("the Railpack tools get tenant build.env without any name that loads code or is the sandbox", () => {
+  const env = railpackToolEnvironment({
+    kind: "railpack",
+    env: {
+      NEXT_PUBLIC_SITE_URL: "https://example.test",
+      LD_AUDIT: "/checkout/evil.so",
+      LD_PRELOAD: "/checkout/evil.so",
+      LD_DEBUG_OUTPUT: "/tmp/x",
+      NODE_OPTIONS: "--require /checkout/evil.js",
+      PYTHONSTARTUP: "/checkout/evil.py",
+      JAVA_TOOL_OPTIONS: "-javaagent:/checkout/evil.jar",
+      DOCKER_HOST: "tcp://evil:2375",
+      PATH: "/checkout/bin",
+      HOME: "/checkout",
+      GIT_SSH_COMMAND: "ssh -i /evil",
+      BASH_ENV: "/checkout/evil.sh",
+      "BAD NAME": "x",
+      "1BAD": "x",
+      "A-B": "x",
+      "": "x",
+    },
+  }, "/work");
+  assertEquals(env.NEXT_PUBLIC_SITE_URL, "https://example.test");
+  for (
+    const refused of [
+      "LD_AUDIT",
+      "LD_PRELOAD",
+      "LD_DEBUG_OUTPUT",
+      "NODE_OPTIONS",
+      "PYTHONSTARTUP",
+      "JAVA_TOOL_OPTIONS",
+      "DOCKER_HOST",
+      "GIT_SSH_COMMAND",
+      "BASH_ENV",
+      "BAD NAME",
+      "1BAD",
+      "A-B",
+      "",
+    ]
+  ) {
+    assertEquals(refused in env, false, refused);
+  }
+  // The daemon's own PATH and the work tree HOME stay what they were.
+  assertEquals(env.HOME, "/work");
+  assertEquals(env.PATH === "/checkout/bin", false);
+  assertEquals(env.CI, "1");
+});
+
+test("the names the Railpack lane drops are listed, by name only, and include tool config families", () => {
+  const dropped = droppedRailpackEnvNames({
+    kind: "railpack",
+    env: {
+      NEXT_PUBLIC_SITE_URL: "https://example.test",
+      GOFLAGS: "-toolexec=/x",
+      MISE_CONFIG_DIR: "/x",
+      ASDF_DATA_DIR: "/x",
+      npm_config_registry: "https://x.test",
+      BUNDLE_GEMFILE: "/x",
+      PIP_INDEX_URL: "https://x.test",
+      LD_PRELOAD: "/x",
+    },
+  });
+  assertEquals(dropped, [
+    "ASDF_DATA_DIR",
+    "BUNDLE_GEMFILE",
+    "GOFLAGS",
+    "LD_PRELOAD",
+    "MISE_CONFIG_DIR",
+    "npm_config_registry",
+    "PIP_INDEX_URL",
+  ]);
+  assertEquals(
+    droppedRailpackEnvNames({ kind: "railpack", env: { OK_NAME: "1" } }),
+    [],
+  );
 });

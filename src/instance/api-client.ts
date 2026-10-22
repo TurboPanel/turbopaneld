@@ -36,11 +36,17 @@ const RESPONSE_VIEW: RetryView<Response> = {
 
 export class DaemonApiError extends Error {
   readonly status: number;
+  /**
+   * On a log-chunk `409`: the sequence the control plane expects next, so the
+   * daemon can resend from there.
+   */
+  readonly nextSeq?: number;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, nextSeq?: number) {
     super(message);
     this.name = "DaemonApiError";
     this.status = status;
+    if (nextSeq !== undefined) this.nextSeq = nextSeq;
   }
 }
 
@@ -358,6 +364,32 @@ export class DaemonApiClient {
   }
 
   /**
+   * Send the certificate chain and private key Caddy just issued for one
+   * hostname (`POST /api/daemon/v1/tls/issued`). The control plane checks the
+   * pair, seals the key and stores it; nothing here is logged and the request
+   * body never appears in an error. Returns what the control plane decided:
+   * `stored` is false for a pair it recognised but did not need to write
+   * again (the same certificate sent twice).
+   */
+  async reportIssuedCertificate(
+    input: { hostname: string; certificatePem: string; privateKeyPem: string },
+  ): Promise<{ stored: boolean }> {
+    const body = await this.#requestJson<{ ok?: boolean; stored?: unknown }>(
+      "/api/daemon/v1/tls/issued",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          hostname: input.hostname,
+          certificatePem: input.certificatePem,
+          privateKeyPem: input.privateKeyPem,
+        }),
+      },
+      { auth: true },
+    );
+    return { stored: body.stored === true };
+  }
+
+  /**
    * Fetch last-applied secret plans plus tpdaemon envelopes for local
    * deployments. Plaintext never appears in this response.
    */
@@ -539,9 +571,16 @@ export class DaemonApiClient {
 
   async #toApiError(response: Response): Promise<DaemonApiError> {
     try {
-      const body = await response.json() as { error?: string };
+      const body = await response.json() as {
+        error?: string;
+        nextSeq?: unknown;
+      };
       if (typeof body.error === "string" && body.error.trim().length > 0) {
-        return new DaemonApiError(response.status, body.error);
+        const nextSeq =
+          Number.isInteger(body.nextSeq) && response.status === 409
+            ? body.nextSeq as number
+            : undefined;
+        return new DaemonApiError(response.status, body.error, nextSeq);
       }
     } catch {
       // ignored

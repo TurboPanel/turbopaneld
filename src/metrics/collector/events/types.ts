@@ -27,8 +27,8 @@ import type { MountEntry } from "../mounts.ts";
 import type { SensorCandidate } from "../types.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 
-/** Mirrors `contract.ts`'s private `MAX_METRIC_EVENTS_PER_SAMPLE` — kept in sync by hand, checked by `events/index.test.ts`. */
-export const MAX_EVENTS_PER_DETECT_TICK = 128;
+/** The contract's `MAX_METRIC_EVENTS_PER_SAMPLE`: one detect tick never yields more than one sample can carry. */
+export { MAX_METRIC_EVENTS_PER_SAMPLE as MAX_EVENTS_PER_DETECT_TICK } from "../../../contracts/metrics-contract.ts";
 
 /** Stable signal identity → discovered sensor candidate, from `hardware-signals.ts`'s live discovery this tick. */
 export type HardwareSignalCandidateMap = ReadonlyMap<string, SensorCandidate>;

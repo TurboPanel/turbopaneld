@@ -364,7 +364,7 @@ test("parseEnvironmentStopPayload round-trips retirePrincipals and refuses unsaf
           retirePrincipals: [{ username }],
         }),
       TypeError,
-      "Invalid environment.stop retirePrincipals entry",
+      "Invalid retirePrincipals entry",
     );
   }
 });

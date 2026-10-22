@@ -71,8 +71,8 @@ connection — no password is slurped or passed, the same trust model
 for the unrelated customer-facing managed-engine backup feature — writes
 atomically (`.part` + rename, `trap` cleanup on failure), and prunes to the
 newest `postgres_backup_retention_keep` dumps (default 14) under
-`{{ postgres_backup_dir }}` (default `{{ turbopanel_state_dir
-}}/backup/postgres`). Off-host push is a separate opt-in,
+`{{ postgres_backup_dir }}` (default `{{ turbopanel_backup_dir }}/panel/database`, root 0700 inside the
+panel backup folder). Off-host push is a separate opt-in,
 `postgres_backup_remote_destination` (default `""`, local-only): when set to
 an `rsync`-compatible target the script pushes the fresh dump there after
 every successful local write — this runs from inside the nightly script

@@ -13,6 +13,7 @@ import {
   buildSpecCwd,
   type BuildWork,
   createBuildWorkDir,
+  observeBuildSlot,
   removeBuildTree,
   removeBuildWork,
   renderBuildSpec,
@@ -667,4 +668,50 @@ test("a build that floods its output is stopped and does not buffer it", async (
     "build output exceeded the size limit",
   );
   assertEquals(killed, ["SIGTERM"]);
+});
+
+test("a deploy hears when it waits for the build slot and when it gets it", async () => {
+  const events: string[] = [];
+  let open = () => {};
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const first = withBuildSlot(undefined, () => gate);
+  const second = observeBuildSlot(
+    {
+      waiting: () => events.push("waiting"),
+      acquired: () => events.push("acquired"),
+    },
+    () => withBuildSlot(undefined, () => Promise.resolve(events.push("ran"))),
+  );
+  assertEquals(events, ["waiting"]);
+  open();
+  await Promise.all([first, second]);
+  assertEquals(events, ["waiting", "acquired", "ran"]);
+});
+
+test("a deploy cancelled while it waits for the build slot leaves the queue", async () => {
+  let open = () => {};
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const first = withBuildSlot(undefined, () => gate);
+  const controller = new AbortController();
+  const ran: string[] = [];
+  const cancelled = withBuildSlot(
+    undefined,
+    () => Promise.resolve(ran.push("cancelled")),
+    "A",
+    controller.signal,
+  );
+  const next = withBuildSlot(
+    undefined,
+    () => Promise.resolve(ran.push("next")),
+    "B",
+  );
+  controller.abort();
+  await assertRejects(() => cancelled, Error, "cancelled");
+  open();
+  await Promise.all([first, next]);
+  assertEquals(ran, ["next"]);
 });

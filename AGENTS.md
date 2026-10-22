@@ -50,6 +50,17 @@ section); link there instead of duplicating DO hibernation detail.
   When adding a new Deno test file, add this alias from the start. Applied to
   every existing Deno test file in this repo and `../turbopanel`.
 
+- **No flaky tests.** A test gives the same result on every run. No unseeded
+  randomness (`crypto.randomUUID`, `Math.random`, random bytes) as input where an
+  assertion or a fake keys on the content, prefix, order or collision of the
+  value: random hex can contain any short letter run (`dbb`, `bad`, `err`) and
+  base64 can contain `+` or `/`, so use a fixed or seeded value. No tight real-time
+  margins (a few-millisecond `setTimeout`, an elapsed-time `>=`): wait with
+  `waitFor` from `src/testing/wait-for.ts` and a generous ceiling, or inject a
+  clock. No wall-clock expectations without a fixed clock (`Date.now()`,
+  `new Date()`, midnight, month and DST edges). No order dependence or shared
+  module state between tests.
+
 ### Ansible style (SonarQube)
 
 - Prefer **`mode: "0640"`** / **`0750"`** with explicit **`owner`** /
@@ -89,7 +100,7 @@ module and CI guard are the only places allowed to reference it.
 | Persistent identity (license, `server.id`, keys, tunnels)         | `/var/lib/turbopanel`                 |
 | Tenant principal homes (`principalHomeRoot`)                      | `/srv/users/<username>`               |
 | Logs                                                              | `/var/log/turbopanel`                 |
-| Managed-engine backups (`backupDir`, one subdir per `managedId`)   | `/backup`                             |
+| Backups (`backupDir`; `managed/`, `volumes/`, `panel/` inside)    | `/backup`                             |
 | Runtime (sockets, `daemon.lock`)                                  | `/run/turbopanel`                     |
 
 **Files at the root of the config and state trees (P1-1).** `/etc/turbopanel`
@@ -118,11 +129,53 @@ recurses or follows links inside a leaf (pinned by
 `/backup` default in development and production: backups are the one artifact
 an operator is expected to point at other storage (a second disk, a NAS mount,
 an attached volume), so `TURBOPANEL_BACKUP_DIR` repoints them without moving
-anything else. Artifacts live at `<backupDir>/<managedId>/` (`managed/engine-paths.ts`'s
-`managedBackupsDir`), written 0600 by the daemon user itself. Repointing the
+anything else. The root is named once (`BACKUP_ROOT` in `src/paths/layout.ts`)
+and holds one folder per kind: `managed/<managedId>/` (`managed/engine-paths.ts`'s
+`managedBackupsDir`), `volumes/<copyId>/` and `panel/` (the control plane's
+upgrade backups at `panel/<upgradeId>/` and its scheduled database dumps at
+`panel/database/`), so an id can never collide with a kind word. Artifacts are
+written 0600 by the daemon user itself. `tp-host` reads the root from
+`backup_dir=` in `lib/tp-host.conf`. Restore intents are state, not backup data:
+`<daemonStateDir>/backup/restore-intents/`. Paths the daemon reports are
+absolute today; `backupRelativePath` / `resolveBackupPath` accept either
+spelling so the control plane can store them relative to the root. Repointing the
 override affects **new** backups only — nothing relocates an existing tree —
 and `managed.destroy` still removes an engine's backup directory along with its
 state dir, so destroying an engine never leaves an orphan tree on that storage.
+
+**Server folders that look odd and are kept on purpose.** The tables in
+`src/paths/layout.ts` (`ROLE_MADE_FOLDERS`, `RUN_FOLDER_UNITS`,
+`BUILD_SIBLING_DIR`) are the one list.
+- `/var/lib/turbopanel-build` is the only sibling of the state root: the
+  throwaway build user is not in group `tp`, so a work folder inside
+  `root:tp 0750` would be unreachable. The hosting Caddy and Docker gate state
+  (`/var/lib/turbopanel/{hosting-caddy,docker-gate}`), the gate cache
+  (`/var/cache/turbopanel/docker-gate`) and the Apache logs
+  (`/var/log/turbopanel/apache`) are nested `StateDirectory=` / `CacheDirectory=`
+  / `LogsDirectory=` folders; the SFTP switch is
+  `/etc/ssh/turbopanel/sftp-chroot` and the egress helper
+  `/opt/turbopanel/lib/docker-egress`. `check:layout` refuses the old names.
+- Run folders stay one per unit at the top of `/run` (`turbopanel-nginx`,
+  `turbopanel-php-<id>`, `tp-publish`, ...): systemd removes them with the unit
+  and the short path keeps a socket inside the 108-byte limit.
+- A native app's variables are staged in `<config>/node-apps/envs/` (daemon-owned)
+  and read from `<config>/node-app-env/` (root-only, made by `tp-host`). The two
+  parents differ on purpose: a daemon-owned parent would let the daemon replace
+  the root-only folder.
+- The hosting Caddy snippets are `<environmentId>.caddy` (one per environment,
+  UUID key, `.caddy` so the site Caddy's `sites/*.conf` glob never matches).
+- OpenLiteSpeed virtual host names are `tp_<environment>__<service>` with every
+  character other than a letter or digit escaped as `_` and two hex digits, so
+  two different pairs can never share a name.
+- `proxysql` and `orchestrator` under the config root are daemon leaves
+  (`tp:tp 0750`, made by daemon-layout because the daemon writes their compose
+  files before any role has run on a daemon-only host); the proxysql and
+  orchestrator roles now set that same owner and mode instead of `root:tp 0770`,
+  so neither play undoes the other, and work only inside. There is no
+  `<state>/proxysql` folder (ProxySQL keeps its data in a Docker volume) and the
+  orchestrator role no longer re-owns `<state>/orchestrator` (a daemon leaf).
+- `host-boot.json` and the host-wide intent marker live in `<state>/system/`,
+  not among the per-database folders.
 
 The **host** allocates UID/GID via `useradd`/`groupadd` from **15001–60000**
 (`-K` on that one command; `/etc/login.defs` is not edited). The control plane
@@ -146,7 +199,7 @@ vs **Organization CA** (two-CA distinction):
 | Daemon env file                  | `/etc/turbopanel/daemon.env`                                                       |
 | Daemon state                     | `/var/lib/turbopanel`                                                              |
 | Logs                             | `/var/log/turbopanel`                                                              |
-| Managed-engine backups           | `/backup`                                                                          |
+| Backups (`managed/`, `volumes/`, `panel/`) | `/backup`                                                                          |
 | Config dir                       | `/etc/turbopanel`                                                                  |
 | Runtime (sockets, `daemon.lock`) | `/run/turbopanel`                                                                  |
 
@@ -170,7 +223,7 @@ service users `tp`, `tpctrl`, `tpcache`, `tpdata`, `tpqueue`, and
 `tpcaddy` — see **`../turbopanel/AGENTS.md`** (Production UID/GID allocation).
 
 **Deno version pin:** `DENO_VERSION` (`src/orchestration/assets.ts`) =
-**`2.9.7`**. Keep it in step with `deno_version` in
+**`2.9.8`**. Keep it in step with `deno_version` in
 `orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
 `scripts/run.sh`, and `DENO_VERSION` in
 [TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
@@ -216,7 +269,10 @@ support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
 `version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
+ignored by a peer that does not list the feature. `command-progress` (the
+deploy step plan, `src/commands/deploy-progress.ts`) is fire-and-forget too
+but carries no feature of its own: both control-plane inbound paths drop an
+unknown message type, so an older peer just never draws the step rail. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
 `php.mode` (FastCGI or php-fpm on nginx and Apache); the control plane refuses to
 deploy any mode but php-fpm to a daemon without it. OpenLiteSpeed and Caddy sites
 still ignore `php.mode` (the lsphp work is turbopaneld#250). `managed-health-v1` is the
@@ -224,7 +280,9 @@ worked example of a control-plane-initiated correlated request
 (`managed-health-request` / `managed-health-result`): this daemon advertises it
 in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
 daemon whose `hello.features` lists it, falling back to its stored observation
-otherwise. A control-plane update the daemon is about to install is refused
+otherwise. `managed-permissions-read-v1` follows the same pattern for
+`managed-permissions-request` / `managed-permissions-result` (a login's current
+permissions, read only). A control-plane update the daemon is about to install is refused
 when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.
@@ -264,50 +322,40 @@ appears.
 `devOrchestrationAnsibleEnv()` set `ANSIBLE_HOME` to `/tmp/turbopanel-ansible`
 (alongside `ANSIBLE_LOCAL_TEMP` under `vendor/uv/cache/ansible-tmp`). Galaxy
 download cache is disposable scratch — first-party roles live under FHS
-`share/orchestration/roles`; Galaxy collections/roles live under
-`vendor/ansible/galaxy-collections` and `vendor/ansible/galaxy-roles`. Managed
+`share/orchestration/roles`; Galaxy collections live under
+`vendor/ansible/galaxy-collections`. Managed
 `run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
 accidental `/root/.ansible` after install. Runtime orchestration runs as
 `tp` (dev: the current dev user).
 
-**Galaxy content is not committed:** collection pins live in
-`orchestration/requirements.yml` (`ansible.posix`); Docker role pins live in
-`orchestration/requirements-docker.yml` (`geerlingguy.docker`). Bootstrap
-(`ensureGalaxyCollections`) installs only collections under
+**Galaxy content ships in the package, nothing is downloaded:** the exact
+`ansible.posix` release tarball is committed under
+`orchestration/vendor/galaxy/` (version recorded in
+`orchestration/requirements.yml`, digest pinned as `GALAXY_POSIX_SHA256`).
+Bootstrap (`ensureGalaxyCollections`) checks the digest and installs it
+offline, only collections, under
 `vendor/ansible/galaxy-collections` — needed for the JSONL callback and
-`ansible.posix.sysctl` on every playbook. The Docker Galaxy role is deferred
-(`ensureGalaxyDockerRole`) until a host actually needs the container runtime
-(`runDockerSetup` / co-located dev converge via
-`scripts/run-orchestration-action.ts` `instance-dev-install` /
-postgres|rabbitmq setup), so fresh daemon installs and pre-Docker
-hosts skip that download. **Install path:** `ensureGalaxyDockerRole` reads the
-version pin from `requirements-docker.yml` and downloads the matching tag via
-**codeload.github.com** (`galaxyDockerRoleCodeloadUrl`) into
-`vendor/ansible/galaxy-roles/geerlingguy.docker` — it does **not** call
-`ansible-galaxy role install`, which resolves classic roles through
-`github.com/.../archive/*.tar.gz` and intermittently fails with edge 503s.
-First-party
-roles (e.g. `docker`, which wraps Galaxy via `include_role`) stay in git;
-Galaxy install trees land under `vendor/ansible/galaxy-roles/` (never the
-checkout `orchestration/roles/` tree — that path is a Vagrant VirtFS mount and
-is not guest-writable). Do not vend them into the repo — Sonar would scan
-third-party `mode: 0644`/`0755` as false vulnerabilities, and release hosts
-reinstall collections at bootstrap and the Docker role on first Docker use.
-Keep leftover checkout copies out of ansible-lint / the Ansible IDE extension:
-`exclude_paths` in repo-root + `orchestration/.ansible-lint`, `files.exclude`
-in `.vscode` / `dev.code-workspace`, and after Galaxy install
-`ensureGalaxyDockerRole` rewrites each present layout's nested `.ansible-lint`
-(`geerlingguy.docker/` and `geerlingguy/docker/`) with a near-total
-`skip_list` (and removes upstream `.yamllint`) so opening files under the role
-— including `tasks/docker-*.yml` — is quiet. Path exclusions only apply to
-discovery, not explicitly opened files.
+`ansible.posix.sysctl` on every playbook. **No Galaxy role is used:** Docker
+Engine is installed by our own `docker` role (`orchestration/roles/docker/tasks/install.yml`,
+shipped in the release package with the rest of `orchestration/roles/`) from
+Docker's official apt repository when a host first needs the container runtime
+(`runDockerSetup` / co-located dev converge / postgres|rabbitmq|proxysql setup),
+so fresh daemon installs and pre-Docker hosts never fetch it and a host with a
+healthy Docker (including an offline one) is left alone. The signing key is
+fetched over HTTPS at install time and refused unless it carries the
+fingerprint pinned in `roles/docker/vars/main.yml`; a release Docker has not
+published packages for yet falls back to the newest published suite.
+Do not vend Galaxy content into the repo — Sonar would scan third-party
+`mode: 0644`/`0755` as false vulnerabilities; release hosts reinstall
+collections at bootstrap. Keep leftover checkout copies (`orchestration/.ansible/`)
+out of ansible-lint / the Ansible IDE extension via `exclude_paths`.
 
 **Upstream licenses:** Ansible Core, `ansible-lint`, the `ansible.posix`
-collection, the `geerlingguy.docker` Galaxy role, and any packages these
+collection, and any packages these
 playbooks install remain under their upstream licenses (pins in
 `orchestration/requirements.txt` (constraints),
 `orchestration/requirements.lock.txt` (CI hash lock),
-`orchestration/requirements.yml`, and `orchestration/requirements-docker.yml`). Installing them on a host is a
+and `orchestration/requirements.yml`). Installing them on a host is a
 different licensing event from redistributing them. Any TurboPanel-published
 appliance, VM/OCI image, or offline bundle that ships copies must carry the
 applicable upstream license, copyright, notice, and source-compliance
@@ -336,7 +384,7 @@ accepts an `--if-needed` flag on `instance-dev-install`. When set, it calls
 `coLocatedInstanceServiceEnabled()` + `emitDevConvergeSkippedIfNeeded()`
 (`src/orchestration/converge-stamp.ts`) and, when the stamp matches, emits a
 single `dev_converge_skipped` JSONL event and exits **before**
-`ensureAnsible` / `ensureGalaxyDockerRole` / the playbook run. Unflagged
+`ensureAnsible` / the playbook run. Unflagged
 invocations (and any flow with `TURBOPANEL_FORCE_CONVERGE=1` set) behave
 exactly as before via `shouldSkipDevConverge()` / `forceConvergeRequested()`.
 The [dev](https://github.com/TurboPanel/dev) console threads this as
@@ -422,7 +470,7 @@ compile toolchain).
   of uncovered history. Sibling `turbopanel` / `ui` also use CI-based analysis;
   `website` still uses Automatic Analysis. Coverage exclusions include
   `**/*.test.ts`, `src/testing/**`, `src/build-info.ts`, `dist/**`,
-  `publish/**`, and the Galaxy Docker role tree.
+  and `publish/**`.
   **`sonar.sources` / `sonar.tests` / `sonar.test.inclusions`** must stay set
   (`src` + `orchestration` + `scripts` + `main.ts`; tests = `**/*.test.ts` and
   `src/testing/**`). The `denoS2187` issue-ignore (`typescript:S2187` on
@@ -499,8 +547,8 @@ that toolchain from `orchestration/requirements.lock.txt` (`pip install
 --require-hashes`). Syntax-check
 resolves `ansible.posix.acl` / `ansible.posix.sysctl`: when the collection is
 not already vendored under `$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections`
-(CI has ansible-core from pip and no vendor tree), the script installs the pin
-from `orchestration/requirements.yml` (not `requirements-docker.yml`). Rules that
+(CI has ansible-core from pip and no vendor tree), the script installs the
+bundled tarball from `orchestration/vendor/galaxy/` offline. Rules that
 still fire on first-party content (`partial-become`, `parser-error`) are in
 `warn_list` in `.ansible-lint` with the reasoning; the full ansible-lint
 profile is deliberately **not** gated (~360 findings, nearly all style).
@@ -577,7 +625,7 @@ from production code.
 | push `trunk` | `verify.yml` | `verify.yml`; `publish` job `needs: verify` → the rolling GitHub `canary` pre-release (`canary` job, via `TurboPanel/dev` `gh-canary.yml`) | nothing compiles from failing code |
 | promote → rc/release | `promote.yml` (notes-only) | `promote.yml` → `TurboPanel/dev` `gh-promote.yml`: **signature + sha256/size of the tested canary build, manifest re-signed, same bytes**; gh-release.yml re-downloads and re-hashes after publish | no new code enters after publish |
 
-**Automatic promotion (two PRs, the normal path):** `promote-prs.yml` keeps a **trunk → staging** PR ("Release Candidate x.y.z-rc.N") open after every green trunk build (opened with the Release App token so `ci-ok` runs; merge commit only). Merging it makes a push to `staging`, which runs `publish-rc.yml` (from the pushed commit, so the first merge already works): it finds the merged PR's head commit, waits for that commit's canary build, finds the canary manifest that names exactly that commit, then runs the shared promote workflows with **no approval gate** (`approval-environment: ""` — the merge is the act) to publish `v<base>-rc.<N>` (N = one past the highest existing rc tag; a bad rc is fixed on trunk and the next merge publishes rc.N+1), and opens/refreshes the **staging → live** PR "Release x.y.z". `verify.yml` skips Sonar on PRs into staging/live (no new code in a promotion). Merging the staging → live PR pushes to `live`, which runs `publish-release.yml`: it picks the newest rc that has not shipped, runs the shared promote workflows (the `release` environment approval stays on this hop until the path has run once end to end) to publish `v<x.y.z>`, and nothing else: no PR opens afterwards. **Versions come from git tags** (no version file, no "Start x.y.z" PR): the base is the newest release tag's next patch, unless an unreleased rc or a `start/vX.Y.0` marker names a higher version; canaries are `<base>-canary.<N>` with N restarting at 1 per base; only the base is stamped into the build (the committed version numbers are what a local build reports). TurboPanel/dev's Version From Tags action (`scripts/promote/version.sh`) works them out. A minor or major is started with turbopaneld's **Start Next Version** workflow (`bump: minor|major`), which pushes the `start/` marker in all four repos and rebuilds their trunks. The plain `promote.yml` form below is **break-glass only**.
+**Automatic promotion (two PRs, the normal path):** `promote-prs.yml` keeps a **trunk → staging** PR ("Release Candidate x.y.z-rc.N") open after every green trunk build (opened with the Release App token so `ci-ok` runs; merge commit only). Merging it makes a push to `staging`, which runs `publish-rc.yml` (from the pushed commit, so the first merge already works): it finds the merged PR's head commit, waits for that commit's canary build, finds the canary manifest that names exactly that commit, then runs the shared promote workflows with **no approval gate** (`approval-environment: ""` — the merge is the act) to publish `v<base>-rc.<N>` (N = one past the highest existing rc tag; a bad rc is fixed on trunk and the next merge publishes rc.N+1), and opens/refreshes the **staging → live** PR "Release x.y.z". `verify.yml` skips Sonar on PRs into staging/live (no new code in a promotion). Merging the staging → live PR pushes to `live`, which runs `publish-release.yml`: it picks the newest rc that has not shipped, runs the shared promote workflows (the `release` environment approval stays on this hop until the path has run once end to end) to publish `v<x.y.z>`. **The version lives in the committed files, and the tags say what it should be.** The tags work out the base: the newest release tag's next patch, unless an unreleased rc or a `start/vX.Y.0` marker names a higher version; canaries are `<base>-canary.<N>` with N restarting at 1 per base (TurboPanel/dev's Version From Tags action, `scripts/promote/version.sh`). The committed fields (`deno.json` `version`, `sonar-project.properties` `sonar.projectVersion`) must already say that base: `publish-daemon-trunk.yml` runs `node scripts/set-version.mjs --check <base>` right after working it out and refuses the canary when any field disagrees, naming the file. So right after each release the committed version has to move to the next patch: `publish-release.yml`'s last job (`start-next`, after finalize) works out the new base from the tags (refusing when the newest release is not the one it just published) and, with the TurboPanel Release App token, opens a PR "chore: start X.Y.Z" through TurboPanel/dev's Start Version PR action (it runs `node scripts/set-version.mjs X.Y.Z` and makes a signed commit through the GitHub API, never a `git push`). The PR merges itself once its checks pass (`auto-merge: "true"`); canaries are refused until it does. A bump by hand is the same command in an ordinary PR. Only the canary path checks; rc and release reuse the canary's bytes. A minor or major is started with turbopaneld's **Start Next Version** workflow (`bump: minor|major`), which pushes the `start/` marker in all four repos and opens the same kind of "chore: start X.Y.0" PR in each, which merges itself once its checks pass (pressing it again retries a PR that failed to open); nothing is rebuilt, since each repo's canary is refused until its PR merges. The release workflows pin TurboPanel/dev twice: the reusable promote workflows and their `dev-ref` at one sha, the composite actions and `scripts/promote` checkouts at one sha (`scripts/release-workflows.test.ts`). The Promote OK check (the `gh-promote-ok.yml` calls in `promote-ok.yml` and `promote-ok-recheck.yml`, with their `dev-ref`) is its own pin group, so a fix to it can ship without moving the rest of the chain. The plain `promote.yml` form below is **break-glass only**.
 
 **Promotion (`.github/workflows/promote.yml`, break-glass):** one click moves a tested build up a channel — `to=rc` turns a canary build (`source` = build id, canary version or `manifest-<version>.json` from the rolling canary release) into `v<base>-rc.<N>` and fast-forwards `staging`; `to=release` turns `v<base>-rc.<N>` into `v<base>` (`releases/latest`; the rolling `rc` pointer is re-pointed at it) and fast-forwards `live`. Same bytes: the source manifest's signature and every asset's sha256/size are verified first, the assets are renamed, the manifest rewritten and re-signed, and the tag is created at the source commit (an existing tag elsewhere = burned version, fails). The three jobs are `TurboPanel/dev`'s `gh-promote.yml` → `gh-release.yml` → `gh-promote-finalize.yml` pinned to ONE dev sha, passed again as `dev-ref`; `signer-ref` is the turbopaneld commit carrying `scripts/sign-manifest.ts` + the key pin — bump it together with the signer pin in `release.yml`. Approval = the `release` environment (prepare, then finalize). `to=release` needs the TurboPanel Release App secrets (`RELEASE_APP_ID` / `RELEASE_APP_PRIVATE_KEY`: bare tags and the `live` push are ruleset-bypass only) and refuses to start without them; `to=rc` runs on `GITHUB_TOKEN` and only its `staging` push fails — with the exact manual `git push` — until the App exists. `release.yml` ignores tag pushes by `[bot]` actors so an App-created tag does not race the promotion with a from-source rebuild. Repos release independently: no release waits on a matching release in another repo — except a new minor (x.y.0), where turbopanel and ui each need an rc of it before the daemon may release it (`minor-gate` in `verify.yml`, dev `gh-minor-gate.yml`; a patch is never gated), and `publish-release.yml` re-runs their waiting Release PR checks after the daemon release exists. Full contract: `../dev/AGENTS.md` → Release promotion.
 
@@ -601,8 +649,8 @@ controls below do not close:
 2. **Closed: the hosting Caddy no longer runs as root.**
    `turbopanel-hosting-caddy.service` runs as `tpedge` (not in group `tp`)
    with `AmbientCapabilities=`/`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
-   and `NoNewPrivileges=yes`, its certificates in the top-level
-   `StateDirectory=turbopanel-hosting-caddy`. tp-host refuses the unit in any
+   and `NoNewPrivileges=yes`, its certificates in the nested
+   `StateDirectory=turbopanel/hosting-caddy` (`/var/lib/turbopanel/hosting-caddy`). tp-host refuses the unit in any
    other shape. Its Caddyfile is still `tp`-written (`/etc/turbopanel/hosting`,
    read through a per-user ACL), so a hostile config now lands as `tpedge`,
    not root; `stripPrefix` and the other inputs still need validation.
@@ -662,7 +710,9 @@ it regresses:
   `--allow-env`. Bumping
   `UV_VERSION` / `ANSIBLE_CORE_VERSION` / `CLOUDFLARED_VERSION` changes the
   rendered `--allow-run` paths: re-render (see the test failure) and commit
-  all copies. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
+  all copies. The compile tasks pass `--quiet` so the binary does not print an
+  `Info Failed to resolve '<tool>' for allow-run` line for every listed tool the
+  host lacks; errors still print and the allow-run list is unchanged. NVML is opened by absolute path first (`NVML_LIBRARY_CANDIDATES`)
   because a scoped `--allow-ffi` resolves bare names against the cwd.
 - **Two writes `--allow-write` never covers** — `src/permissions/scoped-writes.ts`.
   Deno refuses *every* write (`writeFile`, `copyFile`, `chmod`, `rename`,
@@ -753,7 +803,7 @@ it regresses:
     the check;
     the hosting-Caddy unit must run as `tpedge:tpedge` with
     `NoNewPrivileges=yes`, exactly `CAP_NET_BIND_SERVICE` in both capability
-    sets, `StateDirectory=turbopanel-hosting-caddy` and only the
+    sets, `StateDirectory=turbopanel/hosting-caddy` and only the
     `HOME`/`XDG_*` environment that points into it, and may only exec the
     vendored Caddy against the hosting Caddyfile; the `turbopanel-backup-` prefix is reserved for
     scheduled backups — a name under it must be exactly
@@ -892,7 +942,21 @@ it regresses:
   - brings a release into `<home>/sites/<svc>/releases/<id>` only through
     `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
     `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
-    accepts) and `publish <user> <svc> <id>`: it takes the leaf, refuses hard
+    accepts) and `publish <user> <svc> <id>`; the same two verbs also take six
+    words, `<owner> <scope> <slug> <service id> <release id> <publish id>`,
+    for the scope tree (`<home>/<scope>/services/<slug>/releases/<id>`; the
+    leaf is named by the publish id, the lock by the service id, all three
+    lowercase UUIDs). Ownership in a home is checked by position: depth 1 is
+    `home`/`tmp`/`data`, the older `sites`/`volumes`, or a scope folder
+    (root-owned); below a scope only `services` and `volumes`; `rm` leaves
+    scope, `services` and `volumes` folders alone; `asset-path` prints a
+    folder's host path from its components and refuses what the shared
+    name rules refuse; `folder-list` prints every well-formed asset folder
+    (`<owner> <scope> service|volume <name>`, names only, links skipped) and
+    ends with `complete` only when the whole walk finished; `setfacl -m
+    u:<uid>:rwx,d:u:<uid>:rwx -- <volume folder>` gives one numeric uid (never
+    0) an access and a default entry on a volume folder root and nothing else;
+    `sftp-chroot check` walks the scope tree. Publish: it takes the leaf, refuses hard
     links, special files and a shipped `shared`, seals it recursively
     (`root:<user>`, no set-id, nothing group/other-writable), refuses a
     symlink that resolves outside it, renames it in through a root-owned chain
@@ -923,8 +987,7 @@ it regresses:
   builders and a hostile corpus through the validator lifted verbatim from
   the script (`src/testing/tp-orchestrate-validator.ts`). It rebuilds
   PATH/ANSIBLE_* itself, and keeps Ansible's temp/home in a root-only
-  `/tmp/turbopanel-orchestrate`. `galaxy-docker-role` fetches the pinned
-  geerlingguy.docker role into the root-owned roles dir; `update` fetches
+  `/tmp/turbopanel-orchestrate`. `update` fetches
   `run.sh` (CDN, or an HTTPS overlay host with the canonical
   Platform CA — never `-k`) and runs it with re-validated flags, which is how
   panel-driven daemon updates work now (`executeRunReconcile` →
@@ -1079,9 +1142,15 @@ Four maintenance rules:
    packages (`TP_DOCKER_PACKAGES`) and the `phpN.N-*` packages plus
    `debsuryorg-archive-keyring` that the php-fpm role's sury repo supplied are
    purged. A role that adds a new apt repository for its own packages must add
-   its source file to the removal in `tp_purge_apt_packages`, unless the Docker
-   `download.docker.com` scan or the `sury-php.sources` / `sury-php.list` removal
-   already matches it.
+   its source file and signing key to the removal (`TP_DOCKER_APT_SOURCES`,
+   `TP_DOCKER_APT_KEYS`, `TP_SURY_APT_KEYS` or `tp_purge_apt_packages`). A role
+   that holds a package at a version may only hold one of `TP_DOCKER_PACKAGES`:
+   the purge passes `--allow-change-held-packages` for those, and a hold on
+   anything else would make `apt-get purge -y` refuse.
+   `scripts/purge-coverage.test.ts` reads the roles, playbooks, host scripts
+   and `run.sh` and fails when one names an apt source, key, pin or config
+   file, a systemd unit or drop-in, or a Docker or containerd config path that
+   the purge does not remove, or holds a package it does not list.
 4. A new folder the script must delete has to sit inside a tree listed in
    `TP_OWNED_TREES` (or be a `turbopanel*` unit drop-in), or be added to that
    list. `tp_path_is_safe` refuses everything else.
@@ -1121,11 +1190,15 @@ and the mount kept). There is one copy of that function. A Docker apt
 **Post-check rules (what "left over" means).** The final inventory must
 match what can exist after the purge. A `.slice` unit that systemd still
 reports as loaded but with no unit file and inactive (the retired `tpbuild.slice`) is gone
-(`tp_unit_present`). Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
+(`tp_unit_present`). After Docker Engine is purged, `tp_finalize_turbopanel_units`
+stops `turbopanel.slice` / `turbopanel-containers.slice` again, runs
+`daemon-reload` and `reset-failed`, so implicit slices are not reported as
+left over while a container cgroup still held them. The summary's unit diff
+also skips names `tp_unit_present` already treats as gone. Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
 the final inventory skips Docker, so the `<id>-in` containers removed with it
 are not reported. Anything else still on disk stays a failure. When the Docker daemon is not answering at the final check, the pre-purge container and network lists are carried forward only if the removal step itself was skipped (`TP_DOCKER_LEFT`); a daemon that is gone after a removal that ran holds nothing, so it is never a false failure. The purge also
-removes `/var/lib/turbopanel-hosting-caddy` (the hosting Caddy's
-`StateDirectory`, beside `/var/lib/turbopanel`, in `TP_OWNED_TREES`),
+removes `/var/cache/turbopanel` (the Docker gate's cache, in `TP_OWNED_TREES`;
+the hosting Caddy's and the gate's state folders sit inside `/var/lib/turbopanel`),
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf`, and the `tpgatebuild` group
 (`TP_OTHER_GROUPS`, matched by exact name because its gid is outside the
 9900 band). The resume marker clears whenever the remaining failures are

@@ -38,11 +38,13 @@ import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   devOwnershipPlaybookExtraArgs,
   runLocalPlaybook,
 } from "../../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../../orchestration/ansible-events.ts";
 import {
   DENO_APP_RUNTIME_APPLY_PLAYBOOK,
   NODE_APP_RUNTIME_APPLY_PLAYBOOK,
@@ -55,6 +57,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
+import { serviceFolderForCompose } from "../release/release-service-id.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
 import {
@@ -63,6 +66,8 @@ import {
 } from "../release/release-health.ts";
 import type { ReleaseManifestV1 } from "../release/deployment-json.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
+import { redactUrlSecrets } from "../../util/redact-url-secrets.ts";
+import { redactCommandSummary } from "../../logs/redactor.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { NativeAppStart } from "./start-entry.ts";
 import {
@@ -94,6 +99,8 @@ const NATIVE_APP_HEALTH_INTERVAL_MS = 500;
 const NATIVE_APP_HEALTH_ATTEMPT_MS = 3_000;
 /** Journal lines copied into the deploy transcript on a failed health probe. */
 const NATIVE_APP_JOURNAL_TAIL = 80;
+/** How many of the journal's last lines the deploy error itself carries. */
+const NATIVE_APP_ERROR_JOURNAL_LINES = 10;
 
 /** Injectable host command runner — the single privileged seam. */
 export type NativeAppRunFn = RunFn;
@@ -118,6 +125,8 @@ export type NativeAppSleepFn = (ms: number) => Promise<void>;
  */
 export type NativeAppRelease = {
   username: string;
+  /** The service folder the control plane planned for the app. */
+  folder: FolderRefParts;
   /** Release `current` pointed at before this deploy, for rollback. */
   previousReleaseId?: string | null;
   /** `x-turbopanel.source.startCommand`, when the author declared one. */
@@ -140,6 +149,11 @@ export type ApplyNativeAppsOpts = {
   run?: NativeAppRunFn;
   /** Test seam: Ansible playbook runner (vendor tenant Node). */
   runPlaybook?: NativeAppPlaybookFn;
+  /**
+   * Playbook events from the default runner (task starts, failures) for the
+   * deploy transcript. Ignored by a custom `runPlaybook`.
+   */
+  onEvent?: AnsibleEventHandler;
   /** Test seam: loopback health probe. */
   probe?: NativeAppProbeFn;
   /** Test seam: sleep between probe attempts. */
@@ -186,6 +200,7 @@ async function runPlaybookDefault(
   playbookPath: string,
   label: string,
   extraArgs: string[] = [],
+  onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   try {
     await Deno.stat(playbookPath);
@@ -203,7 +218,17 @@ async function runPlaybookDefault(
   await runLocalPlaybook(playbookPath, [
     ...devOwnershipPlaybookExtraArgs(),
     ...extraArgs,
-  ]);
+  ], onEvent);
+}
+
+/** The injected runner, else the default one wired to `onEvent`. */
+function resolvePlaybookRunner(
+  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook" | "onEvent">,
+): NativeAppPlaybookFn {
+  if (opts?.runPlaybook) return opts.runPlaybook;
+  const onEvent = opts?.onEvent;
+  return (playbookPath, label, extraArgs) =>
+    runPlaybookDefault(playbookPath, label, extraArgs, onEvent);
 }
 
 /**
@@ -246,10 +271,12 @@ type NativeAppIo = {
   onOutput?: ReleaseOutputHandler;
 };
 
-function resolveIo(opts?: Partial<NativeAppIo>): NativeAppIo {
+function resolveIo(
+  opts?: Partial<NativeAppIo> & Pick<ApplyNativeAppsOpts, "onEvent">,
+): NativeAppIo {
   return {
     run: opts?.run ?? runDefault,
-    runPlaybook: opts?.runPlaybook ?? runPlaybookDefault,
+    runPlaybook: resolvePlaybookRunner(opts),
     probe: opts?.probe ?? probeDefault,
     sleep: opts?.sleep ?? sleepDefault,
     ...(opts?.onOutput === undefined ? {} : { onOutput: opts.onOutput }),
@@ -387,22 +414,6 @@ async function waitForNativeApp(
   return await pollFrom(0);
 }
 
-function emitOutputLines(
-  onOutput: ReleaseOutputHandler | undefined,
-  stream: "stdout" | "stderr",
-  text: string,
-): number {
-  if (!onOutput) return 0;
-  let count = 0;
-  for (const line of text.split("\n")) {
-    const trimmed = line.replaceAll("\r", "");
-    if (trimmed.length === 0) continue;
-    onOutput(stream, trimmed);
-    count += 1;
-  }
-  return count;
-}
-
 /**
  * Copy the unit's recent journal into the deploy transcript.
  *
@@ -412,10 +423,9 @@ function emitOutputLines(
 async function emitNativeAppJournal(
   io: NativeAppIo,
   unit: string,
-): Promise<void> {
+): Promise<string[]> {
   const onOutput = io.onOutput;
-  if (!onOutput) return;
-  onOutput(
+  onOutput?.(
     "stderr",
     `--- ${unit} journal (last ${NATIVE_APP_JOURNAL_TAIL} lines) ---`,
   );
@@ -431,14 +441,55 @@ async function emitNativeAppJournal(
       "--output=short-iso",
     ]),
   );
-  const text = result.stdout.trim() || result.stderr.trim();
-  let lineCount = 0;
-  if (text.length > 0) {
-    lineCount = emitOutputLines(onOutput, "stderr", text);
+  const text = redactCommandSummary(
+    result.stdout.trim() || result.stderr.trim(),
+  );
+  const lines = text
+    .split("\n")
+    .map((line) => line.replaceAll("\r", ""))
+    .filter((line) => line.length > 0);
+  if (onOutput) {
+    for (const line of lines) onOutput("stderr", line);
+    if (lines.length === 0) {
+      onOutput("stderr", "(no journal output for this unit)");
+    }
   }
-  if (lineCount === 0) {
-    onOutput("stderr", "(no journal output for this unit)");
+  return lines;
+}
+
+/** Longest line, and the whole tail, the deploy error carries from the journal. */
+const ERROR_JOURNAL_LINE_MAX = 300;
+const ERROR_JOURNAL_TOTAL_MAX = 2000;
+
+/**
+ * The scrubber only knows secrets this daemon decrypted, so lines going into
+ * an error text also lose anything that looks like a credential: `key=value`
+ * pairs with a secret-sounding key, bearer tokens and long token-like words.
+ */
+const SECRET_PAIR_RE =
+  /\b([\w.-]*(?:pass|secret|token|(?:api|private)[_-]?key|credential)[\w.-]*)(\s*[=:]\s*)\S+/gi;
+const BEARER_RE = /\b(bearer|basic)\s+[\w.~+/=-]{8,}/gi;
+const LONG_TOKEN_RE = /\b[\w-]{40,}\b/g;
+
+export function scrubJournalLine(line: string): string {
+  const masked = redactUrlSecrets(line)
+    .replace(SECRET_PAIR_RE, "$1$2[hidden]")
+    .replace(BEARER_RE, "$1 [hidden]")
+    .replace(LONG_TOKEN_RE, "[hidden]");
+  return masked.length > ERROR_JOURNAL_LINE_MAX
+    ? `${masked.slice(0, ERROR_JOURNAL_LINE_MAX)}...`
+    : masked;
+}
+
+/** The sentence that puts the app's own last output into the deploy error. */
+export function journalDetail(lines: readonly string[]): string {
+  if (lines.length === 0) return "";
+  let tail = lines.slice(-NATIVE_APP_ERROR_JOURNAL_LINES).map(scrubJournalLine)
+    .join(" | ");
+  if (tail.length > ERROR_JOURNAL_TOTAL_MAX) {
+    tail = `...${tail.slice(-ERROR_JOURNAL_TOTAL_MAX)}`;
   }
+  return `. Last output from the app: ${tail}`;
 }
 
 /**
@@ -525,6 +576,7 @@ async function rollbackNativeApp(
       username: binding.username,
       serviceId: app.serviceId,
       releaseId: params.previousReleaseId,
+      folder: binding.folder,
     });
     await swapCurrentSymlink(paths);
     const changed = await params.prepared.reinstallUnit?.(params.start);
@@ -660,6 +712,7 @@ async function installNativeAppUnit(
       layout,
       app,
       username: binding.username,
+      folder: binding.folder,
       environmentId: params.environmentId,
       environmentFile: params.environmentFile,
       ...(binding.startCommand === undefined
@@ -783,13 +836,13 @@ async function startNativeApp(
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
     }s`,
   );
-  await emitNativeAppJournal(io, unit);
+  const journal = await emitNativeAppJournal(io, unit);
 
   const outcome = await recoverFailedNativeApp(io, layout, prepared);
   throw new Error(
     `native app ${app.composeServiceName} did not answer on 127.0.0.1:${app.listenPort} within ${
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
-    }s${outcome}`,
+    }s${outcome}${journalDetail(journal)}`,
   );
 }
 
@@ -857,16 +910,25 @@ async function applyPrincipalSlices(
 }
 
 /**
+ * What picks a runtime and its series: a native app, or a site whose build
+ * needs the default Node (which names no series, so it gets the newest).
+ */
+export type RuntimeChoice = Pick<
+  EnvironmentDeployNativeAppService,
+  "runtime" | "nodeVersion" | "denoVersion"
+>;
+
+/**
  * Every distinct Node series this apply needs, sorted so the playbook argument
  * is stable across deploys (an unstable argument would show up as churn in the
  * transcript for a deploy that changed nothing).
  *
- * An app with no `nodeVersion` contributes `DEFAULT_NATIVE_APP_NODE_VERSION`,
- * so the default series is vendored exactly like an explicitly pinned one
+ * An app with no `nodeVersion` contributes `NEWEST_NATIVE_APP_NODE_VERSION`,
+ * so the newest series is vendored exactly like an explicitly pinned one
  * instead of being a separate special case on the host.
  */
 export function nativeAppNodeVersions(
-  apps: readonly EnvironmentDeployNativeAppService[],
+  apps: readonly RuntimeChoice[],
 ): string[] {
   const versions = new Set<string>();
   for (const app of apps) {
@@ -879,7 +941,7 @@ export function nativeAppNodeVersions(
 
 /** The Deno series this apply needs, sorted like {@link nativeAppNodeVersions}. */
 export function nativeAppDenoVersions(
-  apps: readonly EnvironmentDeployNativeAppService[],
+  apps: readonly RuntimeChoice[],
 ): string[] {
   const versions = new Set<string>();
   for (const app of apps) {
@@ -909,8 +971,8 @@ export function nativeAppDenoVersions(
  * way round.
  */
 export async function ensureNativeAppRuntime(
-  apps: readonly EnvironmentDeployNativeAppService[],
-  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook">,
+  apps: readonly RuntimeChoice[],
+  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook" | "onEvent">,
 ): Promise<void> {
   if (apps.length === 0) return;
   const nodeVersions = nativeAppNodeVersions(apps);
@@ -923,7 +985,7 @@ export async function ensureNativeAppRuntime(
     const message = unsupportedSeriesMessage("deno", version);
     if (message) throw new Error(message);
   }
-  const runPlaybook = opts?.runPlaybook ?? runPlaybookDefault;
+  const runPlaybook = resolvePlaybookRunner(opts);
   if (nodeVersions.length > 0) {
     await runPlaybook(
       NODE_APP_RUNTIME_APPLY_PLAYBOOK,
@@ -1229,6 +1291,7 @@ export function nativeAppBindingsFromPayload(
       entry.composeServiceName,
       definedFields({
         username: principal.username,
+        folder: serviceFolderForCompose(payload, entry.composeServiceName),
         previousReleaseId: previous,
         startCommand: entry.build.startCommand,
         releaseId: applied?.releaseId,

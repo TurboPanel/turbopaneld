@@ -242,6 +242,7 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         nativeAppUnitContent({
           layout,
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "web" },
           environmentId: "env1",
           app: {
             serviceId: "svc1",
@@ -257,6 +258,7 @@ test("the daemon's own unit files pass; privileged or foreign units do not", asy
         nativeAppUnitContent({
           layout,
           username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "web" },
           environmentId: "env1",
           environmentFile: true,
           nativeStart: { kind: "deno-file", path: "src/main.ts" },
@@ -470,6 +472,7 @@ test("a native app unit may load its own variables file and no other", async () 
       nativeAppUnitContent({
         layout,
         username: "alice",
+        folder: { owner: "alice", scope: "production", slug: "web" },
         environmentId: "env1",
         environmentFile: true,
         app: {
@@ -3151,7 +3154,7 @@ async function newLayoutAlice(host: Host, groups: string[] = []) {
   );
 }
 
-const SWITCH = "etc/ssh/turbopanel-sftp-chroot";
+const SWITCH = "etc/ssh/turbopanel/sftp-chroot";
 
 test("sftp-chroot switches on only when every tpsftp member is on the new layout", async () => {
   await withHost(async (host) => {
@@ -3239,7 +3242,237 @@ test("sftp-chroot refuses a member that also holds the shell level", async () =>
   });
 });
 
-test("sftp-chroot accepts only check, on, off and status", async () => {
+const OFF_MARK = "etc/ssh/turbopanel/sftp-chroot-off";
+
+test("sftp-chroot auto turns the jail on for a clean host and does nothing twice", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    const first = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(first.code, 0, first.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+    assertEquals(
+      (await host.run(["sftp-chroot", "status"])).stdout,
+      `on ${host.path("srv/users")}\n`,
+    );
+    const again = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(again.code, 0, again.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+  });
+});
+
+test("sftp-chroot auto turns the jail on for a host with no tpsftp member yet", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+  });
+});
+
+test("sftp-chroot auto leaves the jail off and names the member that stops it", async () => {
+  await withHost(async (host) => {
+    const group = await Deno.readTextFile(host.path("etc/group"));
+    await Deno.writeTextFile(
+      host.path("etc/group"),
+      group.replace("tpsftp:x:9986:", "tpsftp:x:9986:alice"),
+    );
+    const result = await host.run(["sftp-chroot", "auto"]);
+    // A finding is not a failure: the caller reads the status afterwards.
+    assertEquals(result.code, 0, result.stderr);
+    assertStringIncludes(result.stderr, "alice: passwd home is not");
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sftp-chroot off is remembered: auto never overrides it, on clears it", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+
+    const on = await host.run(["sftp-chroot", "on"]);
+    assertEquals(on.code, 0, on.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+    await Deno.stat(host.path(OFF_MARK)).then(
+      () => {
+        throw new Error("the off marker survived an explicit on");
+      },
+      () => {},
+    );
+  });
+});
+
+test("sftp-chroot off writes the marker before it removes the switch", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    // A directory where the switch should be makes the removal fail, so the
+    // marker is on disk only if it was written first. A concurrent `auto`
+    // between the two steps then cannot turn the jail back on.
+    await Deno.mkdir(host.path(SWITCH));
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code === 0, false);
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+    const auto = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(auto.code, 0, auto.stderr);
+    assertEquals((await Deno.stat(host.path(SWITCH))).isDirectory, true);
+  });
+});
+
+test("an off that lands while auto's layout check runs still wins", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    // Hold auto after its layout check passed and before it writes the switch
+    // (tp-host's test mode pauses there while the pause file exists). `off`
+    // then writes its marker and finds no switch to remove.
+    const pause = host.path("tmp/pause-sftp-auto");
+    const paused = host.path("tmp/paused-sftp-auto");
+    await Deno.writeTextFile(pause, "");
+    const auto = host.run(["sftp-chroot", "auto"]);
+    for (let i = 0; i < 200; i++) {
+      if (await Deno.stat(paused).then(() => true, () => false)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assertEquals(await Deno.stat(paused).then(() => true, () => false), true);
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code, 0, off.stderr);
+    await Deno.remove(pause);
+    const result = await auto;
+    assertEquals(result.code, 0, result.stderr);
+    // auto wrote the switch, then saw the marker and took it back.
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+  });
+});
+
+test("sftp-chroot off still works when the SSH folder is missing", async () => {
+  await withHost(async (host) => {
+    await Deno.remove(host.path("etc/ssh/turbopanel"), { recursive: true });
+    const off = await host.run(["sftp-chroot", "off"]);
+    assertEquals(off.code, 0, off.stderr);
+    assertEquals(await Deno.readTextFile(host.path(OFF_MARK)), "off\n");
+    assertEquals(
+      (await Deno.stat(host.path("etc/ssh/turbopanel"))).mode! & 0o777,
+      0o750,
+    );
+    // Remembered: auto leaves it alone.
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sftp-chroot off and auto-revert are no-ops on a host with no SSH server folder", async () => {
+  await withHost(async (host) => {
+    await Deno.remove(host.path("etc/ssh"), { recursive: true });
+    assertEquals((await host.run(["sftp-chroot", "off"])).code, 0);
+    assertEquals((await host.run(["sftp-chroot", "auto-revert"])).code, 0);
+  });
+});
+
+test("sftp-chroot auto-revert removes the switch without remembering an off", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals(
+      (await host.run(["sftp-chroot", "status"])).stdout.startsWith("on "),
+      true,
+    );
+    const revert = await host.run(["sftp-chroot", "auto-revert"]);
+    assertEquals(revert.code, 0, revert.stderr);
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+    await Deno.stat(host.path(OFF_MARK)).then(
+      () => {
+        throw new Error("auto-revert wrote the explicit-off marker");
+      },
+      () => {},
+    );
+    // The next automatic attempt may switch it on again.
+    assertEquals((await host.run(["sftp-chroot", "auto"])).code, 0);
+    assertEquals(await Deno.readTextFile(host.path(SWITCH)), "on\n");
+  });
+});
+
+test("sftp-chroot refuses a jail root that others can enter", async () => {
+  await withHost(async (host) => {
+    await newLayoutAlice(host);
+    await Deno.chmod(host.path("srv/users/alice"), 0o755);
+    const check = await host.run(["sftp-chroot", "check"]);
+    assertEquals(check.code === 0, false);
+    assertStringIncludes(check.stdout, "must be group alice with mode 0750");
+    assertStringIncludes(
+      await refused(host, ["sftp-chroot", "on"]),
+      "refusing to switch on",
+    );
+    // auto leaves the jail off and names the finding.
+    const auto = await host.run(["sftp-chroot", "auto"]);
+    assertEquals(auto.code, 0, auto.stderr);
+    assertStringIncludes(auto.stderr, "mode 0750");
+    assertEquals((await host.run(["sftp-chroot", "status"])).stdout, "off\n");
+  });
+});
+
+test("sshd-config refuses a symlinked file", async () => {
+  await withHost(async (host) => {
+    await Deno.writeTextFile(host.path("etc/ssh/real_config"), "Port 22\n");
+    await Deno.symlink(
+      host.path("etc/ssh/real_config"),
+      host.path("etc/ssh/sshd_config"),
+    );
+    await refused(host, ["sshd-config"]);
+  });
+});
+
+test("no generic verb can write, read or remove the off marker", async () => {
+  await withHost(async (host) => {
+    const mark = host.path(OFF_MARK);
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      host.path("tmp/staged"),
+      mark,
+    ]);
+    await refused(host, ["tee", mark], "off\n");
+    await Deno.writeTextFile(mark, "off\n");
+    await refused(host, ["rm", "-f", "--", mark]);
+    await refused(host, ["cat", "--", mark]);
+  });
+});
+
+test("sshd-config prints the administrator's file and takes no arguments", async () => {
+  await withHost(async (host) => {
+    const config = "Include /etc/ssh/sshd_config.d/*.conf\nPort 22\n";
+    await Deno.writeTextFile(host.path("etc/ssh/sshd_config"), config);
+    await Deno.chmod(host.path("etc/ssh/sshd_config"), 0o600);
+    const result = await host.run(["sshd-config"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, config);
+    for (
+      const args of [
+        ["/etc/shadow"],
+        ["--", "/etc/ssh/sshd_config"],
+        ["-f", "/etc/passwd"],
+      ]
+    ) {
+      await refused(host, ["sshd-config", ...args]);
+    }
+  });
+});
+
+test("sshd-config refuses when the file is absent", async () => {
+  await withHost(async (host) => {
+    await refused(host, ["sshd-config"]);
+  });
+});
+
+test("sftp-chroot accepts only check, verify, on, off, auto and status", async () => {
   await withHost(async (host) => {
     for (
       const args of [[], ["enable"], ["on", "now"], ["status", "-v"], [
@@ -3248,6 +3481,21 @@ test("sftp-chroot accepts only check, on, off and status", async () => {
       ]]
     ) {
       await refused(host, ["sftp-chroot", ...args]);
+    }
+  });
+});
+
+test("no generic verb touches the hosting Caddy or Docker gate state folders", async () => {
+  await withHost(async (host) => {
+    for (const name of ["hosting-caddy", "docker-gate"]) {
+      const dir = host.path(`var/lib/turbopanel/${name}`);
+      await Deno.mkdir(dir, { recursive: true });
+      const file = `${dir}/probe`;
+      await Deno.writeTextFile(file, "x");
+      await refused(host, ["rm", "-f", "--", file]);
+      await refused(host, ["cat", "--", file]);
+      await refused(host, ["mkdir", "-p", "--", `${dir}/inner`]);
+      await refused(host, ["chown", "tp:tp", "--", file]);
     }
   });
 });
@@ -3337,7 +3585,7 @@ test("cert-dates prints only notAfter dates, skips internal certs, symlinks and 
       group + `tpedge:x:${Deno.gid}:\n`,
     );
     const certs = host.path(
-      "var/lib/turbopanel-hosting-caddy/data/caddy/certificates",
+      "var/lib/turbopanel/hosting-caddy/data/caddy/certificates",
     );
     await selfSignedCert(
       join(certs, "acme-v02.api.letsencrypt.org-directory", "shop.example.com"),
@@ -3370,6 +3618,137 @@ test("cert-dates prints only notAfter dates, skips internal certs, symlinks and 
 test("cert-dates prints nothing when the hosting Caddy has issued no certificates", async () => {
   await withHost(async (host) => {
     const result = await host.run(["cert-dates"]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(result.stdout, "");
+  });
+});
+
+async function withTpedge(
+  host: { path: (p: string) => string },
+): Promise<string> {
+  const passwd = await Deno.readTextFile(host.path("etc/passwd"));
+  await Deno.writeTextFile(
+    host.path("etc/passwd"),
+    passwd + `tpedge:x:${Deno.uid}:${Deno.gid}::/nonexistent:/bin/false\n`,
+  );
+  const group = await Deno.readTextFile(host.path("etc/group"));
+  await Deno.writeTextFile(
+    host.path("etc/group"),
+    group + `tpedge:x:${Deno.gid}:\n`,
+  );
+  return host.path("var/lib/turbopanel/hosting-caddy/data/caddy/certificates");
+}
+
+test("cert-export prints the chain then the key of ONE hostname and nothing else", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    const le = "acme-v02.api.letsencrypt.org-directory";
+    await selfSignedCert(
+      join(certs, le, "shop.example.com"),
+      "shop.example.com",
+      30,
+    );
+    await selfSignedCert(
+      join(certs, le, "other.example.com"),
+      "other.example.com",
+      30,
+    );
+    const result = await host.run(["cert-export", "shop.example.com"]);
+    assertEquals(result.code, 0, result.stderr);
+    const out = result.stdout;
+    assertEquals(
+      out.indexOf("BEGIN CERTIFICATE") < out.indexOf("PRIVATE KEY"),
+      true,
+    );
+    assertEquals(out.match(/BEGIN CERTIFICATE/g)?.length, 1);
+    assertEquals(out.match(/PRIVATE KEY-----/g)?.length, 2);
+    const shopKey = await Deno.readTextFile(
+      join(certs, le, "shop.example.com", "shop.example.com.key"),
+    );
+    const otherKey = await Deno.readTextFile(
+      join(certs, le, "other.example.com", "other.example.com.key"),
+    );
+    assertStringIncludes(out, shopKey.trim());
+    assertEquals(out.includes(otherKey.trim()), false);
+    assertEquals(result.stderr.includes("PRIVATE"), false);
+  });
+});
+
+test("cert-export skips the internal issuer, staging issuers and symlinks, and prints nothing for them", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    await selfSignedCert(
+      join(certs, "local", "intranet.test"),
+      "intranet.test",
+      10,
+    );
+    await selfSignedCert(
+      join(
+        certs,
+        "acme-staging-v02.api.letsencrypt.org-directory",
+        "stage.example.com",
+      ),
+      "stage.example.com",
+      10,
+    );
+    const le = join(certs, "acme-v02.api.letsencrypt.org-directory");
+    await Deno.mkdir(le, { recursive: true });
+    await Deno.symlink(host.path("outside"), join(le, "linked.example.com"));
+    for (
+      const name of [
+        "intranet.test",
+        "stage.example.com",
+        "linked.example.com",
+        "missing.example.com",
+      ]
+    ) {
+      const result = await host.run(["cert-export", name]);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(result.stdout, "", name);
+    }
+  });
+});
+
+test("cert-export takes exactly one plain lowercase hostname", async () => {
+  await withHost(async (host) => {
+    await withTpedge(host);
+    await refused(host, ["cert-export"]);
+    await refused(host, ["cert-export", "a.example.com", "b.example.com"]);
+    await refused(host, ["cert-export", "*.example.com"]);
+    await refused(host, ["cert-export", "../etc"]);
+    await refused(host, ["cert-export", "A.Example.com"]);
+    await refused(host, ["cert-export", "a/b.example.com"]);
+    await refused(host, ["cert-export", ".example.com"]);
+    await refused(host, ["cert-export", "a..example.com"]);
+    await refused(host, ["cert-export", "-a.example.com"]);
+    await refused(host, ["cert-export", `${"a".repeat(250)}.com`]);
+  });
+});
+
+test("cert-export prefers the most recently written pair when two issuers hold one", async () => {
+  await withHost(async (host) => {
+    const certs = await withTpedge(host);
+    const older = join(
+      certs,
+      "acme-v02.api.letsencrypt.org-directory",
+      "shop.example.com",
+    );
+    const newer = join(certs, "other-issuer", "shop.example.com");
+    await selfSignedCert(older, "shop.example.com", 30);
+    await Deno.utime(join(older, "shop.example.com.crt"), 1_000_000, 1_000_000);
+    await selfSignedCert(newer, "shop.example.com", 60);
+    const result = await host.run(["cert-export", "shop.example.com"]);
+    assertEquals(result.code, 0, result.stderr);
+    const newerKey = await Deno.readTextFile(
+      join(newer, "shop.example.com.key"),
+    );
+    assertStringIncludes(result.stdout, newerKey.trim());
+  });
+});
+
+test("cert-export prints nothing when the hosting Caddy has issued no certificates", async () => {
+  await withHost(async (host) => {
+    const result = await host.run(["cert-export", "shop.example.com"]);
     assertEquals(result.code, 0, result.stderr);
     assertEquals(result.stdout, "");
   });

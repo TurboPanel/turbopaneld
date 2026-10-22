@@ -2,7 +2,7 @@ import { assertEquals, assertMatch } from "@std/assert";
 import type { AnsibleEvent } from "./ansible-events.ts";
 import { InstallEventPresenter } from "./installer-tui.ts";
 import { setActiveInstallPresenter } from "./install-presenter-context.ts";
-import { InstallPresenter } from "./install-presenter.ts";
+import { fitToWidth, InstallPresenter } from "./install-presenter.ts";
 import { logInfo } from "../util/logger.ts";
 
 /**
@@ -478,4 +478,37 @@ test("InstallPresenter fail without an active step uses a generic label", () => 
   presenter.fail("   ");
   stderr.restore();
   assertMatch(stderr.text(), /step failed/);
+});
+
+test("fitToWidth leaves short text alone and ends long text in an ellipsis", () => {
+  assertEquals(fitToWidth("short", 20), "short");
+  assertEquals(fitToWidth("exactly-ten", 11), "exactly-ten");
+  assertEquals(fitToWidth("a very long status line", 10), "a very lo…");
+  assertEquals(fitToWidth("anything", 1), "anything");
+});
+
+test("InstallPresenter TTY mode never draws a line wider than the terminal", () => {
+  const stdout = captureWriteStream(Deno.stdout);
+  const presenter = new InstallPresenter(true, () => 30);
+  try {
+    presenter.beginStep("Setting up the control plane on this host…");
+    presenter.pushStatus(
+      "docker › Install the container runtime packages and enable the service",
+    );
+    presenter.pushStatus("caddy › Render the managed Caddyfile for the host");
+    presenter.completeStep(true, "done");
+  } finally {
+    presenter.dispose();
+    stdout.restore();
+  }
+  // deno-lint-ignore no-control-regex
+  const ansi = /\x1b\[[0-9;?]*[A-Za-z]/g;
+  const drawn = stdout.text().replace(ansi, "").split("\n");
+  for (const line of drawn) {
+    assertEquals(
+      Array.from(line).length < 30,
+      true,
+      `line wider than the terminal: ${JSON.stringify(line)}`,
+    );
+  }
 });

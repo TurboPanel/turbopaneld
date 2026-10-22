@@ -1,0 +1,433 @@
+/**
+ * Named Docker volumes for a container that runs as the site owner.
+ *
+ * A container that mounts one of the site owner's volume folders and names no
+ * `user:` of its own is run as the owner's uid and gid (see
+ * `apply-storage-volumes.ts`). A named Docker volume it also mounts is created
+ * by Docker as `root:root 0755`, and that container could not write it. Before
+ * the containers start, the root of each such volume is given to the same uid
+ * and gid, once per volume, by running the service's own image as root for one
+ * `chown` of the mount path itself. Nothing inside the volume is touched, and
+ * nothing is ever given to root.
+ *
+ * A volume is left alone when changing its owner could break another consumer:
+ * one the compose file marks `external`, a mount that is read-only, and a
+ * volume another service mounts without running as the same user. Best effort:
+ * an image with no `chown`, or a service that cannot be started once, only gets
+ * a line in the deploy log. The deploy goes on, and the container may then not
+ * be able to write the volume.
+ *
+ * The one-off container is `docker compose run` of the tenant's own service
+ * definition (its image, mounts and limits), with only the user and the
+ * entrypoint changed, so it is not a daemon helper container and does not carry
+ * the helper platform label (the label test names this file). It never pulls a
+ * second image or builds: an image that is missing is pulled the way `up` would
+ * pull it a moment later (`pull --ignore-buildable`, so nothing is built), and
+ * the run itself is `--pull never`.
+ */
+
+import { composeFileArgs } from "./compose-files.ts";
+import type { DockerCliResult, RunDockerOptions } from "./docker-cli.ts";
+import { forEachSequential } from "../util/sequential.ts";
+
+type RunDockerFn = (
+  args: string[],
+  options?: RunDockerOptions,
+) => Promise<DockerCliResult>;
+
+type ServiceMap = Record<string, Record<string, unknown>>;
+
+/** One mount path of one service that needs its volume root given to a user. */
+export type NamedVolumeOwnerTarget = {
+  composeServiceName: string;
+  /** `uid:gid`, both numeric and neither root. */
+  user: string;
+  /** Absolute path of the volume's mount point inside the container. */
+  target: string;
+  /** The image the service runs: its `image:`, else the name Compose builds it under. */
+  image: string;
+  /** True when the service is built from source and names no image. */
+  buildOnly: boolean;
+};
+
+/** A mount that was looked at and left alone, and why, in plain words. */
+export type NamedVolumeOwnerSkip = {
+  composeServiceName: string;
+  target: string;
+  reason: string;
+};
+
+export type NamedVolumeOwnerPlan = {
+  targets: NamedVolumeOwnerTarget[];
+  skipped: NamedVolumeOwnerSkip[];
+};
+
+const NUMERIC_USER_RE = /^(\d{1,10}):(\d{1,10})$/;
+/** The largest uid or gid Linux accepts (4294967295 is reserved). */
+const MAX_ID = 4294967294;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type VolumeMount = {
+  source: string;
+  target: string;
+  readOnly: boolean;
+  subpath: string;
+};
+
+/** The long-form named-volume mounts of a service, as `docker compose config` writes them. */
+function volumeMounts(
+  service: Record<string, unknown> | undefined,
+): VolumeMount[] {
+  const volumes = service?.volumes;
+  if (!Array.isArray(volumes)) return [];
+  const mounts: VolumeMount[] = [];
+  for (const entry of volumes) {
+    if (!isRecord(entry) || entry.type !== "volume") continue;
+    const { source, target } = entry;
+    if (
+      typeof source !== "string" || typeof target !== "string" ||
+      !target.startsWith("/")
+    ) continue;
+    const volume = isRecord(entry.volume) ? entry.volume : {};
+    mounts.push({
+      source,
+      target,
+      readOnly: entry.read_only === true,
+      subpath: typeof volume.subpath === "string" ? volume.subpath : "",
+    });
+  }
+  return mounts;
+}
+
+function userText(value: unknown): string {
+  if (typeof value === "number") return String(value);
+  return typeof value === "string" ? value : "";
+}
+
+/**
+ * `uid:gid` when both are canonical decimal numbers (no sign, no leading zero)
+ * and neither is root; otherwise `null`. The numbers are compared as numbers,
+ * so `00:1000` and `1000:000` are refused like `0:0`.
+ */
+function ownerUser(value: unknown): string | null {
+  const match = NUMERIC_USER_RE.exec(userText(value));
+  if (match === null) return null;
+  const [uidText, gidText] = [match[1]!, match[2]!];
+  const uid = Number(uidText);
+  const gid = Number(gidText);
+  const canonical = String(uid) === uidText && String(gid) === gidText;
+  if (!canonical || uid === 0 || gid === 0) return null;
+  if (uid > MAX_ID || gid > MAX_ID) return null;
+  return `${uid}:${gid}`;
+}
+
+/** The user a service runs as: the daemon's overlay user, else the one its compose file declares. */
+function effectiveUser(
+  name: string,
+  overlayServices: ServiceMap,
+  resolvedServices: ServiceMap,
+): string {
+  return userText(overlayServices[name]?.user) ||
+    userText(resolvedServices[name]?.user);
+}
+
+/**
+ * The named-volume mounts to give to a user. A mount is considered when its
+ * service runs as the site owner, in one of two ways: the daemon itself set a
+ * numeric, non-root `user` for it (the overlay's `user`, written when the
+ * service mounts one of the owner's volumes), or the compose file declares
+ * exactly the uid of the owner the volume is linked to (`volumeOwners`, volume
+ * name to the owner's `uid:gid`). Any other declared user is the owner's own
+ * choice and is left alone. `topLevelVolumes` is the compose file's own
+ * `volumes:` map, before the daemon rewrites it.
+ */
+export function namedVolumeOwnerTargets(
+  overlayServices: ServiceMap | undefined,
+  resolvedServices: ServiceMap,
+  topLevelVolumes: Record<string, unknown> | undefined,
+  projectName = "project",
+  platformVolumeNames: ReadonlySet<string> = new Set(),
+  volumeOwners: ReadonlyMap<string, string> = new Map(),
+): NamedVolumeOwnerPlan {
+  const overlay = overlayServices ?? {};
+  const plan: NamedVolumeOwnerPlan = { targets: [], skipped: [] };
+  const claimed = new Set<string>();
+  const names = new Set([
+    ...Object.keys(overlay),
+    ...Object.keys(resolvedServices),
+  ]);
+  for (const name of [...names].sort((a, b) => a.localeCompare(b))) {
+    const daemonUser = ownerUser(overlay[name]?.user);
+    const declared = userText(resolvedServices[name]?.user);
+    const { image, buildOnly } = serviceImage(
+      resolvedServices[name],
+      projectName,
+      name,
+    );
+    const mounts = [
+      ...volumeMounts(resolvedServices[name]),
+      ...volumeMounts(overlay[name]),
+    ];
+    for (const mount of mounts) {
+      const user = daemonUser ??
+        declaredOwnerUser(
+          declared,
+          mountOwner(mount, topLevelVolumes, volumeOwners),
+        );
+      if (user === null) continue;
+      const reason = skipReason(
+        { name, user, mount },
+        { overlay, resolvedServices, topLevelVolumes, platformVolumeNames },
+      );
+      if (reason !== null) {
+        plan.skipped.push({
+          composeServiceName: name,
+          target: mount.target,
+          reason,
+        });
+        continue;
+      }
+      const key = `${mount.source}|${mount.subpath}`;
+      if (claimed.has(key)) continue;
+      claimed.add(key);
+      plan.targets.push({
+        composeServiceName: name,
+        user,
+        target: mount.target,
+        image,
+        buildOnly,
+      });
+    }
+  }
+  return plan;
+}
+
+/** The owner a mounted volume is linked to, as `uid:gid`, by the volume's key or its pinned name. */
+function mountOwner(
+  mount: VolumeMount,
+  topLevelVolumes: Record<string, unknown> | undefined,
+  volumeOwners: ReadonlyMap<string, string>,
+): string | undefined {
+  const declared = topLevelVolumes?.[mount.source];
+  const pinned = isRecord(declared) && typeof declared.name === "string"
+    ? declared.name
+    : undefined;
+  return volumeOwners.get(mount.source) ??
+    (pinned === undefined ? undefined : volumeOwners.get(pinned));
+}
+
+/** The owner's `uid:gid` when the compose file declares exactly the owner's uid; otherwise `null`. */
+function declaredOwnerUser(
+  declared: string,
+  owner: string | undefined,
+): string | null {
+  const ownerIds = owner === undefined ? null : ownerUser(owner);
+  if (ownerIds === null || declared === "") return null;
+  return uidOf(declared) === uidOf(ownerIds) ? ownerIds : null;
+}
+
+function uidOf(user: string): string {
+  return user.split(":")[0] ?? "";
+}
+
+/**
+ * A bind mount whose source sits inside the deployment folder (a relative
+ * `./files` in the compose file) belongs to the platform, not to the site
+ * owner: nothing here can hand it to the owner without reaching into the
+ * deployment folder, and Docker makes a missing one `root:root 0755`. A
+ * container that runs as a numeric non-root user cannot write it. The compose
+ * file is never refused for this (it may be read-only data, or the container
+ * may run as root); the deploy log says plainly where to put data the container
+ * writes instead.
+ */
+export function deploymentBindWarnings(
+  overlayServices: ServiceMap | undefined,
+  resolvedServices: ServiceMap,
+  deploymentDirs: readonly string[],
+): string[] {
+  const overlay = overlayServices ?? {};
+  const lines: string[] = [];
+  for (
+    const name of Object.keys(resolvedServices).sort((a, b) =>
+      a.localeCompare(b)
+    )
+  ) {
+    const user = effectiveUser(name, overlay, resolvedServices);
+    // Only a numeric, non-root user is warned about: root can write anything.
+    if (!/^[1-9]\d*$/.test(uidOf(user))) continue;
+    for (
+      const target of unwritableDeploymentBinds(
+        resolvedServices[name],
+        deploymentDirs,
+      )
+    ) {
+      lines.push(
+        `${target} of ${name} is a folder inside the deployment folder, which the platform owns; a container running as ${user} cannot write it. Keep data the container writes in a volume folder of the site owner instead`,
+      );
+    }
+  }
+  return lines;
+}
+
+/** Container paths of the writable binds of a service whose source sits inside the deployment folder. */
+function unwritableDeploymentBinds(
+  service: Record<string, unknown> | undefined,
+  deploymentDirs: readonly string[],
+): string[] {
+  const volumes = service?.volumes;
+  if (!Array.isArray(volumes)) return [];
+  const targets: string[] = [];
+  for (const entry of volumes) {
+    if (!isRecord(entry) || entry.type !== "bind" || entry.read_only === true) {
+      continue;
+    }
+    const { source, target } = entry;
+    if (typeof source !== "string" || typeof target !== "string") continue;
+    if (deploymentDirs.some((dir) => source.startsWith(`${dir}/`))) {
+      targets.push(target);
+    }
+  }
+  return targets;
+}
+
+function serviceImage(
+  service: Record<string, unknown> | undefined,
+  projectName: string,
+  name: string,
+): { image: string; buildOnly: boolean } {
+  const image = service?.image;
+  if (typeof image === "string" && image !== "") {
+    return { image, buildOnly: false };
+  }
+  return { image: `${projectName}-${name}`, buildOnly: true };
+}
+
+/** Why a mount is left alone, or `null` when its volume may be given to the user. */
+function skipReason(
+  mounting: { name: string; user: string; mount: VolumeMount },
+  context: {
+    overlay: ServiceMap;
+    resolvedServices: ServiceMap;
+    topLevelVolumes: Record<string, unknown> | undefined;
+    platformVolumeNames: ReadonlySet<string>;
+  },
+): string | null {
+  const { name, user, mount } = mounting;
+  const declared = context.topLevelVolumes?.[mount.source];
+  if (isRecord(declared) && declared.external === true) {
+    // The platform marks the volumes it created itself `external` so Compose
+    // does not invent a second one; those are ours to give. Only a volume the
+    // compose file's author declared external belongs to something else.
+    const platformName = typeof declared.name === "string"
+      ? declared.name
+      : mount.source;
+    if (!context.platformVolumeNames.has(platformName)) {
+      return "the volume is external, so something else owns it";
+    }
+  }
+  if (mount.readOnly) return "the mount is read-only";
+  const shared = Object.keys(context.resolvedServices).some((other) =>
+    other !== name &&
+    volumeMounts(context.resolvedServices[other]).some((m) =>
+      m.source === mount.source
+    ) &&
+    uidOf(effectiveUser(other, context.overlay, context.resolvedServices)) !==
+      uidOf(user)
+  );
+  return shared
+    ? "another service that runs as a different user mounts the volume"
+    : null;
+}
+
+/**
+ * Give each target's volume root to its user. Never throws: a failure is
+ * written to `log` and the deploy goes on.
+ */
+export async function ensureNamedVolumeOwners(
+  plan: NamedVolumeOwnerPlan,
+  options: {
+    projectName: string;
+    composePaths: readonly string[];
+    run: RunDockerFn;
+    log: (line: string) => void;
+  },
+): Promise<void> {
+  for (const skip of plan.skipped) {
+    options.log(
+      `left ${skip.target} of ${skip.composeServiceName} as it is: ${skip.reason}`,
+    );
+  }
+  await forEachSequential(plan.targets, async (entry) => {
+    const label = `${entry.target} of ${entry.composeServiceName}`;
+    try {
+      if (!(await imageReady(entry, options))) {
+        options.log(
+          `could not give ${label} to ${entry.user}: the image is not on this host yet, so the container may not be able to write that volume`,
+        );
+        return;
+      }
+      const result = await options.run([
+        ...composeFileArgs(options.projectName, options.composePaths),
+        "run",
+        "--pull",
+        "never",
+        "--rm",
+        "--no-deps",
+        "-T",
+        "--user",
+        "0",
+        "--entrypoint",
+        "chown",
+        entry.composeServiceName,
+        entry.user,
+        entry.target,
+      ]);
+      if (result.success) {
+        options.log(`gave ${label} to ${entry.user}`);
+      } else {
+        options.log(
+          `could not give ${label} to ${entry.user}; the container may not be able to write that volume (${
+            firstLine(result.stderr)
+          })`,
+        );
+      }
+    } catch (err) {
+      options.log(
+        `could not give ${label} to ${entry.user}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  });
+}
+
+/** Whether the service's image is on the host; an image from a registry is pulled once if it is not. */
+async function imageReady(
+  entry: NamedVolumeOwnerTarget,
+  options: {
+    projectName: string;
+    composePaths: readonly string[];
+    run: RunDockerFn;
+  },
+): Promise<boolean> {
+  const present = () =>
+    options.run(["image", "inspect", "--format", "{{.Id}}", entry.image]);
+  if ((await present()).success) return true;
+  // A service built from source is never built here: `up` builds it.
+  if (entry.buildOnly) return false;
+  await options.run([
+    ...composeFileArgs(options.projectName, options.composePaths),
+    "pull",
+    "--ignore-buildable",
+    entry.composeServiceName,
+  ]);
+  return (await present()).success;
+}
+
+function firstLine(text: string): string {
+  return text.split("\n").find((line) => line.trim().length > 0)?.trim() ??
+    "no reason given";
+}

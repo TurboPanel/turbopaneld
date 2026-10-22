@@ -195,6 +195,17 @@ test("runScheduledBackup dumps the database the policy entry names", async () =>
   assert(!argv.includes("appdb"));
 });
 
+test("runScheduledBackup reports the database it dumped", async () => {
+  await withLayout(async (layout) => {
+    const named = managedPolicy({ database: "defaultdb" });
+    await writeBackupPoliciesFile(layout, { policies: [named] });
+    const deps = { ...fakeDeps(new TextEncoder().encode("x")), layout };
+    const outcome = await runScheduledBackup(named.policyId, deps);
+    assert(outcome.kind === "ran");
+    assertEquals(outcome.result.database, "defaultdb");
+  });
+});
+
 test("runScheduledBackup falls back to the engine default when the entry names no database", async () => {
   const argv = await mariadbDumpArgv({});
   assertEquals(argv.at(-1), "appdb");
@@ -415,6 +426,7 @@ test("runScheduledBackup fails as busy while another backup holds the copy lock"
       const outcome = await runScheduledBackup(policy.policyId, {
         ...copyDeps(new Uint8Array(), calls),
         layout,
+        lockWaitMs: 0,
       });
       assert(outcome.kind === "ran");
       assertEquals(outcome.result.status, "failed");
@@ -440,7 +452,7 @@ test("runScheduledBackup fails as busy while another run holds the engine lock",
     try {
       const outcome = await runScheduledBackup(
         policy.policyId,
-        { ...fakeDeps(new Uint8Array(), counter), layout },
+        { ...fakeDeps(new Uint8Array(), counter), layout, lockWaitMs: 0 },
       );
       assert(outcome.kind === "ran");
       assertEquals(outcome.result.status, "failed");
@@ -581,5 +593,81 @@ test("a managed database run and a volume run on one host overlap without refusi
     assertEquals(first.result.status, "succeeded");
     assertEquals(second.result.status, "succeeded");
     assertEquals(started, 2);
+  });
+});
+
+test("two policies on one engine scheduled together run one after the other and both succeed", async () => {
+  await withLayout(async (layout) => {
+    const managedId = crypto.randomUUID();
+    const first = managedPolicy({ managedId });
+    const second = managedPolicy({ managedId });
+    await writeBackupPoliciesFile(layout, { policies: [first, second] });
+
+    let running = 0;
+    let overlapped = false;
+    let dumps = 0;
+    const deps: ScheduledBackupDeps = {
+      layout,
+      lockPollMs: 5,
+      freeBytes: () => Promise.resolve(PLENTY),
+      artifact: {
+        ensureDocker: () => Promise.resolve(),
+        resolveContainer: () => Promise.resolve(FAKE_CONTAINER),
+        runDump: async (_argv, destination) => {
+          running += 1;
+          dumps += 1;
+          if (running > 1) overlapped = true;
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          const writer = destination.getWriter();
+          await writer.write(new TextEncoder().encode("bytes"));
+          await writer.close();
+          running -= 1;
+          return { success: true, stderr: "" };
+        },
+      },
+    };
+    const outcomes = await Promise.all([
+      runScheduledBackup(first.policyId, deps),
+      runScheduledBackup(second.policyId, deps),
+    ]);
+    for (const outcome of outcomes) {
+      assert(outcome.kind === "ran");
+      assertEquals(outcome.result.error, undefined);
+      assertEquals(outcome.result.status, "succeeded");
+    }
+    assertEquals(dumps, 2);
+    assertEquals(overlapped, false);
+  });
+});
+
+test("a run that waits for the engine lock gives up as busy once the bounded wait passes", async () => {
+  await withLayout(async (layout) => {
+    const policy = managedPolicy();
+    await writeBackupPoliciesFile(layout, { policies: [policy] });
+    await Deno.mkdir(join(layout.runDir, "managed-locks"), {
+      recursive: true,
+    });
+    const holder = await Deno.open(
+      managedTargetLockPath(layout, policy.managedId!),
+      { create: true, write: true },
+    );
+    assertEquals(await holder.tryLock(true), true);
+    const counter = { calls: 0 };
+    try {
+      const started = Date.now();
+      const outcome = await runScheduledBackup(policy.policyId, {
+        ...fakeDeps(new Uint8Array(), counter),
+        layout,
+        lockWaitMs: 80,
+        lockPollMs: 10,
+      });
+      assert(outcome.kind === "ran");
+      assertEquals(outcome.result.status, "failed");
+      assertMatch(outcome.result.error ?? "", /is busy/);
+      assert(Date.now() - started >= 70);
+    } finally {
+      holder.close();
+    }
+    assertEquals(counter.calls, 0);
   });
 });

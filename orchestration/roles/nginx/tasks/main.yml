@@ -37,10 +37,17 @@
     DEB_VER="{{ nginx_deb_version }}"
     DEB_ARCH="{{ nginx_deb_arch }}"
     DEB_DIST="{{ nginx_deb_dist }}"
+    DEB_SHA256="{{ nginx_deb_sha256[nginx_deb_arch] }}"
     TMP="$(mktemp -d)"
     DEST="{{ turbopanel_vendor_dir }}/nginx/${NGINX_VER}"
     DEB_URL="https://nginx.org/packages/debian/pool/nginx/n/nginx/nginx_${DEB_VER}_${DEB_ARCH}.deb"
     curl -fsSL -o "$TMP/nginx.deb" "$DEB_URL"
+    GOT="$(sha256sum "$TMP/nginx.deb" | cut -d' ' -f1)"
+    [ "$GOT" = "${DEB_SHA256}" ] || {
+      echo "nginx ${DEB_VER} (${DEB_ARCH}): SHA-256 mismatch, expected ${DEB_SHA256}, got ${GOT}; refusing to install. To accept a re-published file, update nginx_deb_sha256 in orchestration/roles/nginx/defaults/main.yml" >&2
+      rm -rf "$TMP"
+      exit 1
+    }
     dpkg-deb -x "$TMP/nginx.deb" "$TMP/extract"
     install -d "$DEST/sbin"
     install -m 0750 "$TMP/extract/usr/sbin/nginx" "$DEST/sbin/nginx"
@@ -169,10 +176,16 @@
     enabled: false
   failed_when: false
 
-- name: Ensure turbopanel-nginx is enabled
+# Started, not just enabled: the pidfile directory is the unit's own
+# RuntimeDirectory=, which only exists while the unit has run. The first site
+# deploy on a fresh host runs `nginx -t` before it starts the unit, and that
+# test fails when the pidfile directory is missing. With no site config yet,
+# nginx starts idle (no listeners).
+- name: Ensure turbopanel-nginx is enabled and running
   ansible.builtin.systemd:
     name: turbopanel-nginx
     enabled: true
+    state: started
     daemon_reload: true
 
 # The pidfile now lives in the unit's own RuntimeDirectory= (/run/{{ nginx_runtime_directory }}),

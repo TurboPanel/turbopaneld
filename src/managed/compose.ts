@@ -7,6 +7,7 @@
  * ProxySQL reachability.
  */
 
+import { resolveManagedEngineImage } from "../util/image-pins.ts";
 import { parse, stringify } from "yaml";
 import {
   getManagedReservedEnvKeys,
@@ -524,6 +525,8 @@ export type NormalizeManagedComposeOptions = {
    * apply does not recreate (restart) it. Default: file form.
    */
   legacyRootPasswordEnv?: boolean;
+  /** Image string in the compose file already on disk (see resolveManagedEngineImage). */
+  storedImage?: string;
 };
 
 /**
@@ -539,7 +542,10 @@ export function normalizeManagedCompose(
   applyManagedPublish(service, payload);
   assertManagedServicePolicy(service, payload);
 
-  service.image = payload.image;
+  service.image = resolveManagedEngineImage(
+    payload.image,
+    options.storedImage,
+  );
   service.container_name = payload.containerName;
   ensureTopLevelVolumes(document, payload.volumes);
   ensureServiceVolumeMounts(service, payload.volumes);
@@ -605,4 +611,22 @@ export function readManagedComposeDataTarget(
     .map((entry) => namedVolumeMount(entry, topLevel))
     .filter((mount) => mount !== undefined);
   return { image: service.image, volumes };
+}
+
+/**
+ * Container name of the sole managed service as the persisted compose file
+ * creates it: `container_name` when set, else compose's `<project>-<service>-1`.
+ * The demoted-member guard stops by name when every container listing fails.
+ */
+export function readManagedComposeContainerName(
+  composeYaml: string,
+  project: string,
+): string {
+  const { composeServiceName, service } = resolveSoleManagedService(
+    parseCompose(composeYaml),
+  );
+  return typeof service.container_name === "string" &&
+      service.container_name.length > 0
+    ? service.container_name
+    : `${project}-${composeServiceName}-1`;
 }

@@ -35,11 +35,14 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+const FOLDER = { owner: "appuser", scope: "production", slug: "example.com" };
+const PUBLISH_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72";
+
 const MANIFEST: ReleaseManifestV1 = {
   version: 1,
-  serviceId: "svc-1",
+  serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   composeServiceName: "web",
-  releaseId: "rel-1",
+  releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
   sourceId: "src-1",
   commitSha: "abc",
   ref: "main",
@@ -74,7 +77,13 @@ async function stageWithDeniedReleaseDir(
 ): Promise<{ argv: string[][]; paths: ReleasePaths; staged: StagedRelease }> {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-    { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    {
+      username: "appuser",
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      folder: FOLDER,
+      publishId: PUBLISH_ID,
+    },
   );
   const workingDir = join(root, "checkout");
   await Deno.mkdir(workingDir, { recursive: true });
@@ -116,11 +125,20 @@ test("stageRelease copies into the daemon's own staging leaf, never into release
       root,
       () => SUDO_OK,
     );
-    assertEquals(argv, [["-n", "publish-open", "appuser", "svc-1", "rel-1"]]);
+    assertEquals(argv, [[
+      "-n",
+      "publish-open",
+      "appuser",
+      "production",
+      "example.com",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      PUBLISH_ID,
+    ]]);
     assertEquals(staged, { dir: paths.stagingDir, viaPublish: true });
     assertEquals(
       paths.stagingDir,
-      join(root, ".tp-staging", "appuser.svc-1.rel-1"),
+      join(root, ".tp-staging", PUBLISH_ID),
     );
     // The escaping link never reached the staged tree.
     const names = [...Deno.readDirSync(paths.stagingDir)].map((e) => e.name);
@@ -152,7 +170,13 @@ test("stageRelease rethrows a non-NotFound source lstat error", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalLstat = Deno.lstat;
     Deno.lstat = () => Promise.reject(new TypeError("lstat io"));
@@ -177,7 +201,13 @@ test("stageRelease rethrows a non-PermissionDenied copy error", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const workingDir = join(root, "checkout");
     await Deno.mkdir(workingDir, { recursive: true });
@@ -197,7 +227,11 @@ test("stageRelease rethrows a non-PermissionDenied copy error", async () => {
 
 test("linkReleaseSharedDir falls back to sudo when the unprivileged link fails", async () => {
   await withTempRelease(async (root) => {
-    const releaseDir = join(root, "releases", "rel-1");
+    const releaseDir = join(
+      root,
+      "releases",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     const argv: string[][] = [];
     await linkReleaseSharedDir(releaseDir, (_command, args) => {
       argv.push([...args]);
@@ -213,7 +247,11 @@ test("linkReleaseSharedDir falls back to sudo when the unprivileged link fails",
 
 test("linkReleaseSharedDir throws when privileged ln fails", async () => {
   await withTempRelease(async (root) => {
-    const releaseDir = join(root, "releases", "rel-1");
+    const releaseDir = join(
+      root,
+      "releases",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     await assertRejects(
       () =>
         linkReleaseSharedDir(releaseDir, () =>
@@ -230,7 +268,11 @@ test("linkReleaseSharedDir throws when privileged ln fails", async () => {
 
 test("linkReleaseSharedDir rethrows a non-NotFound remove error", async () => {
   await withTempRelease(async (root) => {
-    const releaseDir = join(root, "releases", "rel-1");
+    const releaseDir = join(
+      root,
+      "releases",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     await Deno.mkdir(releaseDir, { recursive: true });
     const originalRemove = Deno.remove;
     Deno.remove = () => Promise.reject(new TypeError("busy"));
@@ -250,7 +292,13 @@ test("swapCurrentSymlink falls back to sudo and fails when ln is denied", async 
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await assertRejects(
       () =>
@@ -270,7 +318,13 @@ test("swapCurrentSymlink privileged path throws when mv fails", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await assertRejects(
       () =>
@@ -294,7 +348,13 @@ test("swapCurrentSymlink rethrows a non-NotFound tmp-link remove error", async (
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releaseDir, { recursive: true });
     const originalRemove = Deno.remove;
@@ -315,7 +375,13 @@ test("readCurrentReleaseId falls back to sudo and returns the basename", async (
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -330,13 +396,13 @@ test("readCurrentReleaseId falls back to sudo and returns the basename", async (
         if (args.includes("readlink")) {
           return Promise.resolve({
             success: true,
-            stdout: "releases/rel-1\n",
+            stdout: "releases/019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71\n",
             stderr: "",
           });
         }
         return Promise.resolve({ success: true, stdout: "", stderr: "" });
       });
-      assertEquals(id, "rel-1");
+      assertEquals(id, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71");
     } finally {
       Deno.readLink = originalReadLink;
     }
@@ -347,7 +413,13 @@ test("readCurrentReleaseId privileged path returns null when the link is missing
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -373,7 +445,13 @@ test("readCurrentReleaseId privileged path throws on a sudo invocation error", a
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -399,7 +477,13 @@ test("readCurrentReleaseId privileged path returns null when current is not a sy
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -425,7 +509,13 @@ test("readCurrentReleaseId privileged path returns null on a missing readlink", 
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -451,7 +541,13 @@ test("readCurrentReleaseId privileged path throws on an unexpected readlink erro
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -481,7 +577,13 @@ test("readCurrentReleaseId returns null for an empty link basename", async () =>
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.siteDir, { recursive: true });
     const originalReadLink = Deno.readLink;
@@ -498,7 +600,13 @@ test("readCurrentReleaseId rethrows a non-PermissionDenied readlink error", asyn
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(new TypeError("bad fd"));
@@ -571,12 +679,22 @@ test("promoteExistingRelease rejects a non-directory target", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     await Deno.writeTextFile(paths.releaseDir, "not-a-dir");
     await assertRejects(
-      () => promoteExistingRelease({ paths, releaseId: "rel-1" }),
+      () =>
+        promoteExistingRelease({
+          paths,
+          releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        }),
       Error,
       "not a directory",
     );
@@ -591,7 +709,13 @@ async function promoteManaged(
 ): Promise<{ argv: string[][]; paths: ReleasePaths; seen: string[] }> {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-    { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+    {
+      username: "appuser",
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      folder: FOLDER,
+      publishId: PUBLISH_ID,
+    },
   );
   await Deno.mkdir(paths.releasesDir, { recursive: true });
   const workingDir = join(root, "checkout");
@@ -638,10 +762,28 @@ test("promoteRelease publishes a managed-host release through tp-host only", asy
       },
     );
     assertEquals(argv, [
-      ["-n", "publish-open", "appuser", "svc-1", "rel-1"],
+      [
+        "-n",
+        "publish-open",
+        "appuser",
+        "production",
+        "example.com",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        PUBLISH_ID,
+      ],
       // #239's staged-link check, on the leaf, before anything is sealed.
       ["-n", ...releaseLinkTargetsFindArgs(paths.stagingDir)],
-      ["-n", "publish", "appuser", "svc-1", "rel-1"],
+      [
+        "-n",
+        "publish",
+        "appuser",
+        "production",
+        "example.com",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        PUBLISH_ID,
+      ],
     ]);
     // The manifest and the payload were staged before publish ran.
     assertEquals(seen, [RELEASE_METADATA_DIRNAME, "index.html"]);
@@ -652,7 +794,13 @@ test("promoteRelease removes its staging leaf when publish is refused", async ()
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await assertRejects(
       () =>
@@ -677,7 +825,13 @@ test("promoteRelease privileged cleanup runs when unprivileged remove fails", as
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-fail" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e74",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
@@ -713,7 +867,10 @@ test("promoteRelease privileged cleanup runs when unprivileged remove fails", as
     }
     assertEquals(
       argv.some((args) =>
-        args.includes("rm") && args.some((part) => part.includes("rel-fail"))
+        args.includes("rm") &&
+        args.some((part) =>
+          part.includes("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e74")
+        )
       ),
       true,
     );
@@ -724,7 +881,13 @@ test("promoteRelease rethrows a non-PermissionDenied manifest write", async () =
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releaseDir, { recursive: true });
     await Deno.mkdir(paths.sharedDir, { recursive: true });
@@ -764,7 +927,13 @@ test("promoteRelease swallows a failed privileged cleanup", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-fail" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e74",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
@@ -806,7 +975,13 @@ test("swapCurrentSymlink privileged path succeeds after an unprivileged failure"
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const argv: string[][] = [];
     await swapCurrentSymlink(paths, (_command, args) => {
@@ -822,7 +997,13 @@ test("swapCurrentSymlink swallows a failed tmp-link cleanup after rename is deni
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releaseDir, { recursive: true });
     const originalRename = Deno.rename;
@@ -854,7 +1035,13 @@ test("swapCurrentSymlink falls back to sudo when rename is denied", async () => 
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releaseDir, { recursive: true });
     const originalRename = Deno.rename;
@@ -891,7 +1078,13 @@ test("promoteExistingRelease treats a missing mode as sealed", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releaseDir, { recursive: true });
     const originalStat = Deno.stat;
@@ -902,13 +1095,13 @@ test("promoteExistingRelease treats a missing mode as sealed", async () => {
     try {
       await promoteExistingRelease({
         paths,
-        releaseId: "rel-1",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
         healthProbe: () => Promise.resolve(),
         runFn: testRun(true, []),
       });
       assertEquals(
         await Deno.readLink(paths.currentLink),
-        join("releases", "rel-1"),
+        join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
       );
     } finally {
       Deno.stat = originalStat;
@@ -920,7 +1113,13 @@ test("readCurrentReleaseId privileged path returns null for an empty basename", 
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -942,7 +1141,13 @@ test("readCurrentReleaseId privileged path returns null when stderr is empty", a
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -968,7 +1173,13 @@ test("readCurrentReleaseId privileged path treats a missing path on stdout as ab
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -994,7 +1205,13 @@ test("readCurrentReleaseId privileged path throws when sudo is not allowed", asy
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const originalReadLink = Deno.readLink;
     Deno.readLink = () => Promise.reject(denied("readlink"));
@@ -1049,14 +1266,20 @@ test("promoteExistingRelease checks a denied release only for presence", async (
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.releasesDir, { recursive: true });
     const calls: string[][] = [];
     await withStatDenied(paths.releaseDir, async () => {
       const dir = await promoteExistingRelease({
         paths,
-        releaseId: "rel-1",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
         runFn: testRun(true, calls),
       });
       assertEquals(dir, paths.releaseDir);
@@ -1069,7 +1292,10 @@ test("promoteExistingRelease checks a denied release only for presence", async (
       ["-n", ...releaseLinkTextsFindArgs(paths.releaseDir)],
       ["-n", ...releaseLinkTargetsFindArgs(paths.releaseDir)],
     ]);
-    assertEquals(await Deno.readLink(paths.currentLink), "releases/rel-1");
+    assertEquals(
+      await Deno.readLink(paths.currentLink),
+      "releases/019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
   });
 });
 
@@ -1077,7 +1303,13 @@ test("promoteExistingRelease refuses a denied release that is absent", async () 
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const calls: string[][] = [];
     await withStatDenied(paths.releaseDir, async () => {
@@ -1085,7 +1317,7 @@ test("promoteExistingRelease refuses a denied release that is absent", async () 
         () =>
           promoteExistingRelease({
             paths,
-            releaseId: "rel-1",
+            releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
             runFn: testRun(false, calls),
           }),
         Error,
@@ -1100,7 +1332,13 @@ test("promoteExistingRelease surfaces a stat failure other than denial", async (
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const calls: string[][] = [];
     const originalStat = Deno.stat;
@@ -1113,7 +1351,7 @@ test("promoteExistingRelease surfaces a stat failure other than denial", async (
         () =>
           promoteExistingRelease({
             paths,
-            releaseId: "rel-1",
+            releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
             runFn: testRun(true, calls),
           }),
         Deno.errors.Interrupted,
@@ -1129,7 +1367,13 @@ test("promoteRelease refuses a staged link into shared before publish runs", asy
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "appuser", serviceId: "svc-1", releaseId: "rel-1" },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     const argv: string[][] = [];
     await assertRejects(
@@ -1148,5 +1392,63 @@ test("promoteRelease refuses a staged link into shared before publish runs", asy
       "reach into",
     );
     assertEquals(argv.some((args) => args.includes("publish")), false);
+  });
+});
+
+test("a release in a service folder is staged and published with components and ids", async () => {
+  await withTempRelease(async (root) => {
+    const folder = { owner: "appuser", scope: "production", slug: "shop.test" };
+    const publishId = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+    const SERVICE = "0192a8f4-3c1e-7a52-9b0d-000000000001";
+    const RELEASE = "0192a8f4-3c1e-7a52-9b0d-000000000002";
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      {
+        username: "appuser",
+        serviceId: SERVICE,
+        releaseId: RELEASE,
+        folder,
+        publishId,
+      },
+    );
+    const workingDir = join(root, "checkout");
+    await Deno.mkdir(workingDir, { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "index.html"), "built");
+    const argv: string[][] = [];
+    const originalMkdir = Deno.mkdir;
+    Deno.mkdir = ((...args: Parameters<typeof Deno.mkdir>) => {
+      if (String(args[0]) === paths.releaseDir) {
+        return Promise.reject(denied("mkdir"));
+      }
+      return originalMkdir.apply(Deno, args);
+    }) as typeof Deno.mkdir;
+    try {
+      const staged = await stageRelease({
+        paths,
+        username: "appuser",
+        workingDir,
+        runFn: async (_command, args) => {
+          argv.push([...args]);
+          if (args.includes("publish-open")) {
+            await originalMkdir(paths.stagingDir, { recursive: true });
+          }
+          return SUDO_OK;
+        },
+      });
+      assertEquals(argv, [[
+        "-n",
+        "publish-open",
+        "appuser",
+        "production",
+        "shop.test",
+        SERVICE,
+        RELEASE,
+        publishId,
+      ]]);
+      assertEquals(staged, { dir: paths.stagingDir, viaPublish: true });
+      assertEquals(paths.stagingDir, join(root, ".tp-staging", publishId));
+    } finally {
+      Deno.mkdir = originalMkdir;
+    }
   });
 });

@@ -85,7 +85,7 @@ const FULL_HOST: HostHelloIdentity = {
         threads: { total: 4 },
       },
     ],
-    memory: { totalBytes: 16_384 * 1024 * 1024 },
+    memory: { totalBytes: 16_384 * 1024 * 1024, pageSizeBytes: 16384 },
     swap: { totalBytes: 0 },
   },
 };
@@ -1006,4 +1006,100 @@ test({
     assert(ages.size > 100, "recycle ages must differ per connection");
     assertEquals(jitteredMaxConnectionAgeMs(1_000, () => 0.5), 1_000);
   },
+});
+
+function recoveryHarness() {
+  return installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("commit-a"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+    }),
+  });
+}
+
+const REPORT = { running: ["cmd-run"], unacked: ["cmd-done"] };
+
+test("IdlePresence hello carries the command report only when it is not empty", () => {
+  const restore = recoveryHarness();
+  try {
+    const withReport = openMockSocket();
+    const presence = new IdlePresence({
+      serverId: "srv-cmd-hello",
+      commandReport: () => REPORT,
+    });
+    presence.attach(withReport as unknown as WebSocket);
+    const hello = framesOfType(withReport, "hello")[0] as Record<
+      string,
+      unknown
+    >;
+    assertEquals(hello.commands, REPORT);
+    presence.detach();
+
+    const empty = openMockSocket();
+    const quiet = new IdlePresence({
+      serverId: "srv-cmd-hello-empty",
+      commandReport: () => undefined,
+    });
+    quiet.attach(empty as unknown as WebSocket);
+    const quietHello = framesOfType(empty, "hello")[0] as Record<
+      string,
+      unknown
+    >;
+    assertEquals("commands" in quietHello, false);
+    quiet.detach();
+  } finally {
+    restore();
+  }
+});
+
+async function heartbeatAfterBuildChange(
+  supports: boolean,
+): Promise<Record<string, unknown>> {
+  let build = makeDaemonBuild("commit-a");
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => build,
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+    }),
+  });
+  const socket = openMockSocket();
+  const presence = new IdlePresence({
+    serverId: `srv-cmd-hb-${supports}`,
+    idleCheckIntervalMs: 15,
+    idleThresholdMs: 15,
+    staleConnectionMs: 60_000,
+    commandReport: () => REPORT,
+    peerSupports: (feature) => supports && feature === "command-recovery-v1",
+  });
+  try {
+    presence.attach(socket as unknown as WebSocket);
+    build = makeDaemonBuild("commit-b");
+    for (let i = 0; i < 200; i += 1) {
+      if (framesOfType(socket, "heartbeat").length > 0) break;
+      await sleep(10);
+    }
+    return framesOfType(socket, "heartbeat")[0] as Record<string, unknown>;
+  } finally {
+    presence.detach();
+    restore();
+  }
+}
+
+test("IdlePresence heartbeat carries the command report only for a control plane that advertises the feature", async () => {
+  const supported = await heartbeatAfterBuildChange(true);
+  assertEquals(supported.commands, REPORT);
+  const older = await heartbeatAfterBuildChange(false);
+  assertEquals("commands" in older, false);
 });

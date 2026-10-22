@@ -89,13 +89,18 @@ narrowed at runtime; narrowing them would take a second compiled binary.
   `BackupRunReportMessage`), mode 0640, written as `.<runId>.json.tmp` then
   renamed. Readers skip dot-prefixed names. The reporter deletes a file only
   after the control plane acks it.
-- Artifacts: `<backupDir>/<managedId>/policy-<policyId>/<backupId>.<ext>`
+- Artifacts: `<backupDir>/managed/<managedId>/policy-<policyId>/<backupId>.<ext>`
   (`managed/engine-paths.ts`), pruned to the policy's `retentionKeep` within
-  that directory only. Storage copies: `<backupDir>/copies/<copyId>/<backupId>.tar.gz`
-  (manual) and `<backupDir>/copies/<copyId>/policy-<policyId>/…` (scheduled).
+  that directory only. Storage copies: `<backupDir>/volumes/<copyId>/<backupId>.tar.gz`
+  (manual) and `<backupDir>/volumes/<copyId>/policy-<policyId>/…` (scheduled).
 
 ## Storage copies
 
+- A `path` copy names its source either by `folder` (the volume folder's owner, scope and
+  name; the host builds `<principalRoot>/<owner>/<scope>/volumes/<name>` from the shared
+  folder rules and ignores `hostPath` when both come) or, from a control plane that does
+  not send it yet, by `hostPath` + `ownerUsername`. The symlink guard starts at the owner's
+  tree in both cases (`copyPathBase`).
 - A copy archive is a live gzipped tar (no pause, no stop) written by a
   throwaway helper container, never by the daemon reading tenant files:
   `COPY_BACKUP_HELPER_IMAGE` (alpine pinned by its multi-arch index digest),
@@ -138,7 +143,7 @@ Keep this order (`copy-restore.ts`, pinned by `copy-restore.test.ts`):
    old contents put back; 5 = putting them back failed too; 6 = an earlier
    restore left `.tp-restore-old` without its `.tp-restore-done` marker, so
    nothing is touched. The script never deletes such an `old`).
-   Before step 2 an intent file (`<backupDir>/restore-intents/<copyId>.json`:
+   Before step 2 an intent file (`<daemonStateDir>/backup/restore-intents/<copyId>.json`:
    container ids, helper name) is written; it is removed once the containers
    run again, and `recoverInterruptedRestores` (daemon boot) starts them if the
    daemon died in between.

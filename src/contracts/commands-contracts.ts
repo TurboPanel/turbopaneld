@@ -6,6 +6,12 @@
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
 import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
+import {
+  type FolderRefParts,
+  folderRefParts,
+  isPathId,
+  parseFolderRefParts,
+} from "./directory-names.ts";
 
 export const COMMAND_TYPES = [
   "daemon.ping",
@@ -19,6 +25,7 @@ export const COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -122,6 +129,23 @@ export type NtpSetResult = {
 };
 
 /**
+ * The uid and primary gid a site owner's Linux user has on this host, reported
+ * back so the control plane records them per server. Must stay in sync with the
+ * instance canonical result shapes.
+ */
+export type PrincipalIdReport = {
+  principalId: string;
+  uid: number;
+  gid: number;
+  /**
+   * The account's directory on this host (`<home root>/<name>`), reported by
+   * the daemon because it owns the root. Additive: older control planes ignore
+   * it.
+   */
+  home?: string;
+};
+
+/**
  * Must stay in sync with the instance canonical `server.principals.reconcile`
  * shape.
  *
@@ -134,6 +158,21 @@ export type NtpSetResult = {
  */
 export type PrincipalsReconcilePayload = {
   principals: EnvironmentDeployPrincipalMaterial[];
+  /**
+   * Accounts the panel has deleted and this host should remove once the set
+   * above is applied: user, group, home and slice go through `tp-host
+   * principal-remove`, the same path a delete teardown's `environment.stop`
+   * takes. A name here may not also be in `principals`. Optional, additive:
+   * an older control plane never sends it.
+   */
+  retirePrincipals?: Array<{ username: string }>;
+  /**
+   * Explicit opt-in for an **empty** `principals`. Without it an empty set
+   * prunes nothing: the host keeps every key file it has, because an empty
+   * list is far more often a control-plane bug than a real "nobody is managed
+   * here any more". Optional, additive.
+   */
+  allowEmpty?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `server.principals.reconcile` shape. */
@@ -147,8 +186,85 @@ export type PrincipalsReconcileResult = {
    * SFTP chroot switch is on). Additive: older control planes ignore it.
    */
   sftpChroot: boolean;
+  /**
+   * Accounts from `retirePrincipals` that the host removed. One the host kept
+   * (still referenced, or not a TurboPanel principal) is named in `warnings`.
+   * Additive: older control planes ignore it.
+   */
+  principalsRetired?: string[];
+  /**
+   * The uid and primary gid each applied account has on this host, so the
+   * control plane records them per server. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
+  /**
+   * Every asset folder found on the host by listing each owner's scopes and
+   * their `services` and `volumes` folders, so the control plane can mark a
+   * folder it expects as missing and record one it does not know as an
+   * orphan. Omitted when the listing failed or ran out of time (the reason is
+   * in `warnings`): its absence says nothing about any folder. Nothing is ever
+   * deleted because of this list. Additive: older control planes ignore it.
+   */
+  folders?: ReportedFolder[];
   warnings: string[];
 };
+
+/** One asset folder found on the host, by its four components. */
+export type ReportedFolder = {
+  owner: string;
+  scope: string;
+  kind: "service" | "volume";
+  slug: string;
+  present: boolean;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.folders.remove` shape.
+ *
+ * Remove asset folders the panel has deleted the asset of. This is the only
+ * way a volume folder leaves the host: stopping an environment keeps volumes,
+ * and a service that leaves the compose file keeps its folder. Each entry names
+ * the folder by its four components, never by a path.
+ */
+export type FoldersRemovePayload = {
+  folders: FolderRemoval[];
+};
+
+/** One folder to remove. */
+export type FolderRemoval = {
+  kind: "service" | "volume";
+  /**
+   * The service or volume id, when the panel still has it (a deleted asset's
+   * row has lost it, and the host finds it from its own record of the folder).
+   * Checked against that record, so a wrong reference cannot remove another
+   * asset's folder; also names the records that go with a service folder.
+   */
+  assetId?: string;
+  folder: FolderRefParts;
+};
+
+/** Must stay in sync with the instance canonical `server.folders.remove` shape. */
+export type FoldersRemoveResult = {
+  summary: string;
+  /** One entry per requested folder, in request order. */
+  folders: FolderRemovalState[];
+};
+
+/** What happened to one requested folder. */
+export type FolderRemovalState = {
+  owner: string;
+  scope: string;
+  kind: "service" | "volume";
+  slug: string;
+  /** True once the folder is gone from the host (or was never there). */
+  removed: boolean;
+  /** Why the folder stayed, in plain words. Present only when `removed` is false. */
+  reason?: string;
+};
+
+/** Most folders one `server.folders.remove` may name. */
+export const FOLDERS_REMOVE_MAX = 100;
 
 /**
  * Must stay in sync with the instance canonical `server.firewall.reconcile`
@@ -436,6 +552,8 @@ export type BackupPolicyWireEntry = {
   composeProject?: string;
   organizationId?: string;
   storageId?: string;
+  /** A path copy: the volume's folder by its parts; the host builds the directory from it. */
+  folder?: FolderRefParts;
   onCalendar: string;
   retentionKeep: number;
   enabled: boolean;
@@ -465,14 +583,20 @@ export type CopyBackupSource = {
   composeProject?: string;
   organizationId?: string;
   storageId?: string;
+  /**
+   * A path copy: the volume's folder by its parts. The host builds the
+   * directory from it and ignores `hostPath`, which may ride beside it for a
+   * host that did not know the field.
+   */
+  folder?: FolderRefParts;
 };
 
 /**
  * Must stay in sync with the instance canonical `storage.backup` shape.
  * `create` archives the copy (live, no pause) into
- * `<backupDir>/copies/<copyId>/<backupId>.tar.gz`; `delete` removes an
+ * `<backupDir>/volumes/<copyId>/<backupId>.tar.gz`; `delete` removes an
  * artifact, and `policyId` locates one a scheduled run made
- * (`<backupDir>/copies/<copyId>/policy-<policyId>/…`).
+ * (`<backupDir>/volumes/<copyId>/policy-<policyId>/…`).
  */
 export type StorageBackupPayload = CopyBackupSource & {
   action: "create" | "delete";
@@ -731,6 +855,25 @@ export type EnvironmentDeployStorageMount = {
   readOnly?: boolean;
 };
 
+/** One service's folder under its site owner's tree. */
+/** A hostname and the environment whose host config it is taken over from. */
+export type EnvironmentDeployTakeover = {
+  /** Folded: lowercase, `xn--` for an international name. */
+  hostname: string;
+  fromEnvironmentId: string;
+};
+
+export type EnvironmentDeployServiceFolder = {
+  serviceId: string;
+  /**
+   * The compose service the folder belongs to. It lets the host tie a site or
+   * app with no hostname, source or native app to its service id, which no
+   * other list carries for it.
+   */
+  composeServiceName?: string;
+  folder: FolderRefParts;
+};
+
 export type EnvironmentDeployStorageMaterial = {
   storageId: string;
   locationId: string;
@@ -738,6 +881,11 @@ export type EnvironmentDeployStorageMaterial = {
   name: string;
   provider: "docker" | "path";
   sourcePath?: string;
+  /**
+   * The volume's folder under its site owner's tree, as components. The only
+   * place an owned volume lives; a `sourcePath` without a folder is refused.
+   */
+  folder?: FolderRefParts;
   /**
    * On-host Docker volume name. Required when `provider` is `docker`.
    */
@@ -762,6 +910,15 @@ export type EnvironmentDeployPrincipalMaterial = {
   username: string;
   uid?: number;
   gid?: number;
+  /**
+   * `central` when `uid`/`gid` were chosen by the control plane's
+   * installation-wide allocation rather than set by an operator. Such ids are
+   * advisory: they are used to create a new account, but an account or group
+   * that already exists on the host is adopted with the ids it has (and
+   * reported back), never renumbered. Absent means an operator override,
+   * which is binding. Additive: an older daemon treats every id as binding.
+   */
+  idSource?: "central";
   home?: string;
   shell?: string;
   /**
@@ -874,6 +1031,8 @@ export type EnvironmentDeploySitePrincipal = {
   username: string;
   uid?: number;
   gid?: number;
+  /** See {@link EnvironmentDeployPrincipalMaterial.idSource}. */
+  idSource?: "central";
 };
 
 /**
@@ -1132,9 +1291,9 @@ export type EnvironmentDeployNativeAppVariable = {
  * carry `credentialUsername`, the basic-auth user to answer with; it is opaque
  * here, so no provider-specific rule leaks into the daemon.
  *
- * `releaseId` becomes a directory name under
- * `<principalHome>/sites/<serviceId>/releases/`, so it is validated as a safe
- * id (no path separators).
+ * `releaseId` becomes a directory name under the service's `releases/` folder
+ * (`<principalHome>/<scope>/services/<name>/releases/`), so it is validated as
+ * a safe id (no path separators).
  */
 /**
  * Auth shape of a clone credential. Mirrors instance
@@ -1145,6 +1304,13 @@ export type EnvironmentDeploySourceCredentialKind = "token" | "ssh_key";
 export type EnvironmentDeploySource = {
   sourceId: string;
   composeServiceName: string;
+  /**
+   * Release-tree directory segment for this sourced service: the environment's
+   * TurboPanel `service.id`. Hosting, native units, cron, and stop reclaim all
+   * use this value; older daemons ignore the field and fall back to the compose
+   * key when it is absent.
+   */
+  releaseServiceId?: string;
   /**
    * Which control-plane provider resolved this entry. Informational only — the
    * daemon never branches on it; `cloneUrl`, `credential`, and `credentialKind`
@@ -1406,6 +1572,11 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   noCache?: boolean;
   /**
+   * Hide web server names and versions in responses and default error pages.
+   * Absent reads as off, so an older control plane changes nothing.
+   */
+  hideWebServerNames?: boolean;
+  /**
    * `sequential` stops the previous version, runs migrations, starts the new
    * version, gates on health and rolls back (see `deploy/sequential-deploy.ts`).
    * Absent or `inplace` is the original `compose up -d` deploy. An older
@@ -1426,6 +1597,29 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   envFile?: string;
   secretPlan?: EnvironmentDeploySecretPlanEntry[];
   storageMaterial?: EnvironmentDeployStorageMaterial[];
+  /**
+   * The folder of every service this deploy runs on the host (a site, a native
+   * app or a Git-backed source), as components. The service id is the same
+   * value the release tree, units and hosting use. The control plane always
+   * sends it (an empty list when nothing runs on the host); a host-run service
+   * with no entry is refused. Kept optional on the wire for compatibility.
+   */
+  serviceFolders?: EnvironmentDeployServiceFolder[];
+  /**
+   * Compose service names of sites that left the compose file. The host removes
+   * the vhost, php-fpm pool and per-site runtime of exactly these, in this
+   * environment, after the deploy has succeeded. Absent or empty removes
+   * nothing: a site missing from `sites` is never read as removed.
+   */
+  removedSites?: string[];
+  /**
+   * Hostnames of this deploy's hostings the control plane can prove were last
+   * held, on this server, by a named other environment of the same organization
+   * that no longer has a hosting for them (deleted, or moved). The host takes a
+   * listed name over only from that environment's own snippet, and refuses if
+   * any other environment's snippet also holds it. Absent or empty: refuse.
+   */
+  takeoverHostnames?: EnvironmentDeployTakeover[];
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
@@ -1512,6 +1706,33 @@ export type EnvironmentDeployResult = {
   releases?: EnvironmentDeployResultRelease[];
   /** Per-site facts for the sites this deploy applied; omitted when none. */
   sites?: EnvironmentDeployResultSite[];
+  /**
+   * The uid and primary gid each account this deploy ensured has on this host.
+   * Omitted when the deploy ensured none. Additive: older control planes
+   * ignore it.
+   */
+  principals?: PrincipalIdReport[];
+  /**
+   * Service folders left in place because their service is no longer in the
+   * compose file. A service that leaves the file keeps its files; only an
+   * explicit delete (`server.folders.remove`) removes them. The control plane
+   * marks each one an orphan. Omitted when there were none. Additive.
+   */
+  keptFolders?: KeptFolder[];
+  /**
+   * True when the deploy found nothing to change (same sources, variables and
+   * settings as the last finished deploy) and so built and restarted nothing.
+   * Omitted otherwise. Additive: older control planes ignore it.
+   */
+  unchanged?: boolean;
+};
+
+/** A service folder a deploy left in place, by its components. */
+export type KeptFolder = {
+  owner: string;
+  scope: string;
+  kind: "service";
+  slug: string;
 };
 
 export type EnvironmentStopPayload = {
@@ -1527,14 +1748,21 @@ export type EnvironmentStopPayload = {
    */
   fabricNetworks?: string[];
   /**
-   * Per-service release trees (`<principalHome>/sites/<serviceId>`) to reclaim.
+   * Per-service folders (`<principalHome>/<scope>/services/<name>`) to reclaim.
    *
    * Generic on purpose — this is the same tree the Git release engine publishes
    * into and native apps run out of, not a site
    * detail. Like `fabricNetworks`, the instance has already dropped the rows
    * that named these, so the payload is the only remaining copy for this host.
    */
-  siteReleases?: Array<{ serviceId: string; username: string }>;
+  siteReleases?: StopSiteRelease[];
+  /**
+   * Services whose published releases are cleared on a Destroy while the
+   * service folder stays (uploads in `shared/`, logs, the owner's account).
+   * Same entry shape as `siteReleases`; a delete sends `siteReleases` instead,
+   * which removes the whole folder.
+   */
+  releaseCleanup?: StopSiteRelease[];
   /**
    * Principals no project, site or app on this host uses once this delete
    * commits: the daemon retires each through `tp-host principal-remove`
@@ -1550,6 +1778,23 @@ export type EnvironmentStopResult = {
   summary: string;
   /** Authoritative empty report so the instance clears container pins. */
   containers: EnvironmentDeployContainer[];
+  /**
+   * What happened to each service folder the stop was told to reclaim. Only
+   * present when the payload carried `siteReleases` with a `folder`; `removed`
+   * is true once the folder is gone from the host (or was never there).
+   */
+  folders?: EnvironmentStopFolderState[];
+};
+
+/** One reclaimed (or not) service folder, by its components. */
+export type EnvironmentStopFolderState = {
+  owner: string;
+  scope: string;
+  kind: "service";
+  slug: string;
+  removed: boolean;
+  /** Why the folder stayed, in plain words. Present only when `removed` is false. */
+  reason?: string;
 };
 
 /** Must stay in sync with the instance canonical `environment.lifecycle` action set. */
@@ -1669,12 +1914,25 @@ export type ManagedApplyExposure = {
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
+export const MANAGED_GRANT_MODES = ["preset", "recipe", "self"] as const;
+
+export type ManagedGrantMode = (typeof MANAGED_GRANT_MODES)[number];
+
 export type ManagedApplyCredential = {
   principalId: string;
   username: string;
   role: "root" | "user" | "replication";
   databases: string[];
   privileges?: string[];
+  /**
+   * How the daemon treats this login's permissions. Absent, `preset` and
+   * `recipe` all mean today's behaviour (the daemon sets the permissions from
+   * `privileges` on every apply; recipes are not built yet, so `recipe` acts
+   * like `preset` here). `self` means the site owner manages permissions by
+   * hand: the daemon keeps the login, password and database connect right and
+   * never resets or revokes anything below the database.
+   */
+  grantMode?: ManagedGrantMode;
   /** Daemon-recipient sealed password (`tpdaemon.…`). */
   password: string;
 };
@@ -1683,6 +1941,36 @@ export type ManagedApplyCredential = {
 export type ManagedApplyDatabaseOp = {
   name: string;
   action: "create" | "drop";
+  /**
+   * Postgres only. A new database made with an owner role: the daemon creates
+   * three roles that cannot log in (`tp_<name>_owner`, `_rw`, `_ro`) and the
+   * database belongs to the owner role. Absent means today's behaviour.
+   * Never converts a database that already exists with another owner.
+   */
+  ownerRole?: boolean;
+  /**
+   * Postgres only, with `ownerRole`. The applied username of a login that owns
+   * the database instead of the no-login owner role being the only owner. The
+   * three roles are still made and still own what is created; the login owns
+   * the database and works through the owner role. Moved onto the login once
+   * the login exists, only when the database is the panel's own or still empty.
+   * Needs `managed-database-owner-v1`.
+   */
+  ownerLogin?: string;
+  /**
+   * Postgres only, on a create with `ownerRole`. Asked for by the customer:
+   * a database that already exists with another owner (and may hold data) is
+   * moved onto its owner role. What is in it (schemas, tables and partitions,
+   * views, sequences, routines, types, operators, collations, statistics, text
+   * search objects, conversions, foreign servers; nothing that belongs to an
+   * extension) is handed over in one transaction that gives up after five
+   * seconds waiting for a lock, then the database itself moves. No data is
+   * touched, and a failure leaves the old owner so a repeat finishes the job.
+   * It also repeats safely on a database that already has its owner role,
+   * picking up what other roles made since. Without it an existing database
+   * is left as it is. Needs `managed-database-convert-v1`.
+   */
+  convertExisting?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -1828,6 +2116,15 @@ export type ManagedMemberObservedResult = {
   replication?: ManagedReplicationHealth;
 };
 
+/** The stale-wipe guard carried by a forced re-seed after a planned switchover. */
+export type ManagedSwitchoverReseed = {
+  recoveryId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  /** The primary epoch the switchover's promote established. */
+  epoch: number;
+};
+
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyPayload = {
   managedId: string;
@@ -1864,10 +2161,25 @@ export type ManagedApplyPayload = {
    */
   monitorUsers?: Array<{ username: string; password: string }>;
   /**
+   * The organization's single Orchestrator topology account (username +
+   * `tpdaemon.…` sealed password). MySQL/MariaDB primary payloads only: the
+   * engine creates it once and standbys inherit it through the binlog, and
+   * Orchestrator never dials a Postgres member.
+   */
+  topologyUser?: { username: string; password: string };
+  /**
    * Operator-forced standby re-seed: bootstrap skips its probes, clears the
    * data directory, and seeds fresh from the primary. Standby payloads only.
    */
   forceResync?: boolean;
+  /**
+   * Set on the forced re-seed of a former primary after a planned Postgres
+   * switchover. The daemon refuses the wipe before touching the data when it
+   * is stale: the recovery id must be the one its own fence stop recorded and
+   * the epoch must be exactly one past the epoch recorded then. Absent on an
+   * operator Resync, which is never checked. Older daemons ignore it.
+   */
+  switchoverReseed?: ManagedSwitchoverReseed;
   /**
    * Cross-host consumer server addresses whose ProxySQL dials this engine's
    * private listener (client + monitor traffic). Admitted by the firewall
@@ -1918,6 +2230,43 @@ export type ManagedLifecyclePayload = {
    * (defaults to primary).
    */
   role?: "primary" | "replica";
+  /**
+   * True on a fence stop of a replaced primary. Absent on ordinary operator
+   * stops and on older control planes; older daemons ignore it.
+   */
+  demoted?: boolean;
+  /**
+   * MySQL-family planned switchover: quiesce the running primary and return
+   * its final GTID position before compose stop.
+   */
+  captureSwitchoverGtid?: boolean;
+  /**
+   * Postgres planned switchover, fence stop of the old primary: report its
+   * final write position after the clean shutdown and keep it with this
+   * recovery id, so a later forced re-seed can be tied to this switchover.
+   * Sent together with `primaryEpoch`. Older daemons ignore both.
+   */
+  switchoverRecoveryId?: string;
+  /** The managed cluster's primary epoch when the switchover began. */
+  primaryEpoch?: number;
+  /**
+   * Undo a failed switchover on the old primary: clear the demoted marker,
+   * start the engine, and make it writable again.
+   */
+  reactivateAfterSwitchoverAbort?: boolean;
+  /**
+   * Required with `reactivateAfterSwitchoverAbort` on MySQL-family engines
+   * after a GTID capture fence: the control plane verified the promotion
+   * target never started or finished promoting.
+   */
+  switchoverAbortPromoteSafe?: boolean;
+  /** Set when promotion on the switchover target completed successfully. */
+  switchoverTargetPromoteCompleted?: boolean;
+  /**
+   * Machine-readable promotion failure from the target (`switchover_promote:*`)
+   * when aborting a planned switchover.
+   */
+  switchoverTargetPromoteError?: string;
 };
 
 /** Must stay in sync with the instance canonical `managed.lifecycle` shape. */
@@ -1925,6 +2274,17 @@ export type ManagedLifecycleResult = {
   status: string;
   summary?: string;
   member?: ManagedMemberObservedResult;
+  /** Present when `captureSwitchoverGtid` quiesced the primary before stop. */
+  switchoverPrimaryExecutedGtidSet?: string;
+  /**
+   * Postgres, with `switchoverRecoveryId`: where the cleanly stopped old
+   * primary's WAL ends (`pg_lsn` text such as `0/7258050`), the same value a
+   * caught-up standby reports as its replay position. Absent when the engine
+   * did not shut down cleanly or the position could not be read.
+   */
+  oldPrimaryFinalLsn?: string;
+  /** Timeline the old primary wrote on (positive integer). */
+  oldPrimaryFinalTimeline?: number;
 };
 
 /**
@@ -1959,6 +2319,13 @@ export type ManagedPromotePayload = {
    * postgres).
    */
   engine?: ManagedEngineCode;
+  /**
+   * MySQL-family planned switchover: the old primary's final executed GTID
+   * set. The target must apply it before promotion.
+   */
+  requiredExecutedGtidSet?: string;
+  /** Seconds for `MASTER_GTID_WAIT` / `WAIT_FOR_EXECUTED_GTID_SET` (default 90). */
+  gtidWaitTimeoutSeconds?: number;
 };
 
 /** Must stay in sync with the instance canonical `managed.promote` shape. */
@@ -1970,6 +2337,13 @@ export type ManagedPromoteResult = {
   demotedMemberId?: string;
   demoted: boolean;
   replication?: ManagedReplicationHealth;
+  /**
+   * Postgres: the last WAL position the promoted standby replayed
+   * (`pg_lsn` text), read after recovery ended. Absent when unreadable.
+   */
+  newPrimaryReplayLsn?: string;
+  /** Timeline the new primary writes on (positive integer). */
+  newPrimaryTimeline?: number;
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
@@ -2001,7 +2375,37 @@ export type ProxySqlUserPayload = {
   defaultDatabase?: string;
   /** Absent means `read-write` (control-plane skew). */
   connectionRole?: ProxySqlConnectionRolePayload;
+  /**
+   * Login used by a database tool: always routed to the primary, never given
+   * read/write split rules. Absent means false (control-plane skew).
+   */
+  tool?: boolean;
+  /**
+   * Connect straight through the front door, no connection sharing (a
+   * PostgreSQL login only). The daemon ignores it for a login with
+   * `allowedSources` and for a root login. Absent means false (control-plane skew).
+   */
+  straightThrough?: boolean;
+  /**
+   * Where this login may be used from: plain IPv4/IPv6 addresses or a
+   * trailing-`%` prefix such as `203.0.113.%` or `2001:db8:1:%`. Present —
+   * even empty — limits the login to these places (a root login also always
+   * keeps the server itself, its containers and its own listed addresses; the
+   * daemon adds the host-local sources itself). Absent (an older control
+   * plane) means no limit, as before.
+   */
+  allowedSources?: string[];
+  /** App logins with `allowedSources`: also allow the server itself and its containers. */
+  allowLocalSources?: boolean;
+  /** Most simultaneous connections for this login. Absent = no per-login cap. */
+  maxConnections?: number;
 };
+
+/** Largest per-login connection cap the wire accepts. */
+export const MAX_PROXYSQL_LOGIN_CONNECTIONS = 100_000;
+
+/** Most addresses one root login may list. */
+export const MAX_PROXYSQL_ALLOWED_SOURCES = 1024;
 
 /** Must stay in sync with the instance canonical `MANAGED_INGRESS_PORT_MIN/MAX`. */
 const MANAGED_INGRESS_PORT_MIN = 1024;
@@ -2049,6 +2453,11 @@ export type ManagedIngressListenerPortsPayload = {
 export type ProxySqlClusterPayload = {
   managedId: string;
   engine: string;
+  /**
+   * Engine release series (`18`, `9.7`, `11.8`). ProxySQL reports it to
+   * clients as the server version; absent from an older control plane.
+   */
+  engineVersion?: string;
   protocolPort: number;
   /**
    * Protocol module this cluster is served by. Explicit because a configurable
@@ -2079,10 +2488,11 @@ export type ManagedIngressReconcilePayload = {
    */
   managedNetwork: string;
   /**
-   * Every host address the client listeners publish on. The instance sends one
-   * entry, from the server's single "allow external access to the databases on
-   * this server" setting: `127.0.0.1` (off) or `0.0.0.0` (on). Absent or empty
-   * means no host publish at all.
+   * Every host address the client listeners publish on, from the server's
+   * single "allow external access to the databases on this server" setting:
+   * `127.0.0.1` (off), or `0.0.0.0` (on) plus `::` when the server has IPv6 and
+   * this daemon lists `managed-ingress-ipv6-v1`. Absent or empty means no host
+   * publish at all.
    */
   bindAddresses?: string[];
   /**
@@ -2180,12 +2590,38 @@ export type ManagedHaReconcilePayload = {
   managedNetwork: string;
   desired: ManagedHaReconcileDesired;
   raft: ManagedHaRaftConfig | null;
+  /**
+   * MySQL and MariaDB clusters. Orchestrator speaks the MySQL protocol and
+   * does not manage Postgres HA, so a Postgres cluster from an older control
+   * plane is dropped by the handler before anything is resolved or
+   * registered (`orchestratorMonitorsEngine`).
+   */
   clusters: ManagedHaCluster[];
   identity: {
     serviceId: string;
     composeServiceName: string;
     containerName: string;
   };
+  /**
+   * The organization's single Orchestrator topology account (username +
+   * `tpdaemon.…` sealed password) — the same account `managed.apply` creates
+   * on every MySQL/MariaDB member of every HA cluster in the organization.
+   * Absent on teardown payloads and from control planes older than the
+   * per-organization account, where the first MySQL-family cluster's
+   * replication credential is used instead.
+   */
+  topologyUser?: { username: string; password: string };
+  /**
+   * Organization-wide Orchestrator HTTP basic auth (`HTTPAuthUser` /
+   * `HTTPAuthPassword`). Same derived value on every Raft peer so followers can
+   * proxy to the leader. Sealed to the target daemon; absent on teardown.
+   */
+  orchestratorApiUser?: { username: string; password: string };
+  /**
+   * Organization-wide Orchestrator `RaftAuthToken`, sealed to the target
+   * daemon. Absent on teardown.
+   */
+  orchestratorRaftToken?: string;
   /**
    * Organization CA leaf + Organization CA trust bundle. `caCertPem` is the
    * concatenated active+retired Organization CA PEMs of the server-owner
@@ -2198,11 +2634,22 @@ export type ManagedHaReconcilePayload = {
 export type ManagedHaReconcileResult = {
   summary: string;
   registeredClusters: string[];
+  failedClusters?: ManagedHaRegistrationFailure[];
+  partial?: boolean;
   restarted: boolean;
   containers?: EnvironmentDeployContainer[];
 };
 
-export type ManagedHaFailoverPhase = "drain" | "recover";
+export type ManagedHaRegistrationFailure = {
+  managedId: string;
+  error: string;
+};
+
+export type ManagedHaFailoverPhase =
+  | "drain"
+  | "undrain"
+  | "recover"
+  | "repoint";
 
 /** Must stay in sync with the instance canonical `managed.ha.failover` shape. */
 export type ManagedHaFailoverPayload = {
@@ -2215,6 +2662,23 @@ export type ManagedHaFailoverPayload = {
   sourcePort?: number;
   targetHost?: string;
   targetPort?: number;
+  /**
+   * Dial IP when `targetHost` is the leaf SAN (Postgres `hostaddr`).
+   * Omitted when `targetHost` is already the address to dial.
+   */
+  targetHostaddr?: string;
+  /**
+   * When non-empty, this `repoint` runs on the **new primary** and creates
+   * each missing physical slot (Postgres). MySQL/MariaDB ignore the list.
+   * Follow mode still uses `targetHost` / `targetPort` on remaining replicas.
+   */
+  ensureSlots?: string[];
+  /**
+   * Carried on `recover` when Orchestrator falls back to `managed.promote`:
+   * the old primary's final GTID set from the fence quiesce step.
+   */
+  requiredExecutedGtidSet?: string;
+  gtidWaitTimeoutSeconds?: number;
 };
 
 export type ManagedHaFailoverResult = {
@@ -2228,6 +2692,13 @@ export const HOSTNAME_RE =
 
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
 export const HOSTNAME_MAX_LENGTH = 253;
+
+/**
+ * The name hosting Caddy keeps one fixed internal certificate for, served to
+ * every name nobody hosts. `.invalid` can never be registered; deploys also
+ * refuse it as a hosting name so no customer can claim it.
+ */
+export const HOSTING_FALLBACK_HOSTNAME = "unconfigured.invalid";
 
 const SHELL_METACHAR_RE = /[;|&$`()<>\\"'!*?{}]/;
 
@@ -2542,10 +3013,12 @@ export function parseTimezoneSetPayload(value: unknown): TimezoneSetPayload {
  * deploy and by a reconcile must validate identically, or one channel becomes a
  * way to say something the other refuses.
  *
- * An **empty** `principals` array is legal and means "TurboPanel manages no
- * accounts on this server" — which is a real instruction (remove every key
- * file), not an empty request. A missing or non-array `principals` is a
- * malformed payload and throws, so the two can never be confused.
+ * An **empty** `principals` array parses (an older control plane may send
+ * it), but it only means "remove every key file" when `allowEmpty` is set;
+ * the handler keeps the host's key files otherwise. A missing or non-array
+ * `principals` is a malformed payload and throws, so the two can never be
+ * confused. A `retirePrincipals` name that is also in `principals` is
+ * refused: one payload cannot both keep and remove an account.
  */
 export function parsePrincipalsReconcilePayload(
   value: unknown,
@@ -2568,7 +3041,24 @@ export function parsePrincipalsReconcilePayload(
     }
     seen.add(principal.username);
   }
-  return { principals };
+  const retirePrincipals = parseOptionalMaterialArray(
+    value.retirePrincipals,
+    "retirePrincipals",
+    parseRetirePrincipalEntry,
+  );
+  for (const entry of retirePrincipals ?? []) {
+    if (seen.has(entry.username)) {
+      throw new Error(
+        `retirePrincipals names ${entry.username}, which is also in principals`,
+      );
+    }
+  }
+  const allowEmpty = parseOptionalBoolean(value.allowEmpty, "allowEmpty");
+  return {
+    principals,
+    ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
+    ...(allowEmpty === undefined ? {} : { allowEmpty }),
+  };
 }
 
 export function parseTlsTrustReconcilePayload(
@@ -3720,6 +4210,11 @@ function parseHostingHostnames(value: unknown): string[] {
     if (!isValidHostname(hostname)) {
       throw new TypeError("hostings[].hostnames must contain valid hostnames");
     }
+    if (hostname === HOSTING_FALLBACK_HOSTNAME) {
+      throw new TypeError(
+        `hostings[].hostnames must not use the reserved name ${HOSTING_FALLBACK_HOSTNAME}`,
+      );
+    }
     hostnames.push(hostname);
   }
   return hostnames;
@@ -4060,6 +4555,101 @@ function parseStorageMount(value: unknown): EnvironmentDeployStorageMount {
   return mount;
 }
 
+/** The folder of each host-run service. Two entries may not name the same compose service. */
+function parseServiceFolders(
+  value: unknown,
+): EnvironmentDeployServiceFolder[] | undefined {
+  const entries = parseOptionalMaterialArray(
+    value,
+    "serviceFolders",
+    parseServiceFolder,
+  );
+  const named = new Set<string>();
+  for (const entry of entries ?? []) {
+    if (entry.composeServiceName === undefined) continue;
+    if (named.has(entry.composeServiceName)) {
+      throw new TypeError(
+        `serviceFolders names the service ${entry.composeServiceName} twice`,
+      );
+    }
+    named.add(entry.composeServiceName);
+  }
+  return entries;
+}
+
+/** The takeovers the control plane vouches for: a lowercase hostname and the environment it comes from, or absent. */
+function parseTakeoverHostnames(
+  value: unknown,
+): EnvironmentDeployTakeover[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("takeoverHostnames must be an array");
+  }
+  return value.map((entry) => {
+    if (!isRecord(entry)) {
+      throw new TypeError("takeoverHostnames must hold hostname entries");
+    }
+    const { hostname, fromEnvironmentId } = entry;
+    if (
+      typeof hostname !== "string" || hostname.length > 253 ||
+      !/^[a-z0-9*][a-z0-9.*-]*$/.test(hostname)
+    ) {
+      throw new TypeError("takeoverHostnames must hold lowercase hostnames");
+    }
+    if (
+      typeof fromEnvironmentId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,64}$/.test(fromEnvironmentId)
+    ) {
+      throw new TypeError(
+        "takeoverHostnames must name the environment a hostname comes from",
+      );
+    }
+    return { hostname, fromEnvironmentId };
+  });
+}
+
+/** The sites that left the compose file: an array of compose service names, or absent. */
+function parseRemovedSites(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError("removedSites must be an array");
+  }
+  return value.map((name) => {
+    if (
+      typeof name !== "string" || name === "." || name === ".." ||
+      !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(name)
+    ) {
+      throw new TypeError("removedSites must hold compose service names");
+    }
+    return name;
+  });
+}
+
+function parseServiceFolder(value: unknown): EnvironmentDeployServiceFolder {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy serviceFolders entry");
+  }
+  const serviceId = parseNonEmptyString(value, "serviceId");
+  if (!STOP_SITE_RELEASE_SERVICE_ID_RE.test(serviceId)) {
+    throw new TypeError("Invalid environment deploy serviceFolders serviceId");
+  }
+  const composeServiceName = value.composeServiceName;
+  if (
+    composeServiceName !== undefined &&
+    (typeof composeServiceName !== "string" ||
+      !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(composeServiceName))
+  ) {
+    throw new TypeError(
+      "Invalid environment deploy serviceFolders composeServiceName",
+    );
+  }
+  return {
+    serviceId,
+    ...(composeServiceName === undefined ? {} : { composeServiceName }),
+    folder: folderRefParts(parseFolderRefParts(value.folder, "service")),
+  };
+}
+
 function parseStorageMaterial(
   value: unknown,
 ): EnvironmentDeployStorageMaterial {
@@ -4102,6 +4692,11 @@ function parseStorageMaterial(
   }
   if (typeof value.sourcePath === "string") {
     material.sourcePath = value.sourcePath;
+  }
+  if (value.folder !== undefined) {
+    material.folder = folderRefParts(
+      parseFolderRefParts(value.folder, "volume"),
+    );
   }
   if (typeof value.principalId === "string") {
     material.principalId = value.principalId;
@@ -4228,6 +4823,7 @@ function parsePrincipalMaterial(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
   const home = parsePrincipalOptionalString(
     value.home,
@@ -4412,6 +5008,7 @@ function parseSitePrincipal(
     username: value.username,
     ...(uid === undefined ? {} : { uid }),
     ...(gid === undefined ? {} : { gid }),
+    ...(value.idSource === "central" ? { idSource: "central" as const } : {}),
   };
 }
 
@@ -4449,9 +5046,9 @@ const NODE_PACKAGE_MANAGERS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Same rule the release engine applies to a release directory name, restated
- * here so a `serviceId` can never smuggle a path separator into the unit's
- * `WorkingDirectory`.
+ * Environment TurboPanel **service** UUIDs on `nativeAppServices[].serviceId`
+ * (the release-tree segment), restated here so a value can never smuggle a
+ * path separator into the unit's `WorkingDirectory`.
  */
 const NATIVE_APP_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 
@@ -4715,6 +5312,27 @@ function parseNativeAppVariables(
     return variable;
   });
   return variables.length > 0 ? variables : undefined;
+}
+
+function parseNativeAppServices(
+  value: unknown,
+): EnvironmentDeployNativeAppService[] | undefined {
+  const parsed = parseOptionalMaterialArray(
+    value,
+    "nativeAppServices",
+    parseNativeAppService,
+  );
+  if (!parsed) return undefined;
+  const seen = new Set<string>();
+  for (const app of parsed) {
+    if (seen.has(app.serviceId)) {
+      throw new TypeError(
+        `Duplicate nativeAppServices serviceId ${app.serviceId}`,
+      );
+    }
+    seen.add(app.serviceId);
+  }
+  return parsed;
 }
 
 function parseNativeAppService(
@@ -5172,6 +5790,30 @@ function parseSourceCredentialUsername(value: unknown): string | undefined {
   return value;
 }
 
+function parseOptionalReleaseServiceId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !NATIVE_APP_SERVICE_ID_RE.test(value)) {
+    throw new TypeError("Invalid sourceMaterial releaseServiceId");
+  }
+  return value;
+}
+
+function assertUniqueSourceReleaseServiceIds(
+  sources: readonly EnvironmentDeploySource[] | undefined,
+): void {
+  if (!sources) return;
+  const ownerById = new Map<string, string>();
+  for (const entry of sources) {
+    const id = entry.releaseServiceId;
+    if (!id) continue;
+    const prior = ownerById.get(id);
+    if (prior !== undefined && prior !== entry.composeServiceName) {
+      throw new TypeError(`Duplicate sourceMaterial releaseServiceId ${id}`);
+    }
+    ownerById.set(id, entry.composeServiceName);
+  }
+}
+
 /**
  * Same rule as `releaseId`: this becomes a directory segment under `releases/`,
  * so it must not be able to carry a separator or a dot segment.
@@ -5208,9 +5850,13 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
   if (!SOURCE_RELEASE_ID_RE.test(releaseId)) {
     throw new TypeError("Invalid sourceMaterial releaseId");
   }
+  const releaseServiceId = parseOptionalReleaseServiceId(
+    value.releaseServiceId,
+  );
   return definedFields({
     sourceId: parseNonEmptyString(value, "sourceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    ...(releaseServiceId === undefined ? {} : { releaseServiceId }),
     provider: value.provider as EnvironmentDeploySource["provider"],
     cloneUrl,
     ref: value.ref,
@@ -5826,6 +6472,12 @@ export function parseEnvironmentDeployPayload(
     value.dockerExternalNetworks,
     "dockerExternalNetworks",
   );
+  const sourceMaterial = parseOptionalMaterialArray(
+    value.sourceMaterial,
+    "sourceMaterial",
+    parseDeploySourceEntry,
+  );
+  assertUniqueSourceReleaseServiceIds(sourceMaterial);
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -5840,16 +6492,8 @@ export function parseEnvironmentDeployPayload(
         "sites",
         parseSite,
       ),
-      nativeAppServices: parseOptionalMaterialArray(
-        value.nativeAppServices,
-        "nativeAppServices",
-        parseNativeAppService,
-      ),
-      sourceMaterial: parseOptionalMaterialArray(
-        value.sourceMaterial,
-        "sourceMaterial",
-        parseDeploySourceEntry,
-      ),
+      nativeAppServices: parseNativeAppServices(value.nativeAppServices),
+      sourceMaterial,
       ingressServices: parseOptionalMaterialArray(
         value.ingressServices,
         "ingressServices",
@@ -5873,6 +6517,10 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      hideWebServerNames: parseOptionalBoolean(
+        value.hideWebServerNames,
+        "hideWebServerNames",
+      ),
       deployStrategy: parseDeployStrategy(value.deployStrategy),
       migrations: parseDeployMigrations(value.migrations),
       healthTimeoutSeconds: parseDeployHealthTimeout(
@@ -5908,6 +6556,9 @@ export function parseEnvironmentDeployPayload(
         "storageMaterial",
         parseStorageMaterial,
       ),
+      serviceFolders: parseServiceFolders(value.serviceFolders),
+      removedSites: parseRemovedSites(value.removedSites),
+      takeoverHostnames: parseTakeoverHostnames(value.takeoverHostnames),
       principalMaterial: parseOptionalMaterialArray(
         value.principalMaterial,
         "principalMaterial",
@@ -5929,13 +6580,22 @@ export function parseEnvironmentDeployPayload(
   };
 }
 
+/**
+ * One service release tree to reclaim on stop. `folder` names the service's folder as
+ * components; it is optional until the daemon resolves folders itself, and `username` stays
+ * until then.
+ */
+export type StopSiteRelease = {
+  serviceId: string;
+  username: string;
+  folder?: FolderRefParts;
+};
+
 /** Same charset the release layout enforces before any path join. */
 const STOP_SITE_RELEASE_SERVICE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const STOP_SITE_RELEASE_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,27}$/;
 
-function parseStopSiteRelease(
-  value: unknown,
-): { serviceId: string; username: string } {
+function parseStopSiteRelease(value: unknown): StopSiteRelease {
   if (!isRecord(value)) {
     throw new TypeError("Invalid environment.stop siteReleases entry");
   }
@@ -5951,15 +6611,60 @@ function parseStopSiteRelease(
   ) {
     throw new TypeError("Invalid environment.stop siteReleases username");
   }
-  return { serviceId: value.serviceId, username: value.username };
+  const release: StopSiteRelease = {
+    serviceId: value.serviceId,
+    username: value.username,
+  };
+  if (value.folder !== undefined) {
+    release.folder = folderRefParts(
+      parseFolderRefParts(value.folder, "service"),
+    );
+  }
+  return release;
 }
 
-function parseStopRetirePrincipal(value: unknown): { username: string } {
+/** Parse `server.folders.remove`. */
+export function parseFoldersRemovePayload(
+  value: unknown,
+): FoldersRemovePayload {
+  if (!isRecord(value) || !Array.isArray(value.folders)) {
+    throw new TypeError("Invalid folders remove payload");
+  }
+  if (value.folders.length === 0 || value.folders.length > FOLDERS_REMOVE_MAX) {
+    throw new TypeError(
+      `folders must name 1 to ${FOLDERS_REMOVE_MAX} folders`,
+    );
+  }
+  return { folders: value.folders.map(parseFolderRemoval) };
+}
+
+function parseFolderRemoval(value: unknown): FolderRemoval {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid folders remove entry");
+  }
+  if (value.kind !== "service" && value.kind !== "volume") {
+    throw new TypeError("Invalid folders remove kind");
+  }
+  const entry: FolderRemoval = {
+    kind: value.kind,
+    folder: folderRefParts(parseFolderRefParts(value.folder, value.kind)),
+  };
+  if (value.assetId !== undefined) {
+    if (typeof value.assetId !== "string" || !isPathId(value.assetId)) {
+      throw new TypeError("Invalid folders remove assetId");
+    }
+    entry.assetId = value.assetId;
+  }
+  return entry;
+}
+
+/** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */
+function parseRetirePrincipalEntry(value: unknown): { username: string } {
   if (
     !isRecord(value) || typeof value.username !== "string" ||
     !STOP_SITE_RELEASE_USERNAME_RE.test(value.username)
   ) {
-    throw new TypeError("Invalid environment.stop retirePrincipals entry");
+    throw new TypeError("Invalid retirePrincipals entry");
   }
   return { username: value.username };
 }
@@ -6000,10 +6705,15 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const releaseCleanup = parseOptionalMaterialArray(
+    value.releaseCleanup,
+    "releaseCleanup",
+    parseStopSiteRelease,
+  );
   const retirePrincipals = parseOptionalMaterialArray(
     value.retirePrincipals,
     "retirePrincipals",
-    parseStopRetirePrincipal,
+    parseRetirePrincipalEntry,
   );
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -6012,6 +6722,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(releaseCleanup === undefined ? {} : { releaseCleanup }),
     ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }
@@ -6173,8 +6884,8 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  *
  * **Tested series only.** The control-plane catalog marks a series
  * `tested: true` once it is validated end-to-end, and only those series are
- * creatable: PostgreSQL 18, MySQL 9.7, MariaDB 12.3. The catalog still *knows*
- * about older series (17/16/15, 8.4, 11.8/11.4/10.11) so an already-persisted
+ * creatable: PostgreSQL 18, MySQL 9.7 and 8.4, MariaDB 12.3 and 11.8. The catalog still *knows*
+ * about older series (17/16/15, 11.4/10.11) so an already-persisted
  * image can be named in the UI, but they must never reach Docker — do not add
  * one back here without flipping `tested` in the control-plane catalog and the
  * UI mirror in the same change.
@@ -6185,7 +6896,10 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  * alternative; PostgreSQL's official Alpine variant stays the default for its
  * smaller footprint.
  */
-const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
+export const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<
+  string,
+  readonly string[]
+> = {
   postgres: [
     "docker.io/library/postgres:18-alpine",
     "docker.io/library/postgres:18",
@@ -6193,10 +6907,14 @@ const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
   mysql: [
     "docker.io/library/mysql:9.7",
     "docker.io/library/mysql:9.7-oraclelinux9",
+    "docker.io/library/mysql:8.4",
+    "docker.io/library/mysql:8.4-oraclelinux9",
   ],
   mariadb: [
     "docker.io/library/mariadb:12.3",
     "docker.io/library/mariadb:12.3-ubi",
+    "docker.io/library/mariadb:11.8",
+    "docker.io/library/mariadb:11.8-ubi",
   ],
 };
 
@@ -6749,6 +7467,14 @@ function parseManagedApplyCredentialEntry(
     throw new TypeError("Invalid managed.apply credentials entry");
   }
   const privileges = parseManagedCredentialPrivileges(entry.privileges);
+  if (
+    entry.grantMode !== undefined &&
+    !(MANAGED_GRANT_MODES as readonly unknown[]).includes(entry.grantMode)
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply credentials entry: grantMode must be preset, recipe or self",
+    );
+  }
   return {
     principalId: entry.principalId,
     username: entry.username,
@@ -6756,6 +7482,9 @@ function parseManagedApplyCredentialEntry(
     databases: parseManagedCredentialDatabases(entry.databases),
     password: entry.password,
     ...(privileges === undefined ? {} : { privileges }),
+    ...(entry.grantMode === undefined
+      ? {}
+      : { grantMode: entry.grantMode as ManagedGrantMode }),
   };
 }
 
@@ -6772,9 +7501,10 @@ function parseManagedApplyCredentials(
 }
 
 /** One `{ username, tpdaemon-envelope password }` monitor credential. */
-function parseManagedMonitorCredential(
+/** Username plus a daemon-bound (`tpdaemon.…`) sealed password. */
+function parseManagedSealedCredential(
   value: unknown,
-  label: string,
+  message: string,
 ): { username: string; password: string } {
   if (
     !isRecord(value) ||
@@ -6783,9 +7513,19 @@ function parseManagedMonitorCredential(
     typeof value.password !== "string" ||
     !value.password.startsWith(DAEMON_ENVELOPE_PREFIX)
   ) {
-    throw new TypeError(`Invalid ${label} monitor credential`);
+    throw new TypeError(message);
   }
   return { username: value.username, password: value.password };
+}
+
+function parseManagedMonitorCredential(
+  value: unknown,
+  label: string,
+): { username: string; password: string } {
+  return parseManagedSealedCredential(
+    value,
+    `Invalid ${label} monitor credential`,
+  );
 }
 
 function parseManagedApplyMonitorUsers(
@@ -6798,6 +7538,45 @@ function parseManagedApplyMonitorUsers(
   return value.map((entry) =>
     parseManagedMonitorCredential(entry, "managed.apply")
   );
+}
+
+function parseManagedTopologyUser(
+  value: unknown,
+  label: string,
+): { username: string; password: string } | undefined {
+  if (value === undefined) return undefined;
+  return parseManagedSealedCredential(value, `Invalid ${label} topologyUser`);
+}
+
+/** `ownerLogin` of a database op: a login name, only on a create with `ownerRole`. */
+function parseManagedDatabaseOwnerLogin(
+  entry: Record<string, unknown>,
+): string | undefined {
+  const value = entry.ownerLogin;
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" || !isSafeIdentifier(value) ||
+    entry.ownerRole !== true || entry.action !== "create"
+  ) {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: ownerLogin must be a login name on a created database with ownerRole",
+    );
+  }
+  return value;
+}
+
+/** `convertExisting` of a database op: true, only on a create with `ownerRole`. */
+function parseManagedDatabaseConvert(
+  entry: Record<string, unknown>,
+): boolean {
+  const value = entry.convertExisting;
+  if (value === undefined) return false;
+  if (value !== true || entry.ownerRole !== true || entry.action !== "create") {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: convertExisting must be true on a created database with ownerRole",
+    );
+  }
+  return true;
 }
 
 function parseManagedApplyDatabases(
@@ -6821,9 +7600,18 @@ function parseManagedApplyDatabases(
     ) {
       throw new TypeError("Invalid managed.apply databases entry");
     }
+    if (entry.ownerRole !== undefined && typeof entry.ownerRole !== "boolean") {
+      throw new TypeError(
+        "Invalid managed.apply databases entry: ownerRole must be true or false",
+      );
+    }
+    const ownerLogin = parseManagedDatabaseOwnerLogin(entry);
     databases.push({
       name: entry.name,
       action: entry.action as ManagedApplyDatabaseOp["action"],
+      ...(entry.ownerRole === true ? { ownerRole: true } : {}),
+      ...(ownerLogin === undefined ? {} : { ownerLogin }),
+      ...(parseManagedDatabaseConvert(entry) ? { convertExisting: true } : {}),
     });
   }
   return databases;
@@ -7254,6 +8042,37 @@ function parseManagedApplyForceResync(value: unknown): boolean {
   return value;
 }
 
+const MAX_PRIMARY_EPOCH = 2_147_483_647;
+
+/** A primary epoch: a non-negative integer, never larger than an int4. */
+export function isManagedPrimaryEpoch(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) &&
+    value >= 0 && value <= MAX_PRIMARY_EPOCH;
+}
+
+function parseManagedSwitchoverReseed(
+  value: unknown,
+): ManagedSwitchoverReseed | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    !isString(value.recoveryId) || !MANAGED_UUID_RE.test(value.recoveryId) ||
+    !isString(value.sourceMemberId) ||
+    !MANAGED_UUID_RE.test(value.sourceMemberId) ||
+    !isString(value.targetMemberId) ||
+    !MANAGED_UUID_RE.test(value.targetMemberId) ||
+    !isManagedPrimaryEpoch(value.epoch)
+  ) {
+    throw new TypeError("Invalid managed.apply switchoverReseed");
+  }
+  return {
+    recoveryId: value.recoveryId,
+    sourceMemberId: value.sourceMemberId,
+    targetMemberId: value.targetMemberId,
+    epoch: value.epoch,
+  };
+}
+
 function parseManagedApplyIngressSourceAddresses(
   value: unknown,
 ): string[] | undefined {
@@ -7268,13 +8087,25 @@ function parseManagedApplyIngressSourceAddresses(
   return value as string[];
 }
 
-/** Must stay in sync with the instance canonical `managed.apply` validator. */
-export function parseManagedApplyPayload(
-  value: unknown,
-): ManagedApplyPayload {
-  if (!isRecord(value)) {
-    throw new TypeError("Invalid managed.apply payload");
-  }
+const MANAGED_APPLY_PAYLOAD_ERROR = "Invalid managed.apply payload";
+
+function assertManagedApplyPayloadShape(
+  value: Record<string, unknown>,
+): asserts value is Record<string, unknown> & {
+  managedId: string;
+  environmentId: string;
+  engine: ManagedEngineCode;
+  projectName: string;
+  containerName: string;
+  managedNetwork: string;
+  image: string;
+  containerPort: number;
+  composeYaml: string;
+  memberId: string;
+  memberRole: string;
+  memberOrdinal: number;
+  readEligible: boolean;
+} {
   if (
     typeof value.managedId !== "string" ||
     value.managedId.length === 0 ||
@@ -7302,15 +8133,25 @@ export function parseManagedApplyPayload(
     value.memberOrdinal < 1 ||
     typeof value.readEligible !== "boolean"
   ) {
-    throw new TypeError("Invalid managed.apply payload");
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
   }
 
   // Mirrors the instance settings parser's image allowlist so a
   // forged/replayed command payload cannot smuggle an unsupported or EOL
   // image past this last daemon-side check before Docker runs it.
   if (!isManagedImageAllowed(value.engine, value.image)) {
-    throw new TypeError("Invalid managed.apply payload");
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
   }
+}
+
+/** Must stay in sync with the instance canonical `managed.apply` validator. */
+export function parseManagedApplyPayload(
+  value: unknown,
+): ManagedApplyPayload {
+  if (!isRecord(value)) {
+    throw new TypeError(MANAGED_APPLY_PAYLOAD_ERROR);
+  }
+  assertManagedApplyPayloadShape(value);
 
   const resources = parseManagedApplyResources(value.resources);
   const dockerOptions = parseManagedDockerOptions(
@@ -7319,7 +8160,13 @@ export function parseManagedApplyPayload(
   );
   const databases = parseManagedApplyDatabases(value.databases);
   const monitorUsers = parseManagedApplyMonitorUsers(value.monitorUsers);
+  const topologyUser = value.topologyUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(value.topologyUser, "managed.apply");
   const forceResync = parseManagedApplyForceResync(value.forceResync);
+  const switchoverReseed = parseManagedSwitchoverReseed(
+    value.switchoverReseed,
+  );
   const ingressSourceAddresses = parseManagedApplyIngressSourceAddresses(
     value.ingressSourceAddresses,
   );
@@ -7357,7 +8204,9 @@ export function parseManagedApplyPayload(
     ...(replication === undefined ? {} : { replication }),
     credentials: parseManagedApplyCredentials(value.credentials),
     ...(monitorUsers === undefined ? {} : { monitorUsers }),
+    ...(topologyUser === undefined ? {} : { topologyUser }),
     ...(forceResync ? { forceResync: true } : {}),
+    ...(switchoverReseed === undefined ? {} : { switchoverReseed }),
     ...(ingressSourceAddresses === undefined ? {} : { ingressSourceAddresses }),
     ...(databases === undefined ? {} : { databases }),
     ...(dropUsers === undefined ? {} : { dropUsers }),
@@ -7402,13 +8251,109 @@ export function parseManagedLifecyclePayload(
     }
     payload.engine = value.engine;
   }
-  if (value.role !== undefined) {
-    if (value.role !== "primary" && value.role !== "replica") {
+  const role = parseManagedLifecycleRole(value.role);
+  if (role !== undefined) payload.role = role;
+  if (parseManagedLifecycleDemoted(value.demoted)) payload.demoted = true;
+  applyManagedLifecycleSwitchoverPayloadFields(payload, value);
+  return payload;
+}
+
+function parseManagedLifecycleStrictOptionalTrue(
+  value: unknown,
+): true | undefined {
+  if (value === undefined) return undefined;
+  if (value === true) return true;
+  throw new TypeError("Invalid managed.lifecycle payload");
+}
+
+function parseManagedLifecycleSwitchoverTargetPromoteError(
+  value: unknown,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 4096
+  ) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
+}
+
+function applyManagedLifecycleSwitchoverPayloadFields(
+  payload: ManagedLifecyclePayload,
+  value: Record<string, unknown>,
+): void {
+  if (parseManagedLifecycleStrictOptionalTrue(value.captureSwitchoverGtid)) {
+    payload.captureSwitchoverGtid = true;
+  }
+  if (
+    parseManagedLifecycleStrictOptionalTrue(
+      value.reactivateAfterSwitchoverAbort,
+    )
+  ) {
+    payload.reactivateAfterSwitchoverAbort = true;
+  }
+  if (
+    parseManagedLifecycleStrictOptionalTrue(value.switchoverAbortPromoteSafe)
+  ) {
+    payload.switchoverAbortPromoteSafe = true;
+  }
+  if (
+    parseManagedLifecycleStrictOptionalTrue(
+      value.switchoverTargetPromoteCompleted,
+    )
+  ) {
+    payload.switchoverTargetPromoteCompleted = true;
+  }
+  applyManagedLifecycleFinalPositionFields(payload, value);
+  const targetError = parseManagedLifecycleSwitchoverTargetPromoteError(
+    value.switchoverTargetPromoteError,
+  );
+  if (targetError !== undefined) {
+    payload.switchoverTargetPromoteError = targetError;
+  }
+}
+
+/** Both or neither: the recovery id is only meaningful with its epoch. */
+function applyManagedLifecycleFinalPositionFields(
+  payload: ManagedLifecyclePayload,
+  value: Record<string, unknown>,
+): void {
+  if (value.switchoverRecoveryId === undefined) {
+    if (value.primaryEpoch !== undefined) {
       throw new TypeError("Invalid managed.lifecycle payload");
     }
-    payload.role = value.role;
+    return;
   }
-  return payload;
+  if (
+    !isString(value.switchoverRecoveryId) ||
+    !MANAGED_UUID_RE.test(value.switchoverRecoveryId) ||
+    !isManagedPrimaryEpoch(value.primaryEpoch)
+  ) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  payload.switchoverRecoveryId = value.switchoverRecoveryId;
+  payload.primaryEpoch = value.primaryEpoch;
+}
+
+function parseManagedLifecycleRole(
+  value: unknown,
+): ManagedLifecyclePayload["role"] {
+  if (value === undefined) return undefined;
+  if (value !== "primary" && value !== "replica") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
+}
+
+/** `true` only when the fence marked the stop as a replaced primary's. */
+function parseManagedLifecycleDemoted(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  return value;
 }
 
 /** Must stay in sync with the instance canonical `managed.destroy` validator. */
@@ -7486,6 +8431,27 @@ export function parseManagedPromotePayload(
     }
     payload.engine = value.engine;
   }
+  if (value.requiredExecutedGtidSet !== undefined) {
+    if (
+      typeof value.requiredExecutedGtidSet !== "string" ||
+      value.requiredExecutedGtidSet.length === 0 ||
+      value.requiredExecutedGtidSet.length > 4096
+    ) {
+      throw new TypeError("Invalid managed.promote payload");
+    }
+    payload.requiredExecutedGtidSet = value.requiredExecutedGtidSet;
+  }
+  if (value.gtidWaitTimeoutSeconds !== undefined) {
+    if (
+      typeof value.gtidWaitTimeoutSeconds !== "number" ||
+      !Number.isInteger(value.gtidWaitTimeoutSeconds) ||
+      value.gtidWaitTimeoutSeconds < 1 ||
+      value.gtidWaitTimeoutSeconds > 600
+    ) {
+      throw new TypeError("Invalid managed.promote payload");
+    }
+    payload.gtidWaitTimeoutSeconds = value.gtidWaitTimeoutSeconds;
+  }
   return payload;
 }
 
@@ -7519,7 +8485,32 @@ export function parseManagedPromoteResult(
   if (isString(value.summary)) result.summary = value.summary;
   const replication = parseManagedReplicationHealth(value.replication);
   if (replication !== undefined) result.replication = replication;
+  const replay = parseWalPosition(
+    value.newPrimaryReplayLsn,
+    value.newPrimaryTimeline,
+  );
+  if (replay !== undefined) {
+    result.newPrimaryReplayLsn = replay.lsn;
+    result.newPrimaryTimeline = replay.timeline;
+  }
   return result;
+}
+
+const WAL_LSN_RE = /^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/;
+
+/** A `pg_lsn` and its timeline, only when both are well formed. */
+function parseWalPosition(
+  lsn: unknown,
+  timeline: unknown,
+): { lsn: string; timeline: number } | undefined {
+  if (!isString(lsn) || !WAL_LSN_RE.test(lsn)) return undefined;
+  if (
+    typeof timeline !== "number" || !Number.isInteger(timeline) ||
+    timeline < 1 || timeline > 4_294_967_295
+  ) {
+    return undefined;
+  }
+  return { lsn, timeline };
 }
 
 function isString(value: unknown): value is string {
@@ -7614,6 +8605,23 @@ export function parseManagedLifecycleResult(
   if (isString(value.summary)) result.summary = value.summary;
   const member = parseManagedMemberObservedResult(value.member);
   if (member !== undefined) result.member = member;
+  if (isString(value.switchoverPrimaryExecutedGtidSet)) {
+    if (
+      value.switchoverPrimaryExecutedGtidSet.length > 0 &&
+      value.switchoverPrimaryExecutedGtidSet.length <= 4096
+    ) {
+      result.switchoverPrimaryExecutedGtidSet =
+        value.switchoverPrimaryExecutedGtidSet;
+    }
+  }
+  const final = parseWalPosition(
+    value.oldPrimaryFinalLsn,
+    value.oldPrimaryFinalTimeline,
+  );
+  if (final !== undefined) {
+    result.oldPrimaryFinalLsn = final.lsn;
+    result.oldPrimaryFinalTimeline = final.timeline;
+  }
   return result;
 }
 
@@ -7916,6 +8924,7 @@ const MAX_COPY_HOST_PATH_LENGTH = 1024;
 /** One path segment: no `/`, no `,` (the path lands in a `docker --mount` value), no shell metacharacters. */
 const COPY_HOST_PATH_SEGMENT_RE = /^[\w.@+-]+$/;
 const COPY_SOURCE_FIELDS = [
+  "folder",
   "volumeName",
   "hostPath",
   "ownerUsername",
@@ -7953,6 +8962,22 @@ function parsePathCopySource(
 ): void {
   if (raw.volumeName !== undefined) {
     throw new Error("A path copy source cannot name a volume");
+  }
+  if (raw.folder !== undefined) {
+    const ref = folderRefParts(parseFolderRefParts(raw.folder, "volume"));
+    if (raw.ownerUsername !== undefined && raw.ownerUsername !== ref.owner) {
+      throw new Error(
+        "A path copy source folder must belong to its ownerUsername",
+      );
+    }
+    if (
+      raw.organizationId !== undefined || raw.storageId !== undefined ||
+      raw.composeProject !== undefined
+    ) {
+      throw new Error("Invalid path copy source folder");
+    }
+    source.folder = ref;
+    if (raw.hostPath === undefined) return;
   }
   if (raw.hostPath !== undefined) {
     if (
@@ -8011,7 +9036,7 @@ export function parseCopyBackupSource(
   }
   if (
     raw.hostPath !== undefined || raw.organizationId !== undefined ||
-    raw.ownerUsername !== undefined
+    raw.ownerUsername !== undefined || raw.folder !== undefined
   ) {
     throw new Error("A docker copy source cannot name a host path");
   }
@@ -8328,6 +9353,17 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     role: value.role,
     password: value.password,
   };
+  parseProxySqlUserRouting(value, user);
+  parseProxySqlUserFlags(value, user);
+  parseProxySqlUserLimits(value, user);
+  return user;
+}
+
+/** Optional default database and connection role of a login. */
+function parseProxySqlUserRouting(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
   if (value.defaultDatabase !== undefined) {
     if (
       typeof value.defaultDatabase !== "string" ||
@@ -8350,7 +9386,69 @@ function parseProxySqlUserPayload(value: unknown): ProxySqlUserPayload {
     }
     user.connectionRole = value.connectionRole;
   }
-  return user;
+}
+
+/** Optional boolean flags of a login (`tool`, `straightThrough`); absent = false. */
+function parseProxySqlUserFlags(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
+  for (const key of ["tool", "straightThrough"] as const) {
+    const flag = value[key];
+    if (flag === undefined) continue;
+    if (typeof flag !== "boolean") {
+      throw new TypeError(`Invalid managed.ingress.reconcile user ${key}`);
+    }
+    user[key] = flag;
+  }
+}
+
+/** Optional source limit and connection cap of a login (absent = no limit). */
+function parseProxySqlUserLimits(
+  value: Record<string, unknown>,
+  user: ProxySqlUserPayload,
+): void {
+  if (value.allowedSources !== undefined) {
+    user.allowedSources = parseProxySqlAllowedSources(value.allowedSources);
+  }
+  if (value.allowLocalSources !== undefined) {
+    if (typeof value.allowLocalSources !== "boolean") {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user allowLocalSources",
+      );
+    }
+    user.allowLocalSources = value.allowLocalSources;
+  }
+  const cap = value.maxConnections;
+  if (cap !== undefined) {
+    if (
+      typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 ||
+      cap > MAX_PROXYSQL_LOGIN_CONNECTIONS
+    ) {
+      throw new TypeError(
+        "Invalid managed.ingress.reconcile user maxConnections",
+      );
+    }
+    user.maxConnections = cap;
+  }
+}
+
+function parseProxySqlAllowedSources(value: unknown): string[] {
+  if (
+    !Array.isArray(value) || value.length > MAX_PROXYSQL_ALLOWED_SOURCES ||
+    value.some((entry) =>
+      typeof entry !== "string" || entry.length === 0 || entry.length > 45 ||
+      !/^[0-9a-fA-F:.]+%?$/.test(entry) ||
+      (entry.endsWith("%") &&
+        (!/^[0-9a-fA-F]{1,4}[.:](?:[0-9a-fA-F:.]*[.:])?%$/.test(entry) ||
+          entry.includes("::")))
+    )
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile user allowedSources",
+    );
+  }
+  return [...value];
 }
 
 function isValidHostgroupId(value: unknown): value is number {
@@ -8360,6 +9458,17 @@ function isValidHostgroupId(value: unknown): value is number {
     value >= 0 &&
     value <= 65_535
   );
+}
+
+/**
+ * Engine release series as the instance sends it: `18`, `9.7`, `11.8`. Must
+ * stay in sync with the instance's `MANAGED_INGRESS_ENGINE_VERSION_RE`
+ * (`src/contracts/commands/schemas.ts`).
+ */
+const PROXYSQL_ENGINE_VERSION_RE = /^\d{1,4}(?:\.\d{1,4}){0,2}$/;
+
+export function isProxySqlEngineVersion(value: unknown): value is string {
+  return typeof value === "string" && PROXYSQL_ENGINE_VERSION_RE.test(value);
 }
 
 function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
@@ -8397,6 +9506,14 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
   if (value.family !== undefined && !isManagedIngressFamily(value.family)) {
     throw new TypeError("Invalid managed.ingress.reconcile cluster family");
   }
+  if (
+    value.engineVersion !== undefined &&
+    !isProxySqlEngineVersion(value.engineVersion)
+  ) {
+    throw new TypeError(
+      "Invalid managed.ingress.reconcile cluster engineVersion",
+    );
+  }
   const cluster: ProxySqlClusterPayload = {
     managedId: value.managedId,
     engine: value.engine,
@@ -8407,6 +9524,9 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
     users: value.users.map(parseProxySqlUserPayload),
   };
   if (value.family !== undefined) cluster.family = value.family;
+  if (value.engineVersion !== undefined) {
+    cluster.engineVersion = value.engineVersion;
+  }
   if (value.autoReadSplit !== undefined) {
     cluster.autoReadSplit = value.autoReadSplit;
   }
@@ -8586,10 +9706,16 @@ export function parseManagedIngressReconcileResult(
 }
 
 const HA_PROMOTION_RULES = new Set(["prefer", "must_not"]);
-const HA_FAILOVER_PHASES = new Set(["drain", "recover"]);
+const HA_FAILOVER_PHASES = new Set([
+  "drain",
+  "undrain",
+  "recover",
+  "repoint",
+]);
 const MAX_HA_CLUSTERS = 64;
 const MAX_HA_MEMBERS = 32;
 const MAX_HA_PEERS = 32;
+const MAX_HA_REGISTRATION_ERROR_LENGTH = 300;
 
 function parseManagedHaIdentity(
   value: unknown,
@@ -8756,6 +9882,9 @@ export function parseManagedHaReconcilePayload(
     ? null
     : parseManagedHaRaftConfig(value.raft);
   const orgTlsMaterial = parseManagedApplyOrgTlsMaterial(value.orgTlsMaterial);
+  const topologyUser = value.topologyUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(value.topologyUser, "managed.ha.reconcile");
   const payload: ManagedHaReconcilePayload = {
     serverId: value.serverId,
     managedNetwork: parseManagedNetworkName(
@@ -8767,10 +9896,52 @@ export function parseManagedHaReconcilePayload(
     clusters: value.clusters.map(parseManagedHaCluster),
     identity: parseManagedHaIdentity(value.identity),
   };
+  if (topologyUser !== undefined) {
+    payload.topologyUser = topologyUser;
+  }
+  const orchestratorApiUser = value.orchestratorApiUser === undefined
+    ? undefined
+    : parseManagedTopologyUser(
+      value.orchestratorApiUser,
+      "managed.ha.reconcile orchestratorApiUser",
+    );
+  if (orchestratorApiUser !== undefined) {
+    payload.orchestratorApiUser = orchestratorApiUser;
+  }
+  if (value.orchestratorRaftToken !== undefined) {
+    if (
+      typeof value.orchestratorRaftToken !== "string" ||
+      !value.orchestratorRaftToken.startsWith("tpdaemon.")
+    ) {
+      throw new TypeError("Invalid managed.ha.reconcile orchestratorRaftToken");
+    }
+    payload.orchestratorRaftToken = value.orchestratorRaftToken;
+  }
   if (orgTlsMaterial !== undefined) {
     payload.orgTlsMaterial = orgTlsMaterial;
   }
   return payload;
+}
+
+function parseManagedHaRegistrationFailures(
+  value: unknown,
+): ManagedHaRegistrationFailure[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_HA_CLUSTERS ||
+    !value.every((entry) =>
+      isRecord(entry) &&
+      typeof entry.managedId === "string" &&
+      SAFE_BACKUP_ID_RE.test(entry.managedId) &&
+      typeof entry.error === "string" &&
+      entry.error.length > 0 &&
+      entry.error.length <= MAX_HA_REGISTRATION_ERROR_LENGTH
+    )
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  return value as ManagedHaRegistrationFailure[];
 }
 
 /** Must stay in sync with the instance canonical `managed.ha.reconcile` result parser. */
@@ -8786,7 +9957,19 @@ export function parseManagedHaReconcileResult(
     !value.registeredClusters.every((entry) =>
       typeof entry === "string" && SAFE_BACKUP_ID_RE.test(entry)
     ) ||
+    (value.partial !== undefined && typeof value.partial !== "boolean") ||
     typeof value.restarted !== "boolean"
+  ) {
+    throw new TypeError("Invalid managed.ha.reconcile result");
+  }
+  const failedClusters = parseManagedHaRegistrationFailures(
+    value.failedClusters,
+  );
+  const failedClusterCount = failedClusters?.length ?? 0;
+  if (
+    (value.partial === true &&
+      (failedClusterCount === 0 || value.registeredClusters.length === 0)) ||
+    (value.partial !== true && failedClusterCount > 0)
   ) {
     throw new TypeError("Invalid managed.ha.reconcile result");
   }
@@ -8795,6 +9978,8 @@ export function parseManagedHaReconcileResult(
     registeredClusters: value.registeredClusters as string[],
     restarted: value.restarted,
   };
+  if (failedClusters !== undefined) result.failedClusters = failedClusters;
+  if (value.partial !== undefined) result.partial = value.partial;
   if (value.containers !== undefined) {
     if (!Array.isArray(value.containers)) {
       throw new TypeError("Invalid managed.ha.reconcile result containers");
@@ -8857,6 +10042,26 @@ function parseOptionalManagedHaPort(value: unknown): number | undefined {
   return value;
 }
 
+const HA_FAILOVER_SLOT_RE = /^[a-z0-9_]{1,63}$/;
+const MAX_HA_FAILOVER_ENSURE_SLOTS = 32;
+
+function parseManagedHaFailoverEnsureSlots(
+  value: unknown,
+): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HA_FAILOVER_ENSURE_SLOTS) {
+    throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+  }
+  const slots: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !HA_FAILOVER_SLOT_RE.test(entry)) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    slots.push(entry);
+  }
+  return slots;
+}
+
 /** Must stay in sync with the instance canonical `managed.ha.failover` validator. */
 export function parseManagedHaFailoverPayload(
   value: unknown,
@@ -8881,6 +10086,31 @@ export function parseManagedHaFailoverPayload(
   if (targetHost !== undefined) payload.targetHost = targetHost;
   const targetPort = parseOptionalManagedHaPort(value.targetPort);
   if (targetPort !== undefined) payload.targetPort = targetPort;
+  const targetHostaddr = parseOptionalManagedHaHost(value.targetHostaddr);
+  if (targetHostaddr !== undefined) payload.targetHostaddr = targetHostaddr;
+  const ensureSlots = parseManagedHaFailoverEnsureSlots(value.ensureSlots);
+  if (ensureSlots !== undefined) payload.ensureSlots = ensureSlots;
+  if (value.requiredExecutedGtidSet !== undefined) {
+    if (
+      typeof value.requiredExecutedGtidSet !== "string" ||
+      value.requiredExecutedGtidSet.length === 0 ||
+      value.requiredExecutedGtidSet.length > 4096
+    ) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    payload.requiredExecutedGtidSet = value.requiredExecutedGtidSet;
+  }
+  if (value.gtidWaitTimeoutSeconds !== undefined) {
+    if (
+      typeof value.gtidWaitTimeoutSeconds !== "number" ||
+      !Number.isInteger(value.gtidWaitTimeoutSeconds) ||
+      value.gtidWaitTimeoutSeconds < 1 ||
+      value.gtidWaitTimeoutSeconds > 600
+    ) {
+      throw new TypeError(MANAGED_HA_FAILOVER_PAYLOAD_ERROR);
+    }
+    payload.gtidWaitTimeoutSeconds = value.gtidWaitTimeoutSeconds;
+  }
   return payload;
 }
 

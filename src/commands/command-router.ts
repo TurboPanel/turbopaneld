@@ -1,8 +1,11 @@
 import {
+  answerRepeatedDispatch,
   deliverCommandOutcome,
   markCommandInFlight,
+  noteCommandProgress,
+  recoveryEnabled,
 } from "./command-outbox.ts";
-import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { errorText, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
@@ -18,6 +21,7 @@ import {
   parseFabricReconcilePayload,
   parseFirewallConfirmPayload,
   parseFirewallReconcilePayload,
+  parseFoldersRemovePayload,
   parseHostnamePayload,
   parseManagedApplyPayload,
   parseManagedBackupPayload,
@@ -40,6 +44,10 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
+import {
+  createDeployStepReporter,
+  sendOverOpenSocket,
+} from "./deploy-progress.ts";
 import { handleManagedApply } from "../managed/apply.ts";
 import {
   beginManagedCommandIntent,
@@ -69,6 +77,7 @@ import { handlePing } from "./ping.ts";
 import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
+import { handleFoldersRemove } from "./remove-folders.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
@@ -121,6 +130,7 @@ export type CommandRouterHandlerOverrides = {
   handleFirewallReconcile?: typeof handleFirewallReconcile;
   handleFirewallConfirm?: typeof handleFirewallConfirm;
   handleBackupsReconcile?: typeof handleBackupsReconcile;
+  handleFoldersRemove?: typeof handleFoldersRemove;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -233,6 +243,17 @@ export async function handleCommandDispatch(
     ws.send(JSON.stringify(ack));
   }
 
+  // The same command sent again (a lost link, a control plane restart) never runs twice.
+  if (answerRepeatedDispatch(ws, message.id)) {
+    logWarn(
+      "commands",
+      `command ${
+        sanitizeForLog(message.id)
+      } was sent again; it is not run a second time`,
+    );
+    return;
+  }
+
   await markCommandInFlight(message.id);
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
@@ -336,6 +357,16 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
+      case "server.folders.remove": {
+        const payload = parseFoldersRemovePayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleFoldersRemove",
+          handleFoldersRemove,
+        )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
       case "server.reboot": {
         parseRebootPayload(message.payload);
         result = await handleReboot(
@@ -351,6 +382,15 @@ export async function handleCommandDispatch(
         // Throws `cancelled: …` when a cancel arrived before this dispatch; the
         // catch below reports it as the command's outcome like any failure.
         const cancel = deployCancels.begin(message.commandId);
+        // Step plan + live progress ride the same socket as the outcome,
+        // fire-and-forget like `update-progress`.
+        const progress = createDeployStepReporter({
+          id: message.id,
+          commandId: message.commandId,
+          send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+          onSnapshot: (snapshot) => noteCommandProgress(message.id, snapshot),
+          keepalive: () => recoveryEnabled(),
+        });
         try {
           result = await pickCommandRouterHandler(
             "handleEnvironmentDeploy",
@@ -359,6 +399,7 @@ export async function handleCommandDispatch(
             decryptSecrets: deps?.decryptSecrets,
             logSink,
             cancel,
+            progress,
           });
         } finally {
           deployCancels.end(message.commandId);

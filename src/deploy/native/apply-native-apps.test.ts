@@ -1,4 +1,10 @@
-import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { journalDetail } from "./apply-native-apps.ts";
+import {
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import { resolveLayout } from "../../paths/layout.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
@@ -24,13 +30,13 @@ import {
   removeNativeAppServices,
 } from "./apply-native-apps.ts";
 import {
-  DEFAULT_NATIVE_APP_NODE_VERSION,
   nativeAppConfigDir,
   nativeAppEnvPath,
   nativeAppEnvStagePath,
   nativeAppNodeBinary,
   nativeAppUnitName,
   nativeAppUnitPath,
+  NEWEST_NATIVE_APP_NODE_VERSION,
   principalSliceContent,
   principalSlicePath,
 } from "./unit.ts";
@@ -200,14 +206,21 @@ function callIndexes(
 }
 
 const ENVIRONMENT_ID = "env-1";
-const USERNAME = "tpproj1";
+const USERNAME = "proj1";
+
+/** The service folder the control plane plans for an app. */
+const folderFor = (slug: string) => ({
+  owner: USERNAME,
+  scope: "production",
+  slug,
+});
 
 function makeApp(
   overrides: Partial<EnvironmentDeployNativeAppService> = {},
 ): EnvironmentDeployNativeAppService {
   return {
     composeServiceName: "web",
-    serviceId: "svc-web",
+    serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
     listenPort: 18100,
     framework: "auto",
     ...overrides,
@@ -223,6 +236,7 @@ function bindings(
     "web",
     {
       username: USERNAME,
+      folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
       previousReleaseId: overrides.previousReleaseId ?? null,
       ...(overrides.startCommand === undefined
         ? {}
@@ -247,13 +261,13 @@ async function recordRelease(
   } = {},
 ): Promise<string> {
   const { releaseDir } = resolveDaemonReleasePaths(layout, {
-    serviceId: "svc-web",
+    serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
     releaseId,
   });
   await Deno.mkdir(releaseDir, { recursive: true });
   await writeReleaseManifest(releaseDir, {
     version: 1,
-    serviceId: "svc-web",
+    serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
     composeServiceName: "web",
     releaseId,
     sourceId: "s1",
@@ -300,21 +314,32 @@ test("applyNativeAppServices installs the unit, reloads, and enables it", async 
     );
     assertEquals(result.applied, ["web"]);
 
-    const unitPath = nativeAppUnitPath("svc-web", host.unitDir);
+    const unitPath = nativeAppUnitPath(
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      host.unitDir,
+    );
     const unit = await Deno.readTextFile(unitPath);
     assertStringIncludes(unit, `User=${USERNAME}`);
     assertStringIncludes(unit, `Group=${USERNAME}`);
     assertStringIncludes(unit, `Slice=turbopanel-${USERNAME}.slice`);
     assertStringIncludes(unit, "Environment=PORT=18100");
-    assertStringIncludes(unit, "/sites/svc-web/current");
+    assertStringIncludes(
+      unit,
+      "/production/services/019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70/current",
+    );
     // Hardening is the whole justification for running containerless.
     assertStringIncludes(unit, "NoNewPrivileges=yes");
     assertStringIncludes(unit, "ProtectSystem=strict");
     assertStringIncludes(unit, "CapabilityBoundingSet=");
-    assertStringIncludes(unit, "/sites/svc-web/shared");
+    assertStringIncludes(
+      unit,
+      "/production/services/019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70/shared",
+    );
 
     assertEquals(mock.systemctl("daemon-reload").length > 0, true);
-    assertEquals(mock.systemctl("enable"), [nativeAppUnitName("svc-web")]);
+    assertEquals(mock.systemctl("enable"), [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    ]);
   } finally {
     await host.cleanup();
   }
@@ -332,7 +357,9 @@ test("a second apply with identical content installs nothing and does not reload
     );
 
     const second = createRunMock();
-    second.activeUnits.add(nativeAppUnitName("svc-web"));
+    second.activeUnits.add(
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
@@ -347,7 +374,9 @@ test("a second apply with identical content installs nothing and does not reload
       0,
     );
     assertEquals(second.systemctl("daemon-reload").length, 0);
-    assertEquals(second.systemctl("restart"), [nativeAppUnitName("svc-web")]);
+    assertEquals(second.systemctl("restart"), [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    ]);
   } finally {
     await host.cleanup();
   }
@@ -364,7 +393,9 @@ test("a changed listen port reinstalls the unit and reloads", async () => {
     );
 
     const mock = createRunMock();
-    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    mock.activeUnits.add(
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
@@ -374,7 +405,7 @@ test("a changed listen port reinstalls the unit and reloads", async () => {
 
     assertEquals(mock.systemctl("daemon-reload").length, 1);
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, "Environment=PORT=18201");
   } finally {
@@ -411,7 +442,7 @@ test("the principal slice carries the account ceiling", async () => {
 
     // The per-app unit stays under it rather than beside it.
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, "CPUQuota=150%");
     assertStringIncludes(unit, `MemoryMax=${512 * 1024 * 1024}`);
@@ -427,15 +458,25 @@ test("a failed health probe rolls current back to the previous release", async (
   const siteDir = join(
     host.layout.principalHomeRoot,
     USERNAME,
-    "sites",
-    "svc-web",
+    "production",
+    "services",
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   );
-  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
-  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
-  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
+    { recursive: true },
+  );
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    { recursive: true },
+  );
+  await Deno.symlink(
+    join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    join(siteDir, "current"),
+  );
 
   // The old release ran as a standalone server.js; the new one as next start.
-  await recordRelease(host.layout, "rel-old", {
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71", {
     nativeStart: { kind: "file", path: "server.js" },
   });
 
@@ -447,26 +488,30 @@ test("a failed health probe rolls current back to the previous release", async (
           // Only the restored release answers.
           probe: async () =>
             await Deno.readLink(join(siteDir, "current")) ===
-              join("releases", "rel-old"),
+              join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
           bindings: new Map([["web", {
             username: USERNAME,
-            previousReleaseId: "rel-old",
-            releaseId: "rel-new",
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+            previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+            releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
             nativeStart: { kind: "next-start" as const },
           }]]),
         }),
       Error,
     );
     assertStringIncludes(error.message, "did not answer on 127.0.0.1:18100");
-    assertStringIncludes(error.message, "rolled back to release rel-old");
+    assertStringIncludes(
+      error.message,
+      "rolled back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
 
     assertEquals(
       await Deno.readLink(join(siteDir, "current")),
-      join("releases", "rel-old"),
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
     );
     // The unit is put back the way the old release ran, reloaded, restarted.
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, "/bin/node server.js\n");
     const reloads = callIndexes(
@@ -480,7 +525,7 @@ test("a failed health probe rolls current back to the previous release", async (
     assertEquals((reloads.at(-1) ?? 0) < (restarts.at(-1) ?? 0), true);
     assertEquals(
       mock.systemctl("restart").at(-1),
-      nativeAppUnitName("svc-web"),
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
     );
     assertEquals(mock.systemctl("disable"), []);
   } finally {
@@ -516,32 +561,48 @@ test("a previous release that never answered is not restored; the app is stopped
   const siteDir = join(
     host.layout.principalHomeRoot,
     USERNAME,
-    "sites",
-    "svc-web",
+    "production",
+    "services",
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   );
-  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
-  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
-  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
-  await recordRelease(host.layout, "rel-old", { healthy: false });
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
+    { recursive: true },
+  );
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    { recursive: true },
+  );
+  await Deno.symlink(
+    join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    join(siteDir, "current"),
+  );
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71", {
+    healthy: false,
+  });
   try {
     const error = await assertRejects(
       () =>
         applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
           ...applyOpts(host, mock, false),
-          bindings: bindings({ previousReleaseId: "rel-old" }),
+          bindings: bindings({
+            previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+          }),
         }),
       Error,
     );
     assertStringIncludes(
       error.message,
-      "the previous release rel-old never passed a health check on this server, so it was not restored; the app is stopped",
+      "the previous release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71 never passed a health check on this server, so it was not restored; the app is stopped",
     );
     assertEquals(
       await Deno.readLink(join(siteDir, "current")),
-      join("releases", "rel-new"),
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
     );
     // Stopped and disabled, so a reboot does not bring the crash loop back.
-    assertEquals(mock.systemctl("disable"), [nativeAppUnitName("svc-web")]);
+    assertEquals(mock.systemctl("disable"), [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    ]);
   } finally {
     await host.cleanup();
   }
@@ -552,14 +613,24 @@ test("a rollback restores the old release's own start command and startup file, 
   const siteDir = join(
     host.layout.principalHomeRoot,
     USERNAME,
-    "sites",
-    "svc-web",
+    "production",
+    "services",
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   );
-  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
-  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
-  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
-  // rel-old ran with an explicit command; the new deploy cleared it.
-  await recordRelease(host.layout, "rel-old", {
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
+    { recursive: true },
+  );
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    { recursive: true },
+  );
+  await Deno.symlink(
+    join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    join(siteDir, "current"),
+  );
+  // 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71 ran with an explicit command; the new deploy cleared it.
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71", {
     startCommand: "node dist/main.js",
   });
   const answers = { rolledBack: true };
@@ -576,40 +647,51 @@ test("a rollback restores the old release's own start command and startup file, 
             probe: async () =>
               answers.rolledBack &&
               await Deno.readLink(join(siteDir, "current")) ===
-                join("releases", "rel-old"),
+                join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
             bindings: new Map([["web", {
               username: USERNAME,
-              previousReleaseId: "rel-old",
-              releaseId: "rel-new",
+              folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+              previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
             }]]),
           },
         ),
       Error,
     );
-    assertStringIncludes(error.message, "rolled back to release rel-old");
+    assertStringIncludes(
+      error.message,
+      "rolled back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, "ExecStart=/bin/sh -c 'node dist/main.js'\n");
 
     // The same rollback, but the old release does not answer either.
     answers.rolledBack = false;
     await Deno.remove(join(siteDir, "current"));
-    await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+    await Deno.symlink(
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+      join(siteDir, "current"),
+    );
     const silent = createRunMock();
     const error2 = await assertRejects(
       () =>
         applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
           ...applyOpts(host, silent, false),
-          bindings: bindings({ previousReleaseId: "rel-old" }),
+          bindings: bindings({
+            previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+          }),
         }),
       Error,
     );
     assertStringIncludes(
       error2.message,
-      "rolled back to release rel-old, but it did not answer either; the app is stopped",
+      "rolled back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71, but it did not answer either; the app is stopped",
     );
-    assertEquals(silent.systemctl("disable"), [nativeAppUnitName("svc-web")]);
+    assertEquals(silent.systemctl("disable"), [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    ]);
   } finally {
     await host.cleanup();
   }
@@ -618,7 +700,7 @@ test("a rollback restores the old release's own start command and startup file, 
 test("a re-sent live release is never rolled back to itself", async () => {
   const host = await makeTestHost();
   try {
-    await recordRelease(host.layout, "rel-same");
+    await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e73");
     const mock = createRunMock();
     const error = await assertRejects(
       () =>
@@ -626,8 +708,9 @@ test("a re-sent live release is never rolled back to itself", async () => {
           ...applyOpts(host, mock, false),
           bindings: new Map([["web", {
             username: USERNAME,
-            previousReleaseId: "rel-same",
-            releaseId: "rel-same",
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+            previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e73",
+            releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e73",
           }]]),
         }),
       Error,
@@ -644,33 +727,47 @@ test("a re-sent live release is never rolled back to itself", async () => {
 test("a release that answers is recorded as a rollback target", async () => {
   const host = await makeTestHost();
   try {
-    const recordDir = await recordRelease(host.layout, "rel-new", {
-      healthy: false,
-    });
+    const recordDir = await recordRelease(
+      host.layout,
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
+      {
+        healthy: false,
+      },
+    );
     await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
       ...applyOpts(host, createRunMock()),
       bindings: new Map([["web", {
         username: USERNAME,
+        folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
         previousReleaseId: null,
-        releaseId: "rel-new",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
       }]]),
     });
     await Deno.stat(join(recordDir, HEALTHY_RECORD_MARKER));
     assertEquals(
-      (await readHealthyRelease(host.layout, "svc-web", "rel-new"))?.releaseId,
-      "rel-new",
+      (await readHealthyRelease(
+        host.layout,
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
+      ))?.releaseId,
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
     );
     // A release with no record (published before records) is simply skipped.
     await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
       ...applyOpts(host, createRunMock()),
       bindings: new Map([["web", {
         username: USERNAME,
+        folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
         previousReleaseId: null,
-        releaseId: "rel-unrecorded",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76",
       }]]),
     });
     assertEquals(
-      await readHealthyRelease(host.layout, "svc-web", "rel-unrecorded"),
+      await readHealthyRelease(
+        host.layout,
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e76",
+      ),
       null,
     );
   } finally {
@@ -681,14 +778,25 @@ test("a release that answers is recorded as a rollback target", async () => {
 test("a pending record is never a rollback target", async () => {
   const host = await makeTestHost();
   try {
-    const recordDir = await recordRelease(host.layout, "rel-old");
+    const recordDir = await recordRelease(
+      host.layout,
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     assertEquals(
-      (await readHealthyRelease(host.layout, "svc-web", "rel-old"))?.releaseId,
-      "rel-old",
+      (await readHealthyRelease(
+        host.layout,
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      ))?.releaseId,
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
     );
     await Deno.writeTextFile(join(recordDir, ".pending"), "");
     assertEquals(
-      await readHealthyRelease(host.layout, "svc-web", "rel-old"),
+      await readHealthyRelease(
+        host.layout,
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      ),
       null,
     );
   } finally {
@@ -706,7 +814,7 @@ test("a failed health probe streams the unit journal into the transcript", async
       return {
         success: true,
         stdout:
-          "Error: Cannot find module '/srv/users/tpproj1/sites/svc-web/current/server.js'\n",
+          "Error: Cannot find module '/srv/users/proj1/production/services/019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70/current/server.js'\n",
         stderr: "",
       };
     }
@@ -742,6 +850,38 @@ test("a failed health probe streams the unit journal into the transcript", async
   }
 });
 
+test("a failed health probe puts the last journal lines in the thrown error", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const run = mock.run;
+  const journal = Array.from({ length: 14 }, (_, i) => `old line ${i}`);
+  journal.push("ReferenceError: require is not defined in ES module scope");
+  mock.run = async (command, args) => {
+    if (args.includes("journalctl")) {
+      mock.calls.push({ command, args: [...args] });
+      return { success: true, stdout: journal.join("\n") + "\n", stderr: "" };
+    }
+    return await run(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+        }),
+      Error,
+    );
+    assertEquals(error.message.includes("did not answer"), true);
+    assertEquals(error.message.includes("require is not defined"), true);
+    assertEquals(error.message.includes("old line 14"), false);
+    assertEquals(error.message.includes("old line 4"), false);
+    assertEquals(error.message.includes("old line 5"), true);
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("lifecycle and removal act on this environment's units only", async () => {
   const host = await makeTestHost();
   try {
@@ -765,7 +905,9 @@ test("lifecycle and removal act on this environment's units only", async () => {
       "stop",
       { run: lifecycleMock.run },
     );
-    assertEquals(stopped, [nativeAppUnitName("svc-web")]);
+    assertEquals(stopped, [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    ]);
 
     const removeMock = createRunMock();
     const removed = await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
@@ -774,7 +916,7 @@ test("lifecycle and removal act on this environment's units only", async () => {
     });
     assertEquals(removed, 1);
     assertEquals(removeMock.systemctl("disable"), [
-      nativeAppUnitName("svc-web"),
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
     ]);
 
     // The other environment's unit is untouched, and the shared slice survives
@@ -782,7 +924,13 @@ test("lifecycle and removal act on this environment's units only", async () => {
     await Deno.stat(nativeAppUnitPath("svc-other", host.unitDir));
     await Deno.stat(principalSlicePath(USERNAME, host.unitDir));
     await assertRejects(
-      () => Deno.stat(nativeAppUnitPath("svc-web", host.unitDir)),
+      () =>
+        Deno.stat(
+          nativeAppUnitPath(
+            "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+            host.unitDir,
+          ),
+        ),
       Deno.errors.NotFound,
     );
   } finally {
@@ -798,7 +946,7 @@ test("an explicit startCommand replaces the default ExecStart", async () => {
       bindings: bindings({ startCommand: "node dist/main.js --port $PORT" }),
     });
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(
       unit,
@@ -816,13 +964,14 @@ test("the start the build detected becomes the unit's ExecStart", async () => {
       ...applyOpts(host, createRunMock()),
       bindings: new Map([["web", {
         username: USERNAME,
+        folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
         previousReleaseId: null,
-        releaseId: "rel-new",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
         nativeStart: { kind: "next-start" as const },
       }]]),
     });
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(
       unit,
@@ -858,12 +1007,14 @@ test("an operator-disabled app is installed but stopped and disabled, never prob
     // The unit file is still installed, so re-enabling later is a start, not
     // a re-render.
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, `User=${USERNAME}`);
 
     // `disable --now` instead of enable/restart; no probe, no rollback.
-    assertEquals(mock.systemctl("disable"), [nativeAppUnitName("svc-web")]);
+    assertEquals(mock.systemctl("disable"), [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    ]);
     assertEquals(mock.systemctl("enable"), []);
     assertEquals(mock.systemctl("restart"), []);
     assertEquals(probes, 0);
@@ -884,6 +1035,7 @@ test("nativeAppBindingsFromPayload skips sources with no owning principal", () =
     projectName: "proj",
     composeFiles: [],
     hostings: [],
+    serviceFolders: [{ serviceId: "web", folder: folderFor("web") }],
     sourceMaterial: [
       {
         sourceId: "s1",
@@ -892,7 +1044,7 @@ test("nativeAppBindingsFromPayload skips sources with no owning principal", () =
         cloneUrl: "https://example.test/repo.git",
         ref: "main",
         commitSha: "abc",
-        releaseId: "rel-new",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
         principal: { principalId: "pr1", username: USERNAME },
         build: { kind: "native", startCommand: "node server.js" },
       },
@@ -903,7 +1055,7 @@ test("nativeAppBindingsFromPayload skips sources with no owning principal", () =
         cloneUrl: "https://example.test/repo.git",
         ref: "main",
         commitSha: "abc",
-        releaseId: "rel-new-2",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e74",
         build: { kind: "native" },
       },
     ],
@@ -911,12 +1063,13 @@ test("nativeAppBindingsFromPayload skips sources with no owning principal", () =
 
   const resolved = nativeAppBindingsFromPayload(
     payload,
-    new Map([["web", "rel-old"]]),
+    new Map([["web", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"]]),
   );
   assertEquals(resolved.size, 1);
   assertEquals(resolved.get("web"), {
     username: USERNAME,
-    previousReleaseId: "rel-old",
+    folder: folderFor("web"),
+    previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
     startCommand: "node server.js",
   });
 });
@@ -924,6 +1077,7 @@ test("nativeAppBindingsFromPayload skips sources with no owning principal", () =
 test("nativeAppBindingsFromPayload carries the applied release and its detected start", () => {
   const payload = {
     environmentId: ENVIRONMENT_ID,
+    serviceFolders: [{ serviceId: "web", folder: folderFor("web") }],
     sourceMaterial: [{
       sourceId: "s1",
       composeServiceName: "web",
@@ -931,7 +1085,7 @@ test("nativeAppBindingsFromPayload carries the applied release and its detected 
       cloneUrl: "https://example.test/repo.git",
       ref: "main",
       commitSha: "abc",
-      releaseId: "rel-new",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
       principal: { principalId: "pr1", username: USERNAME },
       build: { kind: "native" },
     }],
@@ -940,14 +1094,15 @@ test("nativeAppBindingsFromPayload carries the applied release and its detected 
     payload,
     new Map([["web", null]]),
     new Map([["web", {
-      releaseId: "rel-new",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
       nativeStart: { kind: "start-script" as const },
     }]]),
   );
   assertEquals(resolved.get("web"), {
     username: USERNAME,
+    folder: folderFor("web"),
     previousReleaseId: null,
-    releaseId: "rel-new",
+    releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
     nativeStart: { kind: "start-script" },
   });
 });
@@ -981,7 +1136,9 @@ test("a slice and a unit changing together still reload after the unit is instal
 
     // Second deploy changes the account ceiling *and* the unit in one apply.
     const mock = createRunMock();
-    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    mock.activeUnits.add(
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
@@ -1015,7 +1172,7 @@ test("a slice and a unit changing together still reload after the unit is instal
     );
     assertStringIncludes(slice, "CPUQuota=800%");
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, "Environment=PORT=18205");
   } finally {
@@ -1034,7 +1191,9 @@ test("a slice-only change still reloads before the unit is restarted", async () 
     );
 
     const mock = createRunMock();
-    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    mock.activeUnits.add(
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
@@ -1089,7 +1248,7 @@ test("different nodeVersion pins select different vendored runtimes", async () =
         makeApp({ nodeVersion: "22" }),
         makeApp({
           composeServiceName: "api",
-          serviceId: "svc-api",
+          serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75",
           listenPort: 18101,
           nodeVersion: "24.17.0",
         }),
@@ -1098,17 +1257,25 @@ test("different nodeVersion pins select different vendored runtimes", async () =
         ...applyOpts(host, createRunMock()),
         runPlaybook: playbook.runPlaybook,
         bindings: new Map([
-          ["web", { username: USERNAME, previousReleaseId: null }],
-          ["api", { username: USERNAME, previousReleaseId: null }],
+          ["web", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+            previousReleaseId: null,
+          }],
+          ["api", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75"),
+            previousReleaseId: null,
+          }],
         ]),
       },
     );
 
     const web = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     const api = await Deno.readTextFile(
-      nativeAppUnitPath("svc-api", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75", host.unitDir),
     );
     assertStringIncludes(
       web,
@@ -1147,17 +1314,17 @@ test("an app with no nodeVersion vendors and runs the default series", async () 
     });
 
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(
       unit,
       `ExecStart=${
-        nativeAppNodeBinary(host.layout, DEFAULT_NATIVE_APP_NODE_VERSION)
+        nativeAppNodeBinary(host.layout, NEWEST_NATIVE_APP_NODE_VERSION)
       } server.js`,
     );
     assertEquals(
       JSON.parse(playbook.calls[0]?.extraArgs?.[1] ?? "{}"),
-      { node_app_versions: [DEFAULT_NATIVE_APP_NODE_VERSION] },
+      { node_app_versions: [NEWEST_NATIVE_APP_NODE_VERSION] },
     );
   } finally {
     await host.cleanup();
@@ -1208,7 +1375,7 @@ test("ensureNativeAppRuntime vendors the distinct series before the Git build", 
       makeApp(),
       makeApp({
         composeServiceName: "api",
-        serviceId: "svc-api",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75",
         nodeVersion: "22",
       }),
     ],
@@ -1217,7 +1384,7 @@ test("ensureNativeAppRuntime vendors the distinct series before the Git build", 
   assertEquals(playbook.calls.length, 1);
   const extraArgs = playbook.calls[0]!.extraArgs ?? [];
   assertEquals(JSON.parse(extraArgs[1] ?? "{}"), {
-    node_app_versions: ["22", DEFAULT_NATIVE_APP_NODE_VERSION],
+    node_app_versions: ["22", NEWEST_NATIVE_APP_NODE_VERSION],
   });
 });
 
@@ -1273,14 +1440,24 @@ test("a Deno app gets a unit that runs the vendored Deno, and a rollback restore
   const siteDir = join(
     host.layout.principalHomeRoot,
     USERNAME,
-    "sites",
-    "svc-web",
+    "production",
+    "services",
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   );
-  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
-  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
-  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
+    { recursive: true },
+  );
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    { recursive: true },
+  );
+  await Deno.symlink(
+    join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    join(siteDir, "current"),
+  );
   // The old release ran its entry file; the new one runs the start task.
-  await recordRelease(host.layout, "rel-old", {
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71", {
     runtime: "deno",
     nativeStart: { kind: "deno-file", path: "main.ts" },
   });
@@ -1295,20 +1472,24 @@ test("a Deno app gets a unit that runs the vendored Deno, and a rollback restore
             ...applyOpts(host, mock, false),
             probe: async () =>
               await Deno.readLink(join(siteDir, "current")) ===
-                join("releases", "rel-old"),
+                join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
             bindings: new Map([["web", {
               username: USERNAME,
-              previousReleaseId: "rel-old",
-              releaseId: "rel-new",
+              folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+              previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
               nativeStart: { kind: "deno-task" as const },
             }]]),
           },
         ),
       Error,
     );
-    assertStringIncludes(error.message, "rolled back to release rel-old");
+    assertStringIncludes(
+      error.message,
+      "rolled back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(
       unit,
@@ -1326,14 +1507,26 @@ test("a first Deno deploy that fails rolls the site back onto Node, not a Deno u
   const siteDir = join(
     host.layout.principalHomeRoot,
     USERNAME,
-    "sites",
-    "svc-web",
+    "production",
+    "services",
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   );
-  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
-  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
-  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
+    { recursive: true },
+  );
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    { recursive: true },
+  );
+  await Deno.symlink(
+    join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    join(siteDir, "current"),
+  );
   // The old release is a Node release: its record says nothing about a runtime.
-  await recordRelease(host.layout, "rel-old", { startCommand: "node app.js" });
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71", {
+    startCommand: "node app.js",
+  });
   try {
     const error = await assertRejects(
       () =>
@@ -1345,20 +1538,24 @@ test("a first Deno deploy that fails rolls the site back onto Node, not a Deno u
             ...applyOpts(host, mock, false),
             probe: async () =>
               await Deno.readLink(join(siteDir, "current")) ===
-                join("releases", "rel-old"),
+                join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
             bindings: new Map([["web", {
               username: USERNAME,
-              previousReleaseId: "rel-old",
-              releaseId: "rel-new",
+              folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+              previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
               nativeStart: { kind: "deno-task" as const },
             }]]),
           },
         ),
       Error,
     );
-    assertStringIncludes(error.message, "rolled back to release rel-old");
+    assertStringIncludes(
+      error.message,
+      "rolled back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, "ExecStart=/bin/sh -c 'node app.js'\n");
     assertStringIncludes(unit, "/node-app/");
@@ -1376,13 +1573,23 @@ test("a failed Node deploy of a site that ran Deno rolls back onto Deno", async 
   const siteDir = join(
     host.layout.principalHomeRoot,
     USERNAME,
-    "sites",
-    "svc-web",
+    "production",
+    "services",
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   );
-  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
-  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
-  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
-  await recordRelease(host.layout, "rel-old", {
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
+    { recursive: true },
+  );
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    { recursive: true },
+  );
+  await Deno.symlink(
+    join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    join(siteDir, "current"),
+  );
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71", {
     runtime: "deno",
     nativeStart: { kind: "deno-task" },
   });
@@ -1397,19 +1604,23 @@ test("a failed Node deploy of a site that ran Deno rolls back onto Deno", async 
             ...applyOpts(host, mock, false),
             probe: async () =>
               await Deno.readLink(join(siteDir, "current")) ===
-                join("releases", "rel-old"),
+                join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
             bindings: new Map([["web", {
               username: USERNAME,
-              previousReleaseId: "rel-old",
-              releaseId: "rel-new",
+              folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+              previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
             }]]),
           },
         ),
       Error,
     );
-    assertStringIncludes(error.message, "rolled back to release rel-old");
+    assertStringIncludes(
+      error.message,
+      "rolled back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, "/deno-app/2/current/bin/deno task start\n");
     assertStringIncludes(unit, "DENO_DIR=");
@@ -1505,15 +1716,23 @@ test("listEnvironmentNativeAppServiceIds reads staged unit filenames", async () 
         makeApp(),
         makeApp({
           composeServiceName: "api",
-          serviceId: "svc-api",
+          serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75",
           listenPort: 18101,
         }),
       ],
       {
         ...applyOpts(host, createRunMock()),
         bindings: new Map([
-          ["web", { username: USERNAME, previousReleaseId: null }],
-          ["api", { username: USERNAME, previousReleaseId: null }],
+          ["web", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+            previousReleaseId: null,
+          }],
+          ["api", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75"),
+            previousReleaseId: null,
+          }],
         ]),
       },
     );
@@ -1521,7 +1740,10 @@ test("listEnvironmentNativeAppServiceIds reads staged unit filenames", async () 
       host.layout,
       ENVIRONMENT_ID,
     );
-    assertEquals(ids, ["svc-api", "svc-web"]);
+    assertEquals(ids, [
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75",
+    ]);
     assertEquals(
       await listEnvironmentNativeAppServiceIds(host.layout, "missing-env"),
       [],
@@ -1541,15 +1763,23 @@ test("applyNativeAppLifecycle continues when one unit refuses the action", async
         makeApp(),
         makeApp({
           composeServiceName: "api",
-          serviceId: "svc-api",
+          serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75",
           listenPort: 18101,
         }),
       ],
       {
         ...applyOpts(host, createRunMock()),
         bindings: new Map([
-          ["web", { username: USERNAME, previousReleaseId: null }],
-          ["api", { username: USERNAME, previousReleaseId: null }],
+          ["web", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+            previousReleaseId: null,
+          }],
+          ["api", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75"),
+            previousReleaseId: null,
+          }],
         ]),
       },
     );
@@ -1559,7 +1789,7 @@ test("applyNativeAppLifecycle continues when one unit refuses the action", async
     mock.run = async (command, args) => {
       if (
         args.includes("stop") &&
-        args.includes(nativeAppUnitName("svc-web"))
+        args.includes(nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"))
       ) {
         return fail("unit busy");
       }
@@ -1571,7 +1801,9 @@ test("applyNativeAppLifecycle continues when one unit refuses the action", async
       "stop",
       { run: mock.run },
     );
-    assertEquals(touched, [nativeAppUnitName("svc-api")]);
+    assertEquals(touched, [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75"),
+    ]);
   } finally {
     await host.cleanup();
   }
@@ -1654,15 +1886,23 @@ test("removeNativeAppServices continues when disable or unit removal fails", asy
         makeApp(),
         makeApp({
           composeServiceName: "api",
-          serviceId: "svc-api",
+          serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75",
           listenPort: 18101,
         }),
       ],
       {
         ...applyOpts(host, createRunMock()),
         bindings: new Map([
-          ["web", { username: USERNAME, previousReleaseId: null }],
-          ["api", { username: USERNAME, previousReleaseId: null }],
+          ["web", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+            previousReleaseId: null,
+          }],
+          ["api", {
+            username: USERNAME,
+            folder: folderFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75"),
+            previousReleaseId: null,
+          }],
         ]),
       },
     );
@@ -1672,13 +1912,15 @@ test("removeNativeAppServices continues when disable or unit removal fails", asy
     mock.run = async (command, args) => {
       if (
         args.includes("disable") &&
-        args.includes(nativeAppUnitName("svc-web"))
+        args.includes(nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"))
       ) {
         return fail("disable refused");
       }
       if (
         args.includes("rm") &&
-        String(args.at(-1)).includes(nativeAppUnitName("svc-api"))
+        String(args.at(-1)).includes(
+          nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75"),
+        )
       ) {
         return fail("rm refused");
       }
@@ -1725,13 +1967,13 @@ test("removeNativeAppServices warns when daemon-reload fails after teardown", as
 });
 
 test("nativeAppNodeVersions deduplicates and sorts series pins", () => {
-  assertEquals(DEFAULT_NATIVE_APP_NODE_VERSION, "24");
+  assertEquals(NEWEST_NATIVE_APP_NODE_VERSION, "26");
   assertEquals(
     nativeAppNodeVersions([
       makeApp({ nodeVersion: "24" }),
       makeApp({
         composeServiceName: "api",
-        serviceId: "svc-api",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75",
         listenPort: 18101,
         nodeVersion: "22",
       }),
@@ -1747,7 +1989,8 @@ test("nativeAppNodeVersions deduplicates and sorts series pins", () => {
         listenPort: 18103,
       }),
     ]),
-    ["22", "24"],
+    // The app that pins nothing contributes the newest offered series.
+    ["22", "24", "26"],
   );
 });
 
@@ -1917,7 +2160,7 @@ test("probeDefault returns false when fetch fails and rollback catch does not ma
   const mock = createRunMock();
   const originalFetch = globalThis.fetch;
   const originalSymlink = Deno.symlink.bind(Deno);
-  await recordRelease(host.layout, "rel-old");
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71");
   globalThis.fetch = () => Promise.reject(new TypeError("connection refused"));
   Deno.symlink =
     (() => Promise.reject(new Error("symlink refused"))) as typeof Deno.symlink;
@@ -1929,7 +2172,9 @@ test("probeDefault returns false when fetch fails and rollback catch does not ma
           ENVIRONMENT_ID,
           [makeApp()],
           {
-            bindings: bindings({ previousReleaseId: "rel-old" }),
+            bindings: bindings({
+              previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+            }),
             run: mock.run,
             runPlaybook: () => Promise.resolve(),
             sleep: () => Promise.resolve(),
@@ -1941,7 +2186,7 @@ test("probeDefault returns false when fetch fails and rollback catch does not ma
     assertStringIncludes(error.message, "did not answer on 127.0.0.1:18100");
     assertStringIncludes(
       error.message,
-      "rolling back to release rel-old failed; the app is stopped",
+      "rolling back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71 failed; the app is stopped",
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -1962,10 +2207,13 @@ test("listEnvironmentNativeAppServiceIds skips non-files and rethrows a non-NotF
     const dir = nativeAppConfigDir(host.layout);
     await Deno.mkdir(join(dir, "tp-env-1-not-a-file"));
     await Deno.writeTextFile(join(dir, "tp-env-1-notes.txt"), "skip");
-    await Deno.writeTextFile(join(dir, "other-svc-web.service"), "skip");
+    await Deno.writeTextFile(
+      join(dir, "other-019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70.service"),
+      "skip",
+    );
     assertEquals(
       await listEnvironmentNativeAppServiceIds(host.layout, ENVIRONMENT_ID),
-      ["svc-web"],
+      ["019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"],
     );
 
     const originalReadDir = Deno.readDir.bind(Deno);
@@ -2028,37 +2276,49 @@ test("a failed rollback restart does not claim the previous release was restored
   const siteDir = join(
     host.layout.principalHomeRoot,
     USERNAME,
-    "sites",
-    "svc-web",
+    "production",
+    "services",
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
   );
-  await Deno.mkdir(join(siteDir, "releases", "rel-old"), { recursive: true });
-  await Deno.mkdir(join(siteDir, "releases", "rel-new"), { recursive: true });
-  await Deno.symlink(join("releases", "rel-new"), join(siteDir, "current"));
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
+    { recursive: true },
+  );
+  await Deno.mkdir(
+    join(siteDir, "releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    { recursive: true },
+  );
+  await Deno.symlink(
+    join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72"),
+    join(siteDir, "current"),
+  );
   const run: typeof mock.run = async (command, args) => {
     if (args.includes("systemctl") && args.includes("restart")) {
       return fail("restart refused");
     }
     return await mock.run(command, args);
   };
-  await recordRelease(host.layout, "rel-old");
+  await recordRelease(host.layout, "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71");
   try {
     const error = await assertRejects(
       () =>
         applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
           ...applyOpts(host, mock, false),
           run,
-          bindings: bindings({ previousReleaseId: "rel-old" }),
+          bindings: bindings({
+            previousReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+          }),
         }),
       Error,
     );
     assertStringIncludes(error.message, "did not answer on 127.0.0.1:18100");
     assertStringIncludes(
       error.message,
-      "rolling back to release rel-old failed; the app is stopped",
+      "rolling back to release 019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71 failed; the app is stopped",
     );
     assertEquals(
       await Deno.readLink(join(siteDir, "current")),
-      join("releases", "rel-old"),
+      join("releases", "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71"),
     );
   } finally {
     await host.cleanup();
@@ -2078,7 +2338,7 @@ test("removeNativeAppServices swallows a leftover staged file that cannot be unl
     );
     const staged = join(
       nativeAppConfigDir(host.layout),
-      `tp-${ENVIRONMENT_ID}-svc-web.service`,
+      `tp-${ENVIRONMENT_ID}-019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70.service`,
     );
     Deno.remove = ((path: string | URL, options?: Deno.RemoveOptions) => {
       if (String(path) === staged) {
@@ -2207,7 +2467,9 @@ test("disabling a native app uses a generic error when systemd is silent", async
     );
     assertStringIncludes(
       error.message,
-      `Failed to disable native app unit ${nativeAppUnitName("svc-web")}`,
+      `Failed to disable native app unit ${
+        nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70")
+      }`,
     );
   } finally {
     await host.cleanup();
@@ -2265,7 +2527,10 @@ test("an app's variables are copied by tp-host before its unit is installed and 
   const host = await makeTestHost();
   const mock = createRunMock(host.layout);
   const lines: string[] = [];
-  const envPath = nativeAppEnvPath(host.layout, "svc-web");
+  const envPath = nativeAppEnvPath(
+    host.layout,
+    "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+  );
   try {
     await applyNativeAppServices(
       host.layout,
@@ -2292,27 +2557,42 @@ test("an app's variables are copied by tp-host before its unit is installed and 
         args.includes("install") && args.at(-1)?.endsWith(".service") === true,
     );
     assertEquals(copyAt < unitAt, true);
-    assertEquals(mock.calls[copyAt].args, ["-n", "app-env-install", "svc-web"]);
+    assertEquals(mock.calls[copyAt].args, [
+      "-n",
+      "app-env-install",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+    ]);
 
-    const text = mock.envCopies.get("svc-web")!;
+    const text = mock.envCopies.get("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70")!;
     assertStringIncludes(text, "API_URL='https://example.test'\n");
     assertStringIncludes(text, "DB_PASSWORD='hunter2'\n");
     // A platform-set name never reaches the file, where it would override.
     assertEquals(text.includes("PORT="), false);
     // The daemon's own staged file is gone: the secret is not on disk twice.
     await assertRejects(
-      () => Deno.stat(nativeAppEnvStagePath(host.layout, "svc-web")),
+      () =>
+        Deno.stat(
+          nativeAppEnvStagePath(
+            host.layout,
+            "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+          ),
+        ),
       Deno.errors.NotFound,
     );
 
     // The unit names the root-owned copy, never the daemon-writable staging
     // path, and holds no value.
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertStringIncludes(unit, `EnvironmentFile=${envPath}\n`);
     assertEquals(
-      unit.includes(nativeAppEnvStagePath(host.layout, "svc-web")),
+      unit.includes(
+        nativeAppEnvStagePath(
+          host.layout,
+          "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        ),
+      ),
       false,
     );
     assertEquals(unit.includes("hunter2"), false);
@@ -2346,17 +2626,25 @@ test("dropping every variable: the unit stops loading the file first, then the c
     });
 
     const mock = createRunMock(host.layout);
-    mock.envCopies.set("svc-web", "left by the earlier deploy");
-    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    mock.envCopies.set(
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      "left by the earlier deploy",
+    );
+    mock.activeUnits.add(
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
       [makeApp()],
       applyOpts(host, mock),
     );
-    assertEquals(mock.envCopies.has("svc-web"), false);
+    assertEquals(
+      mock.envCopies.has("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+      false,
+    );
     const unit = await Deno.readTextFile(
-      nativeAppUnitPath("svc-web", host.unitDir),
+      nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertEquals(unit.includes("EnvironmentFile"), false);
     // The unit changed, so systemd must be told before the restart.
@@ -2384,7 +2672,7 @@ test("dropping every variable: the unit stops loading the file first, then the c
     assertEquals(mock.calls[removeAt].args, [
       "-n",
       "app-env-remove",
-      "svc-web",
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
     ]);
   } finally {
     await host.cleanup();
@@ -2401,7 +2689,9 @@ test("an app that never had variables asks tp-host for nothing but the removal, 
       applyOpts(host, createRunMock()),
     );
     const mock = createRunMock();
-    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    mock.activeUnits.add(
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
@@ -2453,7 +2743,9 @@ test("a variable change with an identical unit still restarts the app, with no r
     });
 
     const mock = createRunMock(host.layout);
-    mock.activeUnits.add(nativeAppUnitName("svc-web"));
+    mock.activeUnits.add(
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    );
     await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [
       makeApp(VARIABLES_APP),
     ], {
@@ -2461,11 +2753,13 @@ test("a variable change with an identical unit still restarts the app, with no r
       ...opts((envelopes) => Promise.resolve(envelopes.map(() => "rotated"))),
     });
     assertStringIncludes(
-      mock.envCopies.get("svc-web")!,
+      mock.envCopies.get("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70")!,
       "DB_PASSWORD='rotated'",
     );
     assertEquals(mock.systemctl("daemon-reload").length, 0);
-    assertEquals(mock.systemctl("restart"), [nativeAppUnitName("svc-web")]);
+    assertEquals(mock.systemctl("restart"), [
+      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+    ]);
   } finally {
     await host.cleanup();
   }
@@ -2508,14 +2802,77 @@ test("removing an environment's apps also removes their variables copies", async
       variableMaterial: VARIABLE_MATERIAL,
       decryptSecrets: decryptForTest,
     });
-    assertEquals(mock.envCopies.has("svc-web"), true);
+    assertEquals(
+      mock.envCopies.has("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+      true,
+    );
 
     await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
       run: mock.run,
       systemdUnitDir: host.unitDir,
     });
-    assertEquals(mock.envCopies.has("svc-web"), false);
+    assertEquals(
+      mock.envCopies.has("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
+      false,
+    );
   } finally {
     await host.cleanup();
   }
+});
+
+test("nativeAppBindingsFromPayload carries the service folder of the sourced service", () => {
+  const folder = { owner: USERNAME, scope: "production", slug: "api" };
+  const payload = {
+    environmentId: ENVIRONMENT_ID,
+    projectId: "p1",
+    organizationId: "o1",
+    projectName: "proj",
+    composeFiles: [],
+    hostings: [],
+    sourceMaterial: [{
+      sourceId: "s1",
+      composeServiceName: "web",
+      releaseServiceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      provider: "github",
+      cloneUrl: "https://example.test/repo.git",
+      ref: "main",
+      commitSha: "abc",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
+      principal: { principalId: "pr1", username: USERNAME },
+      build: { kind: "native", startCommand: "node server.js" },
+    }],
+    serviceFolders: [{
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      folder,
+    }],
+  } as unknown as Parameters<typeof nativeAppBindingsFromPayload>[0];
+  assertEquals(
+    nativeAppBindingsFromPayload(payload).get("web")?.folder,
+    folder,
+  );
+  assertThrows(
+    () => nativeAppBindingsFromPayload({ ...payload, serviceFolders: [] }),
+    Error,
+    "has no folder planned on this server",
+  );
+});
+
+test("journalDetail caps long lines and the whole tail, and masks token-looking text", () => {
+  const long = "x".repeat(900);
+  const detail = journalDetail([
+    long,
+    "DB_PASSWORD=hunter2 started",
+    `Authorization: ${["Bea", "rer"].join("")} ${
+      ["abcdefgh", "ijklmnop1234"].join("")
+    }`,
+    "key " + "A".repeat(50),
+  ]);
+  assertEquals(detail.includes("hunter2"), false);
+  assertEquals(detail.includes("abcdefghijklmnop1234"), false);
+  assertEquals(detail.includes("A".repeat(50)), false);
+  assertEquals(detail.includes("x".repeat(400)), false);
+  const many = journalDetail(
+    Array.from({ length: 10 }, () => "y ".repeat(140)),
+  );
+  assertEquals(many.length < 2100, true);
 });

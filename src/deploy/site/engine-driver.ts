@@ -52,7 +52,7 @@
 import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logWarn } from "../../util/logger.ts";
-import { forEachSequential } from "../../util/sequential.ts";
+import { forEachSequential, repeatSequential } from "../../util/sequential.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 
 /** Engines that can serve a site. */
@@ -441,8 +441,55 @@ export type SiteValidationTarget = Readonly<{
   url: string;
 }>;
 
-/** Attempts per endpoint before a reload is declared a failure. */
+/** Attempts per endpoint that answer with an HTTP 5xx before a reload is declared a failure. */
 const VALIDATION_ATTEMPTS = 3;
+
+/**
+ * Pause after an HTTP 5xx answer before probing again, in milliseconds. A 5xx
+ * is a real answer, so it gets the short pause and only {@link VALIDATION_ATTEMPTS}
+ * tries; the pause is deliberate (the old loop had none), because an engine can
+ * answer 502 for a moment while the app behind it finishes starting.
+ */
+const SERVER_ERROR_RETRY_PAUSE_MS = 250;
+
+/**
+ * Pauses between probes that could not connect at all, in milliseconds, one per
+ * retry (15 retries, 16 probes in all). A web server that was just installed
+ * and started for the first time takes a few seconds before it listens, so
+ * refusing a connection is waited out. The pauses add up to 23.75 seconds.
+ *
+ * Worst case for one endpoint: 16 probes that each run into curl's
+ * `--max-time 5`, about 80 seconds, plus the pauses, about 104 seconds. The
+ * control plane gives an `environment.deploy` command 600 seconds, so one
+ * endpoint cannot spend the whole budget. The wait is not abortable: the probe
+ * runs through the `run` seam, which has no cancel hook, and a cancelled deploy
+ * simply finishes this step first.
+ */
+const CONNECT_RETRY_DELAYS_MS: readonly number[] = [
+  250,
+  500,
+  1000,
+  1000,
+  1000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+  2000,
+];
+
+export type ValidateSiteEndpointsOptions = Readonly<{
+  /** Pause between probes; replaced in tests. */
+  sleep?: (ms: number) => Promise<void>;
+}>;
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Prove the reloaded engine still serves every site it owns.
@@ -452,6 +499,12 @@ const VALIDATION_ATTEMPTS = 3;
  * is the engine that came back refusing connections or failing every request
  * because the config it was just handed is wrong in a way `-t` cannot see.
  *
+ * A connection that cannot be made is retried, with growing pauses that add up
+ * to about 24 seconds, before it counts as a failure: the first site on a host
+ * starts its web server for the first time, and that server is not listening
+ * the moment `systemctl` returns.
+ * An HTTP 5xx is a real answer and is retried only a few times.
+ *
  * The probe runs through the injected `run` seam (`curl`, already a host
  * prerequisite for the vendoring playbooks) so an apply stays testable without
  * a live listener.
@@ -460,38 +513,88 @@ export async function validateSiteEndpoints(
   run: SiteRunFn,
   label: string,
   targets: readonly SiteValidationTarget[],
+  options: ValidateSiteEndpointsOptions = {},
 ): Promise<void> {
-  for (const target of targets) {
-    let failure = "no response";
-    let answered = false;
-    for (let attempt = 0; attempt < VALIDATION_ATTEMPTS; attempt += 1) {
-      const probe = await run("curl", [
-        "-sS",
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{http_code}",
-        "--max-time",
-        "5",
-        target.url,
-      ]);
-      if (!probe.success) {
-        failure = probe.stderr || "request failed";
-        continue;
-      }
-      const status = Number.parseInt(probe.stdout.trim(), 10);
-      if (Number.isFinite(status) && status > 0 && status < 500) {
-        answered = true;
-        break;
-      }
-      failure = `HTTP ${probe.stdout.trim() || "?"}`;
-    }
-    if (!answered) {
+  const sleep = options.sleep ?? defaultSleep;
+  await forEachSequential(targets, async (target) => {
+    const failure = await waitForEndpoint(run, target.url, sleep);
+    if (failure !== null) {
       throw new Error(
         `${label} did not serve ${target.label} at ${target.url} after reload: ${failure}`,
       );
     }
+  });
+}
+
+/** One probe of a loopback URL: it answered, or why it did not. */
+type EndpointProbe =
+  | Readonly<{ answered: true }>
+  | Readonly<{ answered: false; failure: string; connected: boolean }>;
+
+async function probeEndpoint(
+  run: SiteRunFn,
+  url: string,
+): Promise<EndpointProbe> {
+  const probe = await run("curl", [
+    "-sS",
+    "-o",
+    "/dev/null",
+    "-w",
+    "%{http_code}",
+    "--max-time",
+    "5",
+    url,
+  ]);
+  if (!probe.success) {
+    return {
+      answered: false,
+      failure: probe.stderr || "request failed",
+      connected: false,
+    };
   }
+  const status = Number.parseInt(probe.stdout.trim(), 10);
+  if (Number.isFinite(status) && status > 0 && status < 500) {
+    return { answered: true };
+  }
+  return {
+    answered: false,
+    failure: `HTTP ${probe.stdout.trim() || "?"}`,
+    connected: true,
+  };
+}
+
+/**
+ * Probe `url` until it answers, or the retries for its kind of failure run out.
+ * Returns `null` once it answered, else the last failure.
+ */
+async function waitForEndpoint(
+  run: SiteRunFn,
+  url: string,
+  sleep: (ms: number) => Promise<void>,
+): Promise<string | null> {
+  let failure: string | null = "no response";
+  let connectFailures = 0;
+  let badAnswers = 0;
+  await repeatSequential(async () => {
+    const probe = await probeEndpoint(run, url);
+    if (probe.answered) {
+      failure = null;
+      return false;
+    }
+    failure = probe.failure;
+    let pause: number | undefined = SERVER_ERROR_RETRY_PAUSE_MS;
+    if (probe.connected) {
+      badAnswers += 1;
+      if (badAnswers >= VALIDATION_ATTEMPTS) return false;
+    } else {
+      pause = CONNECT_RETRY_DELAYS_MS[connectFailures];
+      connectFailures += 1;
+    }
+    if (pause === undefined) return false;
+    await sleep(pause);
+    return true;
+  });
+  return failure;
 }
 
 /** One engine's render → stage → swap → test → reload behavior. */

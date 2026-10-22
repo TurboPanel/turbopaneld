@@ -18,9 +18,14 @@ import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
-import { guardHostingCaddySites } from "../deploy/ingress.ts";
+import {
+  ensureHostingFallback,
+  guardHostingCaddySites,
+} from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
+import { DemotedMemberGuard } from "../managed/demoted-guard.ts";
+import { ManagedEngineExitGuard } from "../managed/engine-exit-guard.ts";
 import {
   classifyHostBootRecord,
   type HostBootKind,
@@ -66,6 +71,8 @@ export type SentinelLike = {
 
 // Global for shutdown cleanup: P1-2 fix boot-hold local retry timer.
 let bootHoldRetry: { stop(): void } | undefined;
+let demotedMemberGuard: { stop(): void } | undefined;
+let engineExitGuard: { stop(): void } | undefined;
 
 export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
@@ -198,7 +205,10 @@ async function scanLiveReleases(): Promise<void> {
  * (`ingress.ts`), so a stale one does not keep ingress from starting.
  */
 async function guardHostingSites(): Promise<void> {
-  await guardHostingCaddySites(resolveLayout(Deno.env.toObject()));
+  const layout = resolveLayout(Deno.env.toObject());
+  await guardHostingCaddySites(layout);
+  // After the guard, so the check sees only snippets Caddy can load.
+  await ensureHostingFallback(layout);
 }
 
 /**
@@ -244,10 +254,16 @@ export async function applyManagedBootHoldAtStart(
     listingFailed = true;
     logWarn("managed", "boot hold failed, retrying:", sanitizeForLog(err));
   }
+  // Until the members have been listed and held, no engine may be started
+  // by the engine exit guard: a primary that should be held would come back.
+  let holdPending = listingFailed;
   const reapply = listingFailed
     ? async () => {
       const done = await hold(kind, layout);
-      if (done) await persist(layout);
+      if (done) {
+        holdPending = false;
+        await persist(layout);
+      }
       return done;
     }
     : undefined;
@@ -262,10 +278,35 @@ export async function applyManagedBootHoldAtStart(
   retry.start();
   // Stored globally for shutdown cleanup (below).
   bootHoldRetry = retry;
+  demotedMemberGuard?.stop();
+  engineExitGuard?.stop();
+  const demotedGuard = new DemotedMemberGuard({
+    layout,
+    run: runDocker,
+  });
+  demotedGuard.start();
+  demotedMemberGuard = demotedGuard;
+  const exitGuard = new ManagedEngineExitGuard({
+    layout,
+    run: runDocker,
+    startPaused: () => holdPending,
+  });
+  exitGuard.start();
+  engineExitGuard = exitGuard;
   // Only persist the record after every hold is applied.
   if (holdSucceeded) {
     await persist(layout);
   }
+}
+
+/** Test seam: drop timers started by {@link applyManagedBootHoldAtStart}. */
+export function stopManagedRuntimeGuardsForTests(): void {
+  bootHoldRetry?.stop();
+  demotedMemberGuard?.stop();
+  engineExitGuard?.stop();
+  bootHoldRetry = undefined;
+  demotedMemberGuard = undefined;
+  engineExitGuard = undefined;
 }
 
 async function markCleanShutdown(): Promise<void> {
@@ -430,6 +471,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       (io.stopHostStorageSamplers ?? stopHostStorageSamplers)();
       // P1-2 cleanup: stop local retry timer so the process can exit.
       bootHoldRetry?.stop();
+      demotedMemberGuard?.stop();
       closeDockerClient(dockerClient);
       dockerClient = undefined;
       abort.abort();

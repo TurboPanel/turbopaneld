@@ -425,12 +425,13 @@ test("parseEnvironmentDeployPayload carries a Deno native app's runtime and deno
     ...DEPLOY_BASE,
     nativeAppServices: [
       { ...base, runtime: "deno", denoVersion: "2.9" },
-      base,
+      { ...base, composeServiceName: "worker", serviceId: "svc-native-2" },
     ],
   });
   assertEquals(payload.nativeAppServices?.[0]?.runtime, "deno");
   assertEquals(payload.nativeAppServices?.[0]?.denoVersion, "2.9");
   // A Node app's wire shape is untouched.
+  assertEquals(payload.nativeAppServices?.[1]?.composeServiceName, "worker");
   assertEquals("runtime" in (payload.nativeAppServices?.[1] ?? {}), false);
   for (const bad of [{ runtime: "bun" }, { denoVersion: "latest" }]) {
     assertThrows(
@@ -761,6 +762,45 @@ test("parseEnvironmentLifecyclePayload rejects unknown action", () => {
       }),
     TypeError,
     "Invalid environment lifecycle payload",
+  );
+});
+
+test("parsePrincipalsReconcilePayload carries retirePrincipals and allowEmpty", () => {
+  assertEquals(
+    parsePrincipalsReconcilePayload({
+      principals: [],
+      retirePrincipals: [{ username: "old_user" }],
+      allowEmpty: true,
+    }),
+    {
+      principals: [],
+      retirePrincipals: [{ username: "old_user" }],
+      allowEmpty: true,
+    },
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({
+        principals: [{ principalId: PRINCIPAL_ID, username: "kept" }],
+        retirePrincipals: [{ username: "kept" }],
+      }),
+    Error,
+    "retirePrincipals names kept, which is also in principals",
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({
+        principals: [],
+        retirePrincipals: [{ username: "bad name" }],
+      }),
+    TypeError,
+    "Invalid retirePrincipals entry",
+  );
+  assertThrows(
+    () =>
+      parsePrincipalsReconcilePayload({ principals: [], allowEmpty: "yes" }),
+    TypeError,
+    "allowEmpty must be a boolean",
   );
 });
 

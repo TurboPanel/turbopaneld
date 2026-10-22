@@ -114,6 +114,140 @@ export function releaseRoleObjectsSql(
 }
 
 /**
+ * Empties every user schema in the connected database so a restore returns it
+ * to exactly the backup's state (rows, tables and schemas created after the
+ * backup are gone). Every schema is dropped. `public` is the only one the dump
+ * does not create itself, so it is recreated with the same owner and the same
+ * privileges; the dump brings back the others with their own privileges. The
+ * roles bound to the database keep their access. Role-level settings, the database itself (owner, connect rights) and
+ * the cluster's roles are not touched.
+ *
+ * Meant to run inside the same transaction as the restore, after
+ * `BEGIN;`: a failed restore then rolls everything back. `lock_timeout`
+ * makes a busy application connection fail the restore cleanly instead of
+ * waiting forever on a table lock.
+ */
+/**
+ * `pg_restore -f -` replays session `SET lock_timeout` / `SET statement_timeout`
+ * (usually `= 0`) that override an earlier `SET LOCAL lock_timeout` in the same
+ * transaction. Strip only those directives before `psql` sees them.
+ */
+const PG_RESTORE_TIMEOUT_SET_LINE_RE =
+  /^\s*SET\s+(?:lock_timeout|statement_timeout)\s*=/i;
+
+export function stripPgRestoreTimeoutSetLines(sql: string): string {
+  return sql
+    .split("\n")
+    .filter((line) => !PG_RESTORE_TIMEOUT_SET_LINE_RE.test(line))
+    .join("\n");
+}
+
+/** `abc` -> `[Aa][Bb][Cc]`; letters only, other characters pass through. */
+function anyCase(word: string): string {
+  return word.replaceAll(
+    /[a-z]/gi,
+    (ch) => `[${ch.toUpperCase()}${ch.toLowerCase()}]`,
+  );
+}
+
+/**
+ * Plain POSIX `sed -E` address; kept in sync with
+ * {@link stripPgRestoreTimeoutSetLines}. It must not use the GNU-only `I`
+ * (ignore case) flag: the default Postgres image is Alpine, whose BusyBox
+ * `sed` rejects it ("unsupported command I") and so every restore failed.
+ * Bracket pairs such as `[Ss]` match either case instead.
+ */
+export const PG_RESTORE_TIMEOUT_SET_LINE_SED = `/^[[:space:]]*${
+  anyCase("SET")
+}[[:space:]]+(${anyCase("lock_timeout")}|${
+  anyCase("statement_timeout")
+})[[:space:]]*=/`;
+
+export function restoreResetSql(): string {
+  return [
+    "SET LOCAL lock_timeout = '30s';",
+    "DO $tp_reset$",
+    "DECLARE",
+    "  s record;",
+    "  a record;",
+    "BEGIN",
+    "  FOR s IN",
+    "    SELECT n.nspname AS name,",
+    "           n.nspowner::pg_catalog.regrole::pg_catalog.text AS owner,",
+    "           n.nspacl AS acl",
+    "      FROM pg_catalog.pg_namespace n",
+    "     WHERE n.nspname !~ '^pg_'",
+    "       AND n.nspname <> 'information_schema'",
+    "  LOOP",
+    "    EXECUTE pg_catalog.format('DROP SCHEMA %I CASCADE', s.name);",
+    "    IF s.name = 'public' THEN",
+    "      EXECUTE pg_catalog.format('CREATE SCHEMA %I', s.name);",
+    "      EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %s', s.name, s.owner);",
+    "      IF s.acl IS NOT NULL THEN",
+    "        FOR a IN",
+    "          SELECT e.grantee, e.privilege_type, e.is_grantable",
+    "            FROM pg_catalog.aclexplode(s.acl) e",
+    "           WHERE e.grantee <> (SELECT n2.nspowner FROM pg_catalog.pg_namespace n2 WHERE n2.nspname = s.name)",
+    "        LOOP",
+    "          EXECUTE pg_catalog.format(",
+    "            'GRANT %s ON SCHEMA %I TO %s%s',",
+    "            a.privilege_type, s.name,",
+    "            CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::pg_catalog.regrole::pg_catalog.text END,",
+    "            CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END",
+    "          );",
+    "        END LOOP;",
+    "      END IF;",
+    "    END IF;",
+    "  END LOOP;",
+    "END",
+    "$tp_reset$;",
+  ].join("\n");
+}
+
+/**
+ * Recreate per-login schemas for every read-write platform login on the
+ * connected database. The schema reset drops them; the dump does not contain
+ * logins created after the backup. Idempotent — run after `pg_restore` in the
+ * same transaction, before `COMMIT`.
+ */
+export function restoreReadWriteLoginSchemasSql(): string {
+  return [
+    "DO $tp_rw_schemas$",
+    "DECLARE r record;",
+    "BEGIN",
+    // A database that belongs to its owner role has no per-login schemas.
+    "  IF EXISTS (SELECT 1 FROM pg_catalog.pg_database d",
+    "               JOIN pg_catalog.pg_roles o ON o.oid = d.datdba",
+    "              WHERE d.datname = pg_catalog.current_database()",
+    "                AND o.rolname = 'tp_' || d.datname || '_owner') THEN",
+    "    RETURN;",
+    "  END IF;",
+    "  FOR r IN",
+    "    SELECT rol.rolname",
+    "      FROM pg_catalog.pg_roles rol",
+    "     WHERE rol.rolcanlogin",
+    "       AND NOT rol.rolsuper",
+    "       AND pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'CONNECT')",
+    "       AND pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'TEMPORARY')",
+    "       AND NOT pg_catalog.has_database_privilege(",
+    "             rol.oid, pg_catalog.current_database(), 'CREATE')",
+    "  LOOP",
+    "    IF NOT EXISTS (",
+    "      SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = r.rolname",
+    "    ) THEN",
+    "      EXECUTE pg_catalog.format(",
+    "        'CREATE SCHEMA %I AUTHORIZATION %I', r.rolname, r.rolname",
+    "      );",
+    "    END IF;",
+    "  END LOOP;",
+    "END",
+    "$tp_rw_schemas$;",
+  ].join("\n");
+}
+
+/**
  * CREATE DATABASE must not run inside a DO/function block (Postgres error
  * "CREATE DATABASE cannot be executed from a function"). Callers check
  * existence first via {@link databaseExistsSql}, then run this top-level.
@@ -152,11 +286,16 @@ export function dropDatabaseSql(name: string): string {
 const DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"] as const;
 const READ_WRITE_DATABASE_PRIVILEGES = ["CONNECT", "TEMPORARY"] as const;
 const READ_ONLY_DATABASE_PRIVILEGES = ["CONNECT"] as const;
+/** Read-write logins change data only: no TRUNCATE, no REFERENCES (same as MySQL and MariaDB). */
 const WRITER_TABLE_PRIVILEGES = [
   "SELECT",
   "INSERT",
   "UPDATE",
   "DELETE",
+] as const;
+/** Owner logins (the migration level) also empty tables and add foreign keys. */
+const OWNER_TABLE_PRIVILEGES = [
+  ...WRITER_TABLE_PRIVILEGES,
   "TRUNCATE",
   "REFERENCES",
 ] as const;
@@ -250,6 +389,20 @@ export function grantDatabaseSql(
     `$turbopanel$;`,
   );
   return lines.join("\n");
+}
+
+/**
+ * The only database-level right the panel keeps for a login the site owner
+ * manages by hand: the right to connect. It adds that one right and never
+ * revokes anything, so grants made by hand stay as they are.
+ */
+export function grantConnectOnlySql(
+  database: string,
+  username: string,
+): string {
+  return `GRANT CONNECT ON DATABASE ${quoteIdentifier(database)} TO ${
+    quoteIdentifier(username)
+  };`;
 }
 
 /**
@@ -411,7 +564,9 @@ function defaultPrivilegeSql(
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON TABLES FROM ${role};`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} REVOKE ALL ON SEQUENCES FROM ${role};`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
-        WRITER_TABLE_PRIVILEGES.join(", ")
+        (owners.includes(name)
+          ? OWNER_TABLE_PRIVILEGES
+          : WRITER_TABLE_PRIVILEGES).join(", ")
       } ON TABLES TO ${role};`,
       `ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ${
         WRITER_SEQUENCE_PRIVILEGES.join(", ")
@@ -534,7 +689,14 @@ function existingObjectSql(
           : WRITER_SCHEMA_PRIVILEGES,
         true,
       ),
-      exactObjectAclSql(table, name, WRITER_TABLE_PRIVILEGES, true),
+      exactObjectAclSql(
+        table,
+        name,
+        owners.includes(name)
+          ? OWNER_TABLE_PRIVILEGES
+          : WRITER_TABLE_PRIVILEGES,
+        true,
+      ),
       exactObjectAclSql(sequence, name, WRITER_SEQUENCE_PRIVILEGES, true),
     );
   }
@@ -553,7 +715,7 @@ function existingObjectSql(
  * already does not): same end state on every series. Writes only while the
  * PUBLIC entry still holds CREATE.
  */
-function closePublicSchemaSql(): string {
+export function closePublicSchemaSql(): string {
   return [
     `DO $turbopanel$`,
     `BEGIN`,
@@ -573,10 +735,13 @@ function closePublicSchemaSql(): string {
  * each database's own catalog). Covers every schema that is not a system
  * schema, existing objects now and objects made later by any creator.
  *
- * - writers (owner, read-write): SELECT, INSERT, UPDATE, DELETE, TRUNCATE and
- *   REFERENCES on tables (REFERENCES lets a migration add a foreign key to a
- *   table another login owns; it cannot run code); USAGE, SELECT and UPDATE on
- *   sequences; USAGE and CREATE on schemas. Never TRIGGER or MAINTAIN: a login that may add a
+ * - owner logins (the migration level): SELECT, INSERT, UPDATE, DELETE,
+ *   TRUNCATE and REFERENCES on tables (REFERENCES lets a migration add a
+ *   foreign key to a table another login owns; it cannot run code); USAGE,
+ *   SELECT and UPDATE on sequences; USAGE and CREATE on schemas.
+ * - read-write logins: SELECT, INSERT, UPDATE and DELETE on tables (data
+ *   changes only, so a read-write login cannot empty a table, the same as on
+ *   MySQL and MariaDB); the same sequence rights; USAGE on schemas. Never TRIGGER or MAINTAIN: a login that may add a
  *   trigger to a table runs code as whoever writes that table, the owner
  *   login included. Version-neutral (no privilege is named for revoking), so
  *   it applies unchanged on every supported Postgres series.
@@ -770,9 +935,24 @@ export function standbyReplicationStatusSql(): string {
     `    THEN COALESCE(pg_catalog.pg_wal_lsn_diff(r.flushed_lsn, pg_catalog.pg_last_wal_replay_lsn()), 0)`,
     `    ELSE NULL`,
     `  END AS lag_bytes,`,
+    // Clock-from-last-replay is apply delay only while the replica is behind.
+    // An idle primary sends no new xacts, so that timestamp stays put and
+    // `now() - pg_last_xact_replay_timestamp()` would grow without bound
+    // even when flushed/replayed WAL already matches the primary's last
+    // reported end (`latest_end_lsn`). Caught-up idle replicas report 0. The
+    // zero needs a reported end: just after the receiver starts, before the
+    // first message, `latest_end_lsn` is NULL and the clock branch applies.
     `  CASE`,
+    `    WHEN r.status = 'streaming'`,
+    `      AND r.latest_end_lsn IS NOT NULL`,
+    `      AND pg_catalog.pg_last_wal_replay_lsn() IS NOT NULL`,
+    `      AND pg_catalog.pg_wal_lsn_diff(`,
+    `        r.latest_end_lsn,`,
+    `        pg_catalog.pg_last_wal_replay_lsn()`,
+    `      ) <= 0`,
+    `    THEN 0`,
     `    WHEN r.status = 'streaming' AND pg_catalog.pg_last_xact_replay_timestamp() IS NOT NULL`,
-    `    THEN EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp()))`,
+    `    THEN GREATEST(EXTRACT(EPOCH FROM (now() - pg_catalog.pg_last_xact_replay_timestamp())), 0)`,
     `    ELSE NULL`,
     `  END AS lag_seconds,`,
     // Both stay readable after the WAL receiver exits (primary gone): the
@@ -855,8 +1035,180 @@ export function promoteSql(): string {
   return "SELECT pg_catalog.pg_promote(true, 60);";
 }
 
+/**
+ * Undo the demoted fence's persisted `default_transaction_read_only` (an
+ * `ALTER SYSTEM` setting in `postgresql.auto.conf` on the data volume) once
+ * the member is a primary again. A no-op when it was never set.
+ */
+export function resetFencedReadOnlyDefaultSql(): string {
+  return [
+    "ALTER SYSTEM RESET default_transaction_read_only;",
+    "SELECT pg_catalog.pg_reload_conf();",
+  ].join("\n");
+}
+
+export function currentPrimaryConninfoSql(): string {
+  return "SELECT pg_catalog.current_setting('primary_conninfo', true);";
+}
+
+function conninfoValueNeedsQuotes(value: string): boolean {
+  return value.length === 0 || /\s/.test(value) || value.includes("'") ||
+    value.includes("\\");
+}
+
+export function formatConninfoValue(value: string): string {
+  if (!conninfoValueNeedsQuotes(value)) return value;
+  return `'${
+    value.replaceAll("\\", String.raw`\\`).replaceAll("'", String.raw`\'`)
+  }'`;
+}
+
+/** Read a single-quoted conninfo value starting after the opening quote. */
+function readQuotedConninfoValue(
+  text: string,
+  start: number,
+): { value: string; next: number } {
+  let value = "";
+  let i = start;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === "\\" && i + 1 < text.length) {
+      value += text[i + 1];
+      i += 2;
+    } else if (ch === "'") {
+      return { value, next: i + 1 };
+    } else {
+      value += ch;
+      i += 1;
+    }
+  }
+  return { value, next: i };
+}
+
+/** Read an unquoted conninfo value up to the next space. */
+function readBareConninfoValue(
+  text: string,
+  start: number,
+): { value: string; next: number } {
+  let i = start;
+  while (i < text.length && text[i] !== " ") i += 1;
+  return { value: text.slice(start, i), next: i };
+}
+
+function parseConninfoEntries(current: string): Array<[string, string]> {
+  const entries: Array<[string, string]> = [];
+  let i = 0;
+  while (i < current.length) {
+    while (i < current.length && current[i] === " ") i += 1;
+    const eq = current.indexOf("=", i);
+    if (i >= current.length || eq === -1) break;
+    const key = current.slice(i, eq);
+    const valueStart = eq + 1;
+    const read = current[valueStart] === "'"
+      ? readQuotedConninfoValue(current, valueStart + 1)
+      : readBareConninfoValue(current, valueStart);
+    entries.push([key, read.value]);
+    i = read.next;
+  }
+  return entries;
+}
+
+/**
+ * Replace `host` / `port` (and `hostaddr` when supplied) in a libpq
+ * `primary_conninfo` string, leaving user, password, and TLS keys.
+ * When the new dial has no `hostaddr`, drop the old key — libpq requires a
+ * numeric IP there, never a container name.
+ */
+export function rewritePrimaryConninfo(
+  current: string,
+  primary: { host: string; hostaddr?: string; port: number },
+): string {
+  const entries = parseConninfoEntries(current);
+  const byKey = new Map(entries);
+  byKey.set("host", primary.host);
+  byKey.set("port", String(primary.port));
+  if (primary.hostaddr) {
+    byKey.set("hostaddr", primary.hostaddr);
+  } else {
+    byKey.delete("hostaddr");
+  }
+  // Map keeps first-insertion order: existing keys first, new ones after.
+  return [...byKey]
+    .map(([key, value]) => `${key}=${formatConninfoValue(value)}`)
+    .join(" ");
+}
+
+/** Persist a rewritten `primary_conninfo` and restart the WAL receiver. */
+export function applyFollowedPrimaryConninfoSql(conninfo: string): string {
+  return [
+    `ALTER SYSTEM SET primary_conninfo = ${quoteLiteral(conninfo)};`,
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_terminate_backend(pid)",
+    "  FROM pg_catalog.pg_stat_activity",
+    "  WHERE backend_type = 'walreceiver';",
+  ].join("\n");
+}
+
 export function isInRecoverySql(): string {
   return "SELECT pg_catalog.pg_is_in_recovery();";
+}
+
+/**
+ * After a promote: the last WAL position replayed during recovery (static once
+ * recovery ended) and the first 8 hex digits of the WAL file name at the
+ * current insert position, which are the timeline the primary now writes on.
+ */
+export function promotedPositionSql(): string {
+  return "SELECT pg_catalog.pg_last_wal_replay_lsn(), " +
+    "substr(pg_catalog.pg_walfile_name(pg_catalog.pg_current_wal_lsn()), 1, 8);";
+}
+
+/** True when this instance is a writable primary (not standby recovery). */
+export function isWritablePrimarySql(): string {
+  return "SELECT NOT pg_catalog.pg_is_in_recovery();";
+}
+
+/**
+ * Best-effort quiesce for a fenced former primary still running, as far as
+ * Postgres allows against superusers:
+ *
+ * 1. `ALTER SYSTEM SET default_transaction_read_only = on` + reload, so every
+ *    new session (superusers included) starts read-only;
+ * 2. then `pg_terminate_backend` every other client backend, so no session
+ *    opened before the reload keeps a read-write default (WAL senders are
+ *    not client backends and are never touched);
+ * 3. this session itself is set read-only.
+ *
+ * A superuser can still `SET default_transaction_read_only = off` or
+ * `SET TRANSACTION READ WRITE` in a new session, or `ALTER SYSTEM` it back:
+ * Postgres has no read-only mode a superuser cannot leave. Stopping the
+ * container (the guard does, right after this) is the real fence, and
+ * `standby.signal` on the volume keeps the next start in recovery. Each
+ * statement runs on its own (psql reads stdin, no single transaction), as
+ * `ALTER SYSTEM` refuses a transaction block.
+ */
+export function enforceFencedFormerPrimarySql(): string {
+  return [
+    "ALTER SYSTEM SET default_transaction_read_only = on;",
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_terminate_backend(pid)",
+    "  FROM pg_catalog.pg_stat_activity",
+    "  WHERE pid <> pg_catalog.pg_backend_pid()",
+    "    AND backend_type = 'client backend'",
+    "    AND pid NOT IN (",
+    "      SELECT active_pid FROM pg_catalog.pg_replication_slots",
+    "      WHERE active_pid IS NOT NULL);",
+    "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY;",
+  ].join("\n");
+}
+
+/** Undo demoted-fence SQL and promote after a switchover abort reactivation. */
+export function reactivateFormerPrimaryAfterSwitchoverAbortSql(): string {
+  return [
+    "ALTER SYSTEM RESET default_transaction_read_only;",
+    "SELECT pg_catalog.pg_reload_conf();",
+    "SELECT pg_catalog.pg_promote(true, 60);",
+  ].join("\n");
 }
 
 export { MANAGED_SLOT_PREFIX };

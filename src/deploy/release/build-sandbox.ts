@@ -21,13 +21,14 @@
  * Spec format and runner semantics: `orchestration/scripts/tp-build-runner`.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { encodeBase64 } from "@std/encoding/base64";
 import { encodeHex } from "@std/encoding/hex";
 import { basename, join } from "@std/path";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { BUILD_OUTPUT_LIMITS, pumpLines } from "../../logs/line-stream.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
-import { PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
+import { BUILD_SIBLING_DIR, PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
@@ -36,7 +37,7 @@ import { forEachSequential } from "../../util/sequential.ts";
 import { throwIfAborted } from "../deploy-cancel.ts";
 
 /** The build-user role's tree; tp-host pins the same path. */
-export const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
+export const BUILD_SANDBOX_ROOT = BUILD_SIBLING_DIR;
 
 /**
  * Daemon-side ceiling. The unit's own `RuntimeMaxSec=1800` is the hard bound;
@@ -505,10 +506,14 @@ export async function withBuildSlot<T>(
   onOutput: ReleaseOutputHandler | undefined,
   run: () => Promise<T>,
   projectKey = "",
+  signal?: AbortSignal,
 ): Promise<T> {
+  const observer = buildSlotObserver.getStore();
   if (buildBusy) {
     onOutput?.("stdout", "waiting for another build on this host to finish");
-    await new Promise<void>((go) => buildWaiters.push({ projectKey, go }));
+    observer?.waiting();
+    await waitForBuildSlot(projectKey, signal);
+    observer?.acquired();
   } else {
     buildBusy = true;
     lastBuildProject = projectKey;
@@ -518,6 +523,52 @@ export async function withBuildSlot<T>(
   } finally {
     nextBuildWaiter();
   }
+}
+
+/**
+ * Queue for the slot. A cancel while waiting leaves the queue at once (it
+ * never held the slot, so nothing is handed on) and throws the cancel error.
+ */
+function waitForBuildSlot(
+  projectKey: string,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const waiter: BuildWaiter = {
+      projectKey,
+      go: () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      },
+    };
+    const onAbort = () => {
+      const index = buildWaiters.indexOf(waiter);
+      if (index === -1) return;
+      buildWaiters.splice(index, 1);
+      try {
+        throwIfAborted(signal, "before the build started");
+      } catch (err) {
+        reject(err);
+      }
+    };
+    buildWaiters.push(waiter);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Lets a deploy hear when it starts and stops waiting for the build slot,
+ * without every build function in between having to pass a callback.
+ */
+export type BuildSlotObserver = { waiting(): void; acquired(): void };
+const buildSlotObserver = new AsyncLocalStorage<BuildSlotObserver>();
+
+export function observeBuildSlot<T>(
+  observer: BuildSlotObserver,
+  run: () => Promise<T>,
+): Promise<T> {
+  return buildSlotObserver.run(observer, run);
 }
 
 /**
@@ -636,25 +687,30 @@ export async function runSandboxedBuild(
   params: SandboxedBuildParams,
 ): Promise<void> {
   const runFn = params.runFn ?? runPrivileged;
-  await withBuildSlot(params.onOutput, async () => {
-    let failure: unknown = null;
-    try {
-      // A deploy cancelled while it waited for the build slot never starts one.
-      throwIfAborted(params.signal, "before the build started");
-      await runBuildUnit(params, runFn);
-    } catch (err) {
-      failure = err;
-    }
-    try {
-      await returnBuildWork(params.work, runFn);
-    } catch (err) {
-      if (failure === null) throw err;
-      const message = err instanceof Error ? err.message : String(err);
-      params.onOutput?.("stderr", message);
-    }
-    if (failure !== null) {
-      throwIfAborted(params.signal, "while the build was running");
-      throw failure;
-    }
-  }, params.work.projectKey);
+  await withBuildSlot(
+    params.onOutput,
+    async () => {
+      let failure: unknown = null;
+      try {
+        // A deploy cancelled while it waited for the build slot never starts one.
+        throwIfAborted(params.signal, "before the build started");
+        await runBuildUnit(params, runFn);
+      } catch (err) {
+        failure = err;
+      }
+      try {
+        await returnBuildWork(params.work, runFn);
+      } catch (err) {
+        if (failure === null) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        params.onOutput?.("stderr", message);
+      }
+      if (failure !== null) {
+        throwIfAborted(params.signal, "while the build was running");
+        throw failure;
+      }
+    },
+    params.work.projectKey,
+    params.signal,
+  );
 }

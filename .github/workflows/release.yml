@@ -99,8 +99,8 @@ jobs:
       - name: Install Deno
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
-          deno-version: "2.9.7"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
 
       - name: Install zstd
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
@@ -113,8 +113,9 @@ jobs:
 
       - name: Stamp the version into deno.json
         # What the binary reports (src/version.ts reads deno.json): the tag's
-        # number. Versions come from tags now, so deno.json's committed number
-        # is not checked against the tag; it is overwritten in this checkout.
+        # number. The committed number is checked against the tags only on the
+        # canary path (publish-daemon-trunk.yml); here it is overwritten in
+        # this checkout.
         # A dry run's throwaway version (not X.Y.Z) leaves deno.json alone.
         run: |
           set -eu
@@ -169,7 +170,7 @@ jobs:
         run: deno task sbom
 
       - name: Upload the SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: turbopaneld-sbom
           path: dist/sbom.cdx.json
@@ -241,7 +242,7 @@ jobs:
             release-assets/manifest.json
 
       - name: Upload release assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: turbopaneld-release-assets
           path: release-assets

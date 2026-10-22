@@ -121,22 +121,25 @@ async function readPrivileged(
 
 /**
  * An `sshd` config file — the administrator's `sshd_config` or our drop-in —
- * read directly when it is readable (both are `root:root 0644`) and through
- * `sudo` only when it is not.
+ * read directly when it is readable and through `sudo` only when it is not.
  *
- * Direct first because tp-host's `cat` serves only TurboPanel's own trees and
- * refuses both paths: the privileged read alone failed every SSH reconcile on
- * a managed host, and made every existing drop-in look absent, so a refused
- * rewrite "rolled back" by deleting it.
+ * The drop-in is `root:root 0644` and always readable. The administrator's
+ * `sshd_config` is not on every image (Debian 13 ships it `0600`), so that one
+ * falls back to `tp-host sshd-config`, which prints exactly that file. The
+ * generic `cat` cannot serve either path: it reads only TurboPanel's own trees.
  */
 async function readSshdFile(
   runFn: RunFn,
   path: string,
+  administratorsFile = false,
 ): Promise<string | null> {
   try {
     return await Deno.readTextFile(path);
   } catch {
-    return await readPrivileged(runFn, path);
+    if (!administratorsFile) return await readPrivileged(runFn, path);
+    // Only the administrator's own file has a privileged reader.
+    const result = await runFn("sudo", hostSudoArgs(["-n", "sshd-config"]));
+    return result.success ? result.stdout : null;
   }
 }
 
@@ -506,7 +509,12 @@ async function reconcileDropIn(
   return true;
 }
 
-type SftpChroot = { root: string | null; warnings: string[] };
+type SftpChroot = {
+  root: string | null;
+  warnings: string[];
+  /** The switch was off when this reconcile began and `auto` turned it on. */
+  autoEnabled: boolean;
+};
 
 /** `on <absolute root>` or `off`; anything else is not an answer. */
 function parseSftpChrootStatus(stdout: string): string | null | undefined {
@@ -521,44 +529,81 @@ function parseSftpChrootStatus(stdout: string): string | null | undefined {
  * `tpsftp` member still pass the layout check `tp-host sftp-chroot on` ran?
  *
  * Only `tp-host` turns the switch on, and only after that check passes, so the
- * daemon never decides to jail anyone. The root comes from `tp-host` too — the
- * root it validated — never from the daemon's own environment. An unreadable
- * switch aborts the reconcile: rendering the unjailed block because `sudo`
- * hiccuped would fail open. A later finding (a member whose home drifted off
- * the layout) keeps the jail and becomes a warning: that member's logins fail
- * closed until the home is fixed.
+ * daemon never decides to jail anyone itself. A new host starts jailed: while
+ * the switch is off the daemon asks `tp-host sftp-chroot auto`, which turns it
+ * on when the layout check is clean, leaves it alone when an administrator
+ * turned it off on purpose, and otherwise reports what stops it (a warning
+ * here; the next reconcile tries again). The root comes from `tp-host` too —
+ * the root it validated — never from the daemon's own environment. An
+ * unreadable switch aborts the reconcile: rendering the unjailed block because
+ * `sudo` hiccuped would fail open. A later finding (a member whose home
+ * drifted off the layout) keeps the jail and becomes a warning: that member's
+ * logins fail closed until the home is fixed.
  */
 async function readSftpChroot(
   runFn: RunFn,
   managed: boolean,
 ): Promise<SftpChroot> {
-  if (!managed) return { root: null, warnings: [] };
-  const status = await runFn(
-    "sudo",
-    hostSudoArgs(["-n", "sftp-chroot", "status"]),
-  );
-  const root = status.success
-    ? parseSftpChrootStatus(status.stdout)
-    : undefined;
-  if (root === undefined) {
-    throw new Error(
-      `Could not read the SFTP chroot switch; SSH access was not changed: ${
-        status.stderr || status.stdout || "no answer"
-      }`,
+  if (!managed) return { root: null, warnings: [], autoEnabled: false };
+  const readStatus = async (): Promise<string | null> => {
+    const status = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "sftp-chroot", "status"]),
     );
+    const parsed = status.success
+      ? parseSftpChrootStatus(status.stdout)
+      : undefined;
+    if (parsed === undefined) {
+      throw new Error(
+        `Could not read the SFTP chroot switch; SSH access was not changed: ${
+          status.stderr || status.stdout || "no answer"
+        }`,
+      );
+    }
+    return parsed;
+  };
+  let root = await readStatus();
+  const autoWarnings: string[] = [];
+  let autoEnabled = false;
+  if (root === null) {
+    const auto = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "sftp-chroot", "auto"]),
+    );
+    if (!auto.success) {
+      autoWarnings.push(
+        `SFTP chroot could not be turned on automatically: ${
+          auto.stderr || auto.stdout || "no answer"
+        }`,
+      );
+    }
+    root = await readStatus();
+    autoEnabled = root !== null;
+    if (root === null && auto.success) {
+      const findings = (auto.stderr || auto.stdout)
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      for (const finding of findings) {
+        autoWarnings.push(
+          `SFTP chroot is not on yet, because ${finding}. Site owners with files-only access can see the whole host until it is.`,
+        );
+      }
+    }
   }
-  if (root === null) return { root, warnings: [] };
+  if (root === null) return { root, warnings: autoWarnings, autoEnabled };
   const check = await runFn(
     "sudo",
     hostSudoArgs(["-n", "sftp-chroot", "check"]),
   );
-  if (check.success) return { root, warnings: [] };
+  if (check.success) return { root, warnings: [], autoEnabled };
   const findings = (check.stdout || check.stderr || "layout check failed")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
   return {
     root,
+    autoEnabled,
     warnings: findings.map((finding) =>
       `SFTP chroot is on, but ${finding}. That member cannot sign in until its home is back on the layout.`
     ),
@@ -593,7 +638,7 @@ export async function applySshAccess(
   );
 
   const warnings: string[] = [];
-  const sshdConfig = await readSshdFile(runFn, sshdConfigPath);
+  const sshdConfig = await readSshdFile(runFn, sshdConfigPath, true);
   if (sshdConfig === null) {
     throw new Error(
       `Could not read ${sshdConfigPath}; SSH access cannot be configured on this host`,
@@ -630,30 +675,68 @@ export async function applySshAccess(
     throw new Error("runtime registry is missing an SSH access group");
   }
 
-  const sshdReloaded = await reconcileDropIn(
-    runFn,
-    dropInPath,
+  const renderDropIn = (chrootRoot: string | null) =>
     sshdDropInContent({
       sftpGroup,
       shellGroup,
       passwordGroup,
       principalGroup,
       authorizedKeysDir: dir,
-      ...(chroot.root === null ? {} : { sftpChrootRoot: chroot.root }),
-    }),
-    [
-      {
-        run: () => assertForwardingOff(runFn),
-        refusal: "sshd would still allow forwarding as configured",
-        fallback: "forwarding check failed",
-      },
-      ...(chroot.root === null ? [] : [{
-        run: () => runFn("sudo", hostSudoArgs(["-n", "sftp-chroot", "verify"])),
-        refusal: "sshd would not jail SFTP members as configured",
-        fallback: "sftp-chroot verify failed",
-      }]),
-    ],
-  );
+      ...(chrootRoot === null ? {} : { sftpChrootRoot: chrootRoot }),
+    });
+  const dropInChecks = (chrootRoot: string | null) => [
+    {
+      run: () => assertForwardingOff(runFn),
+      refusal: "sshd would still allow forwarding as configured",
+      fallback: "forwarding check failed",
+    },
+    ...(chrootRoot === null ? [] : [{
+      run: () => runFn("sudo", hostSudoArgs(["-n", "sftp-chroot", "verify"])),
+      refusal: "sshd would not jail SFTP members as configured",
+      fallback: "sftp-chroot verify failed",
+    }]),
+  ];
+
+  let sftpChroot = chroot.root;
+  let sshdReloaded: boolean;
+  try {
+    sshdReloaded = await reconcileDropIn(
+      runFn,
+      dropInPath,
+      renderDropIn(sftpChroot),
+      dropInChecks(sftpChroot),
+    );
+  } catch (error) {
+    if (!chroot.autoEnabled) throw error;
+    // The switch was turned on by this very reconcile and sshd refused the
+    // jailed drop-in (reconcileDropIn already restored the previous bytes).
+    // Leaving the switch on would fail every later reconcile the same way and
+    // stop key changes applying, so turn it back off — without the
+    // explicit-off marker, so a later reconcile may try again — and apply the
+    // unjailed drop-in now.
+    const reason = error instanceof Error ? error.message : String(error);
+    const revert = await runFn(
+      "sudo",
+      hostSudoArgs(["-n", "sftp-chroot", "auto-revert"]),
+    );
+    if (!revert.success) {
+      throw new Error(
+        `${reason}; and the SFTP chroot that was just turned on could not be turned back off: ${
+          revert.stderr || revert.stdout || "no answer"
+        }`,
+      );
+    }
+    warnings.push(
+      `SFTP chroot was turned on automatically, but sshd would not accept it (${reason}), so it was turned back off. Files-only site owners can see the whole host until this is fixed; the next update tries again.`,
+    );
+    sftpChroot = null;
+    sshdReloaded = await reconcileDropIn(
+      runFn,
+      dropInPath,
+      renderDropIn(sftpChroot),
+      dropInChecks(sftpChroot),
+    );
+  }
 
   for (const warning of warnings) logWarn("deploy", warning);
   if (changed.length > 0 || removed.length > 0 || sshdReloaded) {
@@ -669,7 +752,7 @@ export async function applySshAccess(
     changedPrincipals: changed,
     removedPrincipals: removed,
     sshdReloaded,
-    sftpChroot: chroot.root !== null,
+    sftpChroot: sftpChroot !== null,
     warnings,
   };
 }

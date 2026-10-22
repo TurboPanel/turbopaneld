@@ -111,3 +111,24 @@ Deno.test("buildHostExtended keeps only what is known and never invents zeros", 
     { mdArraysDegraded: 0, mdArraysResyncing: 0 },
   );
 });
+
+Deno.test("buildHostExtended carries IRQ pressure when the kernel reports it and leaves it out when it does not", () => {
+  const base = {
+    loadavgText: undefined,
+    pidMaxText: undefined,
+    threadsMaxText: undefined,
+    mdstatText: undefined,
+    oomKills: null,
+    rootDisk: undefined,
+  };
+  assertEquals(
+    buildHostExtended({ ...base, irqPressureFullPercent: 1.5 })
+      ?.irqPressureFullPercent,
+    1.5,
+  );
+  assertEquals(
+    "irqPressureFullPercent" in
+      (buildHostExtended({ ...base, irqPressureFullPercent: null }) ?? {}),
+    false,
+  );
+});

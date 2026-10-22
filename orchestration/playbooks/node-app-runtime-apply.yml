@@ -6,10 +6,11 @@
 #
 # The daemon passes the series this deploy actually needs as
 # `-e {"node_app_versions": ["24", "22"]}` (one entry per distinct
-# `nativeAppServices[].nodeVersion`, defaulted daemon-side). Each series is
-# vendored under `vendor/node-app/<series>/current`, so two apps pinning
-# different series resolve to genuinely different binaries. With no `-e` the
-# role falls back to its own default series, which is what a manual run wants.
+# `nativeAppServices[].nodeVersion`; an app that pins none contributes the
+# newest series, daemon-side). Each series is vendored under
+# `vendor/node-app/<series>/current`, so two apps pinning different series
+# resolve to genuinely different binaries. With no `-e` the role vendors the
+# newest series in the runtime registry, which is what a manual run wants.
 - name: TurboPanel native app runtime prerequisites (Node)
   hosts: localhost
   connection: local

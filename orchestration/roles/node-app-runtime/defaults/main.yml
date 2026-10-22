@@ -11,10 +11,11 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # resolves the newest upstream release inside the series and points
 # `<node_app_root>/<series>/current` at it, so a security release lands without
 # a config change and without rewriting a single systemd unit.
-node_app_default_version: "24"
 # Series to vendor on this run. The daemon overrides this with the distinct
-# versions the deploy's native apps declared; a manual run gets the default.
-node_app_versions: ["{{ node_app_default_version }}"]
+# versions the deploy's native apps declared; an empty list (a manual run, or a
+# deploy whose apps were all skipped) vendors the newest series the runtime
+# registry offers. There is no separately chosen default version.
+node_app_versions: []
 node_app_root: "{{ turbopanel_vendor_dir }}/node-app"
 # Every installed series may be run by every site owner's Linux user: there is
 # no per-version group. Each series tree is root-owned, readable and executable

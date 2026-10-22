@@ -204,9 +204,48 @@ test("server.backups.reconcile copy entries name exactly one safe source", () =>
     parseBackupsReconcilePayload({ policies: [defaultPath] }).policies[0],
     defaultPath,
   );
+  // A volume folder names the directory by its parts; the old fields may ride beside it.
+  const folderEntry: BackupPolicyWireEntry = {
+    ...pathEntry,
+    folder: { owner: "shop", scope: "production", slug: "uploads" },
+  };
+  assertEquals(
+    parseBackupsReconcilePayload({ policies: [folderEntry] }).policies[0],
+    folderEntry,
+  );
+  const folderOnly: BackupPolicyWireEntry = {
+    ...folderEntry,
+    hostPath: undefined,
+    ownerUsername: undefined,
+  };
+  assertEquals(
+    parseBackupsReconcilePayload({ policies: [folderOnly] }).policies[0]
+      .folder,
+    folderEntry.folder,
+  );
   for (
     const bad of [
       { ...copyEntry, volumeName: undefined },
+      { ...copyEntry, folder: folderEntry.folder },
+      { ...folderEntry, ownerUsername: "other" },
+      {
+        ...folderEntry,
+        folder: { owner: "shop", scope: "Production", slug: "uploads" },
+      },
+      {
+        ...folderEntry,
+        folder: { owner: "shop", scope: "production", slug: "up/loads" },
+      },
+      {
+        ...folderEntry,
+        folder: {
+          owner: "shop",
+          scope: "production",
+          slug: "uploads",
+          kind: "volume",
+        },
+      },
+      { ...folderOnly, composeProject: "proj" },
       { ...copyEntry, volumeName: "bad name" },
       { ...copyEntry, copyProvider: "nfs" },
       { ...copyEntry, hostPath: "/srv/users/x" },

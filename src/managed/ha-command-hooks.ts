@@ -108,7 +108,8 @@ export async function noteManagedPromoteSucceeded(
 /**
  * After `managed.ha.failover` `recover` succeeded (Orchestrator recover-to or
  * its internal `managed.promote` fallback): the target member on this host
- * is now the primary and must be watched.
+ * is now the primary and must be watched. `repoint` leaves the local member
+ * a replica following the new primary.
  */
 export async function noteManagedFailoverSucceeded(
   payload: ManagedHaFailoverPayload,

@@ -122,7 +122,7 @@ const DEFAULT_VARS: UnitVars = {
   docker_gate_ingress_switch_file:
     "/opt/turbopanel/lib/docker-gate/ingress-socket.on",
   docker_gate_upstream_socket: "/var/run/docker.sock",
-  docker_gate_cache_dir: "/var/cache/turbopanel-docker-gate",
+  docker_gate_cache_dir: "/var/cache/turbopanel/docker-gate",
   docker_gate_group: "tp",
   docker_gate_service_name: "turbopanel-docker-gate",
   docker_gate_summary_seconds: 300,
@@ -133,14 +133,13 @@ const DEFAULT_VARS: UnitVars = {
     "/etc/turbopanel/orchestrator",
   ],
   docker_gate_platform_rw_roots: [
-    "/var/lib/turbopanel/proxysql",
     "/var/lib/turbopanel/orchestrator",
     "/var/lib/turbopanel/managed",
   ],
   docker_gate_approval_pubkeys: "",
-  docker_gate_approval_state_dir: "/var/lib/turbopanel-docker-gate",
+  docker_gate_approval_state_dir: "/var/lib/turbopanel/docker-gate",
   docker_gate_approval_state_file:
-    "/var/lib/turbopanel-docker-gate/approval-used.json",
+    "/var/lib/turbopanel/docker-gate/approval-used.json",
   docker_gate_approval_pubkey_file:
     "/opt/turbopanel/lib/docker-gate/approval.pub",
   docker_gate_build_run_dir: "/run/turbopanel-gate/build",
@@ -282,7 +281,7 @@ jinjaTest(
     );
     assert(
       on.includes(
-        "Environment=TP_DOCKER_GATE_APPROVAL_STATE=/var/lib/turbopanel-docker-gate/approval-used.json",
+        "Environment=TP_DOCKER_GATE_APPROVAL_STATE=/var/lib/turbopanel/docker-gate/approval-used.json",
       ),
     );
     const defaults = await read("defaults/main.yml");
@@ -349,7 +348,7 @@ jinjaTest(
       defaults,
       'docker_gate_ro_run_dir: "{{ docker_gate_run_dir }}/ro"',
     );
-    assertStringIncludes(defaults, 'docker_gate_ingress_socket: ""');
+    assertStringIncludes(defaults, "docker_gate_ingress_socket: true");
     const tasks = await read("tasks/install.yml");
     assertStringIncludes(
       tasks,
@@ -358,7 +357,7 @@ jinjaTest(
   },
 );
 
-test("stage 3: Traefik's switch is root-owned, sticky, and off unless turned on", async () => {
+test("stage 3: Traefik's switch is root-owned, sticky, and on unless turned off", async () => {
   const install = await read("tasks/install.yml");
   const on = install.slice(
     install.indexOf("Turn on Traefik's read-only gate socket"),
@@ -367,7 +366,7 @@ test("stage 3: Traefik's switch is root-owned, sticky, and off unless turned on"
   assertStringIncludes(on, 'dest: "{{ docker_gate_ingress_switch_file }}"');
   assertStringIncludes(on, "owner: root");
   assertStringIncludes(on, 'mode: "0640"');
-  // An empty variable (every update converge) neither writes nor removes it.
+  // An empty variable neither writes nor removes it.
   for (const task of [on, install.slice(install.indexOf("Turn off Traefik"))]) {
     assertStringIncludes(
       task,
@@ -404,7 +403,7 @@ jinjaTest(
     assert(argv.includes("--allow-read"), "symlink resolution reads anywhere");
     assert(
       argv.includes(
-        "--allow-write=/run/turbopanel-gate,/var/run/docker.sock,/var/lib/turbopanel-docker-gate",
+        "--allow-write=/run/turbopanel-gate,/var/run/docker.sock,/var/lib/turbopanel/docker-gate",
       ),
     );
     assert(
@@ -423,7 +422,7 @@ jinjaTest(
       ),
       "ExecStart must grant write on the approval state directory",
     );
-    assert(unit.includes("StateDirectory=turbopanel-docker-gate"));
+    assert(unit.includes("StateDirectory=turbopanel/docker-gate"));
     assertEquals(argv.at(-1), "/opt/turbopanel/lib/docker-gate/main.ts");
     for (const arg of argv) {
       assert(
@@ -494,7 +493,7 @@ jinjaTest(
         "RestrictAddressFamilies=AF_UNIX",
         "CapabilityBoundingSet=CAP_CHOWN CAP_DAC_READ_SEARCH",
         "ReadWritePaths=-/run/turbopanel-gate",
-        "CacheDirectory=turbopanel-docker-gate",
+        "CacheDirectory=turbopanel/docker-gate",
       ]
     ) {
       assert(service.includes(wanted), wanted);
@@ -511,7 +510,7 @@ jinjaTest(
     );
     assert(
       service.includes(
-        "Environment=DENO_DIR=/var/cache/turbopanel-docker-gate",
+        "Environment=DENO_DIR=/var/cache/turbopanel/docker-gate",
       ),
     );
   },
@@ -665,7 +664,7 @@ test("the gate is never fatal in stage 1, never installed for dev, and is wired 
   const converge = await Deno.readTextFile(
     join(ORCHESTRATION, "playbooks/daemon-converge.yml"),
   );
-  assertStringIncludes(converge, "role: docker-gate");
+  assertStringIncludes(converge, "name: docker-gate");
 });
 
 test("nothing routes through the gate yet: no DOCKER_HOST or socket override is set anywhere", async () => {

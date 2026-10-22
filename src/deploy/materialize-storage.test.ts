@@ -364,12 +364,7 @@ test("materializeStorageEntries chowns directory and file copies for a linked pr
   } as unknown as typeof Deno.Command;
   try {
     await withTempLayout(async (layout) => {
-      const ownedDir = join(
-        layout.principalHomeRoot,
-        "siteuser",
-        "volumes",
-        "owned-data",
-      );
+      const ownedDir = storageHostPath(layout, "org-1", "stor-dir", "loc-dir");
       const paths = await materializeStorageEntries(
         layout,
         "org-1",
@@ -382,7 +377,6 @@ test("materializeStorageEntries chowns directory and file copies for a linked pr
             provider: "path",
             serverId: "srv",
             principalId: "pr-1",
-            sourcePath: ownedDir,
             mounts: [],
           },
           {
@@ -537,7 +531,7 @@ test("a file copy name cannot leave its location", async () => {
   });
 });
 
-test("a path copy's source must sit in its own site owner's volumes directory", async () => {
+test("a path copy with a source path and no folder is refused", async () => {
   await withTempLayout(async (layout) => {
     const home = layout.principalHomeRoot;
     const owner = [{ principalId: "pr-1", username: "siteuser" }];
@@ -545,18 +539,14 @@ test("a path copy's source must sit in its own site owner's volumes directory", 
       ...unownedDirectory(sourcePath),
       principalId: "pr-1",
     });
-    const refused = [
-      "/etc",
-      "/",
-      join(home, "victim", "volumes", "data"),
-      join(home, "siteuser", "home"),
-      join(home, "siteuser", "volumes"),
-      `${join(home, "siteuser", "volumes")}/../../victim/volumes/x`,
-      `${join(home, "siteuser", "volumes", "data")}/`,
-      `${join(home, "siteuser", "volumes")}//data`,
-      `${join(home, "siteuser", "volumes-evil", "data")}`,
-    ];
-    for (const sourcePath of refused) {
+    for (
+      const sourcePath of [
+        "/etc",
+        "/",
+        join(home, "siteuser", "volumes", "data"),
+        join(home, "victim", "volumes", "data"),
+      ]
+    ) {
       await assertRejects(
         () =>
           materializeStorageEntries(
@@ -566,16 +556,16 @@ test("a path copy's source must sit in its own site owner's volumes directory", 
             owner,
           ),
         Error,
-        "outside its site owner's volumes directory",
+        "needs a folder planned on this server",
         sourcePath,
       );
     }
-    // No site owner to confine it to: refused rather than mounted as is.
+    // No site owner at all: refused rather than mounted as is.
     await assertRejects(
       () =>
         materializeStorageEntries(layout, "org-1", [unownedDirectory("/etc")]),
       Error,
-      "outside its site owner's volumes directory",
+      "needs a folder planned on this server",
     );
     // The same refusal holds for a file copy that names a source path.
     await assertRejects(
@@ -584,7 +574,7 @@ test("a path copy's source must sit in its own site owner's volumes directory", 
           { ...fileEntry("a.txt"), sourcePath: "/etc" },
         ]),
       Error,
-      "outside its site owner's volumes directory",
+      "needs a folder planned on this server",
     );
   });
 });

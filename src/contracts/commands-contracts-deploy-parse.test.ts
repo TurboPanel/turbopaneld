@@ -92,6 +92,13 @@ test("parseEnvironmentDeployPayload rejects non-object and missing hostings", ()
   );
 });
 
+test("parseEnvironmentDeployPayload refuses the reserved fallback hostname", () => {
+  rejectDeploy(
+    { hostings: [hosting({ hostnames: ["unconfigured.invalid"] })] },
+    "must not use the reserved name unconfigured.invalid",
+  );
+});
+
 test("parseEnvironmentDeployPayload rejects hosting field parse errors", () => {
   rejectDeploy({ hostings: [null] }, "Invalid environment deploy hosting");
   rejectDeploy(
@@ -548,6 +555,60 @@ test("parseEnvironmentDeployPayload rejects sites engine cron and sourceKind", (
   );
 });
 
+test("parseEnvironmentDeployPayload rejects duplicate nativeAppServices serviceId", () => {
+  rejectDeploy(
+    {
+      nativeAppServices: [
+        {
+          composeServiceName: "a",
+          serviceId: "svc-dup",
+          listenPort: 18080,
+          framework: "node",
+        },
+        {
+          composeServiceName: "b",
+          serviceId: "svc-dup",
+          listenPort: 18081,
+          framework: "node",
+        },
+      ],
+    },
+    "Duplicate nativeAppServices serviceId svc-dup",
+  );
+});
+
+test("parseEnvironmentDeployPayload rejects duplicate sourceMaterial releaseServiceId", () => {
+  rejectDeploy(
+    {
+      sourceMaterial: [
+        {
+          sourceId: "src-a",
+          composeServiceName: "web",
+          releaseServiceId: "svc-dup-release",
+          provider: "git",
+          cloneUrl: "https://github.com/example/a.git",
+          ref: "main",
+          commitSha: "abc123def4567890123456789012345678901234",
+          releaseId: "rel-a",
+          build: { kind: "native" },
+        },
+        {
+          sourceId: "src-b",
+          composeServiceName: "api",
+          releaseServiceId: "svc-dup-release",
+          provider: "git",
+          cloneUrl: "https://github.com/example/b.git",
+          ref: "main",
+          commitSha: "def456abc7890123456789012345678901234ab",
+          releaseId: "rel-b",
+          build: { kind: "native" },
+        },
+      ],
+    },
+    "Duplicate sourceMaterial releaseServiceId svc-dup-release",
+  );
+});
+
 test("parseEnvironmentDeployPayload rejects nativeAppServices resource limits", () => {
   rejectDeploy(
     { nativeAppServices: [null] },
@@ -842,6 +903,10 @@ test("parseEnvironmentDeployPayload rejects optional array/boolean/network field
   rejectDeploy({ sites: "all" }, "sites must be an array");
   rejectDeploy({ noCache: "yes" }, "noCache must be a boolean");
   rejectDeploy(
+    { hideWebServerNames: "yes" },
+    "hideWebServerNames must be a boolean",
+  );
+  rejectDeploy(
     { dockerExternalNetworks: "org-net" },
     "dockerExternalNetworks must be an array",
   );
@@ -1006,6 +1071,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
     noCache: true,
+    hideWebServerNames: true,
     dockerExternalNetworks: ["org_net_b", "org_net_a"],
     fabricNetworks: [{
       name: "tpn_mesh01",
@@ -1022,6 +1088,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
     listenerPorts: { postgres: 15432, mysqlFamily: 13306 },
   });
   assertEquals(payload.noCache, true);
+  assertEquals(payload.hideWebServerNames, true);
   assertEquals(payload.dockerExternalNetworks, ["org_net_a", "org_net_b"]);
   assertEquals(payload.fabricNetworks?.[0]?.gateway, "203.0.113.1");
   assertEquals(payload.hostingIngress?.composeServiceName, "traefik");

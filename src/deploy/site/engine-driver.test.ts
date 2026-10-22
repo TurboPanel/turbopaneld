@@ -371,8 +371,47 @@ test("validateSiteEndpoints retries after a failed curl then accepts HTTP 200", 
   await validateSiteEndpoints(run, "nginx", [{
     label: "www",
     url: "http://127.0.0.1:18080/",
-  }]);
+  }], { sleep: () => Promise.resolve() });
   assertEquals(attempts, 2);
+});
+
+test("validateSiteEndpoints waits for a web server that is still starting", async () => {
+  let attempts = 0;
+  const pauses: number[] = [];
+  const run: SiteRunFn = (command) => {
+    if (command !== "curl") return Promise.resolve(ok());
+    attempts += 1;
+    // Refuses the first nine probes, as a server that has only just been started does.
+    if (attempts <= 9) return Promise.resolve(fail("Failed to connect"));
+    return Promise.resolve({ success: true, stdout: "404", stderr: "" });
+  };
+  await validateSiteEndpoints(run, "caddy", [{
+    label: "www",
+    url: "http://127.0.0.1:18557/",
+  }], { sleep: (ms) => (pauses.push(ms), Promise.resolve()) });
+  assertEquals(attempts, 10);
+  assertEquals(pauses.length, 9);
+});
+
+test("validateSiteEndpoints gives up on a server that never listens, after a bounded wait", async () => {
+  let attempts = 0;
+  let waited = 0;
+  const run: SiteRunFn = (command) => {
+    if (command !== "curl") return Promise.resolve(ok());
+    attempts += 1;
+    return Promise.resolve(fail("Failed to connect"));
+  };
+  await assertRejects(
+    () =>
+      validateSiteEndpoints(run, "caddy", [{
+        label: "www",
+        url: "http://127.0.0.1:18557/",
+      }], { sleep: (ms) => (waited += ms, Promise.resolve()) }),
+    Error,
+    "Failed to connect",
+  );
+  assertEquals(attempts > 3, true);
+  assertEquals(waited >= 20_000 && waited <= 40_000, true);
 });
 
 test("validateSiteEndpoints fails when every probe is an HTTP 5xx", async () => {
@@ -387,7 +426,7 @@ test("validateSiteEndpoints fails when every probe is an HTTP 5xx", async () => 
       validateSiteEndpoints(run, "nginx", [{
         label: "www",
         url: "http://127.0.0.1:18080/",
-      }]),
+      }], { sleep: () => Promise.resolve() }),
     Error,
     "HTTP 503",
   );

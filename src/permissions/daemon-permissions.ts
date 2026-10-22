@@ -28,6 +28,7 @@ import {
   UV_VERSION,
 } from "../orchestration/assets.ts";
 import {
+  BUILD_SIBLING_DIR,
   PROD_BACKUP_DIR_DEFAULT,
   PROD_BIN_DIR_DEFAULT,
   PROD_CONFIG_DIR_DEFAULT,
@@ -45,7 +46,7 @@ const VENDOR = PROD_RUNTIME_DIR_DEFAULT;
  * creates `work/<id>`, clones into it, and reads and removes it once
  * `tp-host build-return` has handed it back.
  */
-const BUILD_SANDBOX_ROOT = "/var/lib/turbopanel-build";
+const BUILD_SANDBOX_ROOT = BUILD_SIBLING_DIR;
 const PRINCIPAL_HOME_ROOT = "/srv/users";
 /**
  * The Docker gate's socket directory (`orchestration/roles/docker-gate`):
@@ -69,9 +70,9 @@ const DOCKER_SOCKETS = [
  * install root is root-owned and immutable to the daemon
  * (`orchestration/roles/turbopanel-user`, mirrored as
  * `turbopanel_daemon_vendor_cache_dirs`), so a compromised daemon cannot
- * replace its binary, the orchestration tree root executes, a Galaxy role,
+ * replace its binary, the orchestration tree root executes,
  * or a runtime it is launched from. railpack and its frontend are installed
- * by the `buildkit` role (root); the Galaxy Docker role by `tp-orchestrate`.
+ * by the `buildkit` role (root).
  */
 export const DAEMON_WRITABLE_VENDOR_DIRS: readonly string[] = [
   `${VENDOR}/uv/cache`,
@@ -82,7 +83,7 @@ export const DAEMON_WRITABLE_VENDOR_DIRS: readonly string[] = [
  * The orchestration runtime the root-run installer verbs populate
  * (`src/orchestration/{uv,python,ansible,bootstrap-stamp}.ts`): uv and the
  * pinned interpreter with their `current` symlinks, the Ansible venv, the
- * Galaxy roles/collections, and the bootstrap stamps. The compiled binary
+ * Galaxy collections, and the bootstrap stamps. The compiled binary
  * carries these because it *is* the installer on native hosts. At daemon
  * runtime the grant is inert: the trees are `root:tp 0750` and the process
  * runs as `tp`, so the kernel refuses what Deno would allow, and the

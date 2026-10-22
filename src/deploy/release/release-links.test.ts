@@ -28,6 +28,9 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+const FOLDER = { owner: "alice", scope: "production", slug: "example.com" };
+const PUBLISH_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72";
+
 async function collectLinks(dir: string, out: string[]): Promise<void> {
   const nested: string[] = [];
   for await (const entry of Deno.readDir(dir)) {
@@ -140,7 +143,13 @@ test("promoteRelease refuses a release that links into another principal's home"
     await Deno.writeTextFile(bobConfig, "<?php // bob's secrets");
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "alice", serviceId: "web", releaseId: "rel-1" },
+      {
+        username: "alice",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
@@ -156,7 +165,7 @@ test("promoteRelease refuses a release that links into another principal's home"
         username: "alice",
         healthProbe: (releaseDir) =>
           Deno.symlink(
-            "../../../../../../bob/sites/app/config.php",
+            "../../../../../../../bob/sites/app/config.php",
             join(releaseDir, "public", "leak.txt"),
           ),
         runFn: runSeam,
@@ -173,7 +182,13 @@ test("promoteRelease publishes links that stay inside the release", async () => 
   await withHomes(async (root) => {
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-      { username: "alice", serviceId: "web", releaseId: "rel-1" },
+      {
+        username: "alice",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(root, "checkout");
@@ -259,7 +274,13 @@ for (const { name, build } of TWO_HOP_CASES) {
     await withHomes(async (root) => {
       const paths = resolveReleasePaths(
         { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-        { username: "alice", serviceId: "web", releaseId: "rel-1" },
+        {
+          username: "alice",
+          serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+          releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+          folder: FOLDER,
+          publishId: PUBLISH_ID,
+        },
       );
       await Deno.mkdir(paths.sharedDir, { recursive: true });
       // The tenant owns shared/ and plants a link that resolves inside its
@@ -299,7 +320,13 @@ test("promoteRelease compares link targets with the physical release path", asyn
     await Deno.symlink(join(real, "homes"), root);
     const paths = resolveReleasePaths(
       { principalHomeRoot: root, daemonStateDir: join(real, "state") },
-      { username: "alice", serviceId: "web", releaseId: "rel-1" },
+      {
+        username: "alice",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
     );
     await Deno.mkdir(paths.sharedDir, { recursive: true });
     const workingDir = join(real, "checkout");
@@ -423,7 +450,13 @@ async function sealedRelease(
 ) {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
-    { username: "alice", serviceId: "web", releaseId: "rel-1" },
+    {
+      username: "alice",
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      folder: FOLDER,
+      publishId: PUBLISH_ID,
+    },
   );
   await Deno.mkdir(join(paths.sharedDir), { recursive: true });
   await Deno.writeTextFile(join(paths.sharedDir, "evil"), "tenant-controlled");
@@ -467,7 +500,9 @@ const PRE_FIX_LINKS: Readonly<Record<string, Record<string, string>>> = {
     "here": ".",
     "public/x": "../here/shared/evil",
   },
-  "a link out of the release": { "public/x": "../../rel-0/public" },
+  "a link out of the release": {
+    "public/x": "../../019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e75/public",
+  },
 };
 
 for (const [name, links] of Object.entries(PRE_FIX_LINKS)) {
@@ -476,7 +511,7 @@ for (const [name, links] of Object.entries(PRE_FIX_LINKS)) {
       const err = await assertRejects(() =>
         promoteExistingRelease({
           paths,
-          releaseId: "rel-1",
+          releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
           healthProbe: () => Promise.resolve(),
           runFn: runSeam,
         })
@@ -494,7 +529,7 @@ test("promoteExistingRelease rolls back to a release whose links stay inside", a
   }, async (paths) => {
     await promoteExistingRelease({
       paths,
-      releaseId: "rel-1",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
       healthProbe: () => Promise.resolve(),
       runFn: runSeam,
     });
@@ -515,7 +550,7 @@ test("promoteExistingRelease also refuses a link that resolves out of the releas
     const err = await assertRejects(() =>
       promoteExistingRelease({
         paths,
-        releaseId: "rel-1",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
         healthProbe: () => Promise.resolve(),
         runFn,
       })
@@ -542,7 +577,11 @@ test("promoteExistingRelease lists links as root when the release is unreadable"
     };
     try {
       const err = await assertRejects(() =>
-        promoteExistingRelease({ paths, releaseId: "rel-1", runFn })
+        promoteExistingRelease({
+          paths,
+          releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+          runFn,
+        })
       );
       assertStringIncludes(String(err), "public/x -> ../shared/evil");
     } finally {

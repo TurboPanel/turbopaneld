@@ -1,31 +1,35 @@
 ---
-# TurboPanel wrapper around geerlingguy.docker (Ansible Galaxy).
+# TurboPanel's own Docker Engine install (no Galaxy role, nothing fetched at
+# bootstrap): tasks/install.yml adds Docker's official apt repository and
+# installs the pinned engine packages.
 #
-# The Galaxy role itself is fetched on demand by ensureGalaxyDockerRole()
-# (requirements-docker.yml) — not during orchestration bootstrap.
-#
-# Fast-path: if the docker binary exists and the service is active, skip
-# install. Group membership for docker_user always runs (co-located hosts often
-# already have Docker). Otherwise include geerlingguy.docker after validation.
+# Fast-path: if the docker-ce package is installed (not a distribution's own
+# docker.io) and the service is active, skip install, so a healthy host (even
+# an offline one) is never touched. Upgrades only happen when a run sets
+# turbopanel_docker_upgrade: true. Group membership for docker_user always runs
+# (co-located hosts often already have Docker).
 #
 # daemon.json: this role also owns the org-wide dockerd addressing
 # (`default-address-pools` / `bip`) via tasks/daemon-json.yml — MERGED into
-# any existing /etc/docker/daemon.json, never overwritten. The merge always
-# runs (when turbopanel_docker_manage_daemon_json is true) because it also
-# owns `live-restore: true`, which every host should carry regardless of
-# whether org address pools are configured — not just when the daemon passed
-# non-empty vars or asked to clear them (turbopanel_docker_clear_addressing,
-# sent when an empty org config replaces one previously applied on this host
-# — the merge then REMOVES both address-pool keys so dockerd falls back to
-# its built-in defaults). The write only happens on a real content diff, so
-# an unconfigured host still gets a no-op merge after its first run. A real
-# content change restarts dockerd (handlers/main.yml) — except on a host
-# that also runs the co-located self-hosted instance, where the restart is
-# skipped (see daemon-json.yml): dockerd fronts that instance's own Postgres
-# and RabbitMQ, so an automatic restart there is a control-plane outage, not
-# just a database blip. Existing containers keep their current addresses and
-# existing networks keep their subnets; pools only affect networks created
-# afterwards.
+# any existing /etc/docker/daemon.json, never overwritten. On a fresh host it
+# is written BEFORE the packages install (tasks/install.yml), so dockerd's
+# first start already has the right address pools, log rotation and limits.
+# The merge always runs afterwards (when turbopanel_docker_manage_daemon_json
+# is true) because it also owns `live-restore: true`, which every host should
+# carry regardless of whether org address pools are configured — not just when
+# the daemon passed non-empty vars or asked to clear them
+# (turbopanel_docker_clear_addressing, sent when an empty org config replaces
+# one previously applied on this host — the merge then REMOVES both
+# address-pool keys so dockerd falls back to its built-in defaults). The write
+# only happens on a real content diff, so an unconfigured host still gets a
+# no-op merge after its first run. A real content change restarts dockerd
+# (handlers/main.yml) — except on a host that also runs the co-located
+# self-hosted instance, where the restart is skipped (see daemon-json.yml):
+# dockerd fronts that instance's own Postgres and RabbitMQ containers there,
+# so an automatic restart is a control-plane outage, not just a database blip.
+# Existing containers keep their current addresses and existing networks keep
+# their subnets; pools only affect networks created afterwards. Existing
+# containers also keep their old log driver until they are recreated.
 
 - name: Assert rootless Docker is not requested
   ansible.builtin.assert:
@@ -34,10 +38,41 @@
       Rootless Docker support is planned but not yet implemented.
       Set docker_rootless: false until the feature is built.
 
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['architecture'] in _docker_arch_map
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_facts['architecture'] }}'.
+      TurboPanel supports: {{ _docker_arch_map.keys() | list | join(', ') }}.
+
+- name: Assert supported Linux distribution
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] in _docker_distro_map
+    fail_msg: >-
+      Unsupported distribution '{{ ansible_facts['distribution'] }}'.
+      TurboPanel supports: {{ _docker_distro_map.keys() | list | join(', ') }}.
+
+# The package, not the binary: Debian's own docker.io (26.1.5 on Debian 13)
+# also provides /usr/bin/docker but predates the IPv6 DOCKER-USER chain the
+# firewall assumes.
+- name: Check for Docker's own docker-ce package
+  ansible.builtin.command:
+    argv: [dpkg-query, -W, '-f=${db:Status-Abbrev}', docker-ce]
+  register: _docker_ce_pkg
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
 - name: Check Docker binary
   ansible.builtin.stat:
     path: /usr/bin/docker
   register: _docker_bin
+
+- name: Set _docker_ce_installed fact
+  ansible.builtin.set_fact:
+    _docker_ce_installed: "{{ (_docker_ce_pkg.stdout | default('') | trim) == 'ii' }}"
 
 - name: Check Docker service state
   ansible.builtin.systemd:
@@ -48,13 +83,13 @@
 
 # An installed Docker that is stopped — typically systemd's `start-limit-hit`
 # after a burst of restarts — is started again here instead of falling into
-# the install branch, where geerlingguy's "ensure started" hits the same
+# the install branch, where the install's "ensure started" hits the same
 # lockout and fails. `reset-failed` is the only way to clear that lockout
 # (no module equivalent), and it is a no-op on a unit that is not failed.
 - name: Clear a systemd start-limit lockout on an installed but stopped Docker  # noqa: command-instead-of-module
   ansible.builtin.command: systemctl reset-failed docker.service
   when:
-    - _docker_bin.stat.exists
+    - _docker_ce_installed | bool
     - (_docker_svc.status.ActiveState | default('')) != 'active'
   changed_when: false
   failed_when: false
@@ -65,8 +100,9 @@
     state: started
     enabled: true
   when:
-    - _docker_bin.stat.exists
+    - _docker_ce_installed | bool
     - (_docker_svc.status.ActiveState | default('')) != 'active'
+    - not ansible_check_mode
   register: _docker_restart_attempt
   failed_when: false
 
@@ -81,7 +117,7 @@
 - name: Set _docker_ready fact
   ansible.builtin.set_fact:
     _docker_ready: >-
-      {{ _docker_bin.stat.exists
+      {{ (_docker_ce_installed | bool)
       and (
         (_docker_svc.status.ActiveState | default('')) == 'active'
         or (_docker_svc_after.status.ActiveState | default('')) == 'active'
@@ -90,40 +126,13 @@
 - name: Docker already installed and running
   ansible.builtin.debug:
     msg: "Docker is already installed and running — skipping installation"
-  when: _docker_ready | bool
+  when:
+    - _docker_ready | bool
+    - not (turbopanel_docker_upgrade | bool)
 
-- name: Install Docker
-  when: not _docker_ready | bool
-  block:
-    - name: Ensure Docker networking prerequisites (iptables)
-      ansible.builtin.apt:
-        name:
-          - iptables
-        state: present
-      when: ansible_os_family == 'Debian'
-
-    - name: Assert supported CPU architecture
-      ansible.builtin.assert:
-        that:
-          - ansible_architecture in _docker_arch_map
-        fail_msg: >-
-          Unsupported CPU architecture '{{ ansible_architecture }}'.
-          TurboPanel supports: {{ _docker_arch_map.keys() | list | join(', ') }}.
-
-    - name: Assert supported Linux distribution
-      ansible.builtin.assert:
-        that:
-          - ansible_distribution in _docker_distro_map
-        fail_msg: >-
-          Unsupported distribution '{{ ansible_distribution }}'.
-          TurboPanel supports: {{ _docker_distro_map.keys() | list | join(', ') }}.
-
-    - name: Install Docker via geerlingguy.docker Galaxy role
-      ansible.builtin.include_role:
-        name: geerlingguy.docker
-      vars:
-        docker_repo_url: "{{ _docker_repo_url[ansible_distribution] }}"
-        docker_install_compose_plugin: true
+- name: Install Docker Engine from Docker's apt repository
+  ansible.builtin.include_tasks: install.yml
+  when: (not (_docker_ready | bool)) or (turbopanel_docker_upgrade | bool)
 
 - name: Add daemon user to docker group
   ansible.builtin.user:

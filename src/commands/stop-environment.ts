@@ -27,17 +27,21 @@ import {
 } from "../deploy/ingress.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
+import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
   fabricNetworkDir,
   type LayoutPaths,
-  principalHomePath,
   resolveLayout,
-  siteRoot,
 } from "../paths/layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
+import {
+  reclaimServiceReleases,
+  reclaimServiceTree,
+  removalFailureReason,
+} from "../deploy/release/retention.ts";
 import {
   actOnEarlierContainers,
   earlierRecordedProjects,
@@ -49,9 +53,11 @@ import {
   removeFabricDockerNetworks,
 } from "./fabric.ts";
 import {
+  type EnvironmentStopFolderState,
   type EnvironmentStopPayload,
   type EnvironmentStopResult,
   parseEnvironmentStopPayload,
+  type StopSiteRelease,
 } from "../contracts/commands-contracts.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -78,48 +84,89 @@ export type EnvironmentStopHandlerDeps = {
 };
 
 /**
- * Reclaim `<principalHome>/sites/<serviceId>` for every service the payload
- * names.
+ * Reclaim the tree of every service the payload names: its service folder
+ * (`<owner>/<scope>/services/<name>`), plus the daemon's records of the service.
+ * An entry with no folder names nothing on this host and is skipped.
  *
- * Generic on purpose: this is the tree the Git release engine publishes into
- * (`releases/`, `current`, `shared/`) and the one native apps run out of — not
- * a site artifact. It is root-owned by design, so
- * the daemon cannot unlink it itself; removal goes through the same privileged
- * runner the release engine uses to seal and prune.
+ * Only a delete (or a server leaving the environment) sends `siteReleases`; a
+ * plain stop sends none, so every folder, including `shared/` uploads, stays.
+ * The folder is root-owned by design, so the daemon cannot unlink it itself;
+ * removal goes through the same privileged runner the release engine uses to
+ * seal and prune.
  *
  * Best-effort per entry, matching the rest of this handler: a stop must still
- * tear the stack down when one leftover tree refuses to go.
+ * tear the stack down when one leftover tree refuses to go. Each entry that
+ * carries a folder is reported back with whether the folder is gone, so the
+ * control plane can settle its row.
  */
 async function removeEnvironmentSiteReleases(
   layout: LayoutPaths,
   environmentId: string,
-  siteReleases: ReadonlyArray<{ serviceId: string; username: string }>,
+  siteReleases: readonly StopSiteRelease[],
   runFn: RunFn,
-): Promise<void> {
+): Promise<EnvironmentStopFolderState[]> {
+  const states: EnvironmentStopFolderState[] = [];
   await forEachSequential(siteReleases, async (entry) => {
-    const path = siteRoot(
-      principalHomePath(layout, entry.username),
-      entry.serviceId,
-    );
-    try {
-      const result = await runFn(
-        "sudo",
-        hostSudoArgs(["-n", "rm", "-rf", "--", path]),
-      );
-      if (!result.success) {
-        logWarn(
-          "commands",
-          `environment.stop site release reclaim failed env=${environmentId} path=${path}: ${result.stderr}`,
-        );
-      }
-    } catch (err) {
+    const folder = entry.folder;
+    if (folder === undefined) {
       logWarn(
         "commands",
-        `environment.stop site release reclaim failed env=${environmentId} path=${path}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `environment.stop site release reclaim env=${environmentId}: ${entry.serviceId} has no folder, skipped`,
       );
+      return;
     }
+    const lines: string[] = [];
+    const path = await reclaimServiceTree(
+      layout,
+      { ...entry, folder },
+      runFn,
+      (_, line) => {
+        lines.push(line);
+        logWarn(
+          "commands",
+          `environment.stop site release reclaim env=${environmentId}: ${line}`,
+        );
+      },
+    );
+    states.push({
+      owner: folder.owner,
+      scope: folder.scope,
+      kind: "service",
+      slug: folder.slug,
+      removed: path !== null,
+      ...(path === null ? { reason: removalFailureReason(lines) } : {}),
+    });
+  });
+  return states;
+}
+
+/**
+ * Clear the published releases of every service the payload names, leaving each
+ * service folder (uploads, logs) and the owner's account in place. Entries with
+ * no folder name nothing on this host and are skipped. Best-effort per entry.
+ */
+async function clearEnvironmentReleases(
+  layout: LayoutPaths,
+  environmentId: string,
+  entries: readonly StopSiteRelease[],
+  runFn: RunFn,
+): Promise<void> {
+  await forEachSequential(entries, async (entry) => {
+    if (entry.folder === undefined) return;
+    const removed = await reclaimServiceReleases(
+      layout,
+      { ...entry, folder: entry.folder },
+      runFn,
+      (_, line) =>
+        logWarn(
+          "commands",
+          `environment.stop release cleanup env=${environmentId}: ${line}`,
+        ),
+    );
+    logInfo(
+      "commands",
+      `environment.stop cleared ${removed} release(s) of ${entry.serviceId} env=${environmentId}`,
+    );
   });
 }
 
@@ -317,6 +364,17 @@ export async function handleEnvironmentStop(
 ): Promise<EnvironmentStopResult> {
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
+  return await withKeyedLock(
+    environmentLockKey(parsedPayload.environmentId),
+    () => stopEnvironmentLocked(parsedPayload, daemonReceivedAt, deps),
+  );
+}
+
+async function stopEnvironmentLocked(
+  parsedPayload: EnvironmentStopPayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<EnvironmentStopResult> {
   const dockerPresent = await dockerAvailableForStop(deps);
   const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
@@ -389,10 +447,16 @@ export async function handleEnvironmentStop(
   // deliberately left behind — other environments of the same account still
   // reference it.
   await removeEnvironmentNativeApps(layout, parsedPayload.environmentId);
-  await removeEnvironmentSiteReleases(
+  const folders = await removeEnvironmentSiteReleases(
     layout,
     parsedPayload.environmentId,
     parsedPayload.siteReleases ?? [],
+    deps?.runPrivileged ?? runPrivileged,
+  );
+  await clearEnvironmentReleases(
+    layout,
+    parsedPayload.environmentId,
+    parsedPayload.releaseCleanup ?? [],
     deps?.runPrivileged ?? runPrivileged,
   );
 
@@ -437,9 +501,19 @@ export async function handleEnvironmentStop(
     "commands",
     `environment.stop completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
+  return stopResult(parsedPayload.projectName, summary, folders);
+}
+
+/** The stop result; `folders` is present only when folders were named. */
+function stopResult(
+  projectName: string,
+  summary: string,
+  folders: EnvironmentStopFolderState[],
+): EnvironmentStopResult {
   return {
-    projectName: parsedPayload.projectName,
+    projectName,
     summary,
     containers: [],
+    ...(folders.length > 0 ? { folders } : {}),
   };
 }

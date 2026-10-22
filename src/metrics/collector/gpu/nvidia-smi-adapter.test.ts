@@ -12,7 +12,7 @@ import type { GpuTopology } from "../../../contracts/topology-types.ts";
 const test = Deno.test.bind(Deno);
 
 /** RTX 5060 Ti, driver 595.80, Debian 13 — captured as the daemon user. */
-const RTX_5060_TI_CSV = "00000000:01:00.0, 0, 5, 34, 29, 4.66\n";
+const RTX_5060_TI_CSV = "00000000:01:00.0, 0, 5, 34, 29, 4.66, 16311\n";
 
 function ctx(): GpuReadContext {
   return {
@@ -39,6 +39,7 @@ test("parseNvidiaSmiQuery reads an RTX 5060 Ti / driver 595.80 row", () => {
       utilizationPercent: 0,
       memoryActivityPercent: 5,
       memoryUsedBytes: 34 * 1024 * 1024,
+      memoryTotalBytes: 16311 * 1024 * 1024,
       temperatureCelsius: 29,
       powerWatts: 4.66,
     },
@@ -58,6 +59,7 @@ test("parseNvidiaSmiQuery nulls placeholder cells and tolerates unit suffixes", 
     utilizationPercent: null,
     memoryActivityPercent: 12,
     memoryUsedBytes: 1024 * 1024 * 1024,
+    memoryTotalBytes: null,
     temperatureCelsius: null,
     powerWatts: 70.5,
   });
@@ -65,6 +67,7 @@ test("parseNvidiaSmiQuery nulls placeholder cells and tolerates unit suffixes", 
     utilizationPercent: null,
     memoryActivityPercent: null,
     memoryUsedBytes: null,
+    memoryTotalBytes: null,
     temperatureCelsius: 41,
     powerWatts: null,
   });

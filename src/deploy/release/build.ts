@@ -101,7 +101,7 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
 ]);
 
 /** `LD_*` is the dynamic loader's namespace (`LD_AUDIT`, `LD_DEBUG_OUTPUT`, …). */
-function isReservedBuildEnvKey(key: string): boolean {
+export function isReservedBuildEnvKey(key: string): boolean {
   return RESERVED_BUILD_ENV_KEYS.has(key) || key.startsWith("LD_");
 }
 
