@@ -29,6 +29,16 @@ Docker Compose. The daemon:
    therefore one engine — which is why `listen.owner`/`listen.group` simply
    follow `site.engine` (`tpapache` or `tpnginx`) with no shared-socket
    ownership to negotiate. Metadata still lands in `.turbopanel/php.json`.
+   **Visitor address and HTTPS (`site/forwarded.ts`).** Every engine sits behind
+   the hosting Caddy, which sets `X-Forwarded-For` and `X-Forwarded-Proto`.
+   Only the loopback front server is trusted: nginx (`set_real_ip_from`
+   loopback, `$tp_fwd_*` values that turn to `https`/443 only on a loopback
+   peer's word, sent to PHP after the shared `fastcgi_param` set so they win),
+   Apache (`RemoteIPInternalProxy 127.0.0.1`, or `127.0.0.2` behind nginx;
+   `SetEnv HTTPS on` plus `ProxyFCGISetEnvIf` for port and scheme, which
+   `SetEnv` cannot change), OpenLiteSpeed (`useIpInProxyHeader 2` with
+   `127.0.0.1T`, `E=HTTPS:on` from the header; its port and scheme stay as the
+   server sees them). A docker bridge peer keeps its own address.
 3. Runs `playbooks/site-openlitespeed-apply.yml` (vendor
    `openlitespeed` + `tpols`) when any site uses `engine: openlitespeed`, plus
    vendored **lsphp** on `turbopanel_lsphp_install=true` for a site in

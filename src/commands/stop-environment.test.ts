@@ -431,6 +431,73 @@ test({
 
 test({
   name:
+    "handleEnvironmentStop clears releases for releaseCleanup but keeps the folder and its uploads",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-cleanup-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: Deno.env.get(
+        "TURBOPANEL_PRINCIPAL_HOME_ROOT",
+      ),
+    };
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", join(root, "srv", "users"));
+    const serviceDir = join(
+      root,
+      "srv",
+      "users",
+      "appuser",
+      "production",
+      "services",
+      "svc-1",
+    );
+    await Deno.mkdir(join(serviceDir, "releases", "rel-1"), {
+      recursive: true,
+    });
+    await Deno.mkdir(join(serviceDir, "shared"), { recursive: true });
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envclean001",
+          projectId: "proj-1",
+          projectName: "tp-demo-envclean0",
+          releaseCleanup: [{
+            serviceId: "svc-1",
+            username: "appuser",
+            folder: { owner: "appuser", scope: "production", slug: "svc-1" },
+          }],
+        },
+        new Date().toISOString(),
+        {
+          runPrivileged: async (command, args) => {
+            const path = args.at(-1);
+            if (command === "sudo" && args.includes("rm") && path) {
+              await Deno.remove(path, { recursive: true }).catch(() => {});
+            }
+            return { success: true, stdout: "", stderr: "" };
+          },
+        },
+      );
+      await assertRejects(
+        () => Deno.stat(join(serviceDir, "releases", "rel-1")),
+        Deno.errors.NotFound,
+      );
+      await Deno.stat(join(serviceDir, "shared"));
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
     "handleEnvironmentStop keeps stopping when a release tree refuses to go",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {

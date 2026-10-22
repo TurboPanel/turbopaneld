@@ -1,6 +1,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
+import { waitFor } from "../testing/wait-for.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   applyBootHold,
@@ -386,7 +387,7 @@ test("a held engine is re-stopped during the settle window only, and never after
     });
     retry.start(); // arms the window and fires the first tick
     retry.stop();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitFor("the first retry tick", () => fake.calls.length >= 2);
     assert(fake.calls.length >= 2);
     const inWindow = fake.calls.length;
     clock += 61_000;
@@ -418,7 +419,8 @@ test("a hold released by a command is not re-stopped in the settle window", asyn
     });
     retry.start();
     retry.stop();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Nothing to wait for, so give the first tick ample time to (not) act.
+    await new Promise((resolve) => setTimeout(resolve, 250));
     assertEquals(fake.calls.length, before);
   });
 });

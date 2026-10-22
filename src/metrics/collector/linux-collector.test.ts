@@ -1385,6 +1385,38 @@ test("LinuxMetricsCollector carries this tick's sizes: memory, swap, cores and t
   assertEquals((sizes?.logicalCores ?? 0) > 0, true);
 });
 
+test("LinuxMetricsCollector reports the root totals when / itself cannot be probed", async () => {
+  const deps = makeDeps(
+    () => ({ ...TICK_1, "/proc/mounts": "/dev/sda1 / ext4 rw 0 0\n" }),
+    fullTopologySnapshot(),
+    () => 1_000_000,
+  );
+  const result = await new LinuxMetricsCollector({
+    ...deps,
+    statfs: (path: string) =>
+      path === "/"
+        ? Promise.reject(new Deno.errors.PermissionDenied("read access to /"))
+        : {
+          blocks: 1000,
+          bfree: 500,
+          bavail: 400,
+          bsize: 4096,
+          files: 100,
+          ffree: 50,
+        },
+  }).collect({ sequence: 1, nowMs: 1_000_000 });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+  assertEquals(
+    result.sample.extended?.sizes?.rootFilesystemTotalBytes,
+    1000 * 4096,
+  );
+  assertEquals(result.sample.extended?.sizes?.rootFilesystemTotalInodes, 100);
+  assertEquals(
+    result.sample.host.storage.rootFilesystemAvailableBytes,
+    400 * 4096,
+  );
+});
+
 const HOST_EXTENDED_RAW: RawFixtureMap = {
   "/proc/loadavg": "0.48 0.37 0.35 1/352 151909\n",
   "/proc/sys/kernel/pid_max": "4194304\n",

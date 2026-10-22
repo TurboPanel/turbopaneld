@@ -13,7 +13,10 @@ import { assertEquals, assertThrows } from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
 import { mariadbManagedEngineRuntime } from "./mariadb.ts";
 import { mysqlManagedEngineRuntime } from "./mysql.ts";
-import { ownerRoleNames } from "./postgres-owner-role-sql.ts";
+import {
+  ownerRoleNames,
+  reassignDatabaseObjectsSql,
+} from "./postgres-owner-role-sql.ts";
 import { postgresManagedEngineRuntime } from "./postgres.ts";
 import type {
   ManagedEngineContext,
@@ -456,4 +459,18 @@ test("postgres: an owner login that no longer qualifies hands the database back 
     inputs.join("\n").includes(`OWNER TO "tp_shop_owner"`),
     true,
   );
+});
+
+test("reassignDatabaseObjectsSql hands user objects to the owner role in one block, never REASSIGN OWNED", () => {
+  const sql = reassignDatabaseObjectsSql("tp_app_owner");
+  assertEquals(sql.startsWith("DO $turbopanel$"), true);
+  assertEquals(sql.includes("REASSIGN OWNED"), false);
+  for (
+    const kind of ["SCHEMA", "TABLE", "SEQUENCE", "ROUTINE", "DOMAIN", "TYPE"]
+  ) {
+    assertEquals(sql.includes(`ALTER ${kind} `), true, kind);
+  }
+  // Extension members and the engine's own schemas are left alone.
+  assertEquals(sql.includes("deptype = 'e'"), true);
+  assertEquals(sql.includes("information_schema"), true);
 });

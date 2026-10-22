@@ -27,11 +27,10 @@ docker_gate_socket: "{{ docker_gate_run_dir }}/docker.sock"
 docker_gate_ro_run_dir: "{{ docker_gate_run_dir }}/ro"
 docker_gate_ro_socket: "{{ docker_gate_ro_run_dir }}/docker.sock"
 # Whether the daemon points both Traefiks at the read-only socket instead of
-# the Tecnativa socket-proxy container. Sticky: true writes the root-owned
-# switch file, false removes it, empty (the default) leaves it as it is, so an
-# update converge that does not pass the variable never flips it. Off until
-# someone turns it on.
-docker_gate_ingress_socket: ""
+# the socket proxy image. On by default: true (the default)
+# writes the root-owned switch file on every converge, false removes it, empty
+# leaves it as it is. Set false to keep the socket-proxy container.
+docker_gate_ingress_socket: true
 # The gate's mode: observe (log findings, refuse nothing) or enforce (stage 4:
 # refuse a request with findings). Once it is enforce, a gate that cannot be
 # installed or swapped in fails the converge: an older, laxer gate must never

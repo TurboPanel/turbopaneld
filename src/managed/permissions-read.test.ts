@@ -221,6 +221,30 @@ test("an engine read failure is ok: false with a bounded error", async () => {
   assertEquals(long.error.length, 4096);
 });
 
+test("a read keeps what each MySQL login defines, end to end", async () => {
+  const base = { exists: true, memberships: [], grants: [], defaults: [] };
+  const result = await readManagedPermissions(
+    input({ engine: "mysql", logins: ["viewer", "unreadable", "plain"] }),
+    {
+      resolve: () =>
+        Promise.resolve(fakeEngine({
+          serverVersion: "9.7.0",
+          logins: [
+            { ...base, username: "viewer", definesObjects: ["view appdb.v"] },
+            { ...base, username: "unreadable", definesObjectsUnread: true },
+            { ...base, username: "plain" },
+          ],
+        })),
+      now: () => new Date("2026-10-22T12:00:00.000Z"),
+    },
+  );
+  if (!result.ok) throw new TypeError(result.error);
+  const [viewer, unreadable, plain] = result.permissions.logins;
+  assertEquals(viewer?.definesObjects, ["view appdb.v"]);
+  assertEquals(unreadable?.definesObjectsUnread, true);
+  assertEquals(plain?.definesObjects, undefined);
+});
+
 test("a successful read is stamped and bounded", async () => {
   const result = await readManagedPermissions(input(), {
     resolve: () =>
@@ -307,6 +331,29 @@ test("per-item caps: privileges, columns and long names", () => {
     defaults: [],
   });
   assertEquals(small.truncated, undefined);
+});
+
+test("boundLogin keeps the objects a login defines and the unread flag", () => {
+  const base = { exists: true, memberships: [], grants: [], defaults: [] };
+  const owner = boundLogin({
+    ...base,
+    username: "viewer",
+    definesObjects: ["view appdb.v_orders", "and 3 more"],
+  });
+  assertEquals(owner.definesObjects, ["view appdb.v_orders", "and 3 more"]);
+  assertEquals(owner.definesObjectsUnread, undefined);
+
+  const unread = boundLogin({
+    ...base,
+    username: "viewer",
+    definesObjectsUnread: true,
+  });
+  assertEquals(unread.definesObjectsUnread, true);
+  assertEquals(unread.definesObjects, undefined);
+
+  const plain = boundLogin({ ...base, username: "plain" });
+  assertEquals("definesObjects" in plain, false);
+  assertEquals("definesObjectsUnread" in plain, false);
 });
 
 function bigLogin(username: string, count: number): ObservedLogin {
