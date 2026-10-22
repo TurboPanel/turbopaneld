@@ -34,7 +34,10 @@ import {
 } from "../deploy/docker-cli.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { pruneStaleManagedDockerNetworks } from "./networks.ts";
+import {
+  ensureManagedIngressNetwork,
+  pruneStaleManagedDockerNetworks,
+} from "./networks.ts";
 import {
   assertContainerStable,
   type ContainerStabilityOptions,
@@ -904,6 +907,7 @@ export async function ensureOrchestratorStack(
     networkRenamed;
   await Deno.writeTextFile(composePath, composeYaml, { mode: 0o640 });
 
+  await clearOrchestratorStoppedMarker(layout);
   const upArgs = [
     "compose",
     "-f",
@@ -955,6 +959,57 @@ export async function stopOrchestratorStack(
   if (!down.success) {
     throw new Error(down.stderr || "orchestrator compose down failed");
   }
+  await Deno.writeTextFile(orchestratorStoppedMarkerPath(layout), "", {
+    mode: 0o640,
+  });
+}
+
+function orchestratorStoppedMarkerPath(layout: LayoutPaths): string {
+  return join(orchestratorConfigDir(layout), "stopped.marker");
+}
+
+async function clearOrchestratorStoppedMarker(
+  layout: LayoutPaths,
+): Promise<void> {
+  try {
+    await Deno.remove(orchestratorStoppedMarkerPath(layout));
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+}
+
+/**
+ * Recreate the Orchestrator stack from its on-disk compose file when Docker
+ * came back without its containers (a Docker stop and start removes them for
+ * good). Does nothing when the stack was torn down on purpose (marker left by
+ * {@link stopOrchestratorStack}), when no compose file exists, or when any
+ * container of the stack still exists. Never rewrites compose or conf.
+ */
+export async function startMissingOrchestratorStack(
+  layout: LayoutPaths,
+  run: RunDockerFn = defaultRunDocker,
+): Promise<"absent" | "torn-down" | "present" | "started"> {
+  const composePath = orchestratorComposePath(layout);
+  if (!(await pathExists(composePath))) return "absent";
+  if (await pathExists(orchestratorStoppedMarkerPath(layout))) {
+    return "torn-down";
+  }
+  if (isOrchestratorStackBusy(composePath)) return "present";
+  const ps = await run(["compose", "-f", composePath, "ps", "-a", "-q"]);
+  if (!ps.success) throw new Error(ps.stderr || "docker compose ps failed");
+  if (ps.stdout.trim() !== "") return "present";
+  const managedNetwork = await readCurrentOrchestratorManagedNetwork(layout);
+  if (managedNetwork === null) return "absent";
+  await ensureManagedIngressNetwork(managedNetwork, run);
+  const up = await withOrchestratorStackMutation(
+    layout,
+    () => run(["compose", "-f", composePath, "up", "-d"]),
+  );
+  if (!up.success) {
+    throw new Error(up.stderr || "orchestrator compose up failed");
+  }
+  logInfo("managed", "orchestrator stack recreated after Docker returned");
+  return "started";
 }
 
 export async function restartOrchestratorStack(
