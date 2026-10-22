@@ -7,7 +7,7 @@ import {
   formatTopSites,
   mergeExtended,
   reclaimableBytes,
-} from "./extended-v8.ts";
+} from "./extended-v12.ts";
 
 const CONTAINERS: ContainerHealthSample = {
   running: 7,

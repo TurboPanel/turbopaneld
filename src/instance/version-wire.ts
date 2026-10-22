@@ -167,7 +167,7 @@ export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
   "managed-ha-boot-hold-v1";
 
 /**
- * Metrics schema v8. This daemon can produce v8 samples (`metadata.version`
+ * Metrics schema wire version 8. This daemon can produce wire version 8 samples (`metadata.version`
  * 8: the `extended` section and the `durable` flag). It stamps
  * `METRICS_LEGACY_WIRE_VERSION` until the control plane it is attached to
  * lists this feature, so a daemon updated ahead of the control plane keeps
