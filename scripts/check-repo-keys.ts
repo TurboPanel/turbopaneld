@@ -2,8 +2,9 @@
 /**
  * Repository signing-key drift check.
  *
- * For every shipped key (`orchestration/roles/<role>/files/<name>.asc` with a
- * `<name>.asc.json` beside it): validates the bundled copy against its
+ * For every shipped key (`orchestration/roles/<role>/files/<name>.asc`, or a
+ * binary `<name>.gpg`, with a `<name>.asc.json` / `<name>.gpg.json` beside it,
+ * kept byte for byte as the vendor publishes it): validates the bundled copy against its
  * metadata, fetches the live key from the recorded source, and reports any
  * difference in fingerprint or content plus keys that expire soon. Exits
  * non-zero on drift, a mismatching bundled copy, or an expiry within 60 days.
@@ -82,7 +83,7 @@ export async function findMetaFiles(root: string = ROOT): Promise<string[]> {
     const files = join(roles, role.name, "files");
     try {
       for await (const entry of Deno.readDir(files)) {
-        if (entry.isFile && entry.name.endsWith(".asc.json")) {
+        if (entry.isFile && /\.(asc|gpg)\.json$/.test(entry.name)) {
           out.push(join(files, entry.name));
         }
       }
