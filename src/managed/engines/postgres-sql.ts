@@ -1153,6 +1153,16 @@ export function isInRecoverySql(): string {
   return "SELECT pg_catalog.pg_is_in_recovery();";
 }
 
+/**
+ * After a promote: the last WAL position replayed during recovery (static once
+ * recovery ended) and the first 8 hex digits of the WAL file name at the
+ * current insert position, which are the timeline the primary now writes on.
+ */
+export function promotedPositionSql(): string {
+  return "SELECT pg_catalog.pg_last_wal_replay_lsn(), " +
+    "substr(pg_catalog.pg_walfile_name(pg_catalog.pg_current_wal_lsn()), 1, 8);";
+}
+
 /** True when this instance is a writable primary (not standby recovery). */
 export function isWritablePrimarySql(): string {
   return "SELECT NOT pg_catalog.pg_is_in_recovery();";

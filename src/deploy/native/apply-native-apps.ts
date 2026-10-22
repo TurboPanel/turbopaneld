@@ -805,6 +805,9 @@ async function startNativeApp(
   // `enable --now` on first deploy, `restart` afterwards: an already-enabled
   // unit re-enabled is a no-op, but an already-running one needs a restart to
   // pick up the release `current` now points at.
+  // A unit systemd gave up on refuses every start until its failure is
+  // cleared, which would make a fixed redeploy fail the same way.
+  await systemctl(io, ["reset-failed", unit]);
   const active = await unitIsActive(io, unit);
   const action = active ? "restart" : "enable --now";
   io.onOutput?.(

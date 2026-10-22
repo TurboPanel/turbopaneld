@@ -33,6 +33,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   fabricReinstalls: number;
   firewallReinstalls: number;
   phpReconciles: number;
+  stackHeals: number;
   instanceStops: number;
   sentinelStops: number;
   dockerCloses: number;
@@ -45,6 +46,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   let fabricReinstalls = 0;
   let firewallReinstalls = 0;
   let phpReconciles = 0;
+  let stackHeals = 0;
   let instanceStops = 0;
   let sentinelStops = 0;
   let dockerCloses = 0;
@@ -99,6 +101,10 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       firewallReinstalls += 1;
       return Promise.resolve();
     },
+    healManagedStacks: () => {
+      stackHeals += 1;
+      return Promise.resolve();
+    },
     reconcileSitePhpRuntimes: () => {
       phpReconciles += 1;
       return Promise.resolve();
@@ -138,6 +144,9 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     },
     get firewallReinstalls() {
       return firewallReinstalls;
+    },
+    get stackHeals() {
+      return stackHeals;
     },
     get phpReconciles() {
       return phpReconciles;
@@ -824,4 +833,26 @@ test("a first boot that shuts down mid-converge skips the post-converge steps", 
   converge.resolve(true);
   await flush();
   assertEquals(restores, 0);
+
+test("runDaemon restores the connection point and watcher every time Docker becomes reachable", async () => {
+  const reachability: Array<(reachable: boolean) => void> = [];
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: () => ({
+      subscribeReachability: (cb) => {
+        reachability.push(cb);
+      },
+    }),
+    startTunnels: () => {
+      for (const cb of reachability) {
+        cb(false);
+        cb(true);
+      }
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(stub.stackHeals, 1);
 });

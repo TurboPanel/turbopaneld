@@ -32,6 +32,7 @@ import {
   markHostCleanShutdown,
   recordHostBootPersist,
 } from "../managed/host-boot.ts";
+import { healManagedStacksOnDockerReturn } from "../managed/docker-return-heal.ts";
 import { repairProxySqlFrontendAtBoot } from "../managed/proxysql-boot-repair.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
@@ -53,6 +54,15 @@ import {
 } from "../metrics/collector/index.ts";
 import { collectTopology } from "../metrics/topology/topology.ts";
 import { startTunnels } from "../tunnels/supervisor.ts";
+
+/**
+ * Docker stopped and started again: its containers for the managed database
+ * connection point (ProxySQL) and watcher (Orchestrator) are gone. Recreate
+ * them from the compose files already on disk (`managed/docker-return-heal.ts`).
+ */
+async function healManagedStacksAfterDockerReturn(): Promise<void> {
+  await healManagedStacksOnDockerReturn(resolveLayout(Deno.env.toObject()));
+}
 
 /** Minimal Docker HTTP client surface used at daemon startup. */
 export type DockerClientLike = {
@@ -100,6 +110,8 @@ export type DaemonRunIo = {
   markCleanShutdown?: () => Promise<void>;
   /** Boot-time ProxySQL frontend repair; defaults to {@link repairProxySqlFrontendAtBoot}. */
   repairProxySqlFrontend?: () => Promise<unknown>;
+  /** Bring back ProxySQL and Orchestrator after Docker returns; defaults to {@link healManagedStacksAfterDockerReturn}. */
+  healManagedStacks?: () => Promise<unknown>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
@@ -199,6 +211,14 @@ async function maybeAttachDocker(
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
     void reinstallForwardingJumps();
+    void (io.healManagedStacks ?? healManagedStacksAfterDockerReturn)()
+      .catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "managed",
+          "restoring the connection point and watcher after Docker returned failed:",
+          sanitizeForLog(err),
+        );
+      });
   });
   return { dockerClient, dockerMonitor };
 }
