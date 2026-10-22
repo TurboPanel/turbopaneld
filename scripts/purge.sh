@@ -2162,21 +2162,43 @@ tp_remove_units() {
   tp_remove_unit_files
   tp_prune_wants_symlinks
   tp_run "systemctl daemon-reload" systemctl daemon-reload || true
-  # Scoped to TurboPanel units. A bare reset-failed would clear every failed
-  # unit on the host, including ones this purge did not touch. A glob
-  # that matches nothing is not a failed purge, but wg-quick@tp0.service
-  # is a literal name, not a glob: systemctl errors on "not loaded" for a
-  # literal it has never seen, which is the common case on a host that never
-  # brought up a WireGuard tunnel. Only pass it when it is actually known.
-  _ru_units="turbopanel* turbopaneld*"
-  if systemctl list-units --all --no-legend --plain 'wg-quick@tp0.service' \
-      2>/dev/null | grep -q .; then
-    _ru_units="$_ru_units wg-quick@tp0.service"
+  tp_reset_failed_units
+}
+
+# Clears the failed state of TurboPanel's own units, and only of units systemd
+# has loaded in the failed state. A bare reset-failed would clear every failed
+# unit on the host, and reset-failed on a name systemd has not loaded exits 1
+# ("not loaded"), which would count as a failed purge step and keep the purge
+# marker. The patterns stay quoted: unquoted, the shell expands turbopanel*
+# against the working directory first, and a /tmp/turbopanel-orchestrate there
+# turned it into a literal unit name. Dry-run only logs it (tp_run).
+tp_reset_failed_units() {
+  _rfu_list=$TP_TMP/failed.units
+  : > "$_rfu_list"
+  systemctl list-units --failed --all --no-legend --plain \
+    'turbopanel*' 'turbopaneld*' 'wg-quick@tp0.service' > "$TP_TMP/failed.raw" 2>/dev/null || true
+  set -f
+  while IFS= read -r _rfu_line; do
+    # Older systemd prints a status bullet before the name.
+    for _rfu_word in $_rfu_line; do
+      case $_rfu_word in
+        turbopanel*|wg-quick@tp0.service)
+          tp_file_add "$_rfu_list" "$_rfu_word"
+          break
+          ;;
+      esac
+    done
+  done < "$TP_TMP/failed.raw"
+  set +f
+  if [ ! -s "$_rfu_list" ]; then
+    tp_log_line "no failed TurboPanel units to clear"
+    return 0
   fi
-  # Dry-run must skip this: it clears live unit state.
-  # shellcheck disable=SC2086
-  tp_run "clear failed TurboPanel unit state" \
-    systemctl reset-failed $_ru_units || true
+  set --
+  while IFS= read -r _rfu_unit; do
+    set -- "$@" "$_rfu_unit"
+  done < "$_rfu_list"
+  tp_run "clear failed TurboPanel unit state" systemctl reset-failed "$@" || true
 }
 
 tp_docker_inventory_container_name() {
@@ -2257,9 +2279,7 @@ tp_finalize_turbopanel_units() {
   tp_collect_unit_names
   tp_stop_units_matching other
   tp_run "systemctl daemon-reload" systemctl daemon-reload || true
-  # shellcheck disable=SC2086
-  tp_run "clear failed TurboPanel unit state" \
-    systemctl reset-failed turbopanel* turbopaneld* || true
+  tp_reset_failed_units
 }
 
 tp_remove_docker() {
@@ -2820,9 +2840,40 @@ tp_purge_note_kept() {
   tp_print_warn "keeping ${_pnk_pkg}: ${_pnk_why}"
 }
 
+# dpkg's Status is "<want> <flag> <state>". The want is install, hold,
+# deinstall, purge or unknown: a version hold reads "hold ok installed", so the
+# want never decides whether a package is there. The flag is ok or reinstreq.
+# Only the state says what is on disk: installed, or partway in or out
+# (half-installed, unpacked, half-configured, triggers-awaited,
+# triggers-pending), all of which leave the package's files; config-files
+# leaves only its conffiles; not-installed leaves nothing. A Multi-Arch package
+# prints one line per architecture. Shell only: callers run with a bare PATH.
+# The on-disk states are TP_DPKG_ON_DISK.
+
+# $1 package, $2 space-separated states. True when any line is in one of them.
+tp_pkg_state_in() {
+  _psi_status=$(dpkg-query -W -f '${Status}\n' "$1" 2>/dev/null || true)
+  [ -n "$_psi_status" ] || return 1
+  while IFS=' ' read -r _psi_want _psi_flag _psi_state; do
+    : "$_psi_want" "$_psi_flag"
+    [ -n "$_psi_state" ] || continue
+    case " $2 " in
+      *" $_psi_state "*) return 0 ;;
+    esac
+  done <<EOF
+$_psi_status
+EOF
+  return 1
+}
+
+# The package's files are on the host, whatever dpkg's want or flag says.
 tp_pkg_installed() {
-  _pi_status=$(dpkg-query -W -f '${Status}' "$1" 2>/dev/null || true)
-  [ "$_pi_status" = "install ok installed" ]
+  tp_pkg_state_in "$1" "$TP_DPKG_ON_DISK"
+}
+
+# The purge has something to remove: the package's files or its conffiles.
+tp_pkg_purgeable() {
+  tp_pkg_state_in "$1" "$TP_DPKG_ON_DISK config-files"
 }
 
 # Only packages that are provably TurboPanel's own go through the purge. The
@@ -2848,10 +2899,10 @@ tp_collect_purge_candidates() {
   dpkg-query -W -f '${Package}\n' 'php[0-9]*.[0-9]*-*' > "$TP_TMP/apt.php" 2>/dev/null || true
   while IFS= read -r _cpc; do
     [ -n "$_cpc" ] || continue
-    tp_pkg_installed "$_cpc" || continue
+    tp_pkg_purgeable "$_cpc" || continue
     tp_file_add "$TP_TMP/apt.candidates" "$_cpc"
   done < "$TP_TMP/apt.php"
-  if tp_pkg_installed debsuryorg-archive-keyring; then
+  if tp_pkg_purgeable debsuryorg-archive-keyring; then
     tp_file_add "$TP_TMP/apt.candidates" debsuryorg-archive-keyring
   fi
   if [ -s "$TP_TMP/apt.candidates" ]; then
@@ -3197,6 +3248,17 @@ tp_purge_docker_data_root() {
   fi
 }
 
+# Docker's packages on the host, held or not and also when only partly
+# installed or only their conffiles remain, into docker.pkgs.
+tp_collect_docker_packages() {
+  : > "$TP_TMP/docker.pkgs"
+  for _pde in $TP_DOCKER_PACKAGES; do
+    if tp_pkg_purgeable "$_pde"; then
+      tp_file_add "$TP_TMP/docker.pkgs" "$_pde"
+    fi
+  done
+}
+
 tp_purge_docker_engine() {
   tp_print_step "▸" "Docker Engine"
   # Capture data-root while daemon.json and the daemon are still available.
@@ -3204,15 +3266,11 @@ tp_purge_docker_engine() {
   tp_stop_unit_if_running docker.socket
   tp_stop_unit_if_running docker
   tp_stop_unit_if_running containerd
-  : > "$TP_TMP/docker.pkgs"
   if ! tp_has_tool dpkg-query; then
+    : > "$TP_TMP/docker.pkgs"
     tp_record_skip "dpkg-query not installed"
   else
-    for _pde in $TP_DOCKER_PACKAGES; do
-      if tp_pkg_installed "$_pde"; then
-        tp_file_add "$TP_TMP/docker.pkgs" "$_pde"
-      fi
-    done
+    tp_collect_docker_packages
   fi
   if [ -s "$TP_TMP/docker.pkgs" ]; then
     if tp_has_tool apt-get; then
@@ -3236,10 +3294,32 @@ tp_purge_docker_engine() {
   hash -r 2>/dev/null || true
   if tp_docker_engine_gone; then
     TP_DOCKER_ENGINE_GONE=true
+    tp_purge_docker_unit_leftovers
     tp_purge_docker_network_state
   else
     tp_print_warn "Docker Engine is still installed; its bridges and firewall rules were left"
   fi
+}
+
+# Once Docker Engine is purged its units went with its packages. What can stay
+# is an enablement link left dangling (a purge that stopped partway, or a unit
+# enabled by hand) and an empty drop-in dir (the hosting role's ingress guard
+# drop-in lives in docker.service.d). A real unit file is never touched.
+tp_purge_docker_unit_leftovers() {
+  for _pdu_dir in $TP_SYSTEMD_DIRS; do
+    [ -d "$_pdu_dir" ] || continue
+    for _pdu_unit in docker.service docker.socket containerd.service; do
+      for _pdu_link in "$_pdu_dir"/*.wants/"$_pdu_unit" "$_pdu_dir"/*.requires/"$_pdu_unit"; do
+        if [ -L "$_pdu_link" ] && [ ! -e "$_pdu_link" ]; then
+          tp_run "remove dangling link $_pdu_link" rm -f "$_pdu_link" || true
+        fi
+      done
+      _pdu_drop=$_pdu_dir/$_pdu_unit.d
+      if [ -d "$_pdu_drop" ] && [ ! -L "$_pdu_drop" ] && [ -z "$(ls -A "$_pdu_drop" 2>/dev/null)" ]; then
+        tp_run "remove empty $_pdu_drop" rmdir "$_pdu_drop" || true
+      fi
+    done
+  done
 }
 
 # True when an engine package from TP_DOCKER_PACKAGES is still on the host.
@@ -3894,6 +3974,8 @@ TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folde
 # removal (the Docker lists below, or the sury names in tp_purge_apt_packages);
 # scripts/purge-coverage.test.ts fails when a role names an apt file, a held
 # package or a systemd unit this script does not remove.
+# dpkg states in which a package's files are on disk (see tp_pkg_state_in).
+TP_DPKG_ON_DISK="installed half-installed unpacked half-configured triggers-awaited triggers-pending"
 TP_DOCKER_PACKAGES="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras docker.io docker-compose containerd runc"
 TP_APT_SOURCES_DIR=/etc/apt/sources.list.d
 # Docker apt sources by name: the Docker role's and the Galaxy role's deb822
