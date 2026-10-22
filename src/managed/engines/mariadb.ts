@@ -141,6 +141,92 @@ const mariadbBackupRuntime: ManagedEngineBackupRuntime = {
 
 const MARIADB_SQL_STDIN_MARK = "__TP_SQL__";
 
+export const MARIADB_STANDBY_STREAMING_TIMEOUT_MS = 90_000;
+export const MARIADB_STANDBY_STREAMING_POLL_MS = 3_000;
+
+async function readMariadbStandbyState(
+  ctx: ManagedEngineContext,
+): Promise<string> {
+  try {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    if (!verbose.trim()) return "unknown";
+    return parseShowSlaveStatus(verbose).state;
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * After a fresh seed the IO/SQL threads are not necessarily Yes on the first
+ * read. Wait a bounded time for them, but never fail the apply on a slow
+ * stream: the standby marker is already written, so a retry must not reseed.
+ * Returns false when the window ran out; health reads keep reporting after.
+ */
+export async function waitMariadbStandbyStreaming(
+  ctx: ManagedEngineContext,
+  options?: {
+    timeoutMs?: number;
+    pollMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+  },
+): Promise<boolean> {
+  const timeoutMs = options?.timeoutMs ?? MARIADB_STANDBY_STREAMING_TIMEOUT_MS;
+  const pollMs = options?.pollMs ?? MARIADB_STANDBY_STREAMING_POLL_MS;
+  const sleepFn = options?.sleep ?? sleep;
+  const now = options?.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  const poll = async (): Promise<boolean> => {
+    if (await readMariadbStandbyState(ctx) === "streaming") return true;
+    if (now() >= deadline) return false;
+    await sleepFn(pollMs);
+    return poll();
+  };
+  return await poll();
+}
+
+/**
+ * `skip_slave_start` keeps the replica threads down after a container
+ * restart, and nothing else starts them until a later health heal. A replica
+ * stopped by hand on a long-running server must stay stopped, so threads are
+ * only started when the server itself is younger than this.
+ */
+export const MARIADB_REPLICA_RESUME_MAX_UPTIME_SECONDS = 300;
+
+export type MariadbExistingStandbyOutcome =
+  | "no_replica"
+  | "running"
+  | "left_stopped"
+  | "started";
+
+/**
+ * Standby marker present: this member was seeded before. Only act on a member
+ * that still has replica configuration (promote runs RESET SLAVE ALL and
+ * leaves the marker, so START SLAVE there is ERROR 1200). Does not wait for
+ * streaming: follow-primary and the health poll own that.
+ */
+export async function resumeExistingMariadbStandby(
+  ctx: ManagedEngineContext,
+  options?: { maxUptimeSeconds?: number },
+): Promise<MariadbExistingStandbyOutcome> {
+  const status = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+  if (!status.trim()) return "no_replica";
+  if (parseShowSlaveStatus(status).state !== "stopped") return "running";
+  const uptime = Number(
+    (await runMariadbQuery(
+      ctx,
+      "SELECT VARIABLE_VALUE FROM " +
+        "information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME='UPTIME';",
+    ))
+      .trim(),
+  );
+  const maxUptime = options?.maxUptimeSeconds ??
+    MARIADB_REPLICA_RESUME_MAX_UPTIME_SECONDS;
+  if (!Number.isFinite(uptime) || uptime > maxUptime) return "left_stopped";
+  await runMariadb(ctx, startReplicaSql());
+  return "started";
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -433,7 +519,8 @@ export function resolveMariadbPrimaryConnectHost(primary: {
 
 /**
  * Failure-safe logical seed: credentials only in a 0600 defaults file, trap
- * removes it on every exit, dump|import fails if either side fails.
+ * removes it on every exit, dump and import run as separate processes so
+ * each side's stderr and exit code can be reported.
  */
 export function buildMariadbStandbySeedScript(
   withRootPassword = false,
@@ -449,38 +536,44 @@ export function buildMariadbStandbySeedScript(
   // (ERROR 1948, "contains no value for replication domain N"). `RESET
   // MASTER` clears state left by init; `SET SESSION sql_log_bin=0` keeps the
   // import out of the binlog entirely.
-  const SQL_LOG_BIN_OFF = String
-    .raw`  { printf 'SET SESSION sql_log_bin=0;\n'; `;
+  // `mysql.func` / `mysql.plugin` are skipped: importing DROP TABLE `func`
+  // on 12.3 kills the local engine (ERROR 2013 / TLS broken pipe on the dump
+  // connection, or empty exec output when the container restarts).
+  const dump =
+    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
+    "--triggers --events --gtid --ignore-table=mysql.func --ignore-table=mysql.plugin " +
+    "--all-databases";
   return [
     "set -e",
     "tmp=$(mktemp)",
-    "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
-    'chmod 600 "$tmp"',
+    "dump_err=$(mktemp)",
+    "import_err=$(mktemp)",
+    'fifo="$tmp.fifo"',
+    'trap \'rm -f "$tmp" "$dump_err" "$import_err" "$fifo"\' EXIT INT TERM HUP',
+    'chmod 600 "$tmp" "$dump_err" "$import_err"',
     ...standbySeedStdinLines(withRootPassword),
+    'trap \'rm -f "$tmp" "$dump_err" "$import_err" "$fifo" "$rootcnf"\' EXIT INT TERM HUP',
     `mariadb $rootopt --protocol=socket -u root -e "${
       resetReplicaGtidStateSql().replaceAll(";", "")
     }"`,
-    "if (set -o pipefail) 2>/dev/null; then",
-    "  set -o pipefail",
-    SQL_LOG_BIN_OFF +
-    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
-    "--triggers --events --gtid --all-databases; } " +
-    "| mariadb $rootopt --protocol=socket -u root",
-    "else",
-    '  fifo="$tmp.fifo"',
-    '  mkfifo "$fifo"',
-    '  trap \'rm -f "$tmp" "$fifo"\' EXIT INT TERM HUP',
-    SQL_LOG_BIN_OFF +
-    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
-    '--triggers --events --gtid --all-databases; } >"$fifo" &',
-    "  dump_pid=$!",
-    "  set +e",
-    '  mariadb $rootopt --protocol=socket -u root <"$fifo"',
-    "  import_rc=$?",
-    "  wait $dump_pid",
-    "  dump_rc=$?",
-    "  set -e",
-    '  if [ "$dump_rc" -ne 0 ] || [ "$import_rc" -ne 0 ]; then exit 1; fi',
+    'mkfifo "$fifo"',
+    String
+      .raw`{ printf 'SET SESSION sql_log_bin=0;\n'; ${dump}; } >"$fifo" 2>"$dump_err" &`,
+    "dump_pid=$!",
+    "set +e",
+    'mariadb $rootopt --protocol=socket -u root <"$fifo" 2>"$import_err"',
+    "import_rc=$?",
+    "wait $dump_pid",
+    "dump_rc=$?",
+    "set -e",
+    'if [ "$dump_rc" -ne 0 ] || [ "$import_rc" -ne 0 ]; then',
+    '  echo "dump_exit=$dump_rc import_exit=$import_rc" >&2',
+    '  echo "----- dump stderr -----" >&2',
+    '  tail -c 4000 "$dump_err" >&2 || true',
+    "  echo >&2",
+    '  echo "----- import stderr -----" >&2',
+    '  tail -c 4000 "$import_err" >&2 || true',
+    "  exit 1",
     "fi",
   ].join("\n");
 }
@@ -550,7 +643,10 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       "-f",
       `/var/lib/mysql/${STANDBY_MARKER}`,
     ]);
-    if (markerCheck.success) return;
+    if (markerCheck.success) {
+      await resumeExistingMariadbStandby(ctx);
+      return;
+    }
 
     // hostaddr is the private listener IP (must match IP SAN); host is the DNS SAN.
     const primaryHost = resolveMariadbPrimaryConnectHost(spec.primary);
@@ -565,6 +661,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       // VERIFY_IDENTITY equivalent (CA validation + hostname check).
       "ssl-verify-server-cert",
       "ssl-ca=/etc/mysql/tls/ca.crt",
+      // No timeout keys here: mariadb-dump rejects connect_timeout and the
+      // net_*_timeout names in [client] (exit 7), and has no --init-command.
       "",
     ].join("\n");
 
@@ -605,6 +703,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
 
     await runMariadb(ctx, enforceReadOnlySql());
 
+    // Marker first: once replication is configured the seed is done, and a
+    // retry after a slow stream must not throw the data away and reseed.
     const mark = await ctx.exec([
       "sh",
       "-c",
@@ -615,6 +715,13 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
         `mariadb configureStandby marker failed: ${
           sanitizeForLog(mark.stderr || mark.stdout || "unknown")
         }`,
+      );
+    }
+
+    if (!await waitMariadbStandbyStreaming(ctx)) {
+      logWarn(
+        "managed-mariadb",
+        "standby replica not streaming yet after seed; health polling continues",
       );
     }
   },
