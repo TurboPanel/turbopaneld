@@ -74,9 +74,9 @@ export async function checkKey(
   return { name: meta.name, problems, notes };
 }
 
-async function findMetaFiles(): Promise<string[]> {
+export async function findMetaFiles(root: string = ROOT): Promise<string[]> {
   const out: string[] = [];
-  const roles = join(ROOT, "orchestration", "roles");
+  const roles = join(root, "orchestration", "roles");
   for await (const role of Deno.readDir(roles)) {
     if (!role.isDirectory) continue;
     const files = join(roles, role.name, "files");
@@ -93,6 +93,8 @@ async function findMetaFiles(): Promise<string[]> {
   return out.sort((a, b) => a.localeCompare(b));
 }
 
+export type KeyFetcher = (url: string) => Promise<Uint8Array | null>;
+
 async function fetchLive(url: string): Promise<Uint8Array | null> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(30_000) });
@@ -103,18 +105,31 @@ async function fetchLive(url: string): Promise<Uint8Array | null> {
   }
 }
 
-if (import.meta.main) {
-  let failed = false;
-  for (const metaPath of await findMetaFiles()) {
+/** Check every shipped key under `root`; a failed live fetch is a problem. */
+export async function runKeyChecks(
+  root: string = ROOT,
+  fetcher: KeyFetcher = fetchLive,
+  now: Date = new Date(),
+): Promise<KeyReport[]> {
+  const metaPaths = await findMetaFiles(root);
+  return await Promise.all(metaPaths.map(async (metaPath) => {
     const meta = JSON.parse(await Deno.readTextFile(metaPath)) as KeyMeta;
-    const bundled = await Deno.readFile(metaPath.replace(/\.json$/, ""));
-    const live = await fetchLive(meta.source);
-    const report = await checkKey(meta, bundled, live);
+    const [bundled, live] = await Promise.all([
+      Deno.readFile(metaPath.replace(/\.json$/, "")),
+      fetcher(meta.source),
+    ]);
+    const report = await checkKey(meta, bundled, live, now);
     if (!live) report.problems.push(`could not fetch ${meta.source}`);
-    console.log(`${report.problems.length ? "DRIFT" : "ok   "} ${meta.name}`);
+    return report;
+  }));
+}
+
+if (import.meta.main) {
+  const reports = await runKeyChecks();
+  for (const report of reports) {
+    console.log(`${report.problems.length ? "DRIFT" : "ok   "} ${report.name}`);
     for (const note of report.notes) console.log(`  ${note}`);
     for (const problem of report.problems) console.log(`  ! ${problem}`);
-    if (report.problems.length) failed = true;
   }
-  Deno.exit(failed ? 1 : 0);
+  Deno.exit(reports.some((r) => r.problems.length) ? 1 : 0);
 }

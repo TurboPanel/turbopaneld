@@ -34,7 +34,7 @@ export function dearmor(input: Uint8Array): Uint8Array {
     body.push(line.trim());
   }
   const binary = atob(body.join(""));
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  return Uint8Array.from(binary, (c) => c.codePointAt(0) ?? 0);
 }
 
 function readPacketHeader(
@@ -126,7 +126,9 @@ function signatureTimes(
 
 async function sha1Hex(data: Uint8Array): Promise<string> {
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-1", data as Uint8Array<ArrayBuffer>),
+    // OpenPGP v4 fingerprints are defined as SHA-1 over the key packet; this
+    // identifies a key, it does not protect anything.
+    await crypto.subtle.digest("SHA-1", data as Uint8Array<ArrayBuffer>), // NOSONAR typescript:S4790
   );
   return Array.from(digest, (b) => b.toString(16).padStart(2, "0"))
     .join("")
@@ -137,7 +139,7 @@ async function sha1Hex(data: Uint8Array): Promise<string> {
 export async function readPgpKey(input: Uint8Array): Promise<PgpKeyInfo> {
   const packets = parsePackets(dearmor(input));
   const primary = packets[0];
-  if (!primary || primary.tag !== 6 || primary.body[0] !== 4) {
+  if (primary?.tag !== 6 || primary.body[0] !== 4) {
     throw new Error("expected a v4 public key packet first");
   }
   const created = u32(primary.body, 1);

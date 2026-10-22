@@ -150,7 +150,7 @@
         remote_src: true
         owner: root
         group: root
-        mode: "0644"
+        mode: "0644"  # NOSONAR ansible:S2612 — apt reads the key and source as its sandbox user
       register: _repo_key_installed
 
     - name: Record the result

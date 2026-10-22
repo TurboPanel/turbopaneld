@@ -80,7 +80,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0755"  # NOSONAR ansible:S2612 — apt reads the key and source as its sandbox user
 
 - name: Remove repository and key files left by older install methods
   ansible.builtin.file:
@@ -147,7 +147,7 @@
     dest: "{{ _docker_repo_sources_path }}"
     owner: root
     group: root
-    mode: "0644"
+    mode: "0644"  # NOSONAR ansible:S2612 — apt reads the key and source as its sandbox user
   register: _docker_sources
 
 - name: Refresh the apt cache because the Docker repository changed
