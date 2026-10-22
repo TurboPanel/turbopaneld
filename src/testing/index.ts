@@ -33,7 +33,6 @@ export {
 
 export {
   buildCloudflaredFixtureBinary,
-  buildGalaxyDockerFixtureArchive,
   buildUvFixtureArchive,
   createOrchestrationRuntimeFixture,
   ORCHESTRATION_RUNTIME_ENV_KEYS,

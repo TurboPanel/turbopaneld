@@ -217,20 +217,13 @@ export const SKIP_DIRS = new Set([
   "coverage",
 ]);
 
-/** Untracked/vendored build outputs that must not be scanned. */
-export function isSkippedPath(rel: string): boolean {
-  // Galaxy docker: geerlingguy.docker/ or geerlingguy/docker/
-  return /(^|\/)roles\/geerlingguy([./]|$)/.test(rel);
-}
-
 async function* walk(dir: string, root: string): AsyncGenerator<string> {
   for await (const entry of Deno.readDir(dir)) {
     const abs = join(dir, entry.name);
-    const rel = relative(root, abs);
     if (entry.isDirectory) {
-      if (SKIP_DIRS.has(entry.name) || isSkippedPath(rel)) continue;
+      if (SKIP_DIRS.has(entry.name)) continue;
       yield* walk(abs, root);
-    } else if (entry.isFile && !isSkippedPath(rel)) {
+    } else if (entry.isFile) {
       yield abs;
     }
   }

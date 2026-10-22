@@ -79,7 +79,6 @@ async function runPlaybookVerb(
       `INSTALL_ROOT="${root}"`,
       `VENDOR_DIR="${root}/vendor"`,
       `PLAYBOOKS_DIR="${orch}/playbooks"`,
-      `GALAXY_ROLES_DIR="${root}/vendor/ansible/galaxy-roles"`,
       `ANSIBLE_PLAYBOOK_BIN="${bin}/ansible-playbook"`,
       `ROOT_SCRATCH="${root}/scratch"`,
       'tp_require_root_scratch() { mkdir -p "$ROOT_SCRATCH"; }',

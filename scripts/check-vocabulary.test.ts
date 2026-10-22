@@ -19,9 +19,7 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
-test("isSkippedPath skips Galaxy, skills, migrations, and this checker", () => {
-  assertEquals(isSkippedPath("roles/geerlingguy.docker/tasks/main.yml"), true);
-  assertEquals(isSkippedPath("vendor/roles/geerlingguy/docker/tasks"), true);
+test("isSkippedPath skips skills, migrations, and this checker", () => {
   assertEquals(isSkippedPath(".agents/skills/ui-ux-pro-max/SKILL.md"), true);
   assertEquals(isSkippedPath("docs/.agents/skills/pack.md"), true);
   assertEquals(isSkippedPath("src/migrations/0001.sql"), true);
