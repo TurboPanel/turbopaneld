@@ -276,6 +276,13 @@ export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
  * and the servers list polls every 2 s while that seat is Initializing.
  */
 export const AWAITING_LICENSE_POLL_MS = 5_000;
+/**
+ * Re-check cadence while the control plane has no purchased size free for
+ * this server ("License tier below required" / "not assigned"). Fixed and
+ * slow: only a purchase changes the answer, and the daemon must never give
+ * up on it.
+ */
+export const AWAITING_SEAT_POLL_MS = 15 * 60_000;
 const BACKOFF_MULTIPLIER = 2;
 
 /** Clamp caller-provided reconnect delay to supported [min, max] bounds. */
@@ -409,9 +416,14 @@ export async function clearDaemonKeyState(stateDir: string): Promise<void> {
  * Why the connect loop is parked (no reconnect backoff, periodic re-check):
  * `permanent` — the control plane rejected enrollment/auth; `tls-trust` — the
  * platform CA does not validate the control plane; `awaiting-license` — no
- * license credentials on disk yet (install wizard / installer still to run).
+ * license credentials on disk yet (install wizard / installer still to run);
+ * `awaiting-seat` — no purchased size is free for this server yet.
  */
-type ParkedKind = "permanent" | "tls-trust" | "awaiting-license";
+type ParkedKind =
+  | "permanent"
+  | "tls-trust"
+  | "awaiting-license"
+  | "awaiting-seat";
 
 export class InstanceClient {
   readonly #config: InstanceConfig;
@@ -1004,6 +1016,8 @@ export class InstanceClient {
       await this.#enterParkedState(classified.reason, "tls-trust");
     } else if (classified.kind === "awaiting-license") {
       await this.#enterParkedState(classified.reason, "awaiting-license");
+    } else if (classified.kind === "awaiting-seat") {
+      await this.#enterParkedState(classified.reason, "awaiting-seat");
     } else {
       this.#increaseBackoff();
     }
@@ -1046,6 +1060,13 @@ export class InstanceClient {
       );
       return;
     }
+    if (kind === "awaiting-seat") {
+      logWarn(
+        "instance",
+        `control plane has no purchased size free for this server (${reason}); the organization's managers can buy one in the panel. Re-checking every ${AWAITING_SEAT_POLL_MS} ms`,
+      );
+      return;
+    }
     if (kind === "tls-trust") {
       const caPath = resolveInstanceCaPath() ?? "(none)";
       const uploadedTrust = resolveInstanceUploadedTrustPath() ?? "(none)";
@@ -1077,6 +1098,9 @@ export class InstanceClient {
     if (this.#parkedKind === "awaiting-license") {
       return AWAITING_LICENSE_POLL_MS;
     }
+    if (this.#parkedKind === "awaiting-seat") {
+      return AWAITING_SEAT_POLL_MS;
+    }
     const delayMs = fullJitterMs(
       PARKED_BACKOFF_MIN_MS,
       this.#parkedBackoffMs,
@@ -1089,7 +1113,11 @@ export class InstanceClient {
   }
 
   async #shouldUnpark(): Promise<boolean> {
-    if (this.#parkedKind === "tls-trust") return true;
+    // Retried on the timer: a purchase changes the answer without any
+    // change on this server.
+    if (
+      this.#parkedKind === "tls-trust" || this.#parkedKind === "awaiting-seat"
+    ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
     const stamp = await this.#readLicenseStamp();
     return stamp !== this.#licenseStamp;
@@ -1103,7 +1131,9 @@ export class InstanceClient {
     this.#parkedKind = undefined;
     this.#parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
     this.#resetBackoff();
-    if (kind !== "tls-trust") {
+    // A seat wait retries the same enroll or session; re-enrolling with a
+    // new key would not change the answer.
+    if (kind !== "tls-trust" && kind !== "awaiting-seat") {
       this.#forceEnrollPending = true;
     }
     if (kind === "awaiting-license") {
@@ -1114,6 +1144,8 @@ export class InstanceClient {
       "instance",
       kind === "tls-trust"
         ? `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`
+        : kind === "awaiting-seat"
+        ? `re-checking for a purchased size (${reason})`
         : `unparking after permanent rejection (${reason}); retrying enrollment`,
     );
   }

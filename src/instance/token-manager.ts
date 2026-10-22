@@ -70,11 +70,13 @@ export class DaemonTokenManager {
     try {
       await this.#doRefresh();
     } catch (firstError) {
-      // Permanent enroll/auth failures and JWKS trust failures (invalid signature
-      // / claims, or verified sub/kid mismatch) must not burn a second
-      // challenge+session round-trip — hard-fail on the first error.
+      // Permanent enroll/auth failures, a seat wait (only a purchase changes
+      // it) and JWKS trust failures (invalid signature / claims, or verified
+      // sub/kid mismatch) must not burn a second challenge+session
+      // round-trip — hard-fail on the first error.
+      const kind = classifyConnectFailure(firstError).kind;
       if (
-        classifyConnectFailure(firstError).kind === "permanent" ||
+        kind === "permanent" || kind === "awaiting-seat" ||
         isJwksTrustFailure(firstError)
       ) {
         throw firstError;

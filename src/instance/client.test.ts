@@ -11,6 +11,7 @@ import {
 import { encodeBase64 } from "@std/encoding/base64";
 import {
   AWAITING_LICENSE_POLL_MS,
+  AWAITING_SEAT_POLL_MS,
   connectInstance,
   DEFAULT_INITIAL_BACKOFF_MS,
   DEFAULT_MAX_BACKOFF_MS,
@@ -2861,6 +2862,163 @@ it({
       );
       socket.open();
       assertEquals(socket.readyState, MockWebSocket.OPEN);
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name:
+    "a tier refusal from an older control plane waits for a seat and reconnects without re-enrolling",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const reconnectDelays: number[] = [];
+    let seatBought = false;
+    let enrollCalls = 0;
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken } = await prepareVerifiedAuth({
+      serverId: "srv-1",
+      keyId: "kid-1",
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          return new Response(
+            JSON.stringify({
+              challengeId: "auth-challenge",
+              nonce: "auth-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          enrollCalls += 1;
+          return new Response(JSON.stringify({ error: "not expected" }), {
+            status: 500,
+          });
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          if (!seatBought) {
+            return new Response(
+              JSON.stringify({ error: "License tier below required" }),
+              { status: 400 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      await waitFor(
+        "seat wait delay",
+        () =>
+          reconnectDelays.includes(AWAITING_SEAT_POLL_MS) ? true : undefined,
+      );
+      // Never the exponential permanent-park backoff.
+      assertEquals(
+        reconnectDelays.filter((d) =>
+          d >= PARKED_BACKOFF_MIN_MS && d !== AWAITING_SEAT_POLL_MS
+        ),
+        [],
+      );
+      // The organization buys a size; nothing changes on the server.
+      seatBought = true;
+      const socket = await waitFor("seat websocket", () => sockets.at(0));
+      socket.open();
+      assertEquals(socket.readyState, MockWebSocket.OPEN);
+      assertEquals(enrollCalls, 0);
       socket.close(1000, "done");
     } finally {
       client.stop();

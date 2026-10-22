@@ -7,7 +7,8 @@ export type ConnectFailureClass =
   | "stale-identity"
   | "permanent"
   | "tls-trust"
-  | "awaiting-license";
+  | "awaiting-license"
+  | "awaiting-seat";
 
 export type ClassifiedConnectFailure = {
   kind: ConnectFailureClass;
@@ -19,8 +20,6 @@ type StatusMessage = Readonly<{ status: number; message: string }>;
 const PERMANENT_ENROLLMENT_ERRORS: readonly StatusMessage[] = [
   { status: 401, message: "Invalid license" },
   { status: 400, message: "License already consumed or invalid" },
-  { status: 400, message: "License tier below required" },
-  { status: 400, message: "License tier not assigned" },
   { status: 403, message: "Invalid signature" },
   // An operator revoked this server's key; re-enrolling is refused until
   // the server is deleted and enrolled fresh. Retrying cannot change that.
@@ -30,9 +29,18 @@ const PERMANENT_ENROLLMENT_ERRORS: readonly StatusMessage[] = [
 
 const PERMANENT_AUTH_ERRORS: readonly StatusMessage[] = [
   { status: 400, message: "License is inactive" },
+  { status: 400, message: "Server key is inactive" },
+];
+
+/**
+ * The control plane has no purchased size free for this server yet. Never
+ * permanent: buying a size fixes it without touching the server, so the
+ * daemon keeps re-checking slowly instead of giving up. Current panels only
+ * send these from enroll; an older panel may still send them from session.
+ */
+const AWAITING_SEAT_ERRORS: readonly StatusMessage[] = [
   { status: 400, message: "License tier below required" },
   { status: 400, message: "License tier not assigned" },
-  { status: 400, message: "Server key is inactive" },
 ];
 
 const MISSING_LICENSE_CREDENTIALS_MESSAGE =
@@ -95,6 +103,11 @@ export function isPermanentAuthError(err: unknown): boolean {
     matchesDaemonApiError(err, PERMANENT_AUTH_ERRORS);
 }
 
+export function isAwaitingSeatError(err: unknown): boolean {
+  return err instanceof DaemonApiError &&
+    matchesDaemonApiError(err, AWAITING_SEAT_ERRORS);
+}
+
 export function isTransientConnectError(err: unknown): boolean {
   if (!(err instanceof DaemonApiError)) return true;
   if (err.status >= 500 || err.status === 429) return true;
@@ -139,6 +152,9 @@ export function classifyConnectFailure(
 ): ClassifiedConnectFailure {
   if (isMissingLicenseCredentialsError(err)) {
     return { kind: "awaiting-license", reason: failureReason(err) };
+  }
+  if (isAwaitingSeatError(err)) {
+    return { kind: "awaiting-seat", reason: failureReason(err) };
   }
   if (isPermanentEnrollmentError(err) || isPermanentAuthError(err)) {
     return { kind: "permanent", reason: failureReason(err) };

@@ -312,11 +312,15 @@ maps enroll/session failures to `transient` (network, `>=500`, `429`,
 refresh, no identity clear), `stale-identity` (`404 Server key not found`,
 `400 Server key mismatch` → recover + re-enroll), `tls-trust`
 (Deno/rustls chain/SAN/expiry: `invalid peer certificate`, `UnknownIssuer`,
-`NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop), or
+`NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop),
+`awaiting-seat` (`400 License tier below required`,
+`400 License tier not assigned` — no purchased size is free for this server;
+**park** on a fixed `AWAITING_SEAT_POLL_MS` 15 min re-check that retries the
+same enroll or session, never forces a re-enroll and never gives up; current
+panels only send these from enroll, older ones also from session), or
 `permanent`
 (`401 Invalid license`, `400 License already consumed or invalid`,
-`400 License is inactive`, `400 License tier below required`,
-`400 License tier not assigned`, `400 Server key is inactive`,
+`400 License is inactive`, `400 Server key is inactive`,
 `403 Invalid signature`, `409 Fingerprint already exists`, and the local
 `missing license credentials for enrollment` → **park**). On `permanent` or
 `tls-trust`,
@@ -342,8 +346,8 @@ at the correct control plane, then the daemon auto-recovers`.
 resolved CA path, the local CA fingerprint, and recovery (`run.sh` with
 `--instance-ca` / `--insecure-tls`). Unpark for `tls-trust` uses the parked
 backoff only (re-read CA on the next attempt — does **not** force re-enroll).
-`token-manager.ts` skips its 2 s session-refresh retry on a `permanent` first
-error (no double challenge+session per cycle). Status → action table:
+`token-manager.ts` skips its 2 s session-refresh retry on a `permanent` or
+`awaiting-seat` first error (no double challenge+session per cycle). Status → action table:
 **`../turbopanel/AGENTS.md`** (Daemon key authentication — do-not-retry-soon
 table).
 
