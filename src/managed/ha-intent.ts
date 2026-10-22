@@ -66,9 +66,10 @@ export const MANAGED_INTENT_TTL_MS = 10 * 60_000;
 /**
  * How long a marker suppresses the probe after a SUCCESSFUL promote or
  * failover command. Those handlers only report success once the new primary
- * is writable, so the engine is known to be up and the long window above has
- * nothing left to cover: a primary killed minutes after a switchover is a
- * real failure and must fail over, not be waved off for another ten.
+ * is writable (and a successful apply only after `waitReady`), so the engine
+ * is known to be up and the long window above has nothing left to cover: a
+ * primary killed minutes after a switchover is a real failure and must fail
+ * over, not be waved off for another ten.
  */
 export const MANAGED_INTENT_SETTLED_TTL_MS = 60_000;
 /** Extra quiet time after a transient marker expires before failures count. */
@@ -361,10 +362,14 @@ const RELEASES_HELD: ReadonlySet<ManagedIntentKind> = new Set<
   ManagedIntentKind
 >(["start", "restart", "apply", "promote", "failover"]);
 
-/** Kinds whose SUCCESS means the engine is verified up (see {@link MANAGED_INTENT_SETTLED_TTL_MS}). */
+/**
+ * Kinds whose SUCCESS means the engine is verified up (apply covers replica
+ * add/remove, logins, databases and resync) (see
+ * {@link MANAGED_INTENT_SETTLED_TTL_MS}).
+ */
 const SETTLES_QUICKLY: ReadonlySet<ManagedIntentKind> = new Set<
   ManagedIntentKind
->(["promote", "failover"]);
+>(["apply", "promote", "failover"]);
 
 export type ManagedIntentToken = {
   managedId: string;

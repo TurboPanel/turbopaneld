@@ -140,9 +140,9 @@ jobs:
       # gate at all -- its only feedback was a converge failure on a real host.
       # orchestration/requirements.txt already pinned ansible-lint "for IDE/CI
       # linting"; this is the CI half. check-orchestration.sh also installs
-      # ansible.posix from orchestration/requirements.yml (Galaxy collections
-      # are not committed; CI has no /opt vendor tree). See the script for
-      # what is and is not gated.
+      # ansible.posix from the bundled tarball in orchestration/vendor/galaxy/
+      # (offline; CI has no /opt vendor tree). See the script for what is and
+      # is not gated.
       # Install from the hash lock (githubactions:S8544 / S8541), not the
       # range-pinned constraints file.
       - name: Set up Python for Ansible

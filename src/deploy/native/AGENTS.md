@@ -237,9 +237,16 @@ the single place it becomes systemd's: `condition` → `Restart=` (`any` is
 `StartLimitIntervalSec=`. The two rate-limit directives are `[Unit]`, not
 `[Service]`, so they are emitted apart from `Restart=`; systemd would ignore
 them under `[Service]`. A payload carrying no policy renders the historical
-`Restart=on-failure` / `RestartSec=2` verbatim — the install path is a byte
-diff, so any other default would rewrite every existing unit and restart every
-tenant app on the next deploy. Values outside the honourable subset never
+`Restart=on-failure` / `RestartSec=2` and a bounded crash-loop budget
+(`StartLimitBurst=10`, `StartLimitIntervalSec=120`): systemd's own default (five
+in ten seconds) never trips at `RestartSec=2`, so an app that failed instantly
+restarted for ever. The unit `PATH` leads with the release's
+`node_modules/.bin` (then the vendored Node, then `/usr/bin:/bin`) so a start
+command naming a local binary resolves it; a standalone Next.js release has no
+`.bin`, so leave its start command empty. A deploy whose app never answers
+runs `reset-failed` first (a start-limited unit refuses restarts), and with no
+previous release to return to it disables the unit instead of leaving it
+looping. Values outside the honourable subset never
 arrive: the control-plane linter refuses them at save and at deploy, and
 `parseNativeAppService` refuses them again here, because the payload is
 untrusted input to this process and each value becomes a directive.

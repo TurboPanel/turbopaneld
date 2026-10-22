@@ -2116,6 +2116,15 @@ export type ManagedMemberObservedResult = {
   replication?: ManagedReplicationHealth;
 };
 
+/** The stale-wipe guard carried by a forced re-seed after a planned switchover. */
+export type ManagedSwitchoverReseed = {
+  recoveryId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  /** The primary epoch the switchover's promote established. */
+  epoch: number;
+};
+
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyPayload = {
   managedId: string;
@@ -2163,6 +2172,14 @@ export type ManagedApplyPayload = {
    * data directory, and seeds fresh from the primary. Standby payloads only.
    */
   forceResync?: boolean;
+  /**
+   * Set on the forced re-seed of a former primary after a planned Postgres
+   * switchover. The daemon refuses the wipe before touching the data when it
+   * is stale: the recovery id must be the one its own fence stop recorded and
+   * the epoch must be exactly one past the epoch recorded then. Absent on an
+   * operator Resync, which is never checked. Older daemons ignore it.
+   */
+  switchoverReseed?: ManagedSwitchoverReseed;
   /**
    * Cross-host consumer server addresses whose ProxySQL dials this engine's
    * private listener (client + monitor traffic). Admitted by the firewall
@@ -2224,6 +2241,15 @@ export type ManagedLifecyclePayload = {
    */
   captureSwitchoverGtid?: boolean;
   /**
+   * Postgres planned switchover, fence stop of the old primary: report its
+   * final write position after the clean shutdown and keep it with this
+   * recovery id, so a later forced re-seed can be tied to this switchover.
+   * Sent together with `primaryEpoch`. Older daemons ignore both.
+   */
+  switchoverRecoveryId?: string;
+  /** The managed cluster's primary epoch when the switchover began. */
+  primaryEpoch?: number;
+  /**
    * Undo a failed switchover on the old primary: clear the demoted marker,
    * start the engine, and make it writable again.
    */
@@ -2250,6 +2276,15 @@ export type ManagedLifecycleResult = {
   member?: ManagedMemberObservedResult;
   /** Present when `captureSwitchoverGtid` quiesced the primary before stop. */
   switchoverPrimaryExecutedGtidSet?: string;
+  /**
+   * Postgres, with `switchoverRecoveryId`: where the cleanly stopped old
+   * primary's WAL ends (`pg_lsn` text such as `0/7258050`), the same value a
+   * caught-up standby reports as its replay position. Absent when the engine
+   * did not shut down cleanly or the position could not be read.
+   */
+  oldPrimaryFinalLsn?: string;
+  /** Timeline the old primary wrote on (positive integer). */
+  oldPrimaryFinalTimeline?: number;
 };
 
 /**
@@ -2302,6 +2337,13 @@ export type ManagedPromoteResult = {
   demotedMemberId?: string;
   demoted: boolean;
   replication?: ManagedReplicationHealth;
+  /**
+   * Postgres: the last WAL position the promoted standby replayed
+   * (`pg_lsn` text), read after recovery ended. Absent when unreadable.
+   */
+  newPrimaryReplayLsn?: string;
+  /** Timeline the new primary writes on (positive integer). */
+  newPrimaryTimeline?: number;
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
@@ -8000,6 +8042,37 @@ function parseManagedApplyForceResync(value: unknown): boolean {
   return value;
 }
 
+const MAX_PRIMARY_EPOCH = 2_147_483_647;
+
+/** A primary epoch: a non-negative integer, never larger than an int4. */
+export function isManagedPrimaryEpoch(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) &&
+    value >= 0 && value <= MAX_PRIMARY_EPOCH;
+}
+
+function parseManagedSwitchoverReseed(
+  value: unknown,
+): ManagedSwitchoverReseed | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    !isString(value.recoveryId) || !MANAGED_UUID_RE.test(value.recoveryId) ||
+    !isString(value.sourceMemberId) ||
+    !MANAGED_UUID_RE.test(value.sourceMemberId) ||
+    !isString(value.targetMemberId) ||
+    !MANAGED_UUID_RE.test(value.targetMemberId) ||
+    !isManagedPrimaryEpoch(value.epoch)
+  ) {
+    throw new TypeError("Invalid managed.apply switchoverReseed");
+  }
+  return {
+    recoveryId: value.recoveryId,
+    sourceMemberId: value.sourceMemberId,
+    targetMemberId: value.targetMemberId,
+    epoch: value.epoch,
+  };
+}
+
 function parseManagedApplyIngressSourceAddresses(
   value: unknown,
 ): string[] | undefined {
@@ -8091,6 +8164,9 @@ export function parseManagedApplyPayload(
     ? undefined
     : parseManagedTopologyUser(value.topologyUser, "managed.apply");
   const forceResync = parseManagedApplyForceResync(value.forceResync);
+  const switchoverReseed = parseManagedSwitchoverReseed(
+    value.switchoverReseed,
+  );
   const ingressSourceAddresses = parseManagedApplyIngressSourceAddresses(
     value.ingressSourceAddresses,
   );
@@ -8130,6 +8206,7 @@ export function parseManagedApplyPayload(
     ...(monitorUsers === undefined ? {} : { monitorUsers }),
     ...(topologyUser === undefined ? {} : { topologyUser }),
     ...(forceResync ? { forceResync: true } : {}),
+    ...(switchoverReseed === undefined ? {} : { switchoverReseed }),
     ...(ingressSourceAddresses === undefined ? {} : { ingressSourceAddresses }),
     ...(databases === undefined ? {} : { databases }),
     ...(dropUsers === undefined ? {} : { dropUsers }),
@@ -8229,12 +8306,35 @@ function applyManagedLifecycleSwitchoverPayloadFields(
   ) {
     payload.switchoverTargetPromoteCompleted = true;
   }
+  applyManagedLifecycleFinalPositionFields(payload, value);
   const targetError = parseManagedLifecycleSwitchoverTargetPromoteError(
     value.switchoverTargetPromoteError,
   );
   if (targetError !== undefined) {
     payload.switchoverTargetPromoteError = targetError;
   }
+}
+
+/** Both or neither: the recovery id is only meaningful with its epoch. */
+function applyManagedLifecycleFinalPositionFields(
+  payload: ManagedLifecyclePayload,
+  value: Record<string, unknown>,
+): void {
+  if (value.switchoverRecoveryId === undefined) {
+    if (value.primaryEpoch !== undefined) {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    return;
+  }
+  if (
+    !isString(value.switchoverRecoveryId) ||
+    !MANAGED_UUID_RE.test(value.switchoverRecoveryId) ||
+    !isManagedPrimaryEpoch(value.primaryEpoch)
+  ) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  payload.switchoverRecoveryId = value.switchoverRecoveryId;
+  payload.primaryEpoch = value.primaryEpoch;
 }
 
 function parseManagedLifecycleRole(
@@ -8385,7 +8485,32 @@ export function parseManagedPromoteResult(
   if (isString(value.summary)) result.summary = value.summary;
   const replication = parseManagedReplicationHealth(value.replication);
   if (replication !== undefined) result.replication = replication;
+  const replay = parseWalPosition(
+    value.newPrimaryReplayLsn,
+    value.newPrimaryTimeline,
+  );
+  if (replay !== undefined) {
+    result.newPrimaryReplayLsn = replay.lsn;
+    result.newPrimaryTimeline = replay.timeline;
+  }
   return result;
+}
+
+const WAL_LSN_RE = /^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/;
+
+/** A `pg_lsn` and its timeline, only when both are well formed. */
+function parseWalPosition(
+  lsn: unknown,
+  timeline: unknown,
+): { lsn: string; timeline: number } | undefined {
+  if (!isString(lsn) || !WAL_LSN_RE.test(lsn)) return undefined;
+  if (
+    typeof timeline !== "number" || !Number.isInteger(timeline) ||
+    timeline < 1 || timeline > 4_294_967_295
+  ) {
+    return undefined;
+  }
+  return { lsn, timeline };
 }
 
 function isString(value: unknown): value is string {
@@ -8488,6 +8613,14 @@ export function parseManagedLifecycleResult(
       result.switchoverPrimaryExecutedGtidSet =
         value.switchoverPrimaryExecutedGtidSet;
     }
+  }
+  const final = parseWalPosition(
+    value.oldPrimaryFinalLsn,
+    value.oldPrimaryFinalTimeline,
+  );
+  if (final !== undefined) {
+    result.oldPrimaryFinalLsn = final.lsn;
+    result.oldPrimaryFinalTimeline = final.timeline;
   }
   return result;
 }

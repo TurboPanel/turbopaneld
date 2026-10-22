@@ -1,3 +1,4 @@
+import { verifyGalaxyPosixTarball } from "./galaxy-bundle.ts";
 import { run, runLogged, runOrThrow, symlinkPointsAt } from "./exec.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
 import {
@@ -54,7 +55,7 @@ import {
   DAEMON_SYSTEMD_PLAYBOOK,
   DOCKER_PLAYBOOK,
   GALAXY_COLLECTIONS_DIR,
-  GALAXY_REQUIREMENTS_FILE,
+  GALAXY_POSIX_TARBALL,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   ORCHESTRATION_LAYOUT,
@@ -288,7 +289,8 @@ export function galaxyBootstrapRunContext(): {
 }
 
 /**
- * Install pinned Ansible Galaxy collections needed for every playbook run.
+ * Install the bundled Ansible Galaxy collection needed for every playbook run
+ * (offline, from the tarball in the release package, after a digest check).
  *
  * Collections land in `runtimes/ansible/galaxy-collections/` (`ansible.posix`
  * for the JSONL callback and sysctl modules). Docker is installed by our own
@@ -312,9 +314,10 @@ export async function ensureGalaxyCollections(): Promise<void> {
   const galaxyRun = galaxyBootstrapRunContext();
   ansibleHome();
 
+  await verifyGalaxyPosixTarball();
   logInfo(
     "orchestration",
-    `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`,
+    `installing galaxy collections from ${GALAXY_POSIX_TARBALL}`,
   );
   await withRetry(
     () =>
@@ -323,8 +326,8 @@ export async function ensureGalaxyCollections(): Promise<void> {
         [
           "collection",
           "install",
-          "-r",
-          GALAXY_REQUIREMENTS_FILE,
+          GALAXY_POSIX_TARBALL,
+          "--offline",
           "-p",
           GALAXY_COLLECTIONS_DIR,
         ],

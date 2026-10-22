@@ -328,9 +328,12 @@ download cache is disposable scratch — first-party roles live under FHS
 accidental `/root/.ansible` after install. Runtime orchestration runs as
 `tp` (dev: the current dev user).
 
-**Galaxy content is not committed:** collection pins live in
-`orchestration/requirements.yml` (`ansible.posix`). Bootstrap
-(`ensureGalaxyCollections`) installs only collections under
+**Galaxy content ships in the package, nothing is downloaded:** the exact
+`ansible.posix` release tarball is committed under
+`orchestration/vendor/galaxy/` (version recorded in
+`orchestration/requirements.yml`, digest pinned as `GALAXY_POSIX_SHA256`).
+Bootstrap (`ensureGalaxyCollections`) checks the digest and installs it
+offline, only collections, under
 `vendor/ansible/galaxy-collections` — needed for the JSONL callback and
 `ansible.posix.sysctl` on every playbook. **No Galaxy role is used:** Docker
 Engine is installed by our own `docker` role (`orchestration/roles/docker/tasks/install.yml`,
@@ -544,8 +547,8 @@ that toolchain from `orchestration/requirements.lock.txt` (`pip install
 --require-hashes`). Syntax-check
 resolves `ansible.posix.acl` / `ansible.posix.sysctl`: when the collection is
 not already vendored under `$TURBOPANEL_RUNTIMES_DIR/ansible/galaxy-collections`
-(CI has ansible-core from pip and no vendor tree), the script installs the pin
-from `orchestration/requirements.yml` . Rules that
+(CI has ansible-core from pip and no vendor tree), the script installs the
+bundled tarball from `orchestration/vendor/galaxy/` offline. Rules that
 still fire on first-party content (`partial-become`, `parser-error`) are in
 `warn_list` in `.ansible-lint` with the reasoning; the full ansible-lint
 profile is deliberately **not** gated (~360 findings, nearly all style).
