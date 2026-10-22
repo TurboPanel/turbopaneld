@@ -64,11 +64,38 @@ export type ManagedHealthReportMember = {
   replication?: NonNullable<ManagedMemberObservedResult["replication"]>;
 };
 
+/**
+ * Commands this daemon still owes the control plane (feature
+ * `command-recovery-v1`), sent on `hello` and `heartbeat` when either list is
+ * not empty. `running` holds the ids of commands accepted and not finished
+ * (including any waiting behind another build); `unacked` holds the ids whose
+ * final `command-outcome` is kept on disk until a
+ * {@link CommandOutcomeAckMessage} arrives. At most 64 ids of 64 characters
+ * each per list. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandRecoveryReport = {
+  running: string[];
+  unacked: string[];
+};
+
+/**
+ * Control plane → daemon: the final outcome of command `id` is stored, so the
+ * daemon may drop its journaled copy. Until it arrives the daemon sends the
+ * outcome again on every attach and every 30 seconds. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandOutcomeAckMessage = {
+  type: "command-outcome-ack";
+  id: string;
+  at: string;
+};
+
 /** Daemon → control plane hello. `features` is the advertised wire set. */
 export type DaemonHelloMessage = {
   type: "hello";
   at: string;
   features?: string[];
+  commands?: CommandRecoveryReport;
 };
 
 /** Control-plane → daemon self-update. Optional pin fields are expand-only. */
@@ -684,6 +711,7 @@ export type DaemonMessage =
   }
   | BackupRunReportMessage
   | BackupRunReportResultMessage
+  | CommandOutcomeAckMessage
   | {
     type: "public-urls-update";
     id: string;
