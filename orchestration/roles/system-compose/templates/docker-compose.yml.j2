@@ -16,7 +16,7 @@ name: {{ system_compose_project_name }}
 services:
 {% if _system_compose_database_active %}
   database:
-    image: {{ postgres_image }}
+    image: {{ _system_compose_postgres_image }}
     container_name: {{ postgres_container_name }}
     restart: unless-stopped
     user: "{{ postgres_container_uid }}:{{ postgres_container_gid }}"
@@ -53,7 +53,7 @@ services:
 {% endif %}
 {% if _system_compose_queue_active %}
   queue:
-    image: {{ rabbitmq_image }}
+    image: {{ _system_compose_rabbitmq_image }}
     container_name: {{ rabbitmq_container_name }}
     restart: unless-stopped
     user: "{{ rabbitmq_container_uid }}:{{ rabbitmq_container_gid }}"

@@ -5728,6 +5728,87 @@ it({
 });
 
 it({
+  name: "a failed restart reports the exit code, stderr and elapsed time",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: (options) => {
+        options?.onReport?.({
+          ok: false,
+          endedByRestart: false,
+          command: "restart",
+          exitCode: 1,
+          signal: null,
+          stderr: "Failed to connect to bus",
+          attempts: 2,
+          elapsedMs: 1234,
+        });
+        return Promise.resolve(false);
+      },
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () => Promise.resolve(sampleUpdateInfo("newsha")),
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: () => Promise.resolve(),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-restart-report",
+        upgradeId: "up-restart-report",
+        at: new Date().toISOString(),
+      });
+      const failed = await waitFor(
+        "restart-failed progress with a report",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { errorCode?: string }).errorCode === "restart_failed"
+          ) as
+            | { detail?: string; restart?: Record<string, unknown> }
+            | undefined,
+      );
+      assertEquals(failed.restart, {
+        command: "restart",
+        exitCode: 1,
+        stderr: "Failed to connect to bus",
+        attempts: 2,
+        elapsedMs: 1234,
+      });
+      assert(
+        failed.detail?.startsWith("daemon restart failed after reconcile"),
+      );
+      assert(failed.detail?.includes("exited 1"));
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
   name: "already-on-target update emits done progress",
   permissions: {
     env: true,

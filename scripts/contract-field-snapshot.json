@@ -87,6 +87,11 @@
       { "name": "errorCode", "required": false, "type": "string" },
       { "name": "id", "required": true, "type": "string" },
       {
+        "name": "restart",
+        "required": false,
+        "type": "{ attempts: number; command?: string; elapsedMs: number; exitCode?: number; signal?: string; stderr?: string }"
+      },
+      {
         "name": "stage",
         "required": true,
         "type": "'done' | 'downloading' | 'failed' | 'installing' | 'preparing' | 'restarting' | 'rolled-back' | 'verifying'"
@@ -326,6 +331,23 @@
       { "name": "owner", "required": true, "type": "string" },
       { "name": "scope", "required": true, "type": "string" },
       { "name": "slug", "required": true, "type": "string" }
+    ]
+  },
+  "CommandRecoveryReport": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "running", "required": true, "type": "Array<string>" },
+      { "name": "unacked", "required": true, "type": "Array<string>" }
+    ]
+  },
+  "CommandOutcomeAckMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "type", "required": true, "type": "'command-outcome-ack'" }
     ]
   }
 }

@@ -2,7 +2,8 @@
 # Image pin must not be loosened without reviewing CVE-2026-48773
 # (pre-auth first-packet heap overflow) and CVE-2026-48772 (PROXY-protocol-v1
 # client_addr ACL bypass). Both are fixed in ProxySQL 3.0.9.
-proxysql_image: proxysql/proxysql:3.0.9
+# Image and digest come from orchestration/image-pins.json (edit them there).
+proxysql_image: "{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.proxysql.ref }}@{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.proxysql.digest }}"
 proxysql_config_dir: "{{ turbopanel_config_dir }}/proxysql"
 # Root runs the readiness script from the unit, so it lives in a root-only
 # directory, never under the daemon-writable config dir.

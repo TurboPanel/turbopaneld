@@ -1260,3 +1260,59 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "a command sent again while it runs, or after it finished, is not run twice",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const outbox = await import("./command-outbox.ts");
+    const dir = await Deno.makeTempDir();
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", dir);
+    outbox.resetCommandOutboxForTests();
+    try {
+      const mock = new MockWebSocket();
+      const ws = mock as unknown as WebSocket;
+      await outbox.flushCommandOutcomes(ws, {
+        supports: (feature) => feature === "command-recovery-v1",
+      });
+      const dispatch = (id: string): CommandDispatchMessage => ({
+        type: "command-dispatch",
+        id,
+        commandId: `cmd-${id}`,
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      });
+
+      // Still running: acknowledged, and nothing else happens.
+      await outbox.markCommandInFlight("dup-running");
+      await handleCommandDispatch(dispatch("dup-running"), ws);
+      assertEquals(parseFrames(mock.sentFrames).map((f) => f.type), [
+        "command-ack",
+      ]);
+
+      // Finished and not yet confirmed: the kept outcome is sent again, not re-run.
+      mock.sentFrames.length = 0;
+      await handleCommandDispatch(dispatch("dup-done"), ws);
+      const first = parseFrames(mock.sentFrames);
+      mock.sentFrames.length = 0;
+      await handleCommandDispatch(dispatch("dup-done"), ws);
+      const again = parseFrames(mock.sentFrames);
+      assertEquals(again.map((f) => f.type), [
+        "command-ack",
+        "command-outcome",
+      ]);
+      assertEquals(again[1]?.result, first[1]?.result);
+      assertEquals(again[1]?.daemonRespondedAt, first[1]?.daemonRespondedAt);
+      await outbox.settleCommandJournalWrites();
+    } finally {
+      outbox.resetCommandOutboxForTests();
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});

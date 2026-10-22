@@ -1139,9 +1139,15 @@ Four maintenance rules:
    packages (`TP_DOCKER_PACKAGES`) and the `phpN.N-*` packages plus
    `debsuryorg-archive-keyring` that the php-fpm role's sury repo supplied are
    purged. A role that adds a new apt repository for its own packages must add
-   its source file to the removal in `tp_purge_apt_packages`, unless the Docker
-   `download.docker.com` scan or the `sury-php.sources` / `sury-php.list` removal
-   already matches it.
+   its source file and signing key to the removal (`TP_DOCKER_APT_SOURCES`,
+   `TP_DOCKER_APT_KEYS`, `TP_SURY_APT_KEYS` or `tp_purge_apt_packages`). A role
+   that holds a package at a version may only hold one of `TP_DOCKER_PACKAGES`:
+   the purge passes `--allow-change-held-packages` for those, and a hold on
+   anything else would make `apt-get purge -y` refuse.
+   `scripts/purge-coverage.test.ts` reads the roles, playbooks, host scripts
+   and `run.sh` and fails when one names an apt source, key, pin or config
+   file, a systemd unit or drop-in, or a Docker or containerd config path that
+   the purge does not remove, or holds a package it does not list.
 4. A new folder the script must delete has to sit inside a tree listed in
    `TP_OWNED_TREES` (or be a `turbopanel*` unit drop-in), or be added to that
    list. `tp_path_is_safe` refuses everything else.

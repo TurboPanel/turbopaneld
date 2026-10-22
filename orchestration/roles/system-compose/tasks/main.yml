@@ -135,6 +135,28 @@
         - item.active | bool
       changed_when: true
 
+    # Adding a digest to an image string makes Compose recreate the container,
+    # so a stack already running on the bare tag keeps it; the digest applies on
+    # first create or when the stored file already carries one.
+    - name: Read the existing turbopanel-system docker-compose.yml
+      ansible.builtin.slurp:
+        src: "{{ system_compose_dir }}/docker-compose.yml"
+      register: _system_compose_existing
+      when: _system_compose_file_stat.stat.exists
+      no_log: true
+
+    - name: Choose image strings that do not restart a running stack
+      ansible.builtin.set_fact:
+        _system_compose_postgres_image: >-
+          {{ postgres_image.split('@')[0]
+             if (_system_compose_existing.content | default('') | b64decode).find('image: ' ~ postgres_image.split('@')[0] ~ '\n') >= 0
+             else postgres_image }}
+        _system_compose_rabbitmq_image: >-
+          {{ rabbitmq_image.split('@')[0]
+             if (_system_compose_existing.content | default('') | b64decode).find('image: ' ~ rabbitmq_image.split('@')[0] ~ '\n') >= 0
+             else rabbitmq_image }}
+      no_log: true
+
     - name: Write turbopanel-system docker-compose.yml
       ansible.builtin.template:
         src: docker-compose.yml.j2
