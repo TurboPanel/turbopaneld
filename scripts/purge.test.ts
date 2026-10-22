@@ -42,6 +42,10 @@ const CONSTANTS = [
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
   "TP_DOCKER_PACKAGES",
+  "TP_APT_SOURCES_DIR",
+  "TP_DOCKER_APT_SOURCES",
+  "TP_DOCKER_APT_KEYS",
+  "TP_SURY_APT_KEYS",
   "TP_OTHER_UNITS",
   "TP_PRINCIPAL_ID_MIN",
   "TP_PRINCIPAL_ID_MAX",
@@ -367,7 +371,9 @@ const REAL_PATH = Deno.env.get("PATH") ?? "/usr/bin:/bin";
 
 // A fake apt-get earlier on PATH: `-s purge <pkgs>` prints a simulation that
 // removes the requested packages plus whatever FAKE_APT_EXTRA names; any real
-// (non-simulated) call is recorded in $FAKE_APT_LOG and does nothing.
+// (non-simulated) call is recorded in $FAKE_APT_LOG and does nothing. Like
+// the real apt-get, a real `purge -y` of a package named in $FAKE_APT_HELD is
+// refused without --allow-change-held-packages, while the simulation passes.
 async function fakeAptBin(): Promise<string> {
   const dir = await Deno.makeTempDir({ prefix: "tp-fake-apt-" });
   const script = [
@@ -379,6 +385,17 @@ async function fakeAptBin(): Promise<string> {
     "    done",
     '    for e in $FAKE_APT_EXTRA; do echo "Purg $e [1.0]"; done',
     "    exit 0 ;;",
+    "esac",
+    'case " $* " in',
+    '  *" --allow-change-held-packages "*) ;;',
+    "  *)",
+    "    for h in $FAKE_APT_HELD; do",
+    '      case " $* " in *" $h "*)',
+    '        echo "E: Held packages were changed and -y was used without --allow-change-held-packages." >&2',
+    '        echo "refused: $*" >> "$FAKE_APT_LOG"',
+    "        exit 100 ;;",
+    "      esac",
+    "    done ;;",
     "esac",
     'echo "$*" >> "$FAKE_APT_LOG"',
     "",
@@ -509,13 +526,59 @@ test("a package whose purge removes only the listed packages is purged", async (
   );
   assertStringIncludes(
     result.stdout,
-    "apt-get purge -y docker-ce docker-ce-cli",
+    "apt-get purge -y --allow-change-held-packages docker-ce docker-ce-cli",
   );
   assertEquals(
     result.stdout.split("--final")[1].trim().split("\n").sort(),
     ["docker-ce", "docker-ce-cli"],
     result.stderr,
   );
+});
+
+test("Docker packages the Docker role holds at a pinned version are still purged", async () => {
+  const bin = await fakeAptBin();
+  const log = join(bin, "apt.log");
+  const result = await runPurgeSh(
+    PACKAGE_FUNCTIONS,
+    [
+      'printf "containerd.io\\ndocker-ce\\ndocker-ce-cli\\n" > "$TP_TMP/docker.pkgs"',
+      'tp_purge_guarded_packages Docker "$TP_TMP/docker.pkgs"',
+      'echo "fail=$TP_FAIL_COUNT"',
+    ].join("\n"),
+    {
+      PATH: `${bin}:${REAL_PATH}`,
+      FAKE_APT_HELD: "docker-ce docker-ce-cli",
+      FAKE_APT_LOG: log,
+    },
+  );
+  assertStringIncludes(result.stdout, "fail=0", result.stderr);
+  const calls = await Deno.readTextFile(log);
+  assert(!calls.includes("refused"), calls);
+  assertStringIncludes(
+    calls,
+    "purge -y --allow-change-held-packages containerd.io docker-ce docker-ce-cli",
+  );
+});
+
+test("a held package the purge would drag along still keeps the candidate", async () => {
+  const bin = await fakeAptBin();
+  const log = join(bin, "apt.log");
+  const result = await runPurgeSh(
+    PACKAGE_FUNCTIONS,
+    [
+      'printf "docker-ce\\n" > "$TP_TMP/docker.pkgs"',
+      'tp_purge_guarded_packages Docker "$TP_TMP/docker.pkgs"',
+      'echo "--kept"; cat "$TP_TMP/kept-packages"',
+    ].join("\n"),
+    {
+      PATH: `${bin}:${REAL_PATH}`,
+      FAKE_APT_EXTRA: "admin-held-tool",
+      FAKE_APT_HELD: "admin-held-tool",
+      FAKE_APT_LOG: log,
+    },
+  );
+  assertStringIncludes(result.stdout.split("--kept")[1], "admin-held-tool");
+  assertEquals(await exists(log), false, "a real apt-get purge ran");
 });
 
 test("the script never autoremoves, never marks packages manual, and purges only through the guard", async () => {
@@ -1306,4 +1369,167 @@ test("purge never touches a group named root or tp*", async () => {
     );
     assert(!result.stdout.includes("groupdel"), result.stdout);
   }
+});
+
+const DOCKER_SOURCE_FUNCTIONS = [
+  "tp_purge_docker_sources",
+  "tp_collect_signed_by",
+];
+
+// Lays out a fake apt tree under a temp dir and points the purge's apt
+// constants at it. Key-path safety is stubbed to "inside the temp keyrings
+// dir", since the real check only accepts the host's own keyring directories.
+async function dockerAptTree(): Promise<{ root: string; preamble: string }> {
+  const root = await Deno.makeTempDir({ prefix: "tp-purge-apt-" });
+  await Deno.mkdir(join(root, "sources.list.d"));
+  await Deno.mkdir(join(root, "keyrings"));
+  const src = (name: string) => join(root, "sources.list.d", name);
+  const key = (name: string) => join(root, "keyrings", name);
+  const preamble = [
+    `TP_APT_SOURCES_DIR=${join(root, "sources.list.d")}`,
+    `TP_DOCKER_APT_SOURCES="${src("docker.sources")} ${src("docker.list")}"`,
+    `TP_DOCKER_APT_KEYS="${key("docker.asc")} ${key("docker.asc.fetched")} ${
+      key("docker.gpg")
+    }"`,
+    `tp_apt_keyring_path_ok() { case $1 in ${
+      join(root, "keyrings")
+    }/*) return 0 ;; esac; return 1; }`,
+  ].join("\n");
+  return { root, preamble };
+}
+
+test("Docker's apt source and key go by name too: offline source, orphan key, temp key copy", async () => {
+  const { root, preamble } = await dockerAptTree();
+  const src = (name: string) => join(root, "sources.list.d", name);
+  const key = (name: string) => join(root, "keyrings", name);
+  // The offline install's source has no download.docker.com and no key.
+  await Deno.writeTextFile(
+    src("docker.sources"),
+    "Types: deb\nURIs: file:///srv/docker-debs\nSuites: ./\nTrusted: yes\n",
+  );
+  // An old one-line source found by its content, with its own Signed-By key.
+  await Deno.writeTextFile(
+    src("old-docker.list"),
+    `deb [arch=amd64 signed-by=${
+      key("old-docker.gpg")
+    }] https://download.docker.com/linux/debian trixie stable\n`,
+  );
+  await Deno.writeTextFile(
+    src("other.sources"),
+    "Types: deb\nURIs: https://deb.example.org\nSuites: trixie\n",
+  );
+  // Keys whose source is already gone: a half-finished install, or an
+  // interrupted purge, and the key download's temporary copy.
+  for (
+    const name of [
+      "docker.asc",
+      "docker.asc.fetched",
+      "old-docker.gpg",
+      "other.gpg",
+    ]
+  ) {
+    await Deno.writeTextFile(key(name), "key\n");
+  }
+  const result = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\ntp_purge_docker_sources\necho "fail=$TP_FAIL_COUNT"`,
+  );
+  assertStringIncludes(result.stdout, "fail=0", result.stderr);
+  for (
+    const gone of [
+      src("docker.sources"),
+      src("old-docker.list"),
+      key("docker.asc"),
+      key("docker.asc.fetched"),
+      key("old-docker.gpg"),
+    ]
+  ) {
+    assertEquals(await exists(gone), false, `${gone} was left`);
+  }
+  assertEquals(await exists(src("other.sources")), true);
+  assertEquals(await exists(key("other.gpg")), true);
+  // A second run over the clean tree changes nothing and fails nothing.
+  const again = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\ntp_purge_docker_sources\necho "fail=$TP_FAIL_COUNT"\ncat "$TP_TMP/removed" 2>/dev/null || true`,
+  );
+  assertEquals(again.stdout.trim(), "fail=0", again.stderr);
+});
+
+test("a Docker source found by content and by name is removed once, and a dry run only logs", async () => {
+  const { root, preamble } = await dockerAptTree();
+  const sources = join(root, "sources.list.d", "docker.sources");
+  const key = join(root, "keyrings", "docker.asc");
+  await Deno.writeTextFile(
+    sources,
+    `Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: trixie\nComponents: stable\nSigned-By: ${key}\n`,
+  );
+  await Deno.writeTextFile(key, "key\n");
+  const result = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\nDRY_RUN=true\ntp_purge_docker_sources\ncat "$TP_TMP/removed"`,
+  );
+  const lines = result.stdout.split("\n").filter((l) =>
+    l.includes("[dry-run]")
+  );
+  assertEquals(
+    lines.filter((l) => l.includes("[dry-run] remove ")).sort(),
+    [`[dry-run] remove ${key}`, `[dry-run] remove ${sources}`],
+    result.stdout,
+  );
+  assertEquals(await exists(sources), true);
+  assertEquals(await exists(key), true);
+});
+
+test("a Docker Signed-By key outside the apt keyring directories is refused, not removed", async () => {
+  const { root, preamble } = await dockerAptTree();
+  const outside = join(root, "elsewhere.gpg");
+  await Deno.writeTextFile(outside, "key\n");
+  await Deno.writeTextFile(
+    join(root, "sources.list.d", "docker.list"),
+    `deb [signed-by=${outside}] https://download.docker.com/linux/debian trixie stable\n`,
+  );
+  const result = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\ntp_purge_docker_sources\necho "fail=$TP_FAIL_COUNT"`,
+  );
+  assertStringIncludes(result.stdout, "fail=1", result.stderr);
+  assertEquals(await exists(outside), true);
+});
+
+test("the PHP repository's loose signing key is evidence and is removed with the source", async () => {
+  const keys = await Deno.makeTempDir({ prefix: "tp-purge-sury-" });
+  const key = join(keys, "turbopanel-sury-php.gpg");
+  const fetchedKey = `${key}.fetched`;
+  await Deno.writeTextFile(key, "key\n");
+  await Deno.writeTextFile(fetchedKey, "key\n");
+  const apt = await fakeAptBin();
+  const dpkg = await fakeDpkgBin([]);
+  const result = await runPurgeSh(
+    [
+      ...PACKAGE_FUNCTIONS,
+      "tp_purge_apt_packages",
+      "tp_collect_purge_candidates",
+      "tp_sury_evidence",
+      "tp_pkg_installed",
+    ],
+    [
+      `TP_SURY_APT_KEYS="${key} ${fetchedKey}"`,
+      "if tp_sury_evidence; then echo evidence=yes; else echo evidence=no; fi",
+      "tp_purge_apt_packages",
+      'echo "fail=$TP_FAIL_COUNT"',
+    ].join("\n"),
+    {
+      PATH: `${apt}:${dpkg}:${REAL_PATH}`,
+      FAKE_APT_LOG: join(apt, "apt.log"),
+    },
+  );
+  assertStringIncludes(result.stdout, "evidence=yes", result.stderr);
+  assertStringIncludes(result.stdout, "fail=0", result.stderr);
+  assertEquals(await exists(key), false, "the sury key was left");
+  assertEquals(
+    await exists(fetchedKey),
+    false,
+    "the sury key download copy was left",
+  );
 });

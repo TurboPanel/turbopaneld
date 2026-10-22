@@ -64,22 +64,44 @@ test("cloudflared and the build tool pin both architectures in code", () => {
   }
 });
 
-// Downloads that are verified some other way, with the reason. Anything not
-// listed here must carry a digest check, so a new download without one fails.
+// Download tasks that are verified some other way, with the reason, keyed by
+// task file and task name. Any other download, including a new one in these
+// files, must carry a digest check, so a download without one fails.
 const DOWNLOAD_EXCEPTIONS = new Map<string, string>([
   [
-    "repo-key/tasks/main.yml",
+    "repo-key/tasks/main.yml: Download the key",
     "repository signing keys are checked by fingerprint under the key policy (warn by default), not by a file digest, so a key rotation never blocks installs",
   ],
   [
-    "ui-build/tasks/main.yml",
+    "ui-build/tasks/main.yml: Download UI static export from CDN",
     "development-only checkout step; the artifact URL is chosen by the developer",
   ],
 ]);
 
+// One block per task, nested tasks included, so a download is matched with
+// the task that holds it.
 function taskBlocks(text: string): string[] {
-  return text.split(/\n(?=(?:- name:| {4}- name:))/);
+  return text.split(/\n(?= *- name:)/);
 }
+
+function taskName(block: string): string {
+  return /name:\s*(.+)/.exec(block)?.[1] ?? "(unnamed)";
+}
+
+/** Why the task downloads without a digest check, or null when it is fine. */
+function uncheckedDownload(block: string): string | null {
+  const getsUrl = /ansible\.builtin\.get_url:/.test(block);
+  if (getsUrl && !/\bchecksum:\s*"?(sha256|\{\{)/.test(block)) {
+    return "get_url without checksum";
+  }
+  const curls = /\bcurl\s+-[a-zA-Z]*[fsSL]/.test(block);
+  if (curls && !DIGEST_COMPARISON.test(block)) {
+    return "curl without a digest comparison";
+  }
+  return null;
+}
+
+const DIGEST_COMPARISON = /\[ "\$GOT" = /;
 
 function roleTaskFiles(): string[] {
   const files: string[] = [];
@@ -131,7 +153,7 @@ test("every mismatch message names a pin file that exists", () => {
     const text = Deno.readTextFileSync(join(ROLES, rel));
     for (const block of taskBlocks(text)) {
       if (
-        /\bcurl\s+-[a-zA-Z]*[fsSL]/.test(block) && /sha256sum\s+-c/.test(block)
+        /\bcurl\s+-[a-zA-Z]*[fsSL]/.test(block) && DIGEST_COMPARISON.test(block)
       ) {
         assert(
           /update \w+ in orchestration\/roles\/[\w-]+\/defaults\/main\.yml/
@@ -150,26 +172,30 @@ test("every mismatch message names a pin file that exists", () => {
 test("every role download is checked against a pinned SHA-256", () => {
   const offenders: string[] = [];
   for (const rel of roleTaskFiles()) {
-    if (DOWNLOAD_EXCEPTIONS.has(rel)) continue;
     const text = Deno.readTextFileSync(join(ROLES, rel));
     for (const block of taskBlocks(text)) {
-      const name = /name:\s*(.+)/.exec(block)?.[1] ?? "(unnamed)";
-      const getsUrl = /ansible\.builtin\.get_url:/.test(block);
-      const curls = /\bcurl\s+-[a-zA-Z]*[fsSL]/.test(block);
-      if (getsUrl && !/\bchecksum:\s*"?(sha256|\{\{)/.test(block)) {
-        offenders.push(`${rel}: ${name} (get_url without checksum)`);
-      }
-      if (curls && !/\[ "\$GOT" = /.test(block)) {
-        offenders.push(`${rel}: ${name} (curl without a digest comparison)`);
+      const task = `${rel}: ${taskName(block)}`;
+      const problem = uncheckedDownload(block);
+      if (problem !== null && !DOWNLOAD_EXCEPTIONS.has(task)) {
+        offenders.push(`${task} (${problem})`);
       }
     }
   }
   assertEquals(offenders, []);
 });
 
-test("download exceptions still exist", () => {
-  for (const rel of DOWNLOAD_EXCEPTIONS.keys()) {
-    const stat = Deno.statSync(join(ROLES, rel));
-    assert(stat.isFile, rel);
+test("every download exception names a task that still downloads unchecked", () => {
+  const unchecked = new Set<string>();
+  for (const rel of roleTaskFiles()) {
+    const text = Deno.readTextFileSync(join(ROLES, rel));
+    for (const block of taskBlocks(text)) {
+      if (uncheckedDownload(block) !== null) {
+        unchecked.add(`${rel}: ${taskName(block)}`);
+      }
+    }
   }
+  const stale = [...DOWNLOAD_EXCEPTIONS.keys()].filter((task) =>
+    !unchecked.has(task)
+  );
+  assertEquals(stale, []);
 });

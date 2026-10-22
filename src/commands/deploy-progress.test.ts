@@ -16,6 +16,7 @@ import {
   createNoopDeployStepReporter,
   createPlaybookEventHandler,
   DEPLOY_PROGRESS_DETAIL_INTERVAL_MS,
+  DEPLOY_PROGRESS_KEEPALIVE_MS,
   DEPLOY_PROGRESS_WAITING_BEAT_MS,
   type PlannedDeployStep,
   sendOverOpenSocket,
@@ -546,4 +547,40 @@ test("finishing a deploy that is still waiting stops the repeat", () => {
   const count = h.sent.length;
   h.advance(DEPLOY_PROGRESS_WAITING_BEAT_MS * 2);
   assertEquals(h.sent.length, count);
+});
+
+test("a running deploy repeats its payload as a keepalive until it finishes", () => {
+  let enabled = true;
+  const seen: string[] = [];
+  const reporter = createDeployStepReporter({
+    id: "dispatch-ka",
+    commandId: "cmd-ka",
+    send: (message) => {
+      seen.push(message.progress.updatedAt);
+      return true;
+    },
+    now: () => new Date(2_000_000 + seen.length),
+    setTimer: (fn, ms) => {
+      timersKa.push({ fn, ms });
+      return timersKa.length;
+    },
+    clearTimer: () => {},
+    keepalive: () => enabled,
+    onSnapshot: (progress) => snapshots.push(progress.steps.length),
+  });
+  const timersKa: Array<{ fn: () => void; ms: number }> = [];
+  const snapshots: number[] = [];
+  reporter.plan(PLAN);
+  reporter.running(true);
+  const before = seen.length;
+  assertEquals(timersKa.at(-1)?.ms, DEPLOY_PROGRESS_KEEPALIVE_MS);
+  timersKa.shift()?.fn();
+  assertEquals(seen.length, before + 1);
+  enabled = false; // an older control plane: no repeats
+  timersKa.shift()?.fn();
+  assertEquals(seen.length, before + 1);
+  assertEquals(snapshots.length, seen.length);
+  const timersAtFinish = timersKa.length;
+  reporter.finish("succeeded");
+  assertEquals(timersAtFinish >= 1, true);
 });
