@@ -59,11 +59,3 @@ export function privilegedPlaybookInvocation(
     args: ["-n", "--", ORCHESTRATE_HELPER, "playbook", ...args],
   };
 }
-
-/** `sudo -n tp-orchestrate galaxy-docker-role` — the root-owned role fetch. */
-export function galaxyDockerRoleHelperInvocation(): PlaybookInvocation {
-  return {
-    bin: "sudo",
-    args: ["-n", "--", ORCHESTRATE_HELPER, "galaxy-docker-role"],
-  };
-}

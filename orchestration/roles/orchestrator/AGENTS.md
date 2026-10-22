@@ -5,8 +5,7 @@ Ansible role for TurboPanel orchestration. Shared conventions: `../../AGENTS.md`
 Host prerequisites for the **per-organization** Orchestrator Raft group
 (`managed-ha`). Host prep only — **not** a full stack bring-up of compose
 content. Does not meta-depend on `docker` (a role dependency would run for `daemon-converge`'s `tasks_from` backfill and try to install Docker on every host); playbooks list `role: docker` first. Standalone playbook:
-`playbooks/orchestrator-setup.yml` (invoked by daemon `runOrchestratorSetup`
-after `ensureGalaxyDockerRole`). Co-located dev installs the role via
+`playbooks/orchestrator-setup.yml` (invoked by daemon `runOrchestratorSetup`). Co-located dev installs the role via
 `instance-dev-install` / `dev-converge-manifest.json` (after `proxysql`).
 
 **Division of labour**

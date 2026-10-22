@@ -1,0 +1,31 @@
+---
+# Short name used in messages (docker, ...).
+repo_key_name: ""
+
+# HTTPS URL the key is fetched from at install time.
+repo_key_url: ""
+
+# Path ON THE HOST of the copy shipped in the release package (an ASCII-armored
+# or binary key file). The fallback when the fetch fails or the fetched key is
+# expired, and the only source under policy `bundled`.
+repo_key_bundled: ""
+
+# Where the chosen key is installed (the apt source's Signed-By).
+repo_key_dest: ""
+
+# Expected primary-key fingerprints (40 hex characters, upper case). A list so
+# a release can add a new fingerprint before the old one is removed.
+repo_key_fingerprints: []
+
+# warn     (default) a fetched key that is NOT in the list is still used, with
+#          one loud WARN line. apt still verifies every package signature
+#          against it and TLS to the repository host is the transport trust.
+# enforce  a key that is not in the list fails the run (hardened or air-gapped
+#          customers).
+# bundled  never fetch; use the shipped copy.
+repo_key_policy: warn
+
+# Warn when the chosen key expires within this many days.
+repo_key_warn_days: 60
+
+repo_key_fetch_timeout: 30
