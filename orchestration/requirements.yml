@@ -2,8 +2,7 @@
 # Ansible Galaxy collections installed during orchestration bootstrap.
 # Exact version pins keep installs reproducible across managed server daemons.
 #
-# Docker Galaxy roles live in requirements-docker.yml and are installed on
-# demand when a host first needs the container runtime (not at bootstrap).
+# Docker is installed by our own `docker` role (roles/docker), not from Galaxy.
 collections:
   - name: ansible.posix
     version: "2.2.1"

@@ -33,9 +33,8 @@ test("parseGalaxyRequirementsYaml reads quoted and unquoted name/version pins", 
 collections:
   - name: ansible.posix
     version: "2.2.1"
-roles:
-  - name: 'geerlingguy.docker'
-    version: '8.0.0'
+  - name: 'other.collection'
+    version: '1.2.3'
   - name: unversioned.role
 `);
   assertEquals(pins, [
@@ -45,9 +44,9 @@ roles:
       license: "GPL-3.0-or-later",
     },
     {
-      name: "geerlingguy.docker",
-      version: "8.0.0",
-      license: "MIT",
+      name: "other.collection",
+      version: "1.2.3",
+      license: "",
     },
     {
       name: "unversioned.role",
@@ -80,16 +79,12 @@ test({
     );
     assertEquals(names.includes("ansible-core"), true);
     assertEquals(names.includes("ansible.posix"), true);
-    assertEquals(names.includes("geerlingguy.docker"), true);
     const posix = pins.find((pin) => pin.name === "ansible.posix");
-    const docker = pins.find((pin) => pin.name === "geerlingguy.docker");
-    if (!posix || !docker) {
+    if (!posix) {
       throw new TypeError("expected Galaxy pins");
     }
     assertEquals(posix.version, "2.2.1");
     assertEquals(posix.license, "GPL-3.0-or-later");
-    assertEquals(docker.version, "8.0.0");
-    assertEquals(docker.license, "MIT");
   },
 });
 

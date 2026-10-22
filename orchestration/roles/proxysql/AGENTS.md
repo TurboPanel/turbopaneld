@@ -5,8 +5,7 @@ Ansible role for TurboPanel orchestration. Shared conventions: `../../AGENTS.md`
 Shared **managed-database ingress** on every host that will run managed
 engines. Host prerequisites only — **not** a full stack bring-up of compose
 content. Meta-depends on the `docker` role. Standalone playbook:
-`playbooks/proxysql-setup.yml` (invoked by daemon `runProxySqlSetup` after
-`ensureGalaxyDockerRole`, including **lazily from `managed.ingress.reconcile`**
+`playbooks/proxysql-setup.yml` (invoked by daemon `runProxySqlSetup`, including **lazily from `managed.ingress.reconcile`**
 when host `admin.cnf` is missing). Co-located dev also installs the role via
 `instance-dev-install` / `dev-converge-manifest.json` (after `system-compose`).
 
