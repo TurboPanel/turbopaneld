@@ -15,9 +15,6 @@
 #       must be on the allowlist below with a value of the expected shape;
 #       JSON objects are limited to TP_JSON_EXTRA_VAR_KEYS; @file is refused.
 #       Everything else on the command line is refused.
-#   galaxy-docker-role
-#       Fetch the geerlingguy.docker role pinned in requirements-docker.yml
-#       into the root-owned vendor roles dir (codeload tag tarball).
 #   update --license-stdin [--host URL] [--dl-base URL]
 #          [--instance-ca /etc/turbopanel/instance-ca.pem] [--channel NAME]
 #          [--manifest-url https://…] --no-start
@@ -53,7 +50,6 @@ ORCH_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 INSTALL_ROOT="$(cd "$ORCH_DIR/../.." && pwd -P)"
 VENDOR_DIR="$INSTALL_ROOT/vendor"
 PLAYBOOKS_DIR="$ORCH_DIR/playbooks"
-GALAXY_ROLES_DIR="$VENDOR_DIR/ansible/galaxy-roles"
 ANSIBLE_PLAYBOOK_BIN="$VENDOR_DIR/ansible/current/bin/ansible-playbook"
 # Root-only scratch. The well-known name is reused while it is a root-owned
 # directory (so `exec ansible-playbook` leaves nothing behind per run). /tmp is
@@ -91,7 +87,7 @@ tp_export_runtime_env() {
   ANSIBLE_EXECUTABLE=/bin/bash
   ANSIBLE_HOME="$ROOT_SCRATCH/home"
   ANSIBLE_LOCAL_TEMP="$ROOT_SCRATCH/local-tmp"
-  ANSIBLE_ROLES_PATH="$ORCH_DIR/roles:$GALAXY_ROLES_DIR"
+  ANSIBLE_ROLES_PATH="$ORCH_DIR/roles"
   export PATH OPENSSL_armcap ANSIBLE_CONFIG ANSIBLE_EXECUTABLE ANSIBLE_HOME \
     ANSIBLE_LOCAL_TEMP ANSIBLE_ROLES_PATH
 }
@@ -529,45 +525,6 @@ tp_verb_playbook() {
     _i=$((_i + 1))
   done
   exec "$ANSIBLE_PLAYBOOK_BIN" "$@" "$_resolved"
-}
-
-tp_verb_galaxy_docker_role() {
-  tp_require_root_scratch
-  _req="$ORCH_DIR/requirements-docker.yml"
-  [ -f "$_req" ] || tp_die "missing $_req"
-  # Exact pin, same regex family as parseGalaxyDockerRoleVersion.
-  _version="$(sed -n 's/^[[:space:]]*version:[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*$/\1/p' "$_req" | head -1)"
-  [ -n "$_version" ] || tp_die "requirements-docker.yml must pin geerlingguy.docker to an exact version"
-  _dest="$GALAXY_ROLES_DIR/geerlingguy.docker"
-  if [ -f "$_dest/.turbopanel-version" ] \
-    && [ "$(cat "$_dest/.turbopanel-version")" = "$_version" ]; then
-    printf 'tp-orchestrate: geerlingguy.docker %s already installed\n' "$_version"
-    return 0
-  fi
-  tp_export_runtime_env
-  _url="https://codeload.github.com/geerlingguy/ansible-role-docker/tar.gz/refs/tags/${_version}"
-  _work="$ROOT_SCRATCH/galaxy-docker.$$"
-  rm -rf "$_work"
-  mkdir -m 0700 "$_work"
-  if ! curl -fsSL --max-time 120 --retry 2 --retry-delay 3 --retry-max-time 60 -o "$_work/role.tar.gz" "$_url"; then
-    rm -rf "$_work"
-    tp_die "failed to download $_url"
-  fi
-  tar -xzf "$_work/role.tar.gz" -C "$_work"
-  _extracted="$_work/ansible-role-docker-${_version}"
-  [ -d "$_extracted" ] || { rm -rf "$_work"; tp_die "archive missing ansible-role-docker-${_version}/"; }
-  printf '%s\n' "$_version" > "$_extracted/.turbopanel-version"
-  install -d -m 0750 -o root -g "$(stat -c %G "$VENDOR_DIR")" "$GALAXY_ROLES_DIR"
-  rm -rf "$_dest.new"
-  # Same filesystem as the destination so the swap is a rename.
-  cp -a "$_extracted" "$_dest.new"
-  chown -R root:root "$_dest.new"
-  chmod -R u=rwX,g=rX,o= "$_dest.new"
-  chgrp -R "$(stat -c %G "$VENDOR_DIR")" "$_dest.new"
-  rm -rf "$_dest"
-  mv "$_dest.new" "$_dest"
-  rm -rf "$_work"
-  printf 'tp-orchestrate: geerlingguy.docker %s installed\n' "$_version"
 }
 
 CANONICAL_INSTANCE_CA="/etc/turbopanel/instance-ca.pem"
@@ -1051,12 +1008,11 @@ tp_verb_kernel_features() {
   exec "$_kf_script" "$@"
 }
 
-[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|galaxy-docker-role|update|update-instance|update-colocated|migrate|kernel-features …"
+[ $# -ge 1 ] || tp_die "usage: tp-orchestrate playbook|update|update-instance|update-colocated|migrate|kernel-features …"
 _verb="$1"
 shift
 case "$_verb" in
   playbook) tp_verb_playbook "$@" ;;
-  galaxy-docker-role) tp_verb_galaxy_docker_role "$@" ;;
   update) tp_verb_update "$@" ;;
   update-instance) tp_verb_update_instance "$@" ;;
   update-colocated) tp_verb_update_colocated "$@" ;;

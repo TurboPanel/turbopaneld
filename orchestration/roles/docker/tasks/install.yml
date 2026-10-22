@@ -1,0 +1,157 @@
+---
+# Install Docker Engine from Docker's official apt repository. Entered from
+# tasks/main.yml only when Docker is not already installed and running, so a
+# healthy host (including an offline one) is never touched.
+#
+# Steps: tools -> signing key (fetched over HTTPS, fingerprint pinned in
+# vars/main.yml) -> apt source (deb822, signed-by) -> packages -> service.
+# Idempotent: every step is a no-op on a second run. No reboot.
+#
+# Network failures are reported separately from everything else: the key
+# download, the suite probe and the package install each name the host they
+# could not reach, so "no internet" never reads as a broken role.
+
+- name: Install the tools used to fetch and check the Docker signing key
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the apt keyrings directory
+  ansible.builtin.file:
+    path: "{{ _docker_repo_key_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Read the fingerprints of an already installed Docker signing key
+  ansible.builtin.command:
+    argv: [gpg, --batch, --no-tty, --show-keys, --with-colons, "{{ _docker_repo_key_path }}"]
+  register: _docker_key_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fetch and verify the Docker signing key
+  when: _docker_repo_key_fingerprint not in (_docker_key_installed.stdout_lines | default([]) | select('match', '^fpr:') | map('split', ':') | map('select', 'match', '^[0-9A-F]{40}$') | flatten)
+  block:
+    - name: Download the Docker signing key to a temporary file
+      ansible.builtin.get_url:
+        url: "{{ _docker_repo_base }}/{{ _docker_distro_map[ansible_facts['distribution']] }}/gpg"
+        dest: "{{ _docker_repo_key_path }}.download"
+        owner: root
+        group: root
+        mode: "0600"
+        force: true
+        timeout: 30
+      register: _docker_key_download
+
+    - name: Read the fingerprints in the downloaded key
+      ansible.builtin.command:
+        argv: [gpg, --batch, --no-tty, --show-keys, --with-colons, "{{ _docker_repo_key_path }}.download"]
+      register: _docker_key_info
+      changed_when: false
+
+    - name: Refuse a key that does not carry the pinned fingerprint
+      ansible.builtin.assert:
+        that:
+          - _docker_repo_key_fingerprint in (_docker_key_info.stdout_lines | select('match', '^fpr:') | map('split', ':') | map('select', 'match', '^[0-9A-F]{40}$') | flatten)
+        fail_msg: >-
+          The key downloaded from {{ _docker_repo_base }} does not have the
+          expected Docker fingerprint ({{ _docker_repo_key_fingerprint }}).
+          Refusing to trust it.
+        quiet: true
+
+    - name: Install the verified key
+      ansible.builtin.copy:
+        src: "{{ _docker_repo_key_path }}.download"
+        dest: "{{ _docker_repo_key_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+  rescue:
+    - name: Report the key failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ 'Could not fetch the Docker signing key from download.docker.com (check the internet access and DNS of this server): '
+          if ansible_failed_task.name is search('Download')
+          else 'Docker signing key check failed: ' }}{{ ansible_failed_result.msg | default('unknown error') }}
+  always:
+    - name: Remove the temporary key download
+      ansible.builtin.file:
+        path: "{{ _docker_repo_key_path }}.download"
+        state: absent
+
+- name: Check whether Docker publishes packages for this release
+  ansible.builtin.uri:
+    url: "{{ _docker_repo_base }}/{{ _docker_distro_map[ansible_facts['distribution']] }}/dists/{{ ansible_facts['distribution_release'] }}/Release"
+    method: HEAD
+    status_code: [200, 404]
+    timeout: 30
+  register: _docker_suite_probe
+  failed_when: false
+  check_mode: false
+
+- name: Stop when download.docker.com cannot be reached
+  ansible.builtin.fail:
+    msg: >-
+      Could not reach download.docker.com to install Docker (check this
+      server's internet access and DNS): {{ _docker_suite_probe.msg | default('no response') }}
+  when: _docker_suite_probe.status | default(-1) not in [200, 404]
+
+- name: Choose the Docker apt suite
+  ansible.builtin.set_fact:
+    _docker_suite: >-
+      {{ ansible_facts['distribution_release'] if _docker_suite_probe.status == 200
+      else _docker_fallback_suite[ansible_facts['distribution']] }}
+
+- name: Say when the release falls back to an older suite
+  ansible.builtin.debug:
+    msg: >-
+      Docker has not published packages for {{ ansible_facts['distribution_release'] }}
+      yet; using the {{ _docker_suite }} suite.
+  when: _docker_suite != ansible_facts['distribution_release']
+
+- name: Configure the Docker apt repository
+  ansible.builtin.copy:
+    dest: "{{ _docker_repo_sources_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: {{ _docker_repo_base }}/{{ _docker_distro_map[ansible_facts['distribution']] }}
+      Suites: {{ _docker_suite }}
+      Components: stable
+      Architectures: {{ _docker_arch_map[ansible_facts['architecture']] }}
+      Signed-By: {{ _docker_repo_key_path }}
+
+- name: Install Docker Engine and its plugins
+  block:
+    - name: Install the Docker packages
+      ansible.builtin.apt:
+        name: "{{ _docker_packages }}"
+        state: present
+        update_cache: true
+  rescue:
+    - name: Report the package install failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ 'Could not download the Docker packages from download.docker.com (check the internet access and DNS of this server): '
+          if (ansible_failed_result.msg | default('')) is search('Failed to fetch|Temporary failure|Could not resolve|Connection (timed out|refused)|Unable to connect|Some index files failed')
+          else 'Installing the Docker packages failed: ' }}{{ ansible_failed_result.msg | default('unknown error') }}
+
+- name: Enable and start Docker
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - containerd
+    - docker

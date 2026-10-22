@@ -4,12 +4,12 @@ Ansible roles and playbooks under `orchestration/`. Root context: `../AGENTS.md`
 
 ### Upstream licenses (Ansible tooling)
 
-Ansible Core, `ansible-lint`, the `ansible.posix` collection, the
-`geerlingguy.docker` Galaxy role, and any packages these playbooks
-install remain under their upstream licenses. Pins live in
+Ansible Core, `ansible-lint`, the `ansible.posix` collection, and any
+packages these playbooks install (including Docker Engine from Docker's apt
+repository) remain under their upstream licenses. Pins live in
 `requirements.txt` (Ansible Core / ansible-lint constraints),
 `requirements.lock.txt` (hash-locked CI install set), `requirements.yml`
-(`ansible.posix`), and `requirements-docker.yml` (`geerlingguy.docker`).
+(`ansible.posix`).
 Installing them onto a host is a different licensing event from
 redistributing them. Any TurboPanel-published appliance, VM/OCI image,
 or offline bundle that ships copies must carry the applicable upstream
@@ -35,9 +35,19 @@ stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
 
 ### Docker (`docker`)
 
-Thin wrapper around the deferred `geerlingguy.docker` Galaxy role (fetched
-on demand by `ensureGalaxyDockerRole()`, never during bootstrap) with a
-fast-path when the binary is present and the service active. The role
+Installs Docker Engine itself (`tasks/install.yml`, no Galaxy role): the
+official Docker apt repository as a deb822 source with `Signed-By`, the key
+fetched over HTTPS and refused unless it carries the fingerprint pinned in
+`vars/main.yml`, then `docker-ce`, `docker-ce-cli`, `containerd.io`,
+`docker-buildx-plugin`, `docker-compose-plugin`, and the services enabled and
+started. Debian 12/13 and Ubuntu LTS, amd64 and arm64. If Docker does not publish
+the host's release codename yet, the newest published suite for the
+distribution is used. Idempotent, no reboot. A host whose Docker binary is
+present and service active is left alone (fast-path), so it also works
+offline; otherwise an unreachable `download.docker.com` fails with a message
+that names the network, not the role. Only the Docker role installs Docker:
+other roles must not meta-depend on it (a dependency also runs for
+`tasks_from`), and playbooks list `role: docker` before roles that need it. The role
 **also owns `/etc/docker/daemon.json`** for the org-wide dockerd addressing
 (`tasks/daemon-json.yml`):
 

@@ -15,5 +15,9 @@ galaxy_info:
       versions:
         - trixie
 
-dependencies:
-  - role: docker
+# No role dependency on `docker`: Ansible runs a role's dependencies even for
+# `tasks_from`, so daemon-converge (which only runs the host-prep marker
+# backfill from this role) would try to install Docker on every host. Playbooks
+# that need Docker list `role: docker` before this role
+# (orchestrator-setup.yml, instance-install.yml).
+dependencies: []

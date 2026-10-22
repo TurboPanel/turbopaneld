@@ -1,12 +1,12 @@
 ---
-# TurboPanel wrapper around geerlingguy.docker (Ansible Galaxy).
-#
-# The Galaxy role itself is fetched on demand by ensureGalaxyDockerRole()
-# (requirements-docker.yml) — not during orchestration bootstrap.
+# TurboPanel's own Docker Engine install (no Galaxy role, nothing fetched at
+# bootstrap): tasks/install.yml adds Docker's official apt repository and
+# installs the engine packages.
 #
 # Fast-path: if the docker binary exists and the service is active, skip
-# install. Group membership for docker_user always runs (co-located hosts often
-# already have Docker). Otherwise include geerlingguy.docker after validation.
+# install, so a healthy host (even an offline one) is never touched. Group
+# membership for docker_user always runs (co-located hosts often already have
+# Docker). Otherwise install.yml runs after the platform checks.
 #
 # daemon.json: this role also owns the org-wide dockerd addressing
 # (`default-address-pools` / `bip`) via tasks/daemon-json.yml — MERGED into
@@ -48,7 +48,7 @@
 
 # An installed Docker that is stopped — typically systemd's `start-limit-hit`
 # after a burst of restarts — is started again here instead of falling into
-# the install branch, where geerlingguy's "ensure started" hits the same
+# the install branch, where the install's "ensure started" hits the same
 # lockout and fails. `reset-failed` is the only way to clear that lockout
 # (no module equivalent), and it is a no-op on a unit that is not failed.
 - name: Clear a systemd start-limit lockout on an installed but stopped Docker  # noqa: command-instead-of-module
@@ -118,12 +118,8 @@
           Unsupported distribution '{{ ansible_distribution }}'.
           TurboPanel supports: {{ _docker_distro_map.keys() | list | join(', ') }}.
 
-    - name: Install Docker via geerlingguy.docker Galaxy role
-      ansible.builtin.include_role:
-        name: geerlingguy.docker
-      vars:
-        docker_repo_url: "{{ _docker_repo_url[ansible_distribution] }}"
-        docker_install_compose_plugin: true
+    - name: Install Docker Engine from Docker's apt repository
+      ansible.builtin.include_tasks: install.yml
 
 - name: Add daemon user to docker group
   ansible.builtin.user:
