@@ -143,6 +143,33 @@ function psContainers(stdout: string): ComposeStates["containers"] {
   });
 }
 
+/**
+ * File names in one site config folder. A folder this host never made has no
+ * sites in it (empty). A folder the daemon user may not enter (the hosting
+ * Caddy's is root-owned, group-only) is listed through the host helper, the way
+ * the deploy itself reads it. Anything else, including a helper failure, throws,
+ * so the caller never mistakes "cannot tell" for "present" or for "absent".
+ */
+async function listConfigDir(dir: string, run: RunFn): Promise<string[]> {
+  try {
+    const found: string[] = [];
+    for await (const entry of Deno.readDir(dir)) found.push(entry.name);
+    return found;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    if (!(err instanceof Deno.errors.PermissionDenied)) throw err;
+  }
+  const listing = await run(
+    "sudo",
+    hostSudoArgs(["-n", "ls", "-A", "--", dir]),
+  );
+  if (listing.success) {
+    return listing.stdout.split("\n").filter((name) => name.length > 0);
+  }
+  if (/no such (file or )?directory/i.test(listing.stderr)) return [];
+  throw new Error(listing.stderr || `Failed to list ${dir}`);
+}
+
 /** The real probe: Docker Compose, systemd and the config folders of this host. */
 export function createHostProbe(input: {
   layout: LayoutPaths;
@@ -184,15 +211,9 @@ export function createHostProbe(input: {
         join(input.layout.configDir, "apache", "sites"),
         join(input.layout.configDir, "openlitespeed", "sites"),
       ];
-      const perDir = await Promise.all(dirs.map(async (dir) => {
-        const found: string[] = [];
-        try {
-          for await (const entry of Deno.readDir(dir)) found.push(entry.name);
-        } catch {
-          // A folder this host never made has no sites in it.
-        }
-        return found;
-      }));
+      const perDir = await Promise.all(
+        dirs.map((dir) => listConfigDir(dir, input.run)),
+      );
       return perDir.flat();
     },
   };

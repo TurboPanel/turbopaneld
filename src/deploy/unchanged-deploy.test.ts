@@ -1,5 +1,10 @@
 import { assertEquals } from "@std/assert";
+import { join } from "node:path";
+import { resolveLayout } from "../paths/layout.ts";
+import type { RunFn } from "./ensure-principal.ts";
+import { siteCaddyConfigDir } from "./site/engine-driver.ts";
 import {
+  createHostProbe,
   type DeployedThings,
   type HostProbe,
   hostStillRunsDeploy,
@@ -116,4 +121,92 @@ test("images without a tag, on latest or set by a variable are mutable; pinned o
     usesMutableImageTag(compose("nginx@sha256:" + "a".repeat(64))),
     false,
   );
+});
+
+function siteProbe(
+  root: string,
+  run: (command: string, args: string[]) => Promise<
+    { success: boolean; stdout: string; stderr: string }
+  >,
+): HostProbe {
+  return createHostProbe({
+    layout: resolveLayout({ TURBOPANEL_CONFIG_DIR: root }),
+    composePaths: [],
+    runDocker: () => Promise.reject(new Error("unused")),
+    run: run as RunFn,
+  });
+}
+
+const noHelper = () => Promise.reject(new Error("helper must not be called"));
+
+test("site configs: a readable folder lists its files without the helper", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    const layout = resolveLayout({ TURBOPANEL_CONFIG_DIR: root });
+    const dir = join(siteCaddyConfigDir(layout), "sites");
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(join(dir, "tp-env1-blog.conf"), "x");
+    assertEquals(await siteProbe(root, noHelper).siteConfigNames(), [
+      "tp-env1-blog.conf",
+    ]);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("site configs: a folder that does not exist has no sites", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    assertEquals(await siteProbe(root, noHelper).siteConfigNames(), []);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test({
+  name:
+    "site configs: a folder the daemon cannot enter is listed by the helper",
+  ignore: Deno.uid() === 0,
+  fn: async () => {
+    const root = await Deno.makeTempDir();
+    const layout = resolveLayout({ TURBOPANEL_CONFIG_DIR: root });
+    const dir = join(siteCaddyConfigDir(layout), "sites");
+    try {
+      await Deno.mkdir(dir, { recursive: true });
+      await Deno.chmod(dir, 0o000);
+      const calls: string[][] = [];
+      const listed = siteProbe(root, (_command, args) => {
+        calls.push(args);
+        return Promise.resolve({
+          success: true,
+          stdout: "tp-env1-blog.conf\n",
+          stderr: "",
+        });
+      });
+      assertEquals(await listed.siteConfigNames(), ["tp-env1-blog.conf"]);
+      assertEquals(calls.length, 1);
+      assertEquals(
+        await hostStillRunsDeploy(THINGS, {
+          ...probe(),
+          siteConfigNames: listed.siteConfigNames,
+        }),
+        true,
+      );
+      // The helper cannot tell either: never a skip.
+      const unsure = siteProbe(
+        root,
+        () => Promise.resolve({ success: false, stdout: "", stderr: "denied" }),
+      );
+      assertEquals(
+        await hostStillRunsDeploy(THINGS, {
+          ...probe(),
+          siteConfigNames: unsure.siteConfigNames,
+        }),
+        false,
+      );
+    } finally {
+      await Deno.chmod(dir, 0o755);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
 });
