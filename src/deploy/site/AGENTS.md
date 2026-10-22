@@ -452,16 +452,18 @@ under `<configDir>/openlitespeed/sites/` on each apply/remove (no
 `sites-enabled` convention). PHP context lives inside the per-site
 `vhosts/<name>/vhconf.conf` and fragment that removal already deletes, so
 `removeOpenLiteSpeedSites` needs no PHP-specific step. Site variables for OLS
-PHP land on the vhost processor (see **Site variables** below).
+PHP are written as rewrite rules in the vhost (see **Site variables** below).
 
 **Site variables (`sites[].webEnv`, `sites[].webSecretEnv`).** Runtime variables
 set on a PHP site's hostings reach PHP as FastCGI / LSAPI environment, so
 `getenv()` and `$_SERVER` see them: site Caddy `php_fastcgi { env }`, Apache
 `SetEnv` (mod_proxy_fcgi forwards it), nginx `fastcgi_param` after the shared
 parameter set and before the pinned `SCRIPT_FILENAME` / `PATH_INFO`,
-OpenLiteSpeed processor `env NAME=value` on the per-vhost `extprocessor`
-(FastCGI, php-fpm and detached lsphp — OLS does not start PHP, but still sends
-these on each request). Not yet delivered: `$_ENV` in every mode (FastCGI
+OpenLiteSpeed one `RewriteRule .* - [E=NAME:value]` per variable in the vhost
+(FastCGI, php-fpm and detached lsphp). The processor's own `env` lines do not
+work here: OLS does not start PHP (`autoStart 0`) and never sends them to it
+(checked on a real OpenLiteSpeed 1.8.3). Not yet delivered: `$_ENV` in every
+mode (FastCGI
 parameters never fill it; `variables_order` is `GPCS`). Secret variables travel
 sealed: the control plane sends each as a `tpdaemon` envelope in
 `sites[].webSecretEnv`, and `resolveSiteSecretEnv` (`site/site-secret-env.ts`,
@@ -474,8 +476,9 @@ and environment into every hosting, so nginx **drops and names** (never prints
 the value) a variable it cannot carry rather than failing the deploy: a value
 holding `$` (nginx expands `$name` inside quotes, with no escape), a value that
 is not one line, and a name nginx or PHP sets itself (`SCRIPT_FILENAME`,
-`REMOTE_ADDR`, `HTTP_*`, ...). OpenLiteSpeed likewise drops a value holding `$`
-(it expands `$VH_ROOT`), a brace, `<`, `>` or `#`. A name that is not an
+`REMOTE_ADDR`, `HTTP_*`, ...). OpenLiteSpeed likewise drops an empty value or
+one holding a space, comma, quote, backslash, `$`, `%` or bracket (they end or
+change the rule). A name that is not an
 environment variable name is still refused. `PHP_VALUE` and `PHP_ADMIN_VALUE`
 (any case) are reserved on every engine: PHP-FPM reads them from the FastCGI
 request as ini overrides, so `resolveSiteSecretEnv` drops them (plain or sealed,

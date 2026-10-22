@@ -657,12 +657,19 @@ function apacheEnvRefusal(field: string, raw: string): string | null {
 }
 
 /**
+ * Characters an OpenLiteSpeed rewrite rule carries through to PHP unchanged
+ * (checked against a real server). A space, comma or `]` ends the flag, `\`
+ * is an escape, and `$` / `%` start back-references and server variables, so
+ * a value holding one of those cannot be written safely.
+ */
+const OPENLITESPEED_ENV_VALUE_RE = /^[A-Za-z0-9_@:/.+=~!?;^&|*()#<>{}-]*$/;
+
+/**
  * Why OpenLiteSpeed cannot carry a variable value, or `null` when it can.
  *
- * `env NAME=value` is written unquoted inside the vhost processor block, so a
- * value that holds `$` (OLS expands `$VH_ROOT` and friends), a brace or `}`
- * (block delimiters), `<` (heredoc), or `#` (comment) cannot be written
- * safely. The value must also stay on its line (`safeEnvValue`).
+ * OpenLiteSpeed does not hand the `env` of an externally started PHP process
+ * (autoStart 0) to PHP, so site variables ride a rewrite rule (`E=NAME:value`)
+ * instead, which reaches PHP as CGI environment on every request.
  */
 function openlitespeedEnvRefusal(field: string, raw: string): string | null {
   try {
@@ -671,11 +678,9 @@ function openlitespeedEnvRefusal(field: string, raw: string): string | null {
     if (error instanceof ConfigValueError) return error.message;
     throw error;
   }
-  if (raw.includes("$")) {
-    return "holds a $, which OpenLiteSpeed expands";
-  }
-  if (/[{}<>#]/.test(raw)) {
-    return "holds a brace, angle bracket or #, which OpenLiteSpeed reads as syntax";
+  if (raw.length === 0) return "is empty, which OpenLiteSpeed cannot carry";
+  if (!OPENLITESPEED_ENV_VALUE_RE.test(raw)) {
+    return "holds a space, comma, quote, backslash, $, % or bracket, which OpenLiteSpeed reads as syntax";
   }
   return null;
 }
@@ -1532,18 +1537,18 @@ export type OpenLiteSpeedVhostPhpOpts = Readonly<{
   /** Compose service name, for validator field paths when {@link webEnv} is set. */
   composeServiceName?: string;
   /**
-   * Site variables as processor `env NAME=value` lines, the OLS spelling of
-   * nginx `fastcgi_param` / Apache `SetEnv` — FastCGI, php-fpm and detached
-   * lsphp all see them as CGI environment (`getenv()` / `$_SERVER`).
+   * Site variables, written as rewrite rules (`E=NAME:value`) because the
+   * processor `env` is not passed to a process OLS did not start. FastCGI,
+   * php-fpm and detached lsphp all see them as CGI environment.
    */
   webEnv?: Record<string, string>;
 }>;
 
 /**
- * One processor `env NAME=value` line, or a refusal naming the variable
- * (never its value: it may be a decrypted secret).
+ * One rewrite rule that hands a variable to PHP, or a refusal naming the
+ * variable (never its value: it may be a decrypted secret).
  */
-export function openlitespeedEnvLine(
+export function openlitespeedEnvRule(
   service: string,
   key: string,
   raw: string,
@@ -1551,25 +1556,21 @@ export function openlitespeedEnvLine(
   const name = safeEnvName(`sites.${service}.webEnv`, key);
   const field = `sites.${service}.webEnv.${name}`;
   const value = safeEnvValue(field, raw);
-  if (value.includes("$") || /[{}<>#]/.test(value)) {
-    throw new ConfigValueError(
-      field,
-      "must not contain $, braces, <, > or # in an OpenLiteSpeed site",
-    );
-  }
-  return `  env                       ${name}=${value}`;
+  const refusal = openlitespeedEnvRefusal(field, value);
+  if (refusal !== null) throw new ConfigValueError(field, refusal);
+  return `RewriteRule .* - [E=${name}:${value}]`;
 }
 
 /**
- * The site's variables as processor `env` lines, in name order.
+ * The site's variables as rewrite rules, in name order.
  *
  * A variable OpenLiteSpeed cannot carry is **dropped and named**, the same
  * way nginx, Apache and Caddy already do.
  */
-function openlitespeedEnvLines(opts: OpenLiteSpeedVhostPhpOpts): string[] {
+function openlitespeedEnvRules(opts: OpenLiteSpeedVhostPhpOpts): string[] {
   const env = opts.webEnv ?? {};
   const service = opts.composeServiceName ?? "site";
-  const lines: string[] = [];
+  const rules: string[] = [];
   for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
     const field = `sites.${service}.webEnv`;
     const name = safeEnvName(field, key);
@@ -1582,9 +1583,9 @@ function openlitespeedEnvLines(opts: OpenLiteSpeedVhostPhpOpts): string[] {
       );
       continue;
     }
-    lines.push(openlitespeedEnvLine(service, key, raw));
+    rules.push(openlitespeedEnvRule(service, key, raw));
   }
-  return lines;
+  return rules;
 }
 
 /**
@@ -1594,14 +1595,11 @@ function openlitespeedEnvLines(opts: OpenLiteSpeedVhostPhpOpts): string[] {
  * site owner, on a socket (FastCGI, detached lsphp) or as a php-fpm master, so
  * it outlives an OpenLiteSpeed restart. OpenLiteSpeed runs as `tpols` and
  * cannot switch users, which is why the old per-vhost `extUser`/`extGroup`
- * never took effect (WP0). Site variables ride the processor as `env` so they
- * reach PHP on each request even though OLS did not start the process.
+ * never took effect (WP0).
  */
 export function openlitespeedPhpExtProcessorFragment(
   opts: OpenLiteSpeedVhostPhpOpts,
 ): string {
-  const envLines = openlitespeedEnvLines(opts);
-  const envBlock = envLines.length > 0 ? `${envLines.join("\n")}\n` : "";
   return `extprocessor ${opts.processorName}{
   type                      ${OPENLITESPEED_PHP_TYPE[opts.mode]}
   address                   uds://${opts.socket}
@@ -1611,7 +1609,7 @@ export function openlitespeedPhpExtProcessorFragment(
   persistConn               1
   respBuffer                0
   autoStart                 0
-${envBlock}}
+}
 `;
 }
 
@@ -1671,7 +1669,10 @@ listener ${name}_lo{
  * context in our config executes them, so they are ordinary static downloads
  * and carry no hidden source. `.cgi` stays denied as a server-side type.
  */
-function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
+function openlitespeedScriptDenyRewrite(
+  phpHandled: boolean,
+  envRules: readonly string[] = [],
+): string {
   const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
   const denied = phpHandled ? family : `php|${family}`;
   const backups = String.raw`~|\.(bak|old|orig|save|swp|swo|tmp|dist|txt)`;
@@ -1684,12 +1685,13 @@ function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
 RewriteCond %{HTTP:X-Forwarded-Proto} =https
 RewriteRule .* - [E=HTTPS:on]`
     : "";
+  const siteEnv = envRules.map((rule) => `\n${rule}`).join("");
   return String.raw`rewrite {
   enable                    1
   rules                     <<<END_rules
 RewriteRule (^|/)\.(?!well-known(/|$)) - [F,L]
 RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
-RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]${forwardedHttps}
+RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]${forwardedHttps}${siteEnv}
 END_rules
 }
 `;
@@ -1751,7 +1753,7 @@ scripthandler {
   }:${php.processorName} php
 }
 ${overrideBlock}
-${openlitespeedScriptDenyRewrite(true)}
+${openlitespeedScriptDenyRewrite(true, openlitespeedEnvRules(php))}
 context / {
   allowBrowse 1
   location $DOC_ROOT/

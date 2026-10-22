@@ -15,7 +15,7 @@ import {
   apacheSiteConfig,
   caddySiteConfig,
   hostingWebMetadataFiles,
-  openlitespeedEnvLine,
+  openlitespeedEnvRule,
   openlitespeedVhostConfig,
   planSiteWebEnv,
   SITE_DB_CA_FILE_NAME,
@@ -145,7 +145,7 @@ function olsPhp(webEnv?: Record<string, string>) {
   });
 }
 
-test("OpenLiteSpeed passes bound connection settings to PHP on the processor", () => {
+test("OpenLiteSpeed passes bound connection settings to PHP through rewrite rules", () => {
   assertEquals(
     planSiteWebEnv(site("openlitespeed", DB_ENV, { requiredEnv: REQUIRED })),
     [],
@@ -153,13 +153,13 @@ test("OpenLiteSpeed passes bound connection settings to PHP on the processor", (
   const conf = olsPhp(DB_ENV);
   assertStringIncludes(
     conf,
-    "env                       DATABASE_HOST=127.0.0.1",
+    "RewriteRule .* - [E=DATABASE_HOST:127.0.0.1]",
   );
   assertStringIncludes(
     conf,
-    "env                       DATABASE_PASSWORD=secret",
+    "RewriteRule .* - [E=DATABASE_PASSWORD:secret]",
   );
-  assertStringIncludes(conf, "env                       DATABASE_PORT=13306");
+  assertStringIncludes(conf, "RewriteRule .* - [E=DATABASE_PORT:13306]");
   for (const mode of ["fastcgi", "fpm", "lsphp-detached"] as const) {
     const body = openlitespeedVhostConfig({
       processorName: "php_x",
@@ -170,7 +170,7 @@ test("OpenLiteSpeed passes bound connection settings to PHP on the processor", (
       composeServiceName: "wordpress",
       webEnv: DB_ENV,
     });
-    assertStringIncludes(body, "env                       DATABASE_USER=wp");
+    assertStringIncludes(body, "RewriteRule .* - [E=DATABASE_USER:wp]");
   }
 });
 
@@ -185,7 +185,7 @@ test("OpenLiteSpeed drops an unsafe value and stops a required one without print
   assertEquals(olsPhp({ KEEP: "ok", NOTE: "a$b" }).includes("NOTE"), false);
   assertStringIncludes(
     olsPhp({ KEEP: "ok", NOTE: "a$b" }),
-    "env                       KEEP=ok",
+    "RewriteRule .* - [E=KEEP:ok]",
   );
   const error = assertThrows(
     () =>
@@ -200,7 +200,7 @@ test("OpenLiteSpeed drops an unsafe value and stops a required one without print
   assertStringIncludes(error.message, "cannot start");
   assertEquals(error.message.includes("a$b"), false);
   assertThrows(
-    () => openlitespeedEnvLine("wordpress", "TOKEN", "x$y"),
+    () => openlitespeedEnvRule("wordpress", "TOKEN", "x$y"),
     Error,
     "OpenLiteSpeed",
   );

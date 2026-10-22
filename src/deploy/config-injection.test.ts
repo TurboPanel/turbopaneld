@@ -25,7 +25,7 @@ import {
   apacheSiteConfig,
   caddySiteConfig,
   nginxSiteConfig,
-  openlitespeedEnvLine,
+  openlitespeedEnvRule,
   openlitespeedVhostConfig,
   phpAdminValues,
   phpFpmPoolAdminDirectives,
@@ -369,20 +369,22 @@ test("OpenLiteSpeed env drops a hostile value, refuses a bad name", () => {
       "\u2028",
       "\u2029",
       "$",
-      "{",
-      "}",
-      "<",
-      ">",
-      "#",
+      "%",
+      " ",
+      ",",
+      "]",
+      "[",
+      "\\",
+      "'",
+      '"',
     ]
   ) {
     const conf = olsWithEnv({
-      TOKEN: `x${ch}env                       PATH=/tmp`,
+      TOKEN: `x${ch}y`,
       KEEP: "ok",
     });
     assertEquals(conf.includes("TOKEN"), false);
-    assertEquals(conf.includes("PATH=/tmp"), false);
-    assertEquals(conf.includes("env                       KEEP=ok"), true);
+    assertEquals(conf.includes("RewriteRule .* - [E=KEEP:ok]"), true);
   }
   for (const key of ["A\nB", "A B", "A}", "1A", ""]) {
     assertThrows(
@@ -393,9 +395,9 @@ test("OpenLiteSpeed env drops a hostile value, refuses a bad name", () => {
   }
   assertEquals(olsWithEnv({ BIG: "x".repeat(4097) }).includes("BIG"), false);
   assertThrows(
-    () => openlitespeedEnvLine("phpapp", "TOKEN", "x$y"),
+    () => openlitespeedEnvRule("phpapp", "TOKEN", "x$y"),
     Error,
-    "sites.phpapp.webEnv.TOKEN must not contain",
+    "sites.phpapp.webEnv.TOKEN holds a space",
   );
 });
 
