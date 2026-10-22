@@ -105,10 +105,20 @@ test({
         "-c",
         "max_wal_senders=5",
       ]);
+      // The image first runs a setup server on the socket only, stops it, and
+      // then starts the real one. Only the real one listens on TCP, so asking
+      // over TCP waits past the setup server instead of racing its shutdown.
       await waitFor(
         "primary ready",
         async () =>
-          (await docker(["exec", primary, "pg_isready", "-q"])).success,
+          (await docker([
+            "exec",
+            primary,
+            "pg_isready",
+            "-q",
+            "-h",
+            "127.0.0.1",
+          ])).success,
         { timeoutMs: 90_000, intervalMs: 500 },
       );
       await waitFor(

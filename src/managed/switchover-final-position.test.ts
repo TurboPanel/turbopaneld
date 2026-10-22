@@ -46,6 +46,7 @@ const CONTROL_DATA = [
   "Latest checkpoint's REDO location:    0/7257FC0",
   "Latest checkpoint's TimeLineID:       1",
   "Database block size:                  8192",
+  "WAL block size:                       8192",
   "Bytes per WAL segment:                16777216",
 ].join("\n");
 const WALDUMP =
