@@ -36,8 +36,15 @@ import {
 
 const HA_OBSERVE_MS = 15_000;
 const HA_REVIVE_COOLDOWN_MS = 60_000;
-/** Matches the control-plane automatic-failover cooldown for re-triggers. */
+/** Longest wait between events for one still-dead incident (the control plane's cooldown). */
 const HA_INCIDENT_REEMIT_MS = 15 * 60_000;
+/**
+ * Wait after the first delivered event of an incident; it doubles with each
+ * further one up to {@link HA_INCIDENT_REEMIT_MS}. A refusal at event time
+ * (for example replicas that still look connected to a frozen primary) is
+ * then retried within a minute or two, not after the full cooldown.
+ */
+const HA_INCIDENT_REEMIT_FIRST_MS = 30_000;
 /** Bound each Orchestrator read so one hung request cannot stall polling. */
 const HA_API_TIMEOUT_MS = 10_000;
 const MANAGED_ID_RE =
@@ -53,7 +60,8 @@ export type ManagedHaEventMessage = {
   /**
    * `spanMs`: how long ago the local primary's engine container stopped, so
    * the control plane can tell whether a replica was still streaming when
-   * the primary died. Absent while that time is unknown.
+   * the primary died. For a frozen engine (container still running) it counts
+   * from the first poll that saw the incident.
    */
   evidence?: { spanMs: number; primaryStoppedAt: string };
   at: string;
@@ -124,17 +132,28 @@ type HaPollState = {
   complete: boolean;
 };
 
+/** Wait before the next event of an incident that already delivered `deliveredCount`. */
+export function haIncidentReemitGapMs(deliveredCount: number): number {
+  const doublings = Math.max(0, deliveredCount - 1);
+  return Math.min(
+    HA_INCIDENT_REEMIT_FIRST_MS * 2 ** Math.min(doublings, 30),
+    HA_INCIDENT_REEMIT_MS,
+  );
+}
+
 /**
- * True while an event for this incident reached the control plane less than
- * {@link HA_INCIDENT_REEMIT_MS} ago. Only a delivered event (which always
- * carries the full instance key) starts the cooldown.
+ * True while the last event for this incident reached the control plane less
+ * than the current gap ago. Only a delivered event (which always carries the
+ * full instance key) starts the wait. Without `deliveredCount` the longest
+ * gap applies.
  */
 export function shouldSuppressHaIncidentReemit(
   lastDeliveredMs: number | undefined,
   nowMs: number,
+  deliveredCount: number = Number.MAX_SAFE_INTEGER,
 ): boolean {
   if (lastDeliveredMs === undefined) return false;
-  return nowMs - lastDeliveredMs < HA_INCIDENT_REEMIT_MS;
+  return nowMs - lastDeliveredMs < haIncidentReemitGapMs(deliveredCount);
 }
 
 export class ManagedHaObserver {
@@ -147,8 +166,13 @@ export class ManagedHaObserver {
   readonly #nowMs: () => number;
   readonly #layout: LayoutPaths | undefined;
   readonly #runDocker: RunDockerFn;
-  /** Incident key -> when its event last reached the control plane. */
-  readonly #incidentLastDelivered = new Map<string, number>();
+  /** Incident key -> when its event last reached the control plane, and how many did. */
+  readonly #incidentLastDelivered = new Map<
+    string,
+    { atMs: number; count: number }
+  >();
+  /** Incident key -> when a poll first saw it (failure start for a frozen engine). */
+  readonly #incidentFirstSeen = new Map<string, number>();
   #pollGeneration = 0;
   /** Newest poll that finished after reading every source. */
   #newestCompleteGeneration = 0;
@@ -218,16 +242,20 @@ export class ManagedHaObserver {
   #emitDeadPrimary(candidate: OrchestratorDeadPrimaryEmitContext): void {
     const { managedId, incidentKey, emitKey } = candidate;
     const now = this.#nowMs();
-    if (
-      shouldSuppressHaIncidentReemit(
-        this.#incidentLastDelivered.get(incidentKey),
-        now,
-      )
-    ) {
+    const last = this.#incidentLastDelivered.get(incidentKey);
+    if (shouldSuppressHaIncidentReemit(last?.atMs, now, last?.count)) {
       return;
     }
     const instance = `${emitKey.hostname}:${emitKey.port}`;
-    const evidence = deadPrimaryEvidence(candidate.primaryStoppedAtMs, now);
+    // A frozen engine container still runs, so Docker has no stop time. The
+    // first poll that saw the incident stands in as the failure start.
+    if (!this.#incidentFirstSeen.has(incidentKey)) {
+      this.#incidentFirstSeen.set(incidentKey, now);
+    }
+    const evidence = deadPrimaryEvidence(
+      candidate.primaryStoppedAtMs ?? this.#incidentFirstSeen.get(incidentKey),
+      now,
+    );
     const delivered = this.#send({
       type: "managed-ha-event",
       managedId,
@@ -244,7 +272,10 @@ export class ManagedHaObserver {
       return;
     }
     noteDeadPrimaryEventDelivered(managedId, now);
-    this.#incidentLastDelivered.set(incidentKey, now);
+    this.#incidentLastDelivered.set(incidentKey, {
+      atMs: now,
+      count: (last?.count ?? 0) + 1,
+    });
     logInfo(
       "managed",
       `managed-ha-event emitted managedId=${managedId} instance=${instance} spanMs=${
@@ -262,6 +293,9 @@ export class ManagedHaObserver {
     if (!state.complete || state.generation !== this.#pollGeneration) return;
     for (const key of this.#incidentLastDelivered.keys()) {
       if (!state.pending.has(key)) this.#incidentLastDelivered.delete(key);
+    }
+    for (const key of this.#incidentFirstSeen.keys()) {
+      if (!state.pending.has(key)) this.#incidentFirstSeen.delete(key);
     }
   }
 
