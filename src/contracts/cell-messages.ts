@@ -64,11 +64,38 @@ export type ManagedHealthReportMember = {
   replication?: NonNullable<ManagedMemberObservedResult["replication"]>;
 };
 
+/**
+ * Commands this daemon still owes the control plane (feature
+ * `command-recovery-v1`), sent on `hello` and `heartbeat` when either list is
+ * not empty. `running` holds the ids of commands accepted and not finished
+ * (including any waiting behind another build); `unacked` holds the ids whose
+ * final `command-outcome` is kept on disk until a
+ * {@link CommandOutcomeAckMessage} arrives. At most 64 ids of 64 characters
+ * each per list. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandRecoveryReport = {
+  running: string[];
+  unacked: string[];
+};
+
+/**
+ * Control plane → daemon: the final outcome of command `id` is stored, so the
+ * daemon may drop its journaled copy. Until it arrives the daemon sends the
+ * outcome again on every attach and every 30 seconds. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandOutcomeAckMessage = {
+  type: "command-outcome-ack";
+  id: string;
+  at: string;
+};
+
 /** Daemon → control plane hello. `features` is the advertised wire set. */
 export type DaemonHelloMessage = {
   type: "hello";
   at: string;
   features?: string[];
+  commands?: CommandRecoveryReport;
 };
 
 /** Control-plane → daemon self-update. Optional pin fields are expand-only. */
@@ -139,6 +166,24 @@ export type UpdateProgressMessage = {
   at: string;
   detail?: string;
   errorCode?: string;
+  /**
+   * How the daemon's own restart went, sent with a `failed` stage whose
+   * `errorCode` is `restart_failed`. Optional: an older control plane ignores
+   * it and an older daemon never sends it.
+   */
+  restart?: UpdateRestartReport;
+};
+
+/** Diagnostics for a daemon restart that was reported as failed. */
+export type UpdateRestartReport = {
+  /** `enable` or `restart`: the `systemctl` verb that failed. */
+  command?: string;
+  exitCode?: number;
+  signal?: string;
+  stderr?: string;
+  /** Times the command ran (2 after the one retry). */
+  attempts: number;
+  elapsedMs: number;
 };
 
 /** Longest `steps[]` a `command-progress` payload carries. */
@@ -684,6 +729,7 @@ export type DaemonMessage =
   }
   | BackupRunReportMessage
   | BackupRunReportResultMessage
+  | CommandOutcomeAckMessage
   | {
     type: "public-urls-update";
     id: string;

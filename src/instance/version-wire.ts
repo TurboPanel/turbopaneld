@@ -83,8 +83,17 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-database-owner-v1",
   "managed-database-convert-v1",
   "tls-capture-v1",
+  "command-recovery-v1",
   "host-capacity-v1",
 ] as const;
+
+/**
+ * Command results are kept on disk until the control plane confirms them
+ * (`command-outcome-ack`), still-running and unconfirmed commands are listed on
+ * `hello` / `heartbeat` (`commands`), and a running command repeats its
+ * progress as a keepalive.
+ */
+export const COMMAND_RECOVERY_FEATURE = "command-recovery-v1";
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
 

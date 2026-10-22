@@ -16,7 +16,7 @@ test("daemon-converge backfills incomplete hosting Caddy edge prep", async () =>
   const converge = await Deno.readTextFile(
     join(ORCH, "playbooks/daemon-converge.yml"),
   );
-  assertStringIncludes(converge, "role: hosting-caddy");
+  assertStringIncludes(converge, "name: hosting-caddy");
   assertStringIncludes(converge, "tasks_from: backfill-edge-account.yml");
 
   const backfill = await Deno.readTextFile(

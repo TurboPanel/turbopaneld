@@ -1,6 +1,11 @@
 import { SeenCommandIds } from "./dispatch-dedupe.ts";
 import { closeAndAbandon } from "./socket-close.ts";
-import { restartDaemonService } from "./restart-daemon-service.ts";
+import {
+  type DaemonRestartReport,
+  restartDaemonService,
+  restartFailureMessage,
+  toRestartWire,
+} from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
@@ -165,6 +170,7 @@ import { TopologyReporter } from "./topology-reporter.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
+  CommandRecoveryReport,
   DaemonMessage,
   InstanceHostnameWireEntry,
   UpdateProgressStage,
@@ -217,8 +223,18 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
-  /** Runs when a session attaches: delivers held command outcomes. */
-  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
+  /**
+   * Runs when a session attaches: delivers held command outcomes. `peer`
+   * answers whether the control plane advertised a feature.
+   */
+  handleSessionAttach?: (
+    ws: WebSocket,
+    peer: { supports(feature: string): boolean },
+  ) => Promise<void>;
+  /** The control plane stored a command's outcome (`command-outcome-ack`). */
+  handleCommandOutcomeAck?: (id: string) => Promise<void>;
+  /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
+  commandReport?: () => CommandRecoveryReport | undefined;
 };
 
 let commandPorts: CommandPorts = {};
@@ -594,6 +610,7 @@ export class InstanceClient {
       upgradeId?: string;
       detail?: string;
       errorCode?: string;
+      restart?: ReturnType<typeof toRestartWire>;
       unit?: "daemon" | "instance";
     } = {},
   ): void {
@@ -604,7 +621,10 @@ export class InstanceClient {
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
     const sessionAttach = commandPorts.handleSessionAttach;
     if (sessionAttach) {
-      this.#runSocketHandler("session-attach", sessionAttach(ws));
+      this.#runSocketHandler(
+        "session-attach",
+        sessionAttach(ws, { supports: (f) => this.instanceSupports(f) }),
+      );
     }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
@@ -1654,6 +1674,9 @@ export class InstanceClient {
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
       hostCapacityFlag: () => this.instanceSupports(HOST_CAPACITY_FEATURE),
+      // Running and unconfirmed commands ride on hello / heartbeat.
+      commandReport: () => commandPorts.commandReport?.(),
+      peerSupports: (feature) => this.instanceSupports(feature),
     });
   }
 
@@ -1866,6 +1889,16 @@ export class InstanceClient {
           this.#ensureBackupReporter().handleResult(message),
         );
         break;
+      case "command-outcome-ack": {
+        const acknowledge = commandPorts.handleCommandOutcomeAck;
+        if (acknowledge) {
+          this.#runSocketHandler(
+            "command-outcome-ack",
+            acknowledge(message.id),
+          );
+        }
+        break;
+      }
       case "public-urls-update":
         this.#runSocketHandler(
           "public-urls-update",
@@ -2453,25 +2486,11 @@ export class InstanceClient {
     }
 
     if (ok && shouldRestart) {
-      this.#reportUpdateStage("restarting", { upgradeId });
-      await this.#updateProgress.flush();
-      await new Promise((resolve) =>
-        setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
-      );
-      const restarted = await clientTestHooks.restartDaemonService();
-      if (!restarted) {
+      const restartError = await this.#restartAfterUpdate(upgradeId);
+      if (restartError) {
         ok = false;
-        error = "daemon restart failed after reconcile";
+        error = restartError;
         errorCode = "restart_failed";
-        this.#reportUpdateStage("failed", {
-          upgradeId,
-          errorCode,
-          detail: error,
-        });
-        logWarn(
-          "update",
-          "reconcile succeeded but systemd restart failed; daemon may still be on old code",
-        );
       }
     } else if (ok && !shouldRestart) {
       this.#reportUpdateStage("done", { upgradeId });
@@ -2484,6 +2503,40 @@ export class InstanceClient {
     this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
 
     this.#updateInstallInProgress = false;
+  }
+
+  /**
+   * Restarts the daemon after a reconcile that installed a new build. Returns
+   * the plain failure message when the restart did not come back healthy, or
+   * undefined when it did.
+   */
+  async #restartAfterUpdate(
+    upgradeId: string | undefined,
+  ): Promise<string | undefined> {
+    this.#reportUpdateStage("restarting", { upgradeId });
+    await this.#updateProgress.flush();
+    await new Promise((resolve) =>
+      setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
+    );
+    let restartReport: DaemonRestartReport | undefined;
+    const restarted = await clientTestHooks.restartDaemonService({
+      onReport: (report) => {
+        restartReport = report;
+      },
+    });
+    if (restarted) return undefined;
+    const error = restartFailureMessage(restartReport);
+    this.#reportUpdateStage("failed", {
+      upgradeId,
+      errorCode: "restart_failed",
+      detail: error,
+      restart: restartReport ? toRestartWire(restartReport) : undefined,
+    });
+    logWarn(
+      "update",
+      "reconcile succeeded but systemd restart failed; daemon may still be on old code",
+    );
+    return error;
   }
 
   #sendInstanceUpdateResult(

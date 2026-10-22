@@ -2547,7 +2547,7 @@ test("daemon-converge re-applies only the builder entitlement deny to already-pr
   const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
   // The converge runs the entry file, ahead of the gate, never the whole role.
   assertEquals(
-    /- role: docker\n\s+tasks_from: converge-builder\n\s+- role: docker-gate/
+    /import_role:\n\s+name: docker\n\s+tasks_from: converge-builder\n(?:\s*#.*\n)*\s+- name: .*\n\s+ansible\.builtin\.import_role:\n\s+name: docker-gate\n/
       .test(converge),
     true,
   );

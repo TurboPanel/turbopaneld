@@ -20,7 +20,11 @@ import {
 } from "../deploy/release/live-release-scan.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
-import { DAEMON_WIRE_FEATURES } from "./version-wire.ts";
+import {
+  COMMAND_RECOVERY_FEATURE,
+  DAEMON_WIRE_FEATURES,
+} from "./version-wire.ts";
+import type { CommandRecoveryReport } from "../contracts/cell-messages.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
@@ -114,6 +118,14 @@ export type IdlePresenceOptions = {
    * control plane keeps the hello figures. Defaults to never.
    */
   hostCapacityFlag?: () => boolean;
+  /**
+   * Running and unconfirmed command ids (`command-recovery-v1`). Added to
+   * `hello` whenever not empty (the control plane's feature list is not known
+   * yet at that point; an older one ignores the field) and to `heartbeat` only
+   * once {@link peerSupports} says the control plane advertises the feature.
+   */
+  commandReport?: () => CommandRecoveryReport | undefined;
+  peerSupports?: (feature: string) => boolean;
 };
 
 /** The part of host resources a heartbeat re-sends when it moves. */
@@ -330,6 +342,8 @@ export class IdlePresence {
   #maxConnectionAgeMs: number;
   readonly #onMaxAge: (() => void) | undefined;
   readonly #hostCapacityFlag: (() => boolean) | undefined;
+  readonly #commandReport: IdlePresenceOptions["commandReport"];
+  readonly #peerSupports: IdlePresenceOptions["peerSupports"];
 
   #ws: WebSocket | undefined;
   #idleTimer: ReturnType<typeof setInterval> | undefined;
@@ -363,6 +377,8 @@ export class IdlePresence {
     this.#maxConnectionAgeMs = this.#baseMaxConnectionAgeMs;
     this.#onMaxAge = options.onMaxAge;
     this.#hostCapacityFlag = options.hostCapacityFlag;
+    this.#commandReport = options.commandReport;
+    this.#peerSupports = options.peerSupports;
   }
 
   get lastActivityAt(): number {
@@ -451,6 +467,17 @@ export class IdlePresence {
     return JSON.stringify(snapshot);
   }
 
+  /** `{ commands }` when there is something to report (and, for a heartbeat, the peer supports it). */
+  #commandsField(
+    needsPeer: boolean,
+  ): { commands?: CommandRecoveryReport } {
+    if (needsPeer && this.#peerSupports?.(COMMAND_RECOVERY_FEATURE) !== true) {
+      return {};
+    }
+    const commands = this.#commandReport?.();
+    return commands ? { commands } : {};
+  }
+
   #sendHello(): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -482,6 +509,7 @@ export class IdlePresence {
           ? { releaseLinkScan: presence.releaseLinkScan }
           : {}),
         features: [...DAEMON_WIRE_FEATURES],
+        ...this.#commandsField(false),
       }));
       this.#lastActivityAt = Date.now();
       this.#lastPresenceFrameAt = this.#lastActivityAt;
@@ -631,6 +659,7 @@ export class IdlePresence {
       runtimes?: HostRuntimeMetadata;
       services?: ServiceRunState[];
       releaseLinkScan?: ReleaseLinkScanReport;
+      commands?: CommandRecoveryReport;
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
@@ -647,6 +676,8 @@ export class IdlePresence {
     if (fields.releaseLinkScan) {
       payload.releaseLinkScan = fields.releaseLinkScan;
     }
+
+    Object.assign(payload, this.#commandsField(true));
 
     try {
       ws.send(JSON.stringify(payload));
