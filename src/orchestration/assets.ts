@@ -456,6 +456,19 @@ export function uvDownloadUrl(asset: string, version = UV_VERSION): string {
 /** Pinned cloudflared release. */
 export const CLOUDFLARED_VERSION = "2026.5.2";
 
+/**
+ * SHA-256 of the raw Linux binary per asset, for {@link CLOUDFLARED_VERSION}.
+ * Source: the "SHA256 Checksums" list in the 2026.5.2 release notes
+ * (github.com/cloudflare/cloudflared/releases/tag/2026.5.2), which also equals
+ * the digest GitHub reports for each asset. Bump with the version.
+ */
+export const CLOUDFLARED_SHA256: Readonly<Record<string, string>> = {
+  "cloudflared-linux-amd64":
+    "5286698547f03df745adb2355f04c12dde52ef425491e81f433642d695521886",
+  "cloudflared-linux-arm64":
+    "5a4e8ce2701105271412059f44b6a0bf1ae4542b4d98ff3180c0c019443a5815",
+};
+
 export function cloudflaredDir(version = CLOUDFLARED_VERSION): string {
   return join(RUNTIMES_DIR, "cloudflared", version);
 }

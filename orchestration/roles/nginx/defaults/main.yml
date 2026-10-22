@@ -6,6 +6,13 @@ nginx_version: "1.28.3"
 nginx_deb_version: "1.28.3-1~bookworm"
 # nginx.org still publishes bookworm packages; they run on Debian 13 (trixie).
 nginx_deb_dist: "bookworm"
+# SHA-256 of nginx_<nginx_deb_version>_<arch>.deb (key = nginx_deb_arch). Source:
+# the SHA256 field for each file in nginx.org's signed apt index
+# (packages/debian/dists/bookworm/nginx/binary-<arch>/Packages), equal to the
+# downloaded file. Bump together with nginx_deb_version.
+nginx_deb_sha256:
+  amd64: "ed684ff9b10a05c79097e0947405c0c82c1715579e06efc18d04e9d2199ec157"
+  arm64: "b3c14a51310397b4869be98470dc5c68e3ebca6ccecf1674220be714e0bd5ad8"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 

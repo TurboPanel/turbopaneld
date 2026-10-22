@@ -1,4 +1,10 @@
 redis_version: "8.0.2"
+# SHA-256 of redis-server_<redis_version>-1rl1~bookworm1_<arch>.deb (key = redis_deb_arch).
+# Source: the SHA256 field for each file in packages.redis.io's signed apt index
+# (deb/dists/bookworm/main/binary-<arch>/Packages), equal to the downloaded file.
+redis_deb_sha256:
+  amd64: "768cad8e3dd27d7a17f4cf5c6b0a94e11cb09c354ee3af8e1389a569f78d9777"
+  arm64: "c243679bbaf3e78e7224a88d3bea36368ac48b90cdc94e85174792b8b2149678"
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: >-  # noqa: var-naming[no-role-prefix]
   {{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor

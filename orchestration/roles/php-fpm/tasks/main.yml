@@ -40,6 +40,7 @@
   ansible.builtin.get_url:
     url: "{{ php_fpm_sury_keyring_url }}"
     dest: /tmp/debsuryorg-archive-keyring.deb
+    checksum: "sha256:{{ php_fpm_sury_keyring_sha256 }}"
     # Only `apt` (root) ever opens this staging copy, and /tmp is world-writable
     # and shared, so it is never readable by anyone else while it sits there.
     mode: "0600"

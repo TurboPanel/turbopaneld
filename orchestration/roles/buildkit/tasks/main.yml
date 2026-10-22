@@ -22,10 +22,16 @@
     set -euo pipefail
     BK_VER="{{ buildkit_version }}"
     BK_ARCH="{{ buildkit_arch }}"
+    BK_SHA256="{{ buildkit_sha256[buildkit_arch] }}"
     TMP="$(mktemp -d)"
     ASSET="buildkit-v${BK_VER}.linux-${BK_ARCH}.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/moby/buildkit/releases/download/v${BK_VER}/${ASSET}"
+    echo "${BK_SHA256}  $TMP/$ASSET" | sha256sum -c - >/dev/null 2>&1 || {
+      echo "BuildKit ${BK_VER} (${ASSET}): SHA-256 mismatch, expected ${BK_SHA256}; refusing to install" >&2
+      rm -rf "$TMP"
+      exit 1
+    }
     tar -xzf "$TMP/$ASSET" -C "$TMP"
     install -d "{{ turbopanel_vendor_dir }}/buildkit/${BK_VER}"
     install -m 0750 "$TMP/bin/buildctl" "{{ turbopanel_vendor_dir }}/buildkit/${BK_VER}/buildctl"
@@ -64,10 +70,16 @@
     # Railpack names Linux assets by Rust target triple, not linux-<arch>
     # (keep in step with railpackAssetName in src/deploy/release/railpack-build.ts).
     RP_ARCH="{{ 'x86_64' if buildkit_arch == 'amd64' else 'arm64' }}"
+    RP_SHA256="{{ railpack_sha256[buildkit_arch] }}"
     TMP="$(mktemp -d)"
     ASSET="railpack-v${RP_VER}-${RP_ARCH}-unknown-linux-musl.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/railwayapp/railpack/releases/download/v${RP_VER}/${ASSET}"
+    echo "${RP_SHA256}  $TMP/$ASSET" | sha256sum -c - >/dev/null 2>&1 || {
+      echo "Build tool ${RP_VER} (${ASSET}): SHA-256 mismatch, expected ${RP_SHA256}; refusing to install" >&2
+      rm -rf "$TMP"
+      exit 1
+    }
     tar -xzf "$TMP/$ASSET" -C "$TMP"
     install -d "{{ turbopanel_vendor_dir }}/railpack/${RP_VER}"
     install -m 0750 "$TMP/railpack" "{{ turbopanel_vendor_dir }}/railpack/${RP_VER}/railpack"
