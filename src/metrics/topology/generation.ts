@@ -25,9 +25,10 @@
  * fingerprint (sets + slot mapping) in one pass covers both triggers with a
  * single stored value.
  */
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 
 import { resolveLayout } from "../../paths/layout.ts";
+import { writeTextFileAtomic } from "../atomic-write.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import type {
   SlotMapping,
@@ -223,10 +224,7 @@ async function writePersistedState(
   path: string,
   state: TopologyGenerationState,
 ): Promise<void> {
-  await Deno.mkdir(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp`;
-  await Deno.writeTextFile(tmpPath, JSON.stringify(state));
-  await Deno.rename(tmpPath, path);
+  await writeTextFileAtomic(path, JSON.stringify(state));
 }
 
 export type ResolveTopologyGenerationDeps = {
