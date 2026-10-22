@@ -41,6 +41,7 @@ import {
   resolveOrchestratorRegisterHost,
   restartOrchestratorStack,
   reviveStoppedOrchestratorContainer,
+  startMissingOrchestratorStack,
   stopOrchestratorStack,
 } from "./orchestrator.ts";
 import {
@@ -1274,4 +1275,71 @@ test("orchestratorCompose does not publish the API on a public advertise address
   );
   assertEquals(yaml.includes("127.0.0.1:33001:33001"), true);
   assertEquals(yaml.includes("203.0.113.10:33001:33001"), false);
+});
+
+const NET_COMPOSE =
+  "services:\n  orchestrator:\n    image: x\nnetworks:\n  tp_org_net:\n    external: true\n";
+
+function runRecording(commands: string[][], psStdout: string) {
+  return (args: string[]): Promise<DockerCliResult> => {
+    commands.push([...args]);
+    return Promise.resolve({
+      success: true,
+      stdout: args.includes("ps") ? psStdout : "",
+      stderr: "",
+    } as DockerCliResult);
+  };
+}
+
+test("startMissingOrchestratorStack recreates a stack Docker lost", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(orchestratorComposePath(layout), NET_COMPOSE);
+    const commands: string[][] = [];
+    assertEquals(
+      await startMissingOrchestratorStack(layout, runRecording(commands, "")),
+      "started",
+    );
+    assertEquals(
+      commands.some((c) => c.includes("up") && c.includes("-d")),
+      true,
+    );
+    assertEquals(
+      commands.some((c) => c.includes("--force-recreate")),
+      false,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("startMissingOrchestratorStack leaves a present or torn-down stack alone", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    await Deno.mkdir(orchestratorConfigDir(layout), { recursive: true });
+    await Deno.writeTextFile(orchestratorComposePath(layout), NET_COMPOSE);
+    const present: string[][] = [];
+    assertEquals(
+      await startMissingOrchestratorStack(
+        layout,
+        runRecording(present, "abc123\n"),
+      ),
+      "present",
+    );
+    assertEquals(present.some((c) => c.includes("up")), false);
+
+    // A teardown on purpose must not be undone by the next Docker restart.
+    await stopOrchestratorStack(layout, runRecording([], ""));
+    const torn: string[][] = [];
+    assertEquals(
+      await startMissingOrchestratorStack(layout, runRecording(torn, "")),
+      "torn-down",
+    );
+    assertEquals(torn.length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
 });
