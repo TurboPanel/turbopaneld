@@ -321,17 +321,15 @@ test({
         "-qc",
         "select pg_wal_replay_resume()",
       ]);
+      // Compared as numbers: pg_lsn text may be zero padded on newer releases.
+      const replayed = async () =>
+        parseLsn(await scalar(standby, "select pg_last_wal_replay_lsn()"));
       await waitFor(
         "standby replayed to the final position",
-        async () =>
-          (await scalar(standby, "select pg_last_wal_replay_lsn()")) ===
-            final.lsn,
+        async () => (await replayed()) === parseLsn(final.lsn),
         { timeoutMs: 60_000, intervalMs: 250 },
       );
-      assertEquals(
-        await scalar(standby, "select pg_last_wal_replay_lsn()"),
-        final.lsn,
-      );
+      assertEquals(await replayed(), parseLsn(final.lsn));
 
       // Promote and read the position the new primary reports.
       await ok([

@@ -2116,7 +2116,7 @@ export type ManagedMemberObservedResult = {
   replication?: ManagedReplicationHealth;
 };
 
-/** Must stay in sync with the instance canonical `managed.apply` shape. */
+/** The stale-wipe guard carried by a forced re-seed after a planned switchover. */
 export type ManagedSwitchoverReseed = {
   recoveryId: string;
   sourceMemberId: string;
@@ -2125,6 +2125,7 @@ export type ManagedSwitchoverReseed = {
   epoch: number;
 };
 
+/** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyPayload = {
   managedId: string;
   environmentId: string;
