@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type {
   ManagedPromotePayload,
   ManagedPromoteResult,
@@ -24,6 +24,8 @@ const RECOVER_PAYLOAD = {
   targetHost: "203.0.113.11",
   targetPort: 5432,
 } as const;
+
+const PROMOTED = () => Promise.resolve({ promoted: true } as const);
 
 function promoteStub(calls: unknown[]) {
   return (
@@ -65,6 +67,55 @@ test("managed.ha.failover recover falls back to promote when Orchestrator throws
   );
 });
 
+test("managed.ha.failover recover requires GTID when gtidWaitTimeoutSeconds is set on mysql", async () => {
+  await assertRejects(
+    () =>
+      handleManagedHaFailover(
+        {
+          ...RECOVER_PAYLOAD,
+          engine: "mysql",
+          gtidWaitTimeoutSeconds: 60,
+        },
+        "2026-08-19T12:00:00.000Z",
+        {
+          haPresent: () => Promise.resolve(true),
+          recover: () => Promise.resolve(),
+        },
+      ),
+    Error,
+    "requires requiredExecutedGtidSet",
+  );
+});
+
+test("managed.ha.failover recover proves GTID before Orchestrator when required", async () => {
+  let proveCalled = false;
+  let recoverCalled = false;
+  await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mariadb",
+      requiredExecutedGtidSet: "0-1-9",
+      gtidWaitTimeoutSeconds: 45,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      proveGtid: () => {
+        proveCalled = true;
+        return Promise.resolve();
+      },
+      recover: () => {
+        recoverCalled = true;
+        return Promise.resolve();
+      },
+      checkPromoted: PROMOTED,
+      promote: promoteStub([]),
+    },
+  );
+  assertEquals(proveCalled, true);
+  assertEquals(recoverCalled, true);
+});
+
 test("managed.ha.failover recover does not promote when Orchestrator succeeds", async () => {
   const promoteCalls: unknown[] = [];
   const result = await handleManagedHaFailover(
@@ -73,11 +124,33 @@ test("managed.ha.failover recover does not promote when Orchestrator succeeds", 
     {
       haPresent: () => Promise.resolve(true),
       recover: () => Promise.resolve(),
+      checkPromoted: PROMOTED,
       promote: promoteStub(promoteCalls),
     },
   );
   assertEquals(promoteCalls.length, 0);
   assertEquals(result.summary.includes("designated replica"), true);
+});
+
+test("managed.ha.failover recover promote fallback forwards switchover GTID fields", async () => {
+  const promoteCalls: ManagedPromotePayload[] = [];
+  await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mariadb",
+      requiredExecutedGtidSet: "0-1-9",
+      gtidWaitTimeoutSeconds: 99,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(false),
+      proveGtid: () => Promise.resolve(),
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(promoteCalls[0]?.requiredExecutedGtidSet, "0-1-9");
+  assertEquals(promoteCalls[0]?.gtidWaitTimeoutSeconds, 99);
 });
 
 test("managed.ha.failover recover falls back to promote when the HA stack is absent", async () => {
@@ -173,6 +246,50 @@ test("managed.ha.failover recover probes host prep when haPresent is omitted", a
   assertEquals(result.summary.includes("without Orchestrator"), true);
 });
 
+test("managed.ha.failover undrain uses injected helper when source endpoint is present", async () => {
+  let undrainHost = "";
+  let undrainPort = 0;
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      phase: "undrain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      undrain: (host, port) => {
+        undrainHost = host;
+        undrainPort = port;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(undrainHost, RECOVER_PAYLOAD.sourceHost);
+  assertEquals(undrainPort, RECOVER_PAYLOAD.sourcePort);
+  assertEquals(result.phase, "undrain");
+  assertEquals(result.summary.includes("restored writer routing"), true);
+});
+
+test("managed.ha.failover undrain skips helper when source endpoint is absent", async () => {
+  let undrainCalled = false;
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      phase: "undrain",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      undrain: () => {
+        undrainCalled = true;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(undrainCalled, false);
+  assertEquals(result.phase, "undrain");
+});
+
 test("managed.ha.failover drain skips drain helper when source endpoint is absent", async () => {
   let drainCalled = false;
   const result = await handleManagedHaFailover(
@@ -209,6 +326,163 @@ test("managed.ha.failover recover stringifies non-Error recover failures", async
   assertEquals(result.summary.includes("Orchestrator recover failure"), true);
 });
 
+test("managed.ha.failover repoint follows the new primary on a remaining replica", async () => {
+  const followCalls: unknown[] = [];
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      phase: "repoint",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      follow: (spec) => {
+        followCalls.push(spec);
+        return Promise.resolve();
+      },
+      promote: promoteStub([]),
+    },
+  );
+  assertEquals(followCalls, [
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      engine: "postgres",
+      primary: { host: "203.0.113.11", port: 5432 },
+    },
+  ]);
+  assertEquals(result.phase, "repoint");
+  assertEquals(result.summary.includes("repointed replica"), true);
+});
+
+test("managed.ha.failover repoint passes targetHostaddr through to follow", async () => {
+  const followCalls: unknown[] = [];
+  await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      phase: "repoint",
+      targetHostaddr: "10.100.0.4",
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      follow: (spec) => {
+        followCalls.push(spec);
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(followCalls, [
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      engine: "postgres",
+      primary: {
+        host: "203.0.113.11",
+        port: 5432,
+        hostaddr: "10.100.0.4",
+      },
+    },
+  ]);
+});
+
+test("managed.ha.failover repoint requires the new primary endpoint", async () => {
+  await assertRejects(
+    () =>
+      handleManagedHaFailover(
+        {
+          managedId: RECOVER_PAYLOAD.managedId,
+          sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+          targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+          phase: "repoint",
+        },
+        "2026-08-19T12:00:00.000Z",
+        {
+          follow: () => Promise.reject(new Error("should not run")),
+        },
+      ),
+    Error,
+    "targetHost and targetPort",
+  );
+});
+
+test("managed.ha.failover repoint works for mysql engines", async () => {
+  const followCalls: unknown[] = [];
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mysql",
+      phase: "repoint",
+      targetPort: 3306,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      follow: (spec) => {
+        followCalls.push(spec);
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(followCalls, [
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      engine: "mysql",
+      primary: { host: "203.0.113.11", port: 3306 },
+    },
+  ]);
+  assertEquals(result.phase, "repoint");
+});
+
+test("managed.ha.failover repoint ensureSlots does not require a follow endpoint", async () => {
+  const slotCalls: unknown[] = [];
+  let followCalled = false;
+  const result = await handleManagedHaFailover(
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      sourceMemberId: RECOVER_PAYLOAD.sourceMemberId,
+      targetMemberId: RECOVER_PAYLOAD.targetMemberId,
+      engine: "postgres",
+      phase: "repoint",
+      ensureSlots: ["tp_member_2", "tp_member_3"],
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      ensurePrimarySlots: (spec) => {
+        slotCalls.push(spec);
+        return Promise.resolve();
+      },
+      follow: () => {
+        followCalled = true;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(followCalled, false);
+  assertEquals(slotCalls, [
+    {
+      managedId: RECOVER_PAYLOAD.managedId,
+      engine: "postgres",
+      slots: ["tp_member_2", "tp_member_3"],
+    },
+  ]);
+  assertEquals(result.phase, "repoint");
+  assertEquals(result.summary.includes("slots ensured"), true);
+});
+
+test("managed.ha.failover recover does not repoint the promoted member", async () => {
+  let followCalled = false;
+  await handleManagedHaFailover(
+    RECOVER_PAYLOAD,
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      recover: () => Promise.resolve(),
+      checkPromoted: PROMOTED,
+      follow: () => {
+        followCalled = true;
+        return Promise.resolve();
+      },
+    },
+  );
+  assertEquals(followCalled, false);
+});
+
 test("managed.ha.failover recover stringifies non-JSON-serializable failures", async () => {
   const promoteCalls: unknown[] = [];
   const circular: { self?: unknown } = {};
@@ -224,4 +498,113 @@ test("managed.ha.failover recover stringifies non-JSON-serializable failures", a
   );
   assertEquals(promoteCalls.length, 1);
   assertEquals(result.phase, "recover");
+});
+
+test("managed.ha.failover recover promotes when Orchestrator answers OK without promoting", async () => {
+  const promoteCalls: ManagedPromotePayload[] = [];
+  const checks: unknown[] = [];
+  let promoted = false;
+  const result = await handleManagedHaFailover(
+    {
+      ...RECOVER_PAYLOAD,
+      engine: "mysql",
+      sourcePort: 45000,
+      targetPort: 45000,
+      requiredExecutedGtidSet: "uuid:1-495",
+      gtidWaitTimeoutSeconds: 30,
+    },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      proveGtid: () => Promise.resolve(),
+      // Orchestrator's "Recovery executed" with nothing promoted.
+      recover: () => Promise.resolve(),
+      checkPromoted: (params) => {
+        checks.push(params);
+        return Promise.resolve(
+          promoted
+            ? { promoted: true }
+            : { promoted: false, reason: "still a replica" },
+        );
+      },
+      promote: (raw, received) => {
+        promoted = true;
+        return promoteStub(promoteCalls)(raw, received);
+      },
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(promoteCalls[0]?.memberId, RECOVER_PAYLOAD.targetMemberId);
+  assertEquals(promoteCalls[0]?.demoteMemberId, RECOVER_PAYLOAD.sourceMemberId);
+  assertEquals(promoteCalls[0]?.requiredExecutedGtidSet, "uuid:1-495");
+  assertEquals(promoteCalls[0]?.gtidWaitTimeoutSeconds, 30);
+  assertEquals(checks, [
+    { managedId: RECOVER_PAYLOAD.managedId, engine: "mysql" },
+    { managedId: RECOVER_PAYLOAD.managedId, engine: "mysql" },
+  ]);
+  assertEquals(result.phase, "recover");
+  assertEquals(result.summary.includes("left the target unpromoted"), true);
+});
+
+test("managed.ha.failover recover fails when the target is still not writable after promote", async () => {
+  const promoteCalls: unknown[] = [];
+  await assertRejects(
+    () =>
+      handleManagedHaFailover(
+        { ...RECOVER_PAYLOAD, engine: "mariadb" },
+        "2026-08-19T12:00:00.000Z",
+        {
+          haPresent: () => Promise.resolve(true),
+          recover: () => Promise.resolve(),
+          checkPromoted: () =>
+            Promise.resolve({ promoted: false, reason: "still read-only (1)" }),
+          promote: promoteStub(promoteCalls),
+        },
+      ),
+    Error,
+    "still not a writable primary after promote (still read-only (1))",
+  );
+  assertEquals(promoteCalls.length, 1);
+});
+
+test("managed.ha.failover recover promotes when the engine check itself fails", async () => {
+  const promoteCalls: unknown[] = [];
+  let calls = 0;
+  const result = await handleManagedHaFailover(
+    { ...RECOVER_PAYLOAD, engine: "mysql" },
+    "2026-08-19T12:00:00.000Z",
+    {
+      haPresent: () => Promise.resolve(true),
+      recover: () => Promise.resolve(),
+      checkPromoted: () => {
+        calls += 1;
+        return calls === 1
+          ? Promise.reject(new Error("no running containers"))
+          : Promise.resolve({ promoted: true });
+      },
+      promote: promoteStub(promoteCalls),
+    },
+  );
+  assertEquals(promoteCalls.length, 1);
+  assertEquals(result.summary.includes("left the target unpromoted"), true);
+});
+
+test("managed.ha.failover recover surfaces a failed fallback promote", async () => {
+  await assertRejects(
+    () =>
+      handleManagedHaFailover(
+        { ...RECOVER_PAYLOAD, engine: "mysql" },
+        "2026-08-19T12:00:00.000Z",
+        {
+          haPresent: () => Promise.resolve(true),
+          recover: () => Promise.resolve(),
+          checkPromoted: () =>
+            Promise.resolve({ promoted: false, reason: "still a replica" }),
+          promote: () =>
+            Promise.reject(new Error("GTID set not reached on candidate")),
+        },
+      ),
+    Error,
+    "GTID set not reached on candidate",
+  );
 });

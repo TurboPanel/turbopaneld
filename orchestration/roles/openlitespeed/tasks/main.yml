@@ -47,6 +47,9 @@
         url: >-
           https://github.com/litespeedtech/openlitespeed/releases/download/{{ openlitespeed_release_tag }}/{{ openlitespeed_tarball }}
         dest: "{{ _openlitespeed_tmp.path }}/openlitespeed.tgz"
+        # A mismatch means a re-published file: update openlitespeed_sha256 in
+        # orchestration/roles/openlitespeed/defaults/main.yml.
+        checksum: "sha256:{{ openlitespeed_sha256[ansible_architecture] }}"
         mode: "0640"
         timeout: 120
 
@@ -165,6 +168,14 @@
 # never downloads a PHP interpreter. Layout mirrors every other vendored
 # runtime: `vendor/lsphp/<series>/<version>/` + a `current` symlink, so a patch
 # bump is a defaults edit and the generated vhosts never change.
+#
+# lsphp-series.yml reads `builtinExtensions` from the registry; load it here.
+- name: Load the shared runtime registry
+  when: turbopanel_lsphp_install | default(false) | bool
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
 - name: Vendor lsphp (LSAPI PHP) for OpenLiteSpeed vhosts
   when: turbopanel_lsphp_install | default(false) | bool
   ansible.builtin.include_tasks: lsphp-series.yml
@@ -175,6 +186,15 @@
     }}
   loop_control:
     loop_var: lsphp_series
+
+# Traverse-only for everyone on /opt/turbopanel, vendor/ and vendor/lsphp, and
+# removal of what the old per-version PHP groups left behind.
+- name: Let every site owner's Linux user reach the lsphp tree
+  when: turbopanel_lsphp_install | default(false) | bool
+  ansible.builtin.include_role:
+    name: runtime-access
+  vars:
+    runtime_access_dirs: ["{{ turbopanel_vendor_dir }}/lsphp"]
 
 - name: Ensure FHS config dirs for OpenLiteSpeed (sites + vhosts)
   ansible.builtin.file:

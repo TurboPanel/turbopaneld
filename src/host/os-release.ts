@@ -38,7 +38,7 @@ export type HostHelloIdentity = {
   hostname?: string;
   machineKey?: string;
   os?: HostOsMetadata;
-  /** Capacity facts (cpu/mem/swap totals) for fleet inventory + load bars. */
+  /** Capacity facts (cpu/mem/swap totals, optional memory page size). */
   resources?: HostResources;
 };
 

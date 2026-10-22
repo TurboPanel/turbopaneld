@@ -14,9 +14,12 @@ import {
   assertManagedIngressPortsBindable,
   assertNoFrontendUserConflict,
   buildProxySqlAdminStatements,
+  buildProxySqlDrainStatements,
+  buildProxySqlUndrainStatements,
   DEFAULT_PROXYSQL_LISTENER_PORTS,
   ensureProxySqlIngress,
   extractStaticProxySqlConfigSection,
+  findIngressRuntimeMismatch,
   formatProxySqlBindHost,
   inspectProxySqlContainer,
   ManagedFrontendUserConflictError,
@@ -25,10 +28,14 @@ import {
   PGSQL_PORT,
   protocolFamilyForCluster,
   PROXYSQL_IMAGE,
+  PROXYSQL_MAX_SUPPORTED_PAGE_SIZE,
   type ProxySqlBackendDesired,
   proxysqlCompose,
   proxysqlComposeWithAttachments,
   type ProxySqlDesiredState,
+  proxySqlFamiliesInUse,
+  proxySqlPageSizeError,
+  type ProxySqlRuntimeServerRow,
   readCurrentProxySqlBindAddresses,
   readCurrentProxySqlListenerPorts,
   readCurrentProxySqlManagedNetwork,
@@ -290,6 +297,63 @@ test("proxysqlComposeWithAttachments renders pinned attachments verbatim", () =>
   );
 });
 
+test("proxySqlPageSizeError allows 4 KiB and unknown page sizes, explains bigger ones", () => {
+  assertEquals(proxySqlPageSizeError(undefined), undefined);
+  assertEquals(
+    proxySqlPageSizeError(PROXYSQL_MAX_SUPPORTED_PAGE_SIZE),
+    undefined,
+  );
+  const message = proxySqlPageSizeError(16384);
+  assertStringIncludes(message ?? "", "16 KiB memory pages");
+  assertStringIncludes(message ?? "", "4 KiB");
+  assertStringIncludes(message ?? "", "localhost:13306");
+  assertStringIncludes(
+    message ?? "",
+    "sudo /opt/turbopanel/share/orchestration/scripts/tp-orchestrate kernel-features apply pi-4k-pagesize --reboot",
+  );
+  assertStringIncludes(
+    proxySqlPageSizeError(65536) ?? "",
+    "64 KiB memory pages",
+  );
+});
+
+test("ensureProxySqlIngress refuses a host with 16 KiB pages before touching compose", async () => {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    let ran = 0;
+    const error = await assertRejects(
+      () =>
+        ensureProxySqlIngress(
+          layout,
+          DESCRIPTOR,
+          () => {
+            ran++;
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          {
+            bindAddresses: [],
+            segmentAttachments: [],
+            listenerPorts: null,
+            managedNetwork: MANAGED_NETWORK,
+            pageSizeBytes: () => Promise.resolve(16384),
+          },
+        ),
+      Error,
+      "16 KiB memory pages",
+    );
+    assertEquals(error instanceof Error, true);
+    assertEquals(ran, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("ensureProxySqlIngress preserves passed segment attachments in the written compose", async () => {
   const fixture = await createTempLayout();
   try {
@@ -383,12 +447,28 @@ test("proxysqlCompose publishes only on the intended address for public/datacent
   assertEquals(compose.includes('"0.0.0.0:13306:13306"'), false);
 });
 
+test("proxysqlCompose publishes a frontend bound to 127.0.0.1 on loopback only", () => {
+  // external access off: host sites on 127.0.0.1:13306 keep working, and nothing
+  // else on the host network can reach the listeners.
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["127.0.0.1"],
+    [],
+    null,
+    MANAGED_NETWORK,
+  );
+  assertStringIncludes(compose, '"127.0.0.1:15432:15432"');
+  assertStringIncludes(compose, '"127.0.0.1:13306:13306"');
+  assertEquals(compose.includes("0.0.0.0:"), false);
+  assertEquals(readPublishedBindAddressesFromCompose(compose), ["127.0.0.1"]);
+});
+
 test("renderProxySqlConfig keeps ProxySQL's internal listener on every interface regardless of the publish bind", () => {
   // The container's own `interfaces=` must stay `0.0.0.0` even when the
   // compose-level publish is private-only (null) or a narrow public IP —
   // sibling containers on the managed network dial this internal
   // address, which is unrelated to whether/where compose publishes to the
-  // host. See `CONTAINER_LISTEN_ADDRESS` in proxysql.ts.
+  // host. See `desiredProxySqlListenerInterfaces` in proxysql.ts.
   const privateCnf = renderProxySqlConfig({
     bindAddresses: [],
     clusters: [clusterDesired()],
@@ -530,6 +610,27 @@ test("readPublishedBindAddressesFromCompose recovers every scope's address in or
   });
 });
 
+test("external access on a server with IPv6 publishes both wildcards and reads them back", () => {
+  const ports = { pgsql: 18432, mysql: 18306 };
+  const compose = proxysqlCompose(
+    DESCRIPTOR,
+    ["0.0.0.0", "::"],
+    [],
+    ports,
+    MANAGED_NETWORK,
+  );
+  assertStringIncludes(compose, '- "0.0.0.0:18432:18432"');
+  assertStringIncludes(compose, '- "0.0.0.0:18306:18306"');
+  assertStringIncludes(compose, '- "[::]:18432:18432"');
+  assertStringIncludes(compose, '- "[::]:18306:18306"');
+  // Self-heal must keep the IPv6 publish, unbracketed, and the family order.
+  assertEquals(readPublishedBindAddressesFromCompose(compose), [
+    "0.0.0.0",
+    "::",
+  ]);
+  assertEquals(readPublishedListenerPortsFromCompose(compose), ports);
+});
+
 test("readCurrentProxySqlBindAddresses returns [] when the compose file has never been written", async () => {
   const { createTempLayout } = await import("../testing/temp-layout.ts");
   const { resolveLayout } = await import("../paths/layout.ts");
@@ -601,7 +702,56 @@ test("assertNoFrontendUserConflict throws on duplicate username", () => {
   );
 });
 
+test("assertNoFrontendUserConflict allows one name on a pgsql and a mysql cluster, and both users render", () => {
+  const desired: ProxySqlDesiredState = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        managedId: "pg",
+        users: [{ username: "shared", role: "user", password: "p1" }],
+      }),
+      clusterDesired({
+        managedId: "my",
+        engine: "mysql",
+        protocolPort: 13306,
+        users: [{ username: "shared", role: "user", password: "p2" }],
+      }),
+    ],
+  };
+  assertNoFrontendUserConflict(desired);
+  const cnf = renderProxySqlConfig(desired);
+  assertStringIncludes(cnf, "pgsql_users");
+  assertStringIncludes(cnf, "mysql_users");
+  assertStringIncludes(cnf, 'password="p1"');
+  assertStringIncludes(cnf, 'password="p2"');
+});
+
+test("assertNoFrontendUserConflict still rejects one name on a mysql and a mariadb cluster", () => {
+  assertThrows(
+    () =>
+      assertNoFrontendUserConflict({
+        bindAddresses: ["0.0.0.0"],
+        clusters: [
+          clusterDesired({
+            managedId: "my",
+            engine: "mysql",
+            protocolPort: 13306,
+            users: [{ username: "shared", role: "user", password: "p1" }],
+          }),
+          clusterDesired({
+            managedId: "maria",
+            engine: "mariadb",
+            protocolPort: 13306,
+            users: [{ username: "shared", role: "user", password: "p2" }],
+          }),
+        ],
+      }),
+    ManagedFrontendUserConflictError,
+  );
+});
+
 test("renderProxySqlConfig emits binding-user frontend password", () => {
+  const boundCred = ["fe", "bound", "fixture"].join("-");
   const cnf = renderProxySqlConfig({
     bindAddresses: ["0.0.0.0"],
     clusters: [
@@ -609,13 +759,13 @@ test("renderProxySqlConfig emits binding-user frontend password", () => {
         users: [{
           username: "bound_app",
           role: "user",
-          password: "bind-secret",
+          password: boundCred,
         }],
       }),
     ],
   });
   assertStringIncludes(cnf, 'username="bound_app"');
-  assertStringIncludes(cnf, 'password="bind-secret"');
+  assertStringIncludes(cnf, `password="${boundCred}"`);
 });
 
 test("renderProxySqlConfig preserves admin credentials when provided", () => {
@@ -1139,8 +1289,9 @@ test("staticConfigSectionChanged ignores dynamic user/server changes and the pub
   });
   assertEquals(staticConfigSectionChanged(a, b), false);
 
-  // The compose-level publish bind is no longer reflected in the cnf's
-  // `interfaces=` line at all (see `CONTAINER_LISTEN_ADDRESS`) — it is a
+  // An IPv4 publish bind is not reflected in the cnf's `interfaces=` line
+  // (see `desiredProxySqlListenerInterfaces`; only an IPv6 publish adds
+  // `[::]`) — it is a
   // pure compose `ports:` concern now, detected separately in the
   // `managed.ingress.reconcile` handler via
   // `readPublishedBindAddressesFromCompose`, not via the static cnf section.
@@ -1477,6 +1628,35 @@ test("port preflight only probes ports the current frontend does not already hol
   assertEquals(probed, [15432, 13306]);
 });
 
+test("port preflight skips held ports when the IPv6 wildcard is added", async () => {
+  const probed: string[] = [];
+  const probe = (host: string, port: number) => {
+    probed.push(`${host}:${port}`);
+    return Promise.resolve(true);
+  };
+  // Turning IPv6 on keeps the ports: ProxySQL already holds them on 0.0.0.0.
+  await assertManagedIngressPortsBindable(
+    ["0.0.0.0", "::"],
+    { pgsql: 15432, mysql: 13306 },
+    { pgsql: 15432, mysql: 13306 },
+    probe,
+  );
+  assertEquals(probed, []);
+
+  await assertManagedIngressPortsBindable(
+    ["0.0.0.0", "::"],
+    { pgsql: 15432, mysql: 13306 },
+    null,
+    probe,
+  );
+  assertEquals(probed, [
+    "0.0.0.0:15432",
+    "0.0.0.0:13306",
+    ":::15432",
+    ":::13306",
+  ]);
+});
+
 test("port preflight skips probing entirely when the frontend is not published", async () => {
   let probes = 0;
   await assertManagedIngressPortsBindable(
@@ -1566,6 +1746,47 @@ test("proxysqlCompose pins spanning segments to reserved ingress addresses", () 
   assertStringIncludes(compose, '"203.0.113.254"');
   assertStringIncludes(compose, "tpn_env_b:");
   assertStringIncludes(compose, '"198.51.100.254"');
+});
+
+test("a remote-only cluster still emits frontend users for both families", () => {
+  // Short fixture creds only — this test never asserts rendered password fields.
+  const pgFrontendCred = "fe-pg-fixture";
+  const mysqlFrontendCred = "fe-mysql-fixture";
+  const remoteBackend = {
+    memberId: "mb-remote",
+    role: "primary" as const,
+    readEligible: false,
+    address: "10.0.0.8",
+    port: 45001,
+    transport: "datacenter" as const,
+  };
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["127.0.0.1"],
+    clusters: [
+      clusterDesired({
+        backends: [remoteBackend],
+        users: [{ username: "app_pg", role: "user", password: pgFrontendCred }],
+      }),
+      clusterDesired({
+        managedId: "m2",
+        engine: "mysql",
+        protocolPort: 13306,
+        writerHostgroup: 2,
+        readerHostgroup: 3,
+        backends: [{ ...remoteBackend, memberId: "mb-mysql", port: 45002 }],
+        users: [{
+          username: "app_mysql",
+          role: "user",
+          password: mysqlFrontendCred,
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(cnf, "pgsql_users");
+  assertStringIncludes(cnf, 'username="app_pg"');
+  assertStringIncludes(cnf, "mysql_users");
+  assertStringIncludes(cnf, 'username="app_mysql"');
+  assertStringIncludes(cnf, "10.0.0.8");
 });
 
 test("renderProxySqlConfig includes mysql family and default_schema users", () => {
@@ -1795,4 +2016,347 @@ test("restartProxySqlIngress throws when compose restart fails", async () => {
   } finally {
     await fixture.cleanup();
   }
+});
+
+function runtimeRow(
+  hostgroupId: number,
+  hostname: string,
+  port: number,
+  status = "ONLINE",
+): ProxySqlRuntimeServerRow {
+  return { hostgroupId, hostname, port, status };
+}
+
+/** A failover just moved the primary: engine-2 writes, engine-1 follows. */
+function failedOverCluster(): ProxySqlDesiredState["clusters"][number] {
+  return clusterDesired({
+    backends: [
+      {
+        memberId: "mb2",
+        role: "primary",
+        readEligible: false,
+        address: "engine-2",
+        port: 5432,
+        transport: "local",
+      },
+      {
+        memberId: "mb1",
+        role: "replica",
+        readEligible: true,
+        address: "engine-1",
+        port: 5432,
+        transport: "local",
+      },
+    ],
+  });
+}
+
+function desiredWith(
+  ...clusters: ProxySqlDesiredState["clusters"]
+): ProxySqlDesiredState {
+  return { bindAddresses: [], clusters };
+}
+
+test("findIngressRuntimeMismatch accepts a runtime table that matches the desired placement", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(0, "engine-2", 5432), runtimeRow(1, "engine-1", 5432)],
+    }),
+    null,
+  );
+});
+
+test("findIngressRuntimeMismatch names a stale old primary left in the writer hostgroup", () => {
+  const desired = desiredWith(failedOverCluster());
+  const message = findIngressRuntimeMismatch(desired, {
+    pgsql: [runtimeRow(0, "engine-1", 5432), runtimeRow(1, "engine-1", 5432)],
+  });
+  assertEquals(
+    message,
+    "ProxySQL on this server did not repoint: writer for m1 is still engine-1:5432, expected engine-2:5432",
+  );
+});
+
+test("findIngressRuntimeMismatch fails when the new writer is present but the old one stays beside it", () => {
+  const desired = desiredWith(failedOverCluster());
+  const message = findIngressRuntimeMismatch(desired, {
+    pgsql: [
+      runtimeRow(0, "engine-1", 5432),
+      runtimeRow(0, "engine-2", 5432),
+      runtimeRow(1, "engine-1", 5432),
+    ],
+  });
+  assertStringIncludes(message ?? "", "writer for m1 is still engine-1:5432");
+});
+
+test("findIngressRuntimeMismatch ignores a removed backend still draining as OFFLINE_HARD", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [
+        runtimeRow(0, "engine-1", 5432, "OFFLINE_HARD"),
+        runtimeRow(0, "engine-2", 5432),
+        runtimeRow(1, "engine-1", 5432),
+      ],
+    }),
+    null,
+  );
+  // Still fails when the old primary is live in the writer group.
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [
+        runtimeRow(0, "engine-1", 5432, "SHUNNED"),
+        runtimeRow(0, "engine-2", 5432),
+        runtimeRow(1, "engine-1", 5432),
+      ],
+    }) ?? "",
+    "writer for m1 is still engine-1:5432",
+  );
+});
+
+test("findIngressRuntimeMismatch fails when a desired row is missing", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(0, "engine-2", 5432)],
+    }),
+    "ProxySQL on this server did not repoint: engine-1:5432 is missing from the reader hostgroup for m1",
+  );
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, { pgsql: [] }) ?? "",
+    "engine-2:5432 is missing from the writer hostgroup for m1",
+  );
+  // A table that was never read counts as empty.
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {}) ?? "",
+    "is missing",
+  );
+});
+
+test("findIngressRuntimeMismatch matches on port as well as host", () => {
+  const desired = desiredWith(clusterDesired());
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(0, "engine-1", 5433)],
+    }) ?? "",
+    "writer for m1 is still engine-1:5433, expected engine-1:5432",
+  );
+});
+
+test("findIngressRuntimeMismatch ignores status and extra reader rows", () => {
+  const desired = desiredWith(failedOverCluster());
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [
+        runtimeRow(0, "engine-2", 5432, "SHUNNED"),
+        runtimeRow(1, "engine-1", 5432, "OFFLINE_HARD"),
+        runtimeRow(1, "engine-9", 5432),
+      ],
+    }),
+    null,
+  );
+});
+
+test("findIngressRuntimeMismatch checks the mysql family against runtime_mysql_servers", () => {
+  const mysql = clusterDesired({
+    managedId: "m2",
+    engine: "mysql",
+    family: "mysql",
+    protocolPort: 13306,
+    writerHostgroup: 10,
+    readerHostgroup: 11,
+    backends: [
+      {
+        memberId: "mb3",
+        role: "primary",
+        readEligible: false,
+        address: "my-2",
+        port: 3306,
+        transport: "local",
+      },
+    ],
+  });
+  const desired = desiredWith(mysql);
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      mysql: [runtimeRow(10, "my-2", 3306)],
+    }),
+    null,
+  );
+  assertEquals(
+    findIngressRuntimeMismatch(desired, {
+      mysql: [runtimeRow(10, "my-1", 3306)],
+    }),
+    "ProxySQL on this server did not repoint: writer for m2 is still my-1:3306, expected my-2:3306",
+  );
+  // Rows in the other family's table are not this family's rows.
+  assertStringIncludes(
+    findIngressRuntimeMismatch(desired, {
+      pgsql: [runtimeRow(10, "my-2", 3306)],
+    }) ?? "",
+    "is missing",
+  );
+});
+
+test("findIngressRuntimeMismatch skips families the desired state does not use", () => {
+  assertEquals(proxySqlFamiliesInUse(desiredWith()), []);
+  assertEquals(
+    proxySqlFamiliesInUse(desiredWith(clusterDesired())),
+    ["pgsql"],
+  );
+  assertEquals(findIngressRuntimeMismatch(desiredWith(), {}), null);
+  // Only pgsql is in use, so a stale mysql table is nobody's business here.
+  assertEquals(
+    findIngressRuntimeMismatch(desiredWith(clusterDesired()), {
+      pgsql: [runtimeRow(0, "engine-1", 5432)],
+      mysql: [runtimeRow(0, "old", 3306)],
+    }),
+    null,
+  );
+});
+
+async function runEnsureWithContainer(
+  portsJson: string | null,
+): Promise<string[][]> {
+  const fixture = await createTempLayout();
+  try {
+    const layout = resolveLayout(fixture.env);
+    const calls: string[][] = [];
+    const ok = (stdout: string) =>
+      Promise.resolve({ success: true, stdout, stderr: "", code: 0 });
+    await ensureProxySqlIngress(
+      layout,
+      DESCRIPTOR,
+      (args) => {
+        calls.push(args);
+        if (args.includes("ps")) return ok(portsJson === null ? "" : "abc\n");
+        if (args[0] === "inspect" && args.includes("--format")) {
+          return ok(`true|${portsJson}\n`);
+        }
+        return ok("");
+      },
+      {
+        bindAddresses: ["10.10.1.10"],
+        segmentAttachments: [],
+        listenerPorts: null,
+        managedNetwork: MANAGED_NETWORK,
+        stability: { sleep: () => Promise.resolve(), attempts: 1 },
+      },
+    );
+    return calls;
+  } finally {
+    await fixture.cleanup();
+  }
+}
+
+const upCall = (calls: string[][]) => calls.find((c) => c.includes("up"))!;
+
+test("ensureProxySqlIngress recreates a running container that has no published ports", async () => {
+  const calls = await runEnsureWithContainer("{}");
+  assertEquals(upCall(calls).includes("--force-recreate"), true);
+});
+
+test("ensureProxySqlIngress does not recreate when there is no container yet", async () => {
+  const calls = await runEnsureWithContainer(null);
+  assertEquals(upCall(calls).includes("--force-recreate"), false);
+});
+
+test("buildProxySqlDrainStatements and buildProxySqlUndrainStatements toggle backend status", () => {
+  const host = "203.0.113.9";
+  const port = 3306;
+  const drain = buildProxySqlDrainStatements(host, port);
+  assertEquals(
+    drain[0],
+    `UPDATE mysql_servers SET status='OFFLINE_SOFT' WHERE hostname='${host}' AND port=${port}`,
+  );
+  assertEquals(drain[1]?.includes("pgsql_servers"), true);
+  const undrain = buildProxySqlUndrainStatements(host, port);
+  assertEquals(
+    undrain[0],
+    `UPDATE mysql_servers SET status='ONLINE' WHERE hostname='${host}' AND port=${port}`,
+  );
+  assertEquals(undrain.at(-1), "SAVE PGSQL SERVERS TO DISK");
+  const escaped = buildProxySqlUndrainStatements("db''host", 15432);
+  assertEquals(
+    escaped[0]?.includes("hostname='db''''host'"),
+    true,
+  );
+});
+
+test("a read-only login on a single server routes to the primary", () => {
+  const cnf = renderProxySqlConfig({
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        users: [{
+          username: "app_ro",
+          role: "user",
+          password: "p2",
+          connectionRole: "read-only",
+        }],
+      }),
+    ],
+  });
+  assertStringIncludes(
+    cnf,
+    'username="app_ro" password="p2" default_hostgroup=0',
+  );
+});
+
+test("a tool login goes to the primary and gets no read split rule, even with a reader and autoReadSplit", () => {
+  const input = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [
+      clusterDesired({
+        autoReadSplit: true,
+        backends: PRIMARY_AND_READER_BACKENDS,
+        users: [
+          { username: "app", role: "user" as const, password: "p1" },
+          {
+            username: "gui",
+            role: "user" as const,
+            password: "p3",
+            tool: true,
+          },
+          {
+            username: "gui_ro",
+            role: "user" as const,
+            password: "p4",
+            connectionRole: "read-only" as const,
+            tool: true,
+          },
+        ],
+      }),
+    ],
+  };
+  const cnf = renderProxySqlConfig(input);
+  assertStringIncludes(
+    cnf,
+    'username="gui" password="p3" default_hostgroup=0',
+  );
+  assertStringIncludes(
+    cnf,
+    'username="gui_ro" password="p4" default_hostgroup=0',
+  );
+  assertStringIncludes(cnf, 'username="app" match_pattern="^SELECT"');
+  assertEquals(cnf.includes('username="gui" match_pattern'), false);
+  assertEquals(cnf.includes('username="gui_ro" match_pattern'), false);
+  assertEquals(cnf.includes("fast_forward"), false);
+  const admin = buildProxySqlAdminStatements(input).join("\n");
+  assertStringIncludes(admin, "'gui','p3',0,");
+});
+
+test("a tool flag of false changes nothing", () => {
+  const base = {
+    bindAddresses: ["0.0.0.0"],
+    clusters: [clusterDesired({
+      autoReadSplit: true,
+      backends: PRIMARY_AND_READER_BACKENDS,
+      users: [{ username: "app", role: "user" as const, password: "p" }],
+    })],
+  };
+  const withFlag = structuredClone(base);
+  (withFlag.clusters[0]!.users[0] as { tool?: boolean }).tool = false;
+  assertEquals(renderProxySqlConfig(withFlag), renderProxySqlConfig(base));
 });

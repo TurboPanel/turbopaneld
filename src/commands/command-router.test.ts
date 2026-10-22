@@ -757,6 +757,7 @@ async function dispatchWithStubHandler(
     | "handleEnvironmentLifecycle"
     | "handlePrincipalsReconcile"
     | "handleBackupsReconcile"
+    | "handleFoldersRemove"
     | "handleManagedApply"
     | "handleManagedLifecycle"
     | "handleManagedDestroy"
@@ -828,6 +829,99 @@ test({
     );
     const result = outcome.result as Record<string, unknown>;
     assertEquals(result.summary, "stub deploy");
+  },
+});
+
+const DEPLOY_PAYLOAD = {
+  environmentId: "env-1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "tp-demo-router",
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime",
+    content: "services: {}\n",
+  }],
+  hostings: [],
+};
+
+const STUB_DEPLOY_RESULT = { projectName: "tp-demo-router", summary: "stub" };
+
+function deployDispatch(commandId: string): CommandDispatchMessage {
+  return {
+    type: "command-dispatch",
+    id: commandId,
+    commandId,
+    commandType: "environment.deploy",
+    payload: DEPLOY_PAYLOAD,
+    at: new Date().toISOString(),
+  };
+}
+
+test({
+  name:
+    "a cancel landing mid-deploy ends the command with the cancelled: outcome and frees the registry",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const { deployCancels, DeployCancelledError } = await import(
+      "../deploy/deploy-cancel.ts"
+    );
+    setCommandRouterHandlersForTests({
+      handleEnvironmentDeploy: (_payload, _at, deps) => {
+        // The cell handler answers `cancelling` while the deploy is running.
+        assertEquals(deployCancels.cancel("cmd-mid"), "cancelling");
+        deps?.cancel?.throwIfCancelled("while building");
+        return Promise.resolve(STUB_DEPLOY_RESULT);
+      },
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(deployDispatch("cmd-mid"), ws);
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, false);
+      assertEquals(
+        frames[1]?.error,
+        new DeployCancelledError(
+          "stopped while building; nothing was switched over, the previous version is still serving",
+        ).message,
+      );
+      // Finished: the id is no longer live.
+      assertEquals(deployCancels.cancel("cmd-mid"), "not_running");
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
+test({
+  name:
+    "a deploy dispatched after its cancel fails at once without running the handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const { deployCancels } = await import("../deploy/deploy-cancel.ts");
+    let ran = 0;
+    setCommandRouterHandlersForTests({
+      handleEnvironmentDeploy: () => {
+        ran += 1;
+        return Promise.resolve(STUB_DEPLOY_RESULT);
+      },
+    });
+    try {
+      assertEquals(deployCancels.cancel("cmd-early"), "not_running");
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(deployDispatch("cmd-early"), ws);
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.ok, false);
+      assertMatch(String(frames[1]?.error), /^cancelled: /);
+      assertEquals(ran, 0);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
   },
 });
 
@@ -1070,6 +1164,29 @@ test({
 
 test({
   name:
+    "handleCommandDispatch routes server.folders.remove through stub handler",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const folder = { owner: "alice", scope: "production", slug: "uploads" };
+    const outcome = await dispatchWithStubHandler(
+      "server.folders.remove",
+      { folders: [{ kind: "volume", folder }] },
+      {
+        summary: "Removed 1 of 1 folder(s)",
+        folders: [{ ...folder, kind: "volume", removed: true }],
+      },
+      "handleFoldersRemove",
+    );
+    assertEquals(outcome.ok, true);
+    assertEquals(
+      (outcome.result as { summary: string }).summary,
+      "Removed 1 of 1 folder(s)",
+    );
+  },
+});
+
+test({
+  name:
     "handleCommandDispatch wraps lifecycle rehydrate through parseRehydrateDeploymentResults",
   permissions: { env: true, read: true },
   fn: async () => {
@@ -1140,6 +1257,62 @@ test({
       assertEquals(rehydrateCalls, 1);
     } finally {
       setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
+test({
+  name:
+    "a command sent again while it runs, or after it finished, is not run twice",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const outbox = await import("./command-outbox.ts");
+    const dir = await Deno.makeTempDir();
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", dir);
+    outbox.resetCommandOutboxForTests();
+    try {
+      const mock = new MockWebSocket();
+      const ws = mock as unknown as WebSocket;
+      await outbox.flushCommandOutcomes(ws, {
+        supports: (feature) => feature === "command-recovery-v1",
+      });
+      const dispatch = (id: string): CommandDispatchMessage => ({
+        type: "command-dispatch",
+        id,
+        commandId: `cmd-${id}`,
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      });
+
+      // Still running: acknowledged, and nothing else happens.
+      await outbox.markCommandInFlight("dup-running");
+      await handleCommandDispatch(dispatch("dup-running"), ws);
+      assertEquals(parseFrames(mock.sentFrames).map((f) => f.type), [
+        "command-ack",
+      ]);
+
+      // Finished and not yet confirmed: the kept outcome is sent again, not re-run.
+      mock.sentFrames.length = 0;
+      await handleCommandDispatch(dispatch("dup-done"), ws);
+      const first = parseFrames(mock.sentFrames);
+      mock.sentFrames.length = 0;
+      await handleCommandDispatch(dispatch("dup-done"), ws);
+      const again = parseFrames(mock.sentFrames);
+      assertEquals(again.map((f) => f.type), [
+        "command-ack",
+        "command-outcome",
+      ]);
+      assertEquals(again[1]?.result, first[1]?.result);
+      assertEquals(again[1]?.daemonRespondedAt, first[1]?.daemonRespondedAt);
+      await outbox.settleCommandJournalWrites();
+    } finally {
+      outbox.resetCommandOutboxForTests();
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(dir, { recursive: true });
     }
   },
 });

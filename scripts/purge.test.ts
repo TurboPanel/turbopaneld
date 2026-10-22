@@ -35,6 +35,9 @@ const SUPPORT_FUNCTIONS = [
   "tp_path_in_owned_tree",
   "tp_path_is_safe",
   "tp_note_custom_kept",
+  "tp_pkg_state_in",
+  "tp_pkg_installed",
+  "tp_pkg_purgeable",
 ];
 
 const CONSTANTS = [
@@ -42,7 +45,14 @@ const CONSTANTS = [
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
   "TP_DOCKER_PACKAGES",
+  "TP_DPKG_ON_DISK",
+  "TP_APT_SOURCES_DIR",
+  "TP_DOCKER_APT_SOURCES",
+  "TP_DOCKER_APT_KEYS",
+  "TP_SURY_APT_KEYS",
   "TP_OTHER_UNITS",
+  "TP_PRINCIPAL_ID_MIN",
+  "TP_PRINCIPAL_ID_MAX",
 ];
 
 function extractFunction(source: string, name: string): string | null {
@@ -365,7 +375,9 @@ const REAL_PATH = Deno.env.get("PATH") ?? "/usr/bin:/bin";
 
 // A fake apt-get earlier on PATH: `-s purge <pkgs>` prints a simulation that
 // removes the requested packages plus whatever FAKE_APT_EXTRA names; any real
-// (non-simulated) call is recorded in $FAKE_APT_LOG and does nothing.
+// (non-simulated) call is recorded in $FAKE_APT_LOG and does nothing. Like
+// the real apt-get, a real `purge -y` of a package named in $FAKE_APT_HELD is
+// refused without --allow-change-held-packages, while the simulation passes.
 async function fakeAptBin(): Promise<string> {
   const dir = await Deno.makeTempDir({ prefix: "tp-fake-apt-" });
   const script = [
@@ -377,6 +389,17 @@ async function fakeAptBin(): Promise<string> {
     "    done",
     '    for e in $FAKE_APT_EXTRA; do echo "Purg $e [1.0]"; done',
     "    exit 0 ;;",
+    "esac",
+    'case " $* " in',
+    '  *" --allow-change-held-packages "*) ;;',
+    "  *)",
+    "    for h in $FAKE_APT_HELD; do",
+    '      case " $* " in *" $h "*)',
+    '        echo "E: Held packages were changed and -y was used without --allow-change-held-packages." >&2',
+    '        echo "refused: $*" >> "$FAKE_APT_LOG"',
+    "        exit 100 ;;",
+    "      esac",
+    "    done ;;",
     "esac",
     'echo "$*" >> "$FAKE_APT_LOG"',
     "",
@@ -415,7 +438,7 @@ test("no package is a purge candidate without TurboPanel's own sury evidence", a
     ["tp_collect_purge_candidates", "tp_sury_evidence", "tp_pkg_installed"],
     [
       // Everything below is installed, but nothing shows TurboPanel's PHP role ran.
-      "tp_pkg_installed() { return 0; }",
+      "tp_pkg_purgeable() { return 0; }",
       "tp_sury_evidence() { return 1; }",
       "tp_collect_purge_candidates",
       'echo "candidates=[$(cat "$TP_TMP/apt.candidates")]"',
@@ -431,7 +454,7 @@ test("with sury evidence only phpN.N packages and the sury keyring are candidate
   const result = await runPurgeSh(
     ["tp_collect_purge_candidates", "tp_file_add"],
     [
-      "tp_pkg_installed() { return 0; }",
+      "tp_pkg_purgeable() { return 0; }",
       "tp_sury_evidence() { return 0; }",
       "tp_collect_purge_candidates",
       'cat "$TP_TMP/apt.candidates"',
@@ -507,13 +530,59 @@ test("a package whose purge removes only the listed packages is purged", async (
   );
   assertStringIncludes(
     result.stdout,
-    "apt-get purge -y docker-ce docker-ce-cli",
+    "apt-get purge -y --allow-change-held-packages docker-ce docker-ce-cli",
   );
   assertEquals(
     result.stdout.split("--final")[1].trim().split("\n").sort(),
     ["docker-ce", "docker-ce-cli"],
     result.stderr,
   );
+});
+
+test("Docker packages the Docker role holds at a pinned version are still purged", async () => {
+  const bin = await fakeAptBin();
+  const log = join(bin, "apt.log");
+  const result = await runPurgeSh(
+    PACKAGE_FUNCTIONS,
+    [
+      'printf "containerd.io\\ndocker-ce\\ndocker-ce-cli\\n" > "$TP_TMP/docker.pkgs"',
+      'tp_purge_guarded_packages Docker "$TP_TMP/docker.pkgs"',
+      'echo "fail=$TP_FAIL_COUNT"',
+    ].join("\n"),
+    {
+      PATH: `${bin}:${REAL_PATH}`,
+      FAKE_APT_HELD: "docker-ce docker-ce-cli",
+      FAKE_APT_LOG: log,
+    },
+  );
+  assertStringIncludes(result.stdout, "fail=0", result.stderr);
+  const calls = await Deno.readTextFile(log);
+  assert(!calls.includes("refused"), calls);
+  assertStringIncludes(
+    calls,
+    "purge -y --allow-change-held-packages containerd.io docker-ce docker-ce-cli",
+  );
+});
+
+test("a held package the purge would drag along still keeps the candidate", async () => {
+  const bin = await fakeAptBin();
+  const log = join(bin, "apt.log");
+  const result = await runPurgeSh(
+    PACKAGE_FUNCTIONS,
+    [
+      'printf "docker-ce\\n" > "$TP_TMP/docker.pkgs"',
+      'tp_purge_guarded_packages Docker "$TP_TMP/docker.pkgs"',
+      'echo "--kept"; cat "$TP_TMP/kept-packages"',
+    ].join("\n"),
+    {
+      PATH: `${bin}:${REAL_PATH}`,
+      FAKE_APT_EXTRA: "admin-held-tool",
+      FAKE_APT_HELD: "admin-held-tool",
+      FAKE_APT_LOG: log,
+    },
+  );
+  assertStringIncludes(result.stdout.split("--kept")[1], "admin-held-tool");
+  assertEquals(await exists(log), false, "a real apt-get purge ran");
 });
 
 test("the script never autoremoves, never marks packages manual, and purges only through the guard", async () => {
@@ -594,20 +663,16 @@ test("the stock wg-quick template is not ours until tp0 was enabled or started",
   assertEquals(await wgPresent("inactive", "enabled"), "present");
 });
 
-test("the Docker gate stage-1 folders are owned trees and are removed with the other folders", async () => {
+test("the Docker gate folders are owned trees and are removed with the other folders", async () => {
   const source = await Deno.readTextFile(purgePath);
   const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
   const remove = extractFunction(source, "tp_remove_folders_and_shell") ?? "";
-  for (
-    const dir of [
-      "/run/turbopanel-gate",
-      "/var/cache/turbopanel-docker-gate",
-      "/var/lib/turbopanel-docker-gate",
-    ]
-  ) {
+  // The gate's state folder sits inside /var/lib/turbopanel and goes with it.
+  for (const dir of ["/run/turbopanel-gate", "/var/cache/turbopanel"]) {
     assertStringIncludes(trees, dir);
     assertStringIncludes(remove, `tp_safe_rm_tree ${dir}`);
   }
+  assertEquals(trees.includes("turbopanel-docker-gate"), false);
 });
 
 test("the build slice is stopped and its unit file removed although it is not turbopanel*", async () => {
@@ -671,6 +736,237 @@ test("an inactive slice systemd keeps without a unit file is not reported as lef
   assertEquals(running.stdout.trim(), "present", running.stderr);
 });
 
+const TP_TEST_UUID = "12345678-1234-1234-1234-123456789abc";
+
+test("managed-ha orchestrator containers are included in the removal list", async () => {
+  const result = await runPurgeSh(
+    ["tp_docker_consider_row", "tp_file_add"],
+    [
+      ': > "$TP_TMP/work.containers"',
+      `tp_docker_consider_row "${TP_TEST_UUID}-ha" - managed-ha - - - -`,
+      'cat "$TP_TMP/work.containers"',
+    ].join("\n"),
+  );
+  assertStringIncludes(result.stdout, `${TP_TEST_UUID}-ha`, result.stderr);
+});
+
+test("TurboPanel container names match only anchored UUID shapes", async () => {
+  const fns = [
+    "tp_is_turbopanel_container_name",
+    "tp_docker_container_name_is_turbopanel",
+    "tp_docker_consider_row",
+    "tp_file_add",
+    "tp_list_has_word",
+  ];
+  const owned = [
+    TP_TEST_UUID,
+    `${TP_TEST_UUID}-ha`,
+    `${TP_TEST_UUID}-in`,
+    `${TP_TEST_UUID}-1`,
+  ];
+  const foreign = [
+    "myapp-ha",
+    "nginx-ha",
+    `${TP_TEST_UUID}-extra`,
+    `${TP_TEST_UUID}-ha`.toUpperCase(),
+    `prefix-${TP_TEST_UUID}`,
+  ];
+  for (const name of owned) {
+    const result = await runPurgeSh(
+      fns,
+      `if tp_is_turbopanel_container_name "${name}"; then echo yes; else echo no; fi`,
+    );
+    assertEquals(result.stdout.trim(), "yes", name);
+  }
+  for (const name of foreign) {
+    const result = await runPurgeSh(
+      fns,
+      `if tp_is_turbopanel_container_name "${name}"; then echo yes; else echo no; fi`,
+    );
+    assertEquals(result.stdout.trim(), "no", name);
+  }
+  const namesOnly = await runPurgeSh(
+    fns,
+    [
+      ': > "$TP_TMP/work.containers"',
+      ...foreign.map(
+        (name) => `tp_docker_consider_row "${name}" - - - - - -`,
+      ),
+      `tp_docker_consider_row "${TP_TEST_UUID}-in" - - - - - -`,
+      'wc -l < "$TP_TMP/work.containers"',
+    ].join("\n"),
+  );
+  assertEquals(namesOnly.stdout.trim(), "1", namesOnly.stderr);
+});
+
+test("look-alike -ha names are not merged from the pre-purge inventory", async () => {
+  const stub = await stubBin(
+    "docker",
+    [
+      'case "$1" in',
+      "  ps)",
+      '    if [ "$2" = "-a" ]; then',
+      '      printf "%s\\n" "myapp-ha|-|-|-|-|-|-"',
+      "    fi",
+      "    ;;",
+      '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_docker_ready",
+      "tp_docker_collect",
+      "tp_docker_consider_row",
+      "tp_is_turbopanel_container_name",
+      "tp_docker_container_name_is_turbopanel",
+      "tp_docker_build_removal_list",
+      "tp_docker_remove_one_container",
+      "tp_remove_docker_containers",
+      "tp_has_tool",
+      "tp_list_has_word",
+    ],
+    [
+      "export TP_TMP",
+      'echo "myapp-ha" > "$TP_TMP/before.containers"',
+      'tp_has_tool() { [ "$1" = docker ] && return 0; command -v "$1" >/dev/null 2>&1; }',
+      "tp_docker_ready() { return 0; }",
+      "tp_remove_docker_containers",
+      'test ! -s "$TP_TMP/docker.rmlog" && echo no_removals',
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertStringIncludes(result.stdout, "no_removals", result.stderr);
+});
+
+test("container removal merges the pre-purge inventory and removes every name", async () => {
+  const stub = await stubBin(
+    "docker",
+    [
+      'case "$1" in',
+      "  ps)",
+      '    if [ "$2" = "-a" ]; then',
+      '      printf "%s\\n" "turbopanel-database|turbopanel.role|database|-|-|-|-"',
+      `      printf "%s\\\\n" "${TP_TEST_UUID}-ha|-|managed-ha|-|-|-|-"`,
+      "    fi",
+      "    ;;",
+      '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_docker_ready",
+      "tp_docker_collect",
+      "tp_docker_consider_row",
+      "tp_docker_build_removal_list",
+      "tp_docker_remove_one_container",
+      "tp_remove_docker_containers",
+      "tp_has_tool",
+    ],
+    [
+      "export TP_TMP",
+      'echo "turbopanel-database" > "$TP_TMP/before.containers"',
+      `echo "${TP_TEST_UUID}-ha" >> "$TP_TMP/before.containers"`,
+      'tp_has_tool() { [ "$1" = docker ] && return 0; command -v "$1" >/dev/null 2>&1; }',
+      "tp_docker_ready() { return 0; }",
+      "tp_remove_docker_containers",
+      "tp_remove_docker_containers",
+      'sort "$TP_TMP/docker.rmlog"',
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  const lines = result.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("rm:"));
+  lines.sort();
+  assertEquals(lines, [
+    `rm:${TP_TEST_UUID}-ha`,
+    `rm:${TP_TEST_UUID}-ha`,
+    "rm:turbopanel-database",
+    "rm:turbopanel-database",
+  ]);
+});
+
+test("the summary does not treat inactive slices as left over after they unload", async () => {
+  const stub = await stubBin(
+    "systemctl",
+    [
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo inactive ;;",
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    ["tp_unit_present", "tp_report_remaining"],
+    [
+      'printf "%s\\n" turbopanel.slice turbopanel-containers.slice > "$TP_TMP/before.units"',
+      'printf "%s\\n" turbopanel.slice turbopanel-containers.slice > "$TP_TMP/inv.units"',
+      "tp_report_remaining units units",
+      'test ! -s "$TP_TMP/failed" && echo summary_ok',
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertStringIncludes(result.stdout, "summary_ok", result.stderr);
+});
+
+test("a slice whose unit file is already gone is not still counted as present", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  const stub = await stubBin(
+    "systemctl",
+    [
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo /etc/systemd/system/turbopanel.slice ;;",
+      "  *ActiveState*) echo inactive ;;",
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    ["tp_unit_present"],
+    `TP_SYSTEMD_DIRS=${units}\nif tp_unit_present turbopanel.slice; then echo present; else echo absent; fi`,
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertEquals(result.stdout.trim(), "absent", result.stderr);
+});
+
+test("the unit scan skips a stopped slice with no unit file but keeps a running one", async () => {
+  const body = [
+    "TP_SYSTEMD_DIRS=$TP_TMP/none",
+    ': > "$TP_TMP/inv.units"',
+    "tp_scan_systemctl_units",
+    'cat "$TP_TMP/inv.units"',
+  ].join("\n");
+  const stubFor = (state: string) =>
+    stubBin(
+      "systemctl",
+      [
+        'case "$*" in',
+        "  *LoadState*) echo loaded ;;",
+        "  *FragmentPath*) echo ;;",
+        `  *ActiveState*) echo ${state} ;;`,
+        '  *list-units*) echo "turbopanel.slice loaded ${state} dead TurboPanel" ;;',
+        "esac",
+      ].join("\n"),
+    );
+  const fns = [
+    "tp_scan_systemctl_units",
+    "tp_note_unit",
+    "tp_unit_present",
+    "tp_list_has_word",
+  ];
+  const gone = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("inactive")}:${BASE_PATH}`,
+  });
+  assertEquals(gone.stdout.trim(), "", gone.stderr);
+  const running = await runPurgeSh(fns, body, {
+    PATH: `${await stubFor("active")}:${BASE_PATH}`,
+  });
+  assertStringIncludes(running.stdout, "turbopanel.slice", running.stderr);
+});
+
 test("containers are not carried into the final check once Docker Engine was purged", async () => {
   const stub = await stubBin("docker", "exit 1");
   const run = (gone: string, left = "false") =>
@@ -711,18 +1007,12 @@ test("a purge with Docker already removed reports no false container failure", a
   assertStringIncludes(result.stdout, "fail=0");
 });
 
-test("the hosting Caddy state folder is owned, inventoried and removed", async () => {
+test("the hosting Caddy state folder is inside the state tree and goes with it", async () => {
   const source = await Deno.readTextFile(purgePath);
-  const dir = "/var/lib/turbopanel-hosting-caddy";
-  assertStringIncludes(extractConstant(source, "TP_OWNED_TREES") ?? "", dir);
-  assertStringIncludes(
-    extractFunction(source, "tp_remove_folders_and_shell") ?? "",
-    `tp_safe_rm_tree ${dir}`,
-  );
-  assertStringIncludes(
-    extractFunction(source, "tp_inventory_folders") ?? "",
-    dir,
-  );
+  const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
+  assertStringIncludes(trees, " /var/lib/turbopanel ");
+  assertEquals(trees.includes("turbopanel-hosting-caddy"), false);
+  assertEquals(source.includes("/var/lib/turbopanel-hosting-caddy"), false);
 });
 
 test("the Docker gate build group is removed by exact name even though its gid is outside the service band", async () => {
@@ -914,6 +1204,57 @@ async function engineGone(
   return result.stdout.trim();
 }
 
+test("Docker Engine still-installed warning follows dpkg, not a stale dockerd on PATH", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-deb-" });
+  await Deno.writeTextFile(
+    join(dir, "dpkg-query"),
+    '#!/bin/sh\ncase "$*" in *-s*docker-ce*) exit 1 ;; *) exit 0 ;; esac\n',
+    { mode: 0o755 },
+  );
+  await Deno.writeTextFile(join(dir, "dockerd"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const result = await runPurgeSh(
+    [
+      "tp_docker_engine_packages_remain",
+      "tp_pkg_installed",
+      "tp_has_tool",
+      "tp_docker_engine_gone",
+    ],
+    [
+      "DRY_RUN=false",
+      "if tp_docker_engine_packages_remain; then echo packages=yes; else echo packages=no; fi",
+      "if tp_docker_engine_gone; then echo gone=yes; else echo gone=no; fi",
+    ].join("\n"),
+    { PATH: dir, TP_DOCKER_SOCKETS: "/nonexistent/x.sock" },
+  );
+  assertStringIncludes(result.stdout, "packages=no");
+  assertStringIncludes(result.stdout, "gone=no");
+});
+
+test("moby or snap Docker left after apt purge does not mark the engine gone", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-moby-" });
+  await Deno.writeTextFile(
+    join(dir, "dpkg-query"),
+    '#!/bin/sh\ncase "$*" in *moby-engine*) printf "install ok installed\\n" ;; *) exit 1 ;; esac\n',
+    { mode: 0o755 },
+  );
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const result = await runPurgeSh(
+    ["tp_docker_engine_gone", "tp_has_tool", "tp_pkg_installed"],
+    [
+      "DRY_RUN=false",
+      "TP_DOCKER_ENGINE_GONE=false",
+      "if tp_docker_engine_gone; then TP_DOCKER_ENGINE_GONE=true; else tp_print_warn leftover; fi",
+      'echo "gone=${TP_DOCKER_ENGINE_GONE}"',
+    ].join("\n"),
+    { PATH: dir, TP_DOCKER_SOCKETS: "/nonexistent/x.sock" },
+  );
+  assertStringIncludes(result.stdout, "gone=false");
+  assertStringIncludes(result.stderr + result.stdout, "leftover");
+});
+
 test("Docker Engine counts as gone only when no daemon, snap, service or socket remains", async () => {
   assertEquals(await engineGone({}), "gone");
   assertEquals(await engineGone({ dockerd: "exit 0" }), "present");
@@ -935,4 +1276,499 @@ test("Docker Engine counts as gone only when no daemon, snap, service or socket 
   } finally {
     listener.close();
   }
+});
+
+// getent and groupdel stand-ins over a temp group/passwd pair: groupdel drops
+// the line, as the real one would; tp_run prints "▸ groupdel <name>".
+const GROUP_STUBS = `
+getent() {
+  if [ "$#" -lt 2 ]; then cat "$TP_TMP/$1"; return; fi
+  awk -F: -v n="$2" '$1 == n { print; found = 1 } END { exit !found }' "$TP_TMP/$1"
+}
+groupdel() {
+  awk -F: -v n="$1" '$1 != n' "$TP_TMP/group" > "$TP_TMP/group.new"
+  mv "$TP_TMP/group.new" "$TP_TMP/group"
+}
+`;
+
+async function purgeGroups(
+  group: string[],
+  passwd: string[],
+  call: string,
+): Promise<ShResult> {
+  const result = await runPurgeSh(
+    [
+      "tp_principal_band_gid",
+      "tp_gid_is_primary",
+      "tp_group_has_members",
+      "tp_principal_leave_home",
+      "tp_purge_principal_groups",
+    ],
+    [
+      GROUP_STUBS,
+      `printf '%s\\n' ${
+        group.map((l) => `'${l}'`).join(" ")
+      } > "$TP_TMP/group"`,
+      `printf '%s\\n' ${
+        passwd.map((l) => `'${l}'`).join(" ")
+      } > "$TP_TMP/passwd"`,
+      `if ${call}; then echo KEPT_HOME=no; else echo KEPT_HOME=yes; fi`,
+    ].join("\n"),
+    { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin" },
+  );
+  return { ...result, stdout: result.stdout + result.stderr };
+}
+
+test("purge removes a site owner's own group and an old <name>-grp, engines or not", async () => {
+  const result = await purgeGroups(
+    ["alice:x:15001:tpnginx", "alice-grp:x:15002:", "sudo:x:27:"],
+    ["root:x:0:0::/root:/bin/sh"],
+    `tp_purge_principal_groups alice /srv/users/alice account`,
+  );
+  assertStringIncludes(result.stdout, "groupdel alice\n");
+  assertStringIncludes(result.stdout, "groupdel alice-grp\n");
+  assertStringIncludes(result.stdout, "KEPT_HOME=no");
+});
+
+test("purge never removes a group of the owner's name outside the band", async () => {
+  for (const name of ["sudo", "admin", "staff"]) {
+    const result = await purgeGroups(
+      [`${name}:x:27:`, `${name}-grp:x:1001:`],
+      ["root:x:0:0::/root:/bin/sh"],
+      `tp_purge_principal_groups ${name} /srv/users/${name} orphan`,
+    );
+    assert(!result.stdout.includes("groupdel"), result.stdout);
+    assertStringIncludes(result.stdout, "KEPT_HOME=no");
+    assertStringIncludes(
+      result.stdout,
+      `kept group ${name} (its id is outside`,
+    );
+  }
+});
+
+test("purge keeps an orphan's group that still has members or is a primary group", async () => {
+  const members = await purgeGroups(
+    ["carol:x:15003:tpnginx"],
+    ["root:x:0:0::/root:/bin/sh"],
+    `tp_purge_principal_groups carol /srv/users/carol orphan`,
+  );
+  assert(!members.stdout.includes("groupdel"), members.stdout);
+  assertStringIncludes(members.stdout, "KEPT_HOME=yes");
+
+  const primary = await purgeGroups(
+    ["dave:x:15004:"],
+    ["erin:x:15005:15004::/home/erin:/bin/sh"],
+    `tp_purge_principal_groups dave /srv/users/dave account`,
+  );
+  assert(!primary.stdout.includes("groupdel"), primary.stdout);
+  assertStringIncludes(primary.stdout, "KEPT_HOME=yes");
+});
+
+test("purge never touches a group named root or tp*", async () => {
+  for (const name of ["root", "tp", "tpnginx"]) {
+    const result = await purgeGroups(
+      [`${name}:x:15006:`],
+      ["root:x:0:0::/root:/bin/sh"],
+      `tp_purge_principal_groups ${name} /srv/users/${name} orphan`,
+    );
+    assert(!result.stdout.includes("groupdel"), result.stdout);
+  }
+});
+
+const DOCKER_SOURCE_FUNCTIONS = [
+  "tp_purge_docker_sources",
+  "tp_collect_signed_by",
+];
+
+// Lays out a fake apt tree under a temp dir and points the purge's apt
+// constants at it. Key-path safety is stubbed to "inside the temp keyrings
+// dir", since the real check only accepts the host's own keyring directories.
+async function dockerAptTree(): Promise<{ root: string; preamble: string }> {
+  const root = await Deno.makeTempDir({ prefix: "tp-purge-apt-" });
+  await Deno.mkdir(join(root, "sources.list.d"));
+  await Deno.mkdir(join(root, "keyrings"));
+  const src = (name: string) => join(root, "sources.list.d", name);
+  const key = (name: string) => join(root, "keyrings", name);
+  const preamble = [
+    `TP_APT_SOURCES_DIR=${join(root, "sources.list.d")}`,
+    `TP_DOCKER_APT_SOURCES="${src("docker.sources")} ${src("docker.list")}"`,
+    `TP_DOCKER_APT_KEYS="${key("docker.asc")} ${key("docker.asc.fetched")} ${
+      key("docker.gpg")
+    }"`,
+    `tp_apt_keyring_path_ok() { case $1 in ${
+      join(root, "keyrings")
+    }/*) return 0 ;; esac; return 1; }`,
+  ].join("\n");
+  return { root, preamble };
+}
+
+test("Docker's apt source and key go by name too: offline source, orphan key, temp key copy", async () => {
+  const { root, preamble } = await dockerAptTree();
+  const src = (name: string) => join(root, "sources.list.d", name);
+  const key = (name: string) => join(root, "keyrings", name);
+  // The offline install's source has no download.docker.com and no key.
+  await Deno.writeTextFile(
+    src("docker.sources"),
+    "Types: deb\nURIs: file:///srv/docker-debs\nSuites: ./\nTrusted: yes\n",
+  );
+  // An old one-line source found by its content, with its own Signed-By key.
+  await Deno.writeTextFile(
+    src("old-docker.list"),
+    `deb [arch=amd64 signed-by=${
+      key("old-docker.gpg")
+    }] https://download.docker.com/linux/debian trixie stable\n`,
+  );
+  await Deno.writeTextFile(
+    src("other.sources"),
+    "Types: deb\nURIs: https://deb.example.org\nSuites: trixie\n",
+  );
+  // Keys whose source is already gone: a half-finished install, or an
+  // interrupted purge, and the key download's temporary copy.
+  for (
+    const name of [
+      "docker.asc",
+      "docker.asc.fetched",
+      "old-docker.gpg",
+      "other.gpg",
+    ]
+  ) {
+    await Deno.writeTextFile(key(name), "key\n");
+  }
+  const result = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\ntp_purge_docker_sources\necho "fail=$TP_FAIL_COUNT"`,
+  );
+  assertStringIncludes(result.stdout, "fail=0", result.stderr);
+  for (
+    const gone of [
+      src("docker.sources"),
+      src("old-docker.list"),
+      key("docker.asc"),
+      key("docker.asc.fetched"),
+      key("old-docker.gpg"),
+    ]
+  ) {
+    assertEquals(await exists(gone), false, `${gone} was left`);
+  }
+  assertEquals(await exists(src("other.sources")), true);
+  assertEquals(await exists(key("other.gpg")), true);
+  // A second run over the clean tree changes nothing and fails nothing.
+  const again = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\ntp_purge_docker_sources\necho "fail=$TP_FAIL_COUNT"\ncat "$TP_TMP/removed" 2>/dev/null || true`,
+  );
+  assertEquals(again.stdout.trim(), "fail=0", again.stderr);
+});
+
+test("a Docker source found by content and by name is removed once, and a dry run only logs", async () => {
+  const { root, preamble } = await dockerAptTree();
+  const sources = join(root, "sources.list.d", "docker.sources");
+  const key = join(root, "keyrings", "docker.asc");
+  await Deno.writeTextFile(
+    sources,
+    `Types: deb\nURIs: https://download.docker.com/linux/debian\nSuites: trixie\nComponents: stable\nSigned-By: ${key}\n`,
+  );
+  await Deno.writeTextFile(key, "key\n");
+  const result = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\nDRY_RUN=true\ntp_purge_docker_sources\ncat "$TP_TMP/removed"`,
+  );
+  const lines = result.stdout.split("\n").filter((l) =>
+    l.includes("[dry-run]")
+  );
+  assertEquals(
+    lines.filter((l) => l.includes("[dry-run] remove ")).sort(),
+    [`[dry-run] remove ${key}`, `[dry-run] remove ${sources}`],
+    result.stdout,
+  );
+  assertEquals(await exists(sources), true);
+  assertEquals(await exists(key), true);
+});
+
+test("a Docker Signed-By key outside the apt keyring directories is refused, not removed", async () => {
+  const { root, preamble } = await dockerAptTree();
+  const outside = join(root, "elsewhere.gpg");
+  await Deno.writeTextFile(outside, "key\n");
+  await Deno.writeTextFile(
+    join(root, "sources.list.d", "docker.list"),
+    `deb [signed-by=${outside}] https://download.docker.com/linux/debian trixie stable\n`,
+  );
+  const result = await runPurgeSh(
+    DOCKER_SOURCE_FUNCTIONS,
+    `${preamble}\ntp_purge_docker_sources\necho "fail=$TP_FAIL_COUNT"`,
+  );
+  assertStringIncludes(result.stdout, "fail=1", result.stderr);
+  assertEquals(await exists(outside), true);
+});
+
+test("the PHP repository's loose signing key is evidence and is removed with the source", async () => {
+  const keys = await Deno.makeTempDir({ prefix: "tp-purge-sury-" });
+  const key = join(keys, "turbopanel-sury-php.gpg");
+  const fetchedKey = `${key}.fetched`;
+  await Deno.writeTextFile(key, "key\n");
+  await Deno.writeTextFile(fetchedKey, "key\n");
+  const apt = await fakeAptBin();
+  const dpkg = await fakeDpkgBin([]);
+  const result = await runPurgeSh(
+    [
+      ...PACKAGE_FUNCTIONS,
+      "tp_purge_apt_packages",
+      "tp_collect_purge_candidates",
+      "tp_sury_evidence",
+      "tp_pkg_installed",
+    ],
+    [
+      `TP_SURY_APT_KEYS="${key} ${fetchedKey}"`,
+      "if tp_sury_evidence; then echo evidence=yes; else echo evidence=no; fi",
+      "tp_purge_apt_packages",
+      'echo "fail=$TP_FAIL_COUNT"',
+    ].join("\n"),
+    {
+      PATH: `${apt}:${dpkg}:${REAL_PATH}`,
+      FAKE_APT_LOG: join(apt, "apt.log"),
+    },
+  );
+  assertStringIncludes(result.stdout, "evidence=yes", result.stderr);
+  assertStringIncludes(result.stdout, "fail=0", result.stderr);
+  assertEquals(await exists(key), false, "the sury key was left");
+  assertEquals(
+    await exists(fetchedKey),
+    false,
+    "the sury key download copy was left",
+  );
+});
+
+// A fake dpkg-query that answers `-W -f '${Status}\n' <pkg>` from a table of
+// real dpkg Status strings, and the package list for any other query. Once
+// $FAKE_DPKG_PURGED exists (the fake apt-get below writes it on a real purge),
+// every package it lists reads as not installed.
+async function fakeStatusDpkg(
+  dir: string,
+  statuses: Record<string, string>,
+): Promise<void> {
+  // printf repeats its format, so a Multi-Arch package prints one line each.
+  const cases = Object.entries(statuses).map(([pkg, status]) =>
+    `  ${pkg}) printf '%s\\n' ${
+      status.split("\n").map((line) => `'${line}'`).join(" ")
+    } ;;`
+  );
+  const script = [
+    "#!/bin/sh",
+    'for last in "$@"; do :; done',
+    'if [ -n "${FAKE_DPKG_PURGED:-}" ] && [ -f "$FAKE_DPKG_PURGED" ] && grep -Fxq "$last" "$FAKE_DPKG_PURGED"; then',
+    "  exit 1",
+    "fi",
+    'case "$last" in',
+    ...cases,
+    "  *) exit 1 ;;",
+    "esac",
+    "",
+  ].join("\n");
+  await Deno.writeTextFile(join(dir, "dpkg-query"), script, { mode: 0o755 });
+}
+
+test("a held, half-installed or conffiles-only package counts by dpkg's state, not its want", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-status-" });
+  const statuses: Record<string, string> = {
+    held: "hold ok installed",
+    plain: "install ok installed",
+    reinst: "install reinstreq half-installed",
+    heldunpacked: "hold ok unpacked",
+    halfconf: "install ok half-configured",
+    trigaw: "install ok triggers-awaited",
+    trigpend: "install ok triggers-pending",
+    rc: "deinstall ok config-files",
+    gone: "purge ok not-installed",
+    unknownwant: "unknown ok not-installed",
+    multiarch: "deinstall ok config-files\nhold ok installed",
+  };
+  await fakeStatusDpkg(dir, statuses);
+  // Only sh on PATH: the status check must not need any other tool.
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const names = [...Object.keys(statuses), "neverseen"];
+  const result = await runPurgeSh(
+    [],
+    names.map((p) =>
+      `i=no; tp_pkg_installed ${p} && i=yes; g=no; tp_pkg_purgeable ${p} && g=yes; echo "${p}=$i/$g"`
+    ).join("\n"),
+    { PATH: dir },
+  );
+  const got = Object.fromEntries(
+    result.stdout.trim().split("\n").map((l) => l.split("=")),
+  );
+  assertEquals(got, {
+    held: "yes/yes",
+    plain: "yes/yes",
+    reinst: "yes/yes",
+    heldunpacked: "yes/yes",
+    halfconf: "yes/yes",
+    trigaw: "yes/yes",
+    trigpend: "yes/yes",
+    rc: "no/yes",
+    gone: "no/no",
+    unknownwant: "no/no",
+    multiarch: "yes/yes",
+    neverseen: "no/no",
+  }, result.stderr);
+});
+
+test("a re-run on a half-purged host purges the held Docker packages and their leftovers", async () => {
+  // The state the first real purge left: docker-ce and docker-ce-cli held,
+  // containerd.io kept, Docker's apt source and key already gone, the purge
+  // marker still there, and docker's enablement links left behind.
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-resume-" });
+  const purged = join(dir, "purged");
+  await fakeStatusDpkg(dir, {
+    "docker-ce": "hold ok installed",
+    "docker-ce-cli": "hold ok installed",
+    "containerd.io": "install ok installed",
+    "docker-compose-plugin": "install ok installed",
+    "docker.io": "purge ok not-installed",
+  });
+  const aptLog = join(dir, "apt.log");
+  // Simulation passes on held packages; a real purge of a held one needs the
+  // flag. A real purge records the packages as gone for the fake dpkg-query.
+  await Deno.writeTextFile(
+    join(dir, "apt-get"),
+    [
+      "#!/bin/sh",
+      'case " $* " in *" -s "*)',
+      '  for a in "$@"; do case $a in -*|purge) ;; *) echo "Purg $a [1.0]" ;; esac; done',
+      "  exit 0 ;;",
+      "esac",
+      'case " $* " in *" --allow-change-held-packages "*) ;; *)',
+      '  echo "refused: $*" >> "$FAKE_APT_LOG"; exit 100 ;;',
+      "esac",
+      'echo "$*" >> "$FAKE_APT_LOG"',
+      'for a in "$@"; do case $a in -*|purge|env|LC_ALL=*|DEBIAN_FRONTEND=*) ;; *) echo "$a" >> "$FAKE_DPKG_PURGED" ;; esac; done',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const units = join(dir, "systemd");
+  await Deno.mkdir(join(units, "multi-user.target.wants"), { recursive: true });
+  await Deno.mkdir(join(units, "sockets.target.wants"));
+  await Deno.mkdir(join(units, "docker.service.d"));
+  await Deno.symlink(
+    join(dir, "gone", "docker.service"),
+    join(units, "multi-user.target.wants", "docker.service"),
+  );
+  await Deno.symlink(
+    join(dir, "gone", "docker.socket"),
+    join(units, "sockets.target.wants", "docker.socket"),
+  );
+  // The link targets sit under a directory that does not exist, so they are
+  // dangling on any machine (a CI runner can have the real Docker units).
+  // An admin's own containerd unit file is a real file and stays.
+  await Deno.writeTextFile(join(units, "containerd.service"), "[Unit]\n");
+  const resume = join(dir, "turbopanel-purge");
+  await Deno.mkdir(resume);
+  await Deno.writeTextFile(join(resume, "purge-in-progress"), "1\n");
+  await Deno.writeTextFile(join(resume, "resume-manifest"), "\n");
+  const result = await runPurgeSh(
+    [
+      ...PACKAGE_FUNCTIONS,
+      "tp_collect_docker_packages",
+      "tp_docker_engine_packages_remain",
+      "tp_purge_docker_unit_leftovers",
+      "tp_resume_clearable",
+      "tp_clear_purge_resume",
+      "tp_purge_marker_pending",
+    ],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      `TP_RESUME_DIR=${resume}`,
+      `TP_PURGE_MARKER=${resume}/purge-in-progress`,
+      `TP_RESUME_MANIFEST=${resume}/resume-manifest`,
+      "tp_collect_docker_packages",
+      'echo "selected=$(tr "\\n" " " < "$TP_TMP/docker.pkgs")"',
+      'tp_purge_guarded_packages Docker "$TP_TMP/docker.pkgs"',
+      "if tp_docker_engine_packages_remain; then echo remain=yes; else echo remain=no; fi",
+      "tp_purge_docker_unit_leftovers",
+      "tp_resume_clearable && tp_clear_purge_resume",
+      'echo "fail=$TP_FAIL_COUNT"',
+    ].join("\n"),
+    {
+      PATH: `${dir}:${REAL_PATH}`,
+      FAKE_APT_LOG: aptLog,
+      FAKE_DPKG_PURGED: purged,
+    },
+  );
+  assertStringIncludes(
+    result.stdout,
+    "selected=docker-ce docker-ce-cli containerd.io docker-compose-plugin ",
+    result.stderr,
+  );
+  const calls = await Deno.readTextFile(aptLog);
+  assert(!calls.includes("refused"), calls);
+  assertStringIncludes(
+    calls,
+    "purge -y --allow-change-held-packages containerd.io docker-ce docker-ce-cli docker-compose-plugin",
+  );
+  assertStringIncludes(result.stdout, "remain=no");
+  assertStringIncludes(result.stdout, "fail=0");
+  assertEquals(
+    await exists(join(units, "multi-user.target.wants", "docker.service")),
+    false,
+  );
+  assertEquals(
+    await exists(join(units, "sockets.target.wants", "docker.socket")),
+    false,
+  );
+  assertEquals(await exists(join(units, "docker.service.d")), false);
+  assertEquals(await exists(join(units, "containerd.service")), true);
+  assertEquals(await exists(join(resume, "purge-in-progress")), false);
+});
+
+test("failed-state reset names only loaded failed TurboPanel units, whatever is in the working directory", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-reset-" });
+  const log = join(dir, "systemctl.log");
+  // reset-failed on a name systemd has not loaded exits 1, as the real one does.
+  await Deno.writeTextFile(
+    join(dir, "systemctl"),
+    [
+      "#!/bin/sh",
+      'echo "$*" >> "$FAKE_SYSTEMCTL_LOG"',
+      'case "$1" in',
+      "  list-units) printf '%s\\n' \"$FAKE_FAILED\" ;;",
+      "  reset-failed)",
+      "    shift",
+      '    for u in "$@"; do case " $FAKE_FAILED_NAMES " in *" $u "*) ;; *) echo "Unit $u not loaded." >&2; exit 1 ;; esac; done ;;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  // The working directory holds a turbopanel-orchestrate folder, as /tmp did
+  // on the host where the unquoted glob turned into that unit name.
+  const cwd = join(dir, "cwd");
+  await Deno.mkdir(join(cwd, "turbopanel-orchestrate"), { recursive: true });
+  const run = (failed: string, names: string) =>
+    runPurgeSh(
+      ["tp_reset_failed_units"],
+      `cd ${cwd}\ntp_reset_failed_units\necho "fail=$TP_FAIL_COUNT"`,
+      {
+        PATH: `${dir}:${REAL_PATH}`,
+        FAKE_SYSTEMCTL_LOG: log,
+        FAKE_FAILED: failed,
+        FAKE_FAILED_NAMES: names,
+      },
+    );
+  const none = await run("", "");
+  assertStringIncludes(none.stdout, "fail=0", none.stderr);
+  let calls = await Deno.readTextFile(log);
+  assert(!calls.includes("reset-failed"), calls);
+  assertStringIncludes(calls, "turbopanel* turbopaneld* wg-quick@tp0.service");
+  await Deno.remove(log);
+  const some = await run(
+    "turbopanel-ui.service loaded failed failed UI\n● turbopanel-caddy.service loaded failed failed Caddy",
+    "turbopanel-ui.service turbopanel-caddy.service",
+  );
+  assertStringIncludes(some.stdout, "fail=0", some.stderr);
+  calls = await Deno.readTextFile(log);
+  assertStringIncludes(
+    calls,
+    "reset-failed turbopanel-ui.service turbopanel-caddy.service",
+  );
+  assert(!calls.includes("turbopanel-orchestrate"), calls);
 });

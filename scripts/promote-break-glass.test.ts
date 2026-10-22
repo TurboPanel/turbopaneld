@@ -33,3 +33,38 @@ test("the automatic release workflows exist and AGENTS.md calls the form break-g
   }
   assertStringIncludes(read("AGENTS.md").toLowerCase(), "break-glass");
 });
+
+/**
+ * Every TurboPanel/dev reusable workflow (with its dev-ref) and the signer in
+ * the three promotion workflows. The composite actions are pinned on their own
+ * (scripts/release-workflows.test.ts).
+ */
+function promotionPins(): { dev: string[]; signer: string[] } {
+  const files = ["promote.yml", "publish-rc.yml", "publish-release.yml"];
+  const text = files.map((file) => read(`.github/workflows/${file}`)).join(
+    "\n",
+  );
+  const dev = [
+    ...text.matchAll(
+      /TurboPanel\/dev\/\.github\/workflows\/[\w-]+\.yml@([0-9a-f]{40})/g,
+    ),
+  ].map((match) => match[1]);
+  const devRef = [...text.matchAll(/^\s+dev-ref:\s*([0-9a-f]{40})/gm)].map((
+    match,
+  ) => match[1]);
+  const signer = [...text.matchAll(/^\s+signer-ref:\s*([0-9a-f]{40})/gm)].map((
+    match,
+  ) => match[1]);
+  return { dev: [...dev, ...devRef], signer };
+}
+
+test("the promotion workflows pin ONE dev commit and ONE signer commit", () => {
+  const { dev, signer } = promotionPins();
+  assert(
+    dev.length >= 9,
+    `expected the dev pins of all three workflows, got ${dev.length}`,
+  );
+  assertEquals([...new Set(dev)].length, 1);
+  assert(signer.length >= 3);
+  assertEquals([...new Set(signer)].length, 1);
+});

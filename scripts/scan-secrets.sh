@@ -13,6 +13,13 @@
 # byte-identical in turbopanel, turbopaneld, ui, website and dev. Change all
 # five together; dev's test checks the copies and runs the self-test.
 #
+# Archives (.zip .tar .tgz .gz .zst) are opened and their contents scanned one
+# level deep; the tool to open one (unzip, gzip, zstd) must be installed or the
+# scan fails. PDFs and images are not scanned. The allowlist must stay honest:
+# an entry that names a missing file or a line the file does not hold fails the
+# scan (a secret pasted there would otherwise pass), and its comments are
+# scanned with the same rules.
+#
 # The rules live in scripts/scan-secrets.patterns (private key blocks, vendor
 # tokens, connection URLs, secret-looking assignments, forbidden file names).
 # The scanner reports the rule id and the location, never the matching text, so
@@ -34,10 +41,13 @@
 # number ignored. (So a new-form entry whose text itself starts with "digits:"
 # is read as the old form.)
 #
-# With --all, an entry that allows nothing is reported as stale on stderr. That
-# is a warning only; it does not change the exit status.
+# An entry that names a line the file no longer holds fails the scan. With
+# --all, an entry whose line exists but no rule flags it any more is reported
+# as stale on stderr (a warning only).
 set -eu
 
+# Prefix of an allowlist entry that allows a forbidden file name.
+ATAG="@path "
 MODE=staged
 RANGE=
 case "${1:-}" in
@@ -158,7 +168,7 @@ while IFS= read -r entry || [ -n "$entry" ]; do
     continue
   fi
   case "$entry" in
-    "@path "*) apath=${entry#"@path "} ;;
+    "$ATAG"*) apath=${entry#"$ATAG"} ;;
     *) apath=${entry%%:*} ;;
   esac
   case "$apath" in
@@ -186,9 +196,18 @@ skip_file() {
       # holds the regexes themselves; neither is scanned.
       return 0
       ;;
-    *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.zip|*.tar|*.zst|*.gz|*.pdf)
+    *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.woff|*.woff2|*.ttf|*.otf|*.pdf)
       return 0
       ;;
+    *) return 1 ;;
+  esac
+}
+
+# Archives are opened and their contents scanned line by line (one level deep:
+# an archive inside an archive is not unpacked).
+is_archive() {
+  case "$1" in
+    *.zip|*.tar|*.tgz|*.gz|*.zst) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -216,8 +235,8 @@ check_paths() {
   while IFS= read -r file || [ -n "$file" ]; do
     [ -n "$file" ] || continue
     pid="$(forbidden_path "$file")" || continue
-    printf '@path %s\n' "$file" >> "$FLAGGED"
-    if entry_allowed "@path $file"; then
+    printf '%s%s\n' "$ATAG" "$file" >> "$FLAGGED"
+    if entry_allowed "$ATAG$file"; then
       continue
     fi
     echo "scan-secrets: secret-bearing path must not be committed ($pid): $file" >&2
@@ -225,18 +244,22 @@ check_paths() {
   done < "$TMP/path-hits"
 }
 
-# The generic assignment rules only count a value that looks random: 24+
-# characters, a letter and a digit, no placeholder word.
+# The generic assignment rules only count a value that looks random: a token of
+# 24+ characters with a letter and a digit and no placeholder word. Every token
+# on the line is tried, not just the last, so a trailing comment cannot hide it.
 looks_random() {
   text=$1
-  value="$(printf '%s\n' "$text" | grep -Eo '[A-Za-z0-9+/=_-]{24,}' | tail -n 1)"
-  [ -n "$value" ] || return 1
-  printf '%s\n' "$value" | grep -Eq '[0-9]' || return 1
-  printf '%s\n' "$value" | grep -Eq '[A-Za-z]' || return 1
-  if printf '%s\n' "$value" | grep -Eiq 'example|changeme|change-me|placeholder|your[-_]|dummy|fake|sample|redacted|xxxxx|test|0000|1234'; then
-    return 1
-  fi
-  return 0
+  printf '%s\n' "$text" | grep -Eo '[A-Za-z0-9+/=_-]{24,}' > "$TMP/tokens" || true
+  while IFS= read -r value || [ -n "$value" ]; do
+    [ -n "$value" ] || continue
+    printf '%s\n' "$value" | grep -Eq '[0-9]' || continue
+    printf '%s\n' "$value" | grep -Eq '[A-Za-z]' || continue
+    if printf '%s\n' "$value" | grep -Eiq 'example|changeme|change-me|placeholder|your[-_]|dummy|fake|sample|redacted|xxxxx|test|0000|1234'; then
+      continue
+    fi
+    return 0
+  done < "$TMP/tokens"
+  return 1
 }
 
 # True when the line CTX_N of CTX_FILE looks like the body of a private key.
@@ -280,15 +303,105 @@ check_line() {
   fail=1
 }
 
+# --- archives: paths listed in $TMP/archives -----------------------------------
+scan_archive() {
+  sa_file=$1
+  sa_tool=
+  case "$sa_file" in
+    *.zip) sa_tool=unzip ;;
+    *.gz|*.tgz) sa_tool=gzip ;;
+    *.zst) sa_tool=zstd ;;
+    *) ;;
+  esac
+  if [ -n "$sa_tool" ] && ! command -v "$sa_tool" >/dev/null 2>&1; then
+    echo "scan-secrets: cannot read archive $sa_file: $sa_tool is not installed" >&2
+    fail=1
+    return 0
+  fi
+  case "$sa_file" in
+    *.zip) unzip -p -- "$sa_file" ;;
+    *.gz|*.tgz) gzip -dc -- "$sa_file" ;;
+    *.zst) zstd -dcq -- "$sa_file" ;;
+    *) cat -- "$sa_file" ;;
+  esac > "$TMP/archive.out" 2>/dev/null || {
+    echo "scan-secrets: cannot unpack archive $sa_file (corrupt, or unsupported)" >&2
+    fail=1
+    return 0
+  }
+  grep -naE -f "$LINE_RE" "$TMP/archive.out" > "$TMP/archive.hits" 2>/dev/null || true
+  while IFS= read -r hit || [ -n "$hit" ]; do
+    n=${hit%%:*}
+    CTX_FILE="$TMP/archive.out"
+    CTX_N=$((n + 1))
+    check_line "$sa_file" "$sa_file (inside the archive, line $n)" "${hit#*:}"
+  done < "$TMP/archive.hits"
+}
+
+scan_archives() {
+  while IFS= read -r arc || [ -n "$arc" ]; do
+    [ -n "$arc" ] || continue
+    scan_archive "$arc"
+  done < "$TMP/archives"
+}
+
+# --- allowlist integrity --------------------------------------------------------
+# An entry must name a line that exists in a file that exists, otherwise a
+# secret pasted into the allowlist (with a "# reason:") would pass as an
+# "allowed" entry. The comments are scanned with the same rules and cannot be
+# allowed. Messages name the path, never the entry text.
+check_allowlist() {
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      "$ATAG"*)
+        ca_path=${entry#"$ATAG"}
+        if [ ! -f "$ca_path" ]; then
+          echo "scan-secrets: allowlist names a file that does not exist: $ca_path" >&2
+          fail=1
+        fi
+        ;;
+      *)
+        ca_path=${entry%%:*}
+        ca_text=${entry#*:}
+        if [ ! -f "$ca_path" ]; then
+          echo "scan-secrets: allowlist names a file that does not exist: $ca_path" >&2
+          fail=1
+        elif ! is_archive "$ca_path" && ! grep -Fxq -- "$ca_text" "$ca_path"; then
+          echo "scan-secrets: allowlist entry matches no line in $ca_path; remove it" >&2
+          fail=1
+        fi
+        ;;
+    esac
+  done < "$ALLOWED"
+  grep '^#' "$ALLOWLIST" > "$TMP/allow.comments" || true
+  grep -naE -f "$LINE_RE" "$TMP/allow.comments" > "$TMP/allow.hits" 2>/dev/null || true
+  while IFS= read -r hit || [ -n "$hit" ]; do
+    n=${hit%%:*}
+    CTX_FILE="$TMP/allow.comments"
+    CTX_N=$((n + 1))
+    if cid="$(line_rule "${hit#*:}")"; then
+      echo "scan-secrets: suspected secret in a comment of .secretscan-allowlist ($cid)" >&2
+      fail=1
+    fi
+  done < "$TMP/allow.hits"
+}
+
 # --- working tree and staged files: file names on stdin -----------------------
 scan_files() {
   : > "$TMP/eligible"
+  : > "$TMP/archives"
   while IFS= read -r file || [ -n "$file" ]; do
     [ -f "$file" ] || continue
     skip_file "$file" && continue
-    printf '%s\n' "$file" >> "$TMP/eligible"
+    if is_archive "$file"; then
+      printf '%s\n' "$file" >> "$TMP/archives"
+    else
+      printf '%s\n' "$file" >> "$TMP/eligible"
+    fi
   done
-  check_paths < "$TMP/eligible"
+  cat "$TMP/eligible" "$TMP/archives" > "$TMP/all-paths"
+  check_paths < "$TMP/all-paths"
+  scan_archives
   tr '\n' '\000' < "$TMP/eligible" |
     xargs -0 grep -nIHE -f "$LINE_RE" -- 2>/dev/null > "$TMP/hits" || true
   while IFS= read -r hit || [ -n "$hit" ]; do
@@ -317,12 +430,19 @@ scan_range() {
   fi
   git log --no-merges --name-only --diff-filter=ACMR --format= "$RANGE" | sort -u > "$TMP/range-files"
   : > "$TMP/range-eligible"
+  : > "$TMP/archives"
   while IFS= read -r file || [ -n "$file" ]; do
     [ -n "$file" ] || continue
     skip_file "$file" && continue
     printf '%s\n' "$file" >> "$TMP/range-eligible"
+    # An archive is opened from the working tree (the checked-out tip) when it
+    # is still there; the added-lines scan below cannot read inside it.
+    if is_archive "$file" && [ -f "$file" ]; then
+      printf '%s\n' "$file" >> "$TMP/archives"
+    fi
   done < "$TMP/range-files"
   check_paths < "$TMP/range-eligible"
+  scan_archives
 
   # added.lines and added.meta stay in step: line N of one is an added line
   # and line N of the other is "sha path" for it.
@@ -349,6 +469,8 @@ scan_range() {
 }
 
 # --- run ----------------------------------------------------------------------
+check_allowlist
+
 case "$MODE" in
   all)
     git ls-files > "$TMP/files"
@@ -368,7 +490,7 @@ if [ "$MODE" = all ]; then
   while IFS= read -r entry || [ -n "$entry" ]; do
     [ -n "$entry" ] || continue
     if ! grep -Fxq -- "$entry" "$FLAGGED"; then
-      echo "scan-secrets: warning: stale allowlist entry (allows nothing): $entry" >&2
+      echo "scan-secrets: warning: stale allowlist entry (allows nothing): ${entry%%:*}" >&2
     fi
   done < "$ALLOWED"
 fi

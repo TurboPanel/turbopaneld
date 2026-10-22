@@ -12,7 +12,7 @@ import {
 } from "./compose-host-paths.ts";
 import { PROXYSQL_IMAGE } from "../managed/proxysql.ts";
 import { ORCHESTRATOR_IMAGE } from "../managed/orchestrator.ts";
-import { traefikCompose } from "./ingress.ts";
+import { dockerProxyCompose, traefikCompose } from "./ingress.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -127,9 +127,9 @@ test("empty driver_opts, a sized tmpfs and an absolute bind volume are kept", ()
 test("a built service cannot take a platform image name", () => {
   for (
     const image of [
-      "traefik:v3.6.6",
+      "traefik:v3.7.16",
       "docker.io/library/traefik:latest",
-      "Tecnativa/docker-socket-proxy:0.3.0",
+      "Tecnativa/docker-socket-proxy:v0.5.0",
       "proxysql/proxysql",
     ]
   ) {
@@ -149,7 +149,7 @@ test("a built service cannot take a platform image name", () => {
   assertComposePolicy({
     services: {
       app: { build: ".", image: "myapp:1" },
-      proxy: { image: "traefik:v3.6.6" },
+      proxy: { image: "traefik:v3.7.16" },
     },
   }, {});
 });
@@ -157,7 +157,8 @@ test("a built service cannot take a platform image name", () => {
 test("platform image names stay in step with the platform constants", () => {
   const compose = traefikCompose("net", ["172.18.0.1"]);
   const traefik = /image: (\S+)/.exec(compose)?.[1] ?? "";
-  for (const image of [traefik, PROXYSQL_IMAGE, ORCHESTRATOR_IMAGE]) {
+  const proxy = /image: (\S+)/.exec(dockerProxyCompose("net"))?.[1] ?? "";
+  for (const image of [traefik, proxy, PROXYSQL_IMAGE, ORCHESTRATOR_IMAGE]) {
     if (!PLATFORM_IMAGE_REPOSITORIES.includes(imageRepository(image))) {
       throw new TypeError(`${image} is not in PLATFORM_IMAGE_REPOSITORIES`);
     }
@@ -206,12 +207,27 @@ test("volume options other than bind or a sized tmpfs pass only with host-level 
   }, {});
 });
 
+test("the reserved host port refusal names who reserves them and lists the ports", () => {
+  const doc = {
+    services: { web: { ports: [{ target: 80, published: "443" }] } },
+  };
+  assertThrows(
+    () => assertComposePolicy(doc, {}),
+    Error,
+    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 18080-18999, 19100-19799",
+  );
+});
+
 test("published ports on platform bands are host-level", () => {
   for (
     const published of ["80", "443", 7080, "18080", "19150", "18000-18100"]
   ) {
     const doc = { services: { web: { ports: [{ target: 80, published }] } } };
-    assertThrows(() => assertComposePolicy(doc, {}), Error, "platform uses");
+    assertThrows(
+      () => assertComposePolicy(doc, {}),
+      Error,
+      "platform reserves",
+    );
     assertComposePolicy(doc, { hostLevelApproved: true });
   }
   assertComposePolicy({

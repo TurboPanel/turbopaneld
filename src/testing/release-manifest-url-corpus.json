@@ -4,14 +4,14 @@
     {
       "kind": "daemon",
       "url": "https://dl.trbp.nl/channels/trunk/manifest.json",
-      "allow": true,
-      "why": "CDN trunk drop (builtin daemon trunk)"
+      "allow": false,
+      "why": "the retired trunk CDN drop: dl.trbp.nl is no longer on the rail"
     },
     {
       "kind": "daemon",
       "url": "https://dl.trbp.nl/channels/release/manifest.json",
-      "allow": true,
-      "why": "CDN channel manifest (manual-override rail)"
+      "allow": false,
+      "why": "dl.trbp.nl is no longer on the rail, so it is not a manual-override pin either"
     },
     {
       "kind": "daemon",
@@ -449,7 +449,7 @@
       "kind": "instance",
       "url": "https://dl.trbp.nl/channels/release/manifest.json",
       "allow": false,
-      "why": "CDN has no instance drop"
+      "why": "dl.trbp.nl is off the rail for every kind"
     },
     {
       "kind": "ui",
@@ -461,7 +461,7 @@
       "kind": "ui",
       "url": "https://dl.trbp.nl/channels/release/manifest.json",
       "allow": false,
-      "why": "CDN has no ui drop"
+      "why": "dl.trbp.nl is off the rail for every kind"
     },
     {
       "kind": "daemon",

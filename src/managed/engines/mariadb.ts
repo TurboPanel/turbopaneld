@@ -5,14 +5,34 @@
  * Dump flag is `--gtid` (not MySQL `--set-gtid-purged`).
  */
 
+import { dropUserOnEveryHost } from "./account-hosts.ts";
+import {
+  ensureOrchestratorTopologyAccountSql,
+  grantOrchestratorReplicationTableSql,
+} from "./orchestrator-topology-sql.ts";
 import { helperLabelArgs } from "../../deploy/labels.ts";
 import type {
   ManagedApplyCredential,
   ManagedApplyDatabaseOp,
 } from "../../contracts/commands-contracts.ts";
-import { sanitizeForLog } from "../../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
-import { grantDatabasePrivileges } from "./grant-databases.ts";
+import {
+  grantableDatabases,
+  grantDatabasePrivileges,
+} from "./grant-databases.ts";
+import { parseMariadbFreshness } from "./replica-freshness.ts";
+import {
+  switchoverCaughtErrorDetail,
+  switchoverPromoteErrorMessage,
+} from "./switchover-promote-error.ts";
+import {
+  filterGtidSetForSwitchoverWait,
+  quiesceAndReadPrimaryGtid,
+  SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+  waitForRequiredGtidSet,
+} from "./switchover-gtid.ts";
+import { parseSqlBool } from "./sql-bool.ts";
 import {
   changeReplicationSourceSql,
   connectionCensusSql,
@@ -26,14 +46,31 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
+  listNonLocalAccountsSql,
+  MANAGED_DOCKER_NETWORK_HOST,
+  masterGtidWaitSql,
+  parseGlobalPrivAccountRows,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteIdentifier,
+  quoteLiteral,
+  reassertReplicaPrivilegeGuardSql,
+  resetReplicaGtidStateSql,
+  revokePlainDatabaseGrantSql,
   showReplicaStatusSql,
+  startReplicaSql,
   versionSql,
 } from "./mariadb-sql.ts";
+import {
+  healStoppedReplicaIo,
+  replicaPrimaryLooksReachable,
+  replicaPrimaryPingArgv,
+} from "./replica-io-restart.ts";
 import {
   DOWN_ENGINE_CENSUS,
   type ManagedEngineCensus,
@@ -46,8 +83,22 @@ import type {
   ManagedEngineContext,
   ManagedEngineReplicationRuntime,
   ManagedEngineRuntime,
+  ManagedPermissionsEngineReport,
+  ManagedPermissionsReadClock,
+  ManagedPermissionsReadRequest,
   ManagedReplicationObservedHealth,
 } from "./types.ts";
+import { readMysqlFamilyPermissions } from "./mysql-permissions.ts";
+import {
+  execStandbySeedWithInitRetry,
+  formatStandbySeedFailure,
+  MYSQL_FAMILY_NATIVE_PORT,
+  mysqlFamilyDataRoot,
+  probeMysqlFamilyStandbyData,
+  standbySeedStdinLines,
+  volumeMountArgs,
+  waitMysqlFamilyRealServer,
+} from "./standby-probe.ts";
 
 const STANDBY_MARKER = ".turbopanel-standby";
 
@@ -88,9 +139,93 @@ const mariadbBackupRuntime: ManagedEngineBackupRuntime = {
   },
 };
 
-const READY_POLL_MS = 1_000;
-const READY_TIMEOUT_MS = 120_000;
 const MARIADB_SQL_STDIN_MARK = "__TP_SQL__";
+
+export const MARIADB_STANDBY_STREAMING_TIMEOUT_MS = 90_000;
+export const MARIADB_STANDBY_STREAMING_POLL_MS = 3_000;
+
+async function readMariadbStandbyState(
+  ctx: ManagedEngineContext,
+): Promise<string> {
+  try {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    if (!verbose.trim()) return "unknown";
+    return parseShowSlaveStatus(verbose).state;
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * After a fresh seed the IO/SQL threads are not necessarily Yes on the first
+ * read. Wait a bounded time for them, but never fail the apply on a slow
+ * stream: the standby marker is already written, so a retry must not reseed.
+ * Returns false when the window ran out; health reads keep reporting after.
+ */
+export async function waitMariadbStandbyStreaming(
+  ctx: ManagedEngineContext,
+  options?: {
+    timeoutMs?: number;
+    pollMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+  },
+): Promise<boolean> {
+  const timeoutMs = options?.timeoutMs ?? MARIADB_STANDBY_STREAMING_TIMEOUT_MS;
+  const pollMs = options?.pollMs ?? MARIADB_STANDBY_STREAMING_POLL_MS;
+  const sleepFn = options?.sleep ?? sleep;
+  const now = options?.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  const poll = async (): Promise<boolean> => {
+    if (await readMariadbStandbyState(ctx) === "streaming") return true;
+    if (now() >= deadline) return false;
+    await sleepFn(pollMs);
+    return poll();
+  };
+  return await poll();
+}
+
+/**
+ * `skip_slave_start` keeps the replica threads down after a container
+ * restart, and nothing else starts them until a later health heal. A replica
+ * stopped by hand on a long-running server must stay stopped, so threads are
+ * only started when the server itself is younger than this.
+ */
+export const MARIADB_REPLICA_RESUME_MAX_UPTIME_SECONDS = 300;
+
+export type MariadbExistingStandbyOutcome =
+  | "no_replica"
+  | "running"
+  | "left_stopped"
+  | "started";
+
+/**
+ * Standby marker present: this member was seeded before. Only act on a member
+ * that still has replica configuration (promote runs RESET SLAVE ALL and
+ * leaves the marker, so START SLAVE there is ERROR 1200). Does not wait for
+ * streaming: follow-primary and the health poll own that.
+ */
+export async function resumeExistingMariadbStandby(
+  ctx: ManagedEngineContext,
+  options?: { maxUptimeSeconds?: number },
+): Promise<MariadbExistingStandbyOutcome> {
+  const status = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+  if (!status.trim()) return "no_replica";
+  if (parseShowSlaveStatus(status).state !== "stopped") return "running";
+  const uptime = Number(
+    (await runMariadbQuery(
+      ctx,
+      "SELECT VARIABLE_VALUE FROM " +
+        "information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME='UPTIME';",
+    ))
+      .trim(),
+  );
+  const maxUptime = options?.maxUptimeSeconds ??
+    MARIADB_REPLICA_RESUME_MAX_UPTIME_SECONDS;
+  if (!Number.isFinite(uptime) || uptime > maxUptime) return "left_stopped";
+  await runMariadb(ctx, startReplicaSql());
+  return "started";
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -169,6 +304,37 @@ async function execMariadb(
   const password = ctx.socketPassword;
   if (!password || !deniedNoPassword) return first;
   return await execMariadbWithDefaults(ctx, argv, input, password);
+}
+
+function waitMariadbRealServer(ctx: ManagedEngineContext): Promise<void> {
+  return waitMysqlFamilyRealServer({
+    label: "managed mariadb",
+    fallbackError: "mariadb-admin ping did not succeed",
+    ping: (kind) => {
+      if (kind === "tcp") {
+        // Raw exec: ping exit 0 (including access-denied) means the real
+        // listener is up. Do not treat 1045 as "not ready" here.
+        return ctx.exec([
+          "mariadb-admin",
+          "ping",
+          "--protocol=tcp",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(MYSQL_FAMILY_NATIVE_PORT),
+          "-u",
+          ctx.rootUsername,
+        ]);
+      }
+      return execMariadb(ctx, [
+        "mariadb-admin",
+        "ping",
+        "--protocol=socket",
+        "-u",
+        ctx.rootUsername,
+      ]);
+    },
+  });
 }
 
 async function runMariadb(
@@ -288,12 +454,15 @@ async function applyOneCredential(
     ),
   );
 
+  // A login the site owner manages by hand keeps its account and password
+  // but never has its grants written or reset here.
   await grantDatabasePrivileges({
-    databases: credential.databases,
+    databases: grantableDatabases(credential),
     privileges: credential.privileges ?? [],
     username: credential.username,
     hosts: ctx.clientSourceHosts ?? [],
     grantSql: grantDatabaseSql,
+    revokePlainSql: revokePlainDatabaseGrantSql,
     run: (sql) => runMariadb(ctx, sql),
   });
   await runMariadb(ctx, "FLUSH PRIVILEGES;");
@@ -350,9 +519,12 @@ export function resolveMariadbPrimaryConnectHost(primary: {
 
 /**
  * Failure-safe logical seed: credentials only in a 0600 defaults file, trap
- * removes it on every exit, dump|import fails if either side fails.
+ * removes it on every exit, dump and import run as separate processes so
+ * each side's stderr and exit code can be reported.
  */
-export function buildMariadbStandbySeedScript(): string {
+export function buildMariadbStandbySeedScript(
+  withRootPassword = false,
+): string {
   // `--gtid` records a GTID start position ONLY together with
   // `--master-data`; without it the import leaves gtid_slave_pos empty and
   // MASTER_USE_GTID=slave_pos replays the primary's binlog from the very
@@ -364,38 +536,56 @@ export function buildMariadbStandbySeedScript(): string {
   // (ERROR 1948, "contains no value for replication domain N"). `RESET
   // MASTER` clears state left by init; `SET SESSION sql_log_bin=0` keeps the
   // import out of the binlog entirely.
-  const SQL_LOG_BIN_OFF = String
-    .raw`  { printf 'SET SESSION sql_log_bin=0;\n'; `;
+  // `mysql.func` / `mysql.plugin` are skipped: importing DROP TABLE `func`
+  // on 12.3 kills the local engine (ERROR 2013 / TLS broken pipe on the dump
+  // connection, or empty exec output when the container restarts).
+  const dump =
+    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
+    "--triggers --events --gtid --ignore-table=mysql.func --ignore-table=mysql.plugin " +
+    "--all-databases";
   return [
     "set -e",
     "tmp=$(mktemp)",
-    "trap 'rm -f \"$tmp\"' EXIT INT TERM HUP",
-    'chmod 600 "$tmp"',
-    'cat > "$tmp"',
-    'mariadb --protocol=socket -u root -e "RESET MASTER"',
-    "if (set -o pipefail) 2>/dev/null; then",
-    "  set -o pipefail",
-    SQL_LOG_BIN_OFF +
-    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
-    "--triggers --events --gtid --all-databases; } " +
-    "| mariadb --protocol=socket -u root",
-    "else",
-    '  fifo="$tmp.fifo"',
-    '  mkfifo "$fifo"',
-    '  trap \'rm -f "$tmp" "$fifo"\' EXIT INT TERM HUP',
-    SQL_LOG_BIN_OFF +
-    'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
-    '--triggers --events --gtid --all-databases; } >"$fifo" &',
-    "  dump_pid=$!",
-    "  set +e",
-    '  mariadb --protocol=socket -u root <"$fifo"',
-    "  import_rc=$?",
-    "  wait $dump_pid",
-    "  dump_rc=$?",
-    "  set -e",
-    '  if [ "$dump_rc" -ne 0 ] || [ "$import_rc" -ne 0 ]; then exit 1; fi',
+    "dump_err=$(mktemp)",
+    "import_err=$(mktemp)",
+    'fifo="$tmp.fifo"',
+    'trap \'rm -f "$tmp" "$dump_err" "$import_err" "$fifo"\' EXIT INT TERM HUP',
+    'chmod 600 "$tmp" "$dump_err" "$import_err"',
+    ...standbySeedStdinLines(withRootPassword),
+    'trap \'rm -f "$tmp" "$dump_err" "$import_err" "$fifo" "$rootcnf"\' EXIT INT TERM HUP',
+    `mariadb $rootopt --protocol=socket -u root -e "${
+      resetReplicaGtidStateSql().replaceAll(";", "")
+    }"`,
+    'mkfifo "$fifo"',
+    String
+      .raw`{ printf 'SET SESSION sql_log_bin=0;\n'; ${dump}; } >"$fifo" 2>"$dump_err" &`,
+    "dump_pid=$!",
+    "set +e",
+    'mariadb $rootopt --protocol=socket -u root <"$fifo" 2>"$import_err"',
+    "import_rc=$?",
+    "wait $dump_pid",
+    "dump_rc=$?",
+    "set -e",
+    'if [ "$dump_rc" -ne 0 ] || [ "$import_rc" -ne 0 ]; then',
+    '  echo "dump_exit=$dump_rc import_exit=$import_rc" >&2',
+    '  echo "----- dump stderr -----" >&2',
+    '  tail -c 4000 "$dump_err" >&2 || true',
+    "  echo >&2",
+    '  echo "----- import stderr -----" >&2',
+    '  tail -c 4000 "$import_err" >&2 || true',
+    "  exit 1",
     "fi",
   ].join("\n");
+}
+
+async function reassertReplicaPrivilegeGuard(
+  ctx: ManagedEngineContext,
+): Promise<void> {
+  const tsv = await runMariadbQuery(ctx, listNonLocalAccountsSql());
+  await runMariadb(
+    ctx,
+    reassertReplicaPrivilegeGuardSql(parseGlobalPrivAccountRows(tsv)),
+  );
 }
 
 const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
@@ -408,38 +598,14 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     );
   },
 
+  // MariaDB has no physical slots — failover still sends ensureSlots.
+  ensureSlots: () => Promise.resolve(),
+
+  probeStandbyData: (ctx) => probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER),
+
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
-    const volumeArgs: string[] = [];
-    for (const volume of ctx.volumes) {
-      volumeArgs.push("-v", `${volume.name}:${volume.target}`);
-    }
-    const dataRoot = ctx.volumes[0]?.target ?? "/var/lib/mysql";
-    // `test` exit codes alone cannot distinguish "path absent" from "docker
-    // never ran" (e.g. socket permission error) — echo an explicit marker and
-    // require the probe container itself to succeed, so a docker failure
-    // aborts instead of being misread as an uninitialized volume.
-    const probePath = async (flag: string, path: string): Promise<boolean> => {
-      const probe = await ctx.runDocker([
-        "run",
-        "--rm",
-        ...helperLabelArgs("volume-copy"),
-        "--user",
-        ctx.containerUser,
-        ...volumeArgs,
-        ctx.image,
-        "sh",
-        "-c",
-        `test ${flag} ${path} && echo present || echo absent`,
-      ]);
-      if (!probe.success) {
-        throw new Error(
-          `standby data probe failed: ${
-            sanitizeForLog(probe.stderr || probe.stdout || "unknown")
-          }`,
-        );
-      }
-      return probe.stdout.trim().endsWith("present");
-    };
+    const volumeArgs = volumeMountArgs(ctx.volumes);
+    const dataRoot = mysqlFamilyDataRoot(ctx.volumes);
     if (spec.forceResync) {
       // Operator-forced re-seed: wipe the datadir so the entrypoint re-runs
       // initdb and `configureStandby` reseeds (the standby marker is gone).
@@ -465,12 +631,9 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       return "seeded";
     }
 
-    if (await probePath("-d", `${dataRoot}/mysql`)) {
-      if (await probePath("-f", `${dataRoot}/${STANDBY_MARKER}`)) {
-        return "already_standby";
-      }
-      return "needs_resync";
-    }
+    const state = await probeMysqlFamilyStandbyData(ctx, STANDBY_MARKER);
+    if (state === "standby") return "already_standby";
+    if (state === "not_standby") return "needs_resync";
     return "seeded";
   },
 
@@ -480,7 +643,10 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       "-f",
       `/var/lib/mysql/${STANDBY_MARKER}`,
     ]);
-    if (markerCheck.success) return;
+    if (markerCheck.success) {
+      await resumeExistingMariadbStandby(ctx);
+      return;
+    }
 
     // hostaddr is the private listener IP (must match IP SAN); host is the DNS SAN.
     const primaryHost = resolveMariadbPrimaryConnectHost(spec.primary);
@@ -495,6 +661,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       // VERIFY_IDENTITY equivalent (CA validation + hostname check).
       "ssl-verify-server-cert",
       "ssl-ca=/etc/mysql/tls/ca.crt",
+      // No timeout keys here: mariadb-dump rejects connect_timeout and the
+      // net_*_timeout names in [client] (exit 7), and has no --init-command.
       "",
     ].join("\n");
 
@@ -503,14 +671,16 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     // replication is configured.
     await runMariadb(ctx, disableReadOnlySql());
 
-    const seed = await ctx.exec(
-      ["sh", "-c", buildMariadbStandbySeedScript()],
+    const seed = await execStandbySeedWithInitRetry(
+      ctx,
+      buildMariadbStandbySeedScript,
       defaultsBody,
+      () => waitMariadbRealServer(ctx),
     );
     if (!seed.success) {
       throw new Error(
         `mariadb configureStandby seed failed: ${
-          sanitizeForLog(seed.stderr || seed.stdout || "unknown")
+          formatStandbySeedFailure(seed)
         }`,
       );
     }
@@ -518,7 +688,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
     // The seed imported the primary's grant tables (mysql.*) — the running
     // server's in-memory grants do not reload on their own, and monitor /
     // client logins from other hosts stay denied until they do.
-    await runMariadb(ctx, "FLUSH PRIVILEGES;");
+    await runMariadb(ctx, flushPrivilegesLocalSql());
+    await reassertReplicaPrivilegeGuard(ctx);
 
     await runMariadb(
       ctx,
@@ -532,6 +703,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
 
     await runMariadb(ctx, enforceReadOnlySql());
 
+    // Marker first: once replication is configured the seed is done, and a
+    // retry after a slow stream must not throw the data away and reseed.
     const mark = await ctx.exec([
       "sh",
       "-c",
@@ -544,21 +717,126 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
         }`,
       );
     }
+
+    if (!await waitMariadbStandbyStreaming(ctx)) {
+      logWarn(
+        "managed-mariadb",
+        "standby replica not streaming yet after seed; health polling continues",
+      );
+    }
   },
 
-  async promote(ctx) {
-    await runMariadb(ctx, promoteSql());
-    const deadline = Date.now() + 60_000;
-    const writable = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const out = await runMariadbQuery(ctx, isWritableSql());
-      const readOnly = out.trim();
-      if (readOnly === "0") return true;
-      await sleep(500);
-      return writable();
-    };
-    if (await writable()) return;
-    throw new Error("mariadb promote did not become writable within 60s");
+  async quiesceFormerPrimaryForSwitchover(ctx) {
+    return await quiesceAndReadPrimaryGtid(
+      () => runMariadb(ctx, enforceReadOnlySql()),
+      () => runMariadbQuery(ctx, primaryFinalGtidSetSql()),
+      () => runMariadb(ctx, disableReadOnlySql()),
+    );
+  },
+
+  /**
+   * MariaDB has no super_read_only: `read_only` does not bind accounts with
+   * READ ONLY ADMIN (root has it). So a fenced MariaDB counts as writable
+   * unless it is configured as a replica (a re-seed in progress) with
+   * `read_only` on; a hand-started old primary has no replica config and is
+   * stopped by the demoted guard.
+   */
+  async isWritableFormerPrimary(ctx) {
+    const readOnly = await runMariadbQuery(ctx, isWritableSql());
+    if (parseSqlBool(readOnly.trim()) !== true) return true;
+    const replica = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    return replica.trim().length === 0;
+  },
+
+  async enforceFencedFormerPrimaryReadOnly(ctx) {
+    await runMariadb(ctx, enforceReadOnlySql());
+  },
+
+  runAdminScalarQuery(ctx, sql) {
+    return runMariadbQuery(ctx, sql);
+  },
+
+  async assertFormerPrimarySafeToReactivateAfterSwitchoverAbort(ctx) {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    if (verbose.trim().length > 0) {
+      throw new Error(
+        "switchover: former primary is a standby; cannot reactivate after abort",
+      );
+    }
+    const out = await runMariadbQuery(ctx, isWritableSql());
+    if (parseSqlBool(out) !== true) {
+      throw new Error(
+        "switchover: former primary is not read_only; promotion may have started",
+      );
+    }
+  },
+
+  async reactivateFormerPrimaryAfterSwitchoverAbort(ctx) {
+    await runMariadb(ctx, disableReadOnlySql());
+  },
+
+  async promote(ctx, options) {
+    let promoteStarted = false;
+    try {
+      if (options?.requiredExecutedGtidSet) {
+        const received = await runMariadbQuery(
+          ctx,
+          "SELECT @@GLOBAL.gtid_slave_pos;",
+        );
+        const waitSet = filterGtidSetForSwitchoverWait(
+          options.requiredExecutedGtidSet,
+          received,
+        );
+        await waitForRequiredGtidSet(
+          (sql) => runMariadbQuery(ctx, sql),
+          masterGtidWaitSql,
+          waitSet,
+          options.gtidWaitTimeoutSeconds ??
+            SWITCHOVER_GTID_WAIT_DEFAULT_SECONDS,
+          "mariadb",
+        );
+      }
+      promoteStarted = true;
+      await runMariadb(ctx, promoteSql());
+      // Socket admin must keep ALL (including READ_ONLY ADMIN) so a later
+      // demote/seed can still SET GLOBAL read_only. Network accounts keep
+      // the GRANT ALL minus READ_ONLY ADMIN from the primary apply — do not
+      // give them the bypass back.
+      await runMariadb(ctx, ensureSocketAdminSql());
+      const deadline = Date.now() + 60_000;
+      const writable = async (): Promise<boolean> => {
+        if (Date.now() >= deadline) return false;
+        const out = await runMariadbQuery(ctx, isWritableSql());
+        if (parseSqlBool(out) === false) return true;
+        await sleep(500);
+        return writable();
+      };
+      if (await writable()) return;
+      throw new Error("mariadb promote did not become writable within 60s");
+    } catch (error) {
+      if (promoteStarted) {
+        throw new Error(
+          switchoverPromoteErrorMessage(
+            "promote_started",
+            switchoverCaughtErrorDetail(error),
+          ),
+        );
+      }
+      throw error;
+    }
+  },
+
+  async isStandby(ctx) {
+    const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+    return verbose.trim().length > 0;
+  },
+
+  async followPrimary(ctx, spec) {
+    const host = resolveMariadbPrimaryConnectHost(spec.primary);
+    await runMariadb(
+      ctx,
+      followReplicationSourceSql({ host, port: spec.primary.port }),
+    );
   },
 
   async readHealth(ctx, role): Promise<ManagedReplicationObservedHealth> {
@@ -567,12 +845,37 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       return { state: "primary", observedAt };
     }
     try {
-      const verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+      let verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
       if (!verbose.trim()) {
         return { state: "unknown", observedAt };
       }
+      const restarted = await healStoppedReplicaIo({
+        verbose,
+        startSql: startReplicaSql(),
+        logComponent: "managed-mariadb",
+        runSql: (sql) => runMariadb(ctx, sql),
+        pingPrimary: async (host, port) =>
+          replicaPrimaryLooksReachable(
+            await ctx.exec(
+              replicaPrimaryPingArgv(
+                "mariadb-admin",
+                host,
+                port,
+                ctx.rootUsername,
+              ),
+            ),
+          ),
+      });
+      if (restarted) {
+        verbose = await runMariadbStatusQuery(ctx, showReplicaStatusSql());
+      }
       const parsed = parseShowSlaveStatus(verbose);
-      return { ...parsed, observedAt };
+      // Best effort: a failed read leaves the freshness fields out (unknown).
+      const freshness = await runMariadbStatusQuery(
+        ctx,
+        `${showReplicaStatusSql()}\nSELECT @@GLOBAL.gtid_slave_pos AS gtid_slave_pos;`,
+      ).then(parseMariadbFreshness, () => ({}));
+      return { ...parsed, ...freshness, observedAt };
     } catch {
       return { state: "unknown", observedAt };
     }
@@ -587,28 +890,7 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
   defaultDatabase: "appdb",
 
   async waitReady(ctx: ManagedEngineContext): Promise<void> {
-    const deadline = Date.now() + READY_TIMEOUT_MS;
-    let lastError = "mariadb-admin ping did not succeed";
-    const ready = async (): Promise<boolean> => {
-      if (Date.now() >= deadline) return false;
-      const result = await execMariadb(ctx, [
-        "mariadb-admin",
-        "ping",
-        "--protocol=socket",
-        "-u",
-        ctx.rootUsername,
-      ]);
-      if (result.success) return true;
-      lastError = result.stderr || result.stdout || lastError;
-      await sleep(READY_POLL_MS);
-      return ready();
-    };
-    if (await ready()) return;
-    throw new Error(
-      `managed mariadb not ready within ${READY_TIMEOUT_MS}ms: ${
-        sanitizeForLog(lastError)
-      }`,
-    );
+    await waitMariadbRealServer(ctx);
   },
 
   async readCensus(ctx: ManagedEngineContext): Promise<ManagedEngineCensus> {
@@ -642,6 +924,19 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     }
   },
 
+  readPermissions(
+    ctx: ManagedEngineContext,
+    request: ManagedPermissionsReadRequest,
+    clock?: ManagedPermissionsReadClock,
+  ): Promise<ManagedPermissionsEngineReport> {
+    return readMysqlFamilyPermissions(
+      "mariadb",
+      request,
+      (sql) => runMariadbQuery(ctx, sql),
+      clock,
+    );
+  },
+
   async applyCredentials(
     ctx: ManagedEngineContext,
     credentials: ManagedApplyCredential[],
@@ -668,6 +963,41 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     );
   },
 
+  async ensureOrchestratorTopology(
+    ctx: ManagedEngineContext,
+    credentials: { user: string; password: string },
+  ): Promise<void> {
+    const hosts = ctx.clientSourceHosts ?? [];
+    await runMariadb(
+      ctx,
+      ensureOrchestratorTopologyAccountSql(
+        credentials.user,
+        credentials.password,
+        hosts,
+        "mariadb",
+      ),
+    );
+    // Advisory: a table-level grant fails outright on a release that does not
+    // ship `mysql.gtid_slave_pos`, and Orchestrator only warns without it.
+    try {
+      await runMariadb(
+        ctx,
+        grantOrchestratorReplicationTableSql(
+          credentials.user,
+          hosts,
+          "mariadb",
+        ),
+      );
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managed.apply skipped the Orchestrator replication-table grant: ${
+          sanitizeForLog(err instanceof Error ? err.message : String(err))
+        }`,
+      );
+    }
+  },
+
   async applyDatabases(
     ctx: ManagedEngineContext,
     ops: ManagedApplyDatabaseOp[],
@@ -691,7 +1021,14 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
     const dropped: string[] = [];
     await forEachSequential(usernames, async (username) => {
       if (username === ctx.rootUsername) return;
-      await runMariadb(ctx, dropAccountSql(username));
+      await dropUserOnEveryHost({
+        username,
+        fixedHosts: [MANAGED_DOCKER_NETWORK_HOST, "localhost"],
+        quoteLiteral,
+        query: (sql) => runMariadbQuery(ctx, sql),
+        run: (sql) => runMariadb(ctx, sql),
+        dropAccountSql,
+      });
       dropped.push(username);
     });
     return dropped;

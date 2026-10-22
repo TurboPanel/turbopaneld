@@ -2,7 +2,7 @@
  * Deploy payload validators — keep in sync with instance `src/contracts/commands/deploy-validation.ts`.
  */
 
-import { isValidHostname } from "./commands-contracts.ts";
+import { isValidHostname, wwwSiblingHostname } from "./commands-contracts.ts";
 import type {
   EnvironmentDeployHosting,
   EnvironmentDeployStorageMaterial,
@@ -163,6 +163,65 @@ export function validateDeployHostnameRouting(
   return findDuplicateCatchAllHostname(byHostname);
 }
 
+function isHttpHosting(hosting: EnvironmentDeployHosting): boolean {
+  return (hosting.protocol ?? "http") === "http";
+}
+
+function validateWwwHostnames(
+  hosting: EnvironmentDeployHosting,
+  typed: ReadonlySet<string>,
+): string | null {
+  for (const hostname of hosting.hostnames) {
+    const sibling = wwwSiblingHostname(hostname);
+    if (sibling === null) {
+      return `www: ${hostname} has no www or bare spelling to use`;
+    }
+    if (typed.has(sibling)) {
+      return `www: ${sibling} is already a hostname in this environment, so ${hostname} cannot also claim it`;
+    }
+  }
+  return null;
+}
+
+/** Hostings on different paths of one name must make the same www choice. */
+function findMixedWwwModes(
+  hostings: readonly EnvironmentDeployHosting[],
+): string | null {
+  const modeByName = new Map<string, string>();
+  for (const hosting of hostings) {
+    const mode = hosting.www ?? "off";
+    for (const hostname of hosting.hostnames) {
+      const seen = modeByName.get(hostname);
+      if (seen !== undefined && seen !== mode) {
+        return `www: every path of ${hostname} must use the same www choice (found ${seen} and ${mode})`;
+      }
+      modeByName.set(hostname, mode);
+    }
+  }
+  return null;
+}
+
+/**
+ * `www` answers on a second name per hostname, so it only makes sense on
+ * `http`, every such name must be a valid hostname, none may already be a
+ * hostname in the same deploy (that would be two sites for one name), every
+ * path of one name must make the same choice (so one spelling is never a
+ * redirect for one path and the site for another).
+ */
+export function validateDeployWwwModes(
+  hostings: EnvironmentDeployHosting[],
+): string | null {
+  const http = hostings.filter(isHttpHosting);
+  const typed = new Set(http.flatMap((hosting) => hosting.hostnames));
+  for (const hosting of hostings.filter((h) => h.www !== undefined)) {
+    const error = isHttpHosting(hosting)
+      ? validateWwwHostnames(hosting, typed)
+      : "www requires the http protocol";
+    if (error) return error;
+  }
+  return findMixedWwwModes(http);
+}
+
 export function validateDeployTargetPort(
   targetPort: number | undefined,
 ): boolean {
@@ -215,7 +274,10 @@ export function validateDeployHostings(
     const error = validateDeployHostingEntry(hosting);
     if (error) return error;
   }
-  return validateDeployHostnameRouting(hostings);
+  return (
+    validateDeployHostnameRouting(hostings) ??
+      validateDeployWwwModes(hostings)
+  );
 }
 
 function validateStorageKindAndProvider(

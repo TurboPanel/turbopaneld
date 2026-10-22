@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
   BUILD_TIMEOUT_MS,
@@ -257,47 +257,40 @@ test("buildEnvironment drops reserved sandbox keys from payload env", () => {
   assertEquals(env.NODE_OPTIONS, "--max-old-space-size=512");
 });
 
-test("buildInvocation is a bare sh -c without a runtime group", () => {
+test("runReleaseBuild runs every build command with the build.env variables in its environment", async () => {
+  await withWorkingDir(async (workingDir) => {
+    const seen: Array<Record<string, string>> = [];
+    await runReleaseBuild({
+      build: {
+        kind: "native",
+        installCommand: "npm ci",
+        buildCommand: "npm run build",
+        env: {
+          NEXT_PUBLIC_SITE_URL: "https://example.test",
+          NODE_ENV: "development",
+        },
+      },
+      workingDir,
+      runCommand: (_command, _cwd, env) => {
+        seen.push(env);
+        return Promise.resolve();
+      },
+    });
+    assertEquals(seen.length, 2);
+    for (const env of seen) {
+      assertEquals(env.NEXT_PUBLIC_SITE_URL, "https://example.test");
+      assertEquals(env.HOME, workingDir);
+    }
+    // No variable the payload did not carry appears in the build environment.
+    assertEquals(seen[0]!.SOME_RUNTIME_ONLY_VARIABLE, undefined);
+  });
+});
+
+test("buildInvocation is a bare sh -c", () => {
   assertEquals(buildInvocation("npm run build"), {
     bin: "sh",
     args: ["-c", "npm run build"],
   });
-});
-
-test("buildInvocation enters the tenant Node entitlement group via sudo -u self", () => {
-  const identity = {
-    username: "tp",
-    env: {
-      PATH: "/opt/turbopanel/vendor/node-app/24/current/bin:/usr/bin:/bin",
-      HOME: "/tmp/release-build",
-    },
-  };
-  const invoked = buildInvocation(
-    "corepack pnpm install",
-    "tpnode24",
-    identity,
-  );
-  assertEquals(invoked.bin, "/usr/bin/sudo");
-  assertEquals(invoked.args.slice(0, 4), ["-n", "-u", "tp", "--"]);
-  assertEquals(invoked.args.includes("/usr/bin/sg"), false);
-  assertEquals(invoked.args.includes("/usr/bin/env"), true);
-  // `env` gets `--` so no variable name can be read as one of its options.
-  assertEquals(invoked.args[invoked.args.indexOf("/usr/bin/env") + 1], "--");
-  assertEquals(
-    invoked.args.includes(
-      "PATH=/opt/turbopanel/vendor/node-app/24/current/bin:/usr/bin:/bin",
-    ),
-    true,
-  );
-  assertEquals(invoked.args.slice(-3), ["sh", "-c", "corepack pnpm install"]);
-});
-
-test("buildInvocation refuses a native group wrap without the daemon username", () => {
-  assertThrows(
-    () => buildInvocation("corepack pnpm install", "tpnode24"),
-    TypeError,
-    "daemon username",
-  );
 });
 
 test("runReleaseBuild skips empty commands and runs the rest in order", async () => {

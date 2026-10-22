@@ -134,6 +134,47 @@ test("materializeProxySqlTlsMaterial decrypts and writes PEMs with modes", async
   });
 });
 
+test("materializeProxySqlTlsMaterial replaces files through a rename and leaves no temp files", async () => {
+  await withTempDir(async (managedDir) => {
+    const targetDir = join(managedDir, "orchestrator", "tls");
+    const write = (ca: string) =>
+      materializeProxySqlTlsMaterial(
+        targetDir,
+        {
+          certificatePem:
+            "-----BEGIN CERTIFICATE-----\nLEAF\n-----END CERTIFICATE-----\n",
+          privateKeyEnvelope: "tpdaemon.v1.server.KEYID.ciphertext",
+          caCertPem: ca,
+        },
+        () =>
+          Promise.resolve([
+            "-----BEGIN PRIVATE KEY-----\nTEST\n-----END PRIVATE KEY-----\n",
+          ]),
+      );
+    const gen1 =
+      "-----BEGIN CERTIFICATE-----\nGEN1\n-----END CERTIFICATE-----\n";
+    const both =
+      "-----BEGIN CERTIFICATE-----\nGEN2\n-----END CERTIFICATE-----\n" +
+      gen1;
+
+    await write(gen1);
+    const caPath = join(targetDir, "ca.pem");
+    const firstInode = (await Deno.stat(caPath)).ino;
+    await write(both);
+    assertEquals(await Deno.readTextFile(caPath), both);
+    // A new file was renamed in: a reader holding the old one is unaffected.
+    if (firstInode !== null) {
+      assertEquals((await Deno.stat(caPath)).ino === firstInode, false);
+    }
+    assertEquals(await fileMode(caPath), 0o640);
+    assertEquals(await fileMode(join(targetDir, "privkey.pem")), 0o600);
+
+    const names: string[] = [];
+    for await (const entry of Deno.readDir(targetDir)) names.push(entry.name);
+    assertEquals(names.toSorted(), ["ca.pem", "fullchain.pem", "privkey.pem"]);
+  });
+});
+
 test("materializeProxySqlTlsMaterial writes a multi-PEM CA bundle to ca.pem verbatim", async () => {
   await withTempDir(async (managedDir) => {
     const targetDir = join(managedDir, "tls", "proxysql");

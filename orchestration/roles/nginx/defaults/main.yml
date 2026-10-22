@@ -3,9 +3,13 @@
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
 # Pinned nginx.org stable package (extracted with dpkg-deb -x — never apt-installed).
 nginx_version: "1.28.3"
-nginx_deb_version: "1.28.3-1~bookworm"
-# nginx.org still publishes bookworm packages; they run on Debian 13 (trixie).
-nginx_deb_dist: "bookworm"
+nginx_deb_version: "1.28.3-1~trixie"
+# The nginx.org build made for Debian 13 (trixie), the only supported release.
+nginx_deb_dist: "trixie"
+# SHA-256 of each .deb, from the nginx.org package index for trixie.
+nginx_deb_sha256:
+  amd64: "6a562adf5e1a5d1b54d58496d4eb95ee272c04548822736e620731511108a731"
+  arm64: "494d5e36c799725d773584d59cc16ae048d223d415e883d021158a03e6317046"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 
@@ -18,3 +22,8 @@ turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
+
+# systemd RuntimeDirectory= name (under /run). Top level on purpose, like
+# Apache's: systemd recreates it on every start, so the pidfile directory
+# survives a reboot (/run is tmpfs) without the role having to run first.
+nginx_runtime_directory: turbopanel-nginx

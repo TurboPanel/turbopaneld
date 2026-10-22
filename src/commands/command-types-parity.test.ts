@@ -4,11 +4,13 @@ import {
   type CommandAckMessage,
   type CommandDispatchMessage,
   type CommandOutcomeMessage,
+  FOLDERS_REMOVE_MAX,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
   parseFabricReconcilePayload,
   parseFabricReconcileResult,
+  parseFoldersRemovePayload,
   parseManagedApplyPayload,
   parseManagedApplyResult,
   parseManagedBackupPayload,
@@ -57,6 +59,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -1749,13 +1752,10 @@ test("managed.apply enforces the engine image allowlist", () => {
     }).image,
     "docker.io/library/mysql:9.7",
   );
-  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog; 8.4 is
-  // catalogued but untested, and is refused for the same reason.
+  // MySQL 8.0 went EOL in April 2026 and is absent from the catalog.
   for (
     const image of [
       "docker.io/library/mysql:8.0",
-      "docker.io/library/mysql:8.4",
-      "docker.io/library/mysql:8.4-oraclelinux9",
     ]
   ) {
     assertThrows(
@@ -1824,6 +1824,22 @@ test("managed.apply admits exactly the tested series and their variants", () => 
       image: "docker.io/library/mariadb:12.3-ubi",
       username: "root",
     },
+    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
+    {
+      engine: "mysql",
+      image: "docker.io/library/mysql:8.4-oraclelinux9",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8",
+      username: "root",
+    },
+    {
+      engine: "mariadb",
+      image: "docker.io/library/mariadb:11.8-ubi",
+      username: "root",
+    },
   ];
   for (const row of catalog) {
     assertEquals(
@@ -1861,12 +1877,6 @@ test("managed.apply admits exactly the tested series and their variants", () => 
       engine: "postgres",
       image: "docker.io/library/postgres:15-alpine",
       username: "postgres",
-    },
-    { engine: "mysql", image: "docker.io/library/mysql:8.4", username: "root" },
-    {
-      engine: "mariadb",
-      image: "docker.io/library/mariadb:11.8",
-      username: "root",
     },
     {
       engine: "mariadb",
@@ -2171,8 +2181,34 @@ test("managed.lifecycle fixture round-trips and rejects invalid action", () => {
     parseManagedLifecyclePayload({ managedId: "m1", action: "stop" }),
     { managedId: "m1", action: "stop" },
   );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: true,
+    }),
+    { managedId: "m1", action: "stop", demoted: true },
+  );
+  assertEquals(
+    parseManagedLifecyclePayload({
+      managedId: "m1",
+      action: "stop",
+      demoted: false,
+    }),
+    { managedId: "m1", action: "stop" },
+  );
   assertThrows(
     () => parseManagedLifecyclePayload({ managedId: "m1", action: "pause" }),
+    TypeError,
+    "Invalid managed.lifecycle payload",
+  );
+  assertThrows(
+    () =>
+      parseManagedLifecyclePayload({
+        managedId: "m1",
+        action: "stop",
+        demoted: "yes",
+      }),
     TypeError,
     "Invalid managed.lifecycle payload",
   );
@@ -3057,6 +3093,15 @@ test("managed.ha.failover round-trips drain and recover hosts", () => {
   });
   assertEquals(drain.phase, "drain");
   assertEquals(drain.sourceHost, "db-1");
+  const undrain = parseManagedHaFailoverPayload({
+    managedId: "00000000-0000-4000-8000-000000000001",
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+    phase: "undrain",
+    sourceHost: "db-1",
+    sourcePort: 5432,
+  });
+  assertEquals(undrain.phase, "undrain");
   const recover = parseManagedHaFailoverPayload({
     managedId: "00000000-0000-4000-8000-000000000001",
     sourceMemberId: "00000000-0000-4000-8000-000000000002",
@@ -3069,6 +3114,20 @@ test("managed.ha.failover round-trips drain and recover hosts", () => {
   });
   assertEquals(recover.phase, "recover");
   assertEquals(recover.targetHost, "203.0.113.11");
+  const repoint = parseManagedHaFailoverPayload({
+    managedId: "00000000-0000-4000-8000-000000000001",
+    sourceMemberId: "00000000-0000-4000-8000-000000000002",
+    targetMemberId: "00000000-0000-4000-8000-000000000003",
+    phase: "repoint",
+    targetHost: "203.0.113.11",
+    targetPort: 5432,
+    targetHostaddr: "10.100.0.4",
+    ensureSlots: ["tp_member_1", "tp_member_3"],
+  });
+  assertEquals(repoint.phase, "repoint");
+  assertEquals(repoint.targetHost, "203.0.113.11");
+  assertEquals(repoint.targetHostaddr, "10.100.0.4");
+  assertEquals(repoint.ensureSlots, ["tp_member_1", "tp_member_3"]);
 });
 
 test("managed.ha.reconcile and failover result parsers reject invalid shapes", () => {
@@ -3080,6 +3139,19 @@ test("managed.ha.reconcile and failover result parsers reject invalid shapes", (
     }).restarted,
     false,
   );
+  assertEquals(
+    parseManagedHaReconcileResult({
+      summary: "partial",
+      registeredClusters: ["00000000-0000-4000-8000-000000000001"],
+      failedClusters: [{
+        managedId: "00000000-0000-4000-8000-000000000002",
+        error: "HTTP 500",
+      }],
+      partial: true,
+      restarted: false,
+    }).failedClusters?.[0]?.error,
+    "HTTP 500",
+  );
   assertThrows(
     () =>
       parseManagedHaReconcileResult({
@@ -3090,12 +3162,34 @@ test("managed.ha.reconcile and failover result parsers reject invalid shapes", (
     TypeError,
     "Invalid managed.ha.reconcile result",
   );
+  assertThrows(
+    () =>
+      parseManagedHaReconcileResult({
+        summary: "not partial",
+        registeredClusters: [],
+        failedClusters: [{
+          managedId: "00000000-0000-4000-8000-000000000002",
+          error: "HTTP 500",
+        }],
+        partial: false,
+        restarted: false,
+      }),
+    TypeError,
+    "Invalid managed.ha.reconcile result",
+  );
   assertEquals(
     parseManagedHaFailoverResult({
       summary: "ok",
       phase: "drain",
     }).phase,
     "drain",
+  );
+  assertEquals(
+    parseManagedHaFailoverResult({
+      summary: "repointed",
+      phase: "repoint",
+    }).phase,
+    "repoint",
   );
   assertThrows(
     () =>
@@ -3285,4 +3379,71 @@ Deno.test("environment.deploy payload parses the sequential strategy fields", ()
   ) {
     assertThrows(() => parseEnvironmentDeployPayload({ ...base, ...bad }));
   }
+});
+
+const REMOVE_ASSET = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+
+test("server.folders.remove payload parser round-trips and refuses bad entries", () => {
+  const folder = { owner: "alice", scope: "production", slug: "uploads" };
+  assertEquals(
+    parseFoldersRemovePayload({
+      folders: [
+        { kind: "volume", folder },
+        { kind: "volume", folder, assetId: REMOVE_ASSET },
+        {
+          kind: "service",
+          assetId: REMOVE_ASSET,
+          folder: { ...folder, slug: "example.com" },
+        },
+      ],
+    }),
+    {
+      folders: [
+        { kind: "volume", folder },
+        { kind: "volume", folder, assetId: REMOVE_ASSET },
+        {
+          kind: "service",
+          assetId: REMOVE_ASSET,
+          folder: { ...folder, slug: "example.com" },
+        },
+      ],
+    },
+  );
+  for (
+    const bad of [
+      null,
+      {},
+      { folders: [] },
+      { folders: "x" },
+      { folders: [{ kind: "other", folder }] },
+      { folders: [{ kind: "volume" }] },
+      { folders: [{ kind: "volume", folder, assetId: "../x" }] },
+      { folders: [{ kind: "volume", folder, assetId: 7 }] },
+      {
+        folders: [{ kind: "volume", folder: { ...folder, scope: "volumes" } }],
+      },
+      { folders: [{ kind: "volume", folder: { ...folder, slug: "../x" } }] },
+      { folders: [{ kind: "volume", folder: { ...folder, owner: "Alice" } }] },
+      // A path is never a reference.
+      { folders: [{ kind: "volume", folder: { ...folder, path: "/etc" } }] },
+    ]
+  ) {
+    assertThrows(
+      () => parseFoldersRemovePayload(bad),
+      TypeError,
+      undefined,
+      JSON.stringify(bad),
+    );
+  }
+  assertThrows(
+    () =>
+      parseFoldersRemovePayload({
+        folders: Array.from({ length: FOLDERS_REMOVE_MAX + 1 }, () => ({
+          kind: "volume",
+          folder,
+        })),
+      }),
+    TypeError,
+    "1 to 100",
+  );
 });

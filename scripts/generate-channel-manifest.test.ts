@@ -25,6 +25,9 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+const TEST_ARTIFACT_BASE =
+  "https://github.com/TurboPanel/turbopaneld/releases/download/canary";
+
 test("requireEnv returns present values and rejects blanks", () => {
   assertEquals(requireEnv("BUILD_ID", () => "abc"), "abc");
   assertThrows(
@@ -48,12 +51,11 @@ test("artifactFromPublishFile hashes a file and rejects empty or missing", async
     const entry = await artifactFromPublishFile(
       dir,
       filename,
-      "https://dl.trbp.nl/channels/trunk/daemon",
-      "build-9",
+      TEST_ARTIFACT_BASE,
     );
     assertEquals(
       entry.url,
-      "https://dl.trbp.nl/channels/trunk/daemon/build-9/turbopaneld-amd64.tar.zst",
+      `${TEST_ARTIFACT_BASE}/turbopaneld-amd64.tar.zst`,
     );
     assertEquals(entry.size, 4);
     assertEquals(entry.sha256.length, 64);
@@ -64,8 +66,7 @@ test("artifactFromPublishFile hashes a file and rejects empty or missing", async
         artifactFromPublishFile(
           dir,
           "empty.tar.zst",
-          "https://dl.trbp.nl/channels/trunk/daemon",
-          "build-9",
+          TEST_ARTIFACT_BASE,
         ),
       TypeError,
       "Empty publish artifact",
@@ -75,8 +76,7 @@ test("artifactFromPublishFile hashes a file and rejects empty or missing", async
         artifactFromPublishFile(
           dir,
           "missing.tar.zst",
-          "https://dl.trbp.nl/channels/trunk/daemon",
-          "build-9",
+          TEST_ARTIFACT_BASE,
         ),
     );
   } finally {
@@ -103,6 +103,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
       publishDir: dir,
       outputPath: join(dir, "manifest.json"),
       buildId: "b1",
+      artifactBaseUrl: TEST_ARTIFACT_BASE,
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
       signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
@@ -121,6 +122,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
     await generateChannelManifest({
       publishDir: dir,
       buildId: "b1",
+      artifactBaseUrl: TEST_ARTIFACT_BASE,
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
       signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
@@ -139,6 +141,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
       publishDir: dir,
       outputPath: writtenPath,
       buildId: "b2",
+      artifactBaseUrl: TEST_ARTIFACT_BASE,
       commit: "def5678123456789abcdef0123456789abcdef01",
       builtAt: "2026-02-02T00:00:00.000Z",
       signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
@@ -146,7 +149,7 @@ test("generateChannelManifest writes a file or stdout", async () => {
     assertEquals(defaults.defaultControlPlaneUrl, "https://turbopanel.app");
     assertEquals(
       defaults.binaryArtifacts["linux-amd64"].url.startsWith(
-        "https://dl.trbp.nl/channels/trunk/daemon/b2/",
+        `${TEST_ARTIFACT_BASE}/`,
       ),
       true,
     );
@@ -191,6 +194,7 @@ test("generateChannelManifest honors channel and version for a tagged release", 
     const manifest = await generateChannelManifest({
       publishDir: dir,
       buildId: "b-rc1",
+      artifactBaseUrl: TEST_ARTIFACT_BASE,
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
       signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
@@ -202,7 +206,7 @@ test("generateChannelManifest honors channel and version for a tagged release", 
     assertEquals(manifest.version, "0.1.0-rc1");
     assertEquals(
       manifest.binaryArtifacts["linux-amd64"].url,
-      "https://dl.trbp.nl/channels/rc/daemon/b-rc1/turbopaneld-0.1.0-rc1-amd64.tar.zst",
+      `${TEST_ARTIFACT_BASE}/turbopaneld-0.1.0-rc1-amd64.tar.zst`,
     );
     assertEquals(
       manifest.jsFallbackArtifact.url.endsWith(
@@ -294,8 +298,7 @@ test("artifactFromPublishFile wraps non-Error read failures", async () => {
         artifactFromPublishFile(
           dir,
           "missing.tar.zst",
-          "https://dl.trbp.nl/channels/trunk/daemon",
-          "build-9",
+          TEST_ARTIFACT_BASE,
         ),
       TypeError,
       "disk-down",
@@ -307,13 +310,19 @@ test("artifactFromPublishFile wraps non-Error read failures", async () => {
 });
 
 test("runGenerateChannelManifestCli reads Deno.env when io.env is omitted", async () => {
-  const keys = ["BUILD_ID", "GIT_COMMIT", "BUILT_AT"] as const;
+  const keys = [
+    "BUILD_ID",
+    "GIT_COMMIT",
+    "BUILT_AT",
+    "ARTIFACT_BASE_URL",
+  ] as const;
   const previous = Object.fromEntries(
     keys.map((key) => [key, Deno.env.get(key)]),
   );
   Deno.env.set("BUILD_ID", "env-build");
   Deno.env.set("GIT_COMMIT", "abcdef0123456789abcdef0123456789abcdef01");
   Deno.env.set("BUILT_AT", "2026-01-01T00:00:00.000Z");
+  Deno.env.set("ARTIFACT_BASE_URL", TEST_ARTIFACT_BASE);
   const seen: string[] = [];
   try {
     await runGenerateChannelManifestCli({
@@ -353,6 +362,7 @@ test("runGenerateChannelManifestCli requires a publish dir and env", async () =>
       BUILD_ID: "b1",
       GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
+      ARTIFACT_BASE_URL: TEST_ARTIFACT_BASE,
     },
     args: [],
     error: (message) => {
@@ -386,7 +396,7 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
       BUILD_ID: "b1",
       GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
-      DL_BASE_URL: "  ",
+      ARTIFACT_BASE_URL: TEST_ARTIFACT_BASE,
       TURBOPANEL_DEFAULT_CONTROL_PLANE_URL: "\t",
     },
     args: ["/tmp/publish", "/tmp/manifest.json"],
@@ -395,7 +405,6 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
     },
     generate: (options) => {
       seen.push({
-        dlBaseUrl: options.dlBaseUrl,
         defaultControlPlaneUrl: options.defaultControlPlaneUrl,
         outputPath: options.outputPath,
       });
@@ -416,7 +425,6 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
   });
   assertEquals(exits, []);
   assertEquals(seen[0], {
-    dlBaseUrl: "https://dl.trbp.nl",
     defaultControlPlaneUrl: "https://turbopanel.app",
     outputPath: "/tmp/manifest.json",
   });
@@ -426,13 +434,12 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
       BUILD_ID: "b1",
       GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
-      DL_BASE_URL: "https://cdn.example",
+      ARTIFACT_BASE_URL: TEST_ARTIFACT_BASE,
       TURBOPANEL_DEFAULT_CONTROL_PLANE_URL: "https://panel.example",
     },
     args: ["/tmp/publish"],
     generate: (options) => {
       seen.push({
-        dlBaseUrl: options.dlBaseUrl,
         defaultControlPlaneUrl: options.defaultControlPlaneUrl,
       });
       return Promise.resolve({
@@ -451,7 +458,6 @@ test("runGenerateChannelManifestCli forwards defaults and overrides", async () =
     },
   });
   assertEquals(seen[1], {
-    dlBaseUrl: "https://cdn.example",
     defaultControlPlaneUrl: "https://panel.example",
   });
 });
@@ -480,6 +486,7 @@ test("runGenerateChannelManifestCli defaults CHANNEL to trunk and forwards RELEA
       BUILD_ID: "b1",
       GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
+      ARTIFACT_BASE_URL: TEST_ARTIFACT_BASE,
     },
     args: ["/tmp/publish"],
     generate: (options) => {
@@ -494,6 +501,7 @@ test("runGenerateChannelManifestCli defaults CHANNEL to trunk and forwards RELEA
       BUILD_ID: "b1",
       GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
+      ARTIFACT_BASE_URL: TEST_ARTIFACT_BASE,
       CHANNEL: "rc",
       RELEASE_VERSION: "0.1.0-rc1",
     },
@@ -506,14 +514,14 @@ test("runGenerateChannelManifestCli defaults CHANNEL to trunk and forwards RELEA
   assertEquals(seen[1], { channel: "rc", version: "0.1.0-rc1" });
 });
 
-test("runGenerateChannelManifestCli forwards ARTIFACT_BASE_URL only when set", async () => {
-  const seen: Array<string | undefined> = [];
+test("runGenerateChannelManifestCli forwards ARTIFACT_BASE_URL and refuses to run without it", async () => {
+  const seen: string[] = [];
   const generate = (
     options: {
       commit: string;
       buildId: string;
       builtAt: string;
-      artifactBaseUrl?: string;
+      artifactBaseUrl: string;
     },
   ): Promise<ChannelManifest> => {
     seen.push(options.artifactBaseUrl);
@@ -535,6 +543,7 @@ test("runGenerateChannelManifestCli forwards ARTIFACT_BASE_URL only when set", a
     BUILD_ID: "b1",
     GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
     BUILT_AT: "2026-01-01T00:00:00.000Z",
+    ARTIFACT_BASE_URL: TEST_ARTIFACT_BASE,
   };
   await runGenerateChannelManifestCli({
     env,
@@ -551,9 +560,21 @@ test("runGenerateChannelManifestCli forwards ARTIFACT_BASE_URL only when set", a
     generate,
   });
   assertEquals(seen, [
-    undefined,
+    TEST_ARTIFACT_BASE,
     "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.0",
   ]);
+  const exits: number[] = [];
+  const { ARTIFACT_BASE_URL: _omitted, ...withoutBase } = env;
+  await runGenerateChannelManifestCli({
+    env: withoutBase,
+    args: ["/tmp/publish"],
+    generate,
+    exit: (code) => {
+      exits.push(code);
+    },
+  });
+  assertEquals(exits, [1]);
+  assertEquals(seen.length, 2);
 });
 
 test("generateChannelManifest default stdout writer encodes JSON", async () => {
@@ -578,6 +599,7 @@ test("generateChannelManifest default stdout writer encodes JSON", async () => {
     await generateChannelManifest({
       publishDir: dir,
       buildId: "b3",
+      artifactBaseUrl: TEST_ARTIFACT_BASE,
       commit: "aaa1111123456789abcdef0123456789abcdef01",
       builtAt: "2026-03-03T00:00:00.000Z",
       signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
@@ -615,6 +637,7 @@ test("generateChannelManifest signs the finished manifest with the release key",
       publishDir: dir,
       outputPath: join(dir, "manifest.json"),
       buildId: "b-signed",
+      artifactBaseUrl: TEST_ARTIFACT_BASE,
       commit: "abcdef0123456789abcdef0123456789abcdef01",
       builtAt: "2026-01-01T00:00:00.000Z",
       signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
@@ -659,6 +682,7 @@ test("generateChannelManifest refuses to write an unsigned manifest", async () =
           publishDir: dir,
           outputPath: join(dir, "manifest.json"),
           buildId: "b-unsigned",
+          artifactBaseUrl: TEST_ARTIFACT_BASE,
           commit: "abcdef0123456789abcdef0123456789abcdef01",
           builtAt: "2026-01-01T00:00:00.000Z",
           writeTextFile: (_path, json) => {
@@ -684,6 +708,7 @@ test("the CLI threads RELEASE_SIGNING_KEY into the generator", async () => {
       BUILD_ID: "b1",
       GIT_COMMIT: "abcdef0123456789abcdef0123456789abcdef01",
       BUILT_AT: "2026-01-01T00:00:00.000Z",
+      ARTIFACT_BASE_URL: TEST_ARTIFACT_BASE,
       RELEASE_SIGNING_KEY: TEST_RELEASE_SIGNING_KEY_PEM,
     },
     args: ["/tmp/publish"],

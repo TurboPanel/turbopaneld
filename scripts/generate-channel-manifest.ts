@@ -63,7 +63,6 @@ export async function artifactFromPublishFile(
   publishDir: string,
   filename: string,
   urlBase: string,
-  buildId?: string,
 ): Promise<ArtifactEntry> {
   const path = `${publishDir}/${filename}`;
   let data: Uint8Array;
@@ -82,12 +81,10 @@ export async function artifactFromPublishFile(
   copy.set(data);
   const digest = await crypto.subtle.digest("SHA-256", copy);
   return {
-    // CDN drops version artifact paths by buildId — Bunny CDN ignores
-    // ?build= cache-bust params. A GitHub Release is already immutable per
-    // tag, so its base carries the filename directly.
-    url: buildId
-      ? `${urlBase}/${buildId}/${filename}`
-      : `${urlBase}/${filename}`,
+    // A GitHub Release download path is immutable per tag (or carries
+    // build-unique asset names on the rolling canary), so the base carries
+    // the filename directly.
+    url: `${urlBase}/${filename}`,
     sha256: encodeHex(new Uint8Array(digest)),
     size: data.byteLength,
   };
@@ -99,9 +96,8 @@ export async function generateChannelManifest(options: {
   buildId: string;
   commit: string;
   builtAt: string;
-  dlBaseUrl?: string;
   defaultControlPlaneUrl?: string;
-  /** Which channel this manifest publishes to. Default `"trunk"` — unchanged trunk behavior. */
+  /** Which channel this manifest publishes to. Default `"trunk"` (a label only; both workflows set it). */
   channel?: UpdateChannel;
   /**
    * Release version (e.g. `0.1.0-rc1`), present only for a tagged release
@@ -111,13 +107,12 @@ export async function generateChannelManifest(options: {
    */
   version?: string;
   /**
-   * Where the assets are downloaded from, verbatim — `<base>/<filename>`
-   * with no buildId segment. Set by the GitHub Release job to the
-   * tag-pinned `releases/download/v<version>` path (see
-   * `githubReleaseDownloadBase`); unset, the CDN drop's
-   * `<dlBaseUrl>/channels/<channel>/daemon/<buildId>/…` scheme applies.
+   * Where the assets are downloaded from, verbatim — `<base>/<filename>`.
+   * The GitHub Release job passes the tag-pinned
+   * `releases/download/v<version>` path (see `githubReleaseDownloadBase`);
+   * the canary build passes the rolling `releases/download/canary` path.
    */
-  artifactBaseUrl?: string;
+  artifactBaseUrl: string;
   /**
    * PKCS#8 PEM of the offline release signing key. The finished manifest is
    * signed with it (see src/update/signing.ts) after every artifact entry is
@@ -129,34 +124,27 @@ export async function generateChannelManifest(options: {
   writeStdout?: (json: string) => Promise<void>;
 }): Promise<ChannelManifest> {
   const channel: UpdateChannel = options.channel ?? "trunk";
-  const artifactBase = options.artifactBaseUrl ??
-    `${options.dlBaseUrl ?? "https://dl.trbp.nl"}/channels/${channel}/daemon`;
-  // Only the CDN scheme segments by buildId.
-  const buildIdSegment = options.artifactBaseUrl ? undefined : options.buildId;
+  const artifactBase = options.artifactBaseUrl;
 
   const binaryAmd64 = await artifactFromPublishFile(
     options.publishDir,
     daemonReleaseFilename("amd64", options.version),
     artifactBase,
-    buildIdSegment,
   );
   const binaryArm64 = await artifactFromPublishFile(
     options.publishDir,
     daemonReleaseFilename("arm64", options.version),
     artifactBase,
-    buildIdSegment,
   );
   const jsFallback = await artifactFromPublishFile(
     options.publishDir,
     jsReleaseFilename(options.version),
     artifactBase,
-    buildIdSegment,
   );
   const orchestration = await artifactFromPublishFile(
     options.publishDir,
     orchestrationReleaseFilename(options.version),
     artifactBase,
-    buildIdSegment,
   );
 
   const unsigned: ChannelManifest = {
@@ -237,8 +225,6 @@ export async function runGenerateChannelManifestCli(
     const GIT_COMMIT = requireEnv("GIT_COMMIT", getEnv);
     const BUILT_AT = requireEnv("BUILT_AT", getEnv);
 
-    const DL_BASE_URL = getEnv("DL_BASE_URL")?.trim() ||
-      "https://dl.trbp.nl";
     const DEFAULT_CONTROL_PLANE_URL =
       getEnv("TURBOPANEL_DEFAULT_CONTROL_PLANE_URL")?.trim() ||
       "https://turbopanel.app";
@@ -246,10 +232,9 @@ export async function runGenerateChannelManifestCli(
     const CHANNEL = (getEnv("CHANNEL")?.trim() ||
       "trunk") as UpdateChannel;
     const VERSION = getEnv("RELEASE_VERSION")?.trim() || undefined;
-    // Set by release.yml to the tag-pinned GitHub download path; the trunk
-    // drop leaves it unset and keeps the CDN scheme.
-    const ARTIFACT_BASE_URL = getEnv("ARTIFACT_BASE_URL")?.trim() ||
-      undefined;
+    // Required: the tag-pinned GitHub download path (release.yml) or the
+    // rolling canary's (publish-daemon-trunk.yml). No built-in host exists.
+    const ARTIFACT_BASE_URL = requireEnv("ARTIFACT_BASE_URL", getEnv);
     // The offline release key. Absent → generate() refuses (fail closed);
     // there is no unsigned production manifest.
     const SIGNING_KEY = getEnv(RELEASE_SIGNING_KEY_ENV);
@@ -271,7 +256,6 @@ export async function runGenerateChannelManifestCli(
       buildId: BUILD_ID,
       commit: GIT_COMMIT,
       builtAt: BUILT_AT,
-      dlBaseUrl: DL_BASE_URL,
       defaultControlPlaneUrl: DEFAULT_CONTROL_PLANE_URL,
       channel: CHANNEL,
       version: VERSION,

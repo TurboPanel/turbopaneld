@@ -91,3 +91,39 @@ test("collectBlockTopology: partitions of a kept whole disk are not inventory", 
   });
   assertEquals(devices.map((d) => d.kernelName), ["sda"]);
 });
+
+test("collectBlockTopology: dm-10 / md127 / nvme0n10 are whole devices, not partitions of dm-1 / md1 / nvme0n1", async () => {
+  const names = [
+    "dm-1",
+    "dm-10",
+    "md1",
+    "md127",
+    "nvme0n1",
+    "nvme0n10",
+    "nvme0n1p1",
+    "sda",
+    "sda1",
+  ];
+  const diskstats = names.map((name, i) =>
+    `${259} ${i} ${name} 10 0 80 5 10 0 80 5 0 10 10`
+  ).join("\n");
+  const devices = await collectBlockTopology({
+    readProcFile: (path) => path === "/proc/diskstats" ? diskstats : undefined,
+    io: { listDir: () => [], readFile: () => undefined },
+    sysRoot: "/nonexistent",
+    serviceDeviceNames: ["dm-1", "dm-10", "md1", "md127", "nvme0n10", "sda1"],
+  });
+  const kept = devices.map((d) => d.kernelName).sort();
+  assertEquals(kept, [
+    "dm-1",
+    "dm-10",
+    "md1",
+    "md127",
+    "nvme0n1",
+    "nvme0n10",
+    "sda",
+  ]);
+  const byName = new Map(devices.map((d) => [d.kernelName, d]));
+  assertEquals(byName.get("dm-10")?.isServiceDevice, true);
+  assertEquals(byName.get("sda")?.isServiceDevice, true);
+});

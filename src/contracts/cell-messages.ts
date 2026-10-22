@@ -16,6 +16,26 @@ import type {
 import type { HardwareProfile } from "../metrics/collector/types.ts";
 import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
 import type { TopologySnapshot } from "./topology-types.ts";
+import type { ManagedPermissionsObserved } from "./managed-permissions-observed.ts";
+export {
+  OBSERVED_LEVELS,
+  OBSERVED_MAX_COLUMNS,
+  OBSERVED_MAX_DATABASES,
+  OBSERVED_MAX_GRANTS_PER_LOGIN,
+  OBSERVED_MAX_LOGINS,
+  OBSERVED_MAX_NAME_CHARS,
+  OBSERVED_MAX_PRIVILEGES,
+} from "./managed-permissions-observed.ts";
+export type {
+  ManagedPermissionsObserved,
+  ObservedAccount,
+  ObservedAttributes,
+  ObservedDefaultGrant,
+  ObservedGrant,
+  ObservedLevel,
+  ObservedLogin,
+  ObservedMembership,
+} from "./managed-permissions-observed.ts";
 
 /**
  * Attach acknowledgement. Twin of `CellAttachVersionMessage` in
@@ -35,11 +55,47 @@ export type CellAttachVersionMessage = {
   features?: string[];
 };
 
+/** One replica in a `managed-health-report`: `down`, or its reading. */
+export type ManagedHealthReportMember = {
+  managedId: string;
+  memberId: string;
+  /** The engine is not running or not answering. */
+  down?: true;
+  replication?: NonNullable<ManagedMemberObservedResult["replication"]>;
+};
+
+/**
+ * Commands this daemon still owes the control plane (feature
+ * `command-recovery-v1`), sent on `hello` and `heartbeat` when either list is
+ * not empty. `running` holds the ids of commands accepted and not finished
+ * (including any waiting behind another build); `unacked` holds the ids whose
+ * final `command-outcome` is kept on disk until a
+ * {@link CommandOutcomeAckMessage} arrives. At most 64 ids of 64 characters
+ * each per list. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandRecoveryReport = {
+  running: string[];
+  unacked: string[];
+};
+
+/**
+ * Control plane → daemon: the final outcome of command `id` is stored, so the
+ * daemon may drop its journaled copy. Until it arrives the daemon sends the
+ * outcome again on every attach and every 30 seconds. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandOutcomeAckMessage = {
+  type: "command-outcome-ack";
+  id: string;
+  at: string;
+};
+
 /** Daemon → control plane hello. `features` is the advertised wire set. */
 export type DaemonHelloMessage = {
   type: "hello";
   at: string;
   features?: string[];
+  commands?: CommandRecoveryReport;
 };
 
 /** Control-plane → daemon self-update. Optional pin fields are expand-only. */
@@ -110,6 +166,92 @@ export type UpdateProgressMessage = {
   at: string;
   detail?: string;
   errorCode?: string;
+  /**
+   * How the daemon's own restart went, sent with a `failed` stage whose
+   * `errorCode` is `restart_failed`. Optional: an older control plane ignores
+   * it and an older daemon never sends it.
+   */
+  restart?: UpdateRestartReport;
+};
+
+/** Diagnostics for a daemon restart that was reported as failed. */
+export type UpdateRestartReport = {
+  /** `enable` or `restart`: the `systemctl` verb that failed. */
+  command?: string;
+  exitCode?: number;
+  signal?: string;
+  stderr?: string;
+  /** Times the command ran (2 after the one retry). */
+  attempts: number;
+  elapsedMs: number;
+};
+
+/** Longest `steps[]` a `command-progress` payload carries. */
+export const COMMAND_PROGRESS_MAX_STEPS = 24;
+export const COMMAND_PROGRESS_MAX_ID_CHARS = 64;
+export const COMMAND_PROGRESS_MAX_LABEL_CHARS = 60;
+export const COMMAND_PROGRESS_MAX_DETAIL_CHARS = 200;
+/** Whole serialised payload, in bytes. */
+export const COMMAND_PROGRESS_MAX_BYTES = 8 * 1024;
+
+export type CommandProgressStepState =
+  /** Already on the server, nothing to do (shown ticked from the start). */
+  | "ready"
+  /** Planned, not started. */
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  /** Never ran because an earlier step failed or the deploy was cancelled. */
+  | "skipped";
+
+/**
+ * One step of a command's plan. Twin of `CommandProgressStep` in
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandProgressStep = {
+  /** Stable id: a kind, optionally `:` and a target (`install-php:8.3`). */
+  id: string;
+  /** Plain words, user facing, no vendor platform names. */
+  label: string;
+  state: CommandProgressStepState;
+  /** ISO 8601. */
+  startedAt?: string;
+  /** ISO 8601. */
+  finishedAt?: string;
+  /** Live ticker text for the running step (the current playbook task). */
+  detail?: string;
+};
+
+export type CommandProgress = {
+  version: 1;
+  /** In execution order. */
+  steps: CommandProgressStep[];
+  /** Id of the running step, or null when none is running. */
+  current: string | null;
+  /** ISO 8601. */
+  updatedAt: string;
+  /**
+   * When the server began actually running this command, or `null` while it
+   * waits for the host (another build holds the single build slot). Absent
+   * from a daemon that does not report it. The control plane starts the
+   * command's run deadline from here, so waiting never counts against it.
+   */
+  runningSince?: string | null;
+};
+
+/**
+ * Daemon → control plane step plan and live progress of one command.
+ * Fire-and-forget like `update-progress`: a lost message is harmless because
+ * every message carries the whole payload.
+ */
+export type CommandProgressMessage = {
+  type: "command-progress";
+  /** Correlation id, like `update-progress.id`. */
+  id: string;
+  commandId: string;
+  at: string;
+  progress: CommandProgress;
 };
 
 /**
@@ -170,6 +312,8 @@ export type BackupRunReportMessage = {
   sizeBytes?: number;
   checksum?: string;
   path?: string;
+  /** The database a managed engine's run dumped; absent for storage copies. */
+  database?: string;
   /** `bk_` ids this run's retention removed from the policy's directory. */
   pruned?: string[];
   /** When the policy's timer next fires, read from systemd after the run. */
@@ -187,6 +331,36 @@ export type BackupRunReportResultMessage = {
   type: "backup-run-report-result";
   id: string;
   ok: boolean;
+  error?: string;
+  at: string;
+};
+
+/**
+ * Control plane → daemon: read what these logins may do right now (feature
+ * `managed-permissions-read-v1`). Read only: the daemon runs SELECT / SHOW
+ * statements and nothing else. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type ManagedPermissionsRequestMessage = {
+  type: "managed-permissions-request";
+  id: string;
+  managedId: string;
+  engine: string;
+  /** Applied engine usernames (up to {@link OBSERVED_MAX_LOGINS}). */
+  logins: string[];
+  /** Postgres: databases whose objects to read. Ignored for MySQL and MariaDB. */
+  databases: string[];
+  at: string;
+};
+
+/**
+ * Daemon → control plane, on the request's `id`. Always sent: any failure is
+ * `ok: false` with a short `error`. The JSON stays under 100 KB.
+ */
+export type ManagedPermissionsResultMessage = {
+  type: "managed-permissions-result";
+  id: string;
+  ok: boolean;
+  permissions?: ManagedPermissionsObserved;
   error?: string;
   at: string;
 };
@@ -232,6 +406,19 @@ export type DaemonMessage =
     ok: boolean;
     member?: ManagedMemberObservedResult;
     error?: string;
+    at: string;
+  }
+  | ManagedPermissionsRequestMessage
+  | ManagedPermissionsResultMessage
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget: every managed replica this host runs,
+     * read just now. Sent every 30 s, only to a control plane advertising
+     * `managed-health-report-v1`. A replica whose engine is down is sent as
+     * `down: true` (no `replication`).
+     */
+    type: "managed-health-report";
+    members: ManagedHealthReportMember[];
     at: string;
   }
   | {
@@ -386,6 +573,30 @@ export type DaemonMessage =
   }
   | {
     /**
+     * Control plane asks the daemon to stop one running `environment.deploy`
+     * (`commandId`). Sent only to a daemon advertising `deploy-cancel-v1`.
+     */
+    type: "deploy-cancel";
+    id: string;
+    commandId: string;
+    at: string;
+  }
+  | {
+    /**
+     * `cancelling`: the deploy was signalled and will end with a
+     * `cancelled: ` command outcome. `too_late`: it already switched over and
+     * will finish normally. `not_running`: no such deploy is running here (the
+     * cancel is remembered briefly, so a dispatch that arrives later is refused).
+     */
+    type: "deploy-cancel-result";
+    id: string;
+    ok: boolean;
+    outcome?: "cancelling" | "too_late" | "not_running";
+    error?: string;
+    at: string;
+  }
+  | {
+    /**
      * Daemon-initiated, fire-and-forget (no correlated request/result) —
      * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
      * and generation, reported over the socket by `TopologyReporter`
@@ -413,9 +624,12 @@ export type DaemonMessage =
     /**
      * Who decided the primary is dead. Absent = the Orchestrator poller
      * (`ha-observe.ts`); `postgres-probe` = `pg-dead-primary-observe.ts`,
-     * sent only to a control plane advertising `managed-ha-probe-v1`.
+     * sent only to a control plane advertising `managed-ha-probe-v1`;
+     * `boot-hold` = a primary held after an unclean host restart
+     * (`instance/boot-hold-reporter.ts`, feature `managed-ha-boot-hold-v1`),
+     * never a failover request.
      */
-    detector?: "orchestrator" | "postgres-probe";
+    detector?: "orchestrator" | "postgres-probe" | "boot-hold";
     /**
      * Orchestrator's key for the dead instance (`ha-observe.ts` only; feature
      * `managed-ha-instance-v1`). Both or neither. The control plane fences
@@ -432,12 +646,18 @@ export type DaemonMessage =
      * Daemon-initiated, fire-and-forget (no correlated request/result, same
      * shape as `managed-ha-event`) — `AcmeIssuanceObserver`'s live TLS-probe
      * verdict for one `tlsMode: 'acme'` hostname, sent only on a state
-     * change (first failure after a short debounce, or a recovery).
+     * change (first failure after a short debounce, a recovery, the first
+     * good sighting, or a renewal that moves `notAfter`).
      */
     type: "acme-issuance-event";
     hostname: string;
     ok: boolean;
     errorMessage?: string;
+    /**
+     * Leaf expiry (ISO 8601) the probe read, sent with `ok: true` on the
+     * first good sighting, on recovery and when a renewal changes it.
+     */
+    notAfter?: string;
     at: string;
   }
   | {
@@ -509,6 +729,7 @@ export type DaemonMessage =
   }
   | BackupRunReportMessage
   | BackupRunReportResultMessage
+  | CommandOutcomeAckMessage
   | {
     type: "public-urls-update";
     id: string;
@@ -539,6 +760,7 @@ export type DaemonMessage =
   }
   | InstanceUpdateMessage
   | UpdateProgressMessage
+  | CommandProgressMessage
   | InstanceUpdateResultMessage
   | {
     type: "command-dispatch";

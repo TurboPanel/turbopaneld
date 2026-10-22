@@ -60,17 +60,41 @@
     - role: principal-access
     - role: rapl-access
     - role: time-sync
-    # tpbuild, /var/lib/turbopanel-build and tpbuild.slice for tp-host
-    # build-run's sandboxed builds.
+    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds
+    # (and the retired shared tpbuild account removed).
     - role: build-user
+
+  # Entering one task file of a role needs import_role: Ansible ignores
+  # `tasks_from` on a `roles:` entry and runs the role's main.yml, which
+  # installed Docker and ran the full hosting Caddy role on every boot.
+  # import_role (static, not include_role) keeps the role handlers, keeps
+  # these tasks visible to --list-tasks and --syntax-check, and runs them in
+  # this order, after every role above.
+  tasks:
+    # Docker hosts provisioned before the builder entitlement deny (#204) never
+    # re-run the docker role; re-apply just that daemon.json deny here.
+    - name: Re-apply the Docker builder entitlement deny
+      ansible.builtin.import_role:
+        name: docker
+        tasks_from: converge-builder
     # Existing Docker hosts get the observe-mode gate on their next converge;
     # the role is a no-op where Docker is absent (docker-setup installs it
     # there, via the docker role).
-    # Docker hosts provisioned before the builder entitlement deny (#204) never
-    # re-run the docker role; re-apply just that daemon.json deny here.
-    - role: docker
-      tasks_from: converge-builder
-    - role: docker-gate
+    - name: Docker gate (no-op without Docker, observe mode)
+      ansible.builtin.import_role:
+        name: docker-gate
+    # Orchestrator host prep is normally lazy on managed.ha.reconcile; backfill
+    # host-prep.ok on hosts that already have root-only libexec wait-ready.
+    - name: Backfill the Orchestrator host prep marker
+      ansible.builtin.import_role:
+        name: orchestrator
+        tasks_from: backfill-host-prep-marker.yml
+    # Hosting Caddy edge (tpedge + ingress guard) is normally lazy on deploy;
+    # backfill enrolled/updated hosts before their first compose deploy.
+    - name: Backfill the hosting Caddy edge account
+      ansible.builtin.import_role:
+        name: hosting-caddy
+        tasks_from: backfill-edge-account.yml
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh

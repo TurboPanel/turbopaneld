@@ -2,6 +2,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   apacheSiteConfig,
   nginxSiteConfig,
+  pruneHoldKeysForDeploy,
   resolveSiteEngineNeeds,
   resolveSiteOwnership,
   type SiteApplySpec,
@@ -74,9 +75,13 @@ test("nginx sends Apache one client address, from nginx's own source address", (
     conf,
     `  set_real_ip_from 127.0.0.1;
   set_real_ip_from ::1;
-  real_ip_header X-Forwarded-For;
-  proxy_bind 127.0.0.2;
-  proxy_set_header X-Forwarded-For $remote_addr;`,
+  real_ip_header X-Forwarded-For;`,
+  );
+  assertStringIncludes(
+    conf,
+    `  proxy_bind 127.0.0.2;
+  proxy_set_header X-Forwarded-For $remote_addr;
+  proxy_set_header X-Forwarded-Proto $tp_fwd_scheme;`,
   );
   // Appending would hand Apache "<client>, 127.0.0.1", and Apache trusts
   // 127.0.0.2 only.
@@ -166,15 +171,17 @@ test("Apache behind nginx listens on the backend port only and trusts nginx's 12
   );
 });
 
-test("plain Apache keeps its own listener and no mod_remoteip lines", () => {
+test("plain Apache keeps its own listener and trusts only loopback for the client address", () => {
   const conf = apacheSiteConfig(
     { ...pairedSite, engine: "apache", backendPort: undefined },
     DOC_ROOT,
     { phpFpmSocket: SOCKET, dockerBindAddress: "172.17.0.1" },
   );
   assertStringIncludes(conf, "Listen 127.0.0.1:18080\nListen 172.17.0.1:18080");
-  assertEquals(conf.includes("RemoteIP"), false);
-  // Dotfiles are refused on plain Apache too, but no client-address trust.
+  assertEquals(conf.match(/RemoteIP\w*Proxy.*/g), [
+    "RemoteIPInternalProxy 127.0.0.1",
+  ]);
+  // Dotfiles are refused on plain Apache too.
   assertStringIncludes(conf, "<LocationMatch");
 });
 
@@ -193,11 +200,106 @@ test("a paired site needs both engines and reaches PHP through Apache", () => {
   assertEquals([...needs.phpFpmEngines], ["apache"]);
 });
 
+test("a deploy holds every engine its sites are served by, and its PHP series, never Caddy", () => {
+  assertEquals(pruneHoldKeysForDeploy([pairedSite]), [
+    "php:8.4",
+    "engine:nginx",
+    "engine:apache",
+  ]);
+  assertEquals(
+    pruneHoldKeysForDeploy([
+      {
+        composeServiceName: "ols",
+        engine: "openlitespeed",
+        root: "public",
+        listenPort: 18081,
+        php: { version: "8.3", mode: "lsphp-detached" },
+      },
+      {
+        composeServiceName: "static",
+        engine: "caddy",
+        root: "public",
+        listenPort: 18082,
+        php: { version: "8.4" },
+      },
+    ]),
+    ["php:8.3", "php:8.4", "engine:openlitespeed"],
+  );
+  assertEquals(pruneHoldKeysForDeploy([]), []);
+});
+
 test("a paired site's tree carries the principal group both engines join", () => {
   assertEquals(resolveSiteOwnership(pairedSite), {
     user: "alice",
-    group: "alice-grp",
+    group: "alice",
   });
   assertEquals(siteEngineUnixUser(pairedSite.engine), "tpapache");
   assertEquals(sitePhpRuntimeMode(pairedSite), "fastcgi");
+});
+
+test("hiding web server names turns off nginx tokens and the Apache footer", () => {
+  const hidden: SiteApplySpec = { ...pairedSite, hideWebServerNames: true };
+  const front = nginxSiteConfig(hidden, DOC_ROOT, null, {
+    apacheBackendPort: 18090,
+  });
+  assertStringIncludes(front, "server_tokens off;");
+  assertEquals(frontConfig().includes("server_tokens"), false);
+
+  const backend = apacheSiteConfig(hidden, DOC_ROOT, {
+    phpFpmSocket: SOCKET,
+    behindNginxPort: 18090,
+  });
+  assertStringIncludes(backend, "\nServerTokens Prod\nListen 127.0.0.1:18090");
+  assertStringIncludes(backend, "\n  ServerSignature Off\n");
+  const plain = apacheSiteConfig(pairedSite, DOC_ROOT, {
+    phpFpmSocket: SOCKET,
+    behindNginxPort: 18090,
+  });
+  assertEquals(/ServerTokens|ServerSignature/.test(plain), false);
+
+  const alone = apacheSiteConfig(
+    { ...hidden, engine: "apache" },
+    DOC_ROOT,
+    { phpFpmSocket: SOCKET },
+  );
+  assertStringIncludes(alone, "ServerTokens Prod");
+  const nginxOnly = nginxSiteConfig(
+    { ...hidden, engine: "nginx" },
+    DOC_ROOT,
+    null,
+    { phpFpmSocket: SOCKET },
+  );
+  assertStringIncludes(nginxOnly, "server_name _;\n  server_tokens off;");
+});
+
+test("nginx tells Apache the visitor's scheme only on a loopback peer's word", () => {
+  const conf = frontConfig();
+  assertStringIncludes(
+    conf,
+    'set $tp_fwd_peer "$realip_remote_addr|$http_x_forwarded_proto";',
+  );
+  assertStringIncludes(
+    conf,
+    String.raw`if ($tp_fwd_peer ~ "^(127\.0\.0\.1|::1)\|https$") {`,
+  );
+  // The raw header is never passed on: a bridge peer cannot claim https.
+  assertEquals(
+    conf.includes("proxy_set_header X-Forwarded-Proto $http"),
+    false,
+  );
+});
+
+test("Apache behind nginx sets HTTPS, port 443 and https for PHP on nginx's word only", () => {
+  const conf = apacheSiteConfig(pairedSite, DOC_ROOT, {
+    phpFpmSocket: SOCKET,
+    behindNginxPort: 18090,
+  });
+  const peer =
+    "%{CONN_REMOTE_ADDR} == '127.0.0.2' && %{HTTP:X-Forwarded-Proto} == 'https'";
+  assertStringIncludes(conf, `<If "${peer}">\n    SetEnv HTTPS on\n  </If>`);
+  assertStringIncludes(conf, `ProxyFCGISetEnvIf "${peer}" SERVER_PORT 443`);
+  assertStringIncludes(
+    conf,
+    `ProxyFCGISetEnvIf "${peer}" REQUEST_SCHEME https`,
+  );
 });

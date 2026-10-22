@@ -119,6 +119,50 @@ export async function collectManagedContainers(
   }
 }
 
+const COMPOSE_PROJECT_LABEL = "com.docker.compose.project";
+const COMPOSE_SERVICE_LABEL = "com.docker.compose.service";
+const SAFE_CONTAINER_ID_RE = /^[a-f0-9]{12,64}$/i;
+
+/**
+ * When `docker compose ps` fails, list running engine containers by compose
+ * project label so fence enforcement can still reach the process (fail closed).
+ */
+export async function collectRunningContainersByComposeProjectLabel(
+  project: string,
+  run: RunDockerFn = defaultRunDocker,
+): Promise<EnvironmentDeployContainer[] | undefined> {
+  const listed = await run([
+    "ps",
+    "-q",
+    "--filter",
+    `label=${COMPOSE_PROJECT_LABEL}=${project}`,
+    "--filter",
+    "status=running",
+  ]);
+  if (!listed.success) return undefined;
+  const ids = listed.stdout
+    .trim()
+    .split(/\s+/)
+    .filter((id) => SAFE_CONTAINER_ID_RE.test(id));
+  if (ids.length === 0) return [];
+  const inspect = await run([
+    "inspect",
+    "--format",
+    '{{index .Config.Labels "' + COMPOSE_SERVICE_LABEL + '"}}',
+    ...ids,
+  ]);
+  const serviceNames = inspect.success
+    ? inspect.stdout.trim().split("\n").filter((line) => line.length > 0)
+    : [];
+  return ids.map((containerId, index) => ({
+    containerId,
+    containerName: containerId,
+    composeServiceName: serviceNames[index] ?? "db",
+    status: "running",
+    role: "service" as const,
+  }));
+}
+
 /**
  * Resolve the running engine container id for `composeServiceName`, throwing
  * a clear typed error when the container is missing or not `running`.
@@ -256,7 +300,7 @@ export async function collectManagedMemberHealth(
         defaultDatabase: engine.defaultDatabase,
         exec: async (argv, input) => {
           const result = await run(
-            ["exec", "-i", containerId, ...argv],
+            ["exec", "-i", "-u", "0", containerId, ...argv],
             input === undefined ? undefined : { input },
           );
           const redact = params.redact ?? ((text: string) => text);

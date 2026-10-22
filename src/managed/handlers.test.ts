@@ -312,7 +312,15 @@ test("handleManagedLifecycle reports the member's payload role and defaults to p
     }
     return Promise.resolve(dockerOk());
   };
-  await withManagedStateDir(managedId, async () => {
+  await withManagedStateDir(managedId, async (root) => {
+    // A replica start probes its data volume via the persisted compose file;
+    // the fake docker reports an empty volume, so the restart proceeds.
+    await Deno.writeTextFile(
+      `${root}/docker-compose.yml`,
+      "services:\n  postgres:\n    image: postgres:18\n    volumes:\n" +
+        "      - pgdata:/var/lib/postgresql\nvolumes:\n  pgdata:\n" +
+        "    name: pgdata\n",
+    );
     const replica = await handleManagedLifecycle(
       {
         managedId,
@@ -736,7 +744,7 @@ test("handleManagedDestroy removes the backup tree alongside state", async () =>
         managedId,
       );
       await Deno.mkdir(root, { recursive: true });
-      const backups = join(fixture.dirs.backupDir, managedId);
+      const backups = join(fixture.dirs.backupDir, "managed", managedId);
       await Deno.mkdir(backups, { recursive: true });
       await Deno.writeTextFile(join(backups, "bk_1.dump"), "payload");
       const result = await handleManagedDestroy(
@@ -770,7 +778,7 @@ test("handleManagedDestroy throws when the backup directory cannot be removed", 
       prior.set(key, Deno.env.get(key));
       Deno.env.set(key, value);
     }
-    const backups = join(fixture.dirs.backupDir, managedId);
+    const backups = join(fixture.dirs.backupDir, "managed", managedId);
     await Deno.mkdir(backups, { recursive: true });
     const root = managedDir(
       { stateDir: fixture.dirs.stateDir } as Parameters<typeof managedDir>[0],

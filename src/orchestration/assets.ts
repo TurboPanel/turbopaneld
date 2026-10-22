@@ -106,35 +106,28 @@ export const GALAXY_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,
   "requirements.yml",
 );
-/** Docker Galaxy roles (geerlingguy.docker) — installed on demand only. */
-export const GALAXY_DOCKER_REQUIREMENTS_FILE = join(
+/**
+ * Bundled `ansible.posix` collection artifact (ships in the orchestration
+ * release; installed with `ansible-galaxy collection install <file> --offline`,
+ * no network). Keep the version in step with `requirements.yml`.
+ * Digest source: the `artifact.sha256` field of Galaxy's published metadata for
+ * ansible.posix 2.2.1
+ * (`galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/ansible/posix/versions/2.2.1/`),
+ * which matches the downloaded file.
+ */
+export const GALAXY_POSIX_VERSION = "2.2.1";
+export const GALAXY_POSIX_TARBALL_NAME =
+  `ansible-posix-${GALAXY_POSIX_VERSION}.tar.gz`;
+export const GALAXY_POSIX_SHA256 =
+  "8a5b6f23b0ab9cfd66a0a4d7075b57071cbbacbd2400fb293586a70c3a0fb527";
+export const GALAXY_POSIX_TARBALL = join(
   ORCHESTRATION_DIR,
-  "requirements-docker.yml",
+  "vendor",
+  "galaxy",
+  GALAXY_POSIX_TARBALL_NAME,
 );
-/**
- * Upstream GitHub repo for the pinned geerlingguy.docker Galaxy role.
- * ansible-galaxy resolves classic roles via `github.com/.../archive/*.tar.gz`,
- * which intermittently returns 503 from GitHub's edge; {@link ensureGalaxyDockerRole}
- * downloads the same tag via codeload instead (see {@link galaxyDockerRoleCodeloadUrl}).
- */
-export const GALAXY_DOCKER_ROLE_GITHUB_REPO = "geerlingguy/ansible-role-docker";
-
-/** Codeload archive URL for a pinned geerlingguy.docker role tag. */
-export function galaxyDockerRoleCodeloadUrl(version: string): string {
-  return `https://codeload.github.com/${GALAXY_DOCKER_ROLE_GITHUB_REPO}/tar.gz/refs/tags/${version}`;
-}
-/** First-party Ansible roles in the orchestration checkout (not Galaxy). */
-export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, "roles");
-/**
- * Galaxy-installed roles (`geerlingguy.docker`, …). Under vendor — never the
- * checkout `roles/` tree — so Vagrant VirtFS mounts (host-owned, guest-unwritable)
- * and production FHS stay consistent with {@link GALAXY_COLLECTIONS_DIR}.
- */
-export const GALAXY_VENDOR_ROLES_DIR = join(
-  RUNTIMES_DIR,
-  "ansible",
-  "galaxy-roles",
-);
+/** Ansible roles in the orchestration checkout (all first-party). */
+export const ORCHESTRATION_ROLES_DIR = join(ORCHESTRATION_DIR, "roles");
 export const GALAXY_COLLECTIONS_DIR = join(
   RUNTIMES_DIR,
   "ansible",
@@ -170,8 +163,8 @@ export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
 
 /**
  * Root helper shipped in the orchestration tree. On managed hosts the daemon
- * account has no `sudo /bin/sh`, so every playbook (and the Galaxy Docker
- * role fetch) runs as root through this validated entrypoint instead of
+ * account has no `sudo /bin/sh`, so every playbook runs as root through this
+ * validated entrypoint instead of
  * Ansible `become` — see `privileged.ts` and roles/turbopanel-user.
  */
 export const ORCHESTRATE_HELPER = join(
@@ -206,7 +199,7 @@ export function ansibleProbeEnv(): Record<string, string> {
   return {
     ANSIBLE_CONFIG: ANSIBLE_CFG,
     ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
-    ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
+    ANSIBLE_ROLES_PATH: `${ORCHESTRATION_ROLES_DIR}`,
     HOME: ANSIBLE_STATE_DIR,
     ANSIBLE_HOME: ANSIBLE_STATE_DIR,
     ANSIBLE_LOCAL_TEMP: ANSIBLE_STATE_DIR,
@@ -221,7 +214,7 @@ export function ansibleEnv(): Record<string, string> {
     ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
     ANSIBLE_HOME: ansibleHome(),
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
-    ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
+    ANSIBLE_ROLES_PATH: `${ORCHESTRATION_ROLES_DIR}`,
   };
 }
 
@@ -331,6 +324,26 @@ export const SITE_OPENLITESPEED_APPLY_PLAYBOOK = join(
   "site-openlitespeed-apply.yml",
 );
 /**
+ * Removes PHP series no site uses any more: sury php-fpm packages, the vendored
+ * lsphp tree, and the series' config/log/runtime directories. The daemon passes
+ * `php_series_prune`; the role refuses a series with a site pool or runtime.
+ */
+export const PHP_SERIES_PRUNE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "php-series-prune.yml",
+);
+/**
+ * Removes web engines (nginx, Apache, OpenLiteSpeed) no site uses any more:
+ * the vendored tree, the `turbopanel-<engine>` unit and its config directory.
+ * The daemon passes `engine_prune`; the role refuses an engine with a site.
+ */
+export const ENGINE_PRUNE_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "engine-prune.yml",
+);
+/**
  * Vendors the **tenant** Node release for native `serviceKind: node` apps.
  * Deliberately separate from the `node-runtime` role that vendors the
  * instance's own Node: bumping the runtime tenants execute must not perturb the
@@ -340,6 +353,16 @@ export const NODE_APP_RUNTIME_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
   "node-app-runtime-apply.yml",
+);
+/**
+ * Vendors the **tenant** Deno release for native `runtime: deno` apps, under
+ * `vendor/deno-app/<series>/current`. Nothing else on the host runs it: the
+ * panel itself is not started from this tree.
+ */
+export const DENO_APP_RUNTIME_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "deno-app-runtime-apply.yml",
 );
 export const DAEMON_INSTALL_PLAYBOOK = join(
   ORCHESTRATION_DIR,
@@ -426,6 +449,19 @@ export function uvDownloadUrl(asset: string, version = UV_VERSION): string {
 /** Pinned cloudflared release. */
 export const CLOUDFLARED_VERSION = "2026.5.2";
 
+/**
+ * SHA-256 of the raw Linux binary per asset, for {@link CLOUDFLARED_VERSION}.
+ * Source: the "SHA256 Checksums" list in the 2026.5.2 release notes
+ * (github.com/cloudflare/cloudflared/releases/tag/2026.5.2), which also equals
+ * the digest GitHub reports for each asset. Bump with the version.
+ */
+export const CLOUDFLARED_SHA256: Readonly<Record<string, string>> = {
+  "cloudflared-linux-amd64":
+    "5286698547f03df745adb2355f04c12dde52ef425491e81f433642d695521886",
+  "cloudflared-linux-arm64":
+    "5a4e8ce2701105271412059f44b6a0bf1ae4542b4d98ff3180c0c019443a5815",
+};
+
 export function cloudflaredDir(version = CLOUDFLARED_VERSION): string {
   return join(RUNTIMES_DIR, "cloudflared", version);
 }
@@ -475,7 +511,7 @@ export function cloudflaredDownloadUrl(
  * - `deno_version` in `orchestration/roles/deno-runtime/defaults/main.yml`
  * - `TP_DENO_VERSION` in `scripts/run.sh`
  */
-export const DENO_VERSION = "2.9.7";
+export const DENO_VERSION = "2.9.8";
 
 /** Versioned directory where the Deno runtime is installed. */
 export const DENO_RUNTIME_DIR = join(RUNTIMES_DIR, "deno", DENO_VERSION);

@@ -5,8 +5,7 @@ Ansible role for TurboPanel orchestration. Shared conventions: `../../AGENTS.md`
 Shared **managed-database ingress** on every host that will run managed
 engines. Host prerequisites only — **not** a full stack bring-up of compose
 content. Meta-depends on the `docker` role. Standalone playbook:
-`playbooks/proxysql-setup.yml` (invoked by daemon `runProxySqlSetup` after
-`ensureGalaxyDockerRole`, including **lazily from `managed.ingress.reconcile`**
+`playbooks/proxysql-setup.yml` (invoked by daemon `runProxySqlSetup`, including **lazily from `managed.ingress.reconcile`**
 when host `admin.cnf` is missing). Co-located dev also installs the role via
 `instance-dev-install` / `dev-converge-manifest.json` (after `system-compose`).
 
@@ -21,7 +20,7 @@ The daemon refuses compose up / config write while those paths are directories.
 
 | Owner | Responsibility |
 | --- | --- |
-| Ansible (`proxysql` role) | Config dir `0750` root:`turbopanel_group`, `tls/` subdir, state data dir + first-run alpine `chown` to `999:999`, one-shot `admin.cnf` mode `0600`, initial static `proxysql.cnf` **only when absent** (`force: no`), `wait-ready.sh`, `turbopanel-proxysql-stack.service`. **Never** the managed Docker network and **never** the compose project name — both are per-organization identifiers the control plane allocates and Ansible cannot know at converge time. The `proxysql_managed_network` default var and the unit's `ExecStartPre … docker network create` are **gone**; do not reintroduce either |
+| Ansible (`proxysql` role) | Config dir `0750` `turbopanel_user`:`turbopanel_group` (the same owner and mode as the daemon-layout leaf), `tls/` subdir (no state data folder: ProxySQL keeps its data in a Docker volume), one-shot `admin.cnf` mode `0640` root:`turbopanel_group` (the unprivileged daemon reads it), initial static `proxysql.cnf` **only when absent** (`force: no`), `wait-ready.sh`, `turbopanel-proxysql-stack.service`. **Never** the managed Docker network and **never** the compose project name — both are per-organization identifiers the control plane allocates and Ansible cannot know at converge time. The `proxysql_managed_network` default var and the unit's `ExecStartPre … docker network create` are **gone**; do not reintroduce either |
 | Daemon (`src/managed/proxysql.ts`, `managed.ingress.reconcile`) | Write/update `docker-compose.yml`, regenerate full durable `proxysql.cnf` (static listeners + users/servers/rules), materialize TLS PEMs under `tls/`, admin runtime apply, compose up/restart |
 | Systemd unit | `Type=oneshot` `RemainAfterExit`; **if compose file exists** → `docker compose -f <configDir>/docker-compose.yml up -d --remove-orphans` + wait-ready; **if compose not yet written** → no-op success (pre-reconcile hosts stay healthy after converge). No `-p` and no templated project var: the project is the allocated `managed-ingress` `serviceId`, which the daemon writes into the compose file's own top-level `name:` key |
 
@@ -35,7 +34,6 @@ The daemon refuses compose up / config write while those paths are directories.
 | `…/proxysql.cnf` | `0640` root:group | Cold-start config (Ansible seeds static globals once; daemon owns thereafter) |
 | `<install root>/libexec/proxysql-wait-ready.sh` | `0755` root:root, root-only directory (the unit runs it as root) | Probe admin `127.0.0.1:6032` after compose up |
 | `…/docker-compose.yml` | daemon `0640` | **Not** written by Ansible |
-| `/var/lib/turbopanel/proxysql/` | pre-owned `999:999` | Host-side data tree marker / optional bind target |
 | Managed network (bare-UUID per-org name from `network(kind='managed')`) | bridge | Engines + ProxySQL (never the tenant hosting-ingress network). **Not a path this role owns** — the name is allocated per organization by the control plane, is unknown at converge time, and the daemon creates it on reconcile and re-creates it on `system.reconcile` self-heal (recovered from the on-disk compose file). See `../src/managed/AGENTS.md` → **Managed network self-heal** |
 | Unit `turbopanel-proxysql-stack.service` | `0640` | Reboot durability once compose exists |
 

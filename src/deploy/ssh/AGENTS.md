@@ -55,10 +55,9 @@ ours by construction — so `root`'s keys and an administrator's own
 
 **Access is a group, not a shell test**, because `sshd` matches on groups:
 `tpsftp` (files only, `ForceCommand internal-sftp`) and `tpshell`. Membership is
-reconciled by `ensurePrincipalManagedGroups` in the same pass as runtime
-entitlements — one containment set (`allManagedGroups`), or a principal
-downgraded from shell to files-only would keep `tpshell` because the entitlement
-pass did not recognize it.
+reconciled by `ensurePrincipalManagedGroups` against one containment set
+(`allManagedGroups`, the registry's SSH access groups), which both adds and
+revokes, so a principal downgraded from shell to files-only loses `tpshell`.
 
 **Every principal is matched, including one with no level.** `tpprincipal`
 (registry `accessGroups.principal`) is joined by every principal in
@@ -93,12 +92,35 @@ never rides the wire), applied by `ensurePrincipalPassword` in
 `ps` can read. A material with no `passwordHash` locks the account password
 (`usermod -p !`), the state `useradd` created it in.
 
-**The SFTP chroot is a per-host switch, on last.** With the switch on, the
+**The SFTP chroot is a per-host switch, on by default.** A new host starts
+jailed: while the switch is off, each reconcile asks `tp-host sftp-chroot
+auto`, which runs the layout check and turns the switch on when it is clean
+(a host with no `tpsftp` member yet is clean). `auto` does nothing when the
+switch is already on or when an administrator ran `sftp-chroot off` — `off`
+leaves a root-only marker (`sftp-chroot-off`, as unreachable to generic verbs
+as the switch) that only an explicit `on` clears, so the rollback sticks; the
+marker is written **before** the switch is removed, and `auto` looks for the
+marker again right after it writes the switch (its layout check takes time), so
+whichever of the two runs last, an explicit off wins: either `off` finds the
+switch and removes it, or `auto` finds the marker and takes the switch back.
+`off` is never refused: it creates the SSH folder (root:root 0750) if it is
+missing, and on a host with no SSH server folder at all it does nothing, since
+nothing can be jailed there. If sshd refuses the jailed drop-in right after `auto`
+turned the switch on (`-t`, forwarding or `sftp-chroot verify`), the daemon runs
+`sftp-chroot auto-revert` — switch off, **no** marker, so a later reconcile may
+try again — warns with the reason, and applies the unjailed drop-in in the same
+run; leaving the switch on would fail every later reconcile the same way and
+stop key changes applying. A jail the administrator already had on is never
+reverted. `check` also requires each jail root to be `root:<owner>` mode 0750:
+the owner's group is what lets the session walk in, and nobody else can enter. A
+finding keeps the jail off and comes back as a reconcile warning naming the
+member; a failed `auto` is a warning too, never a failed reconcile. With the
+switch on, the
 `tpsftp` block gets `ChrootDirectory <root>/%u` and
 `ForceCommand internal-sftp -d /home`: the jail is the root-owned principal
-home, the session starts in `home/`, and `sites/` is visible read-only. `%u`,
+home, the session starts in `home/`, and the scope folders (`<scope>/services`, `<scope>/volumes`) are visible read-only. `%u`,
 not `%h`, because the passwd home is `home/` one level down. The switch is
-`/etc/ssh/turbopanel-sftp-chroot`, outside every tp-host tree, so no generic
+`/etc/ssh/turbopanel/sftp-chroot`, outside every tp-host tree, so no generic
 verb can write or remove it: only `tp-host sftp-chroot on` (which refuses
 while any member — supplementary or primary `tpsftp` — fails
 `sftp-chroot check`: a chroot path component not root-owned or group/world
@@ -111,6 +133,16 @@ When on, each reconcile re-runs `check` (findings become warnings and the jail
 stays — fail closed for that member), and after `sshd -t` runs
 `sftp-chroot verify`, which asks `sshd -T -C user=<member>` whether the jail
 is really effective; a refusal rolls the drop-in back like a failed `-t`.
+
+**The administrator's `sshd_config` is read through `tp-host sshd-config`.**
+On a stock Debian 13 image it is `root:root 0600`, so the daemon (user `tp`)
+cannot open it, and tp-host's generic `cat` serves only TurboPanel's own trees.
+The daemon tries a direct read first, then `sudo tp-host sshd-config`, a verb
+that takes no arguments and prints exactly that one file. Without it every SSH
+reconcile failed with "Could not read /etc/ssh/sshd_config", no drop-in was
+written, and a site owner's SFTP login fell through to a shell. The daemon
+still never edits the file; the drop-in directory is only checked for an
+`Include` line.
 
 **Forwarding is asserted, not assumed** (an administrator's earlier drop-in
 with `Match all` + `AllowTcpForwarding yes` outranks ours). After `sshd -t`,

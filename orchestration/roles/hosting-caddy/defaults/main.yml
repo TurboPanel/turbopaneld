@@ -6,7 +6,8 @@
 # and tp-host, which pins the unit to it. The id is in the 9980-9999
 # service-identity band (src/orchestration/service-accounts.test.ts), which
 # fails on any duplicate. 9983 went to tpprincipal (sshd access group, PR
-# #223) and 9994 to tpbuild (build-user, PR #221), so 9982 is the free slot.
+# #223) and 9994 to tpbuild (build-user, PR #221; retired, still reserved), so 9982
+# is the free slot.
 hosting_caddy_user: tpedge
 hosting_caddy_uid: 9982
 

@@ -34,7 +34,28 @@ const EXCLUDED_PSEUDO_DEVICE_PREFIXES = [
 
 const VIRTUAL_BACKED_DEVICE_PREFIXES = ["dm-", "md"] as const;
 
-const PARTITION_SUFFIX = /^p?\d+$/;
+/**
+ * Partition naming by device family. Never a bare "prefix plus digits" rule:
+ * `dm-10` is not a partition of `dm-1`, `md127` is not one of `md1`, and
+ * `nvme0n10` is not one of `nvme0n1`. Device-mapper and md nodes have no
+ * partition suffix form.
+ */
+const PARTITION_NAME_PATTERNS: readonly RegExp[] = [
+  /^((?:sd|vd|xvd|hd)[a-z]+)\d+$/,
+  /^((?:nvme\d+n\d+|mmcblk\d+|nbd\d+))p\d+$/,
+];
+
+/** The whole disk `name` is a partition of, when it is one and that disk is in `candidates`. */
+function partitionParent(
+  name: string,
+  candidates: readonly string[],
+): string | undefined {
+  for (const pattern of PARTITION_NAME_PATTERNS) {
+    const parent = pattern.exec(name)?.[1];
+    if (parent !== undefined && candidates.includes(parent)) return parent;
+  }
+  return undefined;
+}
 
 function isExcludedPseudoDevice(name: string): boolean {
   return EXCLUDED_PSEUDO_DEVICE_PREFIXES.some((prefix) =>
@@ -48,35 +69,25 @@ function isVirtualBackedDevice(name: string): boolean {
   );
 }
 
-/** Same partition-suffix matching `block-devices.ts`'s private `isPartition` uses. */
 function isPartitionOf(name: string, wholeDiskNames: string[]): boolean {
-  return wholeDiskNames.some((other) => {
-    if (other === name || other.length >= name.length) return false;
-    if (!name.startsWith(other)) return false;
-    return PARTITION_SUFFIX.test(name.slice(other.length));
-  });
+  return partitionParent(name, wholeDiskNames) !== undefined;
 }
 
 function findWholeDiskParent(
   name: string,
   wholeDiskNames: string[],
 ): string | undefined {
-  return wholeDiskNames.find((other) => {
-    if (other === name || other.length >= name.length) return false;
-    if (!name.startsWith(other)) return false;
-    return PARTITION_SUFFIX.test(name.slice(other.length));
-  });
+  return partitionParent(name, wholeDiskNames);
 }
 
 /** Whether `deviceName` (a whole disk or virtual/dm-md device) backs one of `serviceDeviceNames`. */
-function backsServiceDevice(
+export function backsServiceDevice(
   deviceName: string,
   serviceDeviceNames: string[],
 ): boolean {
   return serviceDeviceNames.some((preferred) => {
     if (preferred === deviceName) return true;
-    if (!preferred.startsWith(deviceName)) return false;
-    return PARTITION_SUFFIX.test(preferred.slice(deviceName.length));
+    return partitionParent(preferred, [deviceName]) !== undefined;
   });
 }
 

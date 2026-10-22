@@ -1,49 +1,39 @@
-# ⚠️  REQUIRED GITHUB REPOSITORY CONFIGURATION
-# Before this workflow will succeed, configure Settings → Secrets and variables → Actions:
+# Required GitHub repository configuration (Settings → Secrets and variables → Actions):
 #
-# Variables:
-#   DL_S3_ENDPOINT — Bunny S3 endpoint URL (e.g. https://de-s3.storage.bunnycdn.com)
-#   DL_S3_REGION   — Bunny storage region code for AWS CLI signing (e.g. de for
-#                    https://de-s3.storage.bunnycdn.com); must match DL_S3_ENDPOINT
+#   SONAR_TOKEN — SonarCloud token for CI-based scan + LCOV import:
+#                 verify.yml on pull requests, sonar-trunk.yml on trunk
+#                 (required for same-repo / trunk; fork PRs omit it). Keep
+#                 Automatic Analysis off so Deno LCOV can be imported.
 #
-# Secrets:
-#   DL_S3_BUCKET            — Bunny Storage Zone name (bucket name)
-#   DL_S3_ACCESS_KEY_ID     — Bunny Storage Zone Access Key ID
-#   DL_S3_SECRET_ACCESS_KEY — Bunny Storage Zone Password (Secret Access Key)
-#   SONAR_TOKEN             — SonarCloud token for CI-based scan + LCOV import:
-#                             verify.yml on pull requests, sonar-trunk.yml on
-#                             trunk (required for same-repo / trunk; fork PRs
-#                             omit it). Keep Automatic Analysis off.
-#
-# The workflow will fail with a clear error if any DL_S3_* variable or secret is
-# missing. Missing SONAR_TOKEN fails verify on trunk (publish `needs: verify`).
-# Keep SonarCloud Automatic Analysis off so Deno LCOV can be imported.
+# Missing SONAR_TOKEN fails verify on trunk (publish `needs: verify`). The
+# `canary` environment also carries TURBOPANEL_RELEASE_SIGNING_KEY, which signs
+# the canary manifest. There is no CDN upload any more: the per-merge `trunk`
+# drop on dl.trbp.nl was retired (owner decision 2026-10-05), so the old
+# DL_S3_* variables and secrets are gone and nothing here needs them.
 #
 # Code quality gates live in .github/workflows/verify.yml and must pass before
 # anything is compiled or published. Promotion of an already-published build into
 # rc / release re-verifies artifact hashes only and deliberately runs no unit
 # tests, because no new code enters the pipeline after publish.
 #
-# Every green trunk merge is published twice from the same compiled bytes:
+# Every green trunk merge is compiled once and published as the GitHub canary
+# (`canary` channel): the tarballs under versioned names
+# (turbopaneld-<X.Y.Z>-canary.<N>-<arch>.tar.zst) on the rolling `canary`
+# pre-release, published by TurboPanel/dev's gh-canary.yml — what a self-hosted
+# canary install follows. The former CDN drop (`trunk` channel on dl.trbp.nl)
+# is retired.
 #
-#   - the CDN drop (`trunk` channel): unversioned tarballs under
-#     channels/trunk/daemon/<buildId>/ on dl.trbp.nl — the hosted platform's
-#     rail and the hand-operable override (Road to 0.1.x, `trunk-canary`);
-#   - the GitHub canary (`canary` channel): the same tarballs under versioned
-#     names (turbopaneld-<X.Y.Z>-canary.<N>-<arch>.tar.zst) on the
-#     rolling `canary` pre-release, published by TurboPanel/dev's
-#     gh-canary.yml — what a self-hosted canary install follows.
+# The tags work out what the version should be (TurboPanel/dev's Version From
+# Tags action): X.Y.Z is the newest release's next patch, or a higher started /
+# in-flight version, and N restarts at 1 for each X.Y.Z. The committed version
+# fields must already say X.Y.Z (scripts/set-version.mjs --check), or the
+# canary is refused until the "chore: start X.Y.Z" PR merges. The binary
+# reports plain X.Y.Z; `-canary.<N>` lives only in the asset names and the
+# signed manifest.
 #
-# The version comes from git tags, never from deno.json (TurboPanel/dev's
-# Version From Tags action): X.Y.Z is the newest release's next patch, or a
-# higher started / in-flight version, and N restarts at 1 for each X.Y.Z. The
-# binary reports plain X.Y.Z (stamped into this checkout's deno.json before
-# compiling); `-canary.<N>` lives only in the asset names and the signed
-# manifest. deno.json's committed number is what a local build reports.
-#
-# workflow_dispatch re-runs the whole thing for trunk's head: "Start Next
-# Version" uses it so a started minor gets its first canary without waiting
-# for the next merge. A dispatch on any other branch does nothing.
+# workflow_dispatch re-runs the whole thing for trunk's head (for example once
+# a "chore: start X.Y.Z" PR has merged, if no other merge follows it). A
+# dispatch on any other branch does nothing.
 
 name: Publish Daemon Trunk Build
 
@@ -89,39 +79,6 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - name: Verify required secrets and variables
-        env:
-          DL_S3_ENDPOINT: ${{ vars.DL_S3_ENDPOINT }}
-          DL_S3_REGION: ${{ vars.DL_S3_REGION }}
-          DL_S3_BUCKET: ${{ secrets.DL_S3_BUCKET }}
-          DL_S3_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
-          DL_S3_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
-        run: |
-          missing=0
-          if [ -z "$DL_S3_ENDPOINT" ]; then
-            echo "::error::Missing required variable: DL_S3_ENDPOINT"
-            missing=1
-          fi
-          if [ -z "$DL_S3_REGION" ]; then
-            echo "::error::Missing required variable: DL_S3_REGION"
-            missing=1
-          fi
-          if [ -z "$DL_S3_BUCKET" ]; then
-            echo "::error::Missing required secret: DL_S3_BUCKET"
-            missing=1
-          fi
-          if [ -z "$DL_S3_ACCESS_KEY_ID" ]; then
-            echo "::error::Missing required secret: DL_S3_ACCESS_KEY_ID"
-            missing=1
-          fi
-          if [ -z "$DL_S3_SECRET_ACCESS_KEY" ]; then
-            echo "::error::Missing required secret: DL_S3_SECRET_ACCESS_KEY"
-            missing=1
-          fi
-          if [ "$missing" -ne 0 ]; then
-            exit 1
-          fi
-
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -134,8 +91,8 @@ jobs:
         continue-on-error: true
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
-          deno-version: "2.9.7"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
       - name: Wait before retrying the Deno download
         if: steps.deno-try-1.outcome == 'failure'
         run: sleep 15
@@ -145,8 +102,8 @@ jobs:
         continue-on-error: true
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
-          deno-version: "2.9.7"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
       - name: Wait before retrying the Deno download again
         if: steps.deno-try-2.outcome == 'failure'
         run: sleep 45
@@ -154,22 +111,32 @@ jobs:
         if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
-          deno-version: "2.9.7"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
 
       - name: Install zstd
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
 
       - name: Work out this build's version from the tags
         id: version
-        uses: TurboPanel/dev/.github/actions/version@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+        uses: TurboPanel/dev/.github/actions/version@fbb7c467f5d403a577e62864c6c1a6b30be661cd # dev#69
         with:
           mode: canary
 
+      - name: Check the committed version matches the tags
+        # The committed version fields (deno.json, sonar-project.properties)
+        # must already say the base the tags work out. Right after a release
+        # a "chore: start X.Y.Z" PR bumps them (node scripts/set-version.mjs
+        # X.Y.Z) and merges itself once its checks pass; until it merges,
+        # every canary is refused here.
+        env:
+          BASE_VERSION: ${{ steps.version.outputs.base }}
+        run: node scripts/set-version.mjs --check "$BASE_VERSION"
+
       - name: Stamp the version into deno.json
         # What the binary reports (src/version.ts reads deno.json at compile
-        # time): the plain base X.Y.Z, never the -canary.N label. Transient,
-        # this checkout only; the committed number is not the source of truth.
+        # time): the plain base X.Y.Z, never the -canary.N label. The check
+        # above already proved deno.json says it; this keeps the proof local.
         env:
           BASE_VERSION: ${{ steps.version.outputs.base }}
           CANARY_VERSION: ${{ steps.version.outputs.version }}
@@ -250,8 +217,8 @@ jobs:
           . scripts/lib/release-artifacts.sh
           chmod +x scripts/verify-release-root.sh
 
-          _publish_dir="publish/channels/trunk/daemon"
-          mkdir -p "$_publish_dir" publish/channels/trunk
+          _publish_dir="publish/daemon"
+          mkdir -p "$_publish_dir"
 
           _js_name="$(tp_js_release_filename)"
           _orch_name="$(tp_orchestration_release_filename)"
@@ -290,165 +257,9 @@ jobs:
             fi
           done
 
-      - name: Generate channel manifest
-        env:
-          # PKCS#8 PEM of the offline release signing key; the generator refuses
-          # to write an unsigned manifest (src/update/signing.ts).
-          RELEASE_SIGNING_KEY: ${{ secrets.TURBOPANEL_RELEASE_SIGNING_KEY }}
-        run: |
-          deno run --allow-env --allow-read --allow-write scripts/generate-channel-manifest.ts \
-            publish/channels/trunk/daemon \
-            publish/channels/trunk/manifest.json
-          cat > publish/channels.json <<'EOF'
-          {
-            "schema": 1,
-            "defaultChannel": "trunk",
-            "channels": {
-              "trunk": {
-                "manifestUrl": "https://dl.trbp.nl/channels/trunk/manifest.json"
-              }
-            }
-          }
-          EOF
-
-      - name: Upload trunk build to S3
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
-          DL_S3_BUCKET: ${{ secrets.DL_S3_BUCKET }}
-          DL_S3_ENDPOINT: ${{ vars.DL_S3_ENDPOINT }}
-        run: |
-          _prefix="channels/trunk/daemon/${BUILD_ID}"
-          for _artifact in \
-            turbopaneld-amd64.tar.zst \
-            turbopaneld-arm64.tar.zst \
-            turbopaneld.js.tar.zst \
-            orchestration.tar.zst; do
-            aws s3 cp "publish/channels/trunk/daemon/${_artifact}" \
-              "s3://${DL_S3_BUCKET}/${_prefix}/${_artifact}" \
-              --endpoint-url "${DL_S3_ENDPOINT}" \
-              --cache-control "public, max-age=31536000, immutable"
-          done
-          aws s3 cp publish/channels/trunk/manifest.json \
-            "s3://${DL_S3_BUCKET}/channels/trunk/manifest.json" \
-            --endpoint-url "${DL_S3_ENDPOINT}" \
-            --cache-control "public, max-age=30, must-revalidate" \
-            --content-type "application/json"
-          aws s3 cp publish/channels.json \
-            "s3://${DL_S3_BUCKET}/channels.json" \
-            --endpoint-url "${DL_S3_ENDPOINT}" \
-            --cache-control "public, max-age=30, must-revalidate" \
-            --content-type "application/json"
-
-      - name: Verify uploaded artifacts match manifest
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.DL_S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.DL_S3_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: ${{ vars.DL_S3_REGION }}
-          DL_S3_BUCKET: ${{ secrets.DL_S3_BUCKET }}
-          DL_S3_ENDPOINT: ${{ vars.DL_S3_ENDPOINT }}
-        run: |
-          python3 <<'PY'
-          import hashlib
-          import json
-          import os
-          import subprocess
-          import sys
-          import tempfile
-
-          with open("publish/channels/trunk/manifest.json") as f:
-              manifest = json.load(f)
-
-          bucket = os.environ["DL_S3_BUCKET"]
-          endpoint = os.environ["DL_S3_ENDPOINT"]
-
-          checks = [
-              ("linux-amd64", manifest["binaryArtifacts"]["linux-amd64"]),
-              ("linux-arm64", manifest["binaryArtifacts"]["linux-arm64"]),
-              ("js", manifest["jsFallbackArtifact"]),
-              ("orchestration", manifest["orchestrationArtifact"]),
-          ]
-
-          failed = False
-          with tempfile.TemporaryDirectory() as tmp:
-              for name, entry in checks:
-                  url = entry["url"]
-                  filename = url.rsplit("/", 1)[-1]
-                  s3_key = url.split("://", 1)[1].split("/", 1)[1]
-                  dest = os.path.join(tmp, filename)
-                  subprocess.run(
-                      [
-                          "aws", "s3", "cp",
-                          f"s3://{bucket}/{s3_key}",
-                          dest,
-                          "--endpoint-url", endpoint,
-                      ],
-                      check=True,
-                  )
-                  data = open(dest, "rb").read()
-                  digest = hashlib.sha256(data).hexdigest()
-                  if digest != entry["sha256"] or len(data) != entry["size"]:
-                      print(
-                          f"::error::{name} S3 mismatch: "
-                          f"expected sha256={entry['sha256']} size={entry['size']} "
-                          f"got sha256={digest} size={len(data)}",
-                          file=sys.stderr,
-                      )
-                      failed = True
-
-          if failed:
-              sys.exit(1)
-          print(
-              f"Verified S3 artifacts for commit {manifest['commit']} "
-              f"({manifest['buildId']})"
-          )
-          PY
-
-      - name: Verify CDN serves manifest artifact hashes
-        run: |
-          python3 <<'PY'
-          import hashlib
-          import json
-          import sys
-          import urllib.request
-
-          with open("publish/channels/trunk/manifest.json") as f:
-              manifest = json.load(f)
-
-          checks = [
-              ("linux-amd64", manifest["binaryArtifacts"]["linux-amd64"]),
-              ("linux-arm64", manifest["binaryArtifacts"]["linux-arm64"]),
-              ("js", manifest["jsFallbackArtifact"]),
-              ("orchestration", manifest["orchestrationArtifact"]),
-          ]
-
-          failed = False
-          for name, entry in checks:
-              with urllib.request.urlopen(entry["url"]) as resp:
-                  data = resp.read()
-              digest = hashlib.sha256(data).hexdigest()
-              if digest != entry["sha256"] or len(data) != entry["size"]:
-                  print(
-                      f"::error::{name} CDN mismatch: "
-                      f"expected sha256={entry['sha256']} size={entry['size']} "
-                      f"got sha256={digest} size={len(data)} "
-                      f"url={entry['url']}",
-                      file=sys.stderr,
-                  )
-                  failed = True
-
-          if failed:
-              sys.exit(1)
-          print(
-              f"Verified CDN artifacts for commit {manifest['commit']} "
-              f"({manifest['buildId']})"
-          )
-          PY
-
       - name: Stage the canary assets under versioned names
         id: canary
-        # Same bytes as the CDN drop, renamed the way a release names them so
+        # The compiled bytes, renamed the way a release names them so
         # the rolling canary release never has two builds fighting over one
         # filename. The version is the base the binary reports plus a
         # `-canary.<N>` pre-release suffix (N counts this base's canaries),
@@ -466,7 +277,7 @@ jobs:
           esac
           echo "version=${_version}" >> "$GITHUB_OUTPUT"
           mkdir -p canary-assets
-          _src="publish/channels/trunk/daemon"
+          _src="publish/daemon"
           cp "${_src}/turbopaneld-amd64.tar.zst" "canary-assets/$(tp_daemon_release_filename amd64 "$_version")"
           cp "${_src}/turbopaneld-arm64.tar.zst" "canary-assets/$(tp_daemon_release_filename arm64 "$_version")"
           cp "${_src}/$(tp_js_release_filename)" "canary-assets/$(tp_js_release_filename "$_version")"
@@ -488,7 +299,7 @@ jobs:
           cat canary-assets/manifest.json
 
       - name: Upload canary assets
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: turbopaneld-canary-assets
           path: canary-assets

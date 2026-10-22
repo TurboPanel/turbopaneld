@@ -210,9 +210,7 @@ async function seedRailpackReleaseManifest(
   const releaseDir = join(
     daemonStateDir,
     "release-records",
-    "sites",
     serviceId,
-    "releases",
     releaseId,
   );
   await writeReleaseManifest(releaseDir, {
@@ -281,6 +279,31 @@ test("shapeEnvironmentDeployResult includes releases and omits empty services", 
   });
   assertEquals(result.releases, releases);
   assertEquals("services" in result, false);
+});
+
+test("shapeEnvironmentDeployResult reports the service folders it kept, and omits the field when none", () => {
+  const base = {
+    projectName: "demo",
+    environmentId: "env-kept",
+    labeledServices: [],
+    sites: [],
+    containers: [],
+  };
+  const keptFolders = [{
+    owner: "alice",
+    scope: "production",
+    kind: "service" as const,
+    slug: "old.example.com",
+  }];
+  assertEquals(
+    shapeEnvironmentDeployResult({ ...base, keptFolders }).keptFolders,
+    keptFolders,
+  );
+  assertEquals(
+    "keptFolders" in shapeEnvironmentDeployResult({ ...base, keptFolders: [] }),
+    false,
+  );
+  assertEquals("keptFolders" in shapeEnvironmentDeployResult(base), false);
 });
 
 test("shapeEnvironmentDeployResult carries per-site app facts and omits them when empty", () => {
@@ -481,6 +504,99 @@ test({
         ),
       ) as { services: Record<string, unknown> };
       assertEquals(manifest.services, {});
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy skips an unchanged redeploy, but not a changed, forced or previously failed one",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      let failUp = false;
+      let hostUp = true;
+      const calls: string[][] = [];
+      const fakeRunDocker = (args: string[]): Promise<DockerCliResult> => {
+        calls.push([...args]);
+        if (failUp && args.includes("up")) {
+          return Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "boom",
+            code: 1,
+          });
+        }
+        return standardFakeRunDocker()(args);
+      };
+      const deploy = (overrides: Partial<EnvironmentDeployPayload>) => {
+        calls.length = 0;
+        return handleEnvironmentDeploy(
+          baseComposePayload({ environmentId: "envnoop0001", ...overrides }),
+          new Date().toISOString(),
+          {
+            runDocker: fakeRunDocker,
+            ...hermeticDeployDeps,
+            hostProbe: hostUp
+              ? {
+                composeStates: () =>
+                  Promise.resolve({
+                    expected: ["web"],
+                    containers: [{ service: "web", state: "running" }],
+                  }),
+                unitActive: () => Promise.resolve(true),
+                pathExists: () => Promise.resolve(true),
+                siteConfigNames: () => Promise.resolve([]),
+              }
+              : {
+                composeStates: () =>
+                  Promise.resolve({
+                    expected: ["web"],
+                    containers: [{ service: "web", state: "exited" }],
+                  }),
+                unitActive: () => Promise.resolve(false),
+                pathExists: () => Promise.resolve(false),
+                siteConfigNames: () => Promise.resolve([]),
+              },
+          },
+        );
+      };
+      const ranUp = () => calls.some((argv) => argv.includes("up"));
+
+      const first = await deploy({ desiredHash: "a".repeat(64) });
+      assertEquals(first.unchanged, undefined);
+      assertEquals(ranUp(), true);
+
+      const again = await deploy({ desiredHash: "a".repeat(64) });
+      assertEquals(again.unchanged, true);
+      assertEquals(again.summary.includes("Nothing changed"), true);
+      assertEquals(calls.length, 0);
+
+      // The same hash, but the container died: the deploy must run in full.
+      hostUp = false;
+      const afterCrash = await deploy({ desiredHash: "a".repeat(64) });
+      assertEquals(afterCrash.unchanged, undefined);
+      assertEquals(ranUp(), true);
+      hostUp = true;
+
+      const forced = await deploy({
+        desiredHash: "a".repeat(64),
+        noCache: true,
+      });
+      assertEquals(forced.unchanged, undefined);
+      assertEquals(ranUp(), true);
+
+      const changed = await deploy({ desiredHash: "b".repeat(64) });
+      assertEquals(changed.unchanged, undefined);
+      assertEquals(ranUp(), true);
+
+      failUp = true;
+      await assertRejects(() => deploy({ desiredHash: "c".repeat(64) }));
+      failUp = false;
+      // A failed deploy never counts as applied, not even for the hash before it.
+      const afterFailure = await deploy({ desiredHash: "b".repeat(64) });
+      assertEquals(afterFailure.unchanged, undefined);
+      assertEquals(ranUp(), true);
     });
   },
 });
@@ -891,6 +1007,7 @@ test({
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",
+            releaseServiceId: serviceId,
             provider: "github",
             cloneUrl: "https://example.test/repo.git",
             ref: "main",
@@ -1874,99 +1991,125 @@ test({
   },
 });
 
+/**
+ * Deploy an environment whose previous deploy published `previousRelease`,
+ * with that service gone from this payload (only `web` is still sourced).
+ */
+async function deployWithDroppedRelease(
+  previousRelease: Record<string, unknown>,
+  fn: (seen: {
+    principalHomeRoot: string;
+    sudoCalls: Array<{ command: string; args: string[] }>;
+    lines: string[];
+    result: Awaited<ReturnType<typeof handleEnvironmentDeploy>>;
+  }) => void,
+): Promise<void> {
+  await withDeployEnv(async ({ stateDir }) => {
+    const environmentId = "env-reclaimsrc1";
+    const previousHome = Deno.env.get("TURBOPANEL_PRINCIPAL_HOME_ROOT");
+    const principalHomeRoot = join(stateDir, "srv", "users");
+    Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", principalHomeRoot);
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
+      JSON.stringify({
+        version: 2,
+        projectId: "proj-1",
+        environmentId,
+        serverId: "srv-1",
+        generation: 1,
+        projectName: "tp-demo-reclaimsrc",
+        composeSha256: "a".repeat(64),
+        services: {},
+        releases: [previousRelease],
+      }),
+      { mode: 0o640 },
+    );
+    const sudoCalls: Array<{ command: string; args: string[] }> = [];
+    const log = collectingLogSink();
+
+    try {
+      const result = await handleEnvironmentDeploy(
+        baseComposePayload({
+          environmentId,
+          projectName: "tp-demo-reclaimsrc",
+          sourceMaterial: [{
+            sourceId: "src-1",
+            composeServiceName: "web",
+            provider: "github",
+            cloneUrl: "https://example.test/repo.git",
+            ref: "main",
+            commitSha: "c".repeat(40),
+            releaseId: "rel-keep",
+            build: { kind: "native" },
+          }],
+        } as unknown as EnvironmentDeployPayload),
+        new Date().toISOString(),
+        {
+          runDocker: standardFakeRunDocker(),
+          logSink: log.sink,
+          ...hermeticDeployDeps,
+          runPrivileged: (command, args) => {
+            sudoCalls.push({ command, args: [...args] });
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+            });
+          },
+        },
+      );
+      fn({ principalHomeRoot, sudoCalls, lines: log.lines, result });
+    } finally {
+      if (previousHome === undefined) {
+        Deno.env.delete("TURBOPANEL_PRINCIPAL_HOME_ROOT");
+      } else {
+        Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", previousHome);
+      }
+    }
+  });
+}
+
+const PERMISSIONS = { env: true, read: true, write: true, run: true };
+
 test({
   name:
-    "handleEnvironmentDeploy reclaims a dropped release while keeping a still-sourced service id",
-  permissions: { env: true, read: true, write: true, run: true },
+    "handleEnvironmentDeploy keeps the folder of a service that left the compose file and reports it",
+  permissions: PERMISSIONS,
   fn: async () => {
-    await withDeployEnv(async ({ stateDir }) => {
-      const environmentId = "env-reclaimsrc1";
-      const previousHome = Deno.env.get("TURBOPANEL_PRINCIPAL_HOME_ROOT");
-      const principalHomeRoot = join(stateDir, "srv", "users");
-      Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", principalHomeRoot);
-      const deploymentDir = join(
-        stateDir,
-        "deployments",
-        "proj-1",
-        environmentId,
-      );
-      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
-      await Deno.writeTextFile(
-        join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
-        JSON.stringify({
-          version: 2,
-          projectId: "proj-1",
-          environmentId,
-          serverId: "srv-1",
-          generation: 1,
-          projectName: "tp-demo-reclaimsrc",
-          composeSha256: "a".repeat(64),
-          services: {},
-          releases: [{
-            composeServiceName: "gone",
-            serviceId: "svc-gone",
-            releaseId: "rel-1",
-            sourceId: "src-old",
-            commitSha: "a".repeat(40),
-            username: "appuser",
-          }],
-        }),
-        { mode: 0o640 },
-      );
-      const sudoCalls: Array<{ command: string; args: string[] }> = [];
-      const log = collectingLogSink();
-
-      try {
-        await handleEnvironmentDeploy(
-          baseComposePayload({
-            environmentId,
-            projectName: "tp-demo-reclaimsrc",
-            sourceMaterial: [{
-              sourceId: "src-1",
-              composeServiceName: "web",
-              provider: "github",
-              cloneUrl: "https://example.test/repo.git",
-              ref: "main",
-              commitSha: "c".repeat(40),
-              releaseId: "rel-keep",
-              build: { kind: "native" },
-            }],
-          } as unknown as EnvironmentDeployPayload),
-          new Date().toISOString(),
-          {
-            runDocker: standardFakeRunDocker(),
-            logSink: log.sink,
-            ...hermeticDeployDeps,
-            runPrivileged: (command, args) => {
-              sudoCalls.push({ command, args: [...args] });
-              return Promise.resolve({
-                success: true,
-                stdout: "",
-                stderr: "",
-              });
-            },
-          },
-        );
-      } finally {
-        if (previousHome === undefined) {
-          Deno.env.delete("TURBOPANEL_PRINCIPAL_HOME_ROOT");
-        } else {
-          Deno.env.set("TURBOPANEL_PRINCIPAL_HOME_ROOT", previousHome);
-        }
-      }
-
+    await deployWithDroppedRelease({
+      composeServiceName: "gone",
+      serviceId: "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",
+      releaseId: "rel-1",
+      sourceId: "src-old",
+      commitSha: "a".repeat(40),
+      username: "appuser",
+      folder: {
+        owner: "appuser",
+        scope: "production",
+        slug: "old.example.com",
+      },
+    }, ({ sudoCalls, lines, result }) => {
+      // Nothing was removed: the files stay for the owner.
       assertEquals(
-        sudoCalls[0]?.args.includes(join(
-          principalHomeRoot,
-          "appuser",
-          "sites",
-          "svc-gone",
-        )),
-        true,
+        sudoCalls.some((call) => call.args.includes("rm")),
+        false,
       );
+      assertEquals(result.keptFolders, [{
+        owner: "appuser",
+        scope: "production",
+        kind: "service",
+        slug: "old.example.com",
+      }]);
       assertEquals(
-        log.lines.some((line) =>
-          line.startsWith("reclaimed removed service release tree ")
+        lines.some((line) =>
+          line.startsWith("kept the folder of a service that left")
         ),
         true,
       );
@@ -2208,13 +2351,38 @@ test({
 
 test("siteCronWritableDirs: shared/ for a release, webroot/ and shared/ for a managed tree, nothing otherwise", () => {
   const layout = { principalHomeRoot: "/srv/users" };
-  const site = { serviceId: "svc1", username: "alice" };
+  const site = {
+    serviceId: "svc1",
+    username: "alice",
+    folder: { owner: "alice", scope: "production", slug: "svc1" },
+  };
   assertEquals(siteCronWritableDirs(layout, site, undefined), [
-    "/srv/users/alice/sites/svc1/shared",
+    "/srv/users/alice/production/services/svc1/shared",
+    "/srv/users/alice/production/services/svc1/logs",
   ]);
   assertEquals(siteCronWritableDirs(layout, undefined, site), [
-    "/srv/users/alice/sites/svc1/webroot",
-    "/srv/users/alice/sites/svc1/shared",
+    "/srv/users/alice/production/services/svc1/public",
+    "/srv/users/alice/production/services/svc1/shared",
+    "/srv/users/alice/production/services/svc1/logs",
   ]);
   assertEquals(siteCronWritableDirs(layout, undefined, undefined), []);
+});
+
+test("siteCronWritableDirs: a service folder adds logs/, and the uploaded folder is public/", () => {
+  const layout = { principalHomeRoot: "/srv/users" };
+  const site = {
+    serviceId: "svc1",
+    username: "alice",
+    folder: { owner: "alice", scope: "production", slug: "example.com" },
+  };
+  const root = "/srv/users/alice/production/services/example.com";
+  assertEquals(siteCronWritableDirs(layout, site, undefined), [
+    `${root}/shared`,
+    `${root}/logs`,
+  ]);
+  assertEquals(siteCronWritableDirs(layout, undefined, site), [
+    `${root}/public`,
+    `${root}/shared`,
+    `${root}/logs`,
+  ]);
 });

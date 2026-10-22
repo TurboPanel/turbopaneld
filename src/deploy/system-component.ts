@@ -38,17 +38,29 @@ export type SystemComponentKey =
 export const SHARED_TRAEFIK_COMPOSE_SERVICE_NAME = "traefik";
 
 /**
- * Compose service key for the host's Docker-socket proxy, in the same shared
- * ingress project as {@link SHARED_TRAEFIK_COMPOSE_SERVICE_NAME}.
+ * Compose service key for the host's Docker-socket proxy. Also the DNS name
+ * every Traefik on the host reaches it by over the ingress network
+ * (`tcp://docker-socket-proxy:2375`), so it stays the proxy's network alias.
  *
  * Only this container sees `/var/run/docker.sock`. Every Traefik on the host
  * — the shared HTTP ingress and each per-service raw-TCP/UDP one — reaches
  * Docker through it over the ingress network instead, so an RCE in a Traefik
  * that proxies tenant traffic no longer hands over the Engine API. With the
  * Docker gate's stage-3 switch on, the Traefiks use the gate's read-only
- * socket and this service is dropped (`src/deploy/ingress.ts`).
+ * socket and the proxy is removed (`src/deploy/ingress.ts`).
+ *
+ * The proxy is its own compose project ({@link DOCKER_PROXY_PROJECT}), not a
+ * service of the shared Traefik's project, so it has its own lifecycle.
  */
 export const SOCKET_PROXY_COMPOSE_SERVICE_NAME = "docker-socket-proxy";
+
+/**
+ * The host's single Docker-socket proxy: its compose project and its
+ * `container_name`. Plain readable literals (one per host, no allocated id),
+ * unlike the Traefik projects, which are named by UUID.
+ */
+export const DOCKER_PROXY_PROJECT = "turbopanel-docker-proxy";
+export const DOCKER_PROXY_CONTAINER_NAME = "turbopanel-docker-proxy";
 
 /** Compose service key inside the shared ProxySQL managed-ingress project. */
 export const PROXYSQL_COMPOSE_SERVICE_NAME = "proxysql";

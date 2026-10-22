@@ -45,7 +45,8 @@ function payload(
   return {
     copyId: COPY,
     copyProvider: "docker",
-    volumeName: "shop_uploads",
+    volumeName: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
+    storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     action: "create",
     backupId: "bk_manual",
     ...overrides,
@@ -70,6 +71,12 @@ function deps(
           dockerResult(options.pullWorks ?? true, "registry unreachable"),
         );
       }
+      if (args[0] === "volume") {
+        return Promise.resolve({
+          ...dockerResult(true),
+          stdout: JSON.stringify({ Driver: "local", Labels: {} }),
+        });
+      }
       return Promise.resolve(dockerResult(true));
     },
     runArchive: async (argv, destination) => {
@@ -90,7 +97,7 @@ test("a manual create archives the copy outside any policy directory", async () 
       NOW.toISOString(),
       deps(layout, calls),
     );
-    const path = join(layout.backupDir, "copies", COPY, "bk_manual.tar.gz");
+    const path = join(layout.backupDir, "volumes", COPY, "bk_manual.tar.gz");
     assertEquals(result.backupId, "bk_manual");
     assertEquals(result.path, path);
     assertEquals(result.sizeBytes, 7);
@@ -154,7 +161,7 @@ test("a delete removes the manual or the policy's artifact and is idempotent", a
   await withLayout(async (layout) => {
     const policyDir = join(
       layout.backupDir,
-      "copies",
+      "volumes",
       COPY,
       `policy-${POLICY}`,
     );
@@ -189,7 +196,8 @@ test("the payload parser refuses a policy id on create and unsafe sources", () =
   const base = {
     copyId: COPY,
     copyProvider: "docker",
-    volumeName: "shop_uploads",
+    volumeName: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
+    storageId: "0192f1de-7c3b-7e4a-9f10-0000000000b1",
     action: "create",
     backupId: "bk_manual",
   };
@@ -204,7 +212,9 @@ test("the payload parser refuses a policy id on create and unsafe sources", () =
         copyProvider: "path",
         volumeName: undefined,
         hostPath: "/srv/users/../etc",
+        ownerUsername: "shop",
       },
+      { ...base, storageId: undefined },
       { ...base, backupId: "../x" },
     ]
   ) {

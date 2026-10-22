@@ -57,8 +57,8 @@ Deny: `Privileged`; host / `container:` `NetworkMode` `PidMode` `IpcMode`
 `DeviceRequests`; `CapAdd` outside the allowlist (default none);
 `SecurityOpt` other than `no-new-privileges`; `CgroupParent`; `Sysctls`;
 `VolumesFrom`; any `MaskedPaths` / `ReadonlyPaths`; a non-`runc` `Runtime`;
-privileged `exec`; `exec`/`attach`/`archive` on a platform container (rules
-`platform-exec`, `platform-attach`, `platform-archive`) except the daemon's own
+privileged `exec`; `exec`/`attach`/`archive`/`export` on a platform container (rules
+`platform-exec`, `platform-attach`, `platform-archive`, `platform-export`) except the daemon's own
 pairs in `PLATFORM_EXEC_ALLOWLIST` (managed engines; ProxySQL `mysql` only); binds (`Binds`, `Mounts` of type bind, and `local`-driver
 volumes that are really `o=bind,device=<path>` or a `device=/dev/...`) whose
 resolved source is `/`, the Docker socket, a denied tree (`/etc`, `/run`,
@@ -78,9 +78,9 @@ refuses (`body-unparseable` with `empty`, `invalid-utf8`, `invalid-json`,
 (symlinks followed root-side, dangling ones included, `..` refused) under
 `/srv/users` must be one of the places the principal home layout gives
 containers (`policy.ts` `principalViolation`, config `principalRoots`):
-`<user>/data` and `<user>/tmp`, `<user>/volumes/<id>` (path storage),
-`<user>/sites/<site>/shared`, `.../webroot` and the root-owned
-`.../releases`. Everything else under a home (`home/`, the home or `sites/`
+`<user>/tmp`, `<user>/<scope>/volumes/<name>` (path storage),
+`<user>/<scope>/services/<name>/shared`, `.../webroot` and the root-owned
+`.../releases`. Everything else under a home (`home/`, the home or a scope
 as a whole, a site's `.turbopanel-hosting`, `.tp-staging`) is a
 `bind-principal-path` finding. Outside `/srv/users` the older rules stand
 (root-owned bind roots such as `<state>/storage`, the deny list). The gate does
@@ -160,7 +160,8 @@ these labels itself and the config trees are daemon-writable today. It must
 tighten (and the labels stop being trusted) when route 2b makes the config trees
 root-owned; the label check can then be replaced by an exact-path list.
 Known gaps, left as findings on purpose: the ingress `docker-socket-proxy`
-service mounts the Docker socket until the stage-3 switch is on.
+(its own compose project, `turbopanel-docker-proxy`) mounts the Docker socket
+until the stage-3 switch is on.
 
 **Helper containers.** Every daemon-started throwaway `docker run` (backup tar,
 restore swap, managed-file ownership, engine volume bootstrap) stamps
@@ -258,18 +259,21 @@ failure message), and the restored gate is only waited for when it answered befo
 a good swap replaces them and drops `.next`, a broken staged `main.ts` is refused by the load check with nothing replaced. A switch value other than
 yes/no fails the converge before anything changes (a typo never turns it off).
 
-**The switch** (off by default): `docker_gate_ingress_socket: true` writes the
-root-owned `<install>/lib/docker-gate/ingress-socket.on`; `false` removes it;
-empty (the default, and every update converge) leaves it alone. The daemon
+**The switch** (on by default since 2026-10-21): `docker_gate_ingress_socket: true`
+(the default, so every converge) writes the root-owned
+`<install>/lib/docker-gate/ingress-socket.on`; `false` removes it and keeps the
+socket-proxy container; empty leaves it alone. An existing host gets the switch
+file at its next converge and its Traefik moves onto the gate at the next
+ingress apply (the next deploy or ingress reconcile). The daemon
 (`src/deploy/ingress.ts` `ingressDockerGateEnabled`) uses the gate only when the
 switch file AND `/run/turbopanel-gate/ro` exist. Then both Traefiks mount the
 DIRECTORY read-only at `/var/run/turbopanel-gate` (a directory, so a gate
 restart that recreates the socket does not strand Traefik on a dead inode) and
 use `--providers.docker.endpoint=unix:///var/run/turbopanel-gate/docker.sock`.
-The shared ingress project drops the `docker-socket-proxy` service (and
-`--remove-orphans` deletes the Tecnativa container) once no service Traefik
-compose file on disk still names it; until then it keeps the proxy without
-Traefik depending on it. The anonymous shared Traefik (no
+The `turbopanel-docker-proxy` compose project (the Tecnativa container, no
+longer part of the shared Traefik's project) is removed, after the shared
+Traefik has switched, once no service Traefik compose file on disk still
+names it; until then it stays up. The anonymous shared Traefik (no
 `hosting-ingress` descriptor yet, so no `turbopanel.role=ingress` label for the
 allowance) keeps the proxy until it has one. Without the switch both compose
 documents are byte for byte what they were.
@@ -327,7 +331,7 @@ registry auth, query strings, request bodies, the approval token itself. An
 2. Platform allowance, ownership observation, signed approval verifier,
    `/grpc` + `/session` proven end to end, still observe.
 3. **This role (added)**: Traefik on a read-only filtered socket behind a
-   per-host switch (off by default); with it on, the tp-created Tecnativa
+   per-host switch (on by default); with it on, the tp-created Tecnativa
    container is removed.
 4. `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`), drops
    the `sudo -u self docker` fallback, **enforce mode**; `tp` still in `docker`.
@@ -340,6 +344,15 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - Turn the switch on by default (or for every managed host) and prove it on
   canary with `scripts/docker-gate-proof.sh` section 5, before enforcement:
   an enforcing gate refuses the Tecnativa container's socket bind.
+- One proof script per claim, all run as root on a canary host with the switch on
+  (each leaves only `tpgate-proof-*` throwaways, removed on exit):
+  `scripts/docker-gate-proof-udp.sh` (a raw UDP route through a service Traefik on
+  the read-only socket, and again after a gate restart),
+  `scripts/docker-gate-proof-tls.sh` (an HTTPS route on the shared Traefik's
+  `websecure` entrypoint over HTTP/2, and again after a gate restart) and
+  `scripts/docker-gate-proof-reconcile.sh [seconds]` (before/after a
+  `system.reconcile` restart of the shared ingress, which an operator triggers in
+  the panel while the script waits).
 - The Tecnativa container stays on a host until every TCP/UDP service with a
   service Traefik has been redeployed once with the switch on: stage 4 cannot
   claim "no socket mounts" before that (re-render them during the switch, or
@@ -438,7 +451,7 @@ BuildKit's `/session` and `/grpc` upgrade to HTTP/2 the gate cannot read: every 
 mounts) rides inside them. They open only on the **build listener** (`build.ts`):
 
 - **Identity.** The client is the daemon account `tp` (`railpack-build.ts` runs `docker buildx build` as tp; Compose
-  builds too). The sandboxed build runner (`tpbuild`, `tp-host build-run`) never speaks Docker: its unit makes
+  builds too). The sandboxed build runner (`tp-host build-run`'s per-build throwaway users) never speaks Docker: its unit makes
   `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
   SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
   `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).

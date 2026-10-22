@@ -1,7 +1,6 @@
 import { assertEquals } from "@std/assert";
 import { ORCHESTRATE_HELPER } from "./assets.ts";
 import {
-  galaxyDockerRoleHelperInvocation,
   playbooksNeedRootHelper,
   privilegedPlaybookInvocation,
 } from "./privileged.ts";
@@ -59,8 +58,4 @@ test("privilegedPlaybookInvocation routes managed hosts through sudo -n tp-orche
 
 test("the helper lives inside the orchestration tree, never under a daemon-writable path", () => {
   assertEquals(ORCHESTRATE_HELPER.endsWith("/scripts/tp-orchestrate"), true);
-  assertEquals(galaxyDockerRoleHelperInvocation(), {
-    bin: "sudo",
-    args: ["-n", "--", ORCHESTRATE_HELPER, "galaxy-docker-role"],
-  });
 });

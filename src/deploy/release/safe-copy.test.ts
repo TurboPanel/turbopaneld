@@ -285,7 +285,11 @@ test("entry, byte and depth caps refuse an oversized tree", async () => {
 
 test({
   name: "a hard link to a root-owned file is refused",
-  ignore: Deno.build.os !== "linux" || Deno.uid() !== 0,
+  // CI's privileged job sets TURBOPANEL_REQUIRE_ROOT_TESTS=1 so a non-root run
+  // fails (the chown below) instead of skipping the security check.
+  ignore: Deno.build.os !== "linux" ||
+    (Deno.uid() !== 0 &&
+      Deno.env.get("TURBOPANEL_REQUIRE_ROOT_TESTS") !== "1"),
   fn: async () => {
     await withTree(async (tree) => {
       // The tree belongs to an unprivileged account; the linked file to root.

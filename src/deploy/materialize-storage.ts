@@ -6,9 +6,14 @@ import type {
   EnvironmentDeployStorageMaterial,
 } from "../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
+import { ensureAssetFolder } from "./asset-folders.ts";
 import {
   ensureDirectoryOwnedByPrincipal,
+  lookupPrincipalIds,
+  PRINCIPAL_ID_MAX,
+  PRINCIPAL_ID_MIN,
   principalUnixGroupName,
+  type RunFn,
 } from "./ensure-principal.ts";
 import { runDocker } from "./docker-cli.ts";
 import { directoryExists } from "../permissions/privileged-read.ts";
@@ -170,13 +175,57 @@ async function materializeDockerVolume(
   return volumeName;
 }
 
+/**
+ * A path copy lives only in its volume folder (`<owner>/<scope>/volumes/<name>`),
+ * named by `folder`. A `sourcePath` with no folder names nothing the daemon will
+ * create, re-own or bind-mount, so the deploy is refused.
+ */
+function assertHasFolderForSourcePath(
+  entry: EnvironmentDeployStorageMaterial,
+): void {
+  if (entry.sourcePath === undefined) return;
+  throw new Error(
+    `storage ${entry.storageId}: a path copy needs a folder planned on this server, but source path ${entry.sourcePath} came without one; redeploy from the panel`,
+  );
+}
+
+/**
+ * A volume folder (`<owner>/<scope>/volumes/<name>`): checked against the
+ * record of its first components, then created `<owner>:<owner> 0750`. Only
+ * the folder itself is given to the owner, never anything inside it: files a
+ * container writes keep the user id the container ran as.
+ */
+async function materializeVolumeFolder(
+  layout: LayoutPaths,
+  entry: EnvironmentDeployStorageMaterial,
+  ownership: EnvironmentDeployPrincipalMaterial | undefined,
+): Promise<string> {
+  if (entry.folder === undefined) {
+    throw new Error(`storage ${entry.storageId} has no folder`);
+  }
+  if (ownership?.username !== entry.folder.owner) {
+    throw new Error(
+      `storage ${entry.storageId}: its folder belongs to ${entry.folder.owner}, who is not the site owner this deploy names for it`,
+    );
+  }
+  return await ensureAssetFolder(layout, entry.storageId, {
+    ...entry.folder,
+    kind: "volume",
+  });
+}
+
 async function materializeHostPathEntry(
+  layout: LayoutPaths,
   baseDir: string,
   entry: EnvironmentDeployStorageMaterial,
   ownership: EnvironmentDeployPrincipalMaterial | undefined,
   fileContent: string,
 ): Promise<string> {
-  let hostPath = entry.sourcePath ?? baseDir;
+  if (entry.folder !== undefined && entry.kind === "directory") {
+    return await materializeVolumeFolder(layout, entry, ownership);
+  }
+  assertHasFolderForSourcePath(entry);
+  let hostPath = baseDir;
 
   if (entry.kind === "directory") {
     if (ownership) {
@@ -259,6 +308,7 @@ export async function materializeLocation(
   }
 
   return await materializeHostPathEntry(
+    layout,
     baseDir,
     entry,
     ownership,
@@ -306,4 +356,101 @@ export function storageHostPath(
     locationId,
     "data",
   );
+}
+
+/** The user and group ids a container runs as to write into an owner's volume. */
+export type VolumeOwnerIds = ReadonlyMap<
+  string,
+  { uid: number; gid: number }
+>;
+
+/** The site owner an entry belongs to: its folder's owner, else the account its principal names. */
+function ownerNameOf(
+  entry: EnvironmentDeployStorageMaterial,
+  byId: Map<string, EnvironmentDeployPrincipalMaterial>,
+): string | undefined {
+  if (entry.folder !== undefined) return entry.folder.owner;
+  return entry.principalId ? byId.get(entry.principalId)?.username : undefined;
+}
+
+/**
+ * A container is run as these ids, so they must belong to a site owner's
+ * account: inside the band the host gives site owners (never root, never a
+ * system account such as one a package made, which a site owner's name could
+ * otherwise be matched to). Refused with a plain message.
+ */
+export function assertOwnerIdsInBand(
+  storageId: string,
+  owner: string,
+  ids: { uid: number; gid: number },
+): void {
+  const inBand = (id: number) =>
+    Number.isInteger(id) && id >= PRINCIPAL_ID_MIN && id <= PRINCIPAL_ID_MAX;
+  if (!inBand(ids.uid) || !inBand(ids.gid)) {
+    throw new Error(
+      `storage ${storageId}: the account ${owner} has uid ${ids.uid} and gid ${ids.gid}, outside the range used for site owners (${PRINCIPAL_ID_MIN} to ${PRINCIPAL_ID_MAX}), so containers will not be run as it`,
+    );
+  }
+}
+
+/**
+ * Ids of the site owner behind each volume folder and each named Docker volume
+ * linked to an owner, by storage id. A container that mounts one is run as
+ * these ids (unless its own compose file names a user), so what it writes
+ * belongs to the owner the SFTP login and the backups see. The ids come from
+ * the account on this host, else from the deploy's principal material, and
+ * must sit in the site owner band ({@link assertOwnerIdsInBand}).
+ *
+ * An owner with no account on this host yet fails the deploy for a folder (the
+ * folder cannot be made for nobody). For a linked named volume it only skips
+ * that volume's owner setup, with a line to `onSkip`: the volume still works for
+ * a container that runs as its image's own user, so a missing account should
+ * not block a deploy that does not need it.
+ */
+export async function resolveVolumeOwnerIds(
+  entries: readonly EnvironmentDeployStorageMaterial[],
+  principals: readonly EnvironmentDeployPrincipalMaterial[] | undefined,
+  runFn?: RunFn,
+  onSkip?: (line: string) => void,
+): Promise<VolumeOwnerIds> {
+  const byId = principalById(
+    principals as EnvironmentDeployPrincipalMaterial[],
+  );
+  const owners = new Map<string, { uid: number; gid: number }>();
+  const out = new Map<string, { uid: number; gid: number }>();
+  // The owner's folders, and the named Docker volumes linked to a site owner.
+  const wanted = entries.filter((entry) =>
+    (entry.folder !== undefined && entry.kind === "directory") ||
+    (entry.provider === "docker" && ownerNameOf(entry, byId) !== undefined)
+  );
+  await forEachSequential(wanted, async (entry) => {
+    const owner = ownerNameOf(entry, byId)!;
+    let ids = owners.get(owner);
+    if (ids === undefined) {
+      // The account on this host is the truth; the deploy's own ids only
+      // stand in before the account exists.
+      const material = entry.principalId
+        ? byId.get(entry.principalId)
+        : undefined;
+      ids = await lookupPrincipalIds(owner, runFn) ??
+        (material?.uid !== undefined && material.gid !== undefined
+          ? { uid: material.uid, gid: material.gid }
+          : undefined);
+      if (ids === undefined) {
+        if (entry.folder === undefined) {
+          onSkip?.(
+            `the volume ${entry.name} is linked to ${owner}, who has no account on this host yet; its containers are not run as the owner`,
+          );
+          return;
+        }
+        throw new Error(
+          `storage ${entry.storageId}: the site owner ${owner} has no account on this host yet`,
+        );
+      }
+      assertOwnerIdsInBand(entry.storageId, owner, ids);
+      owners.set(owner, ids);
+    }
+    out.set(entry.storageId, ids);
+  });
+  return out;
 }

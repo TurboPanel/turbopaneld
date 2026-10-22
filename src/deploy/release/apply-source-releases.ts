@@ -40,12 +40,15 @@ import {
   type CommandOutputSink,
 } from "../../logs/contracts.ts";
 import type {
+  EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
   EnvironmentDeploySource,
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
+import { ensureAssetFolder } from "../asset-folders.ts";
 import type { RunFn } from "../ensure-principal.ts";
-import { dirname, join } from "@std/path";
+import type { DeployCancelToken } from "../deploy-cancel.ts";
+import { join } from "@std/path";
 import {
   assertCheckoutCredentialsRemoved,
   checkoutRelease,
@@ -54,10 +57,12 @@ import {
 } from "./checkout.ts";
 import {
   type NativeAppBuildOutput,
+  type NativeBuildRuntime,
   prepareNativeAppBuildOutput,
   runReleaseBuild,
 } from "./build.ts";
 import {
+  BUILD_NO_OWNER,
   buildSandboxEnabled,
   type BuildSandboxMarkers,
   buildSpecCwd,
@@ -67,10 +72,10 @@ import {
   resolveBuildWork,
   sweepStaleBuildWork,
 } from "./build-sandbox.ts";
+import type { ImagePrepareSandbox } from "./image-prepare-sandbox.ts";
 import {
-  nativeAppNodeBinary,
-  nativeAppRuntimeGroup,
-  resolveNativeAppNodeVersion,
+  nativeAppRuntimeKind,
+  nativeAppRuntimeTarget,
 } from "../native/unit.ts";
 import {
   ensureBuildkitRailpack,
@@ -85,7 +90,18 @@ import {
   recordRailpackRelease,
   releasePathExists,
 } from "./promote.ts";
+import {
+  resolveReleaseServiceId,
+  serviceFolderFromPayload,
+} from "./release-service-id.ts";
 import { pruneReleases } from "./retention.ts";
+import {
+  missingSiteRootMessage,
+  releaseSiteRoot,
+  siteForSource,
+} from "./site-release.ts";
+import { PENDING_RECORD_MARKER } from "./release-health.ts";
+import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
@@ -95,7 +111,6 @@ import {
 } from "./deployment-json.ts";
 import {
   ensureDaemonReleaseRecordDir,
-  ensureReleaseTree,
   type ReleasePaths,
   removeReleaseScratchDir,
   resetReleaseScratchDir,
@@ -155,37 +170,21 @@ export type AppliedRelease = {
    * server process to supervise, so no systemd unit is generated for it.
    */
   staticExport: boolean;
+  /**
+   * How the unit starts this release when its author typed no start command
+   * (detected at build time, or read back from the release record on a
+   * rollback). Absent when the author chose, or for a release recorded before
+   * this was kept — the unit then falls back to `node server.js`.
+   */
+  nativeStart?: NativeAppStart;
+  /**
+   * The runtime the live release runs on, when it is not Node: the build's own
+   * (`deno`), or on a rollback the one its record kept. Absent means Node.
+   */
+  runtime?: "node" | "deno";
 };
 
-/**
- * Compose service name → TurboPanel service UUID, from the rows that carry it
- * (`hostings[]`, then `ingressServices[]`).
- *
- * A Git-backed service need not publish a hosting (a worker does not), so when
- * neither names it the compose service key is used as the directory segment.
- * It is unique within an environment and charset-safe, which is all the path
- * needs — nothing downstream parses this segment as a UUID.
- */
-export function resolveReleaseServiceId(
-  payload: EnvironmentDeployPayload,
-  composeServiceName: string,
-): string {
-  for (const hosting of payload.hostings ?? []) {
-    if (
-      hosting.composeServiceName === composeServiceName && hosting.serviceId
-    ) {
-      return hosting.serviceId;
-    }
-  }
-  for (const ingress of payload.ingressServices ?? []) {
-    if (
-      ingress.composeServiceName === composeServiceName && ingress.serviceId
-    ) {
-      return ingress.serviceId;
-    }
-  }
-  return composeServiceName;
-}
+export { resolveReleaseServiceId } from "./release-service-id.ts";
 
 /**
  * Decrypt one clone credential.
@@ -220,8 +219,24 @@ function nativeAppForService(
   );
 }
 
+/** `deno` for a Deno app, else nothing: a Node release records no runtime. */
+function builtRuntime(
+  payload: EnvironmentDeployPayload,
+  composeServiceName: string,
+): "deno" | undefined {
+  return nativeAppForService(payload, composeServiceName)?.runtime === "deno"
+    ? "deno"
+    : undefined;
+}
+
 export type ApplySourceReleasesDeps = {
   logSink: CommandOutputSink;
+  /**
+   * Cancel token of the running deploy. Checked between phases; its signal
+   * stops the clone and the build; `commit` runs right before the first step
+   * that switches a release live (see `../deploy-cancel.ts`).
+   */
+  cancel?: DeployCancelToken;
   decryptSecrets: DecryptSecretsFn | undefined;
   /** Privileged runner seam (`sudo -n …`); tests inject a fake. */
   runFn?: RunFn;
@@ -245,8 +260,6 @@ export type ApplySourceReleasesDeps = {
   runRailpackBuildFn?: typeof runRailpackBuild;
   /** Test seam — defaults to {@link ensureBuildkitRailpack}. */
   ensureBuildkitRailpackFn?: typeof ensureBuildkitRailpack;
-  /** Test seam — defaults to {@link ensureReleaseTree}. */
-  ensureReleaseTreeFn?: typeof ensureReleaseTree;
   /** Test seam — defaults to {@link ensureDaemonReleaseRecordDir}. */
   ensureDaemonReleaseRecordDirFn?: typeof ensureDaemonReleaseRecordDir;
   /**
@@ -264,7 +277,7 @@ export type ApplySourceReleasesDeps = {
  * Promote an already-published release for one service — the rollback lane.
  *
  * Deliberately *not* a variation threaded through the build path: it must not
- * run `ensureReleaseTree` (which would repair the sealed release directory back
+ * re-create the release tree (which would repair the sealed release directory back
  * to staging mode and hand the runtime user a writable copy of the code it is
  * running), must not touch the scratch dir, and emits no `fetch` / `build`
  * phase lines because neither happened. What it does share is everything after
@@ -334,6 +347,8 @@ async function rollbackOneRelease(
     };
   }
 
+  // Cutting `current` over is the switch itself: past this line a cancel is too late.
+  deps.cancel?.commit("before the release was switched over");
   const releaseDir =
     await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
       paths,
@@ -368,6 +383,12 @@ async function rollbackOneRelease(
     // those releases already had.
     standaloneOutput: recordedManifest.standaloneOutput ?? false,
     staticExport: recordedManifest.staticExport ?? false,
+    ...(recordedManifest.nativeStart === undefined
+      ? {}
+      : { nativeStart: recordedManifest.nativeStart }),
+    // A record without a runtime ran on Node; say so explicitly so a rollback
+    // across a switch never keeps the newer payload's `deno`.
+    runtime: recordedManifest.runtime ?? "node",
   };
 }
 
@@ -382,8 +403,9 @@ async function rollbackOneRelease(
  * lanes' history lives in one place and rollback can restore this release by
  * re-running its tag instead of re-cloning and rebuilding.
  *
- * The scratch checkout is removed in the caller's `finally`, exactly as on the
- * native lane — a clone never lands anywhere but scratch.
+ * The checkout is removed in the caller's `finally`, exactly as on the native
+ * lane: scratch, or on a managed host the build sandbox's work tree, where the
+ * prepare step runs as a throwaway build user.
  */
 async function applyRailpackRelease(
   layout: LayoutPaths,
@@ -396,6 +418,8 @@ async function applyRailpackRelease(
     commitSha: string;
     deps: ApplySourceReleasesDeps;
     onOutput: ReleaseOutputHandler;
+    /** The build sandbox the prepare step runs in (every managed host). */
+    sandbox?: ImagePrepareSandbox;
   },
 ): Promise<AppliedRelease> {
   const { deps, onOutput, serviceId } = params;
@@ -414,8 +438,13 @@ async function applyRailpackRelease(
     tools,
     onOutput,
     redactSummary: (text) => logSink.redactSummary(text),
+    ...(deps.cancel === undefined ? {} : { signal: deps.cancel.signal }),
+    ...(params.sandbox === undefined ? {} : { sandbox: params.sandbox }),
   });
 
+  // Recording the image is not a switch (compose `up` is), so this is a
+  // checkpoint, not the commit.
+  deps.cancel?.throwIfCancelled("after the image was built");
   logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
   const manifest: ReleaseManifestV1 = {
     version: 1,
@@ -564,9 +593,6 @@ async function resolveRollbackTarget(
     : null;
 }
 
-/** Present in a record dir from before the promote until it has finished. */
-const PENDING_RECORD_MARKER = ".pending";
-
 /**
  * The record at `recordDir`, unless it is still pending: a pending record was
  * written ahead of a promote that never finished (the daemon died mid-way), so
@@ -696,6 +722,7 @@ async function checkoutForEntry(
     checkoutDir,
     onOutput,
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
+    signal: deps.cancel?.signal,
     credential,
     // An SSH deploy key and an HTTPS token are handed to git in completely
     // different ways; the control plane tags which one this is.
@@ -740,22 +767,46 @@ async function buildRailpackRelease(
     paths,
   );
   await resetReleaseScratchDir(paths);
+  let work: BuildWork | null = null;
   try {
+    // The prepare step interprets the repository: on a managed host it runs
+    // in the build sandbox like any other build, in the site owner's slice
+    // (or the platform's own build slice when the service has no owner).
+    work = await prepareBuildWork(payload, entry, {
+      serviceId,
+      owner: entry.principal?.username ?? BUILD_NO_OWNER,
+      deps,
+    });
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
-    const checkout = await checkoutForEntry(entry, paths, deps, onOutput);
+    const checkout = await checkoutForEntry(
+      entry,
+      paths,
+      deps,
+      onOutput,
+      work?.checkoutDir,
+    );
 
     // Same `build` phase the native lane uses — an operator reading the
     // transcript should not have to learn a second phase name to find out why
     // their image did not build.
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+    if (work) await assertCheckoutCredentialsRemoved(paths.scratchDir);
     return await applyRailpackRelease(layout, payload, entry, paths, {
       serviceId,
       buildWorkingDir: buildWorkingDirFor(entry, checkout.workingDir),
       commitSha: checkout.commitSha,
       deps,
       onOutput,
+      ...(work === null ? {} : {
+        sandbox: definedFields({
+          work,
+          cwd: buildSpecCwd(entry.subdirectory),
+          runFn: deps.runFn,
+        }),
+      }),
     });
   } finally {
+    if (work) await removeBuildWork(work, onOutput);
     await removeReleaseScratchDir(paths);
   }
 }
@@ -779,15 +830,23 @@ async function buildNativeRelease(
   const { deps, onOutput, serviceId, username } = params;
   const { logSink } = deps;
 
-  await (deps.ensureReleaseTreeFn ?? ensureReleaseTree)(
-    paths,
-    username,
-    deps.runFn,
-  );
+  if (!paths.publish) {
+    throw new Error(`release for service ${serviceId} has no service folder`);
+  }
+  // The folder, its `releases/`, `shared/` and `logs/`, and the record of its
+  // components; a changed folder for a known service is refused here.
+  await ensureAssetFolder(layout, serviceId, {
+    ...paths.publish.folder,
+    kind: "service",
+  }, deps.runFn);
   await resetReleaseScratchDir(paths);
   let work: BuildWork | null = null;
   try {
-    work = await prepareBuildWork(payload, entry, serviceId, deps);
+    work = await prepareBuildWork(payload, entry, {
+      serviceId,
+      owner: username,
+      deps,
+    });
     logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
     const checkout = await checkoutForEntry(
       entry,
@@ -806,7 +865,14 @@ async function buildNativeRelease(
       onOutput,
     });
 
+    // The release is built and nothing live has changed yet: this is the last
+    // moment a cancel can land. It also precedes the daemon's record of the
+    // release, so a cancelled deploy leaves no record behind.
+    deps.cancel?.commit("before the release was switched over");
     logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+    // A site that would have no document root fails here, while `current` still
+    // points at the last good release and nothing of this one is on disk.
+    await assertSiteRootBuilt(payload, entry, nativeOutput, checkout);
     const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
     const manifest: ReleaseManifestV1 = definedFields({
       version: 1,
@@ -823,6 +889,15 @@ async function buildNativeRelease(
       // without rebuilding — see `ReleaseManifestV1`.
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
+      nativeStart: nativeOutput.start,
+      // Only Deno is written, so a Node manifest is unchanged (see
+      // `ReleaseManifestV1.runtime`).
+      runtime: builtRuntime(payload, entry.composeServiceName),
+      // The author's own start settings, so a rollback to this release
+      // starts it the way it ran (see `ReleaseManifestV1.startCommand`).
+      startCommand: entry.build.startCommand?.trim() || undefined,
+      startupFile: nativeAppForService(payload, entry.composeServiceName)
+        ?.startupFile?.trim() || undefined,
     });
     await recordNativeRelease(layout, manifest, deps);
     let releaseDir: string;
@@ -876,11 +951,43 @@ async function buildNativeRelease(
       previousReleaseId,
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
+      nativeStart: nativeOutput.start,
+      runtime: builtRuntime(payload, entry.composeServiceName),
     });
   } finally {
     if (work) await removeBuildWork(work, onOutput);
     await removeReleaseScratchDir(paths);
   }
+}
+
+/**
+ * For a site, check the folder it serves exists in what is about to be
+ * published, before anything is promoted. Reading it is best-effort: a tree the
+ * daemon cannot read is left to the check that runs after the site is applied.
+ */
+async function assertSiteRootBuilt(
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  nativeOutput: NativeAppBuildOutput,
+  checkout: CheckoutResult,
+): Promise<void> {
+  const site = siteForSource(payload, entry.composeServiceName);
+  if (!site) return;
+  const outputDirectory = entry.build.outputDirectory ??
+    nativeOutput.outputDirectory;
+  const root = releaseSiteRoot(site, outputDirectory);
+  const sourceDir = join(
+    checkout.workingDir,
+    entry.subdirectory ?? "",
+    outputDirectory ?? "",
+    root,
+  );
+  try {
+    if ((await Deno.lstat(sourceDir)).isDirectory) return;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) return;
+  }
+  throw new Error(missingSiteRootMessage(site, root, outputDirectory));
 }
 
 /**
@@ -890,9 +997,14 @@ async function buildNativeRelease(
 async function prepareBuildWork(
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
-  serviceId: string,
-  deps: ApplySourceReleasesDeps,
+  params: {
+    serviceId: string;
+    /** The site owner's Linux user: the build's resource group and cache. */
+    owner: string;
+    deps: ApplySourceReleasesDeps;
+  },
 ): Promise<BuildWork | null> {
+  const { serviceId, owner, deps } = params;
   const sandboxed = deps.sandboxedBuilds ??
     await buildSandboxEnabled(deps.buildSandboxMarkers);
   if (!sandboxed) return null;
@@ -901,7 +1013,12 @@ async function prepareBuildWork(
     onOutput: (stream, line) => deps.logSink.onLine(stream, line),
   });
   const work = await resolveBuildWork(
-    { serviceId, releaseId: entry.releaseId, projectId: payload.projectId },
+    {
+      serviceId,
+      releaseId: entry.releaseId,
+      projectId: payload.projectId,
+      owner,
+    },
     deps.buildSandboxRoot,
   );
   await createBuildWorkDir(work, deps.runFn);
@@ -934,17 +1051,8 @@ async function buildNativeTree(
     // NODE_ENV, so the derived install command and the build both run on
     // the series the app will execute on.
     nativeRuntime: nativeApp
-      ? definedFields({
-        nodeBinDir: dirname(nativeAppNodeBinary(
-          layout,
-          resolveNativeAppNodeVersion(nativeApp),
-        )),
-        nodeEnv: nativeApp.appMode ?? "production",
-        runtimeGroup: nativeAppRuntimeGroup(
-          resolveNativeAppNodeVersion(nativeApp),
-        ),
-      })
-      : undefined,
+      ? nativeBuildRuntime(layout, nativeApp)
+      : siteBuildRuntime(layout, payload, entry),
     sandbox: work
       ? definedFields({
         work,
@@ -952,22 +1060,132 @@ async function buildNativeTree(
         runFn: deps.runFn,
       })
       : undefined,
+    signal: deps.cancel?.signal,
     onOutput,
     redactSummary: (text: string) => deps.logSink.redactSummary(text),
   }));
 
+  if (!nativeApp) return { standaloneOutput: false, staticExport: false };
   // An operator-declared `outputDirectory` always wins: they said where the
   // payload is, and second-guessing that would make the field a suggestion.
-  if (!nativeApp || entry.build.outputDirectory !== undefined) {
-    return { standaloneOutput: false, staticExport: false };
-  }
-  return await (deps.prepareNativeAppBuildOutputFn ??
+  // Only how it starts is still worked out, inside that directory.
+  const output = await (deps.prepareNativeAppBuildOutputFn ??
     prepareNativeAppBuildOutput)(definedFields({
       framework: nativeApp.framework,
+      ...(nativeAppRuntimeKind(nativeApp) === "deno"
+        ? { runtime: "deno" as const }
+        : {}),
       workingDir: buildWorkingDir,
       containmentRoot: work?.workDir,
+      outputDirectory: entry.build.outputDirectory,
+      detectStart: !authorChoseStart(entry, nativeApp),
       onOutput,
     }));
+  if (output.standaloneOutput) {
+    assertStandaloneStart(entry.build.startCommand, nativeApp.startupFile);
+  }
+  return output;
+}
+
+/**
+ * What a native app's build runs on: its vendored runtime on `PATH`, so the
+ * derived install and build commands run on the runtime the app will execute
+ * on.
+ */
+function nativeBuildRuntime(
+  layout: LayoutPaths,
+  nativeApp: Pick<
+    EnvironmentDeployNativeAppService,
+    "runtime" | "nodeVersion" | "denoVersion" | "appMode"
+  >,
+): NativeBuildRuntime {
+  const target = nativeAppRuntimeTarget(layout, nativeApp);
+  return definedFields({
+    ...(target.runtime === "deno" ? { runtime: "deno" as const } : {}),
+    nodeBinDir: target.binDir,
+    nodeEnv: nativeApp.appMode ?? "production",
+  });
+}
+
+/**
+ * A site's build gets the same Node an app without a pinned series gets, so a
+ * static site can run `npm install && npm run build`. Anything else that is not
+ * an app builds with the plain tool path, as before.
+ */
+function siteBuildRuntime(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+): NativeBuildRuntime | undefined {
+  if (!siteForSource(payload, entry.composeServiceName)) return undefined;
+  return nativeBuildRuntime(layout, { runtime: "node" });
+}
+
+/** The author said how the app starts: a start command or a startup file. */
+function authorChoseStart(
+  entry: EnvironmentDeploySource,
+  nativeApp: EnvironmentDeployNativeAppService,
+): boolean {
+  return Boolean(
+    entry.build.startCommand?.trim() || nativeApp.startupFile?.trim(),
+  );
+}
+
+/**
+ * Any `next start` invocation, however it is reached: bare, through `pnpm
+ * exec` or `npx`, or by a `node_modules/.bin` path.
+ */
+const NEXT_START_RE = /(?:^|\s|\/)next\s+start(?:\s|$)/;
+
+/**
+ * The package `start` script by any route — `pnpm start`, `npm run start`,
+ * `npm run-script start`, with or without arguments, optionally through
+ * Corepack. `pnpm start:prod` is a different script and passes.
+ */
+const PACKAGE_START_SCRIPT_RE =
+  /^(?:corepack\s+)?(?:pnpm|yarn|npm)\s+(?:run(?:-script)?\s+)?start(?:\s|$)/;
+
+/**
+ * A Next standalone release is `server.js` plus a pruned `node_modules`: it
+ * has no `next` command and no package scripts, so a start command that needs
+ * either (`pnpm start`, `next start`) can only crash-loop. The daemon also
+ * publishes the standalone subtree *as* the release, so a start command or
+ * startup file under `.next/standalone/` points at nothing. All of this is
+ * known before anything live changes, so the build fails here with the fix
+ * spelled out instead of promoting a release that cannot start.
+ */
+function assertStandaloneStart(
+  startCommand: string | undefined,
+  startupFile: string | undefined,
+): void {
+  const remedy =
+    "Clear the start command and the app starts with node server.js.";
+  const command = startCommand?.trim();
+  if (command) {
+    if (PACKAGE_START_SCRIPT_RE.test(command) || NEXT_START_RE.test(command)) {
+      throw new Error(
+        `the build produced a Next.js standalone release, which has no "next" ` +
+          `command and no package scripts, so the start command "${command}" ` +
+          `cannot run it. ${remedy}`,
+      );
+    }
+    if (command.includes(".next/standalone/")) {
+      throw new Error(
+        `the build produced a Next.js standalone release, and that tree is ` +
+          `published as the release itself, so the start command "${command}" ` +
+          `points at a path that does not exist there. ${remedy}`,
+      );
+    }
+  }
+  const file = startupFile?.trim();
+  if (file?.includes(".next/standalone/")) {
+    throw new Error(
+      `the build produced a Next.js standalone release, and that tree is ` +
+        `published as the release itself, so the startup file "${file}" ` +
+        `points at a path that does not exist there. Clear the startup file ` +
+        `and the app starts with node server.js.`,
+    );
+  }
 }
 
 async function applyOneRelease(
@@ -979,6 +1197,9 @@ async function applyOneRelease(
   const { logSink } = deps;
   const onOutput: ReleaseOutputHandler = (stream, line) =>
     logSink.onLine(stream, line);
+  deps.cancel?.throwIfCancelled(
+    `before ${entry.composeServiceName} was built`,
+  );
 
   const railpack = entry.build.kind === "railpack";
   const principal = entry.principal;
@@ -1010,6 +1231,7 @@ async function applyOneRelease(
       username: principal.username,
       serviceId,
       releaseId: targetReleaseId,
+      folder: serviceFolderFromPayload(payload, serviceId),
     })
     : null;
   // Railpack history is always daemon-owned, principal or not: one service must

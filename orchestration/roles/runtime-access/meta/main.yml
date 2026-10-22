@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  author: turbopanel
+  description: >-
+    Let every site owner's Linux user traverse to the vendored runtimes
+    (an other:x ACL on the install and vendor roots, never a listing), and
+    remove the per-version runtime groups older releases created, with
+    their ACL entries and dpkg-statoverride entries.
+  license: AGPL-3.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+
+dependencies: []

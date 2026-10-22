@@ -28,17 +28,13 @@ import {
   copyTargetLockPath,
   managedTargetLockPath,
 } from "../managed/target-lock.ts";
-import {
-  BOOTSTRAP_STAMP_FILE,
-  GALAXY_DOCKER_STAMP_FILE,
-} from "../orchestration/bootstrap-stamp.ts";
+import { BOOTSTRAP_STAMP_FILE } from "../orchestration/bootstrap-stamp.ts";
 import {
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_INSTALL_DIR,
   CACHE_DIR,
   cloudflaredDir,
   GALAXY_COLLECTIONS_DIR,
-  GALAXY_VENDOR_ROLES_DIR,
   PYTHON_CURRENT_DIR,
   PYTHON_RUNTIME_DIR,
   RUNTIMES_DIR,
@@ -206,6 +202,26 @@ test("deno.json compile tasks and the JS ExecStart render the same daemon contra
     if (!found) throw new TypeError(`missing invocation ${name}`);
     const granted = found.flags.filter((f) => isGrantFlag(f));
     assertEquals(granted, expected, name);
+  }
+});
+
+test("every compile task bakes --quiet so absent optional tools are not logged as Info lines", async () => {
+  // The runtime prints "Info Failed to resolve '<tool>' for allow-run" at
+  // start-up for each listed program missing on the host. Compiling with
+  // --quiet bakes the error-only log level into the binary; real errors and
+  // uncaught exceptions still reach stderr. The run-mode ExecStart lines
+  // already pass --quiet.
+  const invocations = await productionInvocations();
+  for (
+    const name of [
+      "deno.json compile",
+      "deno.json compile:linux-amd64",
+      "deno.json compile:linux-arm64",
+    ]
+  ) {
+    const found = invocations.find((entry) => entry.source === name);
+    if (!found) throw new TypeError(`missing invocation ${name}`);
+    assertEquals(found.flags.includes("--quiet"), true, name);
   }
 });
 
@@ -427,10 +443,8 @@ test("every orchestration bootstrap write target sits inside the compiled write 
     PYTHON_CURRENT_DIR,
     ANSIBLE_INSTALL_DIR,
     ANSIBLE_CURRENT_DIR,
-    GALAXY_VENDOR_ROLES_DIR,
     GALAXY_COLLECTIONS_DIR,
     BOOTSTRAP_STAMP_FILE,
-    GALAXY_DOCKER_STAMP_FILE,
     cloudflaredDir(),
   ];
   for (const target of targets) {
@@ -566,6 +580,12 @@ test("vendored tool grants carry the pinned versions, not `current`", () => {
       assertEquals(entry.includes("/current/"), false, entry);
     }
   }
+});
+
+test("the daemon may read the host's clock and NTP state", () => {
+  // `readTimeSync` (src/host/time-sync.ts) swallows a refused spawn, so a
+  // missing grant silently drops ntpEnabled and ntpSynced from every report.
+  assertEquals(DAEMON_RUN_PROGRAMS.includes("timedatectl"), true);
 });
 
 test("the daemon may spawn the programs the hosting Caddy ACL grant uses", () => {

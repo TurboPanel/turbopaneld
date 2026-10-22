@@ -128,9 +128,19 @@ async function writeTemp(contents: string): Promise<string> {
 export async function listSitePhpUnits(
   io: SitePhpRuntimeIo,
 ): Promise<SitePhpUnitListing> {
+  return await readSitePhpUnits(io) ?? new Map();
+}
+
+/**
+ * {@link listSitePhpUnits}, but `null` when the unit directory could not be
+ * listed, for callers that must not read "could not look" as "none there".
+ */
+export async function readSitePhpUnits(
+  io: SitePhpRuntimeIo,
+): Promise<SitePhpUnitListing | null> {
   const listing = new Map<string, { service: boolean; socket: boolean }>();
   const ls = await sudo(io, ["ls", "-1", "--", io.unitDir]);
-  if (!ls.success) return listing;
+  if (!ls.success) return null;
   for (const name of ls.stdout.split("\n")) {
     const match = /^turbopanel-php-([a-z0-9][a-z0-9-]*)\.(service|socket)$/
       .exec(name.trim());
@@ -143,7 +153,7 @@ export async function listSitePhpUnits(
 }
 
 /**
- * Install one config file root:<owner>-grp 0640 when its bytes differ, with a
+ * Install one config file root:<owner> 0640 when its bytes differ, with a
  * `.tpprev` snapshot of what was there. `null` when nothing changed.
  */
 async function installConfigFile(
@@ -581,14 +591,14 @@ async function listVhostDir(
 }
 
 /**
- * Adds every runtime id the vhosts in `dir` name. An entry `cat` cannot read
- * is entered as a directory while `depth` allows (OpenLiteSpeed's per-site
- * directories); `false` when anything could not be read.
+ * Hands the text of every config file in `dir` to `visit`. An entry `cat`
+ * cannot read is entered as a directory while `depth` allows (OpenLiteSpeed's
+ * per-site directories); `false` when anything could not be read.
  */
-async function referencesIn(
+async function visitVhostTexts(
   io: SitePhpRuntimeIo,
   dir: string,
-  into: Set<string>,
+  visit: (text: string) => void,
   depth = 1,
 ): Promise<boolean> {
   const names = await listVhostDir(io, dir, depth === 1);
@@ -599,15 +609,52 @@ async function referencesIn(
   await forEachSequential(names, async (name) => {
     const cat = await sudo(io, ["cat", "--", join(dir, name)]);
     if (cat.success) {
-      for (const id of sitePhpRuntimeIdsIn(cat.stdout)) into.add(id);
+      visit(cat.stdout);
       return;
     }
-    if (depth > 0 && await referencesIn(io, join(dir, name), into, depth - 1)) {
+    if (
+      depth > 0 && await visitVhostTexts(io, join(dir, name), visit, depth - 1)
+    ) {
       return;
     }
     readAll = false;
   });
   return readAll;
+}
+
+/** Adds every runtime id the vhosts in `dir` name; `false` if any was unreadable. */
+function referencesIn(
+  io: SitePhpRuntimeIo,
+  dir: string,
+  into: Set<string>,
+): Promise<boolean> {
+  return visitVhostTexts(io, dir, (text) => {
+    for (const id of sitePhpRuntimeIdsIn(text)) into.add(id);
+  });
+}
+
+/**
+ * The text of every nginx, Apache and OpenLiteSpeed vhost on this host, or
+ * `null` when any could not be read: the caller then decides nothing on the
+ * strength of a reference it could not see. Caddy's site files are not read:
+ * a Caddy site always runs PHP in a shared pool, which the pool check covers.
+ */
+export async function readSiteConfigTexts(
+  io: SitePhpRuntimeIo,
+  configDir: string,
+): Promise<string[] | null> {
+  const texts: string[] = [];
+  let readAll = true;
+  const dirs = [
+    ...sitePhpVhostDirs(configDir),
+    join(configDir, "openlitespeed", "sites"),
+  ];
+  await forEachSequential(dirs, async (dir) => {
+    if (!await visitVhostTexts(io, dir, (text) => texts.push(text))) {
+      readAll = false;
+    }
+  });
+  return readAll ? texts : null;
 }
 
 /**

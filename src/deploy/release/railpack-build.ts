@@ -52,6 +52,7 @@
  * decrypted envelope, and no daemon token can reach a build script.
  */
 
+import { pinnedImage } from "../../util/image-pins.ts";
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import {
@@ -63,13 +64,33 @@ import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { runBuildkitSetup as defaultRunBuildkitSetup } from "../../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../../orchestration/ansible-events.ts";
 import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
+import { assertFileSha256 } from "../../orchestration/download-verify.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
+import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
+import { isReservedBuildEnvKey, sandboxBuildEnvironment } from "./build.ts";
+import { isSpecEnvName } from "./build-sandbox.ts";
+import { definedFields } from "../../util/optional-fields.ts";
+import {
+  type ImagePrepareSandbox,
+  prepareImagePlanInSandbox,
+} from "./image-prepare-sandbox.ts";
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
 export const RAILPACK_VERSION = "0.9.0";
+/**
+ * SHA-256 of the release tarball per architecture, for {@link RAILPACK_VERSION}.
+ * Source: the digest GitHub reports for each release asset, equal to the
+ * SHA-256 of the file downloaded from the release. Keep in step with
+ * `railpack_sha256` in orchestration/roles/buildkit/defaults/main.yml.
+ */
+export const RAILPACK_SHA256: Readonly<Record<"amd64" | "arm64", string>> = {
+  amd64: "ae91e74d80b8f2e2f519821172d639f6d33555938e0c26416272a56be4302bef",
+  arm64: "ee39088f1879efa913f3d9a76e19b1832a3019d0625c0e8a1dfb4eac8a109600",
+};
 /**
  * Upstream source for the vendored gateway frontend.
  *
@@ -110,15 +131,67 @@ export const RAILPACK_IMAGE_NAMESPACE = "turbopanel-app";
 const RAILPACK_PLAN_FILENAME = "railpack-plan.json";
 const RAILPACK_FRONTEND_TAR_FILENAME = "railpack-frontend.tar";
 
-/** Environment keys a build may never set — they are the sandbox (see build.ts). */
-const RESERVED_BUILD_ENV_KEYS = new Set([
-  "GIT_ASKPASS",
-  "GIT_SSH_COMMAND",
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "PATH",
-  "HOME",
+/**
+ * Keys that make a language runtime or tool load code from a path the tenant
+ * chooses. The Railpack tools run as the daemon, unsandboxed, so these are
+ * refused here on top of the shared build filter ({@link isReservedBuildEnvKey}).
+ */
+const TOOL_CODE_LOADING_ENV_KEYS = new Set([
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PERL5OPT",
+  "PERL5LIB",
+  "RUBYOPT",
+  "RUBYLIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "BUILDKIT_HOST",
+  // Go toolchain and version-manager settings that choose which program or
+  // config a tool loads.
+  "GOFLAGS",
+  "GOENV",
+  "GOTOOLCHAIN",
+  "GOROOT",
+  "GOPATH",
 ]);
+
+/**
+ * Name prefixes of package-manager and version-manager configuration (mise,
+ * asdf, npm, Bundler, pip). In this lane the variables reach only the host-side
+ * tools (Railpack and the image builder client), never the application's own
+ * build inside the image, so none of these has a legitimate use here: package
+ * manager settings belong in the repository's own files (`.npmrc`, `Gemfile`
+ * config, `pip.conf`), which the image build reads.
+ */
+const TOOL_CONFIG_ENV_PREFIXES = [
+  "DOCKER_",
+  "MISE_",
+  "ASDF_",
+  "npm_config_",
+  "NPM_CONFIG_",
+  "BUNDLE_",
+  "PIP_",
+];
+
+/** Whether a tenant `build.env` key may reach the Railpack tools' environment. */
+export function railpackToolAcceptsEnvKey(key: string): boolean {
+  return isSpecEnvName(key) && !isReservedBuildEnvKey(key) &&
+    !TOOL_CODE_LOADING_ENV_KEYS.has(key) &&
+    !TOOL_CONFIG_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+/** The tenant `build.env` names the Railpack lane leaves out, for the build log. */
+export function droppedRailpackEnvNames(
+  build: EnvironmentDeploySourceBuild,
+): string[] {
+  return Object.keys(build.env ?? {}).filter((key) =>
+    !railpackToolAcceptsEnvKey(key)
+  ).sort((a, b) => a.localeCompare(b));
+}
 
 const decoder = new TextDecoder();
 
@@ -240,12 +313,16 @@ function resolveArchDefault(): "arm64" | "amd64" {
 /** Optional test seams for {@link ensureBuildkitRailpack}. */
 export type EnsureBuildkitRailpackDeps = {
   runBuildkitSetup?: () => Promise<void>;
+  /** Playbook events from the default setup, for the deploy transcript. */
+  onEvent?: AnsibleEventHandler;
   runCommand?: (
     command: string,
     args: string[],
     opts?: { cwd?: string },
   ) => Promise<{ success: boolean; stderr: string }>;
   resolveArch?: () => "arm64" | "amd64";
+  /** Overrides the pinned tarball digest (tests serve fixture bytes). */
+  railpackSha256?: string;
 };
 
 export type BuildkitRailpackTools = {
@@ -310,9 +387,11 @@ async function resolveTools(
  */
 async function downloadBuildkitRailpack(
   runtimesDir: string,
-  deps: Required<
-    Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
-  >,
+  deps:
+    & Required<
+      Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
+    >
+    & Pick<EnsureBuildkitRailpackDeps, "railpackSha256">,
 ): Promise<void> {
   const arch = deps.resolveArch();
   const tmp = await Deno.makeTempDir({ prefix: "tp-railpack-" });
@@ -359,7 +438,7 @@ async function installRailpackFrontend(
   tmp: string,
   deps: Required<Pick<EnsureBuildkitRailpackDeps, "runCommand">>,
 ): Promise<void> {
-  const ref = `${RAILPACK_FRONTEND_IMAGE}:${RAILPACK_FRONTEND_TAG}`;
+  const ref = pinnedImage("railpackFrontend");
   logInfo("deploy", `vendoring Railpack frontend ${ref}`);
   const pull = await deps.runCommand("docker", ["pull", ref]);
   if (!pull.success) {
@@ -423,9 +502,11 @@ async function installRailpack(
   runtimesDir: string,
   arch: "arm64" | "amd64",
   tmp: string,
-  deps: Required<
-    Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
-  >,
+  deps:
+    & Required<
+      Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
+    >
+    & Pick<EnsureBuildkitRailpackDeps, "railpackSha256">,
 ): Promise<void> {
   const asset = railpackAssetName(arch);
   const url =
@@ -441,6 +522,12 @@ async function installRailpack(
   if (!curl.success) {
     throw new Error(`curl failed: ${curl.stderr || "download error"}`);
   }
+  await assertFileSha256(
+    tarball,
+    deps.railpackSha256 ?? RAILPACK_SHA256[arch],
+    `Railpack ${RAILPACK_VERSION} (${asset})`,
+    "RAILPACK_SHA256 in src/deploy/release/railpack-build.ts and railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml",
+  );
   const extractDir = join(tmp, "railpack");
   await Deno.mkdir(extractDir, { recursive: true });
   const tar = await deps.runCommand("/usr/bin/tar", [
@@ -465,6 +552,15 @@ async function installRailpack(
 }
 
 /**
+ * True when the vendored build tool and its frontend are already on disk; the
+ * deploy preflight plans "Install the build tool" as ready from this without
+ * running the setup.
+ */
+export async function buildToolPresent(runtimesDir: string): Promise<boolean> {
+  return (await resolveTools(runtimesDir)) !== undefined;
+}
+
+/**
  * Ensure `railpack` **and the vendored gateway frontend** exist under the
  * vendor tree.
  *
@@ -481,7 +577,8 @@ export async function ensureBuildkitRailpack(
   layout: LayoutPaths,
   deps?: EnsureBuildkitRailpackDeps,
 ): Promise<BuildkitRailpackTools> {
-  const runSetup = deps?.runBuildkitSetup ?? defaultRunBuildkitSetup;
+  const runSetup = deps?.runBuildkitSetup ??
+    (() => defaultRunBuildkitSetup(deps?.onEvent));
   const runCommand = deps?.runCommand ?? runDefault;
   const resolveArch = deps?.resolveArch ?? resolveArchDefault;
 
@@ -506,6 +603,7 @@ export async function ensureBuildkitRailpack(
     await downloadBuildkitRailpack(layout.runtimesDir, {
       runCommand,
       resolveArch,
+      railpackSha256: deps?.railpackSha256,
     });
   } catch (err) {
     // On a managed host the vendor tree is root-owned and outside the daemon's
@@ -530,7 +628,7 @@ export async function ensureBuildkitRailpack(
 }
 
 /** Minimal, credential-free environment for the vendored build tools. */
-function railpackToolEnvironment(
+export function railpackToolEnvironment(
   build: EnvironmentDeploySourceBuild,
   workingDir: string,
 ): Record<string, string> {
@@ -540,13 +638,24 @@ function railpackToolEnvironment(
     CI: "1",
     NODE_ENV: "production",
   };
+  // The same filter as the native lanes (one place decides what is the
+  // sandbox), plus the names that load code into a tool run as the daemon.
   for (const [key, value] of Object.entries(build.env ?? {})) {
-    if (RESERVED_BUILD_ENV_KEYS.has(key)) continue;
+    if (!railpackToolAcceptsEnvKey(key)) continue;
     env[key] = value;
   }
-  // Advisory overrides. Railpack's own detection is the default; when an
-  // operator typed a command we hand it over and let Railpack decide whether
-  // the provider it detected has a slot for it.
+  return { ...env, ...builderCommandOverrides(build) };
+}
+
+/**
+ * Advisory overrides. The image builder's own detection is the default; when
+ * an operator typed a command we hand it over and let the builder decide
+ * whether the provider it detected has a slot for it.
+ */
+function builderCommandOverrides(
+  build: EnvironmentDeploySourceBuild,
+): Record<string, string> {
+  const env: Record<string, string> = {};
   if (build.installCommand) env.RAILPACK_INSTALL_CMD = build.installCommand;
   if (build.buildCommand) env.RAILPACK_BUILD_CMD = build.buildCommand;
   if (build.startCommand) env.RAILPACK_START_CMD = build.startCommand;
@@ -564,12 +673,15 @@ async function runToolStreamed(
     redactSummary?: CommandSummaryRedactor;
     /** Test-only override; production keeps {@link RAILPACK_BUILD_TIMEOUT_MS}. */
     timeoutMs?: number;
+    /** Cancel signal of the deploy; aborting it kills the tool. */
+    signal?: AbortSignal;
   },
 ): Promise<void> {
   const redactSummary = options.redactSummary ?? defaultSummaryRedactor;
   const timeoutMs = options.timeoutMs ?? RAILPACK_BUILD_TIMEOUT_MS;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = withCancelSignal(controller.signal, options.signal);
   try {
     const child = new Deno.Command(bin, {
       args,
@@ -579,7 +691,7 @@ async function runToolStreamed(
       stdin: "null",
       stdout: "piped",
       stderr: "piped",
-      signal: controller.signal,
+      signal,
     }).spawn();
     const [status, stdout, stderr] = await Promise.all([
       child.status,
@@ -603,6 +715,7 @@ async function runToolStreamed(
       );
     }
   } catch (err) {
+    throwIfAborted(options.signal, `while ${options.label} was running`);
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new Error(
         `${options.label} timed out after ${timeoutMs}ms`,
@@ -612,6 +725,7 @@ async function runToolStreamed(
   } finally {
     clearTimeout(timeout);
   }
+  throwIfAborted(options.signal, `while ${options.label} was running`);
 }
 
 export type RailpackBuildParams = {
@@ -627,6 +741,14 @@ export type RailpackBuildParams = {
   tools: BuildkitRailpackTools;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
+  /** Cancel signal of the deploy; aborting it stops the build. */
+  signal?: AbortSignal;
+  /**
+   * On a managed host: run the prepare step in the build sandbox (as a
+   * throwaway user, in the site owner's build slice) instead of as the daemon.
+   * `workingDir` is then the checkout inside `sandbox.work`.
+   */
+  sandbox?: ImagePrepareSandbox;
 };
 
 /** Optional test seams for {@link runRailpackBuild}. */
@@ -641,6 +763,7 @@ export type RunRailpackBuildDeps = {
       onOutput?: ReleaseOutputHandler;
       redactSummary?: CommandSummaryRedactor;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
   ) => Promise<void>;
   /** Every `docker` call; defaults to the shared CLI path ({@link runDockerStreamed}). */
@@ -665,14 +788,22 @@ export type RailpackBuildResult = {
   railpackPlanVersion: string;
 };
 
+/**
+ * A plan version worth recording: short and plain. The plan is written by the
+ * build (from the repository), so anything else is ignored.
+ */
+const PLAN_VERSION_RE = /^[\w.+-]{1,64}$/;
+
 /** Best-effort plan-version read; a plan without one is not an error. */
-async function readPlanVersion(planPath: string): Promise<string> {
+export async function readPlanVersion(planPath: string): Promise<string> {
   try {
     const parsed: unknown = JSON.parse(await Deno.readTextFile(planPath));
     if (typeof parsed === "object" && parsed !== null) {
-      const version = (parsed as Record<string, unknown>).version;
-      if (typeof version === "string" && version.length > 0) return version;
-      if (typeof version === "number") return String(version);
+      const raw = (parsed as Record<string, unknown>).version;
+      const version = typeof raw === "number" ? String(raw) : raw;
+      if (typeof version === "string" && PLAN_VERSION_RE.test(version)) {
+        return version;
+      }
     }
   } catch {
     // Unreadable or unparsable plan — the build below will fail loudly on its
@@ -808,18 +939,21 @@ async function runBuildx(
     onOutput?: ReleaseOutputHandler;
     redact: CommandSummaryRedactor;
     timeoutMs: number;
+    cancelSignal?: AbortSignal;
   },
 ): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
   const onOutput = options.onOutput;
+  const signal = withCancelSignal(controller.signal, options.cancelSignal);
   try {
     const result = await runDocker(args, {
-      signal: controller.signal,
+      signal,
       ...(onOutput === undefined
         ? {}
         : { onLine: (event) => onOutput(event.stream, event.line) }),
     });
+    throwIfAborted(options.cancelSignal, "while the image was building");
     if (controller.signal.aborted) {
       throw new Error(
         `docker buildx build timed out after ${options.timeoutMs}ms`,
@@ -855,6 +989,39 @@ async function resolveBuiltImageDigest(
 }
 
 /**
+ * The prepare step on a managed host: it reads and interprets the repository,
+ * so it runs in the build sandbox, never as the daemon account. The sandbox
+ * env drops every variable the native lane drops (`LD_*`, `BASH_ENV`,
+ * `GIT_CONFIG_*`, …) and the runner sets its own `PATH`, `HOME` and `TMPDIR`.
+ */
+async function prepareInSandbox(
+  params: RailpackBuildParams,
+  sandbox: ImagePrepareSandbox,
+  planPath: string,
+): Promise<void> {
+  await prepareImagePlanInSandbox(definedFields({
+    sandbox,
+    tool: params.tools.railpack,
+    toolName: "image-builder",
+    args: ["prepare", "."],
+    planFlag: "--plan-out",
+    env: {
+      ...sandboxBuildEnvironment(
+        params.build,
+        sandbox.work,
+        undefined,
+        params.onOutput,
+      ),
+      ...builderCommandOverrides(params.build),
+    },
+    planDest: planPath,
+    onOutput: params.onOutput,
+    redactSummary: params.redactSummary,
+    signal: params.signal,
+  }));
+}
+
+/**
  * `railpack prepare` → `docker buildx build` (Railpack gateway frontend on the
  * Engine's BuildKit, `--load`ed into the image store).
  *
@@ -873,6 +1040,15 @@ export async function runRailpackBuild(
   deps?: RunRailpackBuildDeps,
 ): Promise<RailpackBuildResult> {
   const env = railpackToolEnvironment(params.build, params.workingDir);
+  // Names only, never a value: why a variable the user set has no effect.
+  for (const name of droppedRailpackEnvNames(params.build)) {
+    params.onOutput?.(
+      "stderr",
+      `build variable ${
+        JSON.stringify(name)
+      } was not passed to the build: the build tools do not accept this name from a site (it is reserved or changes how the build host itself runs)`,
+    );
+  }
   const planPath = join(params.scratchDir, RAILPACK_PLAN_FILENAME);
   const runTool = deps?.runTool ?? runToolStreamed;
   const runDocker = deps?.runDocker ?? runDockerStreamed;
@@ -888,16 +1064,22 @@ export async function runRailpackBuild(
     ...(deps?.toolTimeoutMs === undefined
       ? {}
       : { timeoutMs: deps.toolTimeoutMs }),
+    ...(params.signal === undefined ? {} : { signal: params.signal }),
   };
 
+  throwIfAborted(params.signal, "before the image build started");
   await assertBuildxAvailable(runDocker, redact);
 
   params.onOutput?.("stdout", "$ railpack prepare");
-  await runTool(
-    params.tools.railpack,
-    ["prepare", params.workingDir, "--plan-out", planPath],
-    { ...toolOptions, label: "railpack prepare" },
-  );
+  if (params.sandbox) {
+    await prepareInSandbox(params, params.sandbox, planPath);
+  } else {
+    await runTool(
+      params.tools.railpack,
+      ["prepare", params.workingDir, "--plan-out", planPath],
+      { ...toolOptions, label: "railpack prepare" },
+    );
+  }
 
   await ensureFrontendImage(
     params,
@@ -916,6 +1098,7 @@ export async function runRailpackBuild(
     ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
     redact,
     timeoutMs,
+    ...(params.signal === undefined ? {} : { cancelSignal: params.signal }),
   });
 
   const imageDigest = deps?.inspectImage

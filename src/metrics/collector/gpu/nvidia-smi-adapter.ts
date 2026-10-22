@@ -22,6 +22,7 @@ const QUERY_FIELDS = [
   "memory.used",
   "temperature.gpu",
   "power.draw",
+  "memory.total",
 ] as const;
 
 const MIB = 1024 * 1024;
@@ -31,6 +32,7 @@ export type NvidiaSmiRow = {
   utilizationPercent: number | null;
   memoryActivityPercent: number | null;
   memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
   temperatureCelsius: number | null;
   powerWatts: number | null;
 };
@@ -62,14 +64,19 @@ export function parseNvidiaSmiQuery(text: string): Map<string, NvidiaSmiRow> {
   const rows = new Map<string, NvidiaSmiRow>();
   for (const line of text.split("\n")) {
     const cells = line.split(",");
-    if (cells.length < QUERY_FIELDS.length) continue;
+    // `memory.total` is the last column and optional: a row without it still parses.
+    if (cells.length < QUERY_FIELDS.length - 1) continue;
     const slot = normalizeNvidiaBusId(cells[0]);
     if (!slot) continue;
     const memoryMiB = parseNvidiaSmiNumber(cells[3]);
+    const memoryTotalMiB = parseNvidiaSmiNumber(cells[6]);
     rows.set(slot, {
       utilizationPercent: clampPercent(parseNvidiaSmiNumber(cells[1])),
       memoryActivityPercent: clampPercent(parseNvidiaSmiNumber(cells[2])),
       memoryUsedBytes: memoryMiB === null ? null : Math.round(memoryMiB * MIB),
+      memoryTotalBytes: memoryTotalMiB === null
+        ? null
+        : Math.round(memoryTotalMiB * MIB),
       temperatureCelsius: parseNvidiaSmiNumber(cells[4]),
       powerWatts: parseNvidiaSmiNumber(cells[5]),
     });
@@ -83,7 +90,11 @@ export function parseNvidiaSmiQuery(text: string): Map<string, NvidiaSmiRow> {
  */
 export type NvidiaSmiRunner = () => Promise<string | null | undefined>;
 
+/** nvidia-smi can hang for minutes when a GPU falls off the bus; kill it instead. */
+export const NVIDIA_SMI_TIMEOUT_MS = 8_000;
+
 async function runNvidiaSmi(): Promise<string | null | undefined> {
+  const signal = AbortSignal.timeout(NVIDIA_SMI_TIMEOUT_MS);
   try {
     const { code, stdout } = await new Deno.Command("nvidia-smi", {
       args: [
@@ -92,10 +103,13 @@ async function runNvidiaSmi(): Promise<string | null | undefined> {
       ],
       stdout: "piped",
       stderr: "null",
+      signal,
     }).output();
     if (code !== 0) return undefined;
     return new TextDecoder().decode(stdout);
   } catch {
+    // Killed at the deadline: this run failed, the binary is still there.
+    if (signal.aborted) return undefined;
     // Not installed / not on the allow-run list on this host.
     return null;
   }
@@ -144,6 +158,7 @@ export class NvidiaSmiGpuAdapter implements GpuAdapter {
     return {
       utilizationPercent: row.utilizationPercent,
       memoryUsedBytes: row.memoryUsedBytes,
+      memoryTotalBytes: row.memoryTotalBytes,
       memoryActivityPercent: row.memoryActivityPercent,
       temperatureCelsius: row.temperatureCelsius,
       memoryTemperatureCelsius: null,

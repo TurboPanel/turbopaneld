@@ -130,10 +130,12 @@
           --instance does that.
 
   roles:
+    # Host-base packages first: turbopanel-user sets a traverse ACL, which
+    # needs setfacl (the `acl` package) that minimal Debian images omit.
+    - role: daemon-prereqs
     - role: turbopanel-user
     - role: runtime-sockets
     - role: daemon-logs
-    - role: daemon-prereqs
     - role: rapl-access
     - role: docker
     - role: postgres
@@ -230,7 +232,7 @@
       loop:
         - daemon-layout
         - principal-access
-        # tpbuild, /var/lib/turbopanel-build and tpbuild.slice: tp-host
+        # /var/lib/turbopanel-build (and the retired tpbuild removed): tp-host
         # build-run refuses the first git deploy without them. Same place as
         # in daemon-install.yml and daemon-colocated-refresh.yml.
         - build-user

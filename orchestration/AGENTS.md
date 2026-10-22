@@ -4,12 +4,13 @@ Ansible roles and playbooks under `orchestration/`. Root context: `../AGENTS.md`
 
 ### Upstream licenses (Ansible tooling)
 
-Ansible Core, `ansible-lint`, the `ansible.posix` collection, the
-`geerlingguy.docker` Galaxy role, and any packages these playbooks
-install remain under their upstream licenses. Pins live in
+Ansible Core, `ansible-lint`, the `ansible.posix` collection, and any
+packages these playbooks install (including Docker Engine from Docker's apt
+repository) remain under their upstream licenses. Pins live in
 `requirements.txt` (Ansible Core / ansible-lint constraints),
 `requirements.lock.txt` (hash-locked CI install set), `requirements.yml`
-(`ansible.posix`), and `requirements-docker.yml` (`geerlingguy.docker`).
+(`ansible.posix` version record; the exact tarball ships in `vendor/galaxy/`
+and is installed offline after a SHA-256 check).
 Installing them onto a host is a different licensing event from
 redistributing them. Any TurboPanel-published appliance, VM/OCI image,
 or offline bundle that ships copies must carry the applicable upstream
@@ -35,9 +36,80 @@ stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
 
 ### Docker (`docker`)
 
-Thin wrapper around the deferred `geerlingguy.docker` Galaxy role (fetched
-on demand by `ensureGalaxyDockerRole()`, never during bootstrap) with a
-fast-path when the binary is present and the service active. The role
+Installs Docker Engine itself (`tasks/install.yml`, no Galaxy role, nothing
+fetched at bootstrap). Debian 12/13 and Ubuntu 22.04/24.04, amd64 and arm64
+(Raspberry Pi OS is not claimed: Docker 29 dropped it). Order: remove conflicting
+distribution packages (`docker.io`, `docker-cli`, `containerd`, `runc`,
+`podman-docker`, ...; refused if that engine has containers) -> signing key ->
+deb822 source with `Signed-By` -> `apt update` only when the source or key
+changed -> `daemon.json` -> packages with `--no-install-recommends`
+(`docker-ce`, `docker-ce-cli`, `containerd.io`, buildx and compose plugins, plus
+`apparmor`, `pigz`) -> apt hold -> services. Idempotent, no reboot. Check mode
+is a plan only (it stops before the install when the source file would change,
+and skips the key evaluation until gnupg exists); it needs `python3-apt` already
+on the host, which is Ansible's own requirement for the apt module in check mode.
+
+- **Fast path**: the `docker-ce` package installed and the service active means
+  nothing is touched, so it works offline. A distribution `docker.io`
+  (26.1.5 on Debian 13, older than the IPv6 `DOCKER-USER` chain the firewall
+  assumes) does not count as Docker.
+- **Codename**: the host's own suite when Docker publishes it, else the newest
+  published one (`vars/main.yml`: trixie / noble). Unreachable
+  `download.docker.com` fails with a message that names the network.
+- **Key policy** (`docker_key_policy`, via the reusable `repo-key` role):
+  `warn` (default) fetches the key from Docker over HTTPS and falls back to the
+  copy shipped at `roles/docker/files/docker.asc` (metadata and fingerprint in
+  `docker.asc.json`) when the fetch fails or the fetched key has expired. A key
+  whose fingerprint is not in the list (`vars/main.yml`, plus
+  `turbopanel_docker_extra_key_fingerprints`) is still used, with one loud
+  `WARN docker repository key fingerprint changed: expected [...], got ...`
+  line in the run output (apt still verifies every package signature, TLS is the
+  transport trust); `enforce` fails on a different key (hardened or air-gapped
+  hosts); `bundled` never fetches. A key expiring within 60 days warns.
+  `scripts/check-repo-keys.ts` (`deno task check:repo-keys`) compares the
+  shipped copy with the live key and exits non-zero on drift or near-expiry; a
+  weekly workflow for it is a separate step. Other third-party repository keys
+  can reuse `roles/repo-key` (inputs `repo_key_*`).
+  TODO: the warning is only in the run output, not yet a control-plane notice.
+- **Version and upgrades**: `turbopanel_docker_version` (apt version glob,
+  default the stable release recorded in `defaults/main.yml`) with the packages
+  held (`apt-mark hold` on `docker-ce` and `docker-ce-cli`). Debian's
+  unattended-upgrades only follows Debian's origin and never touches Docker's
+  repository, so upgrades happen only through the role: change the version and
+  run with `turbopanel_docker_upgrade: true`. Patch releases are live-restore
+  safe by Docker's wording; treat minor releases (29.8 to 29.9) as maintenance
+  events and test them. `containerd.io` is not held on its own.
+- **Offline / mirror**: `turbopanel_docker_repo_base` points at a local mirror;
+  `turbopanel_docker_offline_dir` names a directory of Docker `.deb` files with a
+  flat apt index and replaces `download.docker.com` and the key fetch entirely.
+- **daemon.json** is written BEFORE the packages on a fresh host (so dockerd's
+  first start already has the address pools, log settings and limits and no
+  restart is needed), and merged afterwards for existing installs (restart
+  handler only on a real change; live-restore makes it safe for running
+  containers, but they keep their old log driver until recreated). Defaults
+  added only when absent: `log-driver: local` with `max-size 20m` /
+  `max-file 5` (no `default-ulimits` unless `turbopanel_docker_default_nofile` is
+  set: `docker.service` sets no `LimitNOFILE` and containers inherit
+  containerd's, so a fixed number could lower it). Existing hosts installed by
+  the old role get these keys on their next docker role run, which restarts
+  dockerd once (live-restore is already on there, so containers keep running;
+  they keep their old log driver until recreated), except on a co-located
+  instance host, where a pending marker is left. Next to the owned keys
+  (`live-restore`, `cgroup-parent`, `builder.entitlements`, address pools).
+  Left at Docker's defaults: `iptables`, `ip6tables`, `firewall-backend`,
+  `userland-proxy`, storage driver, no `userns-remap`. `cgroup-parent`
+  `turbopanel-containers.slice` is created by systemd when the first container
+  starts under it (there is no unit file for it).
+- **Known risks**: fresh hosts get the containerd image store (Docker 29), hosts
+  upgraded from older Docker keep the classic store, so the fleet is mixed.
+  Docker's Debian page says firewall rules created with `nft` are unsupported
+  on a Docker host; our own nftables tables (`turbopanel_ingress_guard`,
+  `turbopanel_php`) are separate tables Docker does not own and work today, but
+  sit in that documented zone. Firewall behaviour is not changed here.
+
+Only the Docker role installs Docker: other roles must not meta-depend on it (a
+dependency also runs for `tasks_from`), and playbooks list `role: docker` before
+roles that need it. The role
 **also owns `/etc/docker/daemon.json`** for the org-wide dockerd addressing
 (`tasks/daemon-json.yml`):
 
@@ -51,7 +123,7 @@ fast-path when the binary is present and the service active. The role
   (`src/deploy/docker-networking-state.ts`, synced once per daemon session by
   `syncHostDockerNetworking`), so an on-demand install lands with the right
   pools too.
-- **Always-on egress block** (`tasks/egress-guard.yml`, `files/turbopanel-docker-egress`, unit
+- **Always-on egress block** (`tasks/egress-guard.yml`, `files/turbopanel-docker-egress`, installed as `/opt/turbopanel/lib/docker-egress`, unit
   `turbopanel-docker-egress.service`, var `turbopanel_docker_egress_guard`, default true; audit P1-4): chain `TP-EGRESS`
   hung off `DOCKER-USER` and `INPUT` for traffic entering on `docker0` / `br-+` only. Drops 169.254.0.0/16,
   168.63.129.16, 100.100.100.200 (IPv4) and fe80::/10 (ICMPv6 allowed), fd00:ec2::254 (IPv6), with a DNS (53)
@@ -132,6 +204,13 @@ Deploy-time `fabricNetworks[]` is the belt-and-braces bridge path alongside
 command-driven reconcile and boot restore. **Not** wired into
 `daemon-converge.yml` (command-driven, plus boot restore).
 
+Observed peers in the reconcile result carry `interface`: the local NIC whose
+connected subnet holds the peer's live endpoint (`src/commands/fabric-peer-interface.ts`,
+matched against the addresses `collectServerIps` already reports, so it starts
+no process and changes no route). Absent means the endpoint is reached by the
+default route. The control plane's traffic map compares it with the datacenter
+it planned the endpoint from.
+
 ### ProxySQL (`proxysql`)
 
 Moved to `roles/proxysql/AGENTS.md`.
@@ -147,13 +226,13 @@ Moved to `roles/web-service-user/AGENTS.md`.
 ### nginx (`nginx`)
 
 Vendored — **never** a distro package. The role downloads the pinned
-**nginx.org** Debian `.deb` (`nginx_deb_version`, bookworm pool — runs on
-Debian 13 too), extracts the binary with `dpkg-deb -x` (same pattern as the
+**nginx.org** Debian `.deb` (`nginx_deb_version`, trixie build, SHA-256 pinned
+per architecture), extracts the binary with `dpkg-deb -x` (same pattern as the
 `redis` role / packages.redis.io), and installs
 `{{ turbopanel_vendor_dir }}/nginx/<version>/sbin/nginx` + `current`. Main
 config is templated to `/etc/turbopanel/nginx/nginx.conf` and
 `Include`s `/etc/turbopanel/nginx/sites/*.conf`. Temp paths / logs / pidfile
-are under `/var/lib|/var/log|/run/turbopanel/nginx/`. Driven by
+are under `/var/lib|/var/log` and the unit's own `RuntimeDirectory=turbopanel-nginx` (`/run/turbopanel-nginx/`, recreated by systemd on every start, so it survives a reboot). Driven by
 **`turbopanel-nginx.service`** (runs as `tpnginx`; high-port vhosts only —
 hosting Caddy owns `:80`/`:443`).
 
@@ -167,19 +246,39 @@ account php-fpm's master runs as) when the daemon passes
 
 ### Apache (`apache`)
 
-Vendored — **never** a distro package. The role downloads pinned ASF
-**httpd** + **APR** + **APR-util** source tarballs, builds them with
-`--prefix={{ turbopanel_vendor_dir }}/apache/<version>` (compile-time apt
-deps only: `build-essential`, `libssl-dev`, `libpcre2-dev`, … — not
-`apache2`), and points `current` at that tree. Main config is
+Vendored — **never** a distro package, and never compiled on the host (a
+2-core build took over 10 minutes and timed the first deploy out). Apache
+(httpd + bundled APR / APR-util) is built **once in CI** by
+`.github/workflows/vendor-apache.yml` (`scripts/build-apache.sh`, native
+amd64 and arm64 runners, same configure flags) and published as the release
+`apache-httpd-<httpdver>` (never marked Latest): `apache-httpd-<httpdver>-<arch>.tar.zst`
+(arch amd64/arm64, zstd like the daemon's own assets, with the ASF LICENSE and NOTICE
+files under `share/licenses`) plus `SHA256SUMS`. The role pins version, URL and per-arch SHA-256 in its defaults
+(`apache_sha256`), asserts the digest like the caddy role (`get_url`
+`checksum:`), unpacks into `{{ turbopanel_vendor_dir }}/apache/<version>`
+(`creates:` on `bin/httpd` keeps it idempotent) and points `current` at that
+tree. The build script verifies the ASF source tarballs against pinned SHA-256s,
+verifies each tarball's ASF GPG signature against the pinned release-manager fingerprint (KEYS from downloads.apache.org),
+switches off optional modules and APR-util drivers that need extra libraries (HTTP/2, brotli, lua,
+md, proxy_html, xml2enc, session_crypto), and fails if `httpd` or a module
+links anything outside the runtime list (`ldd` gate over bin, modules and lib; a failing ldd or "not found" also fails). The tree bakes in `/opt/turbopanel/vendor`, so the role refuses any other vendor directory. The release job only runs from trunk. Only those runtime
+libraries (`apache_runtime_packages`: `libexpat1`, `libpcre2-8-0`, `libssl3`,
+`libuuid1`, `zlib1g`) come from apt. The tree is built with the default vendor
+root as its prefix (so `apxs`/`envvars` paths are right there) and shipped
+root-owned; the role extracts it with `--no-same-owner` and re-asserts root
+ownership and no group/world write. The role refuses to run while a digest is the `UNPINNED` placeholder: run
+the workflow, then pin its checksums. A published release is never overwritten
+(a rebuild changes the digest); to change the build, bump the version or use a
+new release name. A release is never rebuilt on the host as a fallback. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
 **`turbopanel-apache.service`**, which runs the whole server, master
 included, as `tpapache` (`User=`/`Group=` in the unit, none in
-`httpd.conf`). Logs and the pidfile live in the unit's top-level
-`LogsDirectory=turbopanel-apache` / `RuntimeDirectory=turbopanel-apache`
-(`/var/log/turbopanel-apache`, `/run/turbopanel-apache`), never in the
-`tp`-owned trees. A changed unit restarts a running server (`try-restart`);
+`httpd.conf`). Logs live in the unit's nested
+`LogsDirectory=turbopanel/apache` (`/var/log/turbopanel/apache`, with the other
+engines' logs; systemd leaves the existing parent alone and gives the inner
+folder to `tpapache`) and the pidfile in `RuntimeDirectory=turbopanel-apache`
+(`/run/turbopanel-apache`, removed with the unit). A changed unit restarts a running server (`try-restart`);
 a reload would keep the old master. The daemon's config test is
 `sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,
 pinned in sudoers. Main config includes a
@@ -187,42 +286,45 @@ bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
 fragment exists (Apache refuses zero-Listen configs). ASF httpd has **no**
 mod_php — PHP is the sibling `php-fpm` role below.
 
-### Runtime entitlements (`runtime-entitlement`, `runtime-registry.json`)
+### Runtime access (`runtime-access`, `runtime-registry.json`)
 
-**A runtime entitlement is a unix group**, because that is the only form the
-kernel enforces at `execve`. Anything derived only into a generated systemd unit
-or an FPM pool is invisible to an interactive shell or a cron job — both of which
-run as the principal, and both of which are exactly the cases the grant has to
-cover.
+**Every installed PHP, Node or Deno series may be run by every site owner's
+Linux user** (owner decision 2026-10-07). There is no per-version group: the
+vendored trees (`vendor/lsphp/<series>/`, `vendor/node-app/<series>/`,
+`vendor/deno-app/<series>/`) are root-owned, readable and executable by
+everyone, never writable but by root, and sury's `/usr/bin/php<series>`,
+`/usr/bin/php-cgi<series>` and `/usr/sbin/php-fpm<series>` keep their packaged
+`root:root 0755`. `/opt/turbopanel`, `vendor/` and each runtime's tree root stay
+`0750` with an `other:x` ACL, the traverse-without-list contract
+`principal-access` uses on the home root: a path into a runtime works, a
+listing of the panel's own trees does not.
 
-`orchestration/runtime-registry.json` is the single artifact: Ansible reads it
-with `include_vars` in the `runtime-entitlement` role, and the daemon imports the
-same file in `../src/runtime/registry.ts`. Same bytes, so group names and gids
-cannot drift.
+`orchestration/runtime-registry.json` lists the series a host offers. Ansible
+reads it with `include_vars` and the daemon imports the same file in
+`../src/runtime/registry.ts`, so the two cannot drift. It also defines the SSH
+access groups (`tpsftp`, `tpshell`, `tppasswd`, `tpprincipal`), which are the
+only groups the daemon reconciles on a site owner's Linux user.
 
-**Groups are per `(runtime, series)`** — `tpphp84`, `tpnode24` — never one group
-per runtime. Co-installed PHP versions are distinct binaries, so a single
-`tpphp` would mean granting 8.4 also grants 8.3 with whatever CVEs another
-tenant's pinned app carries. It is also what lets a shell wrapper resolve a
-caller's series from its group list. One PHP group spans both flavors:
-`tpphp84` owns `/usr/sbin/php-fpm8.4`, `/usr/bin/php8.4`, **and**
-`vendor/lsphp/8.4/current/bin/lsphp` — "may execute PHP 8.4 here", whichever
-engine serves the site.
+The `runtime-access` role (included by `php-fpm`, `openlitespeed` for lsphp,
+`node-app-runtime` and `deno-app-runtime`) sets those ACLs and removes what
+older releases left behind: every group named `tpphp<NN>`, `tpnode<N>` or
+`tpdeno<N>` with a gid in **9900–9979** (name and band must both match), first
+the `dpkg-statoverride` entries that name one (dpkg refuses to run while an
+override names a missing group; the binary is put back to `root:root 0755`),
+then their ACL entries, then the group. Nothing else may take a gid in that
+band; **9980–9999** is service identities (9994 stays reserved for `tpbuild`,
+the retired shared build account; builds now run as per-build systemd
+`DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
+enforces both.
 
-gids are hand-assigned in the registry, never computed from the version string
-(that breaks the day `8.10` exists). Band **9900–9979** is entitlements;
-**9980–9999** is service identities (`tpbuild`, the sandboxed build account
-from the `build-user` role, is 9994). `../src/orchestration/service-accounts.test.ts`
-enforces uniqueness across both and that entitlement gids stay inside their band.
-
-**Membership is reconciled by the daemon, not by this role.** The role only
-creates groups and grants them traverse-only ACLs on `/opt/turbopanel` and
-`vendor/`. `ensurePrincipalManagedGroups` (`../src/deploy/ensure-principal.ts`)
-adds *and revokes* during principal materialization — which runs before any unit
-is installed, because systemd resolves supplementary groups at `execve` and a
-unit started too early dies `203/EXEC`. Revocation only ever touches names the
-registry defines, so `<username>-grp`, `tp`, engine groups, and anything an
-operator added by hand are never stripped.
+**Deno** (`deno-app-runtime` role, `playbooks/deno-app-runtime-apply.yml`) vendors the
+tenant Deno under `vendor/deno-app/<series>/current`, the way `node-app-runtime`
+vendors Node: the newest stable release of the series from the official Deno
+distribution (`dl.deno.land/release-latest.txt`, else the release list when the
+series is no longer the newest), the archive checked against the release's
+published SHA-256 before it is unpacked. Deno ships one major, so the series is
+the major (`2`). The playbook and its `deno_app_versions` extra-var are on
+`tp-orchestrate`'s allowlists.
 
 ### php-fpm (`php-fpm`)
 
@@ -286,7 +388,7 @@ template fails the play instead of starting that loop.
 
 Control-plane `XDG_DATA_HOME` is `{{ turbopanel_caddy_runtime_dir }}/share`
 (`<state>/caddy/.local/share`). Hosting Caddy uses its own top-level
-`StateDirectory=turbopanel-hosting-caddy` (`/var/lib/turbopanel-hosting-caddy`).
+`StateDirectory=turbopanel/hosting-caddy` (`/var/lib/turbopanel/hosting-caddy`).
 Those stores must not be the same directory.
 
 ### Hosting Caddy account (`hosting-caddy`)
@@ -296,11 +398,19 @@ Those stores must not be the same directory.
 9982), which is deliberately **not** in group `tp`: its only privilege is
 `CAP_NET_BIND_SERVICE` (ambient and bounding), with `NoNewPrivileges=yes`.
 Certificates, the ACME account, the internal CA and Caddy's autosave live in
-the unit's `StateDirectory=turbopanel-hosting-caddy`, which systemd creates
-owned by `tpedge`; the old root-written `<state>/hosting-caddy` store is
-removed, not migrated (the internal CA and ACME account are recreated).
+the unit's nested `StateDirectory=turbopanel/hosting-caddy`
+(`/var/lib/turbopanel/hosting-caddy`). systemd leaves the existing state root
+alone and creates only the inner folder, owned by `tpedge` (checked on a test
+host with systemd 257: a parent that does not exist yet would be made
+`root:root 0755`, an existing one keeps its owner and mode). Because `tpedge` is
+not in group `tp`, the role grants it traverse (`x`) on the state root next to
+the install, vendor and config roots. `tp-host` refuses every generic verb on
+the folder (`tp_path_class`).
 `caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
-whenever the binary **or** the account is missing (`ensureHostingCaddy`). The
+whenever the binary **or** the account is missing (`ensureHostingCaddy`).
+`playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
+when `tpedge`, the vendored Caddy binary, or the ingress guard is missing or
+stale, so enrolled hosts are edge-ready before the first compose deploy. The
 role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on
@@ -498,3 +608,34 @@ on a closed Postgres port.
 ### System services Compose stack (`system-compose`)
 
 Moved to `roles/system-compose/AGENTS.md`.
+
+## Instance restart on a replaced binary
+
+`instance-launch` only ensures `turbopanel-instance` is started, and the
+one-shot installer (`run.sh --instance`) replaces `bin/turbopanel` before that
+play runs. "Read the running instance process" therefore reports `stale` when
+the running process holds a deleted executable or started before the file on
+disk, and "Restart the instance when its binary was replaced under it" notifies
+`Restart turbopanel instance` (handler, end of play). Without it a canary kept
+serving the previous panel build after a successful update.
+
+## Container image pins
+
+Every image the platform pulls is pinned by digest in `image-pins.json` (the
+daemon reads it through `src/util/image-pins.ts`; roles read it with a file
+lookup). To update an image, edit that one file: change the tag and the digest
+together, where the digest is the multi-architecture index digest of the tag
+(`docker buildx imagetools inspect <image:tag>`; both linux/amd64 and
+linux/arm64 must be listed). A pinned tag no longer floats, so engine patch
+releases and security fixes are not picked up automatically; a release bumps the
+pin on purpose. Managed database engines are keyed by the tag the control plane
+sends and the allow-list in `commands-contracts.ts` must list exactly those
+tags (a test checks it).
+
+Adding a digest to an image string makes Compose recreate the container, so an
+existing deployment keeps the bare tag it already runs: managed engines
+(`resolveManagedEngineImage`), the daemon-rendered stacks (`keepStoredImages`)
+and the control-plane compose (`system-compose`) only take the digest on first
+create, on a deliberate tag change, or when the stored image already carries a
+digest and the table's digest changed. Existing databases therefore keep their
+current image until a deliberate change.

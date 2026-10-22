@@ -1,4 +1,8 @@
 import { assertEquals } from "@std/assert";
+import { engineInspectPortsJson } from "../testing/managed-topology-fixtures.ts";
+import { withTempLayout } from "../testing/temp-layout.ts";
+import { resolveLayout } from "../paths/layout.ts";
+import { saveManagedHaMember } from "./ha-member.ts";
 import { ManagedHaObserver } from "../instance/ha-observe.ts";
 import type { OrchestratorProblem } from "./orchestrator-api.ts";
 
@@ -10,31 +14,82 @@ import type { OrchestratorProblem } from "./orchestrator-api.ts";
  */
 const test = Deno.test.bind(Deno);
 
-test("ManagedHaObserver emits managed-ha-event once per DeadPrimary alias", async () => {
-  const sent: Array<{ type: string; managedId: string }> = [];
-  const problems: OrchestratorProblem[] = [{
-    clusterAlias: "00000000-0000-4000-8000-000000000001",
-    key: { hostname: "db-1", port: 5432 },
-    problems: ["DeadPrimary"],
-  }];
-  const observer = new ManagedHaObserver({
-    send: (message) => {
-      sent.push({ type: message.type, managedId: message.managedId });
-    },
-    isStackPresent: () => Promise.resolve(true),
-    api: {
-      credentials: { user: "admin", password: "x" },
-      fetch: () =>
-        Promise.resolve(
-          new Response(JSON.stringify(problems), { status: 200 }),
-        ),
-    },
+const MANAGED_ID = "00000000-0000-4000-8000-000000000001";
+const MEMBER_ID = "00000000-0000-4000-8000-000000000002";
+const DIAL = { hostname: "172.20.4.10", port: 5432 };
+
+async function seedPrimary(layout: ReturnType<typeof resolveLayout>) {
+  await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
+    recursive: true,
   });
-  await observer.poll();
-  await observer.poll();
-  assertEquals(sent.length, 1);
-  assertEquals(sent[0]?.type, "managed-ha-event");
-  assertEquals(sent[0]?.managedId, "00000000-0000-4000-8000-000000000001");
+  await saveManagedHaMember(layout, {
+    managedId: MANAGED_ID,
+    memberId: MEMBER_ID,
+    engine: "mysql",
+    role: "primary",
+    containerName: "mysql-primary-1",
+    replicaPeerCount: 1,
+    peerCount: 1,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function runDockerForDial() {
+  return (args: string[]) => {
+    if (args[0] === "inspect") {
+      return Promise.resolve({
+        success: true,
+        stdout: engineInspectPortsJson({
+          "3306/tcp": [{
+            HostIp: DIAL.hostname,
+            HostPort: String(DIAL.port),
+          }],
+        }),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: "",
+      code: 1,
+    });
+  };
+}
+
+test("ManagedHaObserver emits managed-ha-event once per DeadPrimary alias", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedPrimary(layout);
+    const sent: Array<{ type: string; managedId: string }> = [];
+    const problems: OrchestratorProblem[] = [{
+      clusterAlias: MANAGED_ID,
+      key: DIAL,
+      problems: ["DeadPrimary"],
+    }];
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(),
+      send: (message) => {
+        sent.push({ type: message.type, managedId: message.managedId });
+        return true;
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () =>
+          Promise.resolve(
+            new Response(JSON.stringify(problems), { status: 200 }),
+          ),
+      },
+    });
+    await observer.poll();
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    assertEquals(sent[0]?.type, "managed-ha-event");
+    assertEquals(sent[0]?.managedId, MANAGED_ID);
+  });
 });
 
 test("ManagedHaObserver ignores read-replica aliases that are not UUIDs", async () => {
@@ -42,6 +97,7 @@ test("ManagedHaObserver ignores read-replica aliases that are not UUIDs", async 
   const observer = new ManagedHaObserver({
     send: (message) => {
       sent.push({ type: message.type, managedId: message.managedId });
+      return true;
     },
     isStackPresent: () => Promise.resolve(true),
     api: {
@@ -65,7 +121,7 @@ test("ManagedHaObserver ignores read-replica aliases that are not UUIDs", async 
 test("ManagedHaObserver skips poll when orchestrator stack is absent", async () => {
   let fetchCalled = false;
   const observer = new ManagedHaObserver({
-    send: () => {},
+    send: () => true,
     isStackPresent: () => Promise.resolve(false),
     api: {
       credentials: { user: "admin", password: "x" },

@@ -3,6 +3,8 @@ import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   computeTopologyGeneration,
   resolveTopologyGeneration,
+  sizesFeaturesNegotiated,
+  topologyGenerationPath,
 } from "./generation.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -207,46 +209,35 @@ test("resolveTopologyGeneration: an operator override reassigning a slot bumps t
   });
 });
 
-test("resolveTopologyGeneration: filesystem totalBytes going from null to a finite value bumps the generation", async () => {
+test("resolveTopologyGeneration: a filesystem changing size (a resize, or a dataset that fills) does not bump the generation", async () => {
   await withTempStateDir(async (daemonStateDir) => {
-    const unknownCapacity = inputs({
-      filesystems: [
-        {
-          filesystemId: "fs:dev:/dev/sda1",
-          mountpoint: "/",
-          fsType: "ext4",
-          sourceDevice: "/dev/sda1",
-          totalBytes: null,
-          totalInodes: null,
-          roles: ["root"],
-        },
-      ],
-    });
-    const first = await resolveTopologyGeneration(
-      unknownCapacity,
-      EMPTY_TOPOLOGY_OVERRIDES,
-      { daemonStateDir },
-    );
-    const knownCapacity = inputs({
-      filesystems: [
-        {
-          filesystemId: "fs:dev:/dev/sda1",
-          mountpoint: "/",
-          fsType: "ext4",
-          sourceDevice: "/dev/sda1",
-          totalBytes: 100_000_000_000,
-          totalInodes: 6_000_000,
-          roles: ["root"],
-        },
-      ],
-    });
-    const second = await resolveTopologyGeneration(
-      knownCapacity,
-      EMPTY_TOPOLOGY_OVERRIDES,
-      { daemonStateDir },
-    );
-    assertEquals(first, 0);
-    assertEquals(second, 1);
+    const withSize = (totalBytes: number | null) =>
+      inputs({
+        filesystems: [
+          {
+            filesystemId: "fs:dev:/dev/sda1",
+            mountpoint: "/",
+            fsType: "ext4",
+            sourceDevice: "/dev/sda1",
+            totalBytes,
+            totalInodes: totalBytes === null ? null : 6_000_000,
+            roles: ["root"],
+          },
+        ],
+      });
+    const gens: number[] = [];
+    for (
+      const size of [null, 100_000_000_000, 120_000_000_000, 90_000_000_000]
+    ) {
+      gens.push(
+        await resolveTopologyGeneration(
+          withSize(size),
+          EMPTY_TOPOLOGY_OVERRIDES,
+          { daemonStateDir, sizesNegotiated: true },
+        ),
+      );
+    }
+    assertEquals(gens, [0, 0, 0, 0]);
   });
 });
 
@@ -254,7 +245,6 @@ test("computeTopologyGeneration: null previous state starts at 0", () => {
   const fingerprint = {
     networkDeviceIds: [],
     filesystemIds: [],
-    filesystemCapacities: [],
     serviceBlockDeviceIds: [],
     gpuIds: [],
     hardwareSignalIds: [],
@@ -273,4 +263,187 @@ test("resolveTopologyGeneration never consults the capability plan", () => {
   assertEquals(source.includes("capability-plan"), false);
   assertEquals(source.includes("capabilityPlan"), false);
   assertEquals(source.includes("truncateSample"), false);
+});
+
+const GIB = 1024 * 1024 * 1024;
+
+async function ticks(
+  dir: string,
+  readings: TopologySnapshotInputs[],
+  sizesNegotiated = true,
+): Promise<number[]> {
+  const out: number[] = [];
+  for (const reading of readings) {
+    // Ticks are sequential by nature: each reads the previous tick's state.
+    out.push(
+      await resolveTopologyGeneration(reading, EMPTY_TOPOLOGY_OVERRIDES, {
+        daemonStateDir: dir,
+        sizesNegotiated,
+      }),
+    );
+  }
+  return out;
+}
+
+function sized(
+  memoryTotalBytes: number | null,
+  cores = 1,
+): TopologySnapshotInputs {
+  return inputs({
+    memoryTotalBytes,
+    swapTotalBytes: GIB,
+    cpu: {
+      sockets: 1,
+      coresPerSocket: cores,
+      threadsPerSocket: cores,
+      model: null,
+      cores: Array.from({ length: cores }, (_, i) => ({
+        logicalIndex: i,
+        coreId: `core:${i}`,
+      })),
+    },
+  });
+}
+
+test("once sizes are negotiated, a RAM resize does not start a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB), sized(4 * GIB)]), [0, 0]);
+  });
+});
+
+test("once sizes are negotiated, a flood of different memory sizes cannot mint generations", async () => {
+  await withTempStateDir(async (dir) => {
+    const readings = Array.from(
+      { length: 500 },
+      (_, i) => sized(GIB + i * 64 * 1024 * 1024, 1 + (i % 7)),
+    );
+    const gens = await ticks(dir, readings);
+    assertEquals(new Set(gens), new Set([0]));
+  });
+});
+
+test("once sizes are negotiated, a CPU core count change does not start a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB, 1), sized(GIB, 2)]), [0, 0]);
+  });
+});
+
+test("a record stored by an earlier build (with size fields) keeps its generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB)]), [0]);
+    // Rewrite the file the way the earlier build stored it, size fields and all.
+    const path = topologyGenerationPath(dir);
+    const record = JSON.parse(await Deno.readTextFile(path));
+    record.fingerprint.memoryTotalBytes = GIB;
+    record.fingerprint.swapTotalBytes = GIB;
+    record.fingerprint.filesystemCapacities = [];
+    record.fingerprint.cpuShape = {
+      sockets: 1,
+      coresPerSocket: 1,
+      threadsPerSocket: 1,
+      logicalCores: 1,
+    };
+    await Deno.writeTextFile(path, JSON.stringify(record));
+    assertEquals(await ticks(dir, [sized(2 * GIB), sized(2 * GIB)]), [0, 0]);
+  });
+});
+
+test("an entity change still starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    const gens = await ticks(dir, [
+      sized(GIB),
+      inputs({
+        ...sized(GIB),
+        networks: [
+          {
+            deviceId: "mac:new",
+            kind: "uplink",
+            name: "eth9",
+            identity: { mac: "new" },
+          },
+        ],
+      }),
+    ]);
+    assertEquals(gens, [0, 1]);
+  });
+});
+
+test("before sizes are negotiated, a RAM resize starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(
+      await ticks(dir, [sized(GIB), sized(4 * GIB), sized(4 * GIB)], false),
+      [0, 1, 1],
+    );
+  });
+});
+
+test("before sizes are negotiated, a CPU core count change starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(
+      await ticks(dir, [sized(GIB, 1), sized(GIB, 2)], false),
+      [0, 1],
+    );
+  });
+});
+
+test("before sizes are negotiated, a filesystem resize starts a new generation", async () => {
+  await withTempStateDir(async (dir) => {
+    const withSize = (totalBytes: number) =>
+      inputs({
+        filesystems: [{
+          filesystemId: "fs:dev:/dev/sda1",
+          mountpoint: "/",
+          fsType: "ext4",
+          sourceDevice: "/dev/sda1",
+          totalBytes,
+          totalInodes: 6_000_000,
+          roles: ["root"],
+        }],
+      });
+    assertEquals(
+      await ticks(dir, [withSize(100), withSize(200)], false),
+      [0, 1],
+    );
+  });
+});
+
+test("before sizes are negotiated, memory jitter within the tolerance keeps the generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(
+      await ticks(
+        dir,
+        [sized(GIB), sized(GIB + 4096), sized(GIB - 4096)],
+        false,
+      ),
+      [0, 0, 0],
+    );
+  });
+});
+
+test("negotiating sizes after a size-aware record keeps the generation", async () => {
+  await withTempStateDir(async (dir) => {
+    assertEquals(await ticks(dir, [sized(GIB)], false), [0]);
+    assertEquals(await ticks(dir, [sized(4 * GIB)], true), [0]);
+  });
+});
+
+test("sizes leave the fingerprint only when both metrics-v8 and metrics-v8-sizes are advertised", () => {
+  assertEquals(
+    sizesFeaturesNegotiated(["metrics-v8", "metrics-v8-sizes"]),
+    true,
+  );
+  assertEquals(sizesFeaturesNegotiated(["metrics-v8-sizes"]), false);
+  assertEquals(sizesFeaturesNegotiated(["metrics-v8"]), false);
+  assertEquals(sizesFeaturesNegotiated([]), false);
+});
+
+test("a reconnect (first resolve before the features are known) keeps the generation, and a later resize still bumps", async () => {
+  await withTempStateDir(async (dir) => {
+    // Stored during a negotiated run: no sizes in the record.
+    assertEquals(await ticks(dir, [sized(GIB)], true), [0]);
+    // Fresh reconnect: the flag is false until the attach frame arrives.
+    assertEquals(await ticks(dir, [sized(GIB)], false), [0]);
+    // The baseline now carries sizes, so a resize while not negotiated bumps.
+    assertEquals(await ticks(dir, [sized(4 * GIB)], false), [1]);
+  });
 });

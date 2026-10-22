@@ -30,25 +30,32 @@
       - apt-transport-https
       - ca-certificates
       - curl
+      # The repo-key role reads the signing key with gpg.
+      - gnupg
     state: present
     update_cache: true
     cache_valid_time: 3600
 
-# Packaged trust root, not a loose curl-dropped keyfile: the .deb carries the
-# key and can be upgraded when sury rotates it.
-- name: Download sury archive keyring package
-  ansible.builtin.get_url:
-    url: "{{ php_fpm_sury_keyring_url }}"
-    dest: /tmp/debsuryorg-archive-keyring.deb
-    # Only `apt` (root) ever opens this staging copy, and /tmp is world-writable
-    # and shared, so it is never readable by anyone else while it sits there.
-    mode: "0600"
-  register: _sury_keyring_download
+# Key policy (php_fpm_key_policy: warn | enforce | bundled): fetched from sury
+# over HTTPS, with the copy in files/sury-php.gpg as the fallback. See
+# roles/repo-key. A key outside the fingerprint list is used with a loud WARN
+# under `warn`, and stops the run under `enforce`.
+# role_path must be resolved HERE: a vars value passed to include_role is
+# evaluated lazily inside repo-key, where role_path is repo-key's own directory.
+- name: Locate the sury signing key shipped with the role
+  ansible.builtin.set_fact:
+    _php_fpm_key_bundled: "{{ role_path }}/files/sury-php.gpg"
 
-- name: Install sury archive keyring
-  ansible.builtin.apt:
-    deb: /tmp/debsuryorg-archive-keyring.deb
-    state: present
+- name: Install the sury repository signing key
+  ansible.builtin.include_role:
+    name: repo-key
+  vars:
+    repo_key_name: sury-php
+    repo_key_url: "{{ php_fpm_sury_key_url }}"
+    repo_key_bundled: "{{ _php_fpm_key_bundled }}"
+    repo_key_dest: "{{ php_fpm_sury_keyring_path }}"
+    repo_key_fingerprints: "{{ php_fpm_sury_key_fingerprints }}"
+    repo_key_policy: "{{ php_fpm_key_policy }}"
 
 - name: Remove any legacy sury sources.list entry
   ansible.builtin.file:
@@ -63,7 +70,7 @@
     owner: root
     group: root
     # Apt only reads this as root. The list names a public repo and its
-    # packaged trust root — no secret — but a tenant does not need to read it.
+    # signing key file — no secret — but a site owner does not need to read it.
     mode: "0640"
     content: |
       Types: deb
@@ -73,10 +80,12 @@
       Signed-By: {{ php_fpm_sury_keyring_path }}
   register: _sury_repo
 
-- name: Refresh apt cache after sury repo change
+- name: Refresh apt cache after sury repo or key change
   ansible.builtin.apt:
     update_cache: true
-  when: _sury_repo.changed # noqa: no-handler
+  when: >- # noqa: no-handler
+    _sury_repo.changed
+    or (repo_key_changed | default(false)) | bool
 
 # One template for every series: `%i` is the series. Installed once, before the
 # loop, because `systemctl enable turbopanel-php-fpm@8.4` needs the template to
@@ -105,6 +114,19 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
+# Loaded before the series loop (series.yml reads `builtinExtensions`).
+- name: Load the shared runtime registry
+  ansible.builtin.include_vars:
+    file: "{{ role_path }}/../../runtime-registry.json"
+    name: runtime_registry
+
+# Every installed PHP series may be run by every site owner's Linux user: the
+# packaged binaries stay root:root 0755. This also drops the dpkg-statoverride
+# entries and groups older releases used to restrict them per version.
+- name: Remove what the old per-version PHP groups left behind
+  ansible.builtin.include_role:
+    name: runtime-access
+
 - name: Install and configure each requested PHP series
   ansible.builtin.include_tasks: series.yml
   loop: "{{ php_fpm_versions | map('trim') | reject('equalto', '') | unique | list }}"
@@ -125,62 +147,33 @@
     - "{{ turbopanel_config_dir }}/php/pools"
     - "{{ turbopanel_config_dir }}/php/conf.d"
 
-# Loaded here rather than relying on the copy runtime-entitlement leaves behind:
-# that role is included per-series from series.yml, so depending on its side
-# effect would make the dispatcher's contents depend on task ordering.
-- name: Load the shared runtime registry
-  ansible.builtin.include_vars:
-    file: "{{ role_path }}/../../runtime-registry.json"
-    name: runtime_registry
-
 # /usr/local/bin precedes /usr/bin in Debian's default PATH, so this shadows
 # sury's `update-alternatives` link for `php` without removing it. Removing the
-# link would break every other package that expects `php` to exist; and the
-# link is not a privilege leak either way, because it resolves to
-# /usr/bin/php<series>, whose 0750 mode the kernel checks at execve.
+# link would break every other package that expects `php` to exist.
 - name: Install the PHP shell dispatcher
   ansible.builtin.template:
     src: php-dispatcher.sh.j2
     dest: /usr/local/bin/php
     owner: root
     group: root
-    # 0750, not 0755. The wrapper grants nothing — the interpreter it execs is
-    # already 0750 and the kernel rechecks that at execve. Entitled accounts
-    # reach this file through the ACL below; everyone else gets the same EACCES
-    # `/usr/bin/php<series>` already returns.
-    mode: "0750"
+    # Owner and group bits only: the "other" bits belong to the ACL below, and
+    # a full octal mode would wipe it on every run.
+    mode: "u=rwx,g=rx"
 
-- name: Resolve PHP entitlement groups for dispatcher access
-  ansible.builtin.set_fact:
-    _php_shell_access_groups: >-
-      {{
-        php_fpm_versions
-        | map('trim')
-        | reject('equalto', '')
-        | unique
-        | list
-        | map('extract', runtime_registry.runtimes.php.series)
-        | select('defined')
-        | select('truthy')
-        | list
-      }}
-
-- name: Grant PHP entitlement groups execute on the dispatcher
+# Every site owner's Linux user may run every installed PHP series, so every
+# account may run the dispatcher too. An `other` ACL entry rather than a 0755
+# mode, the same way the vendored runtime trees are opened (ansible:S2612).
+- name: Let every account run the PHP shell dispatcher
   ansible.posix.acl:
     path: /usr/local/bin/php
-    etype: group
-    entity: "{{ item.group }}"
+    etype: other
     permissions: rx
     state: present
-  loop: "{{ _php_shell_access_groups }}"
-  loop_control:
-    label: "{{ item.group }}"
-  when: _php_shell_access_groups | length > 0
 
 # Root-owned per-account series pins. `/etc/turbopanel` is already 0750, so a
 # world bit here never reached a tenant. Root-writable only: a tenant must not
-# be able to author or alter a pin (and could not use an ungranted series
-# anyway — the dispatcher only selects from what the account holds).
+# be able to author or alter a pin (and the dispatcher only selects from the
+# series installed here).
 - name: Ensure the PHP pin directory
   ansible.builtin.file:
     path: "{{ turbopanel_config_dir }}/php/pins"

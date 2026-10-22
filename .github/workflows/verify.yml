@@ -65,8 +65,8 @@ jobs:
         continue-on-error: true
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
-          deno-version: "2.9.7"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
           cache: true
       - name: Wait before retrying the Deno download
         if: steps.deno-try-1.outcome == 'failure'
@@ -77,8 +77,8 @@ jobs:
         continue-on-error: true
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
-          deno-version: "2.9.7"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
           cache: true
       - name: Wait before retrying the Deno download again
         if: steps.deno-try-2.outcome == 'failure'
@@ -87,8 +87,8 @@ jobs:
         if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.7).
-          deno-version: "2.9.7"
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
           cache: true
 
       - name: Format check
@@ -140,9 +140,9 @@ jobs:
       # gate at all -- its only feedback was a converge failure on a real host.
       # orchestration/requirements.txt already pinned ansible-lint "for IDE/CI
       # linting"; this is the CI half. check-orchestration.sh also installs
-      # ansible.posix from orchestration/requirements.yml (Galaxy collections
-      # are not committed; CI has no /opt vendor tree). See the script for
-      # what is and is not gated.
+      # ansible.posix from the bundled tarball in orchestration/vendor/galaxy/
+      # (offline; CI has no /opt vendor tree). See the script for what is and
+      # is not gated.
       # Install from the hash lock (githubactions:S8544 / S8541), not the
       # range-pinned constraints file.
       - name: Set up Python for Ansible
@@ -202,6 +202,9 @@ jobs:
           sparse-checkout: scripts/download-caddy.mjs
 
       - name: Test with coverage
+        env:
+          # The real-Postgres suites must run here, never skip on a Docker hiccup.
+          TURBOPANEL_REQUIRE_REAL_POSTGRES: "1"
         run: deno task test:coverage
 
       # `deno task test:coverage` already normalizes; re-running here is
@@ -214,7 +217,7 @@ jobs:
           scripts/normalize-lcov.ts coverage/lcov.info
 
       - name: Upload coverage LCOV
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: daemon-coverage-lcov
           path: coverage/lcov.info
@@ -239,7 +242,7 @@ jobs:
           && github.event_name == 'pull_request'
           && github.base_ref != 'staging'
           && github.base_ref != 'live'
-        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -317,7 +320,7 @@ jobs:
         continue-on-error: true
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: "2.9.7"
+          deno-version: "2.9.8"
       - name: Wait before retrying the Deno download
         if: steps.deno-try-1.outcome == 'failure'
         run: sleep 15
@@ -327,7 +330,7 @@ jobs:
         continue-on-error: true
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: "2.9.7"
+          deno-version: "2.9.8"
       - name: Wait before retrying the Deno download again
         if: steps.deno-try-2.outcome == 'failure'
         run: sleep 45
@@ -335,7 +338,7 @@ jobs:
         if: steps.deno-try-2.outcome == 'failure'
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: "2.9.7"
+          deno-version: "2.9.8"
 
       - name: Check contract drift against turbopanel
         working-directory: turbopaneld
@@ -353,9 +356,49 @@ jobs:
   # trunk build and tag builds that call this file) a cancelled run is just
   # cancelled: this job is skipped rather than turning a working commit red.
   # A real failure of a need still runs it, and still fails it.
+  # Suites the main verify job cannot exercise: it runs unprivileged and the
+  # runner image decides which tools exist. Both are security checks that sat
+  # behind an opt-in and so never ran:
+  #   - the sealed-release copy refusing a hard link to a root-owned file
+  #     needs uid 0 (the test is ignored otherwise);
+  #   - the docker gate's request parser is compared with the live Go
+  #     net/http parser (Go is on the runner image, docker is the fallback).
+  # The coverage run in `verify` still runs these files too; here they must
+  # run, not skip (TURBOPANEL_REQUIRE_ROOT_TESTS turns the uid gate into a
+  # failure for a non-root run).
+  privileged-suites:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: daemon-privileged-suites-${{ github.event_name }}-${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && github.run_id || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && github.head_ref != 'trunk' && github.head_ref != 'staging' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Deno
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          # Keep in step with DENO_VERSION / deno_version / TP_DENO_VERSION (2.9.8).
+          deno-version: "2.9.8"
+          cache: true
+
+      - name: Sealed-release copy as root (hard link to a root-owned file)
+        run: >-
+          sudo env "PATH=$PATH" DENO_DIR=/tmp/deno-root-cache
+          TURBOPANEL_REQUIRE_ROOT_TESTS=1
+          deno test -A --no-check src/deploy/release/safe-copy.test.ts
+
+      - name: Docker gate parser against live Go
+        env:
+          DOCKER_GATE_GO_DIFF: "1"
+        run: deno test -A --no-check src/docker-gate/parser-differential.test.ts
+
   ci-ok:
     name: ci-ok
-    needs: [verify, contract-drift]
+    needs: [verify, contract-drift, privileged-suites]
     if: ${{ (github.event_name == 'pull_request' && always()) || !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5

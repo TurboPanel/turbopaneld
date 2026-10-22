@@ -39,6 +39,8 @@ const EXEMPT: Record<string, string> = {
   "config/apache": "root role",
   "config/openlitespeed": "root role (openlitespeed)",
   "config/php": "root role (php-fpm)",
+  "config/node-app-env":
+    "root-owned: tp-host app-env-install makes it and its files; the unit's EnvironmentFile= names it, the daemon never writes it",
   "config/system": "root role (system stack)",
   "config/instance": "control plane (state root not sealed co-located)",
   "state/instance": "control plane (state root not sealed co-located)",
@@ -47,7 +49,8 @@ const EXEMPT: Record<string, string> = {
   "state/update-rollback.json": "written by the root update guard",
   "state/instance-acme": "control plane (state root not sealed co-located)",
   "state/openlitespeed": "root role (openlitespeed)",
-  "state/proxysql": "root-written by the managed-engine playbooks",
+  "state/hosting-caddy":
+    "the hosting Caddy unit's StateDirectory, owned by tpedge; the daemon only reads the validation folder in it",
   // A leaf on a daemon-only host (daemon-layout makes it when no control
   // plane is installed); co-located, instance-launch owns it for the instance
   // user (2770) and daemon-layout leaves it alone.

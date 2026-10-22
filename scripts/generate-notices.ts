@@ -69,7 +69,6 @@ const ORCHESTRATION_LICENSES: Record<string, string> = {
   "ansible-lint": "GPL-3.0-or-later",
   "ansible-compat": "GPL-3.0-or-later",
   "ansible.posix": "GPL-3.0-or-later",
-  "geerlingguy.docker": "MIT",
 };
 
 export type NoticesCliIo = {
@@ -129,7 +128,6 @@ export async function runGenerateNotices(options: {
     "orchestration/requirements.txt",
     "orchestration/requirements.lock.txt",
     "orchestration/requirements.yml",
-    "orchestration/requirements-docker.yml",
   ];
   // Hash the pin files together; entries are added in list order so the
   // fingerprint map keeps a deterministic key order.
@@ -306,7 +304,6 @@ export function parseOrchestrationPins(root: string): OrchestrationPin[] {
   }
   pins.push(
     ...galaxyPins(join(root, "orchestration", "requirements.yml")),
-    ...galaxyPins(join(root, "orchestration", "requirements-docker.yml")),
   );
   return pins;
 }

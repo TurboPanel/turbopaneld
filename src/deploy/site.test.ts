@@ -1,6 +1,7 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   apacheSiteConfig,
+  assertPhpSeriesOffered,
   caddySiteConfig,
   DEFAULT_PHP_SERIES,
   defaultIndexHtml,
@@ -216,7 +217,7 @@ test("site engines follow a symlink only when its owner matches the target's", (
   const ols = openlitespeedSiteFragment(
     "env",
     { ...site, engine: "openlitespeed" },
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env_site/vhconf.conf",
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env__site/vhconf.conf",
     docroot,
   );
   assertStringIncludes(ols, "allowSymbolLink           2\n");
@@ -458,7 +459,7 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
     "/run/turbopanel/php/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = site_user");
-  assertStringIncludes(conf, "group = site_user-grp");
+  assertStringIncludes(conf, "group = site_user");
   assertStringIncludes(conf, "listen.owner = tpapache");
   assertStringIncludes(conf, "listen.group = tpapache");
 });
@@ -557,12 +558,30 @@ test("caddyHttpUpstream only allows loopback hosts", () => {
   );
 });
 
-test("openlitespeedSiteName sanitizes unsafe characters into a stable identifier", () => {
-  assertEquals(openlitespeedSiteName("env1", "site_a"), "tp_env1_site_a");
+test("openlitespeedSiteName keeps letters and digits and escapes everything else", () => {
+  assertEquals(openlitespeedSiteName("env1", "site"), "tp_env1__site");
   assertEquals(
     openlitespeedSiteName("env-1", "site a"),
-    "tp_env_1_site_a",
+    "tp_env_2d1__site_20a",
   );
+});
+
+test("openlitespeedSiteName never gives two different pairs the same name", () => {
+  const pairs: Array<[string, string]> = [
+    ["env", "a-b"],
+    ["env", "a_b"],
+    ["env", "a b"],
+    ["env", "a.b"],
+    ["a_b", "c"],
+    ["a", "b_c"],
+    ["a-b", "c"],
+    ["a", "b-c"],
+    ["a__b", "c"],
+    ["a", "_b_c"],
+  ];
+  const names = pairs.map(([env, svc]) => openlitespeedSiteName(env, svc));
+  assertEquals(new Set(names).size, names.length);
+  for (const name of names) assertEquals(/^[A-Za-z0-9_]+$/.test(name), true);
 });
 
 test("openlitespeedSiteFragment emits loopback listener plus docker bridge when requested", () => {
@@ -574,15 +593,15 @@ test("openlitespeedSiteFragment emits loopback listener plus docker bridge when 
       root: "public",
       listenPort: 18080,
     },
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf",
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf",
     "/var/lib/turbopanel/sites/env1/site/public",
   );
-  assertStringIncludes(fragment, "virtualHost tp_env1_site{");
+  assertStringIncludes(fragment, "virtualHost tp_env1__site{");
   assertStringIncludes(
     fragment,
     "vhRoot                    /var/lib/turbopanel/sites/env1/site/public/",
   );
-  assertStringIncludes(fragment, "listener tp_env1_site_lo{");
+  assertStringIncludes(fragment, "listener tp_env1__site_lo{");
   assertStringIncludes(fragment, "address                   127.0.0.1:18080");
   if (fragment.includes("_dk{")) {
     throw new Error("docker listener must be omitted without a bind address");
@@ -596,11 +615,11 @@ test("openlitespeedSiteFragment emits loopback listener plus docker bridge when 
       root: "public",
       listenPort: 18080,
     },
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf",
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf",
     "/var/lib/turbopanel/sites/env1/site/public",
     "172.17.0.1",
   );
-  assertStringIncludes(withDocker, "listener tp_env1_site_dk{");
+  assertStringIncludes(withDocker, "listener tp_env1__site_dk{");
   assertStringIncludes(withDocker, "address                  172.17.0.1:18080");
 });
 
@@ -608,6 +627,7 @@ test("openlitespeedVhostConfig serves a static document root with no directory l
   const conf = openlitespeedVhostConfig();
   assertStringIncludes(conf, "docRoot $VH_ROOT/");
   assertStringIncludes(conf, "autoIndex 0");
+  assertStringIncludes(conf, "useServer 0");
   // `allowBrowse` is OpenLiteSpeed's "Accessible" flag: 0 answers 403 for `/`.
   assertStringIncludes(conf, "allowBrowse 1");
   assertEquals(conf.includes("allowBrowse 0"), false);
@@ -690,7 +710,7 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
         root: "public",
         listenPort: 18080,
       },
-      "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf",
+      "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf",
       "/var/lib/turbopanel/sites/env1/site/public",
     );
     const conf = openlitespeedMainConfig(layout, [fragment]);
@@ -708,7 +728,7 @@ test("openlitespeedMainConfig assembles a single httpd_config.conf from fragment
       conf,
       `swappingDir                       ${layout.stateDir}/openlitespeed/swap`,
     );
-    assertStringIncludes(conf, "virtualHost tp_env1_site{");
+    assertStringIncludes(conf, "virtualHost tp_env1__site{");
   } finally {
     await cleanup();
   }
@@ -897,8 +917,8 @@ test("phpSeriesForDeploy collects every distinct series, sorted", () => {
 });
 
 test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starting it", () => {
-  const processorName = openlitespeedPhpProcessorName("tp_env1_phpapp");
-  assertEquals(processorName, "php_tp_env1_phpapp");
+  const processorName = openlitespeedPhpProcessorName("tp_env1__phpapp");
+  assertEquals(processorName, "php_tp_env1__phpapp");
   const socket = "/run/turbopanel-php-phpapp-0a1b2c3d4e5f-lsd84/php.sock";
   const want = { "lsphp-detached": "lsapi", fastcgi: "fcgi", fpm: "fcgi" };
   for (const [mode, type] of Object.entries(want)) {
@@ -913,16 +933,21 @@ test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starti
       conf,
       "phpIniOverride {\n  php_admin_value memory_limit 256M\n}",
     );
-    assertStringIncludes(conf, "extprocessor php_tp_env1_phpapp{");
+    assertStringIncludes(conf, "extprocessor php_tp_env1__phpapp{");
     assertStringIncludes(conf, `type                      ${type}`);
     assertStringIncludes(conf, `address                   uds://${socket}`);
     // systemd runs PHP as the owner; OpenLiteSpeed only connects.
     assertStringIncludes(conf, "autoStart                 0");
     assertStringIncludes(
       conf,
-      `add                       ${type}:php_tp_env1_phpapp php`,
+      `add                       ${type}:php_tp_env1__phpapp php`,
     );
-    assertStringIncludes(conf, "indexFiles index.php, index.html");
+    // Without `useServer 0` OLS keeps the server-level `indexFiles index.html`
+    // and `/` never reaches index.php.
+    assertStringIncludes(
+      conf,
+      "indexFiles index.php, index.html\n  useServer 0\n  autoIndex 0",
+    );
     // OpenLiteSpeed runs as tpols and cannot switch users: no suEXEC lines,
     // no binary to start, and the settings live in the runtime's php.ini.
     for (
@@ -998,7 +1023,7 @@ test("openlitespeedSiteFragment declares no identity OpenLiteSpeed cannot take",
     principal: { principalId: "p-1", username: "siteowner" },
   };
   const vhConf =
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_phpapp/vhconf.conf";
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__phpapp/vhconf.conf";
   const root = "/var/lib/turbopanel/sites/env1/phpapp/public";
   const fragment = openlitespeedSiteFragment("env1", site, vhConf, root, null, {
     php: true,
@@ -1019,7 +1044,7 @@ test("openlitespeedSiteFragment enables scripts only for a PHP site", () => {
     listenPort: 18080,
   };
   const vhConf =
-    "/etc/turbopanel/openlitespeed/vhosts/tp_env1_site/vhconf.conf";
+    "/etc/turbopanel/openlitespeed/vhosts/tp_env1__site/vhconf.conf";
   const root = "/var/lib/turbopanel/sites/env1/site/public";
   assertStringIncludes(
     openlitespeedSiteFragment("env1", site, vhConf, root),
@@ -1166,4 +1191,188 @@ test("the Caddy dotfile rule refuses .env and nested dotfiles, not /.well-known/
   ) {
     assertEquals(caddyRefusesDotPath(path), false, path);
   }
+});
+
+const NGINX_PHP_SITE: SiteApplySpec = {
+  composeServiceName: "app",
+  engine: "nginx",
+  root: "public",
+  listenPort: 18080,
+  php: { version: "8.4" },
+};
+
+/** The nginx vhost of a PHP site carrying `webEnv`. */
+function nginxPhpWith(webEnv?: Record<string, string>): string {
+  return nginxSiteConfig(
+    { ...NGINX_PHP_SITE, ...(webEnv ? { webEnv } : {}) },
+    "/srv/users/alice/sites/app/current/public",
+    null,
+    { phpFpmSocket: "/run/turbopanel/php/8.4/tp-env-app.sock" },
+  );
+}
+
+test("nginxSiteConfig passes site variables to PHP as fastcgi_param, name order, before the pinned parameters", () => {
+  const conf = nginxPhpWith({ ZED: "z", APP_ENV: "production" });
+  assertStringIncludes(conf, '    fastcgi_param APP_ENV "production";\n');
+  assertStringIncludes(conf, '    fastcgi_param ZED "z";\n');
+  assertEquals(conf.indexOf("APP_ENV") < conf.indexOf("ZED"), true);
+  // Platform-pinned parameters come last, so a site cannot move the script.
+  assertEquals(
+    conf.indexOf("ZED") < conf.indexOf("fastcgi_param SCRIPT_FILENAME"),
+    true,
+  );
+});
+
+test("nginxSiteConfig escapes quotes and backslashes in a site variable", () => {
+  const conf = nginxPhpWith({ QUOTED: String.raw`a"b\c` });
+  assertStringIncludes(conf, String.raw`fastcgi_param QUOTED "a\"b\\c";`);
+});
+
+test("nginxSiteConfig drops a site variable it cannot carry and keeps the rest, never printing the value", () => {
+  const conf = nginxPhpWith({
+    KEEP: "ok",
+    // nginx expands `$name` inside quotes and has no escape.
+    DOLLAR: "alpha$host",
+    NEWLINE: "a\nfastcgi_param X y",
+    // Parameters the platform sets itself.
+    SCRIPT_FILENAME: "/etc/passwd",
+    REMOTE_ADDR: "127.0.0.1",
+    HTTP_HOST: "evil",
+    http_authorization: "x",
+    HTTPS: "on",
+  });
+  assertStringIncludes(conf, 'fastcgi_param KEEP "ok";');
+  const gone = ["DOLLAR", "alpha", "NEWLINE", "/etc/passwd", "evil", '"on"'];
+  for (const text of [...gone, '127.0.0.1"', "http_authorization"]) {
+    assertEquals(conf.includes(text), false, text);
+  }
+  // Only the platform's own SCRIPT_FILENAME is left.
+  assertEquals(conf.match(/fastcgi_param SCRIPT_FILENAME /g)?.length, 1);
+});
+
+test("nginxSiteConfig still refuses a name that is not an environment variable name", () => {
+  assertThrows(() => nginxPhpWith({ "BAD-NAME": "x" }));
+});
+
+test("nginxSiteConfig carries no site variables outside the PHP location", () => {
+  assertEquals(
+    nginxPhpWith({ APP_ENV: "production" }).replace(
+      '    fastcgi_param APP_ENV "production";\n',
+      "",
+    ),
+    nginxPhpWith(),
+  );
+  // A static site has no PHP location, so nothing to pass the variables to.
+  const staticSite = nginxSiteConfig(
+    {
+      composeServiceName: "app",
+      engine: "nginx",
+      root: "public",
+      listenPort: 18080,
+      webEnv: { APP_ENV: "production" },
+    },
+    "/srv/users/alice/sites/app/current/public",
+  );
+  assertEquals(staticSite.includes("APP_ENV"), false);
+});
+
+test("a PHP series the server's operating system does not offer is refused before any playbook runs", () => {
+  assertPhpSeriesOffered(["8.1", "8.4", "8.5"], "trixie");
+  assertThrows(
+    () => assertPhpSeriesOffered(["8.4", "7.4"], "trixie"),
+    Error,
+    "php 7.4 is not offered on this server's operating system. Offered series: 8.1, 8.2, 8.3, 8.4, 8.5.",
+  );
+  // A suite the table does not list gets every registry series.
+  assertPhpSeriesOffered(["8.1"], "bookworm");
+  assertThrows(() => assertPhpSeriesOffered(["7.4"], "bookworm"), Error);
+});
+
+const FORWARDED_PHP_SITE = {
+  composeServiceName: "phpapp",
+  root: "public",
+  listenPort: 18080,
+  php: { version: "8.4", settings: {} },
+} as const;
+
+test("plain Apache trusts only the loopback front server for address and HTTPS", () => {
+  const conf = apacheSiteConfig(
+    { ...FORWARDED_PHP_SITE, engine: "apache" },
+    "/srv/www",
+    { phpFpmSocket: "/run/x.sock", dockerBindAddress: "172.17.0.1" },
+  );
+  assertStringIncludes(conf, "  RemoteIPHeader X-Forwarded-For\n");
+  // One trusted proxy and no more: a docker bridge peer cannot name the client.
+  assertEquals(conf.match(/RemoteIP\w*Proxy.*/g), [
+    "RemoteIPInternalProxy 127.0.0.1",
+  ]);
+  const peer =
+    "%{CONN_REMOTE_ADDR} == '127.0.0.1' && %{HTTP:X-Forwarded-Proto} == 'https'";
+  assertStringIncludes(conf, `<If "${peer}">\n    SetEnv HTTPS on\n  </If>`);
+  assertStringIncludes(conf, `ProxyFCGISetEnvIf "${peer}" SERVER_PORT 443`);
+  assertStringIncludes(
+    conf,
+    `ProxyFCGISetEnvIf "${peer}" REQUEST_SCHEME https`,
+  );
+});
+
+test("nginx PHP site reads the visitor from a loopback peer and hands PHP https and 443", () => {
+  for (
+    const fastcgiParamsPath of [null, "/etc/turbopanel/nginx/fastcgi_params"]
+  ) {
+    const conf = nginxSiteConfig(
+      { ...FORWARDED_PHP_SITE, engine: "nginx" },
+      "/srv/www",
+      "172.17.0.1",
+      { phpFpmSocket: "/run/x.sock", fastcgiParamsPath },
+    );
+    // Only loopback may name the client address; the bridge address is not listed.
+    assertEquals(conf.match(/set_real_ip_from .*/g), [
+      "set_real_ip_from 127.0.0.1;",
+      "set_real_ip_from ::1;",
+    ]);
+    assertStringIncludes(conf, "real_ip_header X-Forwarded-For;");
+    assertStringIncludes(
+      conf,
+      String.raw`if ($tp_fwd_peer ~ "^(127\.0\.0\.1|::1)\|https$") {`,
+    );
+    // The overrides come after the shared parameter set, so they win.
+    const location = conf.slice(conf.indexOf("location ~ \\.php$"));
+    const after = location.slice(
+      Math.max(
+        location.indexOf("include "),
+        location.indexOf("fastcgi_param SERVER_NAME"),
+      ),
+    );
+    assertStringIncludes(
+      after,
+      `fastcgi_param HTTPS $tp_fwd_https if_not_empty;
+    fastcgi_param SERVER_PORT $tp_fwd_port;
+    fastcgi_param REQUEST_SCHEME $tp_fwd_scheme;`,
+    );
+  }
+});
+
+test("OpenLiteSpeed trusts only loopback for the address and reads HTTPS from the header", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const main = openlitespeedMainConfig(layout, []);
+    assertStringIncludes(main, "useIpInProxyHeader                2");
+    assertStringIncludes(main, "allow                     ALL, 127.0.0.1T");
+  } finally {
+    await cleanup();
+  }
+  const php = openlitespeedVhostConfig({
+    processorName: "p",
+    mode: "fastcgi",
+    socket: "/run/x.sock",
+    children: 4,
+    lockedValues: [],
+  });
+  assertStringIncludes(
+    php,
+    "RewriteCond %{HTTP:X-Forwarded-Proto} =https\nRewriteRule .* - [E=HTTPS:on]",
+  );
+  // A site without PHP has nothing to tell.
+  assertEquals(openlitespeedVhostConfig().includes("X-Forwarded-Proto"), false);
 });

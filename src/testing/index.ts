@@ -33,7 +33,6 @@ export {
 
 export {
   buildCloudflaredFixtureBinary,
-  buildGalaxyDockerFixtureArchive,
   buildUvFixtureArchive,
   createOrchestrationRuntimeFixture,
   ORCHESTRATION_RUNTIME_ENV_KEYS,
@@ -75,3 +74,23 @@ export {
   writeFixtureLeafCertificate,
   writeFixtureLeafPair,
 } from "./openssl-fixture-leaf.ts";
+
+export {
+  createFakeProxySqlAdmin,
+  type FakeProxySqlAdmin,
+} from "./fake-proxysql-admin.ts";
+
+export {
+  mysqlOrchestratorClientCnf,
+  replicationPlainEnvelope,
+  replicationPlaintext,
+  topologyPlainEnvelope,
+  topologyPlaintext,
+  topologyUsername,
+} from "./managed-topology-fixtures.ts";
+
+export {
+  type FakeMysqlCnfDocker,
+  fakeMysqlCnfDocker,
+  type FakeMysqlCnfDockerOptions,
+} from "./fake-mysql-cnf-docker.ts";

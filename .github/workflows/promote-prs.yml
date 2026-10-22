@@ -3,8 +3,8 @@
 # Every green trunk build ("Publish Daemon Trunk Build" succeeded, so a canary
 # exists for that commit) makes sure a PR "Release Candidate <version>-rc.N" from trunk into
 # staging is open. <version> is the base of the canary built from trunk's head
-# (versions come from tags — TurboPanel/dev scripts/promote/version.sh — never
-# from deno.json), so the title names exactly what merging publishes. Merging it is the one human act: publish-rc.yml then publishes the
+# (worked out from the tags by TurboPanel/dev scripts/promote/version.sh; the
+# trunk build refuses a canary whose deno.json says otherwise), so the title names exactly what merging publishes. Merging it is the one human act: publish-rc.yml then publishes the
 # next x.y.z-rc.N from that exact canary's bytes. The PR is opened with the
 # Release App's token, because a PR created with GITHUB_TOKEN never starts the
 # required `ci-ok` check.
@@ -41,7 +41,7 @@ jobs:
     steps:
       - name: Mint a Release App token
         id: app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
@@ -50,7 +50,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/dev
-          ref: d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+          ref: fbb7c467f5d403a577e62864c6c1a6b30be661cd # dev#69
           path: .promote
           fetch-depth: 1
           persist-credentials: false

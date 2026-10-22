@@ -18,27 +18,26 @@
  * `<daemonStateDir>/release-link-scan.json`; redeploying the site publishes a
  * release the publish-time checks have vetted.
  *
- * Every site is walked as `<homes>/<user>/sites/<service>/current`, not from
+ * Every site is walked as `<homes>/<user>/<scope>/services/<name>/current`, not from
  * the deployment manifests, which do not name the principal for releases
  * recorded before they carried one — the very releases this looks for.
  */
 import { join } from "@std/path";
+import {
+  isValidOwnerName,
+  isValidScope,
+} from "../../contracts/directory-names.ts";
 import { writeDaemonFile } from "../../permissions/daemon-files.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import {
   type LayoutPaths,
   principalHomePath,
-  siteCurrentSymlink,
-  siteReleasesDir,
+  serviceTree,
 } from "../../paths/layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { readCurrentReleaseId } from "./promote.ts";
-import {
-  assertSafeReleaseId,
-  assertSafeServiceId,
-  runPrivileged,
-} from "./release-layout.ts";
+import { assertSafeReleaseId, runPrivileged } from "./release-layout.ts";
 import {
   linksLeavingReleaseLexically,
   listReleaseLinks,
@@ -93,20 +92,22 @@ async function scanSite(
   username: string,
   serviceId: string,
   runFn: RunFn,
+  folder: { scope: string; slug: string },
 ): Promise<ReleaseLinkFinding | null> {
   let releaseId: string | null = null;
   try {
-    const home = principalHomePath(layout, username);
-    const service = assertSafeServiceId(serviceId);
+    // A folder is named by its components, so the listing's name is the slug.
+    const tree = serviceTree(layout, {
+      serviceId: "x",
+      username,
+      folder: { owner: username, scope: folder.scope, slug: folder.slug },
+    });
     releaseId = await readCurrentReleaseId(
-      { currentLink: siteCurrentSymlink(home, service) },
+      { currentLink: tree.currentLink },
       runFn,
     );
     if (releaseId === null) return null;
-    const releaseDir = join(
-      siteReleasesDir(home, service),
-      assertSafeReleaseId(releaseId),
-    );
+    const releaseDir = join(tree.releasesDir, assertSafeReleaseId(releaseId));
     const links = linksLeavingReleaseLexically(
       await listReleaseLinks(releaseDir, runFn),
     );
@@ -128,34 +129,82 @@ export async function scanLiveReleaseLinks(
   runFn: RunFn = runPrivileged,
 ): Promise<ReleaseLinkFinding[]> {
   const findings: ReleaseLinkFinding[] = [];
-  const users = await listDirNames(layout.principalHomeRoot, runFn);
+  // Entries that are not a site owner's folder (`.tp-staging`) are not walked.
+  const users = (await listDirNames(layout.principalHomeRoot, runFn)).filter(
+    (name) => isValidOwnerName(name),
+  );
   await forEachSequential(users, async (username) => {
-    let services: string[];
+    await scanScopes(layout, username, runFn, findings);
+  });
+  return findings;
+}
+
+/** Folders of the scope tree: every `<owner>/<scope>/services/<name>`. */
+async function scanScopes(
+  layout: ScanLayout,
+  username: string,
+  runFn: RunFn,
+  findings: ReleaseLinkFinding[],
+): Promise<void> {
+  const home = principalHomePath(layout, username);
+  let scopes: string[];
+  try {
+    scopes = (await listDirNames(home, runFn)).filter((name) =>
+      !OWNER_OWN_ENTRIES.has(name) && isValidScope(name)
+    );
+  } catch (err) {
+    findings.push({
+      username,
+      serviceId: "",
+      releaseId: null,
+      links: [],
+      error: errorText(err),
+    });
+    return;
+  }
+  await forEachSequential(scopes, async (scope) => {
+    let names: string[];
     try {
-      services = await listDirNames(
-        join(principalHomePath(layout, username), "sites"),
-        runFn,
-      );
+      names = await listDirNames(join(home, scope, "services"), runFn);
     } catch (err) {
       findings.push({
         username,
-        serviceId: "",
+        serviceId: `${scope}/`,
         releaseId: null,
         links: [],
         error: errorText(err),
       });
       return;
     }
-    await forEachSequential(services, async (serviceId) => {
-      const finding = await scanSite(layout, username, serviceId, runFn);
+    await forEachSequential(names, async (slug) => {
+      const finding = await scanSite(
+        layout,
+        username,
+        `${scope}/${slug}`,
+        runFn,
+        {
+          scope,
+          slug,
+        },
+      );
       if (finding) findings.push(finding);
     });
   });
-  return findings;
 }
 
+/** Entries of an owner's folder that are not scope folders. */
+const OWNER_OWN_ENTRIES: ReadonlySet<string> = new Set([
+  "home",
+  "tmp",
+  "sites",
+  "volumes",
+  "data",
+]);
+
 function describeFinding(finding: ReleaseLinkFinding): string {
-  const site = `${finding.username}/sites/${finding.serviceId}`;
+  const site = finding.serviceId.includes("/")
+    ? `${finding.username}/${finding.serviceId.replace("/", "/services/")}`
+    : finding.username;
   if (finding.error !== undefined) {
     return `could not check the live release of ${site}: ${finding.error}`;
   }
@@ -192,4 +241,90 @@ export async function reportLiveReleaseLinks(
     0o600,
   );
   return findings;
+}
+
+/** Most findings the control plane is told about; `findingCount` is the full count. */
+export const MAX_REPORTED_LINK_FINDINGS = 20;
+
+/** Longest text (site name, error) put on the wire. */
+const MAX_REPORTED_TEXT_LENGTH = 120;
+
+/** One site in {@link ReleaseLinkScanReport}: which site, never the link text. */
+export type ReleaseLinkScanReportFinding = {
+  username: string;
+  serviceId: string;
+  releaseId?: string;
+  /** Links that leave the release or reach into `shared/`. */
+  linkCount: number;
+  /** Set when the site could not be checked at all. */
+  error?: string;
+};
+
+/**
+ * What the daemon tells the control plane about the last boot scan, sent with
+ * its presence frames. Bounded on purpose: a count, the first
+ * {@link MAX_REPORTED_LINK_FINDINGS} sites, and no link text, which the site
+ * owner controls.
+ */
+export type ReleaseLinkScanReport = {
+  scannedAt: string;
+  findingCount: number;
+  findings: ReleaseLinkScanReportFinding[];
+};
+
+function boundedText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0
+    ? value.slice(0, MAX_REPORTED_TEXT_LENGTH)
+    : undefined;
+}
+
+function reportFinding(value: unknown): ReleaseLinkScanReportFinding | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  const releaseId = boundedText(raw.releaseId);
+  const error = boundedText(raw.error);
+  return {
+    username: boundedText(raw.username) ?? "",
+    serviceId: boundedText(raw.serviceId) ?? "",
+    ...(releaseId === undefined ? {} : { releaseId }),
+    linkCount: Array.isArray(raw.links) ? raw.links.length : 0,
+    ...(error === undefined ? {} : { error }),
+  };
+}
+
+/** `undefined` unless `value` is a version-1 `release-link-scan.json` body. */
+export function summarizeReleaseLinkScan(
+  value: unknown,
+): ReleaseLinkScanReport | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.version !== 1 || !Array.isArray(raw.findings)) return undefined;
+  const scannedAt = boundedText(raw.scannedAt);
+  if (scannedAt === undefined) return undefined;
+  const findings = raw.findings
+    .map(reportFinding)
+    .filter((finding) => finding !== null);
+  return {
+    scannedAt,
+    findingCount: findings.length,
+    findings: findings.slice(0, MAX_REPORTED_LINK_FINDINGS),
+  };
+}
+
+/**
+ * The last scan's report, read from `<daemonStateDir>/release-link-scan.json`.
+ * `undefined` when no scan has run yet or the file is unreadable: presence must
+ * never fail on it.
+ */
+export function readReleaseLinkScanReport(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+): ReleaseLinkScanReport | undefined {
+  try {
+    const text = Deno.readTextFileSync(
+      join(layout.daemonStateDir, RELEASE_LINK_SCAN_FILENAME),
+    );
+    return summarizeReleaseLinkScan(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
 }

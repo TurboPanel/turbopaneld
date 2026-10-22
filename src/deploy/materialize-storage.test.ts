@@ -21,7 +21,10 @@ async function withTempLayout(
 ): Promise<void> {
   const root = await Deno.makeTempDir({ prefix: "tp-storage-test-" });
   try {
-    await fn({ stateDir: root } as LayoutPaths);
+    await fn({
+      stateDir: root,
+      principalHomeRoot: join(root, "users"),
+    } as LayoutPaths);
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -361,7 +364,7 @@ test("materializeStorageEntries chowns directory and file copies for a linked pr
   } as unknown as typeof Deno.Command;
   try {
     await withTempLayout(async (layout) => {
-      const ownedDir = join(layout.stateDir, "owned-data");
+      const ownedDir = storageHostPath(layout, "org-1", "stor-dir", "loc-dir");
       const paths = await materializeStorageEntries(
         layout,
         "org-1",
@@ -374,7 +377,6 @@ test("materializeStorageEntries chowns directory and file copies for a linked pr
             provider: "path",
             serverId: "srv",
             principalId: "pr-1",
-            sourcePath: ownedDir,
             mounts: [],
           },
           {
@@ -414,24 +416,6 @@ function fileEntry(name: string, content = "fresh") {
     contentEnvelope: content,
     mounts: [],
   };
-}
-
-/** Deny the daemon's `mkdir` under `prefix`, as a root-owned parent does. */
-async function withDeniedMkdir(
-  prefix: string,
-  fn: () => Promise<void>,
-): Promise<void> {
-  const mkdir = Deno.mkdir;
-  Deno.mkdir =
-    ((path: string | URL, options?: Deno.MkdirOptions) =>
-      String(path).startsWith(prefix)
-        ? Promise.reject(new Deno.errors.PermissionDenied(String(path)))
-        : mkdir(path, options)) as typeof Deno.mkdir;
-  try {
-    await fn();
-  } finally {
-    Deno.mkdir = mkdir;
-  }
 }
 
 function unownedDirectory(sourcePath: string) {
@@ -547,70 +531,50 @@ test("a file copy name cannot leave its location", async () => {
   });
 });
 
-test("a directory copy refuses a source path that is a link", async () => {
+test("a path copy with a source path and no folder is refused", async () => {
   await withTempLayout(async (layout) => {
-    const outside = join(layout.stateDir, "outside");
-    await Deno.mkdir(outside);
-    const linked = join(layout.stateDir, "linked");
-    await Deno.symlink(outside, linked);
-
-    await assertRejects(
-      () =>
-        materializeLocation(
-          layout,
-          "org-1",
-          {
-            storageId: "stor-1",
-            locationId: "loc-1",
-            kind: "directory",
-            name: "data",
-            provider: "path",
-            serverId: "srv",
-            sourcePath: linked,
-            mounts: [],
-          },
-          undefined,
-          "",
-        ),
-      Error,
-      "is not a directory",
-    );
-  });
-});
-
-test("materializeLocation accepts an existing operator directory the daemon cannot create in", async () => {
-  await withTempLayout(async (layout) => {
-    const operatorDir = join(layout.stateDir, "operator", "data");
-    await Deno.mkdir(operatorDir, { recursive: true });
-    await withDeniedMkdir(join(layout.stateDir, "operator"), async () => {
-      const hostPath = await materializeLocation(
-        layout,
-        "org-1",
-        unownedDirectory(operatorDir),
-        undefined,
-        "",
-      );
-      assertEquals(hostPath, operatorDir);
+    const home = layout.principalHomeRoot;
+    const owner = [{ principalId: "pr-1", username: "siteuser" }];
+    const owned = (sourcePath: string) => ({
+      ...unownedDirectory(sourcePath),
+      principalId: "pr-1",
     });
-  });
-});
-
-test("materializeLocation names a missing unowned directory it may not create", async () => {
-  await withTempLayout(async (layout) => {
-    const operatorDir = join(layout.stateDir, "operator", "data");
-    await withDeniedMkdir(join(layout.stateDir, "operator"), async () => {
+    for (
+      const sourcePath of [
+        "/etc",
+        "/",
+        join(home, "siteuser", "volumes", "data"),
+        join(home, "victim", "volumes", "data"),
+      ]
+    ) {
       await assertRejects(
         () =>
-          materializeLocation(
+          materializeStorageEntries(
             layout,
             "org-1",
-            unownedDirectory(operatorDir),
-            undefined,
-            "",
+            [owned(sourcePath)],
+            owner,
           ),
         Error,
-        "has no principal to own it",
+        "needs a folder planned on this server",
+        sourcePath,
       );
-    });
+    }
+    // No site owner at all: refused rather than mounted as is.
+    await assertRejects(
+      () =>
+        materializeStorageEntries(layout, "org-1", [unownedDirectory("/etc")]),
+      Error,
+      "needs a folder planned on this server",
+    );
+    // The same refusal holds for a file copy that names a source path.
+    await assertRejects(
+      () =>
+        materializeStorageEntries(layout, "org-1", [
+          { ...fileEntry("a.txt"), sourcePath: "/etc" },
+        ]),
+      Error,
+      "needs a folder planned on this server",
+    );
   });
 });

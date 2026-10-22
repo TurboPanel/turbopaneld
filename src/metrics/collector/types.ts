@@ -47,6 +47,12 @@ export interface MetricsCollector {
   collect(options: {
     sequence: number;
     nowMs?: number;
+    /**
+     * The sample is for the live overlay only (non-durable, never stored).
+     * Edge-triggered event detection must not run on it: it would consume a
+     * transition that the stored baseline sample then never carries.
+     */
+    live?: boolean;
   }): Promise<MetricsCollectResult>;
 }
 
@@ -323,7 +329,7 @@ export type CollectorDeps = {
    * stub this so FakeClock microtask draining never waits on real directory
    * I/O (hundreds of PID entries, plus a possible `ls` fallback).
    */
-  /** v7 free-text host facts (`host-text.ts`); the scheduler strips them unless `metrics-v7` is negotiated. */
+  /** v12 free-text host facts (`host-text.ts`); the scheduler strips them unless `metrics-v8` is negotiated. */
   hostText?: () => Promise<HostTextSample>;
   countProcesses?: () => number | null | Promise<number | null>;
   /**
@@ -365,6 +371,12 @@ export type CollectorDeps = {
    * stays `[]`, matching every other adapter's absent-default convention.
    */
   eventCollectors?: TopLevelEventCollector;
+  /**
+   * Deadline for each slow source (statfs, GPU, ingress/proxy/router scrapes,
+   * event detection, host text) inside one collect; a source that misses it
+   * reports its "no data" value. Defaults to {@link SOURCE_DEADLINE_MS}.
+   */
+  sourceDeadlineMs?: number;
   /**
    * Cached directory-usage reading for the hosting root, the backup root and
    * the log directory — the `managed.storage` family's byte fields.

@@ -3,9 +3,11 @@ import type {
   UpdateProgressMessage,
   UpdateProgressStage,
   UpdateProgressUnit,
+  UpdateRestartReport,
 } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 
 const STAGE_MARKER_PREFIX = "::turbopanel-stage::";
 const QUEUE_FILE = "progress-queue.jsonl";
@@ -104,6 +106,7 @@ export class UpdateProgressReporter {
       upgradeId?: string;
       detail?: string;
       errorCode?: string;
+      restart?: UpdateRestartReport;
     } = {},
   ): void {
     const progressId = this.#progressId;
@@ -115,8 +118,11 @@ export class UpdateProgressReporter {
       ...(options.upgradeId ?? this.#upgradeId
         ? { upgradeId: options.upgradeId ?? this.#upgradeId }
         : {}),
-      ...(options.detail ? { detail: options.detail } : {}),
+      // The detail can quote a signed download URL, and it is queued on disk
+      // and sent to the control plane: keep only the host and path.
+      ...(options.detail ? { detail: redactUrlSecrets(options.detail) } : {}),
       ...(options.errorCode ? { errorCode: options.errorCode } : {}),
+      ...(options.restart ? { restart: options.restart } : {}),
     };
     this.#memory.push(payload);
     while (this.#memory.length > MAX_QUEUE_LINES) {

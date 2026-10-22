@@ -16,6 +16,10 @@
  */
 
 import {
+  markProxySqlReconciled,
+  withProxySqlLock,
+} from "../managed/proxysql-lock.ts";
+import {
   dockerBinaryInstalled,
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -39,6 +43,7 @@ import {
   ensureProxySqlIngress,
   inspectProxySqlContainer,
   readCurrentProxySqlBindAddresses,
+  readCurrentProxySqlIpv6Subnet,
   readCurrentProxySqlListenerPorts,
   readCurrentProxySqlManagedNetwork,
   readCurrentProxySqlSegmentAttachments,
@@ -374,10 +379,25 @@ async function observeProxySql(
   descriptor: SystemComponentDescriptor,
 ): Promise<ObservedContainer> {
   const { layout, run } = runtime;
-  await runWhenPresentOrStop(runtime, {
-    stop: () => stopProxySqlIngress(layout, run),
-    present: () =>
-      ensurePresentProxySql(layout, descriptor, run, runtime.action),
+  await withProxySqlLock(async () => {
+    let settled = false;
+    await runWhenPresentOrStop(runtime, {
+      stop: async () => {
+        await stopProxySqlIngress(layout, run);
+        settled = true;
+      },
+      present: async () => {
+        settled = await ensurePresentProxySql(
+          layout,
+          descriptor,
+          run,
+          runtime.action,
+        );
+      },
+    });
+    // A no-op (desired not present) or a thrown run leaves the boot repair
+    // free to bring the frontend back.
+    if (settled) markProxySqlReconciled();
   });
   return inspectProxySqlContainer(layout, descriptor, { runDocker: run });
 }
@@ -387,7 +407,7 @@ async function ensurePresentProxySql(
   descriptor: SystemComponentDescriptor,
   run: RunDockerFn,
   action: SystemReconcilePayload["action"],
-): Promise<void> {
+): Promise<boolean> {
   // The organization's managed network name lives only on the compose file:
   // self-heal has no fresh `managed.ingress.reconcile` payload to read it
   // from. No compose file means the frontend was never reconciled here, so
@@ -398,7 +418,7 @@ async function ensurePresentProxySql(
       "commands",
       "system.reconcile proxysql self-heal skipped: no managed network on disk",
     );
-    return;
+    return false;
   }
   await ensureManagedIngressNetwork(managedNetwork, run);
   // Preserve whatever binds the last `managed.ingress.reconcile` desired
@@ -420,6 +440,11 @@ async function ensurePresentProxySql(
   const preservedListenerPorts = await readCurrentProxySqlListenerPorts(
     layout,
   );
+  // And ProxySQL's own IPv6 network exactly as the last reconcile left it:
+  // adding it is `managed.ingress.reconcile`'s job, because that path also
+  // switches ProxySQL's listeners to IPv6 (a network without them would
+  // forward IPv6 clients to a port nothing listens on).
+  const preservedIpv6Subnet = await readCurrentProxySqlIpv6Subnet(layout);
   await ensureProxySqlIngress(
     layout,
     descriptor,
@@ -429,6 +454,7 @@ async function ensurePresentProxySql(
       segmentAttachments: preservedSegments,
       listenerPorts: preservedListenerPorts,
       managedNetwork,
+      ipv6Subnet: preservedIpv6Subnet,
     },
   );
   // Restart only once the compose file we just healed is known to exist —
@@ -436,6 +462,7 @@ async function ensurePresentProxySql(
   if (action === "restart") {
     await restartProxySqlIngress(layout, run);
   }
+  return true;
 }
 
 async function observeOrchestrator(

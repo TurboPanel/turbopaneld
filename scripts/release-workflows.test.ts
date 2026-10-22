@@ -1,9 +1,10 @@
 /**
- * Shape rules for the release workflows since versions come from git tags
- * (Road to 0.2.x, versioning Phase 3): no workflow opens a "Start x.y.z" PR or
- * gates on a minor, no release step reads deno.json's version, and the one
- * deliberate act, starting a minor or major, is the "Start Next Version"
- * workflow.
+ * Shape rules for the release workflows: the tags work out the version
+ * (Road to 0.2.x, versioning Phase 3), no workflow gates on a minor, no release
+ * step reads its version from deno.json, the trunk build refuses a canary
+ * whose committed version fields disagree with the tags, a release opens the
+ * "chore: start <next patch>" PR, and starting a minor or major is the
+ * "Start Next Version" workflow (which opens the same kind of PR).
  */
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
@@ -27,6 +28,53 @@ function read(name: string): string {
   return Deno.readTextFileSync(join(WORKFLOWS, name));
 }
 
+/** One top-level job of a workflow file (empty when there is none). */
+function jobText(source: string, name: string): string {
+  const start = source.indexOf(`\n  ${name}:\n`);
+  if (start < 0) return "";
+  const rest = source.slice(start + 1);
+  const end = rest.slice(1).search(/\n {2}[\w-]+:\n/);
+  return end < 0 ? rest : rest.slice(0, end + 2);
+}
+
+/** The source with one top-level job removed. */
+function withoutJob(source: string, name: string): string {
+  const job = jobText(source, name);
+  return job ? source.replace(job, "") : source;
+}
+
+/**
+ * The text of every `run:` step in a workflow file (single-line and block
+ * scalars), found by indentation so no YAML parser is needed.
+ */
+function runBodies(source: string): string[] {
+  const lines = source.split("\n");
+  const bodies: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^(\s*)(?:- )?run:\s*(.*)$/.exec(lines[i]);
+    if (!match) continue;
+    const indent = match[1].length;
+    if (!/^[|>][+-]?$/.test(match[2].trim())) {
+      bodies.push(match[2]);
+      continue;
+    }
+    const body: string[] = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (
+        line.trim() !== "" && line.length - line.trimStart().length <= indent
+      ) break;
+      body.push(line);
+    }
+    bodies.push(body.join("\n"));
+  }
+  return bodies;
+}
+
+/** Values an outsider can shape (a tag name, a dispatch input, a job output built from one). */
+const SHELL_UNSAFE =
+  /\$\{\{\s*(inputs\.|github\.ref_name|github\.head_ref|needs\.[\w-]+\.outputs\.)/;
+
 function workflowFiles(): string[] {
   return [...Deno.readDirSync(WORKFLOWS)]
     .filter((entry) => entry.isFile && entry.name.endsWith(".yml"))
@@ -34,7 +82,7 @@ function workflowFiles(): string[] {
     .sort((a, b) => a.localeCompare(b));
 }
 
-test("no workflow opens a Start PR or gates on a minor", () => {
+test("no workflow opens an old-style Start PR or gates on a minor", () => {
   const files = workflowFiles();
   assert(files.length > 0);
   for (const file of files) {
@@ -79,9 +127,16 @@ test("the trunk build stamps the tag-derived base into deno.json before compilin
   const version = text.indexOf(
     "- name: Work out this build's version from the tags",
   );
+  const check = text.indexOf(
+    "- name: Check the committed version matches the tags",
+  );
   const stamp = text.indexOf("- name: Stamp the version into deno.json");
   const compile = text.indexOf("- name: Compile native binary");
-  assert(version > 0 && version < stamp && stamp < compile);
+  assert(version > 0 && version < check && check < stamp && stamp < compile);
+  assertMatch(
+    text,
+    /BASE_VERSION: \$\{\{ steps\.version\.outputs\.base \}\}\n {8}run: node scripts\/set-version\.mjs --check "\$BASE_VERSION"\n/,
+  );
   assertMatch(
     text,
     /uses: TurboPanel\/dev\/\.github\/actions\/version@[0-9a-f]{40} # dev#\d+\n {8}with:\n {10}mode: canary\n/,
@@ -95,7 +150,7 @@ test("the trunk build stamps the tag-derived base into deno.json before compilin
     !text.includes("GITHUB_RUN_NUMBER"),
     "the canary counter is not the run number",
   );
-  // A manual run (Start Next Version's rebuild) only ever builds trunk.
+  // A manual run only ever builds trunk.
   assertMatch(text, /^ {2}workflow_dispatch:$/m);
   assertMatch(
     text,
@@ -121,41 +176,133 @@ test("Start Next Version is a manual minor|major button over the four repos", ()
   const call = text.slice(text.indexOf("start-version.sh"));
   for (
     const spec of [
-      "TurboPanel/turbopaneld:publish-daemon-trunk.yml",
-      "TurboPanel/turbopanel:build.yml",
-      "TurboPanel/ui:verify.yml",
-      "TurboPanel/website:promote-prs.yml",
+      "TurboPanel/turbopaneld",
+      "TurboPanel/turbopanel",
+      "TurboPanel/ui",
+      "TurboPanel/website",
     ]
   ) {
     assert(call.includes(spec), `start-version.sh is not given ${spec}`);
   }
 });
 
-test("the release workflows pin one TurboPanel/dev commit", () => {
-  const pins = new Set<string>();
-  for (
-    const file of [
-      "publish-daemon-trunk.yml",
-      "publish-rc.yml",
-      "publish-release.yml",
-      "promote-prs.yml",
-      "promote-ok.yml",
-      "start-next-version.yml",
-    ]
-  ) {
-    const text = read(file);
+const RELEASE_WORKFLOWS = [
+  "publish-daemon-trunk.yml",
+  "publish-rc.yml",
+  "publish-release.yml",
+  "promote-prs.yml",
+  "promote-ok.yml",
+  "start-next-version.yml",
+];
+
+/**
+ * The jobs that call gh-promote-ok.yml. The Promote OK check pins its own dev
+ * commit, so its fixes can ship without moving the rest of the promotion chain.
+ */
+const PROMOTE_OK_JOBS: Record<string, string> = {
+  "promote-ok.yml": "evaluate",
+  "promote-ok-recheck.yml": "dry-run",
+};
+
+/**
+ * The TurboPanel/dev shas pinned across the release workflows, split in two:
+ * the reusable promote workflows (`.github/workflows/gh-*.yml` and the
+ * `dev-ref:` they are handed), and the scripts (the composite actions and the
+ * checkouts of `scripts/promote`). Each group must be one sha; the groups may
+ * differ because a reusable workflow's inputs and secrets can change between
+ * dev commits, while the scripts only add steps. The Promote OK jobs are left
+ * out: they are their own group (checked below).
+ */
+function devPins(): { workflows: Set<string>; scripts: Set<string> } {
+  const workflows = new Set<string>();
+  const scripts = new Set<string>();
+  for (const file of RELEASE_WORKFLOWS) {
+    let text = read(file);
+    if (PROMOTE_OK_JOBS[file]) text = withoutJob(text, PROMOTE_OK_JOBS[file]);
+    assert(
+      !text.includes("gh-promote-ok.yml@"),
+      `${file} calls gh-promote-ok.yml outside its job`,
+    );
     for (
       const m of text.matchAll(
-        /TurboPanel\/dev\/\.github\/(?:workflows\/[\w.-]+|actions\/version)@([0-9a-f]{40})/g,
+        /TurboPanel\/dev\/\.github\/workflows\/[\w.-]+@([0-9a-f]{40})/g,
       )
-    ) {
-      pins.add(m[1]);
+    ) workflows.add(m[1]);
+    for (const m of text.matchAll(/^ +dev-ref: ([0-9a-f]{40})(?: #.*)?$/gm)) {
+      workflows.add(m[1]);
     }
     for (
-      const m of text.matchAll(/^ +(?:dev-)?ref: ([0-9a-f]{40})(?: #.*)?$/gm)
-    ) {
-      pins.add(m[1]);
+      const m of text.matchAll(
+        /TurboPanel\/dev\/\.github\/actions\/[\w-]+@([0-9a-f]{40})/g,
+      )
+    ) scripts.add(m[1]);
+    for (const m of text.matchAll(/^ +ref: ([0-9a-f]{40})(?: #.*)?$/gm)) {
+      scripts.add(m[1]);
     }
   }
-  assertEquals(pins.size, 1, `pins: ${[...pins].join(", ")}`);
+  return { workflows, scripts };
+}
+
+test("the release workflows pin one TurboPanel/dev commit per kind", () => {
+  const { workflows, scripts } = devPins();
+  assertEquals(
+    workflows.size,
+    1,
+    `workflow pins: ${[...workflows].join(", ")}`,
+  );
+  assertEquals(scripts.size, 1, `script pins: ${[...scripts].join(", ")}`);
+});
+
+test("the Promote OK jobs pin one TurboPanel/dev commit, and hand it on as dev-ref", () => {
+  const pins = new Set<string>();
+  for (const [file, name] of Object.entries(PROMOTE_OK_JOBS)) {
+    const job = jobText(read(file), name);
+    const uses = [
+      ...job.matchAll(/gh-promote-ok\.yml@([0-9a-f]{40}) # dev#\d+$/gm),
+    ];
+    const refs = [...job.matchAll(/^ +dev-ref: ([0-9a-f]{40})(?: #.*)?$/gm)];
+    assertEquals(uses.length, 1, `${file} ${name}: one gh-promote-ok.yml call`);
+    assertEquals(refs.length, 1, `${file} ${name}: one dev-ref`);
+    pins.add(uses[0][1]);
+    pins.add(refs[0][1]);
+  }
+  assertEquals(pins.size, 1, `Promote OK pins: ${[...pins].join(", ")}`);
+});
+
+test("a release opens the next patch's version PR after it is finalized", () => {
+  const text = read("publish-release.yml");
+  const job = text.slice(text.indexOf("\n  start-next:\n"));
+  assert(job.length > 1, "publish-release.yml has no start-next job");
+  assertMatch(job, /^ {4}needs: \[prepare, finalize\]$/m);
+  assertMatch(job, /^ {4}permissions:\n {6}contents: read\n {4}steps:/m);
+  assertMatch(
+    job,
+    /uses: actions\/create-github-app-token@[0-9a-f]{40} # v[\d.]+\n(?: {8}.*\n)*? {10}repositories: turbopaneld\n/,
+  );
+  const base = job.indexOf("mode: base");
+  const guard = job.indexOf('[ "$NEWEST" != "$RELEASED" ]');
+  const pr = job.indexOf("TurboPanel/dev/.github/actions/start-version-pr@");
+  assert(
+    base > 0 && base < guard && guard < pr,
+    "base, then the check, then the PR",
+  );
+  assertMatch(job, /version: \$\{\{ steps\.next\.outputs\.base \}\}/);
+  assertMatch(
+    job,
+    /reason: It was opened after v\$\{\{ needs\.prepare\.outputs\.version \}\} was released\./,
+  );
+  assertMatch(job, /^ {10}auto-merge: "true"$/m);
+  assertMatch(text, /^permissions:\n {2}contents: read\n/m);
+});
+
+test("no run: step splices an input, the ref name or a job output into the shell", () => {
+  for (const file of workflowFiles()) {
+    for (const body of runBodies(read(file))) {
+      assertEquals(
+        SHELL_UNSAFE.test(body),
+        false,
+        `${file}: pass it through env: instead`,
+      );
+    }
+  }
 });

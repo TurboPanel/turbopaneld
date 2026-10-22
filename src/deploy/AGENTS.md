@@ -69,28 +69,47 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
    runs as is missing (only the playbook can create the account). On-demand like
-   Docker; daemon-converge does not install it. Required for hostname ingress.
+   Docker on deploy; `daemon-converge` backfills tpedge, Caddy, and the ingress
+   guard on enrolled hosts (`hosting-caddy/tasks/backfill-edge-account.yml`).
+   Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
-   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`). Homes live
+   (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`; a name must
+   pass the shared owner rule `isValidOwnerName` — lowercase, up to 28, no
+   `tp`/`systemd-` prefix or `-grp` suffix — and not be a host account name).
+   Folders for services and volumes are made by `asset-folders.ts`. Homes live
    under `layout.principalHomeRoot` (default `/srv/users/<username>`):
    the home root is `0750` root:root plus an `other:x` ACL (traverse
    without list — a `0751` world bit trips `ansible:S2612`, and `0755`
-   would let a tenant `ls` every account). The home itself, `sites/` and
-   `volumes/` are `0750` **root**:`<username>-grp` (an owner can rename its
+   would let a tenant `ls` every account). The home itself and each scope folder
+   (an environment slug, or `common`) are `0750` **root**:`<username>` (an owner can rename its
    entries, so nothing root writes into may sit in a tenant-owned directory);
-   `home/` (the passwd home, `useradd -d <root>/<username>/home`), `data/` and
-   `tmp/` are `0700` `username:<username>-grp`. SSH keys live in
+   `home/` (the passwd home, `useradd -d <root>/<username>/home`) and
+   `tmp/` are `0700` `username:<username>`. SSH keys live in
    `/etc/ssh/turbopanel/authorized_keys`, never the home. Host-picked UID/GID come from
    **15001–60000** (`-K` on that `useradd` / `groupadd` only; `/etc/login.defs`
-   is not edited). An explicit operator override must be ≥ **15001**, and every
+   is not edited). An explicit operator override must be **15001–60000** (above it is
+   systemd's range for throwaway build users, which tp-host never treats as a
+   site owner), and every
    override in the batch is checked before the first host call so a later id
    below that floor cannot leave an earlier account already created. Existing
-   accounts are adopted and never renumbered. Username max
-   length is **28** so `<username>-grp` fits the Linux 32-char group-name
-   limit (keep in sync with instance `MAX_PRINCIPAL_USERNAME_LENGTH`). When a GID
-   override is supplied and `<username>-grp` already exists with a different
-   numeric GID, ensure fails (conflict) instead of silently attaching the
-   principal to that group. Shell comes from `principalMaterial[].shell`
+   accounts are adopted and never renumbered. The primary group is the
+   standard Debian per-user group: named after the user (`<username>`), gid in
+   the same band. Username max length is **28** (keep in sync with instance
+   `MAX_PRINCIPAL_USERNAME_LENGTH`). A name reserved for the host's own
+   accounts is refused here before useradd/groupadd
+   (`src/deploy/reserved-principal-names.ts`); tp-host's `TP_RESERVED_NAMES`
+   must gain the same new names (owner action: flagged, not done in this
+   change). When a GID override is supplied and the
+   group `<username>` already exists with a different numeric GID, ensure fails
+   (conflict) instead of silently attaching the principal to that group. An
+   existing group `<username>` is adopted only when its gid is in the band and,
+   if the account exists, it is the account's primary group; an existing
+   account whose primary group is neither is refused. A host set up while the
+   group was still called `<username>-grp` gets it renamed in place
+   (`tp-host groupmod -n <username> <username>-grp`, only for that exact shape:
+   a principal whose primary group it is, in the band, no group `<username>`
+   yet); files and memberships follow the gid. Units rendered before the rename
+   still say `Group=<username>-grp` until the same deploy rewrites them. Shell comes from `principalMaterial[].shell`
    (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing
    accounts are adopted only when the passwd **home** matches the expected
    path — a username collision with a foreign home fails the deploy instead
@@ -105,12 +124,20 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (the storage UUID). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
    directory/file entries arrive with `sourcePath` — principal-owned defaults
-   are `/srv/users/<username>/volumes/<storageId>` (explicit operator paths
-   still win). Never write under `/var/lib/docker/volumes`.
+   are `/srv/users/<username>/volumes/<storageId>`; a `sourcePath` outside the
+   assigned site owner's `volumes/` directory (or with no site owner) is refused
+   before anything is created, re-owned or mounted (`assertSourcePathConfined`). Never write under `/var/lib/docker/volumes`.
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
-   mode `0600`, dir `0700`). Write the payload `.env` (non-secrets only, `0640`)
+   mode `0600`, dir `0700`). Files are only written before `up`. Once the new release is up (and its
+   post-deploy hooks passed; for a sequential deploy, after the health gate),
+   `pruneStaleSecretFiles` removes every file in that directory that is not in
+   the deploy's secret plan (a detached binding's old password, a removed
+   variable, a half-written `.tmp`), and an empty plan removes the whole
+   directory. A failed, cancelled or reverted deploy never prunes: the release
+   still running, or the one restored, may point at those files. Rehydrate never
+   prunes. Write the payload `.env` (non-secrets only, `0640`)
    next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**
    (`apply-storage-volumes.ts`) — docker volumes emit
    `volumes.<name> = { name, external: true }` so Compose mounts the
@@ -154,6 +181,20 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
+   (every deploy also rewrites the reserved `sites/00-fallback.caddy`: the
+   catch-all `http://` and `https://` blocks that answer names nobody hosts
+   with an empty 200, no redirect, and the same hide-names header block as
+   hosted sites when the setting is on. The file is shared by every
+   environment on the server, so the hide-names choice is that of whichever
+   deployed last. HTTPS shows one fixed internal certificate for the reserved
+   name `unconfigured.invalid`, given to every other name by the Caddyfile's
+   `default_sni` / `fallback_sni`; no per-name certificates are made, and
+   deploys refuse that name as a hosting hostname). The daemon also writes
+   the file and the Caddyfile at start (`ensureHostingFallback`, after the
+   guard) when hosting Caddy is set up and running but has no current copy, so
+   an updated host answers unhosted names before any deploy: it keeps a file a
+   deploy wrote, otherwise takes hide-names from the written sites (hidden when
+   unknown), validates first, and leaves live files alone if Caddy refuses)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved
@@ -214,13 +255,44 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `HEAD` + `redirect: manual`) and sending a daemon-initiated
    `acme-issuance-event` only on a state change — a debounced failure (two
    consecutive bad polls, so the few seconds Caddy needs right after a fresh
-   deploy never false-alarms) or an immediate recovery. Caddy's admin API has
+   deploy never false-alarms), an immediate recovery, the first good
+   sighting of a hostname, or a renewal (the probe's `notAfter` changed).
+   Good events carry that `notAfter` when the probe could read it. Caddy's admin API has
    no issuance-status endpoint to poll instead — verified empirically against
    a real container before choosing the live-handshake probe (see
    `src/deploy/acme-probe.ts`'s header comment). The control plane
    merge-patches the matching `managed` `lets_encrypt` row's
-   `tls.metadata.acme.lastError` and deliberately never touches `tls.status`
+   `tls.metadata.acme` (`lastError`, `lastIssuedAt`, `notAfter`) and deliberately never touches `tls.status`
    — see `turbopanel/src/client/tls/acme-issuance-event.ts`.
+11b. **www modes** (`hostings[].www`, omitted = `off`): `both` serves the site
+   on the hostname and its other spelling (`www.` added or removed);
+   `www-to-root` serves the bare name and turns `www.<name>` into a
+   redirect-only site; `root-to-www` the other way round. The direction is
+   about the names, not about which one was typed. One helper,
+   `hostingWwwNames` in `src/contracts/commands-contracts.ts` (twin of the
+   control plane's `src/contracts/commands/hostname.ts`), expands a hostname;
+   `hostingServedNames` feeds the Caddy sites, the Traefik `Host()` rule and
+   the pinned-certificate map, and `hostingWwwRedirects` the redirect sites.
+   A redirect site answers `http://` and `https://` with one permanent
+   redirect to the scheme its target serves: `https://<target>{uri}` in one
+   hop normally (path and query kept), `http://<target>{uri}` when the target
+   has forced HTTPS off and so no HTTPS site. It runs under the hosting's own
+   TLS mode, so in `acme` mode it gets its own certificate and lands in the
+   acme manifest. Names with no www spelling (IP addresses, one-word names like
+   `localhost` or `com` from `www.com`) expand to nothing extra. An older
+   control plane's `wwwRedirect: true` is read as `www-to-root`
+   (`root-to-www` when the first name starts with `www.`).
+   **Where the rules are enforced:** `validateDeployWwwModes` (refuses a mode
+   on `tcp`/`udp`, a name with no other spelling, an other spelling already a
+   hostname in the deploy, and different www choices on paths of one name) is
+   run by the **control plane** before it sends the deploy; the daemon only
+   carries the twin for parity and tests. On the daemon side the guards are:
+   `assertHostingNamesFree` (called by `deploy-environment.ts` before
+   `compose up`: refuses a deploy whose names, typed or added by a www choice,
+   another environment's live site file already answers on, so the shared
+   Traefik never gets a routing label for someone else's name),
+   `addWwwRedirectSites` never replacing a served name, and Caddy's own
+   refusal of a duplicate site in the staged candidate check.
 12. Best-effort `docker compose ps --format json` — per-container identity/status
    (`containerId`, `containerName`, `composeServiceName`, `status`, optional
    `serviceId` from `payload.hostings`) is included in the command result when
@@ -287,11 +359,26 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   `sequence`. The file is the durability source of truth; the in-memory buffer
   is only a batching cache.
 - **Phases** — lines are tagged with the deploy step they belong to: `prepare`,
-  `pull`, `fetch`, `build`, `release-promote`, `pre-deploy`, `compose-up`,
-  `health`, `post-deploy`, plus `hooks`, `managed-apply`, `lifecycle-start` /
-  `lifecycle-stop` / `lifecycle-restart`, and `stop` (`COMMAND_LOG_PHASES` in
-  `src/logs/contracts.ts`). `fetch` / `release-promote` bracket the Git-backed
-  release engine; its build output shares the existing `build` phase.
+  `install-docker`, `install-gateway`, `install-runtime`, `install-web-server`,
+  `install-build-tool`, `pull`, `fetch`, `build`, `release-promote`,
+  `pre-deploy`, `compose-up`, `health`, `post-deploy`, plus `hooks`,
+  `managed-apply`, `lifecycle-start` / `lifecycle-stop` / `lifecycle-restart`,
+  and `stop` (`COMMAND_LOG_PHASES` in `src/logs/contracts.ts`). `fetch` /
+  `release-promote` bracket the Git-backed release engine; its build output
+  shares the existing `build` phase. The `install-*` phases bracket the
+  on-demand playbooks (Docker, gateway, Node / Deno, web engines + PHP, the
+  build tool): each task start is one transcript line, failures carry their
+  message, raw playbook stdout is never streamed.
+- **Step plan** (`src/commands/deploy-progress.ts`, `deploy-progress-plan.ts`)
+  — before `prepare`, the deploy probes what is already on the host (Docker
+  engine, gateway, vendored runtimes, web engine binaries, PHP series, build
+  tool) without installing anything and sends a `command-progress` cell
+  message: the ordered step list (`ready` for what is present, `pending`
+  otherwise), then one message per step transition and a throttled `detail`
+  (≤ 1 per 2 s) while a playbook runs. On failure or cancel a final payload
+  (`running` → `failed` / `skipped`, `pending` → `skipped`) goes out before
+  `command-outcome`. The planner only runs when the router supplied a sender;
+  hermetic callers get the no-op reporter and never probe the host.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
   zero-based and gap-free per command (the first upload is always `seq = 0`),
   and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.
@@ -599,44 +686,115 @@ and `:ro` blocks writes to the socket *file*, not Engine API calls — so a
 remote-code bug in either used to be full Docker control of the host and every
 co-hosted tenant with it.
 
-One `docker-socket-proxy` container per host lives in the shared ingress
-project (`SOCKET_PROXY_COMPOSE_SERVICE_NAME`), holds the only socket mount, and
-answers `CONTAINERS` and `EVENTS` — what a Docker provider reads — with
-everything else, `POST` included, off. The shared HTTP Traefik and every
-per-service raw-TCP/UDP Traefik point at it with
-`--providers.docker.endpoint=tcp://docker-socket-proxy:2375` over the ingress
-network they already join; the per-service files mount nothing at all, so the
-proxy count stays one per host rather than one per service.
+One `docker-socket-proxy` container per host holds the only socket mount. It
+is **its own system component**, not a service of the shared Traefik's project:
+compose project `turbopanel-docker-proxy` (`DOCKER_PROXY_PROJECT`),
+`container_name: turbopanel-docker-proxy` (`DOCKER_PROXY_CONTAINER_NAME`), both
+plain readable names with no allocated id, image
+`tecnativa/docker-socket-proxy:v0.5.0` (HAProxy 3.x; the upstream tag carries a
+`v` since 0.4.0). `dockerProxyCompose(ingressNetwork)` renders it; the applied
+file is `<stateDir>/ingress/docker-proxy/docker-compose.yml`, applied the same
+pending-then-rename way as the Traefik files. It answers `CONTAINERS` and
+`EVENTS` (plus the image's own ping and version defaults) with everything else,
+`POST` included, off; the upgrade to v0.5.0 changed none of those defaults (it
+only added the pause / unpause switches, which are POST and stay off).
 
-**Docker gate stage 3 (per-host switch, off by default).** When the root-owned
+**Image pins** (tag and digest in `orchestration/image-pins.json`, read via `src/util/image-pins.ts`; the tags below name what they pin): `traefik:v3.7.16` and
+`tecnativa/docker-socket-proxy:v0.5.0`; `PLATFORM_IMAGE_REPOSITORIES`
+(`compose-final-policy.ts`) lists the repositories, and a test keeps both pins
+in step with the rendered documents. Traefik 3.7 needed no flag or compose
+change here; from 3.7.12 it logs one startup warning per entrypoint that does not set
+`http.aliasHeadersStrategy` (the default `keep` is the old behaviour, so none is
+set), and 3.7.13+ answers rootless request targets with 400 and 3.7.15+ rejects
+CONNECT with 501.
+
+**One proxy per host.** A host has exactly one ingress network (the
+`hosting-ingress` descriptor is a single file per server; per-service Traefiks
+join the same network), so one proxy, attached to that network and no other,
+serves every Traefik. It already could list every container on the host, so
+sharing it adds no cross-organization exposure; a proxy per network would only
+add a name to keep unique. The proxy has no published ports, a read-only socket
+mount, and no platform labels on purpose: the Docker gate must keep seeing an
+unlabelled socket bind as a finding until its stage-3 switch removes the proxy.
+
+**How a Traefik finds it.** Unchanged: `--providers.docker.endpoint=
+tcp://docker-socket-proxy:2375` over the ingress network. The compose service
+key is `docker-socket-proxy` and the document also states it as an explicit
+network alias, so the name survives a rename of the service key. Neither
+Traefik document has `depends_on` or the proxy service any more; ordering is
+the apply order below, and Traefik's Docker provider retries a refused or
+unresolved connection with backoff (checked on a real daemon: Traefik started
+before the proxy picks up routes once the proxy appears, with no restart; a
+proxy restart under a running Traefik recovers and new containers are still
+discovered through events). Per-service raw TCP/UDP Traefiks reach the proxy
+the same way and mount nothing.
+
+**Apply order** (`planDockerProxy`, pure, in `docker-proxy-plan.ts`; the shared
+ingress apply in `ensureHostingIngress` runs the steps):
+
+- proxy wanted (shared Traefik on the proxy, or gate mode while a service
+  Traefik file still names it): `start-proxy`, then `up-traefik`, then
+  `retire-legacy` if the old in-project proxy container still exists;
+- proxy not wanted (gate mode, nobody left on it): `up-traefik` first, then
+  `retire-legacy` and `remove-proxy` (`compose -p turbopanel-docker-proxy down`
+  and the compose directory removed), so no Traefik loses its Docker source
+  before it has another.
+
+A TCP/UDP deploy on the proxy (`ensureServiceIngress`) calls the same
+`ensureDockerProxy` (idempotent: skipped when the applied file is current, no
+pending file is left and the container runs), so it no longer needs a shared
+Traefik project to exist.
+
+**Upgrading a host that runs the coupled layout** (proxy as a second service in
+the project named by the ingress network id, container
+`<ingress-id>-docker-socket-proxy-1`). The first converge after the change
+(`system.reconcile` or any deploy that renders the shared ingress):
+
+1. starts `turbopanel-docker-proxy` on the ingress network; for a moment both
+   proxies answer to the alias `docker-socket-proxy` and both read the same
+   socket, so nothing is repointed;
+2. `compose up --remove-orphans` on the Traefik document without the proxy
+   (compose removes the old proxy as an orphan; the Traefik is recreated once,
+   because `depends_on` is gone and the image pin changed, which is a brief
+   refusal on the loopback port that the hosting Caddy retries);
+3. removes any old proxy container still found by its compose labels.
+
+Steady state afterwards touches nothing. If step 1 fails the deploy stops
+before any Traefik is touched and the old proxy keeps serving. Rollback is a
+redeploy of the previous release, which brings the coupled layout back and
+leaves the new proxy to be removed by hand (`docker compose -p
+turbopanel-docker-proxy down`).
+
+**Docker gate stage 3 (per-host switch, on by default).** When the root-owned
 `/opt/turbopanel/lib/docker-gate/ingress-socket.on` and the gate's
 `/run/turbopanel-gate/ro` both exist (`ingressDockerGateEnabled`), both
 Traefiks instead mount that directory read-only at `/var/run/turbopanel-gate`
 and use `unix:///var/run/turbopanel-gate/docker.sock`: the root-owned gate's
 read-only listener, which answers only ping / version / events / container list
-and inspect. The shared project then drops the proxy service (`--remove-orphans`
-deletes the container) once no per-service compose file on disk still names
+and inspect. The proxy project is then removed (after the Traefik has switched)
+once no per-service compose file on disk still names
 `tcp://docker-socket-proxy:2375` (`serviceIngressUsesSocketProxy`). The
 anonymous shared Traefik (no descriptor, so no ingress label) keeps the proxy.
-Without the switch nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
+A gate install or swap failure on a Docker host now FAILS the converge (it only warned before), and a host where the gate cannot be installed fails every converge until fixed. The host keeps its old ingress wiring: Traefik is not touched until the next ingress apply, and the deploy snapshot and rollback cover the switch file. Without the switch (set `docker_gate_ingress_socket: false`) nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
 
-Both Traefik compose files are applied, not just written: the document goes to
-`docker-compose.pending.yml`, `compose up` runs on it, and only a successful
-`up` renames it over `docker-compose.yml`. So the applied file is what last
-came up, and the proxy check reads reality, not intent (a failed `up` leaves the
-pending file, which also counts as a proxy user: it may have created a
-container). Switch turned off again: a service Traefik that goes back to the
-proxy first puts the proxy back into a gate-mode shared project
-(`ensureSharedSocketProxy`: same gate Traefik plus the proxy, so the shared
-Traefik is not recreated). That covers a TCP/UDP-only deploy, which never
-renders the shared project. A host with no shared project at all has never had
-a proxy (unchanged).
+The Traefik compose files and the proxy's own file are applied, not just
+written: the document goes to `docker-compose.pending.yml`, `compose up` runs on
+it, and only a successful `up` renames it over `docker-compose.yml`. So the
+applied file is what last came up, and the proxy check reads reality, not intent
+(a failed `up` leaves the pending file, which also counts as a proxy user: it
+may have created a container). Switch turned off again: a service Traefik that
+goes back to the proxy brings the proxy project back itself
+(`ensureDockerProxy`), with the shared Traefik untouched.
 
 Proven on a real Docker daemon (2026-09-18): Traefik's own
 `GET /containers/json` succeeds through the proxy, `/images/json`,
 `/networks`, `/volumes`, `/info` and `POST /containers/create` all answer 403,
-and `/var/run/docker.sock` is absent from the Traefik container. `ingress.ts`
-is the only writer of these files; `ingress.test.ts` pins the invariant.
+and `/var/run/docker.sock` is absent from the Traefik container. The split
+layout was re-proven locally on Traefik 3.7.16 and proxy v0.5.0 (reads 200,
+images / networks / volumes / info and every POST 403, route discovery, late
+proxy start, proxy restart, and the upgrade from the coupled layout).
+`ingress.ts` is the only writer of these files; `ingress.test.ts` and
+`docker-proxy.test.ts` pin the invariant.
 
 ## Shared HTTP ingress identity
 
@@ -739,6 +897,64 @@ Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned
 **never** `traefik.enable`. A missing `turbopanel-system` compose file is
 authoritative absence (`null`).
 
+## Volume folders and who owns the files in them
+
+A volume with a `folder` on `storageMaterial[]` is `<owner>/<scope>/volumes/<name>`
+(`materializeStorageEntries` makes it through `ensureAssetFolder`: the record of
+its components, then `<owner>:<owner> 0750` on the folder itself). Nothing
+below the folder is ever re-owned: no recursive chown, and never to root.
+
+How ownership inside a volume is handled when the container's user is not the
+site owner's Linux user:
+
+- **No `user:` in the compose file.** The daemon runs the container as the
+  owner's own `uid:gid` (read from the account on the host), so files it writes
+  belong to the owner and the owner sees them over SFTP and in backups.
+- **A `user:` in the compose file** (any user, `root` included). The compose
+  file is never refused and the daemon does not rewrite it. The container runs
+  as that user, and files it creates keep that user's ids. The volume root is
+  `<owner>:<owner> 0750`, so a declared user that is neither the owner nor root
+  would not be able to read or write it. For a **numeric** declared user
+  (`999` or `999:999`) the daemon therefore gives that one uid an access entry
+  and a default entry on the volume root (`setfacl -m u:<uid>:rwx,d:u:<uid>:rwx`
+  through `tp-host setfacl`, `deploy/volume-access.ts`), on every deploy because
+  a later mode change on the folder drops it. Only the volume root gets it:
+  nothing inside is touched, nothing is re-owned (no chown, never to root), and
+  files already in the folder keep the access they had; the default entry means
+  files the container creates later stay open to that uid. The uid is whatever the compose file declares; the owner already chose
+  that container, so the host does not check it against other accounts. A declared user
+  given by **name** cannot be mapped to an id on the host (the names live in
+  the image), so it gets no entry and the deploy log says so; use the numeric
+  uid to have one. On a filesystem without access lists `setfacl` fails; the
+  deploy goes on and logs plainly that the container may not be able to write
+  the folder (run it as the owner's ids or use a named Docker volume). `root` in
+  the container can write and its files stay root's; the owner can still delete
+  or rename anything in their own folder (a directory's write permission decides
+  that), but cannot change the contents or modes of a file owned by another uid.
+- **A named Docker volume** (provider `docker`) is outside this tree and its
+  contents are not touched; it stays the way to run an image that insists on a
+  fixed user. A volume linked to a site owner (a principal on its storage row)
+  is that owner's, like the owner's folders: a container that mounts it and
+  names no `user:` runs as the owner. Docker creates the volume `root:root
+  0755`, which that container could not write, so before `compose up` each such
+  mount path gets one non-recursive `chown <uid>:<gid>` through the service's
+  own image (`deploy/named-volume-owner.ts`). It applies when the daemon set the
+  user, or when the compose file declares exactly the owner's uid; any other
+  declared user is never changed. Nothing inside the volume is touched, so files
+  an earlier root run left there stay root's. A bind whose source is inside the
+  deployment folder (a relative `./files`) belongs to the platform, not the
+  owner; a container running as a numeric user cannot write it, and the deploy
+  log says so and points to a volume folder (the compose file is not refused).
+- One container cannot mount volumes of two site owners with defaulted users;
+  that deploy fails with a plain message.
+
+Bind sources are allowed only inside the volume folders this deploy was sent
+(`ownerTree` in `compose-host-paths.ts`, mirrored by the Docker gate): a service
+folder (`releases/` is sealed code, `shared/` is the web side's state), another
+owner's folder and a sibling volume are refused even when host-level features
+are approved, and a link left inside a volume must still resolve inside it.
+Container paths and volume subpaths are shape-checked (`assertMountShape`).
+
 ## Native Node/Next runtime
 
 Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next services
@@ -749,34 +965,44 @@ Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next service
 Moved to [`site/AGENTS.md`](./site/AGENTS.md) — engine drivers, vhost
 materialization, PHP-FPM wiring, managed-directory sites.
 
+## Hiding web server names (`hideWebServerNames`)
+
+`environment.deploy` carries an optional `hideWebServerNames` (absent = off, so
+an older control plane changes nothing; the control plane sends the effective
+per-server value, on by default). When true: every hosting Caddy site block
+(HTTP, HTTPS, `www` redirects) gets `header { -Server -Via -X-Powered-By defer }`
+(`siteSnippet`; `defer` so the removal runs after the proxy copied the
+upstream's headers, which also covers Traefik-routed containers); each nginx
+vhost gets `server_tokens off`; each Apache vhost gets `ServerSignature Off`
+and `ServerTokens Prod` (server-wide, so written beside the `Listen` lines,
+outside the block). OpenLiteSpeed already runs with `showVersionNumber 0`.
+It applies on the environment's next deploy; there is no fan-out command.
+PHP's `expose_php` stays off in the runtime config; nothing here edits it.
+
 ## The PHP shell dispatcher
 
 `/usr/local/bin/php` resolves which co-installed series a bare `php` means for
 the calling account and execs the real binary.
 
-**It grants nothing.** The enforcement is the kernel's at `execve`, against
-`/usr/bin/php<series>` being `root:tpphp<SS> 0750` (the `dpkg-statoverride` the
-php-fpm role applies). The wrapper itself is `root:root 0750` with an execute
-ACL per entitled series group — same answer as running `/usr/bin/php8.3`
-directly. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
+**It grants nothing.** Every installed series may be run by every site owner's
+Linux user: sury's `/usr/bin/php<series>` keeps its packaged `root:root 0755`.
+The wrapper itself is `root:root 0750` with an `other:rx` ACL entry, so every
+account may run it. No sudo, no setuid — `src/orchestration/php-dispatcher.test.ts`
 asserts both.
 
 **It is not a diversion.** `/usr/local/bin` precedes `/usr/bin` in Debian's
 default PATH, so the dispatcher shadows sury's `update-alternatives` link
 without removing it — removing it would break every other package that expects
-`php` to exist. That link was never a privilege leak either: it resolves to
-`/usr/bin/php<series>`, whose mode the kernel checks. What it actually is, is a
-*usability* problem — which series a bare `php` resolves to would otherwise be
-decided by host-global alternatives priority, so two tenants entitled to
-different series would both land on whichever apt installed last.
+`php` to exist. What it fixes is *usability*: which series a bare `php`
+resolves to would otherwise be decided by host-global alternatives priority,
+so two site owners on different series would both land on whichever apt
+installed last.
 
 Resolution order: `$TURBOPANEL_PHP`, then a root-owned per-account pin under
-`<configDir>/php/pins/<username>`, then the highest entitled series. Only ever
-selected from what the account already holds — passing a request straight
-through would reach `execve` and come back as a bare `EACCES` with nothing
-explaining why. The group→series table is **rendered from the registry**, not
-parsed out of the group name (`tpphp810` cannot be read back unambiguously as
-8.10 rather than 81.0), and ordering uses `sort -V` for that same reason.
+`<configDir>/php/pins/<username>`, then the highest installed series. Only ever
+selected from the series installed here (rendered from the playbook's series
+list and checked with `-x`), so a request for a missing one is named instead of
+failing at `execve`. Ordering uses `sort -V`, so 8.10 comes after 8.4.
 
 
 ## Scheduled jobs
@@ -813,8 +1039,9 @@ new sink still needs a `SINKS` row and a refusal test.
 | `hostings[].tlsId` | hosting Caddyfile `tls` paths | `safeConfigToken` |
 | `hostings[].hostnames` | hosting Caddyfile site addresses, Traefik `Host` | `isValidHostname` (contract parse) |
 | `hostings[].bindAddress` | hosting Caddyfile `bind` | IP literal (contract parse, `assertValidBindAddress`) |
-| `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) |
-| `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped: a multi-line PEM is legitimate and other engines carry it) |
+| `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` (refused) / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) (value left out and named by `planSiteWebEnv`, not refused; `apacheSetEnvLine` still throws as the last line of defence) |
+| `sites[].webEnv` key / value | nginx `fastcgi_param` | `safeEnvName` (refused) / `safeEnvValue` and no `$` (nginx expands it inside quotes, no escape) and no name nginx or PHP sets itself (`SCRIPT_FILENAME`, `REMOTE_ADDR`, `HTTP_*`, ...) (all dropped and named, not refused: variables are inherited into every hosting) |
+| `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped, and named by `planSiteWebEnv`) |
 | `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
 | `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |
 | `sites[].root` | every engine's document root | `assertSafeRoot` |
@@ -835,3 +1062,54 @@ own reader and is not loaded by any engine.
 - `traefik.*` labels and `com.turbopanel.raw-port` are reserved owner labels: routing is generated by the daemon only. HTTP-hosted containers get `com.turbopanel.system.routed=true`; the shared Traefik carries `--providers.docker.constraints` on it.
 - Transition: while a running container still routes HTTP (`traefik.http.*` labels) without the routed label, the shared Traefik is rendered without the constraint (`legacyHttpContainersPresent`), so no site goes dark; the render after the last such container is redeployed turns the constraint on. Both the legacy docker.sock file and the socket-proxy shape go through the same `traefikCompose`.
 - The resolved-model policy also refuses, without host-level approval, published host ports inside the platform's bands (`RESERVED_HOST_PORT_RANGES`) and `gpus` / `group_add` / device reservations (the control plane gates `gpus` and `group_add` the same way); it always refuses an authored network that is the hosting-ingress or managed network. Not checkable in the daemon: a volume's `name:` / `external:` pointing at another project's volume — the control plane rewrites its own storage volumes to external named volumes, so only its host-access gate can tell. The legacy-container check lists stopped containers too (`docker ps -a`).
+
+## Cancelling a running deploy (`deploy-cancel.ts`)
+
+The control plane sends the cell message `deploy-cancel { id, commandId }`
+(handled in `instance/client.ts`, answered with `deploy-cancel-result` carrying
+`outcome: cancelling | too_late | not_running`; advertised as the wire feature
+`deploy-cancel-v1`). It is a cell message, not a queued command, because a running
+deploy holds its queue slot for the whole run. `handleCommandDispatch` registers
+a `DeployCancelToken` per `environment.deploy` in `deployCancels` and always
+unregisters it in `finally`; the handler receives it as `deps.cancel`.
+
+**The cutover rule: a cancel is honoured only while nothing the old version
+depends on has changed.** The first step that changes what is serving calls
+`token.commit(where)` (synchronous, atomic with the abort check). After it the
+deploy runs to its normal end and a cancel answers `too_late`. Commit points, in
+the order they occur: the first release switch inside `applySourceReleases`
+(native promote, rollback / re-cut-over; a Railpack image record is not a switch);
+the host-native phase (reclaim of removed release trees, sites, native apps, the
+cron sweep) when the deploy has any of that to do (`hostNativeCutoverPending`;
+any doubt counts as yes); retiring an earlier compose project or the zero-service
+removal; pre-deploy hooks; the sequential engine's `commit` step (before the old
+version is stopped); and right before `compose up` on the in-place path. Before
+the first of them everything is cancellable: ingress and principals, git clone,
+the source build (sandbox unit), the Railpack image build, `docker compose
+build` / `pull`.
+
+On a cancel the deploy throws `DeployCancelledError`, whose message always starts
+with `cancelled: ` (the control plane reads that prefix out of the command
+outcome string, like `rolled_back: `). The existing `finally` blocks clean up the
+scratch checkout, the build work tree and the compose stage directory. If the new
+compose files were already published (they are before the build on the container
+path), `revertPublishedCompose` puts `previous/` back, or removes the published
+files on a first deploy.
+
+Children are stopped through an `AbortSignal` (`AbortSignal.any` with each tool's
+own timeout): git, the unsandboxed build shell, the Railpack tools and every
+streamed docker call. A sandboxed build is stopped the way its timeout stops it
+(kill the `sudo` client, then `systemctl stop` the build unit, then take the work
+tree back). A cancel for a command that has not started yet answers
+`not_running` and is remembered for 15 minutes (256 ids), so the late dispatch
+fails at once.
+
+Limits: a deploy with several Git services is committed at the first release
+switch, so a cancel during the second service's build answers `too_late`; the
+unsandboxed (development) build kills its shell, not necessarily grandchildren; a
+cancel behind another build waiting for the single build slot takes effect when the
+slot frees.
+
+## Hostname takeover (`takeoverHostnames`)
+
+`environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.

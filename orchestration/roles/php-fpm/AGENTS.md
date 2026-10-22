@@ -14,9 +14,14 @@ OpenLiteSpeed / Caddy) does not. Note this is a *deliberate exception* — do no
 mod_proxy_fcgi. **OpenLiteSpeed's `lsphp` is unaffected** and still vendors from
 `rpms.litespeedtech.com` (see below).
 
-The repo is wired the current way — a packaged trust root
-(`debsuryorg-archive-keyring.deb`) plus a deb822
-`/etc/apt/sources.list.d/sury-php.sources` with an explicit `Signed-By`. No
+The repo is wired the current way — the signing key at
+`/usr/share/keyrings/turbopanel-sury-php.gpg`, installed by the shared
+`repo-key` role (fetched from sury over HTTPS, checked against
+`php_fpm_sury_key_fingerprints`, with `files/sury-php.gpg` as the fallback; a
+changed key warns and never blocks under the default `warn` policy) plus a
+deb822 `/etc/apt/sources.list.d/sury-php.sources` with an explicit `Signed-By`.
+Hosts set up before this keep the old `debsuryorg-archive-keyring` package; it
+is no longer referenced and the uninstall script removes it. No
 `apt-key`, no `[signed-by=]` one-liner; both are deprecated. **Sury cannot be
 cleanly removed once enabled** — it also ships replacement builds of libraries
 such as OpenSSL, so dropping the repo breaks the PHP install. Treat it as
@@ -26,6 +31,19 @@ permanent on any host that ever serves PHP.
 optional exact apt pin; empty means "latest in the series". Extension packages
 split into `php_fpm_baseline_extensions` (always installed, parity with the flags the previous
 source build compiled in.
+
+**Which series exist.** The registry's `suiteSeries` table lists the PHP series
+offered per OS suite (`VERSION_CODENAME`; Debian 13 `trixie`: 8.1 to 8.5), the
+same list for php-fpm and lsphp — it mirrors what LiteSpeed's repository
+publishes for that suite, and sury publishes every one of them for Debian
+(checked 2026-10-07 on trixie, bookworm, bullseye). Nothing is installed up
+front: a series lands on the first deploy that names it. An extension compiled
+into a series (`builtinExtensions`: opcache on 8.5) has no `php<series>-<name>`
+package, so `series.yml` leaves it out of the apt list. The counterpart is the
+`php-series-prune` role (`playbooks/php-series-prune.yml`): the daemon passes
+the series no site uses any more and it purges that series' packages, config
+and runtime directories and the vendored lsphp tree (see
+`src/deploy/site/AGENTS.md`).
 
 **Extensions resolve by union, per series.** The daemon passes
 `php_fpm_extensions` as `{"8.4": ["intl","redis"]}` — the union of what every

@@ -1,12 +1,14 @@
 ---
-orchestrator_image: ghcr.io/proxysql/orchestrator:v4.30.2
+# The Orchestrator stack is rendered by the daemon (src/managed/orchestrator.ts)
+# from the "orchestrator" entry in orchestration/image-pins.json; no role task
+# reads an image variable. The old default (ghcr.io/proxysql/orchestrator
+# v4.30.2) never existed publicly, so it is gone rather than corrected here.
 orchestrator_config_dir: "{{ turbopanel_config_dir }}/orchestrator"
 # Root runs the readiness script from the unit, so it lives in a root-only
 # directory, never under the daemon-writable config dir.
 orchestrator_libexec_dir: "{{ turbopanel_install_root }}/libexec"
 orchestrator_wait_ready_script: "{{ orchestrator_libexec_dir }}/orchestrator-wait-ready.sh"
 orchestrator_tls_dir: "{{ orchestrator_config_dir }}/tls"
-orchestrator_data_dir: "{{ turbopanel_state_dir }}/orchestrator"
 orchestrator_service_name: turbopanel-orchestrator-stack
 orchestrator_http_port: 33001
 orchestrator_raft_port: 33002

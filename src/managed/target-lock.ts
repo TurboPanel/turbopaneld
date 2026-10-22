@@ -38,12 +38,36 @@ export function managedTargetLockPath(
   return join(layout.runDir, "managed-locks", `${managedId}.lock`);
 }
 
-/** Hold the non-blocking flock on `path` (under `dir`) while `fn` runs; `busy()` is thrown when it is taken. */
+/** How a caller waits for a taken target lock; absent or `waitMs` 0 refuses at once. */
+export type TargetLockWait = {
+  /** Longest total wait before the busy error is thrown. */
+  waitMs?: number;
+  /** Pause between attempts (default 500 ms). */
+  pollMs?: number;
+};
+
+/** Try the flock now, then again every `pollMs` until the `deadline` (epoch ms) has passed. */
+async function acquireLock(
+  file: Deno.FsFile,
+  deadline: number,
+  pollMs: number,
+): Promise<boolean> {
+  if (await file.tryLock(true)) return true;
+  if (Date.now() >= deadline) return false;
+  await new Promise((resolve) => setTimeout(resolve, pollMs));
+  return acquireLock(file, deadline, pollMs);
+}
+
+/**
+ * Hold the flock on `path` (under `dir`) while `fn` runs; `busy()` is thrown
+ * when it is still taken after the optional bounded wait.
+ */
 async function withTargetLock<T>(
   dir: string,
   path: string,
   busy: () => Error,
   fn: () => Promise<T>,
+  wait: TargetLockWait = {},
 ): Promise<T> {
   await Deno.mkdir(dir, { recursive: true, mode: 0o770 });
   const file = await Deno.open(path, {
@@ -52,7 +76,13 @@ async function withTargetLock<T>(
     mode: 0o660,
   });
   try {
-    if (!(await file.tryLock(true))) {
+    if (
+      !(await acquireLock(
+        file,
+        Date.now() + (wait.waitMs ?? 0),
+        wait.pollMs ?? 500,
+      ))
+    ) {
       throw busy();
     }
     return await fn();
@@ -64,19 +94,86 @@ async function withTargetLock<T>(
 
 /**
  * Run `fn` while holding the engine's lock. Throws {@link ManagedTargetBusyError}
- * without running `fn` when another holder has it.
+ * without running `fn` when another holder has it (after `wait`, if given).
  */
 export async function withManagedTargetLock<T>(
   layout: Pick<LayoutPaths, "runDir">,
   managedId: string,
   fn: () => Promise<T>,
+  wait?: TargetLockWait,
 ): Promise<T> {
   return await withTargetLock(
     join(layout.runDir, "managed-locks"),
     managedTargetLockPath(layout, managedId),
     () => new ManagedTargetBusyError(managedId),
     fn,
+    wait,
   );
+}
+
+/** `<runDir>/managed-locks/<managedId>.lifecycle.lock`; `managedId` is re-validated because it becomes a filename. */
+export function managedLifecycleLockPath(
+  layout: Pick<LayoutPaths, "runDir">,
+  managedId: string,
+): string {
+  if (!SAFE_MANAGED_ID_RE.test(managedId)) {
+    throw new Error("managedId contains unsupported characters");
+  }
+  return join(layout.runDir, "managed-locks", `${managedId}.lifecycle.lock`);
+}
+
+/**
+ * Run `fn` while holding the engine's create/remove lock, waiting (not
+ * refusing) when another holder has it. `managed.apply` and `managed.destroy`
+ * share it so one can never re-create what the other is removing. A separate
+ * file from {@link withManagedTargetLock}: an apply can run for minutes and
+ * must not make a scheduled backup report the engine busy.
+ */
+export async function withManagedLifecycleLock<T>(
+  layout: Pick<LayoutPaths, "runDir">,
+  managedId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const dir = join(layout.runDir, "managed-locks");
+  await Deno.mkdir(dir, { recursive: true, mode: 0o770 });
+  const file = await Deno.open(managedLifecycleLockPath(layout, managedId), {
+    create: true,
+    write: true,
+    mode: 0o660,
+  });
+  try {
+    await file.lock(true);
+    return await fn();
+  } finally {
+    // Closing the descriptor releases the flock.
+    file.close();
+  }
+}
+
+/**
+ * Like {@link withManagedLifecycleLock}, but does not wait: returns `false`
+ * without running `fn` when apply/destroy already holds the lock. The demoted
+ * member guard uses this so a resync apply is not stopped mid-run.
+ */
+export async function tryWithManagedLifecycleLock(
+  layout: Pick<LayoutPaths, "runDir">,
+  managedId: string,
+  fn: () => Promise<void>,
+): Promise<boolean> {
+  const dir = join(layout.runDir, "managed-locks");
+  await Deno.mkdir(dir, { recursive: true, mode: 0o770 });
+  const file = await Deno.open(managedLifecycleLockPath(layout, managedId), {
+    create: true,
+    write: true,
+    mode: 0o660,
+  });
+  try {
+    if (!(await file.tryLock(true))) return false;
+    await fn();
+    return true;
+  } finally {
+    file.close();
+  }
 }
 
 /** Another backup or restore holds this storage copy's lock. */
@@ -109,11 +206,13 @@ export async function withCopyTargetLock<T>(
   layout: Pick<LayoutPaths, "runDir">,
   copyId: string,
   fn: () => Promise<T>,
+  wait?: TargetLockWait,
 ): Promise<T> {
   return await withTargetLock(
     join(layout.runDir, "copy-locks"),
     copyTargetLockPath(layout, copyId),
     () => new CopyTargetBusyError(copyId),
     fn,
+    wait,
   );
 }

@@ -41,10 +41,17 @@
     STRIPE_VER="{{ stripe_cli_version }}"
     STRIPE_TAG="{{ stripe_cli_release_tag }}"
     STRIPE_ARCH="{{ stripe_cli_arch }}"
+    STRIPE_SHA256="{{ stripe_cli_sha256[stripe_cli_arch] }}"
     TMP="$(mktemp -d)"
     ASSET="stripe_${STRIPE_VER}_linux_${STRIPE_ARCH}.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/stripe/stripe-cli/releases/download/${STRIPE_TAG}/${ASSET}"
+    GOT="$(sha256sum "$TMP/$ASSET" | cut -d' ' -f1)"
+    [ "$GOT" = "${STRIPE_SHA256}" ] || {
+      echo "Stripe CLI ${STRIPE_VER} (${ASSET}): SHA-256 mismatch, expected ${STRIPE_SHA256}, got ${GOT}; refusing to install. To accept a re-published file, update stripe_cli_sha256 in orchestration/roles/stripe-listen/defaults/main.yml" >&2
+      rm -rf "$TMP"
+      exit 1
+    }
     tar -xzf "$TMP/$ASSET" -C "$TMP" stripe
     install -d "{{ turbopanel_vendor_dir }}/stripe-cli/${STRIPE_VER}"
     install -m 0750 "$TMP/stripe" "{{ turbopanel_vendor_dir }}/stripe-cli/${STRIPE_VER}/stripe"

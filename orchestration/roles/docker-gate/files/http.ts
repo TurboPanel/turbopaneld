@@ -433,7 +433,16 @@ function parseChunkSize(line: Uint8Array): number {
 
 const NULL_SINK: ByteSink = { write: (p) => Promise.resolve(p.length) };
 
-type ChunkCapture = { chunks: Uint8Array[]; maxBytes: number };
+/**
+ * `held` is the running payload total, kept here so each chunk costs O(1)
+ * (re-summing `chunks` for every chunk made a body of many tiny chunks
+ * quadratic on the gate's single event loop). Absent means zero.
+ */
+export type ChunkCapture = {
+  chunks: Uint8Array[];
+  maxBytes: number;
+  held?: number;
+};
 
 /** Hold one chunk's payload (and relay its bytes), refusing a body over the cap. */
 async function relayCapturedChunk(
@@ -442,12 +451,13 @@ async function relayCapturedChunk(
   size: number,
   capture: ChunkCapture,
 ): Promise<void> {
-  const held = capture.chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const held = capture.held ?? 0;
   if (held + size > capture.maxBytes) {
     throw new HttpError(413, "request body too large");
   }
   const data = await reader.readExact(size + 2);
   capture.chunks.push(data.subarray(0, size));
+  capture.held = held + size;
   await writeAll(sink, data);
 }
 

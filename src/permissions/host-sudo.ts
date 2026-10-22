@@ -34,6 +34,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "journalctl",
   "sshd",
   "sftp-chroot",
+  "sshd-config",
   "ss",
   "sysctl",
   "iptables",
@@ -45,6 +46,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "ip",
   "wg",
   "groupadd",
+  "groupmod",
   "useradd",
   "usermod",
   "gpasswd",
@@ -56,11 +58,15 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "build-return",
   "php-test",
   "cert-dates",
+  "cert-export",
   "site-usage",
+  "folder-list",
   "site-caddy-mounts",
   "publish-open",
   "publish",
   "php-loopback-sync",
+  "app-env-install",
+  "app-env-remove",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {

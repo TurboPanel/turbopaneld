@@ -21,6 +21,8 @@ import {
   normalizeReconnectDelayMs,
   PARKED_BACKOFF_MIN_MS,
   readKeyId,
+  RECONNECT_FIRST_WINDOW_MS,
+  RECONNECT_FLOOR_MS,
   STABLE_SESSION_MS,
   writeKeyId,
 } from "./client.ts";
@@ -884,9 +886,12 @@ it({
       client.start();
       const socket = await waitFor("presence websocket", () => sockets.at(0));
       socket.open();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const hello = parseSentFrames(socket.sentFrames).find((frame) =>
-        frame.type === "hello"
+      const hello = await waitFor(
+        "hello frame",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "hello"
+          ),
       );
       assertExists(hello);
       const daemonBuild = hello.daemonBuild as { commit?: string } | undefined;
@@ -1089,6 +1094,26 @@ it({
 });
 
 it({
+  name: "reconnect delay after a reset backoff is spread over the first window",
+  fn: () => {
+    const delays = new Set<number>();
+    let min = Infinity;
+    let max = 0;
+    for (let i = 0; i < 1_000; i += 1) {
+      const d = fullJitterMs(
+        RECONNECT_FLOOR_MS,
+        Math.max(DEFAULT_INITIAL_BACKOFF_MS, RECONNECT_FIRST_WINDOW_MS),
+      );
+      delays.add(d);
+      min = Math.min(min, d);
+      max = Math.max(max, d);
+    }
+    assert(delays.size > 100, "delays must not collapse to a single value");
+    assert(max - min >= 5_000, `spread ${max - min} ms too narrow`);
+  },
+});
+
+it({
   name: "InstanceClient reconnect delay is jittered within backoff bounds",
   permissions: {
     env: true,
@@ -1123,7 +1148,7 @@ it({
       timeout?: number,
       ...args: unknown[]
     ) => {
-      if (typeof timeout === "number" && timeout >= initialBackoffMs) {
+      if (typeof timeout === "number" && timeout >= RECONNECT_FLOOR_MS) {
         reconnectDelays.push(timeout);
       }
       return originalSetTimeout(handler, 0, ...args);
@@ -1220,8 +1245,8 @@ it({
       const delayMs = reconnectDelays.at(-1);
       assertExists(delayMs);
       assert(
-        delayMs >= initialBackoffMs,
-        `delay ${delayMs} below floor ${initialBackoffMs}`,
+        delayMs >= RECONNECT_FLOOR_MS,
+        `delay ${delayMs} below floor ${RECONNECT_FLOOR_MS}`,
       );
       assert(
         delayMs <= DEFAULT_MAX_BACKOFF_MS,
@@ -1451,13 +1476,15 @@ it({
     const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
     const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
     const sockets: MockWebSocket[] = [];
+    const originalRandom = Math.random;
+    Math.random = () => 0.99;
     const reconnectDelays: number[] = [];
     const clock = createFakeClock({ now: 1_000_000 });
     const restoreClock = clock.install();
     // Track reconnect delays through the injected client delay (not wall setTimeout).
     const restoreDelayTrack = installClientTimeSource({
       delay: (ms) => {
-        if (ms >= DEFAULT_INITIAL_BACKOFF_MS) reconnectDelays.push(ms);
+        if (ms >= RECONNECT_FLOOR_MS) reconnectDelays.push(ms);
         return clock.delay(ms);
       },
     });
@@ -1598,9 +1625,12 @@ it({
         () => reconnectDelays.length >= 2 ? reconnectDelays.at(-1) : undefined,
       );
       assertExists(afterStableDelay);
-      assertEquals(afterStableDelay, clampedInitialBackoffMs);
+      // Reset backoff + clean drop => wide first window, still full jitter.
+      assert(afterStableDelay >= RECONNECT_FLOOR_MS);
+      assert(afterStableDelay <= RECONNECT_FIRST_WINDOW_MS);
     } finally {
       client.stop();
+      Math.random = originalRandom;
       restoreDelayTrack();
       restoreClock();
       Object.defineProperty(globalThis, "fetch", {
@@ -1996,11 +2026,14 @@ it({
       await new Promise((resolve) => setTimeout(resolve, 50));
       assertEquals(socket.readyState, MockWebSocket.OPEN);
       // Hello from IdlePresence should still have been sent.
-      const frames = parseSentFrames(socket.sentFrames);
-      assert(
-        frames.some((frame) => frame.type === "hello"),
-        "expected hello despite metrics factory failure",
+      const hello = await waitFor(
+        "hello despite metrics factory failure",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "hello"
+          ),
       );
+      assertExists(hello);
       socket.close(1000, "done");
     } finally {
       client.stop();
@@ -3513,6 +3546,17 @@ it({
             engine: "redis",
             at: new Date().toISOString(),
           });
+          // An engine with no permissions reader: `ok: false` on the request
+          // id, without touching Docker.
+          socket.receive({
+            type: "managed-permissions-request",
+            id: "perms-1",
+            managedId: "00000000-0000-4000-8000-000000000001",
+            engine: "redis",
+            logins: ["app_user"],
+            databases: [],
+            at: new Date().toISOString(),
+          });
           socket.receive({
             type: "fabric-paths-request",
             id: "fabric-1",
@@ -3599,6 +3643,22 @@ it({
           assertEquals(healthFrame?.id, "health-1");
           assertEquals(healthFrame?.ok, false);
           assertEquals(typeof healthFrame?.error, "string");
+          await waitFor(
+            "managed-permissions-result",
+            () =>
+              lastFrameOfType(socket, "managed-permissions-result")
+                ? true
+                : undefined,
+          );
+          const permissionsFrame = lastFrameOfType(
+            socket,
+            "managed-permissions-result",
+          ) as
+            | { id?: string; ok?: boolean; error?: unknown }
+            | undefined;
+          assertEquals(permissionsFrame?.id, "perms-1");
+          assertEquals(permissionsFrame?.ok, false);
+          assertEquals(typeof permissionsFrame?.error, "string");
           await waitFor(
             "fabric-paths-result",
             () =>
@@ -5502,6 +5562,87 @@ it({
           ),
       );
       assertExists(failed);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "a failed restart reports the exit code, stderr and elapsed time",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: (options) => {
+        options?.onReport?.({
+          ok: false,
+          endedByRestart: false,
+          command: "restart",
+          exitCode: 1,
+          signal: null,
+          stderr: "Failed to connect to bus",
+          attempts: 2,
+          elapsedMs: 1234,
+        });
+        return Promise.resolve(false);
+      },
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () => Promise.resolve(sampleUpdateInfo("newsha")),
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: () => Promise.resolve(),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-restart-report",
+        upgradeId: "up-restart-report",
+        at: new Date().toISOString(),
+      });
+      const failed = await waitFor(
+        "restart-failed progress with a report",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { errorCode?: string }).errorCode === "restart_failed"
+          ) as
+            | { detail?: string; restart?: Record<string, unknown> }
+            | undefined,
+      );
+      assertEquals(failed.restart, {
+        command: "restart",
+        exitCode: 1,
+        stderr: "Failed to connect to bus",
+        attempts: 2,
+        elapsedMs: 1234,
+      });
+      assert(
+        failed.detail?.startsWith("daemon restart failed after reconcile"),
+      );
+      assert(failed.detail?.includes("exited 1"));
     } finally {
       restore();
       restoreHooks();

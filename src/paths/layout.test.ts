@@ -16,7 +16,6 @@ import {
   hasDaemonCheckout,
   isCompiledStubRoot,
   pathExists,
-  principalDataDir,
   principalHomePath,
   principalTmpDir,
   principalUserHome,
@@ -40,11 +39,6 @@ import {
   resolveDevRoot,
   resolveLayout,
   resolveRuntimesDir,
-  siteCurrentSymlink,
-  siteReleasesDir,
-  siteRoot,
-  siteSharedDir,
-  siteWebrootDir,
 } from "./layout.ts";
 
 /**
@@ -574,7 +568,7 @@ test("resolveLayout development orchestration dir falls back when discovery thro
   }
 });
 
-test("site and spool helpers join under principal home and daemon state", () => {
+test("spool and principal home helpers join under principal home and daemon state", () => {
   const layout = resolveLayout({
     TURBOPANEL_DAEMON_STATE_DIR: "/custom/state",
     TURBOPANEL_PRINCIPAL_HOME_ROOT: "/srv/tenants",
@@ -586,28 +580,7 @@ test("site and spool helpers join under principal home and daemon state", () => 
   );
   assertEquals(principalHomePath(layout, "alice"), "/srv/tenants/alice");
   assertEquals(principalUserHome(layout, "alice"), "/srv/tenants/alice/home");
-  assertEquals(principalDataDir(layout, "alice"), "/srv/tenants/alice/data");
   assertEquals(principalTmpDir(layout, "alice"), "/srv/tenants/alice/tmp");
-  assertEquals(
-    siteRoot("/srv/tenants/alice", "svc-1"),
-    "/srv/tenants/alice/sites/svc-1",
-  );
-  assertEquals(
-    siteReleasesDir("/srv/tenants/alice", "svc-1"),
-    "/srv/tenants/alice/sites/svc-1/releases",
-  );
-  assertEquals(
-    siteCurrentSymlink("/srv/tenants/alice", "svc-1"),
-    "/srv/tenants/alice/sites/svc-1/current",
-  );
-  assertEquals(
-    siteWebrootDir("/srv/tenants/alice", "svc-1"),
-    "/srv/tenants/alice/sites/svc-1/webroot",
-  );
-  assertEquals(
-    siteSharedDir("/srv/tenants/alice", "svc-1"),
-    "/srv/tenants/alice/sites/svc-1/shared",
-  );
 });
 
 test("detectInstallMode treats fromMeta checkout as development", async () => {

@@ -27,4 +27,5 @@ turbopanel_daemon_state_leaves:
   - { name: commands, mode: "0750" }
   - { name: release-records, mode: "0750" }
   - { name: release-build, mode: "0700" }
+  - { name: folders, mode: "0750" }
   - { name: ansible, mode: "0750" }

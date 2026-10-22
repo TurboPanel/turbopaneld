@@ -1,19 +1,34 @@
 import { assertEquals } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  COMMAND_RECOVERY_FEATURE,
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
+  DENO_NATIVE_APPS_FEATURE,
+  DEPLOY_CANCEL_FEATURE,
   instanceUnsupportedReason,
+  MANAGED_DATA_ONLY_READWRITE_FEATURE,
+  MANAGED_DATABASE_CONVERT_FEATURE,
+  MANAGED_DATABASE_OWNER_FEATURE,
   MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
+  MANAGED_HEALTH_REPORT_FEATURE,
+  MANAGED_INGRESS_IPV6_FEATURE,
+  MANAGED_LOGIN_LIMITS_FEATURE,
+  MANAGED_OWNER_ROLE_FEATURE,
+  MANAGED_PERMISSIONS_READ_FEATURE,
+  MANAGED_REPLICA_FRESHNESS_FEATURE,
+  MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
   PHP_SITE_MODES_FEATURE,
   resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
+  SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
+  TLS_CAPTURE_FEATURE,
 } from "./version-wire.ts";
 
 /**
@@ -104,6 +119,29 @@ test("capability gates: above and equal open, below and unknown stay closed", ()
   );
 });
 
+test("managed-health-report-v1 is an advertised wire feature and raised no floor", () => {
+  assertEquals(MANAGED_HEALTH_REPORT_FEATURE, "managed-health-report-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_HEALTH_REPORT_FEATURE,
+    ),
+    true,
+  );
+});
+
+test("managed-replica-freshness-v1 is an advertised wire feature", () => {
+  assertEquals(
+    MANAGED_REPLICA_FRESHNESS_FEATURE,
+    "managed-replica-freshness-v1",
+  );
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_REPLICA_FRESHNESS_FEATURE,
+    ),
+    true,
+  );
+});
+
 test("managed-health-v1 is advertised on the wire and raised no floor", () => {
   assertEquals(MANAGED_HEALTH_FEATURE, "managed-health-v1");
   assertEquals(
@@ -114,6 +152,78 @@ test("managed-health-v1 is advertised on the wire and raised no floor", () => {
   );
   // A new wire message is feature-gated; it never moves the version floor.
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-permissions-read-v1 is advertised and raised no floor", () => {
+  assertEquals(
+    MANAGED_PERMISSIONS_READ_FEATURE,
+    "managed-permissions-read-v1",
+  );
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_PERMISSIONS_READ_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-owner-role-v1 is advertised and raised no floor", () => {
+  assertEquals(MANAGED_OWNER_ROLE_FEATURE, "managed-owner-role-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(MANAGED_OWNER_ROLE_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-data-only-readwrite-v1 is advertised and raised no floor", () => {
+  assertEquals(
+    MANAGED_DATA_ONLY_READWRITE_FEATURE,
+    "managed-data-only-readwrite-v1",
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(MANAGED_DATA_ONLY_READWRITE_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-database-owner-v1 is advertised and raised no floor", () => {
+  assertEquals(MANAGED_DATABASE_OWNER_FEATURE, "managed-database-owner-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(MANAGED_DATABASE_OWNER_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-database-convert-v1 is advertised", () => {
+  assertEquals(MANAGED_DATABASE_CONVERT_FEATURE, "managed-database-convert-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(MANAGED_DATABASE_CONVERT_FEATURE),
+    true,
+  );
+});
+
+test("tls-capture-v1 is advertised and raised no floor", () => {
+  assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(TLS_CAPTURE_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-switchover-final-position-v1 is advertised last and raised no floor", () => {
+  assertEquals(
+    MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
+    "managed-switchover-final-position-v1",
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.at(-1),
+    MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("command-recovery-v1 is advertised", () => {
+  assertEquals(COMMAND_RECOVERY_FEATURE, "command-recovery-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
 });
 
 test("site-engine-nginx-apache-v1 is advertised on the wire", () => {
@@ -142,6 +252,61 @@ test("php-site-modes-v1 is advertised on the wire and raised no floor", () => {
   assertEquals(
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(
       PHP_SITE_MODES_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("deploy-cancel-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(DEPLOY_CANCEL_FEATURE, "deploy-cancel-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      DEPLOY_CANCEL_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("site-db-bindings-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(SITE_DB_BINDINGS_FEATURE, "site-db-bindings-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      SITE_DB_BINDINGS_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("deno-native-apps-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(DENO_NATIVE_APPS_FEATURE, "deno-native-apps-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      DENO_NATIVE_APPS_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-ingress-ipv6-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(MANAGED_INGRESS_IPV6_FEATURE, "managed-ingress-ipv6-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_INGRESS_IPV6_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-login-limits-v1 is advertised on the wire and raised no floor", () => {
+  assertEquals(MANAGED_LOGIN_LIMITS_FEATURE, "managed-login-limits-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      MANAGED_LOGIN_LIMITS_FEATURE,
     ),
     true,
   );

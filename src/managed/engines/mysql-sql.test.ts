@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   authSocketPluginPresentSql,
   changeReplicationSourceSql,
@@ -14,6 +14,8 @@ import {
   ensureProxySqlMonitorAccountSql,
   ensureReplicationAccountSql,
   ensureSocketAdminSql,
+  flushPrivilegesLocalSql,
+  followReplicationSourceSql,
   grantDatabaseSql,
   grantReplicationSql,
   grantRootSql,
@@ -24,9 +26,11 @@ import {
   quoteAccount,
   quoteIdentifier,
   quoteLiteral,
+  resetReplicaGtidStateSql,
   showReplicaStatusSql,
   standbyReplicationStatusSql,
   versionSql,
+  withoutSessionBinlogSql,
 } from "./mysql-sql.ts";
 import { mysqlManagedEngineRuntime } from "./mysql.ts";
 
@@ -65,7 +69,11 @@ test("account and privilege SQL uses managed-network netmask scoping", () => {
 
   const grant = grantDatabaseSql("appdb", "app", "owner");
   assertEquals(grant.includes("ALL PRIVILEGES ON `appdb`.*"), true);
-  assertEquals(grant.includes("WITH GRANT OPTION"), true);
+  assertEquals(grant.includes("WITH GRANT OPTION"), false);
+  assertEquals(
+    grantDatabaseSql("appdb", "app", "admin").includes("WITH GRANT OPTION"),
+    true,
+  );
   assertEquals(
     grantDatabaseSql("appdb", "app", "read-only").includes("SELECT, SHOW VIEW"),
     true,
@@ -137,6 +145,31 @@ test("installAuthSocketPluginSql is MySQL INSTALL PLUGIN without IF NOT EXISTS",
   );
 });
 
+function assertWrappedInSessionBinlogOff(sql: string, inner: string): void {
+  const off = sql.indexOf("SET SESSION sql_log_bin = 0;");
+  const body = sql.indexOf(inner);
+  const on = sql.lastIndexOf("SET SESSION sql_log_bin = 1;");
+  assertEquals(off !== -1 && body !== -1 && on !== -1, true);
+  assertEquals(off < body && body < on, true);
+}
+
+test("replica-local SQL is wrapped so it cannot mint a replica GTID", () => {
+  assertWrappedInSessionBinlogOff(
+    withoutSessionBinlogSql("FLUSH PRIVILEGES;"),
+    "FLUSH PRIVILEGES;",
+  );
+  assertWrappedInSessionBinlogOff(
+    flushPrivilegesLocalSql(),
+    "FLUSH PRIVILEGES;",
+  );
+  assertWrappedInSessionBinlogOff(
+    installAuthSocketPluginSql(),
+    "INSTALL PLUGIN auth_socket",
+  );
+  assertEquals(resetReplicaGtidStateSql(), "RESET BINARY LOGS AND GTIDS;");
+  assertEquals(resetReplicaGtidStateSql().includes("RESET MASTER"), false);
+});
+
 test("databases use utf8mb4", () => {
   assertEquals(
     createDatabaseSql("appdb").includes("utf8mb4"),
@@ -161,7 +194,8 @@ test("dumpArgv rejects system schemas and validates identifiers", () => {
   const argv = backup.dumpArgv(ctx, { database: "appdb" });
   assertEquals(argv[0], "mysqldump");
   assertEquals(argv.includes("appdb"), true);
-  assertEquals(argv.includes("--set-gtid-purged=ON"), true);
+  assertEquals(argv.includes("--set-gtid-purged=OFF"), true);
+  assertEquals(argv.includes("--set-gtid-purged=ON"), false);
   assertThrows(() => backup.dumpArgv(ctx, { database: "mysql" }), Error);
   assertThrows(
     () => backup.dumpArgv(ctx, { database: "information_schema" }),
@@ -179,11 +213,79 @@ test("quoteAccount uses account max length", () => {
   assertThrows(() => quoteAccount("a".repeat(33)), Error);
 });
 
-test("grantDatabaseSql covers read-write privilege", () => {
-  const grant = grantDatabaseSql("appdb", "app", "read-write");
-  assertEquals(grant.includes("CREATE TEMPORARY TABLES"), true);
-  assertEquals(grant.includes("ALTER ROUTINE"), true);
+test("read-write grants data changes only and revokes the rest", () => {
+  const sql = grantDatabaseSql("appdb", "app", "read-write");
+  const [grant, ...rest] = sql.split("\n");
+  assertEquals(
+    grant.startsWith(
+      "GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE, LOCK TABLES, " +
+        "CREATE TEMPORARY TABLES, SHOW VIEW ON `appdb`.* TO ",
+    ),
+    true,
+  );
   assertEquals(grant.includes("WITH GRANT OPTION"), false);
+  const revoke = rest.join("\n");
+  for (
+    const [name, column] of [
+      ["CREATE", "Create_priv"],
+      ["DROP", "Drop_priv"],
+      ["INDEX", "Index_priv"],
+      ["ALTER", "Alter_priv"],
+      ["CREATE VIEW", "Create_view_priv"],
+      ["CREATE ROUTINE", "Create_routine_priv"],
+      ["ALTER ROUTINE", "Alter_routine_priv"],
+      ["EVENT", "Event_priv"],
+      ["TRIGGER", "Trigger_priv"],
+      ["REFERENCES", "References_priv"],
+    ]
+  ) {
+    const kept = grant.slice(6, grant.indexOf(" ON ")).split(", ");
+    assertEquals(kept.includes(name), false, name);
+    assertEquals(
+      revoke.includes(`IF(${column} = 'Y'`) && revoke.includes(`'${name}'`),
+      true,
+      name,
+    );
+  }
+  // What it keeps is never in the revoke list.
+  assertEquals(revoke.includes("Select_priv"), false);
+  assertEquals(revoke.includes("Execute_priv"), false);
+  assertEquals(revoke.includes("Grant_priv = 'Y', 'GRANT OPTION'"), true);
+  assertEquals(revoke.includes("DO 0"), true);
+  // A login that still defines a trigger keeps TRIGGER: the trigger would
+  // otherwise fail every write to its table (error 1142).
+  assertStringIncludes(
+    revoke,
+    "IF(Trigger_priv = 'Y' AND NOT EXISTS (SELECT 1 FROM information_schema.TRIGGERS " +
+      "WHERE TRIGGER_SCHEMA = 'appdb' AND DEFINER = 'app@",
+  );
+});
+
+test("read-only grants SELECT and SHOW VIEW and no EXECUTE", () => {
+  const [grant, ...rest] = grantDatabaseSql("appdb", "ro", "read-only")
+    .split("\n");
+  assertEquals(
+    grant.startsWith("GRANT SELECT, SHOW VIEW ON `appdb`.* TO "),
+    true,
+  );
+  const revoke = rest.join("\n");
+  assertEquals(revoke.includes("Execute_priv"), true);
+  assertEquals(revoke.includes("Insert_priv"), true);
+  assertEquals(revoke.includes("Select_priv"), false);
+});
+
+test("owner (migration) grants everything in the database without the grant option", () => {
+  const sql = grantDatabaseSql("appdb", "mig", "owner");
+  assertEquals(sql.includes("GRANT ALL PRIVILEGES ON `appdb`.* TO "), true);
+  assertEquals(sql.includes("WITH GRANT OPTION"), false);
+  assertEquals(sql.includes("Grant_priv = 'Y', 'GRANT OPTION'"), true);
+  assertEquals(sql.includes("Create_priv"), false);
+});
+
+test("admin keeps the grant option", () => {
+  const sql = grantDatabaseSql("appdb", "adm", "admin");
+  assertEquals(sql.endsWith("WITH GRANT OPTION;"), true);
+  assertEquals(sql.includes("REVOKE"), false);
 });
 
 test("ensureReplicationAccountSql falls back to managed network when peers empty", () => {
@@ -207,8 +309,32 @@ test("replication and status SQL builders", () => {
     username: "repl",
     password: "s3cret",
   });
-  assertEquals(change.includes("SOURCE_SSL = 1"), true);
-  assertEquals(change.includes("START REPLICA"), true);
+  for (
+    const expected of [
+      "CHANGE REPLICATION SOURCE TO",
+      "  SOURCE_HOST = '203.0.113.50',",
+      "  SOURCE_PORT = 3306,",
+      "  SOURCE_USER = 'repl',",
+      "  SOURCE_AUTO_POSITION = 1,",
+      "  SOURCE_SSL = 1,",
+      "  SOURCE_SSL_CA = '/etc/mysql/tls/ca.crt',",
+      "  SOURCE_SSL_VERIFY_SERVER_CERT = 1,",
+      "  SOURCE_CONNECT_RETRY = 10,",
+      "  SOURCE_RETRY_COUNT = 60480;",
+      "START REPLICA;",
+    ]
+  ) {
+    assertStringIncludes(change, expected);
+  }
+  const follow = followReplicationSourceSql({
+    host: "10.100.0.4",
+    port: 45001,
+  });
+  assertEquals(follow.includes("STOP REPLICA"), true);
+  assertEquals(follow.includes("SOURCE_HOST = '10.100.0.4'"), true);
+  assertEquals(follow.includes("SOURCE_PORT = 45001"), true);
+  assertEquals(follow.includes("SOURCE_PASSWORD"), false);
+  assertEquals(follow.includes("START REPLICA"), true);
 });
 
 test("runtime defaultDatabase is a non-system application schema", () => {
@@ -218,6 +344,9 @@ test("runtime defaultDatabase is a non-system application schema", () => {
 test("standby seed window and census SQL stay credential-free", () => {
   assertEquals(disableReadOnlySql().includes("super_read_only = OFF"), true);
   assertEquals(enforceReadOnlySql().includes("super_read_only = ON"), true);
+  assertEquals(promoteSql().includes("super_read_only = OFF"), true);
+  assertEquals(grantRootSql("root").includes("REVOKE"), false);
+  assertEquals(grantRootSql("root").includes("READ_ONLY ADMIN"), false);
   assertEquals(
     connectionCensusSql(),
     "SHOW GLOBAL STATUS LIKE 'Threads_connected'; SELECT @@max_connections;",

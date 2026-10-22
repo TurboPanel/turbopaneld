@@ -9,9 +9,10 @@
  * replacement, so an absent field clears that setting. Absent/invalid state
  * yields an empty profile so auto-detection/defaults stay in charge.
  */
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 
 import { resolveLayout } from "../../../paths/layout.ts";
+import { writeTextFileAtomic } from "../../atomic-write.ts";
 import type {
   HardwareProfile,
   HardwareProfileSensorSlot,
@@ -204,10 +205,7 @@ export async function writeHardwareProfile(
   const stateDir = daemonStateDir ??
     resolveLayout(Deno.env.toObject()).daemonStateDir;
   const path = hardwareProfilePath(stateDir);
-  await Deno.mkdir(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp`;
-  await Deno.writeTextFile(tmpPath, JSON.stringify(profile));
-  await Deno.rename(tmpPath, path);
+  await writeTextFileAtomic(path, JSON.stringify(profile));
 }
 
 /** Read the operator-assigned hardware profile from daemon state; `{}` when unset. */

@@ -38,25 +38,41 @@ import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import {
   devOwnershipPlaybookExtraArgs,
   runLocalPlaybook,
 } from "../../orchestration/ansible.ts";
+import type { AnsibleEventHandler } from "../../orchestration/ansible-events.ts";
 import {
+  DENO_APP_RUNTIME_APPLY_PLAYBOOK,
   NODE_APP_RUNTIME_APPLY_PLAYBOOK,
   ORCHESTRATION_DIR,
 } from "../../orchestration/assets.ts";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployPayload,
+  EnvironmentDeployVariableMaterial,
 } from "../../contracts/commands-contracts.ts";
+import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { resolveReleasePaths } from "../release/release-layout.ts";
+import { serviceFolderForCompose } from "../release/release-service-id.ts";
 import type { ReleaseOutputHandler } from "../release/checkout.ts";
 import { swapCurrentSymlink } from "../release/promote.ts";
+import {
+  markReleaseHealthy,
+  readHealthyRelease,
+} from "../release/release-health.ts";
+import type { ReleaseManifestV1 } from "../release/deployment-json.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
+import { redactUrlSecrets } from "../../util/redact-url-secrets.ts";
+import { redactCommandSummary } from "../../logs/redactor.ts";
+import { definedFields } from "../../util/optional-fields.ts";
+import type { NativeAppStart } from "./start-entry.ts";
 import {
   nativeAppConfigDir,
+  nativeAppRuntimeKind,
   nativeAppStagedFilePrefix,
   nativeAppStagedPath,
   nativeAppUnitContent,
@@ -65,9 +81,14 @@ import {
   principalSliceContent,
   principalSlicePath,
   principalSliceStagedPath,
+  resolveNativeAppDenoVersion,
   resolveNativeAppNodeVersion,
   SYSTEMD_UNIT_DIR,
 } from "./unit.ts";
+import {
+  materializeNativeAppVariables,
+  removeNativeAppEnvFile,
+} from "./variables-runtime.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 
@@ -78,6 +99,8 @@ const NATIVE_APP_HEALTH_INTERVAL_MS = 500;
 const NATIVE_APP_HEALTH_ATTEMPT_MS = 3_000;
 /** Journal lines copied into the deploy transcript on a failed health probe. */
 const NATIVE_APP_JOURNAL_TAIL = 80;
+/** How many of the journal's last lines the deploy error itself carries. */
+const NATIVE_APP_ERROR_JOURNAL_LINES = 10;
 
 /** Injectable host command runner — the single privileged seam. */
 export type NativeAppRunFn = RunFn;
@@ -102,10 +125,19 @@ export type NativeAppSleepFn = (ms: number) => Promise<void>;
  */
 export type NativeAppRelease = {
   username: string;
+  /** The service folder the control plane planned for the app. */
+  folder: FolderRefParts;
   /** Release `current` pointed at before this deploy, for rollback. */
   previousReleaseId?: string | null;
   /** `x-turbopanel.source.startCommand`, when the author declared one. */
   startCommand?: string;
+  /** The release this deploy put live (`current`), when one was applied. */
+  releaseId?: string;
+  /**
+   * How that release starts when the author typed no start command, as the
+   * build (or, on a rollback, the release record) decided it.
+   */
+  nativeStart?: NativeAppStart;
 };
 
 export type NativeAppBindings = ReadonlyMap<string, NativeAppRelease>;
@@ -117,12 +149,23 @@ export type ApplyNativeAppsOpts = {
   run?: NativeAppRunFn;
   /** Test seam: Ansible playbook runner (vendor tenant Node). */
   runPlaybook?: NativeAppPlaybookFn;
+  /**
+   * Playbook events from the default runner (task starts, failures) for the
+   * deploy transcript. Ignored by a custom `runPlaybook`.
+   */
+  onEvent?: AnsibleEventHandler;
   /** Test seam: loopback health probe. */
   probe?: NativeAppProbeFn;
   /** Test seam: sleep between probe attempts. */
   sleep?: NativeAppSleepFn;
   /** Test seam: systemd unit directory (defaults to `/etc/systemd/system`). */
   systemdUnitDir?: string;
+  /**
+   * Sealed secrets for `nativeAppServices[].variables[].secretKey`, and the
+   * decrypt call that opens them — the same pair the compose secret files use.
+   */
+  variableMaterial?: readonly EnvironmentDeployVariableMaterial[];
+  decryptSecrets?: DecryptSecretsFn;
   /**
    * Deploy transcript. Native start / health / unit journal ride this the
    * same way fetch and build do — without it, a failed probe is only an
@@ -157,6 +200,7 @@ async function runPlaybookDefault(
   playbookPath: string,
   label: string,
   extraArgs: string[] = [],
+  onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   try {
     await Deno.stat(playbookPath);
@@ -174,7 +218,17 @@ async function runPlaybookDefault(
   await runLocalPlaybook(playbookPath, [
     ...devOwnershipPlaybookExtraArgs(),
     ...extraArgs,
-  ]);
+  ], onEvent);
+}
+
+/** The injected runner, else the default one wired to `onEvent`. */
+function resolvePlaybookRunner(
+  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook" | "onEvent">,
+): NativeAppPlaybookFn {
+  if (opts?.runPlaybook) return opts.runPlaybook;
+  const onEvent = opts?.onEvent;
+  return (playbookPath, label, extraArgs) =>
+    runPlaybookDefault(playbookPath, label, extraArgs, onEvent);
 }
 
 /**
@@ -217,10 +271,12 @@ type NativeAppIo = {
   onOutput?: ReleaseOutputHandler;
 };
 
-function resolveIo(opts?: Partial<NativeAppIo>): NativeAppIo {
+function resolveIo(
+  opts?: Partial<NativeAppIo> & Pick<ApplyNativeAppsOpts, "onEvent">,
+): NativeAppIo {
   return {
     run: opts?.run ?? runDefault,
-    runPlaybook: opts?.runPlaybook ?? runPlaybookDefault,
+    runPlaybook: resolvePlaybookRunner(opts),
     probe: opts?.probe ?? probeDefault,
     sleep: opts?.sleep ?? sleepDefault,
     ...(opts?.onOutput === undefined ? {} : { onOutput: opts.onOutput }),
@@ -358,22 +414,6 @@ async function waitForNativeApp(
   return await pollFrom(0);
 }
 
-function emitOutputLines(
-  onOutput: ReleaseOutputHandler | undefined,
-  stream: "stdout" | "stderr",
-  text: string,
-): number {
-  if (!onOutput) return 0;
-  let count = 0;
-  for (const line of text.split("\n")) {
-    const trimmed = line.replaceAll("\r", "");
-    if (trimmed.length === 0) continue;
-    onOutput(stream, trimmed);
-    count += 1;
-  }
-  return count;
-}
-
 /**
  * Copy the unit's recent journal into the deploy transcript.
  *
@@ -383,7 +423,7 @@ function emitOutputLines(
 async function emitNativeAppJournal(
   io: NativeAppIo,
   unit: string,
-): Promise<string> {
+): Promise<string[]> {
   const onOutput = io.onOutput;
   onOutput?.(
     "stderr",
@@ -401,43 +441,122 @@ async function emitNativeAppJournal(
       "--output=short-iso",
     ]),
   );
-  const text = result.stdout.trim() || result.stderr.trim();
-  let lineCount = 0;
-  if (text.length > 0) {
-    lineCount = emitOutputLines(onOutput, "stderr", text);
+  const text = redactCommandSummary(
+    result.stdout.trim() || result.stderr.trim(),
+  );
+  const lines = text
+    .split("\n")
+    .map((line) => line.replaceAll("\r", ""))
+    .filter((line) => line.length > 0);
+  if (onOutput) {
+    for (const line of lines) onOutput("stderr", line);
+    if (lines.length === 0) {
+      onOutput("stderr", "(no journal output for this unit)");
+    }
   }
-  if (lineCount === 0) {
-    onOutput?.("stderr", "(no journal output for this unit)");
-  }
-  return text;
+  return lines;
 }
 
-const RESTART_COUNTER_RE = /restart counter is at (\d+)/g;
-const SYSTEMD_LINE_RE = /\bsystemd\[\d+\]:/;
+/** Longest line, and the whole tail, the deploy error carries from the journal. */
+const ERROR_JOURNAL_LINE_MAX = 300;
+const ERROR_JOURNAL_TOTAL_MAX = 2000;
 
 /**
- * Plain-words facts from the journal tail of a unit that never answered: the
- * last line the app itself wrote and how many times systemd restarted it.
+ * The scrubber only knows secrets this daemon decrypted, so lines going into
+ * an error text also lose anything that looks like a credential: `key=value`
+ * pairs with a secret-sounding key, bearer tokens and long token-like words.
  */
-export function summarizeNativeAppFailure(journal: string): string {
-  const lines = journal.split("\n").map((l) => l.trim()).filter(Boolean);
-  const appLine = lines.findLast((l) => !SYSTEMD_LINE_RE.test(l));
-  const counters = [...journal.matchAll(RESTART_COUNTER_RE)];
-  const restarts = counters.at(-1)?.[1];
-  const parts: string[] = [];
-  if (appLine) parts.push(`last message from the app: "${appLine}"`);
-  if (restarts) parts.push(`systemd restarted it ${restarts} times`);
-  if (appLine && /\bnot found\b/.test(appLine)) {
-    parts.push(
-      "the start command calls a program that is not in the release; leave the start command empty to use the default server.js",
-    );
+const SECRET_PAIR_RE =
+  /\b([\w.-]*(?:pass|secret|token|(?:api|private)[_-]?key|credential)[\w.-]*)(\s*[=:]\s*)\S+/gi;
+const BEARER_RE = /\b(bearer|basic)\s+[\w.~+/=-]{8,}/gi;
+const LONG_TOKEN_RE = /\b[\w-]{40,}\b/g;
+
+export function scrubJournalLine(line: string): string {
+  const masked = redactUrlSecrets(line)
+    .replace(SECRET_PAIR_RE, "$1$2[hidden]")
+    .replace(BEARER_RE, "$1 [hidden]")
+    .replace(LONG_TOKEN_RE, "[hidden]");
+  return masked.length > ERROR_JOURNAL_LINE_MAX
+    ? `${masked.slice(0, ERROR_JOURNAL_LINE_MAX)}...`
+    : masked;
+}
+
+/** The sentence that puts the app's own last output into the deploy error. */
+export function journalDetail(lines: readonly string[]): string {
+  if (lines.length === 0) return "";
+  let tail = lines.slice(-NATIVE_APP_ERROR_JOURNAL_LINES).map(scrubJournalLine)
+    .join(" | ");
+  if (tail.length > ERROR_JOURNAL_TOTAL_MAX) {
+    tail = `...${tail.slice(-ERROR_JOURNAL_TOTAL_MAX)}`;
   }
-  return parts.length === 0 ? "" : ` (${parts.join("; ")})`;
+  return `. Last output from the app: ${tail}`;
 }
 
 /**
- * Repoint `current` at the release it pointed at before this deploy and restart
- * the unit.
+ * How one release was started, as its record says: the author's start command
+ * and startup file at the time, and what the build detected.
+ */
+export type RecordedStart = {
+  startCommand?: string;
+  startupFile?: string;
+  nativeStart?: NativeAppStart;
+  /**
+   * The runtime that release ran on. A rollback renders its unit for this, not
+   * for the newer payload's runtime. Absent leaves the app's own.
+   */
+  runtime?: "node" | "deno";
+};
+
+/** The start fields of a release record. */
+function recordedStart(manifest: ReleaseManifestV1): RecordedStart {
+  return definedFields({
+    startCommand: manifest.startCommand,
+    startupFile: manifest.startupFile,
+    nativeStart: manifest.nativeStart,
+    // A record with no runtime ran on Node.
+    runtime: manifest.runtime ?? "node",
+  });
+}
+
+/** `binding` and `app` re-pointed at another release's recorded start. */
+function withRecordedStart(
+  binding: NativeAppRelease,
+  app: EnvironmentDeployNativeAppService,
+  start: RecordedStart,
+): { binding: NativeAppRelease; app: EnvironmentDeployNativeAppService } {
+  const {
+    startCommand: _command,
+    nativeStart: _detected,
+    ...bindingRest
+  } = binding;
+  const { startupFile: _file, ...appRest } = app;
+  // The unit is rendered from the app, so the recorded runtime goes there. A
+  // Node release carries no `runtime` key, as a Node payload never does.
+  const { runtime: _runtime, ...appWithoutRuntime } = appRest;
+  const appForRelease = start.runtime === undefined ? appRest : {
+    ...appWithoutRuntime,
+    ...(start.runtime === "deno" ? { runtime: "deno" as const } : {}),
+  };
+  return {
+    binding: {
+      ...bindingRest,
+      ...definedFields({
+        startCommand: start.startCommand,
+        nativeStart: start.nativeStart,
+      }),
+    },
+    app: {
+      ...appForRelease,
+      ...definedFields({ startupFile: start.startupFile }),
+    },
+  };
+}
+
+/**
+ * Repoint `current` at the release it pointed at before this deploy, put back
+ * the unit that release ran under (its own recorded start command, startup
+ * file or detected start, which may differ from the new release's), restart
+ * it, and wait for it to answer.
  *
  * Best-effort by design: the deploy is failing either way, and an error here
  * must not mask the health failure that caused it.
@@ -446,32 +565,106 @@ async function rollbackNativeApp(
   io: NativeAppIo,
   layout: LayoutPaths,
   params: {
-    app: EnvironmentDeployNativeAppService;
-    username: string;
+    prepared: PreparedNativeApp;
     previousReleaseId: string;
+    start: RecordedStart;
   },
-): Promise<boolean> {
+): Promise<"answered" | "silent" | "failed"> {
+  const { app, binding, unit } = params.prepared;
   try {
     const paths = resolveReleasePaths(layout, {
-      username: params.username,
-      serviceId: params.app.serviceId,
+      username: binding.username,
+      serviceId: app.serviceId,
       releaseId: params.previousReleaseId,
+      folder: binding.folder,
     });
     await swapCurrentSymlink(paths);
-    const restart = await systemctl(io, [
-      "restart",
-      nativeAppUnitName(params.app.serviceId),
-    ]);
-    return restart.success;
+    const changed = await params.prepared.reinstallUnit?.(params.start);
+    if (changed) {
+      const reload = await systemctl(io, ["daemon-reload"]);
+      if (!reload.success) {
+        throw new Error(reload.stderr || "daemon-reload failed");
+      }
+    }
+    const restart = await systemctl(io, ["restart", unit]);
+    if (!restart.success) return "failed";
+    return await waitForNativeApp(io, app.listenPort, unit)
+      ? "answered"
+      : "silent";
   } catch (err) {
     logWarn(
       "deploy",
-      `native app rollback failed service=${params.app.serviceId}: ${
+      `native app rollback failed service=${app.serviceId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
-    return false;
+    return "failed";
   }
+}
+
+/**
+ * Stop and disable a unit that has no answering release to run, so it neither
+ * crash-loops until the next deploy nor comes back after a reboot. The next
+ * deploy's `enable --now` starts it again. Best-effort.
+ */
+async function stopFailedNativeApp(
+  io: NativeAppIo,
+  unit: string,
+): Promise<void> {
+  const result = await systemctl(io, ["disable", "--now", unit]);
+  if (!result.success) {
+    logWarn("deploy", `native app stop failed unit=${unit}: ${result.stderr}`);
+  }
+}
+
+/** A healthy, recorded previous release other than the one that just failed. */
+async function healthyPreviousRelease(
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+): Promise<{ previous: string | null; record: ReleaseManifestV1 | null }> {
+  const previous = prepared.binding.previousReleaseId ?? null;
+  // A re-sent deploy of the live release has itself as "previous": going back
+  // to it is not a rollback.
+  if (!previous || previous === prepared.binding.releaseId) {
+    return { previous: null, record: null };
+  }
+  const record = await readHealthyRelease(
+    layout,
+    prepared.app.serviceId,
+    previous,
+  ).catch(() => null);
+  return { previous, record };
+}
+
+/**
+ * After a failed health check: roll back to the previous release when it once
+ * answered on this host ({@link readHealthyRelease}) and answers again,
+ * otherwise stop the app. Returns the sentence the deploy error ends with.
+ */
+async function recoverFailedNativeApp(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+): Promise<string> {
+  const { previous, record } = await healthyPreviousRelease(layout, prepared);
+  if (!previous) {
+    await stopFailedNativeApp(io, prepared.unit);
+    return " — no previous release to roll back to; the app is stopped";
+  }
+  if (!record) {
+    await stopFailedNativeApp(io, prepared.unit);
+    return ` — the previous release ${previous} never passed a health check on this server, so it was not restored; the app is stopped`;
+  }
+  const outcome = await rollbackNativeApp(io, layout, {
+    prepared,
+    previousReleaseId: previous,
+    start: recordedStart(record),
+  });
+  if (outcome === "answered") return ` — rolled back to release ${previous}`;
+  await stopFailedNativeApp(io, prepared.unit);
+  return outcome === "silent"
+    ? ` — rolled back to release ${previous}, but it did not answer either; the app is stopped`
+    : ` — rolling back to release ${previous} failed; the app is stopped`;
 }
 
 /**
@@ -482,6 +675,11 @@ type PreparedNativeApp = {
   app: EnvironmentDeployNativeAppService;
   binding: NativeAppRelease;
   unit: string;
+  /**
+   * Re-render and install this app's unit for another release's recorded
+   * start (a rollback). Returns whether the installed unit changed.
+   */
+  reinstallUnit?: (start: RecordedStart) => Promise<boolean>;
 };
 
 /**
@@ -499,6 +697,7 @@ async function installNativeAppUnit(
     app: EnvironmentDeployNativeAppService;
     binding: NativeAppRelease;
     systemdUnitDir: string;
+    environmentFile: boolean;
   },
 ): Promise<boolean> {
   const { app, binding } = params;
@@ -513,12 +712,53 @@ async function installNativeAppUnit(
       layout,
       app,
       username: binding.username,
+      folder: binding.folder,
       environmentId: params.environmentId,
+      environmentFile: params.environmentFile,
       ...(binding.startCommand === undefined
         ? {}
         : { startCommand: binding.startCommand }),
+      ...(binding.nativeStart === undefined
+        ? {}
+        : { nativeStart: binding.nativeStart }),
     }),
   });
+}
+
+/**
+ * Write (or clear) the app's variables file before its unit is installed, and
+ * tell the transcript what arrived — names and counts only, never values.
+ */
+async function applyNativeAppVariables(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  app: EnvironmentDeployNativeAppService,
+  opts: Pick<ApplyNativeAppsOpts, "variableMaterial" | "decryptSecrets">,
+): Promise<boolean> {
+  const result = await materializeNativeAppVariables(
+    layout,
+    app,
+    opts.variableMaterial ?? [],
+    opts.decryptSecrets,
+    io.run,
+  );
+  if (result.count > 0) {
+    io.onOutput?.(
+      "stdout",
+      `${app.composeServiceName}: ${result.count} environment variable${
+        result.count === 1 ? "" : "s"
+      } written to the app's private environment file`,
+    );
+  }
+  if (result.platformManaged.length > 0) {
+    io.onOutput?.(
+      "stderr",
+      `${app.composeServiceName}: ignored ${
+        result.platformManaged.join(", ")
+      } (set by the platform for every app, so it cannot be overridden)`,
+    );
+  }
+  return result.environmentFile;
 }
 
 /**
@@ -560,7 +800,7 @@ async function startNativeApp(
   layout: LayoutPaths,
   prepared: PreparedNativeApp,
 ): Promise<void> {
-  const { app, binding, unit } = prepared;
+  const { app, unit } = prepared;
 
   // `enable --now` on first deploy, `restart` afterwards: an already-enabled
   // unit re-enabled is a no-op, but an already-running one needs a restart to
@@ -589,6 +829,7 @@ async function startNativeApp(
       "stdout",
       `${app.composeServiceName} answered on 127.0.0.1:${app.listenPort}`,
     );
+    await recordHealthy(layout, prepared);
     return;
   }
 
@@ -599,31 +840,36 @@ async function startNativeApp(
     }s`,
   );
   const journal = await emitNativeAppJournal(io, unit);
-  const facts = summarizeNativeAppFailure(journal);
 
-  const previous = binding.previousReleaseId;
-  await systemctl(io, ["reset-failed", unit]);
-  const rolledBack = previous
-    ? await rollbackNativeApp(io, layout, {
-      app,
-      username: binding.username,
-      previousReleaseId: previous,
-    })
-    : false;
-  if (!rolledBack) {
-    // Nothing healthy to fall back to: stop the failing unit rather than
-    // leave it restarting behind a deploy that already reported failure.
-    await systemctl(io, ["disable", "--now", unit]);
-  }
+  const outcome = await recoverFailedNativeApp(io, layout, prepared);
   throw new Error(
     `native app ${app.composeServiceName} did not answer on 127.0.0.1:${app.listenPort} within ${
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
-    }s${facts}${
-      rolledBack
-        ? ` — rolled back to release ${previous}`
-        : " — no previous release to roll back to; the app was stopped"
-    }`,
+    }s${outcome}${journalDetail(journal)}`,
   );
+}
+
+/**
+ * Remember that this release answered, so a later failed deploy may roll back
+ * to it. Best-effort: the app is up; a missing mark only means it will not be
+ * a rollback target.
+ */
+async function recordHealthy(
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+): Promise<void> {
+  const releaseId = prepared.binding.releaseId;
+  if (!releaseId) return;
+  try {
+    await markReleaseHealthy(layout, prepared.app.serviceId, releaseId);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `native app ${prepared.app.serviceId}: could not record release ${releaseId} as healthy: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 /**
@@ -667,52 +913,118 @@ async function applyPrincipalSlices(
 }
 
 /**
+ * What picks a runtime and its series: a native app, or a site whose build
+ * needs the default Node (which names no series, so it gets the newest).
+ */
+export type RuntimeChoice = Pick<
+  EnvironmentDeployNativeAppService,
+  "runtime" | "nodeVersion" | "denoVersion"
+>;
+
+/**
  * Every distinct Node series this apply needs, sorted so the playbook argument
  * is stable across deploys (an unstable argument would show up as churn in the
  * transcript for a deploy that changed nothing).
  *
- * An app with no `nodeVersion` contributes `DEFAULT_NATIVE_APP_NODE_VERSION`,
- * so the default series is vendored exactly like an explicitly pinned one
+ * An app with no `nodeVersion` contributes `NEWEST_NATIVE_APP_NODE_VERSION`,
+ * so the newest series is vendored exactly like an explicitly pinned one
  * instead of being a separate special case on the host.
  */
 export function nativeAppNodeVersions(
-  apps: readonly EnvironmentDeployNativeAppService[],
+  apps: readonly RuntimeChoice[],
 ): string[] {
   const versions = new Set<string>();
-  for (const app of apps) versions.add(resolveNativeAppNodeVersion(app));
+  for (const app of apps) {
+    if (nativeAppRuntimeKind(app) === "node") {
+      versions.add(resolveNativeAppNodeVersion(app));
+    }
+  }
+  return [...versions].sort((a, b) => a.localeCompare(b));
+}
+
+/** The Deno series this apply needs, sorted like {@link nativeAppNodeVersions}. */
+export function nativeAppDenoVersions(
+  apps: readonly RuntimeChoice[],
+): string[] {
+  const versions = new Set<string>();
+  for (const app of apps) {
+    if (nativeAppRuntimeKind(app) === "deno") {
+      versions.add(resolveNativeAppDenoVersion(app));
+    }
+  }
   return [...versions].sort((a, b) => a.localeCompare(b));
 }
 
 /**
- * Vendor the tenant Node runtimes on first use, the same way hosting Caddy and
- * the web engines are installed on demand rather than up front.
+ * Vendor the tenant Node and Deno runtimes on first use, the same way hosting
+ * Caddy and the web engines are installed on demand rather than up front.
  *
  * Called **before** the Git build as well as from {@link applyNativeAppServices}:
- * native installs run `corepack` / `node` from this tree, and the playbook
- * historically ran only after promote — so the first build had no binary and
- * dash reported `corepack: Permission denied` against an unreadable PATH dir.
+ * native installs run `corepack` / `node` (or `deno`) from this tree, and the
+ * playbook historically ran only after promote — so the first build had no
+ * binary and dash reported `corepack: Permission denied` against an unreadable
+ * PATH dir.
  *
  * The requested series are passed **into** the playbook rather than pinned in
  * its defaults: `nodeVersion` is a per-app contract, so two apps on different
  * series have to end up on two different vendored trees
- * (`vendor/node-app/<series>/current`) or the hint would be decorative.
+ * (`vendor/node-app/<series>/current`) or the hint would be decorative. Each
+ * runtime has its own playbook and runs only when an app of that runtime is in
+ * the deploy, so a Node-only deploy never touches the Deno tree and the other
+ * way round.
  */
 export async function ensureNativeAppRuntime(
-  apps: readonly EnvironmentDeployNativeAppService[],
-  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook">,
+  apps: readonly RuntimeChoice[],
+  opts?: Pick<ApplyNativeAppsOpts, "runPlaybook" | "onEvent">,
 ): Promise<void> {
   if (apps.length === 0) return;
-  const versions = nativeAppNodeVersions(apps);
-  for (const version of versions) {
+  const nodeVersions = nativeAppNodeVersions(apps);
+  const denoVersions = nativeAppDenoVersions(apps);
+  for (const version of nodeVersions) {
     const message = unsupportedSeriesMessage("node", version);
     if (message) throw new Error(message);
   }
-  const runPlaybook = opts?.runPlaybook ?? runPlaybookDefault;
-  await runPlaybook(
-    NODE_APP_RUNTIME_APPLY_PLAYBOOK,
-    `node-app-runtime-apply (vendor tenant Node ${versions.join(", ")})`,
-    ["-e", JSON.stringify({ node_app_versions: versions })],
-  );
+  for (const version of denoVersions) {
+    const message = unsupportedSeriesMessage("deno", version);
+    if (message) throw new Error(message);
+  }
+  const runPlaybook = resolvePlaybookRunner(opts);
+  if (nodeVersions.length > 0) {
+    await runPlaybook(
+      NODE_APP_RUNTIME_APPLY_PLAYBOOK,
+      `node-app-runtime-apply (vendor tenant Node ${nodeVersions.join(", ")})`,
+      ["-e", JSON.stringify({ node_app_versions: nodeVersions })],
+    );
+  }
+  if (denoVersions.length > 0) {
+    await runPlaybook(
+      DENO_APP_RUNTIME_APPLY_PLAYBOOK,
+      `deno-app-runtime-apply (vendor tenant Deno ${denoVersions.join(", ")})`,
+      ["-e", JSON.stringify({ deno_app_versions: denoVersions })],
+    );
+  }
+}
+
+/**
+ * Remove the root-owned variables copy of apps that have none now. Best-effort:
+ * the app is already running without it, so a refusal is a warning (the next
+ * deploy tries again), not a failed deploy.
+ */
+async function dropStaleEnvironmentFiles(
+  io: NativeAppIo,
+  layout: Pick<LayoutPaths, "configDir">,
+  serviceIds: readonly string[],
+): Promise<void> {
+  await forEachSequential(serviceIds, async (serviceId) => {
+    try {
+      await removeNativeAppEnvFile(io.run, layout, serviceId);
+    } catch (err) {
+      logWarn(
+        "deploy",
+        `native app ${serviceId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  });
 }
 
 /**
@@ -755,6 +1067,9 @@ export async function applyNativeAppServices(
   );
 
   const prepared: PreparedNativeApp[] = [];
+  // Apps with no variables: their root-owned copy (left by an earlier deploy)
+  // goes only once the unit that no longer loads it is running.
+  const withoutVariables: string[] = [];
   await forEachSequential(apps, async (app) => {
     const binding = opts.bindings.get(app.composeServiceName);
     if (!binding) {
@@ -764,17 +1079,32 @@ export async function applyNativeAppServices(
       );
       return;
     }
+    const environmentFile = await applyNativeAppVariables(
+      io,
+      layout,
+      app,
+      opts,
+    );
     const unitChanged = await installNativeAppUnit(io, layout, {
       environmentId,
       app,
       binding,
       systemdUnitDir,
+      environmentFile,
     });
     if (unitChanged) filesChanged = true;
+    if (!environmentFile) withoutVariables.push(app.serviceId);
     prepared.push({
       app,
       binding,
       unit: nativeAppUnitName(app.serviceId),
+      reinstallUnit: (start) =>
+        installNativeAppUnit(io, layout, {
+          environmentId,
+          ...withRecordedStart(binding, app, start),
+          systemdUnitDir,
+          environmentFile,
+        }),
     });
   });
 
@@ -798,6 +1128,8 @@ export async function applyNativeAppServices(
     }
     applied.push(entry.app.composeServiceName);
   });
+
+  await dropStaleEnvironmentFiles(io, layout, withoutVariables);
 
   logInfo(
     "deploy",
@@ -919,6 +1251,9 @@ export async function removeNativeAppServices(
         `${nativeAppStagedFilePrefix(environmentId)}${serviceId}.service`,
       ),
     );
+    // The variables file goes with the unit: leaving secrets on disk for an
+    // app that no longer exists would keep them past their purpose.
+    await dropStaleEnvironmentFiles(io, layout, [serviceId]);
     removed += 1;
   });
 
@@ -946,6 +1281,7 @@ export async function removeNativeAppServices(
 export function nativeAppBindingsFromPayload(
   payload: EnvironmentDeployPayload,
   previousReleaseByService?: ReadonlyMap<string, string | null>,
+  appliedByService?: ReadonlyMap<string, AppliedNativeRelease>,
 ): Map<string, NativeAppRelease> {
   const bindings = new Map<string, NativeAppRelease>();
   for (const entry of payload.sourceMaterial ?? []) {
@@ -953,13 +1289,26 @@ export function nativeAppBindingsFromPayload(
     if (!principal) continue;
     const previous = previousReleaseByService?.get(entry.composeServiceName) ??
       null;
-    bindings.set(entry.composeServiceName, {
-      username: principal.username,
-      previousReleaseId: previous,
-      ...(entry.build.startCommand === undefined
-        ? {}
-        : { startCommand: entry.build.startCommand }),
-    });
+    const applied = appliedByService?.get(entry.composeServiceName);
+    bindings.set(
+      entry.composeServiceName,
+      definedFields({
+        username: principal.username,
+        folder: serviceFolderForCompose(payload, entry.composeServiceName),
+        previousReleaseId: previous,
+        startCommand: entry.build.startCommand,
+        releaseId: applied?.releaseId,
+        nativeStart: applied?.nativeStart,
+      }),
+    );
   }
   return bindings;
 }
+
+/** The facts about this deploy's release that the unit needs. */
+export type AppliedNativeRelease = {
+  releaseId: string;
+  nativeStart?: NativeAppStart;
+  /** The runtime the live release runs on; absent keeps the payload's. */
+  runtime?: "node" | "deno";
+};

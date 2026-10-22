@@ -188,7 +188,12 @@ test("reconcile is idempotent when the jumps already exist", async () => {
   }, (args) => (args[0] === "-C" ? ok() : null));
 });
 
-test("reconcile is a no-op without a public listener, IPv4 bind, or known peer", async () => {
+test("reconcile removes the per-cluster chain when the listener is cleared or not public", async () => {
+  const teardown = [
+    `-D ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`,
+    `-F ${CHAIN}`,
+    `-X ${CHAIN}`,
+  ];
   await withRunner(async (invocations) => {
     await reconcileManagedPublicFirewall(basePayload());
     await reconcileManagedPublicFirewall(publicPayload({
@@ -198,6 +203,12 @@ test("reconcile is a no-op without a public listener, IPv4 bind, or known peer",
         transport: "datacenter",
       },
     }));
+    assertEquals(invocations, [...teardown, ...teardown]);
+  });
+});
+
+test("reconcile is a no-op without an IPv4 bind or known peer", async () => {
+  await withRunner(async (invocations) => {
     await reconcileManagedPublicFirewall(publicPayload({
       privateListener: {
         address: "2001:db8::10",
