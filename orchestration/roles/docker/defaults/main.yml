@@ -65,3 +65,60 @@ turbopanel_docker_egress_script: /opt/turbopanel/lib/docker-egress  # noqa: var-
 # (address pools, bip, live-restore) as found. Set by tasks/converge-builder.yml,
 # which daemon-converge runs on hosts the docker role provisioned earlier.
 turbopanel_docker_builder_only: false  # noqa: var-naming[no-role-prefix]
+
+# --- Docker Engine install (tasks/install.yml) ---
+
+# Docker's apt repository base. Point it at a local mirror (the path below it
+# must match download.docker.com/linux/<distro>/) for restricted networks.
+turbopanel_docker_repo_base: https://download.docker.com/linux  # noqa: var-naming[no-role-prefix]
+
+# Offline install: a directory holding the Docker .deb files with a flat apt
+# index (Packages file, as made by dpkg-scanpackages), e.g. shipped with the
+# release. When set, nothing is fetched from download.docker.com: the directory
+# becomes a trusted local repository (root-owned directory required). Empty =
+# use the online repository.
+turbopanel_docker_offline_dir: ""  # noqa: var-naming[no-role-prefix]
+
+# docker-ce / docker-ce-cli version, an apt version glob. Default = the Docker
+# stable release current when this role was last updated. Hosts are held at
+# this version (apt-mark hold) because Debian's unattended-upgrades does not
+# match Docker's repository: upgrades go through this role only, by changing
+# this variable (or setting it to "" for the newest release) and running with
+# turbopanel_docker_upgrade: true. Docker's live-restore keeps containers up
+# across PATCH releases; a MINOR release (29.8 to 29.9) may not be safe, so
+# treat those as maintenance events.
+turbopanel_docker_version: "5:29.9.2-1~*"  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_upgrade: false  # noqa: var-naming[no-role-prefix]
+
+# Remove distribution packages that conflict with Docker's (docker.io,
+# containerd, runc, podman-docker, ...) before installing. Refused when the
+# distribution engine already runs containers; remove them first or recreate
+# them after the swap.
+turbopanel_docker_remove_conflicting: true  # noqa: var-naming[no-role-prefix]
+
+# Docker repository key policy: warn (default; a key outside the fingerprint
+# list is used with a WARN), enforce (fail on a different key) or bundled
+# (never fetch, use files/docker.asc). Key and fingerprint: files/docker.asc.json.
+docker_key_policy: warn
+
+# Extra accepted key fingerprints (40 hex characters), added to the built-in
+# list (vars/main.yml) so a rotated Docker key is accepted without a release.
+turbopanel_docker_extra_key_fingerprints: []  # noqa: var-naming[no-role-prefix]
+
+# Optional packages the engine uses but only Recommends: (AppArmor profile for
+# containers, parallel image decompression).
+turbopanel_docker_extra_packages: [apparmor, pigz]  # noqa: var-naming[no-role-prefix]
+
+# daemon.json defaults for log rotation and an optional descriptor limit (tasks/daemon-json.yml).
+# default-ulimits nofile is OFF (0): docker.service sets no LimitNOFILE and the limit containers
+# inherit comes from containerd, so a fixed number could LOWER it. Set a value only after measuring.
+# Operator-set values in an existing daemon.json win; empty log driver = leave
+# logging alone. Only NEW containers pick up the log settings.
+turbopanel_docker_log_driver: local  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_log_max_size: 20m  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_log_max_file: "5"  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_default_nofile: 0  # noqa: var-naming[no-role-prefix]
+
+# True only while install.yml writes daemon.json ahead of the very first
+# dockerd start: there is nothing to restart yet.
+_docker_fresh_install: false
