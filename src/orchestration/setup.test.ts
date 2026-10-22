@@ -1,9 +1,11 @@
 import { assertEquals } from "@std/assert";
 import {
   isPreOptInCoLocatedDev,
+  runBootConverge,
   setupTestHooks,
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
+  shouldRunDaemonConverge,
 } from "./setup.ts";
 import type { InstallMode } from "../paths/layout.ts";
 
@@ -230,4 +232,23 @@ test("install mode does not change the remote URL daemon or skip-orchestration p
       assertEquals(shouldEnableDockerIntegration(), false);
     });
   });
+});
+
+test("runBootConverge is skipped with orchestration and a no-op where no converge applies", async () => {
+  const skipped = Deno.env.get("TURBOPANEL_SKIP_ORCHESTRATION");
+  const url = Deno.env.get("TURBOPANEL_INSTANCE_URL");
+  try {
+    Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", "1");
+    assertEquals(await runBootConverge(), false);
+    Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    Deno.env.delete("TURBOPANEL_INSTANCE_URL");
+    Deno.env.set("TURBOPANEL_SOCKET", "/tmp/tp-test.sock");
+    assertEquals(shouldRunDaemonConverge(), false);
+    assertEquals(await runBootConverge(), true);
+  } finally {
+    Deno.env.delete("TURBOPANEL_SOCKET");
+    if (skipped === undefined) Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    else Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", skipped);
+    if (url !== undefined) Deno.env.set("TURBOPANEL_INSTANCE_URL", url);
+  }
 });

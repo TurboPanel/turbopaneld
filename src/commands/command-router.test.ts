@@ -67,6 +67,46 @@ test({
 
 test({
   name:
+    "handleCommandDispatch acks at once but runs nothing until the boot converge has finished",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    let finish!: (ok: boolean) => void;
+    gate.trackBootConverge(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    try {
+      const mock = new MockWebSocket();
+      const done = handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-gate",
+        commandId: "cmd-gate",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      assertEquals(parseFrames(mock.sentFrames).map((f) => f.type), [
+        "command-ack",
+      ]);
+      finish(true);
+      await done;
+      assertEquals(parseFrames(mock.sentFrames).map((f) => f.type), [
+        "command-ack",
+        "command-outcome",
+      ]);
+    } finally {
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
     "handleCommandDispatch returns sanitized error for unknown command type",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {

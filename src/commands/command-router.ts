@@ -1,3 +1,4 @@
+import { bootConvergeSettled } from "../orchestration/boot-converge-gate.ts";
 import {
   answerRepeatedDispatch,
   deliverCommandOutcome,
@@ -253,6 +254,11 @@ export async function handleCommandDispatch(
     );
     return;
   }
+
+  // A new server connects before its boot converge has finished; no command
+  // runs on top of that converge (it was acknowledged above, so it shows as
+  // received while it waits).
+  await bootConvergeSettled();
 
   await markCommandInFlight(message.id);
   const logSink = createDispatchLogSink(message, deps);

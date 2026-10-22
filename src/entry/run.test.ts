@@ -4,6 +4,7 @@ import {
   stopManagedRuntimeGuardsForTests,
 } from "./run.ts";
 import { readServiceRunStates } from "../host/service-run-state.ts";
+import { bootConvergeSettled } from "../orchestration/boot-converge-gate.ts";
 import {
   type DaemonRunIo,
   type DockerClientLike,
@@ -615,4 +616,153 @@ test("a hold that throws still starts the retry with a reapply and skips persist
   } finally {
     stopManagedRuntimeGuardsForTests();
   }
+});
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/** Let queued promise callbacks run. */
+async function flush(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 5));
+}
+
+function manualSignalStub(overrides: Partial<DaemonRunIo>) {
+  let sigterm: (() => void) | undefined;
+  const stub = stubIo({
+    addSignalListener: (signal, handler) => {
+      if (signal === "SIGTERM") sigterm = handler;
+    },
+    ...overrides,
+  });
+  return { stub, stop: () => sigterm?.() };
+}
+
+test("first boot connects to the control plane while the boot converge is still running", async () => {
+  const order: string[] = [];
+  const converge = deferred<boolean>();
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    shouldConnectToInstance: () => true,
+    initOrchestration: () => {
+      order.push("unexpected full init");
+      return Promise.resolve(true);
+    },
+    bootstrapOrchestration: () => {
+      order.push("bootstrap");
+      return Promise.resolve(true);
+    },
+    runBootConverge: () => {
+      order.push("converge start");
+      return converge.promise.then((ok) => {
+        order.push("converge end");
+        return ok;
+      });
+    },
+    restoreFabricFromPersistedState: () => {
+      order.push("restore fabric");
+      return Promise.resolve();
+    },
+    connectInstance: () => {
+      order.push("connect");
+      return Promise.resolve({ stop() {} });
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(order, ["bootstrap", "converge start", "connect"]);
+  converge.resolve(true);
+  await flush();
+  assertEquals(order, [
+    "bootstrap",
+    "converge start",
+    "connect",
+    "converge end",
+    "restore fabric",
+  ]);
+  stop();
+  await done;
+});
+
+test("first boot holds commands until the boot converge has finished", async () => {
+  const converge = deferred<boolean>();
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    shouldConnectToInstance: () => true,
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => converge.promise,
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  let released = false;
+  const waiting = bootConvergeSettled().then(() => {
+    released = true;
+  });
+  await flush();
+  assertEquals(released, false);
+  converge.resolve(true);
+  await waiting;
+  assertEquals(released, true);
+  stop();
+  await done;
+});
+
+test("first boot with a failed boot converge keeps running, skips the post-converge steps and releases commands", async () => {
+  const converge = deferred<boolean>();
+  let restores = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    shouldConnectToInstance: () => true,
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => converge.promise,
+    restoreFabricFromPersistedState: () => {
+      restores += 1;
+      return Promise.resolve();
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  converge.resolve(false);
+  await bootConvergeSettled();
+  await flush();
+  assertEquals(restores, 0);
+  stop();
+  await done;
+  assertEquals(stub.exits, [0]);
+});
+
+test("a host that is already enrolled still converges before it connects", async () => {
+  const order: string[] = [];
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(false),
+    shouldConnectToInstance: () => true,
+    initOrchestration: () => {
+      order.push("orchestration");
+      return Promise.resolve(true);
+    },
+    bootstrapOrchestration: () => {
+      order.push("unexpected bootstrap only");
+      return Promise.resolve(true);
+    },
+    restoreFabricFromPersistedState: () => {
+      order.push("restore fabric");
+      return Promise.resolve();
+    },
+    connectInstance: () => {
+      order.push("connect");
+      return Promise.resolve({ stop() {} });
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(order, ["orchestration", "restore fabric", "connect"]);
+  stop();
+  await done;
 });
