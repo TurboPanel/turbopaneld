@@ -1,0 +1,190 @@
+---
+# Install a repository signing key with a warn-not-block policy.
+#
+# Inputs: repo_key_name, repo_key_url, repo_key_bundled, repo_key_dest,
+# repo_key_fingerprints, repo_key_policy (warn | enforce | bundled),
+# repo_key_warn_days. Sets repo_key_changed (the installed key file changed),
+# repo_key_source (fetched | bundled) and repo_key_warnings (list of strings).
+#
+# Candidates are tried in order: the fetched key, then the shipped copy
+# (only the shipped copy under `bundled`). An expired candidate is skipped in
+# favour of the other one (apt rejects an expired key).
+
+- name: Check the key policy
+  ansible.builtin.assert:
+    that:
+      - repo_key_policy in ['warn', 'enforce', 'bundled']
+      - repo_key_dest | length > 0
+      - repo_key_fingerprints | length > 0
+      - repo_key_policy != 'bundled' or repo_key_bundled | length > 0
+    fail_msg: >-
+      {{ repo_key_name }} key setup is misconfigured: policy must be warn,
+      enforce or bundled, and a destination and at least one fingerprint are
+      required (bundled needs the shipped copy).
+    quiet: true
+
+- name: Set the key state
+  ansible.builtin.set_fact:
+    repo_key_warnings: []
+    repo_key_changed: false
+    _repo_key_fetch_ok: false
+    _repo_key_fetched_path: "{{ repo_key_dest }}.fetched"
+
+- name: Look for gpg
+  ansible.builtin.command:
+    argv: [sh, -c, "command -v gpg"]
+  register: _repo_key_gpg
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# On a bare host a check run cannot read keys yet: gnupg is installed by the
+# real run. Say so instead of failing.
+- name: Say that the key check is skipped
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: gpg is not installed yet, so the {{ repo_key_name }}
+      repository key is not evaluated.
+  when:
+    - ansible_check_mode
+    - _repo_key_gpg.rc != 0
+
+- name: Fetch and choose the signing key
+  when: not (ansible_check_mode and _repo_key_gpg.rc != 0)
+  block:
+    - name: Fetch the key over HTTPS
+      when: repo_key_policy != 'bundled'
+      block:
+        - name: Download the key
+          ansible.builtin.get_url:
+            url: "{{ repo_key_url }}"
+            dest: "{{ _repo_key_fetched_path }}"
+            owner: root
+            group: root
+            mode: "0600"
+            force: true
+            timeout: "{{ repo_key_fetch_timeout }}"
+          changed_when: false
+        - name: Remember that the download worked
+          ansible.builtin.set_fact:
+            _repo_key_fetch_ok: "{{ not ansible_check_mode }}"
+      rescue:
+        - name: Note that the download failed
+          ansible.builtin.set_fact:
+            repo_key_warnings: >-
+              {{ repo_key_warnings + ['WARN ' ~ repo_key_name ~ ' repository key could not be fetched from '
+              ~ repo_key_url ~ ' (' ~ (ansible_failed_result.msg | default('unknown error'))
+              ~ '); using the copy shipped with TurboPanel'] }}
+
+    - name: Read the candidate keys
+      ansible.builtin.command:
+        argv: [gpg, --batch, --no-tty, --show-keys, --with-colons, "{{ item.path }}"]
+      register: _repo_key_reads
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      loop: >-
+        {{ ([{'source': 'fetched', 'path': _repo_key_fetched_path}] if _repo_key_fetch_ok | bool else [])
+        + ([{'source': 'bundled', 'path': repo_key_bundled}] if repo_key_bundled | length > 0 else []) }}
+      loop_control:
+        label: "{{ item.source }}"
+
+    - name: Start the candidate list
+      ansible.builtin.set_fact:
+        _repo_key_candidates: []
+
+    - name: Describe each candidate key that gpg could read
+      ansible.builtin.set_fact:
+        _repo_key_candidates: >-
+          {{ _repo_key_candidates + [{
+            'source': item.item.source,
+            'path': item.item.path,
+            'fingerprint': (item.stdout_lines | select('match', '^fpr:') | first).split(':')[9],
+            'expires': (item.stdout_lines | select('match', '^pub:') | first).split(':')[6],
+            'expired': ((item.stdout_lines | select('match', '^pub:') | first).split(':')[6] | length > 0)
+              and ((item.stdout_lines | select('match', '^pub:') | first).split(':')[6] | int <= now(utc=true).timestamp() | int),
+            'days_left': ((((item.stdout_lines | select('match', '^pub:') | first).split(':')[6] | int) - (now(utc=true).timestamp() | int)) // 86400)
+              if (item.stdout_lines | select('match', '^pub:') | first).split(':')[6] | length > 0 else -1
+          }] }}
+      loop: "{{ _repo_key_reads.results }}"
+      loop_control:
+        label: "{{ item.item.source }}"
+      when:
+        - item.stdout_lines | select('match', '^pub:') | list | length > 0
+        - item.stdout_lines | select('match', '^fpr:') | list | length > 0
+
+    - name: Pick the first key that has not expired
+      ansible.builtin.set_fact:
+        _repo_key_chosen: >-
+          {{ _repo_key_candidates | rejectattr('expired') | list | first | default({}) }}
+
+    - name: Warn about a candidate key that has expired
+      ansible.builtin.set_fact:
+        repo_key_warnings: >-
+          {{ repo_key_warnings + ['WARN ' ~ repo_key_name ~ ' repository key (' ~ item.source
+          ~ ') has expired and is not used'] }}
+      loop: "{{ _repo_key_candidates | selectattr('expired') | list }}"
+      loop_control:
+        label: "{{ item.source }}"
+
+    - name: Stop when there is no usable key
+      ansible.builtin.fail:
+        msg: >-
+          No usable {{ repo_key_name }} repository key: the key could not be
+          fetched or read, and the copy shipped with TurboPanel is missing,
+          unreadable or expired. Candidates:
+          {{ _repo_key_candidates | map(attribute='source') | list }}.
+      when: _repo_key_chosen | length == 0
+
+    - name: Refuse a key that is not in the expected list (enforce)
+      ansible.builtin.fail:
+        msg: >-
+          {{ repo_key_name }} repository key fingerprint changed: expected
+          {{ repo_key_fingerprints }}, got {{ _repo_key_chosen.fingerprint }}.
+          Policy is enforce, so the install stops.
+      when:
+        - repo_key_policy == 'enforce'
+        - _repo_key_chosen.fingerprint not in repo_key_fingerprints
+
+    - name: Warn about a key that is not in the expected list
+      ansible.builtin.set_fact:
+        repo_key_warnings: >-
+          {{ repo_key_warnings + ['WARN ' ~ repo_key_name ~ ' repository key fingerprint changed: expected '
+          ~ (repo_key_fingerprints | string) ~ ', got ' ~ _repo_key_chosen.fingerprint
+          ~ ' (continuing: package signatures are still verified against this key)'] }}
+      when: _repo_key_chosen.fingerprint not in repo_key_fingerprints
+
+    - name: Warn about a key that expires soon
+      ansible.builtin.set_fact:
+        repo_key_warnings: >-
+          {{ repo_key_warnings + ['WARN ' ~ repo_key_name ~ ' repository key expires in '
+          ~ (_repo_key_chosen.days_left | string) ~ ' days'] }}
+      when:
+        - _repo_key_chosen.expires | length > 0
+        - _repo_key_chosen.days_left | int <= repo_key_warn_days | int
+
+    - name: Install the chosen key
+      ansible.builtin.copy:
+        src: "{{ _repo_key_chosen.path }}"
+        dest: "{{ repo_key_dest }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"  # NOSONAR ansible:S2612 — apt reads the key and source as its sandbox user
+      register: _repo_key_installed
+
+    - name: Record the result
+      ansible.builtin.set_fact:
+        repo_key_changed: "{{ _repo_key_installed is changed }}"
+        repo_key_source: "{{ _repo_key_chosen.source }}"
+  always:
+    - name: Remove the temporary key download
+      ansible.builtin.file:
+        path: "{{ _repo_key_fetched_path }}"
+        state: absent
+      changed_when: false
+
+- name: Report key warnings
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop: "{{ repo_key_warnings }}"

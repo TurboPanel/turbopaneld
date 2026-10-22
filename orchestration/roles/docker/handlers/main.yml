@@ -16,4 +16,6 @@
   ansible.builtin.systemd:
     name: docker
     state: restarted
-  when: not (_docker_restart_deferred | default(true) | bool)
+  when:
+    - not (_docker_restart_deferred | default(true) | bool)
+    - not (_docker_fresh_install | bool)

@@ -106,35 +106,8 @@ export const GALAXY_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,
   "requirements.yml",
 );
-/** Docker Galaxy roles (geerlingguy.docker) — installed on demand only. */
-export const GALAXY_DOCKER_REQUIREMENTS_FILE = join(
-  ORCHESTRATION_DIR,
-  "requirements-docker.yml",
-);
-/**
- * Upstream GitHub repo for the pinned geerlingguy.docker Galaxy role.
- * ansible-galaxy resolves classic roles via `github.com/.../archive/*.tar.gz`,
- * which intermittently returns 503 from GitHub's edge; {@link ensureGalaxyDockerRole}
- * downloads the same tag via codeload instead (see {@link galaxyDockerRoleCodeloadUrl}).
- */
-export const GALAXY_DOCKER_ROLE_GITHUB_REPO = "geerlingguy/ansible-role-docker";
-
-/** Codeload archive URL for a pinned geerlingguy.docker role tag. */
-export function galaxyDockerRoleCodeloadUrl(version: string): string {
-  return `https://codeload.github.com/${GALAXY_DOCKER_ROLE_GITHUB_REPO}/tar.gz/refs/tags/${version}`;
-}
-/** First-party Ansible roles in the orchestration checkout (not Galaxy). */
-export const GALAXY_ROLES_DIR = join(ORCHESTRATION_DIR, "roles");
-/**
- * Galaxy-installed roles (`geerlingguy.docker`, …). Under vendor — never the
- * checkout `roles/` tree — so Vagrant VirtFS mounts (host-owned, guest-unwritable)
- * and production FHS stay consistent with {@link GALAXY_COLLECTIONS_DIR}.
- */
-export const GALAXY_VENDOR_ROLES_DIR = join(
-  RUNTIMES_DIR,
-  "ansible",
-  "galaxy-roles",
-);
+/** Ansible roles in the orchestration checkout (all first-party). */
+export const ORCHESTRATION_ROLES_DIR = join(ORCHESTRATION_DIR, "roles");
 export const GALAXY_COLLECTIONS_DIR = join(
   RUNTIMES_DIR,
   "ansible",
@@ -170,8 +143,8 @@ export const ANSIBLE_CFG = join(ORCHESTRATION_DIR, "ansible.cfg");
 
 /**
  * Root helper shipped in the orchestration tree. On managed hosts the daemon
- * account has no `sudo /bin/sh`, so every playbook (and the Galaxy Docker
- * role fetch) runs as root through this validated entrypoint instead of
+ * account has no `sudo /bin/sh`, so every playbook runs as root through this
+ * validated entrypoint instead of
  * Ansible `become` — see `privileged.ts` and roles/turbopanel-user.
  */
 export const ORCHESTRATE_HELPER = join(
@@ -206,7 +179,7 @@ export function ansibleProbeEnv(): Record<string, string> {
   return {
     ANSIBLE_CONFIG: ANSIBLE_CFG,
     ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
-    ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
+    ANSIBLE_ROLES_PATH: `${ORCHESTRATION_ROLES_DIR}`,
     HOME: ANSIBLE_STATE_DIR,
     ANSIBLE_HOME: ANSIBLE_STATE_DIR,
     ANSIBLE_LOCAL_TEMP: ANSIBLE_STATE_DIR,
@@ -221,7 +194,7 @@ export function ansibleEnv(): Record<string, string> {
     ANSIBLE_EXECUTABLE: ANSIBLE_SHELL_EXECUTABLE,
     ANSIBLE_HOME: ansibleHome(),
     ANSIBLE_LOCAL_TEMP: ANSIBLE_LOCAL_TMP,
-    ANSIBLE_ROLES_PATH: `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`,
+    ANSIBLE_ROLES_PATH: `${ORCHESTRATION_ROLES_DIR}`,
   };
 }
 

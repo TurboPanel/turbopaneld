@@ -2,10 +2,6 @@
 # Repo-root config for IDE ansible-lint (cwd = daemon checkout).
 # Runtime converge still uses orchestration/ansible.cfg + orchestration/.ansible-lint.
 #
-# geerlingguy.* Galaxy installs (requirements-docker.yml) — third-party,
-# gitignored, and must not be linted or edited. exclude_paths only apply to
-# auto-discovery (explicitly opened files still lint via the nested
-# geerlingguy.*/.ansible-lint written by ensureGalaxyDockerRole).
 offline: true
 
 # Rules that fire on first-party content today. Reported, not fatal, so
@@ -30,10 +26,3 @@ exclude_paths:
   # Agent worktrees are checkouts of this same repo; linting them double-counts
   # every finding against a stale copy.
   - .claude/
-  # Galaxy geerlingguy.docker (dot layout) and geerlingguy/docker (author/role)
-  - orchestration/roles/geerlingguy.docker/
-  - orchestration/roles/geerlingguy/
-  - orchestration/roles/geerlingguy.*/
-  - "**/orchestration/roles/geerlingguy.docker/**"
-  - "**/orchestration/roles/geerlingguy/**"
-  - "**/orchestration/roles/geerlingguy.*/**"
