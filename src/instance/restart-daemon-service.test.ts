@@ -186,6 +186,7 @@ test("a nonzero restart is retried once and a second success is ok", async () =>
   assertEquals(ok, true);
   assertEquals(restartCalls, 2);
   assertEquals(reports[0].ok, true);
+  assertEquals(reports[0].attempts, 2);
 });
 
 test("a restart that fails twice reports the exit code, stderr and tries", async () => {
@@ -275,4 +276,53 @@ test("restart failure text and wire object stay bounded and plain", () => {
     restartFailureMessage(undefined),
     "daemon restart failed after reconcile",
   );
+});
+
+test("a killed enable is a real failure: retried once, then reported, and restart never runs", async () => {
+  const { reports, onReport } = collect();
+  const calls: string[] = [];
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    retryDelayMs: 0,
+    onReport,
+    runSystemctl: (args) => {
+      calls.push(args[2]);
+      return Promise.resolve(
+        args[2] === "enable"
+          ? { success: false, stderr: "", code: 143, signal: null }
+          : { success: true, stderr: "" },
+      );
+    },
+  });
+  assertEquals(ok, false);
+  assertEquals(calls, ["enable", "enable"]);
+  assertEquals(reports.length, 1);
+  assertEquals(reports[0].ok, false);
+  assertEquals(reports[0].endedByRestart, false);
+  assertEquals(reports[0].command, "enable");
+  assertEquals(reports[0].exitCode, 143);
+  assertEquals(reports[0].attempts, 2);
+});
+
+test("an enable killed once and then accepted goes on to restart", async () => {
+  const { reports, onReport } = collect();
+  const calls: string[] = [];
+  const ok = await restartDaemonService({
+    unit: "u.service",
+    retryDelayMs: 0,
+    onReport,
+    runSystemctl: (args) => {
+      calls.push(args[2]);
+      const first = args[2] === "enable" && calls.length === 1;
+      return Promise.resolve(
+        first
+          ? { success: false, stderr: "", code: null, signal: "SIGKILL" }
+          : { success: true, stderr: "" },
+      );
+    },
+  });
+  assertEquals(ok, true);
+  assertEquals(calls, ["enable", "enable", "restart"]);
+  assertEquals(reports[0].ok, true);
+  assertEquals(reports[0].attempts, 2);
 });

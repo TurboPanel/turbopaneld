@@ -66,7 +66,7 @@ export type DaemonRestartReport = {
   exitCode: number | null;
   signal: string | null;
   stderr: string;
-  /** Times the failing command was run (2 after the single retry). */
+  /** Times the failing command was run (2 after the single retry); on success, the most any command needed. */
   attempts: number;
   elapsedMs: number;
 };
@@ -82,6 +82,15 @@ export const RESTART_RETRY_DELAY_MS = 1000;
 export function endedByUnitStop(run: SystemctlRun): boolean {
   if (run.signal && KILLED_SIGNALS.has(run.signal)) return true;
   return typeof run.code === "number" && KILLED_EXIT_CODES.has(run.code);
+}
+
+/**
+ * Only the `restart` call stops this unit, so only a killed `restart` means
+ * the restart happened. A killed `enable` came before any restart was queued
+ * and is a real failure.
+ */
+function restartTookEffect(args: string[], run: SystemctlRun): boolean {
+  return args[2] === "restart" && endedByUnitStop(run);
 }
 
 type RestartOptions = {
@@ -142,7 +151,8 @@ function logRestartFailure(
  * the unit at once and kills the whole cgroup, which still holds the exiting
  * `sudo` parent. On a slow host the parent can be ended by that SIGTERM after
  * `systemctl` already succeeded, so a command ended by SIGTERM/SIGKILL counts
- * as the restart having happened, not as a failure. A real nonzero exit is
+ * as the restart having happened, not as a failure. That holds only for the
+ * `restart` call: a killed `enable` is a real failure. A real failure is
  * retried once before it is reported.
  */
 export async function restartDaemonService(
@@ -167,15 +177,17 @@ export async function restartDaemonService(
     return full.ok;
   };
 
+  let mostAttempts = 1;
   for (const args of buildDaemonRestartSystemctlArgs(unit)) {
     let run = await runSystemctl(args);
     let attempts = 1;
-    if (!run.success && !endedByUnitStop(run)) {
+    if (!run.success && !restartTookEffect(args, run)) {
       logRestartFailure(unit, args, run);
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       run = await runSystemctl(args);
       attempts = 2;
     }
+    mostAttempts = Math.max(mostAttempts, attempts);
     if (run.success) continue;
     const command = args[2];
     const failure = {
@@ -185,13 +197,13 @@ export async function restartDaemonService(
       stderr: run.stderr,
       attempts,
     };
-    if (endedByUnitStop(run)) {
+    if (restartTookEffect(args, run)) {
       return report({ ...failure, ok: true, endedByRestart: true });
     }
     logRestartFailure(unit, args, run);
     return report({ ...failure, ok: false });
   }
-  return report({});
+  return report({ attempts: mostAttempts });
 }
 
 /** One line for the step detail: command, exit status, stderr, tries and elapsed time. */
