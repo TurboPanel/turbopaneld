@@ -11,6 +11,7 @@ import type {
   ManagedLifecyclePayload,
   ManagedLifecycleResult,
 } from "../contracts/commands-contracts.ts";
+import { captureFinalPositionAfterStop } from "./switchover-final-position.ts";
 import {
   type DockerCliResult,
   runDocker as defaultRunDocker,
@@ -441,7 +442,12 @@ async function runManagedLifecycle(
   await runManagedComposeLifecycleAction(payload, project, run);
   if (fenceError !== undefined) throw fenceIncompleteError(fenceError);
 
-  return await finalizeManagedLifecycle(
+  const finalPosition = await captureFinalPositionAfterStop(
+    payload,
+    layout,
+    run,
+  );
+  const result = await finalizeManagedLifecycle(
     payload,
     layout,
     project,
@@ -449,4 +455,5 @@ async function runManagedLifecycle(
     engineDeps,
     switchoverPrimaryExecutedGtidSet,
   );
+  return finalPosition === undefined ? result : { ...result, ...finalPosition };
 }

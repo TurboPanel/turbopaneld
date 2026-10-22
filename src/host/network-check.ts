@@ -8,8 +8,9 @@
  * For each target the host opens a TCP connection to `address:port`, records
  * how long it took and which local address it left from, and closes it
  * without sending a byte. Targets must be private-network addresses (the
- * same test as `collectServerIps`), so the check cannot be pointed at this
- * host, a link-local address or the open internet. The whole run is bounded:
+ * same test as `collectServerIps`), so the check cannot be pointed at
+ * loopback, a link-local address or the open internet. This host's own
+ * private address passes; it simply answers. The whole run is bounded:
  * at most {@link SERVER_NETWORK_CHECK_MAX_TARGETS} targets, each cut off after
  * {@link NETWORK_CHECK_TIMEOUT_MS}.
  */
