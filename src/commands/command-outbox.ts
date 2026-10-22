@@ -173,6 +173,20 @@ export async function markCommandInFlight(id: string): Promise<void> {
   await queueWrite(id, () => writeJournalAtomic(entryFor(id, {})));
 }
 
+/**
+ * A dispatch for a command this daemon already accepted (still running, or
+ * finished with its outcome kept) must not run it again. Returns true when the
+ * id is known; a kept outcome is sent again on `ws`, and a running command
+ * will report as usual.
+ */
+export function answerRepeatedDispatch(ws: OutboxSocket, id: string): boolean {
+  if (running.has(id)) return true;
+  const kept = held.get(id) ?? unacked.get(id);
+  if (kept === undefined) return false;
+  sendOutcome(ws, kept);
+  return true;
+}
+
 function planSignature(progress: CommandProgress): string {
   const steps = progress.steps.map((step) => `${step.id}:${step.state}`);
   return JSON.stringify([steps, progress.current, progress.runningSince]);
@@ -459,7 +473,13 @@ async function pruneUnacked(): Promise<void> {
     const at = outcomeTimeIso(unacked.get(id));
     return at !== undefined && Date.parse(at) < cutoff;
   });
+  // Beyond the cap the oldest outcomes go first; one without a readable time counts as oldest.
+  const recordedMs = (id: string) => {
+    const at = outcomeTimeIso(unacked.get(id));
+    return at === undefined ? Number.NEGATIVE_INFINITY : Date.parse(at);
+  };
   const overflow = ids.filter((id) => !stale.includes(id))
+    .sort((a, b) => recordedMs(a) - recordedMs(b))
     .slice(0, Math.max(0, ids.length - stale.length - UNACKED_MAX_ENTRIES));
   const drop = [...stale, ...overflow];
   if (drop.length === 0) return;

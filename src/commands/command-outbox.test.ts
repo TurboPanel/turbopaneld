@@ -412,3 +412,30 @@ test("an unconfirmed outcome past the retention is dropped, one without a readab
     assertEquals(await journalNames(), ["no-time.json"]);
   });
 });
+
+test("past the entry cap the outcomes recorded first are dropped, whatever order they arrived in", async () => {
+  await withState(async () => {
+    fakeTime();
+    const open = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(open.ws, recovering);
+    // They arrive newest first: order-<i> carries an older time as i grows.
+    const count = UNACKED_MAX_ENTRIES + 2;
+    for (let i = 0; i < count; i++) {
+      const id = `order-${i}`;
+      await markCommandInFlight(id);
+      await deliverCommandOutcome(open.ws, {
+        type: "command-outcome",
+        id,
+        ok: true,
+        at: new Date(Date.parse("2026-10-22T09:00:00.000Z") - i * 1000)
+          .toISOString(),
+      });
+    }
+    await flushCommandOutcomes(open.ws, recovering);
+    const names = await journalNames();
+    assertEquals(names.length, UNACKED_MAX_ENTRIES);
+    assertEquals(names.includes("order-0.json"), true);
+    assertEquals(names.includes(`order-${count - 1}.json`), false);
+    assertEquals(names.includes(`order-${count - 2}.json`), false);
+  });
+});

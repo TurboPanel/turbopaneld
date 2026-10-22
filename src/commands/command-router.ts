@@ -1,10 +1,11 @@
 import {
+  answerRepeatedDispatch,
   deliverCommandOutcome,
   markCommandInFlight,
   noteCommandProgress,
   recoveryEnabled,
 } from "./command-outbox.ts";
-import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { errorText, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
@@ -240,6 +241,17 @@ export async function handleCommandDispatch(
   };
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(ack));
+  }
+
+  // The same command sent again (a lost link, a control plane restart) never runs twice.
+  if (answerRepeatedDispatch(ws, message.id)) {
+    logWarn(
+      "commands",
+      `command ${
+        sanitizeForLog(message.id)
+      } was sent again; it is not run a second time`,
+    );
+    return;
   }
 
   await markCommandInFlight(message.id);
