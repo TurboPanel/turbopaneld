@@ -219,19 +219,6 @@ export function createNetworkAccountSql(
 }
 
 /**
- * Repair / ensure socket-auth platform admins after a password bootstrap.
- * Safe to re-run; does not embed credentials. The daemon installs
- * `auth_socket` first — MySQL has no `INSTALL PLUGIN IF NOT EXISTS`.
- */
-export function ensureSocketAdminSql(osUser: string = "mysql"): string {
-  return socketAdminSql(
-    accountAt("root", "localhost"),
-    accountAt(osUser, "localhost"),
-    "WITH auth_socket",
-  );
-}
-
-/**
  * Session-only: keep replica-local statements out of the binary log so they
  * cannot mint a replica-UUID GTID the primary never executed.
  */
@@ -265,6 +252,19 @@ export function installAuthSocketPluginSql(): string {
 
 export function authSocketPluginPresentSql(): string {
   return "SELECT PLUGIN_NAME FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME = 'auth_socket'";
+}
+
+/**
+ * Repair / ensure socket-auth platform admins after a password bootstrap.
+ * Safe to re-run; does not embed credentials. The daemon installs
+ * `auth_socket` first — MySQL has no `INSTALL PLUGIN IF NOT EXISTS`.
+ */
+export function ensureSocketAdminSql(osUser: string = "mysql"): string {
+  return socketAdminSql(
+    accountAt("root", "localhost"),
+    accountAt(osUser, "localhost"),
+    "WITH auth_socket",
+  );
 }
 
 /**
