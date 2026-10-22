@@ -120,7 +120,7 @@ for (const image of IMAGES) {
           primary,
           "CREATE DATABASE shop; CREATE TABLE shop.t (id INT, note VARCHAR(80)); " +
             `INSERT INTO shop.t VALUES (1, '${SECRET_ROW_VALUE}'); ` +
-            "CREATE USER 'seed_u'@'%' IDENTIFIED BY '${SEED_USER_PASSWORD}';",
+            `CREATE USER 'seed_u'@'%' IDENTIFIED BY '${SEED_USER_PASSWORD}';`,
         );
         assertEquals(setup.success, true, setup.stderr);
 
