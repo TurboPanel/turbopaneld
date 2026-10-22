@@ -23,6 +23,7 @@ import { saveManagedHaMember } from "./ha-member.ts";
 import { dirname } from "@std/path";
 import {
   DEAD_PRIMARY_EVENT_HOLD_MS,
+  isDeadPrimaryEventInFlight,
   noteDeadPrimaryEventDelivered,
   resetDeadPrimaryEventsForTests,
 } from "./dead-primary-inflight.ts";
@@ -831,60 +832,117 @@ test("an explicit start after a failed stop lets the guard act again", async () 
   });
 });
 
-test("a dead primary whose failover event was just sent is not restarted, until the hold runs out", async () => {
+async function guardFor(
+  env: Record<string, string>,
+  role: "primary" | "replica",
+  run: (args: string[]) => Promise<DockerCliResult>,
+  nowMs: () => number,
+): Promise<ManagedEngineExitGuard> {
+  const layout = resolveLayout(env);
+  await seedMember(layout);
+  return new ManagedEngineExitGuard({
+    layout,
+    run,
+    listMembers: () => Promise.resolve([{ ...memberRecord(), role }]),
+    minStartGapMs: 1,
+    nowMs,
+  });
+}
+
+test("a dead primary whose failover event was just sent is not restarted, until the short hold runs out", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
     resetDeadPrimaryEventsForTests();
-    const layout = resolveLayout(env);
-    await seedMember(layout);
     const fake = docker();
     let now = 1_000_000;
-    const guard = new ManagedEngineExitGuard({
-      layout,
-      run: fake.run,
-      listMembers: () => Promise.resolve([memberRecord()]),
-      minStartGapMs: 1,
-      nowMs: () => now,
-    });
-    const starts = () =>
-      fake.calls.filter((args) =>
-        args[0] === "compose" && args.at(-1) === "start"
-      ).length;
+    const guard = await guardFor(env, "primary", fake.run, () => now);
     noteDeadPrimaryEventDelivered(MANAGED_ID, now);
     now += 5_000;
     await guard.tick();
-    assertEquals(starts(), 0);
+    assertEquals(startCount(fake.calls), 0);
     now += DEAD_PRIMARY_EVENT_HOLD_MS;
     await guard.tick();
-    assertEquals(starts(), 1);
+    assertEquals(startCount(fake.calls), 1);
     resetDeadPrimaryEventsForTests();
   });
 });
 
-test("a dead replica is still restarted while its cluster has a dead-primary event in flight", async () => {
+test("re-sent events of one incident do not renew the hold", async () => {
   await withTempLayout(async ({ env }) => {
     resetManagedIntentsForTests();
     resetDeadPrimaryEventsForTests();
-    const layout = resolveLayout(env);
-    await seedMember(layout);
     const fake = docker();
-    const now = 1_000_000;
-    const replica = { ...memberRecord(), role: "replica" as const };
-    const guard = new ManagedEngineExitGuard({
-      layout,
-      run: fake.run,
-      listMembers: () => Promise.resolve([replica]),
-      nowMs: () => now,
-      // The replica start probe needs a real standby volume: not under test.
-    });
+    let now = 1_000_000;
+    const guard = await guardFor(env, "primary", fake.run, () => now);
+    noteDeadPrimaryEventDelivered(MANAGED_ID, now);
+    now += 20_000;
+    noteDeadPrimaryEventDelivered(MANAGED_ID, now);
+    now += 6_000; // 26 s after the first event, 6 s after the re-send
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 1);
+    resetDeadPrimaryEventsForTests();
+  });
+});
+
+test("a failover command that arrives keeps the primary stopped after the short hold ran out", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetDeadPrimaryEventsForTests();
+    const fake = docker();
+    let now = Date.now();
+    const guard = await guardFor(env, "primary", fake.run, () => now);
+    noteDeadPrimaryEventDelivered(MANAGED_ID, now);
+    // The fence command reaches this host: its marker now holds the guard.
+    await beginManagedIntent(
+      resolveLayout(env).stateDir,
+      MANAGED_ID,
+      "failover",
+    );
+    now += 10 * DEAD_PRIMARY_EVENT_HOLD_MS;
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+    resetManagedIntentsForTests();
+    resetDeadPrimaryEventsForTests();
+  });
+});
+
+test("seeing the engine run again ends the incident so the next event starts a fresh hold", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetDeadPrimaryEventsForTests();
+    const running = docker(
+      JSON.stringify([{
+        ID: "a",
+        Name: "db-1",
+        Service: "db",
+        State: "running",
+      }]),
+    );
+    let now = 1_000_000;
+    const guard = await guardFor(env, "primary", running.run, () => now);
     noteDeadPrimaryEventDelivered(MANAGED_ID, now);
     await guard.tick();
-    // A replica is not the one reported dead: the in-flight note must not
-    // be what stops it (the standby check may still decide on its own).
-    assertEquals(
-      fake.calls.some((args) => args.includes("ps")),
-      true,
-    );
+    assertEquals(isDeadPrimaryEventInFlight(MANAGED_ID, now), false);
+    now += 60_000;
+    noteDeadPrimaryEventDelivered(MANAGED_ID, now);
+    assertEquals(isDeadPrimaryEventInFlight(MANAGED_ID, now), true);
+    resetDeadPrimaryEventsForTests();
+  });
+});
+
+test("the in-flight note changes nothing for a dead replica", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetDeadPrimaryEventsForTests();
+    const now = 1_000_000;
+    const without = docker();
+    const guardA = await guardFor(env, "replica", without.run, () => now);
+    await guardA.tick();
+    noteDeadPrimaryEventDelivered(MANAGED_ID, now);
+    const withNote = docker();
+    const guardB = await guardFor(env, "replica", withNote.run, () => now);
+    await guardB.tick();
+    assertEquals(withNote.calls, without.calls);
     resetDeadPrimaryEventsForTests();
   });
 });

@@ -1,3 +1,7 @@
+import {
+  isDeadPrimaryEventInFlight,
+  resetDeadPrimaryEventsForTests,
+} from "../managed/dead-primary-inflight.ts";
 import { assertEquals } from "@std/assert";
 import {
   engineInspectPortsJson,
@@ -1087,6 +1091,37 @@ test("ManagedHaObserver emits full identity after replication-analysis recovers 
     analysisFails = false;
     await observer.poll();
     assertEquals(sent.length, 1);
+  });
+});
+
+test("ManagedHaObserver tells the engine exit guard once an event is delivered, not when it is not", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    for (const delivered of [false, true]) {
+      resetDeadPrimaryEventsForTests();
+      const observer = new ManagedHaObserver({
+        layout,
+        nowMs: () => Date.now(),
+        runDocker: runDockerForDial(DEFAULT_DIAL),
+        send: () => delivered,
+        isStackPresent: () => Promise.resolve(true),
+        api: {
+          credentials: { user: "admin", password: "x" },
+          fetch: () => Promise.resolve(deadPrimaryResponse()),
+        },
+      });
+      await observer.poll();
+      assertEquals(
+        isDeadPrimaryEventInFlight(
+          MANAGED_ID,
+          Date.now(),
+          Number.POSITIVE_INFINITY,
+        ),
+        delivered,
+      );
+    }
+    resetDeadPrimaryEventsForTests();
   });
 });
 

@@ -1,4 +1,8 @@
 import { assert, assertEquals } from "@std/assert";
+import {
+  isDeadPrimaryEventInFlight,
+  resetDeadPrimaryEventsForTests,
+} from "../managed/dead-primary-inflight.ts";
 import type { ManagedHaMemberRecord } from "../managed/ha-member.ts";
 import type { ProbeSample } from "../managed/pg-dead-primary.ts";
 import {
@@ -126,6 +130,21 @@ test("dead primary emits one managed-ha-event with detector and evidence", async
   assertEquals(event.evidence.failures, 6);
   assertEquals(event.evidence.container?.status, "exited");
   assert(!Number.isNaN(Date.parse(event.at)));
+});
+
+test("sending the event tells the engine exit guard a failover is starting", async () => {
+  resetDeadPrimaryEventsForTests();
+  const h = harness();
+  await withAttached(h, () => pollTicks(h, 20));
+  assertEquals(h.sent.length, 1);
+  assert(
+    isDeadPrimaryEventInFlight(
+      MANAGED_ID,
+      Date.now(),
+      Number.POSITIVE_INFINITY,
+    ),
+  );
+  resetDeadPrimaryEventsForTests();
 });
 
 test("active intent marker suppresses the event", async () => {
