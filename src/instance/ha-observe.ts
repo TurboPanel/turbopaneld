@@ -28,6 +28,7 @@ import {
   type OrchestratorDeadPrimaryEmitContext,
   resolveOrchestratorDeadPrimaryEmit,
 } from "../managed/ha-orchestrator-managed-id.ts";
+import { noteDeadPrimaryEventDelivered } from "../managed/dead-primary-inflight.ts";
 import {
   runDocker as defaultRunDocker,
   type RunDockerFn,
@@ -242,6 +243,7 @@ export class ManagedHaObserver {
       );
       return;
     }
+    noteDeadPrimaryEventDelivered(managedId, now);
     this.#incidentLastDelivered.set(incidentKey, now);
     logInfo(
       "managed",

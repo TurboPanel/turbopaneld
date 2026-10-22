@@ -27,6 +27,7 @@
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
+import { noteDeadPrimaryEventDelivered } from "../managed/dead-primary-inflight.ts";
 import {
   listManagedHaMembers,
   type ManagedHaMemberRecord,
@@ -578,6 +579,7 @@ export class PgDeadPrimaryObserver {
     });
     if (!delivered) return;
     watch.detector.markEmitted(monoMs);
+    noteDeadPrimaryEventDelivered(record.managedId, wallMs);
     logInfo(
       "managed",
       `managed-ha-event emitted managedId=${record.managedId} detector=${POSTGRES_PROBE_DETECTOR} failures=${verdict.evidence.failures} attempt=${verdict.evidence.attempt}`,

@@ -21,6 +21,11 @@ import {
 } from "./ha-intent.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
 import { dirname } from "@std/path";
+import {
+  DEAD_PRIMARY_EVENT_HOLD_MS,
+  noteDeadPrimaryEventDelivered,
+  resetDeadPrimaryEventsForTests,
+} from "./dead-primary-inflight.ts";
 import { forEachSequential } from "../util/sequential.ts";
 
 /**
@@ -823,5 +828,63 @@ test("an explicit start after a failed stop lets the guard act again", async () 
     });
     await guard.tick();
     assertEquals(startCount(fake.calls), 1);
+  });
+});
+
+test("a dead primary whose failover event was just sent is not restarted, until the hold runs out", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetDeadPrimaryEventsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    let now = 1_000_000;
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+      minStartGapMs: 1,
+      nowMs: () => now,
+    });
+    const starts = () =>
+      fake.calls.filter((args) =>
+        args[0] === "compose" && args.at(-1) === "start"
+      ).length;
+    noteDeadPrimaryEventDelivered(MANAGED_ID, now);
+    now += 5_000;
+    await guard.tick();
+    assertEquals(starts(), 0);
+    now += DEAD_PRIMARY_EVENT_HOLD_MS;
+    await guard.tick();
+    assertEquals(starts(), 1);
+    resetDeadPrimaryEventsForTests();
+  });
+});
+
+test("a dead replica is still restarted while its cluster has a dead-primary event in flight", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetDeadPrimaryEventsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    const now = 1_000_000;
+    const replica = { ...memberRecord(), role: "replica" as const };
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([replica]),
+      nowMs: () => now,
+      // The replica start probe needs a real standby volume: not under test.
+    });
+    noteDeadPrimaryEventDelivered(MANAGED_ID, now);
+    await guard.tick();
+    // A replica is not the one reported dead: the in-flight note must not
+    // be what stops it (the standby check may still decide on its own).
+    assertEquals(
+      fake.calls.some((args) => args.includes("ps")),
+      true,
+    );
+    resetDeadPrimaryEventsForTests();
   });
 });

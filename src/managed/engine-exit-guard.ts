@@ -30,6 +30,7 @@ import {
 import { replicaStandbyDataAllowsEngineStart } from "./replica-start-guard.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
 import { isBootHoldUnsettled } from "./boot-hold.ts";
+import { isDeadPrimaryEventInFlight } from "./dead-primary-inflight.ts";
 
 export const ENGINE_EXIT_GUARD_INTERVAL_MS = 60_000;
 export const ENGINE_EXIT_GUARD_MIN_START_GAP_MS = 60_000;
@@ -213,6 +214,13 @@ export class ManagedEngineExitGuard {
       )
     ) {
       this.#loggedSkip.delete(managedId);
+      return true;
+    }
+    // A primary whose dead-primary event was just sent is about to be failed
+    // over: restarting it now would let it take writes while it is fenced.
+    if (
+      member.role === "primary" && isDeadPrimaryEventInFlight(managedId, now)
+    ) {
       return true;
     }
     return await intentBlocksEngineStart(this.#layout.stateDir, managedId, now);
