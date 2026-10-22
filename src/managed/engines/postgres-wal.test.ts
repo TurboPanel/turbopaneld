@@ -1,5 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
+  FINAL_POSITION_SCRIPT,
+  FINAL_POSITION_SEPARATOR,
   finalWalPositionFromOutput,
   formatLsn,
   parseControlData,
@@ -19,7 +21,8 @@ const CONTROL_DATA = [
   "Latest checkpoint location:           0/7257FC0",
   "Latest checkpoint's REDO location:    0/7257FC0",
   "Latest checkpoint's TimeLineID:       1",
-  "Database block size:                  8192",
+  "Database block size:                  32768",
+  "WAL block size:                       8192",
   "Bytes per WAL segment:                16777216",
 ].join("\n");
 
@@ -127,6 +130,78 @@ test("a checkpoint that is not a shutdown checkpoint reports no position", () =>
       ),
       WALDUMP,
     ),
+    null,
+  );
+});
+
+test("a cluster on timeline 2 reports its own timeline", () => {
+  const control = CONTROL_DATA.replace(
+    "TimeLineID:       1",
+    "TimeLineID:       2",
+  );
+  assertEquals(
+    finalWalPositionFromOutput(control, WALDUMP.replace("tli 1", "tli 2")),
+    {
+      lsn: "0/7258050",
+      timeline: 2,
+    },
+  );
+});
+
+test("the final position script reads the WAL of the cluster's own timeline", async () => {
+  // Stand-in tools: pg_waldump only finds the record when asked for timeline 2,
+  // as the real one does on a promoted cluster whose segments are named 00000002...
+  const bin = await Deno.makeTempDir();
+  try {
+    const control = CONTROL_DATA.replace(
+      "TimeLineID:       1",
+      "TimeLineID:       2",
+    );
+    await Deno.writeTextFile(
+      `${bin}/pg_controldata`,
+      `#!/bin/sh\ncat <<'EOF'\n${control}\nEOF\n`,
+    );
+    await Deno.writeTextFile(
+      `${bin}/pg_waldump`,
+      [
+        "#!/bin/sh",
+        'case " $* " in',
+        `  *" -t 2 "*) echo '${WALDUMP.replace("tli 1", "tli 2")}' ;;`,
+        "  *) echo 'pg_waldump: error: could not find file' >&2; exit 1 ;;",
+        "esac",
+      ].join("\n") + "\n",
+    );
+    await Deno.chmod(`${bin}/pg_controldata`, 0o755);
+    await Deno.chmod(`${bin}/pg_waldump`, 0o755);
+    const out = await new Deno.Command("sh", {
+      args: ["-c", FINAL_POSITION_SCRIPT, "sh", "/data"],
+      env: { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` },
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    assertEquals(out.success, true);
+    const [controlOut, waldumpOut] = new TextDecoder()
+      .decode(out.stdout)
+      .split(`${FINAL_POSITION_SEPARATOR}\n`);
+    assertEquals(finalWalPositionFromOutput(controlOut, waldumpOut ?? ""), {
+      lsn: "0/7258050",
+      timeline: 2,
+    });
+  } finally {
+    await Deno.remove(bin, { recursive: true });
+  }
+});
+
+test("the block size comes from the WAL block size, not the database block size", () => {
+  const control = parseControlData(
+    CONTROL_DATA.replace(
+      "WAL block size:                       8192",
+      "WAL block size:                       4096",
+    ),
+  );
+  assertEquals(control?.geometry.blockSize, 4096);
+  assertEquals(
+    parseControlData(CONTROL_DATA.replace("WAL block size", "Other")),
     null,
   );
 });

@@ -95,7 +95,7 @@ export function parseControlData(text: string): PostgresControlData | null {
   const timeline = positiveInt(
     controlValue(text, "Latest checkpoint's TimeLineID"),
   );
-  const blockSize = positiveInt(controlValue(text, "Database block size"));
+  const blockSize = positiveInt(controlValue(text, "WAL block size"));
   const segmentSize = positiveInt(controlValue(text, "Bytes per WAL segment"));
   if (state === null || checkpoint === null || redo === null) return null;
   if (timeline === null || blockSize === null || segmentSize === null) {
@@ -162,7 +162,9 @@ export const FINAL_POSITION_SCRIPT = [
   "echo '@@@'",
   String
     .raw`l=$(printf '%s\n' "$out" | sed -n 's/^Latest checkpoint location: *//p')`,
-  'pg_waldump -p "$D/pg_wal" -s "$l" -n 1 2>/dev/null || true',
+  String
+    .raw`t=$(printf '%s\n' "$out" | sed -n "s/^Latest checkpoint's TimeLineID: *//p")`,
+  'pg_waldump -p "$D/pg_wal" -t "$t" -s "$l" -n 1 2>/dev/null || true',
 ].join("\n");
 
 export const FINAL_POSITION_SEPARATOR = "@@@";
