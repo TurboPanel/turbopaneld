@@ -122,6 +122,16 @@ on-demand health: a control plane that sees the feature may send
 `readManagedPermissions` (`src/managed/permissions-read.ts`), which always
 answers. Read only, no command row, no outbox; the answer stays under 100 KB.
 
+**Server network check (`server-network-check-v1`).** A control plane that
+sees the feature may send `server-network-check-request` (`targets`, up to 32,
+each `peerServerId`, a private-network `address` and a TCP `port`) and gets
+`server-network-check-result` on the same id: one entry per target with
+`reachable`, `latencyMs`, `sourceAddress`, `interface` or an `error`
+(`refused`, `timeout`, `unreachable`, `invalid_target`). The host only opens
+and closes a connection (`src/host/network-check.ts`), at most 3 s per target,
+and refuses loopback, link-local and public addresses. Nothing is sent on the
+connection, nothing is stored, no command row.
+
 **Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
 (`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
 (all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends

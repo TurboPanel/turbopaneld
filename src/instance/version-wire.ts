@@ -84,6 +84,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-database-convert-v1",
   "tls-capture-v1",
   "command-recovery-v1",
+  "server-network-check-v1",
 ] as const;
 
 /**
@@ -127,6 +128,16 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_PERMISSIONS_READ_FEATURE: DaemonWireFeature =
   "managed-permissions-read-v1";
+
+/**
+ * This daemon answers `server-network-check-request` with
+ * `server-network-check-result`: whether this host can open a TCP connection
+ * to each listed peer address, and from which local address. Nothing is sent
+ * on the connection. The control plane asks only a daemon that lists this
+ * feature.
+ */
+export const SERVER_NETWORK_CHECK_FEATURE: DaemonWireFeature =
+  "server-network-check-v1";
 
 /**
  * This daemon pushes `managed-health-report` (every local replica's fresh
