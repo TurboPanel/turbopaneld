@@ -1777,6 +1777,23 @@ describe("host capacity refresh", () => {
       dynamicMemoryFromFacts("virtio_balloon", undefined, 1900 * MIB, 33 * MIB),
       { driver: "virtio_balloon", totalMoved: 33 * MIB },
     );
+    // A large static guest: kernel memory map and reservations leave about
+    // 1.5% between present memory and MemTotal even with the driver loaded.
+    const GIB = 1024 * MIB;
+    assertEquals(
+      dynamicMemoryFromFacts(
+        "virtio_balloon",
+        64 * GIB,
+        Math.floor(64 * GIB * 0.985),
+        0,
+      ),
+      undefined,
+    );
+    // A real dynamic guest: a quarter of the memory is held back.
+    assertEquals(
+      dynamicMemoryFromFacts("hv_balloon", 64 * GIB, 48 * GIB, 0),
+      { driver: "hv_balloon", totalMoved: 0 },
+    );
     assertEquals(dynamicMemoryFromFacts("virtio_mem", undefined, 0, 0), {
       driver: "virtio_mem",
       totalMoved: 0,

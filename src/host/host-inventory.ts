@@ -1291,6 +1291,13 @@ const MIB = 1024 * 1024;
 export const DYNAMIC_MEMORY_GAP_BYTES = 256 * MIB;
 
 /**
+ * The kernel's own memory map and reservations also leave present memory above
+ * MemTotal, and that gap grows with the size of the guest (about 1.5% on 4 KiB
+ * pages). A held-back balloon has to exceed this share of MemTotal as well.
+ */
+export const DYNAMIC_MEMORY_GAP_FRACTION = 0.03;
+
+/**
  * MemTotal or present memory moving by more than this counts as a real
  * change; anything smaller is noise (kernel reservations, a partial block).
  */
@@ -1363,7 +1370,11 @@ export function dynamicMemoryFromFacts(
 ): HostDynamicMemory | undefined {
   if (!driver) return undefined;
   const heldBack = presentBytes !== undefined && memTotalBytes !== undefined &&
-    presentBytes - memTotalBytes > DYNAMIC_MEMORY_GAP_BYTES;
+    presentBytes - memTotalBytes >
+      Math.max(
+        DYNAMIC_MEMORY_GAP_BYTES,
+        memTotalBytes * DYNAMIC_MEMORY_GAP_FRACTION,
+      );
   const moved = totalMovedBytes > HOST_CAPACITY_TOLERANCE_BYTES;
   if (driver !== "virtio_mem" && !heldBack && !moved) return undefined;
   return { driver, totalMoved: totalMovedBytes };

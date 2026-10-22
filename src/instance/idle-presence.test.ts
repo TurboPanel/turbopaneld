@@ -1029,8 +1029,28 @@ function balloonHost(memTotalBytes: number): HostResources {
 function capacityPresence(
   flag: boolean,
   readResources: () => HostResources,
-): { presence: IdlePresence; socket: MockWebSocket; restore: () => void } {
-  const restore = installIdlePresenceProviders({
+): {
+  presence: IdlePresence;
+  socket: MockWebSocket;
+  restore: () => void;
+  tick: (ms?: number) => void;
+} {
+  // Deterministic time: the idle timer callback is captured and run by hand
+  // against a fake clock, so no test waits on a real timer.
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  const realNow = Date.now;
+  let fakeNow = realNow.call(Date);
+  let callback: (() => void) | undefined;
+  Date.now = () => fakeNow;
+  globalThis.setInterval = ((fn: () => void) => {
+    callback = fn;
+    return 1;
+  }) as unknown as typeof setInterval;
+  globalThis.clearInterval = (() => {
+    callback = undefined;
+  }) as unknown as typeof clearInterval;
+  const restoreProviders = installIdlePresenceProviders({
     getBuildInfo: () => makeDaemonBuild("abc1234"),
     resolveUpdateChannelConfig: () => ({
       app: "daemon" as const,
@@ -1053,7 +1073,17 @@ function capacityPresence(
     hostCapacityFlag: () => flag,
   });
   presence.attach(socket as unknown as WebSocket);
-  return { presence, socket, restore };
+  const restore = () => {
+    restoreProviders();
+    Date.now = realNow;
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  };
+  const tick = (ms = idleCheckIntervalMs) => {
+    fakeNow += ms;
+    callback?.();
+  };
+  return { presence, socket, restore, tick };
 }
 
 test("hostCapacityMoved needs more than 32 MiB, a CPU change or a flag flip", () => {
@@ -1144,18 +1174,18 @@ test("IdlePresence hello carries the command report only when it is not empty", 
   }
 });
 
-test("IdlePresence re-sends memory on a heartbeat once it moves past 32 MiB", async () => {
+test("IdlePresence re-sends memory on a heartbeat once it moves past 32 MiB", () => {
   let memTotal = 372 * MIB;
-  const { presence, socket, restore } = capacityPresence(
+  const { presence, socket, restore, tick } = capacityPresence(
     true,
     () => balloonHost(memTotal),
   );
   try {
     memTotal = 403 * MIB;
-    await sleep(40);
+    tick();
     assertEquals(framesOfType(socket, "heartbeat").length, 0);
     memTotal = 420 * MIB;
-    await sleep(40);
+    tick();
     const heartbeats = framesOfType(socket, "heartbeat") as Array<{
       resources?: HostResources;
     }>;
@@ -1170,7 +1200,7 @@ test("IdlePresence re-sends memory on a heartbeat once it moves past 32 MiB", as
     assertEquals(resources.dynamicMemory?.driver, "hv_balloon");
     // Addresses did not move, so the panel keeps the stored list.
     assertEquals("ips" in resources, false);
-    await sleep(40);
+    tick();
     assertEquals(framesOfType(socket, "heartbeat").length, 1);
   } finally {
     presence.detach();
@@ -1178,15 +1208,17 @@ test("IdlePresence re-sends memory on a heartbeat once it moves past 32 MiB", as
   }
 });
 
-test("IdlePresence never sends memory on a heartbeat to an older control plane", async () => {
+test("IdlePresence never sends memory on a heartbeat to an older control plane", () => {
   let memTotal = 372 * MIB;
-  const { presence, socket, restore } = capacityPresence(
+  const { presence, socket, restore, tick } = capacityPresence(
     false,
     () => balloonHost(memTotal),
   );
   try {
     memTotal = 2000 * MIB;
-    await sleep(60);
+    tick();
+    tick();
+    tick();
     for (const frame of framesOfType(socket, "heartbeat")) {
       const resources = (frame as { resources?: HostResources }).resources;
       assertEquals(resources?.memory, undefined);
