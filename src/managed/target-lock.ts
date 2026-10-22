@@ -38,12 +38,38 @@ export function managedTargetLockPath(
   return join(layout.runDir, "managed-locks", `${managedId}.lock`);
 }
 
-/** Hold the non-blocking flock on `path` (under `dir`) while `fn` runs; `busy()` is thrown when it is taken. */
+/** How a caller waits for a taken target lock; absent or `waitMs` 0 refuses at once. */
+export type TargetLockWait = {
+  /** Longest total wait before the busy error is thrown. */
+  waitMs?: number;
+  /** Pause between attempts (default 500 ms). */
+  pollMs?: number;
+};
+
+/** Try the flock now, then again every `pollMs` until `waitMs` has passed. */
+async function acquireLock(
+  file: Deno.FsFile,
+  wait: TargetLockWait,
+): Promise<boolean> {
+  const deadline = Date.now() + (wait.waitMs ?? 0);
+  const pollMs = wait.pollMs ?? 500;
+  while (!(await file.tryLock(true))) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  return true;
+}
+
+/**
+ * Hold the flock on `path` (under `dir`) while `fn` runs; `busy()` is thrown
+ * when it is still taken after the optional bounded wait.
+ */
 async function withTargetLock<T>(
   dir: string,
   path: string,
   busy: () => Error,
   fn: () => Promise<T>,
+  wait: TargetLockWait = {},
 ): Promise<T> {
   await Deno.mkdir(dir, { recursive: true, mode: 0o770 });
   const file = await Deno.open(path, {
@@ -52,7 +78,7 @@ async function withTargetLock<T>(
     mode: 0o660,
   });
   try {
-    if (!(await file.tryLock(true))) {
+    if (!(await acquireLock(file, wait))) {
       throw busy();
     }
     return await fn();
@@ -64,18 +90,20 @@ async function withTargetLock<T>(
 
 /**
  * Run `fn` while holding the engine's lock. Throws {@link ManagedTargetBusyError}
- * without running `fn` when another holder has it.
+ * without running `fn` when another holder has it (after `wait`, if given).
  */
 export async function withManagedTargetLock<T>(
   layout: Pick<LayoutPaths, "runDir">,
   managedId: string,
   fn: () => Promise<T>,
+  wait?: TargetLockWait,
 ): Promise<T> {
   return await withTargetLock(
     join(layout.runDir, "managed-locks"),
     managedTargetLockPath(layout, managedId),
     () => new ManagedTargetBusyError(managedId),
     fn,
+    wait,
   );
 }
 
@@ -174,11 +202,13 @@ export async function withCopyTargetLock<T>(
   layout: Pick<LayoutPaths, "runDir">,
   copyId: string,
   fn: () => Promise<T>,
+  wait?: TargetLockWait,
 ): Promise<T> {
   return await withTargetLock(
     join(layout.runDir, "copy-locks"),
     copyTargetLockPath(layout, copyId),
     () => new CopyTargetBusyError(copyId),
     fn,
+    wait,
   );
 }
