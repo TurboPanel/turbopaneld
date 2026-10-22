@@ -10,4 +10,9 @@ galaxy_info:
   platforms:
     - name: Debian
       versions:
-        - all
+        - bookworm
+        - trixie
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble

@@ -50,6 +50,10 @@ test("the release package carries the Docker install role and the playbooks that
         "roles/docker/tasks/main.yml",
         "roles/docker/tasks/install.yml",
         "roles/docker/vars/main.yml",
+        "roles/docker/files/docker.asc",
+        "roles/docker/files/docker.asc.json",
+        "roles/docker/templates/docker.sources.j2",
+        "roles/repo-key/tasks/main.yml",
         "playbooks/docker-setup.yml",
         "playbooks/daemon-converge.yml",
       ]
@@ -88,24 +92,43 @@ test("the release package carries the Docker install role and the playbooks that
 test("the docker role installs Docker itself from the official apt repository", async () => {
   const main = await Deno.readTextFile(join(DOCKER_ROLE, "tasks/main.yml"));
   assertStringIncludes(main, "ansible.builtin.include_tasks: install.yml");
-  // Fast path: a healthy Docker is never touched, so an offline host is fine.
-  assertStringIncludes(main, "when: not _docker_ready | bool");
+  // Fast path: only Docker's own package counts, a healthy one is not touched.
+  assertStringIncludes(main, "dpkg-query");
+  assertStringIncludes(main, "docker-ce");
+  assertStringIncludes(main, "(not (_docker_ready | bool))");
 
   const install = await Deno.readTextFile(
     join(DOCKER_ROLE, "tasks/install.yml"),
   );
-  assertStringIncludes(install, "{{ _docker_repo_base }}");
-  assertStringIncludes(install, "Signed-By: {{ _docker_repo_key_path }}");
-  assertStringIncludes(install, "_docker_repo_key_fingerprint");
-  assertStringIncludes(install, 'name: "{{ _docker_packages }}"');
+  assertStringIncludes(install, "name: repo-key");
+  assertStringIncludes(install, "install_recommends: false");
+  assertStringIncludes(install, "selection: hold");
   assertStringIncludes(install, "Could not reach download.docker.com");
+  assertStringIncludes(install, "_docker_conflicting_packages");
+  // daemon.json goes in before the packages (first dockerd start).
+  assertEquals(
+    install.indexOf("Write daemon.json ahead of the first dockerd start") <
+      install.indexOf("Install the Docker packages"),
+    true,
+  );
+
+  const template = await Deno.readTextFile(
+    join(DOCKER_ROLE, "templates/docker.sources.j2"),
+  );
+  assertStringIncludes(template, "Signed-By: {{ _docker_repo_key_path }}");
+  assertStringIncludes(template, "turbopanel_docker_offline_dir");
+
+  const defaults = await Deno.readTextFile(
+    join(DOCKER_ROLE, "defaults/main.yml"),
+  );
+  assertStringIncludes(defaults, "docker_key_policy: warn");
+  assertStringIncludes(defaults, 'turbopanel_docker_offline_dir: ""');
+  assertStringIncludes(defaults, 'turbopanel_docker_version: "5:29.');
+  assertStringIncludes(defaults, "turbopanel_docker_log_driver: local");
+  assertStringIncludes(defaults, "turbopanel_docker_log_max_size: 20m");
 
   const vars = await Deno.readTextFile(join(DOCKER_ROLE, "vars/main.yml"));
-  assertStringIncludes(vars, "_docker_repo_base: https://download.docker.com/");
-  assertStringIncludes(
-    vars,
-    "_docker_repo_key_fingerprint: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
-  );
+  assertStringIncludes(vars, "9DC858229FC7DD38854AE2D88D81803C0EBFCD88");
   for (
     const pkg of [
       "docker-ce",
@@ -117,12 +140,65 @@ test("the docker role installs Docker itself from the official apt repository", 
   ) {
     assertStringIncludes(vars, `  - ${pkg}\n`);
   }
-  for (const distro of ["Debian: debian", "Ubuntu: ubuntu"]) {
-    assertStringIncludes(vars, distro);
+  for (const conflict of ["docker.io", "podman-docker", "containerd", "runc"]) {
+    assertStringIncludes(vars, `  - ${conflict}\n`);
   }
-  for (const fallback of ["Debian: bookworm", "Ubuntu: noble"]) {
-    assertStringIncludes(vars, fallback);
+  assertStringIncludes(vars, "Debian: debian");
+  assertStringIncludes(vars, "Ubuntu: ubuntu");
+  // Docker 29 stopped Raspbian packages; no claim of support.
+  assertEquals(vars.includes("Raspbian: raspbian"), false);
+  // The Debian fallback is the newest published suite, not an older one.
+  assertStringIncludes(vars, "Debian: trixie");
+  assertStringIncludes(vars, "Ubuntu: noble");
+});
+
+test("daemon.json defaults: log rotation and limits are added only when absent, before first start", async () => {
+  const merge = await Deno.readTextFile(
+    join(DOCKER_ROLE, "tasks/daemon-json.yml"),
+  );
+  assertStringIncludes(merge, "log-driver");
+  assertStringIncludes(merge, "max-size");
+  assertStringIncludes(merge, "default-ulimits");
+  // Operator values win: the defaults are filtered by the keys already there.
+  assertStringIncludes(
+    merge,
+    "rejectattr('key', 'in', _docker_daemon_json_current.keys()",
+  );
+  const handlers = await Deno.readTextFile(
+    join(DOCKER_ROLE, "handlers/main.yml"),
+  );
+  assertStringIncludes(handlers, "_docker_fresh_install");
+  // Left at Docker's defaults.
+  for (
+    const key of [
+      "userland-proxy",
+      "userns-remap",
+      "storage-driver",
+      '"iptables"',
+    ]
+  ) {
+    assertEquals(merge.includes(key), false, key);
   }
+});
+
+test("repo-key role implements the warn / enforce / bundled key policy", async () => {
+  const tasks = await Deno.readTextFile(
+    join(ORCH, "roles/repo-key/tasks/main.yml"),
+  );
+  const defaults = await Deno.readTextFile(
+    join(ORCH, "roles/repo-key/defaults/main.yml"),
+  );
+  assertStringIncludes(defaults, "repo_key_policy: warn");
+  assertStringIncludes(defaults, "repo_key_warn_days: 60");
+  assertStringIncludes(
+    tasks,
+    "repo_key_policy in ['warn', 'enforce', 'bundled']",
+  );
+  assertStringIncludes(tasks, "when: repo_key_policy != 'bundled'");
+  assertStringIncludes(tasks, "repository key fingerprint changed: expected");
+  assertStringIncludes(tasks, "repo_key_policy == 'enforce'");
+  assertStringIncludes(tasks, "rejectattr('expired')");
+  assertStringIncludes(tasks, "using the copy shipped with TurboPanel");
 });
 
 test("no Galaxy role is referenced or fetched anywhere in the daemon repo", async () => {

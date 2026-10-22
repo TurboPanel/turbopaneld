@@ -2339,10 +2339,12 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
   // outage risk, not just a database blip.
   assertEquals(
     handlers.includes(
-      "when: not (_docker_restart_deferred | default(true) | bool)",
+      "- not (_docker_restart_deferred | default(true) | bool)",
     ),
     true,
   );
+  // ...and while daemon.json is written ahead of the very first dockerd start.
+  assertEquals(handlers.includes("- not (_docker_fresh_install | bool)"), true);
 });
 
 test("buildDockerSetupExtraArgs emits one JSON -e object and nothing when empty", () => {
