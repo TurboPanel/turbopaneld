@@ -351,16 +351,15 @@ tp_verify_release_root() {
 		fi
 	fi
 
-	if { [[ "$_mode" = "full" ]] || [[ "$_mode" = "orchestration" ]]; } \
-		&& [[ ! -f "$_prod/share/orchestration/ansible.cfg" ]]; then
-		echo "tp_verify_release_root: missing $_prod/share/orchestration/ansible.cfg" >&2
-		_fail=1
-	fi
-
-	if { [[ "$_mode" = "full" ]] || [[ "$_mode" = "orchestration" ]]; } \
-		&& ! compgen -G "$_prod/share/orchestration/vendor/galaxy/ansible-posix-*.tar.gz" >/dev/null; then
-		echo "tp_verify_release_root: missing bundled ansible.posix tarball under $_prod/share/orchestration/vendor/galaxy/" >&2
-		_fail=1
+	if [[ "$_mode" = "full" ]] || [[ "$_mode" = "orchestration" ]]; then
+		if [[ ! -f "$_prod/share/orchestration/ansible.cfg" ]]; then
+			echo "tp_verify_release_root: missing $_prod/share/orchestration/ansible.cfg" >&2
+			_fail=1
+		fi
+		if ! compgen -G "$_prod/share/orchestration/vendor/galaxy/ansible-posix-*.tar.gz" >/dev/null; then
+			echo "tp_verify_release_root: missing bundled ansible.posix tarball under $_prod/share/orchestration/vendor/galaxy/" >&2
+			_fail=1
+		fi
 	fi
 
 	if [[ ! -f "$_prod/share/THIRD_PARTY_NOTICES.md" ]]; then
