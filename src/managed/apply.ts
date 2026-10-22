@@ -2,7 +2,6 @@
  * Managed engine apply: materialize → compose up → databases/credentials.
  */
 
-import { pinManagedEngineImage } from "../util/image-pins.ts";
 import {
   type EnvironmentDeployContainer,
   isValidIpv4Literal,
@@ -42,6 +41,7 @@ import {
   MANAGED_ROOT_PASSWORD_FILE_SOURCE,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
+  readManagedComposeDataTarget,
 } from "./compose.ts";
 import {
   collectManagedContainers,
@@ -387,7 +387,7 @@ export async function provisionManagedRootPasswordFile(
   );
   if (needsHandOver) {
     await normalizeManagedSecretOwnership(
-      pinManagedEngineImage(payload.image),
+      payload.image,
       managedDir(layout, payload.managedId),
       engine.engineUser,
       engine.engineGroup,
@@ -413,13 +413,22 @@ export async function chooseManagedCompose(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
+  let storedImage: string | undefined;
+  if (previous !== null) {
+    try {
+      storedImage = readManagedComposeDataTarget(previous).image;
+    } catch {
+      storedImage = undefined;
+    }
+  }
   if (previous !== null && composeUsesRootPasswordInterpolation(previous)) {
     const legacy = normalizeManagedCompose(payload, {
       legacyRootPasswordEnv: true,
+      storedImage,
     });
     if (legacy.composeYaml === previous) return legacy;
   }
-  return normalizeManagedCompose(payload);
+  return normalizeManagedCompose(payload, { storedImage });
 }
 
 async function composeUpWithDockerRetry(
@@ -930,7 +939,7 @@ async function applyManagedEngine(
     captureDecryptedSecrets(deps?.decryptSecrets, logSink),
   );
   await normalizeManagedFileOwnership(
-    pinManagedEngineImage(payload.image),
+    payload.image,
     managedRoot,
     engine.containerUser,
     engine.containerGroup,
@@ -972,7 +981,7 @@ async function applyManagedEngine(
     const boot = await engine.replication.bootstrapStandby(
       {
         managedId: payload.managedId,
-        image: pinManagedEngineImage(payload.image),
+        image: payload.image,
         managedNetwork: payload.managedNetwork,
         volumes: payload.volumes,
         stateDir: managedRoot,

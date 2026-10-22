@@ -10,7 +10,7 @@
  * cold-start source of truth.
  */
 
-import { pinnedImage } from "../util/image-pins.ts";
+import { keepStoredImages, pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
@@ -2135,7 +2135,14 @@ export async function ensureProxySqlIngress(
     managedNetwork,
     ipv6Subnet ?? null,
   );
-  await Deno.writeTextFile(composePath, composeText, { mode: 0o640 });
+  await Deno.writeTextFile(
+    composePath,
+    keepStoredImages(
+      composeText,
+      await Deno.readTextFile(composePath).catch(() => null),
+    ),
+    { mode: 0o640 },
+  );
   // A container that failed its publish bind at boot stays "running" with no
   // bindings, and a plain `up -d` leaves it alone (config unchanged). Recreate
   // it then; an unreadable state falls back to the plain `up -d`.

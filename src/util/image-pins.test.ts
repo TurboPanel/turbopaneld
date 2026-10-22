@@ -3,6 +3,12 @@ import { join } from "@std/path";
 import { MANAGED_ALLOWED_IMAGES_BY_ENGINE } from "../contracts/commands-contracts.ts";
 import { dockerProxyCompose, traefikCompose } from "../deploy/ingress.ts";
 import { ORCHESTRATOR_IMAGE } from "../managed/orchestrator.ts";
+import {
+  RAILPACK_FRONTEND_IMAGE,
+  RAILPACK_FRONTEND_TAG,
+  RAILPACK_FRONTEND_VERSION,
+  RAILPACK_VERSION,
+} from "../deploy/release/railpack-build.ts";
 import { PROXYSQL_IMAGE } from "../managed/proxysql.ts";
 import {
   allPinnedDigests,
@@ -101,4 +107,19 @@ test("role image variables come from the table, never a literal tag", () => {
     offenders.filter((o) => !o.includes("railpack_frontend_image")),
     [],
   );
+});
+
+test("the build frontend pin agrees with the build tool version everywhere", () => {
+  const [repo, tag] = pinnedImageTag("railpackFrontend").split(":");
+  assertEquals(repo, RAILPACK_FRONTEND_IMAGE);
+  assertEquals(tag, RAILPACK_FRONTEND_TAG);
+  const defaults = Deno.readTextFileSync(
+    join(ORCHESTRATION, "roles", "buildkit", "defaults", "main.yml"),
+  );
+  assert(
+    defaults.includes(
+      `railpack_frontend_version: "${RAILPACK_FRONTEND_VERSION}"`,
+    ),
+  );
+  assert(defaults.includes(`railpack_version: "${RAILPACK_VERSION}"`));
 });

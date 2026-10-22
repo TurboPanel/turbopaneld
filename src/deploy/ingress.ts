@@ -1,4 +1,4 @@
-import { pinnedImage } from "../util/image-pins.ts";
+import { keepStoredImages, pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
@@ -1168,7 +1168,10 @@ async function applyCompose(
   what: string,
 ): Promise<void> {
   const pending = pendingComposePath(composePath);
-  await Deno.writeTextFile(pending, yaml, { mode: 0o640 });
+  const stored = await Deno.readTextFile(composePath).catch(() => null);
+  await Deno.writeTextFile(pending, keepStoredImages(yaml, stored), {
+    mode: 0o640,
+  });
   const result = await up(pending);
   if (!result.success) throw commandError(what, result);
   await Deno.rename(pending, composePath);

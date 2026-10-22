@@ -7,7 +7,7 @@
  * ProxySQL reachability.
  */
 
-import { pinManagedEngineImage } from "../util/image-pins.ts";
+import { resolveManagedEngineImage } from "../util/image-pins.ts";
 import { parse, stringify } from "yaml";
 import {
   getManagedReservedEnvKeys,
@@ -525,6 +525,8 @@ export type NormalizeManagedComposeOptions = {
    * apply does not recreate (restart) it. Default: file form.
    */
   legacyRootPasswordEnv?: boolean;
+  /** Image string in the compose file already on disk (see resolveManagedEngineImage). */
+  storedImage?: string;
 };
 
 /**
@@ -540,7 +542,10 @@ export function normalizeManagedCompose(
   applyManagedPublish(service, payload);
   assertManagedServicePolicy(service, payload);
 
-  service.image = pinManagedEngineImage(payload.image);
+  service.image = resolveManagedEngineImage(
+    payload.image,
+    options.storedImage,
+  );
   service.container_name = payload.containerName;
   ensureTopLevelVolumes(document, payload.volumes);
   ensureServiceVolumeMounts(service, payload.volumes);

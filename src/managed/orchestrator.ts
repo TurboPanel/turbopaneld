@@ -7,7 +7,7 @@
  * recoveries.
  */
 
-import { pinnedImage } from "../util/image-pins.ts";
+import { keepStoredImages, pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
@@ -889,13 +889,16 @@ export async function ensureOrchestratorStack(
   const caPem = await readPreviousConfig(
     join(orchestratorTlsDir(layout), "ca.pem"),
   );
-  const composeYaml = orchestratorCompose(
-    descriptor,
-    raft,
-    managedNetwork,
-    daemonGid,
-    options.topologyAliases ?? [],
-    await orchestratorFilesDigest(conf, caPem),
+  const composeYaml = keepStoredImages(
+    orchestratorCompose(
+      descriptor,
+      raft,
+      managedNetwork,
+      daemonGid,
+      options.topologyAliases ?? [],
+      await orchestratorFilesDigest(conf, caPem),
+    ),
+    previousCompose,
   );
   const restarted = previousCompose !== composeYaml || previousConf !== conf ||
     networkRenamed;
