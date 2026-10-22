@@ -1,0 +1,267 @@
+---
+# Install (or upgrade) Docker Engine from Docker's official apt repository.
+# Entered from tasks/main.yml only when docker-ce is not installed and running,
+# or when turbopanel_docker_upgrade is set, so a healthy host (including an
+# offline one) is never touched.
+#
+# Order: conflicting distribution packages -> tools -> signing key (fetched
+# over HTTPS, fingerprint pinned in vars/main.yml) -> apt source (deb822,
+# Signed-By) -> apt update only if the source or key changed -> daemon.json
+# (before the first dockerd start) -> packages at the pinned version, without
+# Recommends -> hold -> services. Idempotent, no reboot. In check mode the
+# steps that need a not-yet-installed package are skipped, so a check run on a
+# fresh host is a plan, not a prediction.
+#
+# Network failures are reported separately from everything else: the key
+# download, the suite probe and the package install each name the host they
+# could not reach, so "no internet" never reads as a broken role.
+#
+# Offline: turbopanel_docker_offline_dir (a flat local apt repository of the
+# Docker .deb files) replaces download.docker.com entirely; no key is fetched.
+
+- name: Find distribution packages that conflict with Docker's
+  ansible.builtin.command:
+    argv: "{{ ['dpkg-query', '-W', '-f=${binary:Package} ${db:Status-Abbrev}\\n'] + _docker_conflicting_packages }}"
+  register: _docker_conflicts_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: turbopanel_docker_remove_conflicting | bool
+
+- name: Set the installed conflicting packages
+  ansible.builtin.set_fact:
+    _docker_conflicts_installed: >-
+      {{ _docker_conflicts_probe.stdout_lines | default([])
+      | select('match', '^\S+ ii') | map('split', ' ') | map('first') | list }}
+  when: turbopanel_docker_remove_conflicting | bool
+
+- name: Look for containers on a distribution engine that would be replaced
+  ansible.builtin.command:
+    argv: [docker, ps, --all, --quiet]
+  register: _docker_old_containers
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - turbopanel_docker_remove_conflicting | bool
+    - _docker_conflicts_installed | default([]) | length > 0
+    - _docker_bin.stat.exists
+
+# Also runs when there is no docker CLI at all (the container probe above was
+# skipped): the data directory is looked at directly.
+- name: Look for engine data when the distribution engine is not answering
+  ansible.builtin.command:
+    argv: [find, /var/lib/docker, -mindepth, "1", -maxdepth, "1"]
+  register: _docker_old_data
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - turbopanel_docker_remove_conflicting | bool
+    - _docker_conflicts_installed | default([]) | length > 0
+    - (_docker_old_containers is skipped or (_docker_old_containers.rc | default(0)) != 0)
+
+- name: Refuse to replace a distribution engine that may have containers
+  ansible.builtin.fail:
+    msg: >-
+      This host has the distribution's own Docker packages
+      ({{ _docker_conflicts_installed | join(', ') }}), their engine is not
+      answering, and /var/lib/docker holds data, so containers may exist that
+      cannot be seen. Nothing was removed. Start that engine and remove or
+      recreate its containers, or move /var/lib/docker aside, then run again.
+  when:
+    - turbopanel_docker_remove_conflicting | bool
+    - (_docker_old_containers is skipped or (_docker_old_containers.rc | default(0)) != 0)
+    - (_docker_old_data.stdout | default('') | trim | length) > 0
+
+- name: Refuse to replace a distribution engine that has containers
+  ansible.builtin.fail:
+    msg: >-
+      This host runs the distribution's own Docker packages
+      ({{ _docker_conflicts_installed | join(', ') }}) and they have
+      containers. Installing Docker's engine replaces them and restarts every
+      container. Stop and remove those containers (or recreate them after the
+      swap) and run again.
+  when:
+    - turbopanel_docker_remove_conflicting | bool
+    - (_docker_old_containers.stdout | default('') | trim | length) > 0
+
+- name: Remove distribution packages that conflict with Docker's
+  ansible.builtin.apt:
+    name: "{{ _docker_conflicts_installed }}"
+    state: absent
+  when:
+    - turbopanel_docker_remove_conflicting | bool
+    - _docker_conflicts_installed | default([]) | length > 0
+
+- name: Install the tools used to fetch the Docker signing key and set up networking
+  ansible.builtin.apt:
+    name: "{{ ['ca-certificates', 'gnupg', 'python3-apt', 'iptables', 'nftables'] }}"
+    state: present
+    install_recommends: false
+    cache_valid_time: 3600
+
+- name: Create the apt keyrings directory
+  ansible.builtin.file:
+    path: "{{ _docker_repo_key_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"  # NOSONAR ansible:S2612 — apt reads the key and source as its sandbox user
+
+- name: Remove repository and key files left by older install methods
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ _docker_legacy_repo_files }}"
+
+# Key policy (docker_key_policy: warn | enforce | bundled): fetched from
+# Docker over HTTPS, with the copy in files/docker.asc as the fallback. See
+# roles/repo-key. A key outside the fingerprint list is used with a loud WARN
+# under `warn`, and stops the run under `enforce`.
+# role_path must be resolved HERE: a vars value passed to include_role is
+# evaluated lazily inside repo-key, where role_path is repo-key's own directory.
+- name: Locate the Docker signing key shipped with the role
+  ansible.builtin.set_fact:
+    _docker_key_bundled: "{{ role_path }}/files/docker.asc"
+
+- name: Install the Docker repository signing key
+  ansible.builtin.include_role:
+    name: repo-key
+  vars:
+    repo_key_name: docker
+    repo_key_url: "{{ turbopanel_docker_repo_base }}/{{ _docker_distro_map[ansible_facts['distribution']] }}/gpg"
+    repo_key_bundled: "{{ _docker_key_bundled }}"
+    repo_key_dest: "{{ _docker_repo_key_path }}"
+    repo_key_fingerprints: "{{ _docker_repo_key_fingerprints }}"
+    repo_key_policy: "{{ docker_key_policy }}"
+  when: turbopanel_docker_offline_dir | length == 0
+
+- name: Check whether Docker publishes packages for this release
+  ansible.builtin.uri:
+    url: "{{ turbopanel_docker_repo_base }}/{{ _docker_distro_map[ansible_facts['distribution']] }}/dists/{{ ansible_facts['distribution_release'] }}/Release"
+    method: HEAD
+    status_code: [200, 404]
+    timeout: 30
+  register: _docker_suite_probe
+  failed_when: false
+  check_mode: false
+  when: turbopanel_docker_offline_dir | length == 0
+
+- name: Stop when download.docker.com cannot be reached
+  ansible.builtin.fail:
+    msg: >-
+      Could not reach download.docker.com to install Docker (check the
+      internet access and DNS of this server):
+      {{ _docker_suite_probe.msg | default('no response') }}
+  when:
+    - turbopanel_docker_offline_dir | length == 0
+    - _docker_suite_probe.status | default(-1) not in [200, 404]
+
+- name: Choose the Docker apt suite
+  ansible.builtin.set_fact:
+    _docker_suite: >-
+      {{ ansible_facts['distribution_release']
+      if (_docker_suite_probe.status | default(200)) == 200
+      else _docker_fallback_suite[ansible_facts['distribution']] }}
+
+- name: Say when the release falls back to another suite
+  ansible.builtin.debug:
+    msg: >-
+      Docker has not published packages for {{ ansible_facts['distribution_release'] }}
+      yet; using the {{ _docker_suite }} suite.
+  when:
+    - turbopanel_docker_offline_dir | length == 0
+    - _docker_suite != ansible_facts['distribution_release']
+
+- name: Configure the Docker apt repository
+  ansible.builtin.template:
+    src: docker.sources.j2
+    dest: "{{ _docker_repo_sources_path }}"
+    owner: root
+    group: root
+    mode: "0644"  # NOSONAR ansible:S2612 — apt reads the key and source as its sandbox user
+  register: _docker_sources
+
+- name: Refresh the apt cache because the Docker repository changed
+  ansible.builtin.apt:
+    update_cache: true
+  when: >-
+    _docker_sources is changed
+    or (repo_key_changed | default(false)) | bool
+    or turbopanel_docker_offline_dir | length > 0
+
+# dockerd's first start must already see the right address pools, log rotation
+# and limits, so the file goes in before the packages do (a later change to a
+# running dockerd needs a restart). Skipped when docker-ce is already there:
+# the merge in tasks/main.yml handles existing installs.
+- name: Write daemon.json ahead of the first dockerd start
+  when:
+    - not (_docker_ce_installed | bool)
+    - turbopanel_docker_manage_daemon_json | bool
+  block:
+    # Stays true for the rest of the run: the dockerd restart handler must not
+    # fire for the file just written, dockerd has not started yet.
+    - name: Mark this as a fresh install for the daemon.json merge
+      ansible.builtin.set_fact:
+        _docker_fresh_install: true
+
+    - name: Merge the daemon.json defaults
+      ansible.builtin.include_tasks: daemon-json.yml
+
+# A held package cannot be upgraded; release the hold only on an explicit
+# upgrade run. The hold is put back after the install below.
+- name: Release the version hold for an upgrade
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: install
+  loop: "{{ _docker_versioned_packages }}"
+  when:
+    - turbopanel_docker_upgrade | bool
+    - _docker_ce_installed | bool
+    - not ansible_check_mode
+
+# In check mode a changed repository file is not written, so the packages
+# cannot be resolved yet: the check run stops short of the install there.
+- name: Install Docker Engine and its plugins
+  when: not (ansible_check_mode and (_docker_sources is changed))
+  block:
+    - name: Install the Docker packages
+      ansible.builtin.apt:
+        name: >-
+          {{ (_docker_versioned_packages
+              | map('regex_replace', '$', ('=' ~ turbopanel_docker_version) if turbopanel_docker_version | length > 0 else '')
+              | list)
+          + _docker_other_packages
+          + turbopanel_docker_extra_packages }}
+        state: present
+        install_recommends: false
+        allow_downgrade: "{{ turbopanel_docker_upgrade | bool }}"
+  rescue:
+    - name: Report the package install failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ 'Could not download the Docker packages from download.docker.com (check the internet access and DNS of this server): '
+          if (ansible_failed_result.msg | default('')) is search('Failed to fetch|Temporary failure|Could not resolve|Connection (timed out|refused)|Unable to connect|Some index files failed')
+          else 'Installing the Docker packages failed: ' }}{{ ansible_failed_result.msg | default('unknown error') }}
+
+# Debian's unattended-upgrades only follows Debian's own origin, so nothing
+# upgrades Docker behind the role's back; the hold also stops a manual
+# `apt upgrade`. containerd.io is not held on its own: docker-ce depends on a
+# minimum containerd.io and holding it separately breaks that.
+- name: Hold Docker at the installed version
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ _docker_versioned_packages }}"
+  when: not ansible_check_mode
+
+- name: Enable and start Docker
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - containerd
+    - docker
+  when: not ansible_check_mode
