@@ -7,6 +7,7 @@ import {
   fieldPinDrift,
   main,
   runContractDriftCheck,
+  snapshotDataDrift,
 } from "./check-contract-drift.ts";
 
 /**
@@ -180,4 +181,32 @@ test("the CLI entry exits on a refusal, rethrows other errors, and passes a clea
 
   await main(() => Promise.resolve("ok"), (m) => refusals.push(m));
   assertEquals(refusals.length, 1);
+});
+
+test("snapshotDataDrift ignores layout and names the first differing path", () => {
+  const wrapped = `{
+  "Foo": {
+    "fields": [
+      {
+        "name": "type",
+        "required": true
+      }
+    ]
+  }
+}`;
+  const collapsed =
+    `{"Foo": {"fields": [{ "name": "type", "required": true }]}}`;
+  assertEquals(snapshotDataDrift(wrapped, collapsed), null);
+  assertEquals(
+    snapshotDataDrift(
+      wrapped,
+      collapsed.replace('"required": true', '"required": false'),
+    ),
+    "$.Foo.fields[0].required",
+  );
+  assertEquals(
+    snapshotDataDrift(wrapped, `{"Foo": {"fields": []}}`),
+    "$.Foo.fields[0]",
+  );
+  assertEquals(snapshotDataDrift(wrapped, `{"Bar": {}}`), "$.Foo");
 });
