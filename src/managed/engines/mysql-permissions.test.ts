@@ -636,9 +636,10 @@ test("a login's views, triggers, routines and events are listed on its report", 
     "event shop.nightly",
   ]);
   assertEquals(report.logins[1]?.definesObjects, undefined);
+  assertEquals(report.logins[0]?.definesObjectsUnread, undefined);
 });
 
-test("a failed definer query leaves the report without the field", async () => {
+test("a failed definer query flags the login as unread, not as having none", async () => {
   const engine = fakeEngine({
     "`u1`@'%'": ["GRANT USAGE ON *.* TO `u1`@`%`"],
   }, "u1\t%\tN\n");
@@ -652,4 +653,5 @@ test("a failed definer query leaves the report without the field", async () => {
     query,
   );
   assertEquals(report.logins[0]?.definesObjects, undefined);
+  assertEquals(report.logins[0]?.definesObjectsUnread, true);
 });
