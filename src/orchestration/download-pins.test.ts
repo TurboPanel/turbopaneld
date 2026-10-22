@@ -69,10 +69,6 @@ test("cloudflared and the build tool pin both architectures in code", () => {
 // files, must carry a digest check, so a download without one fails.
 const DOWNLOAD_EXCEPTIONS = new Map<string, string>([
   [
-    "php-fpm/tasks/main.yml: Download sury archive keyring package",
-    "repository signing key package: keys warn on change instead of hard-failing",
-  ],
-  [
     "repo-key/tasks/main.yml: Download the key",
     "repository signing keys are checked by fingerprint under the key policy (warn by default), not by a file digest, so a key rotation never blocks installs",
   ],

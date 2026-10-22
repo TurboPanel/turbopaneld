@@ -30,25 +30,32 @@
       - apt-transport-https
       - ca-certificates
       - curl
+      # The repo-key role reads the signing key with gpg.
+      - gnupg
     state: present
     update_cache: true
     cache_valid_time: 3600
 
-# Packaged trust root, not a loose curl-dropped keyfile: the .deb carries the
-# key and can be upgraded when sury rotates it.
-- name: Download sury archive keyring package
-  ansible.builtin.get_url:
-    url: "{{ php_fpm_sury_keyring_url }}"
-    dest: /tmp/debsuryorg-archive-keyring.deb
-    # Only `apt` (root) ever opens this staging copy, and /tmp is world-writable
-    # and shared, so it is never readable by anyone else while it sits there.
-    mode: "0600"
-  register: _sury_keyring_download
+# Key policy (php_fpm_key_policy: warn | enforce | bundled): fetched from sury
+# over HTTPS, with the copy in files/sury-php.gpg as the fallback. See
+# roles/repo-key. A key outside the fingerprint list is used with a loud WARN
+# under `warn`, and stops the run under `enforce`.
+# role_path must be resolved HERE: a vars value passed to include_role is
+# evaluated lazily inside repo-key, where role_path is repo-key's own directory.
+- name: Locate the sury signing key shipped with the role
+  ansible.builtin.set_fact:
+    _php_fpm_key_bundled: "{{ role_path }}/files/sury-php.gpg"
 
-- name: Install sury archive keyring
-  ansible.builtin.apt:
-    deb: /tmp/debsuryorg-archive-keyring.deb
-    state: present
+- name: Install the sury repository signing key
+  ansible.builtin.include_role:
+    name: repo-key
+  vars:
+    repo_key_name: sury-php
+    repo_key_url: "{{ php_fpm_sury_key_url }}"
+    repo_key_bundled: "{{ _php_fpm_key_bundled }}"
+    repo_key_dest: "{{ php_fpm_sury_keyring_path }}"
+    repo_key_fingerprints: "{{ php_fpm_sury_key_fingerprints }}"
+    repo_key_policy: "{{ php_fpm_key_policy }}"
 
 - name: Remove any legacy sury sources.list entry
   ansible.builtin.file:
@@ -63,7 +70,7 @@
     owner: root
     group: root
     # Apt only reads this as root. The list names a public repo and its
-    # packaged trust root — no secret — but a tenant does not need to read it.
+    # signing key file — no secret — but a site owner does not need to read it.
     mode: "0640"
     content: |
       Types: deb
@@ -73,10 +80,12 @@
       Signed-By: {{ php_fpm_sury_keyring_path }}
   register: _sury_repo
 
-- name: Refresh apt cache after sury repo change
+- name: Refresh apt cache after sury repo or key change
   ansible.builtin.apt:
     update_cache: true
-  when: _sury_repo.changed # noqa: no-handler
+  when: >- # noqa: no-handler
+    _sury_repo.changed
+    or (repo_key_changed | default(false)) | bool
 
 # One template for every series: `%i` is the series. Installed once, before the
 # loop, because `systemctl enable turbopanel-php-fpm@8.4` needs the template to
