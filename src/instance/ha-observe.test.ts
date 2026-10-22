@@ -1090,7 +1090,7 @@ test("ManagedHaObserver emits full identity after replication-analysis recovers 
   });
 });
 
-test("ManagedHaObserver sends one complete emit per incident inside the re-emit cooldown", async () => {
+test("ManagedHaObserver sends one complete emit per incident inside the re-emit gap", async () => {
   const clock = createFakeClock({ now: 1_000_000 });
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
@@ -1113,7 +1113,7 @@ test("ManagedHaObserver sends one complete emit per incident inside the re-emit 
     await observer.poll();
     await observer.poll();
     assertEquals(sent.length, 1);
-    await clock.advance(15 * 60_000);
+    await clock.advance(30_000);
     await observer.poll();
     assertEquals(sent.length, 2);
   });
@@ -1359,7 +1359,12 @@ async function pollRerun7(
 }
 
 test("ManagedHaObserver emits once for the captured DeadMasterAndReplicas row", async () => {
-  const sent = await pollRerun7(capturedAnalysis());
+  const sent = (await pollRerun7(capturedAnalysis())).map((message) => {
+    // The container was not stopped: the first sighting stands in as the start.
+    assertEquals(message.evidence?.spanMs, 0);
+    const { evidence: _evidence, ...rest } = message;
+    return rest;
+  });
   assertEquals(sent, [{
     type: "managed-ha-event",
     managedId: MANAGED_ID,
@@ -1789,7 +1794,7 @@ test("ManagedHaObserver sends the primary's stop time as evidence for the captur
   });
 });
 
-test("ManagedHaObserver sends no evidence when the primary's stop time is unknown", async () => {
+test("ManagedHaObserver dates a hung primary from the first time the incident was seen", async () => {
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
     await seedMysqlPrimary(layout);
@@ -1818,7 +1823,56 @@ test("ManagedHaObserver sends no evidence when the primary's stop time is unknow
       await observer.poll();
       return sent.map((message) => message.evidence);
     }));
-    assertEquals(results, [[undefined], [undefined], [undefined]]);
+    // No Docker stop time (a frozen engine still runs): the failure start is
+    // the first poll that saw the incident, so the control plane can still
+    // check a replica's last contact against it.
+    const seen = {
+      spanMs: 0,
+      primaryStoppedAt: new Date(KILLED_AT_MS + 21_000).toISOString(),
+    };
+    assertEquals(results, [[seen], [seen], [seen]]);
+  });
+});
+
+test("ManagedHaObserver keeps the first-seen time and re-sends a hung primary's event soon", async () => {
+  const clock = createFakeClock({ now: 1_000_000 });
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    const observer = new ManagedHaObserver({
+      layout,
+      nowMs: () => clock.now(),
+      runDocker: runDockerForDial(DEFAULT_DIAL),
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      isStackPresent: () => Promise.resolve(true),
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => Promise.resolve(deadPrimaryResponse()),
+      },
+    });
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    await clock.advance(29_000);
+    await observer.poll();
+    assertEquals(sent.length, 1);
+    await clock.advance(1_000);
+    await observer.poll();
+    assertEquals(sent.length, 2);
+    assertEquals(sent[1]?.evidence?.spanMs, 30_000);
+    // The wait doubles: 60 s after the second, then 120 s.
+    await clock.advance(59_000);
+    await observer.poll();
+    assertEquals(sent.length, 2);
+    await clock.advance(1_000);
+    await observer.poll();
+    assertEquals(sent.length, 3);
+    await clock.advance(120_000);
+    await observer.poll();
+    assertEquals(sent.length, 4);
   });
 });
 
