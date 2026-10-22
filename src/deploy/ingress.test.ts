@@ -624,10 +624,19 @@ test("hostingFallbackSnippet answers unhosted names on 80 and 443 and hides name
   assertEquals(plain.includes("-Server"), false);
   assertStringIncludes(plain, "http:// {");
   assertStringIncludes(plain, "https:// {");
-  assertStringIncludes(plain, "tls internal {\n    on_demand\n  }");
+  assertEquals(plain.includes("on_demand"), false);
+  assertEquals(plain.split("tls internal").length - 1, 1);
+  assertStringIncludes(plain, "unconfigured.invalid {\n  tls internal\n");
   assertEquals(plain.includes("redir"), false);
   const hidden = hostingFallbackSnippet(true);
-  assertEquals(hidden.split(HIDE_HEADER_BLOCK).length - 1, 2);
+  assertEquals(hidden.split(HIDE_HEADER_BLOCK).length - 1, 3);
+});
+
+test("the Caddyfile hands every unmatched name the one fixed fallback certificate", () => {
+  const config = caddyfile(CONFIG_DIR);
+  assertStringIncludes(config, "default_sni unconfigured.invalid");
+  assertStringIncludes(config, "fallback_sni unconfigured.invalid");
+  assertEquals(config.includes("on_demand"), false);
 });
 
 for (const hide of [true, false]) {

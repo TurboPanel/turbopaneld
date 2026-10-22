@@ -2651,6 +2651,13 @@ export const HOSTNAME_RE =
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
 export const HOSTNAME_MAX_LENGTH = 253;
 
+/**
+ * The name hosting Caddy keeps one fixed internal certificate for, served to
+ * every name nobody hosts. `.invalid` can never be registered; deploys also
+ * refuse it as a hosting name so no customer can claim it.
+ */
+export const HOSTING_FALLBACK_HOSTNAME = "unconfigured.invalid";
+
 const SHELL_METACHAR_RE = /[;|&$`()<>\\"'!*?{}]/;
 
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
@@ -4160,6 +4167,11 @@ function parseHostingHostnames(value: unknown): string[] {
   for (const hostname of value) {
     if (!isValidHostname(hostname)) {
       throw new TypeError("hostings[].hostnames must contain valid hostnames");
+    }
+    if (hostname === HOSTING_FALLBACK_HOSTNAME) {
+      throw new TypeError(
+        `hostings[].hostnames must not use the reserved name ${HOSTING_FALLBACK_HOSTNAME}`,
+      );
     }
     hostnames.push(hostname);
   }

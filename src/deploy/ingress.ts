@@ -13,6 +13,7 @@ import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
+  HOSTING_FALLBACK_HOSTNAME,
   hostingServedNames,
   hostingWwwRedirects,
   isValidIpv4Literal,
@@ -909,6 +910,8 @@ export function caddyfile(
   admin ${HOSTING_CADDY_ADMIN_ADDR}|0600${storage}
   auto_https disable_redirects
   skip_install_trust
+  default_sni ${HOSTING_FALLBACK_HOSTNAME}
+  fallback_sni ${HOSTING_FALLBACK_HOSTNAME}
   grace_period ${HOSTING_CADDY_GRACE_PERIOD}
   metrics
   servers {
@@ -1952,10 +1955,16 @@ const HIDE_WEB_SERVER_NAMES_BLOCK = `  header {
 /**
  * The hosting web server's answer for a name nobody hosts, on :80 and :443.
  * Ports 80/443 are for hosting, so an unconfigured name is answered here (an
- * empty 200, no redirect) rather than refused; the HTTPS side presents a
- * self-signed certificate made on demand so any name gets a handshake. Hosted
- * names keep their own site blocks, which always win over these catch-alls.
- * The panel's own address is a different listener and is not affected.
+ * empty 200, no redirect) rather than refused. The HTTPS side shows one fixed
+ * self-signed certificate, made for {@link HOSTING_FALLBACK_HOSTNAME} and handed
+ * to every other name by the Caddyfile's `default_sni` / `fallback_sni`, so the
+ * number of certificates never depends on what clients send. Hosted names keep
+ * their own site blocks, which always win. The panel's own address is a
+ * different listener and is not affected.
+ *
+ * This one file is shared by every environment on the server: each hosting
+ * deploy rewrites it, so the hide-names choice in force is that of whichever
+ * environment deployed last.
  */
 export function hostingFallbackSnippet(
   hideWebServerNames: boolean | undefined,
@@ -1967,9 +1976,11 @@ ${hide}  respond "" 200
 }
 
 https:// {
-  tls internal {
-    on_demand
-  }
+${hide}  respond "" 200
+}
+
+${HOSTING_FALLBACK_HOSTNAME} {
+  tls internal
 ${hide}  respond "" 200
 }
 `;
