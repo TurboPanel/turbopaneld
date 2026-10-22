@@ -109,13 +109,15 @@ turbopanel_docker_extra_key_fingerprints: []  # noqa: var-naming[no-role-prefix]
 # containers, parallel image decompression).
 turbopanel_docker_extra_packages: [apparmor, pigz]  # noqa: var-naming[no-role-prefix]
 
-# daemon.json defaults for log rotation and descriptor limits (tasks/daemon-json.yml).
+# daemon.json defaults for log rotation and an optional descriptor limit (tasks/daemon-json.yml).
+# default-ulimits nofile is OFF (0): docker.service sets no LimitNOFILE and the limit containers
+# inherit comes from containerd, so a fixed number could LOWER it. Set a value only after measuring.
 # Operator-set values in an existing daemon.json win; empty log driver = leave
 # logging alone. Only NEW containers pick up the log settings.
 turbopanel_docker_log_driver: local  # noqa: var-naming[no-role-prefix]
 turbopanel_docker_log_max_size: 20m  # noqa: var-naming[no-role-prefix]
 turbopanel_docker_log_max_file: "5"  # noqa: var-naming[no-role-prefix]
-turbopanel_docker_default_nofile: 65536  # noqa: var-naming[no-role-prefix]
+turbopanel_docker_default_nofile: 0  # noqa: var-naming[no-role-prefix]
 
 # True only while install.yml writes daemon.json ahead of the very first
 # dockerd start: there is nothing to restart yet.

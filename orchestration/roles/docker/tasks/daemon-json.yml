@@ -46,14 +46,27 @@
   register: _docker_daemon_json_slurp
   when: _docker_daemon_json_stat.stat.exists and _docker_daemon_json_stat.stat.size > 0
 
+# Empty or whitespace-only is treated as {}. Anything else must parse: an admin's
+# file that is not valid JSON is never overwritten.
 - name: Decode the existing daemon.json (empty when missing)
-  ansible.builtin.set_fact:
-    _docker_daemon_json_current: >-
-      {{
-        (_docker_daemon_json_slurp.content | b64decode | from_json)
-        if (_docker_daemon_json_slurp is not skipped and _docker_daemon_json_slurp.content is defined)
-        else {}
-      }}
+  block:
+    - name: Parse the existing daemon.json
+      ansible.builtin.set_fact:
+        _docker_daemon_json_current: >-
+          {{
+            (_docker_daemon_json_slurp.content | b64decode | from_json)
+            if (_docker_daemon_json_slurp is not skipped and _docker_daemon_json_slurp.content is defined
+                and (_docker_daemon_json_slurp.content | b64decode | trim | length) > 0)
+            else {}
+          }}
+  rescue:
+    - name: Stop on a daemon.json that is not valid JSON
+      ansible.builtin.fail:
+        msg: >-
+          /etc/docker/daemon.json is not valid JSON, so it was NOT modified
+          (and Docker was not installed or restarted by this step). Fix or
+          move the file and run again, or set
+          turbopanel_docker_manage_daemon_json: false.
 
 - name: Assert the existing daemon.json is a JSON object
   ansible.builtin.assert:
@@ -192,7 +205,9 @@
           if (turbopanel_docker_address_pools | length == 0
               and turbopanel_docker_default_bridge_cidr | length == 0)
           else ', setting default-address-pools/bip' }}).
-      {{ 'dockerd will NOT be restarted automatically (co-located instance host, or the running dockerd has no live-restore); a pending marker is left and a later converge restarts it once live-restore is running.'
+      {{ 'This is a fresh install: dockerd has not started yet, so no restart is needed.'
+          if (_docker_fresh_install | bool)
+          else 'dockerd will NOT be restarted automatically (co-located instance host, or the running dockerd has no live-restore); a pending marker is left and a later converge restarts it once live-restore is running.'
           if _docker_restart_deferred
           else 'dockerd RESTARTS. Existing containers keep their current addresses and existing networks keep their subnets — the pools only affect networks created afterwards.' }}
   when: >-

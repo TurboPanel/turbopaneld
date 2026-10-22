@@ -101,6 +101,25 @@ test("the docker role installs Docker itself from the official apt repository", 
     join(DOCKER_ROLE, "tasks/install.yml"),
   );
   assertStringIncludes(install, "name: repo-key");
+  // role_path inside include_role vars would resolve to repo-key's own dir.
+  assertStringIncludes(
+    install,
+    '_docker_key_bundled: "{{ role_path }}/files/docker.asc"',
+  );
+  assertStringIncludes(
+    install,
+    'repo_key_bundled: "{{ _docker_key_bundled }}"',
+  );
+  assertEquals(
+    install.indexOf("_docker_key_bundled: ") <
+      install.indexOf("name: repo-key"),
+    true,
+  );
+  assertStringIncludes(
+    install,
+    "Refuse to replace a distribution engine that may have containers",
+  );
+  assertStringIncludes(install, "python3-apt");
   assertStringIncludes(install, "install_recommends: false");
   assertStringIncludes(install, "selection: hold");
   assertStringIncludes(install, "Could not reach download.docker.com");
@@ -126,6 +145,8 @@ test("the docker role installs Docker itself from the official apt repository", 
   assertStringIncludes(defaults, 'turbopanel_docker_version: "5:29.');
   assertStringIncludes(defaults, "turbopanel_docker_log_driver: local");
   assertStringIncludes(defaults, "turbopanel_docker_log_max_size: 20m");
+  // No descriptor limit by default: a fixed number could lower what containers inherit.
+  assertStringIncludes(defaults, "turbopanel_docker_default_nofile: 0");
 
   const vars = await Deno.readTextFile(join(DOCKER_ROLE, "vars/main.yml"));
   assertStringIncludes(vars, "9DC858229FC7DD38854AE2D88D81803C0EBFCD88");

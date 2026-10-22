@@ -43,8 +43,10 @@ distribution packages (`docker.io`, `docker-cli`, `containerd`, `runc`,
 deb822 source with `Signed-By` -> `apt update` only when the source or key
 changed -> `daemon.json` -> packages with `--no-install-recommends`
 (`docker-ce`, `docker-ce-cli`, `containerd.io`, buildx and compose plugins, plus
-`apparmor`, `pigz`) -> apt hold -> services. Idempotent, no reboot, check mode
-is a plan only (it stops before the install when the source file would change).
+`apparmor`, `pigz`) -> apt hold -> services. Idempotent, no reboot. Check mode
+is a plan only (it stops before the install when the source file would change,
+and skips the key evaluation until gnupg exists); it needs `python3-apt` already
+on the host, which is Ansible's own requirement for the apt module in check mode.
 
 - **Fast path**: the `docker-ce` package installed and the service active means
   nothing is touched, so it works offline. A distribution `docker.io`
@@ -85,7 +87,13 @@ is a plan only (it stops before the install when the source file would change).
   handler only on a real change; live-restore makes it safe for running
   containers, but they keep their old log driver until recreated). Defaults
   added only when absent: `log-driver: local` with `max-size 20m` /
-  `max-file 5`, `default-ulimits.nofile` 65536, next to the owned keys
+  `max-file 5` (no `default-ulimits` unless `turbopanel_docker_default_nofile` is
+  set: `docker.service` sets no `LimitNOFILE` and containers inherit
+  containerd's, so a fixed number could lower it). Existing hosts installed by
+  the old role get these keys on their next docker role run, which restarts
+  dockerd once (live-restore is already on there, so containers keep running;
+  they keep their old log driver until recreated), except on a co-located
+  instance host, where a pending marker is left. Next to the owned keys
   (`live-restore`, `cgroup-parent`, `builder.entitlements`, address pools).
   Left at Docker's defaults: `iptables`, `ip6tables`, `firewall-backend`,
   `userland-proxy`, storage driver, no `userns-remap`. `cgroup-parent`

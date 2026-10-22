@@ -8,7 +8,7 @@
  * difference in fingerprint or content plus keys that expire soon. Exits
  * non-zero on drift, a mismatching bundled copy, or an expiry within 60 days.
  *
- * Run: `deno task check:repo-keys` (weekly in CI; offline checks are covered
+ * Run: `deno task check:repo-keys` (run it on a schedule; offline checks are covered
  * by `src/orchestration/repo-keys.test.ts`).
  */
 import { fromFileUrl, join } from "@std/path";

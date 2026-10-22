@@ -30,7 +30,27 @@
     _repo_key_fetch_ok: false
     _repo_key_fetched_path: "{{ repo_key_dest }}.fetched"
 
+- name: Look for gpg
+  ansible.builtin.command:
+    argv: [sh, -c, "command -v gpg"]
+  register: _repo_key_gpg
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+# On a bare host a check run cannot read keys yet: gnupg is installed by the
+# real run. Say so instead of failing.
+- name: Say that the key check is skipped
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: gpg is not installed yet, so the {{ repo_key_name }}
+      repository key is not evaluated.
+  when:
+    - ansible_check_mode
+    - _repo_key_gpg.rc != 0
+
 - name: Fetch and choose the signing key
+  when: not (ansible_check_mode and _repo_key_gpg.rc != 0)
   block:
     - name: Fetch the key over HTTPS
       when: repo_key_policy != 'bundled'
