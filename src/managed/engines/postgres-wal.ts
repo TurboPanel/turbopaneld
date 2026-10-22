@@ -146,7 +146,7 @@ export function finalWalPositionFromOutput(
   waldump: string,
 ): FinalWalPosition | null {
   const control = parseControlData(controlData);
-  if (control === null || control.state !== "shut down") return null;
+  if (control?.state !== "shut down") return null;
   if (control.checkpointLsn !== control.redoLsn) return null;
   const total = parseWaldumpShutdownRecord(waldump, control.checkpointLsn);
   if (total === null) return null;
@@ -158,9 +158,10 @@ export function finalWalPositionFromOutput(
 export const FINAL_POSITION_SCRIPT = [
   'D="$1"',
   'out=$(pg_controldata "$D") || exit 1',
-  "printf '%s\\n' \"$out\"",
+  String.raw`printf '%s\n' "$out"`,
   "echo '@@@'",
-  "l=$(printf '%s\\n' \"$out\" | sed -n 's/^Latest checkpoint location: *//p')",
+  String
+    .raw`l=$(printf '%s\n' "$out" | sed -n 's/^Latest checkpoint location: *//p')`,
   'pg_waldump -p "$D/pg_wal" -s "$l" -n 1 2>/dev/null || true',
 ].join("\n");
 
