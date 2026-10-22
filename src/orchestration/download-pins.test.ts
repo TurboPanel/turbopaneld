@@ -138,6 +138,10 @@ test("every mismatch message names a pin file that exists", () => {
             .test(block),
           `${rel}: mismatch message does not name its pin file`,
         );
+        assert(
+          /expected \$\{\w+\}, got \$\{GOT\}/.test(block),
+          `${rel}: mismatch message must show the expected and received digest`,
+        );
       }
     }
   }
@@ -155,8 +159,8 @@ test("every role download is checked against a pinned SHA-256", () => {
       if (getsUrl && !/\bchecksum:\s*"?(sha256|\{\{)/.test(block)) {
         offenders.push(`${rel}: ${name} (get_url without checksum)`);
       }
-      if (curls && !/sha256sum\s+-c/.test(block)) {
-        offenders.push(`${rel}: ${name} (curl without sha256sum -c)`);
+      if (curls && !/\[ "\$GOT" = /.test(block)) {
+        offenders.push(`${rel}: ${name} (curl without a digest comparison)`);
       }
     }
   }
