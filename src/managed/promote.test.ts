@@ -134,6 +134,58 @@ test("handleManagedPromote promotes standby and reports primary health", async (
   });
 });
 
+test("handleManagedPromote reports the replay position and timeline of the new primary", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const run = (replay: string) =>
+    (
+      args: string[],
+      options?: { input?: string },
+    ) => {
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve(dockerOk(RUNNING_PS));
+      }
+      if (args[0] === "exec" && args.includes("psql")) {
+        const sql = options?.input ?? "";
+        if (sql.includes("pg_last_wal_replay_lsn")) {
+          return Promise.resolve(dockerOk(replay));
+        }
+        if (sql.includes("pg_is_in_recovery")) {
+          return Promise.resolve(dockerOk("f\n"));
+        }
+      }
+      return Promise.resolve(dockerOk("absent\n"));
+    };
+    const payload = {
+      managedId: "managed_promote_position",
+      memberId: "00000000-0000-4000-8000-000000000002",
+      engine: "postgres" as const,
+    };
+    const promoted = await handleManagedPromote(
+      payload,
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: run("0/7258050\t00000002\n"),
+      },
+    );
+    assertEquals(promoted.newPrimaryReplayLsn, "0/7258050");
+    assertEquals(promoted.newPrimaryTimeline, 2);
+
+    // An unreadable position never fails the promote; it only reports none.
+    const unreadable = await handleManagedPromote(
+      payload,
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: run("\n"),
+      },
+    );
+    assertEquals(unreadable.status, "ready");
+    assertEquals(unreadable.newPrimaryReplayLsn, undefined);
+    assertEquals(unreadable.newPrimaryTimeline, undefined);
+  });
+});
+
 test("handleManagedPromote blocks promotion when GTID wait times out", async () => {
   const mysqlPs = JSON.stringify([
     {

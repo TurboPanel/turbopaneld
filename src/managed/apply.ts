@@ -3,6 +3,10 @@
  */
 
 import {
+  assertSwitchoverReseedAllowed,
+  clearSwitchoverFinalPositionRecord,
+} from "./switchover-final-position.ts";
+import {
   type EnvironmentDeployContainer,
   isValidIpv4Literal,
   isValidIpv6Literal,
@@ -881,12 +885,17 @@ export async function handleManagedApply(
     ) {
       throw new ManagedDestroyedError(payload.managedId);
     }
+    // Before anything is touched: a stale switchover re-seed is refused here.
+    await assertSwitchoverReseedAllowed(layout, payload);
     const result = await applyManagedEngine(
       payload,
       daemonReceivedAt,
       layout,
       deps,
     );
+    if (payload.switchoverReseed !== undefined) {
+      await clearSwitchoverFinalPositionRecord(layout, payload.managedId);
+    }
     const runDocker = deps?.runDocker ?? defaultRunDocker;
     await maybeClearDemotedMarkerAfterApply(
       layout,

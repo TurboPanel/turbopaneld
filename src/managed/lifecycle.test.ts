@@ -54,6 +54,18 @@ const POSTGRES_COMPOSE = composeYaml("postgres:18", "/var/lib/postgresql");
 const MYSQL_COMPOSE = composeYaml("mysql:8.4", "/var/lib/mysql");
 const MARIADB_COMPOSE = composeYaml("mariadb:11", "/var/lib/mysql");
 
+const FINAL_POSITION_CONTROL_DATA = [
+  "Database cluster state:               shut down",
+  "Latest checkpoint location:           0/7257FC0",
+  "Latest checkpoint's REDO location:    0/7257FC0",
+  "Latest checkpoint's TimeLineID:       1",
+  "Database block size:                  8192",
+  "Bytes per WAL segment:                16777216",
+].join("\n");
+const FINAL_POSITION_WALDUMP =
+  "rmgr: XLOG        len (rec/tot):    114/   114, tx:          0, lsn: 0/07257FC0, prev 0/07257F98, desc: CHECKPOINT_SHUTDOWN redo 0/7257FC0; tli 1";
+const SWITCHOVER_RECOVERY_ID = "00000000-0000-4000-8000-0000000000c3";
+
 type Recorder = {
   calls: string[][];
   run: (args: string[]) => Promise<DockerCliResult>;
@@ -65,7 +77,10 @@ function fakeDocker(present: Set<string>): Recorder {
   const run = (args: string[]): Promise<DockerCliResult> => {
     calls.push([...args]);
     let stdout = "";
-    if (args[0] === "run") {
+    if (args[0] === "run" && args.includes("final-position")) {
+      stdout =
+        `${FINAL_POSITION_CONTROL_DATA}\n@@@\n${FINAL_POSITION_WALDUMP}\n`;
+    } else if (args[0] === "run") {
       const script = args.at(-1) ?? "";
       const path = script.split(" ")[2] ?? "";
       // Fence helpers mutate the simulated volume: `touch 'p'` / `rm -f 'p'`.
@@ -391,6 +406,44 @@ test("lifecycle stop with demoted writes a marker; an ordinary stop does not", a
       }
     }
   });
+});
+
+test("a switchover fence stop reports the final write position after compose stop", async () => {
+  const { result, calls } = await runLifecycle(
+    POSTGRES_COMPOSE,
+    {
+      action: "stop",
+      memberId: MEMBER_ID,
+      engine: "postgres",
+      role: "primary",
+      demoted: true,
+      switchoverRecoveryId: SWITCHOVER_RECOVERY_ID,
+      primaryEpoch: 4,
+    },
+    new Set(),
+  );
+  assertEquals(result.oldPrimaryFinalLsn, "0/7258050");
+  assertEquals(result.oldPrimaryFinalTimeline, 1);
+  const stopAt = calls.findIndex((args) =>
+    args[0] === "compose" && args.at(-1) === "stop"
+  );
+  const readAt = calls.findIndex((args) => args.includes("final-position"));
+  assert(stopAt >= 0 && readAt > stopAt, "position is read after the stop");
+  const parsed = parseManagedLifecycleResult(
+    JSON.parse(JSON.stringify(result)),
+  );
+  assertEquals(parsed.oldPrimaryFinalLsn, "0/7258050");
+  assertEquals(parsed.oldPrimaryFinalTimeline, 1);
+});
+
+test("an ordinary stop reads no final position", async () => {
+  const { result, calls } = await runLifecycle(
+    POSTGRES_COMPOSE,
+    { action: "stop", memberId: MEMBER_ID, engine: "postgres" },
+    new Set(),
+  );
+  assertEquals(result.oldPrimaryFinalLsn, undefined);
+  assertEquals(calls.some((args) => args.includes("final-position")), false);
 });
 
 test("demoted fence stop without memberId stores ha-member.json member id", async () => {

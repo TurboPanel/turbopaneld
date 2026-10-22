@@ -18,6 +18,7 @@ import {
   MANAGED_OWNER_ROLE_FEATURE,
   MANAGED_PERMISSIONS_READ_FEATURE,
   MANAGED_REPLICA_FRESHNESS_FEATURE,
+  MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
   PHP_SITE_MODES_FEATURE,
@@ -201,9 +202,21 @@ test("managed-database-convert-v1 is advertised", () => {
   );
 });
 
-test("tls-capture-v1 is advertised last and raised no floor", () => {
+test("tls-capture-v1 is advertised and raised no floor", () => {
   assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TLS_CAPTURE_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(TLS_CAPTURE_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-switchover-final-position-v1 is advertised last and raised no floor", () => {
+  assertEquals(
+    MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
+    "managed-switchover-final-position-v1",
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.at(-1),
+    MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
+  );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
