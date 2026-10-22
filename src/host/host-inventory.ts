@@ -1309,7 +1309,7 @@ const HEX_DIGITS = /^[0-9a-f]+$/;
 
 function dirHasEntries(layout: InventoryLayout, path: string): boolean {
   try {
-    for (const _entry of layout.readDirSync(path)) return true;
+    return !layout.readDirSync(path)[Symbol.iterator]().next().done;
   } catch {
     // Missing or unreadable: treat as absent.
   }
