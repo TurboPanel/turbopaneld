@@ -1,6 +1,11 @@
 import { SeenCommandIds } from "./dispatch-dedupe.ts";
 import { closeAndAbandon } from "./socket-close.ts";
-import { restartDaemonService } from "./restart-daemon-service.ts";
+import {
+  type DaemonRestartReport,
+  restartDaemonService,
+  restartFailureMessage,
+  toRestartWire,
+} from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
@@ -593,6 +598,7 @@ export class InstanceClient {
       upgradeId?: string;
       detail?: string;
       errorCode?: string;
+      restart?: ReturnType<typeof toRestartWire>;
       unit?: "daemon" | "instance";
     } = {},
   ): void {
@@ -2456,15 +2462,21 @@ export class InstanceClient {
       await new Promise((resolve) =>
         setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
       );
-      const restarted = await clientTestHooks.restartDaemonService();
+      let restartReport: DaemonRestartReport | undefined;
+      const restarted = await clientTestHooks.restartDaemonService({
+        onReport: (report) => {
+          restartReport = report;
+        },
+      });
       if (!restarted) {
         ok = false;
-        error = "daemon restart failed after reconcile";
+        error = restartFailureMessage(restartReport);
         errorCode = "restart_failed";
         this.#reportUpdateStage("failed", {
           upgradeId,
           errorCode,
           detail: error,
+          restart: restartReport ? toRestartWire(restartReport) : undefined,
         });
         logWarn(
           "update",

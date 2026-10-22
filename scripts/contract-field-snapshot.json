@@ -87,6 +87,11 @@
       { "name": "errorCode", "required": false, "type": "string" },
       { "name": "id", "required": true, "type": "string" },
       {
+        "name": "restart",
+        "required": false,
+        "type": "{ attempts: number; command?: string; elapsedMs: number; exitCode?: number; signal?: string; stderr?: string }"
+      },
+      {
         "name": "stage",
         "required": true,
         "type": "'done' | 'downloading' | 'failed' | 'installing' | 'preparing' | 'restarting' | 'rolled-back' | 'verifying'"
