@@ -833,6 +833,7 @@ test("a first boot that shuts down mid-converge skips the post-converge steps", 
   converge.resolve(true);
   await flush();
   assertEquals(restores, 0);
+});
 
 test("runDaemon restores the connection point and watcher every time Docker becomes reachable", async () => {
   const reachability: Array<(reachable: boolean) => void> = [];
