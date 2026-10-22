@@ -27,6 +27,7 @@ import {
   resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
+  SERVER_NETWORK_CHECK_FEATURE,
   SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   TLS_CAPTURE_FEATURE,
@@ -227,9 +228,8 @@ test("command-recovery-v1 is advertised", () => {
   assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
 });
 
-test("host-capacity-v1 is advertised last and raised no floor", () => {
+test("host-capacity-v1 is named and raised no floor", () => {
   assertEquals(HOST_CAPACITY_FEATURE, "host-capacity-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), HOST_CAPACITY_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
@@ -317,5 +317,11 @@ test("managed-login-limits-v1 is advertised on the wire and raised no floor", ()
     ),
     true,
   );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("server-network-check-v1 is advertised last and raised no floor", () => {
+  assertEquals(SERVER_NETWORK_CHECK_FEATURE, "server-network-check-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), SERVER_NETWORK_CHECK_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

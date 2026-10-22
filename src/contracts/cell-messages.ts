@@ -365,6 +365,61 @@ export type ManagedPermissionsResultMessage = {
   at: string;
 };
 
+/** One peer address the daemon is asked to try (feature `server-network-check-v1`). */
+export type ServerNetworkCheckTarget = {
+  peerServerId: string;
+  /** The peer's address on the network being checked (an IPv4 or IPv6 literal). */
+  address: string;
+  /** A TCP port the peer already listens on, reached from this host. */
+  port: number;
+};
+
+/** What happened for one {@link ServerNetworkCheckTarget}. */
+export type ServerNetworkCheckEntry = {
+  peerServerId: string;
+  address: string;
+  reachable: boolean;
+  /** Time to open the connection, whole milliseconds. Only when reachable. */
+  latencyMs?: number;
+  /** The local address the connection left from. Only when reachable. */
+  sourceAddress?: string;
+  /** The local interface that owns {@link sourceAddress}, when known. */
+  interface?: string;
+  /** A short reason when not reachable: `refused`, `timeout`, `unreachable`, `invalid_target`. */
+  error?: string;
+};
+
+/**
+ * Control plane → daemon: try to open a TCP connection from this host to each
+ * target and say what happened (feature `server-network-check-v1`). Nothing is
+ * sent on the connection and nothing is stored. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type ServerNetworkCheckRequestMessage = {
+  type: "server-network-check-request";
+  id: string;
+  /** Up to {@link SERVER_NETWORK_CHECK_MAX_TARGETS}. */
+  targets: ServerNetworkCheckTarget[];
+  at: string;
+};
+
+/**
+ * Daemon → control plane, on the request's `id`. Always sent: a request that
+ * cannot be run at all is `ok: false` with a short `error`; otherwise `results`
+ * holds one entry per target, in order.
+ */
+export type ServerNetworkCheckResultMessage = {
+  type: "server-network-check-result";
+  id: string;
+  ok: boolean;
+  results?: ServerNetworkCheckEntry[];
+  error?: string;
+  at: string;
+};
+
+/** Most targets in one `server-network-check-request`. */
+export const SERVER_NETWORK_CHECK_MAX_TARGETS = 32;
+
 /** Instance-wide ACME knobs for hostnames whose source is `lets-encrypt`. */
 export type InstanceAcmeWireSettings = {
   contactEmail: string;
@@ -410,6 +465,8 @@ export type DaemonMessage =
   }
   | ManagedPermissionsRequestMessage
   | ManagedPermissionsResultMessage
+  | ServerNetworkCheckRequestMessage
+  | ServerNetworkCheckResultMessage
   | {
     /**
      * Daemon-initiated, fire-and-forget: every managed replica this host runs,
