@@ -8,6 +8,12 @@
 # Pinned release; assets are stripe_<ver>_linux_{x86_64,arm64}.tar.gz.
 stripe_cli_version: "1.50.10"
 stripe_cli_release_tag: "v1.50.10"
+# SHA-256 of each release tarball (key = stripe_cli_arch). Source: the release's
+# own stripe-linux-checksums.txt, which also equals the digest GitHub reports
+# for the asset. Bump with the version above.
+stripe_cli_sha256:
+  x86_64: "de57a83f97c813bb2440d06db4345a2361e57dd684198452cd121e9f22479b38"
+  arm64: "173b74ce056029055097d0d2dfdecb9559a255febd6bacc30fd3f24cb0fbc8b1"
 stripe_listen_service_name: turbopanel-stripe-listen
 # The instance's Caddy listener (instance-launch caddy_port); self-signed, so
 # the wrapper passes --skip-verify.

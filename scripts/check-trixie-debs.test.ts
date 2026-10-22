@@ -25,6 +25,17 @@ function assertPinnedDigests(defaults: string, name: string) {
   }
 }
 
+// The downloaded deb's digest is compared with the pin, and the comparison
+// comes before the deb is unpacked.
+function assertCheckedBeforeExtraction(tasks: string) {
+  const check = tasks.indexOf('[ "$GOT" = "${DEB_SHA256}" ]');
+  assert(check !== -1, "missing the digest comparison");
+  assert(
+    check < tasks.indexOf('dpkg-deb -x "$TMP/'),
+    "digest checked after extraction",
+  );
+}
+
 test("nginx deb is the trixie build, pinned by digest and checked before extraction", async () => {
   const defaults = await role("nginx/defaults/main.yml");
   const tasks = await role("nginx/tasks/main.yml");
@@ -33,10 +44,7 @@ test("nginx deb is the trixie build, pinned by digest and checked before extract
   assert(!defaults.includes("bookworm"), "no Debian 12 build on Debian 13");
   assertPinnedDigests(defaults, "nginx_deb_sha256");
   assert(tasks.includes("nginx_deb_sha256[nginx_deb_arch]"));
-  assert(tasks.includes("sha256sum -c -"));
-  assert(
-    tasks.indexOf("sha256sum -c -") < tasks.indexOf('dpkg-deb -x "\$TMP/'),
-  );
+  assertCheckedBeforeExtraction(tasks);
 });
 
 test("redis deb is the trixie build, pinned by digest and checked before extraction", async () => {
@@ -47,7 +55,5 @@ test("redis deb is the trixie build, pinned by digest and checked before extract
   assert(tasks.includes("-1rl1~trixie1_"));
   assertPinnedDigests(defaults, "redis_deb_sha256");
   assert(tasks.includes("redis_deb_sha256[redis_deb_arch]"));
-  assert(
-    tasks.indexOf("sha256sum -c -") < tasks.indexOf('dpkg-deb -x "\$TMP/'),
-  );
+  assertCheckedBeforeExtraction(tasks);
 });
