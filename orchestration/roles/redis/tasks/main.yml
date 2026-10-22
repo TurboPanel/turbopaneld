@@ -74,10 +74,12 @@
     set -euo pipefail
     REDIS_VER="{{ redis_version }}"
     DEB_ARCH="{{ redis_deb_arch }}"
+    DEB_SHA256="{{ redis_deb_sha256[redis_deb_arch] }}"
     TMP="$(mktemp -d)"
     DEST="{{ turbopanel_vendor_dir }}/redis/${REDIS_VER}/bin"
-    DEB_URL="https://packages.redis.io/deb/pool/bookworm/r/re/redis-server_${REDIS_VER}-1rl1~bookworm1_${DEB_ARCH}.deb"
+    DEB_URL="https://packages.redis.io/deb/pool/trixie/r/re/redis-server_${REDIS_VER}-1rl1~trixie1_${DEB_ARCH}.deb"
     curl -fsSL -o "$TMP/redis-server.deb" "$DEB_URL"
+    echo "${DEB_SHA256}  $TMP/redis-server.deb" | sha256sum -c -
     dpkg-deb -x "$TMP/redis-server.deb" "$TMP/extract"
     install -d "$DEST"
     install -m 0750 "$TMP/extract/usr/bin/redis-server" "$DEST/redis-server"
