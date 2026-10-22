@@ -248,7 +248,24 @@ export function formatStandbySeedFailure(result: {
   const combined = stderr.length > 0 && stdout.length > 0 && stderr !== stdout
     ? `${stderr}\n${stdout}`
     : (stderr || stdout);
-  return sanitizeForLog(combined);
+  return sanitizeForLog(scrubSeedOutput(combined));
+}
+
+const SEED_OUTPUT_MAX_CHARS = 4_000;
+
+/**
+ * Seed stderr can quote SQL: a rejected INSERT repeats row values and a
+ * rejected grant repeats `mysql.user` password hashes. Drop quoted text,
+ * password hashes and long hex runs before the text is printed or reported;
+ * the error numbers and statement kinds stay.
+ */
+export function scrubSeedOutput(text: string): string {
+  return text
+    .replaceAll(/(?<![A-Za-z])'(?:[^'\\\n]|\\.|'')*'/g, "'<redacted>'")
+    .replaceAll(/"(?:[^"\\\n]|\\.|"")*"/g, '"<redacted>"')
+    .replaceAll(/\*[0-9A-Fa-f]{40}\b/g, "<redacted>")
+    .replaceAll(/\b[0-9A-Fa-f]{32,}\b/g, "<redacted>")
+    .slice(-SEED_OUTPUT_MAX_CHARS);
 }
 
 /**

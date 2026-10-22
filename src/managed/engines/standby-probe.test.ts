@@ -7,6 +7,7 @@ import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
 import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
+  scrubSeedOutput,
   isTransientStandbySeedFailure,
   waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
@@ -248,4 +249,26 @@ test("execStandbySeedWithInitRetry does not retry an unrelated error", async () 
   assertEquals(seeds, 1);
   assertEquals(waited, 0);
   assertEquals(formatStandbySeedFailure(result).includes("unknown"), false);
+});
+
+test("scrubSeedOutput drops quoted values and password hashes but keeps error codes", () => {
+  const hash = `*${"AB12".repeat(10)}`;
+  const text = scrubSeedOutput(
+    `ERROR 1062 (23000) at line 9: Duplicate entry 'alice@example' for key 'PRIMARY'\n` +
+      `ERROR 1064 near 'IDENTIFIED BY PASSWORD ${hash}' at line 3\n` +
+      `ERROR 1133 (28000): Can't find any matching row`,
+  );
+  assertEquals(text.includes("alice"), false);
+  assertEquals(text.includes("AB12"), false);
+  assertEquals(text.includes("ERROR 1062 (23000) at line 9"), true);
+  assertEquals(text.includes("Can't find any matching row"), true);
+});
+
+test("formatStandbySeedFailure scrubs row values from import stderr", () => {
+  const text = formatStandbySeedFailure({
+    stdout: "",
+    stderr: "ERROR 1406 (22001) at line 12: Data too long 'secret-note'",
+  });
+  assertEquals(text.includes("secret-note"), false);
+  assertEquals(text.includes("ERROR 1406"), true);
 });

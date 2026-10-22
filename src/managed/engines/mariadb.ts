@@ -456,7 +456,6 @@ export function buildMariadbStandbySeedScript(
   const dump =
     'mariadb-dump --defaults-extra-file="$tmp" --single-transaction --master-data=1 --routines ' +
     "--triggers --events --gtid --ignore-table=mysql.func --ignore-table=mysql.plugin " +
-    "--init-command='SET SESSION net_read_timeout=3600,net_write_timeout=3600,max_allowed_packet=1073741824' " +
     "--all-databases";
   return [
     "set -e",
@@ -573,11 +572,8 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       // VERIFY_IDENTITY equivalent (CA validation + hostname check).
       "ssl-verify-server-cert",
       "ssl-ca=/etc/mysql/tls/ca.crt",
-      // Long logical dumps over TLS otherwise die with ERROR 2013 / 2006
-      // when the primary's net_write_timeout (default 60s) cuts the snapshot.
-      "connect_timeout=60",
-      "net_read_timeout=3600",
-      "net_write_timeout=3600",
+      // No timeout keys here: mariadb-dump rejects connect_timeout and the
+      // net_*_timeout names in [client] (exit 7), and has no --init-command.
       "",
     ].join("\n");
 

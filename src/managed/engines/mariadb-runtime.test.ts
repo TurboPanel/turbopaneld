@@ -88,7 +88,8 @@ test("buildMariadbStandbySeedScript registers trap before writing credentials", 
   assertEquals(script.includes("dump_exit="), true);
   assertEquals(script.includes("----- dump stderr -----"), true);
   assertEquals(script.includes("----- import stderr -----"), true);
-  assertEquals(script.includes("net_write_timeout=3600"), true);
+  // mariadb-dump has no --init-command; the real-container test proves it.
+  assertEquals(script.includes("--init-command"), false);
 });
 
 type RecordedExec = { argv: string[]; input?: string };
