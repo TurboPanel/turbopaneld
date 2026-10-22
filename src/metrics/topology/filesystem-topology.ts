@@ -17,7 +17,7 @@ import {
   mountForPath,
   parseProcMounts,
 } from "../collector/mounts.ts";
-import { probeStorage } from "../collector/filesystem.ts";
+import { probeMountCapacity } from "../collector/filesystem.ts";
 import type { StatfsResult } from "../collector/types.ts";
 import { isAllowedFilesystem } from "./allowlist.ts";
 import { deriveFilesystemId, type IdentityIo } from "./identity.ts";
@@ -137,9 +137,11 @@ export async function collectFilesystemTopology(
   return await Promise.all(
     [...groups.entries()].map(
       async ([filesystemId, { entry, roles }]): Promise<FilesystemTopology> => {
-        const probe = await probeStorage(entry.mountPoint, {
-          statfs: deps.statfs,
-        });
+        const probe = await probeMountCapacity(
+          entry.mountPoint,
+          { statfs: deps.statfs },
+          mountEntries,
+        );
         return {
           filesystemId,
           mountpoint: entry.mountPoint,

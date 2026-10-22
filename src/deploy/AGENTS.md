@@ -181,6 +181,20 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
+   (every deploy also rewrites the reserved `sites/00-fallback.caddy`: the
+   catch-all `http://` and `https://` blocks that answer names nobody hosts
+   with an empty 200, no redirect, and the same hide-names header block as
+   hosted sites when the setting is on. The file is shared by every
+   environment on the server, so the hide-names choice is that of whichever
+   deployed last. HTTPS shows one fixed internal certificate for the reserved
+   name `unconfigured.invalid`, given to every other name by the Caddyfile's
+   `default_sni` / `fallback_sni`; no per-name certificates are made, and
+   deploys refuse that name as a hosting hostname). The daemon also writes
+   the file and the Caddyfile at start (`ensureHostingFallback`, after the
+   guard) when hosting Caddy is set up and running but has no current copy, so
+   an updated host answers unhosted names before any deploy: it keeps a file a
+   deploy wrote, otherwise takes hide-names from the written sites (hidden when
+   unknown), validates first, and leaves live files alone if Caddy refuses)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved
@@ -751,7 +765,7 @@ redeploy of the previous release, which brings the coupled layout back and
 leaves the new proxy to be removed by hand (`docker compose -p
 turbopanel-docker-proxy down`).
 
-**Docker gate stage 3 (per-host switch, off by default).** When the root-owned
+**Docker gate stage 3 (per-host switch, on by default).** When the root-owned
 `/opt/turbopanel/lib/docker-gate/ingress-socket.on` and the gate's
 `/run/turbopanel-gate/ro` both exist (`ingressDockerGateEnabled`), both
 Traefiks instead mount that directory read-only at `/var/run/turbopanel-gate`
@@ -761,7 +775,7 @@ and inspect. The proxy project is then removed (after the Traefik has switched)
 once no per-service compose file on disk still names
 `tcp://docker-socket-proxy:2375` (`serviceIngressUsesSocketProxy`). The
 anonymous shared Traefik (no descriptor, so no ingress label) keeps the proxy.
-Without the switch nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
+A gate install or swap failure on a Docker host now FAILS the converge (it only warned before), and a host where the gate cannot be installed fails every converge until fixed. The host keeps its old ingress wiring: Traefik is not touched until the next ingress apply, and the deploy snapshot and rollback cover the switch file. Without the switch (set `docker_gate_ingress_socket: false`) nothing changes. See `orchestration/roles/docker-gate/AGENTS.md`.
 
 The Traefik compose files and the proxy's own file are applied, not just
 written: the document goes to `docker-compose.pending.yml`, `compose up` runs on

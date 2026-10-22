@@ -16,6 +16,7 @@ import {
   createNoopDeployStepReporter,
   createPlaybookEventHandler,
   DEPLOY_PROGRESS_DETAIL_INTERVAL_MS,
+  DEPLOY_PROGRESS_WAITING_BEAT_MS,
   type PlannedDeployStep,
   sendOverOpenSocket,
 } from "./deploy-progress.ts";
@@ -492,4 +493,57 @@ test("sendOverOpenSocket sends only on an open socket", () => {
   assertEquals(sendOverOpenSocket(closed, message), false);
   assertEquals(sendOverOpenSocket(open, message), true);
   assertEquals(JSON.parse(frames[0]).type, "echo");
+});
+
+test("running reports when the deploy starts and when it waits for the host", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  assertEquals(h.last().runningSince, undefined);
+  h.reporter.running(true);
+  assertEquals(h.last().runningSince, new Date(1_000_000).toISOString());
+  const count = h.sent.length;
+  h.reporter.running(true);
+  assertEquals(h.sent.length, count);
+  h.advance(5000);
+  h.reporter.running(false);
+  assertEquals(h.last().runningSince, null);
+  h.advance(5000);
+  h.reporter.running(true);
+  assertEquals(h.last().runningSince, new Date(1_010_000).toISOString());
+});
+
+test("a first running(false) reports the deploy as waiting", () => {
+  const h = harness();
+  h.reporter.running(false);
+  assertEquals(h.last().runningSince, null);
+  const count = h.sent.length;
+  h.reporter.running(false);
+  assertEquals(h.sent.length, count);
+});
+
+test("a deploy that waits for the host says so again every minute until it runs or ends", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  h.reporter.running(false);
+  const afterWait = h.sent.length;
+  h.advance(DEPLOY_PROGRESS_WAITING_BEAT_MS);
+  assertEquals(h.sent.length, afterWait + 1);
+  assertEquals(h.last().runningSince, null);
+  h.advance(DEPLOY_PROGRESS_WAITING_BEAT_MS);
+  assertEquals(h.sent.length, afterWait + 2);
+  h.reporter.running(true);
+  const afterRun = h.sent.length;
+  h.advance(DEPLOY_PROGRESS_WAITING_BEAT_MS * 3);
+  assertEquals(h.sent.length, afterRun);
+  assertEquals(h.timers.size, 0);
+});
+
+test("finishing a deploy that is still waiting stops the repeat", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  h.reporter.running(false);
+  h.reporter.finish("cancelled");
+  const count = h.sent.length;
+  h.advance(DEPLOY_PROGRESS_WAITING_BEAT_MS * 2);
+  assertEquals(h.sent.length, count);
 });

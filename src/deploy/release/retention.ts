@@ -53,6 +53,15 @@ import {
 /** Published releases kept per service, in addition to `current`. */
 export const DEFAULT_RELEASE_RETENTION = 5;
 
+/**
+ * A release folder name that is safe to join into a path handed to `rm -rf`:
+ * one plain segment, never `.`/`..`, never a newline or slash. Names read back
+ * from the host (the privileged listing is plain text) are filtered with this.
+ */
+export function isSafeReleaseName(name: string): boolean {
+  return name !== "." && name !== ".." && /^[A-Za-z0-9._-]+$/.test(name);
+}
+
 /** Directory entries under `releases/`, newest-modified first. */
 async function listReleaseIds(
   releasesDir: string,
@@ -80,7 +89,8 @@ async function listReleaseIds(
   }
   return entries
     .toSorted((a, b) => b.mtime - a.mtime || b.name.localeCompare(a.name))
-    .map((entry) => entry.name);
+    .map((entry) => entry.name)
+    .filter(isSafeReleaseName);
 }
 
 async function listReleaseIdsPrivileged(
@@ -103,7 +113,7 @@ async function listReleaseIdsPrivileged(
   return result.stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter((name) => name.length > 0);
+    .filter(isSafeReleaseName);
 }
 
 /**
@@ -268,6 +278,59 @@ export async function reclaimServiceTree(
     );
   }
   return path;
+}
+
+/**
+ * Clear what a Destroy built up in one service's tree: every published release,
+ * the `current` link, and the daemon's own release records and build scratch.
+ * The service folder itself, its `shared/` uploads, its logs and the owner's
+ * account stay; deleting the service is what removes the folder.
+ *
+ * Returns the number of releases removed. Best-effort and silent about
+ * failures except through `onOutput`: a Destroy must still tear the rest down.
+ */
+export async function reclaimServiceReleases(
+  layout: Pick<LayoutPaths, "principalHomeRoot" | "daemonStateDir">,
+  ref: ReleaseTreeRef,
+  runFn: RunFn,
+  onOutput?: ReclaimOutput | undefined,
+): Promise<number> {
+  let tree: ReturnType<typeof serviceTree>;
+  try {
+    assertSafeServiceId(ref.serviceId);
+    tree = serviceTree(layout, ref);
+    await assertNoSymlinkComponents(layout.principalHomeRoot, tree.releasesDir);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.(
+      "stderr",
+      `release cleanup skipped ${ref.serviceId}: ${message}`,
+    );
+    return 0;
+  }
+  let removed = 0;
+  try {
+    const releaseIds = await listReleaseIds(tree.releasesDir, runFn);
+    await forEachSequential(releaseIds, async (releaseId) => {
+      try {
+        await removePublishedRelease(join(tree.releasesDir, releaseId), runFn);
+        removed += 1;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        onOutput?.(
+          "stderr",
+          `release cleanup could not remove ${releaseId}: ${message}`,
+        );
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    onOutput?.("stderr", `release cleanup could not list releases: ${message}`);
+    return removed;
+  }
+  await removeTreeWithHelper(tree.currentLink, runFn, onOutput);
+  await removeServiceStateDirs(layout, ref.serviceId, onOutput);
+  return removed;
 }
 
 /**
