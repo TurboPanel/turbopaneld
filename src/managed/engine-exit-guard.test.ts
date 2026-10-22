@@ -15,10 +15,12 @@ import {
   clearManagedIntent,
   endManagedIntent,
   HOST_WIDE_INTENT_ID,
+  managedIntentPath,
   recordManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
+import { dirname } from "@std/path";
 import { forEachSequential } from "../util/sequential.ts";
 
 /**
@@ -703,5 +705,123 @@ test("a replica is not probed again while the wait is running", async () => {
     now += 1_000;
     await guard.tick();
     assertEquals(calls.filter((args) => args[0] === "run").length, probes);
+  });
+});
+
+test("the give-up warning is raised exactly once", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    const given: string[] = [];
+    let now = 1_000_000;
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+      nowMs: () => now,
+      onGiveUp: (id) => given.push(id),
+    });
+    await forEachSequential(Array.from({ length: 20 }), async () => {
+      now += ENGINE_EXIT_GUARD_MAX_START_GAP_MS + 1;
+      await guard.tick();
+    });
+    assertEquals(given, [MANAGED_ID]);
+    assertEquals(startCount(fake.calls), ENGINE_EXIT_GUARD_MAX_ATTEMPTS);
+  });
+});
+
+test("an unreadable intent marker blocks the start", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const path = managedIntentPath(layout.stateDir, MANAGED_ID);
+    await Deno.mkdir(dirname(path), { recursive: true });
+    await Deno.writeTextFile(path, "{ not json");
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+  });
+});
+
+test("a stop that begins while the standby probe runs is not undone", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const replica = { ...memberRecord(), role: "replica" as const };
+    await saveManagedHaMember(layout, replica);
+    const calls: string[][] = [];
+    const run = async (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      let stdout = "";
+      if (args[0] === "run") {
+        stdout = "present\n";
+        // The operator's stop lands while the probe is still running.
+        await beginManagedIntent(layout.stateDir, MANAGED_ID, "stop");
+      }
+      if (args[0] === "compose" && args.includes("ps")) stdout = EXITED_PS;
+      return { success: true, code: 0, stdout, stderr: "" };
+    };
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run,
+      listMembers: () => Promise.resolve([replica]),
+    });
+    await guard.tick();
+    assertEquals(calls.some((args) => args[0] === "run"), true);
+    assertEquals(startCount(calls), 0);
+  });
+});
+
+test("a stop that failed and whose timer ran out is not undone", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const token = await beginManagedIntent(layout.stateDir, MANAGED_ID, "stop");
+    await endManagedIntent(layout.stateDir, token, false);
+    const fake = docker();
+    // Well past the 10 minute timer and its grace period.
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+      nowMs: () => Date.now() + 60 * 60_000,
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+  });
+});
+
+test("an explicit start after a failed stop lets the guard act again", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const stop = await beginManagedIntent(layout.stateDir, MANAGED_ID, "stop");
+    await endManagedIntent(layout.stateDir, stop, false);
+    const start = await beginManagedIntent(
+      layout.stateDir,
+      MANAGED_ID,
+      "start",
+    );
+    await endManagedIntent(layout.stateDir, start, true);
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+      nowMs: () => Date.now() + 60 * 60_000,
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 1);
   });
 });

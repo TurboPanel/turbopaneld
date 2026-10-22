@@ -52,6 +52,8 @@ export type ManagedEngineExitGuardDeps = {
    * engine may be started until the hold has been applied.
    */
   startPaused?: () => boolean;
+  /** Called once when the guard stops trying for one engine (test seam). */
+  onGiveUp?: (managedId: string) => void;
 };
 
 type StartAttempts = { count: number; lastMs: number; gaveUp: boolean };
@@ -81,12 +83,12 @@ function intentLookupBlocksEngineStart(
 ): boolean {
   if (lookup.status === "unreadable") return true;
   if (lookup.status !== "found") return false;
-  if (
-    isHeldIntent(lookup) &&
-    (lookup.intent.kind === "stop" || lookup.intent.kind === "destroy")
-  ) {
-    return true;
-  }
+  // A requested stop stands until an explicit start, restart, apply, promote
+  // or failover replaces the marker, even after its timer ran out: a stop
+  // that failed half way leaves only a timed marker, and the engine must not
+  // come back on its own once that expires.
+  if (lookup.intent.kind === "stop") return true;
+  if (isHeldIntent(lookup) && lookup.intent.kind === "destroy") return true;
   return isIntentLookupActive(lookup, nowMs);
 }
 
@@ -133,6 +135,7 @@ export class ManagedEngineExitGuard {
   readonly #minStartGapMs: number;
   readonly #nowMs: () => number;
   readonly #startPaused: () => boolean;
+  readonly #onGiveUp: (managedId: string) => void;
   readonly #attempts = new Map<string, StartAttempts>();
   readonly #loggedSkip = new Set<string>();
 
@@ -146,6 +149,7 @@ export class ManagedEngineExitGuard {
       ENGINE_EXIT_GUARD_MIN_START_GAP_MS;
     this.#nowMs = deps.nowMs ?? (() => Date.now());
     this.#startPaused = deps.startPaused ?? (() => false);
+    this.#onGiveUp = deps.onGiveUp ?? (() => undefined);
   }
 
   start(): void {
@@ -235,6 +239,7 @@ export class ManagedEngineExitGuard {
         "managed",
         `engine exit guard: engine did not stay up after ${count} starts, giving up until it runs again or an operator starts it managedId=${managedId}`,
       );
+      this.#onGiveUp(managedId);
     }
   }
 
@@ -288,6 +293,10 @@ export class ManagedEngineExitGuard {
     // Cheap checks first: the standby probe runs a container.
     if (this.#startBackoffBlocks(managedId, now)) return;
     if (!(await this.#standbyAllowsStart(member))) return;
+
+    // The probe above takes seconds and stop, restore and failover commands
+    // do not take the lifecycle lock: look again right before starting.
+    if (await this.#meantToStayStopped(member, this.#nowMs())) return;
 
     this.#noteStartAttempt(managedId, now);
     await composeStartStoppedEngine(this.#run, project, managedId, member);
