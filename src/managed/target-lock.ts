@@ -46,18 +46,16 @@ export type TargetLockWait = {
   pollMs?: number;
 };
 
-/** Try the flock now, then again every `pollMs` until `waitMs` has passed. */
+/** Try the flock now, then again every `pollMs` until the `deadline` (epoch ms) has passed. */
 async function acquireLock(
   file: Deno.FsFile,
-  wait: TargetLockWait,
+  deadline: number,
+  pollMs: number,
 ): Promise<boolean> {
-  const deadline = Date.now() + (wait.waitMs ?? 0);
-  const pollMs = wait.pollMs ?? 500;
-  while (!(await file.tryLock(true))) {
-    if (Date.now() >= deadline) return false;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return true;
+  if (await file.tryLock(true)) return true;
+  if (Date.now() >= deadline) return false;
+  await new Promise((resolve) => setTimeout(resolve, pollMs));
+  return acquireLock(file, deadline, pollMs);
 }
 
 /**
@@ -78,7 +76,13 @@ async function withTargetLock<T>(
     mode: 0o660,
   });
   try {
-    if (!(await acquireLock(file, wait))) {
+    if (
+      !(await acquireLock(
+        file,
+        Date.now() + (wait.waitMs ?? 0),
+        wait.pollMs ?? 500,
+      ))
+    ) {
       throw busy();
     }
     return await fn();
