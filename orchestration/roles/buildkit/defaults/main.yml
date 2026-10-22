@@ -20,6 +20,6 @@ railpack_frontend_tag: "v{{ railpack_frontend_version }}"
 # then never look at the registry again" — the vendored bytes are the pin from
 # that point on. Set it to a `sha256:…` manifest digest to make the *fetch*
 # immutable as well, which is what a rebuild-from-scratch audit wants.
-railpack_frontend_source_digest: ""
+railpack_frontend_source_digest: "{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.railpackFrontend.digest }}"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]

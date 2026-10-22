@@ -7,6 +7,7 @@
  * recoveries.
  */
 
+import { pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
@@ -68,7 +69,7 @@ import {
  * `ghcr.io/proxysql/orchestrator:v4.30.2` pin never existed publicly (every
  * pull failed `unauthorized`), so the HA stack had never actually started.
  */
-export const ORCHESTRATOR_IMAGE = "percona/percona-orchestrator:3.2.6-24";
+export const ORCHESTRATOR_IMAGE = pinnedImage("orchestrator");
 
 export const MANAGED_HA_HTTP_PORT = 33001;
 export const MANAGED_HA_RAFT_PORT = 33002;

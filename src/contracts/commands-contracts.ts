@@ -6854,7 +6854,10 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  * alternative; PostgreSQL's official Alpine variant stays the default for its
  * smaller footprint.
  */
-const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
+export const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<
+  string,
+  readonly string[]
+> = {
   postgres: [
     "docker.io/library/postgres:18-alpine",
     "docker.io/library/postgres:18",

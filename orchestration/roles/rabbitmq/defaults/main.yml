@@ -1,4 +1,5 @@
-rabbitmq_image: rabbitmq:4-management
+# Image and digest come from orchestration/image-pins.json (edit them there).
+rabbitmq_image: "{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.rabbitmq.ref }}@{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.rabbitmq.digest }}"
 rabbitmq_container_name: turbopanel-queue
 rabbitmq_amqp_port: 5672
 rabbitmq_mgmt_port: 15672

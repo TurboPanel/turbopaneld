@@ -7,6 +7,7 @@
  * ProxySQL reachability.
  */
 
+import { pinManagedEngineImage } from "../util/image-pins.ts";
 import { parse, stringify } from "yaml";
 import {
   getManagedReservedEnvKeys,
@@ -539,7 +540,7 @@ export function normalizeManagedCompose(
   applyManagedPublish(service, payload);
   assertManagedServicePolicy(service, payload);
 
-  service.image = payload.image;
+  service.image = pinManagedEngineImage(payload.image);
   service.container_name = payload.containerName;
   ensureTopLevelVolumes(document, payload.volumes);
   ensureServiceVolumeMounts(service, payload.volumes);

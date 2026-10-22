@@ -2,6 +2,7 @@
  * Managed engine apply: materialize → compose up → databases/credentials.
  */
 
+import { pinManagedEngineImage } from "../util/image-pins.ts";
 import {
   type EnvironmentDeployContainer,
   isValidIpv4Literal,
@@ -386,7 +387,7 @@ export async function provisionManagedRootPasswordFile(
   );
   if (needsHandOver) {
     await normalizeManagedSecretOwnership(
-      payload.image,
+      pinManagedEngineImage(payload.image),
       managedDir(layout, payload.managedId),
       engine.engineUser,
       engine.engineGroup,
@@ -929,7 +930,7 @@ async function applyManagedEngine(
     captureDecryptedSecrets(deps?.decryptSecrets, logSink),
   );
   await normalizeManagedFileOwnership(
-    payload.image,
+    pinManagedEngineImage(payload.image),
     managedRoot,
     engine.containerUser,
     engine.containerGroup,
@@ -971,7 +972,7 @@ async function applyManagedEngine(
     const boot = await engine.replication.bootstrapStandby(
       {
         managedId: payload.managedId,
-        image: payload.image,
+        image: pinManagedEngineImage(payload.image),
         managedNetwork: payload.managedNetwork,
         volumes: payload.volumes,
         stateDir: managedRoot,

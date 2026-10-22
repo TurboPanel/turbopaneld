@@ -10,6 +10,7 @@
  * cold-start source of truth.
  */
 
+import { pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
@@ -71,7 +72,7 @@ import {
  * Pinned 3.0.9 — fixes CVE-2026-48773 (pre-auth first-packet heap overflow)
  * and CVE-2026-48772 (PROXY-protocol-v1 `client_addr` ACL bypass).
  */
-export const PROXYSQL_IMAGE = "proxysql/proxysql:3.0.9";
+export const PROXYSQL_IMAGE = pinnedImage("proxysql");
 
 export const ADMIN_PORT = 6032;
 
