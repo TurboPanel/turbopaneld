@@ -37,10 +37,12 @@
     DEB_VER="{{ nginx_deb_version }}"
     DEB_ARCH="{{ nginx_deb_arch }}"
     DEB_DIST="{{ nginx_deb_dist }}"
+    DEB_SHA256="{{ nginx_deb_sha256[nginx_deb_arch] }}"
     TMP="$(mktemp -d)"
     DEST="{{ turbopanel_vendor_dir }}/nginx/${NGINX_VER}"
     DEB_URL="https://nginx.org/packages/debian/pool/nginx/n/nginx/nginx_${DEB_VER}_${DEB_ARCH}.deb"
     curl -fsSL -o "$TMP/nginx.deb" "$DEB_URL"
+    echo "${DEB_SHA256}  $TMP/nginx.deb" | sha256sum -c -
     dpkg-deb -x "$TMP/nginx.deb" "$TMP/extract"
     install -d "$DEST/sbin"
     install -m 0750 "$TMP/extract/usr/sbin/nginx" "$DEST/sbin/nginx"
