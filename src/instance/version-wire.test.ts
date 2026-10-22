@@ -228,8 +228,9 @@ test("command-recovery-v1 is advertised", () => {
   assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
 });
 
-test("host-capacity-v1 is named and raised no floor", () => {
+test("host-capacity-v1 is advertised and raised no floor", () => {
   assertEquals(HOST_CAPACITY_FEATURE, "host-capacity-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(HOST_CAPACITY_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

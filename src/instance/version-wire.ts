@@ -85,6 +85,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tls-capture-v1",
   "command-recovery-v1",
   "managed-switchover-final-position-v1",
+  "host-capacity-v1",
   "server-network-check-v1",
 ] as const;
 
