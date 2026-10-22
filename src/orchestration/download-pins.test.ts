@@ -72,6 +72,10 @@ const DOWNLOAD_EXCEPTIONS = new Map<string, string>([
     "repository signing key package: keys warn on change instead of hard-failing",
   ],
   [
+    "repo-key/tasks/main.yml",
+    "repository signing keys are checked by fingerprint under the key policy (warn by default), not by a file digest, so a key rotation never blocks installs",
+  ],
+  [
     "ui-build/tasks/main.yml",
     "development-only checkout step; the artifact URL is chosen by the developer",
   ],
