@@ -7,8 +7,8 @@ import type { ManagedEngineContext, ManagedEngineExec } from "./types.ts";
 import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
-  scrubSeedOutput,
   isTransientStandbySeedFailure,
+  scrubSeedOutput,
   waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
