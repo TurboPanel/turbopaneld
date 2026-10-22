@@ -400,17 +400,22 @@ async function afterOrchestration(
  * the one case where the converge is long (a whole new host) and there is no
  * saved state or earlier command that needs it to have finished.
  */
+type BootConvergeChoiceDeps = {
+  shouldRunConverge: () => boolean;
+  enrolled: () => Promise<boolean>;
+};
+
+const defaultBootConvergeChoiceDeps: BootConvergeChoiceDeps = {
+  shouldRunConverge: shouldRunDaemonConverge,
+  enrolled: () => hasEnrolledServerId(),
+};
+
 export async function connectBeforeBootConvergeDefault(
-  deps: {
-    shouldRunConverge: () => boolean;
-    enrolled: () => Promise<boolean>;
-  } = {
-    shouldRunConverge: shouldRunDaemonConverge,
-    enrolled: () => hasEnrolledServerId(),
-  },
+  deps?: BootConvergeChoiceDeps,
 ): Promise<boolean> {
-  if (!deps.shouldRunConverge()) return false;
-  return !(await deps.enrolled());
+  const { shouldRunConverge, enrolled } = deps ?? defaultBootConvergeChoiceDeps;
+  if (!shouldRunConverge()) return false;
+  return !(await enrolled());
 }
 
 /**
@@ -462,7 +467,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     orchestrationReady =
       await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)();
 
-    if (connectFirst && orchestrationReady) {
+    if (orchestrationReady) {
       const converge = (io.runBootConverge ?? runBootConverge)();
       trackBootConverge(converge);
       void converge.then(async (ok) => {
