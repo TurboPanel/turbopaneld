@@ -15,6 +15,7 @@ import {
 } from "../managed/engine-paths.ts";
 import { reviveStoppedOrchestratorContainer } from "../managed/orchestrator.ts";
 import type { OrchestratorProblem } from "../managed/orchestrator-api.ts";
+import { waitFor } from "../testing/wait-for.ts";
 import {
   type ManagedHaEventMessage,
   ManagedHaObserver,
@@ -111,7 +112,7 @@ test("ManagedHaObserver.attach schedules poll and detach clears the timer", asyn
     });
 
     observer.attach();
-    await new Promise((resolve) => setTimeout(resolve, 45));
+    await waitFor("the first poll to send", () => sent.length >= 1);
     await flushMicrotasks();
     observer.detach();
     const afterDetach = sent.length;

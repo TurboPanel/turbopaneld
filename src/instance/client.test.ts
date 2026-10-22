@@ -886,9 +886,12 @@ it({
       client.start();
       const socket = await waitFor("presence websocket", () => sockets.at(0));
       socket.open();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      const hello = parseSentFrames(socket.sentFrames).find((frame) =>
-        frame.type === "hello"
+      const hello = await waitFor(
+        "hello frame",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "hello"
+          ),
       );
       assertExists(hello);
       const daemonBuild = hello.daemonBuild as { commit?: string } | undefined;
@@ -2023,11 +2026,14 @@ it({
       await new Promise((resolve) => setTimeout(resolve, 50));
       assertEquals(socket.readyState, MockWebSocket.OPEN);
       // Hello from IdlePresence should still have been sent.
-      const frames = parseSentFrames(socket.sentFrames);
-      assert(
-        frames.some((frame) => frame.type === "hello"),
-        "expected hello despite metrics factory failure",
+      const hello = await waitFor(
+        "hello despite metrics factory failure",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "hello"
+          ),
       );
+      assertExists(hello);
       socket.close(1000, "done");
     } finally {
       client.stop();
