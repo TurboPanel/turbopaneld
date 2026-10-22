@@ -1,6 +1,11 @@
 import { SeenCommandIds } from "./dispatch-dedupe.ts";
 import { closeAndAbandon } from "./socket-close.ts";
-import { restartDaemonService } from "./restart-daemon-service.ts";
+import {
+  type DaemonRestartReport,
+  restartDaemonService,
+  restartFailureMessage,
+  toRestartWire,
+} from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
@@ -604,6 +609,7 @@ export class InstanceClient {
       upgradeId?: string;
       detail?: string;
       errorCode?: string;
+      restart?: ReturnType<typeof toRestartWire>;
       unit?: "daemon" | "instance";
     } = {},
   ): void {
@@ -2478,25 +2484,11 @@ export class InstanceClient {
     }
 
     if (ok && shouldRestart) {
-      this.#reportUpdateStage("restarting", { upgradeId });
-      await this.#updateProgress.flush();
-      await new Promise((resolve) =>
-        setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
-      );
-      const restarted = await clientTestHooks.restartDaemonService();
-      if (!restarted) {
+      const restartError = await this.#restartAfterUpdate(upgradeId);
+      if (restartError) {
         ok = false;
-        error = "daemon restart failed after reconcile";
+        error = restartError;
         errorCode = "restart_failed";
-        this.#reportUpdateStage("failed", {
-          upgradeId,
-          errorCode,
-          detail: error,
-        });
-        logWarn(
-          "update",
-          "reconcile succeeded but systemd restart failed; daemon may still be on old code",
-        );
       }
     } else if (ok && !shouldRestart) {
       this.#reportUpdateStage("done", { upgradeId });
@@ -2509,6 +2501,40 @@ export class InstanceClient {
     this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
 
     this.#updateInstallInProgress = false;
+  }
+
+  /**
+   * Restarts the daemon after a reconcile that installed a new build. Returns
+   * the plain failure message when the restart did not come back healthy, or
+   * undefined when it did.
+   */
+  async #restartAfterUpdate(
+    upgradeId: string | undefined,
+  ): Promise<string | undefined> {
+    this.#reportUpdateStage("restarting", { upgradeId });
+    await this.#updateProgress.flush();
+    await new Promise((resolve) =>
+      setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
+    );
+    let restartReport: DaemonRestartReport | undefined;
+    const restarted = await clientTestHooks.restartDaemonService({
+      onReport: (report) => {
+        restartReport = report;
+      },
+    });
+    if (restarted) return undefined;
+    const error = restartFailureMessage(restartReport);
+    this.#reportUpdateStage("failed", {
+      upgradeId,
+      errorCode: "restart_failed",
+      detail: error,
+      restart: restartReport ? toRestartWire(restartReport) : undefined,
+    });
+    logWarn(
+      "update",
+      "reconcile succeeded but systemd restart failed; daemon may still be on old code",
+    );
+    return error;
   }
 
   #sendInstanceUpdateResult(

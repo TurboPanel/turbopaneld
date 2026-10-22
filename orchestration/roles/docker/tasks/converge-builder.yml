@@ -1,5 +1,5 @@
 ---
-# Entry point for daemon-converge (`- role: docker, tasks_from: converge-builder`).
+# Entry point for daemon-converge (`import_role: name: docker, tasks_from: converge-builder`).
 #
 # The docker role otherwise runs only on install, on a socket-unreachable retry
 # or when the address-pool descriptor changes, so a host provisioned before the

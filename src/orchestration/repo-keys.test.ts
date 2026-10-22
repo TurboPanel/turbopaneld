@@ -12,6 +12,7 @@ import { readPgpKey, sha256Hex } from "../../scripts/lib/pgp-key.ts";
 const test = Deno.test.bind(Deno);
 
 const DOCKER_FILES = join(DAEMON_ROOT, "orchestration/roles/docker/files");
+const PHP_FPM = join(DAEMON_ROOT, "orchestration/roles/php-fpm");
 
 async function bundledDocker(): Promise<{ meta: KeyMeta; key: Uint8Array }> {
   const meta = JSON.parse(
@@ -19,6 +20,24 @@ async function bundledDocker(): Promise<{ meta: KeyMeta; key: Uint8Array }> {
   ) as KeyMeta;
   const key = await Deno.readFile(join(DOCKER_FILES, "docker.asc"));
   return { meta, key };
+}
+
+async function bundledSury(): Promise<{ meta: KeyMeta; key: Uint8Array }> {
+  const meta = JSON.parse(
+    await Deno.readTextFile(join(PHP_FPM, "files/sury-php.gpg.json")),
+  ) as KeyMeta;
+  const key = await Deno.readFile(join(PHP_FPM, "files/sury-php.gpg"));
+  return { meta, key };
+}
+
+/** Every shipped key by its source URL, so a fake fetch can answer "live". */
+async function bundledBySource(): Promise<Map<string, Uint8Array>> {
+  const docker = await bundledDocker();
+  const sury = await bundledSury();
+  return new Map([
+    [docker.meta.source, docker.key],
+    [sury.meta.source, sury.key],
+  ]);
 }
 
 /** A tiny v4 key packet plus a self-signature carrying creation and expiry. */
@@ -76,6 +95,33 @@ test("the role's fingerprint list contains the bundled key's fingerprint", async
   assertStringIncludes(vars, `'${meta.fingerprint}'`);
 });
 
+test("the bundled PHP repository key matches its metadata", async () => {
+  const { meta, key } = await bundledSury();
+  const info = await readPgpKey(key);
+  assertEquals(info.fingerprint, meta.fingerprint);
+  assertEquals(
+    info.expires?.toISOString(),
+    new Date(meta.expires!).toISOString(),
+  );
+  assertEquals(await sha256Hex(key), meta.sha256);
+  const report = await checkKey(meta, key, null, new Date("2026-10-22"));
+  assertEquals(report.problems, []);
+});
+
+test("the php-fpm role installs its key through repo-key with the warn policy", async () => {
+  const { meta } = await bundledSury();
+  const defaults = await Deno.readTextFile(join(PHP_FPM, "defaults/main.yml"));
+  assertStringIncludes(defaults, `"${meta.fingerprint}"`);
+  assertStringIncludes(defaults, "php_fpm_key_policy: warn");
+  assertStringIncludes(defaults, `php_fpm_sury_key_url: "${meta.source}"`);
+  const tasks = await Deno.readTextFile(join(PHP_FPM, "tasks/main.yml"));
+  assertStringIncludes(tasks, "name: repo-key");
+  assertStringIncludes(tasks, '"{{ role_path }}/files/sury-php.gpg"');
+  assertStringIncludes(tasks, "repo_key_changed | default(false)");
+  assertStringIncludes(tasks, "- gnupg");
+  assertEquals(tasks.includes("tp-apt-key"), false);
+});
+
 test("checkKey reports metadata drift, live-key drift and near expiry", async () => {
   const { meta, key } = await bundledDocker();
   const wrongPrint = await checkKey(
@@ -112,17 +158,35 @@ test("checkKey reports metadata drift, live-key drift and near expiry", async ()
 });
 
 test("runKeyChecks passes when the live key matches and flags a missing or changed live key", async () => {
-  const { key } = await bundledDocker();
-  const same = await runKeyChecks(DAEMON_ROOT, () => Promise.resolve(key));
-  assertEquals(same.map((r) => r.problems), [[]]);
+  const bySource = await bundledBySource();
+  const now = new Date("2026-10-22");
+  const same = await runKeyChecks(
+    DAEMON_ROOT,
+    (url) => Promise.resolve(bySource.get(url) ?? null),
+    now,
+  );
+  assertEquals(same.map((r) => r.name).sort(), ["docker", "sury-php"]);
+  assertEquals(same.map((r) => r.problems), [[], []]);
 
-  const offline = await runKeyChecks(DAEMON_ROOT, () => Promise.resolve(null));
-  assertEquals(offline[0]!.problems.length, 1);
-  assertStringIncludes(offline[0]!.problems[0]!, "could not fetch");
+  const offline = await runKeyChecks(
+    DAEMON_ROOT,
+    () => Promise.resolve(null),
+    now,
+  );
+  for (const report of offline) {
+    assertEquals(report.problems.length, 1);
+    assertStringIncludes(report.problems[0]!, "could not fetch");
+  }
 
   const other = syntheticKey(1_700_000_000, null);
-  const changed = await runKeyChecks(DAEMON_ROOT, () => Promise.resolve(other));
-  assertStringIncludes(changed[0]!.problems.join("\n"), "live key fingerprint");
+  const changed = await runKeyChecks(
+    DAEMON_ROOT,
+    () => Promise.resolve(other),
+    now,
+  );
+  for (const report of changed) {
+    assertStringIncludes(report.problems.join("\n"), "live key fingerprint");
+  }
 });
 
 test("the key reader handles old-format, long and five-byte packet lengths", async () => {
