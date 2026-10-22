@@ -6,6 +6,7 @@
  */
 
 import { grantSqlFor } from "./grant-pattern.ts";
+import { socketAdminSql } from "./socket-admin-sql.ts";
 import {
   type FollowSourceDialect,
   renderFollowSourceSql,
@@ -287,20 +288,11 @@ export function createNetworkAccountSql(
  * MariaDB ships `unix_socket` built-in — no INSTALL PLUGIN.
  */
 export function ensureSocketAdminSql(osUser: string = "mysql"): string {
-  const rootAccount = accountAt("root", "localhost");
-  const osAccount = accountAt(osUser, "localhost");
-  return [
-    // The image also creates root@'%' with the cluster root password; that
-    // account would let root log in from any host on the datacenter network
-    // (and, on MariaDB, write on a replica). Only the socket admin stays.
-    "DROP USER IF EXISTS `root`@'%';",
-    `CREATE USER IF NOT EXISTS ${rootAccount} IDENTIFIED VIA unix_socket;`,
-    `ALTER USER ${rootAccount} IDENTIFIED VIA unix_socket;`,
-    `GRANT ALL PRIVILEGES ON *.* TO ${rootAccount} WITH GRANT OPTION;`,
-    `CREATE USER IF NOT EXISTS ${osAccount} IDENTIFIED VIA unix_socket;`,
-    `ALTER USER ${osAccount} IDENTIFIED VIA unix_socket;`,
-    `GRANT ALL PRIVILEGES ON *.* TO ${osAccount} WITH GRANT OPTION;`,
-  ].join("\n");
+  return socketAdminSql(
+    accountAt("root", "localhost"),
+    accountAt(osUser, "localhost"),
+    "VIA unix_socket",
+  );
 }
 
 /**
