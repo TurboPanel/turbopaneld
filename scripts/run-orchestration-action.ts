@@ -16,17 +16,13 @@
  * (see `devOrchestrationAnsibleEnv`). Daemon-only playbooks run from the daemon
  * checkout's own `orchestration/` dir.
  *
- * Docker Galaxy (`geerlingguy.docker`) is not part of bootstrap — call
- * {@link ensureGalaxyDockerRole} before any playbook that pulls in the docker
- * role (dev converge, docker/postgres/rabbitmq setup). Same gate as
- * production `runDockerSetup` / `runPostgresSetup` / `runRabbitmqSetup`.
+ * Docker is installed by the `docker` role inside the playbooks that need it.
  */
 import { join } from "@std/path";
 import { runPlaybookStreaming } from "../src/orchestration/ansible-events.ts";
 import {
   coLocatedInstanceServiceEnabled,
   ensureAnsible,
-  ensureGalaxyDockerRole,
   runBuildToggle as runAnsibleBuildToggle,
 } from "../src/orchestration/ansible.ts";
 import {
@@ -55,13 +51,6 @@ import {
   ORCHESTRATION_DIR,
 } from "../src/orchestration/assets.ts";
 import { readEnv, resolveDevRoot, resolveLayout } from "../src/paths/layout.ts";
-
-/** Playbooks that include the docker role (or a role with a docker meta-dep). */
-export const PLAYBOOKS_NEEDING_DOCKER_GALAXY = new Set([
-  "docker-setup.yml",
-  "postgres-setup.yml",
-  "rabbitmq-setup.yml",
-]);
 
 /**
  * FHS daemon env file — the same `/etc/turbopanel/daemon.env` the dev console
@@ -234,7 +223,6 @@ export type OrchestrationActionDeps = {
   emitDevConvergeSkippedIfNeeded: typeof emitDevConvergeSkippedIfNeeded;
   requireDevOrchestrationLayout: () => Promise<DevOrchestrationLayout>;
   ensureAnsible: () => Promise<void>;
-  ensureGalaxyDockerRole: () => Promise<void>;
   runPlaybookStreaming: typeof runPlaybookStreaming;
   writeDevConvergeStamp: typeof writeDevConvergeStamp;
   computeDevConvergeStamp: typeof computeDevConvergeStamp;
@@ -251,7 +239,6 @@ function defaultDeps(): OrchestrationActionDeps {
     emitDevConvergeSkippedIfNeeded,
     requireDevOrchestrationLayout,
     ensureAnsible,
-    ensureGalaxyDockerRole,
     runPlaybookStreaming,
     writeDevConvergeStamp,
     computeDevConvergeStamp,
@@ -282,7 +269,7 @@ export async function runInstanceDevInstall(
         options,
       )
     ) {
-      // Stamp matches — exit before ensureAnsible / Galaxy / playbook.
+      // Stamp matches — exit before ensureAnsible / playbook.
       return "skipped";
     }
   }
@@ -291,9 +278,6 @@ export async function runInstanceDevInstall(
 
   // Sync orchestration venv packages (ansible-lint for IDE linting, etc.) before converge.
   await deps.ensureAnsible();
-  // Dev converge always pulls Docker (postgres/redis/rabbitmq/…);
-  // fetch the Galaxy docker role only now — not during orchestration bootstrap.
-  await deps.ensureGalaxyDockerRole();
 
   await deps.runPlaybookStreaming(
     deps.ansiblePlaybookBin,
@@ -347,9 +331,6 @@ export async function runPlaybook(
     "playbooks",
     playbookRelative,
   );
-  if (PLAYBOOKS_NEEDING_DOCKER_GALAXY.has(playbookRelative)) {
-    await deps.ensureGalaxyDockerRole();
-  }
   // Co-located dev playbooks need dev user + runtime context from the daemon env;
   // CLI extra-vars passed after dev defaults win on duplicate keys.
   await deps.runPlaybookStreaming(
