@@ -45,6 +45,13 @@ export const DEPLOY_PROGRESS_DETAIL_INTERVAL_MS = 2000;
  */
 export const DEPLOY_PROGRESS_WAITING_BEAT_MS = 60_000;
 
+/**
+ * While a deploy runs, the whole payload is sent again this often (when the
+ * control plane advertises `command-recovery-v1`), so a quiet build is told
+ * apart from a lost link.
+ */
+export const DEPLOY_PROGRESS_KEEPALIVE_MS = 30_000;
+
 /** A planned step: id + label + whether the host already has it. */
 export type PlannedDeployStep = Pick<CommandProgressStep, "id" | "label"> & {
   state: "ready" | "pending";
@@ -113,6 +120,11 @@ export type DeployStepReporterOptions = {
   /** Test seams — the trailing detail flush timer. */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /** Called with every payload that is sent (the journal keeps the latest). */
+  onSnapshot?: (progress: CommandProgress) => void;
+  /** True when the running payload should be repeated as a keepalive. */
+  keepalive?: () => boolean;
+  keepaliveMs?: number;
 };
 
 /**
@@ -211,6 +223,10 @@ class DeployStepReporterImpl implements DeployStepReporter {
   #lastSentAt = Number.NEGATIVE_INFINITY;
   #flushTimer: unknown = undefined;
   #beatTimer: unknown = undefined;
+  #keepaliveTimer: unknown = undefined;
+  readonly #onSnapshot: ((progress: CommandProgress) => void) | undefined;
+  readonly #keepalive: (() => boolean) | undefined;
+  readonly #keepaliveMs: number;
 
   constructor(options: DeployStepReporterOptions) {
     this.#id = options.id;
@@ -221,6 +237,9 @@ class DeployStepReporterImpl implements DeployStepReporter {
       ((fn, ms) => setTimeout(fn, ms));
     this.#clearTimer = options.clearTimer ??
       ((handle) => clearTimeout(handle as number));
+    this.#onSnapshot = options.onSnapshot;
+    this.#keepalive = options.keepalive;
+    this.#keepaliveMs = options.keepaliveMs ?? DEPLOY_PROGRESS_KEEPALIVE_MS;
   }
 
   plan(steps: readonly PlannedDeployStep[]): void {
@@ -307,6 +326,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
 
   finish(outcome: DeployProgressOutcome): void {
     this.#stopWaitingBeat();
+    this.#stopKeepalive();
     const at = this.#now().toISOString();
     const running = RUNNING_AT_FINISH[outcome];
     let changed = false;
@@ -332,9 +352,27 @@ class DeployStepReporterImpl implements DeployStepReporter {
         : this.#runningSince === null
     ) return;
     this.#runningSince = active ? this.#now().toISOString() : null;
+    this.#startKeepalive();
     this.#sendNow();
     this.#stopWaitingBeat();
     if (!active) this.#startWaitingBeat();
+  }
+
+  #startKeepalive(): void {
+    if (this.#keepalive === undefined || this.#keepaliveTimer !== undefined) {
+      return;
+    }
+    this.#keepaliveTimer = this.#setTimer(() => {
+      this.#keepaliveTimer = undefined;
+      if (this.#runningSince !== null && this.#keepalive?.()) this.#sendNow();
+      this.#startKeepalive();
+    }, this.#keepaliveMs);
+  }
+
+  #stopKeepalive(): void {
+    if (this.#keepaliveTimer === undefined) return;
+    this.#clearTimer(this.#keepaliveTimer);
+    this.#keepaliveTimer = undefined;
   }
 
   #startWaitingBeat(): void {
@@ -428,13 +466,19 @@ class DeployStepReporterImpl implements DeployStepReporter {
     this.#cancelFlush();
     const at = this.#now();
     this.#lastSentAt = at.getTime();
+    const progress = this.snapshot();
+    try {
+      this.#onSnapshot?.(progress);
+    } catch {
+      // The journal copy is best effort too.
+    }
     try {
       this.#send({
         type: "command-progress",
         id: this.#id,
         commandId: this.#commandId,
         at: at.toISOString(),
-        progress: this.snapshot(),
+        progress,
       });
     } catch {
       // Progress is best effort; the outcome message stays authoritative.

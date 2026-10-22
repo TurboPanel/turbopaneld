@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  COMMAND_RECOVERY_FEATURE,
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
@@ -201,10 +202,15 @@ test("managed-database-convert-v1 is advertised", () => {
   );
 });
 
-test("tls-capture-v1 is advertised last and raised no floor", () => {
+test("tls-capture-v1 is advertised and raised no floor", () => {
   assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TLS_CAPTURE_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(TLS_CAPTURE_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("command-recovery-v1 is advertised last", () => {
+  assertEquals(COMMAND_RECOVERY_FEATURE, "command-recovery-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), COMMAND_RECOVERY_FEATURE);
 });
 
 test("site-engine-nginx-apache-v1 is advertised on the wire", () => {

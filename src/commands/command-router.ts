@@ -1,6 +1,8 @@
 import {
   deliverCommandOutcome,
   markCommandInFlight,
+  noteCommandProgress,
+  recoveryEnabled,
 } from "./command-outbox.ts";
 import { errorText, sanitizeForLog } from "../util/logger.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
@@ -374,6 +376,8 @@ export async function handleCommandDispatch(
           id: message.id,
           commandId: message.commandId,
           send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+          onSnapshot: (snapshot) => noteCommandProgress(message.id, snapshot),
+          keepalive: () => recoveryEnabled(),
         });
         try {
           result = await pickCommandRouterHandler(
