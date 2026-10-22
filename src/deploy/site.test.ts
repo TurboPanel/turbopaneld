@@ -1242,7 +1242,7 @@ test("nginxSiteConfig drops a site variable it cannot carry and keeps the rest, 
     HTTPS: "on",
   });
   assertStringIncludes(conf, 'fastcgi_param KEEP "ok";');
-  const gone = ["DOLLAR", "alpha", "NEWLINE", "/etc/passwd", "evil", "HTTPS"];
+  const gone = ["DOLLAR", "alpha", "NEWLINE", "/etc/passwd", "evil", '"on"'];
   for (const text of [...gone, '127.0.0.1"', "http_authorization"]) {
     assertEquals(conf.includes(text), false, text);
   }
@@ -1286,4 +1286,93 @@ test("a PHP series the server's operating system does not offer is refused befor
   // A suite the table does not list gets every registry series.
   assertPhpSeriesOffered(["8.1"], "bookworm");
   assertThrows(() => assertPhpSeriesOffered(["7.4"], "bookworm"), Error);
+});
+
+const FORWARDED_PHP_SITE = {
+  composeServiceName: "phpapp",
+  root: "public",
+  listenPort: 18080,
+  php: { version: "8.4", settings: {} },
+} as const;
+
+test("plain Apache trusts only the loopback front server for address and HTTPS", () => {
+  const conf = apacheSiteConfig(
+    { ...FORWARDED_PHP_SITE, engine: "apache" },
+    "/srv/www",
+    { phpFpmSocket: "/run/x.sock", dockerBindAddress: "172.17.0.1" },
+  );
+  assertStringIncludes(conf, "  RemoteIPHeader X-Forwarded-For\n");
+  // One trusted proxy and no more: a docker bridge peer cannot name the client.
+  assertEquals(conf.match(/RemoteIP\w*Proxy.*/g), [
+    "RemoteIPInternalProxy 127.0.0.1",
+  ]);
+  const peer =
+    "%{CONN_REMOTE_ADDR} == '127.0.0.1' && %{HTTP:X-Forwarded-Proto} == 'https'";
+  assertStringIncludes(conf, `<If "${peer}">\n    SetEnv HTTPS on\n  </If>`);
+  assertStringIncludes(conf, `ProxyFCGISetEnvIf "${peer}" SERVER_PORT 443`);
+  assertStringIncludes(
+    conf,
+    `ProxyFCGISetEnvIf "${peer}" REQUEST_SCHEME https`,
+  );
+});
+
+test("nginx PHP site reads the visitor from a loopback peer and hands PHP https and 443", () => {
+  for (
+    const fastcgiParamsPath of [null, "/etc/turbopanel/nginx/fastcgi_params"]
+  ) {
+    const conf = nginxSiteConfig(
+      { ...FORWARDED_PHP_SITE, engine: "nginx" },
+      "/srv/www",
+      "172.17.0.1",
+      { phpFpmSocket: "/run/x.sock", fastcgiParamsPath },
+    );
+    // Only loopback may name the client address; the bridge address is not listed.
+    assertEquals(conf.match(/set_real_ip_from .*/g), [
+      "set_real_ip_from 127.0.0.1;",
+      "set_real_ip_from ::1;",
+    ]);
+    assertStringIncludes(conf, "real_ip_header X-Forwarded-For;");
+    assertStringIncludes(
+      conf,
+      String.raw`if ($tp_fwd_peer ~ "^(127\.0\.0\.1|::1)\|https$") {`,
+    );
+    // The overrides come after the shared parameter set, so they win.
+    const location = conf.slice(conf.indexOf("location ~ \\.php$"));
+    const after = location.slice(
+      Math.max(
+        location.indexOf("include "),
+        location.indexOf("fastcgi_param SERVER_NAME"),
+      ),
+    );
+    assertStringIncludes(
+      after,
+      `fastcgi_param HTTPS $tp_fwd_https if_not_empty;
+    fastcgi_param SERVER_PORT $tp_fwd_port;
+    fastcgi_param REQUEST_SCHEME $tp_fwd_scheme;`,
+    );
+  }
+});
+
+test("OpenLiteSpeed trusts only loopback for the address and reads HTTPS from the header", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const main = openlitespeedMainConfig(layout, []);
+    assertStringIncludes(main, "useIpInProxyHeader                2");
+    assertStringIncludes(main, "allow                     ALL, 127.0.0.1T");
+  } finally {
+    await cleanup();
+  }
+  const php = openlitespeedVhostConfig({
+    processorName: "p",
+    mode: "fastcgi",
+    socket: "/run/x.sock",
+    children: 4,
+    lockedValues: [],
+  });
+  assertStringIncludes(
+    php,
+    "RewriteCond %{HTTP:X-Forwarded-Proto} =https\nRewriteRule .* - [E=HTTPS:on]",
+  );
+  // A site without PHP has nothing to tell.
+  assertEquals(openlitespeedVhostConfig().includes("X-Forwarded-Proto"), false);
 });

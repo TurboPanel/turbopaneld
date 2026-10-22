@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import type { BootHoldRecord } from "../managed/boot-hold.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
+import { waitFor } from "../testing/wait-for.ts";
 import {
   type BootHoldEventMessage,
   BootHoldReporter,
@@ -183,7 +184,7 @@ test("while the feature list is unknown the reporter looks again soon, then repo
     await new Promise((resolve) => setTimeout(resolve, 30));
     assertEquals(sent.length, 0);
     support = true;
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await waitFor("the re-look to send", () => sent.length >= 1);
     reporter.detach();
     assertEquals(sent.length >= 1, true);
     assertEquals(docker.calls, []);

@@ -8,6 +8,7 @@ import {
   DEPLOY_CANCEL_FEATURE,
   instanceUnsupportedReason,
   MANAGED_DATA_ONLY_READWRITE_FEATURE,
+  MANAGED_DATABASE_CONVERT_FEATURE,
   MANAGED_DATABASE_OWNER_FEATURE,
   MANAGED_HA_INSTANCE_FEATURE,
   MANAGED_HEALTH_FEATURE,
@@ -190,6 +191,14 @@ test("managed-database-owner-v1 is advertised and raised no floor", () => {
     true,
   );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-database-convert-v1 is advertised", () => {
+  assertEquals(MANAGED_DATABASE_CONVERT_FEATURE, "managed-database-convert-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(MANAGED_DATABASE_CONVERT_FEATURE),
+    true,
+  );
 });
 
 test("tls-capture-v1 is advertised last and raised no floor", () => {

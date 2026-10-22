@@ -81,6 +81,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-owner-role-v1",
   "managed-data-only-readwrite-v1",
   "managed-database-owner-v1",
+  "managed-database-convert-v1",
   "tls-capture-v1",
 ] as const;
 
@@ -277,6 +278,14 @@ export const MANAGED_DATA_ONLY_READWRITE_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_DATABASE_OWNER_FEATURE: DaemonWireFeature =
   "managed-database-owner-v1";
+
+/**
+ * This daemon honours `convertExisting` on a Postgres database op: an existing
+ * database that holds data is handed to its owner role on request. The control
+ * plane sends it only to a primary that lists this.
+ */
+export const MANAGED_DATABASE_CONVERT_FEATURE: DaemonWireFeature =
+  "managed-database-convert-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =
