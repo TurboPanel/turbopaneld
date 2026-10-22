@@ -84,6 +84,11 @@ test("platform stacks keep a tag-only stored image and move on a stored digest",
   );
   assertEquals(keepStoredImages(traefik, bare), bare);
   assertEquals(keepStoredImages(traefik, null), traefik);
+  const quoted = bare.replace(
+    pinnedImageTag("traefik"),
+    `"${pinnedImageTag("traefik")}"`,
+  );
+  assertEquals(keepStoredImages(traefik, quoted), bare);
   const withOtherDigest = traefik.replace(
     /@sha256:[0-9a-f]{64}/,
     `@sha256:${"2".repeat(64)}`,

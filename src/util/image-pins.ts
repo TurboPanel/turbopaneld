@@ -87,18 +87,35 @@ export function keepStoredImages(
   stored: string | null,
 ): string {
   if (stored === null) return rendered;
-  return rendered.replace(
-    /^(\s*image:\s*)(\S+?)@sha256:[0-9a-f]{64}\s*$/gm,
-    (line, lead: string, base: string) => {
-      const bare = new RegExp(
-        `^\\s*image:\\s*["']?${escapeRegExp(base)}["']?\\s*$`,
-        "m",
-      );
-      return bare.test(stored) ? `${lead}${base}` : line;
-    },
-  );
+  const storedImages = storedImageValues(stored);
+  return rendered
+    .split("\n")
+    .map((line) => {
+      const match = PINNED_IMAGE_LINE.exec(line);
+      if (match === null) return line;
+      const [, lead, base] = match;
+      return storedImages.has(base) ? `${lead}${base}` : line;
+    })
+    .join("\n");
 }
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** One compose line `image: name:tag@sha256:<64 hex>`, split into lead and base. */
+const PINNED_IMAGE_LINE =
+  /^([ \t]*image:[ \t]*)([^\s@]+)@sha256:[0-9a-f]{64}\s*$/;
+
+/** Every `image:` value in the stored compose text, without quotes. */
+function storedImageValues(stored: string): Set<string> {
+  const values = new Set<string>();
+  for (const line of stored.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("image:")) continue;
+    values.add(
+      trimmed
+        .slice("image:".length)
+        .trim()
+        .replace(/^["']/, "")
+        .replace(/["']$/, ""),
+    );
+  }
+  return values;
 }
