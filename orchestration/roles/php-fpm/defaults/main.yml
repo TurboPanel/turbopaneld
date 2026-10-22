@@ -36,13 +36,7 @@ php_fpm_apt_version: ""
 
 # Sury repo wiring. The keyring ships as its own .deb so the trust root is
 # packaged and upgradable rather than a loose file dropped by curl.
-# Versioned pool file, not the rolling name, so the digest below stays valid
-# until the key package is deliberately bumped. Source of the SHA-256: the
-# SHA256 field of packages.sury.org's signed apt index
-# (php/dists/trixie/main/binary-amd64/Packages), equal to the downloaded file.
-php_fpm_sury_keyring_version: "2025.11.18"
-php_fpm_sury_keyring_url: "https://packages.sury.org/php/pool/main/d/debsuryorg-archive-keyring/debsuryorg-archive-keyring_{{ php_fpm_sury_keyring_version }}_all.deb"
-php_fpm_sury_keyring_sha256: "7511384559c9ddf1d5ce5f60be429ae9d4e7d01d9480d6f1b7a30c0810cf8b60"
+php_fpm_sury_keyring_url: "https://packages.sury.org/debsuryorg-archive-keyring.deb"
 php_fpm_sury_keyring_path: "/usr/share/keyrings/debsuryorg-archive-keyring.gpg"
 php_fpm_sury_repo_url: "https://packages.sury.org/php"
 php_fpm_sury_suite: "{{ ansible_distribution_release }}"

@@ -27,8 +27,9 @@
     ASSET="buildkit-v${BK_VER}.linux-${BK_ARCH}.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/moby/buildkit/releases/download/v${BK_VER}/${ASSET}"
-    echo "${BK_SHA256}  $TMP/$ASSET" | sha256sum -c - >/dev/null 2>&1 || {
-      echo "BuildKit ${BK_VER} (${ASSET}): SHA-256 mismatch, expected ${BK_SHA256}; refusing to install. To accept a re-published file, update buildkit_sha256 in orchestration/roles/buildkit/defaults/main.yml" >&2
+    GOT="$(sha256sum "$TMP/$ASSET" | cut -d' ' -f1)"
+    [ "$GOT" = "${BK_SHA256}" ] || {
+      echo "BuildKit ${BK_VER} (${ASSET}): SHA-256 mismatch, expected ${BK_SHA256}, got ${GOT}; refusing to install. To accept a re-published file, update buildkit_sha256 in orchestration/roles/buildkit/defaults/main.yml" >&2
       rm -rf "$TMP"
       exit 1
     }
@@ -75,8 +76,9 @@
     ASSET="railpack-v${RP_VER}-${RP_ARCH}-unknown-linux-musl.tar.gz"
     curl -fsSL -o "$TMP/$ASSET" \
       "https://github.com/railwayapp/railpack/releases/download/v${RP_VER}/${ASSET}"
-    echo "${RP_SHA256}  $TMP/$ASSET" | sha256sum -c - >/dev/null 2>&1 || {
-      echo "Build tool ${RP_VER} (${ASSET}): SHA-256 mismatch, expected ${RP_SHA256}; refusing to install. To accept a re-published file, update railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml" >&2
+    GOT="$(sha256sum "$TMP/$ASSET" | cut -d' ' -f1)"
+    [ "$GOT" = "${RP_SHA256}" ] || {
+      echo "Build tool ${RP_VER} (${ASSET}): SHA-256 mismatch, expected ${RP_SHA256}, got ${GOT}; refusing to install. To accept a re-published file, update railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml" >&2
       rm -rf "$TMP"
       exit 1
     }

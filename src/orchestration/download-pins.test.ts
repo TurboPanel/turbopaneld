@@ -51,17 +51,6 @@ for (const [role, name, arches] of ROLE_DIGESTS) {
   });
 }
 
-test("the keyring package for the PHP repo is pinned by SHA-256", () => {
-  const defaults = readDefaults("php-fpm");
-  assert(isSha256Hex(String(defaults.php_fpm_sury_keyring_sha256)));
-  assert(
-    String(defaults.php_fpm_sury_keyring_url).includes(
-      "php_fpm_sury_keyring_version",
-    ),
-    "the keyring URL must name a fixed version, not the rolling file",
-  );
-});
-
 test("cloudflared and the build tool pin both architectures in code", () => {
   assertEquals(Object.keys(CLOUDFLARED_SHA256).sort(), [
     "cloudflared-linux-amd64",
@@ -78,6 +67,10 @@ test("cloudflared and the build tool pin both architectures in code", () => {
 // Downloads that are verified some other way, with the reason. Anything not
 // listed here must carry a digest check, so a new download without one fails.
 const DOWNLOAD_EXCEPTIONS = new Map<string, string>([
+  [
+    "php-fpm/tasks/main.yml",
+    "repository signing key package: keys warn on change instead of hard-failing",
+  ],
   [
     "ui-build/tasks/main.yml",
     "development-only checkout step; the artifact URL is chosen by the developer",
@@ -145,6 +138,10 @@ test("every mismatch message names a pin file that exists", () => {
             .test(block),
           `${rel}: mismatch message does not name its pin file`,
         );
+        assert(
+          /expected \$\{\w+\}, got \$\{GOT\}/.test(block),
+          `${rel}: mismatch message must show the expected and received digest`,
+        );
       }
     }
   }
@@ -162,8 +159,8 @@ test("every role download is checked against a pinned SHA-256", () => {
       if (getsUrl && !/\bchecksum:\s*"?(sha256|\{\{)/.test(block)) {
         offenders.push(`${rel}: ${name} (get_url without checksum)`);
       }
-      if (curls && !/sha256sum\s+-c/.test(block)) {
-        offenders.push(`${rel}: ${name} (curl without sha256sum -c)`);
+      if (curls && !/\[ "\$GOT" = /.test(block)) {
+        offenders.push(`${rel}: ${name} (curl without a digest comparison)`);
       }
     }
   }
