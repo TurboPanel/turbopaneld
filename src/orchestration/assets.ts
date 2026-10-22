@@ -106,6 +106,26 @@ export const GALAXY_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,
   "requirements.yml",
 );
+/**
+ * Bundled `ansible.posix` collection artifact (ships in the orchestration
+ * release; installed with `ansible-galaxy collection install <file> --offline`,
+ * no network). Keep the version in step with `requirements.yml`.
+ * Digest source: the `artifact.sha256` field of Galaxy's published metadata for
+ * ansible.posix 2.2.1
+ * (`galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/ansible/posix/versions/2.2.1/`),
+ * which matches the downloaded file.
+ */
+export const GALAXY_POSIX_VERSION = "2.2.1";
+export const GALAXY_POSIX_TARBALL_NAME =
+  `ansible-posix-${GALAXY_POSIX_VERSION}.tar.gz`;
+export const GALAXY_POSIX_SHA256 =
+  "8a5b6f23b0ab9cfd66a0a4d7075b57071cbbacbd2400fb293586a70c3a0fb527";
+export const GALAXY_POSIX_TARBALL = join(
+  ORCHESTRATION_DIR,
+  "vendor",
+  "galaxy",
+  GALAXY_POSIX_TARBALL_NAME,
+);
 /** Docker Galaxy roles (geerlingguy.docker) — installed on demand only. */
 export const GALAXY_DOCKER_REQUIREMENTS_FILE = join(
   ORCHESTRATION_DIR,

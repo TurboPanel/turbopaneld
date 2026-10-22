@@ -1,3 +1,4 @@
+import { verifyGalaxyPosixTarball } from "./galaxy-bundle.ts";
 import { run, runLogged, runOrThrow, symlinkPointsAt } from "./exec.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
 import {
@@ -63,7 +64,7 @@ import {
   DOCKER_PLAYBOOK,
   GALAXY_COLLECTIONS_DIR,
   GALAXY_DOCKER_REQUIREMENTS_FILE,
-  GALAXY_REQUIREMENTS_FILE,
+  GALAXY_POSIX_TARBALL,
   GALAXY_VENDOR_ROLES_DIR,
   galaxyDockerRoleCodeloadUrl,
   LOCALHOST_PLAYBOOK,
@@ -323,9 +324,10 @@ export async function ensureGalaxyCollections(): Promise<void> {
   const galaxyRun = galaxyBootstrapRunContext();
   ansibleHome();
 
+  await verifyGalaxyPosixTarball();
   logInfo(
     "orchestration",
-    `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`,
+    `installing galaxy collections from ${GALAXY_POSIX_TARBALL}`,
   );
   await withRetry(
     () =>
@@ -334,8 +336,8 @@ export async function ensureGalaxyCollections(): Promise<void> {
         [
           "collection",
           "install",
-          "-r",
-          GALAXY_REQUIREMENTS_FILE,
+          GALAXY_POSIX_TARBALL,
+          "--offline",
           "-p",
           GALAXY_COLLECTIONS_DIR,
         ],

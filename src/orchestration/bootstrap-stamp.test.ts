@@ -9,6 +9,7 @@ import {
 } from "./bootstrap-stamp.ts";
 import {
   GALAXY_DOCKER_REQUIREMENTS_FILE,
+  GALAXY_POSIX_SHA256,
   GALAXY_REQUIREMENTS_FILE,
   PYTHON_VERSION,
   REQUIREMENTS_FILE,
@@ -35,7 +36,8 @@ test("computeBootstrapStamp incorporates pinned uv and python versions", async (
     Deno.readTextFile(REQUIREMENTS_FILE),
     Deno.readTextFile(GALAXY_REQUIREMENTS_FILE),
   ]);
-  const material = `${UV_VERSION}\n${PYTHON_VERSION}\n${reqTxt}\n${reqYml}`;
+  const material =
+    `${UV_VERSION}\n${PYTHON_VERSION}\n${reqTxt}\n${reqYml}\n${GALAXY_POSIX_SHA256}`;
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(material),

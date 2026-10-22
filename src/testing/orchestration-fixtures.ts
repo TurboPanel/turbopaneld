@@ -202,6 +202,20 @@ export async function seedOrchestrationTree(
     );
   }
 
+  // The real bundled collection: ensureGalaxyCollections checks its digest.
+  await Deno.mkdir(join(orchestrationDir, "vendor", "galaxy"), {
+    recursive: true,
+  });
+  await copyFileIfPresent(
+    join(
+      CHECKOUT_ORCHESTRATION,
+      "vendor",
+      "galaxy",
+      "ansible-posix-2.2.1.tar.gz",
+    ),
+    join(orchestrationDir, "vendor", "galaxy", "ansible-posix-2.2.1.tar.gz"),
+  );
+
   const stubPlaybook = `---
 - hosts: localhost
   gather_facts: false

@@ -71,6 +71,7 @@ ensure_posix_collection() {
 
   collections_dir="${TMPDIR:-/tmp}/turbopanel-orchestration-collections"
   req="$ROOT/orchestration/requirements.yml"
+  posix_version=$(sed -n 's/^ *version: *"\([^"]*\)".*/\1/p' "$req" | head -n 1)
   stamp_file="$collections_dir/.requirements.sha256"
   req_hash="none"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -92,7 +93,7 @@ ensure_posix_collection() {
   ANSIBLE_COLLECTIONS_PATH="$collections_dir"
   export ANSIBLE_COLLECTIONS_PATH
 
-  echo "    installing ansible.posix from orchestration/requirements.yml"
+  echo "    installing ansible.posix from the bundled tarball"
   rm -rf "$collections_dir"
   mkdir -p "$collections_dir"
   attempt=1
@@ -100,7 +101,7 @@ ensure_posix_collection() {
     # --force: galaxy treats a collection found in any other collections_path
     # as installed and skips -p. CI has no other copy; a guest with a vendor
     # tree we are not using still might.
-    if ansible-galaxy collection install --force -r "$req" -p "$collections_dir" &&
+    if ansible-galaxy collection install --force --offline "$ROOT/orchestration/vendor/galaxy/ansible-posix-$posix_version.tar.gz" -p "$collections_dir" &&
       [ -d "$collections_dir/ansible_collections/ansible/posix" ]; then
       if [ "$req_hash" != "none" ]; then
         printf "%s\n" "$req_hash" > "$stamp_file"

@@ -2,6 +2,12 @@
 # Ansible Galaxy collections installed during orchestration bootstrap.
 # Exact version pins keep installs reproducible across managed server daemons.
 #
+# The collection is not downloaded: the exact release artifact ships in the
+# orchestration tree at vendor/galaxy/ansible-posix-<version>.tar.gz and is
+# installed offline after its SHA-256 is checked (see GALAXY_POSIX_SHA256 in
+# src/orchestration/assets.ts). Bump version here, replace the tarball and
+# update the digest together; a test keeps the three in step.
+#
 # Docker Galaxy roles live in requirements-docker.yml and are installed on
 # demand when a host first needs the container runtime (not at bootstrap).
 collections:
