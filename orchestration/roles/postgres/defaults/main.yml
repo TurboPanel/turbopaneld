@@ -1,6 +1,7 @@
 # Keep >= 18: instance migrations require the built-in uuidv7() — `pnpm migrate`
 # preflights this (turbopanel scripts/check-postgres-compat.mjs) and refuses older servers.
-postgres_image: postgres:18
+# Image and digest come from orchestration/image-pins.json (edit them there).
+postgres_image: "{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.postgres.ref }}@{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.postgres.digest }}"
 postgres_container_name: turbopanel-database
 # PG 18+ images store data under $PGDATA (/var/lib/postgresql/18/docker); mount the parent.
 # Data lives in a named Docker volume (postgres_volume_name), not a host bind-mount.

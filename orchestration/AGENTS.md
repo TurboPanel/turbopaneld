@@ -617,3 +617,24 @@ the running process holds a deleted executable or started before the file on
 disk, and "Restart the instance when its binary was replaced under it" notifies
 `Restart turbopanel instance` (handler, end of play). Without it a canary kept
 serving the previous panel build after a successful update.
+
+## Container image pins
+
+Every image the platform pulls is pinned by digest in `image-pins.json` (the
+daemon reads it through `src/util/image-pins.ts`; roles read it with a file
+lookup). To update an image, edit that one file: change the tag and the digest
+together, where the digest is the multi-architecture index digest of the tag
+(`docker buildx imagetools inspect <image:tag>`; both linux/amd64 and
+linux/arm64 must be listed). A pinned tag no longer floats, so engine patch
+releases and security fixes are not picked up automatically; a release bumps the
+pin on purpose. Managed database engines are keyed by the tag the control plane
+sends and the allow-list in `commands-contracts.ts` must list exactly those
+tags (a test checks it).
+
+Adding a digest to an image string makes Compose recreate the container, so an
+existing deployment keeps the bare tag it already runs: managed engines
+(`resolveManagedEngineImage`), the daemon-rendered stacks (`keepStoredImages`)
+and the control-plane compose (`system-compose`) only take the digest on first
+create, on a deliberate tag change, or when the stored image already carries a
+digest and the table's digest changed. Existing databases therefore keep their
+current image until a deliberate change.

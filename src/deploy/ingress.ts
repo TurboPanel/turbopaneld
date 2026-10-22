@@ -1,3 +1,4 @@
+import { keepStoredImages, pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
@@ -67,7 +68,8 @@ import {
 } from "./system-component.ts";
 
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
-const TRAEFIK_IMAGE = "traefik:v3.7.16";
+// Tag and digest live in orchestration/image-pins.json (traefik).
+const TRAEFIK_IMAGE = pinnedImage("traefik");
 /**
  * The only container on the host that sees the Docker socket.
  *
@@ -77,7 +79,7 @@ const TRAEFIK_IMAGE = "traefik:v3.7.16";
  * every co-hosted tenant with it. They now reach Docker through this proxy,
  * which answers only the two read endpoints a Docker provider needs.
  */
-const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:v0.5.0";
+const SOCKET_PROXY_IMAGE = pinnedImage("socketProxy");
 const SOCKET_PROXY_PORT = 2375;
 const SOCKET_PROXY_ENDPOINT =
   `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
@@ -1166,7 +1168,10 @@ async function applyCompose(
   what: string,
 ): Promise<void> {
   const pending = pendingComposePath(composePath);
-  await Deno.writeTextFile(pending, yaml, { mode: 0o640 });
+  const stored = await Deno.readTextFile(composePath).catch(() => null);
+  await Deno.writeTextFile(pending, keepStoredImages(yaml, stored), {
+    mode: 0o640,
+  });
   const result = await up(pending);
   if (!result.success) throw commandError(what, result);
   await Deno.rename(pending, composePath);
