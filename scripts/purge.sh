@@ -22,7 +22,8 @@
 # run, config, state, log and backup folders TurboPanel created, service
 # accounts in the 9900-9999 band, principal accounts and homes, ansible scratch
 # dirs, /opt/turbopanel/ lines in shell startup files, and Docker Engine
-# completely (containers, images, volumes, packages, apt source).
+# completely (containers, images, volumes, packages, apt source and signing
+# key), plus the signing key and apt source of TurboPanel's PHP repository.
 #
 # What it never removes: any distribution package. Hosts run this on desktops
 # and shared machines, so curl, git, acl, gnupg, iptables, openssl,
@@ -31,7 +32,8 @@
 # apt packages it purges are Docker's, and the PHP series (phpN.N-*) and the
 # sury archive keyring that TurboPanel's own PHP role added — each checked with
 # an apt simulation first; a package whose removal would drag anything else
-# along is kept and reported.
+# along is kept and reported. A version hold (the Docker role holds docker-ce
+# and docker-ce-cli) does not stop the purge of a package on that list.
 #
 # After confirmation it writes a root-only purge-in-progress marker and a
 # resume manifest under /var/lib/turbopanel-purge. The marker is outside the
@@ -2833,6 +2835,9 @@ tp_pkg_installed() {
 tp_sury_evidence() {
   [ -e /etc/apt/sources.list.d/sury-php.sources ] && return 0
   [ -e /etc/apt/sources.list.d/sury-php.list ] && return 0
+  for _se_key in $TP_SURY_APT_KEYS; do
+    [ -e "$_se_key" ] && return 0
+  done
   [ -f "$TP_TMP/before.units" ] && grep -q 'turbopanel-php-fpm' "$TP_TMP/before.units" && return 0
   return 1
 }
@@ -3024,6 +3029,11 @@ tp_run_listed_packages() {
 # nothing beyond the list; a package whose purge would drag anything else along
 # is kept and reported. Nothing here ever runs autoremove: only the named
 # packages leave, so whatever else is on the host stays exactly as it was.
+# A version hold on a listed package (the Docker role holds docker-ce and
+# docker-ce-cli) would make `apt-get purge -y` refuse the whole call while the
+# simulation above still passes, so the purge is allowed to change holds. That
+# only ever applies to the listed packages: a held package the purge would drag
+# along shows up in the simulation and keeps the whole candidate.
 tp_purge_guarded_packages() {
   _pgp_label=$1
   _pgp_cand=$2
@@ -3032,7 +3042,7 @@ tp_purge_guarded_packages() {
   mv "$_pgp_cand.sorted" "$_pgp_cand"
   tp_choose_purge_packages "$_pgp_cand"
   tp_run_listed_packages "purge ${_pgp_label} packages" "$TP_TMP/apt.final" \
-    env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get purge -y
+    env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-change-held-packages
 }
 
 tp_purge_apt_packages() {
@@ -3052,9 +3062,11 @@ tp_purge_apt_packages() {
   else
     tp_print_ok "no PHP packages added by TurboPanel"
   fi
-  # TurboPanel's own sury source goes last, so an interrupted run still finds
-  # it as evidence on the next one.
-  for _pap in /etc/apt/sources.list.d/sury-php.sources /etc/apt/sources.list.d/sury-php.list; do
+  # TurboPanel's own sury source and its signing key go last, so an
+  # interrupted run still finds them as evidence on the next one. The key is a
+  # loose file when the PHP role installed it under its key policy; an older
+  # install shipped it in the debsuryorg-archive-keyring package purged above.
+  for _pap in /etc/apt/sources.list.d/sury-php.sources /etc/apt/sources.list.d/sury-php.list $TP_SURY_APT_KEYS; do
     if [ -e "$_pap" ] || [ -L "$_pap" ]; then
       tp_run "remove $_pap" rm -f "$_pap" || true
     fi
@@ -3101,17 +3113,38 @@ tp_collect_signed_by() {
   done < "$TP_TMP/docker.signed"
 }
 
+# Docker's apt source and signing key, by content and by name. The scan finds
+# any source that points at download.docker.com and the keys its Signed-By
+# names. The fixed names in TP_DOCKER_APT_SOURCES and TP_DOCKER_APT_KEYS cover
+# what the scan cannot see: an offline install's file:// source, a key left
+# without its source (a half-finished install writes the key first; an
+# interrupted purge removes the source first), and the key download's
+# temporary copy.
 tp_purge_docker_sources() {
-  [ -d /etc/apt/sources.list.d ] || return 0
   : > "$TP_TMP/docker.keyrings"
-  find /etc/apt/sources.list.d -maxdepth 1 \( -type f -o -type l \) > "$TP_TMP/docker.sourcefiles" 2>/dev/null || true
+  : > "$TP_TMP/docker.sourcefiles"
+  : > "$TP_TMP/docker.sources"
+  if [ -d "$TP_APT_SOURCES_DIR" ]; then
+    find "$TP_APT_SOURCES_DIR" -maxdepth 1 \( -type f -o -type l \) > "$TP_TMP/docker.sourcefiles" 2>/dev/null || true
+  fi
   while IFS= read -r _pds; do
     [ -n "$_pds" ] || continue
     grep -q 'download.docker.com' "$_pds" 2>/dev/null || continue
+    tp_file_add "$TP_TMP/docker.sources" "$_pds"
+  done < "$TP_TMP/docker.sourcefiles"
+  for _pds in $TP_DOCKER_APT_SOURCES; do
+    if [ -e "$_pds" ] || [ -L "$_pds" ]; then
+      tp_file_add "$TP_TMP/docker.sources" "$_pds"
+    fi
+  done
+  while IFS= read -r _pds; do
+    [ -n "$_pds" ] || continue
     tp_collect_signed_by "$_pds" "$TP_TMP/docker.keyrings"
     tp_run "remove $_pds" rm -f "$_pds" || true
-  done < "$TP_TMP/docker.sourcefiles"
-  [ -s "$TP_TMP/docker.keyrings" ] || return 0
+  done < "$TP_TMP/docker.sources"
+  for _pds_key in $TP_DOCKER_APT_KEYS; do
+    tp_file_add "$TP_TMP/docker.keyrings" "$_pds_key"
+  done
   while IFS= read -r _pds_key; do
     [ -n "$_pds_key" ] || continue
     [ -e "$_pds_key" ] || [ -L "$_pds_key" ] || continue
@@ -3857,10 +3890,20 @@ TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folde
 # it added. Never add a generic package here (curl, git, acl, gnupg, iptables,
 # openssl, wireguard-tools, build-essential, sudo, systemd-timesyncd, ...): the
 # installer relies on them but a desktop or shared host owns them. A role that
-# adds an apt repository has to add its source file to the removal in
-# tp_purge_apt_packages (the Docker download.docker.com scan or the sury
-# filenames would not match another).
+# adds an apt repository has to add its source file and signing key to the
+# removal (the Docker lists below, or the sury names in tp_purge_apt_packages);
+# scripts/purge-coverage.test.ts fails when a role names an apt file, a held
+# package or a systemd unit this script does not remove.
 TP_DOCKER_PACKAGES="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras docker.io docker-compose containerd runc"
+TP_APT_SOURCES_DIR=/etc/apt/sources.list.d
+# Docker apt sources by name: the Docker role's and the Galaxy role's deb822
+# file, and the one-line files older installs used.
+TP_DOCKER_APT_SOURCES="/etc/apt/sources.list.d/docker.sources /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/download_docker_com_linux_debian.list /etc/apt/sources.list.d/download_docker_com_linux_ubuntu.list /etc/apt/sources.list.d/download_docker_com_linux_raspbian.list"
+# Docker signing keys by name, with the key download's temporary copy.
+TP_DOCKER_APT_KEYS="/etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.asc.fetched /etc/apt/keyrings/docker.gpg /etc/apt/trusted.gpg.d/docker.asc /etc/apt/trusted.gpg.d/docker.gpg"
+# The PHP repository's signing key when the PHP role installs it as a loose
+# file, with that install's temporary copy.
+TP_SURY_APT_KEYS="/usr/share/keyrings/turbopanel-sury-php.gpg /usr/share/keyrings/turbopanel-sury-php.gpg.tmp"
 
 if ! tp_is_interactive; then
   tp_print_error "A controlling terminal is required. Nothing was changed."
