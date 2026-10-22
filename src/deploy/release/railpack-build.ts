@@ -525,6 +525,7 @@ async function installRailpack(
     tarball,
     deps.railpackSha256 ?? RAILPACK_SHA256[arch],
     `Railpack ${RAILPACK_VERSION} (${asset})`,
+    "RAILPACK_SHA256 in src/deploy/release/railpack-build.ts and railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml",
   );
   const extractDir = join(tmp, "railpack");
   await Deno.mkdir(extractDir, { recursive: true });

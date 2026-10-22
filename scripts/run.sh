@@ -2659,14 +2659,25 @@ if [ -r /etc/os-release ]; then
   # shellcheck disable=SC1091
   . /etc/os-release
   case "${ID:-}" in
-    debian | raspbian) ;;
+    debian | raspbian)
+      # VERSION_ID is a plain number on releases (13); testing/sid omit it.
+      case "${VERSION_ID:-}" in
+        '' | *[!0-9]*) ;;
+        *)
+          if [ "$VERSION_ID" -lt 13 ]; then
+            tp_print_error "Unsupported operating system '${PRETTY_NAME:-${ID:-unknown}}' — TurboPanel supports Debian 13 (trixie) and later only."
+            exit 1
+          fi
+          ;;
+      esac
+      ;;
     *)
-      tp_print_error "Unsupported operating system '${PRETTY_NAME:-${ID:-unknown}}' — TurboPanel supports Debian and Raspbian only."
+      tp_print_error "Unsupported operating system '${PRETTY_NAME:-${ID:-unknown}}' — TurboPanel supports Debian 13 (trixie) and later only."
       exit 1
       ;;
   esac
 else
-  tp_print_error "Cannot read /etc/os-release to identify the operating system — TurboPanel supports Debian and Raspbian only."
+  tp_print_error "Cannot read /etc/os-release to identify the operating system — TurboPanel supports Debian 13 (trixie) and later only."
   exit 1
 fi
 tp_print_ok "Operating system supported (${PRETTY_NAME:-$ID})"

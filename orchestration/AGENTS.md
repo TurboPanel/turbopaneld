@@ -154,8 +154,8 @@ Moved to `roles/web-service-user/AGENTS.md`.
 ### nginx (`nginx`)
 
 Vendored — **never** a distro package. The role downloads the pinned
-**nginx.org** Debian `.deb` (`nginx_deb_version`, bookworm pool — runs on
-Debian 13 too), extracts the binary with `dpkg-deb -x` (same pattern as the
+**nginx.org** Debian `.deb` (`nginx_deb_version`, trixie build, SHA-256 pinned
+per architecture), extracts the binary with `dpkg-deb -x` (same pattern as the
 `redis` role / packages.redis.io), and installs
 `{{ turbopanel_vendor_dir }}/nginx/<version>/sbin/nginx` + `current`. Main
 config is templated to `/etc/turbopanel/nginx/nginx.conf` and
