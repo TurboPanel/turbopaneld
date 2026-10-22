@@ -2,17 +2,24 @@ import { assertEquals } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
-import { ManagedEngineExitGuard } from "./engine-exit-guard.ts";
+import {
+  ENGINE_EXIT_GUARD_MAX_ATTEMPTS,
+  ENGINE_EXIT_GUARD_MAX_START_GAP_MS,
+  ManagedEngineExitGuard,
+} from "./engine-exit-guard.ts";
+import { applyBootHold, resetUnsettledBootHoldsForTests } from "./boot-hold.ts";
 import { writeManagedDemotedMarker } from "./demoted-marker.ts";
 import { writeManagedDestroyedMarker } from "./destroyed-marker.ts";
 import {
   beginManagedIntent,
+  clearManagedIntent,
   endManagedIntent,
   HOST_WIDE_INTENT_ID,
   recordManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
+import { forEachSequential } from "../util/sequential.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -531,5 +538,170 @@ test("host-wide server.reboot blocks compose start", async () => {
       ),
       false,
     );
+  });
+});
+
+function startCount(calls: string[][]): number {
+  return calls.filter((args) =>
+    args[0] === "compose" && args.at(-1) === "start"
+  )
+    .length;
+}
+
+test("a boot hold that could not be finished keeps the engine stopped", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const failingStop = (args: string[]): Promise<DockerCliResult> =>
+      Promise.resolve({
+        success: !args.includes("stop"),
+        code: args.includes("stop") ? 1 : 0,
+        stdout: "",
+        stderr: "",
+      });
+    try {
+      await applyBootHold("unclean", {
+        layout,
+        run: failingStop,
+        listMembers: () => Promise.resolve([memberRecord()]),
+      });
+      // The held marker could not be written: only the in-process note is left.
+      await clearManagedIntent(layout.stateDir, MANAGED_ID, "test");
+      const fake = docker();
+      const guard = new ManagedEngineExitGuard({
+        layout,
+        run: fake.run,
+        listMembers: () => Promise.resolve([memberRecord()]),
+      });
+      await guard.tick();
+      assertEquals(startCount(fake.calls), 0);
+    } finally {
+      resetUnsettledBootHoldsForTests();
+    }
+  });
+});
+
+test("nothing is started while the boot hold is still pending", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    let pending = true;
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+      startPaused: () => pending,
+    });
+    await guard.tick();
+    assertEquals(fake.calls.length, 0);
+    pending = false;
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 1);
+  });
+});
+
+test("the wait between starts doubles and the guard gives up", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    const gap = 60_000;
+    let now = 1_000_000;
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+      minStartGapMs: gap,
+      nowMs: () => now,
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 1);
+    now += gap + 1;
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 2);
+    // The wait before the third try is two gaps, not one.
+    now += gap + 1;
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 2);
+    now += gap;
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 3);
+    await forEachSequential(Array.from({ length: 20 }), async () => {
+      now += ENGINE_EXIT_GUARD_MAX_START_GAP_MS + 1;
+      await guard.tick();
+    });
+    assertEquals(startCount(fake.calls), ENGINE_EXIT_GUARD_MAX_ATTEMPTS);
+  });
+});
+
+test("seeing the engine run again resets the wait and the give-up count", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const calls: string[][] = [];
+    let ps = EXITED_PS;
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      const stdout = args[0] === "compose" && args.includes("ps") ? ps : "";
+      return Promise.resolve({ success: true, code: 0, stdout, stderr: "" });
+    };
+    let now = 1_000_000;
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run,
+      listMembers: () => Promise.resolve([memberRecord()]),
+      nowMs: () => now,
+    });
+    await guard.tick();
+    assertEquals(startCount(calls), 1);
+    ps = JSON.stringify([{
+      ID: "a",
+      Name: "db-1",
+      Service: "db",
+      State: "running",
+    }]);
+    now += 1;
+    await guard.tick();
+    ps = EXITED_PS;
+    now += 1;
+    await guard.tick();
+    // The engine ran in between, so the next stop is tried at once.
+    assertEquals(startCount(calls), 2);
+  });
+});
+
+test("a replica is not probed again while the wait is running", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const replica = { ...memberRecord(), role: "replica" as const };
+    await saveManagedHaMember(layout, replica);
+    const calls: string[][] = [];
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      let stdout = "";
+      if (args[0] === "run") stdout = "present\n";
+      if (args[0] === "compose" && args.includes("ps")) stdout = EXITED_PS;
+      return Promise.resolve({ success: true, code: 0, stdout, stderr: "" });
+    };
+    let now = 1_000_000;
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run,
+      listMembers: () => Promise.resolve([replica]),
+      nowMs: () => now,
+    });
+    await guard.tick();
+    const probes = calls.filter((args) => args[0] === "run").length;
+    now += 1_000;
+    await guard.tick();
+    assertEquals(calls.filter((args) => args[0] === "run").length, probes);
   });
 });

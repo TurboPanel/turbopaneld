@@ -254,10 +254,16 @@ export async function applyManagedBootHoldAtStart(
     listingFailed = true;
     logWarn("managed", "boot hold failed, retrying:", sanitizeForLog(err));
   }
+  // Until the members have been listed and held, no engine may be started
+  // by the engine exit guard: a primary that should be held would come back.
+  let holdPending = listingFailed;
   const reapply = listingFailed
     ? async () => {
       const done = await hold(kind, layout);
-      if (done) await persist(layout);
+      if (done) {
+        holdPending = false;
+        await persist(layout);
+      }
       return done;
     }
     : undefined;
@@ -283,6 +289,7 @@ export async function applyManagedBootHoldAtStart(
   const exitGuard = new ManagedEngineExitGuard({
     layout,
     run: runDocker,
+    startPaused: () => holdPending,
   });
   exitGuard.start();
   engineExitGuard = exitGuard;

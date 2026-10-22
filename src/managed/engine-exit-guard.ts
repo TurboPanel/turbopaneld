@@ -29,9 +29,14 @@ import {
 } from "./ha-member.ts";
 import { replicaStandbyDataAllowsEngineStart } from "./replica-start-guard.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
+import { isBootHoldUnsettled } from "./boot-hold.ts";
 
 export const ENGINE_EXIT_GUARD_INTERVAL_MS = 60_000;
 export const ENGINE_EXIT_GUARD_MIN_START_GAP_MS = 60_000;
+/** The wait between starts doubles after each try, up to this ceiling. */
+export const ENGINE_EXIT_GUARD_MAX_START_GAP_MS = 15 * 60_000;
+/** Starts tried without ever seeing the engine up before the guard gives up. */
+export const ENGINE_EXIT_GUARD_MAX_ATTEMPTS = 6;
 
 export type DockerRunFn = (args: string[]) => Promise<DockerCliResult>;
 
@@ -42,7 +47,14 @@ export type ManagedEngineExitGuardDeps = {
   intervalMs?: number;
   minStartGapMs?: number;
   nowMs?: () => number;
+  /**
+   * True while the boot hold has not finished (members not yet listed): no
+   * engine may be started until the hold has been applied.
+   */
+  startPaused?: () => boolean;
 };
+
+type StartAttempts = { count: number; lastMs: number; gaveUp: boolean };
 
 function engineContainersDown(
   containers: EnvironmentDeployContainer[],
@@ -120,7 +132,8 @@ export class ManagedEngineExitGuard {
   readonly #intervalMs: number;
   readonly #minStartGapMs: number;
   readonly #nowMs: () => number;
-  readonly #lastStartAttempt = new Map<string, number>();
+  readonly #startPaused: () => boolean;
+  readonly #attempts = new Map<string, StartAttempts>();
   readonly #loggedSkip = new Set<string>();
 
   constructor(deps: ManagedEngineExitGuardDeps) {
@@ -132,6 +145,7 @@ export class ManagedEngineExitGuard {
     this.#minStartGapMs = deps.minStartGapMs ??
       ENGINE_EXIT_GUARD_MIN_START_GAP_MS;
     this.#nowMs = deps.nowMs ?? (() => Date.now());
+    this.#startPaused = deps.startPaused ?? (() => false);
   }
 
   start(): void {
@@ -151,6 +165,7 @@ export class ManagedEngineExitGuard {
 
   async tick(): Promise<void> {
     if (this.#ticking) return;
+    if (this.#startPaused()) return;
     this.#ticking = true;
     try {
       const members = await this.#listMembers();
@@ -175,15 +190,17 @@ export class ManagedEngineExitGuard {
     if (!acquired) return;
   }
 
-  async #maybeStart(member: ManagedHaMemberRecord): Promise<void> {
-    const { managedId, memberId } = member;
-    if (!(await pathExists(managedDir(this.#layout, managedId)))) return;
-
+  /** Demoted, destroyed, held, mid-command or boot-held: leave it stopped. */
+  async #meantToStayStopped(
+    member: ManagedHaMemberRecord,
+    now: number,
+  ): Promise<boolean> {
+    const { managedId } = member;
+    if (isBootHoldUnsettled(managedId)) return true;
     if (await isManagedMemberDemoted(this.#layout, managedId)) {
       this.#loggedSkip.delete(managedId);
-      return;
+      return true;
     }
-
     if (
       await isManagedMemberDestroyed(
         this.#layout.stateDir,
@@ -192,13 +209,68 @@ export class ManagedEngineExitGuard {
       )
     ) {
       this.#loggedSkip.delete(managedId);
-      return;
+      return true;
     }
+    return await intentBlocksEngineStart(this.#layout.stateDir, managedId, now);
+  }
+
+  /** The wait is still running, or the guard has given up on this engine. */
+  #startBackoffBlocks(managedId: string, now: number): boolean {
+    const tries = this.#attempts.get(managedId);
+    if (tries === undefined) return false;
+    if (tries.gaveUp) return true;
+    const gap = Math.min(
+      this.#minStartGapMs * 2 ** (tries.count - 1),
+      Math.max(ENGINE_EXIT_GUARD_MAX_START_GAP_MS, this.#minStartGapMs),
+    );
+    return now - tries.lastMs < gap;
+  }
+
+  #noteStartAttempt(managedId: string, now: number): void {
+    const count = (this.#attempts.get(managedId)?.count ?? 0) + 1;
+    const gaveUp = count >= ENGINE_EXIT_GUARD_MAX_ATTEMPTS;
+    this.#attempts.set(managedId, { count, lastMs: now, gaveUp });
+    if (gaveUp) {
+      logWarn(
+        "managed",
+        `engine exit guard: engine did not stay up after ${count} starts, giving up until it runs again or an operator starts it managedId=${managedId}`,
+      );
+    }
+  }
+
+  async #standbyAllowsStart(member: ManagedHaMemberRecord): Promise<boolean> {
+    const { managedId, memberId } = member;
+    try {
+      const allowed = await replicaStandbyDataAllowsEngineStart(
+        this.#layout,
+        managedId,
+        member.engine,
+        member.role,
+        this.#run,
+      );
+      if (allowed || this.#loggedSkip.has(managedId)) return allowed;
+      logInfo(
+        "managed",
+        `engine exit guard: not starting replica with non-standby data managedId=${managedId} member=${memberId}`,
+      );
+      this.#loggedSkip.add(managedId);
+      return false;
+    } catch (err) {
+      logWarn(
+        "managed",
+        `engine exit guard: standby probe failed managedId=${managedId}:`,
+        sanitizeForLog(err),
+      );
+      return false;
+    }
+  }
+
+  async #maybeStart(member: ManagedHaMemberRecord): Promise<void> {
+    const { managedId } = member;
+    if (!(await pathExists(managedDir(this.#layout, managedId)))) return;
 
     const now = this.#nowMs();
-    if (await intentBlocksEngineStart(this.#layout.stateDir, managedId, now)) {
-      return;
-    }
+    if (await this.#meantToStayStopped(member, now)) return;
 
     const project = managedComposeProject(managedId);
     const containers = await collectManagedContainers(
@@ -209,41 +281,15 @@ export class ManagedEngineExitGuard {
     if (containers === undefined) return;
     if (!engineContainersDown(containers)) {
       this.#loggedSkip.delete(managedId);
+      this.#attempts.delete(managedId);
       return;
     }
 
-    let mayStart: boolean;
-    try {
-      mayStart = await replicaStandbyDataAllowsEngineStart(
-        this.#layout,
-        managedId,
-        member.engine,
-        member.role,
-        this.#run,
-      );
-    } catch (err) {
-      logWarn(
-        "managed",
-        `engine exit guard: standby probe failed managedId=${managedId}:`,
-        sanitizeForLog(err),
-      );
-      return;
-    }
-    if (!mayStart) {
-      if (!this.#loggedSkip.has(managedId)) {
-        logInfo(
-          "managed",
-          `engine exit guard: not starting replica with non-standby data managedId=${managedId} member=${memberId}`,
-        );
-        this.#loggedSkip.add(managedId);
-      }
-      return;
-    }
+    // Cheap checks first: the standby probe runs a container.
+    if (this.#startBackoffBlocks(managedId, now)) return;
+    if (!(await this.#standbyAllowsStart(member))) return;
 
-    const last = this.#lastStartAttempt.get(managedId) ?? 0;
-    if (now - last < this.#minStartGapMs) return;
-
-    this.#lastStartAttempt.set(managedId, now);
+    this.#noteStartAttempt(managedId, now);
     await composeStartStoppedEngine(this.#run, project, managedId, member);
   }
 }
