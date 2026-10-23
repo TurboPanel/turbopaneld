@@ -3,6 +3,7 @@ import { DaemonApiError } from "./api-client.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   classifyConnectFailure,
+  isAwaitingSeatError,
   isMissingLicenseCredentialsError,
   isPermanentAuthError,
   isPermanentEnrollmentError,
@@ -11,6 +12,7 @@ import {
   temporaryAuthFailure,
 } from "./connect-failure.ts";
 import {
+  awaitingSeatErrorResponse,
   permanentAuthErrorResponse,
   permanentEnrollmentErrorResponse,
   serverKeyMismatchResponse,
@@ -24,15 +26,7 @@ it("classifies permanent enrollment and auth errors", async () => {
     await toDaemonApiError(
       permanentEnrollmentErrorResponse("already-consumed"),
     ),
-    await toDaemonApiError(
-      permanentEnrollmentErrorResponse("tier-below-required"),
-    ),
-    await toDaemonApiError(
-      permanentEnrollmentErrorResponse("tier-unassigned"),
-    ),
     await toDaemonApiError(permanentAuthErrorResponse("license-inactive")),
-    await toDaemonApiError(permanentAuthErrorResponse("tier-below-required")),
-    await toDaemonApiError(permanentAuthErrorResponse("tier-unassigned")),
     await toDaemonApiError(permanentAuthErrorResponse("key-inactive")),
     await toDaemonApiError(
       permanentEnrollmentErrorResponse("invalid-signature"),
@@ -48,6 +42,31 @@ it("classifies permanent enrollment and auth errors", async () => {
       `expected permanent for ${String(err)}`,
     );
   }
+});
+
+it("classifies the tier refusals as a slow seat wait, never permanent", async () => {
+  // Buying a size fixes these without touching the server, so the daemon must
+  // keep re-checking. Older panels also send them from /auth/session.
+  for (
+    const kind of ["tier-below-required", "tier-unassigned"] as const
+  ) {
+    const err = await toDaemonApiError(awaitingSeatErrorResponse(kind));
+    assertEquals(isAwaitingSeatError(err), true, kind);
+    assertEquals(isPermanentEnrollmentError(err), false, kind);
+    assertEquals(isPermanentAuthError(err), false, kind);
+    assertEquals(isTransientConnectError(err), false, kind);
+    assertEquals(classifyConnectFailure(err), {
+      kind: "awaiting-seat",
+      reason: `400 ${err instanceof DaemonApiError ? err.message : ""}`,
+    });
+  }
+  // Same text on another status is not a seat wait.
+  assertEquals(
+    isAwaitingSeatError(
+      new DaemonApiError(403, "License tier below required"),
+    ),
+    false,
+  );
 });
 
 it("classifies missing on-disk license credentials as awaiting-license", () => {

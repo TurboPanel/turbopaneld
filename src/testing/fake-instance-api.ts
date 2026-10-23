@@ -16,17 +16,15 @@ export type FakeInstanceApiResponder = (
 type PermanentEnrollmentKind =
   | "invalid-license"
   | "already-consumed"
-  | "tier-below-required"
-  | "tier-unassigned"
   | "invalid-signature"
   | "key-revoked"
   | "fingerprint-exists";
 
 type PermanentAuthKind =
   | "license-inactive"
-  | "tier-below-required"
-  | "tier-unassigned"
   | "key-inactive";
+
+type AwaitingSeatKind = "tier-below-required" | "tier-unassigned";
 
 /** Exact pairs from connect-failure.ts PERMANENT_ENROLLMENT_ERRORS. */
 const PERMANENT_ENROLLMENT: Record<
@@ -38,11 +36,6 @@ const PERMANENT_ENROLLMENT: Record<
     status: 400,
     message: "License already consumed or invalid",
   },
-  "tier-below-required": {
-    status: 400,
-    message: "License tier below required",
-  },
-  "tier-unassigned": { status: 400, message: "License tier not assigned" },
   "invalid-signature": { status: 403, message: "Invalid signature" },
   "key-revoked": { status: 403, message: "Server key revoked" },
   "fingerprint-exists": {
@@ -57,12 +50,19 @@ const PERMANENT_AUTH: Record<
   { status: number; message: string }
 > = {
   "license-inactive": { status: 400, message: "License is inactive" },
+  "key-inactive": { status: 400, message: "Server key is inactive" },
+};
+
+/** Exact pairs from connect-failure.ts AWAITING_SEAT_ERRORS. */
+const AWAITING_SEAT: Record<
+  AwaitingSeatKind,
+  { status: number; message: string }
+> = {
   "tier-below-required": {
     status: 400,
     message: "License tier below required",
   },
   "tier-unassigned": { status: 400, message: "License tier not assigned" },
-  "key-inactive": { status: 400, message: "Server key is inactive" },
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -187,6 +187,14 @@ export function permanentAuthErrorResponse(
   const entry = PERMANENT_AUTH[kind];
   if (!entry) {
     throw new TypeError(`unknown permanent auth kind: ${String(kind)}`);
+  }
+  return errorResponse(entry.status, entry.message);
+}
+
+export function awaitingSeatErrorResponse(kind: AwaitingSeatKind): Response {
+  const entry = AWAITING_SEAT[kind];
+  if (!entry) {
+    throw new TypeError(`unknown awaiting-seat kind: ${String(kind)}`);
   }
   return errorResponse(entry.status, entry.message);
 }

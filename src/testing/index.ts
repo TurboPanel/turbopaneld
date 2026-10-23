@@ -43,6 +43,7 @@ export {
 } from "./orchestration-fixtures.ts";
 
 export {
+  awaitingSeatErrorResponse,
   challengeResponse,
   createFakeInstanceApi,
   enrollResponse,
