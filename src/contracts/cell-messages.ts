@@ -336,6 +336,43 @@ export type BackupRunReportResultMessage = {
 };
 
 /**
+ * Daemon → control plane: how copying one finished backup to its S3-compatible
+ * target ended (feature `backup-s3-copy-v1`; sent only to a control plane that
+ * lists it). Correlated by `id` like {@link BackupRunReportMessage}: the
+ * spooled report is deleted only when a {@link BackupCopyReportResultMessage}
+ * with the same `id` arrives, and a second copy of the same report is a no-op.
+ * Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type BackupCopyReportMessage = {
+  type: "backup-copy-report";
+  id: string;
+  destinationId: string;
+  managedId: string;
+  backupId: string;
+  policyId?: string;
+  state: "copied" | "failed";
+  /** A plain reason when `state` is `failed`. */
+  error?: string;
+  /** Object key inside the bucket (the target's prefix included). */
+  objectKey?: string;
+  sizeBytes?: number;
+  attempts: number;
+  finishedAt: string;
+  /** `bk_` ids the bucket retention removed after this copy. */
+  pruned?: string[];
+  at: string;
+};
+
+/** Control plane → daemon: the copy report with this `id` is stored or refused for good. */
+export type BackupCopyReportResultMessage = {
+  type: "backup-copy-report-result";
+  id: string;
+  ok: boolean;
+  error?: string;
+  at: string;
+};
+
+/**
  * Control plane → daemon: read what these logins may do right now (feature
  * `managed-permissions-read-v1`). Read only: the daemon runs SELECT / SHOW
  * statements and nothing else. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
@@ -786,6 +823,8 @@ export type DaemonMessage =
   }
   | BackupRunReportMessage
   | BackupRunReportResultMessage
+  | BackupCopyReportMessage
+  | BackupCopyReportResultMessage
   | CommandOutcomeAckMessage
   | {
     type: "public-urls-update";

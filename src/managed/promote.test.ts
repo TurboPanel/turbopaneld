@@ -10,7 +10,11 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedPromote } from "./promote.ts";
 import { managedDir } from "./engine-paths.ts";
-import { readSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
+import {
+  readSwitchoverPromoteLocalMarker,
+  readSwitchoverQuiescedMarker,
+  writeSwitchoverQuiescedMarker,
+} from "./switchover-state-marker.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
 import {
   isManagedMemberDemoted,
@@ -233,7 +237,7 @@ test("handleManagedPromote blocks promotion when GTID wait times out", async () 
   assertEquals(sawPromoteSql, false);
 });
 
-test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", async () => {
+test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote and drops the quiesced mark of its time as old primary", async () => {
   await withPromoteLayoutEnv(async () => {
     const managedId = "managed_promote_mysql";
     const mysqlPs = JSON.stringify([
@@ -245,6 +249,12 @@ test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", asy
       },
     ]);
     let sawGtidWait = false;
+    const earlier = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(earlier, managedId), { recursive: true });
+    await writeSwitchoverQuiescedMarker(earlier, managedId, {
+      primaryExecutedGtidSet: "uuid:1-9",
+      quiescedAt: "2026-01-01T00:00:00.000Z",
+    });
     const result = await handleManagedPromote(
       {
         managedId,
@@ -277,6 +287,7 @@ test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", asy
     const layout = resolveLayout(Deno.env.toObject());
     const marker = await readSwitchoverPromoteLocalMarker(layout, managedId);
     assertEquals(marker?.phase, "completed");
+    assertEquals(await readSwitchoverQuiescedMarker(layout, managedId), null);
   });
 });
 

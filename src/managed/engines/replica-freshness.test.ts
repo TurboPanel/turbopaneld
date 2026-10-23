@@ -184,6 +184,9 @@ test("mariadb empty GTID positions are unknown; malformed reports nothing", () =
 
 test("boundedGtid strips line breaks and rejects bad text", () => {
   assertEquals(boundedGtid(`${U1}:1-5,\n${U1}:7`), `${U1}:1-5,${U1}:7`);
+  // `mysql -N -B` prints the newline between two UUIDs as backslash + n.
+  assertEquals(boundedGtid(`${U1}:1-5,\\n${U1}:7`), `${U1}:1-5,${U1}:7`);
+  assertEquals(boundedGtid("a\\tb"), undefined);
   assertEquals(boundedGtid("é"), undefined);
   assertEquals(boundedGtid(undefined), undefined);
 });

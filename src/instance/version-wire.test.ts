@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  BACKUP_S3_COPY_FEATURE,
   COMMAND_RECOVERY_FEATURE,
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
@@ -321,8 +322,17 @@ test("managed-login-limits-v1 is advertised on the wire and raised no floor", ()
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("server-network-check-v1 is advertised last and raised no floor", () => {
+test("server-network-check-v1 is advertised and raised no floor", () => {
   assertEquals(SERVER_NETWORK_CHECK_FEATURE, "server-network-check-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), SERVER_NETWORK_CHECK_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(SERVER_NETWORK_CHECK_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("backup-s3-copy-v1 is advertised last and raised no floor", () => {
+  assertEquals(BACKUP_S3_COPY_FEATURE, "backup-s3-copy-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), BACKUP_S3_COPY_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

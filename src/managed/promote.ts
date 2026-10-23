@@ -29,7 +29,10 @@ import {
   resolveLocalReplicationEngine,
 } from "./local-engine-context.ts";
 import { proveSwitchoverGtidBeforePromote } from "./switchover-gtid-proof.ts";
-import { writeSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
+import {
+  clearSwitchoverQuiescedMarker,
+  writeSwitchoverPromoteLocalMarker,
+} from "./switchover-state-marker.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 
@@ -131,6 +134,10 @@ async function promoteManagedMember(
       new Date().toISOString(),
     );
   }
+  // The member is the primary now. A quiesced mark left from the time it was
+  // the old primary of an earlier switchover would silence its failover
+  // detection for as long as it stays primary.
+  await clearSwitchoverQuiescedMarker(layout, payload.managedId);
   const run = deps?.runDocker ?? defaultRunDocker;
   await clearManagedDemotionArtifacts(layout, payload.managedId, {
     engine: payload.engine,

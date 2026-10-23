@@ -87,6 +87,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-switchover-final-position-v1",
   "host-capacity-v1",
   "server-network-check-v1",
+  "backup-s3-copy-v1",
 ] as const;
 
 /**
@@ -124,6 +125,15 @@ export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
  */
 export const MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE: DaemonWireFeature =
   "managed-switchover-final-position-v1";
+
+/**
+ * This daemon copies finished managed backups to an S3-compatible bucket when
+ * a policy or a manual backup names a target, tests a target
+ * (`server.backups.test-target`) and restores from a bucket. The control plane
+ * sends a target only to a daemon that lists this feature, and the daemon sends
+ * `backup-copy-report` only to a control plane that lists it too.
+ */
+export const BACKUP_S3_COPY_FEATURE: DaemonWireFeature = "backup-s3-copy-v1";
 
 /**
  * This daemon answers `managed-health-request` with `managed-health-result`

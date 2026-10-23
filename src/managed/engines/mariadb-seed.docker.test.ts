@@ -5,6 +5,7 @@
  */
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
+import { docker, dockerReachable } from "../../testing/docker-run.ts";
 import { waitFor } from "../../testing/wait-for.ts";
 import { buildMariadbStandbySeedScript } from "./mariadb.ts";
 import { execStandbySeed, formatStandbySeedFailure } from "./standby-probe.ts";
@@ -16,37 +17,6 @@ const ROOT_PASSWORD = ["seed", "root", "fixture"].join("-");
 const SEED_USER_PASSWORD = ["seed", "user", "fixture"].join("-");
 const SECRET_ROW_VALUE = ["row", "value", "must", "not", "leak"].join("-");
 const IMAGES = ["mariadb:11.8", "mariadb:12.3"];
-
-type Result = { success: boolean; stdout: string; stderr: string };
-
-async function docker(args: string[], input?: string): Promise<Result> {
-  const child = new Deno.Command("docker", {
-    args,
-    stdin: input === undefined ? "null" : "piped",
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
-  if (input !== undefined) {
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(input));
-    await writer.close();
-  }
-  const out = await child.output();
-  const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-  return {
-    success: out.success,
-    stdout: decode(out.stdout),
-    stderr: decode(out.stderr),
-  };
-}
-
-async function dockerReachable(): Promise<boolean> {
-  try {
-    return (await docker(["info"])).success;
-  } catch {
-    return false;
-  }
-}
 
 const DOCKER_AVAILABLE = await dockerReachable();
 if (!DOCKER_AVAILABLE) {
@@ -86,7 +56,7 @@ async function startServer(
   );
 }
 
-function sql(name: string, statement: string): Promise<Result> {
+function sql(name: string, statement: string) {
   return docker([
     "exec",
     name,
@@ -102,10 +72,16 @@ function sql(name: string, statement: string): Promise<Result> {
   ]);
 }
 
-for (const image of IMAGES) {
+for (
+  const [image, readOnly] of IMAGES.flatMap((
+    image,
+  ) => [[image, false], [image, true]] as const)
+) {
   test({
     name:
-      `the standby seed script copies a primary into an empty standby on ${image}`,
+      `the standby seed script copies a primary into an empty standby on ${image}${
+        readOnly ? " that stays read-only" : ""
+      }`,
     ignore: !DOCKER_AVAILABLE,
     fn: async () => {
       const suffix = crypto.randomUUID().slice(0, 8);
@@ -123,6 +99,13 @@ for (const image of IMAGES) {
             `CREATE USER 'seed_u'@'%' IDENTIFIED BY '${SEED_USER_PASSWORD}';`,
         );
         assertEquals(setup.success, true, setup.stderr);
+
+        if (readOnly) {
+          // Read-only before and during the whole seed, the way the platform
+          // config boots a standby: the socket admin imports through it.
+          const lock = await sql(standby, "SET GLOBAL read_only = ON");
+          assertEquals(lock.success, true, lock.stderr);
+        }
 
         const ctx = {
           rootUsername: "root",
@@ -147,6 +130,10 @@ for (const image of IMAGES) {
           "SELECT COUNT(*) FROM mysql.user WHERE user='seed_u'",
         );
         assertEquals(user.stdout.trim(), "1");
+        if (readOnly) {
+          const flag = await sql(standby, "SELECT @@GLOBAL.read_only");
+          assertEquals(["1", "ON"].includes(flag.stdout.trim()), true);
+        }
 
         // A failing seed (primary unreachable) reports both exit codes.
         const bad = await execStandbySeed(

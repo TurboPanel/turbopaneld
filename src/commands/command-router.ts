@@ -16,6 +16,7 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import {
   parseBackupsReconcilePayload,
+  parseBackupTargetTestPayload,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -82,6 +83,7 @@ import { handleFoldersRemove } from "./remove-folders.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
+import { handleBackupTargetTest } from "../backups/test-target.ts";
 import { handleStorageBackup } from "../backups/storage-backup.ts";
 import { handleStorageRestore } from "../backups/copy-restore.ts";
 import { handleTlsTrust } from "./tls-trust.ts";
@@ -131,6 +133,7 @@ export type CommandRouterHandlerOverrides = {
   handleFirewallReconcile?: typeof handleFirewallReconcile;
   handleFirewallConfirm?: typeof handleFirewallConfirm;
   handleBackupsReconcile?: typeof handleBackupsReconcile;
+  handleBackupTargetTest?: typeof handleBackupTargetTest;
   handleFoldersRemove?: typeof handleFoldersRemove;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
@@ -363,6 +366,16 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
+      case "server.backups.test-target": {
+        const payload = parseBackupTargetTestPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleBackupTargetTest",
+          handleBackupTargetTest,
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
       case "server.folders.remove": {
         const payload = parseFoldersRemovePayload(message.payload);
         result = await pickCommandRouterHandler(
@@ -501,7 +514,7 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleManagedBackup",
           handleManagedBackup,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -511,7 +524,7 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleManagedRestore",
           handleManagedRestore,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

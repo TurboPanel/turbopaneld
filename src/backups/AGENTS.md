@@ -19,6 +19,7 @@ daemon, and it never takes `daemon.lock`.
 | Storage-copy archive through the pinned helper image (scheduled and manual) | `copy-backup.ts` |
 | `storage.backup` handler (manual create / delete of one copy archive) | `storage-backup.ts` |
 | `storage.restore` handler (stop the copy's containers, swap, start them) | `copy-restore.ts` |
+| Off-server copy: queue, copier, reporter, S3 client (`s3/`), test-target | `copy-queue.ts`, `copier.ts`, `copy-reporter.ts`, `copy-target.ts`, `s3/`, `test-target.ts` |
 | Timer + service renderers (`turbopanel-backup-<policyId>.*`) | `units.ts` |
 | `server.backups.reconcile` handler | `reconcile.ts` |
 | Shared install-if-changed / reload / enable / sweep machinery (with tenant cron) | `src/deploy/systemd-unit-set.ts` |
@@ -154,6 +155,46 @@ Only containers are stopped. A native (systemd) app reading a `/srv/users/`
 directory keeps running, and a deploy or lifecycle command for the same app
 during the restore can start a container again: the copy lock does not cover
 deploy.
+
+## Copy to S3-compatible storage (`backup-s3-copy-v1`)
+
+A `managed` policy entry, a manual `managed.backup` and a `managed.restore`
+may carry a `BackupCopyTargetWire` (endpoint, region, bucket, prefix,
+path-style, server-side encryption, access key id, and the secret key as a
+`tpdaemon` envelope). Design: `reports/S3 backup copy design 2026-10-21.md`.
+
+- The one-shot runner has no network permission: after a good dump it only
+  writes `<state>/backup/copies/queue/<jobId>.json` (`copy-queue.ts`; `jobId` =
+  first 32 hex of sha256 of `managedId/backupId`). The long-running daemon's
+  `BackupCopier` (started when the socket attaches) uploads, then writes
+  `copies/reports/<jobId>.json`; `BackupCopyReporter` sends it as
+  `backup-copy-report` (only to a control plane listing `backup-s3-copy-v1`)
+  and deletes it when `backup-copy-report-result` arrives.
+- The secret key stays sealed on disk. It is opened through the control plane
+  (`decryptSecrets`) and kept in memory for the session (`copy-target.ts`).
+  With the control plane unreachable a job waits (no try is used up).
+- Retries: 1, 5, 15, 60, then every 360 minutes, 8 tries; a refusal that
+  cannot fix itself (`retryable` false) stops after two. A failed job aborts its
+  multipart upload. The local file is never touched by the copier.
+- The client (`s3/client.ts`) signs with SigV4 on Web Crypto, no SDK. Request
+  bodies are bounded `Uint8Array`s with a known length (a streamed body goes
+  out chunked and many servers refuse it): **at most one part (16 MiB) is in
+  memory at a time. This is a deliberate exception to "never buffer a dump".**
+  Downloads stream to a `.part` file in ranges (resumable) and are checked
+  against the recorded SHA-256 before the rename. Redirects are never followed.
+- `endpoint-guard.ts` refuses loopback, link-local, metadata and public
+  plain-http endpoints (the panel applies the same rules when it saves).
+  Errors are plain reasons and never carry a response body.
+- Object key: `<prefix>/managed/<managedId>/<policy-<policyId>|manual>/<backupId>.<ext>`.
+  Bucket retention (`s3/prune.ts`) runs after a good copy of a scheduled backup
+  and keeps the newest `retentionKeep` (the object just copied always counts).
+  Manual backups are never pruned. Deleting a backup deletes its object.
+- Restore from a bucket (`copySource`) downloads to `<backupId>-fromcopy.<ext>`
+  in the manual folder, restores from it under the engine lock, and removes it.
+- Tests: `s3/*.test.ts` and `copy-flow.test.ts` run against the in-process fake
+  (`src/testing/fake-s3.ts`). `s3/s3-live.test.ts` runs against a real server
+  when `TP_S3_TEST_ENDPOINT`, `TP_S3_TEST_ACCESS_KEY` and
+  `TP_S3_TEST_SECRET_KEY` are set (a throwaway local container; remove it after).
 
 ## Rules
 

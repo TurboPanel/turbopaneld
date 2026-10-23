@@ -42,7 +42,8 @@ import {
   type CopyBackupDeps,
   createCopyBackupArtifact,
 } from "./copy-backup.ts";
-import { sanitizeForLog } from "../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { enqueueCopyJob } from "./copy-queue.ts";
 import { backupPoliciesPath, readBackupPoliciesFile } from "./policies-file.ts";
 import { freeBytesAtNearestDir } from "./free-space.ts";
 import {
@@ -249,6 +250,33 @@ function backUpTarget(
     : backUpManagedTarget(layout, entry, deps);
 }
 
+/**
+ * Queue the off-server copy of a finished managed backup, when the policy
+ * names a target. The long-running daemon does the upload. A queue problem is
+ * logged and never fails the backup, which is already safe on this host.
+ */
+async function queueCopyOf(
+  layout: LayoutPaths,
+  entry: BackupPolicyWireEntry,
+  artifact: ScheduledArtifact,
+): Promise<void> {
+  if (entry.targetKind !== "managed" || !entry.copyTarget) return;
+  try {
+    await enqueueCopyJob(layout, {
+      target: entry.copyTarget,
+      managedId: entry.managedId!,
+      backupId: artifact.backupId,
+      policyId: entry.policyId,
+      artifactExtension: entry.artifactExtension!,
+      sha256: artifact.checksum,
+      sizeBytes: artifact.sizeBytes,
+      retentionKeep: entry.retentionKeep,
+    });
+  } catch (err) {
+    logWarn("backups", "could not queue the backup copy:", sanitizeForLog(err));
+  }
+}
+
 async function runPolicy(
   layout: LayoutPaths,
   entry: BackupPolicyWireEntry,
@@ -262,6 +290,7 @@ async function runPolicy(
   };
   try {
     const artifact = await backUpTarget(layout, entry, deps);
+    await queueCopyOf(layout, entry, artifact);
     const result: BackupRunResult = {
       ...base,
       finishedAt: now().toISOString(),
