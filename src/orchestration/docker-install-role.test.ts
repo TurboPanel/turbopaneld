@@ -89,6 +89,34 @@ test("the release package carries the Docker install role and the playbooks that
   }
 });
 
+test("the docker role creates the docker system group before any Docker unit is started", async () => {
+  const main = await Deno.readTextFile(join(DOCKER_ROLE, "tasks/main.yml"));
+  const install = await Deno.readTextFile(
+    join(DOCKER_ROLE, "tasks/install.yml"),
+  );
+  const group = main.indexOf(
+    "- name: Make sure the docker system group exists",
+  );
+  assertEquals(group >= 0, true);
+  const task = main.slice(group, main.indexOf("\n\n", group));
+  assertStringIncludes(task, "ansible.builtin.group:");
+  assertStringIncludes(task, "name: docker");
+  assertStringIncludes(task, "system: true");
+  assertStringIncludes(task, "state: present");
+  // No `when`: it runs on every converge, and is a no-op when the group exists.
+  assertEquals(task.includes("when:"), false);
+  // Before the start of an installed Docker and before the install that starts it.
+  assertEquals(
+    group < main.indexOf("- name: Start an installed but stopped Docker"),
+    true,
+  );
+  assertEquals(
+    group < main.indexOf("ansible.builtin.include_tasks: install.yml"),
+    true,
+  );
+  assertStringIncludes(install, "name: Enable and start Docker");
+});
+
 test("the docker role installs Docker itself from the official apt repository", async () => {
   const main = await Deno.readTextFile(join(DOCKER_ROLE, "tasks/main.yml"));
   assertStringIncludes(main, "ansible.builtin.include_tasks: install.yml");

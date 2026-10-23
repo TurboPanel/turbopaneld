@@ -3284,21 +3284,61 @@ tp_purge_docker_engine() {
   tp_purge_docker_data_root
   tp_safe_rm_tree /etc/docker
   tp_purge_docker_sources
-  if tp_has_tool getent && getent group docker >/dev/null 2>&1; then
-    if tp_has_tool groupdel; then
-      tp_run "groupdel docker" groupdel docker || true
-    else
-      tp_record_skip "groupdel not installed"
-    fi
-  fi
+  tp_reset_failed_docker_units
+  tp_purge_docker_group
   hash -r 2>/dev/null || true
   if tp_docker_engine_gone; then
     TP_DOCKER_ENGINE_GONE=true
+    tp_purge_docker_stale_sockets
     tp_purge_docker_unit_leftovers
     tp_purge_docker_network_state
   else
-    tp_print_warn "Docker Engine is still installed; its bridges and firewall rules were left"
+    tp_print_warn "Docker Engine is still installed (${TP_DOCKER_PRESENT_WHY:-reason unknown}); its bridges and firewall rules were left"
   fi
+}
+
+# The docker group goes only with the engine. docker.socket resolves the group
+# at boot (Group=docker), so a group removed while engine packages stay leaves
+# a host whose Docker can never start again, and a reinstall that finds the
+# package already there does not recreate it. Dry runs change nothing, so they
+# report the step as they always did.
+tp_purge_docker_group() {
+  tp_has_tool getent || return 0
+  getent group docker >/dev/null 2>&1 || return 0
+  _pdg_remain=false
+  if [ "$DRY_RUN" != true ] && tp_has_tool dpkg-query; then
+    for _pdg_pkg in docker-ce docker-ce-cli docker-ce-rootless-extras docker.io moby-engine moby-cli; do
+      if tp_pkg_installed "$_pdg_pkg"; then
+        _pdg_remain=true
+      fi
+    done
+  fi
+  if [ "$_pdg_remain" = true ]; then
+    tp_print_warn "keeping the docker group: Docker Engine packages are still installed"
+    return 0
+  fi
+  if tp_has_tool groupdel; then
+    tp_run "groupdel docker" groupdel docker || true
+  else
+    tp_record_skip "groupdel not installed"
+  fi
+}
+
+# Clears the failed state systemd keeps for Docker's units once they are
+# stopped or purged, so no stale "failed" docker.socket outlives the purge.
+# Only units loaded in the failed state are named: reset-failed on a name
+# systemd has not loaded exits 1 and would count as a failed step.
+tp_reset_failed_docker_units() {
+  tp_has_tool systemctl || return 0
+  set --
+  for _rfd_unit in docker.socket docker.service containerd.service; do
+    _rfd_state=$(systemctl is-failed "$_rfd_unit" 2>/dev/null || true)
+    if [ "$_rfd_state" = failed ]; then
+      set -- "$@" "$_rfd_unit"
+    fi
+  done
+  [ "$#" -gt 0 ] || return 0
+  tp_run "clear failed Docker unit state" systemctl reset-failed "$@" || true
 }
 
 # Once Docker Engine is purged its units went with its packages. What can stay
@@ -3335,23 +3375,44 @@ tp_docker_engine_packages_remain() {
   return 1
 }
 
+# True when a process is listening on the unix socket path $1. A socket file
+# with no listener is stale (a failed docker.socket leaves one behind). Without
+# ss there is no way to tell, and the packages, binaries and units were already
+# checked by the caller, so the file counts as stale.
+tp_socket_listening() {
+  tp_has_tool ss || return 1
+  ss -xl 2>/dev/null | grep -F -- " $1 " >/dev/null 2>&1
+}
+
+# Removes the stale socket files of a Docker that is gone: only the listed
+# socket paths, only when they are sockets nobody listens on.
+tp_purge_docker_stale_sockets() {
+  for _pdss in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
+    if [ -S "$_pdss" ] && [ ! -L "$_pdss" ] && ! tp_socket_listening "$_pdss"; then
+      tp_run "remove stale socket $_pdss" rm -f "$_pdss" || true
+    fi
+  done
+}
+
 # Docker Engine is gone only when nothing of it remains: no daemon binary
 # (also the snap and rootless ones), no engine package, no active or installed
-# service, and no live socket. Anything uncertain counts as still present.
+# service, and no socket with a listener. Anything uncertain counts as still present.
 # Dry runs change nothing, so they never count as gone.
 tp_docker_engine_gone() {
-  [ "$DRY_RUN" = true ] && return 1
-  tp_has_tool docker && return 1
-  tp_has_tool dockerd && return 1
-  tp_has_tool dockerd-rootless.sh && return 1
-  [ -x /snap/bin/docker.dockerd ] && return 1
-  [ -d /snap/docker ] && return 1
+  [ "$DRY_RUN" = true ] && { TP_DOCKER_PRESENT_WHY="dry run"; return 1; }
+  tp_has_tool docker && { TP_DOCKER_PRESENT_WHY="a docker command is on the PATH"; return 1; }
+  tp_has_tool dockerd && { TP_DOCKER_PRESENT_WHY="dockerd is on the PATH"; return 1; }
+  tp_has_tool dockerd-rootless.sh && { TP_DOCKER_PRESENT_WHY="rootless dockerd is on the PATH"; return 1; }
+  [ -x /snap/bin/docker.dockerd ] && { TP_DOCKER_PRESENT_WHY="the snap Docker is installed"; return 1; }
+  [ -d /snap/docker ] && { TP_DOCKER_PRESENT_WHY="the snap Docker is installed"; return 1; }
   if tp_has_tool snap && snap list docker >/dev/null 2>&1; then
+    TP_DOCKER_PRESENT_WHY="the snap Docker is installed"
     return 1
   fi
   if tp_has_tool dpkg-query; then
     for _deg in docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io docker-ce-rootless-extras moby-engine moby-cli; do
       if tp_pkg_installed "$_deg"; then
+        TP_DOCKER_PRESENT_WHY="package $_deg is installed"
         return 1
       fi
     done
@@ -3359,12 +3420,16 @@ tp_docker_engine_gone() {
   if tp_has_tool systemctl; then
     for _deg in docker.service docker.socket snap.docker.dockerd.service; do
       if systemctl is-active --quiet "$_deg" 2>/dev/null; then
+        TP_DOCKER_PRESENT_WHY="$_deg is active"
         return 1
       fi
     done
   fi
   for _deg in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
-    [ -S "$_deg" ] && return 1
+    if [ -S "$_deg" ] && tp_socket_listening "$_deg"; then
+      TP_DOCKER_PRESENT_WHY="something is listening on $_deg"
+      return 1
+    fi
   done
   return 0
 }

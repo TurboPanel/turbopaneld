@@ -81,13 +81,24 @@
   failed_when: false
   check_mode: false
 
+# docker.socket names this group (Group=docker) and fails with status 216/GROUP
+# at boot when it is missing. The package creates it only on a first install, so
+# a host that kept the package but lost the group (for example after a purge
+# that left the engine in place) would never get it back. Created before any
+# Docker unit is started or enabled; no change when it already exists.
+- name: Make sure the docker system group exists
+  ansible.builtin.group:
+    name: docker
+    system: true
+    state: present
+
 # An installed Docker that is stopped — typically systemd's `start-limit-hit`
 # after a burst of restarts — is started again here instead of falling into
 # the install branch, where the install's "ensure started" hits the same
 # lockout and fails. `reset-failed` is the only way to clear that lockout
 # (no module equivalent), and it is a no-op on a unit that is not failed.
 - name: Clear a systemd start-limit lockout on an installed but stopped Docker  # noqa: command-instead-of-module
-  ansible.builtin.command: systemctl reset-failed docker.service
+  ansible.builtin.command: systemctl reset-failed docker.service docker.socket
   when:
     - _docker_ce_installed | bool
     - (_docker_svc.status.ActiveState | default('')) != 'active'
