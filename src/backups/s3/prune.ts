@@ -1,6 +1,7 @@
 /** Retention inside the bucket: keep the newest `keep` copies of one policy. */
 
 import type { S3Client } from "./client.ts";
+import { compareStrings } from "./sigv4.ts";
 
 /** `bk_x.dump` -> `bk_x`; null for a key that is not a backup object. */
 export function backupIdOfKey(key: string): string | null {
@@ -25,9 +26,9 @@ export async function pruneBucketFolder(
   objects.sort((a, b) => {
     if (a.key === justCopied) return -1;
     if (b.key === justCopied) return 1;
-    return a.lastModified === b.lastModified
-      ? (a.key < b.key ? 1 : -1)
-      : (a.lastModified < b.lastModified ? 1 : -1);
+    // Newest first; the key breaks a tie.
+    return compareStrings(b.lastModified, a.lastModified) ||
+      compareStrings(b.key, a.key);
   });
   const removed: string[] = [];
   for (const old of objects.slice(keep)) {

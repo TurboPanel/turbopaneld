@@ -79,7 +79,7 @@ async function resumableState(
 ): Promise<UploadState> {
   const old = await readState(req.statePath);
   if (
-    old && old.key === req.key && old.size === size &&
+    old?.key === req.key && old.size === size &&
     old.mtimeMs === mtimeMs &&
     old.partBytes === partBytes
   ) {

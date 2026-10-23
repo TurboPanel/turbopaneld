@@ -14,6 +14,7 @@
 import { crypto } from "@std/crypto";
 import { encodeHex } from "@std/encoding/hex";
 import type {
+  BackupCopyTargetWire,
   EnvironmentDeployContainer,
   ManagedBackupArtifactExtension,
   ManagedBackupPayload,
@@ -24,7 +25,7 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
@@ -46,7 +47,6 @@ import {
 } from "./engine-paths.ts";
 import { withManagedTargetLock } from "./target-lock.ts";
 import { dirname } from "@std/path";
-import type { BackupCopyTargetWire } from "../contracts/commands-contracts.ts";
 import {
   type DecryptSecretsFn,
   openTargetClient,
@@ -55,7 +55,6 @@ import { enqueueCopyJob } from "../backups/copy-queue.ts";
 import { copyKey } from "../backups/copy-keys.ts";
 import type { S3Client } from "../backups/s3/client.ts";
 import { downloadBackupFile } from "../backups/s3/download.ts";
-import { logWarn } from "../util/logger.ts";
 
 type StreamExecOutcome = { success: boolean; stderr: string };
 

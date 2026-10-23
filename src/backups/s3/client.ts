@@ -76,7 +76,7 @@ type RequestOptions = {
 };
 
 function xmlTag(xml: string, tag: string): string | null {
-  const match = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(xml);
+  const match = new RegExp(String.raw`<${tag}>([\s\S]*?)</${tag}>`).exec(xml);
   return match ? decodeXml(match[1]!) : null;
 }
 
@@ -91,7 +91,7 @@ function decodeXml(value: string): string {
 
 function xmlBlocks(xml: string, tag: string): string[] {
   const out: string[] = [];
-  const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g");
+  const re = new RegExp(String.raw`<${tag}>([\s\S]*?)</${tag}>`, "g");
   for (const m of xml.matchAll(re)) out.push(m[1]!);
   return out;
 }

@@ -49,11 +49,17 @@ async function hmac(
   return new Uint8Array(signature);
 }
 
+/** Byte-order comparison, which SigV4 needs (never a locale order). */
+export function compareStrings(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 /** RFC 3986 percent-encoding, as SigV4 wants it (`/` kept only when asked). */
 export function uriEncode(value: string, keepSlash = false): string {
   let out = "";
   for (const byte of encoder.encode(value)) {
-    const ch = String.fromCharCode(byte);
+    const ch = String.fromCodePoint(byte);
     if (/[A-Za-z0-9\-._~]/.test(ch) || (keepSlash && ch === "/")) {
       out += ch;
     } else {
@@ -69,7 +75,7 @@ function canonicalQuery(url: URL): string {
     pairs.push([uriEncode(name), uriEncode(value)]);
   }
   pairs.sort((a, b) =>
-    a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : (a[0] < b[0] ? -1 : 1)
+    compareStrings(a[0], b[0]) || compareStrings(a[1], b[1])
   );
   return pairs.map(([k, v]) => `${k}=${v}`).join("&");
 }
@@ -106,7 +112,7 @@ export async function signS3Request(
   headers["host"] = input.url.host;
   headers["x-amz-content-sha256"] = input.payloadHash;
   headers["x-amz-date"] = date;
-  const names = Object.keys(headers).sort();
+  const names = Object.keys(headers).sort(compareStrings);
   const canonicalHeaders = names.map((n) => `${n}:${headers[n]}\n`).join("");
   const signedHeaders = names.join(";");
   const canonicalRequest = [
