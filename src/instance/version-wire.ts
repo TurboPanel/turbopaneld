@@ -85,6 +85,8 @@ export const DAEMON_WIRE_FEATURES = [
   "tls-capture-v1",
   "command-recovery-v1",
   "managed-switchover-final-position-v1",
+  "host-capacity-v1",
+  "server-network-check-v1",
 ] as const;
 
 /**
@@ -138,6 +140,16 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_PERMISSIONS_READ_FEATURE: DaemonWireFeature =
   "managed-permissions-read-v1";
+
+/**
+ * This daemon answers `server-network-check-request` with
+ * `server-network-check-result`: whether this host can open a TCP connection
+ * to each listed peer address, and from which local address. Nothing is sent
+ * on the connection. The control plane asks only a daemon that lists this
+ * feature.
+ */
+export const SERVER_NETWORK_CHECK_FEATURE: DaemonWireFeature =
+  "server-network-check-v1";
 
 /**
  * This daemon pushes `managed-health-report` (every local replica's fresh
@@ -306,6 +318,15 @@ export const MANAGED_DATABASE_OWNER_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_DATABASE_CONVERT_FEATURE: DaemonWireFeature =
   "managed-database-convert-v1";
+
+/**
+ * The control plane merges heartbeat `resources.{memory,swap,cpus}` and the
+ * optional `memory.presentBytes` / `memory.blockSizeBytes` / `dynamicMemory`
+ * fields. This daemon re-sends them on a heartbeat after they move only to a
+ * control plane that lists this feature; hello always carries them, and
+ * `memory.totalBytes` still means MemTotal.
+ */
+export const HOST_CAPACITY_FEATURE = "host-capacity-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =
