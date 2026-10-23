@@ -442,3 +442,91 @@ test("captureSwitchoverGtidBeforeStop forgets the promotion mark of an earlier s
     }
   });
 });
+
+function neverFencedDocker(readOnly: "0" | "1") {
+  return (args: string[]): Promise<DockerCliResult> => {
+    if (args[0] === "compose" && args.includes("ps")) {
+      return Promise.resolve(dockerOk(RUNNING_MARIADB_PS));
+    }
+    if (args[0] === "exec") {
+      const sql = String(args[args.indexOf("-e") + 1] ?? "");
+      if (sql.includes("@@GLOBAL.read_only")) {
+        return Promise.resolve(dockerOk(`${readOnly}\n`));
+      }
+      return Promise.resolve(dockerOk(""));
+    }
+    return Promise.resolve(dockerOk());
+  };
+}
+
+test("reactivatePrimaryAfterSwitchoverAbort has nothing to undo when the fence stop failed before it fenced anything", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const managedId = `managed_switchover_unfenced_${crypto.randomUUID()}`;
+      const layout = {
+        stateDir: fixture.dirs.stateDir,
+      } as Parameters<typeof managedDir>[0];
+      await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+      // No quiesced mark, no demoted mark, still the writable primary.
+      await reactivatePrimaryAfterSwitchoverAbort(
+        {
+          managedId,
+          action: "start",
+          reactivateAfterSwitchoverAbort: true,
+          engine: "mariadb",
+          switchoverAbortPromoteSafe: true,
+        },
+        neverFencedDocker("0"),
+        { ensureDocker: () => Promise.resolve() },
+      );
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("reactivatePrimaryAfterSwitchoverAbort still refuses a read-only engine that has no quiesced mark", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const managedId = `managed_switchover_readonly_${crypto.randomUUID()}`;
+      const layout = {
+        stateDir: fixture.dirs.stateDir,
+      } as Parameters<typeof managedDir>[0];
+      await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+      await assertRejects(
+        () =>
+          reactivatePrimaryAfterSwitchoverAbort(
+            {
+              managedId,
+              action: "start",
+              reactivateAfterSwitchoverAbort: true,
+              engine: "mariadb",
+              switchoverAbortPromoteSafe: true,
+            },
+            neverFencedDocker("1"),
+            { ensureDocker: () => Promise.resolve() },
+          ),
+        Error,
+        "no quiesced marker",
+      );
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});

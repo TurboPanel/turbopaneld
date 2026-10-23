@@ -8,6 +8,7 @@
  */
 
 import { assertEquals } from "@std/assert";
+import { docker, dockerReachable } from "../../testing/docker-run.ts";
 import { waitFor } from "../../testing/wait-for.ts";
 import { boundedGtid } from "./replica-freshness.ts";
 import { buildMysqlStandbySeedScript } from "./mysql.ts";
@@ -21,37 +22,6 @@ const IMAGE = "mysql:9.7";
 const ROW_VALUE = ["row", "value", "fixture"].join("-");
 const USER_PASSWORD = ["seed", "user", "fixture"].join("-");
 
-type Result = { success: boolean; stdout: string; stderr: string };
-
-async function docker(args: string[], input?: string): Promise<Result> {
-  const child = new Deno.Command("docker", {
-    args,
-    stdin: input === undefined ? "null" : "piped",
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
-  if (input !== undefined) {
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(input));
-    await writer.close();
-  }
-  const out = await child.output();
-  const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-  return {
-    success: out.success,
-    stdout: decode(out.stdout),
-    stderr: decode(out.stderr),
-  };
-}
-
-async function dockerReachable(): Promise<boolean> {
-  try {
-    return (await docker(["info"])).success;
-  } catch {
-    return false;
-  }
-}
-
 const DOCKER_AVAILABLE = await dockerReachable();
 if (!DOCKER_AVAILABLE) {
   console.warn(
@@ -59,7 +29,7 @@ if (!DOCKER_AVAILABLE) {
   );
 }
 
-function sql(name: string, statement: string, user = "root"): Promise<Result> {
+function sql(name: string, statement: string, user = "root") {
   return docker([
     "exec",
     name,
