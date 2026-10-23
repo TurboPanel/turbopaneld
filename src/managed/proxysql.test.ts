@@ -2472,3 +2472,21 @@ test("a tool flag of false changes nothing", () => {
   (withFlag.clusters[0]!.users[0] as { tool?: boolean }).tool = false;
   assertEquals(renderProxySqlConfig(withFlag), renderProxySqlConfig(base));
 });
+
+test("writeProxySqlConfigAtomic commits owner-only 0600, replacing a looser file", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-proxysql-mode-" });
+  try {
+    const path = join(root, "proxysql.cnf");
+    await Deno.writeTextFile(path, "old", { mode: 0o660 });
+    await Deno.chmod(path, 0o660);
+    await writeProxySqlConfigAtomic(path, "admin_variables=\n{\n}");
+    const info = await Deno.stat(path);
+    assertEquals((info.mode ?? 0) & 0o777, 0o600);
+    assertEquals(info.uid, Deno.uid());
+    for await (const entry of Deno.readDir(root)) {
+      assertEquals(entry.name, "proxysql.cnf");
+    }
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

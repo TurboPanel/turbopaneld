@@ -1912,6 +1912,9 @@ export function findIngressRuntimeMismatch(
   return null;
 }
 
+/** Mode of every file `writeProxySqlConfigAtomic` commits. */
+export const PROXYSQL_CONFIG_FILE_MODE = 0o600;
+
 export async function writeProxySqlConfigAtomic(
   path: string,
   contents: string,
@@ -1929,7 +1932,12 @@ export async function writeProxySqlConfigAtomic(
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
   const tmpPath = join(dir, `.${crypto.randomUUID()}.tmp`);
-  await Deno.writeTextFile(tmpPath, contents, { mode: 0o640 });
+  // Owner-only: these files carry login and admin passwords. The proxy
+  // container runs as root (the image sets no user), so it reads the bind-
+  // mounted proxysql.cnf with its DAC override whatever the owner is.
+  await Deno.writeTextFile(tmpPath, contents, {
+    mode: PROXYSQL_CONFIG_FILE_MODE,
+  });
   try {
     const written = await Deno.readTextFile(tmpPath);
     if (written.trim().length === 0) {
