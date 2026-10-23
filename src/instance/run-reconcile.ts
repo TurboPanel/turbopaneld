@@ -1577,22 +1577,12 @@ async function refreshBrokerConfig(
   run: NonNullable<InstanceUpdateHooks["run"]>,
   installRoot: string,
 ): Promise<void> {
-  const refresh = rootHelperPlaybookInvocation("queue-config-refresh.yml", {
-    turbopanel_install_root: installRoot,
-  });
-  let problem = "";
-  try {
-    const refreshed = await run(refresh.bin, refresh.args);
-    if (refreshed.code !== 0) {
-      problem = refreshed.stderr.trim() || refreshed.stdout.trim() ||
-        "unknown error";
-    }
-  } catch (err) {
-    problem = err instanceof Error ? err.message : String(err);
-  }
-  if (problem) {
-    logWarn("update", "broker config refresh failed:", problem);
-  }
+  await runPlaybookWarnOnly(
+    run,
+    "queue-config-refresh.yml",
+    installRoot,
+    "broker config refresh failed:",
+  );
 }
 
 /**
@@ -1607,7 +1597,22 @@ async function refreshControlPlaneUnits(
   run: NonNullable<InstanceUpdateHooks["run"]>,
   installRoot: string,
 ): Promise<void> {
-  const refresh = rootHelperPlaybookInvocation("instance-units-refresh.yml", {
+  await runPlaybookWarnOnly(
+    run,
+    "instance-units-refresh.yml",
+    installRoot,
+    "unit refresh failed, keeping the installed units:",
+  );
+}
+
+/** Run a root-helper playbook; a failure is logged as a warning, never thrown. */
+async function runPlaybookWarnOnly(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  playbook: string,
+  installRoot: string,
+  warning: string,
+): Promise<void> {
+  const refresh = rootHelperPlaybookInvocation(playbook, {
     turbopanel_install_root: installRoot,
   });
   let problem = "";
@@ -1620,13 +1625,7 @@ async function refreshControlPlaneUnits(
   } catch (err) {
     problem = err instanceof Error ? err.message : String(err);
   }
-  if (problem) {
-    logWarn(
-      "update",
-      "unit refresh failed, keeping the installed units:",
-      problem,
-    );
-  }
+  if (problem) logWarn("update", warning, problem);
 }
 
 /**
