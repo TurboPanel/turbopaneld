@@ -268,6 +268,11 @@ export const RABBITMQ_PLAYBOOK = join(
   "playbooks",
   "rabbitmq-setup.yml",
 );
+export const QUEUE_CONFIG_REFRESH_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "queue-config-refresh.yml",
+);
 export const SOCKET_DIRS_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

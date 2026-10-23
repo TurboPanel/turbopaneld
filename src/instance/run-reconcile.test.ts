@@ -1588,6 +1588,47 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the UI cache rules are
   assertEquals(names.includes("instance-launch-only.yml"), true);
 });
 
+test("executeInstanceUpdateReconcile refreshes the broker config once, after the new build is healthy", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  assertEquals(names.filter((n) => n === "queue-config-refresh.yml").length, 1);
+  assertEquals(names.at(-1), "queue-config-refresh.yml");
+  assertEquals(
+    names.indexOf("queue-config-refresh.yml") >
+      calls.findIndex((c) => c.args.includes("update-instance")),
+    true,
+  );
+});
+
+test("executeInstanceUpdateReconcile only warns when the broker config refresh fails", async () => {
+  for (const mode of ["exit", "throw"] as const) {
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    const hooks = managedUpdateHooks(calls);
+    const baseRun = hooks.run!;
+    hooks.run = (bin, args) => {
+      if (args.at(-1) === "queue-config-refresh.yml") {
+        calls.push({ bin, args });
+        if (mode === "throw") return Promise.reject(new Error("boom"));
+        return Promise.resolve({ code: 2, stdout: "", stderr: "failed" });
+      }
+      return baseRun(bin, args);
+    };
+    const outcome = await executeInstanceUpdateReconcile({
+      channel: "release",
+      hooks,
+    });
+    assertEquals(outcome, {});
+    assertEquals(
+      calls.some((c) => c.args.at(-1) === "queue-config-refresh.yml"),
+      true,
+    );
+  }
+});
+
 test("executeInstanceUpdateReconcile re-renders the units once, after the swap and before the restart", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
   const order: string[] = [];

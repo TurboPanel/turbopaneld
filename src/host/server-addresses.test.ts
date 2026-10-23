@@ -10,6 +10,7 @@ import {
   parseLinkState,
   readDefaultRouteInterfaces,
   readInterfaceLinkStates,
+  readOptionalText,
   reportedAddressScope,
 } from "./server-addresses.ts";
 
@@ -940,4 +941,79 @@ test("reportedAddressScope classifies IPv6 transition addresses by the IPv4 they
   for (const [address, scope] of cases) {
     assertEquals(reportedAddressScope(address, 6), scope, address);
   }
+});
+
+function withBlockedReads(error: Error, fn: () => void): void {
+  const original = Deno.readTextFileSync;
+  // deno-lint-ignore no-explicit-any
+  (Deno as any).readTextFileSync = () => {
+    throw error;
+  };
+  try {
+    fn();
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).readTextFileSync = original;
+  }
+}
+
+test("readOptionalText falls back to cat when Deno refuses the read", () => {
+  withBlockedReads(new Deno.errors.NotCapable("blocked"), () => {
+    const asked: string[] = [];
+    const text = readOptionalText("/sys/class/net/eth0/operstate", (path) => {
+      asked.push(path);
+      return { code: 0, stdout: new TextEncoder().encode("up\n") };
+    });
+    assertEquals(text, "up\n");
+    assertEquals(asked, ["/sys/class/net/eth0/operstate"]);
+  });
+});
+
+test("readOptionalText reports unreadable when cat fails or the file is missing", () => {
+  withBlockedReads(new Deno.errors.PermissionDenied("blocked"), () => {
+    assertEquals(
+      readOptionalText("/sys/class/net/eth0/carrier", () => ({
+        code: 1,
+        stdout: new Uint8Array(),
+      })),
+      undefined,
+    );
+    assertEquals(
+      readOptionalText("/sys/class/net/eth0/carrier", () => {
+        throw new Error("no cat");
+      }),
+      undefined,
+    );
+  });
+  withBlockedReads(new Deno.errors.NotFound("gone"), () => {
+    let spawned = false;
+    assertEquals(
+      readOptionalText("/proc/net/ipv6_route", () => {
+        spawned = true;
+        return { code: 0, stdout: new Uint8Array() };
+      }),
+      undefined,
+    );
+    assertEquals(spawned, false);
+  });
+});
+
+test("link states come through the cat fallback", () => {
+  const files: Record<string, string> = {
+    "/sys/class/net/enp1s0/operstate": "up\n",
+    "/sys/class/net/enp2s0/operstate": "down\n",
+  };
+  withBlockedReads(new Deno.errors.NotCapable("blocked"), () => {
+    const read = (path: string) =>
+      readOptionalText(
+        path,
+        (p) =>
+          p in files
+            ? { code: 0, stdout: new TextEncoder().encode(files[p]) }
+            : { code: 1, stdout: new Uint8Array() },
+      );
+    const states = readInterfaceLinkStates(["enp1s0", "enp2s0"], read);
+    assertEquals(states.get("enp1s0"), "up");
+    assertEquals(states.get("enp2s0"), "down");
+  });
 });

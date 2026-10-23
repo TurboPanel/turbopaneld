@@ -323,10 +323,35 @@ export function parseIpv6DefaultRouteInterface(
  * `undefined` on a non-Linux host, with /proc or /sys not mounted, or when the
  * kernel refuses the read (`carrier` on an administratively down NIC): the
  * addresses still report, just without a preferred marker or a link state.
+ * The compiled daemon cannot read these paths directly (Deno 2 answers
+ * `NotCapable` for `/proc` and `/sys`), so a blocked read goes through `cat`.
  */
-function readOptionalText(path: string): string | undefined {
+export function readOptionalText(
+  path: string,
+  runCat?: (path: string) => { code: number; stdout: Uint8Array },
+): string | undefined {
   try {
     return Deno.readTextFileSync(path);
+  } catch (err) {
+    // A missing file is final. Deno 2 refuses /proc and /sys reads even under
+    // a scoped --allow-read (NotCapable), so only that case falls back to cat.
+    if (
+      !(err instanceof Deno.errors.NotCapable ||
+        err instanceof Deno.errors.PermissionDenied)
+    ) {
+      return undefined;
+    }
+  }
+  try {
+    const { code, stdout } = runCat ? runCat(path) : new Deno.Command("cat", {
+      args: [path],
+      stdout: "piped",
+      stderr: "null",
+      // A scoped --allow-run=cat cannot inherit LD_* / DYLD_* (Deno 2.9).
+      clearEnv: true,
+    }).outputSync();
+    if (code !== 0) return undefined;
+    return new TextDecoder().decode(stdout);
   } catch {
     return undefined;
   }

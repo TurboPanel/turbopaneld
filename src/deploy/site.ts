@@ -2187,10 +2187,20 @@ async function reloadPhpFpm(
 }
 
 /**
- * Group of every php-fpm `pools/` dir — the php-fpm role's
- * `php_fpm_service_group`, shared by nginx and Apache sites.
+ * Group of the php-fpm `pools/` dirs: the php-fpm role's `php_fpm_service_group`
+ * for the engines this deploy needs PHP for. Caddy, nginx and Apache share
+ * `tpapache`; an OpenLiteSpeed-only host has no `tpapache` at all (its
+ * playbook runs the role as `tpols`), so naming it there is refused as an
+ * unknown service group. Any Apache-family engine in the deploy wins, because
+ * that account is provisioned whenever one of them is installed.
  */
-const PHP_FPM_POOLS_GROUP = "tpapache";
+export function phpFpmPoolsGroup(
+  engines: ReadonlySet<SiteApplySpec["engine"]>,
+): string {
+  const onlyOpenLiteSpeed = engines.size > 0 &&
+    [...engines].every((engine) => engine === "openlitespeed");
+  return onlyOpenLiteSpeed ? "tpols" : "tpapache";
+}
 
 /**
  * Create (or re-assert) a root-owned engine config dir `root:<group>` `0750`
@@ -2828,7 +2838,7 @@ async function ensureSiteConfigDirs(
     await forEachSequential(phpSeries, async (series) => {
       await ensureEngineConfigDir(
         phpFpmPoolsDir(layout, series),
-        PHP_FPM_POOLS_GROUP,
+        phpFpmPoolsGroup(needs.phpFpmEngines),
       );
     });
   }
