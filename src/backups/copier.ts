@@ -227,7 +227,7 @@ export class BackupCopier {
       await this.#abandon(job);
     }
     await writeCopyReport(layout, job.jobId, {
-      targetId: job.target.targetId,
+      destinationId: job.target.destinationId,
       managedId: job.managedId,
       backupId: job.backupId,
       ...(job.policyId ? { policyId: job.policyId } : {}),

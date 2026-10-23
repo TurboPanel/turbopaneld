@@ -68,7 +68,7 @@ async function sha(bytes: Uint8Array): Promise<string> {
 
 function wire(over: Partial<BackupCopyTargetWire> = {}): BackupCopyTargetWire {
   return {
-    targetId: TARGET_ID,
+    destinationId: TARGET_ID,
     name: "Offsite",
     endpoint: "http://127.0.0.1:1",
     region: "us-east-1",
@@ -548,7 +548,7 @@ test("the wire accepts a good target and refuses a bad one", () => {
       wire({ region: "us east" }),
       wire({ accessKeyId: "has space" }),
       wire({ secretKeyEnvelope: "" }),
-      wire({ targetId: "not-a-uuid" }),
+      wire({ destinationId: "not-a-uuid" }),
     ]
   ) {
     assertThrows(() => parseBackupCopyTarget(bad));
@@ -570,7 +570,7 @@ test("targets ride on policies, manual backups and restores; a copy policy canno
   };
   assertEquals(
     parseBackupsReconcilePayload({ policies: [entry] }).policies[0]!.copyTarget
-      ?.targetId,
+      ?.destinationId,
     TARGET_ID,
   );
   assertThrows(() =>

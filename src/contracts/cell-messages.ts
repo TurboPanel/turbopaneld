@@ -346,7 +346,7 @@ export type BackupRunReportResultMessage = {
 export type BackupCopyReportMessage = {
   type: "backup-copy-report";
   id: string;
-  targetId: string;
+  destinationId: string;
   managedId: string;
   backupId: string;
   policyId?: string;

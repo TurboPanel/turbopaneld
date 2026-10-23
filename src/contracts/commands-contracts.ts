@@ -8941,7 +8941,7 @@ function isCanonicalBackupUuid(value: unknown): value is string {
  * when a copy runs and never written to disk in the clear.
  */
 export type BackupCopyTargetWire = {
-  targetId: string;
+  destinationId: string;
   name: string;
   endpoint: string;
   region: string;
@@ -8976,7 +8976,7 @@ function wireText(value: unknown, field: string, max: number): string {
 }
 
 export function parseBackupCopyTarget(raw: unknown): BackupCopyTargetWire {
-  if (!isRecord(raw) || !isCanonicalBackupUuid(raw.targetId)) {
+  if (!isRecord(raw) || !isCanonicalBackupUuid(raw.destinationId)) {
     throw new Error("Invalid backup copy target");
   }
   const prefix = wireText(raw.prefix ?? "", "prefix", 256);
@@ -8995,7 +8995,7 @@ export function parseBackupCopyTarget(raw: unknown): BackupCopyTargetWire {
     throw new Error("Invalid backup copy target");
   }
   return {
-    targetId: raw.targetId,
+    destinationId: raw.destinationId,
     name: wireText(raw.name ?? "", "name", 64),
     endpoint: wireText(raw.endpoint, "endpoint", 512),
     region,
