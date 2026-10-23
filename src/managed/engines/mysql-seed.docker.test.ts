@@ -66,9 +66,21 @@ async function startServer(
     "--log-bin=mysql-bin",
   ]);
   if (!run.success) throw new Error(`docker run failed: ${run.stderr}`);
+  // The image entrypoint first runs a temporary server that listens on the
+  // socket only; the real server is the one that answers on TCP.
   await waitFor(
-    `${name} to accept logins`,
-    async () => (await sql(name, "SELECT 1")).success,
+    `${name} to accept TCP logins`,
+    async () =>
+      (await docker([
+        "exec",
+        name,
+        "mysql",
+        "--protocol=tcp",
+        "-h127.0.0.1",
+        "-uroot",
+        "-e",
+        "SELECT 1",
+      ])).success,
     { timeoutMs: 180_000, intervalMs: 1_000 },
   );
 }
