@@ -937,6 +937,74 @@ function extractObjectLiteral(source: string, name: string): string | null {
   return stripQuotes(normalizeWs(source.slice(open, close + 1)));
 }
 
+/**
+ * Compares two snapshot files by parsed data, not bytes, because each repo's
+ * formatter wraps lines differently. Returns the path of the first difference
+ * (for example `$.Foo.fields[2].type`) or null when the data is identical.
+ * Throws a one-line Error when either file is not valid JSON.
+ */
+export function snapshotDataDrift(left: string, right: string): string | null {
+  return firstDataDifference(
+    parseSnapshot(left, "instance"),
+    parseSnapshot(right, "daemon"),
+    "$",
+  );
+}
+
+function parseSnapshot(text: string, side: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `contract-field-snapshot.json on the ${side} is not valid JSON`,
+    );
+  }
+}
+
+function firstDataDifference(
+  a: unknown,
+  b: unknown,
+  path: string,
+): string | null {
+  if (Array.isArray(a) && Array.isArray(b)) return arrayDifference(a, b, path);
+  if (isPlainObject(a) && isPlainObject(b)) return objectDifference(a, b, path);
+  return Object.is(a, b) ? null : path;
+}
+
+function arrayDifference(
+  a: unknown[],
+  b: unknown[],
+  path: string,
+): string | null {
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    const at = `${path}[${i}]`;
+    if (i >= a.length || i >= b.length) return at;
+    const found = firstDataDifference(a[i], b[i], at);
+    if (found) return found;
+  }
+  return null;
+}
+
+function objectDifference(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+  path: string,
+): string | null {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    const at = `${path}.${key}`;
+    if (!(key in a) || !(key in b)) return at;
+    const found = firstDataDifference(a[key], b[key], at);
+    if (found) return found;
+  }
+  return null;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 type ContractPin = {
   instance: string;
   daemon: string;
@@ -978,8 +1046,16 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     await readRel(td, "scripts/contract-field-snapshot.json"),
     "contract-field-snapshot.json missing on the daemon",
   );
-  if (normalizeWs(left) !== normalizeWs(right)) {
-    fail("contract-field-snapshot.json drifted between checkouts");
+  let differsAt: string | null = null;
+  try {
+    differsAt = snapshotDataDrift(left, right);
+  } catch (error) {
+    fail((error as Error).message);
+  }
+  if (differsAt) {
+    fail(
+      `contract-field-snapshot.json drifted between checkouts at ${differsAt}`,
+    );
   }
   const snapshot = JSON.parse(left) as Record<string, ContractPin>;
   // Reads are independent (readRel never throws); the checks below still run
