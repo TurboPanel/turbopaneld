@@ -1,0 +1,65 @@
+---
+# Cache rules for the exported UI in an INSTALLED Caddyfile (imported by
+# main.yml).
+#
+# A Caddyfile rendered by an older build answers every missing file with
+# index.html and sends no Cache-Control. After an update a browser that kept
+# the old page asks for the old bundle names, gets the page back as text/html,
+# refuses to run it (nosniff) and hangs on its spinner. The template now caches
+# hashed bundles for a year, 404s missing ones and revalidates the page, but a
+# host whose Caddyfile was kept (Let's Encrypt or uploaded hostnames, see
+# caddyfile.yml) is not re-rendered. So swap the UI handle's last two lines
+# for the template's block, only when it is missing: nothing else in the file
+# is touched, the result must still adapt with the vendored Caddy or the file
+# is left as it was, and a backup is kept.
+- name: Read the installed Caddyfile for the UI cache check
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_caddyfile }}"
+  register: _ui_cache_caddyfile
+  failed_when: false
+
+- name: Add the UI cache rules to the installed Caddyfile when missing
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _ui_cache_caddyfile.content is defined
+    - (_ui_cache_caddyfile.content | b64decode) is not search('ui_hashed')
+  ansible.builtin.replace:
+    path: "{{ turbopanel_caddyfile }}"
+    # Keep identical to the UI handle in templates/Caddyfile.j2.
+    regexp: '^( +)(root \* .+\n)\1try_files \{path\} /index\.html\n\1file_server\n'
+    replace: |
+      \g<1>\g<2>\g<1>@ui_hashed path /_expo/static/* /assets/*
+      \g<1>handle @ui_hashed {
+      \g<1>        @ui_hashed_file file
+      \g<1>        handle @ui_hashed_file {
+      \g<1>                header Cache-Control "public, max-age=31536000, immutable"
+      \g<1>                file_server
+      \g<1>        }
+      \g<1>        handle {
+      \g<1>                header Cache-Control "no-store"
+      \g<1>                respond "Not Found" 404
+      \g<1>        }
+      \g<1>}
+      \g<1>handle {
+      \g<1>        header Cache-Control "no-cache"
+      \g<1>        try_files {path} /index.html
+      \g<1>        file_server
+      \g<1>}
+    backup: true
+    validate: "{{ turbopanel_vendor_dir }}/caddy/current/caddy adapt --config %s --adapter caddyfile"
+  register: _ui_cache_inserted
+  failed_when: false
+  notify:
+    - Reload turbopanel caddy
+
+- name: Warn when the UI cache rules could not be added
+  when:
+    - _ui_cache_inserted is not skipped
+    - _ui_cache_inserted.msg is defined
+    - _ui_cache_inserted.msg is search('validation')
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: could not add the UI cache rules to {{ turbopanel_caddyfile }};
+      the file is unchanged. Browsers may keep an old panel page after an
+      update until Hostnames is re-applied in the app.
