@@ -16,7 +16,7 @@
 #   recreate the database or queue container.
 # - It restarts the queue container once, and only when rabbitmq.conf was
 #   actually rewritten. A host whose config is current is left untouched.
-# - It skips hosts with no broker (no generated queue password).
+# - It skips hosts with no broker (no queue config.json).
 # - It never fails the update: any error is reported as a warning.
 - name: TurboPanel queue config refresh
   hosts: localhost
@@ -30,11 +30,11 @@
   tasks:
     - name: Find an installed queue broker
       ansible.builtin.stat:
-        path: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
-      register: _queue_refresh_pass
+        path: "{{ turbopanel_config_dir }}/rabbitmq/config.json"
+      register: _queue_refresh_cfg
 
     - name: Refresh the broker config
-      when: _queue_refresh_pass.stat.exists
+      when: _queue_refresh_cfg.stat.exists
       block:
         - name: Render the queue config files
           ansible.builtin.include_role:
