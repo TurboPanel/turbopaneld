@@ -6,7 +6,7 @@ Third-party components remain under their own copyright and license terms and ar
 
 <!-- lockfiles
 deno.lock sha256:b4e413d18b6b68272808cee6d903a05eaf4bbfbb61941e80b211a1a8f81020a8
-orchestration/requirements.lock.txt sha256:737c704d62c062f199eeaa860992f67bd76123496db8b576e84f1ea035ad8a9c
+orchestration/requirements.lock.txt sha256:de1763b7773fd0d8686e715a7750d707b7cfcf341d79fab7dd01aa2358c3b69d
 orchestration/requirements.txt sha256:bcd5495ade36b7203ef5411fe77be58d740df3437810a00332203a1bbc162162
 orchestration/requirements.yml sha256:23a8d5078fc5e56246e822a0e30e88a10d58c0f252d708b034651274bee039f0
 -->
