@@ -13,6 +13,7 @@ import { resolveLayout } from "../paths/layout.ts";
 import { assertSwitchoverAbortReactivateAllowed } from "./switchover-abort-guard.ts";
 import { clearManagedDemotionArtifacts } from "./demoted-marker.ts";
 import {
+  clearSwitchoverPromoteLocalMarker,
   clearSwitchoverQuiescedMarker,
   writeSwitchoverQuiescedMarker,
 } from "./switchover-state-marker.ts";
@@ -43,8 +44,12 @@ export async function captureSwitchoverGtidBeforeStop(
       "managed.lifecycle captureSwitchoverGtid is not supported for this engine",
     );
   }
-  const gtidSet = await quiesce(ctx);
   const layout = resolveLayout(Deno.env.toObject());
+  // A new fence starts here: what the previous switchover left behind (this
+  // member's own "promotion completed" mark) is history, and would make the
+  // abort guard refuse to reactivate this member for ever.
+  await clearSwitchoverPromoteLocalMarker(layout, payload.managedId);
+  const gtidSet = await quiesce(ctx);
   await writeSwitchoverQuiescedMarker(layout, payload.managedId, {
     primaryExecutedGtidSet: gtidSet,
     quiescedAt: new Date().toISOString(),

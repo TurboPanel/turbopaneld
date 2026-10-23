@@ -6,7 +6,11 @@ import {
   captureSwitchoverGtidBeforeStop,
   reactivatePrimaryAfterSwitchoverAbort,
 } from "./lifecycle-switchover.ts";
-import { readSwitchoverQuiescedMarker } from "./switchover-state-marker.ts";
+import {
+  readSwitchoverPromoteLocalMarker,
+  readSwitchoverQuiescedMarker,
+  writeSwitchoverPromoteLocalMarker,
+} from "./switchover-state-marker.ts";
 import {
   isManagedMemberDemoted,
   writeManagedDemotedMarker,
@@ -374,6 +378,62 @@ test("reactivatePrimaryAfterSwitchoverAbort clears postgres standby.signal and p
       );
       assertEquals(removedSignal, true);
       assertEquals(flags.reactivateBatch, true);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("captureSwitchoverGtidBeforeStop forgets the promotion mark of an earlier switchover", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const managedId = `managed_switchover_again_${crypto.randomUUID()}`;
+      const layout = {
+        stateDir: fixture.dirs.stateDir,
+      } as Parameters<typeof managedDir>[0];
+      await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+      // This member was promoted by the previous switchover and is now the
+      // old primary of the next one.
+      await writeSwitchoverPromoteLocalMarker(
+        layout,
+        managedId,
+        "completed",
+        "2026-01-01T00:00:00.000Z",
+      );
+      const gtid = await captureSwitchoverGtidBeforeStop(
+        {
+          managedId,
+          action: "stop",
+          engine: "mariadb",
+          captureSwitchoverGtid: true,
+        },
+        (args) => {
+          if (args[0] === "compose" && args.includes("ps")) {
+            return Promise.resolve(dockerOk(RUNNING_MARIADB_PS));
+          }
+          if (args[0] === "exec") return Promise.resolve(dockerOk("0-1-9\n"));
+          return Promise.resolve(dockerOk());
+        },
+        { ensureDocker: () => Promise.resolve() },
+      );
+      assertEquals(gtid, "0-1-9");
+      assertEquals(
+        await readSwitchoverPromoteLocalMarker(layout, managedId),
+        null,
+      );
+      assertEquals(
+        (await readSwitchoverQuiescedMarker(layout, managedId))
+          ?.primaryExecutedGtidSet,
+        "0-1-9",
+      );
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) Deno.env.delete(key);

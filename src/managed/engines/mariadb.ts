@@ -666,10 +666,10 @@ const mariadbReplicationRuntime: ManagedEngineReplicationRuntime = {
       "",
     ].join("\n");
 
-    // The platform my.cnf boots standbys read-only — the seed IMPORT needs a
-    // writable window (error 1290 otherwise); re-enforced below once
-    // replication is configured.
-    await runMariadb(ctx, disableReadOnlySql());
+    // The platform my.cnf boots standbys read-only and the socket admin (which
+    // holds READ_ONLY ADMIN) imports through it, so the seed no longer lifts
+    // read_only: no other login can write at any point of the setup.
+    await runMariadb(ctx, enforceReadOnlySql());
 
     const seed = await execStandbySeedWithInitRetry(
       ctx,
