@@ -155,11 +155,14 @@ import {
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
+import { BackupCopier } from "../backups/copier.ts";
+import { BackupCopyReporter } from "../backups/copy-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  BACKUP_S3_COPY_FEATURE,
   HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
@@ -506,6 +509,8 @@ export class InstanceClient {
   #mysqlFamilySampler: PgStandbySampler | undefined;
   #managedHealthReporter: ManagedHealthReporter | undefined;
   #backupReporter: BackupResultReporter | undefined;
+  #backupCopier: BackupCopier | undefined;
+  #backupCopyReporter: BackupCopyReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
   #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
@@ -952,6 +957,8 @@ export class InstanceClient {
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
+    this.#backupCopier?.stop();
+    this.#backupCopyReporter?.detach();
     this.#acmeObserver?.detach();
     this.#acmeObserver = undefined;
     this.#instanceAcmeRenewal?.stop();
@@ -1037,6 +1044,8 @@ export class InstanceClient {
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
     this.#backupReporter?.detach();
+    this.#backupCopier?.stop();
+    this.#backupCopyReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
     const classified = classifyConnectFailure(err);
@@ -1489,6 +1498,8 @@ export class InstanceClient {
     this.#mysqlFamilySampler.attach();
     this.#ensureManagedHealthReporter().attach();
     this.#ensureBackupReporter().attach();
+    this.#ensureBackupCopier().start();
+    this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
@@ -1552,6 +1563,8 @@ export class InstanceClient {
       this.#mysqlFamilySampler?.detach();
       this.#managedHealthReporter?.detach();
       this.#backupReporter?.detach();
+      this.#backupCopier?.stop();
+      this.#backupCopyReporter?.detach();
       this.#acmeObserver?.detach();
       this.#metricsScheduler?.detach();
       this.#topologyReporter?.detach();
@@ -1653,6 +1666,31 @@ export class InstanceClient {
       },
     });
     return this.#backupReporter;
+  }
+
+  /** Copies finished backups to their S3-compatible targets; opens the sealed keys through the control plane. */
+  #ensureBackupCopier(): BackupCopier {
+    this.#backupCopier ??= new BackupCopier({
+      decryptSecrets: () => {
+        const api = this.#apiClient;
+        return api
+          ? (ciphertexts) => api.decryptSecrets(ciphertexts)
+          : undefined;
+      },
+    });
+    return this.#backupCopier;
+  }
+
+  #ensureBackupCopyReporter(): BackupCopyReporter {
+    this.#backupCopyReporter ??= new BackupCopyReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupports: () => this.instanceSupports(BACKUP_S3_COPY_FEATURE),
+    });
+    return this.#backupCopyReporter;
   }
 
   #ensureAcmeObserver(): void {
@@ -1926,6 +1964,12 @@ export class InstanceClient {
         this.#runSocketHandler(
           "tunnel-token",
           this.#applyTunnelToken(message, ws),
+        );
+        break;
+      case "backup-copy-report-result":
+        this.#runSocketHandler(
+          "backup-copy-report-result",
+          this.#ensureBackupCopyReporter().handleResult(message),
         );
         break;
       case "backup-run-report-result":
