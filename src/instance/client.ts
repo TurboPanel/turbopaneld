@@ -346,6 +346,14 @@ async function readServerId(
   }
 }
 
+/**
+ * True once this host has enrolled with a control plane (its `server.id` is on
+ * disk). A host that has not is on its first start and has nothing to restore.
+ */
+export async function hasEnrolledServerId(dir?: string): Promise<boolean> {
+  return (await readServerId(dir)) !== undefined;
+}
+
 async function readDaemonKeyFile(
   dir = resolveServerIdDir(),
 ): Promise<DaemonKeyFile | null> {

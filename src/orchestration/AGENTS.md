@@ -50,3 +50,16 @@ Tests: `src/orchestration/presentation.test.ts`, `install-presenter.test.ts`,
 `ansible-events.test.ts` ( `formatAnsibleEventLog` ), `ansible.test.ts`
 (internal path vs presented status lines).
 
+
+## Boot converge on a new server
+
+`initOrchestration` is two steps: `bootstrapOrchestrationTools` (a few seconds)
+and `runBootConverge` (`daemon-converge.yml`, about a minute and a half on a new
+host). An enrolled host runs both before it connects, as it always did. A host
+with no `server.id` yet (first start, daemon-only managed server) runs only the
+tools step, connects to the control plane, and converges in the background so
+the panel sees it within seconds. `boot-converge-gate.ts` holds command
+dispatch (after the ack) until that converge has finished, passed or failed, so
+no command runs a playbook on top of it. The fabric, forwarding, PHP and
+background checks that normally precede the connection run after a successful
+converge on that path.
