@@ -25,9 +25,20 @@ import {
   type OrchestratorReplicationAnalysis,
 } from "../managed/orchestrator-api.ts";
 import {
+  isOrchestratorHaEmitSuppressed,
   type OrchestratorDeadPrimaryEmitContext,
+  resolveHungPrimaryEmit,
   resolveOrchestratorDeadPrimaryEmit,
 } from "../managed/ha-orchestrator-managed-id.ts";
+import {
+  listManagedHaMembers,
+  type ManagedHaMemberRecord,
+} from "../managed/ha-member.ts";
+import {
+  HungPrimaryTracker,
+  type HungSample,
+  sampleMysqlFamilyPrimary,
+} from "../managed/mysql-hung-primary.ts";
 import {
   runDocker as defaultRunDocker,
   type RunDockerFn,
@@ -35,15 +46,24 @@ import {
 
 const HA_OBSERVE_MS = 15_000;
 const HA_REVIVE_COOLDOWN_MS = 60_000;
-/** Longest wait between events for one still-dead incident (the control plane's cooldown). */
+/** Wait between events once an incident has outlasted the control plane's patience. */
 const HA_INCIDENT_REEMIT_MS = 15 * 60_000;
 /**
  * Wait after the first delivered event of an incident; it doubles with each
- * further one up to {@link HA_INCIDENT_REEMIT_MS}. A refusal at event time
- * (for example replicas that still look connected to a frozen primary) is
- * then retried within a minute or two, not after the full cooldown.
+ * further one up to {@link HA_INCIDENT_REEMIT_STEADY_MS}. A refusal at event
+ * time (for example replicas that still look connected to a frozen primary,
+ * or the control plane's 15 minute cooldown) is then retried within a minute,
+ * not after a growing back-off that could skip past the cooldown's end.
  */
 const HA_INCIDENT_REEMIT_FIRST_MS = 30_000;
+/** The steady wait between events while the control plane may still accept one. */
+const HA_INCIDENT_REEMIT_STEADY_MS = 60_000;
+/**
+ * Events sent at the steady pace per incident (about 24 minutes): past the
+ * 15 minute cooldown, and the control plane refuses a failure older than 20
+ * minutes anyway. After that the slow pace keeps the incident visible only.
+ */
+const HA_INCIDENT_REEMIT_STEADY_COUNT = 25;
 /** Bound each Orchestrator read so one hung request cannot stall polling. */
 const HA_API_TIMEOUT_MS = 10_000;
 const MANAGED_ID_RE =
@@ -89,7 +109,17 @@ export type ManagedHaObserverOptions = {
   layout?: LayoutPaths;
   /** Test seam — defaults to {@link defaultRunDocker}. */
   runDocker?: RunDockerFn;
+  /** Test seam — defaults to {@link listManagedHaMembers}. */
+  listMembers?: () => Promise<ManagedHaMemberRecord[]>;
+  /** Test seam — defaults to {@link sampleMysqlFamilyPrimary}. */
+  sampleHung?: (record: ManagedHaMemberRecord) => Promise<HungSample>;
 };
+
+/** A local MySQL or MariaDB primary with at least one replica to fail over to. */
+export function isHungProbeWatched(record: ManagedHaMemberRecord): boolean {
+  return (record.engine === "mysql" || record.engine === "mariadb") &&
+    record.role === "primary" && record.replicaPeerCount > 0;
+}
 
 function isReplicationAnalysisMasterRow(
   entry: OrchestratorReplicationAnalysis,
@@ -133,10 +163,13 @@ type HaPollState = {
 
 /** Wait before the next event of an incident that already delivered `deliveredCount`. */
 export function haIncidentReemitGapMs(deliveredCount: number): number {
+  if (deliveredCount >= HA_INCIDENT_REEMIT_STEADY_COUNT) {
+    return HA_INCIDENT_REEMIT_MS;
+  }
   const doublings = Math.max(0, deliveredCount - 1);
   return Math.min(
     HA_INCIDENT_REEMIT_FIRST_MS * 2 ** Math.min(doublings, 30),
-    HA_INCIDENT_REEMIT_MS,
+    HA_INCIDENT_REEMIT_STEADY_MS,
   );
 }
 
@@ -165,6 +198,9 @@ export class ManagedHaObserver {
   readonly #nowMs: () => number;
   readonly #layout: LayoutPaths | undefined;
   readonly #runDocker: RunDockerFn;
+  readonly #listMembers: () => Promise<ManagedHaMemberRecord[]>;
+  readonly #sampleHung: (record: ManagedHaMemberRecord) => Promise<HungSample>;
+  readonly #hungTracker = new HungPrimaryTracker();
   /** Incident key -> when its event last reached the control plane, and how many did. */
   readonly #incidentLastDelivered = new Map<
     string,
@@ -186,6 +222,10 @@ export class ManagedHaObserver {
     this.#api = options.api;
     this.#layout = options.layout;
     this.#runDocker = options.runDocker ?? defaultRunDocker;
+    this.#listMembers = options.listMembers ??
+      (() => listManagedHaMembers(this.#resolveLayout()));
+    this.#sampleHung = options.sampleHung ??
+      ((record) => sampleMysqlFamilyPrimary(record, this.#runDocker));
     this.#isStackPresent = options.isStackPresent ??
       (() => orchestratorStackPresent(this.#resolveLayout()));
     this.#reviveStack = options.reviveStack ??
@@ -351,6 +391,53 @@ export class ManagedHaObserver {
   }
 
   /**
+   * A primary that is hung (paused, or its server never answers a timed
+   * ping) is not something Orchestrator reports as dead: its replicas still
+   * look connected. This host's own probe reports it instead, as the same
+   * event, once it has been silent long enough (see `mysql-hung-primary.ts`).
+   */
+  async #pollHungPrimaries(
+    state: HaPollState,
+    layout: LayoutPaths,
+  ): Promise<void> {
+    const watched = (await this.#listMembers()).filter(isHungProbeWatched);
+    this.#hungTracker.retainOnly(new Set(watched.map((row) => row.managedId)));
+    await forEachSequential(watched, async (record) => {
+      const nowMs = this.#nowMs();
+      // A planned stop, switchover or destroy never counts toward a hang.
+      if (
+        await isOrchestratorHaEmitSuppressed(layout, record.managedId, nowMs)
+      ) {
+        this.#hungTracker.forget(record.managedId);
+        return;
+      }
+      const verdict = this.#hungTracker.step(
+        record.managedId,
+        await this.#sampleHung(record),
+        this.#nowMs(),
+      );
+      if (!verdict.hung) return;
+      const ctx = await resolveHungPrimaryEmit(
+        layout,
+        record.managedId,
+        verdict.sinceMs,
+        this.#runDocker,
+        this.#nowMs(),
+      );
+      if (!ctx) return;
+      if (!state.pending.has(ctx.incidentKey)) {
+        logWarn(
+          "managed",
+          `primary managedId=${record.managedId} is hung (${verdict.reason}; ${verdict.samples} probes over ${
+            Math.round((this.#nowMs() - verdict.sinceMs) / 1000)
+          } s)`,
+        );
+        state.pending.set(ctx.incidentKey, ctx);
+      }
+    });
+  }
+
+  /**
    * Send this poll's events unless a newer poll already finished with every
    * source read: that one saw a fresher state (healthy, or dead and sent).
    */
@@ -410,6 +497,11 @@ export class ManagedHaObserver {
         state,
         "replication-analysis",
         () => this.#pollReplicationAnalysis(state, layout, api),
+      );
+      await this.#pollSource(
+        state,
+        "hung-primary probe",
+        () => this.#pollHungPrimaries(state, layout),
       );
       this.#finishPoll(state);
     } catch (err) {
