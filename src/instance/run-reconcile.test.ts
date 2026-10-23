@@ -2124,7 +2124,7 @@ test("a new build that is serving after a failed rollback is a success with a wa
 
 test("a failed migration keeps the previous database and rolls back", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
-  let history = ["0000_init"];
+  let history = ["0000_example"];
   const error = await assertRejects(
     () =>
       executeInstanceUpdateReconcile({
@@ -2132,7 +2132,7 @@ test("a failed migration keeps the previous database and rolls back", async () =
         upgradeId: "up-migrate",
         hooks: managedUpdateHooks(calls, {
           migrate: () => {
-            history = ["0000_init"];
+            history = ["0000_example"];
             return Promise.resolve({
               code: 1,
               stdout: "",
@@ -2144,7 +2144,7 @@ test("a failed migration keeps the previous database and rolls back", async () =
     ControlPlaneUpdateFailedError,
     "migration_failed",
   );
-  assertEquals(history, ["0000_init"]);
+  assertEquals(history, ["0000_example"]);
   assertEquals(
     calls.some((call) => call.args.includes("instance-rollback.yml")),
     true,
@@ -2154,13 +2154,13 @@ test("a failed migration keeps the previous database and rolls back", async () =
 
 test("a successful migration lets the new instance boot", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
-  let history = ["0000_init"];
+  let history = ["0000_example"];
   let booted = false;
   await executeInstanceUpdateReconcile({
     channel: "release",
     hooks: managedUpdateHooks(calls, {
       migrate: () => {
-        history = ["0000_init", "0007_add_upgrade_tables"];
+        history = ["0000_example", "0007_add_upgrade_tables"];
         return Promise.resolve({
           code: 0,
           stdout: "migrations applied successfully\n",
