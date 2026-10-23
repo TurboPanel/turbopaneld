@@ -63,8 +63,9 @@ function sql(name: string, statement: string): Promise<Result> {
     "exec",
     name,
     "mariadb",
-    "--protocol=tcp",
-    "-h127.0.0.1",
+    // The network root account is gone; the local socket is the way in
+    // (password until socket auth is installed, then the socket itself).
+    "--protocol=socket",
     "-uroot",
     `-p${ROOT_PASSWORD}`,
     "-N",

@@ -349,3 +349,10 @@ test("replica-local SQL is wrapped so it cannot mint a replica GTID", () => {
   assertEquals(guardOnlySocket.includes("unix_socket"), true);
   assertEquals(guardOnlySocket.includes("REVOKE READ_ONLY ADMIN"), false);
 });
+
+test("ensureSocketAdminSql drops the image's root@'%' network account", () => {
+  const sql = ensureSocketAdminSql();
+  assertEquals(sql.includes("DROP USER IF EXISTS `root`@'%';"), true);
+  // Dropped before the socket admin is (re)granted, never the localhost one.
+  assertEquals(sql.includes("DROP USER IF EXISTS `root`@'localhost'"), false);
+});
