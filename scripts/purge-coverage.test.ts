@@ -499,3 +499,73 @@ test("every package a role holds at a version is one the purge purges despite th
     "the purge would refuse a held package",
   );
 });
+
+function shellFunction(source: string, name: string): string {
+  const start = source.indexOf(`\n${name}() {`);
+  assert(start >= 0, `${name} is missing from purge.sh`);
+  const end = source.indexOf("\n}\n", start + 1);
+  return source.slice(start + 1, end + 2);
+}
+
+test("the purge selects every package a role holds when dpkg reports it held", async () => {
+  const files = [];
+  for (const file of await installFiles()) {
+    const rel = relative(repo, file);
+    files.push({
+      rel,
+      text: await Deno.readTextFile(file),
+      vars: await roleVars(rel),
+    });
+  }
+  const { held } = holdGaps(files, []);
+  assert(held.length > 0, "the hold reader found no held package");
+  const source = await Deno.readTextFile(purgePath);
+  const constants = ["TP_DOCKER_PACKAGES", "TP_DPKG_ON_DISK"].map((name) => {
+    const line = source.match(new RegExp(`^${name}=.*$`, "m"));
+    assert(line, `${name} is missing from purge.sh`);
+    return line[0];
+  });
+  const functions = [
+    "tp_file_add",
+    "tp_pkg_state_in",
+    "tp_pkg_installed",
+    "tp_pkg_purgeable",
+    "tp_collect_docker_packages",
+  ].map((name) => shellFunction(source, name));
+  // dpkg's own wording for a package held at its installed version.
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-held-" });
+  await Deno.writeTextFile(
+    join(bin, "dpkg-query"),
+    [
+      "#!/bin/sh",
+      'for last in "$@"; do :; done',
+      `case " ${
+        held.join(" ")
+      } " in *" $last "*) printf 'hold ok installed\\n' ;; *) exit 1 ;; esac`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const tmp = await Deno.makeTempDir({ prefix: "tp-purge-held-tmp-" });
+  const out = await new Deno.Command("sh", {
+    args: [
+      "-c",
+      [
+        ...constants,
+        ...functions,
+        `TP_TMP=${tmp}`,
+        "tp_collect_docker_packages",
+        'cat "$TP_TMP/docker.pkgs"',
+      ].join("\n"),
+    ],
+    env: { PATH: `${bin}:${Deno.env.get("PATH") ?? "/usr/bin:/bin"}` },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const selected = new TextDecoder().decode(out.stdout).trim().split("\n");
+  assertEquals(
+    held.filter((pkg) => !selected.includes(pkg)),
+    [],
+    new TextDecoder().decode(out.stderr),
+  );
+});

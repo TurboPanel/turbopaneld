@@ -22,6 +22,7 @@ import {
   resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
 } from "./sockets.ts";
+import { runServerNetworkCheck } from "../host/network-check.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
@@ -159,6 +160,7 @@ import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
@@ -349,6 +351,14 @@ async function readServerId(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * True once this host has enrolled with a control plane (its `server.id` is on
+ * disk). A host that has not is on its first start and has nothing to restore.
+ */
+export async function hasEnrolledServerId(dir?: string): Promise<boolean> {
+  return (await readServerId(dir)) !== undefined;
 }
 
 async function readDaemonKeyFile(
@@ -1705,6 +1715,7 @@ export class InstanceClient {
       onStaleConnection: () => this.#closeActiveSocket(),
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
+      hostCapacityFlag: () => this.instanceSupports(HOST_CAPACITY_FEATURE),
       // Running and unconfirmed commands ride on hello / heartbeat.
       commandReport: () => commandPorts.commandReport?.(),
       peerSupports: (feature) => this.instanceSupports(feature),
@@ -1865,6 +1876,9 @@ export class InstanceClient {
         break;
       case "managed-permissions-request":
         void this.#readManagedPermissionsAsync(message, ws);
+        break;
+      case "server-network-check-request":
+        void this.#runServerNetworkCheckAsync(message, ws);
         break;
       case "metrics-live-start":
         this.#applyLiveLeaseStart(message, ws);
@@ -2917,6 +2931,17 @@ export class InstanceClient {
       at: new Date().toISOString(),
     };
 
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  async #runServerNetworkCheckAsync(
+    message: Extract<DaemonMessage, { type: "server-network-check-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    // `runServerNetworkCheck` never throws: a bad request is `ok: false`.
+    const result = await runServerNetworkCheck(message.targets, message.id);
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(result));
     }

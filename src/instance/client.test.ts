@@ -3715,6 +3715,13 @@ it({
             databases: [],
             at: new Date().toISOString(),
           });
+          // No targets: answered `ok: false` on the request id.
+          socket.receive({
+            type: "server-network-check-request",
+            id: "netcheck-1",
+            targets: [],
+            at: new Date().toISOString(),
+          });
           socket.receive({
             type: "fabric-paths-request",
             id: "fabric-1",
@@ -3817,6 +3824,20 @@ it({
           assertEquals(permissionsFrame?.id, "perms-1");
           assertEquals(permissionsFrame?.ok, false);
           assertEquals(typeof permissionsFrame?.error, "string");
+          await waitFor(
+            "server-network-check-result",
+            () =>
+              lastFrameOfType(socket, "server-network-check-result")
+                ? true
+                : undefined,
+          );
+          const networkFrame = lastFrameOfType(
+            socket,
+            "server-network-check-result",
+          ) as { id?: string; ok?: boolean; error?: unknown } | undefined;
+          assertEquals(networkFrame?.id, "netcheck-1");
+          assertEquals(networkFrame?.ok, false);
+          assertEquals(networkFrame?.error, "no targets");
           await waitFor(
             "fabric-paths-result",
             () =>

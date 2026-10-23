@@ -133,8 +133,32 @@
                         Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
                 }
                 root * {{ turbopanel_ui_dist_dir }}
-                try_files {path} /index.html
-                file_server
+                # Bundle and asset names carry a content hash, so they are
+                # cached for a year. A missing one is a plain 404: after an
+                # update a page cached by the browser still asks for the old
+                # names, and answering with index.html (text/html, nosniff)
+                # left the page stuck on its spinner. Everything else is the
+                # page itself (or an unhashed file such as /theme-boot.js) and
+                # is revalidated on every load, so an update shows up at once.
+                # Existing hosts get this block from tasks/caddyfile-ui-cache.yml;
+                # keep the two identical.
+                @ui_hashed path /_expo/static/* /assets/*
+                handle @ui_hashed {
+                        @ui_hashed_file file
+                        handle @ui_hashed_file {
+                                header Cache-Control "public, max-age=31536000, immutable"
+                                file_server
+                        }
+                        handle {
+                                header Cache-Control "no-store"
+                                respond "Not Found" 404
+                        }
+                }
+                handle {
+                        header Cache-Control "no-cache"
+                        try_files {path} /index.html
+                        file_server
+                }
         }
 
         # Upstream 502/503/504 while the instance socket is down (package

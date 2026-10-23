@@ -1,9 +1,13 @@
 import { assertEquals } from "@std/assert";
 import {
+  bootstrapOrchestrationTools,
+  initOrchestration,
   isPreOptInCoLocatedDev,
+  runBootConverge,
   setupTestHooks,
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
+  shouldRunDaemonConverge,
 } from "./setup.ts";
 import type { InstallMode } from "../paths/layout.ts";
 
@@ -230,4 +234,88 @@ test("install mode does not change the remote URL daemon or skip-orchestration p
       assertEquals(shouldEnableDockerIntegration(), false);
     });
   });
+});
+
+test("runBootConverge is skipped with orchestration and a no-op where no converge applies", async () => {
+  const skipped = Deno.env.get("TURBOPANEL_SKIP_ORCHESTRATION");
+  const url = Deno.env.get("TURBOPANEL_INSTANCE_URL");
+  try {
+    Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", "1");
+    assertEquals(await runBootConverge(), false);
+    Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    Deno.env.delete("TURBOPANEL_INSTANCE_URL");
+    Deno.env.set("TURBOPANEL_SOCKET", "/tmp/tp-test.sock");
+    assertEquals(shouldRunDaemonConverge(), false);
+    assertEquals(await runBootConverge(), true);
+  } finally {
+    Deno.env.delete("TURBOPANEL_SOCKET");
+    if (skipped === undefined) Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    else Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", skipped);
+    if (url !== undefined) Deno.env.set("TURBOPANEL_INSTANCE_URL", url);
+  }
+});
+
+test("runBootConverge runs the converge for a remote daemon and reports a failure as false", async () => {
+  const url = Deno.env.get("TURBOPANEL_INSTANCE_URL");
+  const original = setupTestHooks.runDaemonConverge;
+  try {
+    Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://panel.example.com");
+    let runs = 0;
+    setupTestHooks.runDaemonConverge = () => {
+      runs += 1;
+      return Promise.resolve();
+    };
+    assertEquals(await runBootConverge(), true);
+    assertEquals(runs, 1);
+    setupTestHooks.runDaemonConverge = () =>
+      Promise.reject(new Error("playbook failed"));
+    assertEquals(await runBootConverge(), false);
+  } finally {
+    setupTestHooks.runDaemonConverge = original;
+    if (url === undefined) Deno.env.delete("TURBOPANEL_INSTANCE_URL");
+    else Deno.env.set("TURBOPANEL_INSTANCE_URL", url);
+  }
+});
+
+test("bootstrapOrchestrationTools reports ready, failed and skipped", async () => {
+  const skipped = Deno.env.get("TURBOPANEL_SKIP_ORCHESTRATION");
+  const original = setupTestHooks.bootstrapSteps;
+  try {
+    Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    const ran: string[] = [];
+    setupTestHooks.bootstrapSteps = () => [
+      ["one", () => {
+        ran.push("one");
+        return Promise.resolve();
+      }],
+      ["two", () => {
+        ran.push("two");
+        return Promise.resolve();
+      }],
+    ];
+    assertEquals(await bootstrapOrchestrationTools(), true);
+    assertEquals(ran, ["one", "two"]);
+    setupTestHooks.bootstrapSteps = () => [
+      ["broken", () => Promise.reject(new Error("no network"))],
+    ];
+    assertEquals(await bootstrapOrchestrationTools(), false);
+    Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", "1");
+    assertEquals(await bootstrapOrchestrationTools(), false);
+  } finally {
+    setupTestHooks.bootstrapSteps = original;
+    if (skipped === undefined) Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    else Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", skipped);
+  }
+});
+
+test("initOrchestration is not ready when the tool bootstrap fails", async () => {
+  const skipped = Deno.env.get("TURBOPANEL_SKIP_ORCHESTRATION");
+  try {
+    Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", "1");
+    assertEquals(await initOrchestration(), false);
+  } finally {
+    if (skipped === undefined) Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
+    else Deno.env.set("TURBOPANEL_SKIP_ORCHESTRATION", skipped);
+  }
 });

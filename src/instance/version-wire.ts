@@ -84,6 +84,9 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-database-convert-v1",
   "tls-capture-v1",
   "command-recovery-v1",
+  "managed-switchover-final-position-v1",
+  "host-capacity-v1",
+  "server-network-check-v1",
 ] as const;
 
 /**
@@ -113,6 +116,16 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
 export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
 
 /**
+ * Planned Postgres switchover: the fence stop reports the old primary's final
+ * write position, the promote reports the new primary's replay position, and
+ * a forced re-seed (`switchoverReseed`) is refused by the daemon when it is
+ * stale. The control plane never wipes a former primary automatically unless
+ * the daemons of both servers list this feature.
+ */
+export const MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE: DaemonWireFeature =
+  "managed-switchover-final-position-v1";
+
+/**
  * This daemon answers `managed-health-request` with `managed-health-result`
  * (a fresh replication observation for one member). The control plane sends
  * the request only to a daemon that lists this feature.
@@ -127,6 +140,16 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_PERMISSIONS_READ_FEATURE: DaemonWireFeature =
   "managed-permissions-read-v1";
+
+/**
+ * This daemon answers `server-network-check-request` with
+ * `server-network-check-result`: whether this host can open a TCP connection
+ * to each listed peer address, and from which local address. Nothing is sent
+ * on the connection. The control plane asks only a daemon that lists this
+ * feature.
+ */
+export const SERVER_NETWORK_CHECK_FEATURE: DaemonWireFeature =
+  "server-network-check-v1";
 
 /**
  * This daemon pushes `managed-health-report` (every local replica's fresh
@@ -295,6 +318,15 @@ export const MANAGED_DATABASE_OWNER_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_DATABASE_CONVERT_FEATURE: DaemonWireFeature =
   "managed-database-convert-v1";
+
+/**
+ * The control plane merges heartbeat `resources.{memory,swap,cpus}` and the
+ * optional `memory.presentBytes` / `memory.blockSizeBytes` / `dynamicMemory`
+ * fields. This daemon re-sends them on a heartbeat after they move only to a
+ * control plane that lists this feature; hello always carries them, and
+ * `memory.totalBytes` still means MemTotal.
+ */
+export const HOST_CAPACITY_FEATURE = "host-capacity-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

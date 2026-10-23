@@ -404,3 +404,10 @@ test("grantReplicationSql keeps REQUIRE SSL out of GRANT (removed in MySQL 8)", 
     true,
   );
 });
+
+test("ensureSocketAdminSql drops the image's root@'%' network account", () => {
+  const sql = ensureSocketAdminSql();
+  assertEquals(sql.includes("DROP USER IF EXISTS `root`@'%';"), true);
+  // Dropped before the socket admin is (re)granted, never the localhost one.
+  assertEquals(sql.includes("DROP USER IF EXISTS `root`@'localhost'"), false);
+});
