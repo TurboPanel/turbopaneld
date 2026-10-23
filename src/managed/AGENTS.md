@@ -112,7 +112,7 @@ Backup restore skips per-login schemas on an owner-role database; a restored tab
 # Ansible provisions directories / admin.cnf / base static cnf / unit only.
 <configDir>/proxysql/
 ├── docker-compose.yml   # daemon-written (mode 0640); absent until first reconcile
-├── proxysql.cnf         # durable cold-start config (static + users/servers/rules)
+├── proxysql.cnf         # durable cold-start config (static + users/servers/rules), mode 0600 daemon user (holds login passwords; the proxy container runs as root and reads it anyway)
 ├── admin.cnf            # [client] admin user/password, mode 0640 root:<daemon group> (Ansible once; the unprivileged daemon reads it, the proxy container mounts it read-only)
 ├── wait-ready.sh        # Ansible; admin-port readiness for the oneshot unit
 └── tls/                 # leaf fullchain/privkey + CA PEMs written on reconcile

@@ -31,7 +31,7 @@ The daemon refuses compose up / config write while those paths are directories.
 | `/etc/turbopanel/proxysql/` | `0750` root:group | Config root (`proxysql_config_dir`) |
 | `…/tls/` | `0750` root:group | Org-CA leaf + CA for frontend TLS (daemon writes PEMs) |
 | `…/admin.cnf` | `0600` root:group | mysql-client-style `[client]` admin user/password (like postgres `.pgpass`) |
-| `…/proxysql.cnf` | `0640` root:group | Cold-start config (Ansible seeds static globals once; daemon owns thereafter) |
+| `…/proxysql.cnf` | `0600` daemon user:group | Cold-start config with every login password (Ansible seeds static globals once; daemon owns thereafter). The proxy container runs as root (the image sets no user), so it reads the bind mount regardless of owner |
 | `<install root>/libexec/proxysql-wait-ready.sh` | `0755` root:root, root-only directory (the unit runs it as root) | Probe admin `127.0.0.1:6032` after compose up |
 | `…/docker-compose.yml` | daemon `0640` | **Not** written by Ansible |
 | Managed network (bare-UUID per-org name from `network(kind='managed')`) | bridge | Engines + ProxySQL (never the tenant hosting-ingress network). **Not a path this role owns** — the name is allocated per organization by the control plane, is unknown at converge time, and the daemon creates it on reconcile and re-creates it on `system.reconcile` self-heal (recovered from the on-disk compose file). See `../src/managed/AGENTS.md` → **Managed network self-heal** |
