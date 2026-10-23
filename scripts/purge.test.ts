@@ -1772,3 +1772,77 @@ test("failed-state reset names only loaded failed TurboPanel units, whatever is 
   );
   assert(!calls.includes("turbopanel-orchestrate"), calls);
 });
+
+async function dockerGroupRun(
+  statuses: Record<string, string>,
+  systemctlBody = "exit 0",
+): Promise<ShResult> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-dgrp-" });
+  await fakeStatusDpkg(dir, statuses);
+  await Deno.writeTextFile(
+    join(dir, "systemctl"),
+    `#!/bin/sh\n${systemctlBody}\n`,
+    {
+      mode: 0o755,
+    },
+  );
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const result = await runPurgeSh(
+    [
+      "tp_purge_docker_group",
+      "tp_reset_failed_docker_units",
+      "tp_has_tool",
+      "tp_pkg_installed",
+    ],
+    [
+      GROUP_STUBS,
+      `printf '%s\\n' 'docker:x:989:tp' 'sudo:x:27:' > "$TP_TMP/group"`,
+      "tp_purge_docker_group",
+      `if getent group docker >/dev/null 2>&1; then echo GROUP=kept; else echo GROUP=gone; fi`,
+    ].join("\n"),
+    { PATH: `${dir}:/usr/bin:/bin` },
+  );
+  return { ...result, stdout: result.stdout + result.stderr };
+}
+
+test("the docker group stays while Docker Engine packages remain", async () => {
+  const result = await dockerGroupRun({
+    "docker-ce": "install ok installed",
+    "containerd.io": "install ok installed",
+  });
+  assertStringIncludes(result.stdout, "GROUP=kept");
+  assertEquals(result.stdout.includes("groupdel docker"), false);
+  assertStringIncludes(result.stdout, "keeping the docker group");
+});
+
+test("the docker group is deleted once the engine packages are gone", async () => {
+  const result = await dockerGroupRun({
+    "docker-ce": "purge ok not-installed",
+    "docker.io": "deinstall ok config-files",
+  });
+  assertStringIncludes(result.stdout, "groupdel docker");
+  assertStringIncludes(result.stdout, "GROUP=gone");
+});
+
+test("failed Docker units are reset, and only the ones systemd holds as failed", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-rfd-" });
+  const calls = join(dir, "calls");
+  await Deno.writeTextFile(
+    join(dir, "systemctl"),
+    `#!/bin/sh
+case "$1" in
+  is-failed) if [ "$2" = docker.socket ]; then echo failed; exit 0; fi; echo inactive; exit 1 ;;
+  reset-failed) shift; echo "$*" >> "${calls}"; exit 0 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  const result = await runPurgeSh(
+    ["tp_reset_failed_docker_units", "tp_has_tool"],
+    "tp_reset_failed_docker_units; echo fail=$TP_FAIL_COUNT",
+    { PATH: dir },
+  );
+  assertStringIncludes(result.stdout, "fail=0");
+  assertEquals((await Deno.readTextFile(calls)).trim(), "docker.socket");
+});
