@@ -2,6 +2,7 @@
 
 import type { S3Client } from "./client.ts";
 import { compareStrings } from "./sigv4.ts";
+import { forEachSequential } from "../../util/sequential.ts";
 
 /** `bk_x.dump` -> `bk_x`; null for a key that is not a backup object. */
 export function backupIdOfKey(key: string): string | null {
@@ -31,9 +32,9 @@ export async function pruneBucketFolder(
       compareStrings(b.key, a.key);
   });
   const removed: string[] = [];
-  for (const old of objects.slice(keep)) {
+  await forEachSequential(objects.slice(keep), async (old) => {
     await client.deleteObject(old.key);
     removed.push(backupIdOfKey(old.key)!);
-  }
+  });
   return removed;
 }

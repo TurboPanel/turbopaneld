@@ -47,6 +47,20 @@ function ipv6Class(host: string): "loopback" | "private" | "other" {
   return "other";
 }
 
+/** A plain reason when the URL is not a bare http(s) host, else null. */
+function shapeRefusal(url: URL): string | null {
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return "the endpoint must start with https://";
+  }
+  if (url.username || url.password) {
+    return "the endpoint must not contain a user name or password";
+  }
+  if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
+    return "the endpoint must be a host name only, without a path";
+  }
+  return null;
+}
+
 /** A plain reason when the endpoint may not be used, else null. */
 export function endpointRefusal(
   endpoint: string,
@@ -58,15 +72,8 @@ export function endpointRefusal(
   } catch {
     return "the endpoint is not a valid URL";
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    return "the endpoint must start with https://";
-  }
-  if (url.username || url.password) {
-    return "the endpoint must not contain a user name or password";
-  }
-  if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash) {
-    return "the endpoint must be a host name only, without a path";
-  }
+  const shape = shapeRefusal(url);
+  if (shape) return shape;
   const host = url.hostname.toLowerCase();
   const v4 = ipv4Parts(host);
   const isV6 = host.startsWith("[");

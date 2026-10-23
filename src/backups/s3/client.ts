@@ -21,6 +21,7 @@ import {
   signS3Request,
   uriEncode,
 } from "./sigv4.ts";
+import { repeatSequential } from "../../util/sequential.ts";
 
 export type S3TargetConfig = {
   endpoint: string;
@@ -187,46 +188,74 @@ export class S3Client {
     if (refusal) throw new S3Error(refusal, 0, "EndpointRefused", false);
     const body = options.body;
     const payloadHash = body ? await sha256Hex(body) : EMPTY_PAYLOAD_SHA256;
-    let last: S3Error | null = null;
-    for (let attempt = 0; attempt < this.#deps.attempts; attempt++) {
+    const result: { response: Response | null; last: S3Error | null } = {
+      response: null,
+      last: null,
+    };
+    let attempt = 0;
+    await repeatSequential(async () => {
+      if (attempt >= this.#deps.attempts) return false;
       if (attempt > 0) {
         const base = 250 * 2 ** (attempt - 1);
         await this.#deps.sleep(base + Math.floor(Math.random() * base));
       }
-      const url = this.#url(key, options.query);
-      const headers = await signS3Request({
-        method,
-        url,
-        region: this.config.region,
-        credentials: this.config.credentials,
-        headers: options.headers,
-        payloadHash,
-        now: this.#deps.now(),
-      });
-      if (body) headers["content-length"] = String(body.byteLength);
-      try {
-        const response = await this.#deps.fetch(url, {
-          method,
-          headers,
-          body: body as BodyInit | undefined,
-          redirect: "manual",
-          signal: AbortSignal.timeout(this.#deps.requestTimeoutMs),
-        });
-        if (response.status >= 200 && response.status < 300) return response;
-        const error = await this.#errorFrom(response);
-        if (!error.retryable) throw error;
-        last = error;
-      } catch (err) {
-        if (err instanceof S3Error && !err.retryable) throw err;
-        last = err instanceof S3Error ? err : new S3Error(
-          "the storage did not answer (network error or timeout)",
-          0,
-          "Network",
-          true,
-        );
+      attempt++;
+      const outcome = await this.#tryOnce(method, key, options, payloadHash);
+      if (outcome instanceof Response) {
+        result.response = outcome;
+        return false;
       }
+      result.last = outcome;
+      return true;
+    });
+    if (result.response) return result.response;
+    throw result.last ??
+      new S3Error("the storage did not answer", 0, "Network", true);
+  }
+
+  /** One signed try: the response, or the retryable failure (a final one is thrown). */
+  async #tryOnce(
+    method: string,
+    key: string,
+    options: RequestOptions,
+    payloadHash: string,
+  ): Promise<Response | S3Error> {
+    const body = options.body;
+    const url = this.#url(key, options.query);
+    const headers = await signS3Request({
+      method,
+      url,
+      region: this.config.region,
+      credentials: this.config.credentials,
+      headers: options.headers,
+      payloadHash,
+      now: this.#deps.now(),
+    });
+    if (body) headers["content-length"] = String(body.byteLength);
+    try {
+      const response = await this.#deps.fetch(url, {
+        method,
+        headers,
+        body: body as BodyInit | undefined,
+        redirect: "manual",
+        signal: AbortSignal.timeout(this.#deps.requestTimeoutMs),
+      });
+      if (response.status >= 200 && response.status < 300) return response;
+      const error = await this.#errorFrom(response);
+      if (!error.retryable) throw error;
+      return error;
+    } catch (err) {
+      if (err instanceof S3Error) {
+        if (!err.retryable) throw err;
+        return err;
+      }
+      return new S3Error(
+        "the storage did not answer (network error or timeout)",
+        0,
+        "Network",
+        true,
+      );
     }
-    throw last ?? new S3Error("the storage did not answer", 0, "Network", true);
   }
 
   async #errorFrom(response: Response): Promise<S3Error> {
@@ -401,7 +430,7 @@ export class S3Client {
   async listObjects(prefix: string): Promise<S3ObjectInfo[]> {
     const out: S3ObjectInfo[] = [];
     let token: string | null = null;
-    do {
+    await repeatSequential(async () => {
       const query: Record<string, string> = { "list-type": "2", prefix };
       if (token) query["continuation-token"] = token;
       const response = await this.#send("GET", "", { query });
@@ -418,7 +447,8 @@ export class S3Client {
       token = xmlTag(xml, "IsTruncated") === "true"
         ? xmlTag(xml, "NextContinuationToken")
         : null;
-    } while (token);
+      return token !== null;
+    });
     return out;
   }
 }

@@ -89,10 +89,8 @@ export async function enqueueCopyJob(
 ): Promise<string> {
   const jobId = await copyJobId(input.managedId, input.backupId);
   const path = join(copyQueueDir(layout), `${jobId}.json`);
-  try {
-    await Deno.stat(path);
-    return jobId;
-  } catch { /* not queued yet */ }
+  const queued = await Deno.stat(path).then(() => true, () => false);
+  if (queued) return jobId;
   const job: CopyJob = {
     ...input,
     version: 1,
@@ -102,7 +100,7 @@ export async function enqueueCopyJob(
   };
   await writeAtomic(copyQueueDir(layout), `${jobId}.json`, job);
   notifyCopyQueued();
-  return jobId;
+  return job.jobId;
 }
 
 export async function saveCopyJob(layout: StateLayout, job: CopyJob) {
@@ -120,7 +118,8 @@ function parseJob(raw: unknown, name: string): CopyJob | null {
   const r = raw as Record<string, unknown>;
   try {
     if (
-      r.version !== 1 || `${r.jobId}.json` !== name ||
+      r.version !== 1 || typeof r.jobId !== "string" ||
+      `${r.jobId}.json` !== name ||
       typeof r.managedId !== "string" || typeof r.backupId !== "string" ||
       typeof r.artifactExtension !== "string" ||
       typeof r.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(r.sha256) ||
@@ -146,17 +145,21 @@ export async function listCopyJobs(layout: StateLayout): Promise<CopyJob[]> {
     if (err instanceof Deno.errors.NotFound) return [];
     throw err;
   }
-  const jobs: CopyJob[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile || !JOB_FILE_RE.test(entry.name)) continue;
-    try {
-      const job = parseJob(
-        JSON.parse(await Deno.readTextFile(join(dir, entry.name))),
-        entry.name,
-      );
-      if (job) jobs.push(job);
-    } catch { /* a half-written or foreign file: skip */ }
-  }
+  const read = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile && JOB_FILE_RE.test(entry.name))
+      .map(async (entry): Promise<CopyJob | null> => {
+        try {
+          return parseJob(
+            JSON.parse(await Deno.readTextFile(join(dir, entry.name))),
+            entry.name,
+          );
+        } catch {
+          return null; // a half-written or foreign file: skip
+        }
+      }),
+  );
+  const jobs = read.filter((job): job is CopyJob => job !== null);
   return jobs.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
@@ -180,18 +183,23 @@ export async function listCopyReports(
     if (err instanceof Deno.errors.NotFound) return [];
     throw err;
   }
-  const out: { jobId: string; report: CopyReport }[] = [];
-  for (const entry of entries) {
-    const jobId = JOB_FILE_RE.exec(entry.name)?.[1];
-    if (!entry.isFile || !jobId) continue;
-    try {
-      const { version: _v, ...report } = JSON.parse(
-        await Deno.readTextFile(join(dir, entry.name)),
-      ) as StoredReport;
-      out.push({ jobId, report });
-    } catch { /* skip */ }
-  }
-  return out.slice(0, 20);
+  const read = await Promise.all(
+    entries.map(
+      async (entry): Promise<{ jobId: string; report: CopyReport } | null> => {
+        const jobId = JOB_FILE_RE.exec(entry.name)?.[1];
+        if (!entry.isFile || !jobId) return null;
+        try {
+          const { version: _v, ...report } = JSON.parse(
+            await Deno.readTextFile(join(dir, entry.name)),
+          ) as StoredReport;
+          return { jobId, report };
+        } catch {
+          return null;
+        }
+      },
+    ),
+  );
+  return read.filter((item) => item !== null).slice(0, 20);
 }
 
 export async function removeCopyReport(layout: StateLayout, jobId: string) {

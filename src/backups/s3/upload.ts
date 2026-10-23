@@ -8,6 +8,7 @@
  */
 
 import { type S3Client, S3Error } from "./client.ts";
+import { forEachSequential, repeatSequential } from "../../util/sequential.ts";
 
 export const DEFAULT_PART_BYTES = 16 * 1024 * 1024;
 const MAX_PARTS = 9000;
@@ -62,11 +63,13 @@ async function readRange(
   const buf = new Uint8Array(length);
   await file.seek(offset, Deno.SeekMode.Start);
   let read = 0;
-  while (read < length) {
+  await repeatSequential(async () => {
+    if (read >= length) return false;
     const n = await file.read(buf.subarray(read));
     if (n === null) throw new Error("the backup file ended early");
     read += n;
-  }
+    return true;
+  });
   return buf;
 }
 
@@ -112,8 +115,10 @@ async function uploadParts(
 ): Promise<void> {
   const total = Math.ceil(state.size / state.partBytes);
   const done = new Set(state.parts.map((p) => p.n));
-  for (let n = 1; n <= total; n++) {
-    if (done.has(n)) continue;
+  const pending = Array.from({ length: total }, (_, i) => i + 1).filter(
+    (n) => !done.has(n),
+  );
+  await forEachSequential(pending, async (n) => {
     const offset = (n - 1) * state.partBytes;
     const length = Math.min(state.partBytes, state.size - offset);
     const etag = await client.uploadPart(
@@ -124,7 +129,7 @@ async function uploadParts(
     );
     state.parts.push({ n, etag });
     await writeState(req.statePath, state);
-  }
+  });
 }
 
 /** Returns the stored size. Throws {@link S3Error} with a plain reason. */

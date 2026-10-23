@@ -29,6 +29,7 @@ import { type S3Client, type S3ClientDeps, S3Error } from "./s3/client.ts";
 import { pruneBucketFolder } from "./s3/prune.ts";
 import { abandonUpload, uploadBackupFile } from "./s3/upload.ts";
 import { join } from "@std/path";
+import { forEachSequential } from "../util/sequential.ts";
 import { MAX_RESULT_ERROR_LENGTH } from "./result-spool.ts";
 
 export const MAX_ATTEMPTS = 8;
@@ -55,7 +56,7 @@ function plainError(err: unknown): { text: string; retryable: boolean } {
   if (err instanceof S3Error) {
     return { text: err.message, retryable: err.retryable };
   }
-  const text = err instanceof Error ? err.message : String(err);
+  const text = err instanceof Error ? err.message : sanitizeForLog(err);
   return { text: sanitizeForLog(text), retryable: true };
 }
 
@@ -101,14 +102,17 @@ export class BackupCopier {
   async #runDue(): Promise<void> {
     try {
       const now = (this.#opts.now ?? (() => new Date()))();
-      for (const job of await listCopyJobs(this.#layout())) {
-        if (
-          job.nextAttemptAt && Date.parse(job.nextAttemptAt) > now.getTime()
-        ) {
-          continue;
-        }
-        await this.#process(job);
-      }
+      await forEachSequential(
+        await listCopyJobs(this.#layout()),
+        async (job) => {
+          if (
+            job.nextAttemptAt && Date.parse(job.nextAttemptAt) > now.getTime()
+          ) {
+            return;
+          }
+          await this.#process(job);
+        },
+      );
     } catch (err) {
       logWarn("backups", "backup copy run failed:", sanitizeForLog(err));
     }

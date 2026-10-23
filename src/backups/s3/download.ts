@@ -5,6 +5,7 @@
 
 import { digestFileSha256 } from "../../managed/backup.ts";
 import { type S3Client, S3Error } from "./client.ts";
+import { repeatSequential } from "../../util/sequential.ts";
 import { DEFAULT_PART_BYTES } from "./upload.ts";
 
 export type DownloadRequest = {
@@ -54,7 +55,8 @@ export async function downloadBackupFile(
   });
   try {
     await file.seek(have, Deno.SeekMode.Start);
-    while (have < head.size) {
+    await repeatSequential(async () => {
+      if (have >= head.size) return false;
       const end = Math.min(have + step, head.size) - 1;
       const response = await client.getObject(req.key, { start: have, end });
       const bytes = new Uint8Array(await response.arrayBuffer());
@@ -68,7 +70,8 @@ export async function downloadBackupFile(
       }
       await file.write(bytes);
       have += bytes.byteLength;
-    }
+      return true;
+    });
   } finally {
     file.close();
   }
