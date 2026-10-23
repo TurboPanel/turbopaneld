@@ -50,7 +50,7 @@ change-detected heartbeats.
   NIC: `operstate`, then `carrier`) stamps each address with `link: 'up' | 'down'`,
   because `Deno.networkInterfaces()` keeps listing a static address after its
   cable is pulled; the control plane uses it to move traffic off a dead network
-  (absent means "unknown", read as up). A link flip rides the existing
+  (absent means "unknown", read as up). These `/proc` and `/sys` reads must go through `readOptionalText`: the compiled daemon's direct read is refused (Deno 2 `NotCapable`) even under a scoped `--allow-read`, so a blocked read falls back to `cat`; a direct-only read silently drops `preferred` and `link`. A link flip rides the existing
   change-detected heartbeat. **These are load-bearing, not decorative:** whenever the
   daemon reaches the control plane through a reverse proxy, a Cloudflare Tunnel,
   or a forwarded port, the peer address the control plane sees is the proxy's,
