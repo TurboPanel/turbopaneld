@@ -32,7 +32,8 @@ export type ReplicaFreshness = {
 /** Trimmed GTID text, or `undefined` when too long or not GTID-shaped. */
 export function boundedGtid(raw: string | undefined): string | undefined {
   if (raw === undefined) return undefined;
-  const text = raw.replaceAll(/[\r\n]/g, "").trim();
+  // `mysql -N -B` prints a newline inside a value as a backslash and `n`.
+  const text = raw.replaceAll(/\\[nr]|[\r\n]/g, "").trim();
   if (text === "NULL") return "";
   if (text.length > GTID_MAX_LENGTH || !GTID_TEXT_RE.test(text)) {
     return undefined;
