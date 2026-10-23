@@ -17,10 +17,13 @@ import { reviveStoppedOrchestratorContainer } from "../managed/orchestrator.ts";
 import type { OrchestratorProblem } from "../managed/orchestrator-api.ts";
 import { waitFor } from "../testing/wait-for.ts";
 import {
+  haIncidentReemitGapMs,
+  isHungProbeWatched,
   type ManagedHaEventMessage,
   ManagedHaObserver,
   shouldSuppressHaIncidentReemit,
 } from "./ha-observe.ts";
+import type { HungSample } from "../managed/mysql-hung-primary.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1919,4 +1922,138 @@ test("ManagedHaObserver holds the captured DeadMaster row while an apply marker 
       resetManagedIntentsForTests();
     }
   });
+});
+
+test("an incident that keeps failing is re-sent every minute for about 24 minutes, then slowly", () => {
+  assertEquals(haIncidentReemitGapMs(1), 30_000);
+  assertEquals(haIncidentReemitGapMs(2), 60_000);
+  for (let delivered = 2; delivered < 25; delivered++) {
+    assertEquals(haIncidentReemitGapMs(delivered), 60_000);
+  }
+  assertEquals(haIncidentReemitGapMs(25), 15 * 60_000);
+  // A refusal by the control plane's 15 minute cooldown is retried within a
+  // minute of the cooldown ending, well inside its 20 minute failure limit.
+  let elapsed = 0;
+  let count = 0;
+  while (elapsed < 15 * 60_000) {
+    count += 1;
+    elapsed += haIncidentReemitGapMs(count);
+  }
+  assertEquals(elapsed - 15 * 60_000 <= 60_000, true);
+  assertEquals(elapsed < 20 * 60_000, true);
+});
+
+test("only a MySQL or MariaDB primary with a replica is watched for a hang", () => {
+  const base = {
+    managedId: MANAGED_ID,
+    memberId: MEMBER_ID,
+    containerName: "c",
+    updatedAt: "x",
+  } as const;
+  assertEquals(
+    isHungProbeWatched({
+      ...base,
+      engine: "mysql",
+      role: "primary",
+      replicaPeerCount: 1,
+    }),
+    true,
+  );
+  assertEquals(
+    isHungProbeWatched({
+      ...base,
+      engine: "mariadb",
+      role: "primary",
+      replicaPeerCount: 0,
+    }),
+    false,
+  );
+  assertEquals(
+    isHungProbeWatched({
+      ...base,
+      engine: "mariadb",
+      role: "replica",
+      replicaPeerCount: 1,
+    }),
+    false,
+  );
+  assertEquals(
+    isHungProbeWatched({
+      ...base,
+      engine: "postgres",
+      role: "primary",
+      replicaPeerCount: 1,
+    }),
+    false,
+  );
+});
+
+async function runHungPolls(
+  samples: HungSample[],
+  stepMs = 15_000,
+): Promise<ManagedHaEventMessage[][]> {
+  const perPoll: ManagedHaEventMessage[][] = [];
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    await seedMysqlPrimary(layout);
+    const sent: ManagedHaEventMessage[] = [];
+    let nowMs = Date.parse("2026-10-23T12:00:00.000Z");
+    let index = 0;
+    const observer = new ManagedHaObserver({
+      layout,
+      runDocker: runDockerForDial(DEFAULT_DIAL),
+      nowMs: () => nowMs,
+      now: () => new Date(nowMs).toISOString(),
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      isStackPresent: () => Promise.resolve(true),
+      // Orchestrator sees nothing wrong: replicas still look connected.
+      api: {
+        credentials: { user: "admin", password: "x" },
+        fetch: () => Promise.resolve(new Response("[]", { status: 200 })),
+      },
+      sampleHung: () =>
+        Promise.resolve(samples[Math.min(index++, samples.length - 1)]!),
+    });
+    for (let poll = 0; poll < samples.length; poll++) {
+      const before = sent.length;
+      await observer.poll();
+      perPoll.push(sent.slice(before));
+      nowMs += stepMs;
+    }
+  });
+  return perPoll;
+}
+
+test("a hung MySQL or MariaDB primary that Orchestrator does not report is sent after 30 s, anchored on when it stopped answering", async () => {
+  const hung: HungSample = {
+    kind: "hung",
+    reason: "ping did not return in time",
+  };
+  const polls = await runHungPolls([hung, hung, hung, hung]);
+  assertEquals(polls.map((sent) => sent.length), [0, 0, 1, 0]);
+  const event = polls[2]![0]!;
+  assertEquals(event.type, "managed-ha-event");
+  assertEquals(event.managedId, MANAGED_ID);
+  assertEquals(event.instanceHost, DEFAULT_DIAL.hostname);
+  assertEquals(event.instancePort, DEFAULT_DIAL.port);
+  // The hang began at the first unanswered probe, 30 s before this poll.
+  assertEquals(event.evidence?.spanMs, 30_000);
+});
+
+test("a primary that answers in between, or is merely down, is never reported as hung", async () => {
+  const hung: HungSample = { kind: "hung", reason: "x" };
+  const polls = await runHungPolls([
+    hung,
+    hung,
+    { kind: "alive" },
+    hung,
+    hung,
+    { kind: "inconclusive", reason: "container is exited" },
+    hung,
+    hung,
+  ]);
+  assertEquals(polls.flat().length, 0);
 });
