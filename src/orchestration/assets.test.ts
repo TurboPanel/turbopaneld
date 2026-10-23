@@ -1347,3 +1347,26 @@ test("runtime roles verify every download with get_url checksum before extractio
     assertEquals(/checksum: "sha256:\{\{/.test(tasks), true, role);
   }
 });
+
+test("queue-config-refresh renders only the queue role, restarts only on a config change and never fails the update", () => {
+  const text = Deno.readTextFileSync(
+    join(ORCHESTRATION_DIR, "playbooks", "queue-config-refresh.yml"),
+  );
+  for (
+    const needle of [
+      "name: rabbitmq\n",
+      "rabbitmq_conf_written is changed",
+      "rescue:",
+      "docker, restart",
+    ]
+  ) {
+    if (!text.includes(needle)) {
+      throw new TypeError(`queue-config-refresh.yml needs ${needle}`);
+    }
+  }
+  for (const role of ["name: system-compose", "name: docker\n"]) {
+    if (text.includes(role)) {
+      throw new TypeError(`queue-config-refresh.yml must not run ${role}`);
+    }
+  }
+});

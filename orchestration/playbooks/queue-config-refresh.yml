@@ -1,0 +1,75 @@
+---
+# Re-apply the queue broker's own config after a control-plane update.
+#
+# The update flow never re-ran the full queue setup on an existing host, so a
+# changed broker setting (for example the consumer timeout) was never written
+# and the running broker kept the old value. The daemon runs this play at the
+# very end of a successful update:
+#
+#   tp-orchestrate playbook -i localhost, -c local \
+#     -e turbopanel_install_root=/opt/turbopanel queue-config-refresh.yml
+#
+# Contract:
+# - Runs as root through the helper, so it can read the root-owned broker
+#   config the daemon user cannot. It only renders the queue role (config
+#   files); it never runs the docker or system-compose roles, so it cannot
+#   recreate the database or queue container.
+# - It restarts the queue container once, and only when rabbitmq.conf was
+#   actually rewritten. A host whose config is current is left untouched.
+# - It skips hosts with no broker (no generated queue password).
+# - It never fails the update: any error is reported as a warning.
+- name: TurboPanel queue config refresh
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_config_dir: /etc/turbopanel
+
+  tasks:
+    - name: Find an installed queue broker
+      ansible.builtin.stat:
+        path: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
+      register: _queue_refresh_pass
+
+    - name: Refresh the broker config
+      when: _queue_refresh_pass.stat.exists
+      block:
+        - name: Render the queue config files
+          ansible.builtin.include_role:
+            name: rabbitmq
+            public: true
+
+        - name: Find the running queue container
+          ansible.builtin.command:
+            argv: [docker, ps, -q, --filter, "name=^{{ rabbitmq_container_name }}$"]
+          register: _queue_refresh_running
+          changed_when: false
+          failed_when: false
+
+        - name: Restart the queue container to load the new config
+          ansible.builtin.command:
+            argv: [docker, restart, "{{ rabbitmq_container_name }}"]
+          when:
+            - rabbitmq_conf_written is changed
+            - _queue_refresh_running.stdout | default('') | trim | length > 0
+          changed_when: true
+
+        - name: Wait for the queue to answer
+          ansible.builtin.command:
+            argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmq-diagnostics, -q, ping]
+          register: _queue_refresh_ping
+          until: _queue_refresh_ping.rc == 0
+          retries: 30
+          delay: 2
+          changed_when: false
+          when:
+            - rabbitmq_conf_written is changed
+            - _queue_refresh_running.stdout | default('') | trim | length > 0
+      rescue:
+        - name: Report that the broker config could not be refreshed
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: queue config not refreshed, the running broker keeps
+              its settings: {{ ansible_failed_result.msg | default('unknown error') }}

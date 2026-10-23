@@ -236,6 +236,7 @@ export async function seedOrchestrationTree(
       "orchestrator-setup.yml",
       "redis-setup.yml",
       "rabbitmq-setup.yml",
+      "queue-config-refresh.yml",
       "socket-dirs-setup.yml",
       "set-hostname.yml",
       "time-sync-apply.yml",

@@ -949,12 +949,6 @@ export type InstanceUpdateHooks = {
   readHealth?: () => Promise<ControlPlaneHealthSnapshot | null>;
   unitActive?: () => Promise<boolean>;
   readCaddyfile?: () => Promise<string | null>;
-  /**
-   * Read the broker config on disk. `null` means the host has no broker
-   * config (nothing to refresh); `undefined` means it exists but could not
-   * be read, so the refresh runs (it only restarts the broker on a change).
-   */
-  readBrokerConf?: () => Promise<string | null | undefined>;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 };
@@ -1281,33 +1275,6 @@ function caddyNeedsRefresh(text: string | null): boolean {
     !text.includes("@ui_hashed");
 }
 
-/**
- * The consumer timeout (ms) the rabbitmq role renders into rabbitmq.conf.
- * Must equal `rabbitmq_consumer_timeout_ms` in the role defaults (a test
- * checks it). The update flow never re-ran the role, so a changed value
- * never reached a host that updated in place.
- */
-export const BROKER_CONSUMER_TIMEOUT_MS = 7_200_000;
-
-async function defaultReadBrokerConf(): Promise<string | null | undefined> {
-  const layout = resolveLayout(Deno.env.toObject());
-  try {
-    return await Deno.readTextFile(
-      `${layout.configDir}/rabbitmq/rabbitmq.conf`,
-    );
-  } catch (err) {
-    return err instanceof Deno.errors.NotFound ? null : undefined;
-  }
-}
-
-/** A broker config from an older build, or one that cannot be checked. */
-function brokerConfNeedsRefresh(text: string | null | undefined): boolean {
-  if (text === null) return false;
-  if (text === undefined) return true;
-  const match = /^\s*consumer_timeout\s*=\s*(\d+)\s*$/m.exec(text);
-  return match?.[1] !== String(BROKER_CONSUMER_TIMEOUT_MS);
-}
-
 /** The plain fact first: what did not happen, and for how long we waited. */
 function controlPlaneRecoveryLead(reason: string | undefined): string {
   if (reason === "health_timeout" || reason === "health_mismatch") {
@@ -1598,21 +1565,19 @@ async function refreshCaddyIfNeeded(
 }
 
 /**
- * Re-apply the queue role when the broker config on disk is stale. The role
- * rewrites rabbitmq.conf and the compose step restarts the broker container
- * only when that file changed, so a host that is already current is not
- * touched. A failure is a warning: the running broker keeps working.
+ * Re-apply the queue broker's own config (consumer timeout and friends) once
+ * the new build is healthy. The play renders only the queue role and restarts
+ * the broker container only when rabbitmq.conf actually changed, so a current
+ * host is untouched. The update command reaches the daemon over its
+ * WebSocket, not through the broker, so the restart cannot drop it; the
+ * panel's consumers reconnect. Running last means a failed or rolled-back
+ * update never restarts the broker. Never blocks: a failure is a warning.
  */
-async function refreshBrokerConfigIfNeeded(
+async function refreshBrokerConfig(
   run: NonNullable<InstanceUpdateHooks["run"]>,
   installRoot: string,
-  readBrokerConf: InstanceUpdateHooks["readBrokerConf"],
 ): Promise<void> {
-  const conf = readBrokerConf
-    ? await readBrokerConf()
-    : await defaultReadBrokerConf();
-  if (!brokerConfNeedsRefresh(conf)) return;
-  const refresh = rootHelperPlaybookInvocation("rabbitmq-setup.yml", {
+  const refresh = rootHelperPlaybookInvocation("queue-config-refresh.yml", {
     turbopanel_install_root: installRoot,
   });
   let problem = "";
@@ -1732,7 +1697,6 @@ export async function executeInstanceUpdateReconcile(options: {
   const previous = await readHealth();
   await runControlPlaneBackup({ run, layout, upgradeId, previous });
   await refreshCaddyIfNeeded(run, layout.home, hooks.readCaddyfile);
-  await refreshBrokerConfigIfNeeded(run, layout.home, hooks.readBrokerConf);
 
   const helper = rootHelperInstanceUpdateInvocation({
     channel: releaseChannel,
@@ -1819,6 +1783,7 @@ export async function executeInstanceUpdateReconcile(options: {
       webServerFailureDetail(manifest.version ?? manifest.commit),
     );
   }
+  await refreshBrokerConfig(run, layout.home);
   report("done");
   return {};
 }

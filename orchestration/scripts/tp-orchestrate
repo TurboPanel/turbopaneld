@@ -426,7 +426,7 @@ tp_valid_extra_var() {
 # A playbook shipped in the tree but missing from this list is refused, so a
 # new play the daemon runs through the helper must be added here
 # (src/orchestration/tp-orchestrate.test.ts checks the list against the daemon).
-TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml deno-app-runtime-apply.yml docker-setup.yml engine-prune.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml php-series-prune.yml postgres-setup.yml proxysql-setup.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml socket-dirs-setup.yml time-sync-apply.yml"
+TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml deno-app-runtime-apply.yml docker-setup.yml engine-prune.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml php-series-prune.yml postgres-setup.yml proxysql-setup.yml queue-config-refresh.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml socket-dirs-setup.yml time-sync-apply.yml"
 
 # Resolve the caller's playbook argument into $_resolved, or die. It is a bare
 # basename, or the daemon's absolute constant (<orchestration>/playbooks/<name>),

@@ -9,7 +9,6 @@ import {
   assertControlPlaneManifestPreflight,
   assertControlPlaneUpdateAllowed,
   assertUpdateDiskPreflight,
-  BROKER_CONSUMER_TIMEOUT_MS,
   buildRunReconcileArgs,
   CDN_RUN_SCRIPT,
   ControlPlaneUpdateFailedError,
@@ -1175,7 +1174,6 @@ function managedUpdateHooks(
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
     readCaddyfile: () =>
       Promise.resolve("handle_errors\nupdating.html\n@ui_hashed path\n"),
-    readBrokerConf: () => Promise.resolve("consumer_timeout = 7200000\n"),
     restartUnits: () => Promise.resolve(true),
     ensureWebServer: () => Promise.resolve(true),
     migrate: () =>
@@ -1590,52 +1588,45 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the UI cache rules are
   assertEquals(names.includes("instance-launch-only.yml"), true);
 });
 
-test("executeInstanceUpdateReconcile re-applies the queue role when the broker config is stale", async () => {
-  for (const conf of ["consumer_timeout = 1800000\n", "# none\n", undefined]) {
+test("executeInstanceUpdateReconcile refreshes the broker config once, after the new build is healthy", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  assertEquals(names.filter((n) => n === "queue-config-refresh.yml").length, 1);
+  assertEquals(names.at(-1), "queue-config-refresh.yml");
+  assertEquals(
+    names.indexOf("queue-config-refresh.yml") >
+      calls.findIndex((c) => c.args.includes("update-instance")),
+    true,
+  );
+});
+
+test("executeInstanceUpdateReconcile only warns when the broker config refresh fails", async () => {
+  for (const mode of ["exit", "throw"] as const) {
     const calls: Array<{ bin: string; args: string[] }> = [];
-    await executeInstanceUpdateReconcile({
+    const hooks = managedUpdateHooks(calls);
+    const baseRun = hooks.run!;
+    hooks.run = (bin, args) => {
+      if (args.at(-1) === "queue-config-refresh.yml") {
+        calls.push({ bin, args });
+        if (mode === "throw") return Promise.reject(new Error("boom"));
+        return Promise.resolve({ code: 2, stdout: "", stderr: "failed" });
+      }
+      return baseRun(bin, args);
+    };
+    const outcome = await executeInstanceUpdateReconcile({
       channel: "release",
-      hooks: managedUpdateHooks(calls, {
-        readBrokerConf: () => Promise.resolve(conf),
-      }),
+      hooks,
     });
-    const names = calls.map((call) => call.args.at(-1));
-    assertEquals(names.filter((n) => n === "rabbitmq-setup.yml").length, 1);
+    assertEquals(outcome, {});
     assertEquals(
-      names.indexOf("rabbitmq-setup.yml") <
-        calls.findIndex((c) => c.args.includes("update-instance")),
+      calls.some((c) => c.args.at(-1) === "queue-config-refresh.yml"),
       true,
     );
   }
-});
-
-test("executeInstanceUpdateReconcile leaves the broker alone when its config is current or absent", async () => {
-  for (const conf of ["consumer_timeout = 7200000\n", null]) {
-    const calls: Array<{ bin: string; args: string[] }> = [];
-    await executeInstanceUpdateReconcile({
-      channel: "release",
-      hooks: managedUpdateHooks(calls, {
-        readBrokerConf: () => Promise.resolve(conf),
-      }),
-    });
-    const names = calls.map((call) => call.args.at(-1));
-    assertEquals(names.includes("rabbitmq-setup.yml"), false);
-  }
-});
-
-test("broker consumer timeout matches the rabbitmq role default", async () => {
-  const defaults = await Deno.readTextFile(
-    new URL(
-      "../../orchestration/roles/rabbitmq/defaults/main.yml",
-      import.meta.url,
-    ),
-  );
-  assertEquals(
-    defaults.includes(
-      `rabbitmq_consumer_timeout_ms: ${BROKER_CONSUMER_TIMEOUT_MS}`,
-    ),
-    true,
-  );
 });
 
 test("executeInstanceUpdateReconcile re-renders the units once, after the swap and before the restart", async () => {
