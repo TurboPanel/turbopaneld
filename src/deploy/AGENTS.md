@@ -699,7 +699,7 @@ pending-then-rename way as the Traefik files. It answers `CONTAINERS` and
 `POST` included, off; the upgrade to v0.5.0 changed none of those defaults (it
 only added the pause / unpause switches, which are POST and stay off).
 
-**Image pins** (`ingress.ts`): `traefik:v3.7.16` and
+**Image pins** (tag and digest in `orchestration/image-pins.json`, read via `src/util/image-pins.ts`; the tags below name what they pin): `traefik:v3.7.16` and
 `tecnativa/docker-socket-proxy:v0.5.0`; `PLATFORM_IMAGE_REPOSITORIES`
 (`compose-final-policy.ts`) lists the repositories, and a test keeps both pins
 in step with the rendered documents. Traefik 3.7 needed no flag or compose

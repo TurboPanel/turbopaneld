@@ -1265,9 +1265,14 @@ async function defaultReadCaddyfile(): Promise<string | null> {
   }
 }
 
+/**
+ * A Caddyfile from an older build: no updating page, or no UI cache rules
+ * (browsers then keep running an old panel page after an update).
+ */
 function caddyNeedsRefresh(text: string | null): boolean {
   if (!text) return true;
-  return !text.includes("handle_errors") || !text.includes("updating.html");
+  return !text.includes("handle_errors") || !text.includes("updating.html") ||
+    !text.includes("@ui_hashed");
 }
 
 /** The plain fact first: what did not happen, and for how long we waited. */

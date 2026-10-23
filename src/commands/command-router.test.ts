@@ -67,6 +67,93 @@ test({
 
 test({
   name:
+    "handleCommandDispatch acks at once but runs nothing until the boot converge has finished",
+  permissions: { env: true, sys: ["hostname"], read: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    let finish!: (ok: boolean) => void;
+    gate.trackBootConverge(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    try {
+      const mock = new MockWebSocket();
+      const done = handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-gate",
+        commandId: "cmd-gate",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      assertEquals(parseFrames(mock.sentFrames).map((f) => f.type), [
+        "command-ack",
+      ]);
+      finish(true);
+      await done;
+      assertEquals(parseFrames(mock.sentFrames).map((f) => f.type), [
+        "command-ack",
+        "command-outcome",
+      ]);
+    } finally {
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
+    "a command sent again while it waits for the boot converge runs only once",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    const outbox = await import("./command-outbox.ts");
+    const dir = await Deno.makeTempDir();
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", dir);
+    outbox.resetCommandOutboxForTests();
+    gate.resetBootConvergeForTests();
+    let finish!: (ok: boolean) => void;
+    gate.trackBootConverge(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    try {
+      const mock = new MockWebSocket();
+      const ws = mock as unknown as WebSocket;
+      const message: CommandDispatchMessage = {
+        type: "command-dispatch",
+        id: "req-gate-twice",
+        commandId: "cmd-gate-twice",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      };
+      const first = handleCommandDispatch(message, ws);
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      await handleCommandDispatch(message, ws);
+      finish(true);
+      await first;
+      const types = parseFrames(mock.sentFrames).map((f) => f.type);
+      assertEquals(types.filter((t) => t === "command-outcome").length, 1);
+    } finally {
+      gate.resetBootConvergeForTests();
+      outbox.resetCommandOutboxForTests();
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
     "handleCommandDispatch returns sanitized error for unknown command type",
   permissions: { env: true, sys: ["hostname"], read: true },
   fn: async () => {
@@ -1257,6 +1344,62 @@ test({
       assertEquals(rehydrateCalls, 1);
     } finally {
       setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
+test({
+  name:
+    "a command sent again while it runs, or after it finished, is not run twice",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const outbox = await import("./command-outbox.ts");
+    const dir = await Deno.makeTempDir();
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", dir);
+    outbox.resetCommandOutboxForTests();
+    try {
+      const mock = new MockWebSocket();
+      const ws = mock as unknown as WebSocket;
+      await outbox.flushCommandOutcomes(ws, {
+        supports: (feature) => feature === "command-recovery-v1",
+      });
+      const dispatch = (id: string): CommandDispatchMessage => ({
+        type: "command-dispatch",
+        id,
+        commandId: `cmd-${id}`,
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      });
+
+      // Still running: acknowledged, and nothing else happens.
+      await outbox.markCommandInFlight("dup-running");
+      await handleCommandDispatch(dispatch("dup-running"), ws);
+      assertEquals(parseFrames(mock.sentFrames).map((f) => f.type), [
+        "command-ack",
+      ]);
+
+      // Finished and not yet confirmed: the kept outcome is sent again, not re-run.
+      mock.sentFrames.length = 0;
+      await handleCommandDispatch(dispatch("dup-done"), ws);
+      const first = parseFrames(mock.sentFrames);
+      mock.sentFrames.length = 0;
+      await handleCommandDispatch(dispatch("dup-done"), ws);
+      const again = parseFrames(mock.sentFrames);
+      assertEquals(again.map((f) => f.type), [
+        "command-ack",
+        "command-outcome",
+      ]);
+      assertEquals(again[1]?.result, first[1]?.result);
+      assertEquals(again[1]?.daemonRespondedAt, first[1]?.daemonRespondedAt);
+      await outbox.settleCommandJournalWrites();
+    } finally {
+      outbox.resetCommandOutboxForTests();
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(dir, { recursive: true });
     }
   },
 });

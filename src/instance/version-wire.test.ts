@@ -1,11 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  COMMAND_RECOVERY_FEATURE,
   compareSemver,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
+  HOST_CAPACITY_FEATURE,
   instanceUnsupportedReason,
   MANAGED_DATA_ONLY_READWRITE_FEATURE,
   MANAGED_DATABASE_CONVERT_FEATURE,
@@ -18,12 +20,14 @@ import {
   MANAGED_OWNER_ROLE_FEATURE,
   MANAGED_PERMISSIONS_READ_FEATURE,
   MANAGED_REPLICA_FRESHNESS_FEATURE,
+  MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
   PHP_SITE_MODES_FEATURE,
   resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
+  SERVER_NETWORK_CHECK_FEATURE,
   SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   TLS_CAPTURE_FEATURE,
@@ -201,9 +205,32 @@ test("managed-database-convert-v1 is advertised", () => {
   );
 });
 
-test("tls-capture-v1 is advertised last and raised no floor", () => {
+test("tls-capture-v1 is advertised and raised no floor", () => {
   assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TLS_CAPTURE_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(TLS_CAPTURE_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("managed-switchover-final-position-v1 is advertised and raised no floor", () => {
+  assertEquals(
+    MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
+    "managed-switchover-final-position-v1",
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("command-recovery-v1 is advertised", () => {
+  assertEquals(COMMAND_RECOVERY_FEATURE, "command-recovery-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
+});
+
+test("host-capacity-v1 is advertised and raised no floor", () => {
+  assertEquals(HOST_CAPACITY_FEATURE, "host-capacity-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(HOST_CAPACITY_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
@@ -291,5 +318,11 @@ test("managed-login-limits-v1 is advertised on the wire and raised no floor", ()
     ),
     true,
   );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("server-network-check-v1 is advertised last and raised no floor", () => {
+  assertEquals(SERVER_NETWORK_CHECK_FEATURE, "server-network-check-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), SERVER_NETWORK_CHECK_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

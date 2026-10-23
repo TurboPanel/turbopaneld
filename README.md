@@ -52,8 +52,8 @@ Development co-located installs run as the current dev user instead of `tp` — 
 
 | OS | Architecture | Notes |
 | --- | --- | --- |
-| Debian 12+ (Bookworm / Trixie) | `x86_64` (amd64) | Recommended |
-| Debian 12+ (Bookworm / Trixie) | `aarch64` (arm64) | Supported |
+| Debian 13 (Trixie) | `x86_64` (amd64) | Recommended |
+| Debian 13 (Trixie) | `aarch64` (arm64) | Supported |
 | Raspberry Pi OS **64-bit** | `aarch64` (arm64) | 64-bit images only |
 
 **Not supported:** 32-bit ARM (`armv7l`, `armhf`), 32-bit Raspberry Pi OS, or any CPU other than `aarch64` and `x86_64`.

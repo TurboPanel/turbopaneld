@@ -52,6 +52,7 @@
  * decrypted envelope, and no daemon token can reach a build script.
  */
 
+import { pinnedImage } from "../../util/image-pins.ts";
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import {
@@ -67,6 +68,7 @@ import type { AnsibleEventHandler } from "../../orchestration/ansible-events.ts"
 import { createSymlink } from "../../permissions/scoped-writes.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import type { EnvironmentDeploySourceBuild } from "../../contracts/commands-contracts.ts";
+import { assertFileSha256 } from "../../orchestration/download-verify.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import { isReservedBuildEnvKey, sandboxBuildEnvironment } from "./build.ts";
@@ -79,6 +81,16 @@ import {
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
 export const RAILPACK_VERSION = "0.9.0";
+/**
+ * SHA-256 of the release tarball per architecture, for {@link RAILPACK_VERSION}.
+ * Source: the digest GitHub reports for each release asset, equal to the
+ * SHA-256 of the file downloaded from the release. Keep in step with
+ * `railpack_sha256` in orchestration/roles/buildkit/defaults/main.yml.
+ */
+export const RAILPACK_SHA256: Readonly<Record<"amd64" | "arm64", string>> = {
+  amd64: "ae91e74d80b8f2e2f519821172d639f6d33555938e0c26416272a56be4302bef",
+  arm64: "ee39088f1879efa913f3d9a76e19b1832a3019d0625c0e8a1dfb4eac8a109600",
+};
 /**
  * Upstream source for the vendored gateway frontend.
  *
@@ -309,6 +321,8 @@ export type EnsureBuildkitRailpackDeps = {
     opts?: { cwd?: string },
   ) => Promise<{ success: boolean; stderr: string }>;
   resolveArch?: () => "arm64" | "amd64";
+  /** Overrides the pinned tarball digest (tests serve fixture bytes). */
+  railpackSha256?: string;
 };
 
 export type BuildkitRailpackTools = {
@@ -373,9 +387,11 @@ async function resolveTools(
  */
 async function downloadBuildkitRailpack(
   runtimesDir: string,
-  deps: Required<
-    Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
-  >,
+  deps:
+    & Required<
+      Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
+    >
+    & Pick<EnsureBuildkitRailpackDeps, "railpackSha256">,
 ): Promise<void> {
   const arch = deps.resolveArch();
   const tmp = await Deno.makeTempDir({ prefix: "tp-railpack-" });
@@ -422,7 +438,7 @@ async function installRailpackFrontend(
   tmp: string,
   deps: Required<Pick<EnsureBuildkitRailpackDeps, "runCommand">>,
 ): Promise<void> {
-  const ref = `${RAILPACK_FRONTEND_IMAGE}:${RAILPACK_FRONTEND_TAG}`;
+  const ref = pinnedImage("railpackFrontend");
   logInfo("deploy", `vendoring Railpack frontend ${ref}`);
   const pull = await deps.runCommand("docker", ["pull", ref]);
   if (!pull.success) {
@@ -486,9 +502,11 @@ async function installRailpack(
   runtimesDir: string,
   arch: "arm64" | "amd64",
   tmp: string,
-  deps: Required<
-    Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
-  >,
+  deps:
+    & Required<
+      Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
+    >
+    & Pick<EnsureBuildkitRailpackDeps, "railpackSha256">,
 ): Promise<void> {
   const asset = railpackAssetName(arch);
   const url =
@@ -504,6 +522,12 @@ async function installRailpack(
   if (!curl.success) {
     throw new Error(`curl failed: ${curl.stderr || "download error"}`);
   }
+  await assertFileSha256(
+    tarball,
+    deps.railpackSha256 ?? RAILPACK_SHA256[arch],
+    `Railpack ${RAILPACK_VERSION} (${asset})`,
+    "RAILPACK_SHA256 in src/deploy/release/railpack-build.ts and railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml",
+  );
   const extractDir = join(tmp, "railpack");
   await Deno.mkdir(extractDir, { recursive: true });
   const tar = await deps.runCommand("/usr/bin/tar", [
@@ -579,6 +603,7 @@ export async function ensureBuildkitRailpack(
     await downloadBuildkitRailpack(layout.runtimesDir, {
       runCommand,
       resolveArch,
+      railpackSha256: deps?.railpackSha256,
     });
   } catch (err) {
     // On a managed host the vendor tree is root-owned and outside the daemon's

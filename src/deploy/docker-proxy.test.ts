@@ -36,9 +36,12 @@ function proxyDocument() {
 test("image pins: Traefik 3.7.x and the socket proxy v0.5.0 (HAProxy 3.x)", () => {
   const traefik = /image: (\S+)/.exec(traefikCompose(NETWORK, ["172.19.0.1"]))
     ?.[1];
-  assertEquals(traefik, "traefik:v3.7.16");
+  assertEquals(traefik?.startsWith("traefik:v3.7.16@sha256:"), true);
   const proxy = proxyDocument().services[SOCKET_PROXY_COMPOSE_SERVICE_NAME];
-  assertEquals(proxy.image, "tecnativa/docker-socket-proxy:v0.5.0");
+  assertEquals(
+    proxy.image.startsWith("tecnativa/docker-socket-proxy:v0.5.0@sha256:"),
+    true,
+  );
 });
 
 test("the proxy is its own readable project with a plain container name", () => {

@@ -11,6 +11,7 @@ import {
 import { encodeBase64 } from "@std/encoding/base64";
 import {
   AWAITING_LICENSE_POLL_MS,
+  AWAITING_SEAT_POLL_MS,
   connectInstance,
   DEFAULT_INITIAL_BACKOFF_MS,
   DEFAULT_MAX_BACKOFF_MS,
@@ -2884,6 +2885,163 @@ it({
 
 it({
   name:
+    "a tier refusal from an older control plane waits for a seat and reconnects without re-enrolling",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+    const reconnectDelays: number[] = [];
+    let seatBought = false;
+    let enrollCalls = 0;
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        reconnectDelays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken } = await prepareVerifiedAuth({
+      serverId: "srv-1",
+      keyId: "kid-1",
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          return new Response(
+            JSON.stringify({
+              challengeId: "auth-challenge",
+              nonce: "auth-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          enrollCalls += 1;
+          return new Response(JSON.stringify({ error: "not expected" }), {
+            status: 500,
+          });
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          if (!seatBought) {
+            return new Response(
+              JSON.stringify({ error: "License tier below required" }),
+              { status: 400 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      await waitFor(
+        "seat wait delay",
+        () =>
+          reconnectDelays.includes(AWAITING_SEAT_POLL_MS) ? true : undefined,
+      );
+      // Never the exponential permanent-park backoff.
+      assertEquals(
+        reconnectDelays.filter((d) =>
+          d >= PARKED_BACKOFF_MIN_MS && d !== AWAITING_SEAT_POLL_MS
+        ),
+        [],
+      );
+      // The organization buys a size; nothing changes on the server.
+      seatBought = true;
+      const socket = await waitFor("seat websocket", () => sockets.at(0));
+      socket.open();
+      assertEquals(socket.readyState, MockWebSocket.OPEN);
+      assertEquals(enrollCalls, 0);
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      globalThis.setTimeout = originalSetTimeout;
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name:
     "parked daemon unparks on TURBOPANEL_FORCE_ENROLL without license change",
   permissions: {
     env: true,
@@ -3557,6 +3715,13 @@ it({
             databases: [],
             at: new Date().toISOString(),
           });
+          // No targets: answered `ok: false` on the request id.
+          socket.receive({
+            type: "server-network-check-request",
+            id: "netcheck-1",
+            targets: [],
+            at: new Date().toISOString(),
+          });
           socket.receive({
             type: "fabric-paths-request",
             id: "fabric-1",
@@ -3659,6 +3824,20 @@ it({
           assertEquals(permissionsFrame?.id, "perms-1");
           assertEquals(permissionsFrame?.ok, false);
           assertEquals(typeof permissionsFrame?.error, "string");
+          await waitFor(
+            "server-network-check-result",
+            () =>
+              lastFrameOfType(socket, "server-network-check-result")
+                ? true
+                : undefined,
+          );
+          const networkFrame = lastFrameOfType(
+            socket,
+            "server-network-check-result",
+          ) as { id?: string; ok?: boolean; error?: unknown } | undefined;
+          assertEquals(networkFrame?.id, "netcheck-1");
+          assertEquals(networkFrame?.ok, false);
+          assertEquals(networkFrame?.error, "no targets");
           await waitFor(
             "fabric-paths-result",
             () =>
@@ -5562,6 +5741,87 @@ it({
           ),
       );
       assertExists(failed);
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "a failed restart reports the exit code, stderr and elapsed time",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: (options) => {
+        options?.onReport?.({
+          ok: false,
+          endedByRestart: false,
+          command: "restart",
+          exitCode: 1,
+          signal: null,
+          stderr: "Failed to connect to bus",
+          attempts: 2,
+          elapsedMs: 1234,
+        });
+        return Promise.resolve(false);
+      },
+      getBuildInfo: () => ({
+        commit: "old",
+        buildId: "dev-old",
+        builtAt: "2026-08-01T00:00:00Z",
+        channel: "trunk",
+        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+      }),
+      resolveUpdate: () => Promise.resolve(sampleUpdateInfo("newsha")),
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: () => Promise.resolve(),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-restart-report",
+        upgradeId: "up-restart-report",
+        at: new Date().toISOString(),
+      });
+      const failed = await waitFor(
+        "restart-failed progress with a report",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { errorCode?: string }).errorCode === "restart_failed"
+          ) as
+            | { detail?: string; restart?: Record<string, unknown> }
+            | undefined,
+      );
+      assertEquals(failed.restart, {
+        command: "restart",
+        exitCode: 1,
+        stderr: "Failed to connect to bus",
+        attempts: 2,
+        elapsedMs: 1234,
+      });
+      assert(
+        failed.detail?.startsWith("daemon restart failed after reconcile"),
+      );
+      assert(failed.detail?.includes("exited 1"));
     } finally {
       restore();
       restoreHooks();

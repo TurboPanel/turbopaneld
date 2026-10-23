@@ -209,7 +209,7 @@ test("buildMetricsSample never coerces missing metrics to 0", () => {
   assertEquals(sample.host.storage.diskReadBytesPerSecond, null);
 });
 
-test("buildMetricsSample accepts a v8-stamped sample and keeps its wire version", () => {
+test("buildMetricsSample accepts a sample stamped with wire version 8 and keeps its wire version", () => {
   const input = fixtureInput();
   input.metadata.version = METRICS_SCHEMA_VERSION;
   input.metadata.durable = false;
@@ -218,7 +218,7 @@ test("buildMetricsSample accepts a v8-stamped sample and keeps its wire version"
   assertEquals(sample.metadata.durable, false);
 });
 
-test("buildMetricsSample sanitizes the v8 extended section without coercing missing to 0", () => {
+test("buildMetricsSample sanitizes the v12 extended section without coercing missing to 0", () => {
   const input = fixtureInput();
   input.extended = {
     host: {
@@ -265,7 +265,7 @@ test("buildMetricsSample sanitizes the v8 extended section without coercing miss
   assertEquals(extended?.gpuText, [{ gpuId: "gpu0", driver: "nvidia 570.1" }]);
 });
 
-test("buildMetricsSample keeps the v8 sizes, drops non-finite ones and caps the per-entity arrays", () => {
+test("buildMetricsSample keeps the v12 sizes, drops non-finite ones and caps the per-entity arrays", () => {
   const input = fixtureInput();
   input.extended = {
     sizes: {

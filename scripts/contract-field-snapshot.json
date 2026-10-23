@@ -87,6 +87,11 @@
       { "name": "errorCode", "required": false, "type": "string" },
       { "name": "id", "required": true, "type": "string" },
       {
+        "name": "restart",
+        "required": false,
+        "type": "{ attempts: number; command?: string; elapsedMs: number; exitCode?: number; signal?: string; stderr?: string }"
+      },
+      {
         "name": "stage",
         "required": true,
         "type": "'done' | 'downloading' | 'failed' | 'installing' | 'preparing' | 'restarting' | 'rolled-back' | 'verifying'"
@@ -208,9 +213,19 @@
       { "name": "managedId", "required": true, "type": "string" },
       { "name": "memberId", "required": false, "type": "string" },
       {
+        "name": "primaryEpoch",
+        "required": false,
+        "type": "number"
+      },
+      {
         "name": "role",
         "required": false,
         "type": "'primary' | 'replica'"
+      },
+      {
+        "name": "switchoverRecoveryId",
+        "required": false,
+        "type": "string"
       }
     ]
   },
@@ -326,6 +341,83 @@
       { "name": "owner", "required": true, "type": "string" },
       { "name": "scope", "required": true, "type": "string" },
       { "name": "slug", "required": true, "type": "string" }
+    ]
+  },
+  "CommandRecoveryReport": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "running", "required": true, "type": "Array<string>" },
+      { "name": "unacked", "required": true, "type": "Array<string>" }
+    ]
+  },
+  "CommandOutcomeAckMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "type", "required": true, "type": "'command-outcome-ack'" }
+    ]
+  },
+  "ServerNetworkCheckTarget": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "address", "required": true, "type": "string" },
+      { "name": "peerServerId", "required": true, "type": "string" },
+      { "name": "port", "required": true, "type": "number" }
+    ]
+  },
+  "ServerNetworkCheckEntry": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "address", "required": true, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "interface", "required": false, "type": "string" },
+      { "name": "latencyMs", "required": false, "type": "number" },
+      { "name": "peerServerId", "required": true, "type": "string" },
+      { "name": "reachable", "required": true, "type": "boolean" },
+      { "name": "sourceAddress", "required": false, "type": "string" }
+    ]
+  },
+  "ServerNetworkCheckRequestMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      {
+        "name": "targets",
+        "required": true,
+        "type": "Array<{ address: string; peerServerId: string; port: number }>"
+      },
+      {
+        "name": "type",
+        "required": true,
+        "type": "'server-network-check-request'"
+      }
+    ]
+  },
+  "ServerNetworkCheckResultMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "ok", "required": true, "type": "boolean" },
+      {
+        "name": "results",
+        "required": false,
+        "type": "Array<{ address: string; error?: string; interface?: string; latencyMs?: number; peerServerId: string; reachable: boolean; sourceAddress?: string }>"
+      },
+      {
+        "name": "type",
+        "required": true,
+        "type": "'server-network-check-result'"
+      }
     ]
   }
 }
