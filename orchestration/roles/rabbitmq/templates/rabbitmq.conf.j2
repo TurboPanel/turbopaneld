@@ -1,3 +1,5 @@
 # Deprecated management metrics collection is disabled proactively.
 # AMQP and the management UI for queue/connection inspection are unchanged; charts are omitted.
 management_agent.disable_metrics_collector = true
+# Let long commands wait unacknowledged (see rabbitmq_consumer_timeout_ms in defaults).
+consumer_timeout = {{ rabbitmq_consumer_timeout_ms }}
