@@ -656,6 +656,35 @@ function apacheEnvRefusal(field: string, raw: string): string | null {
   return raw.includes("${") ? "holds ${, which Apache expands" : null;
 }
 
+/**
+ * Characters an OpenLiteSpeed rewrite rule carries through to PHP unchanged
+ * (checked against a real server). A space, comma or `]` ends the flag, `\`
+ * is an escape, and `$` / `%` start back-references and server variables, so
+ * a value holding one of those cannot be written safely.
+ */
+const OPENLITESPEED_ENV_VALUE_RE = /^[A-Za-z0-9_@:/.+=~!?;^&|*()#<>{}-]*$/;
+
+/**
+ * Why OpenLiteSpeed cannot carry a variable value, or `null` when it can.
+ *
+ * OpenLiteSpeed does not hand the `env` of an externally started PHP process
+ * (autoStart 0) to PHP, so site variables ride a rewrite rule (`E=NAME:value`)
+ * instead, which reaches PHP as CGI environment on every request.
+ */
+function openlitespeedEnvRefusal(field: string, raw: string): string | null {
+  try {
+    safeEnvValue(field, raw);
+  } catch (error) {
+    if (error instanceof ConfigValueError) return error.message;
+    throw error;
+  }
+  if (raw.length === 0) return "is empty, which OpenLiteSpeed cannot carry";
+  if (!OPENLITESPEED_ENV_VALUE_RE.test(raw)) {
+    return "holds a space, comma, quote, backslash, $, % or bracket, which OpenLiteSpeed reads as syntax";
+  }
+  return null;
+}
+
 const ENGINE_ENV_LABELS: Readonly<Record<SiteApplySpec["engine"], string>> = {
   caddy: "Caddy",
   apache: "Apache",
@@ -679,8 +708,9 @@ function webEnvRefusal(
       return apacheEnvRefusal(field, raw);
     case "caddy":
       return caddyEnvRefusal(raw);
+    case "openlitespeed":
+      return openlitespeedEnvRefusal(field, raw);
     default:
-      // OpenLiteSpeed receives no variables at all (handled by the caller).
       return null;
   }
 }
@@ -702,11 +732,6 @@ export function planSiteWebEnv(site: SiteApplySpec): string[] {
   const required = site.requiredEnv ?? [];
   const label = ENGINE_ENV_LABELS[site.engine];
   const name = site.composeServiceName;
-  if (site.engine === "openlitespeed" && required.length > 0) {
-    throw new Error(
-      `Site ${name} needs its database settings as variables, and OpenLiteSpeed does not pass variables to PHP yet. Move the site to Apache, nginx or Caddy, then deploy again.`,
-    );
-  }
   const warnings: string[] = [];
   for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
     const refusal = webEnvRefusal(site, key, env[key] ?? "");
@@ -1509,7 +1534,59 @@ export type OpenLiteSpeedVhostPhpOpts = Readonly<{
   children: number;
   /** The limits site code must not raise ({@link sitePhpLockedValues}). */
   lockedValues: readonly PhpAdminValue[];
+  /** Compose service name, for validator field paths when {@link webEnv} is set. */
+  composeServiceName?: string;
+  /**
+   * Site variables, written as rewrite rules (`E=NAME:value`) because the
+   * processor `env` is not passed to a process OLS did not start. FastCGI,
+   * php-fpm and detached lsphp all see them as CGI environment.
+   */
+  webEnv?: Record<string, string>;
 }>;
+
+/**
+ * One rewrite rule that hands a variable to PHP, or a refusal naming the
+ * variable (never its value: it may be a decrypted secret).
+ */
+export function openlitespeedEnvRule(
+  service: string,
+  key: string,
+  raw: string,
+): string {
+  const name = safeEnvName(`sites.${service}.webEnv`, key);
+  const field = `sites.${service}.webEnv.${name}`;
+  const value = safeEnvValue(field, raw);
+  const refusal = openlitespeedEnvRefusal(field, value);
+  if (refusal !== null) throw new ConfigValueError(field, refusal);
+  return `RewriteRule .* - [E=${name}:${value}]`;
+}
+
+/**
+ * The site's variables as rewrite rules, in name order.
+ *
+ * A variable OpenLiteSpeed cannot carry is **dropped and named**, the same
+ * way nginx, Apache and Caddy already do.
+ */
+function openlitespeedEnvRules(opts: OpenLiteSpeedVhostPhpOpts): string[] {
+  const env = opts.webEnv ?? {};
+  const service = opts.composeServiceName ?? "site";
+  const rules: string[] = [];
+  for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
+    const field = `sites.${service}.webEnv`;
+    const name = safeEnvName(field, key);
+    const raw = env[key] ?? "";
+    const refusal = openlitespeedEnvRefusal(`${field}.${name}`, raw);
+    if (refusal !== null) {
+      logWarn(
+        "site",
+        `OpenLiteSpeed site ${service}: variable ${name} not passed to PHP (${refusal})`,
+      );
+      continue;
+    }
+    rules.push(openlitespeedEnvRule(service, key, raw));
+  }
+  return rules;
+}
 
 /**
  * Per-vhost `extprocessor` for the site's own runtime.
@@ -1592,7 +1669,10 @@ listener ${name}_lo{
  * context in our config executes them, so they are ordinary static downloads
  * and carry no hidden source. `.cgi` stays denied as a server-side type.
  */
-function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
+function openlitespeedScriptDenyRewrite(
+  phpHandled: boolean,
+  envRules: readonly string[] = [],
+): string {
   const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
   const denied = phpHandled ? family : `php|${family}`;
   const backups = String.raw`~|\.(bak|old|orig|save|swp|swo|tmp|dist|txt)`;
@@ -1605,12 +1685,13 @@ function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
 RewriteCond %{HTTP:X-Forwarded-Proto} =https
 RewriteRule .* - [E=HTTPS:on]`
     : "";
+  const siteEnv = envRules.map((rule) => `\n${rule}`).join("");
   return String.raw`rewrite {
   enable                    1
   rules                     <<<END_rules
 RewriteRule (^|/)\.(?!well-known(/|$)) - [F,L]
 RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
-RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]${forwardedHttps}
+RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]${forwardedHttps}${siteEnv}
 END_rules
 }
 `;
@@ -1672,7 +1753,7 @@ scripthandler {
   }:${php.processorName} php
 }
 ${overrideBlock}
-${openlitespeedScriptDenyRewrite(true)}
+${openlitespeedScriptDenyRewrite(true, openlitespeedEnvRules(php))}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
@@ -3449,6 +3530,8 @@ function openlitespeedVhostPhp(
     lockedValues: sitePhpLockedValues(
       site.php ? phpAdminValues(site.php, adminOpts) : [],
     ),
+    composeServiceName: site.composeServiceName,
+    webEnv: site.webEnv,
   };
 }
 

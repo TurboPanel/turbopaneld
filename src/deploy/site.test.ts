@@ -938,6 +938,7 @@ test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starti
     assertStringIncludes(conf, `address                   uds://${socket}`);
     // systemd runs PHP as the owner; OpenLiteSpeed only connects.
     assertStringIncludes(conf, "autoStart                 0");
+    assertEquals(conf.includes("\n  env "), false);
     assertStringIncludes(
       conf,
       `add                       ${type}:php_tp_env1__phpapp php`,
@@ -963,6 +964,25 @@ test("openlitespeedVhostConfig hands PHP to the site's own runtime, never starti
     ) {
       assertEquals(conf.includes(dead), false, `${mode}: ${dead}`);
     }
+  }
+});
+
+test("openlitespeedVhostConfig writes site variables as rewrite rules for every PHP mode", () => {
+  for (const mode of ["fastcgi", "fpm", "lsphp-detached"] as const) {
+    const conf = openlitespeedVhostConfig({
+      processorName: "php_tp_env1_phpapp",
+      mode,
+      socket: "/run/turbopanel-php-phpapp/php.sock",
+      children: 10,
+      lockedValues: [],
+      composeServiceName: "phpapp",
+      webEnv: { DATABASE_HOST: "127.0.0.1", DATABASE_PORT: "13306" },
+    });
+    assertStringIncludes(
+      conf,
+      "RewriteRule .* - [E=DATABASE_HOST:127.0.0.1]",
+    );
+    assertStringIncludes(conf, "RewriteRule .* - [E=DATABASE_PORT:13306]");
   }
 });
 
