@@ -3,6 +3,10 @@
  */
 
 import {
+  assertSwitchoverReseedAllowed,
+  clearSwitchoverFinalPositionRecord,
+} from "./switchover-final-position.ts";
+import {
   type EnvironmentDeployContainer,
   isValidIpv4Literal,
   isValidIpv6Literal,
@@ -41,6 +45,7 @@ import {
   MANAGED_ROOT_PASSWORD_FILE_SOURCE,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
+  readManagedComposeDataTarget,
 } from "./compose.ts";
 import {
   collectManagedContainers,
@@ -412,13 +417,22 @@ export async function chooseManagedCompose(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
+  let storedImage: string | undefined;
+  if (previous !== null) {
+    try {
+      storedImage = readManagedComposeDataTarget(previous).image;
+    } catch {
+      storedImage = undefined;
+    }
+  }
   if (previous !== null && composeUsesRootPasswordInterpolation(previous)) {
     const legacy = normalizeManagedCompose(payload, {
       legacyRootPasswordEnv: true,
+      storedImage,
     });
     if (legacy.composeYaml === previous) return legacy;
   }
-  return normalizeManagedCompose(payload);
+  return normalizeManagedCompose(payload, { storedImage });
 }
 
 async function composeUpWithDockerRetry(
@@ -881,12 +895,17 @@ export async function handleManagedApply(
     ) {
       throw new ManagedDestroyedError(payload.managedId);
     }
+    // Before anything is touched: a stale switchover re-seed is refused here.
+    await assertSwitchoverReseedAllowed(layout, payload);
     const result = await applyManagedEngine(
       payload,
       daemonReceivedAt,
       layout,
       deps,
     );
+    if (payload.switchoverReseed !== undefined) {
+      await clearSwitchoverFinalPositionRecord(layout, payload.managedId);
+    }
     const runDocker = deps?.runDocker ?? defaultRunDocker;
     await maybeClearDemotedMarkerAfterApply(
       layout,

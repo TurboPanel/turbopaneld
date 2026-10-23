@@ -8,9 +8,10 @@
  * deleted. Absent or invalid state means the collector sends the full sample
  * (server-side truncation still applies for hosted ingest).
  */
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 
 import { resolveLayout } from "../../paths/layout.ts";
+import { writeTextFileAtomic } from "../atomic-write.ts";
 import {
   type MetricsCapabilityPlan,
   parseMetricsCapabilityPlan,
@@ -60,13 +61,7 @@ export async function writeCapabilityPlan(
   const stateDir = daemonStateDir ??
     resolveLayout(Deno.env.toObject()).daemonStateDir;
   const path = capabilityPlanPath(stateDir);
-  await Deno.mkdir(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp`;
-  await Deno.writeTextFile(
-    tmpPath,
-    JSON.stringify({ plan, generation }),
-  );
-  await Deno.rename(tmpPath, path);
+  await writeTextFileAtomic(path, JSON.stringify({ plan, generation }));
 }
 
 export async function clearCapabilityPlan(

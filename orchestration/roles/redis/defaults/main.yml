@@ -1,4 +1,9 @@
-redis_version: "8.0.2"
+redis_version: "8.0.6"
+# packages.redis.io publishes no 8.0.2 build for Debian 13 (trixie); 8.0.6 is
+# the closest release in the same 8.0 line. SHA-256 from the trixie index.
+redis_deb_sha256:
+  amd64: "683d300e1c442588eb8d385207a383bb1dfcc69766eb22c8c9f305d20e93813d"
+  arm64: "337beacb53784868c110dc33289198d3a3ff1cd86608fbd5479d590726d2c558"
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: >-  # noqa: var-naming[no-role-prefix]
   {{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor

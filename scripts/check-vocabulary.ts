@@ -90,8 +90,6 @@ const SKIP_FILENAMES = new Set([
 
 /** Untracked/vendored build outputs and skill packs that must not be scanned. */
 export function isSkippedPath(rel: string): boolean {
-  // Galaxy docker: geerlingguy.docker/ or geerlingguy/docker/
-  if (/(^|\/)roles\/geerlingguy([./]|$)/.test(rel)) return true;
   if (/(^|\/)\.agents\/skills(\/|$)/.test(rel)) return true;
   if (/(^|\/)migrations(\/|$)/.test(rel)) return true;
   // This checker's own forbidden-phrase constants would otherwise flag itself.

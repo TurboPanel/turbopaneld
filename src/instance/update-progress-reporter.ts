@@ -3,6 +3,7 @@ import type {
   UpdateProgressMessage,
   UpdateProgressStage,
   UpdateProgressUnit,
+  UpdateRestartReport,
 } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -105,6 +106,7 @@ export class UpdateProgressReporter {
       upgradeId?: string;
       detail?: string;
       errorCode?: string;
+      restart?: UpdateRestartReport;
     } = {},
   ): void {
     const progressId = this.#progressId;
@@ -120,6 +122,7 @@ export class UpdateProgressReporter {
       // and sent to the control plane: keep only the host and path.
       ...(options.detail ? { detail: redactUrlSecrets(options.detail) } : {}),
       ...(options.errorCode ? { errorCode: options.errorCode } : {}),
+      ...(options.restart ? { restart: options.restart } : {}),
     };
     this.#memory.push(payload);
     while (this.#memory.length > MAX_QUEUE_LINES) {

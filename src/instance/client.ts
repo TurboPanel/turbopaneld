@@ -1,6 +1,11 @@
 import { SeenCommandIds } from "./dispatch-dedupe.ts";
 import { closeAndAbandon } from "./socket-close.ts";
-import { restartDaemonService } from "./restart-daemon-service.ts";
+import {
+  type DaemonRestartReport,
+  restartDaemonService,
+  restartFailureMessage,
+  toRestartWire,
+} from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import { forEachSequential, repeatSequential } from "../util/sequential.ts";
@@ -17,6 +22,7 @@ import {
   resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
 } from "./sockets.ts";
+import { runServerNetworkCheck } from "../host/network-check.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
@@ -157,6 +163,7 @@ import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   BACKUP_S3_COPY_FEATURE,
+  HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
@@ -167,6 +174,7 @@ import { TopologyReporter } from "./topology-reporter.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
+  CommandRecoveryReport,
   DaemonMessage,
   InstanceHostnameWireEntry,
   UpdateProgressStage,
@@ -219,8 +227,18 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
-  /** Runs when a session attaches: delivers held command outcomes. */
-  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
+  /**
+   * Runs when a session attaches: delivers held command outcomes. `peer`
+   * answers whether the control plane advertised a feature.
+   */
+  handleSessionAttach?: (
+    ws: WebSocket,
+    peer: { supports(feature: string): boolean },
+  ) => Promise<void>;
+  /** The control plane stored a command's outcome (`command-outcome-ack`). */
+  handleCommandOutcomeAck?: (id: string) => Promise<void>;
+  /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
+  commandReport?: () => CommandRecoveryReport | undefined;
 };
 
 let commandPorts: CommandPorts = {};
@@ -279,6 +297,13 @@ export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
  * and the servers list polls every 2 s while that seat is Initializing.
  */
 export const AWAITING_LICENSE_POLL_MS = 5_000;
+/**
+ * Re-check cadence while the control plane has no purchased size free for
+ * this server ("License tier below required" / "not assigned"). Fixed and
+ * slow: only a purchase changes the answer, and the daemon must never give
+ * up on it.
+ */
+export const AWAITING_SEAT_POLL_MS = 15 * 60_000;
 const BACKOFF_MULTIPLIER = 2;
 
 /** Clamp caller-provided reconnect delay to supported [min, max] bounds. */
@@ -329,6 +354,14 @@ async function readServerId(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * True once this host has enrolled with a control plane (its `server.id` is on
+ * disk). A host that has not is on its first start and has nothing to restore.
+ */
+export async function hasEnrolledServerId(dir?: string): Promise<boolean> {
+  return (await readServerId(dir)) !== undefined;
 }
 
 async function readDaemonKeyFile(
@@ -412,9 +445,14 @@ export async function clearDaemonKeyState(stateDir: string): Promise<void> {
  * Why the connect loop is parked (no reconnect backoff, periodic re-check):
  * `permanent` — the control plane rejected enrollment/auth; `tls-trust` — the
  * platform CA does not validate the control plane; `awaiting-license` — no
- * license credentials on disk yet (install wizard / installer still to run).
+ * license credentials on disk yet (install wizard / installer still to run);
+ * `awaiting-seat` — no purchased size is free for this server yet.
  */
-type ParkedKind = "permanent" | "tls-trust" | "awaiting-license";
+type ParkedKind =
+  | "permanent"
+  | "tls-trust"
+  | "awaiting-license"
+  | "awaiting-seat";
 
 export class InstanceClient {
   readonly #config: InstanceConfig;
@@ -598,6 +636,7 @@ export class InstanceClient {
       upgradeId?: string;
       detail?: string;
       errorCode?: string;
+      restart?: ReturnType<typeof toRestartWire>;
       unit?: "daemon" | "instance";
     } = {},
   ): void {
@@ -608,7 +647,10 @@ export class InstanceClient {
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
     const sessionAttach = commandPorts.handleSessionAttach;
     if (sessionAttach) {
-      this.#runSocketHandler("session-attach", sessionAttach(ws));
+      this.#runSocketHandler(
+        "session-attach",
+        sessionAttach(ws, { supports: (f) => this.instanceSupports(f) }),
+      );
     }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
@@ -1013,6 +1055,8 @@ export class InstanceClient {
       await this.#enterParkedState(classified.reason, "tls-trust");
     } else if (classified.kind === "awaiting-license") {
       await this.#enterParkedState(classified.reason, "awaiting-license");
+    } else if (classified.kind === "awaiting-seat") {
+      await this.#enterParkedState(classified.reason, "awaiting-seat");
     } else {
       this.#increaseBackoff();
     }
@@ -1055,6 +1099,13 @@ export class InstanceClient {
       );
       return;
     }
+    if (kind === "awaiting-seat") {
+      logWarn(
+        "instance",
+        `control plane has no purchased size free for this server (${reason}); the organization's managers can buy one in the panel. Re-checking every ${AWAITING_SEAT_POLL_MS} ms`,
+      );
+      return;
+    }
     if (kind === "tls-trust") {
       const caPath = resolveInstanceCaPath() ?? "(none)";
       const uploadedTrust = resolveInstanceUploadedTrustPath() ?? "(none)";
@@ -1086,6 +1137,9 @@ export class InstanceClient {
     if (this.#parkedKind === "awaiting-license") {
       return AWAITING_LICENSE_POLL_MS;
     }
+    if (this.#parkedKind === "awaiting-seat") {
+      return AWAITING_SEAT_POLL_MS;
+    }
     const delayMs = fullJitterMs(
       PARKED_BACKOFF_MIN_MS,
       this.#parkedBackoffMs,
@@ -1098,7 +1152,11 @@ export class InstanceClient {
   }
 
   async #shouldUnpark(): Promise<boolean> {
-    if (this.#parkedKind === "tls-trust") return true;
+    // Retried on the timer: a purchase changes the answer without any
+    // change on this server.
+    if (
+      this.#parkedKind === "tls-trust" || this.#parkedKind === "awaiting-seat"
+    ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
     const stamp = await this.#readLicenseStamp();
     return stamp !== this.#licenseStamp;
@@ -1112,19 +1170,24 @@ export class InstanceClient {
     this.#parkedKind = undefined;
     this.#parkedBackoffMs = PARKED_BACKOFF_MIN_MS;
     this.#resetBackoff();
-    if (kind !== "tls-trust") {
+    // A seat wait retries the same enroll or session; re-enrolling with a
+    // new key would not change the answer.
+    if (kind !== "tls-trust" && kind !== "awaiting-seat") {
       this.#forceEnrollPending = true;
     }
     if (kind === "awaiting-license") {
       logInfo("instance", "license credentials found; enrolling");
       return;
     }
-    logDebug(
-      "instance",
-      kind === "tls-trust"
-        ? `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`
-        : `unparking after permanent rejection (${reason}); retrying enrollment`,
-    );
+    let message =
+      `unparking after permanent rejection (${reason}); retrying enrollment`;
+    if (kind === "tls-trust") {
+      message =
+        `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`;
+    } else if (kind === "awaiting-seat") {
+      message = `re-checking for a purchased size (${reason})`;
+    }
+    logDebug("instance", message);
   }
 
   #newWebSocket(jwt: string): WebSocket {
@@ -1690,6 +1753,10 @@ export class InstanceClient {
       onStaleConnection: () => this.#closeActiveSocket(),
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
+      hostCapacityFlag: () => this.instanceSupports(HOST_CAPACITY_FEATURE),
+      // Running and unconfirmed commands ride on hello / heartbeat.
+      commandReport: () => commandPorts.commandReport?.(),
+      peerSupports: (feature) => this.instanceSupports(feature),
     });
   }
 
@@ -1848,6 +1915,9 @@ export class InstanceClient {
       case "managed-permissions-request":
         void this.#readManagedPermissionsAsync(message, ws);
         break;
+      case "server-network-check-request":
+        void this.#runServerNetworkCheckAsync(message, ws);
+        break;
       case "metrics-live-start":
         this.#applyLiveLeaseStart(message, ws);
         break;
@@ -1908,6 +1978,16 @@ export class InstanceClient {
           this.#ensureBackupReporter().handleResult(message),
         );
         break;
+      case "command-outcome-ack": {
+        const acknowledge = commandPorts.handleCommandOutcomeAck;
+        if (acknowledge) {
+          this.#runSocketHandler(
+            "command-outcome-ack",
+            acknowledge(message.id),
+          );
+        }
+        break;
+      }
       case "public-urls-update":
         this.#runSocketHandler(
           "public-urls-update",
@@ -2495,25 +2575,11 @@ export class InstanceClient {
     }
 
     if (ok && shouldRestart) {
-      this.#reportUpdateStage("restarting", { upgradeId });
-      await this.#updateProgress.flush();
-      await new Promise((resolve) =>
-        setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
-      );
-      const restarted = await clientTestHooks.restartDaemonService();
-      if (!restarted) {
+      const restartError = await this.#restartAfterUpdate(upgradeId);
+      if (restartError) {
         ok = false;
-        error = "daemon restart failed after reconcile";
+        error = restartError;
         errorCode = "restart_failed";
-        this.#reportUpdateStage("failed", {
-          upgradeId,
-          errorCode,
-          detail: error,
-        });
-        logWarn(
-          "update",
-          "reconcile succeeded but systemd restart failed; daemon may still be on old code",
-        );
       }
     } else if (ok && !shouldRestart) {
       this.#reportUpdateStage("done", { upgradeId });
@@ -2526,6 +2592,40 @@ export class InstanceClient {
     this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
 
     this.#updateInstallInProgress = false;
+  }
+
+  /**
+   * Restarts the daemon after a reconcile that installed a new build. Returns
+   * the plain failure message when the restart did not come back healthy, or
+   * undefined when it did.
+   */
+  async #restartAfterUpdate(
+    upgradeId: string | undefined,
+  ): Promise<string | undefined> {
+    this.#reportUpdateStage("restarting", { upgradeId });
+    await this.#updateProgress.flush();
+    await new Promise((resolve) =>
+      setTimeout(resolve, clientTestHooks.updateResultHandoffDelayMs)
+    );
+    let restartReport: DaemonRestartReport | undefined;
+    const restarted = await clientTestHooks.restartDaemonService({
+      onReport: (report) => {
+        restartReport = report;
+      },
+    });
+    if (restarted) return undefined;
+    const error = restartFailureMessage(restartReport);
+    this.#reportUpdateStage("failed", {
+      upgradeId,
+      errorCode: "restart_failed",
+      detail: error,
+      restart: restartReport ? toRestartWire(restartReport) : undefined,
+    });
+    logWarn(
+      "update",
+      "reconcile succeeded but systemd restart failed; daemon may still be on old code",
+    );
+    return error;
   }
 
   #sendInstanceUpdateResult(
@@ -2875,6 +2975,17 @@ export class InstanceClient {
       at: new Date().toISOString(),
     };
 
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  async #runServerNetworkCheckAsync(
+    message: Extract<DaemonMessage, { type: "server-network-check-request" }>,
+    ws: WebSocket,
+  ): Promise<void> {
+    // `runServerNetworkCheck` never throws: a bad request is `ok: false`.
+    const result = await runServerNetworkCheck(message.targets, message.id);
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(result));
     }

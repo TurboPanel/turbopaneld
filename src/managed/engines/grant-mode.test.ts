@@ -28,8 +28,8 @@ const test = Deno.test.bind(Deno);
  */
 const GOLDEN: Record<string, string> = {
   __MARIADB__:
-    "84b71e2043d6b7565c0da3fb885e3206a1dc585a63617f980ca9d1329b9c5431",
-  __MYSQL__: "2795b61057d05b529380cf108471f36d3b61aa1ad737e1778efa44ae75b72a7c",
+    "cc3abf515ab524bb436c03240f82c83ddc6424f99c349dc63ce76efd5fb86692",
+  __MYSQL__: "6e4ed315e394aec22937f755339b8ab3c1b36f354a97c0ec9602ce52891314ef",
   __POSTGRES__:
     "b658c9e3b7fc725904d83d75bdf417f30ec288fc34d7bcfa12a3edadca932d38",
 };

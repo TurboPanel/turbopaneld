@@ -52,6 +52,11 @@ export type ProxySqlBootRepairDeps = {
   now?: () => number;
   /** Total time to wait for addresses and Docker, default 10 minutes. */
   budgetMs?: number;
+  /**
+   * Repair even after a reconcile ran this daemon run. For Docker coming back
+   * after it was stopped, which removes the containers a reconcile made.
+   */
+  ignoreReconcile?: boolean;
   /** Log sinks; default to the daemon logger. */
   info?: (message: string) => void;
   warn?: (message: string) => void;
@@ -143,7 +148,7 @@ class Repair {
   }
 
   private async attempt(): Promise<Attempt> {
-    if (proxySqlReconciledSinceStart()) return this.standDown();
+    if (this.superseded()) return this.standDown();
     const health = await this.isHealthy();
     if (!health.ok) return { kind: "retry", reason: health.reason };
     if (health.healthy) return RUNNING;
@@ -163,6 +168,10 @@ class Repair {
     return await withProxySqlLock(() => this.upLocked());
   }
 
+  private superseded(): boolean {
+    return !this.deps.ignoreReconcile && proxySqlReconciledSinceStart();
+  }
+
   private standDown(): Attempt {
     this.info("ProxySQL boot repair stood down: reconcile ran");
     return SUPERSEDED;
@@ -174,7 +183,7 @@ class Repair {
   }
 
   private async upLocked(): Promise<Attempt> {
-    if (proxySqlReconciledSinceStart()) return this.standDown();
+    if (this.superseded()) return this.standDown();
     const current = await this.readCompose(this.composePath);
     if (current === null) return this.abort("compose file removed");
     if (

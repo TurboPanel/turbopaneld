@@ -1360,7 +1360,7 @@ test("LinuxMetricsCollector puts container, TLS, site and host text data in exte
   assertEquals(extended?.text?.topSites, "site-a=700");
 });
 
-test("LinuxMetricsCollector sends only the always-known RAID zeros and the sizes when nothing else v8 was collected", async () => {
+test("LinuxMetricsCollector sends only the always-known RAID zeros and the sizes when nothing else v12 was collected", async () => {
   const result = await new LinuxMetricsCollector(
     makeDeps(() => TICK_1, fullTopologySnapshot(), () => 1_000_000),
   ).collect({ sequence: 1, nowMs: 1_000_000 });
@@ -1383,6 +1383,38 @@ test("LinuxMetricsCollector carries this tick's sizes: memory, swap, cores and t
   assertEquals(typeof sizes?.memoryTotalBytes, "number");
   assertEquals((sizes?.memoryTotalBytes ?? 0) > 0, true);
   assertEquals((sizes?.logicalCores ?? 0) > 0, true);
+});
+
+test("LinuxMetricsCollector reports the root totals when / itself cannot be probed", async () => {
+  const deps = makeDeps(
+    () => ({ ...TICK_1, "/proc/mounts": "/dev/sda1 / ext4 rw 0 0\n" }),
+    fullTopologySnapshot(),
+    () => 1_000_000,
+  );
+  const result = await new LinuxMetricsCollector({
+    ...deps,
+    statfs: (path: string) =>
+      path === "/"
+        ? Promise.reject(new Deno.errors.PermissionDenied("read access to /"))
+        : {
+          blocks: 1000,
+          bfree: 500,
+          bavail: 400,
+          bsize: 4096,
+          files: 100,
+          ffree: 50,
+        },
+  }).collect({ sequence: 1, nowMs: 1_000_000 });
+  if (!result.supported) throw new TypeError("expected a supported sample");
+  assertEquals(
+    result.sample.extended?.sizes?.rootFilesystemTotalBytes,
+    1000 * 4096,
+  );
+  assertEquals(result.sample.extended?.sizes?.rootFilesystemTotalInodes, 100);
+  assertEquals(
+    result.sample.host.storage.rootFilesystemAvailableBytes,
+    400 * 4096,
+  );
 });
 
 const HOST_EXTENDED_RAW: RawFixtureMap = {

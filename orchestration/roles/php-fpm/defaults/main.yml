@@ -34,10 +34,20 @@ php_fpm_series: "{{ php_fpm_default_series }}"
 # Empty means "latest 8.4.x sury publishes". Pin it to freeze a fleet.
 php_fpm_apt_version: ""
 
-# Sury repo wiring. The keyring ships as its own .deb so the trust root is
-# packaged and upgradable rather than a loose file dropped by curl.
-php_fpm_sury_keyring_url: "https://packages.sury.org/debsuryorg-archive-keyring.deb"
-php_fpm_sury_keyring_path: "/usr/share/keyrings/debsuryorg-archive-keyring.gpg"
+# Sury repo wiring.
+# The repository signing key is installed by the shared repo-key role: fetched
+# over HTTPS from php_fpm_sury_key_url, checked against the fingerprint list
+# below, with the copy in files/sury-php.gpg as the fallback. Policy: warn
+# (default: a key outside the list is still used, with one loud WARN, so a key
+# rotation never blocks installs), enforce (a key outside the list stops the
+# run) or bundled (never fetch, use the shipped copy).
+php_fpm_key_policy: warn
+php_fpm_sury_key_url: "https://packages.sury.org/php/apt.gpg"
+# Primary-key fingerprints (40 hex, upper case). A list so a release can add a
+# new key before the old one is dropped. Keep files/sury-php.gpg.json in step.
+php_fpm_sury_key_fingerprints:
+  - "15058500A0235D97F5D10063B188E2B695BD4743"
+php_fpm_sury_keyring_path: "/usr/share/keyrings/turbopanel-sury-php.gpg"
 php_fpm_sury_repo_url: "https://packages.sury.org/php"
 php_fpm_sury_suite: "{{ ansible_distribution_release }}"
 

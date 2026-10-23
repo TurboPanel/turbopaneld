@@ -38,6 +38,20 @@ import { definedFields } from "../util/optional-fields.ts";
 
 export const DEPLOY_PROGRESS_DETAIL_INTERVAL_MS = 2000;
 
+/**
+ * While a deploy waits for another build it says so again this often, so the
+ * control plane can tell a deploy that is still queued here from one this
+ * server lost (a restart empties the build line).
+ */
+export const DEPLOY_PROGRESS_WAITING_BEAT_MS = 60_000;
+
+/**
+ * While a deploy runs, the whole payload is sent again this often (when the
+ * control plane advertises `command-recovery-v1`), so a quiet build is told
+ * apart from a lost link.
+ */
+export const DEPLOY_PROGRESS_KEEPALIVE_MS = 30_000;
+
 /** A planned step: id + label + whether the host already has it. */
 export type PlannedDeployStep = Pick<CommandProgressStep, "id" | "label"> & {
   state: "ready" | "pending";
@@ -80,6 +94,15 @@ export type DeployStepReporter = {
    * `failed` or `skipped` (cancel) and every `pending` step `skipped`.
    */
   finish(outcome: DeployProgressOutcome): void;
+  /**
+   * Tell the control plane whether the deploy is running (`true`: its run
+   * deadline counts from now) or waiting for the host (`false`: another build
+   * holds the build slot, nothing counts, and the state is repeated every
+   * minute). Each resume after a wait starts a new run segment on the control
+   * plane; time spent waiting is never counted. Sent at once, and a repeat of
+   * the same state is dropped.
+   */
+  running(active: boolean): void;
   /** The payload as it would be sent now. */
   snapshot(): CommandProgress;
   /** False for the no-op reporter: nothing is planned or probed for it. */
@@ -97,6 +120,11 @@ export type DeployStepReporterOptions = {
   /** Test seams — the trailing detail flush timer. */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  /** Called with every payload that is sent (the journal keeps the latest). */
+  onSnapshot?: (progress: CommandProgress) => void;
+  /** True when the running payload should be repeated as a keepalive. */
+  keepalive?: () => boolean;
+  keepaliveMs?: number;
 };
 
 /**
@@ -190,8 +218,15 @@ class DeployStepReporterImpl implements DeployStepReporter {
   #current: string | null = null;
   /** The phase step a nested install interrupted; `current` returns to it. */
   #resume: string | null = null;
+  /** `undefined` until the first {@link running} call. */
+  #runningSince: string | null | undefined = undefined;
   #lastSentAt = Number.NEGATIVE_INFINITY;
   #flushTimer: unknown = undefined;
+  #beatTimer: unknown = undefined;
+  #keepaliveTimer: unknown = undefined;
+  readonly #onSnapshot: ((progress: CommandProgress) => void) | undefined;
+  readonly #keepalive: (() => boolean) | undefined;
+  readonly #keepaliveMs: number;
 
   constructor(options: DeployStepReporterOptions) {
     this.#id = options.id;
@@ -202,6 +237,9 @@ class DeployStepReporterImpl implements DeployStepReporter {
       ((fn, ms) => setTimeout(fn, ms));
     this.#clearTimer = options.clearTimer ??
       ((handle) => clearTimeout(handle as number));
+    this.#onSnapshot = options.onSnapshot;
+    this.#keepalive = options.keepalive;
+    this.#keepaliveMs = options.keepaliveMs ?? DEPLOY_PROGRESS_KEEPALIVE_MS;
   }
 
   plan(steps: readonly PlannedDeployStep[]): void {
@@ -287,6 +325,8 @@ class DeployStepReporterImpl implements DeployStepReporter {
   }
 
   finish(outcome: DeployProgressOutcome): void {
+    this.#stopWaitingBeat();
+    this.#stopKeepalive();
     const at = this.#now().toISOString();
     const running = RUNNING_AT_FINISH[outcome];
     let changed = false;
@@ -305,12 +345,60 @@ class DeployStepReporterImpl implements DeployStepReporter {
     else this.#cancelFlush();
   }
 
+  running(active: boolean): void {
+    if (
+      active
+        ? typeof this.#runningSince === "string"
+        : this.#runningSince === null
+    ) return;
+    this.#runningSince = active ? this.#now().toISOString() : null;
+    this.#startKeepalive();
+    this.#sendNow();
+    this.#stopWaitingBeat();
+    if (!active) this.#startWaitingBeat();
+  }
+
+  #startKeepalive(): void {
+    if (this.#keepalive === undefined || this.#keepaliveTimer !== undefined) {
+      return;
+    }
+    this.#keepaliveTimer = this.#setTimer(() => {
+      this.#keepaliveTimer = undefined;
+      if (this.#runningSince !== null && this.#keepalive?.()) this.#sendNow();
+      this.#startKeepalive();
+    }, this.#keepaliveMs);
+  }
+
+  #stopKeepalive(): void {
+    if (this.#keepaliveTimer === undefined) return;
+    this.#clearTimer(this.#keepaliveTimer);
+    this.#keepaliveTimer = undefined;
+  }
+
+  #startWaitingBeat(): void {
+    this.#beatTimer = this.#setTimer(() => {
+      this.#beatTimer = undefined;
+      if (this.#runningSince !== null) return;
+      this.#sendNow();
+      this.#startWaitingBeat();
+    }, DEPLOY_PROGRESS_WAITING_BEAT_MS);
+  }
+
+  #stopWaitingBeat(): void {
+    if (this.#beatTimer === undefined) return;
+    this.#clearTimer(this.#beatTimer);
+    this.#beatTimer = undefined;
+  }
+
   snapshot(): CommandProgress {
     return clampCommandProgress({
       version: 1,
       steps: this.#steps.map(definedStep),
       current: this.#current,
       updatedAt: this.#now().toISOString(),
+      ...(this.#runningSince === undefined
+        ? {}
+        : { runningSince: this.#runningSince }),
     });
   }
 
@@ -378,13 +466,19 @@ class DeployStepReporterImpl implements DeployStepReporter {
     this.#cancelFlush();
     const at = this.#now();
     this.#lastSentAt = at.getTime();
+    const progress = this.snapshot();
+    try {
+      this.#onSnapshot?.(progress);
+    } catch {
+      // The journal copy is best effort too.
+    }
     try {
       this.#send({
         type: "command-progress",
         id: this.#id,
         commandId: this.#commandId,
         at: at.toISOString(),
-        progress: this.snapshot(),
+        progress,
       });
     } catch {
       // Progress is best effort; the outcome message stays authoritative.
@@ -413,6 +507,7 @@ export function createNoopDeployStepReporter(): DeployStepReporter {
     detail() {},
     phase() {},
     finish() {},
+    running() {},
     snapshot: () => ({
       version: 1,
       steps: [],

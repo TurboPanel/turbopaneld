@@ -6,7 +6,6 @@ import {
   devOwnershipPlaybookExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
-  parseGalaxyDockerRoleVersion,
 } from "./ansible.ts";
 import {
   DEV_CONVERGE_MANIFEST_FILE,
@@ -26,9 +25,8 @@ import {
   ansibleProbeEnv,
   DAEMON_ROOT,
   GALAXY_COLLECTIONS_DIR,
-  GALAXY_ROLES_DIR,
-  GALAXY_VENDOR_ROLES_DIR,
   ORCHESTRATION_LAYOUT,
+  ORCHESTRATION_ROLES_DIR,
   RABBITMQ_PLAYBOOK,
   REDIS_PLAYBOOK,
 } from "./assets.ts";
@@ -115,8 +113,8 @@ test("checked-in ansible.cfg defines vendored collections_path", async () => {
     );
     assertMatch(
       cfg,
-      /roles_path\s*=\s*[^\n]*galaxy-roles/,
-      `roles_path galaxy-roles in ${cfgPath}`,
+      /^roles_path\s*=\s*roles\s*$/m,
+      `roles_path is the checked-in roles dir only in ${cfgPath}`,
     );
     assertMatch(
       cfg,
@@ -304,10 +302,11 @@ test("ansibleEnv uses a private per-process ANSIBLE_HOME without overriding coll
   }
   assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "ansibleEnv");
   if (
-    env.ANSIBLE_ROLES_PATH !== `${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}`
+    env.ANSIBLE_ROLES_PATH !==
+      `${ORCHESTRATION_ROLES_DIR}`
   ) {
     throw new Error(
-      `expected ANSIBLE_ROLES_PATH=${GALAXY_ROLES_DIR}:${GALAXY_VENDOR_ROLES_DIR}, got ${env.ANSIBLE_ROLES_PATH}`,
+      `expected ANSIBLE_ROLES_PATH=${ORCHESTRATION_ROLES_DIR}, got ${env.ANSIBLE_ROLES_PATH}`,
     );
   }
 });
@@ -347,8 +346,7 @@ test("devOrchestrationAnsibleEnv selects overlay config without collections over
       );
     }
     assertNotIn(env, "ANSIBLE_COLLECTIONS_PATH", "devOrchestrationAnsibleEnv");
-    const expectedRolesPath =
-      `${layout.devRolesDir}:${layout.daemonRolesDir}:${GALAXY_VENDOR_ROLES_DIR}`;
+    const expectedRolesPath = `${layout.devRolesDir}:${layout.daemonRolesDir}`;
     if (env.ANSIBLE_ROLES_PATH !== expectedRolesPath) {
       throw new Error(
         `expected ANSIBLE_ROLES_PATH=${expectedRolesPath}, got ${env.ANSIBLE_ROLES_PATH}`,
@@ -392,9 +390,9 @@ test("requirements.yml pins ansible.posix to an exact version", async () => {
   if (/version:\s*">=/.test(requirements)) {
     throw new Error("requirements.yml must not use ranged collection versions");
   }
-  if (/geerlingguy\.docker/.test(requirements)) {
+  if (/^roles:/m.test(requirements)) {
     throw new Error(
-      "geerlingguy.docker must live in requirements-docker.yml (deferred), not bootstrap requirements.yml",
+      "requirements.yml must list collections only; Docker is installed by the docker role, not from Galaxy",
     );
   }
 });
@@ -411,11 +409,6 @@ test("check-orchestration installs ansible.posix when the vendor tree is absent"
   if (!script.includes("orchestration/requirements.yml")) {
     throw new Error(
       "check-orchestration.sh must install from orchestration/requirements.yml",
-    );
-  }
-  if (/-r[^\n]*requirements-docker\.yml/.test(script)) {
-    throw new Error(
-      "check-orchestration.sh must not install requirements-docker.yml (deferred Docker role)",
     );
   }
   if (!script.includes("ANSIBLE_COLLECTIONS_PATH")) {
@@ -445,130 +438,6 @@ test("check-orchestration installs ansible.posix when the vendor tree is absent"
   }
 });
 
-test("requirements-docker.yml pins geerlingguy.docker to an exact version", async () => {
-  const requirements = await Deno.readTextFile(
-    join(CHECKOUT_ORCHESTRATION_DIR, "requirements-docker.yml"),
-  );
-  assertMatch(
-    requirements,
-    /name:\s*geerlingguy\.docker[\s\S]*version:\s*"\d+\.\d+\.\d+"/,
-    "exact geerlingguy.docker pin",
-  );
-  if (/version:\s*">=/.test(requirements)) {
-    throw new Error(
-      "requirements-docker.yml must not use ranged role versions",
-    );
-  }
-});
-
-test("parseGalaxyDockerRoleVersion reads the requirements-docker pin", async () => {
-  const requirements = await Deno.readTextFile(
-    join(CHECKOUT_ORCHESTRATION_DIR, "requirements-docker.yml"),
-  );
-  const version = parseGalaxyDockerRoleVersion(requirements);
-  assertMatch(version, /^\d+\.\d+\.\d+$/, "geerlingguy.docker version pin");
-  try {
-    parseGalaxyDockerRoleVersion("roles: []\n");
-    throw new Error("expected TypeError for missing pin");
-  } catch (err) {
-    if (!(err instanceof TypeError)) {
-      throw err;
-    }
-  }
-});
-
-test("parseGalaxyDockerRoleVersion accepts spaced pins and rejects unquoted versions", () => {
-  assertEquals(
-    parseGalaxyDockerRoleVersion(
-      '- name: geerlingguy.docker\n  src: ignored\n  version: "8.1.2"\n',
-    ),
-    "8.1.2",
-  );
-  try {
-    parseGalaxyDockerRoleVersion(
-      "- name: geerlingguy.docker\n  version: 8.1.2\n",
-    );
-    throw new TypeError("expected TypeError for unquoted version");
-  } catch (err) {
-    if (!(err instanceof TypeError)) {
-      throw err;
-    }
-    assertEquals(
-      err.message.includes("must pin geerlingguy.docker"),
-      true,
-    );
-  }
-});
-
-test("ensureGalaxyDockerRole downloads via codeload, not ansible-galaxy role install", () => {
-  const source = Deno.readTextFileSync(
-    join(DAEMON_ROOT, "src", "orchestration", "ansible.ts"),
-  );
-  const start = source.indexOf(
-    "async function installGalaxyDockerRoleFromArchive",
-  );
-  const end = source.indexOf("export async function runLocalhostTest", start);
-  if (start < 0 || end < 0) {
-    throw new Error(
-      "could not locate installGalaxyDockerRoleFromArchive / runLocalhostTest",
-    );
-  }
-  const dockerInstall = source.slice(start, end);
-  if (!dockerInstall.includes("galaxyDockerRoleCodeloadUrl")) {
-    throw new Error(
-      "ensureGalaxyDockerRole must download via galaxyDockerRoleCodeloadUrl",
-    );
-  }
-  if (/"role"\s*,\s*"install"/.test(dockerInstall)) {
-    throw new Error(
-      "ensureGalaxyDockerRole must not call ansible-galaxy role install",
-    );
-  }
-  if (/github\.com\/.+\/archive\//.test(dockerInstall)) {
-    throw new Error(
-      "ensureGalaxyDockerRole must not use github.com/.../archive URLs",
-    );
-  }
-  // Staging must share a filesystem with the final path — /tmp → /opt rename
-  // fails with EXDEV on typical Vagrant guests.
-  if (!dockerInstall.includes("dir: GALAXY_VENDOR_ROLES_DIR")) {
-    throw new Error(
-      "galaxy docker role staging must use makeTempDir({ dir: GALAXY_VENDOR_ROLES_DIR })",
-    );
-  }
-});
-
-test("galaxy docker lint neutralize silences third-party ansible-lint", () => {
-  // Nested role .ansible-lint is the only path the IDE uses when a Galaxy file
-  // is opened (exclude_paths do not apply to explicit lintables). Cover both
-  // geerlingguy.docker/ and geerlingguy/docker/ layouts.
-  const source = Deno.readTextFileSync(
-    join(DAEMON_ROOT, "src", "orchestration", "ansible.ts"),
-  );
-  if (!source.includes("GALAXY_ROLE_ANSIBLE_LINT_CONFIG")) {
-    throw new Error(
-      "ansible.ts must define GALAXY_ROLE_ANSIBLE_LINT_CONFIG for ensureGalaxyDockerRole",
-    );
-  }
-  for (
-    const needle of [
-      "no-free-form",
-      "fqcn",
-      "yaml",
-      "offline: true",
-      'Deno.remove(join(roleDir, ".yamllint"))',
-      'join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy.docker")',
-      'join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy", "docker")',
-    ]
-  ) {
-    if (!source.includes(needle)) {
-      throw new Error(
-        `galaxy docker lint neutralize must include ${JSON.stringify(needle)}`,
-      );
-    }
-  }
-});
-
 /**
  * Index of an awaited call in a script source, tolerating the injected-deps
  * form (`await deps.ensureAnsible()`) the orchestration script uses for its
@@ -580,7 +449,7 @@ function awaitedCallIndex(source: string, fn: string): number {
 
 test("TUI orchestration script emits dev_converge_skipped before expensive setup", () => {
   // instance-dev-install --if-needed must emit the skip JSONL event and return
-  // before ensureAnsible / Galaxy / playbook when the stamp matches.
+  // before ensureAnsible / playbook when the stamp matches.
   const script = Deno.readTextFileSync(
     join(DAEMON_ROOT, "scripts", "run-orchestration-action.ts"),
   );
@@ -591,16 +460,10 @@ test("TUI orchestration script emits dev_converge_skipped before expensive setup
   }
   const skipCall = awaitedCallIndex(script, "emitDevConvergeSkippedIfNeeded");
   const ensureAnsibleCall = awaitedCallIndex(script, "ensureAnsible");
-  const galaxyCall = awaitedCallIndex(script, "ensureGalaxyDockerRole");
   const playbookCall = awaitedCallIndex(script, "runPlaybookStreaming");
   if (skipCall < 0 || ensureAnsibleCall < 0 || skipCall > ensureAnsibleCall) {
     throw new Error(
       "run-orchestration-action.ts must call emitDevConvergeSkippedIfNeeded before ensureAnsible()",
-    );
-  }
-  if (galaxyCall < 0 || skipCall > galaxyCall) {
-    throw new Error(
-      "run-orchestration-action.ts must call emitDevConvergeSkippedIfNeeded before ensureGalaxyDockerRole()",
     );
   }
   if (playbookCall < 0 || skipCall > playbookCall) {
@@ -619,18 +482,10 @@ test("TUI orchestration script emits dev_converge_skipped before expensive setup
   }
 });
 
-test("TUI orchestration script fetches Docker Galaxy before docker-using playbooks", () => {
-  // Dev console converge uses scripts/run-orchestration-action.ts — not
-  // ansible.ts runInstanceDevInstall — so the script must call
-  // ensureGalaxyDockerRole itself (bootstrap no longer installs the role).
+test("TUI orchestration script streams quiet slimmed playbook events", () => {
   const script = Deno.readTextFileSync(
     join(DAEMON_ROOT, "scripts", "run-orchestration-action.ts"),
   );
-  if (!script.includes("ensureGalaxyDockerRole")) {
-    throw new Error(
-      "run-orchestration-action.ts must call ensureGalaxyDockerRole before docker-using playbooks",
-    );
-  }
   if (!script.includes("quiet: true")) {
     throw new Error(
       "run-orchestration-action.ts must run playbooks with quiet: true for clean TUI JSONL",
@@ -640,28 +495,6 @@ test("TUI orchestration script fetches Docker Galaxy before docker-using playboo
     throw new Error(
       "run-orchestration-action.ts must slim ansible events before emitting to the TUI",
     );
-  }
-  // instance-dev-install must ensure Galaxy *before* the playbook streams —
-  // otherwise the TUI hits include_role: geerlingguy.docker with an empty tree.
-  const ensureCall = awaitedCallIndex(script, "ensureGalaxyDockerRole");
-  const playbookCall = awaitedCallIndex(script, "runPlaybookStreaming");
-  if (ensureCall < 0 || playbookCall < 0 || ensureCall > playbookCall) {
-    throw new Error(
-      "run-orchestration-action.ts must await ensureGalaxyDockerRole() before runPlaybookStreaming()",
-    );
-  }
-  for (
-    const playbook of [
-      "docker-setup.yml",
-      "postgres-setup.yml",
-      "rabbitmq-setup.yml",
-    ]
-  ) {
-    if (!script.includes(`"${playbook}"`)) {
-      throw new Error(
-        `run-orchestration-action.ts must list ${playbook} in PLAYBOOKS_NEEDING_DOCKER_GALAXY`,
-      );
-    }
   }
 });
 
@@ -702,11 +535,6 @@ test("galaxy collections install target matches cfg vendored path default", () =
   if (!GALAXY_COLLECTIONS_DIR.endsWith(VENDORED_COLLECTIONS_MARKER)) {
     throw new Error(
       `expected GALAXY_COLLECTIONS_DIR to end with ${VENDORED_COLLECTIONS_MARKER}, got ${GALAXY_COLLECTIONS_DIR}`,
-    );
-  }
-  if (!GALAXY_VENDOR_ROLES_DIR.endsWith("galaxy-roles")) {
-    throw new Error(
-      `expected GALAXY_VENDOR_ROLES_DIR to end with galaxy-roles, got ${GALAXY_VENDOR_ROLES_DIR}`,
     );
   }
 });
@@ -2511,10 +2339,12 @@ test("docker role merges daemon.json address pools and live-restore, skipping th
   // outage risk, not just a database blip.
   assertEquals(
     handlers.includes(
-      "when: not (_docker_restart_deferred | default(true) | bool)",
+      "- not (_docker_restart_deferred | default(true) | bool)",
     ),
     true,
   );
+  // ...and while daemon.json is written ahead of the very first dockerd start.
+  assertEquals(handlers.includes("- not (_docker_fresh_install | bool)"), true);
 });
 
 test("buildDockerSetupExtraArgs emits one JSON -e object and nothing when empty", () => {
@@ -2717,7 +2547,7 @@ test("daemon-converge re-applies only the builder entitlement deny to already-pr
   const defaults = await Deno.readTextFile(join(roleDir, "defaults/main.yml"));
   // The converge runs the entry file, ahead of the gate, never the whole role.
   assertEquals(
-    /- role: docker\n\s+tasks_from: converge-builder\n\s+- role: docker-gate/
+    /import_role:\n\s+name: docker\n\s+tasks_from: converge-builder\n(?:\s*#.*\n)*\s+- name: .*\n\s+ansible\.builtin\.import_role:\n\s+name: docker-gate\n/
       .test(converge),
     true,
   );

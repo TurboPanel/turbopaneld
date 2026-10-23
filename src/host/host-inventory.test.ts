@@ -5,10 +5,13 @@ import {
   countCpuSockets,
   countCpuThreads,
   countPhysicalCpuCores,
+  dynamicMemoryFromFacts,
+  HostInventoryReader,
   hostResourcesFromProc,
   normalizePciSlot,
   parseCpulist,
   parseMeminfoTotals,
+  parseMemoryBlockSize,
   parseNvidiaSmiMemoryCsv,
   parseSizeToBytes,
   parseUeventMap,
@@ -993,6 +996,10 @@ describe("host-inventory", () => {
         nvidiaSmiCsv: () => "00000000:01:00.0, 8151\n",
         runLs: (path) => {
           listed.push(path);
+          // Real `ls` fails on a missing directory (no balloon module here).
+          if (!path.endsWith("/class/drm")) {
+            return { code: 2, stdout: new Uint8Array() };
+          }
           return {
             code: 0,
             stdout: new TextEncoder().encode(
@@ -1001,7 +1008,9 @@ describe("host-inventory", () => {
           };
         },
       });
-      assertEquals(listed, [`${sysRoot}/class/drm`]);
+      assertEquals(listed.filter((path) => path.endsWith("/class/drm")), [
+        `${sysRoot}/class/drm`,
+      ]);
       assertEquals(resources?.gpus, [
         {
           vendorId: "0x10de",
@@ -1624,15 +1633,15 @@ exit 1
     }
   });
 
-  it("readHostResources process-caches a failed default read", () => {
+  it("readHostResources keeps fixed facts and re-reads only memory and the CPU list", () => {
     resetHostResourcesCacheForTests();
     const originalRead = Deno.readTextFileSync;
     const OriginalCommand = Deno.Command;
     const originalReadDir = Deno.readDirSync;
     const originalBuild = Object.getOwnPropertyDescriptor(Deno, "build");
-    let reads = 0;
-    Deno.readTextFileSync = () => {
-      reads++;
+    const reads: string[] = [];
+    Deno.readTextFileSync = (path) => {
+      reads.push(String(path));
       throw new Error("read blocked");
     };
     Deno.readDirSync = () => {
@@ -1649,15 +1658,272 @@ exit 1
     });
     try {
       assertEquals(readHostResources(), undefined);
-      const afterFirst = reads;
+      const afterFirst = reads.length;
       assertEquals(readHostResources(), undefined);
-      assertEquals(reads, afterFirst);
+      assertEquals(reads.slice(afterFirst), [
+        "/sys/devices/system/cpu/online",
+        "/proc/meminfo",
+      ]);
     } finally {
       Deno.readTextFileSync = originalRead;
       Deno.Command = OriginalCommand;
       Deno.readDirSync = originalReadDir;
       if (originalBuild) Object.defineProperty(Deno, "build", originalBuild);
       resetHostResourcesCacheForTests();
+    }
+  });
+});
+
+const MIB = 1024 * 1024;
+
+type MemoryFixture = {
+  driver?: "hv_balloon" | "virtio_balloon" | "virtio_mem" | "xen";
+  memTotalMiB: number;
+  onlineBlocks: number;
+  offlineBlocks?: number;
+  cpuCount?: number;
+};
+
+function cpuFixtureTexts(count: number): { stat: string; cpuinfo: string } {
+  const statLines = ["cpu  10 0 0 0 0 0 0 0"];
+  const cpuinfo: string[] = [];
+  for (let n = 0; n < count; n++) {
+    statLines.push(`cpu${n} 5 0 0 0 0 0 0 0`);
+    cpuinfo.push(`processor\t: ${n}`, "model name\t: Fixture VM CPU", "");
+  }
+  return { stat: `${statLines.join("\n")}\n`, cpuinfo: cpuinfo.join("\n") };
+}
+
+function meminfoText(memTotalMiB: number): string {
+  return `MemTotal:       ${memTotalMiB * 1024} kB\nSwapTotal:      0 kB\n`;
+}
+
+/** A proc/sys tree for a VM: memory blocks of 128 MiB and an optional driver. */
+function buildMemoryFixture(fixture: MemoryFixture): {
+  io: { procRoot: string; sysRoot: string } & Record<string, unknown>;
+  root: string;
+  procRoot: string;
+  sysRoot: string;
+} {
+  const root = Deno.makeTempDirSync({ prefix: "tp-host-capacity-" });
+  const procRoot = `${root}/proc`;
+  const sysRoot = `${root}/sys`;
+  const cpus = cpuFixtureTexts(fixture.cpuCount ?? 2);
+  writeFile(`${procRoot}/stat`, cpus.stat);
+  writeFile(`${procRoot}/cpuinfo`, cpus.cpuinfo);
+  writeFile(`${procRoot}/meminfo`, meminfoText(fixture.memTotalMiB));
+  writeFile(
+    `${sysRoot}/devices/system/cpu/online`,
+    `0-${(fixture.cpuCount ?? 2) - 1}\n`,
+  );
+  const memoryDir = `${sysRoot}/devices/system/memory`;
+  writeFile(`${memoryDir}/block_size_bytes`, "8000000\n");
+  writeFile(`${memoryDir}/auto_online_blocks`, "online\n");
+  const offline = fixture.offlineBlocks ?? 0;
+  for (let n = 0; n < fixture.onlineBlocks + offline; n++) {
+    writeFile(
+      `${memoryDir}/memory${n}/online`,
+      n < fixture.onlineBlocks ? "1\n" : "0\n",
+    );
+  }
+  if (fixture.driver === "xen") {
+    writeFile(`${sysRoot}/devices/system/xen_memory/xen_memory0/uevent`, "");
+  } else if (fixture.driver) {
+    writeFile(`${sysRoot}/module/${fixture.driver}/initstate`, "live\n");
+  }
+  const failed = () => ({ code: 1, stdout: new Uint8Array() });
+  return {
+    io: {
+      procRoot,
+      sysRoot,
+      architecture: "x86_64",
+      nvidiaSmiCsv: () => undefined,
+      runCat: failed,
+      runLs: failed,
+    },
+    root,
+    procRoot,
+    sysRoot,
+  };
+}
+
+describe("host capacity refresh", () => {
+  it("parseMemoryBlockSize reads the hex sysfs value", () => {
+    assertEquals(parseMemoryBlockSize("8000000\n"), 128 * MIB);
+    assertEquals(parseMemoryBlockSize("0x10000000"), 256 * MIB);
+    assertEquals(parseMemoryBlockSize(""), undefined);
+    assertEquals(parseMemoryBlockSize("not-hex"), undefined);
+    assertEquals(parseMemoryBlockSize(undefined), undefined);
+  });
+
+  it("dynamicMemoryFromFacts needs more than a loaded driver", () => {
+    assertEquals(
+      dynamicMemoryFromFacts(undefined, 2048 * MIB, 372 * MIB, 0),
+      undefined,
+    );
+    assertEquals(
+      dynamicMemoryFromFacts("virtio_balloon", 2048 * MIB, 1900 * MIB, 0),
+      undefined,
+    );
+    assertEquals(
+      dynamicMemoryFromFacts("hv_balloon", 2048 * MIB, 372 * MIB, 0),
+      { driver: "hv_balloon", totalMoved: 0 },
+    );
+    assertEquals(
+      dynamicMemoryFromFacts("virtio_balloon", undefined, 1900 * MIB, 32 * MIB),
+      undefined,
+    );
+    assertEquals(
+      dynamicMemoryFromFacts("virtio_balloon", undefined, 1900 * MIB, 33 * MIB),
+      { driver: "virtio_balloon", totalMoved: 33 * MIB },
+    );
+    // A large static guest: kernel memory map and reservations leave about
+    // 1.5% between present memory and MemTotal even with the driver loaded.
+    const GIB = 1024 * MIB;
+    assertEquals(
+      dynamicMemoryFromFacts(
+        "virtio_balloon",
+        64 * GIB,
+        Math.floor(64 * GIB * 0.985),
+        0,
+      ),
+      undefined,
+    );
+    // A real dynamic guest: a quarter of the memory is held back.
+    assertEquals(
+      dynamicMemoryFromFacts("hv_balloon", 64 * GIB, 48 * GIB, 0),
+      { driver: "hv_balloon", totalMoved: 0 },
+    );
+    assertEquals(dynamicMemoryFromFacts("virtio_mem", undefined, 0, 0), {
+      driver: "virtio_mem",
+      totalMoved: 0,
+    });
+  });
+
+  it("a Hyper-V guest with 16 online blocks reads 2 GiB present", () => {
+    const { io, root } = buildMemoryFixture({
+      driver: "hv_balloon",
+      memTotalMiB: 372,
+      onlineBlocks: 16,
+      offlineBlocks: 2,
+    });
+    try {
+      const resources = readHostResources(io);
+      assertEquals(resources?.memory?.totalBytes, 372 * MIB);
+      assertEquals(resources?.memory?.presentBytes, 2048 * MIB);
+      assertEquals(resources?.memory?.blockSizeBytes, 128 * MIB);
+      assertEquals(resources?.dynamicMemory, {
+        driver: "hv_balloon",
+        totalMoved: 0,
+      });
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+    }
+  });
+
+  it("bare metal with no driver keeps MemTotal only", () => {
+    const { io, root } = buildMemoryFixture({
+      memTotalMiB: 15_900,
+      onlineBlocks: 128,
+    });
+    try {
+      const resources = readHostResources(io);
+      assertEquals(resources?.memory?.totalBytes, 15_900 * MIB);
+      assertEquals(resources?.memory?.presentBytes, undefined);
+      assertEquals(resources?.memory?.blockSizeBytes, undefined);
+      assertEquals(resources?.dynamicMemory, undefined);
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+    }
+  });
+
+  it("a fixed VM with a balloon driver is not dynamic until MemTotal moves past 32 MiB", () => {
+    const { io, root, procRoot } = buildMemoryFixture({
+      driver: "virtio_balloon",
+      memTotalMiB: 1900,
+      onlineBlocks: 16,
+    });
+    try {
+      const reader = new HostInventoryReader(io);
+      const first = reader.read();
+      assertEquals(first?.memory?.presentBytes, 2048 * MIB);
+      assertEquals(first?.dynamicMemory, undefined);
+
+      Deno.writeTextFileSync(`${procRoot}/meminfo`, meminfoText(1931));
+      const small = reader.read();
+      assertEquals(small?.memory?.totalBytes, 1931 * MIB);
+      assertEquals(small?.dynamicMemory, undefined);
+
+      Deno.writeTextFileSync(`${procRoot}/meminfo`, meminfoText(1867));
+      assertEquals(reader.read()?.dynamicMemory, {
+        driver: "virtio_balloon",
+        totalMoved: 64 * MIB,
+      });
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+    }
+  });
+
+  it("present memory follows blocks the host adds", () => {
+    const { io, root, sysRoot } = buildMemoryFixture({
+      driver: "hv_balloon",
+      memTotalMiB: 372,
+      onlineBlocks: 16,
+    });
+    try {
+      const reader = new HostInventoryReader(io);
+      assertEquals(reader.read()?.memory?.presentBytes, 2048 * MIB);
+      for (let n = 16; n < 32; n++) {
+        writeFile(`${sysRoot}/devices/system/memory/memory${n}/online`, "1\n");
+      }
+      assertEquals(reader.read()?.memory?.presentBytes, 4096 * MIB);
+    } finally {
+      Deno.removeSync(root, { recursive: true });
+    }
+  });
+
+  it("virtio_mem and Xen count as hot-plug drivers", () => {
+    const mem = buildMemoryFixture({
+      driver: "virtio_mem",
+      memTotalMiB: 1990,
+      onlineBlocks: 16,
+    });
+    const xen = buildMemoryFixture({
+      driver: "xen",
+      memTotalMiB: 1990,
+      onlineBlocks: 16,
+    });
+    try {
+      assertEquals(readHostResources(mem.io)?.dynamicMemory, {
+        driver: "virtio_mem",
+        totalMoved: 0,
+      });
+      const xenResources = readHostResources(xen.io);
+      assertEquals(xenResources?.memory?.presentBytes, 2048 * MIB);
+      assertEquals(xenResources?.dynamicMemory, undefined);
+    } finally {
+      Deno.removeSync(mem.root, { recursive: true });
+      Deno.removeSync(xen.root, { recursive: true });
+    }
+  });
+
+  it("re-reads CPUs only when the online CPU list changes", () => {
+    const { io, root, procRoot, sysRoot } = buildMemoryFixture({
+      memTotalMiB: 2048,
+      onlineBlocks: 16,
+      cpuCount: 2,
+    });
+    try {
+      const reader = new HostInventoryReader(io);
+      assertEquals(reader.read()?.cpus?.[0]?.threads?.total, 2);
+      const three = cpuFixtureTexts(3);
+      Deno.writeTextFileSync(`${procRoot}/stat`, three.stat);
+      Deno.writeTextFileSync(`${procRoot}/cpuinfo`, three.cpuinfo);
+      assertEquals(reader.read()?.cpus?.[0]?.threads?.total, 2);
+      Deno.writeTextFileSync(`${sysRoot}/devices/system/cpu/online`, "0-2\n");
+      assertEquals(reader.read()?.cpus?.[0]?.threads?.total, 3);
+    } finally {
+      Deno.removeSync(root, { recursive: true });
     }
   });
 });

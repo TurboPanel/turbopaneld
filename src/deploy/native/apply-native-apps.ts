@@ -66,6 +66,8 @@ import {
 } from "../release/release-health.ts";
 import type { ReleaseManifestV1 } from "../release/deployment-json.ts";
 import type { RunFn, RunResult } from "../ensure-principal.ts";
+import { redactUrlSecrets } from "../../util/redact-url-secrets.ts";
+import { redactCommandSummary } from "../../logs/redactor.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { NativeAppStart } from "./start-entry.ts";
 import {
@@ -97,6 +99,8 @@ const NATIVE_APP_HEALTH_INTERVAL_MS = 500;
 const NATIVE_APP_HEALTH_ATTEMPT_MS = 3_000;
 /** Journal lines copied into the deploy transcript on a failed health probe. */
 const NATIVE_APP_JOURNAL_TAIL = 80;
+/** How many of the journal's last lines the deploy error itself carries. */
+const NATIVE_APP_ERROR_JOURNAL_LINES = 10;
 
 /** Injectable host command runner — the single privileged seam. */
 export type NativeAppRunFn = RunFn;
@@ -410,22 +414,6 @@ async function waitForNativeApp(
   return await pollFrom(0);
 }
 
-function emitOutputLines(
-  onOutput: ReleaseOutputHandler | undefined,
-  stream: "stdout" | "stderr",
-  text: string,
-): number {
-  if (!onOutput) return 0;
-  let count = 0;
-  for (const line of text.split("\n")) {
-    const trimmed = line.replaceAll("\r", "");
-    if (trimmed.length === 0) continue;
-    onOutput(stream, trimmed);
-    count += 1;
-  }
-  return count;
-}
-
 /**
  * Copy the unit's recent journal into the deploy transcript.
  *
@@ -435,10 +423,9 @@ function emitOutputLines(
 async function emitNativeAppJournal(
   io: NativeAppIo,
   unit: string,
-): Promise<void> {
+): Promise<string[]> {
   const onOutput = io.onOutput;
-  if (!onOutput) return;
-  onOutput(
+  onOutput?.(
     "stderr",
     `--- ${unit} journal (last ${NATIVE_APP_JOURNAL_TAIL} lines) ---`,
   );
@@ -454,14 +441,55 @@ async function emitNativeAppJournal(
       "--output=short-iso",
     ]),
   );
-  const text = result.stdout.trim() || result.stderr.trim();
-  let lineCount = 0;
-  if (text.length > 0) {
-    lineCount = emitOutputLines(onOutput, "stderr", text);
+  const text = redactCommandSummary(
+    result.stdout.trim() || result.stderr.trim(),
+  );
+  const lines = text
+    .split("\n")
+    .map((line) => line.replaceAll("\r", ""))
+    .filter((line) => line.length > 0);
+  if (onOutput) {
+    for (const line of lines) onOutput("stderr", line);
+    if (lines.length === 0) {
+      onOutput("stderr", "(no journal output for this unit)");
+    }
   }
-  if (lineCount === 0) {
-    onOutput("stderr", "(no journal output for this unit)");
+  return lines;
+}
+
+/** Longest line, and the whole tail, the deploy error carries from the journal. */
+const ERROR_JOURNAL_LINE_MAX = 300;
+const ERROR_JOURNAL_TOTAL_MAX = 2000;
+
+/**
+ * The scrubber only knows secrets this daemon decrypted, so lines going into
+ * an error text also lose anything that looks like a credential: `key=value`
+ * pairs with a secret-sounding key, bearer tokens and long token-like words.
+ */
+const SECRET_PAIR_RE =
+  /\b([\w.-]*(?:pass|secret|token|(?:api|private)[_-]?key|credential)[\w.-]*)(\s*[=:]\s*)\S+/gi;
+const BEARER_RE = /\b(bearer|basic)\s+[\w.~+/=-]{8,}/gi;
+const LONG_TOKEN_RE = /\b[\w-]{40,}\b/g;
+
+export function scrubJournalLine(line: string): string {
+  const masked = redactUrlSecrets(line)
+    .replace(SECRET_PAIR_RE, "$1$2[hidden]")
+    .replace(BEARER_RE, "$1 [hidden]")
+    .replace(LONG_TOKEN_RE, "[hidden]");
+  return masked.length > ERROR_JOURNAL_LINE_MAX
+    ? `${masked.slice(0, ERROR_JOURNAL_LINE_MAX)}...`
+    : masked;
+}
+
+/** The sentence that puts the app's own last output into the deploy error. */
+export function journalDetail(lines: readonly string[]): string {
+  if (lines.length === 0) return "";
+  let tail = lines.slice(-NATIVE_APP_ERROR_JOURNAL_LINES).map(scrubJournalLine)
+    .join(" | ");
+  if (tail.length > ERROR_JOURNAL_TOTAL_MAX) {
+    tail = `...${tail.slice(-ERROR_JOURNAL_TOTAL_MAX)}`;
   }
+  return `. Last output from the app: ${tail}`;
 }
 
 /**
@@ -777,6 +805,9 @@ async function startNativeApp(
   // `enable --now` on first deploy, `restart` afterwards: an already-enabled
   // unit re-enabled is a no-op, but an already-running one needs a restart to
   // pick up the release `current` now points at.
+  // A unit systemd gave up on refuses every start until its failure is
+  // cleared, which would make a fixed redeploy fail the same way.
+  await systemctl(io, ["reset-failed", unit]);
   const active = await unitIsActive(io, unit);
   const action = active ? "restart" : "enable --now";
   io.onOutput?.(
@@ -808,13 +839,13 @@ async function startNativeApp(
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
     }s`,
   );
-  await emitNativeAppJournal(io, unit);
+  const journal = await emitNativeAppJournal(io, unit);
 
   const outcome = await recoverFailedNativeApp(io, layout, prepared);
   throw new Error(
     `native app ${app.composeServiceName} did not answer on 127.0.0.1:${app.listenPort} within ${
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
-    }s${outcome}`,
+    }s${outcome}${journalDetail(journal)}`,
   );
 }
 

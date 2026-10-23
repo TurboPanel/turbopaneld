@@ -1,8 +1,12 @@
+import { bootConvergeSettled } from "../orchestration/boot-converge-gate.ts";
 import {
+  answerRepeatedDispatch,
   deliverCommandOutcome,
   markCommandInFlight,
+  noteCommandProgress,
+  recoveryEnabled,
 } from "./command-outbox.ts";
-import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { errorText, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
@@ -243,7 +247,23 @@ export async function handleCommandDispatch(
     ws.send(JSON.stringify(ack));
   }
 
+  // The same command sent again (a lost link, a control plane restart) never runs twice.
+  if (answerRepeatedDispatch(ws, message.id)) {
+    logWarn(
+      "commands",
+      `command ${
+        sanitizeForLog(message.id)
+      } was sent again; it is not run a second time`,
+    );
+    return;
+  }
+
   await markCommandInFlight(message.id);
+  // A new server connects before its boot converge has finished; no command
+  // runs on top of that converge. It was acknowledged above and is marked
+  // running before the wait, so the same command sent again meanwhile is
+  // answered like any running command and never runs twice.
+  await bootConvergeSettled();
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
   // own stop/restart/re-apply/promote/restore/destroy as intent, not a crash.
@@ -387,6 +407,8 @@ export async function handleCommandDispatch(
           id: message.id,
           commandId: message.commandId,
           send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+          onSnapshot: (snapshot) => noteCommandProgress(message.id, snapshot),
+          keepalive: () => recoveryEnabled(),
         });
         try {
           result = await pickCommandRouterHandler(

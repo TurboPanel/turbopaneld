@@ -181,6 +181,20 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    envelopes — decrypt only through `POST /api/daemon/v1/secrets/decrypt`
    (daemon JWT); never log plaintext.
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
+   (every deploy also rewrites the reserved `sites/00-fallback.caddy`: the
+   catch-all `http://` and `https://` blocks that answer names nobody hosts
+   with an empty 200, no redirect, and the same hide-names header block as
+   hosted sites when the setting is on. The file is shared by every
+   environment on the server, so the hide-names choice is that of whichever
+   deployed last. HTTPS shows one fixed internal certificate for the reserved
+   name `unconfigured.invalid`, given to every other name by the Caddyfile's
+   `default_sni` / `fallback_sni`; no per-name certificates are made, and
+   deploys refuse that name as a hosting hostname). The daemon also writes
+   the file and the Caddyfile at start (`ensureHostingFallback`, after the
+   guard) when hosting Caddy is set up and running but has no current copy, so
+   an updated host answers unhosted names before any deploy: it keeps a file a
+   deploy wrote, otherwise takes hide-names from the written sites (hidden when
+   unknown), validates first, and leaves live files alone if Caddy refuses)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved
@@ -685,7 +699,7 @@ pending-then-rename way as the Traefik files. It answers `CONTAINERS` and
 `POST` included, off; the upgrade to v0.5.0 changed none of those defaults (it
 only added the pause / unpause switches, which are POST and stay off).
 
-**Image pins** (`ingress.ts`): `traefik:v3.7.16` and
+**Image pins** (tag and digest in `orchestration/image-pins.json`, read via `src/util/image-pins.ts`; the tags below name what they pin): `traefik:v3.7.16` and
 `tecnativa/docker-socket-proxy:v0.5.0`; `PLATFORM_IMAGE_REPOSITORIES`
 (`compose-final-policy.ts`) lists the repositories, and a test keeps both pins
 in step with the rendered documents. Traefik 3.7 needed no flag or compose
@@ -1028,6 +1042,7 @@ new sink still needs a `SINKS` row and a refusal test.
 | `sites[].webEnv` key / value | Apache `SetEnv` | `safeEnvName` (refused) / `safeEnvValue`, and no `${` (Apache expands it on every line, with no escape) (value left out and named by `planSiteWebEnv`, not refused; `apacheSetEnvLine` still throws as the last line of defence) |
 | `sites[].webEnv` key / value | nginx `fastcgi_param` | `safeEnvName` (refused) / `safeEnvValue` and no `$` (nginx expands it inside quotes, no escape) and no name nginx or PHP sets itself (`SCRIPT_FILENAME`, `REMOTE_ADDR`, `HTTP_*`, ...) (all dropped and named, not refused: variables are inherited into every hosting) |
 | `sites[].webEnv` key / value | site Caddy `php_fastcgi env` | `safeEnvName` (refused) / `isSafeCaddyEnvValue` (dropped, and named by `planSiteWebEnv`) |
+| `sites[].webEnv` key / value | OpenLiteSpeed rewrite rule `E=NAME:value` | `safeEnvName` (refused) / `safeEnvValue` and an allowlist of characters (no space, comma, quote, backslash, `$`, `%`, brackets) (dropped and named by `planSiteWebEnv`) |
 | `sites[].php.settings` | php-fpm `php_admin_value[...]`, OpenLiteSpeed `phpIniOverride{}` | key allowlist (unknown keys dropped), `safePhpIniValue` |
 | `sites[].php.pool` | php-fpm pool tuning | key allowlist, `^[A-Za-z0-9._-]+$` |
 | `sites[].root` | every engine's document root | `assertSafeRoot` |

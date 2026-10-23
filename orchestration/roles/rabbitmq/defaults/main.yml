@@ -1,4 +1,5 @@
-rabbitmq_image: rabbitmq:4-management
+# Image and digest come from orchestration/image-pins.json (edit them there).
+rabbitmq_image: "{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.rabbitmq.ref }}@{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.rabbitmq.digest }}"
 rabbitmq_container_name: turbopanel-queue
 rabbitmq_amqp_port: 5672
 rabbitmq_mgmt_port: 15672
@@ -28,3 +29,9 @@ rabbitmq_config_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default
 # load needs more.
 rabbitmq_container_mem_limit: 512m
 rabbitmq_container_pids_limit: 200
+# How long a delivered command may stay unacknowledged before the broker closes
+# the channel (milliseconds). The default of 30 minutes is shorter than a
+# backlog of long commands (backups and restores get up to 30 minutes each), and
+# an expired channel redelivers the command, so it would run twice. Two hours
+# covers a handful of back-to-back longest commands on one server.
+rabbitmq_consumer_timeout_ms: 7200000

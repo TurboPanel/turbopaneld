@@ -1,12 +1,14 @@
 import { join } from "@std/path";
 import {
   CLOUDFLARED_CURRENT_DIR,
+  CLOUDFLARED_SHA256,
   CLOUDFLARED_VERSION,
   cloudflaredBin,
   cloudflaredDir,
   cloudflaredDownloadUrl,
   resolveCloudflaredAsset,
 } from "./assets.ts";
+import { assertBytesSha256 } from "./download-verify.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import {
   createSymlink,
@@ -80,10 +82,14 @@ async function repointCurrent(version = CLOUDFLARED_VERSION): Promise<void> {
  * `paths.ts`. Idempotent: a no-op when the binary already reports the pinned
  * version. Returns the absolute path to the binary.
  *
- * Unlike uv, cloudflared releases don't publish per-asset checksum siblings, so
- * the install is verified by invoking `cloudflared --version` afterwards.
+ * The download is checked against the pinned SHA-256 for the asset (from the
+ * release notes' checksum list) before anything is written, and the installed
+ * binary is then checked with `cloudflared --version`. `expectedSha256` exists
+ * for tests that serve fixture bytes.
  */
-export async function ensureCloudflared(): Promise<string> {
+export async function ensureCloudflared(
+  expectedSha256?: string,
+): Promise<string> {
   const bin = cloudflaredBin();
 
   const current = await installedCloudflaredVersion(bin);
@@ -97,6 +103,12 @@ export async function ensureCloudflared(): Promise<string> {
   const url = cloudflaredDownloadUrl(asset);
   logInfo("cloudflared", `downloading ${CLOUDFLARED_VERSION} from ${url}`);
   const bytes = await fetchBytes(url);
+  await assertBytesSha256(
+    bytes,
+    expectedSha256 ?? CLOUDFLARED_SHA256[asset] ?? "",
+    `cloudflared ${CLOUDFLARED_VERSION} (${asset})`,
+    "CLOUDFLARED_SHA256 in src/orchestration/assets.ts",
+  );
 
   await Deno.mkdir(cloudflaredDir(), { recursive: true });
   // cloudflared is on the run allowlist, which Deno treats as a write refusal

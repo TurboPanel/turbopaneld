@@ -121,3 +121,23 @@ test("collectFilesystemTopology: a docker role resolving to a tmpfs or overlay m
   assertEquals(filesystems.map((fs) => fs.fsType), ["ext4"]);
   assertEquals(filesystems[0]!.roles.includes("root"), true);
 });
+
+test("collectFilesystemTopology: the root total is read through a readable path when / is denied", async () => {
+  const filesystems = await collectFilesystemTopology({
+    readProcFile: (path) =>
+      path === "/proc/mounts" ? fixtureText("proc-mounts.txt") : undefined,
+    statfs: (path) =>
+      path === "/"
+        ? Promise.reject(new Deno.errors.PermissionDenied("read access to /"))
+        : fakeStatfs(),
+    resolveHostingPath: () => "/",
+    resolveDockerDataRoot: () => Promise.resolve(null),
+    resolveBackupPath: () => "/backup",
+    resolveLogsPath: () => "/var/log/turbopanel",
+    io: defaultSensorIo(),
+    sysRoot: fixtureRoot("net-topology"),
+  });
+  const root = filesystems.find((fs) => fs.roles.includes("root"));
+  assertEquals(root?.totalBytes, 1000 * 4096);
+  assertEquals(root?.totalInodes, 100);
+});

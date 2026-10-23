@@ -1,3 +1,4 @@
+import { keepStoredImages, pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
@@ -13,6 +14,7 @@ import {
   type EnvironmentDeployContainer,
   type EnvironmentDeployHosting,
   type EnvironmentDeployPayload,
+  HOSTING_FALLBACK_HOSTNAME,
   hostingServedNames,
   hostingWwwRedirects,
   isValidIpv4Literal,
@@ -20,7 +22,10 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { type LayoutPaths, PROD_HOME_DEFAULT } from "../paths/layout.ts";
 import { safeConfigToken, safeUrlPath } from "../contracts/config-values.ts";
-import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
+import {
+  HOSTING_FALLBACK_SITE,
+  isDaemonReservedHostingSite,
+} from "./instance-acme-http01.ts";
 import {
   parseComposePsEntries,
   readComposePsContainer,
@@ -63,7 +68,8 @@ import {
 } from "./system-component.ts";
 
 const CADDY_SERVICE = "turbopanel-hosting-caddy.service";
-const TRAEFIK_IMAGE = "traefik:v3.7.16";
+// Tag and digest live in orchestration/image-pins.json (traefik).
+const TRAEFIK_IMAGE = pinnedImage("traefik");
 /**
  * The only container on the host that sees the Docker socket.
  *
@@ -73,7 +79,7 @@ const TRAEFIK_IMAGE = "traefik:v3.7.16";
  * every co-hosted tenant with it. They now reach Docker through this proxy,
  * which answers only the two read endpoints a Docker provider needs.
  */
-const SOCKET_PROXY_IMAGE = "tecnativa/docker-socket-proxy:v0.5.0";
+const SOCKET_PROXY_IMAGE = pinnedImage("socketProxy");
 const SOCKET_PROXY_PORT = 2375;
 const SOCKET_PROXY_ENDPOINT =
   `tcp://${SOCKET_PROXY_COMPOSE_SERVICE_NAME}:${SOCKET_PROXY_PORT}`;
@@ -906,6 +912,8 @@ export function caddyfile(
   admin ${HOSTING_CADDY_ADMIN_ADDR}|0600${storage}
   auto_https disable_redirects
   skip_install_trust
+  default_sni ${HOSTING_FALLBACK_HOSTNAME}
+  fallback_sni ${HOSTING_FALLBACK_HOSTNAME}
   grace_period ${HOSTING_CADDY_GRACE_PERIOD}
   metrics
   servers {
@@ -1160,7 +1168,10 @@ async function applyCompose(
   what: string,
 ): Promise<void> {
   const pending = pendingComposePath(composePath);
-  await Deno.writeTextFile(pending, yaml, { mode: 0o640 });
+  const stored = await Deno.readTextFile(composePath).catch(() => null);
+  await Deno.writeTextFile(pending, keepStoredImages(yaml, stored), {
+    mode: 0o640,
+  });
   const result = await up(pending);
   if (!result.success) throw commandError(what, result);
   await Deno.rename(pending, composePath);
@@ -1945,6 +1956,40 @@ const HIDE_WEB_SERVER_NAMES_BLOCK = `  header {
     defer
   }
 `;
+
+/**
+ * The hosting web server's answer for a name nobody hosts, on :80 and :443.
+ * Ports 80/443 are for hosting, so an unconfigured name is answered here (an
+ * empty 200, no redirect) rather than refused. The HTTPS side shows one fixed
+ * self-signed certificate, made for {@link HOSTING_FALLBACK_HOSTNAME} and handed
+ * to every other name by the Caddyfile's `default_sni` / `fallback_sni`, so the
+ * number of certificates never depends on what clients send. Hosted names keep
+ * their own site blocks, which always win. The panel's own address is a
+ * different listener and is not affected.
+ *
+ * This one file is shared by every environment on the server: each hosting
+ * deploy rewrites it, so the hide-names choice in force is that of whichever
+ * environment deployed last.
+ */
+export function hostingFallbackSnippet(
+  hideWebServerNames: boolean | undefined,
+): string {
+  const hide = hideWebServerNames ? HIDE_WEB_SERVER_NAMES_BLOCK : "";
+  return `# Names nobody hosts. Rewritten on every deploy.
+http:// {
+${hide}  respond "" 200
+}
+
+https:// {
+${hide}  respond "" 200
+}
+
+${HOSTING_FALLBACK_HOSTNAME} {
+  tls internal
+${hide}  respond "" 200
+}
+`;
+}
 
 /** The bind line plus, when asked, the header removal that follows it. */
 function siteBlockPreamble(
@@ -2737,6 +2782,7 @@ async function validateHostingCaddyCandidate(
   siteFile: string,
   contents: string,
   grantRead: (hostingDir: string) => Promise<void>,
+  fallbackContents?: string,
 ): Promise<void> {
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
@@ -2760,6 +2806,13 @@ async function validateHostingCaddyCandidate(
         Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
       ),
     );
+    if (fallbackContents !== undefined) {
+      await Deno.writeTextFile(
+        join(candidate.sitesDir, HOSTING_FALLBACK_SITE),
+        fallbackContents,
+        { mode: 0o640 },
+      );
+    }
     await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
@@ -2870,6 +2923,119 @@ async function guardHostingCaddySitesLocked(
   } finally {
     await closeHostingCandidate(candidate);
   }
+}
+
+/**
+ * The hide-names choice to give the catch-all when no deploy has sent one: the
+ * answer already on disk wins, then what the written sites say (any of them
+ * hides names: yes; sites without it: no), and an unknown answer hides names,
+ * which is the organization default.
+ */
+async function lastKnownHideWebServerNames(
+  sitesDir: string,
+  names: readonly string[],
+): Promise<boolean> {
+  const sites = names.filter((name) => !isDaemonReservedHostingSite(name));
+  if (sites.length === 0) return true;
+  const texts = await Promise.all(
+    sites.map((name) =>
+      readTextIfPresent(join(sitesDir, name)).catch(() => undefined)
+    ),
+  );
+  const readable = texts.filter((text) => text !== undefined);
+  if (readable.length === 0) return true;
+  return readable.some((text) => text.includes(HIDE_WEB_SERVER_NAMES_BLOCK));
+}
+
+/**
+ * At daemon start: make sure a host that already runs hosting Caddy answers
+ * unhosted names (the reserved `sites/00-fallback.caddy` and the Caddyfile's
+ * `default_sni` / `fallback_sni`) without waiting for a deploy to write them.
+ * Nothing happens when this host has no hosting Caddy (not set up, or not
+ * running), when both are already current, or when hosting Caddy refuses the
+ * result: the live files are then left as they were and the reason is thrown.
+ * Returns true when something was changed and Caddy was reloaded.
+ */
+export function ensureHostingFallback(
+  layout: LayoutPaths,
+  grantRead: (hostingDir: string) => Promise<void> = grantHostingCaddyRead,
+): Promise<boolean> {
+  return withHostingSitesLock(() =>
+    ensureHostingFallbackLocked(layout, grantRead)
+  );
+}
+
+async function ensureHostingFallbackLocked(
+  layout: LayoutPaths,
+  grantRead: (hostingDir: string) => Promise<void>,
+): Promise<boolean> {
+  const hostingDir = join(layout.configDir, "hosting");
+  const sitesDir = join(hostingDir, "sites");
+  const caddyfilePath = join(hostingDir, "Caddyfile");
+  // The staged unit is written only by the hosting Caddy setup.
+  if (await readTextIfPresent(join(hostingDir, CADDY_SERVICE)) === undefined) {
+    return false;
+  }
+  if (!await (hostingCaddyReadyOverride ?? hostingCaddyReady)(layout)) {
+    return false;
+  }
+  const running = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "is-active", "--quiet", CADDY_SERVICE]),
+  );
+  if (!running.success) return false;
+
+  const wantCaddyfile = caddyfile(layout.configDir);
+  const liveCaddyfile = await readTextIfPresent(caddyfilePath);
+  const names = await liveSnippetNames(sitesDir).catch((err) => {
+    if (err instanceof Deno.errors.NotFound) return [] as string[];
+    throw err;
+  });
+  const fallbackPath = join(sitesDir, HOSTING_FALLBACK_SITE);
+  const liveFallback = await readTextIfPresent(fallbackPath);
+  if (liveFallback !== undefined && liveCaddyfile === wantCaddyfile) {
+    return false;
+  }
+  const fallback = liveFallback ??
+    hostingFallbackSnippet(await lastKnownHideWebServerNames(sitesDir, names));
+
+  const candidate = await openHostingCandidate(layout, hostingDir);
+  try {
+    const others = names.filter((name) => name !== HOSTING_FALLBACK_SITE);
+    await Promise.all(
+      others.map((name) =>
+        Deno.copyFile(join(sitesDir, name), join(candidate.sitesDir, name))
+      ),
+    );
+    await Deno.writeTextFile(
+      join(candidate.sitesDir, HOSTING_FALLBACK_SITE),
+      fallback,
+      { mode: 0o640 },
+    );
+    await grantRead(hostingDir);
+    const refusal = await hostingCandidateRefusal(layout, candidate);
+    if (refusal !== null) {
+      throw new Error(
+        `hosting Caddy refused the unhosted-name answer, left as it was: ${refusal}`,
+      );
+    }
+  } finally {
+    await closeHostingCandidate(candidate);
+  }
+
+  const next = `${caddyfilePath}.tpnew`;
+  await Deno.writeTextFile(next, wantCaddyfile, { mode: 0o640 });
+  await Deno.rename(next, caddyfilePath);
+  try {
+    await activateHostingSites([{ live: fallbackPath, contents: fallback }]);
+  } catch (err) {
+    if (liveCaddyfile !== undefined) {
+      await Deno.writeTextFile(caddyfilePath, liveCaddyfile, { mode: 0o640 });
+    }
+    throw err;
+  }
+  await grantRead(hostingDir);
+  return true;
 }
 
 /** Put the previous snippet back after a failed reload. */
@@ -2985,10 +3151,6 @@ async function activateHostingSites(
   );
 }
 
-function activateHostingSite(live: string, contents: string): Promise<void> {
-  return activateHostingSites([{ live, contents }]);
-}
-
 /**
  * Write one environment's hosting snippet. The new snippet is validated as part
  * of the whole set before it touches the live include glob; when a running
@@ -3043,6 +3205,9 @@ async function rewriteHostingCaddySitesLocked(
     })
     .join("\n");
   const siteFile = `${payload.environmentId}.caddy`;
+  const fallbackContent = hostingFallbackSnippet(
+    payload.hideWebServerNames === true,
+  );
   await validateHostingCaddyCandidate(
     layout,
     hostingDir,
@@ -3050,6 +3215,7 @@ async function rewriteHostingCaddySitesLocked(
     siteFile,
     siteContent,
     grantRead,
+    fallbackContent,
   );
 
   if (hostnames.length > 0) {
@@ -3066,7 +3232,10 @@ async function rewriteHostingCaddySitesLocked(
     }
   }
 
-  await activateHostingSite(join(sitesDir, siteFile), siteContent);
+  await activateHostingSites([
+    { live: join(sitesDir, siteFile), contents: siteContent },
+    { live: join(sitesDir, HOSTING_FALLBACK_SITE), contents: fallbackContent },
+  ]);
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
   // environment that moves off acme-mode entirely never leaves a stale entry
