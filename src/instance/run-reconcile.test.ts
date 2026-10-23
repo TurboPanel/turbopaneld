@@ -1172,7 +1172,8 @@ function managedUpdateHooks(
     statfsProbe: PLENTY_STATFS,
     fetchText: () =>
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
-    readCaddyfile: () => Promise.resolve("handle_errors\nupdating.html\n"),
+    readCaddyfile: () =>
+      Promise.resolve("handle_errors\nupdating.html\n@ui_hashed path\n"),
     restartUnits: () => Promise.resolve(true),
     ensureWebServer: () => Promise.resolve(true),
     migrate: () =>
@@ -1573,6 +1574,18 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the updating page is a
   );
   assertEquals(backupAt >= 0 && refreshAt > backupAt, true);
   assertEquals(installAt > refreshAt, true);
+});
+
+test("executeInstanceUpdateReconcile refreshes Caddy when the UI cache rules are absent", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      readCaddyfile: () => Promise.resolve("handle_errors\nupdating.html\n"),
+    }),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  assertEquals(names.includes("instance-launch-only.yml"), true);
 });
 
 test("executeInstanceUpdateReconcile re-renders the units once, after the swap and before the restart", async () => {
