@@ -3289,6 +3289,7 @@ tp_purge_docker_engine() {
   hash -r 2>/dev/null || true
   if tp_docker_engine_gone; then
     TP_DOCKER_ENGINE_GONE=true
+    tp_purge_docker_stale_sockets
     tp_purge_docker_unit_leftovers
     tp_purge_docker_network_state
   else
@@ -3374,9 +3375,28 @@ tp_docker_engine_packages_remain() {
   return 1
 }
 
+# True when a process is listening on the unix socket path $1. A socket file
+# with no listener is stale (a failed docker.socket leaves one behind). Without
+# ss there is no way to tell, and the packages, binaries and units were already
+# checked by the caller, so the file counts as stale.
+tp_socket_listening() {
+  tp_has_tool ss || return 1
+  ss -xl 2>/dev/null | grep -F -- " $1 " >/dev/null 2>&1
+}
+
+# Removes the stale socket files of a Docker that is gone: only the listed
+# socket paths, only when they are sockets nobody listens on.
+tp_purge_docker_stale_sockets() {
+  for _pdss in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
+    if [ -S "$_pdss" ] && [ ! -L "$_pdss" ] && ! tp_socket_listening "$_pdss"; then
+      tp_run "remove stale socket $_pdss" rm -f "$_pdss" || true
+    fi
+  done
+}
+
 # Docker Engine is gone only when nothing of it remains: no daemon binary
 # (also the snap and rootless ones), no engine package, no active or installed
-# service, and no live socket. Anything uncertain counts as still present.
+# service, and no socket with a listener. Anything uncertain counts as still present.
 # Dry runs change nothing, so they never count as gone.
 tp_docker_engine_gone() {
   [ "$DRY_RUN" = true ] && { TP_DOCKER_PRESENT_WHY="dry run"; return 1; }
@@ -3406,7 +3426,10 @@ tp_docker_engine_gone() {
     done
   fi
   for _deg in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
-    [ -S "$_deg" ] && { TP_DOCKER_PRESENT_WHY="the socket $_deg exists"; return 1; }
+    if [ -S "$_deg" ] && tp_socket_listening "$_deg"; then
+      TP_DOCKER_PRESENT_WHY="something is listening on $_deg"
+      return 1
+    fi
   done
   return 0
 }

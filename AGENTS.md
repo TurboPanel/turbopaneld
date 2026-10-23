@@ -1267,7 +1267,7 @@ Purge order:
    data root, and `/etc/docker` even when the packages are already gone.
    Remove any file in `/etc/apt/sources.list.d` that references
    `download.docker.com`, and the keyring named in that file's `Signed-By`
-   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`, only when no Docker engine package (`docker-ce`, `docker.io` and kin) is still installed: `docker.socket` needs the group at boot, and the Docker role recreates it on every run. Failed Docker units are reset (`tp_reset_failed_docker_units`). Once
+   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`, only when no Docker engine package (`docker-ce`, `docker.io` and kin) is still installed: `docker.socket` needs the group at boot, and the Docker role recreates it on every run. Failed Docker units are reset (`tp_reset_failed_docker_units`). A docker socket file counts as a live engine only when something listens on it (`ss -xl`); a stale one is removed once the engine is gone. Once
    Docker Engine is gone (no `dockerd`, no `docker-ce`/`docker.io`;
    `tp_docker_engine_gone`), `tp_purge_docker_network_state` deletes the
    `docker0` and `br-<12 hex>` bridges, the rules in the filter, nat and raw

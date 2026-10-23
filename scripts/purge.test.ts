@@ -1255,7 +1255,7 @@ test("moby or snap Docker left after apt purge does not mark the engine gone", a
   assertStringIncludes(result.stderr + result.stdout, "leftover");
 });
 
-test("Docker Engine counts as gone only when no daemon, snap, service or socket remains", async () => {
+test("Docker Engine counts as gone only when no daemon, snap, package or service remains", async () => {
   assertEquals(await engineGone({}), "gone");
   assertEquals(await engineGone({ dockerd: "exit 0" }), "present");
   assertEquals(
@@ -1268,7 +1268,7 @@ test("Docker Engine counts as gone only when no daemon, snap, service or socket 
     await engineGone({ "dpkg-query": 'printf "install ok installed"' }),
     "present",
   );
-  const dir = await Deno.makeTempDir({ prefix: "tp-purge-sock-" });
+});
   const sock = join(dir, "docker.sock");
   const listener = Deno.listen({ transport: "unix", path: sock });
   try {
@@ -1845,4 +1845,51 @@ esac
   );
   assertStringIncludes(result.stdout, "fail=0");
   assertEquals((await Deno.readTextFile(calls)).trim(), "docker.socket");
+});
+
+async function staleSocketRun(listening: boolean): Promise<ShResult> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-sock-" });
+  const sock = join(dir, "docker.sock");
+  const server = Deno.listen({ transport: "unix", path: sock });
+  if (!listening) server.close();
+  const ss = `#!/bin/sh\n${
+    listening ? `echo "u_str LISTEN 0 4096 ${sock} 1 * 0"` : "true"
+  }\n`;
+  const bin = join(dir, "bin");
+  await Deno.mkdir(bin);
+  await Deno.writeTextFile(join(bin, "ss"), ss, { mode: 0o755 });
+  await Deno.symlink("/bin/sh", join(bin, "sh"));
+  await Deno.symlink("/usr/bin/grep", join(bin, "grep")).catch(() =>
+    Deno.symlink("/bin/grep", join(bin, "grep"))
+  );
+  await Deno.symlink("/bin/rm", join(bin, "rm")).catch(() =>
+    Deno.symlink("/usr/bin/rm", join(bin, "rm"))
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_docker_engine_gone",
+      "tp_socket_listening",
+      "tp_purge_docker_stale_sockets",
+      "tp_has_tool",
+      "tp_pkg_installed",
+    ],
+    `DRY_RUN=false
+if tp_docker_engine_gone; then echo gone; tp_purge_docker_stale_sockets; else echo present; fi
+if [ -S "${sock}" ]; then echo sock=left; else echo sock=removed; fi`,
+    { PATH: bin, TP_DOCKER_SOCKETS: sock },
+  );
+  if (listening) server.close();
+  return { ...result, stdout: result.stdout + result.stderr };
+}
+
+test("a stale docker socket file with nothing installed counts as gone and is removed", async () => {
+  const result = await staleSocketRun(false);
+  assertStringIncludes(result.stdout, "gone");
+  assertStringIncludes(result.stdout, "sock=removed");
+});
+
+test("a docker socket with a live listener keeps the engine present and the socket", async () => {
+  const result = await staleSocketRun(true);
+  assertStringIncludes(result.stdout, "present");
+  assertStringIncludes(result.stdout, "sock=left");
 });
