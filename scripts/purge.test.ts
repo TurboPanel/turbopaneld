@@ -1269,14 +1269,6 @@ test("Docker Engine counts as gone only when no daemon, snap, package or service
     "present",
   );
 });
-  const sock = join(dir, "docker.sock");
-  const listener = Deno.listen({ transport: "unix", path: sock });
-  try {
-    assertEquals(await engineGone({}, { TP_DOCKER_SOCKETS: sock }), "present");
-  } finally {
-    listener.close();
-  }
-});
 
 // getent and groupdel stand-ins over a temp group/passwd pair: groupdel drops
 // the line, as the real one would; tp_run prints "▸ groupdel <name>".
