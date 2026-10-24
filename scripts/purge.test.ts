@@ -45,6 +45,7 @@ const CONSTANTS = [
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
   "TP_DOCKER_PACKAGES",
+  "TP_DOCKER_ENGINE_PACKAGES",
   "TP_DPKG_ON_DISK",
   "TP_APT_SOURCES_DIR",
   "TP_DOCKER_APT_SOURCES",
@@ -1785,6 +1786,7 @@ async function dockerGroupRun(
       "tp_reset_failed_docker_units",
       "tp_has_tool",
       "tp_pkg_installed",
+      "tp_docker_engine_packages_remain",
     ],
     [
       GROUP_STUBS,
@@ -1884,4 +1886,107 @@ test("a docker socket with a live listener keeps the engine present and the sock
   const result = await staleSocketRun(true);
   assertStringIncludes(result.stdout, "present");
   assertStringIncludes(result.stdout, "sock=left");
+});
+
+test("docker group stays when only containerd.io remains", async () => {
+  const result = await dockerGroupRun({
+    "docker-ce": "purge ok not-installed",
+    "containerd.io": "install ok installed",
+  });
+  assertStringIncludes(result.stdout, "GROUP=kept");
+});
+
+async function socketPathRun(
+  ssBody: string,
+  checkPath: string,
+): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-sockp-" });
+  if (ssBody) {
+    await Deno.writeTextFile(join(dir, "ss"), `#!/bin/sh\n${ssBody}\n`, {
+      mode: 0o755,
+    });
+  }
+  await Deno.symlink("/bin/sh", join(dir, "sh"));
+  await Deno.symlink("/usr/bin/grep", join(dir, "grep")).catch(() =>
+    Deno.symlink("/bin/grep", join(dir, "grep"))
+  );
+  const result = await runPurgeSh(
+    ["tp_socket_listening", "tp_has_tool"],
+    `if tp_socket_listening ${checkPath}; then echo LIVE; else echo STALE; fi`,
+    { PATH: dir },
+  );
+  return result.stdout;
+}
+
+test("a listener bound as /var/run/docker.sock counts for /run/docker.sock and back", async () => {
+  const a = await socketPathRun(
+    'echo "u_str LISTEN 0 4096 /var/run/docker.sock 1 * 0"',
+    "/run/docker.sock",
+  );
+  assertStringIncludes(a, "LIVE");
+  const b = await socketPathRun(
+    'echo "u_str LISTEN 0 4096 /run/docker.sock 1 * 0"',
+    "/var/run/docker.sock",
+  );
+  assertStringIncludes(b, "LIVE");
+});
+
+test("a socket nobody listens on is stale, ss failing is uncertain (live), no ss is stale", async () => {
+  assertStringIncludes(
+    await socketPathRun(
+      'echo "u_str LISTEN 0 4096 /run/other.sock 1 * 0"',
+      "/run/docker.sock",
+    ),
+    "STALE",
+  );
+  assertStringIncludes(
+    await socketPathRun("exit 1", "/run/docker.sock"),
+    "LIVE",
+  );
+  assertStringIncludes(await socketPathRun("", "/run/docker.sock"), "STALE");
+});
+
+async function forwardPolicyRun(
+  afterRules: string,
+): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-fwd-" });
+  const calls = join(dir, "calls");
+  await Deno.writeTextFile(
+    join(dir, "iptables"),
+    [
+      "#!/bin/sh",
+      `echo "iptables $*" >> ${calls}`,
+      'case "$*" in',
+      `  *"-t filter -S") printf -- "${afterRules}" ;;`,
+      "esac",
+    ].join("\n") + "\n",
+    { mode: 0o755 },
+  );
+  const result = await runPurgeSh(
+    ["tp_restore_forward_policy"],
+    "tp_restore_forward_policy iptables",
+    { PATH: `${dir}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  try {
+    return await Deno.readTextFile(calls);
+  } catch {
+    return "";
+  }
+}
+
+test("a FORWARD policy of DROP with no FORWARD rules left goes back to ACCEPT", async () => {
+  const log = await forwardPolicyRun(
+    "-P INPUT ACCEPT\\n-P FORWARD DROP\\n-P OUTPUT ACCEPT\\n",
+  );
+  assertStringIncludes(log, "-t filter -P FORWARD ACCEPT");
+});
+
+test("an operator's FORWARD rule, or a policy that is not DROP, leaves the policy alone", async () => {
+  const kept = await forwardPolicyRun(
+    "-P FORWARD DROP\\n-A FORWARD -s 10.0.0.1 -j ACCEPT\\n",
+  );
+  assert(!kept.includes("-P FORWARD ACCEPT"), kept);
+  const accept = await forwardPolicyRun("-P FORWARD ACCEPT\\n");
+  assert(!accept.includes("-P FORWARD ACCEPT"), accept);
 });
