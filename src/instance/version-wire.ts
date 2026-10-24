@@ -88,6 +88,7 @@ export const DAEMON_WIRE_FEATURES = [
   "host-capacity-v1",
   "server-network-check-v1",
   "backup-s3-copy-v1",
+  "deploy-hostings-only-v1",
 ] as const;
 
 /**
@@ -99,6 +100,16 @@ export const DAEMON_WIRE_FEATURES = [
 export const COMMAND_RECOVERY_FEATURE = "command-recovery-v1";
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
+
+/**
+ * This daemon honours `hostingsOnly` on `environment.deploy`: it rewrites only
+ * the environment's hosting web server config and certificates, with no build
+ * and no restart. The control plane sends a hostings-only run (after a hosting
+ * gets a Let's Encrypt certificate) only when the daemon of every server lists
+ * this feature; an older daemon would run it as a full deploy.
+ */
+export const DEPLOY_HOSTINGS_ONLY_FEATURE: DaemonWireFeature =
+  "deploy-hostings-only-v1";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`
