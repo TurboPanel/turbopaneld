@@ -1380,7 +1380,7 @@ runtime inventory probes.
 
 ## Subsystem docs (nested `AGENTS.md`)
 
-Large subsystems live in focused `AGENTS.md` files next to their code — Cursor loads the nearest one automatically when you work in that directory. **Read the matching file before editing that area.** This root keeps the foundational path model + conventions; the detail moved to:
+Large subsystems live in focused `AGENTS.md` files next to their code. **Read the matching file before editing that area.** This root keeps the foundational path model + conventions; the detail moved to:
 
 | Subsystem | Read before editing | Covers |
 |---|---|---|
