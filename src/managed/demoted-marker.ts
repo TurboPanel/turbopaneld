@@ -27,6 +27,7 @@ import {
   readManagedHaMember,
 } from "./ha-member.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
+import { clearSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
 
 const MARKER_FILE = "demoted.json";
 
@@ -442,6 +443,8 @@ export async function maybeClearDemotedMarkerAfterApply(
     keepStandbySignal: true,
   });
   if (wasDemoted) {
+    // Back as a standby: an earlier promote mark of this member is history.
+    await clearSwitchoverPromoteLocalMarker(layout, payload.managedId);
     reseedFinishedAt.set(payload.managedId, Date.now());
   }
 }

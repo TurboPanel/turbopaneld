@@ -14,6 +14,10 @@ import {
 } from "./demoted-marker.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
 import {
+  readSwitchoverPromoteLocalMarker,
+  writeSwitchoverPromoteLocalMarker,
+} from "./switchover-state-marker.ts";
+import {
   handleManagedLifecycle,
   refuseWritableFencedAfterComposeStart,
 } from "./lifecycle.ts";
@@ -462,6 +466,49 @@ test("a stop of a demoted replica that was sent before its re-seed finished is d
       );
       assertEquals(composeCalled(docker.calls, "stop"), true);
       assert(await isManagedMemberDemoted(layout, managedId));
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("a demoted stop forgets a promote mark left by an earlier switchover", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const managedId = "managed_lifecycle_old_promote_mark";
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await writeSwitchoverPromoteLocalMarker(
+        layout,
+        managedId,
+        "completed",
+        "2026-10-20T00:00:00.000Z",
+      );
+      await handleManagedLifecycle(
+        {
+          managedId,
+          action: "stop",
+          memberId: MEMBER_ID,
+          role: "primary",
+          demoted: true,
+        },
+        new Date().toISOString(),
+        { runDocker: fakeDocker(new Set()).run },
+      );
+      assertEquals(
+        await readSwitchoverPromoteLocalMarker(layout, managedId),
+        null,
+      );
     } finally {
       for (const [key, value] of Object.entries(prior)) {
         if (value === undefined) Deno.env.delete(key);

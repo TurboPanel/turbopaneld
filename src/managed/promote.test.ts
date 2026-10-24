@@ -12,6 +12,7 @@ import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedPromote } from "./promote.ts";
 import { managedDir } from "./engine-paths.ts";
 import {
+  clearSwitchoverPromoteLocalMarker,
   readSwitchoverPromoteLocalMarker,
   readSwitchoverQuiescedMarker,
   writeSwitchoverPromoteLocalMarker,
@@ -104,6 +105,33 @@ test("a promote on a member with no running engine says nothing was promoted", a
       "target_not_running",
     );
     assertStringIncludes(message, "no running containers");
+  });
+});
+
+test("a promote mark of this switchover is still honoured; one cleared at demotion is not", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_mark_cleared";
+    const layout = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+    await writeSwitchoverPromoteLocalMarker(
+      layout,
+      managedId,
+      "completed",
+      "2026-10-20T00:00:00.000Z",
+    );
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(
+        await promoteWithNoContainer(managedId),
+      ),
+      null,
+    );
+    await clearSwitchoverPromoteLocalMarker(layout, managedId);
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(
+        await promoteWithNoContainer(managedId),
+      ),
+      "target_not_running",
+    );
   });
 });
 

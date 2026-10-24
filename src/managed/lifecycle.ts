@@ -54,6 +54,7 @@ import {
   isFencedMemberStillWritable,
 } from "./fenced-member-enforce.ts";
 import { withManagedLifecycleLock } from "./target-lock.ts";
+import { clearSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 type RunDockerFn = (
@@ -447,6 +448,12 @@ async function runManagedLifecycle(
     runDocker: run,
     ...(deps?.ensureDocker ? { ensureDocker: deps.ensureDocker } : {}),
   };
+  if (payload.action === "stop" && payload.demoted === true) {
+    // A member being demoted (any engine) starts over: its "promoted" mark
+    // from an earlier switchover is history. Left behind, it would later make
+    // a promote that never started look like one that did.
+    await clearSwitchoverPromoteLocalMarker(layout, payload.managedId);
+  }
   const switchoverPrimaryExecutedGtidSet =
     await captureSwitchoverGtidBeforeStop(
       payload,
