@@ -4,15 +4,18 @@
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { parseSwitchoverPromoteFailureCode } from "./engines/switchover-promote-error.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedPromote } from "./promote.ts";
 import { managedDir } from "./engine-paths.ts";
 import {
+  clearSwitchoverPromoteLocalMarker,
   readSwitchoverPromoteLocalMarker,
   readSwitchoverQuiescedMarker,
+  writeSwitchoverPromoteLocalMarker,
   writeSwitchoverQuiescedMarker,
 } from "./switchover-state-marker.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
@@ -73,6 +76,80 @@ test("handleManagedPromote rejects when no containers are running", async () => 
     Error,
     "no running containers",
   );
+});
+
+async function promoteWithNoContainer(managedId: string): Promise<string> {
+  try {
+    await handleManagedPromote(
+      {
+        managedId,
+        memberId: "00000000-0000-4000-8000-000000000002",
+      },
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: () => Promise.resolve(dockerOk("[]")),
+      },
+    );
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new TypeError("expected the promote to be refused");
+}
+
+test("a promote on a member with no running engine says nothing was promoted", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const message = await promoteWithNoContainer("managed_promote_not_running");
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(message),
+      "target_not_running",
+    );
+    assertStringIncludes(message, "no running containers");
+  });
+});
+
+test("a promote mark of this switchover is still honoured; one cleared at demotion is not", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_mark_cleared";
+    const layout = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+    await writeSwitchoverPromoteLocalMarker(
+      layout,
+      managedId,
+      "completed",
+      "2026-10-20T00:00:00.000Z",
+    );
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(
+        await promoteWithNoContainer(managedId),
+      ),
+      null,
+    );
+    await clearSwitchoverPromoteLocalMarker(layout, managedId);
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(
+        await promoteWithNoContainer(managedId),
+      ),
+      "target_not_running",
+    );
+  });
+});
+
+test("a promote that already started on this host is never reported as not started", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_started_before";
+    const layout = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+    await writeSwitchoverPromoteLocalMarker(
+      layout,
+      managedId,
+      "started",
+      "2026-10-24T00:00:00.000Z",
+    );
+    const message = await promoteWithNoContainer(managedId);
+    assertEquals(parseSwitchoverPromoteFailureCode(message), null);
+    assertStringIncludes(message, "no running containers");
+  });
 });
 
 test("handleManagedPromote promotes standby and reports primary health", async () => {

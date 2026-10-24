@@ -8,10 +8,15 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   isManagedMemberDemoted,
+  maybeClearDemotedMarkerAfterApply,
   readManagedDemotedMarker,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
+import {
+  readSwitchoverPromoteLocalMarker,
+  writeSwitchoverPromoteLocalMarker,
+} from "./switchover-state-marker.ts";
 import {
   handleManagedLifecycle,
   refuseWritableFencedAfterComposeStart,
@@ -399,6 +404,110 @@ test("lifecycle stop with demoted writes a marker; an ordinary stop does not", a
       assertEquals(
         await isManagedMemberDemoted(layout, ordinaryId),
         false,
+      );
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("a stop of a demoted replica that was sent before its re-seed finished is dropped", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const managedId = "managed_lifecycle_stale_stop";
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await writeManagedDemotedMarker(
+        layout,
+        managedId,
+        MEMBER_ID,
+        "2026-10-08T12:00:00.000Z",
+        "postgres",
+      );
+      const docker = fakeDocker(new Set());
+      const sentBeforeSeed = new Date(Date.now() - 1000).toISOString();
+      // The re-seed apply finishes: the member is a ready standby again.
+      await maybeClearDemotedMarkerAfterApply(
+        layout,
+        { managedId, memberRole: "replica", engine: "postgres" },
+        "ready",
+        docker.run,
+      );
+      assertEquals(await isManagedMemberDemoted(layout, managedId), false);
+      const stop: ManagedLifecyclePayload = {
+        managedId,
+        action: "stop",
+        memberId: MEMBER_ID,
+        role: "replica",
+        demoted: true,
+      };
+      const stale = await handleManagedLifecycle(stop, sentBeforeSeed, {
+        runDocker: docker.run,
+      });
+      assertEquals(stale.status, "ready");
+      assertEquals(composeCalled(docker.calls, "stop"), false);
+      assertEquals(await isManagedMemberDemoted(layout, managedId), false);
+
+      // A stop received after the re-seed is a new fence and is carried out.
+      await handleManagedLifecycle(
+        stop,
+        new Date(Date.now() + 1000).toISOString(),
+        { runDocker: docker.run },
+      );
+      assertEquals(composeCalled(docker.calls, "stop"), true);
+      assert(await isManagedMemberDemoted(layout, managedId));
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("a demoted stop forgets a promote mark left by an earlier switchover", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const managedId = "managed_lifecycle_old_promote_mark";
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await writeSwitchoverPromoteLocalMarker(
+        layout,
+        managedId,
+        "completed",
+        "2026-10-20T00:00:00.000Z",
+      );
+      await handleManagedLifecycle(
+        {
+          managedId,
+          action: "stop",
+          memberId: MEMBER_ID,
+          role: "primary",
+          demoted: true,
+        },
+        new Date().toISOString(),
+        { runDocker: fakeDocker(new Set()).run },
+      );
+      assertEquals(
+        await readSwitchoverPromoteLocalMarker(layout, managedId),
+        null,
       );
     } finally {
       for (const [key, value] of Object.entries(prior)) {
