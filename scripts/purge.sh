@@ -3307,11 +3307,7 @@ tp_purge_docker_group() {
   getent group docker >/dev/null 2>&1 || return 0
   _pdg_remain=false
   if [ "$DRY_RUN" != true ] && tp_has_tool dpkg-query; then
-    for _pdg_pkg in docker-ce docker-ce-cli docker-ce-rootless-extras docker.io moby-engine moby-cli; do
-      if tp_pkg_installed "$_pdg_pkg"; then
-        _pdg_remain=true
-      fi
-    done
+    tp_docker_engine_packages_remain && _pdg_remain=true
   fi
   if [ "$_pdg_remain" = true ]; then
     tp_print_warn "keeping the docker group: Docker Engine packages are still installed"
@@ -3362,12 +3358,13 @@ tp_purge_docker_unit_leftovers() {
   done
 }
 
-# True when an engine package from TP_DOCKER_PACKAGES is still on the host.
+# True when an engine package from TP_DOCKER_ENGINE_PACKAGES (the one list the
+# docker group decision and the engine-gone check share) is still on the host.
 tp_docker_engine_packages_remain() {
   if ! tp_has_tool dpkg-query; then
     return 1
   fi
-  for _depr in $TP_DOCKER_PACKAGES; do
+  for _depr in $TP_DOCKER_ENGINE_PACKAGES; do
     if tp_pkg_installed "$_depr"; then
       return 0
     fi
@@ -3375,13 +3372,22 @@ tp_docker_engine_packages_remain() {
   return 1
 }
 
-# True when a process is listening on the unix socket path $1. A socket file
-# with no listener is stale (a failed docker.socket leaves one behind). Without
-# ss there is no way to tell, and the packages, binaries and units were already
-# checked by the caller, so the file counts as stale.
+# True when a process is listening on the unix socket path $1, or may be: ss
+# lists the path the listener bound, and /run and /var/run are the same
+# directory, so both spellings are matched. A socket file with no listener is
+# stale (a failed docker.socket leaves one behind). If ss exists but fails, it
+# is uncertain and counts as listening. Without ss there is no way to tell, and
+# the packages, binaries and units were already checked by the caller, so the
+# file counts as stale.
 tp_socket_listening() {
   tp_has_tool ss || return 1
-  ss -xl 2>/dev/null | grep -F -- " $1 " >/dev/null 2>&1
+  _tsl_out=$(ss -xl 2>/dev/null) || return 0
+  _tsl_alt=
+  case $1 in
+    /var/run/*) _tsl_alt=/run/${1#/var/run/} ;;
+    /run/*) _tsl_alt=/var/run/${1#/run/} ;;
+  esac
+  printf '%s\n' "$_tsl_out" | grep -F -e " $1 " ${_tsl_alt:+-e " $_tsl_alt "} >/dev/null 2>&1
 }
 
 # Removes the stale socket files of a Docker that is gone: only the listed
@@ -3410,7 +3416,7 @@ tp_docker_engine_gone() {
     return 1
   fi
   if tp_has_tool dpkg-query; then
-    for _deg in docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io docker-ce-rootless-extras moby-engine moby-cli; do
+    for _deg in $TP_DOCKER_ENGINE_PACKAGES; do
       if tp_pkg_installed "$_deg"; then
         TP_DOCKER_PRESENT_WHY="package $_deg is installed"
         return 1
@@ -3498,6 +3504,22 @@ tp_purge_docker_net_table() {
       TP_NET_LEFT=true
     fi
   done
+  [ "$_dnt_table" = filter ] && tp_restore_forward_policy "$_dnt_bin"
+  return 0
+}
+
+# Docker sets the FORWARD policy to DROP and never puts it back. Once its rules
+# are gone, a FORWARD policy of DROP with no FORWARD rule left is Docker's
+# leftover and goes back to ACCEPT, so a purged host forwards like a clean one.
+# Any FORWARD rule that remains is the operator's, and then the policy is theirs.
+tp_restore_forward_policy() {
+  _rfp_bin=$1
+  "$_rfp_bin" -w 5 -t filter -S > "$TP_TMP/dn.after" 2>>"$TP_LOG_FILE" || return 0
+  grep -q '^-P FORWARD DROP$' "$TP_TMP/dn.after" || return 0
+  if grep -q '^-A FORWARD ' "$TP_TMP/dn.after"; then
+    return 0
+  fi
+  tp_run "set $_rfp_bin FORWARD policy to ACCEPT" "$_rfp_bin" -w 5 -t filter -P FORWARD ACCEPT || true
 }
 
 # After Docker Engine is purged its bridges and firewall rules are orphans.
@@ -4041,6 +4063,7 @@ TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folde
 # package or a systemd unit this script does not remove.
 # dpkg states in which a package's files are on disk (see tp_pkg_state_in).
 TP_DPKG_ON_DISK="installed half-installed unpacked half-configured triggers-awaited triggers-pending"
+TP_DOCKER_ENGINE_PACKAGES="docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io docker-ce-rootless-extras moby-engine moby-cli"
 TP_DOCKER_PACKAGES="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras docker.io docker-compose containerd runc"
 TP_APT_SOURCES_DIR=/etc/apt/sources.list.d
 # Docker apt sources by name: the Docker role's and the Galaxy role's deb822
