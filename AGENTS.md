@@ -1267,14 +1267,14 @@ Purge order:
    data root, and `/etc/docker` even when the packages are already gone.
    Remove any file in `/etc/apt/sources.list.d` that references
    `download.docker.com`, and the keyring named in that file's `Signed-By`
-   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`, only when no Docker engine package (`docker-ce`, `docker.io` and kin) is still installed: `docker.socket` needs the group at boot, and the Docker role recreates it on every run. Failed Docker units are reset (`tp_reset_failed_docker_units`). A docker socket file counts as a live engine only when something listens on it (`ss -xl`); a stale one is removed once the engine is gone. Once
+   (usually `/etc/apt/keyrings/docker.asc`). `groupdel docker`, only when no Docker engine package (any package in `TP_DOCKER_ENGINE_PACKAGES`, the one list the group decision and the engine-gone check share) is still installed: `docker.socket` needs the group at boot, and the Docker role recreates it on every run. Failed Docker units are reset (`tp_reset_failed_docker_units`). A docker socket file counts as a live engine only when something listens on it (`ss -xl`); a stale one is removed once the engine is gone. Once
    Docker Engine is gone (no `dockerd`, no `docker-ce`/`docker.io`;
    `tp_docker_engine_gone`), `tp_purge_docker_network_state` deletes the
    `docker0` and `br-<12 hex>` bridges, the rules in the filter, nat and raw
    tables that name those bridges or jump to a `DOCKER*` chain (rules with
    quoted words are never touched), and the `DOCKER*` chains. `DOCKER-USER`
    is kept when it holds anything but Docker's default `RETURN`. The
-   iptables-nft tables themselves belong to the host and stay. Whatever
+   iptables-nft tables themselves belong to the host and stay. When no FORWARD rule is left, a FORWARD policy of DROP (Docker's leftover) is set back to ACCEPT (`tp_restore_forward_policy`); an operator FORWARD rule keeps the policy as is. Whatever
    cannot be removed sets `TP_NET_LEFT`, which is the only time the summary
    asks for a reboot.
 3. **Data folders.** Every discovered config, state, log, run, and backup
