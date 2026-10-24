@@ -69,10 +69,8 @@ test("shouldDropPresenterLogLine drops bootstrap orchestration internals", () =>
     "downloading uv 0.11.21 from https://example.com/uv.tar.gz",
     "ensuring Python 3.12.7 is installed",
     "installing galaxy collections from orchestration/galaxy.yml",
-    "installing galaxy docker role from orchestration/requirements-docker.yml",
     "ansible already installed, skipping setup",
     "galaxy content up to date, skipping install",
-    "galaxy docker role up to date, skipping install",
     "uv 0.11.21 already installed",
     "uv 0.11.0 found, replacing with pinned 0.11.21",
     "uv archive checksum verified",
@@ -80,7 +78,6 @@ test("shouldDropPresenterLogLine drops bootstrap orchestration internals", () =>
     "Python 3.12.7 ready at /opt/turbopanel/vendor/python/3.12",
     "ansible installed",
     "galaxy collections ready",
-    "galaxy docker role ready",
     "bootstrap inputs unchanged, skipping localhost smoke-test",
   ];
 
@@ -196,7 +193,6 @@ test("shouldDropPresenterLogLine drops raw lines that survive sanitization", () 
     "Using CPython 3.12.7 interpreter at: /usr/bin/python3",
     "uv 0.11.21 already installed",
     "installing galaxy collections from orchestration/galaxy.yml",
-    "installing galaxy docker role from orchestration/requirements-docker.yml",
   ];
 
   for (const line of rawLines) {
@@ -215,10 +211,8 @@ test("shouldDropPresenterLogLine drops sanitized bootstrap orchestration interna
     "Using runtime 3.12.7 interpreter at: /usr/bin/python3",
     "runtime 0.11.21 already installed",
     "installing orchestration collections from orchestration/galaxy.yml",
-    "installing orchestration docker role from orchestration/requirements-docker.yml",
     "orchestration already installed, skipping setup",
     "orchestration content up to date, skipping install",
-    "orchestration docker role up to date, skipping install",
   ];
 
   for (const line of dropped) {

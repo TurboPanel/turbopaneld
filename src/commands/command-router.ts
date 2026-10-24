@@ -1,8 +1,12 @@
+import { bootConvergeSettled } from "../orchestration/boot-converge-gate.ts";
 import {
+  answerRepeatedDispatch,
   deliverCommandOutcome,
   markCommandInFlight,
+  noteCommandProgress,
+  recoveryEnabled,
 } from "./command-outbox.ts";
-import { errorText, sanitizeForLog } from "../util/logger.ts";
+import { errorText, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 import type {
   CommandAckMessage,
@@ -12,6 +16,7 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import {
   parseBackupsReconcilePayload,
+  parseBackupTargetTestPayload,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -78,6 +83,7 @@ import { handleFoldersRemove } from "./remove-folders.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
+import { handleBackupTargetTest } from "../backups/test-target.ts";
 import { handleStorageBackup } from "../backups/storage-backup.ts";
 import { handleStorageRestore } from "../backups/copy-restore.ts";
 import { handleTlsTrust } from "./tls-trust.ts";
@@ -127,6 +133,7 @@ export type CommandRouterHandlerOverrides = {
   handleFirewallReconcile?: typeof handleFirewallReconcile;
   handleFirewallConfirm?: typeof handleFirewallConfirm;
   handleBackupsReconcile?: typeof handleBackupsReconcile;
+  handleBackupTargetTest?: typeof handleBackupTargetTest;
   handleFoldersRemove?: typeof handleFoldersRemove;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
@@ -240,7 +247,23 @@ export async function handleCommandDispatch(
     ws.send(JSON.stringify(ack));
   }
 
+  // The same command sent again (a lost link, a control plane restart) never runs twice.
+  if (answerRepeatedDispatch(ws, message.id)) {
+    logWarn(
+      "commands",
+      `command ${
+        sanitizeForLog(message.id)
+      } was sent again; it is not run a second time`,
+    );
+    return;
+  }
+
   await markCommandInFlight(message.id);
+  // A new server connects before its boot converge has finished; no command
+  // runs on top of that converge. It was acknowledged above and is marked
+  // running before the wait, so the same command sent again meanwhile is
+  // answered like any running command and never runs twice.
+  await bootConvergeSettled();
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
   // own stop/restart/re-apply/promote/restore/destroy as intent, not a crash.
@@ -343,6 +366,16 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
+      case "server.backups.test-target": {
+        const payload = parseBackupTargetTestPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleBackupTargetTest",
+          handleBackupTargetTest,
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
       case "server.folders.remove": {
         const payload = parseFoldersRemovePayload(message.payload);
         result = await pickCommandRouterHandler(
@@ -374,6 +407,8 @@ export async function handleCommandDispatch(
           id: message.id,
           commandId: message.commandId,
           send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+          onSnapshot: (snapshot) => noteCommandProgress(message.id, snapshot),
+          keepalive: () => recoveryEnabled(),
         });
         try {
           result = await pickCommandRouterHandler(
@@ -479,7 +514,7 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleManagedBackup",
           handleManagedBackup,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -489,7 +524,7 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleManagedRestore",
           handleManagedRestore,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

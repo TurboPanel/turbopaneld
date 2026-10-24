@@ -1,9 +1,6 @@
+import { verifyGalaxyPosixTarball } from "./galaxy-bundle.ts";
 import { run, runLogged, runOrThrow, symlinkPointsAt } from "./exec.ts";
 import { createSymlink } from "../permissions/scoped-writes.ts";
-import {
-  galaxyDockerRoleHelperInvocation,
-  playbooksNeedRootHelper,
-} from "./privileged.ts";
 import {
   type AnsibleEventHandler,
   type AnsibleRawLineStream,
@@ -12,13 +9,9 @@ import {
 } from "./ansible-events.ts";
 import {
   computeBootstrapStamp,
-  computeGalaxyDockerStamp,
   galaxyCollectionsPresent,
-  galaxyDockerRolePresent,
   readBootstrapStamp,
-  readGalaxyDockerStamp,
   writeBootstrapStamp,
-  writeGalaxyDockerStamp,
 } from "./bootstrap-stamp.ts";
 import {
   computeDevConvergeStamp,
@@ -62,10 +55,7 @@ import {
   DAEMON_SYSTEMD_PLAYBOOK,
   DOCKER_PLAYBOOK,
   GALAXY_COLLECTIONS_DIR,
-  GALAXY_DOCKER_REQUIREMENTS_FILE,
-  GALAXY_REQUIREMENTS_FILE,
-  GALAXY_VENDOR_ROLES_DIR,
-  galaxyDockerRoleCodeloadUrl,
+  GALAXY_POSIX_TARBALL,
   LOCALHOST_PLAYBOOK,
   ORCHESTRATION_DIR,
   ORCHESTRATION_LAYOUT,
@@ -299,11 +289,12 @@ export function galaxyBootstrapRunContext(): {
 }
 
 /**
- * Install pinned Ansible Galaxy collections needed for every playbook run.
+ * Install the bundled Ansible Galaxy collection needed for every playbook run
+ * (offline, from the tarball in the release package, after a digest check).
  *
  * Collections land in `runtimes/ansible/galaxy-collections/` (`ansible.posix`
- * for the JSONL callback and sysctl modules). Docker Galaxy roles are deferred
- * to {@link ensureGalaxyDockerRole} — they are not part of bootstrap.
+ * for the JSONL callback and sysctl modules). Docker is installed by our own
+ * `docker` role, not from Galaxy.
  */
 export async function ensureGalaxyCollections(): Promise<void> {
   if (!(await ansiblePlaybookWorks())) {
@@ -323,9 +314,10 @@ export async function ensureGalaxyCollections(): Promise<void> {
   const galaxyRun = galaxyBootstrapRunContext();
   ansibleHome();
 
+  await verifyGalaxyPosixTarball();
   logInfo(
     "orchestration",
-    `installing galaxy collections from ${GALAXY_REQUIREMENTS_FILE}`,
+    `installing galaxy collections from ${GALAXY_POSIX_TARBALL}`,
   );
   await withRetry(
     () =>
@@ -334,8 +326,8 @@ export async function ensureGalaxyCollections(): Promise<void> {
         [
           "collection",
           "install",
-          "-r",
-          GALAXY_REQUIREMENTS_FILE,
+          GALAXY_POSIX_TARBALL,
+          "--offline",
           "-p",
           GALAXY_COLLECTIONS_DIR,
         ],
@@ -348,284 +340,6 @@ export async function ensureGalaxyCollections(): Promise<void> {
     { label: "install galaxy collections", attempts: 3 },
   );
   logInfo("orchestration", "galaxy collections ready");
-}
-
-/**
- * Nested ansible-lint config written into Galaxy role trees. Project
- * `exclude_paths` skip discovery, but Red Hat Ansible / ansible-lint still
- * lint an explicitly opened path and use the nearest `.ansible-lint` (so this
- * must silence nearly all rules). `skip_list` tags + rule ids; unskippable
- * rules (`syntax-check`, `load-failure`, …) cannot be listed.
- */
-const GALAXY_ROLE_ANSIBLE_LINT_CONFIG =
-  `# Written by TurboPanel ensureGalaxyDockerRole after ansible-galaxy install.
-# Third-party Galaxy role — do not lint or edit this tree.
-offline: true
-exclude_paths:
-  - .cache/
-  - .github/
-  - molecule/
-skip_list:
-  # Tags (covers current + future rules that share them)
-  - command-shell
-  - core
-  - deprecations
-  - experimental
-  - formatting
-  - idempotency
-  - idiom
-  - metadata
-  - opt-in
-  - risk
-  - security
-  - syntax
-  - unpredictability
-  - yaml
-  # Rule ids (match.tag cleansing needs the bare id; tags alone are not enough)
-  - args
-  - avoid-implicit
-  - command-instead-of-module
-  - command-instead-of-shell
-  - complexity
-  - deprecated-bare-vars
-  - deprecated-local-action
-  - deprecated-module
-  - empty-string-compare
-  - fqcn
-  - galaxy
-  - galaxy-version-incorrect
-  - ignore-errors
-  - inline-env-var
-  - jinja
-  - key-order
-  - latest
-  - literal-compare
-  - loop-var-prefix
-  - meta-incorrect
-  - meta-no-tags
-  - meta-runtime
-  - meta-video-links
-  - name
-  - no-changed-when
-  - no-free-form
-  - no-handler
-  - no-jinja-when
-  - no-log-password
-  - no-prompting
-  - no-relative-paths
-  - no-same-owner
-  - no-tabs
-  - only-builtins
-  - package-latest
-  - partial-become
-  - playbook-extension
-  - risky-file-permissions
-  - risky-octal
-  - risky-shell-pipe
-  - role-name
-  - run-once
-  - sanity
-  - schema
-  - var-naming
-  - warning
-`;
-
-/**
- * On-disk roots for the geerlingguy Docker Galaxy role. Canonical Galaxy
- * install is `geerlingguy.docker/`; some tools/docs use the author/role form
- * `geerlingguy/docker/`. Neutralize every present layout so opens under either
- * path (including `tasks/docker-*.yml`) use our skip config.
- */
-function galaxyDockerRoleDirCandidates(): string[] {
-  return [
-    join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy.docker"),
-    join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy", "docker"),
-  ];
-}
-
-async function neutralizeOneGalaxyRoleLintTree(roleDir: string): Promise<void> {
-  if (!(await fileExists(roleDir))) {
-    return;
-  }
-  await Deno.writeTextFile(
-    join(roleDir, ".ansible-lint"),
-    GALAXY_ROLE_ANSIBLE_LINT_CONFIG,
-  );
-  // Upstream extends default yamllint values that ansible-lint rejects (and
-  // prints a noisy WARNING on every IDE validation of files in this tree).
-  try {
-    await Deno.remove(join(roleDir, ".yamllint"));
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      throw err;
-    }
-  }
-}
-
-/**
- * Replace each present Galaxy docker role tree's shipped `.ansible-lint` (and
- * drop its ansible-lint-incompatible `.yamllint`) so IDE/CLI lint against an
- * open file does not use upstream rules. The role is third-party (gitignored);
- * project configs already exclude the tree from discovery, but ansible-lint
- * still lints an explicitly opened path and walks up to this nested config.
- */
-async function neutralizeGalaxyDockerLintConfig(): Promise<void> {
-  await Promise.all(
-    galaxyDockerRoleDirCandidates().map(neutralizeOneGalaxyRoleLintTree),
-  );
-}
-
-/**
- * Parse the exact geerlingguy.docker version pin from requirements-docker.yml.
- */
-export function parseGalaxyDockerRoleVersion(requirementsYaml: string): string {
-  const match =
-    /name:\s*geerlingguy\.docker\b[\s\S]*?version:\s*"(\d+\.\d+\.\d+)"/
-      .exec(requirementsYaml);
-  if (!match?.[1]) {
-    throw new TypeError(
-      "requirements-docker.yml must pin geerlingguy.docker to an exact version",
-    );
-  }
-  return match[1];
-}
-
-/** Per-request timeout for Galaxy role archive fetches. */
-const GALAXY_DOCKER_FETCH_TIMEOUT_MS = 30_000;
-/** Total attempts (including the first) before giving up on the role archive. */
-const GALAXY_DOCKER_FETCH_ATTEMPTS = 4;
-
-async function fetchGalaxyDockerArchive(url: string): Promise<Uint8Array> {
-  return await withRetry(async () => {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(GALAXY_DOCKER_FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      await res.body?.cancel();
-      throw new Error(
-        `Failed to download ${url}: ${res.status} ${res.statusText}`,
-      );
-    }
-    return new Uint8Array(await res.arrayBuffer());
-  }, {
-    label: "download galaxy docker role archive",
-    attempts: GALAXY_DOCKER_FETCH_ATTEMPTS,
-  });
-}
-
-/**
- * Install a downloaded role tarball under {@link GALAXY_VENDOR_ROLES_DIR} as
- * `geerlingguy.docker` (Galaxy layout). Archive root is
- * `ansible-role-docker-<version>/`.
- *
- * Staging lives under the vendor roles dir (same filesystem as the final
- * path) so `rename` cannot hit EXDEV when `/tmp` and `/opt` are different
- * mounts — common on Vagrant guests.
- */
-async function installGalaxyDockerRoleFromArchive(
-  archiveBytes: Uint8Array,
-  version: string,
-): Promise<void> {
-  await Deno.mkdir(GALAXY_VENDOR_ROLES_DIR, { recursive: true });
-  const tmpDir = await Deno.makeTempDir({
-    dir: GALAXY_VENDOR_ROLES_DIR,
-    prefix: ".tmp-galaxy-docker-",
-  });
-  try {
-    const archivePath = join(tmpDir, `ansible-role-docker-${version}.tar.gz`);
-    await Deno.writeFile(archivePath, archiveBytes);
-    await runLogged("tar", ["-xzf", archivePath, "-C", tmpDir], {
-      level: "DEBUG",
-      component: logComponent("ansible-galaxy"),
-    });
-
-    const extracted = join(tmpDir, `ansible-role-docker-${version}`);
-    if (!(await fileExists(extracted))) {
-      throw new Error(
-        `galaxy docker role archive missing expected root ${extracted}`,
-      );
-    }
-
-    const dest = join(GALAXY_VENDOR_ROLES_DIR, "geerlingguy.docker");
-    try {
-      await Deno.remove(dest, { recursive: true });
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) {
-        throw err;
-      }
-    }
-    await Deno.rename(extracted, dest);
-  } finally {
-    await Deno.remove(tmpDir, { recursive: true }).catch(() => {});
-  }
-}
-
-/**
- * Install the pinned geerlingguy.docker Galaxy role when a host needs Docker.
- *
- * Called from docker-using entry points (`runDockerSetup`, co-located dev
- * converge, postgres/rabbitmq setup) — never from orchestration bootstrap —
- * so daemon install skips this download until a container workload appears.
- *
- * Downloads the tagged archive from codeload.github.com (not
- * `ansible-galaxy role install`, which hits flaky `github.com/.../archive`
- * URLs). The version pin still lives in {@link GALAXY_DOCKER_REQUIREMENTS_FILE}.
- */
-export async function ensureGalaxyDockerRole(): Promise<void> {
-  if (!(await ansiblePlaybookWorks())) {
-    throw new Error(
-      "ansible-galaxy requires a working ansible-playbook install",
-    );
-  }
-
-  const stamp = await computeGalaxyDockerStamp();
-  const storedStamp = await readGalaxyDockerStamp();
-  if (storedStamp === stamp && await galaxyDockerRolePresent()) {
-    logInfo(
-      "orchestration",
-      "galaxy docker role up to date, skipping install",
-    );
-    // Editor hygiene for checkouts only; the managed roles dir is root-owned.
-    if (!playbooksNeedRootHelper()) await neutralizeGalaxyDockerLintConfig();
-    return;
-  }
-
-  if (playbooksNeedRootHelper()) {
-    // Managed host: the vendor roles dir is root-owned (a role tree the
-    // daemon could write would run as root on the next playbook), so the
-    // fetch goes through the helper, which reads the pin from the
-    // root-owned requirements-docker.yml itself.
-    logInfo(
-      "orchestration",
-      "installing galaxy docker role via tp-orchestrate",
-    );
-    const helper = galaxyDockerRoleHelperInvocation();
-    await runOrThrow(helper.bin, helper.args);
-    logInfo("orchestration", "galaxy docker role ready");
-    // No stamp write: the stamp lives in the same root-owned tree. The
-    // helper keeps its own marker (`.turbopanel-version` in the role) and
-    // answers "already installed" when the pin is current.
-    return;
-  }
-
-  ansibleHome();
-  await Deno.mkdir(GALAXY_VENDOR_ROLES_DIR, { recursive: true });
-
-  const requirementsYaml = await Deno.readTextFile(
-    GALAXY_DOCKER_REQUIREMENTS_FILE,
-  );
-  const version = parseGalaxyDockerRoleVersion(requirementsYaml);
-  const url = galaxyDockerRoleCodeloadUrl(version);
-
-  logInfo(
-    "orchestration",
-    `installing galaxy docker role from ${GALAXY_DOCKER_REQUIREMENTS_FILE}`,
-  );
-  const archiveBytes = await fetchGalaxyDockerArchive(url);
-  await installGalaxyDockerRoleFromArchive(archiveBytes, version);
-  logInfo("orchestration", "galaxy docker role ready");
-  await neutralizeGalaxyDockerLintConfig();
-  await writeGalaxyDockerStamp(stamp);
 }
 
 /**
@@ -881,9 +595,6 @@ export async function runInstanceDevInstall(
 
   const layout = await requireDevOrchestrationLayout();
   const args = devInstanceExtraArgs(options);
-  // Dev converge pulls Docker (postgres/redis/rabbitmq/…); fetch the
-  // Galaxy docker role only now, not during orchestration bootstrap.
-  await ensureGalaxyDockerRole();
   logInfo(
     "orchestration",
     `running instance-dev-install converge playbook (${layout.playbookPath}): ${convergeReason}`,
@@ -999,7 +710,6 @@ export async function runDockerSetup(
   opts?: DockerSetupOpts,
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  await ensureGalaxyDockerRole();
   const resolved = opts ??
     (await readDockerNetworkingState(ORCHESTRATION_LAYOUT)) ?? {};
   logInfo("orchestration", "running docker-setup playbook");
@@ -1025,14 +735,13 @@ export async function runCaddySetup(
  *
  * Called on demand from `ensureBuildkitRailpack` when a deploy asks for
  * `build.kind: railpack`, never from `daemon-converge` or
- * `instance-dev-install`. `ensureGalaxyDockerRole()` runs first because the
- * build runs on the Docker Engine's own BuildKit and lands in its image store,
- * so the container runtime has to be there before this is worth installing.
+ * `instance-dev-install`. The build runs on the Docker Engine's own BuildKit
+ * and lands in its image store, so the playbook installs the container runtime
+ * first (the `docker` role).
  */
 export async function runBuildkitSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running buildkit-setup playbook");
   await runLocalPlaybook(BUILDKIT_PLAYBOOK, devInstanceExtraArgs(), onEvent);
   logInfo("orchestration", "buildkit-setup complete");
@@ -1042,7 +751,6 @@ export async function runBuildkitSetup(
 export async function runPostgresSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running postgres-setup playbook");
   await runLocalPlaybook(POSTGRES_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "postgres-setup complete");
@@ -1057,7 +765,6 @@ export async function runPostgresSetup(
 export async function runProxySqlSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running proxysql-setup playbook");
   await runLocalPlaybook(PROXYSQL_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "proxysql-setup complete");
@@ -1072,7 +779,6 @@ export async function runProxySqlSetup(
 export async function runOrchestratorSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running orchestrator-setup playbook");
   await runLocalPlaybook(ORCHESTRATOR_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "orchestrator-setup complete");
@@ -1091,7 +797,6 @@ export async function runRedisSetup(
 export async function runRabbitmqSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  await ensureGalaxyDockerRole();
   logInfo("orchestration", "running rabbitmq-setup playbook");
   await runLocalPlaybook(RABBITMQ_PLAYBOOK, [], onEvent);
   logInfo("orchestration", "rabbitmq-setup complete");
@@ -1100,7 +805,8 @@ export async function runRabbitmqSetup(
 /**
  * Bootstrap orchestration runtime tools (uv, Python, ansible, Galaxy collections).
  *
- * Docker Galaxy roles are not installed here — see {@link ensureGalaxyDockerRole}.
+ * Docker is not installed here; the `docker` role installs it when a host first
+ * needs a container workload.
  * Runs the localhost smoke test only when bootstrap inputs changed or ansible
  * was freshly installed. Writes the bootstrap stamp on success, and only when
  * it changed: on a managed host the root-run install (`run.sh` →

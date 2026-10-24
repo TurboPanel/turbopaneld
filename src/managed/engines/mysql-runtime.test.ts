@@ -608,6 +608,70 @@ test("mysql configureStandby empty seed failure is not reported as unknown", asy
   assertEquals(err.message.includes("unknown"), false);
 });
 
+function readOnlySteps(sqls: string[]): string[] {
+  return sqls.flatMap((sql) => {
+    if (sql.includes("super_read_only = OFF")) return ["window"];
+    if (sql.includes("super_read_only = ON")) return ["locked"];
+    if (sql.includes("FLUSH PRIVILEGES")) return ["flush"];
+    if (sql.includes("CHANGE REPLICATION SOURCE")) return ["source"];
+    return [];
+  });
+}
+
+test("mysql configureStandby never lifts read_only and locks again before the imported logins load", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  const sqls: string[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    sqls.push(`${argv.join(" ")} ${input ?? ""}`);
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await replication.configureStandby(
+    buildContext(exec),
+    standbyReplicationSpec(),
+  );
+  assertEquals(readOnlySteps(sqls), ["window", "locked", "flush", "source"]);
+  assertEquals(
+    sqls.some((sql) =>
+      sql.includes("read_only = OFF") && !sql.includes("super_read_only = OFF")
+    ),
+    false,
+  );
+});
+
+test("mysql configureStandby locks the engine again when the seed fails", async () => {
+  const replication = mysqlManagedEngineRuntime.replication;
+  if (!replication?.configureStandby) {
+    throw new TypeError("expected mysql configureStandby");
+  }
+  const sqls: string[] = [];
+  const exec: ManagedEngineExec = (argv, input) => {
+    if (argv[0] === "test" && argv.includes("-f")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "" });
+    }
+    if (argv[0] === "sh" && argv[2]?.includes("--all-databases")) {
+      return Promise.resolve({ success: false, stdout: "", stderr: "boom" });
+    }
+    sqls.push(`${argv.join(" ")} ${input ?? ""}`);
+    return Promise.resolve({ success: true, stdout: "", stderr: "" });
+  };
+  await assertRejects(
+    () =>
+      replication.configureStandby!(
+        buildContext(exec),
+        standbyReplicationSpec(),
+      ),
+    Error,
+    "seed failed",
+  );
+  assertEquals(readOnlySteps(sqls), ["window", "locked"]);
+});
+
 test("mysql enforceFencedFormerPrimaryReadOnly sets read_only", async () => {
   const replication = mysqlManagedEngineRuntime.replication;
   if (!replication?.enforceFencedFormerPrimaryReadOnly) {

@@ -27,6 +27,7 @@ import {
 } from "../deploy/ingress.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
+import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
@@ -37,6 +38,7 @@ import {
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
 import {
+  reclaimServiceReleases,
   reclaimServiceTree,
   removalFailureReason,
 } from "../deploy/release/retention.ts";
@@ -136,6 +138,36 @@ async function removeEnvironmentSiteReleases(
     });
   });
   return states;
+}
+
+/**
+ * Clear the published releases of every service the payload names, leaving each
+ * service folder (uploads, logs) and the owner's account in place. Entries with
+ * no folder name nothing on this host and are skipped. Best-effort per entry.
+ */
+async function clearEnvironmentReleases(
+  layout: LayoutPaths,
+  environmentId: string,
+  entries: readonly StopSiteRelease[],
+  runFn: RunFn,
+): Promise<void> {
+  await forEachSequential(entries, async (entry) => {
+    if (entry.folder === undefined) return;
+    const removed = await reclaimServiceReleases(
+      layout,
+      { ...entry, folder: entry.folder },
+      runFn,
+      (_, line) =>
+        logWarn(
+          "commands",
+          `environment.stop release cleanup env=${environmentId}: ${line}`,
+        ),
+    );
+    logInfo(
+      "commands",
+      `environment.stop cleared ${removed} release(s) of ${entry.serviceId} env=${environmentId}`,
+    );
+  });
 }
 
 /**
@@ -332,6 +364,17 @@ export async function handleEnvironmentStop(
 ): Promise<EnvironmentStopResult> {
   const parsedPayload = parseEnvironmentStopPayload(payload);
   assertSafeStopIdentifiers(parsedPayload);
+  return await withKeyedLock(
+    environmentLockKey(parsedPayload.environmentId),
+    () => stopEnvironmentLocked(parsedPayload, daemonReceivedAt, deps),
+  );
+}
+
+async function stopEnvironmentLocked(
+  parsedPayload: EnvironmentStopPayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<EnvironmentStopResult> {
   const dockerPresent = await dockerAvailableForStop(deps);
   const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
   const runStreamed = createStreamedRunner(deps?.runDocker);
@@ -408,6 +451,12 @@ export async function handleEnvironmentStop(
     layout,
     parsedPayload.environmentId,
     parsedPayload.siteReleases ?? [],
+    deps?.runPrivileged ?? runPrivileged,
+  );
+  await clearEnvironmentReleases(
+    layout,
+    parsedPayload.environmentId,
+    parsedPayload.releaseCleanup ?? [],
     deps?.runPrivileged ?? runPrivileged,
   );
 

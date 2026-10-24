@@ -55,6 +55,14 @@ function buildEngineExec(
   };
 }
 
+/** The member has no running engine container on this host (nothing was run). */
+export class ManagedEngineNotRunningError extends Error {
+  constructor(commandName: string, managedId: string) {
+    super(`${commandName}: no running containers for ${managedId}`);
+    this.name = "ManagedEngineNotRunningError";
+  }
+}
+
 export async function resolveLocalReplicationEngine(
   managedId: string,
   engineCode: ManagedEngineCode | undefined,
@@ -76,7 +84,7 @@ export async function resolveLocalReplicationEngine(
 
   const container = await findLocalEngineContainer(managedId, run);
   if (!container) {
-    throw new Error(`${commandName}: no running containers for ${managedId}`);
+    throw new ManagedEngineNotRunningError(commandName, managedId);
   }
   return {
     engine,

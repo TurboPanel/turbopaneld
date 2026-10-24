@@ -4,13 +4,20 @@
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { parseSwitchoverPromoteFailureCode } from "./engines/switchover-promote-error.ts";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedPromote } from "./promote.ts";
 import { managedDir } from "./engine-paths.ts";
-import { readSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
+import {
+  clearSwitchoverPromoteLocalMarker,
+  readSwitchoverPromoteLocalMarker,
+  readSwitchoverQuiescedMarker,
+  writeSwitchoverPromoteLocalMarker,
+  writeSwitchoverQuiescedMarker,
+} from "./switchover-state-marker.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
 import {
   isManagedMemberDemoted,
@@ -69,6 +76,80 @@ test("handleManagedPromote rejects when no containers are running", async () => 
     Error,
     "no running containers",
   );
+});
+
+async function promoteWithNoContainer(managedId: string): Promise<string> {
+  try {
+    await handleManagedPromote(
+      {
+        managedId,
+        memberId: "00000000-0000-4000-8000-000000000002",
+      },
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: () => Promise.resolve(dockerOk("[]")),
+      },
+    );
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  throw new TypeError("expected the promote to be refused");
+}
+
+test("a promote on a member with no running engine says nothing was promoted", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const message = await promoteWithNoContainer("managed_promote_not_running");
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(message),
+      "target_not_running",
+    );
+    assertStringIncludes(message, "no running containers");
+  });
+});
+
+test("a promote mark of this switchover is still honoured; one cleared at demotion is not", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_mark_cleared";
+    const layout = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+    await writeSwitchoverPromoteLocalMarker(
+      layout,
+      managedId,
+      "completed",
+      "2026-10-20T00:00:00.000Z",
+    );
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(
+        await promoteWithNoContainer(managedId),
+      ),
+      null,
+    );
+    await clearSwitchoverPromoteLocalMarker(layout, managedId);
+    assertEquals(
+      parseSwitchoverPromoteFailureCode(
+        await promoteWithNoContainer(managedId),
+      ),
+      "target_not_running",
+    );
+  });
+});
+
+test("a promote that already started on this host is never reported as not started", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const managedId = "managed_promote_started_before";
+    const layout = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(layout, managedId), { recursive: true });
+    await writeSwitchoverPromoteLocalMarker(
+      layout,
+      managedId,
+      "started",
+      "2026-10-24T00:00:00.000Z",
+    );
+    const message = await promoteWithNoContainer(managedId);
+    assertEquals(parseSwitchoverPromoteFailureCode(message), null);
+    assertStringIncludes(message, "no running containers");
+  });
 });
 
 test("handleManagedPromote promotes standby and reports primary health", async () => {
@@ -134,6 +215,58 @@ test("handleManagedPromote promotes standby and reports primary health", async (
   });
 });
 
+test("handleManagedPromote reports the replay position and timeline of the new primary", async () => {
+  await withPromoteLayoutEnv(async () => {
+    const run = (replay: string) =>
+    (
+      args: string[],
+      options?: { input?: string },
+    ) => {
+      if (args[0] === "compose" && args.includes("ps")) {
+        return Promise.resolve(dockerOk(RUNNING_PS));
+      }
+      if (args[0] === "exec" && args.includes("psql")) {
+        const sql = options?.input ?? "";
+        if (sql.includes("pg_last_wal_replay_lsn")) {
+          return Promise.resolve(dockerOk(replay));
+        }
+        if (sql.includes("pg_is_in_recovery")) {
+          return Promise.resolve(dockerOk("f\n"));
+        }
+      }
+      return Promise.resolve(dockerOk("absent\n"));
+    };
+    const payload = {
+      managedId: "managed_promote_position",
+      memberId: "00000000-0000-4000-8000-000000000002",
+      engine: "postgres" as const,
+    };
+    const promoted = await handleManagedPromote(
+      payload,
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: run("0/7258050\t00000002\n"),
+      },
+    );
+    assertEquals(promoted.newPrimaryReplayLsn, "0/7258050");
+    assertEquals(promoted.newPrimaryTimeline, 2);
+
+    // An unreadable position never fails the promote; it only reports none.
+    const unreadable = await handleManagedPromote(
+      payload,
+      new Date().toISOString(),
+      {
+        ensureDocker: () => Promise.resolve(),
+        runDocker: run("\n"),
+      },
+    );
+    assertEquals(unreadable.status, "ready");
+    assertEquals(unreadable.newPrimaryReplayLsn, undefined);
+    assertEquals(unreadable.newPrimaryTimeline, undefined);
+  });
+});
+
 test("handleManagedPromote blocks promotion when GTID wait times out", async () => {
   const mysqlPs = JSON.stringify([
     {
@@ -181,7 +314,7 @@ test("handleManagedPromote blocks promotion when GTID wait times out", async () 
   assertEquals(sawPromoteSql, false);
 });
 
-test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", async () => {
+test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote and drops the quiesced mark of its time as old primary", async () => {
   await withPromoteLayoutEnv(async () => {
     const managedId = "managed_promote_mysql";
     const mysqlPs = JSON.stringify([
@@ -193,6 +326,12 @@ test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", asy
       },
     ]);
     let sawGtidWait = false;
+    const earlier = resolveLayout(Deno.env.toObject());
+    await Deno.mkdir(managedDir(earlier, managedId), { recursive: true });
+    await writeSwitchoverQuiescedMarker(earlier, managedId, {
+      primaryExecutedGtidSet: "uuid:1-9",
+      quiescedAt: "2026-01-01T00:00:00.000Z",
+    });
     const result = await handleManagedPromote(
       {
         managedId,
@@ -225,6 +364,7 @@ test("handleManagedPromote mysql honors requiredExecutedGtidSet on promote", asy
     const layout = resolveLayout(Deno.env.toObject());
     const marker = await readSwitchoverPromoteLocalMarker(layout, managedId);
     assertEquals(marker?.phase, "completed");
+    assertEquals(await readSwitchoverQuiescedMarker(layout, managedId), null);
   });
 });
 

@@ -68,7 +68,8 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-ha-probe-v1",
   "managed-ha-instance-v1",
   "managed-ha-boot-hold-v1",
-  "metrics-v7",
+  "metrics-v8",
+  "metrics-v8-sizes",
   "php-site-modes-v1",
   "site-engine-nginx-apache-v1",
   "deploy-cancel-v1",
@@ -80,8 +81,22 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-owner-role-v1",
   "managed-data-only-readwrite-v1",
   "managed-database-owner-v1",
+  "managed-database-convert-v1",
   "tls-capture-v1",
+  "command-recovery-v1",
+  "managed-switchover-final-position-v1",
+  "host-capacity-v1",
+  "server-network-check-v1",
+  "backup-s3-copy-v1",
 ] as const;
+
+/**
+ * Command results are kept on disk until the control plane confirms them
+ * (`command-outcome-ack`), still-running and unconfirmed commands are listed on
+ * `hello` / `heartbeat` (`commands`), and a running command repeats its
+ * progress as a keepalive.
+ */
+export const COMMAND_RECOVERY_FEATURE = "command-recovery-v1";
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
 
@@ -102,6 +117,25 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
 export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
 
 /**
+ * Planned Postgres switchover: the fence stop reports the old primary's final
+ * write position, the promote reports the new primary's replay position, and
+ * a forced re-seed (`switchoverReseed`) is refused by the daemon when it is
+ * stale. The control plane never wipes a former primary automatically unless
+ * the daemons of both servers list this feature.
+ */
+export const MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE: DaemonWireFeature =
+  "managed-switchover-final-position-v1";
+
+/**
+ * This daemon copies finished managed backups to an S3-compatible bucket when
+ * a policy or a manual backup names a target, tests a target
+ * (`server.backups.test-target`) and restores from a bucket. The control plane
+ * sends a target only to a daemon that lists this feature, and the daemon sends
+ * `backup-copy-report` only to a control plane that lists it too.
+ */
+export const BACKUP_S3_COPY_FEATURE: DaemonWireFeature = "backup-s3-copy-v1";
+
+/**
  * This daemon answers `managed-health-request` with `managed-health-result`
  * (a fresh replication observation for one member). The control plane sends
  * the request only to a daemon that lists this feature.
@@ -116,6 +150,16 @@ export const MANAGED_HEALTH_FEATURE: DaemonWireFeature = "managed-health-v1";
  */
 export const MANAGED_PERMISSIONS_READ_FEATURE: DaemonWireFeature =
   "managed-permissions-read-v1";
+
+/**
+ * This daemon answers `server-network-check-request` with
+ * `server-network-check-result`: whether this host can open a TCP connection
+ * to each listed peer address, and from which local address. Nothing is sent
+ * on the connection. The control plane asks only a daemon that lists this
+ * feature.
+ */
+export const SERVER_NETWORK_CHECK_FEATURE: DaemonWireFeature =
+  "server-network-check-v1";
 
 /**
  * This daemon pushes `managed-health-report` (every local replica's fresh
@@ -165,13 +209,21 @@ export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
   "managed-ha-boot-hold-v1";
 
 /**
- * Metrics schema v7. This daemon can produce v7 samples (`metadata.version`
- * 7: the `extended` section and the `durable` flag). It stamps
+ * Metrics schema wire version 8. This daemon can produce wire version 8 samples (`metadata.version`
+ * 8: the `extended` section and the `durable` flag). It stamps
  * `METRICS_LEGACY_WIRE_VERSION` until the control plane it is attached to
  * lists this feature, so a daemon updated ahead of the control plane keeps
  * sending samples the old control plane accepts.
  */
-export const METRICS_V7_FEATURE: DaemonWireFeature = "metrics-v7";
+export const METRICS_V8_FEATURE: DaemonWireFeature = "metrics-v8";
+
+/**
+ * The control plane accepts the per-sample sizes (`extended.sizes`,
+ * `filesystemSizes`, `gpuSizes`). A control plane that advertises `metrics-v8`
+ * but predates the sizes rejects the unknown `extended` keys, which would
+ * drop every sample, so the daemon sends the sizes only once this is listed.
+ */
+export const METRICS_V8_SIZES_FEATURE: DaemonWireFeature = "metrics-v8-sizes";
 
 /**
  * This daemon deploys sites with `engine: 'nginx+apache'` (nginx in front of
@@ -268,6 +320,23 @@ export const MANAGED_DATA_ONLY_READWRITE_FEATURE: DaemonWireFeature =
  */
 export const MANAGED_DATABASE_OWNER_FEATURE: DaemonWireFeature =
   "managed-database-owner-v1";
+
+/**
+ * This daemon honours `convertExisting` on a Postgres database op: an existing
+ * database that holds data is handed to its owner role on request. The control
+ * plane sends it only to a primary that lists this.
+ */
+export const MANAGED_DATABASE_CONVERT_FEATURE: DaemonWireFeature =
+  "managed-database-convert-v1";
+
+/**
+ * The control plane merges heartbeat `resources.{memory,swap,cpus}` and the
+ * optional `memory.presentBytes` / `memory.blockSizeBytes` / `dynamicMemory`
+ * fields. This daemon re-sends them on a heartbeat after they move only to a
+ * control plane that lists this feature; hello always carries them, and
+ * `memory.totalBytes` still means MemTotal.
+ */
+export const HOST_CAPACITY_FEATURE = "host-capacity-v1";
 
 /** Features that need an instance at or above a semver. Empty until one lands. */
 export const INSTANCE_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> =

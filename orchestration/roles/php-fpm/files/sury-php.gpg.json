@@ -1,0 +1,9 @@
+{
+  "name": "sury-php",
+  "source": "https://packages.sury.org/php/apt.gpg",
+  "sha256": "b486fd5488185c4c46467960fa69c53d5085fec492cf76b9eaf3db33561c9d7c",
+  "fingerprint": "15058500A0235D97F5D10063B188E2B695BD4743",
+  "created": "2019-03-18T10:14:55Z",
+  "expires": "2028-02-04T11:00:03Z",
+  "fetched": "2026-10-22"
+}

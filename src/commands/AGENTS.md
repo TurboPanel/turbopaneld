@@ -43,3 +43,20 @@ Root context: `../../AGENTS.md`. Transport: `../instance/AGENTS.md`.
   `instance/client.ts` → `deploy/` / `managed/` edges (rehydrate, docker
   networking, ACME observe, HA observe, managed logs) stay as a documented
   one-way DAG — not fully hexagonalized in this pass.
+
+## Command results survive a lost link (`command-recovery-v1`)
+
+`command-outbox.ts` journals every accepted command under
+`<stateDir>/commands/inflight/<id>.json` (atomic temp file + rename): the
+accept time, the latest step plan (rewritten on a step change, otherwise at
+most every 30 s) and, once finished, the final `command-outcome`. With a
+control plane that advertises the feature the entry is removed only when its
+`command-outcome-ack` arrives; until then the outcome is sent again on every
+attach and every 30 s. Without the feature it is removed once sent, as before.
+An entry with no outcome left by a killed daemon is answered with a failed
+outcome whose `result` is `{ interrupted: true, lastStep?, releasePromoted? }`.
+`hello` / `heartbeat` carry `commands: { running, unacked }` (ids, at most 64)
+when either list is not empty, and a running deploy repeats its step plan every
+30 s. Transcript chunks the control plane has not taken are kept and resent in
+order (retry every 5 s, resync from the `nextSeq` of a `409`; see
+`../logs/sink.ts`).

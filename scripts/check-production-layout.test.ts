@@ -8,7 +8,6 @@ import {
   assertRuntimesDirContract,
   collectForbiddenReferenceFailures,
   collectRetiredIdentityFailures,
-  isSkippedPath,
   recordLayoutMismatch,
   reportLayoutFailures,
   runProductionLayoutCheck,
@@ -103,15 +102,6 @@ test("assertDaemonUnitLock requires the runtime_socket_dir token", () => {
   const missing: string[] = [];
   assertDaemonUnitLock(missing, "ExecStart=turbopaneld");
   assertEquals(missing.length, 1);
-});
-
-test("isSkippedPath matches Galaxy docker role trees", () => {
-  assertEquals(
-    isSkippedPath("orchestration/roles/geerlingguy.docker/tasks"),
-    true,
-  );
-  assertEquals(isSkippedPath("roles/geerlingguy/docker/tasks"), true);
-  assertEquals(isSkippedPath("src/paths/layout.ts"), false);
 });
 
 test("collectForbiddenReferenceFailures flags a retired sibling folder", () => {
@@ -482,10 +472,6 @@ test("runProductionLayoutCheck walks fixtures and skips vendored trees", async (
       "ExecStartPre=flock {{ runtime_socket_dir }}/daemon.lock\n",
     );
     await Deno.mkdir(join(root, "src/coverage"), { recursive: true });
-    await Deno.mkdir(
-      join(root, "orchestration/roles/geerlingguy.docker/tasks"),
-      { recursive: true },
-    );
     await Deno.writeTextFile(join(root, "main.ts"), "export {}\n");
     await Deno.writeTextFile(join(root, "src/ok.ts"), "export {}\n");
     await Deno.writeTextFile(join(root, "src/notes.md"), "ignore me\n");
@@ -497,10 +483,6 @@ test("runProductionLayoutCheck walks fixtures and skips vendored trees", async (
       join(root, "src/coverage/hidden.ts"),
       "const root = '/opt/turbopanel/platform';\n",
     );
-    await Deno.writeTextFile(
-      join(root, "orchestration/roles/geerlingguy.docker/tasks/main.yml"),
-      "path: /opt/turbopanel/platform\n",
-    );
 
     const failures = await runProductionLayoutCheck(root);
     assertEquals(
@@ -509,10 +491,6 @@ test("runProductionLayoutCheck walks fixtures and skips vendored trees", async (
     );
     assertEquals(
       failures.some((line) => line.includes("src/coverage/hidden.ts")),
-      false,
-    );
-    assertEquals(
-      failures.some((line) => line.includes("geerlingguy.docker")),
       false,
     );
   } finally {

@@ -285,6 +285,45 @@ test({
 });
 
 test({
+  name:
+    "handleSystemReconcile ingress action=restart re-applies the compose file before restarting",
+  permissions: { env: true, read: true, write: true },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await withLayoutEnv(fixture, async () => {
+        const order: string[] = [];
+        await handleSystemReconcile(
+          { ...basePayload("present"), action: "restart" },
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            // The apply re-renders the compose file (docker gate switch
+            // included) and runs `compose up`, which recreates a changed Traefik.
+            ensureHostingIngress: () => {
+              order.push("apply");
+              return Promise.resolve();
+            },
+            runDocker: (args) => {
+              if (args.includes("restart")) order.push("restart");
+              return Promise.resolve(
+                {
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                  code: 0,
+                } satisfies DockerCliResult,
+              );
+            },
+            inspectHostingIngressContainer: () => Promise.resolve(null),
+          },
+        );
+        assertEquals(order, ["apply", "restart"]);
+      });
+    });
+  },
+});
+
+test({
   name: "handleSystemReconcile ignores non-matching compose-ps identity",
   permissions: { env: true, read: true, write: true },
   fn: async () => {

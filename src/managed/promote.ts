@@ -16,18 +16,26 @@ import {
   clearManagedDemotionArtifacts,
   isManagedMemberDemoted,
 } from "./demoted-marker.ts";
+import { clearSwitchoverFinalPositionRecord } from "./switchover-final-position.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { withManagedLifecycleLock } from "./target-lock.ts";
 import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import {
   parseSwitchoverPromoteFailureCode,
   switchoverCaughtErrorDetail,
+  switchoverPromoteErrorMessage,
 } from "./engines/switchover-promote-error.ts";
 import {
   type LocalEngineContextDeps,
+  ManagedEngineNotRunningError,
   resolveLocalReplicationEngine,
 } from "./local-engine-context.ts";
 import { proveSwitchoverGtidBeforePromote } from "./switchover-gtid-proof.ts";
-import { writeSwitchoverPromoteLocalMarker } from "./switchover-state-marker.ts";
+import {
+  clearSwitchoverQuiescedMarker,
+  readSwitchoverPromoteLocalMarker,
+  writeSwitchoverPromoteLocalMarker,
+} from "./switchover-state-marker.ts";
 
 type DecryptSecretsFn = (ciphertexts: string[]) => Promise<(string | null)[]>;
 
@@ -88,15 +96,48 @@ export async function handleManagedPromote(
   );
 }
 
+/**
+ * A target without a running engine container never ran a promote. Say so in
+ * the machine-readable form, so the control plane can bring the fenced old
+ * primary back instead of leaving the cluster with no writer. Not said when
+ * this host already recorded a started or completed promote (a restart of the
+ * engine after a promote must not read as "nothing happened").
+ */
+async function resolveEngineOrReportNotRunning(
+  layout: ReturnType<typeof resolveLayout>,
+  payload: ManagedPromotePayload,
+  deps: ManagedPromoteHandlerDeps | undefined,
+) {
+  try {
+    return await resolveLocalReplicationEngine(
+      payload.managedId,
+      payload.engine,
+      "managed.promote",
+      deps,
+    );
+  } catch (error) {
+    if (!(error instanceof ManagedEngineNotRunningError)) throw error;
+    const marker = await readSwitchoverPromoteLocalMarker(
+      layout,
+      payload.managedId,
+    );
+    if (marker?.phase === "started" || marker?.phase === "completed") {
+      throw error;
+    }
+    throw new Error(
+      switchoverPromoteErrorMessage("target_not_running", error.message),
+    );
+  }
+}
+
 async function promoteManagedMember(
   payload: ManagedPromotePayload,
   layout: ReturnType<typeof resolveLayout>,
   deps: ManagedPromoteHandlerDeps | undefined,
 ): Promise<ManagedPromoteResult> {
-  const { engine, ctx } = await resolveLocalReplicationEngine(
-    payload.managedId,
-    payload.engine,
-    "managed.promote",
+  const { engine, ctx } = await resolveEngineOrReportNotRunning(
+    layout,
+    payload,
     deps,
   );
 
@@ -129,12 +170,21 @@ async function promoteManagedMember(
       new Date().toISOString(),
     );
   }
+  // The member is the primary now. A quiesced mark left from the time it was
+  // the old primary of an earlier switchover would silence its failover
+  // detection for as long as it stays primary.
+  await clearSwitchoverQuiescedMarker(layout, payload.managedId);
   const run = deps?.runDocker ?? defaultRunDocker;
   await clearManagedDemotionArtifacts(layout, payload.managedId, {
     engine: payload.engine,
     run: (args) => run(args),
   });
   const health = await engine.replication!.readHealth(ctx, "primary");
+  const replay = await readPromotedPosition(engine, ctx);
+  // This host is the primary now: an old fence stop record must not outlive it.
+  await clearSwitchoverFinalPositionRecord(layout, payload.managedId).catch(
+    () => undefined,
+  );
 
   return {
     status: "ready",
@@ -146,5 +196,26 @@ async function promoteManagedMember(
       : {}),
     summary: "standby promoted to primary",
     replication: health,
+    ...(replay === null ? {} : {
+      newPrimaryReplayLsn: replay.lsn,
+      newPrimaryTimeline: replay.timeline,
+    }),
   };
+}
+
+/** Best effort: a failed reading only means the re-seed is not proven. */
+async function readPromotedPosition(
+  engine: Awaited<ReturnType<typeof resolveLocalReplicationEngine>>["engine"],
+  ctx: Awaited<ReturnType<typeof resolveLocalReplicationEngine>>["ctx"],
+): Promise<{ lsn: string; timeline: number } | null> {
+  try {
+    return await engine.replication?.readPromotedPosition?.(ctx) ?? null;
+  } catch (err) {
+    logWarn(
+      "managed",
+      "promote replay position unreadable:",
+      sanitizeForLog(err),
+    );
+    return null;
+  }
 }

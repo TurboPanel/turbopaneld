@@ -59,20 +59,35 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitReady(name: string, attemptsLeft: number): Promise<boolean> {
+/**
+ * The image entrypoint first runs a temporary init server that has a socket
+ * but no TCP listener, then shuts it down and starts the real server. A socket
+ * probe can pass against the temporary server and the next exec then lands in
+ * the gap. Probe over TCP (only the final server listens there) and require
+ * two successes in a row.
+ */
+async function waitReady(
+  name: string,
+  attemptsLeft: number,
+  streak = 0,
+): Promise<boolean> {
   const probe = await docker([
     "exec",
     name,
     "mariadb",
+    "--protocol=tcp",
+    "-h127.0.0.1",
+    "-P3306",
     "-uroot",
     `-p${ROOT_PASSWORD}`,
     "-e",
     "SELECT 1",
   ]);
-  if (probe.success) return true;
+  const nextStreak = probe.success ? streak + 1 : 0;
+  if (nextStreak >= 2) return true;
   if (attemptsLeft <= 1) return false;
   await delay(1000);
-  return waitReady(name, attemptsLeft - 1);
+  return waitReady(name, attemptsLeft - 1, nextStreak);
 }
 
 test({

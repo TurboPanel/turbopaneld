@@ -115,3 +115,8 @@ export function parseMeminfoDiagnostics(
     committedAsBytes: readKbField(lines, "Committed_AS") ?? null,
   };
 }
+
+/** `CommitLimit` in bytes, the ceiling `Committed_AS` is judged against; `null` when absent. */
+export function parseCommitLimitBytes(text: string): number | null {
+  return readKbField(text.split("\n"), "CommitLimit") ?? null;
+}

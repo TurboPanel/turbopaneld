@@ -1,10 +1,12 @@
 import { assertEquals } from "@std/assert";
 import {
+  buildFilesystemReadings,
   buildFilesystemSamples,
   probeRootFilesystemCapacity,
   probeStorage,
 } from "./filesystem.ts";
 import type { FilesystemTopology } from "../../contracts/topology-types.ts";
+import { parseProcMounts } from "./mounts.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -238,7 +240,12 @@ test("probeRootFilesystemCapacity reports the root-tagged entry's availableBytes
           ffree: 150,
         },
   });
-  assertEquals(capacity, { availableBytes: 300 * 4096, freeInodes: 60 });
+  assertEquals(capacity, {
+    availableBytes: 300 * 4096,
+    freeInodes: 60,
+    totalBytes: 1000 * 4096,
+    totalInodes: 100,
+  });
 });
 
 test("probeRootFilesystemCapacity returns null when no topology entry is tagged root", async () => {
@@ -262,5 +269,104 @@ test("probeRootFilesystemCapacity reports null fields when the root probe fails"
   const capacity = await probeRootFilesystemCapacity(topology, {
     statfs: () => null,
   });
-  assertEquals(capacity, { availableBytes: null, freeInodes: null });
+  assertEquals(capacity, {
+    availableBytes: null,
+    freeInodes: null,
+    totalBytes: null,
+    totalInodes: null,
+  });
+});
+
+test("buildFilesystemReadings reports each probe's size from the same statfs call", async () => {
+  const topology = [
+    filesystemTopology({ filesystemId: "fs:a", mountpoint: "/" }),
+    filesystemTopology({
+      filesystemId: "fs:b",
+      mountpoint: "/data",
+      roles: ["hosting"],
+    }),
+    filesystemTopology({
+      filesystemId: "fs:c",
+      mountpoint: "/gone",
+      roles: ["custom"],
+    }),
+  ];
+  const { samples, sizes } = await buildFilesystemReadings(topology, {
+    statfs: (path: string) =>
+      path === "/data"
+        ? {
+          blocks: 1000,
+          bfree: 400,
+          bavail: 300,
+          bsize: 4096,
+          files: 100,
+          ffree: 60,
+        }
+        : null,
+  });
+  assertEquals(samples.map((s) => s.filesystemId), ["fs:b", "fs:c"]);
+  assertEquals(sizes, [
+    { filesystemId: "fs:b", totalBytes: 1000 * 4096, totalInodes: 100 },
+    { filesystemId: "fs:c", totalBytes: null, totalInodes: null },
+  ]);
+});
+
+// The packaged daemon reads with a scoped --allow-read that omits "/", so
+// statfs("/") is denied there while /usr is allowed (canary, 2026-10-21).
+const deniedRootStatfs = (path: string) =>
+  path === "/"
+    ? Promise.reject(new Deno.errors.PermissionDenied("read access to /"))
+    : {
+      blocks: 1000,
+      bfree: 400,
+      bavail: 300,
+      bsize: 4096,
+      files: 500,
+      ffree: 200,
+    };
+
+test("probeRootFilesystemCapacity falls back to a readable path on the root mount when / is denied", async () => {
+  const mounts = parseProcMounts(
+    "/dev/vda2 / ext4 rw 0 0\n/dev/vdb1 /usr ext4 rw 0 0\n",
+  );
+  const capacity = await probeRootFilesystemCapacity(
+    [filesystemTopology({ filesystemId: "fs:a", mountpoint: "/" })],
+    { statfs: deniedRootStatfs },
+    // /usr is its own filesystem here; /etc/hostname is on root.
+    mounts,
+  );
+  assertEquals(capacity, {
+    availableBytes: 300 * 4096,
+    freeInodes: 200,
+    totalBytes: 1000 * 4096,
+    totalInodes: 500,
+  });
+});
+
+test("probeRootFilesystemCapacity does not borrow a path from another filesystem", async () => {
+  const mounts = parseProcMounts(
+    "/dev/vda2 / ext4 rw 0 0\n/dev/vdb1 /usr ext4 rw 0 0\n/dev/vdc1 /etc ext4 rw 0 0\n",
+  );
+  const capacity = await probeRootFilesystemCapacity(
+    [filesystemTopology({ filesystemId: "fs:a", mountpoint: "/" })],
+    { statfs: deniedRootStatfs },
+    mounts,
+  );
+  assertEquals(capacity?.totalBytes, null);
+  assertEquals(capacity?.totalInodes, null);
+});
+
+test("probeRootFilesystemCapacity still probes / directly when it is readable", async () => {
+  const seen: string[] = [];
+  const capacity = await probeRootFilesystemCapacity(
+    [filesystemTopology({ filesystemId: "fs:a", mountpoint: "/" })],
+    {
+      statfs: (path) => {
+        seen.push(path);
+        return { blocks: 10, bfree: 5, bavail: 5, bsize: 4096 };
+      },
+    },
+  );
+  assertEquals(seen, ["/"]);
+  assertEquals(capacity?.totalBytes, 10 * 4096);
 });

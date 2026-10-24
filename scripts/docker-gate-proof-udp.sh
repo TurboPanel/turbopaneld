@@ -33,7 +33,7 @@ GATE_DIR=/run/turbopanel-gate
 RO_DIR="$GATE_DIR/ro"
 RO_SOCKET="$RO_DIR/docker.sock"
 INGRESS_SWITCH=/opt/turbopanel/lib/docker-gate/ingress-socket.on
-TRAEFIK_IMAGE=traefik:v3.6.6
+TRAEFIK_IMAGE=traefik:v3.7.16
 IMAGE=docker.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
 PROOF_SERVICE=tpgateproofudp
 NET=tpgate-proof-udp-net
@@ -77,6 +77,7 @@ start_backend() {
   _be_name=$1
   docker run -d --name "$_be_name" --network "$NET" \
     --label traefik.enable=true \
+    --label com.turbopanel.system.routed=true \
     --label "com.turbopanel.service=$PROOF_SERVICE" \
     --label com.turbopanel.raw-port=true \
     --label "traefik.udp.routers.$PROOF_SERVICE.entrypoints=udp$PORT" \

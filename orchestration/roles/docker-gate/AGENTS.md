@@ -160,7 +160,8 @@ these labels itself and the config trees are daemon-writable today. It must
 tighten (and the labels stop being trusted) when route 2b makes the config trees
 root-owned; the label check can then be replaced by an exact-path list.
 Known gaps, left as findings on purpose: the ingress `docker-socket-proxy`
-service mounts the Docker socket until the stage-3 switch is on.
+(its own compose project, `turbopanel-docker-proxy`) mounts the Docker socket
+until the stage-3 switch is on.
 
 **Helper containers.** Every daemon-started throwaway `docker run` (backup tar,
 restore swap, managed-file ownership, engine volume bootstrap) stamps
@@ -258,18 +259,21 @@ failure message), and the restored gate is only waited for when it answered befo
 a good swap replaces them and drops `.next`, a broken staged `main.ts` is refused by the load check with nothing replaced. A switch value other than
 yes/no fails the converge before anything changes (a typo never turns it off).
 
-**The switch** (off by default): `docker_gate_ingress_socket: true` writes the
-root-owned `<install>/lib/docker-gate/ingress-socket.on`; `false` removes it;
-empty (the default, and every update converge) leaves it alone. The daemon
+**The switch** (on by default since 2026-10-21): `docker_gate_ingress_socket: true`
+(the default, so every converge) writes the root-owned
+`<install>/lib/docker-gate/ingress-socket.on`; `false` removes it and keeps the
+socket-proxy container; empty leaves it alone. An existing host gets the switch
+file at its next converge and its Traefik moves onto the gate at the next
+ingress apply (the next deploy or ingress reconcile). The daemon
 (`src/deploy/ingress.ts` `ingressDockerGateEnabled`) uses the gate only when the
 switch file AND `/run/turbopanel-gate/ro` exist. Then both Traefiks mount the
 DIRECTORY read-only at `/var/run/turbopanel-gate` (a directory, so a gate
 restart that recreates the socket does not strand Traefik on a dead inode) and
 use `--providers.docker.endpoint=unix:///var/run/turbopanel-gate/docker.sock`.
-The shared ingress project drops the `docker-socket-proxy` service (and
-`--remove-orphans` deletes the Tecnativa container) once no service Traefik
-compose file on disk still names it; until then it keeps the proxy without
-Traefik depending on it. The anonymous shared Traefik (no
+The `turbopanel-docker-proxy` compose project (the Tecnativa container, no
+longer part of the shared Traefik's project) is removed, after the shared
+Traefik has switched, once no service Traefik compose file on disk still
+names it; until then it stays up. The anonymous shared Traefik (no
 `hosting-ingress` descriptor yet, so no `turbopanel.role=ingress` label for the
 allowance) keeps the proxy until it has one. Without the switch both compose
 documents are byte for byte what they were.
@@ -327,7 +331,7 @@ registry auth, query strings, request bodies, the approval token itself. An
 2. Platform allowance, ownership observation, signed approval verifier,
    `/grpc` + `/session` proven end to end, still observe.
 3. **This role (added)**: Traefik on a read-only filtered socket behind a
-   per-host switch (off by default); with it on, the tp-created Tecnativa
+   per-host switch (on by default); with it on, the tp-created Tecnativa
    container is removed.
 4. `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`), drops
    the `sudo -u self docker` fallback, **enforce mode**; `tp` still in `docker`.

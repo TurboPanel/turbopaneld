@@ -5,10 +5,11 @@
  * same atomic-write discipline as `sensors/overrides.ts`'s
  * `writeHardwareProfile`. Feeds `MetricsSample.metadata.bootGeneration`.
  */
-import { dirname, join } from "@std/path";
+import { join } from "@std/path";
 
 import { resolveLayout } from "../../paths/layout.ts";
 import { readProcFile } from "../collector/proc-read.ts";
+import { writeTextFileAtomic } from "../atomic-write.ts";
 
 export const PROC_BOOT_ID = "/proc/sys/kernel/random/boot_id";
 export const BOOT_GENERATION_RELATIVE_PATH = "metrics/boot-generation.json";
@@ -54,10 +55,7 @@ async function writePersistedState(
   path: string,
   state: BootGenerationState,
 ): Promise<void> {
-  await Deno.mkdir(dirname(path), { recursive: true });
-  const tmpPath = `${path}.tmp`;
-  await Deno.writeTextFile(tmpPath, JSON.stringify(state));
-  await Deno.rename(tmpPath, path);
+  await writeTextFileAtomic(path, JSON.stringify(state));
 }
 
 /**

@@ -14,6 +14,8 @@ import { COMMAND_LOG_PHASES } from "./contracts.ts";
  */
 const test = Deno.test.bind(Deno);
 
+const noWait = () => Promise.resolve();
+
 type SentChunk = { commandId: string; seq: number; bytes: string };
 
 function parseEvents(chunks: SentChunk[]) {
@@ -113,6 +115,7 @@ test("spool survives an uploader failure and stays for the orphan sweep", async 
       phase: "prepare",
       layout: { daemonStateDir: fixture.dirs.stateDir },
       send: () => Promise.reject(new Error("instance unreachable")),
+      sleep: noWait,
     });
     sink.onLine("stdout", "line one");
     await sink.finalize();
@@ -178,6 +181,7 @@ test("a failed truncation marker keeps the spool file for the orphan sweep", asy
       layout: { daemonStateDir: fixture.dirs.stateDir },
       flushBytes: 64,
       maxBytes: 200,
+      sleep: noWait,
       send: (params) => {
         if (params.bytes.includes(TRUNCATION_MARKER)) {
           return Promise.reject(new Error("instance unreachable"));
@@ -359,6 +363,7 @@ test("a throwing uploader leaves the spool for the orphan sweep", async () => {
         phase: COMMAND_LOG_PHASES.PREPARE,
         layout: { daemonStateDir: fixture.dirs.stateDir },
         send: () => Promise.resolve({ nextSeq: 1 }),
+        sleep: noWait,
       });
       sink.onLine("stdout", "line one");
       await sink.finalize();
@@ -425,3 +430,106 @@ test("sink accepts an explicit spoolDir and flush clock", async () => {
     );
   });
 });
+
+test("a chunk the control plane did not take is kept and sent in order on the retry timer", async () => {
+  await withTempLayout(async (fixture) => {
+    const received: number[] = [];
+    let down = true;
+    const timers: Array<() => void> = [];
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-retry",
+      phase: "build",
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      flushBytes: 1,
+      maxAttempts: 1,
+      setTimer: (fn) => {
+        timers.push(fn);
+        return timers.length;
+      },
+      clearTimer: () => {},
+      sleep: noWait,
+      send: (params) => {
+        if (down) return Promise.reject(new Error("panel restarting"));
+        received.push(params.seq);
+        return Promise.resolve({ nextSeq: params.seq + 1 });
+      },
+    });
+    sink.onLine("stdout", "first");
+    await waitFor(() => timers.length === 1);
+    sink.onLine("stdout", "second");
+    down = false;
+    timers.shift()?.();
+    await waitFor(() => received.length === 2);
+    assertEquals(received, [0, 1]);
+    await sink.finalize();
+  });
+});
+
+test("a 409 with the expected sequence resends from there", async () => {
+  await withTempLayout(async (fixture) => {
+    const received: number[] = [];
+    let rejected = false;
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-resync",
+      phase: "build",
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      flushBytes: 1,
+      sleep: noWait,
+      setTimer: () => 1,
+      clearTimer: () => {},
+      send: (params) => {
+        if (params.seq === 1 && !rejected) {
+          rejected = true;
+          const gap = Object.assign(new Error("gap"), {
+            status: 409,
+            nextSeq: 0,
+          });
+          return Promise.reject(gap);
+        }
+        received.push(params.seq);
+        return Promise.resolve({ nextSeq: params.seq + 1 });
+      },
+    });
+    sink.onLine("stdout", "a");
+    await waitFor(() => received.length === 1);
+    sink.onLine("stdout", "b");
+    await sink.finalize();
+    assertEquals(received, [0, 0, 1]);
+  });
+});
+
+test("finalize waits through failing rounds, then leaves the spool when nothing was taken", async () => {
+  await withTempLayout(async (fixture) => {
+    let slept = 0;
+    let calls = 0;
+    const sink = createCommandOutputSink({
+      commandId: "cmd-sink-final",
+      phase: "build",
+      layout: { daemonStateDir: fixture.dirs.stateDir },
+      maxAttempts: 1,
+      sleep: () => {
+        slept += 1;
+        return Promise.resolve();
+      },
+      send: () => {
+        calls += 1;
+        return Promise.reject(new Error("down"));
+      },
+    });
+    sink.onLine("stdout", "kept");
+    await sink.finalize();
+    assertEquals(slept, 12);
+    assertEquals(calls >= 12, true);
+    const spoolPath = commandLogSpoolPath(
+      commandLogSpoolDir({ daemonStateDir: fixture.dirs.stateDir }),
+      "cmd-sink-final",
+    );
+    assertStringIncludes(await Deno.readTextFile(spoolPath), "kept");
+  });
+});
+
+async function waitFor(check: () => boolean): Promise<void> {
+  for (let i = 0; i < 200 && !check(); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}

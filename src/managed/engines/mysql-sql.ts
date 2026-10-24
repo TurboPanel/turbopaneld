@@ -7,6 +7,7 @@
  */
 
 import { grantSqlFor } from "./grant-pattern.ts";
+import { socketAdminSql } from "./socket-admin-sql.ts";
 import {
   type FollowSourceDialect,
   renderFollowSourceSql,
@@ -218,24 +219,6 @@ export function createNetworkAccountSql(
 }
 
 /**
- * Repair / ensure socket-auth platform admins after a password bootstrap.
- * Safe to re-run; does not embed credentials. The daemon installs
- * `auth_socket` first — MySQL has no `INSTALL PLUGIN IF NOT EXISTS`.
- */
-export function ensureSocketAdminSql(osUser: string = "mysql"): string {
-  const rootAccount = accountAt("root", "localhost");
-  const osAccount = accountAt(osUser, "localhost");
-  return [
-    `CREATE USER IF NOT EXISTS ${rootAccount} IDENTIFIED WITH auth_socket;`,
-    `ALTER USER ${rootAccount} IDENTIFIED WITH auth_socket;`,
-    `GRANT ALL PRIVILEGES ON *.* TO ${rootAccount} WITH GRANT OPTION;`,
-    `CREATE USER IF NOT EXISTS ${osAccount} IDENTIFIED WITH auth_socket;`,
-    `ALTER USER ${osAccount} IDENTIFIED WITH auth_socket;`,
-    `GRANT ALL PRIVILEGES ON *.* TO ${osAccount} WITH GRANT OPTION;`,
-  ].join("\n");
-}
-
-/**
  * Session-only: keep replica-local statements out of the binary log so they
  * cannot mint a replica-UUID GTID the primary never executed.
  */
@@ -272,6 +255,19 @@ export function authSocketPluginPresentSql(): string {
 }
 
 /**
+ * Repair / ensure socket-auth platform admins after a password bootstrap.
+ * Safe to re-run; does not embed credentials. The daemon installs
+ * `auth_socket` first — MySQL has no `INSTALL PLUGIN IF NOT EXISTS`.
+ */
+export function ensureSocketAdminSql(osUser: string = "mysql"): string {
+  return socketAdminSql(
+    accountAt("root", "localhost"),
+    accountAt(osUser, "localhost"),
+    "WITH auth_socket",
+  );
+}
+
+/**
  * Standby seed window: the platform my.cnf boots standbys with
  * `read_only=ON, super_read_only=ON`, which blocks the seed IMPORT (even for
  * root over the socket, error 1290). `configureStandby` disables both for
@@ -291,6 +287,19 @@ export function enforceReadOnlySql(): string {
   ].join("\n");
 }
 
+/**
+ * Standby seed window: only `super_read_only` is lifted. `read_only` stays ON,
+ * so every account without SUPER (client, replication and monitor logins, all
+ * of them imported by the seed) is still refused while the local socket admin
+ * can run the import. The socket admin is the only way in.
+ */
+export function seedWindowReadOnlySql(): string {
+  return [
+    "SET GLOBAL read_only = ON;",
+    "SET GLOBAL super_read_only = OFF;",
+  ].join("\n");
+}
+
 export function promoteSql(): string {
   return [
     "STOP REPLICA;",
@@ -300,9 +309,14 @@ export function promoteSql(): string {
   ].join("\n");
 }
 
-/** Executed GTID set on a quiesced MySQL primary (what replicas must apply). */
+/**
+ * Executed GTID set on a quiesced MySQL primary (what replicas must apply).
+ * A server that has run more than one UUID prints the set as `a:1-5,\nb:1-3`,
+ * and `mysql -N -B` escapes that newline into a literal backslash and `n`,
+ * which is not GTID text. Strip the newline in SQL, as the other GTID reads do.
+ */
 export function primaryFinalGtidSetSql(): string {
-  return "SELECT @@GLOBAL.gtid_executed AS gtid_set;";
+  return "SELECT REPLACE(@@GLOBAL.gtid_executed, CHAR(10), '') AS gtid_set;";
 }
 
 export function waitForExecutedGtidSetSql(

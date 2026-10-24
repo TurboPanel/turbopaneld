@@ -813,7 +813,11 @@ test("a running command's marker suppresses for its whole duration (TTL starts a
   await withTempLayout(async ({ dirs }) => {
     resetManagedIntentsForTests();
     const begun = Date.now();
-    const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, "apply");
+    const token = await beginManagedIntent(
+      dirs.stateDir,
+      MANAGED_ID,
+      "restart",
+    );
     const running = await readManagedIntent(dirs.stateDir, MANAGED_ID);
     // A major upgrade keeping the engine down 11 min is still suppressed.
     assert(isManagedIntentActive(running, begun + 11 * 60_000));
@@ -925,9 +929,9 @@ test("managed.ha.failover repoint carries no intent but drain and recover do", (
   );
 });
 
-test("a successful promote or failover stops suppressing the probe after a minute, other outcomes keep the long window", async () => {
+test("a successful promote, failover or apply stops suppressing the probe after a minute, other outcomes keep the long window", async () => {
   await withTempLayout(async ({ dirs }) => {
-    for (const kind of ["promote", "failover"] as const) {
+    for (const kind of ["promote", "failover", "apply"] as const) {
       resetManagedIntentsForTests();
       const before = Date.now();
       const token = await beginManagedIntent(dirs.stateDir, MANAGED_ID, kind);
@@ -951,7 +955,7 @@ test("a successful promote or failover stops suppressing the probe after a minut
       const [kind, succeeded] of [
         ["promote", false],
         ["failover", false],
-        ["apply", true],
+        ["apply", false],
         ["restart", true],
       ] as const
     ) {

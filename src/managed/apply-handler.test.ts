@@ -908,6 +908,44 @@ test("handleManagedApply forceResync removes the engine container before bootstr
   });
 });
 
+test("handleManagedApply refuses a stale switchover re-seed before touching docker or the data", async () => {
+  await withApplyEnv(async () => {
+    const calls: string[][] = [];
+    await assertRejects(
+      () =>
+        handleManagedApply(
+          basePayload({
+            memberRole: "replica",
+            forceResync: true,
+            switchoverReseed: {
+              recoveryId: "00000000-0000-4000-8000-0000000000c3",
+              sourceMemberId: "00000000-0000-4000-8000-0000000000a1",
+              targetMemberId: "00000000-0000-4000-8000-0000000000b2",
+              epoch: 5,
+            },
+            replication: {
+              role: "standby",
+              username: "tp_repl",
+              primary: { host: "managed-primary-id", port: 15432 },
+            },
+          }),
+          new Date().toISOString(),
+          {
+            ensureDocker: () => Promise.resolve(),
+            runHostPrep: () => Promise.resolve(),
+            runDocker: (args) => {
+              calls.push([...args]);
+              return Promise.resolve(dockerOk());
+            },
+          },
+        ),
+      Error,
+      "switchover re-seed refused",
+    );
+    assertEquals(calls, []);
+  });
+});
+
 test("handleManagedApply primary replication collects member health", async () => {
   await withApplyEnv(async () => {
     const result = await handleManagedApply(

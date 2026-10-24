@@ -223,9 +223,9 @@ test("no re-send before the first back-off; a new incident waits for the back-of
   assert(first >= 0);
   const firstAt = T0 + first * CONFIG.intervalMs;
   detector.markEmitted(firstAt);
-  // Same incident: nothing before the first re-send is due (5 min).
+  // Same incident: nothing before the first re-send is due (1 min).
   assertEquals(
-    runUntilFire(detector, () => EXITED, 50, { start: firstAt + 5_000 }),
+    runUntilFire(detector, () => EXITED, 10, { start: firstAt + 5_000 }),
     -1,
   );
   // Healthy closes the incident; a new one inside the back-off waits.
@@ -464,7 +464,7 @@ test("readControlData: a failed or hung read is 'unreadable', never 'in producti
   );
 });
 
-test("a still-dead primary is re-sent with exponential back-off, bounded per incident", () => {
+test("a still-dead primary is re-sent every minute, bounded per incident", () => {
   const detector = new DeadPrimaryDetector();
   const fired: number[] = [];
   // 4 hours of a dead primary, every event delivered.
@@ -478,12 +478,15 @@ test("a still-dead primary is re-sent with exponential back-off, bounded per inc
   }
   const first = (CONFIG.failureThreshold - 1) * CONFIG.intervalMs;
   const minutes = (ms: number) => ms / 60_000;
-  // 25 s, then +5, +10, +20, +40 min; then nothing (5 events max).
-  assertEquals(fired.map((ms) => minutes(ms - first)), [0, 5, 15, 35, 75]);
+  // 25 s, then one more every minute; then nothing (25 events max).
+  assertEquals(
+    fired.map((ms) => minutes(ms - first)),
+    Array.from({ length: CONFIG.maxEventsPerIncident }, (_, i) => i),
+  );
   assertEquals(fired.length, CONFIG.maxEventsPerIncident);
 });
 
-test("a re-send lands after a 15 min control-plane cooldown that refused the first event", () => {
+test("a re-send lands within a minute of a 15 min control-plane cooldown ending, inside its 20 min span limit", () => {
   const detector = new DeadPrimaryDetector();
   const sent: number[] = [];
   for (let i = 0; i < (30 * 60_000) / CONFIG.intervalMs; i++) {
@@ -493,7 +496,16 @@ test("a re-send lands after a 15 min control-plane cooldown that refused the fir
     sent.push(nowMs);
     detector.markEmitted(nowMs);
   }
-  // Worst case: the cooldown started just before the first event, so it
-  // ends 15 min later; some re-send must come after that.
-  assert(sent.some((ms) => ms - sent[0]! >= 15 * 60_000));
+  // Worst case: the cooldown started just before the failure, so it ends 15
+  // min after the first event. A re-send must follow within a minute, and the
+  // event's own failure span (what the control plane checks) stays under its
+  // 20 min limit.
+  const cooldownEnd = sent[0]! + 15 * 60_000;
+  const retry = sent.find((ms) => ms >= cooldownEnd)!;
+  assert(retry - cooldownEnd < 60_000 + CONFIG.intervalMs);
+  assert(retry - sent[0]! + 60_000 < 20 * 60_000);
+  // Never a gap longer than a minute (plus one tick) while the incident lasts.
+  for (let i = 1; i < sent.length; i++) {
+    assert(sent[i]! - sent[i - 1]! <= 60_000 + CONFIG.intervalMs);
+  }
 });

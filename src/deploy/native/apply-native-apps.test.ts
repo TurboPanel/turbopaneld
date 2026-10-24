@@ -1,3 +1,4 @@
+import { journalDetail } from "./apply-native-apps.ts";
 import {
   assertEquals,
   assertRejects,
@@ -844,6 +845,38 @@ test("a failed health probe streams the unit journal into the transcript", async
       mock.calls.some((call) => call.args.includes("journalctl")),
       true,
     );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed health probe puts the last journal lines in the thrown error", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const run = mock.run;
+  const journal = Array.from({ length: 14 }, (_, i) => `old line ${i}`);
+  journal.push("ReferenceError: require is not defined in ES module scope");
+  mock.run = async (command, args) => {
+    if (args.includes("journalctl")) {
+      mock.calls.push({ command, args: [...args] });
+      return { success: true, stdout: journal.join("\n") + "\n", stderr: "" };
+    }
+    return await run(command, args);
+  };
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          run: mock.run,
+        }),
+      Error,
+    );
+    assertEquals(error.message.includes("did not answer"), true);
+    assertEquals(error.message.includes("require is not defined"), true);
+    assertEquals(error.message.includes("old line 14"), false);
+    assertEquals(error.message.includes("old line 4"), false);
+    assertEquals(error.message.includes("old line 5"), true);
   } finally {
     await host.cleanup();
   }
@@ -2822,4 +2855,24 @@ test("nativeAppBindingsFromPayload carries the service folder of the sourced ser
     Error,
     "has no folder planned on this server",
   );
+});
+
+test("journalDetail caps long lines and the whole tail, and masks token-looking text", () => {
+  const long = "x".repeat(900);
+  const detail = journalDetail([
+    long,
+    "DB_PASSWORD=hunter2 started",
+    `Authorization: ${["Bea", "rer"].join("")} ${
+      ["abcdefgh", "ijklmnop1234"].join("")
+    }`,
+    "key " + "A".repeat(50),
+  ]);
+  assertEquals(detail.includes("hunter2"), false);
+  assertEquals(detail.includes("abcdefghijklmnop1234"), false);
+  assertEquals(detail.includes("A".repeat(50)), false);
+  assertEquals(detail.includes("x".repeat(400)), false);
+  const many = journalDetail(
+    Array.from({ length: 10 }, () => "y ".repeat(140)),
+  );
+  assertEquals(many.length < 2100, true);
 });
