@@ -35,6 +35,7 @@ import {
   isManagedMemberDemoted,
   resolveDemotedEngineForClear,
   resolveDemotedMarkerMemberId,
+  wasReseededSince,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
 import {
@@ -380,6 +381,12 @@ async function finalizeManagedLifecycle(
   );
 }
 
+/** The control plane's stop of a demoted replica that came back (not a primary fence). */
+function isReturnFenceStop(payload: ManagedLifecyclePayload): boolean {
+  return payload.action === "stop" && payload.demoted === true &&
+    payload.role === "replica";
+}
+
 export async function handleManagedLifecycle(
   payload: ManagedLifecyclePayload,
   _daemonReceivedAt: string,
@@ -389,6 +396,21 @@ export async function handleManagedLifecycle(
     throw new Error("managedId contains unsupported characters");
   }
   const layout = resolveLayout(Deno.env.toObject());
+  if (isReturnFenceStop(payload)) {
+    // A stop for a demoted replica waits behind any apply that is re-seeding
+    // it, then drops itself if that apply made the member a standby again
+    // after this stop was received: it was meant for the old data.
+    return await withManagedLifecycleLock(layout, payload.managedId, () => {
+      if (wasReseededSince(payload.managedId, _daemonReceivedAt)) {
+        return Promise.resolve<ManagedLifecycleResult>({
+          status: "ready",
+          summary:
+            "stale stop skipped: the member was re-seeded after it was sent",
+        });
+      }
+      return runManagedLifecycle(payload, layout, deps);
+    });
+  }
   if (payload.reactivateAfterSwitchoverAbort !== true) {
     return await runManagedLifecycle(payload, layout, deps);
   }

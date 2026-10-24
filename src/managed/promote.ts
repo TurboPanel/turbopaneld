@@ -23,14 +23,17 @@ import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import {
   parseSwitchoverPromoteFailureCode,
   switchoverCaughtErrorDetail,
+  switchoverPromoteErrorMessage,
 } from "./engines/switchover-promote-error.ts";
 import {
   type LocalEngineContextDeps,
+  ManagedEngineNotRunningError,
   resolveLocalReplicationEngine,
 } from "./local-engine-context.ts";
 import { proveSwitchoverGtidBeforePromote } from "./switchover-gtid-proof.ts";
 import {
   clearSwitchoverQuiescedMarker,
+  readSwitchoverPromoteLocalMarker,
   writeSwitchoverPromoteLocalMarker,
 } from "./switchover-state-marker.ts";
 
@@ -93,15 +96,48 @@ export async function handleManagedPromote(
   );
 }
 
+/**
+ * A target without a running engine container never ran a promote. Say so in
+ * the machine-readable form, so the control plane can bring the fenced old
+ * primary back instead of leaving the cluster with no writer. Not said when
+ * this host already recorded a started or completed promote (a restart of the
+ * engine after a promote must not read as "nothing happened").
+ */
+async function resolveEngineOrReportNotRunning(
+  layout: ReturnType<typeof resolveLayout>,
+  payload: ManagedPromotePayload,
+  deps: ManagedPromoteHandlerDeps | undefined,
+) {
+  try {
+    return await resolveLocalReplicationEngine(
+      payload.managedId,
+      payload.engine,
+      "managed.promote",
+      deps,
+    );
+  } catch (error) {
+    if (!(error instanceof ManagedEngineNotRunningError)) throw error;
+    const marker = await readSwitchoverPromoteLocalMarker(
+      layout,
+      payload.managedId,
+    );
+    if (marker?.phase === "started" || marker?.phase === "completed") {
+      throw error;
+    }
+    throw new Error(
+      switchoverPromoteErrorMessage("target_not_running", error.message),
+    );
+  }
+}
+
 async function promoteManagedMember(
   payload: ManagedPromotePayload,
   layout: ReturnType<typeof resolveLayout>,
   deps: ManagedPromoteHandlerDeps | undefined,
 ): Promise<ManagedPromoteResult> {
-  const { engine, ctx } = await resolveLocalReplicationEngine(
-    payload.managedId,
-    payload.engine,
-    "managed.promote",
+  const { engine, ctx } = await resolveEngineOrReportNotRunning(
+    layout,
+    payload,
     deps,
   );
 

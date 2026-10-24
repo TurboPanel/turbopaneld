@@ -5,7 +5,8 @@
 export type SwitchoverPromoteFailureCode =
   | "gtid_wait_timeout"
   | "gtid_wait_error"
-  | "promote_started";
+  | "promote_started"
+  | "target_not_running";
 
 const PREFIX = "switchover_promote:";
 
@@ -31,7 +32,7 @@ export function parseSwitchoverPromoteFailureCode(
 ): SwitchoverPromoteFailureCode | null {
   if (!error) return null;
   const match =
-    /^switchover_promote:(gtid_wait_timeout|gtid_wait_error|promote_started):/
+    /^switchover_promote:(gtid_wait_timeout|gtid_wait_error|promote_started|target_not_running):/
       .exec(error);
   if (!match) return null;
   return match[1] as SwitchoverPromoteFailureCode;

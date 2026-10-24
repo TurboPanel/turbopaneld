@@ -435,9 +435,35 @@ export async function maybeClearDemotedMarkerAfterApply(
 ): Promise<void> {
   if (payload.memberRole !== "replica") return;
   if (memberStatus !== "ready") return;
+  const wasDemoted = await isManagedMemberDemoted(layout, payload.managedId);
   await clearManagedDemotionArtifacts(layout, payload.managedId, {
     engine: payload.engine,
     run,
     keepStandbySignal: true,
   });
+  if (wasDemoted) {
+    reseedFinishedAt.set(payload.managedId, Date.now());
+  }
+}
+
+/**
+ * When a demoted member was last brought back as a standby on this host
+ * (a successful replica apply that cleared its marker), by cluster. Memory
+ * only: a stop that was waiting behind that apply is in this process too.
+ */
+const reseedFinishedAt = new Map<string, number>();
+
+/**
+ * True when a demoted member was re-seeded after the daemon received a stop
+ * meant for its old data. Such a stop is stale and must not stop the new
+ * standby.
+ */
+export function wasReseededSince(
+  managedId: string,
+  receivedAt: string,
+): boolean {
+  const finished = reseedFinishedAt.get(managedId);
+  if (finished === undefined) return false;
+  const received = Date.parse(receivedAt);
+  return Number.isFinite(received) && finished >= received;
 }
