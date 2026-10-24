@@ -1575,6 +1575,13 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   noCache?: boolean;
   /**
+   * When true, rewrite only this environment's hosting Caddy config and
+   * certificates: no build, no restart, nothing else on the host changes. The
+   * control plane sends it after a hosting gets a Let's Encrypt certificate,
+   * so issuing starts without a full redeploy. Absent reads as a full deploy.
+   */
+  hostingsOnly?: boolean;
+  /**
    * Hide web server names and versions in responses and default error pages.
    * Absent reads as off, so an older control plane changes nothing.
    */
@@ -6520,6 +6527,7 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      hostingsOnly: parseOptionalBoolean(value.hostingsOnly, "hostingsOnly"),
       hideWebServerNames: parseOptionalBoolean(
         value.hideWebServerNames,
         "hideWebServerNames",
