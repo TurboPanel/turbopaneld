@@ -190,6 +190,21 @@ test("principal-remove refuses while the host still references the account", asy
       "srv/users/dave/sites/svc1/releases/r1/index.html",
       "<p>live</p>\n",
     ],
+    [
+      "a service folder is left in an environment",
+      "srv/users/dave/production/services/web/index.html",
+      "<p>live</p>\n",
+    ],
+    [
+      "a volume folder is left in an environment",
+      "srv/users/dave/production/volumes/data/db.sqlite",
+      "rows\n",
+    ],
+    [
+      "a shared volume folder is left",
+      "srv/users/dave/common/volumes/cache/blob",
+      "bytes\n",
+    ],
   ];
   for (const [label, file, body] of references) {
     await withHost(async (host) => {
