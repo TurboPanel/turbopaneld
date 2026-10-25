@@ -8,6 +8,19 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # run on the Docker Engine's BuildKit); the binaries are still vendored.
 buildkit_version: "0.27.0"
 railpack_version: "0.9.0"
+# SHA-256 of each release tarball, per architecture (amd64 / arm64). The install
+# refuses a download that does not match. Bump together with the versions above;
+# the railpack digests must also match RAILPACK_SHA256 in
+# src/deploy/release/railpack-build.ts.
+# Source: the digest GitHub reports for each release asset, equal to the SHA-256
+# of the file downloaded from the release (buildkit-v<ver>.linux-<arch>.tar.gz,
+# railpack-v<ver>-<x86_64|arm64>-unknown-linux-musl.tar.gz).
+buildkit_sha256:
+  amd64: "1100d32a869c85f0b206ed314ad3af35c5c1f6a64c8d99d0452724a0616285fb"
+  arm64: "fb1a4b7a7f91802fe8a2064f57ea814b988418674885b32d26bdcbce54903e4c"
+railpack_sha256:
+  amd64: "ae91e74d80b8f2e2f519821172d639f6d33555938e0c26416272a56be4302bef"
+  arm64: "ee39088f1879efa913f3d9a76e19b1832a3019d0625c0e8a1dfb4eac8a109600"
 # The Railpack BuildKit gateway frontend is vendored as a local OCI image layout
 # rather than resolved from the registry at deploy time. Keep in step with
 # RAILPACK_FRONTEND_VERSION in src/deploy/release/railpack-build.ts.
@@ -20,6 +33,6 @@ railpack_frontend_tag: "v{{ railpack_frontend_version }}"
 # then never look at the registry again" — the vendored bytes are the pin from
 # that point on. Set it to a `sha256:…` manifest digest to make the *fetch*
 # immutable as well, which is what a rebuild-from-scratch audit wants.
-railpack_frontend_source_digest: ""
+railpack_frontend_source_digest: "{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.railpackFrontend.digest }}"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]

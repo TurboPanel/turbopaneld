@@ -1,0 +1,57 @@
+{
+  "note": "Every container image the platform pulls, pinned by digest. Each digest is the multi-architecture index digest of the tag in ref (amd64 and arm64 both present), so updating an image is a one-line edit here: change ref and digest together. Managed database engine images are keyed by the tag the control plane sends.",
+  "images": {
+    "traefik": {
+      "ref": "traefik:v3.7.16",
+      "digest": "sha256:22a759fb803abb5c3a7ba5d5a55a201c5fb0fc8993d5c72c47a89075e64f1953"
+    },
+    "socketProxy": {
+      "ref": "tecnativa/docker-socket-proxy:v0.5.0",
+      "digest": "sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459"
+    },
+    "proxysql": {
+      "ref": "proxysql/proxysql:3.0.9",
+      "digest": "sha256:aa5aab1e4d82dcad5a7de45f683345eedee9c1b81f6307c0e69e357201d65ff9"
+    },
+    "orchestrator": {
+      "ref": "percona/percona-orchestrator:3.2.6-24",
+      "digest": "sha256:44476d6d04d14152280ff2a52cef2eb930f2269e3f77c52c687b7d9de2154700"
+    },
+    "postgres": {
+      "ref": "postgres:18",
+      "digest": "sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6"
+    },
+    "rabbitmq": {
+      "ref": "rabbitmq:4-management",
+      "digest": "sha256:c200fd496482cda18c412be4e6f244830e1e75949b8cf5f0e887cea9ea456109"
+    },
+    "railpackFrontend": {
+      "ref": "ghcr.io/railwayapp/railpack-frontend:v0.9.0",
+      "digest": "sha256:e9cf7bf69e221861e5a81123d52c5231938d36131bd648ebe175660a729fd14e"
+    },
+    "redisInsight": {
+      "ref": "redis/redisinsight:3.8.0",
+      "digest": "sha256:b5e19ee240abef6edb435871b90ff8a210995422e8e018ab61c0339d318a1f84"
+    },
+    "mailpit": {
+      "ref": "axllent/mailpit:v1.31.6",
+      "digest": "sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387"
+    },
+    "socat": {
+      "ref": "alpine/socat:1.8.1.3",
+      "digest": "sha256:22d77becaeeea8ef56b8c4bb2312323acafe85354be6a85714ff5050e3537842"
+    }
+  },
+  "managedEngines": {
+    "docker.io/library/postgres:18-alpine": "sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
+    "docker.io/library/postgres:18": "sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6",
+    "docker.io/library/mysql:9.7": "sha256:8fb11c38b3551e22d50adbb688f027f8ff4ea2d2445aa277c1cc97b4af85ec54",
+    "docker.io/library/mysql:9.7-oraclelinux9": "sha256:8fb11c38b3551e22d50adbb688f027f8ff4ea2d2445aa277c1cc97b4af85ec54",
+    "docker.io/library/mysql:8.4": "sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69",
+    "docker.io/library/mysql:8.4-oraclelinux9": "sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69",
+    "docker.io/library/mariadb:12.3": "sha256:99c125f103f5d081ebbc9ffe064e63daf7f688ac33a5f7f29af2d7260a96debf",
+    "docker.io/library/mariadb:12.3-ubi": "sha256:a9418290253c520e51b3999f78ed8349d31b258b033447da86b072ebcd273e22",
+    "docker.io/library/mariadb:11.8": "sha256:f16d7a344413e519dff518f27bdb221388f84b0d274c97c4fb5f2cb0dc1b34fa",
+    "docker.io/library/mariadb:11.8-ubi": "sha256:7c4e9f4a8ca4da7d340cfefb083e13755f9584030016030fae002f2fe9fba23b"
+  }
+}

@@ -1,3 +1,4 @@
+import { pinManagedEngineImage } from "../util/image-pins.ts";
 import { assertEquals, assertThrows } from "@std/assert";
 import { parse } from "yaml";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
@@ -120,7 +121,10 @@ test("normalizeManagedCompose rewrites nested config/tls mounts that Docker cann
   const doc = parseNormalized(withTls);
   const services = doc.services as Record<string, Record<string, unknown>>;
   const service = services.postgres!;
-  assertEquals(service.image, "docker.io/library/postgres:18-alpine");
+  assertEquals(
+    service.image,
+    pinManagedEngineImage("docker.io/library/postgres:18-alpine"),
+  );
   assertEquals(
     service.container_name,
     "01936b3e-aaaa-bbbb-cccc-123456789abc-1",

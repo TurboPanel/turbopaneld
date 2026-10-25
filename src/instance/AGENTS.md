@@ -106,6 +106,13 @@ Database admin login on a database without an owner role the read-write rights.
 The control plane sends those only to a primary that lists it (else 409
 `managed_database_owner_needs_daemon_update` for a chosen login owner).
 
+**Managed database convert (`managed-database-convert-v1`).** No message: it
+says this daemon honours `databases[].convertExisting` on a Postgres create
+with `ownerRole`: an existing database (platform admin's or a login's, data
+and all) is handed to its owner role, ownership only: the objects in one
+transaction with a 5 s lock timeout, then the database itself. The
+control plane sends it only to a primary that lists it.
+
 **Managed permissions read (`managed-permissions-read-v1`).** Same shape as
 on-demand health: a control plane that sees the feature may send
 `managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,
@@ -114,6 +121,16 @@ on-demand health: a control plane that sees the feature may send
 `InstanceClient.#readManagedPermissionsAsync` hands it to
 `readManagedPermissions` (`src/managed/permissions-read.ts`), which always
 answers. Read only, no command row, no outbox; the answer stays under 100 KB.
+
+**Server network check (`server-network-check-v1`).** A control plane that
+sees the feature may send `server-network-check-request` (`targets`, up to 32,
+each `peerServerId`, a private-network `address` and a TCP `port`) and gets
+`server-network-check-result` on the same id: one entry per target with
+`reachable`, `latencyMs`, `sourceAddress`, `interface` or an `error`
+(`refused`, `timeout`, `unreachable`, `invalid_target`). The host only opens
+and closes a connection (`src/host/network-check.ts`), at most 3 s per target,
+and refuses loopback, link-local and public addresses. Nothing is sent on the
+connection, nothing is stored, no command row.
 
 **Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
 (`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
@@ -207,7 +224,7 @@ identifier per hour (one refill every 12 minutes). The tenant
   GPU identity + memory, `totalBytes`, optional `memory.pageSizeBytes` (kernel
   page size in bytes from `getconf PAGESIZE`, Linux only — omitted elsewhere or
   when unreadable), plus `resources.ips`) come from `/proc/stat` + `/proc/cpuinfo` + `/proc/meminfo`
-  + `/sys` (cpufreq, cache, DRM) via `src/host/host-inventory.ts` (process-cached; cpus/gpus/mem/swap on hello only)
+  + `/sys` (cpufreq, cache, DRM, memory blocks) via `src/host/host-inventory.ts` (fixed facts read once; memory, swap and the online CPU set re-read each call; optional `memory.presentBytes` / `memory.blockSizeBytes` / `dynamicMemory` on balloon guests)
   and `collectServerIps()` (`src/host/server-addresses.ts`) as
   `{ address, version, scope, cidr?, interface? }[]` (public + private; `interface`
   is the NIC name). Time sync facts come from
@@ -241,7 +258,13 @@ identifier per hour (one refill every 12 minutes). The tenant
   linkCount, error? }] }`, first 20 sites, no link text); the boot scan runs
   after the first hello, so it normally arrives on a heartbeat. The control
   plane stores it at `server.metadata.releaseLinkScan` and returns it on
-  `GET /api/client/v1/servers`. Do **not** put OS or cpus/gpus/mem/swap on heartbeat. Offline
+  `GET /api/client/v1/servers`. Do **not** put OS or gpus on heartbeat.
+  `resources.{memory,swap,cpus}` (plus `dynamicMemory`) ride a heartbeat only
+  when the control plane lists `host-capacity-v1` and MemTotal or present
+  memory moved by more than 32 MiB, the CPU list changed (re-read only when
+  the online CPU set changes) or the dynamic-memory flag flipped, compared
+  with the last frame that carried them; an older control plane keeps the
+  hello figures. Offline
   self-heal
   (Postgres `connected: false` while the socket is still live) is handled by the
   instance **offline-sweep cron** re-projecting online via `onDaemonConnected`
@@ -305,11 +328,15 @@ maps enroll/session failures to `transient` (network, `>=500`, `429`,
 refresh, no identity clear), `stale-identity` (`404 Server key not found`,
 `400 Server key mismatch` → recover + re-enroll), `tls-trust`
 (Deno/rustls chain/SAN/expiry: `invalid peer certificate`, `UnknownIssuer`,
-`NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop), or
+`NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop),
+`awaiting-seat` (`400 License tier below required`,
+`400 License tier not assigned` — no purchased size is free for this server;
+**park** on a fixed `AWAITING_SEAT_POLL_MS` 15 min re-check that retries the
+same enroll or session, never forces a re-enroll and never gives up; current
+panels only send these from enroll, older ones also from session), or
 `permanent`
 (`401 Invalid license`, `400 License already consumed or invalid`,
-`400 License is inactive`, `400 License tier below required`,
-`400 License tier not assigned`, `400 Server key is inactive`,
+`400 License is inactive`, `400 Server key is inactive`,
 `403 Invalid signature`, `409 Fingerprint already exists`, and the local
 `missing license credentials for enrollment` → **park**). On `permanent` or
 `tls-trust`,
@@ -335,8 +362,8 @@ at the correct control plane, then the daemon auto-recovers`.
 resolved CA path, the local CA fingerprint, and recovery (`run.sh` with
 `--instance-ca` / `--insecure-tls`). Unpark for `tls-trust` uses the parked
 backoff only (re-read CA on the next attempt — does **not** force re-enroll).
-`token-manager.ts` skips its 2 s session-refresh retry on a `permanent` first
-error (no double challenge+session per cycle). Status → action table:
+`token-manager.ts` skips its 2 s session-refresh retry on a `permanent` or
+`awaiting-seat` first error (no double challenge+session per cycle). Status → action table:
 **`../turbopanel/AGENTS.md`** (Daemon key authentication — do-not-retry-soon
 table).
 
@@ -580,7 +607,10 @@ running (`preflight_backup` via `docker inspect`). An overlapping
 `instance-update` is `preflight_in_progress`. `instance-backup.yml` then
 writes `<backupDir>/panel/<upgradeId>/` (`pg_dump -Fc` inside the
 database container, an `/etc/turbopanel` tarball, and `meta.json` with the
-migration-history fingerprint) and keeps the newest three. When the rendered
+migration-history fingerprint) and keeps the newest three. To restore by hand,
+stop the instance, then run `docker exec -i turbopanel-database pg_restore
+--clean --if-exists -U turbopanel -d turbopanel < <backupDir>/panel/<upgradeId>/turbopanel.dump`
+(the same command `instance-rollback.yml` uses). When the rendered
 Caddyfile does not yet serve `updating.html`, `instance-launch-only.yml`
 re-templates it first; that render keeps the `TURBOPANEL_UPDATE_CHANNEL` already
 in runtime.env (only the installer sets the channel). After restart, `waitForInstanceHealth` polls

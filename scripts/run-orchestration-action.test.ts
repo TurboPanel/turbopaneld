@@ -1,7 +1,7 @@
 /**
  * Host-free coverage for orchestration action dispatch helpers.
  *
- * Ansible / Galaxy / playbook streaming are injected — nothing here may spawn
+ * Ansible / playbook streaming are injected — nothing here may spawn
  * ansible-playbook or touch the real `/opt/turbopanel` stamp tree.
  */
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
@@ -12,7 +12,6 @@ import {
   dispatchOrchestrationAction,
   emitEvent,
   type OrchestrationActionDeps,
-  PLAYBOOKS_NEEDING_DOCKER_GALAXY,
   resolveDaemonEnvPath,
   runBuildToggle,
   runInstanceDevInstall,
@@ -69,7 +68,6 @@ function recordingDeps(overrides: Partial<OrchestrationActionDeps> = {}) {
     args: string[];
     cwd?: string;
   }> = [];
-  let galaxyCalls = 0;
   let ansibleCalls = 0;
   let stampWrites = 0;
   let buildToggleCalls = 0;
@@ -81,11 +79,6 @@ function recordingDeps(overrides: Partial<OrchestrationActionDeps> = {}) {
     ensureAnsible: () => {
       ansibleCalls += 1;
       calls.push("ensureAnsible");
-      return Promise.resolve();
-    },
-    ensureGalaxyDockerRole: () => {
-      galaxyCalls += 1;
-      calls.push("ensureGalaxyDockerRole");
       return Promise.resolve();
     },
     runPlaybookStreaming: (bin, args, opts) => {
@@ -118,9 +111,6 @@ function recordingDeps(overrides: Partial<OrchestrationActionDeps> = {}) {
     events,
     calls,
     playbookInvocations,
-    get galaxyCalls() {
-      return galaxyCalls;
-    },
     get ansibleCalls() {
       return ansibleCalls;
     },
@@ -346,7 +336,6 @@ test("instance-dev-install --if-needed skips before ansible when stamp matches",
   assertEquals(outcome, "skipped");
   assertEquals(skipOptions, [options]);
   assertEquals(rec.ansibleCalls, 0);
-  assertEquals(rec.galaxyCalls, 0);
   assertEquals(rec.playbookInvocations.length, 0);
   assertEquals(rec.stampWrites, 0);
   assertEquals(
@@ -355,7 +344,7 @@ test("instance-dev-install --if-needed skips before ansible when stamp matches",
   );
 });
 
-test("instance-dev-install runs ansible + galaxy + playbook + stamp when needed", async () => {
+test("instance-dev-install runs ansible + playbook + stamp when needed", async () => {
   const stampOptions: unknown[] = [];
   const rec = recordingDeps({
     computeDevConvergeStamp: (options) => {
@@ -378,7 +367,6 @@ test("instance-dev-install runs ansible + galaxy + playbook + stamp when needed"
   );
   assertEquals(rec.calls, [
     "ensureAnsible",
-    "ensureGalaxyDockerRole",
     "runPlaybookStreaming",
     "writeDevConvergeStamp",
   ]);
@@ -419,7 +407,7 @@ test("build-toggle requires JSON and forwards parsed options", async () => {
   assertEquals(rec.buildToggleCalls, 1);
 });
 
-test("playbook requires a path and fetches Galaxy only for docker playbooks", async () => {
+test("playbook requires a path and passes the extra args through", async () => {
   const rec = recordingDeps();
   await assertRejects(
     () => runPlaybook(undefined, [], rec.deps),
@@ -428,7 +416,6 @@ test("playbook requires a path and fetches Galaxy only for docker playbooks", as
   );
 
   await runPlaybook("redis-setup.yml", ["-e", "x=1"], rec.deps);
-  assertEquals(rec.galaxyCalls, 0);
   assertEquals(
     rec.playbookInvocations[0]?.args.includes(
       "/tmp/orch/playbooks/redis-setup.yml",
@@ -436,12 +423,6 @@ test("playbook requires a path and fetches Galaxy only for docker playbooks", as
     true,
   );
   assertEquals(rec.playbookInvocations[0]?.args.includes("-e"), true);
-
-  const dockerRec = recordingDeps();
-  await runPlaybook("docker-setup.yml", [], dockerRec.deps);
-  assertEquals(dockerRec.galaxyCalls, 1);
-  assertEquals(PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("postgres-setup.yml"), true);
-  assertEquals(PLAYBOOKS_NEEDING_DOCKER_GALAXY.has("rabbitmq-setup.yml"), true);
 });
 
 test("dispatchOrchestrationAction routes known actions and rejects unknown", async () => {

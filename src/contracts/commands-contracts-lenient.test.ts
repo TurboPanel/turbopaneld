@@ -6,6 +6,7 @@ import {
   parseManagedApplyResult,
   parseManagedBackupResult,
   parseManagedDestroyResult,
+  parseManagedLifecyclePayload,
   parseManagedLifecycleResult,
   parseManagedPromoteResult,
   parseManagedReplicationHealth,
@@ -586,4 +587,119 @@ test("parseManagedApplyPayload accepts forceResync and ingressSourceAddresses", 
     TypeError,
     "ingressSourceAddresses",
   );
+});
+
+const FP_RECOVERY = "00000000-0000-4000-8000-0000000000c3";
+const FP_SOURCE = "00000000-0000-4000-8000-0000000000a1";
+const FP_TARGET = "00000000-0000-4000-8000-0000000000b2";
+
+test("managed.apply switchoverReseed parses when whole and is refused when malformed", () => {
+  const reseed = {
+    recoveryId: FP_RECOVERY,
+    sourceMemberId: FP_SOURCE,
+    targetMemberId: FP_TARGET,
+    epoch: 5,
+  };
+  const payload = parseManagedApplyPayload({
+    ...VALID_MANAGED_APPLY,
+    forceResync: true,
+    switchoverReseed: reseed,
+  });
+  assertEquals(payload.switchoverReseed, reseed);
+  assertEquals(
+    parseManagedApplyPayload({ ...VALID_MANAGED_APPLY }).switchoverReseed,
+    undefined,
+  );
+  for (
+    const bad of [
+      { ...reseed, epoch: -1 },
+      { ...reseed, epoch: 1.5 },
+      { ...reseed, recoveryId: "not-a-uuid" },
+      { ...reseed, targetMemberId: undefined },
+      "yes",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseManagedApplyPayload({
+          ...VALID_MANAGED_APPLY,
+          switchoverReseed: bad,
+        }),
+      TypeError,
+      "switchoverReseed",
+    );
+  }
+});
+
+test("managed.lifecycle payload carries the switchover recovery id and epoch together or not at all", () => {
+  const stop = { managedId: FP_SOURCE, action: "stop", engine: "postgres" };
+  const parsed = parseManagedLifecyclePayload({
+    ...stop,
+    switchoverRecoveryId: FP_RECOVERY,
+    primaryEpoch: 0,
+  });
+  assertEquals(parsed.switchoverRecoveryId, FP_RECOVERY);
+  assertEquals(parsed.primaryEpoch, 0);
+  assertEquals(
+    parseManagedLifecyclePayload(stop).switchoverRecoveryId,
+    undefined,
+  );
+  for (
+    const bad of [
+      { switchoverRecoveryId: FP_RECOVERY },
+      { primaryEpoch: 3 },
+      { switchoverRecoveryId: "x", primaryEpoch: 3 },
+      { switchoverRecoveryId: FP_RECOVERY, primaryEpoch: -2 },
+    ]
+  ) {
+    assertThrows(
+      () => parseManagedLifecyclePayload({ ...stop, ...bad }),
+      TypeError,
+      "managed.lifecycle",
+    );
+  }
+});
+
+test("lifecycle and promote results keep a well-formed position and drop a malformed one", () => {
+  const stopped = parseManagedLifecycleResult({
+    status: "stopped",
+    oldPrimaryFinalLsn: "0/7258050",
+    oldPrimaryFinalTimeline: 1,
+  });
+  assertEquals(stopped.oldPrimaryFinalLsn, "0/7258050");
+  assertEquals(stopped.oldPrimaryFinalTimeline, 1);
+  const promoted = parseManagedPromoteResult({
+    status: "ready",
+    role: "primary",
+    promotedMemberId: FP_TARGET,
+    demoted: false,
+    newPrimaryReplayLsn: "A/FF",
+    newPrimaryTimeline: 2,
+  });
+  assertEquals(promoted.newPrimaryReplayLsn, "A/FF");
+  assertEquals(promoted.newPrimaryTimeline, 2);
+  for (
+    const bad of [
+      { lsn: "7258050", timeline: 1 },
+      { lsn: "0/123456789", timeline: 1 },
+      { lsn: "0/7258050", timeline: 0 },
+      { lsn: "0/7258050", timeline: 1.5 },
+      { lsn: "0/7258050" },
+      { timeline: 1 },
+    ]
+  ) {
+    const result = parseManagedLifecycleResult({
+      status: "stopped",
+      oldPrimaryFinalLsn: bad.lsn,
+      oldPrimaryFinalTimeline: bad.timeline,
+    });
+    assertEquals(result.oldPrimaryFinalLsn, undefined);
+    assertEquals(result.oldPrimaryFinalTimeline, undefined);
+  }
+});
+
+test("a result without the new fields still parses exactly as before", () => {
+  assertEquals(parseManagedLifecycleResult({ status: "stopped" }), {
+    status: "stopped",
+  });
 });

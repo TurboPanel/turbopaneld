@@ -217,20 +217,20 @@
   ansible.builtin.template:
     src: proxysql.cnf.j2
     dest: "{{ proxysql_config_dir }}/proxysql.cnf"
-    owner: root
+    owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "0660"
+    mode: "0600"
     force: false
   when: not (_proxysql_cnf_stat.stat.isreg | default(false))
   no_log: true
 
-- name: Ensure existing proxysql.cnf is group-writable for the daemon
+- name: Ensure existing proxysql.cnf is owner-only, owned by the daemon user
   ansible.builtin.file:
     path: "{{ proxysql_config_dir }}/proxysql.cnf"
     follow: false
-    owner: root
+    owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "0660"
+    mode: "0600"
   when: _proxysql_cnf_stat.stat.isreg | default(false)
 
 - name: Ensure the root-only libexec directory exists

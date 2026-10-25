@@ -4,8 +4,6 @@ import {
   cloudflaredBin,
   cloudflaredDir,
   cloudflaredDownloadUrl,
-  GALAXY_DOCKER_ROLE_GITHUB_REPO,
-  galaxyDockerRoleCodeloadUrl,
   resolveCloudflaredAsset,
   resolveUvTarget,
   UV_VERSION,
@@ -89,13 +87,5 @@ test("cloudflared paths and download URL use the pinned version", () => {
   assertEquals(
     cloudflaredDownloadUrl(asset),
     `https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/${asset}`,
-  );
-});
-
-test("galaxyDockerRoleCodeloadUrl uses the codeload archive path", () => {
-  const version = "7.0.0";
-  assertEquals(
-    galaxyDockerRoleCodeloadUrl(version),
-    `https://codeload.github.com/${GALAXY_DOCKER_ROLE_GITHUB_REPO}/tar.gz/refs/tags/${version}`,
   );
 });

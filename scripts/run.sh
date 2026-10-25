@@ -1294,7 +1294,7 @@ TP_HOST_LOCAL_ARTIFACTS=".git .github logs cloudflared"
 
 # Keep in sync with orchestration/roles/deno-runtime/defaults/main.yml
 # (deno_version + deno_sha256; src/orchestration/assets.test.ts pins all three).
-TP_DENO_VERSION="2.9.7"
+TP_DENO_VERSION="2.9.8"
 
 # Scoped Deno grants for the JS-fallback installer verbs (bootstrap-orchestration,
 # run-installer), which run as root before the unit exists. Rendered by
@@ -1305,8 +1305,8 @@ TP_INSTALLER_DENO_PERMISSIONS="--allow-read=/opt/turbopanel,/etc/turbopanel,/var
 # `<asset>.sha256sum` beside each asset). The download below is verified
 # against these before extraction — this path runs as root before any Ansible
 # hardening on JS-fallback hosts, so it cannot lean on the role's check.
-TP_DENO_SHA256_X86_64="c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490"
-TP_DENO_SHA256_AARCH64="c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511d2f65bbf"
+TP_DENO_SHA256_X86_64="a39762429792913fe762ef0b59c9cba41dbd38195984da99221a193b13d97b40"
+TP_DENO_SHA256_AARCH64="2664fcd6a58a37676449e5750ef2140cd46c18f2bbc08be0e03cbcb26ca4de22"
 
 # Print the pinned digest for the host architecture ($1 = uname -m), or fail
 # when none is pinned — a bump without digests must not install anything.
@@ -2659,14 +2659,25 @@ if [ -r /etc/os-release ]; then
   # shellcheck disable=SC1091
   . /etc/os-release
   case "${ID:-}" in
-    debian | raspbian) ;;
+    debian | raspbian)
+      # VERSION_ID is a plain number on releases (13); testing/sid omit it.
+      case "${VERSION_ID:-}" in
+        '' | *[!0-9]*) ;;
+        *)
+          if [ "$VERSION_ID" -lt 13 ]; then
+            tp_print_error "Unsupported operating system '${PRETTY_NAME:-${ID:-unknown}}' — TurboPanel supports Debian 13 (trixie) and later only."
+            exit 1
+          fi
+          ;;
+      esac
+      ;;
     *)
-      tp_print_error "Unsupported operating system '${PRETTY_NAME:-${ID:-unknown}}' — TurboPanel supports Debian and Raspbian only."
+      tp_print_error "Unsupported operating system '${PRETTY_NAME:-${ID:-unknown}}' — TurboPanel supports Debian 13 (trixie) and later only."
       exit 1
       ;;
   esac
 else
-  tp_print_error "Cannot read /etc/os-release to identify the operating system — TurboPanel supports Debian and Raspbian only."
+  tp_print_error "Cannot read /etc/os-release to identify the operating system — TurboPanel supports Debian 13 (trixie) and later only."
   exit 1
 fi
 tp_print_ok "Operating system supported (${PRETTY_NAME:-$ID})"

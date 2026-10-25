@@ -39,6 +39,7 @@ import {
   managedSlotRetentionSql,
   PG_RESTORE_TIMEOUT_SET_LINE_SED,
   primaryReplicationStatusSql,
+  promotedPositionSql,
   promoteSql,
   quoteIdentifier,
   reactivateFormerPrimaryAfterSwitchoverAbortSql,
@@ -57,11 +58,14 @@ import {
   strongestPrivilege,
 } from "./postgres-sql.ts";
 import {
+  countObjectsToReassignSql,
+  DATABASE_OWNER_SQL,
   databaseAdminAttributesSql,
   databaseIsEmptySql,
   databaseOwnerSql,
   dropOwnerRolesSql,
   ensureOwnerRolesSql,
+  handOverPlatformObjectsSql,
   moveDatabaseOwnerSql,
   OWNER_ROLE_MAX_DATABASE_NAME,
   ownerLoginReturnSql,
@@ -70,6 +74,7 @@ import {
   type OwnerRoleLoginLevel,
   ownerRoleLoginSql,
   ownerRoleNames,
+  reassignDatabaseObjectsSql,
 } from "./postgres-owner-role-sql.ts";
 import {
   DOWN_ENGINE_CENSUS,
@@ -94,6 +99,12 @@ import type {
 import { readPostgresPermissions } from "./postgres-permissions.ts";
 import { execSqlWithStdinRetry } from "./sql-stdin.ts";
 import { probeStandbyState, volumeMountArgs } from "./standby-probe.ts";
+import {
+  FINAL_POSITION_SCRIPT,
+  FINAL_POSITION_SEPARATOR,
+  type FinalWalPosition,
+  finalWalPositionFromOutput,
+} from "./postgres-wal.ts";
 
 /**
  * Validate `database` with the same identifier guard used by SQL callers
@@ -165,7 +176,13 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
       ctx.rootUsername,
       db,
       restoreResetSql(),
-      restoreReadWriteLoginSchemasSql(),
+      [
+        restoreReadWriteLoginSchemasSql(),
+        handOverPlatformObjectsSql(
+          DATABASE_OWNER_SQL,
+          "ARRAY[current_user::text]",
+        ),
+      ].join("\n"),
     ];
   },
 };
@@ -607,6 +624,7 @@ async function createOwnerRoleDatabase(
   ctx: ManagedEngineContext,
   name: string,
   ownerLogin?: string,
+  convertExisting = false,
 ): Promise<void> {
   if (name.length > OWNER_ROLE_MAX_DATABASE_NAME) {
     throw new Error(
@@ -618,6 +636,13 @@ async function createOwnerRoleDatabase(
   if (existing.length === 0) {
     await runPsql(ctx, ensureOwnerRolesSql(name));
     await runPsql(ctx, createDatabaseSql(name, names.owner));
+    return;
+  }
+  // Asked for by the customer: hand over what is in it even when the database
+  // already belongs to its owner role (or to the chosen login), because things
+  // made since by other roles are not the owner role's yet.
+  if (convertExisting && !RESERVED_DATABASES.has(name)) {
+    await convertDatabaseToOwnerRole(ctx, name);
     return;
   }
   if (
@@ -644,6 +669,31 @@ async function createOwnerRoleDatabase(
     `postgres database ${
       sanitizeForLog(name)
     } already exists with another owner; keeping it as it is`,
+  );
+}
+
+/**
+ * Move an existing database, data and all, onto its owner role (asked for by
+ * the customer). Ownership only. The objects move in one transaction that
+ * gives up on a lock after five seconds; the database itself moves in a
+ * separate statement after it,
+ * so a failure leaves the old owner and a repeat finishes the job. Safe to
+ * repeat: it only touches what is not the owner role's yet.
+ */
+async function convertDatabaseToOwnerRole(
+  ctx: ManagedEngineContext,
+  name: string,
+): Promise<void> {
+  const owner = ownerRoleNames(name).owner;
+  await runPsql(ctx, ensureOwnerRolesSql(name));
+  const rows = await parsePsqlRows(ctx, countObjectsToReassignSql(owner), name);
+  await runPsql(ctx, reassignDatabaseObjectsSql(owner), name);
+  await runPsql(ctx, moveDatabaseOwnerSql(name, owner));
+  logInfo(
+    "managed",
+    `postgres database ${sanitizeForLog(name)} moved onto its owner role (${
+      rows[0]?.[0] ?? "?"
+    } objects handed over)`,
   );
 }
 
@@ -836,6 +886,57 @@ function probePostgresStandbyData(
 }
 
 /**
+ * Final write position of a cleanly stopped primary, read from its stopped
+ * data volume in a throwaway container (`postgres-wal.ts` says why the end is
+ * computed). Null when the position cannot be proven; never throws for a
+ * missing or unclean data directory.
+ */
+async function readPostgresFinalWalPosition(
+  ctx: ManagedEngineProbeContext,
+): Promise<FinalWalPosition | null> {
+  const result = await ctx.runDocker([
+    "run",
+    "--rm",
+    ...helperLabelArgs("volume-copy"),
+    "--user",
+    ctx.containerUser,
+    "-e",
+    "LC_ALL=C",
+    ...volumeMountArgs(ctx.volumes),
+    "--entrypoint",
+    "sh",
+    ctx.image,
+    "-c",
+    FINAL_POSITION_SCRIPT,
+    "final-position",
+    postgresDataDir(ctx.volumes),
+  ]);
+  if (!result.success) return null;
+  const [controlData, waldump] = result.stdout.split(
+    `\n${FINAL_POSITION_SEPARATOR}\n`,
+  );
+  if (controlData === undefined || waldump === undefined) return null;
+  return finalWalPositionFromOutput(controlData, waldump);
+}
+
+/**
+ * Where a promoted standby stopped replaying and the timeline it now writes
+ * on. Read after the promote: once recovery ended the replay position stays
+ * at the last record applied, so it cannot move under the reading.
+ */
+async function readPostgresPromotedPosition(
+  ctx: ManagedEngineContext,
+): Promise<FinalWalPosition | null> {
+  const rows = await parsePsqlRows(ctx, promotedPositionSql());
+  const lsn = rows[0]?.[0]?.trim() ?? "";
+  const walFile = rows[0]?.[1]?.trim() ?? "";
+  if (!/^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/.test(lsn)) return null;
+  if (!/^[0-9A-Fa-f]{8}$/.test(walFile)) return null;
+  const timeline = Number.parseInt(walFile, 16);
+  return timeline > 0 ? { lsn: lsn.toUpperCase(), timeline } : null;
+}
+
+/**
  * Hand a role's objects to the platform admin and strip its privileges in
  * every connectable database, so `DROP ROLE` no longer fails with "some
  * objects depend on it". Ownership moves first (data survives); a role that
@@ -921,6 +1022,10 @@ const postgresReplicationRuntime: ManagedEngineReplicationRuntime = {
   pruneOrphanSlots: (ctx, desired) => pruneOrphanSlots(ctx, new Set(desired)),
 
   probeStandbyData: probePostgresStandbyData,
+
+  readStoppedPrimaryFinalPosition: readPostgresFinalWalPosition,
+
+  readPromotedPosition: readPostgresPromotedPosition,
 
   async bootstrapStandby(ctx: ManagedEngineBootstrapContext, spec) {
     const volumeArgs = volumeMountArgs(ctx.volumes);
@@ -1414,7 +1519,12 @@ export const postgresManagedEngineRuntime: ManagedEngineRuntime = {
     const applied: string[] = [];
     await forEachSequential(ops, async (op) => {
       if (op.action === "create" && op.ownerRole === true) {
-        await createOwnerRoleDatabase(ctx, op.name, op.ownerLogin);
+        await createOwnerRoleDatabase(
+          ctx,
+          op.name,
+          op.ownerLogin,
+          op.convertExisting === true,
+        );
       } else if (op.action === "create") {
         // CREATE DATABASE cannot run inside PL/pgSQL; check then create.
         const existing = await parsePsqlRows(ctx, databaseExistsSql(op.name));

@@ -20,14 +20,22 @@ import {
 } from "../deploy/release/live-release-scan.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
-import { DAEMON_WIRE_FEATURES } from "./version-wire.ts";
+import {
+  COMMAND_RECOVERY_FEATURE,
+  DAEMON_WIRE_FEATURES,
+} from "./version-wire.ts";
+import type { CommandRecoveryReport } from "../contracts/cell-messages.ts";
 import {
   collectServerIps,
   readDefaultRouteInterfaces,
   readHostInterfaceLinkStates,
   type ServerReportedIp,
 } from "../host/server-addresses.ts";
-import type { HostResources } from "../host/host-inventory.ts";
+import {
+  HOST_CAPACITY_TOLERANCE_BYTES,
+  type HostResources,
+  readHostResources,
+} from "../host/host-inventory.ts";
 import {
   readServiceRunStates,
   type ServiceRunState,
@@ -104,7 +112,72 @@ export type IdlePresenceOptions = {
    * reconnect loop can run.
    */
   onMaxAge?: () => void;
+  /**
+   * True when the control plane lists `host-capacity-v1`. Only then does a
+   * heartbeat carry `resources.{memory,swap,cpus}` after they move; an older
+   * control plane keeps the hello figures. Defaults to never.
+   */
+  hostCapacityFlag?: () => boolean;
+  /**
+   * Running and unconfirmed command ids (`command-recovery-v1`). Added to
+   * `hello` whenever not empty (the control plane's feature list is not known
+   * yet at that point; an older one ignores the field) and to `heartbeat` only
+   * once {@link peerSupports} says the control plane advertises the feature.
+   */
+  commandReport?: () => CommandRecoveryReport | undefined;
+  peerSupports?: (feature: string) => boolean;
 };
+
+/** The part of host resources a heartbeat re-sends when it moves. */
+export type HostCapacitySnapshot = Pick<
+  HostResources,
+  "memory" | "swap" | "cpus" | "dynamicMemory"
+>;
+
+/** Capacity fields of `resources`, or `undefined` when it has none. */
+export function hostCapacityFromResources(
+  resources: HostResources | undefined,
+): HostCapacitySnapshot | undefined {
+  if (!resources) return undefined;
+  const capacity: HostCapacitySnapshot = {};
+  if (resources.memory) capacity.memory = resources.memory;
+  if (resources.swap) capacity.swap = resources.swap;
+  if (resources.cpus) capacity.cpus = resources.cpus;
+  if (resources.dynamicMemory) capacity.dynamicMemory = resources.dynamicMemory;
+  return Object.keys(capacity).length > 0 ? capacity : undefined;
+}
+
+function movedBeyondTolerance(
+  previous: number | undefined,
+  next: number | undefined,
+): boolean {
+  if (previous === undefined || next === undefined) return previous !== next;
+  return Math.abs(next - previous) > HOST_CAPACITY_TOLERANCE_BYTES;
+}
+
+/**
+ * True when `next` is worth a heartbeat against what was last sent: MemTotal
+ * or present memory moved by more than 32 MiB, the CPU list changed (it is
+ * only re-read when the online CPU set changes), or the dynamic-memory flag
+ * appeared or went away. An unreadable `next` never sends.
+ */
+export function hostCapacityMoved(
+  previous: HostCapacitySnapshot | undefined,
+  next: HostCapacitySnapshot | undefined,
+): boolean {
+  if (!next) return false;
+  if (!previous) return true;
+  return movedBeyondTolerance(
+    previous.memory?.totalBytes,
+    next.memory?.totalBytes,
+  ) ||
+    movedBeyondTolerance(
+      previous.memory?.presentBytes,
+      next.memory?.presentBytes,
+    ) ||
+    JSON.stringify(previous.cpus) !== JSON.stringify(next.cpus) ||
+    Boolean(previous.dynamicMemory) !== Boolean(next.dynamicMemory);
+}
 
 type PresenceSnapshot = {
   timeSync: HostTimeSync;
@@ -139,6 +212,7 @@ type BuildInfoProvider = () => BuildInfo;
 type UpdateChannelConfigProvider = () => UpdateChannelConfig;
 type HostHelloIdentityProvider = () => HostHelloIdentity;
 type PresenceSnapshotProvider = () => PresenceSnapshot;
+type HostResourcesProvider = () => HostResources | undefined;
 
 /** `daemonBuild` on the wire: BuildInfo plus the live-resolved channel —
  * channel is a placement fact, never baked into BuildInfo itself — and the
@@ -191,6 +265,7 @@ let updateChannelConfigProvider: UpdateChannelConfigProvider =
 let hostHelloIdentityProvider: HostHelloIdentityProvider = getHostHelloIdentity;
 let presenceSnapshotProvider: PresenceSnapshotProvider =
   defaultPresenceSnapshot;
+let hostResourcesProvider: HostResourcesProvider = () => readHostResources();
 
 function currentDaemonBuild(): DaemonBuildWire {
   return {
@@ -209,11 +284,13 @@ export function installIdlePresenceProviders(source: {
   resolveUpdateChannelConfig?: UpdateChannelConfigProvider;
   getHostHelloIdentity?: HostHelloIdentityProvider;
   collectPresenceSnapshot?: PresenceSnapshotProvider;
+  readHostResources?: HostResourcesProvider;
 }): () => void {
   const previousBuildInfo = buildInfoProvider;
   const previousChannel = updateChannelConfigProvider;
   const previousHost = hostHelloIdentityProvider;
   const previousPresence = presenceSnapshotProvider;
+  const previousResources = hostResourcesProvider;
   if (source.getBuildInfo) buildInfoProvider = source.getBuildInfo;
   if (source.resolveUpdateChannelConfig) {
     updateChannelConfigProvider = source.resolveUpdateChannelConfig;
@@ -224,11 +301,15 @@ export function installIdlePresenceProviders(source: {
   if (source.collectPresenceSnapshot) {
     presenceSnapshotProvider = source.collectPresenceSnapshot;
   }
+  if (source.readHostResources) {
+    hostResourcesProvider = source.readHostResources;
+  }
   return () => {
     buildInfoProvider = previousBuildInfo;
     updateChannelConfigProvider = previousChannel;
     hostHelloIdentityProvider = previousHost;
     presenceSnapshotProvider = previousPresence;
+    hostResourcesProvider = previousResources;
   };
 }
 
@@ -260,6 +341,9 @@ export class IdlePresence {
   readonly #jitterMaxAge: boolean;
   #maxConnectionAgeMs: number;
   readonly #onMaxAge: (() => void) | undefined;
+  readonly #hostCapacityFlag: (() => boolean) | undefined;
+  readonly #commandReport: IdlePresenceOptions["commandReport"];
+  readonly #peerSupports: IdlePresenceOptions["peerSupports"];
 
   #ws: WebSocket | undefined;
   #idleTimer: ReturnType<typeof setInterval> | undefined;
@@ -270,6 +354,8 @@ export class IdlePresence {
   #lastPresenceFrameAt = 0;
   #lastDaemonBuildCommit: string | undefined;
   #lastPresenceSnapshot: string | undefined;
+  /** Capacity figures in the last hello or heartbeat that carried them. */
+  #lastCapacity: HostCapacitySnapshot | undefined;
   #staleReported = false;
   #connectedAtMs = Date.now();
   #maxAgeReported = false;
@@ -290,6 +376,9 @@ export class IdlePresence {
     this.#jitterMaxAge = options.maxConnectionAgeMs === undefined;
     this.#maxConnectionAgeMs = this.#baseMaxConnectionAgeMs;
     this.#onMaxAge = options.onMaxAge;
+    this.#hostCapacityFlag = options.hostCapacityFlag;
+    this.#commandReport = options.commandReport;
+    this.#peerSupports = options.peerSupports;
   }
 
   get lastActivityAt(): number {
@@ -378,6 +467,17 @@ export class IdlePresence {
     return JSON.stringify(snapshot);
   }
 
+  /** `{ commands }` when there is something to report (and, for a heartbeat, the peer supports it). */
+  #commandsField(
+    needsPeer: boolean,
+  ): { commands?: CommandRecoveryReport } {
+    if (needsPeer && this.#peerSupports?.(COMMAND_RECOVERY_FEATURE) !== true) {
+      return {};
+    }
+    const commands = this.#commandReport?.();
+    return commands ? { commands } : {};
+  }
+
   #sendHello(): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -387,6 +487,7 @@ export class IdlePresence {
     const host = hostHelloIdentityProvider();
     const presence = this.#collectPresenceSnapshot();
     this.#lastPresenceSnapshot = this.#serializePresenceSnapshot(presence);
+    this.#lastCapacity = hostCapacityFromResources(host.resources);
 
     try {
       const resources: HostResources = host.resources
@@ -408,6 +509,7 @@ export class IdlePresence {
           ? { releaseLinkScan: presence.releaseLinkScan }
           : {}),
         features: [...DAEMON_WIRE_FEATURES],
+        ...this.#commandsField(false),
       }));
       this.#lastActivityAt = Date.now();
       this.#lastPresenceFrameAt = this.#lastActivityAt;
@@ -428,7 +530,9 @@ export class IdlePresence {
    * 2. The app-level heartbeat — sent when the daemon build commit changed
    *    since the last hello/heartbeat, **or** when `timeSync` / `resources.ips` /
    *    `docker` / `releaseLinkScan` changed since the last presence snapshot (change-detected,
-   *    cadence-bound), **or** when no presence frame has gone out for
+   *    cadence-bound), **or** — only when the control plane lists
+   *    `host-capacity-v1` — when memory or the online CPU set moved (see
+   *    {@link hostCapacityMoved}), **or** when no presence frame has gone out for
    *    {@link PRESENCE_REFRESH_MS}. That last case is the cheap floor that
    *    still refreshes presence facts on a connection where nothing else
    *    ever changes — see {@link PRESENCE_REFRESH_MS}.
@@ -458,20 +562,33 @@ export class IdlePresence {
     return Date.now() - this.#lastPresenceSendAt >= skipBelowMs;
   }
 
-  /** `undefined` for either half means "this one did not move; omit it". */
+  /** `undefined` for any part means "this one did not move; omit it". */
   #sendPresenceHeartbeat(
     daemonBuild: BuildInfo | undefined,
     presence: PresenceSnapshot | undefined,
+    capacity: HostCapacitySnapshot | undefined,
   ): void {
+    const resources: HostResources | undefined = presence || capacity
+      ? { ...(presence ? { ips: presence.ips } : {}), ...capacity }
+      : undefined;
     this.#sendHeartbeat({
       daemonBuild,
       timeSync: presence?.timeSync,
-      resources: presence && { ips: presence.ips },
+      resources,
       docker: presence?.docker,
       runtimes: presence?.runtimes,
       services: presence?.services,
       releaseLinkScan: presence?.releaseLinkScan,
     });
+  }
+
+  /** Moved capacity to re-send, or `undefined` (also for an older control plane). */
+  #capacityToSend(): HostCapacitySnapshot | undefined {
+    if (!this.#hostCapacityFlag?.()) return undefined;
+    const next = hostCapacityFromResources(hostResourcesProvider());
+    if (!hostCapacityMoved(this.#lastCapacity, next)) return undefined;
+    this.#lastCapacity = next;
+    return next;
   }
 
   #maybeSendPresence(): void {
@@ -484,6 +601,7 @@ export class IdlePresence {
     const presence = this.#collectPresenceSnapshot();
     const serialized = this.#serializePresenceSnapshot(presence);
     const presenceChanged = serialized !== this.#lastPresenceSnapshot;
+    const capacity = this.#capacityToSend();
 
     // Nothing moved *and* the connection is inside its refresh window: stay
     // silent. Otherwise send, so an idle daemon still refreshes presence
@@ -491,10 +609,11 @@ export class IdlePresence {
     const refreshDue = this.#lastPresenceFrameAt === 0 ||
       Date.now() - this.#lastPresenceFrameAt >= this.#presenceRefreshIntervalMs;
 
-    if (daemonBuildChanged || presenceChanged || refreshDue) {
+    if (daemonBuildChanged || presenceChanged || capacity || refreshDue) {
       this.#sendPresenceHeartbeat(
         daemonBuildChanged ? daemonBuild : undefined,
         presenceChanged ? presence : undefined,
+        capacity,
       );
       if (presenceChanged) {
         this.#lastPresenceSnapshot = serialized;
@@ -540,6 +659,7 @@ export class IdlePresence {
       runtimes?: HostRuntimeMetadata;
       services?: ServiceRunState[];
       releaseLinkScan?: ReleaseLinkScanReport;
+      commands?: CommandRecoveryReport;
     } = {
       type: "heartbeat",
       at: new Date().toISOString(),
@@ -556,6 +676,8 @@ export class IdlePresence {
     if (fields.releaseLinkScan) {
       payload.releaseLinkScan = fields.releaseLinkScan;
     }
+
+    Object.assign(payload, this.#commandsField(true));
 
     try {
       ws.send(JSON.stringify(payload));

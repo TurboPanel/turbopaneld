@@ -14,6 +14,7 @@
 import { crypto } from "@std/crypto";
 import { encodeHex } from "@std/encoding/hex";
 import type {
+  BackupCopyTargetWire,
   EnvironmentDeployContainer,
   ManagedBackupArtifactExtension,
   ManagedBackupPayload,
@@ -24,7 +25,7 @@ import type {
 } from "../contracts/commands-contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import { spawnDockerStreaming } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
@@ -45,6 +46,15 @@ import {
   SAFE_MANAGED_ID_RE,
 } from "./engine-paths.ts";
 import { withManagedTargetLock } from "./target-lock.ts";
+import { dirname } from "@std/path";
+import {
+  type DecryptSecretsFn,
+  openTargetClient,
+} from "../backups/copy-target.ts";
+import { enqueueCopyJob } from "../backups/copy-queue.ts";
+import { copyKey } from "../backups/copy-keys.ts";
+import type { S3Client } from "../backups/s3/client.ts";
+import { downloadBackupFile } from "../backups/s3/download.ts";
 
 type StreamExecOutcome = { success: boolean; stderr: string };
 
@@ -76,9 +86,18 @@ export type ManagedBackupArtifactDeps = EngineAccessDeps & {
   ) => Promise<StreamExecOutcome>;
 };
 
-export type ManagedBackupHandlerDeps = ManagedBackupArtifactDeps & {
-  now?: () => Date;
+/** Opening a target's sealed key and reaching its bucket; tests replace both. */
+export type CopyTargetDeps = {
+  decryptSecrets?: DecryptSecretsFn;
+  openClient?: (target: BackupCopyTargetWire) => Promise<S3Client>;
 };
+
+export type ManagedBackupHandlerDeps =
+  & ManagedBackupArtifactDeps
+  & CopyTargetDeps
+  & {
+    now?: () => Date;
+  };
 
 export type ManagedRestoreArtifactDeps = EngineAccessDeps & {
   /** Pipes `source` into restore stdin; never buffers the payload. */
@@ -88,9 +107,12 @@ export type ManagedRestoreArtifactDeps = EngineAccessDeps & {
   ) => Promise<StreamExecOutcome>;
 };
 
-export type ManagedRestoreHandlerDeps = ManagedRestoreArtifactDeps & {
-  now?: () => Date;
-};
+export type ManagedRestoreHandlerDeps =
+  & ManagedRestoreArtifactDeps
+  & CopyTargetDeps
+  & {
+    now?: () => Date;
+  };
 
 async function readStreamText(
   stream: ReadableStream<Uint8Array> | null,
@@ -520,6 +542,55 @@ export async function createManagedBackupArtifact(
   };
 }
 
+async function targetClient(
+  target: BackupCopyTargetWire,
+  deps: CopyTargetDeps | undefined,
+): Promise<S3Client> {
+  if (deps?.openClient) return await deps.openClient(target);
+  return await openTargetClient(target, deps?.decryptSecrets);
+}
+
+/** Deleting a backup also removes its bucket copy; a failure is logged, never fatal. */
+async function removeBucketCopy(
+  payload: ManagedBackupPayload,
+  deps: CopyTargetDeps | undefined,
+): Promise<void> {
+  if (!payload.copyTarget) return;
+  try {
+    const client = await targetClient(payload.copyTarget, deps);
+    await client.deleteObject(client.fullKey(copyKey(payload)));
+  } catch (err) {
+    logWarn(
+      "backups",
+      "could not remove the bucket copy:",
+      sanitizeForLog(err),
+    );
+  }
+}
+
+/** Queue the off-server copy of a manual backup; the daemon uploads it. */
+async function queueManualCopy(
+  layout: LayoutPaths,
+  payload: ManagedBackupPayload,
+  artifact: { sizeBytes: number; checksum: string },
+): Promise<void> {
+  if (!payload.copyTarget) return;
+  try {
+    await enqueueCopyJob(layout, {
+      target: payload.copyTarget,
+      managedId: payload.managedId,
+      backupId: payload.backupId,
+      policyId: payload.policyId,
+      artifactExtension: payload.artifactExtension,
+      sha256: artifact.checksum,
+      sizeBytes: artifact.sizeBytes,
+      retentionKeep: payload.policyId ? payload.retentionKeep : undefined,
+    });
+  } catch (err) {
+    logWarn("backups", "could not queue the backup copy:", sanitizeForLog(err));
+  }
+}
+
 export async function handleManagedBackup(
   payload: ManagedBackupPayload,
   daemonReceivedAt: string,
@@ -545,6 +616,7 @@ export async function handleManagedBackup(
         payload.policyId,
       ),
     );
+    await removeBucketCopy(payload, deps);
     return {
       backupId: payload.backupId,
       deleted: true,
@@ -569,6 +641,8 @@ export async function handleManagedBackup(
         deps,
       ),
   );
+
+  await queueManualCopy(layout, payload, artifact);
 
   const result: ManagedBackupResult = {
     backupId: payload.backupId,
@@ -660,6 +734,39 @@ export async function restoreManagedBackupArtifact(
   return database;
 }
 
+/** A name that cannot collide with a backup already on this host. */
+function fetchedBackupId(backupId: string): string {
+  return `${backupId}-fromcopy`;
+}
+
+/** Download the copy named by `copySource` to this host's manual-backup folder; returns the path. */
+async function fetchBucketCopy(
+  layout: LayoutPaths,
+  payload: ManagedRestorePayload,
+  deps: CopyTargetDeps | undefined,
+): Promise<string> {
+  const source = payload.copySource!;
+  const prefix = source.target.prefix;
+  if (prefix && !source.key.startsWith(`${prefix}/`)) {
+    throw new Error("managed.restore copy key is outside the target's folder");
+  }
+  const client = await targetClient(source.target, deps);
+  const destination = managedBackupArtifactPath(
+    layout,
+    payload.managedId,
+    fetchedBackupId(payload.backupId),
+    payload.artifactExtension,
+  );
+  await Deno.mkdir(dirname(destination), { recursive: true, mode: 0o750 });
+  await downloadBackupFile(client, {
+    key: source.key,
+    destination,
+    sha256: payload.checksum,
+    size: payload.sizeBytes,
+  });
+  return destination;
+}
+
 export async function handleManagedRestore(
   payload: ManagedRestorePayload,
   daemonReceivedAt: string,
@@ -675,25 +782,37 @@ export async function handleManagedRestore(
   );
   const now = deps?.now ?? (() => new Date());
 
-  const database = await withManagedTargetLock(
-    layout,
-    payload.managedId,
-    () =>
-      restoreManagedBackupArtifact(
-        layout,
-        engine,
-        {
-          managedId: payload.managedId,
-          backupId: payload.backupId,
-          artifactExtension: payload.artifactExtension,
-          checksum: payload.checksum,
-          sizeBytes: payload.sizeBytes,
-          database: payload.database,
-          policyId: payload.policyId,
-        },
-        deps,
-      ),
-  );
+  // From a bucket copy the artifact is fetched to this host first (checked
+  // against the recorded checksum), restored from, and removed again.
+  const fetched = payload.copySource
+    ? await fetchBucketCopy(layout, payload, deps)
+    : undefined;
+  let database: string;
+  try {
+    database = await withManagedTargetLock(
+      layout,
+      payload.managedId,
+      () =>
+        restoreManagedBackupArtifact(
+          layout,
+          engine,
+          {
+            managedId: payload.managedId,
+            backupId: fetched
+              ? fetchedBackupId(payload.backupId)
+              : payload.backupId,
+            artifactExtension: payload.artifactExtension,
+            checksum: payload.checksum,
+            sizeBytes: payload.sizeBytes,
+            database: payload.database,
+            policyId: fetched ? undefined : payload.policyId,
+          },
+          deps,
+        ),
+    );
+  } finally {
+    if (fetched) await removeIfExists(fetched);
+  }
 
   return {
     backupId: payload.backupId,

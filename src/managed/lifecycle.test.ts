@@ -8,10 +8,15 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   isManagedMemberDemoted,
+  maybeClearDemotedMarkerAfterApply,
   readManagedDemotedMarker,
   writeManagedDemotedMarker,
 } from "./demoted-marker.ts";
 import { saveManagedHaMember } from "./ha-member.ts";
+import {
+  readSwitchoverPromoteLocalMarker,
+  writeSwitchoverPromoteLocalMarker,
+} from "./switchover-state-marker.ts";
 import {
   handleManagedLifecycle,
   refuseWritableFencedAfterComposeStart,
@@ -54,6 +59,19 @@ const POSTGRES_COMPOSE = composeYaml("postgres:18", "/var/lib/postgresql");
 const MYSQL_COMPOSE = composeYaml("mysql:8.4", "/var/lib/mysql");
 const MARIADB_COMPOSE = composeYaml("mariadb:11", "/var/lib/mysql");
 
+const FINAL_POSITION_CONTROL_DATA = [
+  "Database cluster state:               shut down",
+  "Latest checkpoint location:           0/7257FC0",
+  "Latest checkpoint's REDO location:    0/7257FC0",
+  "Latest checkpoint's TimeLineID:       1",
+  "Database block size:                  8192",
+  "WAL block size:                       8192",
+  "Bytes per WAL segment:                16777216",
+].join("\n");
+const FINAL_POSITION_WALDUMP =
+  "rmgr: XLOG        len (rec/tot):    114/   114, tx:          0, lsn: 0/07257FC0, prev 0/07257F98, desc: CHECKPOINT_SHUTDOWN redo 0/7257FC0; tli 1";
+const SWITCHOVER_RECOVERY_ID = "00000000-0000-4000-8000-0000000000c3";
+
 type Recorder = {
   calls: string[][];
   run: (args: string[]) => Promise<DockerCliResult>;
@@ -65,7 +83,10 @@ function fakeDocker(present: Set<string>): Recorder {
   const run = (args: string[]): Promise<DockerCliResult> => {
     calls.push([...args]);
     let stdout = "";
-    if (args[0] === "run") {
+    if (args[0] === "run" && args.includes("final-position")) {
+      stdout =
+        `${FINAL_POSITION_CONTROL_DATA}\n@@@\n${FINAL_POSITION_WALDUMP}\n`;
+    } else if (args[0] === "run") {
       const script = args.at(-1) ?? "";
       const path = script.split(" ")[2] ?? "";
       // Fence helpers mutate the simulated volume: `touch 'p'` / `rm -f 'p'`.
@@ -391,6 +412,148 @@ test("lifecycle stop with demoted writes a marker; an ordinary stop does not", a
       }
     }
   });
+});
+
+test("a stop of a demoted replica that was sent before its re-seed finished is dropped", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const managedId = "managed_lifecycle_stale_stop";
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await writeManagedDemotedMarker(
+        layout,
+        managedId,
+        MEMBER_ID,
+        "2026-10-08T12:00:00.000Z",
+        "postgres",
+      );
+      const docker = fakeDocker(new Set());
+      const sentBeforeSeed = new Date(Date.now() - 1000).toISOString();
+      // The re-seed apply finishes: the member is a ready standby again.
+      await maybeClearDemotedMarkerAfterApply(
+        layout,
+        { managedId, memberRole: "replica", engine: "postgres" },
+        "ready",
+        docker.run,
+      );
+      assertEquals(await isManagedMemberDemoted(layout, managedId), false);
+      const stop: ManagedLifecyclePayload = {
+        managedId,
+        action: "stop",
+        memberId: MEMBER_ID,
+        role: "replica",
+        demoted: true,
+      };
+      const stale = await handleManagedLifecycle(stop, sentBeforeSeed, {
+        runDocker: docker.run,
+      });
+      assertEquals(stale.status, "ready");
+      assertEquals(composeCalled(docker.calls, "stop"), false);
+      assertEquals(await isManagedMemberDemoted(layout, managedId), false);
+
+      // A stop received after the re-seed is a new fence and is carried out.
+      await handleManagedLifecycle(
+        stop,
+        new Date(Date.now() + 1000).toISOString(),
+        { runDocker: docker.run },
+      );
+      assertEquals(composeCalled(docker.calls, "stop"), true);
+      assert(await isManagedMemberDemoted(layout, managedId));
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("a demoted stop forgets a promote mark left by an earlier switchover", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, value);
+    }
+    try {
+      const layout = resolveLayout(fixture.env);
+      const managedId = "managed_lifecycle_old_promote_mark";
+      const root = managedDir(layout, managedId);
+      await Deno.mkdir(root, { recursive: true });
+      await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
+      await writeSwitchoverPromoteLocalMarker(
+        layout,
+        managedId,
+        "completed",
+        "2026-10-20T00:00:00.000Z",
+      );
+      await handleManagedLifecycle(
+        {
+          managedId,
+          action: "stop",
+          memberId: MEMBER_ID,
+          role: "primary",
+          demoted: true,
+        },
+        new Date().toISOString(),
+        { runDocker: fakeDocker(new Set()).run },
+      );
+      assertEquals(
+        await readSwitchoverPromoteLocalMarker(layout, managedId),
+        null,
+      );
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("a switchover fence stop reports the final write position after compose stop", async () => {
+  const { result, calls } = await runLifecycle(
+    POSTGRES_COMPOSE,
+    {
+      action: "stop",
+      memberId: MEMBER_ID,
+      engine: "postgres",
+      role: "primary",
+      demoted: true,
+      switchoverRecoveryId: SWITCHOVER_RECOVERY_ID,
+      primaryEpoch: 4,
+    },
+    new Set(),
+  );
+  assertEquals(result.oldPrimaryFinalLsn, "0/7258050");
+  assertEquals(result.oldPrimaryFinalTimeline, 1);
+  const stopAt = calls.findIndex((args) =>
+    args[0] === "compose" && args.at(-1) === "stop"
+  );
+  const readAt = calls.findIndex((args) => args.includes("final-position"));
+  assert(stopAt >= 0 && readAt > stopAt, "position is read after the stop");
+  const parsed = parseManagedLifecycleResult(
+    JSON.parse(JSON.stringify(result)),
+  );
+  assertEquals(parsed.oldPrimaryFinalLsn, "0/7258050");
+  assertEquals(parsed.oldPrimaryFinalTimeline, 1);
+});
+
+test("an ordinary stop reads no final position", async () => {
+  const { result, calls } = await runLifecycle(
+    POSTGRES_COMPOSE,
+    { action: "stop", memberId: MEMBER_ID, engine: "postgres" },
+    new Set(),
+  );
+  assertEquals(result.oldPrimaryFinalLsn, undefined);
+  assertEquals(calls.some((args) => args.includes("final-position")), false);
 });
 
 test("demoted fence stop without memberId stores ha-member.json member id", async () => {

@@ -6,15 +6,61 @@ _docker_arch_map:
   aarch64: arm64
 
 # Distribution names as reported by Ansible (ansible_distribution) mapped to
-# the Docker apt repository subdomain. When a new distro family is added,
-# extend this map and add a matching tasks file under tasks/.
+# the path segment of Docker's apt repository
+# (https://download.docker.com/linux/<segment>). Raspberry Pi OS is not listed:
+# Docker 29 stopped publishing Raspbian packages and TurboPanel does not claim
+# it (use Debian arm64). When a new distro family is added, extend this map and
+# _docker_fallback_suite.
 _docker_distro_map:
   Debian: debian
-  Raspbian: raspbian
+  Ubuntu: ubuntu
 
-# Base URL passed to geerlingguy.docker as docker_repo_url. The Galaxy role
-# appends /{{ ansible_distribution | lower }} for apt uris and gpg — do not
-# include the distro segment here (…/linux/debian/debian/gpg 404s).
-_docker_repo_url:
-  Debian: https://download.docker.com/linux
-  Raspbian: https://download.docker.com/linux
+# Docker's official apt repository (tasks/install.yml). The signing key is
+# fetched over HTTPS at install time and refused unless it carries one of
+# these fingerprints (Docker's published release key; public, not a secret).
+# A second entry is the way to accept a rotated key (turbopanel_docker_extra_key_fingerprints).
+_docker_repo_key_fingerprints: >-
+  {{ ['9DC858229FC7DD38854AE2D88D81803C0EBFCD88']
+  + (turbopanel_docker_extra_key_fingerprints | default([])) }}
+_docker_repo_key_path: /etc/apt/keyrings/docker.asc
+_docker_repo_sources_path: /etc/apt/sources.list.d/docker.sources
+
+# Suite used when Docker has not published packages for this release's own
+# codename yet (a brand-new Debian or Ubuntu release): the newest published
+# suite for the distribution (checked against download.docker.com/linux/<distro>/dists/
+# on 2026-10-22). Its packages install on the newer release.
+_docker_fallback_suite:
+  Debian: trixie
+  Ubuntu: noble
+
+# Packages from Docker's repository: the engine, CLI, containerd, and the
+# BuildKit and Compose plugins TurboPanel's builds and stacks rely on.
+# docker-ce and docker-ce-cli carry turbopanel_docker_version; the rest follow
+# by dependency and repository order. Recommends are not installed.
+_docker_versioned_packages:
+  - docker-ce
+  - docker-ce-cli
+_docker_other_packages:
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# Distribution packages that conflict with Docker's (Docker's install docs).
+_docker_conflicting_packages:
+  - docker.io
+  - docker-cli
+  - docker-buildx
+  - docker-doc
+  - docker-compose
+  - docker-compose-v2
+  - podman-docker
+  - containerd
+  - runc
+
+# Left behind by older install methods; removed so apt sees one definition of
+# the repository.
+_docker_legacy_repo_files:
+  - /etc/apt/sources.list.d/docker.list
+  - /etc/apt/keyrings/docker.gpg
+  - /etc/apt/trusted.gpg.d/docker.gpg
+  - /etc/apt/trusted.gpg.d/docker.asc

@@ -63,6 +63,7 @@ import {
   replicaFreshnessSql,
   resetReplicaGtidStateSql,
   revokePlainDatabaseGrantSql,
+  seedWindowReadOnlySql,
   showReplicaStatusSql,
   startReplicaSql,
   versionSql,
@@ -596,28 +597,36 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
       "",
     ].join("\n");
 
-    // The platform my.cnf boots standbys read-only — the seed IMPORT needs a
-    // writable window (error 1290 otherwise); re-enforced below once
-    // replication is configured.
-    await runMysql(ctx, disableReadOnlySql());
+    // The platform my.cnf boots standbys read-only. The seed IMPORT only
+    // needs super_read_only lifted (error 1290 otherwise): read_only stays ON,
+    // so no login except the local socket admin can write during the seed, and
+    // the window is closed again the moment the seed ends, pass or fail.
+    await runMysql(ctx, seedWindowReadOnlySql());
+    try {
+      // The seed imports the primary's grant tables, where root@localhost is
+      // `auth_socket`. A standby's initdb cannot install the plugin (it boots
+      // super_read_only, error 1290), so without this the FLUSH below locks
+      // every socket admin out ("Plugin 'auth_socket' is not loaded").
+      await ensureAuthSocketPlugin(ctx);
 
-    // The seed imports the primary's grant tables, where root@localhost is
-    // `auth_socket`. A standby's initdb cannot install the plugin (it boots
-    // super_read_only, error 1290), so without this the FLUSH below locks
-    // every socket admin out ("Plugin 'auth_socket' is not loaded").
-    await ensureAuthSocketPlugin(ctx);
-
-    // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
-    const seed = await execStandbySeedWithInitRetry(
-      ctx,
-      buildMysqlStandbySeedScript,
-      defaultsBody,
-      () => waitMysqlRealServer(ctx),
-    );
-    if (!seed.success) {
-      throw new Error(
-        `mysql configureStandby seed failed: ${formatStandbySeedFailure(seed)}`,
+      // Short-lived 0600 defaults file via stdin (never -p on argv / never MYSQL_PWD).
+      const seed = await execStandbySeedWithInitRetry(
+        ctx,
+        buildMysqlStandbySeedScript,
+        defaultsBody,
+        () => waitMysqlRealServer(ctx),
       );
+      if (!seed.success) {
+        throw new Error(
+          `mysql configureStandby seed failed: ${
+            formatStandbySeedFailure(seed)
+          }`,
+        );
+      }
+    } finally {
+      // Before the imported grants load: a login that holds SUPER must not be
+      // able to write between the flush and the end of the setup.
+      await runMysql(ctx, enforceReadOnlySql());
     }
 
     // The seed imported the primary's grant tables (mysql.*) — the running
@@ -634,8 +643,6 @@ const mysqlReplicationRuntime: ManagedEngineReplicationRuntime = {
         password: spec.password,
       }),
     );
-
-    await runMysql(ctx, enforceReadOnlySql());
 
     const mark = await ctx.exec([
       "sh",

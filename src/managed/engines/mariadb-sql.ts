@@ -6,6 +6,7 @@
  */
 
 import { grantSqlFor } from "./grant-pattern.ts";
+import { socketAdminSql } from "./socket-admin-sql.ts";
 import {
   type FollowSourceDialect,
   renderFollowSourceSql,
@@ -149,6 +150,18 @@ export function revokeReadOnlyAdminSql(username: string, host: string): string {
   return `REVOKE READ_ONLY ADMIN ON *.* FROM ${accountAt(username, host)};`;
 }
 
+/**
+ * Repair / ensure socket-auth platform admins after a password bootstrap.
+ * MariaDB ships `unix_socket` built-in — no INSTALL PLUGIN.
+ */
+export function ensureSocketAdminSql(osUser: string = "mysql"): string {
+  return socketAdminSql(
+    accountAt("root", "localhost"),
+    accountAt(osUser, "localhost"),
+    "VIA unix_socket",
+  );
+}
+
 /** Non-localhost accounts: the dump copies the primary's grant tables. */
 export function listNonLocalAccountsSql(): string {
   return "SELECT User, Host FROM mysql.global_priv WHERE Host <> 'localhost' AND User <> '';";
@@ -280,23 +293,6 @@ export function createNetworkAccountSql(
   return hosts
     .map((host) => createOrAlterAccountSql(username, password, host))
     .join("\n");
-}
-
-/**
- * Repair / ensure socket-auth platform admins after a password bootstrap.
- * MariaDB ships `unix_socket` built-in — no INSTALL PLUGIN.
- */
-export function ensureSocketAdminSql(osUser: string = "mysql"): string {
-  const rootAccount = accountAt("root", "localhost");
-  const osAccount = accountAt(osUser, "localhost");
-  return [
-    `CREATE USER IF NOT EXISTS ${rootAccount} IDENTIFIED VIA unix_socket;`,
-    `ALTER USER ${rootAccount} IDENTIFIED VIA unix_socket;`,
-    `GRANT ALL PRIVILEGES ON *.* TO ${rootAccount} WITH GRANT OPTION;`,
-    `CREATE USER IF NOT EXISTS ${osAccount} IDENTIFIED VIA unix_socket;`,
-    `ALTER USER ${osAccount} IDENTIFIED VIA unix_socket;`,
-    `GRANT ALL PRIVILEGES ON *.* TO ${osAccount} WITH GRANT OPTION;`,
-  ].join("\n");
 }
 
 /**

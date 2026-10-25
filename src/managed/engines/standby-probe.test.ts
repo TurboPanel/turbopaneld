@@ -8,6 +8,7 @@ import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
   isTransientStandbySeedFailure,
+  scrubSeedOutput,
   waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
@@ -36,6 +37,19 @@ test("formatStandbySeedFailure sanitizes non-empty stderr", () => {
     stderr: "ERROR 1133 (28000) at line 11",
   });
   assertEquals(text.includes("1133"), true);
+  assertEquals(text.includes("unknown"), false);
+});
+
+test("formatStandbySeedFailure keeps dump and import stderr tails together", () => {
+  const text = formatStandbySeedFailure({
+    stdout: "import note",
+    stderr:
+      "dump_exit=1 import_exit=1\n----- dump stderr -----\nERROR 2013 Lost connection\n----- import stderr -----\nERROR 2013 at line 259",
+  });
+  assertEquals(text.includes("dump_exit=1"), true);
+  assertEquals(text.includes("ERROR 2013 Lost connection"), true);
+  assertEquals(text.includes("at line 259"), true);
+  assertEquals(text.includes("import note"), true);
   assertEquals(text.includes("unknown"), false);
 });
 
@@ -69,6 +83,15 @@ test("isTransientStandbySeedFailure matches empty output and init-window codes",
       success: false,
       stdout: "",
       stderr: "ERROR 2013 (HY000): Lost connection to server during query",
+    }),
+    true,
+  );
+  assertEquals(
+    isTransientStandbySeedFailure({
+      success: false,
+      stdout: "",
+      stderr:
+        "dump_exit=1 import_exit=1\nERROR 2006 (HY000): MySQL server has gone away",
     }),
     true,
   );
@@ -226,4 +249,26 @@ test("execStandbySeedWithInitRetry does not retry an unrelated error", async () 
   assertEquals(seeds, 1);
   assertEquals(waited, 0);
   assertEquals(formatStandbySeedFailure(result).includes("unknown"), false);
+});
+
+test("scrubSeedOutput drops quoted values and password hashes but keeps error codes", () => {
+  const hash = `*${"AB12".repeat(10)}`;
+  const text = scrubSeedOutput(
+    `ERROR 1062 (23000) at line 9: Duplicate entry 'alice@example' for key 'PRIMARY'\n` +
+      `ERROR 1064 near 'IDENTIFIED BY PASSWORD ${hash}' at line 3\n` +
+      `ERROR 1133 (28000): Can't find any matching row`,
+  );
+  assertEquals(text.includes("alice"), false);
+  assertEquals(text.includes("AB12"), false);
+  assertEquals(text.includes("ERROR 1062 (23000) at line 9"), true);
+  assertEquals(text.includes("Can't find any matching row"), true);
+});
+
+test("formatStandbySeedFailure scrubs row values from import stderr", () => {
+  const text = formatStandbySeedFailure({
+    stdout: "",
+    stderr: "ERROR 1406 (22001) at line 12: Data too long 'secret-note'",
+  });
+  assertEquals(text.includes("secret-note"), false);
+  assertEquals(text.includes("ERROR 1406"), true);
 });

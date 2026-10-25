@@ -152,7 +152,9 @@ for (const [name, engine] of engines) {
       engine.applyCredentials(ctx, [{
         principalId: "p1",
         username: "app_user",
-        password: ["pw", crypto.randomUUID()].join("-"),
+        // Fixed on purpose: a random hex password could contain the failing
+        // marker ("dbb") and fail the very first statement.
+        password: ["pw", "xyz"].join("-"),
         role: "user",
         databases: ["dba", "dbb", "dbc"],
         privileges: ["read-write"],

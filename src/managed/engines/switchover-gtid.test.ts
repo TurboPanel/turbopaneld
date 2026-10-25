@@ -124,3 +124,16 @@ test("waitForRequiredGtidSet throws gtid_wait_error on NULL", async () => {
     ),
   );
 });
+
+test("filterGtidSetForSwitchoverWait reads a two-UUID MySQL set printed with an escaped newline", () => {
+  const w = "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa";
+  const x = "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb";
+  assertEquals(
+    filterGtidSetForSwitchoverWait(`${w}:1-9,\\n${x}:1-4`, `${x}:1-3`),
+    `${x}:1-4`,
+  );
+  assertEquals(
+    filterGtidSetForSwitchoverWait(`${w}:1-9,${x}:1-4`, ""),
+    `${w}:1-9,${x}:1-4`,
+  );
+});

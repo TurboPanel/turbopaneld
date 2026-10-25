@@ -47,6 +47,8 @@ export class CommandLogUploader {
   #uploadedBytes = 0;
   #truncated = false;
   #stopped = false;
+  #conflictNextSeq: number | undefined;
+  #refused = false;
 
   constructor(options: CommandLogUploaderOptions) {
     this.commandId = options.commandId;
@@ -63,6 +65,21 @@ export class CommandLogUploader {
    */
   get truncated(): boolean {
     return this.#truncated;
+  }
+
+  /**
+   * Set when the control plane answered a chunk with `409` and the sequence it
+   * expects next (it is missing earlier chunks). Cleared by {@link takeConflict}.
+   */
+  takeConflict(): number | undefined {
+    const next = this.#conflictNextSeq;
+    this.#conflictNextSeq = undefined;
+    return next;
+  }
+
+  /** True after the control plane refused the transcript for good (sealed). */
+  get refused(): boolean {
+    return this.#refused;
   }
 
   get uploadedBytes(): number {
@@ -100,6 +117,16 @@ export class CommandLogUploader {
     return true;
   }
 
+  /** A `409` is an answer, not a transport failure: do not retry the same chunk. */
+  #noteConflict(err: unknown): boolean {
+    const status = (err as { status?: unknown } | null)?.status;
+    if (status !== 409) return false;
+    const next = (err as { nextSeq?: unknown }).nextSeq;
+    if (typeof next === "number") this.#conflictNextSeq = next;
+    else this.#refused = true;
+    return true;
+  }
+
   async #sendWithRetry(
     seq: number,
     bytes: string,
@@ -110,6 +137,7 @@ export class CommandLogUploader {
       await this.#send({ commandId: this.commandId, seq, bytes });
       return true;
     } catch (err) {
+      if (this.#noteConflict(err)) return false;
       if (attempt === this.#maxAttempts) {
         logWarn(
           "logs",

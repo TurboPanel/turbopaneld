@@ -59,6 +59,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.backups.test-target",
   "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",

@@ -22,11 +22,13 @@ import {
   installAuthSocketPluginSql,
   isWritableSql,
   MANAGED_DOCKER_NETWORK_HOST,
+  primaryFinalGtidSetSql,
   promoteSql,
   quoteAccount,
   quoteIdentifier,
   quoteLiteral,
   resetReplicaGtidStateSql,
+  seedWindowReadOnlySql,
   showReplicaStatusSql,
   standbyReplicationStatusSql,
   versionSql,
@@ -402,5 +404,27 @@ test("grantReplicationSql keeps REQUIRE SSL out of GRANT (removed in MySQL 8)", 
       "GRANT SELECT, RELOAD, PROCESS, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, REPLICATION SLAVE, REPLICATION CLIENT ON *.*",
     ),
     true,
+  );
+});
+
+test("ensureSocketAdminSql drops the image's root@'%' network account", () => {
+  const sql = ensureSocketAdminSql();
+  assertEquals(sql.includes("DROP USER IF EXISTS `root`@'%';"), true);
+  // Dropped before the socket admin is (re)granted, never the localhost one.
+  assertEquals(sql.includes("DROP USER IF EXISTS `root`@'localhost'"), false);
+});
+
+test("primaryFinalGtidSetSql strips the newline between UUIDs in SQL", () => {
+  const sql = primaryFinalGtidSetSql();
+  assertStringIncludes(sql, "REPLACE(@@GLOBAL.gtid_executed, CHAR(10), '')");
+});
+
+test("seedWindowReadOnlySql keeps read_only on and lifts only super_read_only", () => {
+  const sql = seedWindowReadOnlySql();
+  assertStringIncludes(sql, "SET GLOBAL read_only = ON;");
+  assertStringIncludes(sql, "SET GLOBAL super_read_only = OFF;");
+  assertEquals(
+    sql.includes("read_only = OFF"),
+    sql.includes("super_read_only = OFF"),
   );
 });

@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
   ContractDriftError,
@@ -7,6 +7,7 @@ import {
   fieldPinDrift,
   main,
   runContractDriftCheck,
+  snapshotDataDrift,
 } from "./check-contract-drift.ts";
 
 /**
@@ -180,4 +181,47 @@ test("the CLI entry exits on a refusal, rethrows other errors, and passes a clea
 
   await main(() => Promise.resolve("ok"), (m) => refusals.push(m));
   assertEquals(refusals.length, 1);
+});
+
+test("snapshotDataDrift ignores layout and names the first differing path", () => {
+  const wrapped = `{
+  "Foo": {
+    "fields": [
+      {
+        "name": "type",
+        "required": true
+      }
+    ]
+  }
+}`;
+  const collapsed =
+    `{"Foo": {"fields": [{ "name": "type", "required": true }]}}`;
+  assertEquals(snapshotDataDrift(wrapped, collapsed), null);
+  assertEquals(
+    snapshotDataDrift(
+      wrapped,
+      collapsed.replace('"required": true', '"required": false'),
+    ),
+    "$.Foo.fields[0].required",
+  );
+  assertEquals(
+    snapshotDataDrift(wrapped, `{"Foo": {"fields": []}}`),
+    "$.Foo.fields[0]",
+  );
+  assertEquals(snapshotDataDrift(wrapped, `{"Bar": {}}`), "$.Foo");
+});
+
+test("snapshotDataDrift reports a shorter array and a malformed file", () => {
+  assertEquals(snapshotDataDrift(`{"a": [1, 2]}`, `{"a": [1]}`), "$.a[1]");
+  assertEquals(snapshotDataDrift(`{"a": 1, "b": 2}`, `{"b": 2, "a": 1}`), null);
+  assertThrows(
+    () => snapshotDataDrift(`{"a": `, `{}`),
+    Error,
+    "contract-field-snapshot.json on the instance is not valid JSON",
+  );
+  assertThrows(
+    () => snapshotDataDrift(`{}`, `nope`),
+    Error,
+    "on the daemon is not valid JSON",
+  );
 });

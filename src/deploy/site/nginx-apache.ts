@@ -36,6 +36,7 @@
  */
 
 import type { SiteEngineId, SiteValidationTarget } from "./engine-driver.ts";
+import { apacheForwardedLines, nginxForwardedLines } from "./forwarded.ts";
 
 /** The `engine` value of a site served by nginx in front of Apache. */
 export const NGINX_APACHE_ENGINE = "nginx+apache";
@@ -147,7 +148,8 @@ export function nginxApacheBackendProbe(
  *
  * `set_real_ip_from` loopback: the site-edge Caddy reaches nginx there, so
  * `$remote_addr` becomes the last `X-Forwarded-For` entry Caddy set; a docker
- * bridge peer stays itself. Apache gets that one address, never a list.
+ * bridge peer stays itself. Apache gets that one address, never a list, and
+ * `X-Forwarded-Proto` is `https` only when that same loopback peer said so.
  *
  * nginx streams request bodies straight through (`proxy_request_buffering off`,
  * no size cap here): Apache and PHP's own `post_max_size` set the limit, so an
@@ -162,11 +164,10 @@ export function nginxApacheLocations(backendPort: number): string {
     "  proxy_http_version 1.1;",
     "  proxy_request_buffering off;",
     "  proxy_set_header Host $host;",
-    "  set_real_ip_from 127.0.0.1;",
-    "  set_real_ip_from ::1;",
-    "  real_ip_header X-Forwarded-For;",
+    ...nginxForwardedLines(),
     `  proxy_bind ${NGINX_APACHE_TRUSTED_PROXY};`,
     "  proxy_set_header X-Forwarded-For $remote_addr;",
+    "  proxy_set_header X-Forwarded-Proto $tp_fwd_scheme;",
     "",
     "  # Dotfiles (.htaccess, .env, .git) are refused here and never reach Apache.",
     ...nginxDotfileDenyLines(),
@@ -195,8 +196,7 @@ export function nginxApacheLocations(backendPort: number): string {
  */
 export function apacheBehindNginxLines(): string[] {
   return [
-    "  RemoteIPHeader X-Forwarded-For",
-    `  RemoteIPInternalProxy ${NGINX_APACHE_TRUSTED_PROXY}`,
+    ...apacheForwardedLines(NGINX_APACHE_TRUSTED_PROXY),
     ...apacheDotfileDenyLines(),
   ];
 }

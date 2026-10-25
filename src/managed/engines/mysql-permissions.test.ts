@@ -617,3 +617,41 @@ test("each script bounds its statements on the server", () => {
     "SET SESSION max_statement_time = 3;",
   );
 });
+
+test("a login's views, triggers, routines and events are listed on its report", async () => {
+  const engine = fakeEngine({
+    "`u1`@'%'": ["GRANT USAGE ON *.* TO `u1`@`%`"],
+  }, "u1\t%\tN\n");
+  const query = (sql: string) =>
+    sql.includes("information_schema.VIEWS")
+      ? Promise.resolve("u1\tview\tshop\torders_v\nu1\tevent\tshop\tnightly\n")
+      : engine.query(sql);
+  const report = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1", "gone"], databases: [] },
+    query,
+  );
+  assertEquals(report.logins[0]?.definesObjects, [
+    "view shop.orders_v",
+    "event shop.nightly",
+  ]);
+  assertEquals(report.logins[1]?.definesObjects, undefined);
+  assertEquals(report.logins[0]?.definesObjectsUnread, undefined);
+});
+
+test("a failed definer query flags the login as unread, not as having none", async () => {
+  const engine = fakeEngine({
+    "`u1`@'%'": ["GRANT USAGE ON *.* TO `u1`@`%`"],
+  }, "u1\t%\tN\n");
+  const query = (sql: string) =>
+    sql.includes("information_schema.VIEWS")
+      ? Promise.reject(new Error("boom"))
+      : engine.query(sql);
+  const report = await readMysqlFamilyPermissions(
+    "mysql",
+    { logins: ["u1"], databases: [] },
+    query,
+  );
+  assertEquals(report.logins[0]?.definesObjects, undefined);
+  assertEquals(report.logins[0]?.definesObjectsUnread, true);
+});

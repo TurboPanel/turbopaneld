@@ -31,11 +31,14 @@
  *   only when `pg_ctl status` confirms the postmaster is gone, otherwise
  *   soft for `unresponsiveGraceMs` (an overloaded primary is not dead);
  * - a failed `pg_controldata` read keeps the long crash-recovery grace;
- * - while one incident lasts the event is re-sent with exponential back-off
- *   (`resendBaseMs` doubling to `resendMaxMs`, at most `maxEventsPerIncident`
- *   events) so a refusal (e.g. inside the control plane's 15 min cooldown)
- *   is retried after it; a new incident no sooner than `backoffMs` after
- *   the last event, reset when the primary answers again.
+ * - while one incident lasts the event is re-sent every `resendBaseMs`
+ *   (doubling up to `resendMaxMs`; both one minute by default, at most
+ *   `maxEventsPerIncident` events) so a refusal (e.g. inside the control
+ *   plane's 15 min cooldown) is retried within a minute of the refusal
+ *   ending. The control plane only accepts a failure up to 20 minutes old
+ *   (`MAX_FAILURE_SPAN_MS`), so a back-off that skips past the cooldown's
+ *   end would never be retried successfully; a new incident no sooner than
+ *   `backoffMs` after the last event, reset when the primary answers again.
  *
  * Only read-only probes run, as the `postgres` user: `docker inspect`,
  * `pg_isready`, `pg_ctl status`, `pg_controldata`. No SQL, no credentials
@@ -68,9 +71,9 @@ export type PgDeadPrimaryConfig = {
    */
   unresponsiveGraceMs: number;
   backoffMs: number;
-  /** First re-send of a still-dead incident; doubles each time. */
+  /** First re-send of a still-dead incident; doubles each time up to `resendMaxMs`. */
   resendBaseMs: number;
-  /** Ceiling for the re-send interval. */
+  /** Ceiling for the re-send interval (one minute: see the module comment). */
   resendMaxMs: number;
   /** Events per incident, including the first. */
   maxEventsPerIncident: number;
@@ -87,9 +90,11 @@ export const DEFAULT_PG_DEAD_PRIMARY_CONFIG: Readonly<PgDeadPrimaryConfig> = {
   startGraceMs: 60_000,
   unresponsiveGraceMs: 5 * 60_000,
   backoffMs: 5 * 60_000,
-  resendBaseMs: 5 * 60_000,
-  resendMaxMs: 60 * 60_000,
-  maxEventsPerIncident: 5,
+  resendBaseMs: 60_000,
+  resendMaxMs: 60_000,
+  // The first event plus a re-send a minute apart for about 24 minutes: past
+  // the control plane's 15 min cooldown and its 20 min failure-span limit.
+  maxEventsPerIncident: 25,
   dockerTimeoutMs: 10_000,
   pgReadyTimeoutSeconds: 3,
 };

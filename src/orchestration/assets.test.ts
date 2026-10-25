@@ -18,8 +18,6 @@ import {
   DENO_RUNTIME_DIR,
   DENO_VERSION,
   GALAXY_COLLECTIONS_DIR,
-  GALAXY_VENDOR_ROLES_DIR,
-  galaxyDockerRoleCodeloadUrl,
   ORCHESTRATION_DIR,
   ORCHESTRATION_LAYOUT,
   PYTHON_CURRENT_DIR,
@@ -466,16 +464,6 @@ test("module-level orchestration constants match active layout", () => {
     GALAXY_COLLECTIONS_DIR,
     join(layout.runtimesDir, "ansible", "galaxy-collections"),
     "GALAXY_COLLECTIONS_DIR",
-  );
-  assertEquals(
-    GALAXY_VENDOR_ROLES_DIR,
-    join(layout.runtimesDir, "ansible", "galaxy-roles"),
-    "GALAXY_VENDOR_ROLES_DIR",
-  );
-  assertEquals(
-    galaxyDockerRoleCodeloadUrl("8.0.0"),
-    "https://codeload.github.com/geerlingguy/ansible-role-docker/tar.gz/refs/tags/8.0.0",
-    "galaxyDockerRoleCodeloadUrl",
   );
   assertEquals(
     ANSIBLE_LOCAL_TMP,
@@ -1357,5 +1345,28 @@ test("runtime roles verify every download with get_url checksum before extractio
     assertEquals(tasks.includes("curl -fsSL"), false, `${role} curl`);
     assertEquals(tasks.includes("ansible.builtin.get_url"), true, role);
     assertEquals(/checksum: "sha256:\{\{/.test(tasks), true, role);
+  }
+});
+
+test("queue-config-refresh renders only the queue role, restarts only on a config change and never fails the update", () => {
+  const text = Deno.readTextFileSync(
+    join(ORCHESTRATION_DIR, "playbooks", "queue-config-refresh.yml"),
+  );
+  for (
+    const needle of [
+      "name: rabbitmq\n",
+      "rabbitmq_conf_written is changed",
+      "rescue:",
+      "docker, restart",
+    ]
+  ) {
+    if (!text.includes(needle)) {
+      throw new TypeError(`queue-config-refresh.yml needs ${needle}`);
+    }
+  }
+  for (const role of ["name: system-compose", "name: docker\n"]) {
+    if (text.includes(role)) {
+      throw new TypeError(`queue-config-refresh.yml must not run ${role}`);
+    }
   }
 });

@@ -1,0 +1,14 @@
+{# Docker apt source (deb822). Online: Docker's repository with the pinned key. Offline: a local flat repository. #}
+{% if turbopanel_docker_offline_dir | length > 0 %}
+Types: deb
+URIs: file://{{ turbopanel_docker_offline_dir }}
+Suites: ./
+Trusted: yes
+{% else %}
+Types: deb
+URIs: {{ turbopanel_docker_repo_base }}/{{ _docker_distro_map[ansible_facts['distribution']] }}
+Suites: {{ _docker_suite }}
+Components: stable
+Architectures: {{ _docker_arch_map[ansible_facts['architecture']] }}
+Signed-By: {{ _docker_repo_key_path }}
+{% endif %}

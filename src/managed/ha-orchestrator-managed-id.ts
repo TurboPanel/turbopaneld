@@ -255,6 +255,38 @@ export async function resolveOrchestratorDeadPrimaryEmit(
   };
 }
 
+/**
+ * The same emit context as an Orchestrator dead-primary row, for a primary
+ * this host's own probe found hung. `failureStartedAtMs` is when the hang
+ * began (the first unanswered probe): the control plane tells whether a
+ * replica was still in contact at that moment, so it must not be later.
+ * Returns null when the cluster is suppressed (intent, destroyed, switchover
+ * markers) or the primary's listener cannot be read.
+ */
+export async function resolveHungPrimaryEmit(
+  layout: LayoutPaths,
+  managedId: string,
+  failureStartedAtMs: number,
+  run: RunDockerFn,
+  nowMs: number,
+): Promise<OrchestratorDeadPrimaryEmitContext | null> {
+  if (await isOrchestratorHaEmitSuppressed(layout, managedId, nowMs)) {
+    return null;
+  }
+  const dial = await resolveLocalPrimaryOrchestratorDial(
+    layout,
+    managedId,
+    run,
+  );
+  if (!dial) return null;
+  return {
+    managedId,
+    incidentKey: `${managedId}:${orchestratorIncidentPrimaryKey(dial)}`,
+    emitKey: { hostname: dial.hostname, port: dial.port },
+    primaryStoppedAtMs: failureStartedAtMs,
+  };
+}
+
 export async function resolveManagedIdForOrchestratorInstance(
   layout: LayoutPaths,
   key: { hostname: string; port: number },

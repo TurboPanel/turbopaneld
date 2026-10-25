@@ -104,9 +104,13 @@ export async function reloadControlPlaneCaddy(
   }
 }
 
+/** The catch-all for names nobody hosts; written by every hosting deploy. */
+export const HOSTING_FALLBACK_SITE = "00-fallback.caddy";
+
 /** Hosting site fragments tenant sweeps must never delete. */
 export const DAEMON_RESERVED_HOSTING_SITES = new Set([
   "00-empty.caddy",
+  HOSTING_FALLBACK_SITE,
   INSTANCE_ACME_HTTP01_SITE,
 ]);
 

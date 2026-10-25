@@ -22,7 +22,8 @@
 # run, config, state, log and backup folders TurboPanel created, service
 # accounts in the 9900-9999 band, principal accounts and homes, ansible scratch
 # dirs, /opt/turbopanel/ lines in shell startup files, and Docker Engine
-# completely (containers, images, volumes, packages, apt source).
+# completely (containers, images, volumes, packages, apt source and signing
+# key), plus the signing key and apt source of TurboPanel's PHP repository.
 #
 # What it never removes: any distribution package. Hosts run this on desktops
 # and shared machines, so curl, git, acl, gnupg, iptables, openssl,
@@ -31,7 +32,8 @@
 # apt packages it purges are Docker's, and the PHP series (phpN.N-*) and the
 # sury archive keyring that TurboPanel's own PHP role added — each checked with
 # an apt simulation first; a package whose removal would drag anything else
-# along is kept and reported.
+# along is kept and reported. A version hold (the Docker role holds docker-ce
+# and docker-ce-cli) does not stop the purge of a package on that list.
 #
 # After confirmation it writes a root-only purge-in-progress marker and a
 # resume manifest under /var/lib/turbopanel-purge. The marker is outside the
@@ -2160,21 +2162,43 @@ tp_remove_units() {
   tp_remove_unit_files
   tp_prune_wants_symlinks
   tp_run "systemctl daemon-reload" systemctl daemon-reload || true
-  # Scoped to TurboPanel units. A bare reset-failed would clear every failed
-  # unit on the host, including ones this purge did not touch. A glob
-  # that matches nothing is not a failed purge, but wg-quick@tp0.service
-  # is a literal name, not a glob: systemctl errors on "not loaded" for a
-  # literal it has never seen, which is the common case on a host that never
-  # brought up a WireGuard tunnel. Only pass it when it is actually known.
-  _ru_units="turbopanel* turbopaneld*"
-  if systemctl list-units --all --no-legend --plain 'wg-quick@tp0.service' \
-      2>/dev/null | grep -q .; then
-    _ru_units="$_ru_units wg-quick@tp0.service"
+  tp_reset_failed_units
+}
+
+# Clears the failed state of TurboPanel's own units, and only of units systemd
+# has loaded in the failed state. A bare reset-failed would clear every failed
+# unit on the host, and reset-failed on a name systemd has not loaded exits 1
+# ("not loaded"), which would count as a failed purge step and keep the purge
+# marker. The patterns stay quoted: unquoted, the shell expands turbopanel*
+# against the working directory first, and a /tmp/turbopanel-orchestrate there
+# turned it into a literal unit name. Dry-run only logs it (tp_run).
+tp_reset_failed_units() {
+  _rfu_list=$TP_TMP/failed.units
+  : > "$_rfu_list"
+  systemctl list-units --failed --all --no-legend --plain \
+    'turbopanel*' 'turbopaneld*' 'wg-quick@tp0.service' > "$TP_TMP/failed.raw" 2>/dev/null || true
+  set -f
+  while IFS= read -r _rfu_line; do
+    # Older systemd prints a status bullet before the name.
+    for _rfu_word in $_rfu_line; do
+      case $_rfu_word in
+        turbopanel*|wg-quick@tp0.service)
+          tp_file_add "$_rfu_list" "$_rfu_word"
+          break
+          ;;
+      esac
+    done
+  done < "$TP_TMP/failed.raw"
+  set +f
+  if [ ! -s "$_rfu_list" ]; then
+    tp_log_line "no failed TurboPanel units to clear"
+    return 0
   fi
-  # Dry-run must skip this: it clears live unit state.
-  # shellcheck disable=SC2086
-  tp_run "clear failed TurboPanel unit state" \
-    systemctl reset-failed $_ru_units || true
+  set --
+  while IFS= read -r _rfu_unit; do
+    set -- "$@" "$_rfu_unit"
+  done < "$_rfu_list"
+  tp_run "clear failed TurboPanel unit state" systemctl reset-failed "$@" || true
 }
 
 tp_docker_inventory_container_name() {
@@ -2255,9 +2279,7 @@ tp_finalize_turbopanel_units() {
   tp_collect_unit_names
   tp_stop_units_matching other
   tp_run "systemctl daemon-reload" systemctl daemon-reload || true
-  # shellcheck disable=SC2086
-  tp_run "clear failed TurboPanel unit state" \
-    systemctl reset-failed turbopanel* turbopaneld* || true
+  tp_reset_failed_units
 }
 
 tp_remove_docker() {
@@ -2818,9 +2840,40 @@ tp_purge_note_kept() {
   tp_print_warn "keeping ${_pnk_pkg}: ${_pnk_why}"
 }
 
+# dpkg's Status is "<want> <flag> <state>". The want is install, hold,
+# deinstall, purge or unknown: a version hold reads "hold ok installed", so the
+# want never decides whether a package is there. The flag is ok or reinstreq.
+# Only the state says what is on disk: installed, or partway in or out
+# (half-installed, unpacked, half-configured, triggers-awaited,
+# triggers-pending), all of which leave the package's files; config-files
+# leaves only its conffiles; not-installed leaves nothing. A Multi-Arch package
+# prints one line per architecture. Shell only: callers run with a bare PATH.
+# The on-disk states are TP_DPKG_ON_DISK.
+
+# $1 package, $2 space-separated states. True when any line is in one of them.
+tp_pkg_state_in() {
+  _psi_status=$(dpkg-query -W -f '${Status}\n' "$1" 2>/dev/null || true)
+  [ -n "$_psi_status" ] || return 1
+  while IFS=' ' read -r _psi_want _psi_flag _psi_state; do
+    : "$_psi_want" "$_psi_flag"
+    [ -n "$_psi_state" ] || continue
+    case " $2 " in
+      *" $_psi_state "*) return 0 ;;
+    esac
+  done <<EOF
+$_psi_status
+EOF
+  return 1
+}
+
+# The package's files are on the host, whatever dpkg's want or flag says.
 tp_pkg_installed() {
-  _pi_status=$(dpkg-query -W -f '${Status}' "$1" 2>/dev/null || true)
-  [ "$_pi_status" = "install ok installed" ]
+  tp_pkg_state_in "$1" "$TP_DPKG_ON_DISK"
+}
+
+# The purge has something to remove: the package's files or its conffiles.
+tp_pkg_purgeable() {
+  tp_pkg_state_in "$1" "$TP_DPKG_ON_DISK config-files"
 }
 
 # Only packages that are provably TurboPanel's own go through the purge. The
@@ -2833,6 +2886,9 @@ tp_pkg_installed() {
 tp_sury_evidence() {
   [ -e /etc/apt/sources.list.d/sury-php.sources ] && return 0
   [ -e /etc/apt/sources.list.d/sury-php.list ] && return 0
+  for _se_key in $TP_SURY_APT_KEYS; do
+    [ -e "$_se_key" ] && return 0
+  done
   [ -f "$TP_TMP/before.units" ] && grep -q 'turbopanel-php-fpm' "$TP_TMP/before.units" && return 0
   return 1
 }
@@ -2843,10 +2899,10 @@ tp_collect_purge_candidates() {
   dpkg-query -W -f '${Package}\n' 'php[0-9]*.[0-9]*-*' > "$TP_TMP/apt.php" 2>/dev/null || true
   while IFS= read -r _cpc; do
     [ -n "$_cpc" ] || continue
-    tp_pkg_installed "$_cpc" || continue
+    tp_pkg_purgeable "$_cpc" || continue
     tp_file_add "$TP_TMP/apt.candidates" "$_cpc"
   done < "$TP_TMP/apt.php"
-  if tp_pkg_installed debsuryorg-archive-keyring; then
+  if tp_pkg_purgeable debsuryorg-archive-keyring; then
     tp_file_add "$TP_TMP/apt.candidates" debsuryorg-archive-keyring
   fi
   if [ -s "$TP_TMP/apt.candidates" ]; then
@@ -3024,6 +3080,11 @@ tp_run_listed_packages() {
 # nothing beyond the list; a package whose purge would drag anything else along
 # is kept and reported. Nothing here ever runs autoremove: only the named
 # packages leave, so whatever else is on the host stays exactly as it was.
+# A version hold on a listed package (the Docker role holds docker-ce and
+# docker-ce-cli) would make `apt-get purge -y` refuse the whole call while the
+# simulation above still passes, so the purge is allowed to change holds. That
+# only ever applies to the listed packages: a held package the purge would drag
+# along shows up in the simulation and keeps the whole candidate.
 tp_purge_guarded_packages() {
   _pgp_label=$1
   _pgp_cand=$2
@@ -3032,7 +3093,7 @@ tp_purge_guarded_packages() {
   mv "$_pgp_cand.sorted" "$_pgp_cand"
   tp_choose_purge_packages "$_pgp_cand"
   tp_run_listed_packages "purge ${_pgp_label} packages" "$TP_TMP/apt.final" \
-    env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get purge -y
+    env LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-change-held-packages
 }
 
 tp_purge_apt_packages() {
@@ -3052,9 +3113,11 @@ tp_purge_apt_packages() {
   else
     tp_print_ok "no PHP packages added by TurboPanel"
   fi
-  # TurboPanel's own sury source goes last, so an interrupted run still finds
-  # it as evidence on the next one.
-  for _pap in /etc/apt/sources.list.d/sury-php.sources /etc/apt/sources.list.d/sury-php.list; do
+  # TurboPanel's own sury source and its signing key go last, so an
+  # interrupted run still finds them as evidence on the next one. The key is a
+  # loose file when the PHP role installed it under its key policy; an older
+  # install shipped it in the debsuryorg-archive-keyring package purged above.
+  for _pap in /etc/apt/sources.list.d/sury-php.sources /etc/apt/sources.list.d/sury-php.list $TP_SURY_APT_KEYS; do
     if [ -e "$_pap" ] || [ -L "$_pap" ]; then
       tp_run "remove $_pap" rm -f "$_pap" || true
     fi
@@ -3101,17 +3164,38 @@ tp_collect_signed_by() {
   done < "$TP_TMP/docker.signed"
 }
 
+# Docker's apt source and signing key, by content and by name. The scan finds
+# any source that points at download.docker.com and the keys its Signed-By
+# names. The fixed names in TP_DOCKER_APT_SOURCES and TP_DOCKER_APT_KEYS cover
+# what the scan cannot see: an offline install's file:// source, a key left
+# without its source (a half-finished install writes the key first; an
+# interrupted purge removes the source first), and the key download's
+# temporary copy.
 tp_purge_docker_sources() {
-  [ -d /etc/apt/sources.list.d ] || return 0
   : > "$TP_TMP/docker.keyrings"
-  find /etc/apt/sources.list.d -maxdepth 1 \( -type f -o -type l \) > "$TP_TMP/docker.sourcefiles" 2>/dev/null || true
+  : > "$TP_TMP/docker.sourcefiles"
+  : > "$TP_TMP/docker.sources"
+  if [ -d "$TP_APT_SOURCES_DIR" ]; then
+    find "$TP_APT_SOURCES_DIR" -maxdepth 1 \( -type f -o -type l \) > "$TP_TMP/docker.sourcefiles" 2>/dev/null || true
+  fi
   while IFS= read -r _pds; do
     [ -n "$_pds" ] || continue
     grep -q 'download.docker.com' "$_pds" 2>/dev/null || continue
+    tp_file_add "$TP_TMP/docker.sources" "$_pds"
+  done < "$TP_TMP/docker.sourcefiles"
+  for _pds in $TP_DOCKER_APT_SOURCES; do
+    if [ -e "$_pds" ] || [ -L "$_pds" ]; then
+      tp_file_add "$TP_TMP/docker.sources" "$_pds"
+    fi
+  done
+  while IFS= read -r _pds; do
+    [ -n "$_pds" ] || continue
     tp_collect_signed_by "$_pds" "$TP_TMP/docker.keyrings"
     tp_run "remove $_pds" rm -f "$_pds" || true
-  done < "$TP_TMP/docker.sourcefiles"
-  [ -s "$TP_TMP/docker.keyrings" ] || return 0
+  done < "$TP_TMP/docker.sources"
+  for _pds_key in $TP_DOCKER_APT_KEYS; do
+    tp_file_add "$TP_TMP/docker.keyrings" "$_pds_key"
+  done
   while IFS= read -r _pds_key; do
     [ -n "$_pds_key" ] || continue
     [ -e "$_pds_key" ] || [ -L "$_pds_key" ] || continue
@@ -3164,6 +3248,17 @@ tp_purge_docker_data_root() {
   fi
 }
 
+# Docker's packages on the host, held or not and also when only partly
+# installed or only their conffiles remain, into docker.pkgs.
+tp_collect_docker_packages() {
+  : > "$TP_TMP/docker.pkgs"
+  for _pde in $TP_DOCKER_PACKAGES; do
+    if tp_pkg_purgeable "$_pde"; then
+      tp_file_add "$TP_TMP/docker.pkgs" "$_pde"
+    fi
+  done
+}
+
 tp_purge_docker_engine() {
   tp_print_step "▸" "Docker Engine"
   # Capture data-root while daemon.json and the daemon are still available.
@@ -3171,15 +3266,11 @@ tp_purge_docker_engine() {
   tp_stop_unit_if_running docker.socket
   tp_stop_unit_if_running docker
   tp_stop_unit_if_running containerd
-  : > "$TP_TMP/docker.pkgs"
   if ! tp_has_tool dpkg-query; then
+    : > "$TP_TMP/docker.pkgs"
     tp_record_skip "dpkg-query not installed"
   else
-    for _pde in $TP_DOCKER_PACKAGES; do
-      if tp_pkg_installed "$_pde"; then
-        tp_file_add "$TP_TMP/docker.pkgs" "$_pde"
-      fi
-    done
+    tp_collect_docker_packages
   fi
   if [ -s "$TP_TMP/docker.pkgs" ]; then
     if tp_has_tool apt-get; then
@@ -3193,28 +3284,87 @@ tp_purge_docker_engine() {
   tp_purge_docker_data_root
   tp_safe_rm_tree /etc/docker
   tp_purge_docker_sources
-  if tp_has_tool getent && getent group docker >/dev/null 2>&1; then
-    if tp_has_tool groupdel; then
-      tp_run "groupdel docker" groupdel docker || true
-    else
-      tp_record_skip "groupdel not installed"
-    fi
-  fi
+  tp_reset_failed_docker_units
+  tp_purge_docker_group
   hash -r 2>/dev/null || true
   if tp_docker_engine_gone; then
     TP_DOCKER_ENGINE_GONE=true
+    tp_purge_docker_stale_sockets
+    tp_purge_docker_unit_leftovers
     tp_purge_docker_network_state
   else
-    tp_print_warn "Docker Engine is still installed; its bridges and firewall rules were left"
+    tp_print_warn "Docker Engine is still installed (${TP_DOCKER_PRESENT_WHY:-reason unknown}); its bridges and firewall rules were left"
   fi
 }
 
-# True when an engine package from TP_DOCKER_PACKAGES is still on the host.
+# The docker group goes only with the engine. docker.socket resolves the group
+# at boot (Group=docker), so a group removed while engine packages stay leaves
+# a host whose Docker can never start again, and a reinstall that finds the
+# package already there does not recreate it. Dry runs change nothing, so they
+# report the step as they always did.
+tp_purge_docker_group() {
+  tp_has_tool getent || return 0
+  getent group docker >/dev/null 2>&1 || return 0
+  _pdg_remain=false
+  if [ "$DRY_RUN" != true ] && tp_has_tool dpkg-query; then
+    tp_docker_engine_packages_remain && _pdg_remain=true
+  fi
+  if [ "$_pdg_remain" = true ]; then
+    tp_print_warn "keeping the docker group: Docker Engine packages are still installed"
+    return 0
+  fi
+  if tp_has_tool groupdel; then
+    tp_run "groupdel docker" groupdel docker || true
+  else
+    tp_record_skip "groupdel not installed"
+  fi
+}
+
+# Clears the failed state systemd keeps for Docker's units once they are
+# stopped or purged, so no stale "failed" docker.socket outlives the purge.
+# Only units loaded in the failed state are named: reset-failed on a name
+# systemd has not loaded exits 1 and would count as a failed step.
+tp_reset_failed_docker_units() {
+  tp_has_tool systemctl || return 0
+  set --
+  for _rfd_unit in docker.socket docker.service containerd.service; do
+    _rfd_state=$(systemctl is-failed "$_rfd_unit" 2>/dev/null || true)
+    if [ "$_rfd_state" = failed ]; then
+      set -- "$@" "$_rfd_unit"
+    fi
+  done
+  [ "$#" -gt 0 ] || return 0
+  tp_run "clear failed Docker unit state" systemctl reset-failed "$@" || true
+}
+
+# Once Docker Engine is purged its units went with its packages. What can stay
+# is an enablement link left dangling (a purge that stopped partway, or a unit
+# enabled by hand) and an empty drop-in dir (the hosting role's ingress guard
+# drop-in lives in docker.service.d). A real unit file is never touched.
+tp_purge_docker_unit_leftovers() {
+  for _pdu_dir in $TP_SYSTEMD_DIRS; do
+    [ -d "$_pdu_dir" ] || continue
+    for _pdu_unit in docker.service docker.socket containerd.service; do
+      for _pdu_link in "$_pdu_dir"/*.wants/"$_pdu_unit" "$_pdu_dir"/*.requires/"$_pdu_unit"; do
+        if [ -L "$_pdu_link" ] && [ ! -e "$_pdu_link" ]; then
+          tp_run "remove dangling link $_pdu_link" rm -f "$_pdu_link" || true
+        fi
+      done
+      _pdu_drop=$_pdu_dir/$_pdu_unit.d
+      if [ -d "$_pdu_drop" ] && [ ! -L "$_pdu_drop" ] && [ -z "$(ls -A "$_pdu_drop" 2>/dev/null)" ]; then
+        tp_run "remove empty $_pdu_drop" rmdir "$_pdu_drop" || true
+      fi
+    done
+  done
+}
+
+# True when an engine package from TP_DOCKER_ENGINE_PACKAGES (the one list the
+# docker group decision and the engine-gone check share) is still on the host.
 tp_docker_engine_packages_remain() {
   if ! tp_has_tool dpkg-query; then
     return 1
   fi
-  for _depr in $TP_DOCKER_PACKAGES; do
+  for _depr in $TP_DOCKER_ENGINE_PACKAGES; do
     if tp_pkg_installed "$_depr"; then
       return 0
     fi
@@ -3222,23 +3372,53 @@ tp_docker_engine_packages_remain() {
   return 1
 }
 
+# True when a process is listening on the unix socket path $1, or may be: ss
+# lists the path the listener bound, and /run and /var/run are the same
+# directory, so both spellings are matched. A socket file with no listener is
+# stale (a failed docker.socket leaves one behind). If ss exists but fails, it
+# is uncertain and counts as listening. Without ss there is no way to tell, and
+# the packages, binaries and units were already checked by the caller, so the
+# file counts as stale.
+tp_socket_listening() {
+  tp_has_tool ss || return 1
+  _tsl_out=$(ss -xl 2>/dev/null) || return 0
+  _tsl_alt=
+  case $1 in
+    /var/run/*) _tsl_alt=/run/${1#/var/run/} ;;
+    /run/*) _tsl_alt=/var/run/${1#/run/} ;;
+  esac
+  printf '%s\n' "$_tsl_out" | grep -F -e " $1 " ${_tsl_alt:+-e " $_tsl_alt "} >/dev/null 2>&1
+}
+
+# Removes the stale socket files of a Docker that is gone: only the listed
+# socket paths, only when they are sockets nobody listens on.
+tp_purge_docker_stale_sockets() {
+  for _pdss in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
+    if [ -S "$_pdss" ] && [ ! -L "$_pdss" ] && ! tp_socket_listening "$_pdss"; then
+      tp_run "remove stale socket $_pdss" rm -f "$_pdss" || true
+    fi
+  done
+}
+
 # Docker Engine is gone only when nothing of it remains: no daemon binary
 # (also the snap and rootless ones), no engine package, no active or installed
-# service, and no live socket. Anything uncertain counts as still present.
+# service, and no socket with a listener. Anything uncertain counts as still present.
 # Dry runs change nothing, so they never count as gone.
 tp_docker_engine_gone() {
-  [ "$DRY_RUN" = true ] && return 1
-  tp_has_tool docker && return 1
-  tp_has_tool dockerd && return 1
-  tp_has_tool dockerd-rootless.sh && return 1
-  [ -x /snap/bin/docker.dockerd ] && return 1
-  [ -d /snap/docker ] && return 1
+  [ "$DRY_RUN" = true ] && { TP_DOCKER_PRESENT_WHY="dry run"; return 1; }
+  tp_has_tool docker && { TP_DOCKER_PRESENT_WHY="a docker command is on the PATH"; return 1; }
+  tp_has_tool dockerd && { TP_DOCKER_PRESENT_WHY="dockerd is on the PATH"; return 1; }
+  tp_has_tool dockerd-rootless.sh && { TP_DOCKER_PRESENT_WHY="rootless dockerd is on the PATH"; return 1; }
+  [ -x /snap/bin/docker.dockerd ] && { TP_DOCKER_PRESENT_WHY="the snap Docker is installed"; return 1; }
+  [ -d /snap/docker ] && { TP_DOCKER_PRESENT_WHY="the snap Docker is installed"; return 1; }
   if tp_has_tool snap && snap list docker >/dev/null 2>&1; then
+    TP_DOCKER_PRESENT_WHY="the snap Docker is installed"
     return 1
   fi
   if tp_has_tool dpkg-query; then
-    for _deg in docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io docker-ce-rootless-extras moby-engine moby-cli; do
+    for _deg in $TP_DOCKER_ENGINE_PACKAGES; do
       if tp_pkg_installed "$_deg"; then
+        TP_DOCKER_PRESENT_WHY="package $_deg is installed"
         return 1
       fi
     done
@@ -3246,12 +3426,16 @@ tp_docker_engine_gone() {
   if tp_has_tool systemctl; then
     for _deg in docker.service docker.socket snap.docker.dockerd.service; do
       if systemctl is-active --quiet "$_deg" 2>/dev/null; then
+        TP_DOCKER_PRESENT_WHY="$_deg is active"
         return 1
       fi
     done
   fi
   for _deg in ${TP_DOCKER_SOCKETS:-/var/run/docker.sock /run/docker.sock /run/user/*/docker.sock /var/snap/docker/common/run/docker.sock}; do
-    [ -S "$_deg" ] && return 1
+    if [ -S "$_deg" ] && tp_socket_listening "$_deg"; then
+      TP_DOCKER_PRESENT_WHY="something is listening on $_deg"
+      return 1
+    fi
   done
   return 0
 }
@@ -3320,6 +3504,22 @@ tp_purge_docker_net_table() {
       TP_NET_LEFT=true
     fi
   done
+  [ "$_dnt_table" = filter ] && tp_restore_forward_policy "$_dnt_bin"
+  return 0
+}
+
+# Docker sets the FORWARD policy to DROP and never puts it back. Once its rules
+# are gone, a FORWARD policy of DROP with no FORWARD rule left is Docker's
+# leftover and goes back to ACCEPT, so a purged host forwards like a clean one.
+# Any FORWARD rule that remains is the operator's, and then the policy is theirs.
+tp_restore_forward_policy() {
+  _rfp_bin=$1
+  "$_rfp_bin" -w 5 -t filter -S > "$TP_TMP/dn.after" 2>>"$TP_LOG_FILE" || return 0
+  grep -q '^-P FORWARD DROP$' "$TP_TMP/dn.after" || return 0
+  if grep -q '^-A FORWARD ' "$TP_TMP/dn.after"; then
+    return 0
+  fi
+  tp_run "set $_rfp_bin FORWARD policy to ACCEPT" "$_rfp_bin" -w 5 -t filter -P FORWARD ACCEPT || true
 }
 
 # After Docker Engine is purged its bridges and firewall rules are orphans.
@@ -3857,10 +4057,24 @@ TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folde
 # it added. Never add a generic package here (curl, git, acl, gnupg, iptables,
 # openssl, wireguard-tools, build-essential, sudo, systemd-timesyncd, ...): the
 # installer relies on them but a desktop or shared host owns them. A role that
-# adds an apt repository has to add its source file to the removal in
-# tp_purge_apt_packages (the Docker download.docker.com scan or the sury
-# filenames would not match another).
+# adds an apt repository has to add its source file and signing key to the
+# removal (the Docker lists below, or the sury names in tp_purge_apt_packages);
+# scripts/purge-coverage.test.ts fails when a role names an apt file, a held
+# package or a systemd unit this script does not remove.
+# dpkg states in which a package's files are on disk (see tp_pkg_state_in).
+TP_DPKG_ON_DISK="installed half-installed unpacked half-configured triggers-awaited triggers-pending"
+TP_DOCKER_ENGINE_PACKAGES="docker-ce docker-ce-cli containerd.io docker-compose-plugin docker.io docker-ce-rootless-extras moby-engine moby-cli"
 TP_DOCKER_PACKAGES="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras docker.io docker-compose containerd runc"
+TP_APT_SOURCES_DIR=/etc/apt/sources.list.d
+# Docker apt sources by name: the Docker role's and the Galaxy role's deb822
+# file, and the one-line files older installs used.
+TP_DOCKER_APT_SOURCES="/etc/apt/sources.list.d/docker.sources /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/download_docker_com_linux_debian.list /etc/apt/sources.list.d/download_docker_com_linux_ubuntu.list /etc/apt/sources.list.d/download_docker_com_linux_raspbian.list"
+# Docker signing keys by name, with the key download's temporary copy (the
+# repo-key role fetches to <key>.fetched and removes it unless interrupted).
+TP_DOCKER_APT_KEYS="/etc/apt/keyrings/docker.asc /etc/apt/keyrings/docker.asc.fetched /etc/apt/keyrings/docker.gpg /etc/apt/trusted.gpg.d/docker.asc /etc/apt/trusted.gpg.d/docker.gpg"
+# The PHP repository's signing key when the PHP role installs it as a loose
+# file through the repo-key role, with that role's <key>.fetched download.
+TP_SURY_APT_KEYS="/usr/share/keyrings/turbopanel-sury-php.gpg /usr/share/keyrings/turbopanel-sury-php.gpg.fetched"
 
 if ! tp_is_interactive; then
   tp_print_error "A controlling terminal is required. Nothing was changed."

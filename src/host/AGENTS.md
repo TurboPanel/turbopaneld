@@ -5,12 +5,24 @@ machine-key / runtime inventory probes attached on hello and refreshed by
 change-detected heartbeats.
 
 - **Host OS** — `src/host/os-release.ts` (process-cached; attached once on hello).
-- **Host resources** — `src/host/host-inventory.ts` (`readHostResources`,
-  process-cached). Static capacity for hello: CPU sockets, GPUs, memory /
-  swap `totalBytes`, and optional `memory.pageSizeBytes` (positive integer
-  bytes from `getconf PAGESIZE`, Linux only; omitted on other OS or when
-  unreadable / non-positive). Spawn is behind `HostInventoryIo.getconfPagesize`
-  so tests never need a live host.
+- **Host resources** — `src/host/host-inventory.ts` (`readHostResources`, one
+  process-level `HostInventoryReader`). Capacity for hello: CPU sockets, GPUs,
+  memory / swap `totalBytes`, and optional `memory.pageSizeBytes` (positive
+  integer bytes from `getconf PAGESIZE`, Linux only; omitted on other OS or
+  when unreadable / non-positive). Spawn is behind
+  `HostInventoryIo.getconfPagesize` so tests never need a live host. CPU
+  model, caches, GPUs, virtualization, page size and the memory driver are
+  read once; every call re-reads MemTotal / SwapTotal and
+  `/sys/devices/system/cpu/online` (re-parsing `/proc/stat` + `/proc/cpuinfo`
+  only when that list changes). When a balloon or hot-plug driver is loaded
+  (`/sys/module/{virtio_mem,hv_balloon,virtio_balloon,vmw_balloon}` or
+  `/sys/devices/system/xen_memory`) it also reports `memory.presentBytes`
+  (online memory blocks x `block_size_bytes`) and `memory.blockSizeBytes`;
+  `memory.totalBytes` keeps meaning MemTotal. `dynamicMemory: { driver,
+  totalMoved }` (bytes MemTotal moved while the process ran) is set only when
+  the driver is `virtio_mem`, or present memory is more than 256 MiB above
+  MemTotal, or MemTotal moved more than 32 MiB. hv_balloon debugfs needs root
+  and is not read.
 - **Kernel features** — `src/host/kernel-features.ts` is the typed registry mirroring `orchestration/scripts/tp-kernel-features` (`pi-4k-pagesize`); the daemon never calls the helper. Commands printed to a person use the absolute path `/opt/turbopanel/share/orchestration/scripts/tp-orchestrate` (`tp-orchestrate` is not on PATH). The installer reboots only on a first install: it records whether `server.id` existed and when the run began, and a reboot needs fresh enrolment files (`server.id`, `server-key-id`, the saved server key). `undo` only removes a line this tool added (marker in `/var/lib/turbopanel-kernel`).
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
@@ -38,7 +50,7 @@ change-detected heartbeats.
   NIC: `operstate`, then `carrier`) stamps each address with `link: 'up' | 'down'`,
   because `Deno.networkInterfaces()` keeps listing a static address after its
   cable is pulled; the control plane uses it to move traffic off a dead network
-  (absent means "unknown", read as up). A link flip rides the existing
+  (absent means "unknown", read as up). These `/proc` and `/sys` reads must go through `readOptionalText`: the compiled daemon's direct read is refused (Deno 2 `NotCapable`) even under a scoped `--allow-read`, so a blocked read falls back to `cat`; a direct-only read silently drops `preferred` and `link`. A link flip rides the existing
   change-detected heartbeat. **These are load-bearing, not decorative:** whenever the
   daemon reaches the control plane through a reverse proxy, a Cloudflare Tunnel,
   or a forwarded port, the peer address the control plane sees is the proxy's,

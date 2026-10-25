@@ -10,6 +10,7 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import {
   applySites,
   confServiceName,
+  phpFpmPoolsGroup,
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
   removeNamedSites,
   removeSites,
@@ -5182,4 +5183,15 @@ test("a folder that belongs to another owner stops the site before any folder is
   } finally {
     await cleanup();
   }
+});
+
+test("the shared php-fpm pools directory follows the engines that need it, so no engine is handed another's group", () => {
+  const needs = (...sites: (typeof olsPhpSite)[]) =>
+    resolveSiteEngineNeeds(sites).phpFpmEngines;
+  const apacheSite = { ...olsPhpSite, engine: "apache" as const };
+  const nginxSite = { ...olsPhpSite, engine: "nginx" as const };
+  assertEquals(phpFpmPoolsGroup(needs(olsPhpSite)), "tpols");
+  assertEquals(phpFpmPoolsGroup(needs(apacheSite)), "tpapache");
+  assertEquals(phpFpmPoolsGroup(needs(nginxSite)), "tpapache");
+  assertEquals(phpFpmPoolsGroup(needs(olsPhpSite, apacheSite)), "tpapache");
 });

@@ -5,6 +5,7 @@ import {
   tpOrchestrateValidatorSource,
 } from "../testing/tp-orchestrate-validator.ts";
 import * as assets from "./assets.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -78,7 +79,6 @@ async function runPlaybookVerb(
       `INSTALL_ROOT="${root}"`,
       `VENDOR_DIR="${root}/vendor"`,
       `PLAYBOOKS_DIR="${orch}/playbooks"`,
-      `GALAXY_ROLES_DIR="${root}/vendor/ansible/galaxy-roles"`,
       `ANSIBLE_PLAYBOOK_BIN="${bin}/ansible-playbook"`,
       `ROOT_SCRATCH="${root}/scratch"`,
       'tp_require_root_scratch() { mkdir -p "$ROOT_SCRATCH"; }',
@@ -383,9 +383,7 @@ async function runUpdateVerb(
       stdout: "piped",
       stderr: "piped",
     }).spawn();
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(options.stdin ?? "abc\n"));
-    await writer.close();
+    await writeChildStdin(child.stdin, options.stdin ?? "abc\n");
     const out = await child.output();
     return {
       status: out.code,

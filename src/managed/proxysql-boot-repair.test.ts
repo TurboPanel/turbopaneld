@@ -236,3 +236,17 @@ Deno.test("boot repair: IPv6 addresses match by normalised form", async () => {
   });
   assertEquals(await run(h), "already-running");
 });
+
+Deno.test("boot repair: ignoreReconcile still recreates a lost frontend after a reconcile", async () => {
+  const h = harness({ psSteps: [{ success: true, stdout: "" }] });
+  resetProxySqlLockForTests();
+  markProxySqlReconciled();
+  assertEquals(
+    await repairProxySqlFrontendAtBoot(layout, {
+      ...h.deps,
+      ignoreReconcile: true,
+    }),
+    "started",
+  );
+  assertEquals(ups(h.calls), 1);
+});
