@@ -33,6 +33,7 @@ import {
 } from "../managed/backup.ts";
 import { managedBackupArtifactDir } from "../managed/engine-paths.ts";
 import {
+  type TargetLockWait,
   withCopyTargetLock,
   withManagedTargetLock,
 } from "../managed/target-lock.ts";
@@ -41,7 +42,8 @@ import {
   type CopyBackupDeps,
   createCopyBackupArtifact,
 } from "./copy-backup.ts";
-import { sanitizeForLog } from "../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
+import { enqueueCopyJob } from "./copy-queue.ts";
 import { backupPoliciesPath, readBackupPoliciesFile } from "./policies-file.ts";
 import { freeBytesAtNearestDir } from "./free-space.ts";
 import {
@@ -67,7 +69,21 @@ export type ScheduledBackupDeps = {
   artifact?: ManagedBackupArtifactDeps;
   /** Volume checks and the helper archive stream for copy targets; defaults reach Docker. */
   copy?: CopyBackupDeps;
+  /** Longest a run waits for another backup or restore of the same target (default 30 min); 0 refuses at once. */
+  lockWaitMs?: number;
+  /** Pause between lock attempts (default 500 ms). */
+  lockPollMs?: number;
 };
+
+/** Scheduled runs on one target queue for this long; the unit's own timeout is 6 h. */
+export const DEFAULT_LOCK_WAIT_MS = 30 * 60 * 1000;
+
+function lockWaitOf(deps: ScheduledBackupDeps): TargetLockWait {
+  return {
+    waitMs: deps.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS,
+    pollMs: deps.lockPollMs,
+  };
+}
 
 export type ScheduledBackupOutcome =
   | { kind: "invalid-policy-id"; message: string }
@@ -132,6 +148,8 @@ type ScheduledArtifact = {
   sizeBytes: number;
   checksum: string;
   pruned: string[];
+  /** The database a managed dump was of. */
+  database?: string;
 };
 
 function backUpManagedTarget(
@@ -172,7 +190,7 @@ function backUpManagedTarget(
       deps.artifact,
     );
     return { ...artifact, backupId };
-  });
+  }, lockWaitOf(deps));
 }
 
 /** The copy-source fields of a (validated) `copy` policy entry. */
@@ -219,7 +237,7 @@ function backUpCopyTarget(
       deps.copy,
     );
     return { ...artifact, backupId };
-  });
+  }, lockWaitOf(deps));
 }
 
 function backUpTarget(
@@ -230,6 +248,33 @@ function backUpTarget(
   return entry.targetKind === "copy"
     ? backUpCopyTarget(layout, entry, deps)
     : backUpManagedTarget(layout, entry, deps);
+}
+
+/**
+ * Queue the off-server copy of a finished managed backup, when the policy
+ * names a target. The long-running daemon does the upload. A queue problem is
+ * logged and never fails the backup, which is already safe on this host.
+ */
+async function queueCopyOf(
+  layout: LayoutPaths,
+  entry: BackupPolicyWireEntry,
+  artifact: ScheduledArtifact,
+): Promise<void> {
+  if (entry.targetKind !== "managed" || !entry.copyTarget) return;
+  try {
+    await enqueueCopyJob(layout, {
+      target: entry.copyTarget,
+      managedId: entry.managedId!,
+      backupId: artifact.backupId,
+      policyId: entry.policyId,
+      artifactExtension: entry.artifactExtension!,
+      sha256: artifact.checksum,
+      sizeBytes: artifact.sizeBytes,
+      retentionKeep: entry.retentionKeep,
+    });
+  } catch (err) {
+    logWarn("backups", "could not queue the backup copy:", sanitizeForLog(err));
+  }
 }
 
 async function runPolicy(
@@ -245,6 +290,7 @@ async function runPolicy(
   };
   try {
     const artifact = await backUpTarget(layout, entry, deps);
+    await queueCopyOf(layout, entry, artifact);
     const result: BackupRunResult = {
       ...base,
       finishedAt: now().toISOString(),
@@ -254,6 +300,7 @@ async function runPolicy(
       checksum: artifact.checksum,
       path: artifact.path,
     };
+    if (artifact.database !== undefined) result.database = artifact.database;
     if (artifact.pruned.length > 0) result.pruned = artifact.pruned;
     return result;
   } catch (err) {

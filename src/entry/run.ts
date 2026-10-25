@@ -4,7 +4,7 @@ import {
   DockerClient,
   DockerMonitor,
 } from "../docker/index.ts";
-import { connectInstance } from "../instance/client.ts";
+import { connectInstance, hasEnrolledServerId } from "../instance/client.ts";
 import { handleCommandDispatch } from "../commands/command-router.ts";
 import { handleDrivetempEnable } from "../commands/drivetemp.ts";
 import {
@@ -18,16 +18,21 @@ import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
-import { guardHostingCaddySites } from "../deploy/ingress.ts";
+import {
+  ensureHostingFallback,
+  guardHostingCaddySites,
+} from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
 import { DemotedMemberGuard } from "../managed/demoted-guard.ts";
+import { ManagedEngineExitGuard } from "../managed/engine-exit-guard.ts";
 import {
   classifyHostBootRecord,
   type HostBootKind,
   markHostCleanShutdown,
   recordHostBootPersist,
 } from "../managed/host-boot.ts";
+import { healManagedStacksOnDockerReturn } from "../managed/docker-return-heal.ts";
 import { repairProxySqlFrontendAtBoot } from "../managed/proxysql-boot-repair.ts";
 import { createSentinel, type SentinelOptions } from "../monitor/index.ts";
 import type { ServiceRunState } from "../contracts/service-run-state.ts";
@@ -35,16 +40,29 @@ import { setServiceRunStateSource } from "../host/service-run-state.ts";
 import { stopCrashLoopingContainer } from "../monitor/crash-loop-guard.ts";
 import { fetchContainerLastLogLine } from "../monitor/service-run-state.ts";
 import {
+  bootstrapOrchestrationTools,
   initOrchestration,
+  runBootConverge,
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
+  shouldRunDaemonConverge,
 } from "../orchestration/setup.ts";
+import { trackBootConverge } from "../orchestration/boot-converge-gate.ts";
 import {
   createMetricsCollector,
   stopHostStorageSamplers,
 } from "../metrics/collector/index.ts";
 import { collectTopology } from "../metrics/topology/topology.ts";
 import { startTunnels } from "../tunnels/supervisor.ts";
+
+/**
+ * Docker stopped and started again: its containers for the managed database
+ * connection point (ProxySQL) and watcher (Orchestrator) are gone. Recreate
+ * them from the compose files already on disk (`managed/docker-return-heal.ts`).
+ */
+async function healManagedStacksAfterDockerReturn(): Promise<void> {
+  await healManagedStacksOnDockerReturn(resolveLayout(Deno.env.toObject()));
+}
 
 /** Minimal Docker HTTP client surface used at daemon startup. */
 export type DockerClientLike = {
@@ -68,9 +86,19 @@ export type SentinelLike = {
 // Global for shutdown cleanup: P1-2 fix boot-hold local retry timer.
 let bootHoldRetry: { stop(): void } | undefined;
 let demotedMemberGuard: { stop(): void } | undefined;
+let engineExitGuard: { stop(): void } | undefined;
 
 export type DaemonRunIo = {
   initOrchestration?: () => Promise<boolean>;
+  /**
+   * First start of a new server: connect to the control plane while the boot
+   * converge runs in the background. Defaults to {@link connectBeforeBootConvergeDefault}.
+   */
+  connectBeforeBootConverge?: () => Promise<boolean>;
+  /** Quick tool bootstrap used on the connect-first path. */
+  bootstrapOrchestration?: () => Promise<boolean>;
+  /** The slow boot converge used on the connect-first path. */
+  runBootConverge?: () => Promise<boolean>;
   restoreFabricFromPersistedState?: () => Promise<void>;
   /** Boot-time live-release link scan; defaults to {@link scanLiveReleases}. */
   scanLiveReleases?: () => Promise<void>;
@@ -82,6 +110,8 @@ export type DaemonRunIo = {
   markCleanShutdown?: () => Promise<void>;
   /** Boot-time ProxySQL frontend repair; defaults to {@link repairProxySqlFrontendAtBoot}. */
   repairProxySqlFrontend?: () => Promise<unknown>;
+  /** Bring back ProxySQL and Orchestrator after Docker returns; defaults to {@link healManagedStacksAfterDockerReturn}. */
+  healManagedStacks?: () => Promise<unknown>;
   reinstallFabricForwardingIfEnabled?: () => Promise<void>;
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
@@ -181,6 +211,14 @@ async function maybeAttachDocker(
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
     void reinstallForwardingJumps();
+    void (io.healManagedStacks ?? healManagedStacksAfterDockerReturn)()
+      .catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "managed",
+          "restoring the connection point and watcher after Docker returned failed:",
+          sanitizeForLog(err),
+        );
+      });
   });
   return { dockerClient, dockerMonitor };
 }
@@ -200,7 +238,10 @@ async function scanLiveReleases(): Promise<void> {
  * (`ingress.ts`), so a stale one does not keep ingress from starting.
  */
 async function guardHostingSites(): Promise<void> {
-  await guardHostingCaddySites(resolveLayout(Deno.env.toObject()));
+  const layout = resolveLayout(Deno.env.toObject());
+  await guardHostingCaddySites(layout);
+  // After the guard, so the check sees only snippets Caddy can load.
+  await ensureHostingFallback(layout);
 }
 
 /**
@@ -246,10 +287,16 @@ export async function applyManagedBootHoldAtStart(
     listingFailed = true;
     logWarn("managed", "boot hold failed, retrying:", sanitizeForLog(err));
   }
+  // Until the members have been listed and held, no engine may be started
+  // by the engine exit guard: a primary that should be held would come back.
+  let holdPending = listingFailed;
   const reapply = listingFailed
     ? async () => {
       const done = await hold(kind, layout);
-      if (done) await persist(layout);
+      if (done) {
+        holdPending = false;
+        await persist(layout);
+      }
       return done;
     }
     : undefined;
@@ -265,12 +312,20 @@ export async function applyManagedBootHoldAtStart(
   // Stored globally for shutdown cleanup (below).
   bootHoldRetry = retry;
   demotedMemberGuard?.stop();
+  engineExitGuard?.stop();
   const demotedGuard = new DemotedMemberGuard({
     layout,
     run: runDocker,
   });
   demotedGuard.start();
   demotedMemberGuard = demotedGuard;
+  const exitGuard = new ManagedEngineExitGuard({
+    layout,
+    run: runDocker,
+    startPaused: () => holdPending,
+  });
+  exitGuard.start();
+  engineExitGuard = exitGuard;
   // Only persist the record after every hold is applied.
   if (holdSucceeded) {
     await persist(layout);
@@ -281,8 +336,10 @@ export async function applyManagedBootHoldAtStart(
 export function stopManagedRuntimeGuardsForTests(): void {
   bootHoldRetry?.stop();
   demotedMemberGuard?.stop();
+  engineExitGuard?.stop();
   bootHoldRetry = undefined;
   demotedMemberGuard = undefined;
+  engineExitGuard = undefined;
 }
 
 async function markCleanShutdown(): Promise<void> {
@@ -304,6 +361,81 @@ async function bestEffort(
       err instanceof Error ? err.message : String(err),
     );
   }
+}
+
+/**
+ * What a host does once its orchestration runtime is ready: put back its
+ * fabric and forwarding rules, start site PHP runtimes, and kick off the
+ * background checks. Runs before the connection on an enrolled host, and after
+ * the boot converge on a new one.
+ */
+async function afterOrchestration(
+  io: DaemonRunIo,
+  reinstallForwardingJumps: () => Promise<void>,
+): Promise<void> {
+  await (io.restoreFabricFromPersistedState ??
+    restoreFabricFromPersistedState)();
+  await reinstallForwardingJumps();
+  await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
+  (io.recoverInterruptedRestores ?? (() => recoverInterruptedRestores()))()
+    .catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "backup",
+        "restore recovery failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  // In the background: a slow tree walk must not hold up the connection, and
+  // a failure is only ever reported.
+  (io.scanLiveReleases ?? scanLiveReleases)().catch((err) => {
+    (io.logWarn ?? logWarn)(
+      "release",
+      "live release link scan failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  });
+  // Also in the background, and only ever reported on.
+  (io.guardHostingCaddySites ?? guardHostingSites)().catch((err) => {
+    (io.logWarn ?? logWarn)(
+      "deploy",
+      "hosting Caddy snippet check failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  });
+  // In the background: it may wait minutes for the datacenter address, and a
+  // failure is only ever reported.
+  (io.repairProxySqlFrontend ??
+    (() => repairProxySqlFrontendAtBoot(resolveLayout(Deno.env.toObject()))))()
+    .catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "managed",
+        "ProxySQL frontend boot repair failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+}
+
+/**
+ * Connect first only on a daemon-only managed server that has never enrolled:
+ * the one case where the converge is long (a whole new host) and there is no
+ * saved state or earlier command that needs it to have finished.
+ */
+type BootConvergeChoiceDeps = {
+  shouldRunConverge: () => boolean;
+  enrolled: () => Promise<boolean>;
+};
+
+const defaultBootConvergeChoiceDeps: BootConvergeChoiceDeps = {
+  shouldRunConverge: shouldRunDaemonConverge,
+  enrolled: () => hasEnrolledServerId(),
+};
+
+export async function connectBeforeBootConvergeDefault(
+  deps?: BootConvergeChoiceDeps,
+): Promise<boolean> {
+  const { shouldRunConverge, enrolled } = deps ?? defaultBootConvergeChoiceDeps;
+  if (!shouldRunConverge()) return false;
+  return !(await enrolled());
 }
 
 /**
@@ -343,64 +475,41 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     io.applyManagedBootHold ?? applyManagedBootHoldAtStart,
   );
 
-  const orchestrationReady =
-    await (io.initOrchestration ?? initOrchestration)();
-
-  if (orchestrationReady) {
-    await (io.restoreFabricFromPersistedState ??
-      restoreFabricFromPersistedState)();
-    await reinstallForwardingJumps();
-    await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
-  }
-  if (orchestrationReady) {
-    (io.recoverInterruptedRestores ?? (() => recoverInterruptedRestores()))()
-      .catch((err) => {
-        (io.logWarn ?? logWarn)(
-          "backup",
-          "restore recovery failed:",
-          err instanceof Error ? err.message : String(err),
-        );
-      });
-  }
-  // In the background: a slow tree walk must not hold up the connection, and
-  // a failure is only ever reported.
-  if (orchestrationReady) {
-    (io.scanLiveReleases ?? scanLiveReleases)().catch((err) => {
-      (io.logWarn ?? logWarn)(
-        "release",
-        "live release link scan failed:",
-        err instanceof Error ? err.message : String(err),
-      );
-    });
-  }
-
-  // Also in the background, and only ever reported on.
-  if (orchestrationReady) {
-    (io.guardHostingCaddySites ?? guardHostingSites)().catch((err) => {
-      (io.logWarn ?? logWarn)(
-        "deploy",
-        "hosting Caddy snippet check failed:",
-        err instanceof Error ? err.message : String(err),
-      );
-    });
-  }
-
-  // In the background: it may wait minutes for the datacenter address, and a
-  // failure is only ever reported.
-  if (orchestrationReady) {
-    (io.repairProxySqlFrontend ??
-      (() =>
-        repairProxySqlFrontendAtBoot(resolveLayout(Deno.env.toObject()))))()
-      .catch((err) => {
-        (io.logWarn ?? logWarn)(
-          "managed",
-          "ProxySQL frontend boot repair failed:",
-          err instanceof Error ? err.message : String(err),
-        );
-      });
-  }
-
   const abort = new AbortController();
+  // A new server (not enrolled yet) has nothing to restore, so it connects
+  // right after the quick tool bootstrap and converges in the background;
+  // commands wait for that converge (boot-converge-gate.ts). An enrolled host
+  // keeps the old order: converge, restore its state, then connect.
+  const connectFirst = await (io.connectBeforeBootConverge ??
+    connectBeforeBootConvergeDefault)();
+  let orchestrationReady: boolean;
+  if (connectFirst) {
+    orchestrationReady =
+      await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)();
+
+    if (orchestrationReady) {
+      const converge = (io.runBootConverge ?? runBootConverge)();
+      trackBootConverge(converge);
+      void converge.then(async (ok) => {
+        if (!ok || abort.signal.aborted) return;
+        try {
+          await afterOrchestration(io, reinstallForwardingJumps);
+        } catch (err) {
+          (io.logWarn ?? logWarn)(
+            "orchestration",
+            "post-converge start-up steps failed:",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      });
+    }
+  } else {
+    orchestrationReady = await (io.initOrchestration ?? initOrchestration)();
+    if (orchestrationReady) {
+      await afterOrchestration(io, reinstallForwardingJumps);
+    }
+  }
+
   let shuttingDown = false;
   let dockerClient: DockerClientLike | undefined;
   const sentinelOptions: SentinelOptions = {};

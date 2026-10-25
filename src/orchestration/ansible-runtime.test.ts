@@ -3,7 +3,6 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
 import {
   applyOrchestrationEnv,
-  buildGalaxyDockerFixtureArchive,
   createOrchestrationRuntimeFixture,
   type OrchestrationRuntimeFixture,
   restoreOrchestrationEnv,
@@ -25,12 +24,10 @@ describe("ansible runtime with stubbed binaries", () => {
     fixture = await createOrchestrationRuntimeFixture({
       withGalaxyCollections: true,
       withBootstrapStamp: true,
-      withGalaxyDockerRole: true,
     });
     applyOrchestrationEnv(fixture.env);
     await writeOrchestrationBootstrapStamps({
       withBootstrapStamp: true,
-      withGalaxyDockerRole: true,
     });
     ansible = await import("./ansible.ts");
     bootstrapStamp = await import("./bootstrap-stamp.ts");
@@ -54,10 +51,6 @@ describe("ansible runtime with stubbed binaries", () => {
 
   it("ensureGalaxyCollections skips when collections and stamp match", async () => {
     await ansible.ensureGalaxyCollections();
-  });
-
-  it("ensureGalaxyDockerRole skips when role and stamp match", async () => {
-    await ansible.ensureGalaxyDockerRole();
   });
 
   it("runLocalPlaybook completes against stub ansible-playbook", async () => {
@@ -166,33 +159,6 @@ describe("ansible runtime with stubbed binaries", () => {
     assertEquals(await bootstrapStamp.galaxyCollectionsPresent(), true);
   });
 
-  it("ensureGalaxyDockerRole installs from mocked fetch", async () => {
-    const { galaxyVendorRolesDir, galaxyDockerStampFile } = runtimePaths(
-      fixture.runtimesDir,
-    );
-    await Deno.remove(galaxyVendorRolesDir, { recursive: true });
-    await Deno.remove(galaxyDockerStampFile);
-
-    const archive = await buildGalaxyDockerFixtureArchive("8.0.0");
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (input) => {
-      const url = String(input);
-      if (url.includes("codeload.github.com")) {
-        return Promise.resolve(
-          new Response(new Uint8Array(archive), { status: 200 }),
-        );
-      }
-      return originalFetch(input);
-    };
-
-    try {
-      await ansible.ensureGalaxyDockerRole();
-      assertEquals(await bootstrapStamp.galaxyDockerRolePresent(), true);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   it("ensureAnsible installs packages when ansible-playbook is missing", async () => {
     const { ansibleBinDir } = runtimePaths(fixture.runtimesDir);
     await Deno.remove(ansibleBinDir, { recursive: true });
@@ -258,7 +224,7 @@ describe("ansible runtime with stubbed binaries", () => {
     }
   });
 
-  it("ensureGalaxyCollections and ensureGalaxyDockerRole require ansible-playbook", async () => {
+  it("ensureGalaxyCollections requires ansible-playbook", async () => {
     const { ansibleBinDir } = runtimePaths(fixture.runtimesDir);
     const playbookBin = join(ansibleBinDir, "ansible-playbook");
     const backup = await Deno.readTextFile(playbookBin);
@@ -269,58 +235,9 @@ describe("ansible runtime with stubbed binaries", () => {
         Error,
         "ansible-galaxy requires a working ansible-playbook install",
       );
-      await assertRejects(
-        () => ansible.ensureGalaxyDockerRole(),
-        Error,
-        "ansible-galaxy requires a working ansible-playbook install",
-      );
     } finally {
       await Deno.writeTextFile(playbookBin, backup);
       await Deno.chmod(playbookBin, 0o755);
-    }
-  });
-
-  it("ensureGalaxyDockerRole rejects non-OK fetch and bad archives", async () => {
-    const { galaxyVendorRolesDir, galaxyDockerStampFile } = runtimePaths(
-      fixture.runtimesDir,
-    );
-    await Deno.remove(galaxyVendorRolesDir, { recursive: true }).catch(
-      () => {},
-    );
-    await Deno.remove(galaxyDockerStampFile).catch(() => {});
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = () =>
-      Promise.resolve(
-        new Response("nope", { status: 503, statusText: "Unavailable" }),
-      );
-    try {
-      await assertRejects(
-        () => ansible.ensureGalaxyDockerRole(),
-        Error,
-        "Failed to download",
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-
-    await Deno.remove(galaxyVendorRolesDir, { recursive: true }).catch(
-      () => {},
-    );
-    await Deno.remove(galaxyDockerStampFile).catch(() => {});
-    const wrongArchive = await buildGalaxyDockerFixtureArchive("9.9.9");
-    globalThis.fetch = () =>
-      Promise.resolve(
-        new Response(new Uint8Array(wrongArchive), { status: 200 }),
-      );
-    try {
-      await assertRejects(
-        () => ansible.ensureGalaxyDockerRole(),
-        Error,
-        "missing expected root",
-      );
-    } finally {
-      globalThis.fetch = originalFetch;
     }
   });
 
@@ -491,7 +408,6 @@ exit 0
       await Deno.chmod(lintBin, 0o755);
       await writeOrchestrationBootstrapStamps({
         withBootstrapStamp: true,
-        withGalaxyDockerRole: true,
       });
     }
 
@@ -530,7 +446,6 @@ exit 0
       await Deno.chmod(lintBin, 0o755);
       await writeOrchestrationBootstrapStamps({
         withBootstrapStamp: true,
-        withGalaxyDockerRole: true,
       });
     }
   });
@@ -582,75 +497,14 @@ exit 0
     }
   });
 
-  it("neutralizeGalaxyDockerLintConfig rethrows non-NotFound yamllint removals", async () => {
-    const { galaxyVendorRolesDir } = runtimePaths(fixture.runtimesDir);
-    const roleDir = join(galaxyVendorRolesDir, "geerlingguy.docker");
-    const yamllintDir = join(roleDir, ".yamllint");
-    await Deno.mkdir(yamllintDir, { recursive: true });
-    await Deno.writeTextFile(join(yamllintDir, "inner"), "keep\n");
-    try {
-      await assertRejects(
-        () => ansible.ensureGalaxyDockerRole(),
-        Error,
-      );
-    } finally {
-      await Deno.remove(yamllintDir, { recursive: true }).catch(() => {});
-    }
-  });
-
-  it("installGalaxyDockerRoleFromArchive rethrows dest removal errors", async () => {
-    const { galaxyVendorRolesDir, galaxyDockerStampFile } = runtimePaths(
-      fixture.runtimesDir,
-    );
-    await Deno.remove(galaxyDockerStampFile).catch(() => {});
-    const dest = join(galaxyVendorRolesDir, "geerlingguy.docker");
-    await Deno.mkdir(dest, { recursive: true });
-    const archive = await buildGalaxyDockerFixtureArchive("8.0.0");
-    const originalFetch = globalThis.fetch;
-    const originalRemove = Deno.remove;
-    globalThis.fetch = (input) => {
-      if (String(input).includes("codeload.github.com")) {
-        return Promise.resolve(
-          new Response(new Uint8Array(archive), { status: 200 }),
-        );
-      }
-      return originalFetch(input);
-    };
-    Deno.remove = ((path, options) => {
-      if (String(path) === dest) {
-        return Promise.reject(new Deno.errors.PermissionDenied("blocked dest"));
-      }
-      return originalRemove.call(Deno, path, options);
-    }) as typeof Deno.remove;
-    try {
-      await assertRejects(
-        () => ansible.ensureGalaxyDockerRole(),
-        Deno.errors.PermissionDenied,
-      );
-    } finally {
-      Deno.remove = originalRemove;
-      globalThis.fetch = originalFetch;
-      await Deno.remove(dest, { recursive: true }).catch(() => {});
-      await writeOrchestrationBootstrapStamps({
-        withBootstrapStamp: true,
-        withGalaxyDockerRole: true,
-      });
-    }
-  });
-
   it("bootstrap stamps treat blank files as missing", async () => {
-    const { bootstrapStampFile, galaxyDockerStampFile } = runtimePaths(
-      fixture.runtimesDir,
-    );
+    const { bootstrapStampFile } = runtimePaths(fixture.runtimesDir);
     await Deno.writeTextFile(bootstrapStampFile, "  \n");
-    await Deno.writeTextFile(galaxyDockerStampFile, "  \n");
     try {
       assertEquals(await bootstrapStamp.readBootstrapStamp(), null);
-      assertEquals(await bootstrapStamp.readGalaxyDockerStamp(), null);
     } finally {
       await writeOrchestrationBootstrapStamps({
         withBootstrapStamp: true,
-        withGalaxyDockerRole: true,
       });
     }
   });

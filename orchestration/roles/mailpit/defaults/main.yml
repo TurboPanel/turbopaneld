@@ -1,4 +1,5 @@
-mailpit_image: axllent/mailpit:latest
+# Image and digest come from orchestration/image-pins.json (edit them there).
+mailpit_image: "{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.mailpit.ref }}@{{ (lookup('ansible.builtin.file', role_path ~ '/../../image-pins.json') | from_json).images.mailpit.digest }}"
 mailpit_container_name: turbopanel-dev-mailpit
 mailpit_service_name: turbopanel-mailpit
 mailpit_web_port: 8025

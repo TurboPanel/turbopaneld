@@ -7,7 +7,11 @@
  * reach the client through registered callbacks.
  */
 import { handleCommandDispatch } from "./command-router.ts";
-import { flushCommandOutcomes } from "./command-outbox.ts";
+import {
+  acknowledgeCommandOutcome,
+  commandRecoveryReport,
+  flushCommandOutcomes,
+} from "./command-outbox.ts";
 import { handleDrivetempEnable } from "./drivetemp.ts";
 import { handleFabricPathProbe } from "./fabric.ts";
 import { registerCommandPorts } from "../instance/client.ts";
@@ -18,5 +22,7 @@ export function wireCommandPorts(): () => void {
     handleFabricPathProbe,
     handleDrivetempEnable,
     handleSessionAttach: flushCommandOutcomes,
+    handleCommandOutcomeAck: acknowledgeCommandOutcome,
+    commandReport: commandRecoveryReport,
   });
 }

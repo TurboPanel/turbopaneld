@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
+import { sha256HexOfBytes } from "./download-verify.ts";
 import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
 import {
   applyOrchestrationEnv,
@@ -65,8 +66,36 @@ describe("ensureCloudflared", () => {
     };
 
     try {
-      const path = await cloudflared.ensureCloudflared();
+      const path = await cloudflared.ensureCloudflared(
+        await sha256HexOfBytes(bytes),
+      );
       assertEquals(path, bin);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("refuses a download whose SHA-256 differs from the pinned digest", async () => {
+    const bin = paths.cloudflaredBin();
+    await Deno.remove(bin).catch(() => {});
+
+    const url = paths.cloudflaredDownloadUrl(paths.resolveCloudflaredAsset());
+    const bytes = await buildCloudflaredFixtureBinary(
+      paths.CLOUDFLARED_VERSION,
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (input) =>
+      String(input) === url
+        ? Promise.resolve(new Response(new Uint8Array(bytes), { status: 200 }))
+        : originalFetch(input);
+
+    try {
+      await assertRejects(
+        () => cloudflared.ensureCloudflared(),
+        Error,
+        "SHA-256 mismatch",
+      );
+      await assertRejects(() => Deno.stat(bin), Deno.errors.NotFound);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -118,7 +147,8 @@ describe("ensureCloudflared", () => {
 
     try {
       await assertRejects(
-        () => cloudflared.ensureCloudflared(),
+        async () =>
+          cloudflared.ensureCloudflared(await sha256HexOfBytes(bytes)),
         Error,
         "cloudflared install verification failed",
       );
@@ -209,7 +239,9 @@ exit 2
       return originalFetch(input);
     };
     try {
-      const path = await cloudflared.ensureCloudflared();
+      const path = await cloudflared.ensureCloudflared(
+        await sha256HexOfBytes(good),
+      );
       assertEquals(path, bin);
     } finally {
       globalThis.fetch = originalFetch;
@@ -243,7 +275,9 @@ exit 0
       return originalFetch(input);
     };
     try {
-      const path = await cloudflared.ensureCloudflared();
+      const path = await cloudflared.ensureCloudflared(
+        await sha256HexOfBytes(good),
+      );
       assertEquals(path, bin);
     } finally {
       globalThis.fetch = originalFetch;
@@ -282,7 +316,9 @@ exit 0
       return originalFetch(input);
     };
     try {
-      const path = await cloudflared.ensureCloudflared();
+      const path = await cloudflared.ensureCloudflared(
+        await sha256HexOfBytes(good),
+      );
       assertEquals(path, bin);
     } finally {
       Deno.Command = originalCommand;
@@ -320,7 +356,7 @@ exit 0
     } as typeof Deno.Command;
     try {
       await assertRejects(
-        () => cloudflared.ensureCloudflared(),
+        async () => cloudflared.ensureCloudflared(await sha256HexOfBytes(body)),
         Error,
         "got none",
       );
@@ -345,7 +381,7 @@ exit 0
     };
     try {
       await assertRejects(
-        () => cloudflared.ensureCloudflared(),
+        async () => cloudflared.ensureCloudflared(await sha256HexOfBytes(body)),
         Error,
         "got none",
       );

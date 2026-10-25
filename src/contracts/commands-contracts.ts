@@ -25,6 +25,7 @@ export const COMMAND_TYPES = [
   "server.firewall.reconcile",
   "server.firewall.confirm",
   "server.backups.reconcile",
+  "server.backups.test-target",
   "server.folders.remove",
   "environment.deploy",
   "environment.lifecycle",
@@ -557,6 +558,8 @@ export type BackupPolicyWireEntry = {
   onCalendar: string;
   retentionKeep: number;
   enabled: boolean;
+  /** Where to copy each finished `managed` backup (S3-compatible storage). Absent: no copy. */
+  copyTarget?: BackupCopyTargetWire;
 };
 
 /** The storage-copy providers a backup can read: a named Docker volume, or a host directory. */
@@ -1572,6 +1575,18 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   noCache?: boolean;
   /**
+   * When true, rewrite only this environment's hosting Caddy config and
+   * certificates: no build, no restart, nothing else on the host changes. The
+   * control plane sends it after a hosting gets a Let's Encrypt certificate,
+   * so issuing starts without a full redeploy. Absent reads as a full deploy.
+   */
+  hostingsOnly?: boolean;
+  /**
+   * Hide web server names and versions in responses and default error pages.
+   * Absent reads as off, so an older control plane changes nothing.
+   */
+  hideWebServerNames?: boolean;
+  /**
    * `sequential` stops the previous version, runs migrations, starts the new
    * version, gates on health and rolls back (see `deploy/sequential-deploy.ts`).
    * Absent or `inplace` is the original `compose up -d` deploy. An older
@@ -1714,6 +1729,12 @@ export type EnvironmentDeployResult = {
    * marks each one an orphan. Omitted when there were none. Additive.
    */
   keptFolders?: KeptFolder[];
+  /**
+   * True when the deploy found nothing to change (same sources, variables and
+   * settings as the last finished deploy) and so built and restarted nothing.
+   * Omitted otherwise. Additive: older control planes ignore it.
+   */
+  unchanged?: boolean;
 };
 
 /** A service folder a deploy left in place, by its components. */
@@ -1745,6 +1766,13 @@ export type EnvironmentStopPayload = {
    * that named these, so the payload is the only remaining copy for this host.
    */
   siteReleases?: StopSiteRelease[];
+  /**
+   * Services whose published releases are cleared on a Destroy while the
+   * service folder stays (uploads in `shared/`, logs, the owner's account).
+   * Same entry shape as `siteReleases`; a delete sends `siteReleases` instead,
+   * which removes the whole folder.
+   */
+  releaseCleanup?: StopSiteRelease[];
   /**
    * Principals no project, site or app on this host uses once this delete
    * commits: the daemon retires each through `tp-host principal-remove`
@@ -1939,6 +1967,20 @@ export type ManagedApplyDatabaseOp = {
    * Needs `managed-database-owner-v1`.
    */
   ownerLogin?: string;
+  /**
+   * Postgres only, on a create with `ownerRole`. Asked for by the customer:
+   * a database that already exists with another owner (and may hold data) is
+   * moved onto its owner role. What is in it (schemas, tables and partitions,
+   * views, sequences, routines, types, operators, collations, statistics, text
+   * search objects, conversions, foreign servers; nothing that belongs to an
+   * extension) is handed over in one transaction that gives up after five
+   * seconds waiting for a lock, then the database itself moves. No data is
+   * touched, and a failure leaves the old owner so a repeat finishes the job.
+   * It also repeats safely on a database that already has its owner role,
+   * picking up what other roles made since. Without it an existing database
+   * is left as it is. Needs `managed-database-convert-v1`.
+   */
+  convertExisting?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
@@ -2084,6 +2126,15 @@ export type ManagedMemberObservedResult = {
   replication?: ManagedReplicationHealth;
 };
 
+/** The stale-wipe guard carried by a forced re-seed after a planned switchover. */
+export type ManagedSwitchoverReseed = {
+  recoveryId: string;
+  sourceMemberId: string;
+  targetMemberId: string;
+  /** The primary epoch the switchover's promote established. */
+  epoch: number;
+};
+
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyPayload = {
   managedId: string;
@@ -2131,6 +2182,14 @@ export type ManagedApplyPayload = {
    * data directory, and seeds fresh from the primary. Standby payloads only.
    */
   forceResync?: boolean;
+  /**
+   * Set on the forced re-seed of a former primary after a planned Postgres
+   * switchover. The daemon refuses the wipe before touching the data when it
+   * is stale: the recovery id must be the one its own fence stop recorded and
+   * the epoch must be exactly one past the epoch recorded then. Absent on an
+   * operator Resync, which is never checked. Older daemons ignore it.
+   */
+  switchoverReseed?: ManagedSwitchoverReseed;
   /**
    * Cross-host consumer server addresses whose ProxySQL dials this engine's
    * private listener (client + monitor traffic). Admitted by the firewall
@@ -2192,6 +2251,15 @@ export type ManagedLifecyclePayload = {
    */
   captureSwitchoverGtid?: boolean;
   /**
+   * Postgres planned switchover, fence stop of the old primary: report its
+   * final write position after the clean shutdown and keep it with this
+   * recovery id, so a later forced re-seed can be tied to this switchover.
+   * Sent together with `primaryEpoch`. Older daemons ignore both.
+   */
+  switchoverRecoveryId?: string;
+  /** The managed cluster's primary epoch when the switchover began. */
+  primaryEpoch?: number;
+  /**
    * Undo a failed switchover on the old primary: clear the demoted marker,
    * start the engine, and make it writable again.
    */
@@ -2218,6 +2286,15 @@ export type ManagedLifecycleResult = {
   member?: ManagedMemberObservedResult;
   /** Present when `captureSwitchoverGtid` quiesced the primary before stop. */
   switchoverPrimaryExecutedGtidSet?: string;
+  /**
+   * Postgres, with `switchoverRecoveryId`: where the cleanly stopped old
+   * primary's WAL ends (`pg_lsn` text such as `0/7258050`), the same value a
+   * caught-up standby reports as its replay position. Absent when the engine
+   * did not shut down cleanly or the position could not be read.
+   */
+  oldPrimaryFinalLsn?: string;
+  /** Timeline the old primary wrote on (positive integer). */
+  oldPrimaryFinalTimeline?: number;
 };
 
 /**
@@ -2270,6 +2347,13 @@ export type ManagedPromoteResult = {
   demotedMemberId?: string;
   demoted: boolean;
   replication?: ManagedReplicationHealth;
+  /**
+   * Postgres: the last WAL position the promoted standby replayed
+   * (`pg_lsn` text), read after recovery ended. Absent when unreadable.
+   */
+  newPrimaryReplayLsn?: string;
+  /** Timeline the new primary writes on (positive integer). */
+  newPrimaryTimeline?: number;
 };
 
 /** Must stay in sync with the instance canonical `managed.ingress.reconcile` shape. */
@@ -2618,6 +2702,13 @@ export const HOSTNAME_RE =
 
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
 export const HOSTNAME_MAX_LENGTH = 253;
+
+/**
+ * The name hosting Caddy keeps one fixed internal certificate for, served to
+ * every name nobody hosts. `.invalid` can never be registered; deploys also
+ * refuse it as a hosting name so no customer can claim it.
+ */
+export const HOSTING_FALLBACK_HOSTNAME = "unconfigured.invalid";
 
 const SHELL_METACHAR_RE = /[;|&$`()<>\\"'!*?{}]/;
 
@@ -4128,6 +4219,11 @@ function parseHostingHostnames(value: unknown): string[] {
   for (const hostname of value) {
     if (!isValidHostname(hostname)) {
       throw new TypeError("hostings[].hostnames must contain valid hostnames");
+    }
+    if (hostname === HOSTING_FALLBACK_HOSTNAME) {
+      throw new TypeError(
+        `hostings[].hostnames must not use the reserved name ${HOSTING_FALLBACK_HOSTNAME}`,
+      );
     }
     hostnames.push(hostname);
   }
@@ -6431,6 +6527,11 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      hostingsOnly: parseOptionalBoolean(value.hostingsOnly, "hostingsOnly"),
+      hideWebServerNames: parseOptionalBoolean(
+        value.hideWebServerNames,
+        "hideWebServerNames",
+      ),
       deployStrategy: parseDeployStrategy(value.deployStrategy),
       migrations: parseDeployMigrations(value.migrations),
       healthTimeoutSeconds: parseDeployHealthTimeout(
@@ -6615,6 +6716,11 @@ export function parseEnvironmentStopPayload(
     "siteReleases",
     parseStopSiteRelease,
   );
+  const releaseCleanup = parseOptionalMaterialArray(
+    value.releaseCleanup,
+    "releaseCleanup",
+    parseStopSiteRelease,
+  );
   const retirePrincipals = parseOptionalMaterialArray(
     value.retirePrincipals,
     "retirePrincipals",
@@ -6627,6 +6733,7 @@ export function parseEnvironmentStopPayload(
     ...(ingressServices === undefined ? {} : { ingressServices }),
     ...(fabricNetworks === undefined ? {} : { fabricNetworks }),
     ...(siteReleases === undefined ? {} : { siteReleases }),
+    ...(releaseCleanup === undefined ? {} : { releaseCleanup }),
     ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
   };
 }
@@ -6800,7 +6907,10 @@ const MAX_MANAGED_IMAGE_LENGTH = 256;
  * alternative; PostgreSQL's official Alpine variant stays the default for its
  * smaller footprint.
  */
-const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<string, readonly string[]> = {
+export const MANAGED_ALLOWED_IMAGES_BY_ENGINE: Record<
+  string,
+  readonly string[]
+> = {
   postgres: [
     "docker.io/library/postgres:18-alpine",
     "docker.io/library/postgres:18",
@@ -7466,6 +7576,20 @@ function parseManagedDatabaseOwnerLogin(
   return value;
 }
 
+/** `convertExisting` of a database op: true, only on a create with `ownerRole`. */
+function parseManagedDatabaseConvert(
+  entry: Record<string, unknown>,
+): boolean {
+  const value = entry.convertExisting;
+  if (value === undefined) return false;
+  if (value !== true || entry.ownerRole !== true || entry.action !== "create") {
+    throw new TypeError(
+      "Invalid managed.apply databases entry: convertExisting must be true on a created database with ownerRole",
+    );
+  }
+  return true;
+}
+
 function parseManagedApplyDatabases(
   value: unknown,
 ): ManagedApplyDatabaseOp[] | undefined {
@@ -7498,6 +7622,7 @@ function parseManagedApplyDatabases(
       action: entry.action as ManagedApplyDatabaseOp["action"],
       ...(entry.ownerRole === true ? { ownerRole: true } : {}),
       ...(ownerLogin === undefined ? {} : { ownerLogin }),
+      ...(parseManagedDatabaseConvert(entry) ? { convertExisting: true } : {}),
     });
   }
   return databases;
@@ -7928,6 +8053,37 @@ function parseManagedApplyForceResync(value: unknown): boolean {
   return value;
 }
 
+const MAX_PRIMARY_EPOCH = 2_147_483_647;
+
+/** A primary epoch: a non-negative integer, never larger than an int4. */
+export function isManagedPrimaryEpoch(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) &&
+    value >= 0 && value <= MAX_PRIMARY_EPOCH;
+}
+
+function parseManagedSwitchoverReseed(
+  value: unknown,
+): ManagedSwitchoverReseed | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    !isString(value.recoveryId) || !MANAGED_UUID_RE.test(value.recoveryId) ||
+    !isString(value.sourceMemberId) ||
+    !MANAGED_UUID_RE.test(value.sourceMemberId) ||
+    !isString(value.targetMemberId) ||
+    !MANAGED_UUID_RE.test(value.targetMemberId) ||
+    !isManagedPrimaryEpoch(value.epoch)
+  ) {
+    throw new TypeError("Invalid managed.apply switchoverReseed");
+  }
+  return {
+    recoveryId: value.recoveryId,
+    sourceMemberId: value.sourceMemberId,
+    targetMemberId: value.targetMemberId,
+    epoch: value.epoch,
+  };
+}
+
 function parseManagedApplyIngressSourceAddresses(
   value: unknown,
 ): string[] | undefined {
@@ -8019,6 +8175,9 @@ export function parseManagedApplyPayload(
     ? undefined
     : parseManagedTopologyUser(value.topologyUser, "managed.apply");
   const forceResync = parseManagedApplyForceResync(value.forceResync);
+  const switchoverReseed = parseManagedSwitchoverReseed(
+    value.switchoverReseed,
+  );
   const ingressSourceAddresses = parseManagedApplyIngressSourceAddresses(
     value.ingressSourceAddresses,
   );
@@ -8058,6 +8217,7 @@ export function parseManagedApplyPayload(
     ...(monitorUsers === undefined ? {} : { monitorUsers }),
     ...(topologyUser === undefined ? {} : { topologyUser }),
     ...(forceResync ? { forceResync: true } : {}),
+    ...(switchoverReseed === undefined ? {} : { switchoverReseed }),
     ...(ingressSourceAddresses === undefined ? {} : { ingressSourceAddresses }),
     ...(databases === undefined ? {} : { databases }),
     ...(dropUsers === undefined ? {} : { dropUsers }),
@@ -8157,12 +8317,35 @@ function applyManagedLifecycleSwitchoverPayloadFields(
   ) {
     payload.switchoverTargetPromoteCompleted = true;
   }
+  applyManagedLifecycleFinalPositionFields(payload, value);
   const targetError = parseManagedLifecycleSwitchoverTargetPromoteError(
     value.switchoverTargetPromoteError,
   );
   if (targetError !== undefined) {
     payload.switchoverTargetPromoteError = targetError;
   }
+}
+
+/** Both or neither: the recovery id is only meaningful with its epoch. */
+function applyManagedLifecycleFinalPositionFields(
+  payload: ManagedLifecyclePayload,
+  value: Record<string, unknown>,
+): void {
+  if (value.switchoverRecoveryId === undefined) {
+    if (value.primaryEpoch !== undefined) {
+      throw new TypeError("Invalid managed.lifecycle payload");
+    }
+    return;
+  }
+  if (
+    !isString(value.switchoverRecoveryId) ||
+    !MANAGED_UUID_RE.test(value.switchoverRecoveryId) ||
+    !isManagedPrimaryEpoch(value.primaryEpoch)
+  ) {
+    throw new TypeError("Invalid managed.lifecycle payload");
+  }
+  payload.switchoverRecoveryId = value.switchoverRecoveryId;
+  payload.primaryEpoch = value.primaryEpoch;
 }
 
 function parseManagedLifecycleRole(
@@ -8313,7 +8496,32 @@ export function parseManagedPromoteResult(
   if (isString(value.summary)) result.summary = value.summary;
   const replication = parseManagedReplicationHealth(value.replication);
   if (replication !== undefined) result.replication = replication;
+  const replay = parseWalPosition(
+    value.newPrimaryReplayLsn,
+    value.newPrimaryTimeline,
+  );
+  if (replay !== undefined) {
+    result.newPrimaryReplayLsn = replay.lsn;
+    result.newPrimaryTimeline = replay.timeline;
+  }
   return result;
+}
+
+const WAL_LSN_RE = /^[0-9A-Fa-f]{1,8}\/[0-9A-Fa-f]{1,8}$/;
+
+/** A `pg_lsn` and its timeline, only when both are well formed. */
+function parseWalPosition(
+  lsn: unknown,
+  timeline: unknown,
+): { lsn: string; timeline: number } | undefined {
+  if (!isString(lsn) || !WAL_LSN_RE.test(lsn)) return undefined;
+  if (
+    typeof timeline !== "number" || !Number.isInteger(timeline) ||
+    timeline < 1 || timeline > 4_294_967_295
+  ) {
+    return undefined;
+  }
+  return { lsn, timeline };
 }
 
 function isString(value: unknown): value is string {
@@ -8417,6 +8625,14 @@ export function parseManagedLifecycleResult(
         value.switchoverPrimaryExecutedGtidSet;
     }
   }
+  const final = parseWalPosition(
+    value.oldPrimaryFinalLsn,
+    value.oldPrimaryFinalTimeline,
+  );
+  if (final !== undefined) {
+    result.oldPrimaryFinalLsn = final.lsn;
+    result.oldPrimaryFinalTimeline = final.timeline;
+  }
   return result;
 }
 
@@ -8485,6 +8701,8 @@ export type ManagedBackupPayload = {
    * how the file is found. Omitted for a manual backup.
    */
   policyId?: string;
+  /** Copy the new backup here once it is made, and on `delete` remove its copy. */
+  copyTarget?: BackupCopyTargetWire;
 };
 
 /** Must stay in sync with the instance canonical `managed.backup` shape. */
@@ -8515,6 +8733,11 @@ export type ManagedRestorePayload = {
    * file is found. Omitted for a manual backup.
    */
   policyId?: string;
+  /**
+   * Fetch the artifact from this bucket first (it is not on this host). The
+   * download is checked against `checksum` before the engine is touched.
+   */
+  copySource?: { target: BackupCopyTargetWire; key: string };
 };
 
 /** Must stay in sync with the instance canonical `managed.restore` shape. */
@@ -8586,6 +8809,9 @@ export function parseManagedBackupPayload(
       throw new Error("Invalid managed.backup payload policyId");
     }
     payload.policyId = value.policyId;
+  }
+  if (value.copyTarget !== undefined) {
+    payload.copyTarget = parseBackupCopyTarget(value.copyTarget);
   }
   return payload;
 }
@@ -8671,6 +8897,18 @@ export function parseManagedRestorePayload(
     }
     payload.policyId = value.policyId;
   }
+  if (value.copySource !== undefined) {
+    if (
+      !isRecord(value.copySource) || !isString(value.copySource.key) ||
+      !isSafeBucketKey(value.copySource.key)
+    ) {
+      throw new Error("Invalid managed.restore payload copySource");
+    }
+    payload.copySource = {
+      target: parseBackupCopyTarget(value.copySource.target),
+      key: value.copySource.key,
+    };
+  }
   return payload;
 }
 
@@ -8702,6 +8940,103 @@ const BACKUP_POLICY_UUID_RE =
 
 function isCanonicalBackupUuid(value: unknown): value is string {
   return typeof value === "string" && BACKUP_POLICY_UUID_RE.test(value);
+}
+
+/**
+ * An S3-compatible bucket a finished backup is copied to. Must stay in sync
+ * with the instance canonical `BackupCopyTargetWire`. The secret key arrives
+ * only as an envelope sealed to this host's daemon key; it is opened in memory
+ * when a copy runs and never written to disk in the clear.
+ */
+export type BackupCopyTargetWire = {
+  destinationId: string;
+  name: string;
+  endpoint: string;
+  region: string;
+  bucket: string;
+  /** Folder inside the bucket; no leading or trailing slash; may be empty. */
+  prefix: string;
+  pathStyle: boolean;
+  serverSideEncryption: boolean;
+  accessKeyId: string;
+  secretKeyEnvelope: string;
+};
+
+const BUCKET_NAME_RE = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+const REGION_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const BUCKET_PREFIX_RE = /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/;
+const ACCESS_KEY_RE = /^[\x21-\x7e]{1,128}$/;
+
+/** A key the control plane wrote: safe characters, no empty or dot segments. */
+export function isSafeBucketKey(key: string): boolean {
+  return key.length > 0 && key.length <= 1024 &&
+    key.split("/").every((part) =>
+      part !== "" && part !== "." && part !== ".." &&
+      /^[A-Za-z0-9._-]+$/.test(part)
+    );
+}
+
+function wireText(value: unknown, field: string, max: number): string {
+  if (typeof value !== "string" || value.length > max) {
+    throw new Error(`Invalid backup copy target ${field}`);
+  }
+  return value;
+}
+
+export function parseBackupCopyTarget(raw: unknown): BackupCopyTargetWire {
+  if (!isRecord(raw) || !isCanonicalBackupUuid(raw.destinationId)) {
+    throw new Error("Invalid backup copy target");
+  }
+  const prefix = wireText(raw.prefix ?? "", "prefix", 256);
+  const region = wireText(raw.region, "region", 32);
+  const bucket = wireText(raw.bucket, "bucket", 63);
+  const accessKeyId = wireText(raw.accessKeyId, "accessKeyId", 128);
+  const envelope = wireText(raw.secretKeyEnvelope, "secretKeyEnvelope", 4096);
+  if (
+    typeof raw.pathStyle !== "boolean" ||
+    typeof raw.serverSideEncryption !== "boolean" ||
+    !BUCKET_NAME_RE.test(bucket) || !REGION_RE.test(region) ||
+    (prefix !== "" && !BUCKET_PREFIX_RE.test(prefix)) ||
+    prefix.split("/").includes("..") || !ACCESS_KEY_RE.test(accessKeyId) ||
+    envelope.length === 0
+  ) {
+    throw new Error("Invalid backup copy target");
+  }
+  return {
+    destinationId: raw.destinationId,
+    name: wireText(raw.name ?? "", "name", 64),
+    endpoint: wireText(raw.endpoint, "endpoint", 512),
+    region,
+    bucket,
+    prefix,
+    pathStyle: raw.pathStyle,
+    serverSideEncryption: raw.serverSideEncryption,
+    accessKeyId,
+    secretKeyEnvelope: envelope,
+  };
+}
+
+/** `server.backups.test-target`: write, read and delete a small object. */
+export type BackupTargetTestPayload = { target: BackupCopyTargetWire };
+
+export type BackupTargetTestStep = {
+  step: "write" | "read" | "delete";
+  ok: boolean;
+  /** A plain reason; never a response body. */
+  error?: string;
+};
+
+export type BackupTargetTestResult = {
+  ok: boolean;
+  steps: BackupTargetTestStep[];
+  error?: string;
+};
+
+export function parseBackupTargetTestPayload(
+  value: unknown,
+): BackupTargetTestPayload {
+  if (!isRecord(value)) throw new Error("Invalid backup target test payload");
+  return { target: parseBackupCopyTarget(value.target) };
 }
 
 const BACKUP_TARGET_KIND_SET = new Set(["managed", "copy"]);
@@ -8911,6 +9246,9 @@ function parseBackupPolicyWireEntry(raw: unknown): BackupPolicyWireEntry {
   ) {
     throw new Error("Invalid backup policy entry");
   }
+  const copyTarget = raw.copyTarget === undefined
+    ? undefined
+    : parseBackupCopyTarget(raw.copyTarget);
   const entry: BackupPolicyWireEntry = {
     policyId: raw.policyId,
     targetKind: raw.targetKind as BackupPolicyWireEntry["targetKind"],
@@ -8919,6 +9257,12 @@ function parseBackupPolicyWireEntry(raw: unknown): BackupPolicyWireEntry {
     enabled: raw.enabled,
   };
   parseBackupPolicyTarget(raw, entry);
+  if (copyTarget) {
+    if (entry.targetKind !== "managed") {
+      throw new Error("Invalid backup policy: only managed backups are copied");
+    }
+    entry.copyTarget = copyTarget;
+  }
   return entry;
 }
 

@@ -4,6 +4,12 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # Pinned to the litespeedtech/openlitespeed GitHub release tag/asset naming.
 openlitespeed_version: "1.9.1"
 openlitespeed_release_tag: "v1.9.1"
+# SHA-256 of openlitespeed-<version>-<ansible_architecture>-linux.tgz. Source:
+# the digest GitHub reports for each release asset, equal to the downloaded file
+# (the release publishes no checksum file). Bump with the version.
+openlitespeed_sha256:
+  x86_64: "8940c9ca7438dd9c0b2e90957ef840f1cab588561914832df02fc4f01e649f21"
+  aarch64: "552b4f1f2dd1937bd2c18efd2d5792e38876faf32e8f97d1964d08a83db6ac16"
 turbopanel_dev_user: ""  # noqa: var-naming[no-role-prefix]
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"  # noqa: var-naming[no-role-prefix]
 

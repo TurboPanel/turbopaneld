@@ -1,11 +1,11 @@
 ---
 # Stages 1-2 of closing the Docker-socket route to root (observe mode). Installed
-# wherever Docker is, on managed hosts only. Nothing routes through the gate
-# yet: the daemon still talks to the real socket and `tp` is still in the
-# `docker` group, so a failure here must never block the Docker install or a
-# converge: the whole install is a block with a rescue that only warns. Stage 3
-# exception: while Traefik's switch is on (or this converge turns it on), Traefik depends on the gate's
-# read-only socket, so the rescue fails the converge instead. In enforce mode
+# wherever Docker is, on managed hosts only. The daemon still talks to the real
+# socket and `tp` is still in the `docker` group, so a failure here would not
+# need to block the Docker install: the install is a block with a rescue.
+# Stage 3: Traefik's switch is on by default, so while it is on (or this
+# converge turns it on) Traefik depends on the gate's read-only socket and the
+# rescue fails the converge instead of only warning. In enforce mode
 # (docker_gate_mode) the rescue always fails the converge.
 
 # Outside the block, so a typo ("ture") fails loudly instead of being rescued,

@@ -600,6 +600,10 @@ const SITES: CallSite[] = [
       setup: unitSetup(backupTimerContent(BACKUP_POLICY, "*-*-* 03:00:00")),
     },
   ),
+  tpHost('src/deploy/unchanged-deploy.ts|["-n","ls","-A","--",dir]', {
+    argv: ["ls", "-A", "--", `${CONF}/site-caddy/sites`],
+    setup: dir(`${CONF}/site-caddy/sites`),
+  }),
   tpHost('src/deploy/systemd-unit-set.ts|["-n","ls","-1","--",unitDir]', {
     argv: ["ls", "-1", "--", UNITS],
   }),
@@ -1071,6 +1075,24 @@ const SITES: CallSite[] = [
       },
     },
   ),
+  tpHost(
+    'src/deploy/unchanged-deploy.ts|["-n","systemctl","is-active","--quiet",unit]',
+    {
+      argv: [
+        "systemctl",
+        "is-active",
+        "--quiet",
+        "turbopanel-hosting-caddy.service",
+      ],
+    },
+  ),
+  tpHost('src/deploy/unchanged-deploy.ts|["-n","test","-e",path]', {
+    argv: ["test", "-e", `${SITE}/current`],
+    setup: {
+      dirs: [RELEASE],
+      links: [["releases/20260927-120000", `${SITE}/current`]],
+    },
+  }),
   tpHost('src/deploy/release/promote.ts|["-n","test","-e",currentLink]', {
     argv: ["test", "-e", `${SITE}/current`],
     setup: {
@@ -2078,6 +2100,12 @@ const SITES: CallSite[] = [
     'src/deploy/native/apply-native-apps.ts|systemctl(io,["is-active","--quiet",unit])',
     {
       argv: ["systemctl", "is-active", "--quiet", APP_UNIT],
+    },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["reset-failed",unit])',
+    {
+      argv: ["systemctl", "reset-failed", APP_UNIT],
     },
   ),
   tpHost(

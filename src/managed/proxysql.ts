@@ -10,6 +10,7 @@
  * cold-start source of truth.
  */
 
+import { keepStoredImages, pinnedImage } from "../util/image-pins.ts";
 import { join } from "@std/path";
 import {
   assertSafeComposeProjectName,
@@ -71,7 +72,7 @@ import {
  * Pinned 3.0.9 — fixes CVE-2026-48773 (pre-auth first-packet heap overflow)
  * and CVE-2026-48772 (PROXY-protocol-v1 `client_addr` ACL bypass).
  */
-export const PROXYSQL_IMAGE = "proxysql/proxysql:3.0.9";
+export const PROXYSQL_IMAGE = pinnedImage("proxysql");
 
 export const ADMIN_PORT = 6032;
 
@@ -1911,6 +1912,9 @@ export function findIngressRuntimeMismatch(
   return null;
 }
 
+/** Mode of every file `writeProxySqlConfigAtomic` commits. */
+export const PROXYSQL_CONFIG_FILE_MODE = 0o600;
+
 export async function writeProxySqlConfigAtomic(
   path: string,
   contents: string,
@@ -1928,7 +1932,12 @@ export async function writeProxySqlConfigAtomic(
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
   const tmpPath = join(dir, `.${crypto.randomUUID()}.tmp`);
-  await Deno.writeTextFile(tmpPath, contents, { mode: 0o640 });
+  // Owner-only: these files carry login and admin passwords. The proxy
+  // container runs as root (the image sets no user), so it reads the bind-
+  // mounted proxysql.cnf with its DAC override whatever the owner is.
+  await Deno.writeTextFile(tmpPath, contents, {
+    mode: PROXYSQL_CONFIG_FILE_MODE,
+  });
   try {
     const written = await Deno.readTextFile(tmpPath);
     if (written.trim().length === 0) {
@@ -2134,7 +2143,14 @@ export async function ensureProxySqlIngress(
     managedNetwork,
     ipv6Subnet ?? null,
   );
-  await Deno.writeTextFile(composePath, composeText, { mode: 0o640 });
+  await Deno.writeTextFile(
+    composePath,
+    keepStoredImages(
+      composeText,
+      await Deno.readTextFile(composePath).catch(() => null),
+    ),
+    { mode: 0o640 },
+  );
   // A container that failed its publish bind at boot stays "running" with no
   // bindings, and a plain `up -d` leaves it alone (config unchanged). Recreate
   // it then; an unreadable state falls back to the plain `up -d`.

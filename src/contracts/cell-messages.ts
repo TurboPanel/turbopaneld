@@ -64,11 +64,38 @@ export type ManagedHealthReportMember = {
   replication?: NonNullable<ManagedMemberObservedResult["replication"]>;
 };
 
+/**
+ * Commands this daemon still owes the control plane (feature
+ * `command-recovery-v1`), sent on `hello` and `heartbeat` when either list is
+ * not empty. `running` holds the ids of commands accepted and not finished
+ * (including any waiting behind another build); `unacked` holds the ids whose
+ * final `command-outcome` is kept on disk until a
+ * {@link CommandOutcomeAckMessage} arrives. At most 64 ids of 64 characters
+ * each per list. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandRecoveryReport = {
+  running: string[];
+  unacked: string[];
+};
+
+/**
+ * Control plane → daemon: the final outcome of command `id` is stored, so the
+ * daemon may drop its journaled copy. Until it arrives the daemon sends the
+ * outcome again on every attach and every 30 seconds. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type CommandOutcomeAckMessage = {
+  type: "command-outcome-ack";
+  id: string;
+  at: string;
+};
+
 /** Daemon → control plane hello. `features` is the advertised wire set. */
 export type DaemonHelloMessage = {
   type: "hello";
   at: string;
   features?: string[];
+  commands?: CommandRecoveryReport;
 };
 
 /** Control-plane → daemon self-update. Optional pin fields are expand-only. */
@@ -139,6 +166,24 @@ export type UpdateProgressMessage = {
   at: string;
   detail?: string;
   errorCode?: string;
+  /**
+   * How the daemon's own restart went, sent with a `failed` stage whose
+   * `errorCode` is `restart_failed`. Optional: an older control plane ignores
+   * it and an older daemon never sends it.
+   */
+  restart?: UpdateRestartReport;
+};
+
+/** Diagnostics for a daemon restart that was reported as failed. */
+export type UpdateRestartReport = {
+  /** `enable` or `restart`: the `systemctl` verb that failed. */
+  command?: string;
+  exitCode?: number;
+  signal?: string;
+  stderr?: string;
+  /** Times the command ran (2 after the one retry). */
+  attempts: number;
+  elapsedMs: number;
 };
 
 /** Longest `steps[]` a `command-progress` payload carries. */
@@ -186,6 +231,13 @@ export type CommandProgress = {
   current: string | null;
   /** ISO 8601. */
   updatedAt: string;
+  /**
+   * When the server began actually running this command, or `null` while it
+   * waits for the host (another build holds the single build slot). Absent
+   * from a daemon that does not report it. The control plane starts the
+   * command's run deadline from here, so waiting never counts against it.
+   */
+  runningSince?: string | null;
 };
 
 /**
@@ -260,6 +312,8 @@ export type BackupRunReportMessage = {
   sizeBytes?: number;
   checksum?: string;
   path?: string;
+  /** The database a managed engine's run dumped; absent for storage copies. */
+  database?: string;
   /** `bk_` ids this run's retention removed from the policy's directory. */
   pruned?: string[];
   /** When the policy's timer next fires, read from systemd after the run. */
@@ -275,6 +329,43 @@ export type BackupRunReportMessage = {
  */
 export type BackupRunReportResultMessage = {
   type: "backup-run-report-result";
+  id: string;
+  ok: boolean;
+  error?: string;
+  at: string;
+};
+
+/**
+ * Daemon → control plane: how copying one finished backup to its S3-compatible
+ * target ended (feature `backup-s3-copy-v1`; sent only to a control plane that
+ * lists it). Correlated by `id` like {@link BackupRunReportMessage}: the
+ * spooled report is deleted only when a {@link BackupCopyReportResultMessage}
+ * with the same `id` arrives, and a second copy of the same report is a no-op.
+ * Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type BackupCopyReportMessage = {
+  type: "backup-copy-report";
+  id: string;
+  destinationId: string;
+  managedId: string;
+  backupId: string;
+  policyId?: string;
+  state: "copied" | "failed";
+  /** A plain reason when `state` is `failed`. */
+  error?: string;
+  /** Object key inside the bucket (the target's prefix included). */
+  objectKey?: string;
+  sizeBytes?: number;
+  attempts: number;
+  finishedAt: string;
+  /** `bk_` ids the bucket retention removed after this copy. */
+  pruned?: string[];
+  at: string;
+};
+
+/** Control plane → daemon: the copy report with this `id` is stored or refused for good. */
+export type BackupCopyReportResultMessage = {
+  type: "backup-copy-report-result";
   id: string;
   ok: boolean;
   error?: string;
@@ -310,6 +401,61 @@ export type ManagedPermissionsResultMessage = {
   error?: string;
   at: string;
 };
+
+/** One peer address the daemon is asked to try (feature `server-network-check-v1`). */
+export type ServerNetworkCheckTarget = {
+  peerServerId: string;
+  /** The peer's address on the network being checked (an IPv4 or IPv6 literal). */
+  address: string;
+  /** A TCP port the peer already listens on, reached from this host. */
+  port: number;
+};
+
+/** What happened for one {@link ServerNetworkCheckTarget}. */
+export type ServerNetworkCheckEntry = {
+  peerServerId: string;
+  address: string;
+  reachable: boolean;
+  /** Time to open the connection, whole milliseconds. Only when reachable. */
+  latencyMs?: number;
+  /** The local address the connection left from. Only when reachable. */
+  sourceAddress?: string;
+  /** The local interface that owns {@link sourceAddress}, when known. */
+  interface?: string;
+  /** A short reason when not reachable: `refused`, `timeout`, `unreachable`, `invalid_target`. */
+  error?: string;
+};
+
+/**
+ * Control plane → daemon: try to open a TCP connection from this host to each
+ * target and say what happened (feature `server-network-check-v1`). Nothing is
+ * sent on the connection and nothing is stored. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type ServerNetworkCheckRequestMessage = {
+  type: "server-network-check-request";
+  id: string;
+  /** Up to {@link SERVER_NETWORK_CHECK_MAX_TARGETS}. */
+  targets: ServerNetworkCheckTarget[];
+  at: string;
+};
+
+/**
+ * Daemon → control plane, on the request's `id`. Always sent: a request that
+ * cannot be run at all is `ok: false` with a short `error`; otherwise `results`
+ * holds one entry per target, in order.
+ */
+export type ServerNetworkCheckResultMessage = {
+  type: "server-network-check-result";
+  id: string;
+  ok: boolean;
+  results?: ServerNetworkCheckEntry[];
+  error?: string;
+  at: string;
+};
+
+/** Most targets in one `server-network-check-request`. */
+export const SERVER_NETWORK_CHECK_MAX_TARGETS = 32;
 
 /** Instance-wide ACME knobs for hostnames whose source is `lets-encrypt`. */
 export type InstanceAcmeWireSettings = {
@@ -356,6 +502,8 @@ export type DaemonMessage =
   }
   | ManagedPermissionsRequestMessage
   | ManagedPermissionsResultMessage
+  | ServerNetworkCheckRequestMessage
+  | ServerNetworkCheckResultMessage
   | {
     /**
      * Daemon-initiated, fire-and-forget: every managed replica this host runs,
@@ -675,6 +823,9 @@ export type DaemonMessage =
   }
   | BackupRunReportMessage
   | BackupRunReportResultMessage
+  | BackupCopyReportMessage
+  | BackupCopyReportResultMessage
+  | CommandOutcomeAckMessage
   | {
     type: "public-urls-update";
     id: string;

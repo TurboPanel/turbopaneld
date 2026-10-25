@@ -114,6 +114,8 @@ export type NvmlBinding = {
     handle: bigint,
   ): Maybe<{ gpuPercent: number; memoryPercent: number } | null>;
   getMemoryUsedBytes(handle: bigint): Maybe<number | null>;
+  /** Total device memory; optional so a binding that cannot read it still works. */
+  getMemoryTotalBytes?(handle: bigint): Maybe<number | null>;
   getTemperatureCelsius(handle: bigint): Maybe<number | null>;
   getPowerWatts(handle: bigint): Maybe<number | null>;
   getPcieThroughputBytesPerSecond(
@@ -268,6 +270,16 @@ export function createNvmlBindingFromLibrary(lib: NvmlLibrary): NvmlBinding {
       if (rc !== NVML_SUCCESS) return null;
       // `used` sits after `free` (offset 24) — reading 24 reports free memory.
       return Number(view.getBigUint64(32, true));
+    },
+    async getMemoryTotalBytes(handle) {
+      // Same struct as above; `total` is the first u64, at offset 8.
+      const STRUCT_SIZE = 40;
+      const out = new Uint8Array(STRUCT_SIZE);
+      const view = new DataView(out.buffer);
+      view.setUint32(0, STRUCT_SIZE | (2 << 24), true);
+      const rc = await sym.nvmlDeviceGetMemoryInfo_v2(handle, out);
+      if (rc !== NVML_SUCCESS) return null;
+      return Number(view.getBigUint64(8, true));
     },
     async getTemperatureCelsius(handle) {
       const out = new Uint8Array(4);
@@ -458,6 +470,9 @@ export class NvmlGpuAdapter implements GpuAdapter {
     const memoryUsedBytes = await safeCall(() =>
       binding.getMemoryUsedBytes(handle)
     );
+    const memoryTotalBytes = await safeCall(() =>
+      binding.getMemoryTotalBytes?.(handle) ?? null
+    );
     const temperatureCelsius = await safeCall(() =>
       binding.getTemperatureCelsius(handle)
     );
@@ -485,6 +500,7 @@ export class NvmlGpuAdapter implements GpuAdapter {
     return {
       utilizationPercent: utilization?.gpuPercent ?? null,
       memoryUsedBytes,
+      memoryTotalBytes: memoryTotalBytes ?? null,
       memoryActivityPercent: utilization?.memoryPercent ?? null,
       temperatureCelsius,
       memoryTemperatureCelsius: null,

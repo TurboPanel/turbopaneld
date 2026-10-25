@@ -28,17 +28,13 @@ import {
   copyTargetLockPath,
   managedTargetLockPath,
 } from "../managed/target-lock.ts";
-import {
-  BOOTSTRAP_STAMP_FILE,
-  GALAXY_DOCKER_STAMP_FILE,
-} from "../orchestration/bootstrap-stamp.ts";
+import { BOOTSTRAP_STAMP_FILE } from "../orchestration/bootstrap-stamp.ts";
 import {
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_INSTALL_DIR,
   CACHE_DIR,
   cloudflaredDir,
   GALAXY_COLLECTIONS_DIR,
-  GALAXY_VENDOR_ROLES_DIR,
   PYTHON_CURRENT_DIR,
   PYTHON_RUNTIME_DIR,
   RUNTIMES_DIR,
@@ -447,10 +443,8 @@ test("every orchestration bootstrap write target sits inside the compiled write 
     PYTHON_CURRENT_DIR,
     ANSIBLE_INSTALL_DIR,
     ANSIBLE_CURRENT_DIR,
-    GALAXY_VENDOR_ROLES_DIR,
     GALAXY_COLLECTIONS_DIR,
     BOOTSTRAP_STAMP_FILE,
-    GALAXY_DOCKER_STAMP_FILE,
     cloudflaredDir(),
   ];
   for (const target of targets) {

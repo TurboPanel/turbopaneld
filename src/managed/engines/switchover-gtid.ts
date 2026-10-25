@@ -45,7 +45,10 @@ export function gtidSetTooLongForWire(length: number): boolean {
 }
 
 function gtidComponents(set: string): string[] {
-  return set.split(",").map((part) => part.trim()).filter(Boolean);
+  // `mysql -N -B` prints a newline inside a value as a backslash and `n`.
+  return set.replaceAll(/\\[nr]|[\r\n]/g, "").split(",").map((part) =>
+    part.trim()
+  ).filter(Boolean);
 }
 
 function domainId(component: string): string {

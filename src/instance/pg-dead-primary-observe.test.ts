@@ -1,6 +1,9 @@
 import { assert, assertEquals } from "@std/assert";
 import type { ManagedHaMemberRecord } from "../managed/ha-member.ts";
-import type { ProbeSample } from "../managed/pg-dead-primary.ts";
+import {
+  DEFAULT_PG_DEAD_PRIMARY_CONFIG,
+  type ProbeSample,
+} from "../managed/pg-dead-primary.ts";
 import {
   type IntentState,
   isWatchedPrimary,
@@ -116,7 +119,7 @@ async function withAttached(
 
 test("dead primary emits one managed-ha-event with detector and evidence", async () => {
   const h = harness();
-  await withAttached(h, () => pollTicks(h, 20));
+  await withAttached(h, () => pollTicks(h, 12));
   assertEquals(h.sent.length, 1);
   const event = h.sent[0]!;
   assertEquals(event.type, "managed-ha-event");
@@ -401,7 +404,7 @@ test("a stopped primary with no marker at start is not silently held (probed as 
       return Promise.resolve();
     },
   });
-  await withAttached(h, () => pollTicks(h, 20));
+  await withAttached(h, () => pollTicks(h, 12));
   assertEquals(held.length, 0);
   assertEquals(h.sent.length, 1);
 });
@@ -497,10 +500,20 @@ test("a hung primary (no response, postmaster alive) is logged but not reported 
   assertEquals(h.sent.length, 0);
 });
 
-test("the observer re-sends while the primary stays dead, then stops at the per-incident bound", async () => {
+test("the observer re-sends every minute while the primary stays dead, then stops at the per-incident bound", async () => {
   const h = harness();
   await withAttached(h, () => pollTicks(h, (3 * 3_600_000) / 5_000));
-  assertEquals(h.sent.map((e) => e.evidence.attempt), [1, 2, 3, 4, 5]);
+  assertEquals(
+    h.sent.map((e) => e.evidence.attempt),
+    Array.from(
+      { length: DEFAULT_PG_DEAD_PRIMARY_CONFIG.maxEventsPerIncident },
+      (_, i) => i + 1,
+    ),
+  );
+  // The last event's failure span stays within what the control plane takes (it is
+  // checked against a 20 minute limit, so the bound must not run far past it).
+  const span = (e: (typeof h.sent)[number]) => e.evidence.spanMs;
+  assert(span(h.sent[14]!) < 20 * 60_000);
 });
 
 test("startup check waits for a conclusive Docker read and survives a failing holdStop", async () => {

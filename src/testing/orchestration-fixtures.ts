@@ -115,8 +115,6 @@ export type OrchestrationSeedOptions = {
   withGalaxyCollections?: boolean;
   /** Write bootstrap.stamp matching current requirements. */
   withBootstrapStamp?: boolean;
-  /** Pre-create geerlingguy.docker role dir (skip docker galaxy fetch). */
-  withGalaxyDockerRole?: boolean;
   /** Install fake ansible-playbook/ansible-lint before tests run. */
   withAnsibleBinaries?: boolean;
   /** When false, omit the stub uv binary (forces download-path tests). */
@@ -192,7 +190,6 @@ export async function seedOrchestrationTree(
     const name of [
       "requirements.txt",
       "requirements.yml",
-      "requirements-docker.yml",
       "ansible.cfg",
     ] as const
   ) {
@@ -201,6 +198,20 @@ export async function seedOrchestrationTree(
       join(orchestrationDir, name),
     );
   }
+
+  // The real bundled collection: ensureGalaxyCollections checks its digest.
+  await Deno.mkdir(join(orchestrationDir, "vendor", "galaxy"), {
+    recursive: true,
+  });
+  await copyFileIfPresent(
+    join(
+      CHECKOUT_ORCHESTRATION,
+      "vendor",
+      "galaxy",
+      "ansible-posix-2.2.1.tar.gz",
+    ),
+    join(orchestrationDir, "vendor", "galaxy", "ansible-posix-2.2.1.tar.gz"),
+  );
 
   const stubPlaybook = `---
 - hosts: localhost
@@ -225,6 +236,7 @@ export async function seedOrchestrationTree(
       "orchestrator-setup.yml",
       "redis-setup.yml",
       "rabbitmq-setup.yml",
+      "queue-config-refresh.yml",
       "socket-dirs-setup.yml",
       "set-hostname.yml",
       "time-sync-apply.yml",
@@ -270,17 +282,13 @@ export function runtimePaths(runtimesDir: string): {
   uvBin: string;
   ansibleBinDir: string;
   galaxyCollectionsDir: string;
-  galaxyVendorRolesDir: string;
   bootstrapStampFile: string;
-  galaxyDockerStampFile: string;
 } {
   return {
     uvBin: join(runtimesDir, "uv", UV_VERSION, "uv"),
     ansibleBinDir: join(runtimesDir, "ansible", ANSIBLE_CORE_VERSION, "bin"),
     galaxyCollectionsDir: join(runtimesDir, "ansible", "galaxy-collections"),
-    galaxyVendorRolesDir: join(runtimesDir, "ansible", "galaxy-roles"),
     bootstrapStampFile: join(runtimesDir, "ansible", "bootstrap.stamp"),
-    galaxyDockerStampFile: join(runtimesDir, "ansible", "galaxy-docker.stamp"),
   };
 }
 
@@ -308,15 +316,6 @@ async function seedGalaxyCollections(runtimesDir: string): Promise<void> {
   );
   await Deno.mkdir(marker, { recursive: true });
   await Deno.writeTextFile(join(marker, ".fixture"), "ok\n");
-}
-
-async function seedGalaxyDockerRole(runtimesDir: string): Promise<void> {
-  const roleDir = join(
-    runtimePaths(runtimesDir).galaxyVendorRolesDir,
-    "geerlingguy.docker",
-  );
-  await Deno.mkdir(roleDir, { recursive: true });
-  await Deno.writeTextFile(join(roleDir, "README.md"), "# fixture\n");
 }
 
 export async function createOrchestrationRuntimeFixture(
@@ -357,10 +356,6 @@ export async function createOrchestrationRuntimeFixture(
 
   if (opts.withGalaxyCollections) {
     await seedGalaxyCollections(layout.dirs.runtimesDir);
-  }
-
-  if (opts.withGalaxyDockerRole) {
-    await seedGalaxyDockerRole(layout.dirs.runtimesDir);
   }
 
   return {
@@ -426,29 +421,6 @@ exit 0
   }
 }
 
-/** Minimal tar.gz archive for ensureGalaxyDockerRole install path tests. */
-export async function buildGalaxyDockerFixtureArchive(
-  version: string,
-): Promise<Uint8Array> {
-  const tmp = await Deno.makeTempDir({ prefix: "tp-galaxy-docker-" });
-  try {
-    const root = join(tmp, `ansible-role-docker-${version}`);
-    await Deno.mkdir(root, { recursive: true });
-    await Deno.writeTextFile(join(root, "README.md"), "# fixture role\n");
-    const archivePath = join(tmp, "archive.tar.gz");
-    const cmd = new Deno.Command("tar", {
-      args: ["-czf", archivePath, "-C", tmp, `ansible-role-docker-${version}`],
-    });
-    const output = await cmd.output();
-    if (!output.success) {
-      throw new Error("failed to build galaxy docker fixture archive");
-    }
-    return await Deno.readFile(archivePath);
-  } finally {
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
-  }
-}
-
 async function writeMatchingStamps(
   opts: OrchestrationSeedOptions,
 ): Promise<void> {
@@ -456,21 +428,13 @@ async function writeMatchingStamps(
   const bootstrap = await import("../orchestration/bootstrap-stamp.ts");
   const stamp = await bootstrap.computeBootstrapStamp();
   await bootstrap.writeBootstrapStamp(stamp);
-  if (opts.withGalaxyDockerRole) {
-    const dockerStamp = await bootstrap.computeGalaxyDockerStamp();
-    await bootstrap.writeGalaxyDockerStamp(dockerStamp);
-  }
 }
 
 export async function writeOrchestrationBootstrapStamps(
-  opts: Pick<
-    OrchestrationSeedOptions,
-    "withBootstrapStamp" | "withGalaxyDockerRole"
-  >,
+  opts: Pick<OrchestrationSeedOptions, "withBootstrapStamp">,
 ): Promise<void> {
   await writeMatchingStamps({
     withBootstrapStamp: opts.withBootstrapStamp,
-    withGalaxyDockerRole: opts.withGalaxyDockerRole,
   });
 }
 

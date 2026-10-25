@@ -272,6 +272,10 @@ export function boundLogin(login: ObservedLogin): ObservedLogin {
     ),
   };
   if (login.attributes) out.attributes = { ...login.attributes };
+  // The control plane's delete check reads these; dropping them makes a login
+  // that owns views look free to delete.
+  if (login.definesObjects) out.definesObjects = [...login.definesObjects];
+  if (login.definesObjectsUnread) out.definesObjectsUnread = true;
   if (login.accounts) {
     out.accounts = boundList(
       login.accounts,

@@ -233,6 +233,8 @@ test("parseSpooledBackupRunResult refuses files the control plane would reject",
     [{ sizeBytes: -1 }, "invalid sizeBytes"],
     [{ checksum: "A".repeat(64) }, "invalid checksum"],
     [{ path: "p".repeat(1025) }, "invalid path"],
+    [{ database: "" }, "invalid database"],
+    [{ database: 7 }, "invalid database"],
     [{ pruned: ["bk/../x"] }, "invalid pruned"],
   ];
   for (const [overrides, reason] of cases) {

@@ -122,6 +122,12 @@ import {
 } from "./site/engine-prune.ts";
 import { engineHoldKey, phpSeriesHoldKey } from "./site/prune-holds.ts";
 import {
+  apacheForwardedLines,
+  FORWARDED_TRUSTED_LOOPBACK,
+  nginxForwardedFastcgiLines,
+  nginxForwardedLines,
+} from "./site/forwarded.ts";
+import {
   apacheBehindNginxLines,
   apacheDotfileDenyLines,
   isNginxApacheSite,
@@ -173,7 +179,13 @@ const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
 const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
-export type SiteApplySpec = EnvironmentDeploySite;
+export type SiteApplySpec = EnvironmentDeploySite & {
+  /**
+   * Set by {@link applySites} from the deploy: render the vhost so the engine
+   * names neither itself nor its version (error-page footers, `Server`).
+   */
+  hideWebServerNames?: boolean;
+};
 
 /**
  * The Git release tree one compose service serves from.
@@ -562,6 +574,7 @@ function buildNginxPhpLocation(
     `    fastcgi_pass unix:${phpFpmSocket};`,
     "    fastcgi_index index.php;",
     ...params.map((line) => `    ${line}`),
+    ...nginxForwardedFastcgiLines().map((line) => `    ${line}`),
     ...envLines.map((line) => `    ${line}`),
     "    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;",
     "    fastcgi_param PATH_INFO $fastcgi_path_info;",
@@ -643,6 +656,35 @@ function apacheEnvRefusal(field: string, raw: string): string | null {
   return raw.includes("${") ? "holds ${, which Apache expands" : null;
 }
 
+/**
+ * Characters an OpenLiteSpeed rewrite rule carries through to PHP unchanged
+ * (checked against a real server). A space, comma or `]` ends the flag, `\`
+ * is an escape, and `$` / `%` start back-references and server variables, so
+ * a value holding one of those cannot be written safely.
+ */
+const OPENLITESPEED_ENV_VALUE_RE = /^[A-Za-z0-9_@:/.+=~!?;^&|*()#<>{}-]*$/;
+
+/**
+ * Why OpenLiteSpeed cannot carry a variable value, or `null` when it can.
+ *
+ * OpenLiteSpeed does not hand the `env` of an externally started PHP process
+ * (autoStart 0) to PHP, so site variables ride a rewrite rule (`E=NAME:value`)
+ * instead, which reaches PHP as CGI environment on every request.
+ */
+function openlitespeedEnvRefusal(field: string, raw: string): string | null {
+  try {
+    safeEnvValue(field, raw);
+  } catch (error) {
+    if (error instanceof ConfigValueError) return error.message;
+    throw error;
+  }
+  if (raw.length === 0) return "is empty, which OpenLiteSpeed cannot carry";
+  if (!OPENLITESPEED_ENV_VALUE_RE.test(raw)) {
+    return "holds a space, comma, quote, backslash, $, % or bracket, which OpenLiteSpeed reads as syntax";
+  }
+  return null;
+}
+
 const ENGINE_ENV_LABELS: Readonly<Record<SiteApplySpec["engine"], string>> = {
   caddy: "Caddy",
   apache: "Apache",
@@ -666,8 +708,9 @@ function webEnvRefusal(
       return apacheEnvRefusal(field, raw);
     case "caddy":
       return caddyEnvRefusal(raw);
+    case "openlitespeed":
+      return openlitespeedEnvRefusal(field, raw);
     default:
-      // OpenLiteSpeed receives no variables at all (handled by the caller).
       return null;
   }
 }
@@ -689,11 +732,6 @@ export function planSiteWebEnv(site: SiteApplySpec): string[] {
   const required = site.requiredEnv ?? [];
   const label = ENGINE_ENV_LABELS[site.engine];
   const name = site.composeServiceName;
-  if (site.engine === "openlitespeed" && required.length > 0) {
-    throw new Error(
-      `Site ${name} needs its database settings as variables, and OpenLiteSpeed does not pass variables to PHP yet. Move the site to Apache, nginx or Caddy, then deploy again.`,
-    );
-  }
   const warnings: string[] = [];
   for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
     const refusal = webEnvRefusal(site, key, env[key] ?? "");
@@ -808,6 +846,11 @@ function nginxDisableSymlinks(releaseBacked: boolean): string {
   disable_symlinks if_not_owner from=$document_root;`;
 }
 
+/** `server_tokens off` drops the version from `Server` and from error pages. */
+function nginxServerTokensLine(site: SiteApplySpec): string {
+  return site.hideWebServerNames ? "\n  server_tokens off;" : "";
+}
+
 export function nginxSiteConfig(
   site: SiteApplySpec,
   documentRoot: string,
@@ -822,7 +865,7 @@ export function nginxSiteConfig(
     return `server {
   listen 127.0.0.1:${site.listenPort};
   listen [::1]:${site.listenPort};${dockerListen}
-  server_name _;
+  server_name _;${nginxServerTokensLine(site)}
   root ${documentRoot};
   ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
 ${nginxApacheLocations(backendPort)}
@@ -849,9 +892,10 @@ ${nginxApacheLocations(backendPort)}
   return `server {
   listen 127.0.0.1:${site.listenPort};
   listen [::1]:${site.listenPort};${dockerListen}
-  server_name _;
+  server_name _;${nginxServerTokensLine(site)}
   root ${documentRoot};
   ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
+${nginxForwardedLines().join("\n")}
   index ${indexFiles};
 ${nginxDotfileDenyLines().join("\n")}
 
@@ -1336,12 +1380,20 @@ function apacheVhostHead(
   behindNginxPort: number | null,
 ): string {
   const name = site.composeServiceName;
+  // `ServerTokens` is server-wide only (not valid inside a VirtualHost), so it
+  // sits with the `Listen` lines, outside the block. `ServerSignature` is the
+  // error-page and directory-listing footer, which a vhost may set.
+  const hide = site.hideWebServerNames === true;
+  const tokens = hide ? ["ServerTokens Prod"] : [];
+  const signature = hide ? ["  ServerSignature Off"] : [];
   if (behindNginxPort !== null) {
     return [
       `# TurboPanel site ${name} (behind nginx)`,
+      ...tokens,
       `Listen 127.0.0.1:${behindNginxPort}`,
       `<VirtualHost 127.0.0.1:${behindNginxPort}>`,
       "  ServerName localhost",
+      ...signature,
       ...apacheBehindNginxLines(),
     ].join("\n");
   }
@@ -1349,9 +1401,12 @@ function apacheVhostHead(
   if (dockerBindAddress) addrs.push(`${dockerBindAddress}:${site.listenPort}`);
   return [
     `# TurboPanel site ${name}`,
+    ...tokens,
     ...addrs.map((addr) => `Listen ${addr}`),
     `<VirtualHost ${addrs.join(" ")}>`,
     "  ServerName localhost",
+    ...signature,
+    ...apacheForwardedLines(FORWARDED_TRUSTED_LOOPBACK),
     ...apacheDotfileDenyLines(),
   ].join("\n");
 }
@@ -1479,7 +1534,59 @@ export type OpenLiteSpeedVhostPhpOpts = Readonly<{
   children: number;
   /** The limits site code must not raise ({@link sitePhpLockedValues}). */
   lockedValues: readonly PhpAdminValue[];
+  /** Compose service name, for validator field paths when {@link webEnv} is set. */
+  composeServiceName?: string;
+  /**
+   * Site variables, written as rewrite rules (`E=NAME:value`) because the
+   * processor `env` is not passed to a process OLS did not start. FastCGI,
+   * php-fpm and detached lsphp all see them as CGI environment.
+   */
+  webEnv?: Record<string, string>;
 }>;
+
+/**
+ * One rewrite rule that hands a variable to PHP, or a refusal naming the
+ * variable (never its value: it may be a decrypted secret).
+ */
+export function openlitespeedEnvRule(
+  service: string,
+  key: string,
+  raw: string,
+): string {
+  const name = safeEnvName(`sites.${service}.webEnv`, key);
+  const field = `sites.${service}.webEnv.${name}`;
+  const value = safeEnvValue(field, raw);
+  const refusal = openlitespeedEnvRefusal(field, value);
+  if (refusal !== null) throw new ConfigValueError(field, refusal);
+  return `RewriteRule .* - [E=${name}:${value}]`;
+}
+
+/**
+ * The site's variables as rewrite rules, in name order.
+ *
+ * A variable OpenLiteSpeed cannot carry is **dropped and named**, the same
+ * way nginx, Apache and Caddy already do.
+ */
+function openlitespeedEnvRules(opts: OpenLiteSpeedVhostPhpOpts): string[] {
+  const env = opts.webEnv ?? {};
+  const service = opts.composeServiceName ?? "site";
+  const rules: string[] = [];
+  for (const key of Object.keys(env).sort((a, b) => a.localeCompare(b))) {
+    const field = `sites.${service}.webEnv`;
+    const name = safeEnvName(field, key);
+    const raw = env[key] ?? "";
+    const refusal = openlitespeedEnvRefusal(`${field}.${name}`, raw);
+    if (refusal !== null) {
+      logWarn(
+        "site",
+        `OpenLiteSpeed site ${service}: variable ${name} not passed to PHP (${refusal})`,
+      );
+      continue;
+    }
+    rules.push(openlitespeedEnvRule(service, key, raw));
+  }
+  return rules;
+}
 
 /**
  * Per-vhost `extprocessor` for the site's own runtime.
@@ -1562,16 +1669,29 @@ listener ${name}_lo{
  * context in our config executes them, so they are ordinary static downloads
  * and carry no hidden source. `.cgi` stays denied as a server-side type.
  */
-function openlitespeedScriptDenyRewrite(phpHandled: boolean): string {
+function openlitespeedScriptDenyRewrite(
+  phpHandled: boolean,
+  envRules: readonly string[] = [],
+): string {
   const family = "php[0-9]+|phtml|phar|phps|pht|phpt|inc|cgi";
   const denied = phpHandled ? family : `php|${family}`;
   const backups = String.raw`~|\.(bak|old|orig|save|swp|swo|tmp|dist|txt)`;
+  // PHP learns the visitor used HTTPS from the front server's header. This is
+  // last and has no `L`, so it never lets a denied path through. The address
+  // is the server-wide `useIpInProxyHeader` in the main config; port and scheme cannot be
+  // changed from here.
+  const forwardedHttps = phpHandled
+    ? `
+RewriteCond %{HTTP:X-Forwarded-Proto} =https
+RewriteRule .* - [E=HTTPS:on]`
+    : "";
+  const siteEnv = envRules.map((rule) => `\n${rule}`).join("");
   return String.raw`rewrite {
   enable                    1
   rules                     <<<END_rules
 RewriteRule (^|/)\.(?!well-known(/|$)) - [F,L]
 RewriteRule \.(${denied})(/.*)?$ - [F,L,NC]
-RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]
+RewriteRule \.(php|${family})(${backups})$ - [F,L,NC]${forwardedHttps}${siteEnv}
 END_rules
 }
 `;
@@ -1633,7 +1753,7 @@ scripthandler {
   }:${php.processorName} php
 }
 ${overrideBlock}
-${openlitespeedScriptDenyRewrite(true)}
+${openlitespeedScriptDenyRewrite(true, openlitespeedEnvRules(php))}
 context / {
   allowBrowse 1
   location $DOC_ROOT/
@@ -1670,6 +1790,13 @@ showVersionNumber                 0
 indexFiles                        index.html
 disableWebAdmin                   1
 httpdWorkers                      ${OPENLITESPEED_HTTPD_WORKERS}
+
+# The visitor's address from X-Forwarded-For, taken only from the front server
+# on loopback ("T" marks a trusted peer); a docker bridge peer stays itself.
+useIpInProxyHeader                2
+accessControl {
+        allow                     ALL, ${FORWARDED_TRUSTED_LOOPBACK}T
+}
 
 # OLS refuses a static file without the world-read bit unless told otherwise;
 # site files are principal-owned and shared with tpols by group, never world.
@@ -1999,7 +2126,7 @@ async function assertReleaseDocumentRoot(
   );
   if (stat === null) {
     throw new Error(
-      `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}")`,
+      `site release document root missing for ${site.composeServiceName}: ${documentRoot} (no promoted release, or the build did not emit "${site.root}"). Set the site's "root" to the folder the build writes, or set "outputDirectory" to it and leave "root" unset`,
     );
   }
   if (stat !== "directory" && !stat.isDirectory) {
@@ -2060,10 +2187,20 @@ async function reloadPhpFpm(
 }
 
 /**
- * Group of every php-fpm `pools/` dir — the php-fpm role's
- * `php_fpm_service_group`, shared by nginx and Apache sites.
+ * Group of the php-fpm `pools/` dirs: the php-fpm role's `php_fpm_service_group`
+ * for the engines this deploy needs PHP for. Caddy, nginx and Apache share
+ * `tpapache`; an OpenLiteSpeed-only host has no `tpapache` at all (its
+ * playbook runs the role as `tpols`), so naming it there is refused as an
+ * unknown service group. Any Apache-family engine in the deploy wins, because
+ * that account is provisioned whenever one of them is installed.
  */
-const PHP_FPM_POOLS_GROUP = "tpapache";
+export function phpFpmPoolsGroup(
+  engines: ReadonlySet<SiteApplySpec["engine"]>,
+): string {
+  const onlyOpenLiteSpeed = engines.size > 0 &&
+    [...engines].every((engine) => engine === "openlitespeed");
+  return onlyOpenLiteSpeed ? "tpols" : "tpapache";
+}
 
 /**
  * Create (or re-assert) a root-owned engine config dir `root:<group>` `0750`
@@ -2403,6 +2540,8 @@ async function applySiteTreeOwnership(
 }
 
 export type ApplySiteOpts = {
+  /** Render every vhost so the engine names neither itself nor its version. */
+  hideWebServerNames?: boolean;
   /** When set, vhosts also listen on the docker bridge for container reachability. */
   dockerBindAddress?: string | null;
   /**
@@ -2699,7 +2838,7 @@ async function ensureSiteConfigDirs(
     await forEachSequential(phpSeries, async (series) => {
       await ensureEngineConfigDir(
         phpFpmPoolsDir(layout, series),
-        PHP_FPM_POOLS_GROUP,
+        phpFpmPoolsGroup(needs.phpFpmEngines),
       );
     });
   }
@@ -3401,6 +3540,8 @@ function openlitespeedVhostPhp(
     lockedValues: sitePhpLockedValues(
       site.php ? phpAdminValues(site.php, adminOpts) : [],
     ),
+    composeServiceName: site.composeServiceName,
+    webEnv: site.webEnv,
   };
 }
 
@@ -4077,7 +4218,10 @@ export async function applySites(
     };
     let reloaded: string[];
     try {
-      await forEachSequential(sites, async (site) => {
+      await forEachSequential(sites, async (declared) => {
+        const site: SiteApplySpec = opts?.hideWebServerNames
+          ? { ...declared, hideWebServerNames: true }
+          : declared;
         const hold = holdSiteRuntime(environmentId, site);
         if (hold) holds.push(hold);
         const result = await applyOneSite(

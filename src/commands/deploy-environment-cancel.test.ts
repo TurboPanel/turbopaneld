@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
@@ -52,7 +53,8 @@ function payload(
       content: `services:\n  web:\n    image: ${image}\n`,
     }],
     generation: 1,
-    desiredHash: "a".repeat(64),
+    // A different image is a different desired state, as the control plane hashes it.
+    desiredHash: createHash("sha256").update(image).digest("hex"),
     serverId: SERVER_ID,
     replicaCounts: { web: 1 },
     hostings: [],

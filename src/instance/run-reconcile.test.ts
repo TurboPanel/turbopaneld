@@ -1172,7 +1172,8 @@ function managedUpdateHooks(
     statfsProbe: PLENTY_STATFS,
     fetchText: () =>
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
-    readCaddyfile: () => Promise.resolve("handle_errors\nupdating.html\n"),
+    readCaddyfile: () =>
+      Promise.resolve("handle_errors\nupdating.html\n@ui_hashed path\n"),
     restartUnits: () => Promise.resolve(true),
     ensureWebServer: () => Promise.resolve(true),
     migrate: () =>
@@ -1573,6 +1574,59 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the updating page is a
   );
   assertEquals(backupAt >= 0 && refreshAt > backupAt, true);
   assertEquals(installAt > refreshAt, true);
+});
+
+test("executeInstanceUpdateReconcile refreshes Caddy when the UI cache rules are absent", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls, {
+      readCaddyfile: () => Promise.resolve("handle_errors\nupdating.html\n"),
+    }),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  assertEquals(names.includes("instance-launch-only.yml"), true);
+});
+
+test("executeInstanceUpdateReconcile refreshes the broker config once, after the new build is healthy", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  assertEquals(names.filter((n) => n === "queue-config-refresh.yml").length, 1);
+  assertEquals(names.at(-1), "queue-config-refresh.yml");
+  assertEquals(
+    names.indexOf("queue-config-refresh.yml") >
+      calls.findIndex((c) => c.args.includes("update-instance")),
+    true,
+  );
+});
+
+test("executeInstanceUpdateReconcile only warns when the broker config refresh fails", async () => {
+  for (const mode of ["exit", "throw"] as const) {
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    const hooks = managedUpdateHooks(calls);
+    const baseRun = hooks.run!;
+    hooks.run = (bin, args) => {
+      if (args.at(-1) === "queue-config-refresh.yml") {
+        calls.push({ bin, args });
+        if (mode === "throw") return Promise.reject(new Error("boom"));
+        return Promise.resolve({ code: 2, stdout: "", stderr: "failed" });
+      }
+      return baseRun(bin, args);
+    };
+    const outcome = await executeInstanceUpdateReconcile({
+      channel: "release",
+      hooks,
+    });
+    assertEquals(outcome, {});
+    assertEquals(
+      calls.some((c) => c.args.at(-1) === "queue-config-refresh.yml"),
+      true,
+    );
+  }
 });
 
 test("executeInstanceUpdateReconcile re-renders the units once, after the swap and before the restart", async () => {
@@ -2070,7 +2124,7 @@ test("a new build that is serving after a failed rollback is a success with a wa
 
 test("a failed migration keeps the previous database and rolls back", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
-  let history = ["0000_init"];
+  let history = ["0000_example"];
   const error = await assertRejects(
     () =>
       executeInstanceUpdateReconcile({
@@ -2078,7 +2132,7 @@ test("a failed migration keeps the previous database and rolls back", async () =
         upgradeId: "up-migrate",
         hooks: managedUpdateHooks(calls, {
           migrate: () => {
-            history = ["0000_init"];
+            history = ["0000_example"];
             return Promise.resolve({
               code: 1,
               stdout: "",
@@ -2090,7 +2144,7 @@ test("a failed migration keeps the previous database and rolls back", async () =
     ControlPlaneUpdateFailedError,
     "migration_failed",
   );
-  assertEquals(history, ["0000_init"]);
+  assertEquals(history, ["0000_example"]);
   assertEquals(
     calls.some((call) => call.args.includes("instance-rollback.yml")),
     true,
@@ -2100,13 +2154,13 @@ test("a failed migration keeps the previous database and rolls back", async () =
 
 test("a successful migration lets the new instance boot", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
-  let history = ["0000_init"];
+  let history = ["0000_example"];
   let booted = false;
   await executeInstanceUpdateReconcile({
     channel: "release",
     hooks: managedUpdateHooks(calls, {
       migrate: () => {
-        history = ["0000_init", "0007_add_upgrade_tables"];
+        history = ["0000_example", "0007_add_upgrade_tables"];
         return Promise.resolve({
           code: 0,
           stdout: "migrations applied successfully\n",

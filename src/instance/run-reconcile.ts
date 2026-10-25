@@ -44,6 +44,7 @@ import {
   type InstanceConfig,
   stripTrailingSlashes,
 } from "./sockets.ts";
+import { writeChildStdin } from "../util/write-child-stdin.ts";
 
 export const PRODUCTION_CONTROL_PLANE = "https://turbopanel.app";
 export const CDN_RUN_SCRIPT = "https://turbopanel.sh";
@@ -606,9 +607,7 @@ async function writeHelperStdin(
   stdin: WritableStream<Uint8Array>,
   text: string,
 ): Promise<void> {
-  const writer = stdin.getWriter();
-  await writer.write(new TextEncoder().encode(text));
-  await writer.close();
+  await writeChildStdin(stdin, text);
 }
 
 /**
@@ -712,9 +711,7 @@ async function runReconcileCommand(
 ): Promise<void> {
   const child = command.spawn();
   if (options.stdin !== undefined) {
-    const writer = child.stdin.getWriter();
-    await writer.write(new TextEncoder().encode(options.stdin));
-    await writer.close();
+    await writeChildStdin(child.stdin, options.stdin);
   }
   const [stdoutText, stderrText, status] = await Promise.all([
     consumeReconcileStdout(child.stdout, options.onStage),
@@ -1268,9 +1265,14 @@ async function defaultReadCaddyfile(): Promise<string | null> {
   }
 }
 
+/**
+ * A Caddyfile from an older build: no updating page, or no UI cache rules
+ * (browsers then keep running an old panel page after an update).
+ */
 function caddyNeedsRefresh(text: string | null): boolean {
   if (!text) return true;
-  return !text.includes("handle_errors") || !text.includes("updating.html");
+  return !text.includes("handle_errors") || !text.includes("updating.html") ||
+    !text.includes("@ui_hashed");
 }
 
 /** The plain fact first: what did not happen, and for how long we waited. */
@@ -1563,6 +1565,27 @@ async function refreshCaddyIfNeeded(
 }
 
 /**
+ * Re-apply the queue broker's own config (consumer timeout and friends) once
+ * the new build is healthy. The play renders only the queue role and restarts
+ * the broker container only when rabbitmq.conf actually changed, so a current
+ * host is untouched. The update command reaches the daemon over its
+ * WebSocket, not through the broker, so the restart cannot drop it; the
+ * panel's consumers reconnect. Running last means a failed or rolled-back
+ * update never restarts the broker. Never blocks: a failure is a warning.
+ */
+async function refreshBrokerConfig(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  installRoot: string,
+): Promise<void> {
+  await runPlaybookWarnOnly(
+    run,
+    "queue-config-refresh.yml",
+    installRoot,
+    "broker config refresh failed:",
+  );
+}
+
+/**
  * Re-render the control-plane units (instance, Caddy, Docker gate, ...) from
  * the orchestration bundle the daemon already carries. The package swap above
  * only replaces binaries, so a changed unit template (a sandbox, a new gate)
@@ -1574,7 +1597,22 @@ async function refreshControlPlaneUnits(
   run: NonNullable<InstanceUpdateHooks["run"]>,
   installRoot: string,
 ): Promise<void> {
-  const refresh = rootHelperPlaybookInvocation("instance-units-refresh.yml", {
+  await runPlaybookWarnOnly(
+    run,
+    "instance-units-refresh.yml",
+    installRoot,
+    "unit refresh failed, keeping the installed units:",
+  );
+}
+
+/** Run a root-helper playbook; a failure is logged as a warning, never thrown. */
+async function runPlaybookWarnOnly(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  playbook: string,
+  installRoot: string,
+  warning: string,
+): Promise<void> {
+  const refresh = rootHelperPlaybookInvocation(playbook, {
     turbopanel_install_root: installRoot,
   });
   let problem = "";
@@ -1587,13 +1625,7 @@ async function refreshControlPlaneUnits(
   } catch (err) {
     problem = err instanceof Error ? err.message : String(err);
   }
-  if (problem) {
-    logWarn(
-      "update",
-      "unit refresh failed, keeping the installed units:",
-      problem,
-    );
-  }
+  if (problem) logWarn("update", warning, problem);
 }
 
 /**
@@ -1750,6 +1782,7 @@ export async function executeInstanceUpdateReconcile(options: {
       webServerFailureDetail(manifest.version ?? manifest.commit),
     );
   }
+  await refreshBrokerConfig(run, layout.home);
   report("done");
   return {};
 }

@@ -1,6 +1,5 @@
 import {
   bootstrapOrchestrationRuntime,
-  ensureGalaxyDockerRole,
   runDaemonConverge,
   runLocalPlaybook,
 } from "./ansible.ts";
@@ -60,6 +59,13 @@ function shouldInstallDevInstance(): boolean {
  * "development" — stub this to exercise the managed branches.
  */
 export const setupTestHooks = {
+  runDaemonConverge: (): Promise<void> => runDaemonConverge(),
+  bootstrapSteps: (): Array<[string, () => Promise<void>]> => [
+    ["ensureOrchestrationTree", ensureOrchestrationTree],
+    ["ensureUv", ensureUv],
+    ["ensurePython", ensurePython],
+    ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],
+  ],
   detectInstallMode: (): InstallMode => detectInstallMode(Deno.env.toObject()),
 };
 
@@ -111,7 +117,7 @@ export function shouldEnableDockerIntegration(): boolean {
  * True daemon-only managed servers (remote URL dial). These still auto-converge
  * on startup outside the dev-console deferred-start install path.
  */
-function shouldRunDaemonConverge(): boolean {
+export function shouldRunDaemonConverge(): boolean {
   if (isPreOptInCoLocatedDev()) return false;
   return resolveInstanceConfig().kind === "url";
 }
@@ -131,6 +137,16 @@ function shouldRunDaemonConverge(): boolean {
  * problem shouldn't take the whole service down. Returns `true` on success.
  */
 export async function initOrchestration(): Promise<boolean> {
+  if (!(await bootstrapOrchestrationTools())) return false;
+  return await runBootConverge();
+}
+
+/**
+ * The quick part of start-up: extract the orchestration tree and make sure uv,
+ * Python and Ansible are in place (a couple of seconds once installed).
+ * Returns `true` when the runtime is ready; failures are logged, never thrown.
+ */
+export async function bootstrapOrchestrationTools(): Promise<boolean> {
   if (shouldSkipOrchestration()) {
     logInfo("orchestration", "skipped (TURBOPANEL_SKIP_ORCHESTRATION)");
     return false;
@@ -138,25 +154,44 @@ export async function initOrchestration(): Promise<boolean> {
 
   const started = performance.now();
   logInfo("orchestration", "bootstrapping runtime");
-  const preOptInDev = isPreOptInCoLocatedDev();
-  const steps: Array<[string, () => Promise<void>]> = [
-    ["ensureOrchestrationTree", ensureOrchestrationTree],
-    ["ensureUv", ensureUv],
-    ["ensurePython", ensurePython],
-    ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],
-  ];
-  if (shouldRunDaemonConverge()) {
-    steps.push(["runDaemonConverge", runDaemonConverge]);
-  } else if (preOptInDev) {
-    logInfo(
-      "orchestration",
-      "co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge",
-    );
-  }
+  const steps = setupTestHooks.bootstrapSteps();
   try {
     await forEachSequential(steps, async ([, step]) => {
       await step();
     });
+    const elapsed = ((performance.now() - started) / 1000).toFixed(1);
+    logInfo("orchestration", `tools ready in ${elapsed}s`);
+    return true;
+  } catch (err) {
+    logError("orchestration", "bootstrap failed:", err);
+    logError(
+      "orchestration",
+      "daemon will continue running without a verified runtime",
+    );
+    return false;
+  }
+}
+
+/**
+ * The slow part of start-up: the `daemon-converge.yml` playbook for managed
+ * daemon-only hosts (about a minute and a half on a new server). A no-op that
+ * returns `true` where no converge applies. Failures are logged loudly, never
+ * thrown, and return `false`.
+ */
+export async function runBootConverge(): Promise<boolean> {
+  if (shouldSkipOrchestration()) return false;
+  if (!shouldRunDaemonConverge()) {
+    if (isPreOptInCoLocatedDev()) {
+      logInfo(
+        "orchestration",
+        "co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge",
+      );
+    }
+    return true;
+  }
+  const started = performance.now();
+  try {
+    await setupTestHooks.runDaemonConverge();
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
     logInfo("orchestration", `runtime ready in ${elapsed}s`);
     return true;
@@ -262,15 +297,6 @@ export async function runInstaller(opts: RunInstallerOptions): Promise<void> {
     if (!varsFile) {
       varsFile = await createInstallerVarsFile(opts);
       internallyCreatedVarsFile = true;
-    }
-
-    // The instance installer converges Docker (postgres/redis/rabbitmq run as
-    // one compose project) through the pinned geerlingguy.docker Galaxy
-    // role, which orchestration bootstrap deliberately does not fetch —
-    // same on-demand step the dev converge takes. The daemon installer needs
-    // no Docker.
-    if (playbookName === "instance-install.yml") {
-      await ensureGalaxyDockerRole();
     }
 
     const onEvent: AnsibleEventHandler = (event) => {
