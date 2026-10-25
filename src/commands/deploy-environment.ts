@@ -2633,13 +2633,17 @@ async function handleEnvironmentDeployLocked(
     // pauses while the deploy waits for another build to free the host.
     const progress = deps?.progress;
     progress?.running(true);
-    const result = await observeBuildSlot(
-      {
-        waiting: () => progress?.running(false),
-        acquired: () => progress?.running(true),
-      },
-      () => deployEnvironmentHolding(parsedPayload, daemonReceivedAt, deps),
-    );
+    // Rewriting the web server config builds nothing, so it does not wait for
+    // a build slot.
+    const result = parsedPayload.hostingsOnly === true
+      ? await applyHostingsOnly(parsedPayload, deps)
+      : await observeBuildSlot(
+        {
+          waiting: () => progress?.running(false),
+          acquired: () => progress?.running(true),
+        },
+        () => deployEnvironmentHolding(parsedPayload, daemonReceivedAt, deps),
+      );
     deps?.progress?.finish("succeeded");
     return result;
   } catch (err) {
@@ -2652,6 +2656,55 @@ async function handleEnvironmentDeployLocked(
   } finally {
     releaseHolds();
   }
+}
+
+/**
+ * `hostingsOnly`: a hosting's certificate choice changed (a Let's Encrypt
+ * certificate was picked) and the control plane wants it live without a
+ * redeploy. Only this environment's hosting Caddy config and the certificates
+ * it pins are rewritten; nothing is built, started, stopped or pruned. The
+ * applied-deploy hash is left alone, so the next real deploy still runs even
+ * when the payload also carried changes this run did not apply. A server
+ * whose hosting Caddy has no site for this environment yet has had no deploy
+ * to point the config at, so the run is refused there.
+ */
+export async function applyHostingsOnly(
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  deps?: EnvironmentDeployDeps,
+): Promise<EnvironmentDeployResult> {
+  assertSafeDeploymentIdentifiers(parsedPayload);
+  const layout = resolveLayout(Deno.env.toObject());
+  const sitePath = join(
+    layout.configDir,
+    "hosting",
+    "sites",
+    `${parsedPayload.environmentId}.caddy`,
+  );
+  try {
+    await Deno.stat(sitePath);
+  } catch {
+    throw new Error(
+      "this environment has no web server config on this server yet: deploy it first",
+    );
+  }
+  const runtime = resolveEnvironmentDeployRuntime(deps);
+  await assertHostingNamesFree(layout, parsedPayload);
+  const hostnameTls = await materializeDeployTls(
+    layout,
+    parsedPayload,
+    runtime.decryptSecrets,
+  );
+  await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
+  logInfo(
+    "commands",
+    `environment.deploy hostings only env=${parsedPayload.environmentId}`,
+  );
+  return {
+    projectName: parsedPayload.projectName,
+    summary:
+      `Web server settings applied for environment ${parsedPayload.environmentId}: no build, no restart`,
+    unchanged: true,
+  };
 }
 
 /**

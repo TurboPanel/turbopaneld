@@ -8,6 +8,7 @@ import {
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
+  DEPLOY_HOSTINGS_ONLY_FEATURE,
   HOST_CAPACITY_FEATURE,
   instanceUnsupportedReason,
   MANAGED_DATA_ONLY_READWRITE_FEATURE,
@@ -331,8 +332,14 @@ test("server-network-check-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("backup-s3-copy-v1 is advertised last and raised no floor", () => {
+test("backup-s3-copy-v1 is advertised and raised no floor", () => {
   assertEquals(BACKUP_S3_COPY_FEATURE, "backup-s3-copy-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), BACKUP_S3_COPY_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(BACKUP_S3_COPY_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("deploy-hostings-only-v1 is advertised last and raised no floor", () => {
+  assertEquals(DEPLOY_HOSTINGS_ONLY_FEATURE, "deploy-hostings-only-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), DEPLOY_HOSTINGS_ONLY_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
