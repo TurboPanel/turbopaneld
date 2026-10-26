@@ -1,15 +1,18 @@
 import { assertEquals } from "@std/assert";
 import {
   acknowledgeCommandOutcome,
+  answerRepeatedDispatch,
   commandRecoveryReport,
   deliverCommandOutcome,
   flushCommandOutcomes,
   interruptedFacts,
   markCommandInFlight,
   noteCommandProgress,
+  noteSessionOpen,
   PROGRESS_JOURNAL_INTERVAL_MS,
   RESEND_INTERVAL_MS,
   resetCommandOutboxForTests,
+  sendCommandFrame,
   settleCommandJournalWrites,
   UNACKED_MAX_ENTRIES,
   UNACKED_RETENTION_MS,
@@ -49,6 +52,120 @@ async function journalNames(): Promise<string[]> {
     return [];
   }
 }
+
+const recoveringPeer = {
+  supports: (feature: string) => feature === "command-recovery-v1",
+};
+
+function progressMessage() {
+  return {
+    type: "command-progress" as const,
+    id: "cmd-moved",
+    commandId: "cmd-moved",
+    at: new Date().toISOString(),
+    progress: runningPlan("build"),
+  };
+}
+
+function runningPlan(current: string): CommandProgress {
+  return {
+    version: 1,
+    steps: [{ id: current, label: "Build", state: "running" }],
+    current,
+    updatedAt: new Date().toISOString(),
+    runningSince: new Date().toISOString(),
+  };
+}
+
+test("a repeated dispatch of a finished command gets its kept outcome on the new socket", async () => {
+  await withState(async () => {
+    const first = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(first.ws, recoveringPeer);
+    await markCommandInFlight("cmd-rep");
+    first.ws.readyState = WebSocket.CLOSED;
+    await deliverCommandOutcome(first.ws, {
+      type: "command-outcome",
+      id: "cmd-rep",
+      ok: true,
+    });
+    assertEquals(first.sent.length, 0);
+
+    const second = socket(WebSocket.OPEN);
+    assertEquals(answerRepeatedDispatch(second.ws, "cmd-rep"), true);
+    assertEquals(second.sent.map((m) => [m.type, m.id]), [[
+      "command-outcome",
+      "cmd-rep",
+    ]]);
+    // The kept outcome stays until the control plane confirms it.
+    assertEquals(await journalNames(), ["cmd-rep.json"]);
+  });
+});
+
+test("a repeated dispatch of a running command gets its latest step plan", async () => {
+  await withState(async () => {
+    const live = socket(WebSocket.OPEN);
+    await markCommandInFlight("cmd-run");
+    noteCommandProgress("cmd-run", runningPlan("build"));
+    assertEquals(
+      answerRepeatedDispatch(live.ws, "cmd-run", "cmd-run-command"),
+      true,
+    );
+    assertEquals(live.sent.length, 1);
+    assertEquals(live.sent[0].type, "command-progress");
+    assertEquals(live.sent[0].commandId, "cmd-run-command");
+    assertEquals((live.sent[0].progress as CommandProgress).current, "build");
+  });
+});
+
+test("an unknown repeated dispatch is left to run", async () => {
+  await withState(() => {
+    const live = socket(WebSocket.OPEN);
+    assertEquals(answerRepeatedDispatch(live.ws, "cmd-new"), false);
+    assertEquals(live.sent.length, 0);
+    return Promise.resolve();
+  });
+});
+
+test("a socket that just opened gets held outcomes but every journal is kept", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-open");
+    const closed = socket(WebSocket.CLOSED);
+    await deliverCommandOutcome(closed.ws, {
+      type: "command-outcome",
+      id: "cmd-open",
+      ok: true,
+    });
+    const opened = socket(WebSocket.OPEN);
+    noteSessionOpen(opened.ws);
+    assertEquals(opened.sent.map((m) => [m.type, m.id]), [[
+      "command-outcome",
+      "cmd-open",
+    ]]);
+    await settleCommandJournalWrites();
+    assertEquals(await journalNames(), ["cmd-open.json"]);
+
+    // The attach frame then says results are confirmed: still kept until the ack.
+    await flushCommandOutcomes(opened.ws, recoveringPeer);
+    assertEquals(await journalNames(), ["cmd-open.json"]);
+    await acknowledgeCommandOutcome("cmd-open");
+    assertEquals(await journalNames(), []);
+  });
+});
+
+test("a running command's frames move to the socket attached after a reconnect", async () => {
+  await withState(async () => {
+    const dispatched = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(dispatched.ws, recoveringPeer);
+    dispatched.ws.readyState = WebSocket.CLOSED;
+    const reconnected = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(reconnected.ws, recoveringPeer);
+    assertEquals(
+      sendCommandFrame(dispatched.ws, progressMessage()),
+      true,
+    );
+    assertEquals(reconnected.sent.map((m) => m.type), ["command-progress"]);
+  });
+});
 
 test("an outcome sent into a closed socket is held and delivered on attach", async () => {
   await withState(async () => {
