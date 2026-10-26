@@ -24,10 +24,15 @@ import {
   readKeyId,
   RECONNECT_FIRST_WINDOW_MS,
   RECONNECT_FLOOR_MS,
+  registerCommandPorts,
   STABLE_SESSION_MS,
   writeKeyId,
 } from "./client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
+import {
+  deliverCommandOutcome,
+  markCommandInFlight,
+} from "../commands/command-outbox.ts";
 import { ControlPlaneUpdateFailedError } from "./run-reconcile.ts";
 import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
 import { enrollDaemon } from "./enroll.ts";
@@ -6142,6 +6147,8 @@ async function startConnectedClient(
 ): Promise<{
   client: InstanceClient;
   socket: MockWebSocket;
+  /** Every socket the client opened, in order (reconnects append). */
+  sockets: MockWebSocket[];
   restore: () => void;
 }> {
   const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
@@ -6216,6 +6223,7 @@ async function startConnectedClient(
   return {
     client,
     socket,
+    sockets,
     restore: () => {
       client.stop();
       restoreFetch();
@@ -7196,6 +7204,87 @@ it({
       );
     } finally {
       restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "an outcome finished after a reconnect goes out on the new socket, even without its attach frame",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      restartDaemonService: () => Promise.resolve(true),
+    });
+    const restoreTime = installClientTimeSource({
+      delay: () => Promise.resolve(),
+    });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const restorePorts = registerCommandPorts({
+      handleCommandDispatch: async (message, ws) => {
+        await markCommandInFlight(message.id);
+        await gate;
+        await deliverCommandOutcome(ws, {
+          type: "command-outcome",
+          id: message.id,
+          ok: true,
+        });
+      },
+    });
+    const { socket, sockets, restore } = await startConnectedClient();
+    const version = {
+      type: "version",
+      commit: "abc",
+      branch: "trunk",
+      instanceVersion: "0.1.1",
+      features: ["command-recovery-v1"],
+      at: new Date().toISOString(),
+    };
+    try {
+      socket.receive(version);
+      await flushMicrotasks();
+      socket.receive({
+        type: "command-dispatch",
+        id: "cmd-after-reconnect",
+        commandId: "00000000-0000-4000-8000-000000000099",
+        commandType: "environment.deploy",
+        payload: {},
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.close(1001, "link lost");
+      const next = await waitFor(
+        "reconnected socket",
+        () => sockets.at(1),
+        5_000,
+      );
+      next.open();
+      await flushMicrotasks();
+      // No attach `version` frame on the new socket: the result must not wait on it.
+      release();
+      await waitFor(
+        "outcome on the new socket",
+        () =>
+          framesOfType(next, "command-outcome").some((f) =>
+            (f as { id?: string }).id === "cmd-after-reconnect"
+          ) || undefined,
+      );
+    } finally {
+      release();
+      restore();
+      restorePorts();
+      restoreTime();
       restoreHooks();
     }
   },

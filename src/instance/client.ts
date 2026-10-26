@@ -653,14 +653,18 @@ export class InstanceClient {
     this.#updateProgress.reportStage(unit ?? "daemon", stage, rest);
   }
 
-  async #afterAttachVersion(ws: WebSocket): Promise<void> {
+  /** Hand the open session socket to the command outbox (held outcomes, resends). */
+  #attachCommandSession(ws: WebSocket): void {
     const sessionAttach = commandPorts.handleSessionAttach;
-    if (sessionAttach) {
-      this.#runSocketHandler(
-        "session-attach",
-        sessionAttach(ws, { supports: (f) => this.instanceSupports(f) }),
-      );
-    }
+    if (!sessionAttach) return;
+    this.#runSocketHandler(
+      "session-attach",
+      sessionAttach(ws, { supports: (f) => this.instanceSupports(f) }),
+    );
+  }
+
+  async #afterAttachVersion(ws: WebSocket): Promise<void> {
+    this.#attachCommandSession(ws);
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
       this.#pendingInstanceUpdateResult = null;
@@ -1591,6 +1595,12 @@ export class InstanceClient {
       // collector holds its batches while `readyToSend()` is false and ships
       // them once the transport is back; only an org toggle stops it.
     };
+
+    // Held and unconfirmed command outcomes go out as soon as the socket is
+    // open, not only when the attach `version` frame arrives: a result must
+    // never wait on one frame that may be lost with the upgrade. The attach
+    // frame runs the same flush again once it lands; repeats are harmless.
+    this.#attachCommandSession(ws);
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
       ws.addEventListener("close", (event) => resolve(event as CloseEvent), {
