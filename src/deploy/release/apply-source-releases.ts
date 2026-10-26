@@ -161,6 +161,12 @@ export type AppliedRelease = {
    * own "leave `current` alone" guarantee has already been spent.
    */
   previousReleaseId: string | null;
+  /**
+   * True when the release was published without moving `current` (a Node app
+   * that was serving): the native apply moves `current` to it, beside the
+   * release serving or, when that one stopped since, before starting it.
+   */
+  heldCurrent?: boolean;
   /** True when a Next standalone tree was published instead of the checkout. */
   standaloneOutput: boolean;
   /**
@@ -219,6 +225,25 @@ function nativeAppForService(
   );
 }
 
+/**
+ * Whether to publish this service's release without moving `current`: only a
+ * server build (never a static export) of a Node app that is serving now.
+ * Asking the host is best-effort: a probe that fails moves `current` as before.
+ */
+async function holdsCurrent(
+  deps: Pick<ApplySourceReleasesDeps, "holdCurrent">,
+  composeServiceName: string,
+  serviceId: string,
+  staticExport: boolean,
+): Promise<boolean> {
+  if (staticExport || !deps.holdCurrent) return false;
+  try {
+    return await deps.holdCurrent({ composeServiceName, serviceId });
+  } catch {
+    return false;
+  }
+}
+
 /** `deno` for a Deno app, else nothing: a Node release records no runtime. */
 function builtRuntime(
   payload: EnvironmentDeployPayload,
@@ -258,6 +283,15 @@ export type ApplySourceReleasesDeps = {
   recordRailpackReleaseFn?: typeof recordRailpackRelease;
   /** Test seam — defaults to {@link runRailpackBuild}. */
   runRailpackBuildFn?: typeof runRailpackBuild;
+  /**
+   * True when this service is a Node app that is serving now: its release is
+   * published without moving `current`, which the native apply moves only
+   * once the new release has answered beside the one serving. A static export
+   * leaves that lane, so it is never asked about.
+   */
+  holdCurrent?: (
+    service: { composeServiceName: string; serviceId: string },
+  ) => Promise<boolean>;
   /** Test seam — defaults to {@link ensureBuildkitRailpack}. */
   ensureBuildkitRailpackFn?: typeof ensureBuildkitRailpack;
   /** Test seam — defaults to {@link ensureDaemonReleaseRecordDir}. */
@@ -272,6 +306,42 @@ export type ApplySourceReleasesDeps = {
   /** Test seam — the build-user role's tree (`/var/lib/turbopanel-build`). */
   buildSandboxRoot?: string;
 };
+
+/** What a rollback to an image-built release reports: its record is the rollback. */
+function imageRollbackResult(
+  entry: EnvironmentDeploySource,
+  target: RollbackTarget,
+  params: { serviceId: string; releaseId: string },
+  previousReleaseId: string | null,
+): AppliedRelease {
+  const { paths, manifest: recordedManifest } = target;
+  return {
+    composeServiceName: entry.composeServiceName,
+    serviceId: params.serviceId,
+    releaseId: params.releaseId,
+    commitSha: recordedManifest.commitSha,
+    ...(recordedManifest.commitMessage === undefined
+      ? {}
+      : { commitMessage: recordedManifest.commitMessage }),
+    ...(recordedManifest.commitAuthor === undefined
+      ? {}
+      : { commitAuthor: recordedManifest.commitAuthor }),
+    releaseDir: paths.releaseDir,
+    imageTag: recordedManifest.imageTag,
+    ...(recordedManifest.imageDigest === undefined
+      ? {}
+      : { imageDigest: recordedManifest.imageDigest }),
+    ...(recordedManifest.railpackFrontendVersion === undefined ? {} : {
+      railpackFrontendVersion: recordedManifest.railpackFrontendVersion,
+    }),
+    ...(recordedManifest.railpackPlanVersion === undefined
+      ? {}
+      : { railpackPlanVersion: recordedManifest.railpackPlanVersion }),
+    previousReleaseId,
+    standaloneOutput: false,
+    staticExport: false,
+  };
+}
 
 /**
  * Promote an already-published release for one service — the rollback lane.
@@ -319,41 +389,23 @@ async function rollbackOneRelease(
       `rolled ${entry.composeServiceName} back to release ${params.releaseId} ` +
         `(image ${recordedManifest.imageTag})`,
     );
-    return {
-      composeServiceName: entry.composeServiceName,
-      serviceId: params.serviceId,
-      releaseId: params.releaseId,
-      commitSha: recordedManifest.commitSha,
-      ...(recordedManifest.commitMessage === undefined
-        ? {}
-        : { commitMessage: recordedManifest.commitMessage }),
-      ...(recordedManifest.commitAuthor === undefined
-        ? {}
-        : { commitAuthor: recordedManifest.commitAuthor }),
-      releaseDir: paths.releaseDir,
-      imageTag: recordedManifest.imageTag,
-      ...(recordedManifest.imageDigest === undefined
-        ? {}
-        : { imageDigest: recordedManifest.imageDigest }),
-      ...(recordedManifest.railpackFrontendVersion === undefined ? {} : {
-        railpackFrontendVersion: recordedManifest.railpackFrontendVersion,
-      }),
-      ...(recordedManifest.railpackPlanVersion === undefined
-        ? {}
-        : { railpackPlanVersion: recordedManifest.railpackPlanVersion }),
-      previousReleaseId,
-      standaloneOutput: false,
-      staticExport: false,
-    };
+    return imageRollbackResult(entry, target, params, previousReleaseId);
   }
 
   // Cutting `current` over is the switch itself: past this line a cancel is too late.
   deps.cancel?.commit("before the release was switched over");
+  const keepCurrent = await holdsCurrent(
+    deps,
+    entry.composeServiceName,
+    params.serviceId,
+    recordedManifest.staticExport === true,
+  );
   const releaseDir =
     await (deps.promoteExistingReleaseFn ?? promoteExistingRelease)({
       paths,
       releaseId: params.releaseId,
       ...(deps.runFn === undefined ? {} : { runFn: deps.runFn }),
+      ...(keepCurrent ? { keepCurrent } : {}),
     });
   logSink.onLine(
     "stdout",
@@ -376,6 +428,7 @@ async function rollbackOneRelease(
     ...(commitAuthor === undefined ? {} : { commitAuthor }),
     releaseDir,
     previousReleaseId,
+    ...(keepCurrent ? { heldCurrent: true } : {}),
     // The runtime lane a rollback restores is the one the original promote
     // established, so both come off that release's own manifest rather than
     // being re-derived (nothing was built here to derive them from). A
@@ -900,6 +953,12 @@ async function buildNativeRelease(
         ?.startupFile?.trim() || undefined,
     });
     await recordNativeRelease(layout, manifest, deps);
+    const keepCurrent = await holdsCurrent(
+      deps,
+      entry.composeServiceName,
+      serviceId,
+      nativeOutput.staticExport === true,
+    );
     let releaseDir: string;
     try {
       releaseDir = await (deps.promoteReleaseFn ?? promoteRelease)(
@@ -913,6 +972,7 @@ async function buildNativeRelease(
             nativeOutput.outputDirectory,
           containmentRoot: work?.workDir,
           runFn: deps.runFn,
+          keepCurrent: keepCurrent || undefined,
         }),
       );
     } catch (err) {
@@ -922,7 +982,9 @@ async function buildNativeRelease(
     await finalizeNativeRecord(layout, serviceId, entry.releaseId, deps);
     logSink.onLine(
       "stdout",
-      `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
+      keepCurrent
+        ? `published release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}; it takes traffic once it answers beside the release serving`
+        : `promoted release ${entry.releaseId} (${checkout.commitSha}) for ${entry.composeServiceName}`,
     );
 
     const pruned = await (deps.pruneReleasesFn ?? pruneReleases)(definedFields({
@@ -949,6 +1011,7 @@ async function buildNativeRelease(
       commitAuthor: entry.commitAuthor,
       releaseDir,
       previousReleaseId,
+      heldCurrent: keepCurrent || undefined,
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,

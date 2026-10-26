@@ -31,7 +31,7 @@ export type FolderPublishIds = {
 };
 
 export async function runFolderPublishVerb(
-  verb: "publish-open" | "publish",
+  verb: "publish-open" | "publish" | "publish-keep",
   parts: FolderRefParts,
   ids: FolderPublishIds,
   runFn: RunFn,

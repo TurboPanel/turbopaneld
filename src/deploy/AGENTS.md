@@ -361,7 +361,8 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
 - **Phases** — lines are tagged with the deploy step they belong to: `prepare`,
   `install-docker`, `install-gateway`, `install-runtime`, `install-web-server`,
   `install-build-tool`, `pull`, `fetch`, `build`, `release-promote`,
-  `pre-deploy`, `compose-up`, `health`, `post-deploy`, plus `hooks`,
+  `pre-deploy`, `compose-up`, `start-release`, `health`, `switch-traffic`,
+  `stop-old-release`, `post-deploy`, plus `hooks`,
   `managed-apply`, `lifecycle-start` / `lifecycle-stop` / `lifecycle-restart`,
   and `stop` (`COMMAND_LOG_PHASES` in `src/logs/contracts.ts`). `fetch` /
   `release-promote` bracket the Git-backed release engine; its build output

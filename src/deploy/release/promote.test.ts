@@ -521,3 +521,57 @@ test("promoteRelease never removes a release that was already on the host", asyn
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("promoteRelease and promoteExistingRelease keeping current leave it where it is", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-promote-keep-" });
+  try {
+    const layout = {
+      principalHomeRoot: root,
+      daemonStateDir: join(root, "state"),
+    };
+    const pathsFor = (releaseId: string) =>
+      resolveReleasePaths(layout, {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId,
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      });
+    const serving = pathsFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71");
+    const next = pathsFor("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72");
+    await Deno.mkdir(serving.releaseDir, { recursive: true });
+    await swapCurrentSymlink(serving);
+    const workingDir = join(root, "checkout");
+    await Deno.mkdir(workingDir, { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "index.html"), "v2");
+    await promoteRelease({
+      paths: next,
+      workingDir,
+      username: "appuser",
+      healthProbe: () => Promise.resolve(),
+      runFn: runOk,
+      keepCurrent: true,
+    });
+    assertEquals(
+      await readCurrentReleaseId(next),
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
+    await Deno.chmod(next.releaseDir, 0o550);
+    try {
+      await promoteExistingRelease({
+        paths: next,
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
+        runFn: runOk,
+        keepCurrent: true,
+      });
+    } finally {
+      await Deno.chmod(next.releaseDir, 0o750);
+    }
+    assertEquals(
+      await readCurrentReleaseId(next),
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

@@ -180,6 +180,7 @@ import {
   ensureNativeAppRuntime,
   type NativeAppBindings,
   nativeAppBindingsFromPayload,
+  nativeAppIsServing,
   type RuntimeChoice,
 } from "../deploy/native/apply-native-apps.ts";
 import {
@@ -1545,6 +1546,7 @@ async function applyDeployNativeApps(
       entry.composeServiceName,
       definedFields({
         releaseId: entry.releaseId,
+        heldCurrent: entry.heldCurrent,
         nativeStart: entry.nativeStart,
         runtime: entry.runtime,
       }),
@@ -1567,6 +1569,7 @@ async function applyDeployNativeApps(
     {
       variableMaterial: parsedPayload.variableMaterial ?? [],
       decryptSecrets,
+      setPhase: (phase) => logSink.setPhase(phase),
       ...io,
       onOutput: io?.onOutput ??
         ((stream, line) => logSink.onLine(stream, line)),
@@ -2962,6 +2965,16 @@ async function deployEnvironmentHolding(
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    // A Node app that is serving keeps `current` until its new release has
+    // answered beside it, so a crash, a cancel or a failure anywhere before
+    // the switch leaves the serving release live (and the one a restart or a
+    // reboot starts).
+    holdCurrent: (service) =>
+      nativeAppIsServing(
+        parsedPayload.nativeAppServices ?? [],
+        service,
+        deps?.nativeAppIo,
+      ),
     ensureBuildkitRailpackFn: (releaseLayout) =>
       runInstallStep(
         runtime,
@@ -3068,14 +3081,14 @@ async function deployEnvironmentHolding(
     },
   );
 
-  // Native apps come last of the host-native lanes: the release is promoted and
-  // the vhost tree is settled, so a unit that fails its health probe fails only
-  // itself and rolls its own `current` back. Health (not promote) owns this
-  // pass so start + unit journal land in the same transcript section as the
-  // probe verdict. A deploy without native apps keeps `prepare`, so the
-  // step rail does not show "Check it answers" before anything started.
+  // Native apps come last of the host-native lanes: the release is published
+  // and the vhost tree is settled, so a new release that does not answer fails
+  // only its own app. The apply walks the transcript through "start the new
+  // release", "check it answers", "switch traffic" and "stop the old release"
+  // itself. A deploy without native apps keeps `prepare`, so the step rail
+  // does not show "Check it answers" before anything started.
   if (nativeAppServicesForHost.length > 0) {
-    runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
     await applyDeployNativeApps(
       layout,
       parsedPayload,

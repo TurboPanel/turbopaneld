@@ -124,6 +124,25 @@ test("publish seals every entry, not only the top, and swaps current", async () 
   });
 });
 
+test("publish-keep seals and places the release but leaves current alone", async () => {
+  await withHost(async (host) => {
+    await openRelease(host, "r1");
+    const first = await host.run(["publish", "alice", "web", "r1"]);
+    assertEquals(first.code, 0, first.stderr);
+    await openRelease(host, "r2");
+    const kept = await host.run(["publish-keep", "alice", "web", "r2"]);
+    assertEquals(kept.code, 0, kept.stderr);
+    const release = host.path(`${SITE}/releases/r2`);
+    assertEquals(mode(await Deno.stat(release)), 0o550);
+    assertEquals(await unsealedEntries(release), []);
+    assertEquals(
+      await Deno.readLink(host.path(`${SITE}/current`)),
+      "releases/r1",
+    );
+    assertEquals(await exists(host.path(`${SITE}/current.tmp.r2`)), false);
+  });
+});
+
 test("publish refuses a symlink that resolves outside the release", async () => {
   const hostile: Array<[string, Array<[string, string]>]> = [
     ["another home", [["../../../../bob/sites/app/current", "bob"]]],

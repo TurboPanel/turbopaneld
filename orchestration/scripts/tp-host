@@ -182,8 +182,8 @@ tp_under() {
 tp_path_class() {
   _pc="$1"
   tp_path_shape_ok "$_pc" || return 1
-  # The release staging area is no principal's home: only publish-open and
-  # publish reach it, and no generic verb accepts the class.
+  # The release staging area is no principal's home: only publish-open,
+  # publish and publish-keep reach it, and no generic verb accepts the class.
   if tp_under "$_pc" "$R_STAGING"; then echo staging; return 0; fi
   if tp_under "$_pc" "$R_PRINCIPALS"; then echo principal; return 0; fi
   # Per-site PHP config sits inside the config tree but is never `tree`: only
@@ -1120,6 +1120,10 @@ tp_unit_ok() {
       # Only a native app unit may load an environment file (its own
       # variables); tp_app_envfile_ok pins the one path.
       if (app == "1") ok["Service", "EnvironmentFile"] = 1
+      # A native app check copy runs beside the release serving, under the
+      # same account ceilings: it may ask the kernel to kill it first, never
+      # to spare it (1 to 1000 only).
+      if (app == "1") ok["Service", "OOMScoreAdjust"] = 1
       # Only the hosting Caddy keeps state in a systemd StateDirectory= and
       # its admin socket in a RuntimeDirectory=; tp_hosting_caddy_unit_ok pins
       # each value.
@@ -1161,6 +1165,7 @@ tp_unit_ok() {
       # binding :80/:443.
       if (key ~ /^(CapabilityBoundingSet|AmbientCapabilities)$/ && val != "" && !(hosting == "1" && val == hostcap)) fail(key "=" val)
       if (key == "NoNewPrivileges") nnp = val
+      if (key == "OOMScoreAdjust" && (val !~ /^[1-9][0-9]*$/ || val + 0 > 1000)) fail(key "=" val)
       # Tenant output goes to the journal (or nowhere): systemd opens `file:`,
       # `append:` and `truncate:` targets itself, before it drops to User=.
       if (key ~ /^Standard(Output|Error)$/ && val !~ /^(journal|null|inherit)$/) fail(key "=" val)
@@ -4630,7 +4635,8 @@ tp_publish_swap() {
   mv -T -f -- "./$_sw_tmp" ./current
 }
 
-tp_verb_publish() {
+# Seal and place the staged tree as releases/<id>, without touching current.
+tp_publish_into_releases() {
   tp_publish_args "$@"
   tp_publish_lock
   tp_staging_pin
@@ -4642,7 +4648,18 @@ tp_verb_publish() {
   tp_publish_links
   tp_publish_place
   trap - EXIT
+}
+
+tp_verb_publish() {
+  tp_publish_into_releases "$@"
   tp_publish_swap
+}
+
+# The same publish, leaving current where it is: a Node app that is serving
+# keeps its release live until the new one has answered beside it, and the
+# daemon then moves current itself (the swap verb a rollback uses).
+tp_verb_publish_keep() {
+  tp_publish_into_releases "$@"
 }
 
 # --- native app variables (EnvironmentFile=) ----------------------------------
@@ -4843,6 +4860,7 @@ case "$_verb" in
   folder-list) tp_verb_folder_list "$@" ;;
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
+  publish-keep) tp_verb_publish_keep "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
   cert-dates) tp_verb_cert_dates "$@" ;;
   cert-export) tp_verb_cert_export "$@" ;;

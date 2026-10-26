@@ -158,6 +158,8 @@ const MGD_MATCH = [
   "5432",
 ];
 const APP_UNIT = "turbopanel-app-svc1.service";
+/** The check copy of svc1: its new release, started beside the one serving. */
+const CHECK_UNIT = "turbopanel-app-svc1-new.service";
 const PROBE =
   "a version probe runs as the daemon and never gets a permission error, " +
   "so runHost never retries it through sudo";
@@ -975,6 +977,40 @@ const SITES: CallSite[] = [
         }),
       ),
     },
+    // The new release's check copy: its own id and variables file, run out
+    // of the release folder, with no [Install] section.
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        `${UNITS}/${CHECK_UNIT}`,
+      ],
+      setup: unitSetup(
+        nativeAppUnitContent({
+          layout: LAYOUT,
+          app: {
+            composeServiceName: "api",
+            serviceId: "svc1-new",
+            listenPort: 41234,
+            framework: "node",
+          },
+          username: "alice",
+          folder: { owner: "alice", scope: "production", slug: "api" },
+          environmentId: "env1",
+          environmentFile: true,
+          checkCopy: {
+            workingDirectory:
+              "/srv/users/alice/production/services/api/releases/r2",
+          },
+        }),
+      ),
+    },
   ),
   tpHost(
     'src/deploy/native/variables-runtime.ts|["-n","app-env-install",serviceId]',
@@ -988,10 +1024,21 @@ const SITES: CallSite[] = [
         ]),
       ),
     },
+    {
+      argv: ["app-env-install", "svc1-new"],
+      setup: file(
+        `${CONF}/node-apps/envs/svc1-new.env`,
+        renderNativeAppEnvFile([{
+          name: "API_URL",
+          value: "https://example.test",
+        }]),
+      ),
+    },
   ),
   tpHost(
     'src/deploy/native/variables-runtime.ts|["-n","app-env-remove",serviceId]',
     { argv: ["app-env-remove", "svc1"] },
+    { argv: ["app-env-remove", "svc1-new"] },
   ),
   tpHost(
     'src/deploy/native/apply-native-apps.ts|["-n","systemctl",...args]',
@@ -1019,8 +1066,9 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/native/apply-native-apps.ts|["-n","rm","-f","--",nativeAppUnitPath(serviceId,deps?.systemdUnitDir)]',
+    'src/deploy/native/apply-native-apps.ts|["-n","rm","-f","--",path]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-app-svc1.service`] },
+    { argv: ["rm", "-f", "--", `${UNITS}/${CHECK_UNIT}`] },
   ),
 
   // --- release promotion ----------------------------------------------------
@@ -2119,6 +2167,22 @@ const SITES: CallSite[] = [
     {
       argv: ["systemctl", "restart", APP_UNIT],
     },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["reset-failed",check.unit])',
+    { argv: ["systemctl", "reset-failed", CHECK_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["restart",check.unit])',
+    { argv: ["systemctl", "restart", CHECK_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["stop",unit])',
+    { argv: ["systemctl", "stop", CHECK_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["stop",check.unit])',
+    { argv: ["systemctl", "stop", CHECK_UNIT] },
   ),
   tpHost(
     "src/deploy/native/apply-native-apps.ts|systemctl(io,[action,unit])",
