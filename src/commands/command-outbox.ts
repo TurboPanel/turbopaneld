@@ -20,6 +20,7 @@ import { join } from "@std/path";
 import type {
   CommandProgress,
   CommandRecoveryReport,
+  DaemonMessage,
 } from "../contracts/cell-messages.ts";
 import { COMMAND_RECOVERY_FEATURE } from "../instance/version-wire.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -35,7 +36,14 @@ type OutcomeMessage =
 type OutboxSocket = Pick<WebSocket, "readyState" | "send">;
 
 /** What the outbox needs to know about the attached control plane. */
-export type OutboxPeer = { supports(feature: string): boolean };
+export type OutboxPeer = {
+  supports(feature: string): boolean;
+  /**
+   * False while the current socket's attach frame (which carries the feature
+   * list) has not arrived. Absent means always known.
+   */
+  known?(): boolean;
+};
 
 /** How often unconfirmed outcomes are sent again while any are waiting. */
 export const RESEND_INTERVAL_MS = 30_000;
@@ -101,6 +109,14 @@ let resendTimer: unknown;
 
 function recovers(): boolean {
   return currentPeer?.supports(COMMAND_RECOVERY_FEATURE) === true;
+}
+
+/**
+ * Keep a result until the control plane confirms it: it says it confirms
+ * results, or it has not said yet on this socket (features unknown).
+ */
+function keepsUntilAck(): boolean {
+  return recovers() || currentPeer?.known?.() === false;
 }
 
 /** True when the attached control plane keeps command results until it confirms them. */
@@ -180,6 +196,7 @@ export async function markCommandInFlight(id: string): Promise<void> {
  * gets an answer on the socket the dispatch came in on: the kept outcome, or
  * the latest step plan of a command that is still running. That socket just
  * delivered a frame, so it also becomes the one later outcomes and resends use.
+ * A kept outcome stays kept: only a `command-outcome-ack` clears it.
  */
 export function answerRepeatedDispatch(
   ws: OutboxSocket,
@@ -204,14 +221,14 @@ function progressFrame(
   id: string,
   commandId: string,
   progress: CommandProgress,
-) {
+): DaemonMessage {
   return {
-    type: "command-progress" as const,
+    type: "command-progress",
     id,
     commandId,
     at: new Date(timers.now()).toISOString(),
     progress,
-  };
+  } satisfies DaemonMessage;
 }
 
 /**
@@ -219,7 +236,10 @@ function progressFrame(
  * to the socket it was dispatched on. A command outlives its socket: after a
  * reconnect its step plan must reach the control plane on the new one.
  */
-export function sendCommandFrame(ws: OutboxSocket, message: object): boolean {
+export function sendCommandFrame(
+  ws: OutboxSocket,
+  message: DaemonMessage,
+): boolean {
   return trySend(currentSocket, message) || trySend(ws, message);
 }
 
@@ -293,7 +313,7 @@ export async function deliverCommandOutcome(
   await queueWrite(outcome.id, () => writeJournalAtomic(entry));
   acceptedAt.delete(outcome.id);
   const sent = trySend(currentSocket, outcome) || trySend(ws, outcome);
-  if (recovers()) {
+  if (keepsUntilAck()) {
     unacked.set(outcome.id, outcome);
     scheduleResend();
     return;
@@ -442,8 +462,19 @@ function orphanReply(id: string, entry: JournalEntry | undefined) {
   };
 }
 
-/** Send held outcomes (control plane without the feature). */
+/**
+ * Send held outcomes. With a control plane that confirms results they become
+ * unconfirmed (journal kept until the ack; sent by the resend that follows);
+ * without one a sent outcome is done.
+ */
 async function flushHeld(ws: OutboxSocket): Promise<void> {
+  if (recovers()) {
+    for (const [id, outcome] of held) {
+      unacked.set(id, outcome);
+      held.delete(id);
+    }
+    return;
+  }
   const sent: string[] = [];
   for (const [id, outcome] of held) {
     if (
@@ -527,6 +558,35 @@ async function pruneUnacked(): Promise<void> {
 }
 
 /**
+ * A socket just opened, before its attach frame says what the control plane
+ * supports. Held and unconfirmed outcomes go out on it at once, but every
+ * journal is kept: only the attach frame ({@link flushCommandOutcomes}) or a
+ * `command-outcome-ack` may clear one. Interrupted commands are left to the
+ * attach frame too.
+ */
+export function noteSessionOpen(ws: OutboxSocket, peer?: OutboxPeer): void {
+  currentPeer = peer ?? currentPeer;
+  if (ws.readyState !== WebSocket.OPEN) return;
+  currentSocket = ws;
+  for (const outcome of held.values()) sendOutcome(ws, outcome);
+  for (const outcome of unacked.values()) sendOutcome(ws, outcome);
+  scheduleResend();
+}
+
+/**
+ * Outcomes kept while the features were unknown, now that the attach frame
+ * says the control plane does not confirm results: handled like any outcome
+ * for such a control plane (sent, then cleared).
+ */
+function releaseForOlderPeer(): void {
+  if (recovers()) return;
+  for (const [id, outcome] of unacked) {
+    held.set(id, outcome);
+    unacked.delete(id);
+  }
+}
+
+/**
  * On a new session: send held outcomes, send unconfirmed ones again, then
  * answer journaled commands that are neither running nor held (their daemon
  * died mid-command) with their journaled outcome, or as interrupted when none
@@ -538,6 +598,7 @@ export async function flushCommandOutcomes(
 ): Promise<void> {
   currentSocket = ws;
   currentPeer = peer ?? currentPeer;
+  releaseForOlderPeer();
   await flushHeld(ws);
   if (ws.readyState !== WebSocket.OPEN) return;
   await answerOrphans(ws);

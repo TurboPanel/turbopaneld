@@ -32,6 +32,7 @@ import { wireCommandPorts } from "../commands/wire.ts";
 import {
   deliverCommandOutcome,
   markCommandInFlight,
+  settleCommandJournalWrites,
 } from "../commands/command-outbox.ts";
 import { ControlPlaneUpdateFailedError } from "./run-reconcile.ts";
 import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
@@ -7280,6 +7281,28 @@ it({
             (f as { id?: string }).id === "cmd-after-reconnect"
           ) || undefined,
       );
+      // Sent before the attach frame, so it stays journaled until confirmed.
+      const journal = join(
+        Deno.env.get("TURBOPANEL_STATE_DIR")!,
+        "commands",
+        "inflight",
+        "cmd-after-reconnect.json",
+      );
+      await settleCommandJournalWrites();
+      assertExists(await Deno.stat(journal));
+      next.receive({
+        type: "command-outcome-ack",
+        id: "cmd-after-reconnect",
+        at: new Date().toISOString(),
+      });
+      await waitFor("journal cleared after the ack", async () => {
+        try {
+          await Deno.stat(journal);
+          return undefined;
+        } catch {
+          return true;
+        }
+      });
     } finally {
       release();
       restore();

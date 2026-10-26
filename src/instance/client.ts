@@ -235,6 +235,14 @@ export type CommandPorts = {
     ws: WebSocket,
     peer: { supports(feature: string): boolean },
   ) => Promise<void>;
+  /**
+   * A session socket opened (before its attach frame): send held results on
+   * it without clearing anything.
+   */
+  handleSessionOpen?: (
+    ws: WebSocket,
+    peer: { supports(feature: string): boolean; known(): boolean },
+  ) => void;
   /** The control plane stored a command's outcome (`command-outcome-ack`). */
   handleCommandOutcomeAck?: (id: string) => Promise<void>;
   /**
@@ -653,18 +661,22 @@ export class InstanceClient {
     this.#updateProgress.reportStage(unit ?? "daemon", stage, rest);
   }
 
-  /** Hand the open session socket to the command outbox (held outcomes, resends). */
-  #attachCommandSession(ws: WebSocket): void {
-    const sessionAttach = commandPorts.handleSessionAttach;
-    if (!sessionAttach) return;
-    this.#runSocketHandler(
-      "session-attach",
-      sessionAttach(ws, { supports: (f) => this.instanceSupports(f) }),
-    );
+  /** What the command outbox may ask about the attached control plane. */
+  #commandPeer(): { supports(feature: string): boolean; known(): boolean } {
+    return {
+      supports: (feature) => this.instanceSupports(feature),
+      known: () => this.#peerFeaturesKnown,
+    };
   }
 
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
-    this.#attachCommandSession(ws);
+    const sessionAttach = commandPorts.handleSessionAttach;
+    if (sessionAttach) {
+      this.#runSocketHandler(
+        "session-attach",
+        sessionAttach(ws, this.#commandPeer()),
+      );
+    }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
       this.#pendingInstanceUpdateResult = null;
@@ -1598,9 +1610,10 @@ export class InstanceClient {
 
     // Held and unconfirmed command outcomes go out as soon as the socket is
     // open, not only when the attach `version` frame arrives: a result must
-    // never wait on one frame that may be lost with the upgrade. The attach
-    // frame runs the same flush again once it lands; repeats are harmless.
-    this.#attachCommandSession(ws);
+    // never wait on one frame that may be lost with the upgrade. Nothing is
+    // cleared until the attach frame says the control plane confirms results
+    // (or it confirms one); a repeat send is harmless.
+    commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
       ws.addEventListener("close", (event) => resolve(event as CloseEvent), {

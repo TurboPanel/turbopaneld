@@ -8,6 +8,7 @@ import {
   interruptedFacts,
   markCommandInFlight,
   noteCommandProgress,
+  noteSessionOpen,
   PROGRESS_JOURNAL_INTERVAL_MS,
   RESEND_INTERVAL_MS,
   resetCommandOutboxForTests,
@@ -55,6 +56,16 @@ async function journalNames(): Promise<string[]> {
 const recoveringPeer = {
   supports: (feature: string) => feature === "command-recovery-v1",
 };
+
+function progressMessage() {
+  return {
+    type: "command-progress" as const,
+    id: "cmd-moved",
+    commandId: "cmd-moved",
+    at: new Date().toISOString(),
+    progress: runningPlan("build"),
+  };
+}
 
 function runningPlan(current: string): CommandProgress {
   return {
@@ -107,10 +118,37 @@ test("a repeated dispatch of a running command gets its latest step plan", async
 });
 
 test("an unknown repeated dispatch is left to run", async () => {
-  await withState(async () => {
+  await withState(() => {
     const live = socket(WebSocket.OPEN);
     assertEquals(answerRepeatedDispatch(live.ws, "cmd-new"), false);
     assertEquals(live.sent.length, 0);
+    return Promise.resolve();
+  });
+});
+
+test("a socket that just opened gets held outcomes but every journal is kept", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-open");
+    const closed = socket(WebSocket.CLOSED);
+    await deliverCommandOutcome(closed.ws, {
+      type: "command-outcome",
+      id: "cmd-open",
+      ok: true,
+    });
+    const opened = socket(WebSocket.OPEN);
+    noteSessionOpen(opened.ws);
+    assertEquals(opened.sent.map((m) => [m.type, m.id]), [[
+      "command-outcome",
+      "cmd-open",
+    ]]);
+    await settleCommandJournalWrites();
+    assertEquals(await journalNames(), ["cmd-open.json"]);
+
+    // The attach frame then says results are confirmed: still kept until the ack.
+    await flushCommandOutcomes(opened.ws, recoveringPeer);
+    assertEquals(await journalNames(), ["cmd-open.json"]);
+    await acknowledgeCommandOutcome("cmd-open");
+    assertEquals(await journalNames(), []);
   });
 });
 
@@ -122,7 +160,7 @@ test("a running command's frames move to the socket attached after a reconnect",
     const reconnected = socket(WebSocket.OPEN);
     await flushCommandOutcomes(reconnected.ws, recoveringPeer);
     assertEquals(
-      sendCommandFrame(dispatched.ws, { type: "command-progress" }),
+      sendCommandFrame(dispatched.ws, progressMessage()),
       true,
     );
     assertEquals(reconnected.sent.map((m) => m.type), ["command-progress"]);

@@ -12,6 +12,7 @@ import {
   answerRepeatedDispatch,
   commandRecoveryReport,
   flushCommandOutcomes,
+  noteSessionOpen,
 } from "./command-outbox.ts";
 import { handleDrivetempEnable } from "./drivetemp.ts";
 import { handleFabricPathProbe } from "./fabric.ts";
@@ -23,6 +24,7 @@ export function wireCommandPorts(): () => void {
     handleFabricPathProbe,
     handleDrivetempEnable,
     handleSessionAttach: flushCommandOutcomes,
+    handleSessionOpen: noteSessionOpen,
     handleCommandOutcomeAck: acknowledgeCommandOutcome,
     handleRepeatedDispatch: answerRepeatedDispatch,
     commandReport: commandRecoveryReport,
