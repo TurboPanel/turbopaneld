@@ -127,7 +127,7 @@ export type NativeBuildRuntime = {
    */
   nodeBinDir: string;
   /** Operator's application mode; `production` when undeclared. */
-  nodeEnv: "production" | "development";
+  nodeEnv: string;
 };
 
 export type ReleaseBuildParams = {
