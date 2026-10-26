@@ -176,15 +176,51 @@ export async function markCommandInFlight(id: string): Promise<void> {
 /**
  * A dispatch for a command this daemon already accepted (still running, or
  * finished with its outcome kept) must not run it again. Returns true when the
- * id is known; a kept outcome is sent again on `ws`, and a running command
- * will report as usual.
+ * id is known. The control plane asks again because it is still waiting, so it
+ * gets an answer on the socket the dispatch came in on: the kept outcome, or
+ * the latest step plan of a command that is still running. That socket just
+ * delivered a frame, so it also becomes the one later outcomes and resends use.
  */
-export function answerRepeatedDispatch(ws: OutboxSocket, id: string): boolean {
-  if (running.has(id)) return true;
+export function answerRepeatedDispatch(
+  ws: OutboxSocket,
+  id: string,
+  commandId: string = id,
+): boolean {
+  if (ws.readyState === WebSocket.OPEN) currentSocket = ws;
+  if (running.has(id)) {
+    const latest = lastProgress.get(id);
+    if (latest) {
+      sendCommandFrame(ws, progressFrame(id, commandId, latest.progress));
+    }
+    return true;
+  }
   const kept = held.get(id) ?? unacked.get(id);
   if (kept === undefined) return false;
   sendOutcome(ws, kept);
   return true;
+}
+
+function progressFrame(
+  id: string,
+  commandId: string,
+  progress: CommandProgress,
+) {
+  return {
+    type: "command-progress" as const,
+    id,
+    commandId,
+    at: new Date(timers.now()).toISOString(),
+    progress,
+  };
+}
+
+/**
+ * Send a frame for a running command on the live session socket, falling back
+ * to the socket it was dispatched on. A command outlives its socket: after a
+ * reconnect its step plan must reach the control plane on the new one.
+ */
+export function sendCommandFrame(ws: OutboxSocket, message: object): boolean {
+  return trySend(currentSocket, message) || trySend(ws, message);
 }
 
 function planSignature(progress: CommandProgress): string {

@@ -9,6 +9,7 @@
 import { handleCommandDispatch } from "./command-router.ts";
 import {
   acknowledgeCommandOutcome,
+  answerRepeatedDispatch,
   commandRecoveryReport,
   flushCommandOutcomes,
 } from "./command-outbox.ts";
@@ -23,6 +24,7 @@ export function wireCommandPorts(): () => void {
     handleDrivetempEnable,
     handleSessionAttach: flushCommandOutcomes,
     handleCommandOutcomeAck: acknowledgeCommandOutcome,
+    handleRepeatedDispatch: answerRepeatedDispatch,
     commandReport: commandRecoveryReport,
   });
 }

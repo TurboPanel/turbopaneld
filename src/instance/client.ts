@@ -237,6 +237,15 @@ export type CommandPorts = {
   ) => Promise<void>;
   /** The control plane stored a command's outcome (`command-outcome-ack`). */
   handleCommandOutcomeAck?: (id: string) => Promise<void>;
+  /**
+   * A dispatch for a command already accepted: answer it with the kept
+   * outcome, or the latest step plan of one still running.
+   */
+  handleRepeatedDispatch?: (
+    ws: WebSocket,
+    id: string,
+    commandId: string,
+  ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
 };
@@ -1546,7 +1555,12 @@ export class InstanceClient {
         logWarn("instance", "authentication rejected");
       }
       if (sessionRegistered) {
-        logInfo("instance", "websocket closed after registration");
+        logInfo(
+          "instance",
+          "websocket closed after registration",
+          `code=${event.code}`,
+          `reason=${sanitizeForLog(event.reason || "-")}`,
+        );
       } else {
         logDebug("instance", "websocket closed before registration");
       }
@@ -1885,7 +1899,8 @@ export class InstanceClient {
             "ignored repeated command-dispatch",
             sanitizeForLog(message.id),
           );
-          // Re-ack so the control plane stops waiting on an ack it missed.
+          // Re-ack so the control plane stops waiting on an ack it missed,
+          // then answer with what this daemon already knows about it.
           if (ws.readyState === WebSocket.OPEN) {
             const at = new Date().toISOString();
             ws.send(JSON.stringify({
@@ -1895,6 +1910,11 @@ export class InstanceClient {
               daemonReceivedAt: at,
             }));
           }
+          commandPorts.handleRepeatedDispatch?.(
+            ws,
+            message.id,
+            message.commandId,
+          );
           break;
         }
         this.#runSocketHandler(

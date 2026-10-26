@@ -7148,6 +7148,60 @@ it({
 });
 
 it({
+  name:
+    "a repeated command-dispatch of a finished command sends its kept outcome again",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const restoreHooks = installClientTestHooks({
+      restartDaemonService: () => Promise.resolve(true),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["command-recovery-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      const frame = {
+        type: "command-dispatch",
+        id: "cmd-repeat-outcome",
+        commandId: "00000000-0000-4000-8000-000000000098",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      };
+      const outcomes = () =>
+        framesOfType(socket, "command-outcome").filter((f) =>
+          (f as { id?: string }).id === "cmd-repeat-outcome"
+        ).length;
+      socket.receive(frame);
+      await waitFor("first outcome", () => outcomes() || undefined);
+      const before = outcomes();
+      // No `command-outcome-ack` came back, so the outcome is still kept.
+      socket.receive(frame);
+      await waitFor(
+        "outcome sent again",
+        () => outcomes() > before || undefined,
+      );
+    } finally {
+      restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
   name: "parked connect loop exits when stopped during parked wait",
   permissions: {
     env: true,
