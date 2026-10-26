@@ -462,8 +462,9 @@ async function resolveNodeManager(params: {
 }
 
 /**
- * The flag that keeps `devDependencies` in a pnpm install under the build's
- * `NODE_ENV=production`, per pnpm major (checked against the real binaries):
+ * The flag that keeps `devDependencies` in a pnpm install when the build's
+ * `NODE_ENV` is `production` (the default application mode), per pnpm major
+ * (checked against the real binaries):
  *
  * - pnpm 9 drops dev dependencies under `NODE_ENV=production` and takes
  *   `--prod=false` to keep them.
@@ -483,9 +484,10 @@ function pnpmDevDepsArgs(major: number | undefined): string[] {
  * (`pnpm-lock.yaml` > `yarn.lock` > `package-lock.json` > bare npm).
  *
  * The dev-deps flags (`--include=dev`, `--production=false`, and for pnpm
- * whatever `pnpmDevDepsArgs` picks for the pinned major) are load-bearing: the build environment sets `NODE_ENV=production`, under
- * which npm, pnpm, and classic yarn silently omit devDependencies — which is
- * where every build toolchain lives.
+ * whatever `pnpmDevDepsArgs` picks for the pinned major) are load-bearing: the
+ * build environment sets `NODE_ENV` to the app's mode, `production` by default,
+ * under which npm, pnpm, and classic yarn silently omit devDependencies — which
+ * is where every build toolchain lives. Under any other mode they are harmless.
  *
  * Returns `undefined` when there is no `package.json` to install from.
  */
