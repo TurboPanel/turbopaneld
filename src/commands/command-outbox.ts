@@ -417,19 +417,25 @@ export function interruptedFacts(progress: CommandProgress | undefined): {
 
 /**
  * A plan with native apps moves traffic in its own step: `switch` done (or the
- * old release already being stopped) means yes, still pending means no unless
- * something else was started first, and running is unknown.
+ * old release already being stopped) means yes, unless the next app's start or
+ * check is running again (some apps switched, not all: unknown); still pending
+ * means no unless something else was started first, and running is unknown.
  */
 function trafficSwitched(
   progress: CommandProgress,
   switchStep: CommandProgress["steps"][number],
 ): boolean | undefined {
   const stopOld = progress.steps.find((step) => step.id === STOP_OLD_STEP_ID);
-  if (switchStep.state === "done" || (stopOld && stopOld.state !== "pending")) {
-    return true;
-  }
-  if (switchStep.state !== "pending") return undefined;
   const start = progress.steps.find((step) => step.id === PROMOTE_STEP_ID);
+  const health = progress.steps.find((step) => step.id === "health");
+  const switched = switchStep.state === "done" ||
+    (stopOld !== undefined && stopOld.state !== "pending");
+  // Several apps run these steps in turn: a start or check running again after
+  // a switch is the next app's, so only some of them were switched.
+  const nextAppUnderWay = start?.state === "running" ||
+    health?.state === "running";
+  if (switched) return nextAppUnderWay ? undefined : true;
+  if (switchStep.state !== "pending") return undefined;
   return start?.state === "pending" ? false : undefined;
 }
 

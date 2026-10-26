@@ -942,7 +942,9 @@ it regresses:
   - brings a release into `<home>/sites/<svc>/releases/<id>` only through
     `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
     `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
-    accepts) and `publish <user> <svc> <id>`; the same two verbs also take six
+    accepts) and `publish <user> <svc> <id>` (`publish-keep` takes the same words and
+    publishes without moving `current`, for a Node app that is
+    serving); the same two verbs also take six
     words, `<owner> <scope> <slug> <service id> <release id> <publish id>`,
     for the scope tree (`<home>/<scope>/services/<slug>/releases/<id>`; the
     leaf is named by the publish id, the lock by the service id, all three

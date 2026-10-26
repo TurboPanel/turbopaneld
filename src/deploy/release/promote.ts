@@ -98,7 +98,7 @@ function isMissingPrivilegedPathError(stderr: string): boolean {
  * staging leaf, `publish` seals it into `releases/<id>` and swaps `current`.
  */
 async function runPublishVerb(
-  verb: "publish-open" | "publish",
+  verb: "publish-open" | "publish" | "publish-keep",
   paths: Pick<ReleasePaths, "publish">,
   runFn: RunFn,
 ): Promise<void> {
@@ -604,6 +604,8 @@ export async function promoteExistingRelease(
     releaseId: string;
     healthProbe?: ReleaseHealthProbe;
     runFn?: RunFn;
+    /** Check the release but leave `current` where it is (see {@link PromoteReleaseParams.keepCurrent}). */
+    keepCurrent?: boolean;
   },
 ): Promise<string> {
   const runFn = params.runFn ?? runPrivileged;
@@ -623,7 +625,9 @@ export async function promoteExistingRelease(
   await assertSealedLinksStayInRelease(releaseDir, runFn, stat === "present");
 
   if (params.healthProbe) await params.healthProbe(releaseDir);
-  await swapCurrentSymlink(params.paths, runFn);
+  if (params.keepCurrent !== true) {
+    await swapCurrentSymlink(params.paths, runFn);
+  }
   return releaseDir;
 }
 
@@ -663,6 +667,12 @@ export type PromoteReleaseParams = StageReleaseParams & {
   manifest?: ReleaseManifestV1;
   healthProbe?: ReleaseHealthProbe;
   runFn?: RunFn;
+  /**
+   * Publish into `releases/<id>` but leave `current` on the release it serves
+   * (tp-host `publish-keep`): a Node app that is serving moves `current` only
+   * once the new release has answered beside it.
+   */
+  keepCurrent?: boolean;
 };
 
 /** Manifest, then probe, against the staged tree — before anything is sealed. */
@@ -693,7 +703,8 @@ async function publishStagedRelease(
   await removeReleaseSharedEntry(stagingDir, runFn);
   await assertStagedLinksStayInRelease(stagingDir, runFn);
   await prepareStagedTree(params, stagingDir, runFn);
-  await runPublishVerb("publish", params.paths, runFn);
+  const verb = params.keepCurrent === true ? "publish-keep" : "publish";
+  await runPublishVerb(verb, params.paths, runFn);
 }
 
 /** The daemon-owned layout: the same steps, run on the release in place. */
@@ -711,7 +722,9 @@ async function sealReleaseInPlace(
   await sealPublishedRelease(releaseDir, params.username, runFn);
   // Only once sealed: the build can no longer change a link after the check.
   await assertReleaseLinksStayHome(params.paths, releaseDir, runFn);
-  await swapCurrentSymlink(params.paths, runFn);
+  if (params.keepCurrent !== true) {
+    await swapCurrentSymlink(params.paths, runFn);
+  }
 }
 
 /**

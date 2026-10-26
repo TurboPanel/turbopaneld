@@ -180,6 +180,7 @@ import {
   ensureNativeAppRuntime,
   type NativeAppBindings,
   nativeAppBindingsFromPayload,
+  nativeAppIsServing,
   type RuntimeChoice,
 } from "../deploy/native/apply-native-apps.ts";
 import {
@@ -2963,6 +2964,16 @@ async function deployEnvironmentHolding(
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    // A Node app that is serving keeps `current` until its new release has
+    // answered beside it, so a crash, a cancel or a failure anywhere before
+    // the switch leaves the serving release live (and the one a restart or a
+    // reboot starts).
+    holdCurrent: (service) =>
+      nativeAppIsServing(
+        parsedPayload.nativeAppServices ?? [],
+        service,
+        deps?.nativeAppIo,
+      ),
     ensureBuildkitRailpackFn: (releaseLayout) =>
       runInstallStep(
         runtime,

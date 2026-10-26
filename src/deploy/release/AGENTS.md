@@ -225,6 +225,14 @@ filesystem, so a reader sees the old release or the new one, never a missing
 link. **Any failure before the rename leaves `current` untouched** and removes
 the staged tree; there is no partial publish.
 
+**Publishing beside a serving Node app.** For a Node app that is switched on
+and whose unit is active, `applySourceReleases` asks `holdCurrent` and then
+publishes with `keepCurrent` (tp-host `publish-keep`, the same publish without
+the `current` swap; a rollback or a re-sent release skips the swap the same
+way). `current` stays on the release serving until the native apply has seen
+the new one answer beside it (`../native/AGENTS.md`, "Check before the
+switch"). A static export is never held: it leaves that lane.
+
 **Sealed publish** (managed hosts). `tp-host publish-open <user> <svc> <id>`
 makes a fresh leaf `<principalHomeRoot>/.tp-staging/<user>.<svc>.<id>`, owned by
 the daemon (0700) under a `root:tp 0710` parent that no tenant or build can

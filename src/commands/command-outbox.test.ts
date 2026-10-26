@@ -461,6 +461,9 @@ test("a plan with a traffic switch is live only once the switch is done", () => 
   assertEquals(facts("done", "done", "running", "pending"), undefined);
   assertEquals(facts("done", "done", "done", "pending"), true);
   assertEquals(facts("done", "done", "done", "running"), true);
+  // The first app switched, the second is being checked: not known for all.
+  assertEquals(facts("done", "running", "done", "done"), undefined);
+  assertEquals(facts("running", "done", "done", "done"), undefined);
 });
 
 test("the step plan is journaled on a step change and then at most every interval", async () => {

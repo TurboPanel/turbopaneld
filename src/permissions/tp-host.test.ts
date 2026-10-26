@@ -459,6 +459,63 @@ async function refusedUnit(host: Host, name: string, content: string) {
   ]);
 }
 
+test("a check copy may ask to be killed first, never to be spared", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const name = "turbopanel-app-svc1-new.service";
+    const unit = nativeAppUnitContent({
+      layout,
+      username: "alice",
+      folder: { owner: "alice", scope: "production", slug: "web" },
+      environmentId: "env1",
+      environmentFile: true,
+      checkCopy: {
+        workingDirectory: host.path(
+          "srv/users/alice/production/services/web/releases/r2",
+        ),
+      },
+      app: {
+        serviceId: "svc1-new",
+        composeServiceName: "web",
+        listenPort: 41234,
+      } as unknown as EnvironmentDeployNativeAppService,
+    });
+    assertStringIncludes(unit, "OOMScoreAdjust=900\n");
+    const result = await installUnit(host, name, unit);
+    assertEquals(result.code, 0, result.stderr);
+    for (const value of ["-500", "0", "1001", "900 "]) {
+      await refusedUnit(
+        host,
+        name,
+        unit.replace("OOMScoreAdjust=900", `OOMScoreAdjust=${value}`),
+      );
+    }
+    // Only app units: a cron unit may not set it at all.
+    await refusedUnit(
+      host,
+      "turbopanel-cron-env1-web-nightly.service",
+      cronServiceContent({
+        layout,
+        environmentId: "env1",
+        composeServiceName: "web",
+        job: {
+          name: "nightly",
+          schedule: "*-*-* 03:00:00",
+          command: ["/usr/bin/true"],
+        } as unknown as EnvironmentDeployCronJob,
+        username: "alice",
+        workingDirectory: host.path("srv/users/alice/sites/web/current"),
+      }).replace("[Service]\n", "[Service]\nOOMScoreAdjust=900\n"),
+    );
+  });
+});
+
 test("a native app unit may load its own variables file and no other", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({

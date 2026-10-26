@@ -706,6 +706,7 @@ async function promoteManaged(
   root: string,
   respond: (args: string[]) => SudoResult,
   build: (workingDir: string) => Promise<void> = () => Promise.resolve(),
+  keepCurrent?: true,
 ): Promise<{ argv: string[][]; paths: ReleasePaths; seen: string[] }> {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
@@ -731,6 +732,7 @@ async function promoteManaged(
       workingDir,
       username: "appuser",
       manifest: MANIFEST,
+      ...(keepCurrent ? { keepCurrent } : {}),
       runFn: async (_command, args) => {
         argv.push([...args]);
         const result = respond([...args]);
@@ -787,6 +789,19 @@ test("promoteRelease publishes a managed-host release through tp-host only", asy
     ]);
     // The manifest and the payload were staged before publish ran.
     assertEquals(seen, [RELEASE_METADATA_DIRNAME, "index.html"]);
+  });
+});
+
+test("promoteRelease keeping current publishes with publish-keep", async () => {
+  await withTempRelease(async (root) => {
+    const { argv } = await promoteManaged(
+      root,
+      () => SUDO_OK,
+      undefined,
+      true,
+    );
+    assertEquals(argv.at(-1)?.slice(0, 2), ["-n", "publish-keep"]);
+    assertEquals(argv.some((args) => args.includes("publish")), false);
   });
 });
 

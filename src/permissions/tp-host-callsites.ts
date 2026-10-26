@@ -2181,6 +2181,10 @@ const SITES: CallSite[] = [
     { argv: ["systemctl", "stop", CHECK_UNIT] },
   ),
   tpHost(
+    'src/deploy/native/apply-native-apps.ts|systemctl(io,["stop",check.unit])',
+    { argv: ["systemctl", "stop", CHECK_UNIT] },
+  ),
+  tpHost(
     "src/deploy/native/apply-native-apps.ts|systemctl(io,[action,unit])",
     { argv: ["systemctl", "start", APP_UNIT] },
     { argv: ["systemctl", "stop", APP_UNIT] },

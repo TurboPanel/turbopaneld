@@ -68,17 +68,26 @@ the unit starts. Per app:
 **Check before the switch.** Steps, as the transcript and the step rail name
 them:
 
-1. *Start the new release* (`start-release`). Publishing already moved
-   `current`; it is pointed back at the release serving, so a crash restart or
-   a reboot before the switch still starts what was serving. The new release
+1. *Start the new release* (`start-release`). Publishing did not move
+   `current`: for an app that is switched on and whose unit is active,
+   `applySourceReleases` publishes with tp-host `publish-keep`
+   (`promoteRelease`'s `keepCurrent`, asked through `nativeAppIsServing`), so a
+   crash, a cancel or any failure before the switch leaves the release serving
+   live, and it is what a crash restart or a reboot starts. (If the host could
+   not be asked, publishing moves `current` as before and the apply puts it
+   back for every serving app before preparing any of them.) The new release
    runs as a **check copy**, `turbopanel-app-<serviceId>-new.service`
    (`nativeAppCheckCopyId`), on a spare loopback port the kernel picks (its
    ephemeral range, far above the control plane's 18080–19799 band), out of
    `releases/<releaseId>` itself, with its own variables copy
    (`<serviceId>-new.env`, the same `app-env-install` verb) and no
-   `[Install]` section, so it can never be enabled or start at boot. Its unit
-   is staged under `<configDir>/node-apps/check/`, outside the per-environment
-   index of the apps' own units. The app's own unit, variables file and
+   `[Install]` section, so it can never be enabled or start at boot, and with
+   `OOMScoreAdjust=900`: it runs under the same account slice as the release
+   serving, so if both reach the memory ceiling the kernel kills the copy
+   first. Its unit is staged under `<configDir>/node-apps/check/`, outside the
+   per-environment index of the apps' own units; that file is written first,
+   before the copy's variables, so an interrupted deploy always leaves the
+   marker its cleanup looks for. The app's own unit, variables file and
    `current` are not touched.
 2. *Check it answers* (`health`): the same probe as a first start, on the
    spare port. When the copy does not start or does not answer, its journal
@@ -86,14 +95,15 @@ them:
    fails saying the new release never took traffic and the release that was
    serving keeps serving. Nothing to roll back: nothing switched.
 3. *Switch traffic* (`switch-traffic`): the app's own variables file and unit
-   are written for the new release (reload only if the unit changed),
-   `current` moves to it, and the app's own unit restarts on its own port —
-   that is where the old release's process stops — and is probed again. A
-   failure here is handled like a first start (rollback to the previous
-   release when it once answered).
-4. *Stop the old release* (`stop-old-release`): the check copy is stopped,
-   its unit, variables copy and staged file removed; the previous release
-   stays on disk for a rollback (retention keeps five).
+   are written for the new release (reload only if the unit changed), the
+   check copy is stopped (it shares the account's ceilings), `current` moves,
+   and the app's own unit restarts on its own port — that is where the old
+   release's process stops — and is probed again; only that answer marks the
+   release healthy. A unit that does not restart or does not answer rolls
+   back to the previous release when it once answered.
+4. *Stop the old release* (`stop-old-release`): the check copy's unit,
+   variables copy and staged file are removed; the previous release stays on
+   disk for a rollback (retention keeps five).
 
 Known limits: the app's own unit still restarts at the switch, so the port is
 briefly closed while the checked release boots (Caddy answers 502 for that
@@ -103,8 +113,11 @@ script (often migrations) runs before traffic moves and again at the switch,
 and both releases run at once for the length of the check against the same
 `shared/` folder and databases. A deploy the daemon did not finish (it
 restarted) can leave a check copy running on its spare port: nothing routes to
-it, it never starts at boot, and the next deploy or `environment.stop` of that
-environment removes every check copy still staged.
+it, it never starts at boot, and the next deploy, `environment.stop` or a
+lifecycle `stop` of that environment removes every check copy still staged
+(a copy that refuses to stop keeps its unit and marker, so it is retried).
+During the check both releases count against one account ceiling; the
+copy's `OOMScoreAdjust` only decides which one the kernel kills first.
 
 **Render → diff → install-if-changed** is the same discipline the vhost path
 uses, and the same reasoning: a candidate is staged under

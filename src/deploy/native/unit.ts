@@ -381,6 +381,9 @@ export function nativeAppStagedPath(
  * Service ids are UUIDs, which never end in `-new`, so no app's own id can be
  * another app's check copy.
  */
+/** The check copy's `OOMScoreAdjust=`: killed before the release serving. */
+export const NATIVE_APP_CHECK_COPY_OOM_SCORE_ADJUST = 900;
+
 export function nativeAppCheckCopyId(serviceId: string): string {
   return `${serviceId}-new`;
 }
@@ -847,6 +850,14 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
 
   if (opts.checkCopy === undefined) {
     lines.push("", "[Install]", "WantedBy=multi-user.target");
+  } else {
+    // Under the same account slice as the release serving: if the two together
+    // reach the memory ceiling, the kernel kills the copy first.
+    lines.splice(
+      lines.indexOf("NoNewPrivileges=yes"),
+      0,
+      `OOMScoreAdjust=${NATIVE_APP_CHECK_COPY_OOM_SCORE_ADJUST}`,
+    );
   }
   lines.push("");
   return lines.join("\n");
