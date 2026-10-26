@@ -42,6 +42,7 @@ import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { runFolderPublishVerb } from "./folder-publish.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { logWarn } from "../../util/logger.ts";
 import {
   assertReleaseLinksStayHome,
   assertSealedLinksStayInRelease,
@@ -703,8 +704,33 @@ async function publishStagedRelease(
   await removeReleaseSharedEntry(stagingDir, runFn);
   await assertStagedLinksStayInRelease(stagingDir, runFn);
   await prepareStagedTree(params, stagingDir, runFn);
-  const verb = params.keepCurrent === true ? "publish-keep" : "publish";
-  await runPublishVerb(verb, params.paths, runFn);
+  if (params.keepCurrent === true) {
+    await publishKeepingCurrent(params.paths, runFn);
+  } else {
+    await runPublishVerb("publish", params.paths, runFn);
+  }
+}
+
+/**
+ * `publish-keep`, or plain `publish` on a host whose helper predates it: that
+ * moves `current`, and the native apply puts it back on the release serving
+ * until the new one has answered beside it.
+ */
+async function publishKeepingCurrent(
+  paths: Pick<ReleasePaths, "publish">,
+  runFn: RunFn,
+): Promise<void> {
+  try {
+    await runPublishVerb("publish-keep", paths, runFn);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.includes("refusing verb publish-keep")) throw err;
+    logWarn(
+      "deploy",
+      "the host helper is older than this daemon and cannot publish without moving current; published with publish instead (finish the update on this host)",
+    );
+    await runPublishVerb("publish", paths, runFn);
+  }
 }
 
 /** The daemon-owned layout: the same steps, run on the release in place. */

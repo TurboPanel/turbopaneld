@@ -148,8 +148,13 @@ export type NativeAppRelease = {
   previousReleaseId?: string | null;
   /** `x-turbopanel.source.startCommand`, when the author declared one. */
   startCommand?: string;
-  /** The release this deploy put live (`current`), when one was applied. */
+  /** The release this deploy published, when one was applied. */
   releaseId?: string;
+  /**
+   * True when `releaseId` was published without moving `current` (the app
+   * was serving then): this apply moves `current` to it.
+   */
+  heldCurrent?: boolean;
   /**
    * How that release starts when the author typed no start command, as the
    * build (or, on a rollback, the release record) decided it.
@@ -972,6 +977,22 @@ async function pointCurrentAt(
   }));
 }
 
+/**
+ * A release published without moving `current` whose app stopped serving
+ * since (a crash, a kill, a restart caught half-way): with nothing to check
+ * it beside, `current` moves to it now, so the start below runs it and not
+ * the release it replaces.
+ */
+async function catchUpHeldRelease(
+  layout: LayoutPaths,
+  prepared: Pick<PreparedNativeApp, "app" | "binding">,
+): Promise<void> {
+  const { heldCurrent, releaseId } = prepared.binding;
+  if (heldCurrent === true && releaseId) {
+    await pointCurrentAt(layout, prepared, releaseId);
+  }
+}
+
 /** The folder the check copy runs out of: the new release itself. */
 function newReleaseDir(
   layout: LayoutPaths,
@@ -1075,6 +1096,7 @@ async function prepareNativeApp(
       installOwn(prepared.environmentFile === true, start),
   };
   if (!serving) {
+    await catchUpHeldRelease(layout, prepared);
     prepared.environmentFile = await applyNativeAppVariables(
       io,
       layout,
@@ -1867,6 +1889,7 @@ export function nativeAppBindingsFromPayload(
         previousReleaseId: previous,
         startCommand: entry.build.startCommand,
         releaseId: applied?.releaseId,
+        heldCurrent: applied?.heldCurrent,
         nativeStart: applied?.nativeStart,
       }),
     );
@@ -1877,6 +1900,8 @@ export function nativeAppBindingsFromPayload(
 /** The facts about this deploy's release that the unit needs. */
 export type AppliedNativeRelease = {
   releaseId: string;
+  /** Published without moving `current` (see {@link NativeAppRelease}). */
+  heldCurrent?: boolean;
   nativeStart?: NativeAppStart;
   /** The runtime the live release runs on; absent keeps the payload's. */
   runtime?: "node" | "deno";

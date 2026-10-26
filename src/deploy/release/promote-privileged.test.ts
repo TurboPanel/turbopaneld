@@ -805,6 +805,47 @@ test("promoteRelease keeping current publishes with publish-keep", async () => {
   });
 });
 
+test("promoteRelease keeping current falls back to publish on an older host helper", async () => {
+  await withTempRelease(async (root) => {
+    const { argv } = await promoteManaged(
+      root,
+      (args) =>
+        args.includes("publish-keep")
+          ? {
+            success: false,
+            stdout: "",
+            stderr: "tp-host: refusing verb publish-keep",
+          }
+          : SUDO_OK,
+      undefined,
+      true,
+    );
+    assertEquals(argv.slice(-2).map((args) => args[1]), [
+      "publish-keep",
+      "publish",
+    ]);
+  });
+});
+
+test("promoteRelease keeping current fails on any other publish-keep error", async () => {
+  await withTempRelease(async (root) => {
+    await assertRejects(
+      () =>
+        promoteManaged(
+          root,
+          (args) =>
+            args.includes("publish-keep")
+              ? { success: false, stdout: "", stderr: "tp-host: disk full" }
+              : SUDO_OK,
+          undefined,
+          true,
+        ),
+      Error,
+      "disk full",
+    );
+  });
+});
+
 test("promoteRelease removes its staging leaf when publish is refused", async () => {
   await withTempRelease(async (root) => {
     const paths = resolveReleasePaths(

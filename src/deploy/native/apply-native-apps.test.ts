@@ -2886,6 +2886,18 @@ test("nativeAppBindingsFromPayload carries the service folder of the sourced ser
     nativeAppBindingsFromPayload(payload).get("web")?.folder,
     folder,
   );
+  // A release published without moving `current` says so to the apply.
+  assertEquals(
+    nativeAppBindingsFromPayload(
+      payload,
+      undefined,
+      new Map([["web", {
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e72",
+        heldCurrent: true,
+      }]]),
+    ).get("web")?.heldCurrent,
+    true,
+  );
   assertThrows(
     () => nativeAppBindingsFromPayload({ ...payload, serviceFolders: [] }),
     Error,
@@ -2923,10 +2935,11 @@ const NEW_RELEASE = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e82";
 
 /**
  * A host where `SERVING_RELEASE` serves and this deploy has just published
- * `NEW_RELEASE` (publishing moves `current`), with the app's unit installed
- * by an earlier deploy and running.
+ * `NEW_RELEASE` (publishing moves `current`, or with `held` leaves it on the
+ * release serving), with the app's unit installed by an earlier deploy and
+ * running.
  */
-async function servingHost() {
+async function servingHost(options: { held?: boolean } = {}) {
   const host = await makeTestHost();
   const siteDir = join(
     host.layout.principalHomeRoot,
@@ -2940,7 +2953,10 @@ async function servingHost() {
       Deno.mkdir(join(siteDir, "releases", release), { recursive: true })
     ),
   );
-  await Deno.symlink(join("releases", NEW_RELEASE), join(siteDir, "current"));
+  await Deno.symlink(
+    join("releases", options.held ? SERVING_RELEASE : NEW_RELEASE),
+    join(siteDir, "current"),
+  );
   await applyNativeAppServices(
     host.layout,
     ENVIRONMENT_ID,
@@ -2961,6 +2977,7 @@ async function servingHost() {
       folder: folderFor(SERVICE_ID),
       previousReleaseId: SERVING_RELEASE,
       releaseId: NEW_RELEASE,
+      ...(options.held ? { heldCurrent: true } : {}),
     }]]),
     setPhase: (phase: string) => {
       if (phases.at(-1) !== phase) phases.push(phase);
@@ -3124,6 +3141,47 @@ test("a new release that answers beside the old one takes over its port; its cop
       lines.some((line) =>
         line.includes(`release ${SERVING_RELEASE} stays on disk for a rollback`)
       ),
+      true,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a release held at publish whose app stopped since goes live when started directly", async () => {
+  const { host, mock, opts, current } = await servingHost({ held: true });
+  const seen: string[] = [];
+  try {
+    await recordRelease(host.layout, NEW_RELEASE);
+    await Deno.remove(
+      join(
+        resolveDaemonReleasePaths(host.layout, {
+          serviceId: SERVICE_ID,
+          releaseId: NEW_RELEASE,
+        }).releaseDir,
+        HEALTHY_RECORD_MARKER,
+      ),
+    );
+    // The unit crashed (or was killed) after the publish: nothing serves.
+    mock.activeUnits.delete(OWN_UNIT);
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...opts,
+      probe: async (port: number) => {
+        seen.push(`${port} ${await current()}`);
+        return true;
+      },
+    });
+    // Started directly, out of the new release.
+    assertEquals(seen, [`18100 ${join("releases", NEW_RELEASE)}`]);
+    assertEquals(await current(), join("releases", NEW_RELEASE));
+    assertEquals(mock.systemctl("enable"), [OWN_UNIT]);
+    assertEquals(
+      mock.calls.some((call) => call.args.includes(CHECK_UNIT)),
+      false,
+    );
+    assertEquals(
+      (await readHealthyRelease(host.layout, SERVICE_ID, NEW_RELEASE)) !==
+        null,
       true,
     );
   } finally {

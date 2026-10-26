@@ -74,8 +74,13 @@ them:
    (`promoteRelease`'s `keepCurrent`, asked through `nativeAppIsServing`), so a
    crash, a cancel or any failure before the switch leaves the release serving
    live, and it is what a crash restart or a reboot starts. (If the host could
-   not be asked, publishing moves `current` as before and the apply puts it
-   back for every serving app before preparing any of them.) The new release
+   not be asked, or its helper predates `publish-keep` and plain `publish`
+   ran, publishing moves `current` as before and the apply puts it back for
+   every serving app before preparing any of them.) The release records that
+   it was held (`heldCurrent`, carried in the binding): when its unit is no
+   longer active by the apply (a crash, a kill), the app is started directly
+   and `current` moves to the held release first, so the new code is what
+   starts and what is marked healthy. The new release
    runs as a **check copy**, `turbopanel-app-<serviceId>-new.service`
    (`nativeAppCheckCopyId`), on a spare loopback port the kernel picks (its
    ephemeral range, far above the control plane's 18080–19799 band), out of

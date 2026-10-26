@@ -231,7 +231,9 @@ publishes with `keepCurrent` (tp-host `publish-keep`, the same publish without
 the `current` swap; a rollback or a re-sent release skips the swap the same
 way). `current` stays on the release serving until the native apply has seen
 the new one answer beside it (`../native/AGENTS.md`, "Check before the
-switch"). A static export is never held: it leaves that lane.
+switch"). A static export is never held: it leaves that lane. A host helper
+that predates the verb refuses it and gets plain `publish`; the native apply
+puts `current` back. The applied release says it was held (`heldCurrent`).
 
 **Sealed publish** (managed hosts). `tp-host publish-open <user> <svc> <id>`
 makes a fresh leaf `<principalHomeRoot>/.tp-staging/<user>.<svc>.<id>`, owned by

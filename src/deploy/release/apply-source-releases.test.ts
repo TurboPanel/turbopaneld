@@ -437,7 +437,6 @@ test("applySourceReleases publishes a serving Node app's release without moving 
       });
       await mkdirReleaseTree(paths);
 
-      let pruneCalled = false;
       const asked: string[] = [];
       const keepCurrent: boolean[] = [];
       const log = fakeLogSink();
@@ -515,10 +514,8 @@ test("applySourceReleases publishes a serving Node app's release without moving 
             }
             return params.paths.releaseDir;
           },
-          pruneReleasesFn: () => {
-            pruneCalled = true;
-            return Promise.resolve(["019e0a1b-7c3d-7a52-9b4e-3f1a2c000007"]);
-          },
+          pruneReleasesFn: () =>
+            Promise.resolve(["019e0a1b-7c3d-7a52-9b4e-3f1a2c000007"]),
         },
       );
 
@@ -526,6 +523,7 @@ test("applySourceReleases publishes a serving Node app's release without moving 
       // Serving: published beside, `current` left on the release serving.
       assertEquals(asked, [`web/${serviceId}`]);
       assertEquals(keepCurrent, [true]);
+      assertEquals(applied[0].heldCurrent, true);
       assertEquals(await readCurrentReleaseId(paths), null);
       assertEquals(
         log.lines.some((line) =>
@@ -552,7 +550,6 @@ test("applySourceReleases never holds current for a static export", async () => 
       });
       await mkdirReleaseTree(paths);
 
-      let pruneCalled = false;
       const asked: string[] = [];
       const keepCurrent: boolean[] = [];
       const log = fakeLogSink();
@@ -630,10 +627,8 @@ test("applySourceReleases never holds current for a static export", async () => 
             }
             return params.paths.releaseDir;
           },
-          pruneReleasesFn: () => {
-            pruneCalled = true;
-            return Promise.resolve(["019e0a1b-7c3d-7a52-9b4e-3f1a2c000007"]);
-          },
+          pruneReleasesFn: () =>
+            Promise.resolve(["019e0a1b-7c3d-7a52-9b4e-3f1a2c000007"]),
         },
       );
 
@@ -641,6 +636,7 @@ test("applySourceReleases never holds current for a static export", async () => 
       // A static export leaves the Node app lane: never held.
       assertEquals(asked, []);
       assertEquals(keepCurrent, [false]);
+      assertEquals(applied[0].heldCurrent, undefined);
     } finally {
       await fixture.cleanup();
     }

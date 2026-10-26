@@ -1546,6 +1546,7 @@ async function applyDeployNativeApps(
       entry.composeServiceName,
       definedFields({
         releaseId: entry.releaseId,
+        heldCurrent: entry.heldCurrent,
         nativeStart: entry.nativeStart,
         runtime: entry.runtime,
       }),

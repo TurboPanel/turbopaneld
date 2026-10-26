@@ -161,6 +161,12 @@ export type AppliedRelease = {
    * own "leave `current` alone" guarantee has already been spent.
    */
   previousReleaseId: string | null;
+  /**
+   * True when the release was published without moving `current` (a Node app
+   * that was serving): the native apply moves `current` to it, beside the
+   * release serving or, when that one stopped since, before starting it.
+   */
+  heldCurrent?: boolean;
   /** True when a Next standalone tree was published instead of the checkout. */
   standaloneOutput: boolean;
   /**
@@ -411,6 +417,7 @@ async function rollbackOneRelease(
     ...(commitAuthor === undefined ? {} : { commitAuthor }),
     releaseDir,
     previousReleaseId,
+    ...(keepCurrent ? { heldCurrent: true } : {}),
     // The runtime lane a rollback restores is the one the original promote
     // established, so both come off that release's own manifest rather than
     // being re-derived (nothing was built here to derive them from). A
@@ -993,6 +1000,7 @@ async function buildNativeRelease(
       commitAuthor: entry.commitAuthor,
       releaseDir,
       previousReleaseId,
+      heldCurrent: keepCurrent || undefined,
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
