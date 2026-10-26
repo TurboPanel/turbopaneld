@@ -209,7 +209,8 @@ directions, so they would also cut the app off from every outside service it
 calls.
 
 **Application mode.** `appMode` renders as `Environment=NODE_ENV=<mode>` in the
-unit (default `production`) and rides into the release build as the same value
+unit (default `production`; any other value matching `NATIVE_APP_MODE_RE`,
+such as `staging`, is passed as is) and rides into the release build as the same value
 (see `../release/AGENTS.md`, native-app builds), so a `development` app builds
 and runs under one mode instead of two.
 
