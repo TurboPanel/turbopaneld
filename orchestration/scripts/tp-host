@@ -3421,13 +3421,18 @@ tp_retire_refs_check() {
   if [ -d "./$1/sites" ] && [ -n "$(ls -A -- "./$1/sites")" ]; then
     tp_die "principal-remove: $1 still has site trees under $R_PRINCIPALS/$1/sites"
   fi
+  # Service and volume folders in every scope (environments and common): the
+  # home is removed whole, so a volume left here would take its data with it.
   for _rs_scope in "./$1"/*; do
     tp_scope_ok "${_rs_scope##*/}" || continue
-    _rs_dir="$_rs_scope/services"
-    [ -d "$_rs_dir" ] && [ ! -L "$_rs_dir" ] && [ ! -L "$_rs_scope" ] || continue
-    if [ -n "$(ls -A -- "$_rs_dir")" ]; then
-      tp_die "principal-remove: $1 still has service folders under $R_PRINCIPALS/${_rs_dir#./}"
-    fi
+    [ ! -L "$_rs_scope" ] || continue
+    for _rs_kind in services volumes; do
+      _rs_dir="$_rs_scope/$_rs_kind"
+      [ -d "$_rs_dir" ] && [ ! -L "$_rs_dir" ] || continue
+      if [ -n "$(ls -A -- "$_rs_dir")" ]; then
+        tp_die "principal-remove: $1 still has ${_rs_kind%s} folders under $R_PRINCIPALS/${_rs_dir#./}"
+      fi
+    done
   done
 }
 
