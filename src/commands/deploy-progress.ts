@@ -139,7 +139,10 @@ const PHASE_STEPS: Readonly<Record<string, string>> = {
   [COMMAND_LOG_PHASES.PRE_DEPLOY]: "start",
   [COMMAND_LOG_PHASES.COMPOSE_UP]: "start",
   [COMMAND_LOG_PHASES.POST_DEPLOY]: "start",
+  [COMMAND_LOG_PHASES.START_RELEASE]: "start",
   [COMMAND_LOG_PHASES.HEALTH]: "health",
+  [COMMAND_LOG_PHASES.SWITCH_TRAFFIC]: "switch",
+  [COMMAND_LOG_PHASES.STOP_OLD_RELEASE]: "stop-old",
 };
 
 /** What the running step becomes when the deploy ends. */

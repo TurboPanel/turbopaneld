@@ -373,6 +373,41 @@ export function nativeAppStagedPath(
   );
 }
 
+/**
+ * The id of an app's **check copy**: the new release started beside the one
+ * serving, on a spare loopback port, so it answers before it takes traffic.
+ * Its unit is `turbopanel-app-<serviceId>-new.service` and its variables copy
+ * `<serviceId>-new.env`, the shapes `tp-host` already accepts for an app id.
+ * Service ids are UUIDs, which never end in `-new`, so no app's own id can be
+ * another app's check copy.
+ */
+export function nativeAppCheckCopyId(serviceId: string): string {
+  return `${serviceId}-new`;
+}
+
+/**
+ * Where a check copy's unit is staged: a folder of its own under `node-apps/`,
+ * so the per-environment index of the apps' own units never lists one. A file
+ * here also marks a check copy that may still be installed (a deploy the
+ * daemon did not finish), which the next deploy or `environment.stop` removes.
+ */
+export function nativeAppCheckCopyStageDir(
+  layout: Pick<LayoutPaths, "configDir">,
+): string {
+  return join(nativeAppConfigDir(layout), "check");
+}
+
+export function nativeAppCheckCopyStagedPath(
+  layout: Pick<LayoutPaths, "configDir">,
+  environmentId: string,
+  serviceId: string,
+): string {
+  return join(
+    nativeAppCheckCopyStageDir(layout),
+    `${nativeAppStagedFilePrefix(environmentId)}${serviceId}.service`,
+  );
+}
+
 export function principalSliceStagedPath(
   layout: Pick<LayoutPaths, "configDir">,
   username: string,
@@ -661,6 +696,13 @@ export type NativeAppUnitOpts = {
    * feature restarts no app that has none.
    */
   environmentFile?: boolean;
+  /**
+   * Render the app's check copy instead ({@link nativeAppCheckCopyId}): it
+   * runs out of this release folder rather than `current` (which still points
+   * at the release serving), and has no `[Install]` section, so it can never
+   * be enabled and never starts at boot.
+   */
+  checkCopy?: { workingDirectory: string };
 };
 
 /**
@@ -693,7 +735,7 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     username,
     folder: opts.folder,
   });
-  const workingDir = tree.currentLink;
+  const workingDir = opts.checkCopy?.workingDirectory ?? tree.currentLink;
   const sharedDir = tree.sharedDir;
   const group = principalUnixGroupName(username);
   const target = nativeAppRuntimeTarget(opts.layout, app);
@@ -803,12 +845,10 @@ export function nativeAppUnitContent(opts: NativeAppUnitOpts): string {
     lines.push(`MemoryMax=${formatMemoryBytes(app.resources.memoryBytes)}`);
   }
 
-  lines.push(
-    "",
-    "[Install]",
-    "WantedBy=multi-user.target",
-    "",
-  );
+  if (opts.checkCopy === undefined) {
+    lines.push("", "[Install]", "WantedBy=multi-user.target");
+  }
+  lines.push("");
   return lines.join("\n");
 }
 

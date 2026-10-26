@@ -61,6 +61,9 @@ export const REPORT_MAX_ID_CHARS = 64;
 
 /** The step that shows the new release was made live (`deploy-progress.ts` PHASE_STEPS). */
 const PROMOTE_STEP_ID = "start";
+/** Where a native app's checked release takes traffic, and where the old one stops. */
+const SWITCH_STEP_ID = "switch";
+const STOP_OLD_STEP_ID = "stop-old";
 
 const UNSAFE_ID = /[^A-Za-z0-9_-]/;
 
@@ -413,11 +416,31 @@ export function interruptedFacts(progress: CommandProgress | undefined): {
 }
 
 /**
+ * A plan with native apps moves traffic in its own step: `switch` done (or the
+ * old release already being stopped) means yes, still pending means no unless
+ * something else was started first, and running is unknown.
+ */
+function trafficSwitched(
+  progress: CommandProgress,
+  switchStep: CommandProgress["steps"][number],
+): boolean | undefined {
+  const stopOld = progress.steps.find((step) => step.id === STOP_OLD_STEP_ID);
+  if (switchStep.state === "done" || (stopOld && stopOld.state !== "pending")) {
+    return true;
+  }
+  if (switchStep.state !== "pending") return undefined;
+  const start = progress.steps.find((step) => step.id === PROMOTE_STEP_ID);
+  return start?.state === "pending" ? false : undefined;
+}
+
+/**
  * Was the new release made live? `start` covers the switch-over, so done (or a
  * health check already begun) means yes, still pending means no, and running
- * is unknown.
+ * is unknown. A plan with a `switch` step answers from that step instead.
  */
 function releasePromoted(progress: CommandProgress): boolean | undefined {
+  const switchStep = progress.steps.find((step) => step.id === SWITCH_STEP_ID);
+  if (switchStep) return trafficSwitched(progress, switchStep);
   const start = progress.steps.find((step) => step.id === PROMOTE_STEP_ID);
   if (!start) return undefined;
   const health = progress.steps.find((step) => step.id === "health");

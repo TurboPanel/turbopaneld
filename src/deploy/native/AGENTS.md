@@ -52,17 +52,59 @@ the unit starts. Per app:
    then start the app from the unit contents systemd loaded before this deploy.
    Writing everything first and reloading once is the only sequence in which
    systemd is guaranteed to have read every file the apply touched.
-6. `enable --now` on first deploy, `restart` when the unit is already active,
-   nothing when neither is needed — unless the operator set `enabled: false`,
-   which issues `disable --now` instead (see "Operator disable" below).
-7. Probe `127.0.0.1:<listenPort>` until it answers. Start, the probe
-   verdict, and a failed unit's `journalctl` tail are written to the
-   command transcript (`health` phase).
-8. On probe failure, dump the unit journal **first**, then — only when the
-   previous release once answered on this host — repoint `current` back at
-   it, re-render the unit for that release's recorded start, reload if it
-   changed, restart and probe it again; when there is no such release, or it
-   does not answer either, `disable --now` the unit. Then fail the command.
+6. Nothing serving yet (a first deploy, or the unit is down): `enable --now`
+   and probe `127.0.0.1:<listenPort>` until it answers — unless the operator
+   set `enabled: false`, which issues `disable --now` instead (see "Operator
+   disable" below). On probe failure, dump the unit journal **first**, then —
+   only when the previous release once answered on this host — repoint
+   `current` back at it, re-render the unit for that release's recorded start,
+   reload if it changed, restart and probe it again; when there is no such
+   release, or it does not answer either, `disable --now` the unit. Then fail
+   the command.
+7. A release already serving (the unit is active): the new release is
+   **checked beside it before it takes traffic** — see "Check before the
+   switch" below.
+
+**Check before the switch.** Steps, as the transcript and the step rail name
+them:
+
+1. *Start the new release* (`start-release`). Publishing already moved
+   `current`; it is pointed back at the release serving, so a crash restart or
+   a reboot before the switch still starts what was serving. The new release
+   runs as a **check copy**, `turbopanel-app-<serviceId>-new.service`
+   (`nativeAppCheckCopyId`), on a spare loopback port the kernel picks (its
+   ephemeral range, far above the control plane's 18080–19799 band), out of
+   `releases/<releaseId>` itself, with its own variables copy
+   (`<serviceId>-new.env`, the same `app-env-install` verb) and no
+   `[Install]` section, so it can never be enabled or start at boot. Its unit
+   is staged under `<configDir>/node-apps/check/`, outside the per-environment
+   index of the apps' own units. The app's own unit, variables file and
+   `current` are not touched.
+2. *Check it answers* (`health`): the same probe as a first start, on the
+   spare port. When the copy does not start or does not answer, its journal
+   goes to the transcript, the copy is stopped and removed, and the deploy
+   fails saying the new release never took traffic and the release that was
+   serving keeps serving. Nothing to roll back: nothing switched.
+3. *Switch traffic* (`switch-traffic`): the app's own variables file and unit
+   are written for the new release (reload only if the unit changed),
+   `current` moves to it, and the app's own unit restarts on its own port —
+   that is where the old release's process stops — and is probed again. A
+   failure here is handled like a first start (rollback to the previous
+   release when it once answered).
+4. *Stop the old release* (`stop-old-release`): the check copy is stopped,
+   its unit, variables copy and staged file removed; the previous release
+   stays on disk for a rollback (retention keeps five).
+
+Known limits: the app's own unit still restarts at the switch, so the port is
+briefly closed while the checked release boots (Caddy answers 502 for that
+moment, as before); a proxy-level handover would remove that gap. The new
+release starts twice (beside the old, then on its own port), so a `prestart`
+script (often migrations) runs before traffic moves and again at the switch,
+and both releases run at once for the length of the check against the same
+`shared/` folder and databases. A deploy the daemon did not finish (it
+restarted) can leave a check copy running on its spare port: nothing routes to
+it, it never starts at boot, and the next deploy or `environment.stop` of that
+environment removes every check copy still staged.
 
 **Render → diff → install-if-changed** is the same discipline the vhost path
 uses, and the same reasoning: a candidate is staged under
@@ -73,7 +115,8 @@ and installed only on a real difference. `WorkingDirectory` points at the
 `current` **symlink** of the service folder (`serviceTree`) — never at a
 release directory, which is exactly what
 makes the unit text byte-identical across promotes, so an ordinary redeploy
-writes nothing, reloads nothing, and only restarts.
+never rewrites the app's own unit and reloads only for its check copy (in,
+then out).
 
 **The staged directory is the per-environment index.** `environment.lifecycle`
 and `environment.stop` find this environment's units by listing
@@ -429,9 +472,11 @@ The per-principal **slice is deliberately left behind**: other environments of
 the same account still reference it, and an unreferenced slice costs nothing.
 
 Transcript: fetch / build / release-promote still bracket the Git release.
-Native start, the loopback probe, and (on probe failure) a `journalctl`
-dump of the unit land under **`health`**, so an operator opening Deploy
-output sees why the app exited rather than only the 30s timeout.
+Native start lands under **`start-release`**, the loopback probe and (on probe
+failure) a `journalctl` dump of the unit under **`health`**, so an operator
+opening Deploy output sees why the app exited rather than only the 30s
+timeout; then **`switch-traffic`** and **`stop-old-release`** (with one line
+each on a first deploy, which has nothing to switch from).
 A source with no `installCommand` / `buildCommand` still ships the
 checkout as-is, but the build phase records that — an empty Build section
 used to look like the engine skipped the step.

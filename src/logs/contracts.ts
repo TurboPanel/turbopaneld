@@ -50,7 +50,13 @@ export const COMMAND_LOG_PHASES = {
   RELEASE_PROMOTE: "release-promote",
   PRE_DEPLOY: "pre-deploy",
   COMPOSE_UP: "compose-up",
+  /** A native app's new release, started beside the one serving. */
+  START_RELEASE: "start-release",
   HEALTH: "health",
+  /** A native app's checked release takes over its port from the old one. */
+  SWITCH_TRAFFIC: "switch-traffic",
+  /** The native app's check copy is removed once traffic has moved. */
+  STOP_OLD_RELEASE: "stop-old-release",
   POST_DEPLOY: "post-deploy",
   HOOKS: "hooks",
   MANAGED_APPLY: "managed-apply",

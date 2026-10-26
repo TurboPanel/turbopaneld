@@ -428,6 +428,41 @@ test("interrupted facts read the release state from the step plan", () => {
   assertEquals(interruptedFacts(plan("running")).lastStep, "Start the app");
 });
 
+test("a plan with a traffic switch is live only once the switch is done", () => {
+  const native = (
+    states: Record<"start" | "health" | "switch" | "stopOld", string>,
+  ) =>
+    ({
+      steps: [
+        { id: "start", label: "Start the new release", state: states.start },
+        { id: "health", label: "Check it answers", state: states.health },
+        { id: "switch", label: "Switch traffic", state: states.switch },
+        {
+          id: "stop-old",
+          label: "Stop the old release",
+          state: states.stopOld,
+        },
+      ],
+      current: null,
+      updatedAt: "2026-10-26T10:00:00.000Z",
+    }) as unknown as Parameters<typeof interruptedFacts>[0];
+  const facts = (
+    start: string,
+    health: string,
+    switchState: string,
+    stopOld: string,
+  ) =>
+    interruptedFacts(
+      native({ start, health, switch: switchState, stopOld }),
+    ).releasePromoted;
+  // Checked beside the old release, not switched yet: not live.
+  assertEquals(facts("pending", "pending", "pending", "pending"), false);
+  assertEquals(facts("done", "running", "pending", "pending"), undefined);
+  assertEquals(facts("done", "done", "running", "pending"), undefined);
+  assertEquals(facts("done", "done", "done", "pending"), true);
+  assertEquals(facts("done", "done", "done", "running"), true);
+});
+
 test("the step plan is journaled on a step change and then at most every interval", async () => {
   await withState(async () => {
     const time = fakeTime();

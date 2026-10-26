@@ -57,6 +57,11 @@ export type DeployStepNeeds = {
   composeBuild: boolean;
   /** Certificates are written for hostnames in this deploy. */
   certificates: boolean;
+  /**
+   * Native apps run in this deploy: a new release starts beside the one
+   * serving and takes traffic only once it answers.
+   */
+  nativeApps: boolean;
 };
 
 /** What the probes found on the host. */
@@ -127,6 +132,7 @@ export function deployStepNeeds(
     composeBuild: edge.hasContainers &&
       (payload.noCache === true || payload.deployStrategy === "sequential"),
     certificates: (payload.tlsMaterial ?? []).length > 0,
+    nativeApps: apps.length > 0,
   };
 }
 
@@ -283,11 +289,20 @@ export function planDeploySteps(
   if (needs.sourceBuilds || needs.composeBuild) {
     steps.push(step("build", "Build", false));
   }
-  steps.push(step("start", "Start the app", false));
+  const startLabel = needs.nativeApps
+    ? "Start the new release"
+    : "Start the app";
+  steps.push(step("start", startLabel, false));
   if (needs.certificates) {
     steps.push(step("certificates", "Set up certificates", false));
   }
   steps.push(step("health", "Check it answers", false));
+  if (needs.nativeApps) {
+    steps.push(
+      step("switch", "Switch traffic", false),
+      step("stop-old", "Stop the old release", false),
+    );
+  }
   return steps;
 }
 

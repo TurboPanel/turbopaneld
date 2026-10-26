@@ -1567,6 +1567,7 @@ async function applyDeployNativeApps(
     {
       variableMaterial: parsedPayload.variableMaterial ?? [],
       decryptSecrets,
+      setPhase: (phase) => logSink.setPhase(phase),
       ...io,
       onOutput: io?.onOutput ??
         ((stream, line) => logSink.onLine(stream, line)),
@@ -3068,14 +3069,14 @@ async function deployEnvironmentHolding(
     },
   );
 
-  // Native apps come last of the host-native lanes: the release is promoted and
-  // the vhost tree is settled, so a unit that fails its health probe fails only
-  // itself and rolls its own `current` back. Health (not promote) owns this
-  // pass so start + unit journal land in the same transcript section as the
-  // probe verdict. A deploy without native apps keeps `prepare`, so the
-  // step rail does not show "Check it answers" before anything started.
+  // Native apps come last of the host-native lanes: the release is published
+  // and the vhost tree is settled, so a new release that does not answer fails
+  // only its own app. The apply walks the transcript through "start the new
+  // release", "check it answers", "switch traffic" and "stop the old release"
+  // itself. A deploy without native apps keeps `prepare`, so the step rail
+  // does not show "Check it answers" before anything started.
   if (nativeAppServicesForHost.length > 0) {
-    runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
     await applyDeployNativeApps(
       layout,
       parsedPayload,

@@ -291,6 +291,13 @@ async function recordRelease(
   return releaseDir;
 }
 
+/** The spare port tests hand a check copy. */
+const CHECK_PORT = 41234;
+const SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70";
+const OWN_UNIT = nativeAppUnitName(SERVICE_ID);
+/** The new release's copy beside the one serving. */
+const CHECK_UNIT = nativeAppUnitName(`${SERVICE_ID}-new`);
+
 function applyOpts(host: TestHost, mock: RunMock, healthy = true) {
   return {
     bindings: bindings(),
@@ -298,8 +305,14 @@ function applyOpts(host: TestHost, mock: RunMock, healthy = true) {
     runPlaybook: () => Promise.resolve(),
     probe: () => Promise.resolve(healthy),
     sleep: () => Promise.resolve(),
+    pickPort: () => CHECK_PORT,
     systemdUnitDir: host.unitDir,
   };
+}
+
+/** A `sudo install` of the unit file at `path`. */
+function installsAt(path: string) {
+  return (args: string[]) => args.includes("install") && args.at(-1) === path;
 }
 
 test("applyNativeAppServices installs the unit, reloads, and enables it", async () => {
@@ -367,16 +380,23 @@ test("a second apply with identical content installs nothing and does not reload
       applyOpts(host, second),
     );
 
-    // Byte-identical unit + slice ⇒ no install, no daemon-reload. Only the
-    // restart that picks up the newly promoted release.
+    // Byte-identical unit + slice ⇒ the app's own unit is not reinstalled.
+    // The only files written are the check copy's, which is started beside the
+    // serving release first, so the only reloads are its own (in, then out).
     assertEquals(
-      second.calls.filter((call) => call.args.includes("install")).length,
+      callIndexes(
+        second,
+        installsAt(nativeAppUnitPath(SERVICE_ID, host.unitDir)),
+      )
+        .length,
       0,
     );
-    assertEquals(second.systemctl("daemon-reload").length, 0);
-    assertEquals(second.systemctl("restart"), [
-      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
-    ]);
+    assertEquals(
+      callIndexes(second, (args) => args.includes("install")).length,
+      1,
+    );
+    assertEquals(second.systemctl("daemon-reload").length, 2);
+    assertEquals(second.systemctl("restart"), [CHECK_UNIT, OWN_UNIT]);
   } finally {
     await host.cleanup();
   }
@@ -403,7 +423,17 @@ test("a changed listen port reinstalls the unit and reloads", async () => {
       applyOpts(host, mock),
     );
 
-    assertEquals(mock.systemctl("daemon-reload").length, 1);
+    // Check copy in, the app's own changed unit at the switch, check copy out.
+    assertEquals(mock.systemctl("daemon-reload").length, 3);
+    const [checkStarted] = callIndexes(
+      mock,
+      (args) => args.includes("restart") && args.at(-1) === CHECK_UNIT,
+    );
+    const [ownInstalled] = callIndexes(
+      mock,
+      installsAt(nativeAppUnitPath(SERVICE_ID, host.unitDir)),
+    );
+    assertEquals(checkStarted < ownInstalled, true);
     const unit = await Deno.readTextFile(
       nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
@@ -1135,10 +1165,8 @@ test("a slice and a unit changing together still reload after the unit is instal
     );
 
     // Second deploy changes the account ceiling *and* the unit in one apply.
+    // The app is down, so it is started directly (no check copy).
     const mock = createRunMock();
-    mock.activeUnits.add(
-      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
-    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
@@ -1153,7 +1181,7 @@ test("a slice and a unit changing together still reload after the unit is instal
     );
     const restarts = callIndexes(
       mock,
-      (args) => args.includes("systemctl") && args.includes("restart"),
+      (args) => args.includes("systemctl") && args.includes("enable"),
     );
 
     // Both files were rewritten, and one reload covers both.
@@ -1191,9 +1219,6 @@ test("a slice-only change still reloads before the unit is restarted", async () 
     );
 
     const mock = createRunMock();
-    mock.activeUnits.add(
-      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
-    );
     await applyNativeAppServices(
       host.layout,
       ENVIRONMENT_ID,
@@ -2647,25 +2672,28 @@ test("dropping every variable: the unit stops loading the file first, then the c
       nativeAppUnitPath("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70", host.unitDir),
     );
     assertEquals(unit.includes("EnvironmentFile"), false);
-    // The unit changed, so systemd must be told before the restart.
-    assertEquals(mock.systemctl("daemon-reload").length, 1);
+    // The unit changed at the switch, so systemd is told before the restart
+    // (beside the check copy's own reloads, in and out).
+    assertEquals(mock.systemctl("daemon-reload").length, 3);
 
     // A crash-restart of the old unit between these steps would fail if the
     // copy went first: it goes after the new unit is installed, reloaded and
     // restarted.
     const [unitAt] = callIndexes(
       mock,
-      (args) =>
-        args.includes("install") && args.at(-1)?.endsWith(".service") === true,
+      installsAt(nativeAppUnitPath(SERVICE_ID, host.unitDir)),
     );
-    const [reloadAt] = callIndexes(
+    const reloadAt = callIndexes(
       mock,
       (args) => args.includes("daemon-reload"),
+    ).find((index) => index > unitAt) ?? -1;
+    const [restartAt] = callIndexes(
+      mock,
+      (args) => args.includes("restart") && args.at(-1) === OWN_UNIT,
     );
-    const [restartAt] = callIndexes(mock, (args) => args.includes("restart"));
     const [removeAt] = callIndexes(
       mock,
-      (args) => args.includes("app-env-remove"),
+      (args) => args.includes("app-env-remove") && args.at(-1) === SERVICE_ID,
     );
     assertEquals(unitAt < reloadAt && reloadAt < restartAt, true);
     assertEquals(restartAt < removeAt, true);
@@ -2702,7 +2730,14 @@ test("an app that never had variables asks tp-host for nothing but the removal, 
       callIndexes(mock, (args) => args.includes("app-env-install")).length,
       0,
     );
-    assertEquals(mock.systemctl("daemon-reload").length, 0);
+    // Only the check copy's reloads (in, then out): the app's own unit is
+    // untouched.
+    assertEquals(mock.systemctl("daemon-reload").length, 2);
+    assertEquals(
+      callIndexes(mock, installsAt(nativeAppUnitPath(SERVICE_ID, host.unitDir)))
+        .length,
+      0,
+    );
   } finally {
     await host.cleanup();
   }
@@ -2728,7 +2763,7 @@ test("a refused removal of a stale copy warns and does not fail the deploy", asy
   }
 });
 
-test("a variable change with an identical unit still restarts the app, with no reload", async () => {
+test("a variable change with an identical unit still restarts the app; only the check copy reloads", async () => {
   const host = await makeTestHost();
   try {
     const opts = (decrypt: (e: string[]) => Promise<(string | null)[]>) => ({
@@ -2756,10 +2791,10 @@ test("a variable change with an identical unit still restarts the app, with no r
       mock.envCopies.get("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70")!,
       "DB_PASSWORD='rotated'",
     );
-    assertEquals(mock.systemctl("daemon-reload").length, 0);
-    assertEquals(mock.systemctl("restart"), [
-      nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
-    ]);
+    // The check copy ran on the rotated value first, and is gone again.
+    assertEquals(mock.envCopies.has(`${SERVICE_ID}-new`), false);
+    assertEquals(mock.systemctl("daemon-reload").length, 2);
+    assertEquals(mock.systemctl("restart"), [CHECK_UNIT, OWN_UNIT]);
   } finally {
     await host.cleanup();
   }
@@ -2875,4 +2910,435 @@ test("journalDetail caps long lines and the whole tail, and masks token-looking 
     Array.from({ length: 10 }, () => "y ".repeat(140)),
   );
   assertEquals(many.length < 2100, true);
+});
+
+// ---------------------------------------------------------------------------
+// A release already serving: the new one is started beside it on a spare
+// port, must answer there, and only then takes the app's own port.
+// ---------------------------------------------------------------------------
+
+const SERVING_RELEASE = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e81";
+const NEW_RELEASE = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e82";
+
+/**
+ * A host where `SERVING_RELEASE` serves and this deploy has just published
+ * `NEW_RELEASE` (publishing moves `current`), with the app's unit installed
+ * by an earlier deploy and running.
+ */
+async function servingHost() {
+  const host = await makeTestHost();
+  const siteDir = join(
+    host.layout.principalHomeRoot,
+    USERNAME,
+    "production",
+    "services",
+    SERVICE_ID,
+  );
+  await Promise.all(
+    [SERVING_RELEASE, NEW_RELEASE].map((release) =>
+      Deno.mkdir(join(siteDir, "releases", release), { recursive: true })
+    ),
+  );
+  await Deno.symlink(join("releases", NEW_RELEASE), join(siteDir, "current"));
+  await applyNativeAppServices(
+    host.layout,
+    ENVIRONMENT_ID,
+    [makeApp()],
+    applyOpts(host, createRunMock()),
+  );
+  const ownUnitBefore = await Deno.readTextFile(
+    nativeAppUnitPath(SERVICE_ID, host.unitDir),
+  );
+  const mock = createRunMock();
+  mock.activeUnits.add(OWN_UNIT);
+  const phases: string[] = [];
+  const lines: string[] = [];
+  const opts = {
+    ...applyOpts(host, mock),
+    bindings: new Map([["web", {
+      username: USERNAME,
+      folder: folderFor(SERVICE_ID),
+      previousReleaseId: SERVING_RELEASE,
+      releaseId: NEW_RELEASE,
+    }]]),
+    setPhase: (phase: string) => {
+      if (phases.at(-1) !== phase) phases.push(phase);
+    },
+    onOutput: (_stream: string, line: string) => {
+      lines.push(line);
+    },
+  };
+  const current = () => Deno.readLink(join(siteDir, "current"));
+  return { host, mock, opts, phases, lines, current, siteDir, ownUnitBefore };
+}
+
+test("a new release that does not answer beside the old one never takes traffic", async () => {
+  const { host, mock, opts, lines, current, ownUnitBefore } =
+    await servingHost();
+  const probed: number[] = [];
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...opts,
+          // The release serving keeps answering; the new one never does.
+          probe: (port: number) => {
+            probed.push(port);
+            return Promise.resolve(port !== CHECK_PORT);
+          },
+        }),
+      Error,
+    );
+    assertStringIncludes(
+      error.message,
+      `the new release did not answer on 127.0.0.1:${CHECK_PORT} within 30s, so it never took traffic; the release that was serving keeps serving`,
+    );
+    // `current` is back on the release serving, which was never touched:
+    // no restart, no stop, no disable, and its unit is what it was.
+    assertEquals(await current(), join("releases", SERVING_RELEASE));
+    assertEquals(probed.includes(18100), false);
+    for (const verb of ["restart", "stop", "disable"]) {
+      assertEquals(
+        mock.systemctl(verb).filter((unit) => unit === OWN_UNIT),
+        [],
+      );
+    }
+    assertEquals(
+      await Deno.readTextFile(nativeAppUnitPath(SERVICE_ID, host.unitDir)),
+      ownUnitBefore,
+    );
+    // The check copy is stopped and gone, with its staged file.
+    assertEquals(mock.systemctl("stop"), [CHECK_UNIT]);
+    await assertRejects(() =>
+      Deno.stat(nativeAppUnitPath(`${SERVICE_ID}-new`, host.unitDir))
+    );
+    assertEquals(
+      await listEnvironmentNativeAppServiceIds(host.layout, ENVIRONMENT_ID),
+      [SERVICE_ID],
+    );
+    // Its journal is in the transcript, and it is not a rollback target.
+    assertEquals(
+      lines.some((line) => line.includes(`${CHECK_UNIT} journal`)),
+      true,
+    );
+    assertEquals(
+      await readHealthyRelease(host.layout, SERVICE_ID, NEW_RELEASE).catch(
+        () => null,
+      ),
+      null,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a new release that answers beside the old one takes over its port, then the copy goes", async () => {
+  const { host, mock, opts, phases, lines, current } = await servingHost();
+  const seen: Array<{ port: number; current: string; checkUnit?: string }> = [];
+  try {
+    await recordRelease(host.layout, NEW_RELEASE);
+    await Deno.remove(
+      join(
+        resolveDaemonReleasePaths(host.layout, {
+          serviceId: SERVICE_ID,
+          releaseId: NEW_RELEASE,
+        }).releaseDir,
+        HEALTHY_RECORD_MARKER,
+      ),
+    );
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...opts,
+      probe: async (port: number) => {
+        seen.push({
+          port,
+          current: await current(),
+          ...(port === CHECK_PORT
+            ? {
+              checkUnit: await Deno.readTextFile(
+                nativeAppUnitPath(`${SERVICE_ID}-new`, host.unitDir),
+              ),
+            }
+            : {}),
+        });
+        return true;
+      },
+    });
+    // Checked first, while `current` still served the old release; switched
+    // after.
+    assertEquals(seen.map((entry) => entry.port), [CHECK_PORT, 18100]);
+    assertEquals(seen[0].current, join("releases", SERVING_RELEASE));
+    assertEquals(seen[1].current, join("releases", NEW_RELEASE));
+    assertEquals(await current(), join("releases", NEW_RELEASE));
+    assertEquals(mock.systemctl("restart"), [CHECK_UNIT, OWN_UNIT]);
+
+    // The copy ran the new release's own folder on the spare port, and can
+    // never be enabled.
+    const checkUnit = seen[0].checkUnit ?? "";
+    assertStringIncludes(
+      checkUnit,
+      `WorkingDirectory=${
+        join(
+          host.layout.principalHomeRoot,
+          USERNAME,
+          "production",
+          "services",
+          SERVICE_ID,
+          "releases",
+          NEW_RELEASE,
+        )
+      }\n`,
+    );
+    assertStringIncludes(checkUnit, `Environment=PORT=${CHECK_PORT}\n`);
+    assertEquals(checkUnit.includes("[Install]"), false);
+
+    // Stopped and removed once traffic moved; the new release is a rollback
+    // target now.
+    assertEquals(mock.systemctl("stop"), [CHECK_UNIT]);
+    const [ownRestart] = callIndexes(
+      mock,
+      (args) => args.includes("restart") && args.at(-1) === OWN_UNIT,
+    );
+    const [checkStop] = callIndexes(
+      mock,
+      (args) => args.includes("stop") && args.at(-1) === CHECK_UNIT,
+    );
+    assertEquals(ownRestart < checkStop, true);
+    await assertRejects(() =>
+      Deno.stat(nativeAppUnitPath(`${SERVICE_ID}-new`, host.unitDir))
+    );
+    assertEquals(
+      (await readHealthyRelease(host.layout, SERVICE_ID, NEW_RELEASE)) !==
+        null,
+      true,
+    );
+    assertEquals(phases, [
+      "start-release",
+      "health",
+      "switch-traffic",
+      "stop-old-release",
+    ]);
+    assertEquals(
+      lines.some((line) =>
+        line.includes(`release ${SERVING_RELEASE} stays on disk for a rollback`)
+      ),
+      true,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a first deploy starts the app directly and has nothing to switch from", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const phases: string[] = [];
+  const lines: string[] = [];
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...applyOpts(host, mock),
+      setPhase: (phase: string) => {
+        if (phases.at(-1) !== phase) phases.push(phase);
+      },
+      onOutput: (_stream: string, line: string) => {
+        lines.push(line);
+      },
+    });
+    assertEquals(mock.systemctl("enable"), [OWN_UNIT]);
+    assertEquals(
+      mock.calls.some((call) => call.args.includes(CHECK_UNIT)),
+      false,
+    );
+    assertEquals(phases, [
+      "start-release",
+      "health",
+      "switch-traffic",
+      "stop-old-release",
+    ]);
+    assertEquals(
+      lines.some((line) => line.includes("nothing was serving before")),
+      true,
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("with no spare port the release serving is left as it was", async () => {
+  const { host, mock, opts, current } = await servingHost();
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...opts,
+          pickPort: () => {
+            throw new Error("Address already in use");
+          },
+        }),
+      Error,
+    );
+    assertStringIncludes(error.message, "no free loopback port");
+    assertStringIncludes(error.message, "keeps serving");
+    assertEquals(await current(), join("releases", SERVING_RELEASE));
+    assertEquals(mock.systemctl("restart"), []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a check copy that systemd refuses to start fails the deploy and is removed", async () => {
+  const { host, mock, opts, current } = await servingHost();
+  const refuse: RunFn = (command, args) =>
+    args.includes("restart") && args.at(-1) === CHECK_UNIT
+      ? Promise.resolve(fail("Unit failed to start"))
+      : mock.run(command, args);
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...opts,
+          run: refuse,
+        }),
+      Error,
+    );
+    assertStringIncludes(
+      error.message,
+      "the new release could not be started (Unit failed to start), so it never took traffic",
+    );
+    assertEquals(await current(), join("releases", SERVING_RELEASE));
+    assertEquals(mock.systemctl("stop"), [CHECK_UNIT]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a release that answered beside the old one but not after the switch rolls back", async () => {
+  const { host, mock, opts, current } = await servingHost();
+  await recordRelease(host.layout, SERVING_RELEASE);
+  let switched = false;
+  try {
+    const error = await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...opts,
+          probe: async (port: number) => {
+            if (port === CHECK_PORT) return true;
+            // After the switch only the restored release answers.
+            switched = true;
+            return await current() === join("releases", SERVING_RELEASE);
+          },
+        }),
+      Error,
+    );
+    assertEquals(switched, true);
+    assertStringIncludes(
+      error.message,
+      `rolled back to release ${SERVING_RELEASE}`,
+    );
+    assertEquals(await current(), join("releases", SERVING_RELEASE));
+    // The copy is removed on this path too.
+    assertEquals(mock.systemctl("stop"), [CHECK_UNIT]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a check copy left by a deploy that did not finish is removed by the next one and by stop", async () => {
+  const host = await makeTestHost();
+  const checkId = `${SERVICE_ID}-new`;
+  const leave = async () => {
+    await Deno.mkdir(join(nativeAppConfigDir(host.layout), "check"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      join(
+        nativeAppConfigDir(host.layout),
+        "check",
+        `tp-${ENVIRONMENT_ID}-${checkId}.service`,
+      ),
+      "leftover",
+    );
+    await Deno.writeTextFile(
+      nativeAppUnitPath(checkId, host.unitDir),
+      "leftover",
+    );
+  };
+  try {
+    await leave();
+    const mock = createRunMock();
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    assertEquals(mock.systemctl("stop"), [CHECK_UNIT]);
+    await assertRejects(() =>
+      Deno.stat(nativeAppUnitPath(checkId, host.unitDir))
+    );
+    // Removed before the app is started.
+    const [stopAt] = callIndexes(mock, (args) => args.includes("stop"));
+    const [enableAt] = callIndexes(mock, (args) => args.includes("enable"));
+    assertEquals(stopAt < enableAt, true);
+
+    await leave();
+    const stop = createRunMock();
+    await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+      run: stop.run,
+      systemdUnitDir: host.unitDir,
+    });
+    assertEquals(stop.systemctl("stop"), [CHECK_UNIT]);
+    await assertRejects(() =>
+      Deno.stat(nativeAppUnitPath(checkId, host.unitDir))
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("without a port seam the check copy gets a free loopback port from the kernel", async () => {
+  const { host, opts } = await servingHost();
+  const { pickPort: _seam, ...withoutSeam } = opts;
+  const ports: number[] = [];
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...withoutSeam,
+      probe: (port: number) => {
+        ports.push(port);
+        return Promise.resolve(true);
+      },
+    });
+    assertEquals(ports.length, 2);
+    assertEquals(ports[0] !== 18100 && ports[0] > 1024, true);
+    assertEquals(ports[1], 18100);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a check copy whose unit cannot be removed stays staged, so the next deploy retries", async () => {
+  const host = await makeTestHost();
+  const checkId = `${SERVICE_ID}-new`;
+  const staged = join(
+    nativeAppConfigDir(host.layout),
+    "check",
+    `tp-${ENVIRONMENT_ID}-${checkId}.service`,
+  );
+  try {
+    await Deno.mkdir(dirname(staged), { recursive: true });
+    await Deno.writeTextFile(staged, "leftover");
+    const mock = createRunMock();
+    const refuse: RunFn = (command, args) =>
+      (args.includes("stop") || args.includes("rm")) &&
+        args.at(-1)?.includes(checkId) === true
+        ? Promise.resolve(fail("refused"))
+        : mock.run(command, args);
+    await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+      run: refuse,
+      systemdUnitDir: host.unitDir,
+    });
+    assertEquals((await Deno.stat(staged)).isFile, true);
+    assertEquals(mock.systemctl("daemon-reload"), []);
+  } finally {
+    await host.cleanup();
+  }
 });
