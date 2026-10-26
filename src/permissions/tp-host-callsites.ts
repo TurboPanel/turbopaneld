@@ -1066,11 +1066,8 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/native/apply-native-apps.ts|["-n","rm","-f","--",nativeAppUnitPath(serviceId,deps?.systemdUnitDir)]',
+    'src/deploy/native/apply-native-apps.ts|["-n","rm","-f","--",path]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-app-svc1.service`] },
-  ),
-  tpHost(
-    'src/deploy/native/apply-native-apps.ts|["-n","rm","-f","--",nativeAppUnitPath(params.checkId,params.systemdUnitDir)]',
     { argv: ["rm", "-f", "--", `${UNITS}/${CHECK_UNIT}`] },
   ),
 

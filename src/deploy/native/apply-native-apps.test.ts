@@ -3342,3 +3342,22 @@ test("a check copy whose unit cannot be removed stays staged, so the next deploy
     await host.cleanup();
   }
 });
+
+test("an app id shaped like a check copy is refused", async () => {
+  const host = await makeTestHost();
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(
+          host.layout,
+          ENVIRONMENT_ID,
+          [makeApp({ serviceId: "web-new" })],
+          applyOpts(host, createRunMock()),
+        ),
+      Error,
+      "must not end in -new",
+    );
+  } finally {
+    await host.cleanup();
+  }
+});

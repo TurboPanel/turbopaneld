@@ -411,6 +411,14 @@ async function systemctl(
   return await io.run("sudo", hostSudoArgs(["-n", "systemctl", ...args]));
 }
 
+/** Remove one installed unit file (absent is fine). */
+async function removeUnitFile(
+  io: NativeAppIo,
+  path: string,
+): Promise<RunResult> {
+  return await io.run("sudo", hostSudoArgs(["-n", "rm", "-f", "--", path]));
+}
+
 /** True when the unit is currently active (a redeploy restarts, not enables). */
 async function unitIsActive(io: NativeAppIo, unit: string): Promise<boolean> {
   const result = await systemctl(io, ["is-active", "--quiet", unit]);
@@ -1098,15 +1106,9 @@ async function retireCheckCopy(
       `native app check copy stop failed unit=${unit}: ${stop.stderr}`,
     );
   }
-  const rm = await io.run(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      "rm",
-      "-f",
-      "--",
-      nativeAppUnitPath(params.checkId, params.systemdUnitDir),
-    ]),
+  const rm = await removeUnitFile(
+    io,
+    nativeAppUnitPath(params.checkId, params.systemdUnitDir),
   );
   if (!rm.success) {
     logWarn(
@@ -1520,6 +1522,11 @@ export async function applyNativeAppServices(
   assertSafeId(environmentId, "environmentId");
   for (const app of apps) {
     assertSafeId(app.serviceId, "serviceId");
+    // The check copy's id is `<serviceId>-new`: an app id of that shape could
+    // be another app's check copy.
+    if (app.serviceId.endsWith("-new")) {
+      throw new Error("native app serviceId must not end in -new");
+    }
   }
 
   const io = resolveIo(opts);
@@ -1698,15 +1705,9 @@ export async function removeNativeAppServices(
         `native app disable failed unit=${unit}: ${disable.stderr}`,
       );
     }
-    const rm = await io.run(
-      "sudo",
-      hostSudoArgs([
-        "-n",
-        "rm",
-        "-f",
-        "--",
-        nativeAppUnitPath(serviceId, deps?.systemdUnitDir),
-      ]),
+    const rm = await removeUnitFile(
+      io,
+      nativeAppUnitPath(serviceId, deps?.systemdUnitDir),
     );
     if (!rm.success) {
       logWarn(
