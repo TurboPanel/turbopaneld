@@ -307,6 +307,42 @@ export type ApplySourceReleasesDeps = {
   buildSandboxRoot?: string;
 };
 
+/** What a rollback to an image-built release reports: its record is the rollback. */
+function imageRollbackResult(
+  entry: EnvironmentDeploySource,
+  target: RollbackTarget,
+  params: { serviceId: string; releaseId: string },
+  previousReleaseId: string | null,
+): AppliedRelease {
+  const { paths, manifest: recordedManifest } = target;
+  return {
+    composeServiceName: entry.composeServiceName,
+    serviceId: params.serviceId,
+    releaseId: params.releaseId,
+    commitSha: recordedManifest.commitSha,
+    ...(recordedManifest.commitMessage === undefined
+      ? {}
+      : { commitMessage: recordedManifest.commitMessage }),
+    ...(recordedManifest.commitAuthor === undefined
+      ? {}
+      : { commitAuthor: recordedManifest.commitAuthor }),
+    releaseDir: paths.releaseDir,
+    imageTag: recordedManifest.imageTag,
+    ...(recordedManifest.imageDigest === undefined
+      ? {}
+      : { imageDigest: recordedManifest.imageDigest }),
+    ...(recordedManifest.railpackFrontendVersion === undefined ? {} : {
+      railpackFrontendVersion: recordedManifest.railpackFrontendVersion,
+    }),
+    ...(recordedManifest.railpackPlanVersion === undefined
+      ? {}
+      : { railpackPlanVersion: recordedManifest.railpackPlanVersion }),
+    previousReleaseId,
+    standaloneOutput: false,
+    staticExport: false,
+  };
+}
+
 /**
  * Promote an already-published release for one service — the rollback lane.
  *
@@ -353,32 +389,7 @@ async function rollbackOneRelease(
       `rolled ${entry.composeServiceName} back to release ${params.releaseId} ` +
         `(image ${recordedManifest.imageTag})`,
     );
-    return {
-      composeServiceName: entry.composeServiceName,
-      serviceId: params.serviceId,
-      releaseId: params.releaseId,
-      commitSha: recordedManifest.commitSha,
-      ...(recordedManifest.commitMessage === undefined
-        ? {}
-        : { commitMessage: recordedManifest.commitMessage }),
-      ...(recordedManifest.commitAuthor === undefined
-        ? {}
-        : { commitAuthor: recordedManifest.commitAuthor }),
-      releaseDir: paths.releaseDir,
-      imageTag: recordedManifest.imageTag,
-      ...(recordedManifest.imageDigest === undefined
-        ? {}
-        : { imageDigest: recordedManifest.imageDigest }),
-      ...(recordedManifest.railpackFrontendVersion === undefined ? {} : {
-        railpackFrontendVersion: recordedManifest.railpackFrontendVersion,
-      }),
-      ...(recordedManifest.railpackPlanVersion === undefined
-        ? {}
-        : { railpackPlanVersion: recordedManifest.railpackPlanVersion }),
-      previousReleaseId,
-      standaloneOutput: false,
-      staticExport: false,
-    };
+    return imageRollbackResult(entry, target, params, previousReleaseId);
   }
 
   // Cutting `current` over is the switch itself: past this line a cancel is too late.
