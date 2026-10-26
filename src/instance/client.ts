@@ -1892,6 +1892,11 @@ export class InstanceClient {
         // resolves to unknown.
         this.#noteInstanceVersion(message.instanceVersion);
         this.#notePeerFeatures(message.features);
+        logInfo(
+          "instance",
+          "attach frame received",
+          `features=${this.#peerFeatures.length}`,
+        );
         void this.#afterAttachVersion(ws);
         break;
       case "echo":
