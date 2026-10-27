@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import {
   applyManagedBootHoldAtStart,
   connectBeforeBootConvergeDefault,
@@ -488,6 +488,42 @@ test("runDaemon connect path falls back to default metric factories", async () =
   });
   await runDaemon(stub.io);
   assertEquals(usedDefaults, true);
+});
+
+test("runDaemon registers the command ports before it connects and undoes them on shutdown", async () => {
+  const events: string[] = [];
+  const stub = stubIo({
+    shouldConnectToInstance: () => true,
+    wireCommandPorts: () => {
+      events.push("wire");
+      return () => events.push("unwire");
+    },
+    connectInstance: () => {
+      events.push("connect");
+      return Promise.resolve({
+        stop() {
+          events.push("stop");
+        },
+      });
+    },
+  });
+  await runDaemon(stub.io);
+  await Promise.resolve();
+  assertEquals(events, ["wire", "connect", "stop", "unwire"]);
+});
+
+test("runDaemon undoes the command ports when connecting fails", async () => {
+  const events: string[] = [];
+  const stub = stubIo({
+    shouldConnectToInstance: () => true,
+    wireCommandPorts: () => {
+      events.push("wire");
+      return () => events.push("unwire");
+    },
+    connectInstance: () => Promise.reject(new TypeError("no control plane")),
+  });
+  await assertRejects(() => runDaemon(stub.io), TypeError, "no control plane");
+  assertEquals(events, ["wire", "unwire"]);
 });
 
 test("runDaemon writes startup logs through the default logger", async () => {
