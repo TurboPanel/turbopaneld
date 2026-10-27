@@ -51,9 +51,20 @@ export const RESEND_INTERVAL_MS = 30_000;
 /** The journaled step plan is rewritten at most this often when only text changed. */
 export const PROGRESS_JOURNAL_INTERVAL_MS = 30_000;
 
-/** An unconfirmed outcome older than this, or beyond the entry cap, is dropped. */
+/**
+ * An unconfirmed outcome older than this, or beyond the entry cap, is dropped.
+ * The cap matches {@link REPORT_MAX_IDS}, so `hello` can list every one.
+ */
 export const UNACKED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-export const UNACKED_MAX_ENTRIES = 200;
+export const UNACKED_MAX_ENTRIES = 64;
+
+/**
+ * Kept outcomes sent on one socket per {@link RESEND_INTERVAL_MS} window; the
+ * rest wait for the next window. The control plane closes a socket that sends
+ * more than 120 frames in 60 s, so resends stay at 60 at most in any 60 s and
+ * presence, progress and new results always fit beside them.
+ */
+export const OUTCOME_BURST_MAX = 20;
 
 /** Wire bounds for {@link CommandRecoveryReport}. */
 export const REPORT_MAX_IDS = 64;
@@ -109,6 +120,33 @@ const writeChains = new Map<string, Promise<void>>();
 let currentSocket: OutboxSocket | undefined;
 let currentPeer: OutboxPeer | undefined;
 let resendTimer: unknown;
+/** Outcome ids sent on the current socket, with when; cleared on a new socket. */
+const sentOnSocket = new Map<string, number>();
+/** Kept outcomes sent in the current window (see {@link OUTCOME_BURST_MAX}). */
+let burstWindow = { start: 0, used: 0 };
+/** When an outcome answered from a dead daemon's journal was first recorded. */
+const keptSince = new Map<string, number>();
+
+/** Make `ws` the session socket; a different socket starts with nothing sent. */
+function useSocket(ws: OutboxSocket): void {
+  if (ws === currentSocket) return;
+  currentSocket = ws;
+  sentOnSocket.clear();
+  burstWindow = { start: timers.now(), used: 0 };
+}
+
+function burstLeft(): number {
+  const now = timers.now();
+  if (now - burstWindow.start >= RESEND_INTERVAL_MS) {
+    burstWindow = { start: now, used: 0 };
+  }
+  return OUTCOME_BURST_MAX - burstWindow.used;
+}
+
+function noteSent(id: string): void {
+  sentOnSocket.set(id, timers.now());
+  burstWindow.used += 1;
+}
 
 function recovers(): boolean {
   return currentPeer?.supports(COMMAND_RECOVERY_FEATURE) === true;
@@ -206,7 +244,7 @@ export function answerRepeatedDispatch(
   id: string,
   commandId: string = id,
 ): boolean {
-  if (ws.readyState === WebSocket.OPEN) currentSocket = ws;
+  if (ws.readyState === WebSocket.OPEN) useSocket(ws);
   if (running.has(id)) {
     const latest = lastProgress.get(id);
     if (latest) {
@@ -289,10 +327,30 @@ function trySend(ws: OutboxSocket | undefined, message: object): boolean {
   }
 }
 
-/** Send on the newest attached socket, falling back to `ws`. */
+/** Send on the newest attached socket, falling back to `ws`. Not paced. */
+function sendLive(ws: OutboxSocket | undefined, outcome: OutcomeMessage) {
+  if (trySend(currentSocket, outcome)) {
+    noteSent(outcome.id);
+    return true;
+  }
+  return trySend(ws, outcome);
+}
+
+/** {@link sendLive} with the send time stamped. */
 function sendOutcome(ws: OutboxSocket | undefined, outcome: OutcomeMessage) {
+  return sendLive(ws, {
+    ...outcome,
+    at: new Date(timers.now()).toISOString(),
+  });
+}
+
+/** Send a kept outcome on the session socket while this window allows. */
+function sendKept(outcome: OutcomeMessage): boolean {
+  if (burstLeft() <= 0) return false;
   const fresh = { ...outcome, at: new Date(timers.now()).toISOString() };
-  return trySend(currentSocket, fresh) || trySend(ws, fresh);
+  if (!trySend(currentSocket, fresh)) return false;
+  noteSent(outcome.id);
+  return true;
 }
 
 /**
@@ -315,7 +373,7 @@ export async function deliverCommandOutcome(
   });
   await queueWrite(outcome.id, () => writeJournalAtomic(entry));
   acceptedAt.delete(outcome.id);
-  const sent = trySend(currentSocket, outcome) || trySend(ws, outcome);
+  const sent = sendLive(ws, outcome);
   if (keepsUntilAck()) {
     unacked.set(outcome.id, outcome);
     scheduleResend();
@@ -336,22 +394,40 @@ export async function acknowledgeCommandOutcome(id: string): Promise<void> {
   if (running.has(id)) return;
   unacked.delete(id);
   held.delete(id);
+  keptSince.delete(id);
   writeChains.delete(id);
   await removeJournal(id);
 }
 
 function scheduleResend(): void {
-  if (resendTimer !== undefined || unacked.size === 0) return;
+  if (resendTimer !== undefined || (unacked.size === 0 && held.size === 0)) {
+    return;
+  }
   resendTimer = timers.setTimer(() => {
     resendTimer = undefined;
-    resendUnacked();
+    resendUnacked(RESEND_INTERVAL_MS);
+    // An older control plane gets what one window could not carry now.
+    if (!keepsUntilAck()) void flushHeld();
     scheduleResend();
   }, RESEND_INTERVAL_MS);
 }
 
-function resendUnacked(): void {
+/**
+ * Send unconfirmed outcomes not sent on this socket in the last `minAgeMs`
+ * (never sent first, then the longest ago), as far as the window allows.
+ */
+function resendUnacked(minAgeMs: number): void {
   if (currentSocket?.readyState !== WebSocket.OPEN) return;
-  for (const outcome of unacked.values()) sendOutcome(currentSocket, outcome);
+  const now = timers.now();
+  const sentAt = (id: string) => sentOnSocket.get(id) ?? -1;
+  const due = [...unacked.values()]
+    .filter((outcome) =>
+      !sentOnSocket.has(outcome.id) || now - sentAt(outcome.id) >= minAgeMs
+    )
+    .sort((a, b) => sentAt(a.id) - sentAt(b.id));
+  for (const outcome of due) {
+    if (!sendKept(outcome)) return;
+  }
 }
 
 async function readJournalEntry(id: string): Promise<JournalEntry | undefined> {
@@ -494,9 +570,10 @@ function orphanReply(id: string, entry: JournalEntry | undefined) {
 /**
  * Send held outcomes. With a control plane that confirms results they become
  * unconfirmed (journal kept until the ack; sent by the resend that follows);
- * without one a sent outcome is done.
+ * without one a sent outcome is done. One already sent on this socket (when
+ * it opened) is not sent again; what the window cannot carry stays held.
  */
-async function flushHeld(ws: OutboxSocket): Promise<void> {
+async function flushHeld(): Promise<void> {
   if (recovers()) {
     for (const [id, outcome] of held) {
       unacked.set(id, outcome);
@@ -506,30 +583,32 @@ async function flushHeld(ws: OutboxSocket): Promise<void> {
   }
   const sent: string[] = [];
   for (const [id, outcome] of held) {
-    if (
-      !trySend(ws, { ...outcome, at: new Date(timers.now()).toISOString() })
-    ) {
-      break;
-    }
+    if (!sentOnSocket.has(id) && !sendKept(outcome)) break;
     held.delete(id);
     sent.push(id);
   }
   await Promise.all(sent.map(removeJournal));
 }
 
+/** When a dead daemon's journal entry was recorded, if it says so readably. */
+function entryRecordedMs(entry: JournalEntry | undefined): number | undefined {
+  const times = [entry?.journaledAt, entry?.outcome?.at, entry?.acceptedAt];
+  for (const time of times) {
+    const ms = typeof time === "string" ? Date.parse(time) : Number.NaN;
+    if (Number.isFinite(ms)) return ms;
+  }
+  return undefined;
+}
+
 /** Answer journal entries of a daemon that died, then keep or clear them. */
-async function answerOrphans(ws: OutboxSocket): Promise<void> {
+async function answerOrphans(): Promise<void> {
   const ids = await orphanedIds();
   const entries = await Promise.all(ids.map((id) => readJournalEntry(id)));
   const keep = recovers();
-  const answered: string[] = [];
   ids.forEach((id, index) => {
-    const reply = orphanReply(id, entries[index]);
-    if (keep) {
-      unacked.set(id, reply);
-      return;
-    }
-    if (trySend(ws, reply)) answered.push(id);
+    const recorded = entryRecordedMs(entries[index]);
+    if (recorded !== undefined) keptSince.set(id, recorded);
+    (keep ? unacked : held).set(id, orphanReply(id, entries[index]));
   });
   if (keep) {
     await Promise.all(ids.map((id, index) => {
@@ -547,7 +626,7 @@ async function answerOrphans(ws: OutboxSocket): Promise<void> {
     }));
     return;
   }
-  await Promise.all(answered.map(removeJournal));
+  await flushHeld();
 }
 
 /** When an outcome message says it was sent, if that is a readable timestamp. */
@@ -560,20 +639,30 @@ function outcomeTimeIso(
     : undefined;
 }
 
+/**
+ * When an unconfirmed outcome was recorded: its journal entry's time for one
+ * answered after a restart (its message is stamped when it is sent), else the
+ * outcome's own time.
+ */
+function recordedAtMs(id: string): number | undefined {
+  const since = keptSince.get(id);
+  if (since !== undefined) return since;
+  const at = outcomeTimeIso(unacked.get(id));
+  return at === undefined ? undefined : Date.parse(at);
+}
+
 /** Drop unconfirmed entries that are too old or beyond the cap, with a warning. */
 async function pruneUnacked(): Promise<void> {
   const cutoff = timers.now() - UNACKED_RETENTION_MS;
   const ids = [...unacked.keys()];
   // An outcome without a readable time is kept; only the entry cap drops it.
   const stale = ids.filter((id) => {
-    const at = outcomeTimeIso(unacked.get(id));
-    return at !== undefined && Date.parse(at) < cutoff;
+    const at = recordedAtMs(id);
+    return at !== undefined && at < cutoff;
   });
   // Beyond the cap the oldest outcomes go first; one without a readable time counts as oldest.
-  const recordedMs = (id: string) => {
-    const at = outcomeTimeIso(unacked.get(id));
-    return at === undefined ? Number.NEGATIVE_INFINITY : Date.parse(at);
-  };
+  const recordedMs = (id: string) =>
+    recordedAtMs(id) ?? Number.NEGATIVE_INFINITY;
   const overflow = ids.filter((id) => !stale.includes(id))
     .sort((a, b) => recordedMs(a) - recordedMs(b))
     .slice(0, Math.max(0, ids.length - stale.length - UNACKED_MAX_ENTRIES));
@@ -596,9 +685,10 @@ async function pruneUnacked(): Promise<void> {
 export function noteSessionOpen(ws: OutboxSocket, peer?: OutboxPeer): void {
   currentPeer = peer ?? currentPeer;
   if (ws.readyState !== WebSocket.OPEN) return;
-  currentSocket = ws;
-  for (const outcome of held.values()) sendOutcome(ws, outcome);
-  for (const outcome of unacked.values()) sendOutcome(ws, outcome);
+  useSocket(ws);
+  for (const outcome of [...unacked.values(), ...held.values()]) {
+    if (!sendKept(outcome)) break;
+  }
   scheduleResend();
 }
 
@@ -625,14 +715,15 @@ export async function flushCommandOutcomes(
   ws: OutboxSocket,
   peer?: OutboxPeer,
 ): Promise<void> {
-  currentSocket = ws;
+  useSocket(ws);
   currentPeer = peer ?? currentPeer;
   releaseForOlderPeer();
-  await flushHeld(ws);
+  await flushHeld();
   if (ws.readyState !== WebSocket.OPEN) return;
-  await answerOrphans(ws);
+  await answerOrphans();
   await pruneUnacked();
-  resendUnacked();
+  // What went out when this socket opened is not sent a second time now.
+  resendUnacked(Number.POSITIVE_INFINITY);
   scheduleResend();
 }
 
@@ -670,6 +761,9 @@ export function resetCommandOutboxForTests(
   acceptedAt.clear();
   lastProgress.clear();
   writeChains.clear();
+  sentOnSocket.clear();
+  keptSince.clear();
+  burstWindow = { start: 0, used: 0 };
   currentSocket = undefined;
   currentPeer = undefined;
   timers = { ...defaultTimers, ...override };

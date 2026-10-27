@@ -9,6 +9,7 @@ import {
   markCommandInFlight,
   noteCommandProgress,
   noteSessionOpen,
+  OUTCOME_BURST_MAX,
   PROGRESS_JOURNAL_INTERVAL_MS,
   RESEND_INTERVAL_MS,
   resetCommandOutboxForTests,
@@ -595,5 +596,129 @@ test("past the entry cap the outcomes recorded first are dropped, whatever order
     assertEquals(names.includes("order-0.json"), true);
     assertEquals(names.includes(`order-${count - 1}.json`), false);
     assertEquals(names.includes(`order-${count - 2}.json`), false);
+  });
+});
+
+/** The control plane closes a socket past this many frames in 60 s. */
+const PANEL_FRAMES_PER_MINUTE = 120;
+
+/** Most frames sent within any 60 s, read from the send stamps. */
+function busiestMinute(sent: Record<string, unknown>[]): number {
+  const times = sent.map((m) => Date.parse(String(m.at))).sort((a, b) => a - b);
+  return Math.max(
+    0,
+    ...times.map((start) =>
+      times.filter((t) => t >= start && t < start + 60_000).length
+    ),
+  );
+}
+
+/** Keep `count` results unconfirmed while the socket is down. */
+async function keepWhileDown(
+  count: number,
+  peer: { supports(feature: string): boolean } = recovering,
+) {
+  const closed = socket(WebSocket.CLOSED);
+  await flushCommandOutcomes(closed.ws, peer);
+  const ids = Array.from({ length: count }, (_, i) => `burst-${i}`);
+  for (const id of ids) {
+    await markCommandInFlight(id);
+    await deliverCommandOutcome(closed.ws, {
+      type: "command-outcome",
+      id,
+      ok: true,
+    });
+  }
+  return ids;
+}
+
+test("a reconnect with more kept results than the control plane takes per minute is paced and still drains", async () => {
+  await withState(async () => {
+    const time = fakeTime();
+    const ids = await keepWhileDown(UNACKED_MAX_ENTRIES);
+    const fresh = socket(WebSocket.OPEN);
+    noteSessionOpen(fresh.ws, { ...recovering, known: () => false });
+    await flushCommandOutcomes(fresh.ws, recovering);
+    // The attach does not send again what went out when the socket opened.
+    assertEquals(fresh.sent.length, OUTCOME_BURST_MAX);
+    assertEquals(new Set(fresh.sent.map((m) => m.id)).size, OUTCOME_BURST_MAX);
+    for (let tick = 0; tick < 6; tick++) {
+      time.advance(RESEND_INTERVAL_MS);
+      time.fire();
+    }
+    assertEquals(new Set(fresh.sent.map((m) => m.id)), new Set(ids));
+    const busiest = busiestMinute(fresh.sent);
+    assertEquals(busiest <= 3 * OUTCOME_BURST_MAX, true);
+    assertEquals(busiest < PANEL_FRAMES_PER_MINUTE, true);
+  });
+});
+
+test("journal entries answered after a restart are paced too", async () => {
+  await withState(async () => {
+    const ids = await keepWhileDown(UNACKED_MAX_ENTRIES);
+    const time = fakeTime(); // the daemon restarted: only the journals are left
+    const fresh = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(fresh.ws, recovering);
+    assertEquals(fresh.sent.length, OUTCOME_BURST_MAX);
+    for (let tick = 0; tick < 6; tick++) {
+      time.advance(RESEND_INTERVAL_MS);
+      time.fire();
+    }
+    assertEquals(new Set(fresh.sent.map((m) => m.id)), new Set(ids));
+    assertEquals(busiestMinute(fresh.sent) <= 3 * OUTCOME_BURST_MAX, true);
+  });
+});
+
+test("an older control plane gets a dead daemon's results paced and every journal still clears", async () => {
+  await withState(async () => {
+    const count = OUTCOME_BURST_MAX + 10;
+    await keepWhileDown(count, older);
+    const time = fakeTime();
+    const fresh = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(fresh.ws, older);
+    assertEquals(fresh.sent.length, OUTCOME_BURST_MAX);
+    assertEquals((await journalNames()).length, count - OUTCOME_BURST_MAX);
+    time.advance(RESEND_INTERVAL_MS);
+    time.fire();
+    await settleCommandJournalWrites();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assertEquals(fresh.sent.length, count);
+    assertEquals(await journalNames(), []);
+  });
+});
+
+test("a result answered after a restart ages from when it was journaled, oldest dropped first", async () => {
+  await withState(async () => {
+    const first = fakeTime();
+    const open = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(open.ws, recovering);
+    const count = UNACKED_MAX_ENTRIES + 1;
+    for (let i = 0; i < count; i++) {
+      await markCommandInFlight(`aged-${i}`);
+      // The message times run backwards; the journal times decide.
+      await deliverCommandOutcome(open.ws, {
+        type: "command-outcome",
+        id: `aged-${i}`,
+        ok: true,
+        at: new Date(Date.parse("2026-10-22T12:00:00.000Z") - i * 1000)
+          .toISOString(),
+      });
+      first.advance(1000);
+    }
+    fakeTime(); // restarted
+    const fresh = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(fresh.ws, recovering);
+    let names = await journalNames();
+    assertEquals(names.length, UNACKED_MAX_ENTRIES);
+    assertEquals(names.includes("aged-0.json"), false);
+    assertEquals(names.includes(`aged-${count - 1}.json`), true);
+
+    // Restarted again a week later: every one is past the retention.
+    fakeTime().advance(UNACKED_RETENTION_MS + count * 1000 + 1);
+    const after = socket(WebSocket.OPEN);
+    await flushCommandOutcomes(after.ws, recovering);
+    names = await journalNames();
+    assertEquals(names, []);
+    assertEquals(after.sent.length, 0);
   });
 });

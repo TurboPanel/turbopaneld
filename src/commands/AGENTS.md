@@ -1,13 +1,13 @@
 # Command handlers — AGENTS.md
 
 Handlers live under `src/commands/`. `src/instance/client.ts` is transport
-only: it never imports this directory. `src/entry/run.ts` injects
-`handleCommandDispatch`, `handleFabricPathProbe`, and `handleDrivetempEnable`
-into `InstanceClient`, and registers the rest through
-`src/commands/wire.ts` (`wireCommandPorts`) before it connects: the command
-result keeping (resend on open and attach, the result ack, repeated
-dispatches, the hello report) reaches the client only through those ports.
-Tests that construct the client without the options call it too.
+only: it never imports this directory. `src/entry/run.ts` calls
+`wireCommandPorts` (`src/commands/wire.ts`) before it connects, which
+registers all eight client ports: command dispatch, the fabric path probe,
+drivetemp enable, session open and attach (resend kept results), the result
+ack, repeated dispatches and the `hello` report. Nothing is passed as client
+options any more. Tests that construct the client call `wireCommandPorts` (or
+`registerCommandPorts`) the same way.
 
 Wire contracts (payload parse / result shapes) live in
 `src/contracts/commands-contracts.ts` and must stay aligned with the
@@ -56,6 +56,11 @@ most every 30 s) and, once finished, the final `command-outcome`. With a
 control plane that advertises the feature the entry is removed only when its
 `command-outcome-ack` arrives; until then the outcome is sent again on every
 attach and every 30 s. Without the feature it is removed once sent, as before.
+Kept results are paced: at most `OUTCOME_BURST_MAX` (20) per socket per 30 s
+window (the control plane closes a socket past 120 frames a minute), never
+sent twice on one socket between its open and its attach, and the rest go out
+on the next windows. At most 64 stay unconfirmed, for at most 7 days counted
+from when they were journaled; beyond that the oldest are dropped.
 An entry with no outcome left by a killed daemon is answered with a failed
 outcome whose `result` is `{ interrupted: true, lastStep?, releasePromoted? }`.
 `hello` / `heartbeat` carry `commands: { running, unacked }` (ids, at most 64)

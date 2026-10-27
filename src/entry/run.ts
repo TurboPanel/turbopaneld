@@ -5,11 +5,8 @@ import {
   DockerMonitor,
 } from "../docker/index.ts";
 import { connectInstance, hasEnrolledServerId } from "../instance/client.ts";
-import { handleCommandDispatch } from "../commands/command-router.ts";
-import { handleDrivetempEnable } from "../commands/drivetemp.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
-  handleFabricPathProbe,
   reinstallFabricForwardingIfEnabled,
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
@@ -199,9 +196,6 @@ async function openControlPlane(
   return await connectInstance({
     metricsCollectorFactory: () => createMetricsCollector(),
     collectTopologyFn: () => collectTopology(),
-    handleCommandDispatch,
-    handleFabricPathProbe,
-    handleDrivetempEnable,
   });
 }
 
