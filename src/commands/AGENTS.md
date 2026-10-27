@@ -3,8 +3,11 @@
 Handlers live under `src/commands/`. `src/instance/client.ts` is transport
 only: it never imports this directory. `src/entry/run.ts` injects
 `handleCommandDispatch`, `handleFabricPathProbe`, and `handleDrivetempEnable`
-into `InstanceClient` (plus `src/commands/wire.ts` for tests that construct
-the client without those options).
+into `InstanceClient`, and registers the rest through
+`src/commands/wire.ts` (`wireCommandPorts`) before it connects: the command
+result keeping (resend on open and attach, the result ack, repeated
+dispatches, the hello report) reaches the client only through those ports.
+Tests that construct the client without the options call it too.
 
 Wire contracts (payload parse / result shapes) live in
 `src/contracts/commands-contracts.ts` and must stay aligned with the

@@ -7,6 +7,7 @@ import {
 import { connectInstance, hasEnrolledServerId } from "../instance/client.ts";
 import { handleCommandDispatch } from "../commands/command-router.ts";
 import { handleDrivetempEnable } from "../commands/drivetemp.ts";
+import { wireCommandPorts } from "../commands/wire.ts";
 import {
   handleFabricPathProbe,
   reinstallFabricForwardingIfEnabled,
@@ -130,6 +131,12 @@ export type DaemonRunIo = {
     metricsCollectorFactory: () => unknown;
     collectTopologyFn: () => unknown;
   }) => Promise<{ stop(): void }>;
+  /**
+   * Register the command result keeping (resend on attach, the result ack,
+   * repeated dispatches, the hello report) with the client; returns the undo.
+   * Defaults to {@link wireCommandPorts}.
+   */
+  wireCommandPorts?: () => () => void;
   createMetricsCollector?: () => unknown;
   collectTopology?: () => unknown;
   /**
@@ -154,7 +161,31 @@ function closeDockerClient(client: DockerClientLike | undefined): void {
   }
 }
 
+/**
+ * Connect with the command ports registered first: the first socket's open and
+ * attach already send kept results, and without the ports a result finished
+ * while the link was down was never sent again nor answered after a restart.
+ */
 async function connectControlPlane(
+  io: DaemonRunIo,
+): Promise<{ stop(): void }> {
+  const unwire = (io.wireCommandPorts ?? wireCommandPorts)();
+  let instance: { stop(): void };
+  try {
+    instance = await openControlPlane(io);
+  } catch (err) {
+    unwire();
+    throw err;
+  }
+  return {
+    stop() {
+      instance.stop();
+      unwire();
+    },
+  };
+}
+
+async function openControlPlane(
   io: DaemonRunIo,
 ): Promise<{ stop(): void }> {
   const connect = io.connectInstance;
