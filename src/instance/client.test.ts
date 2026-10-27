@@ -7032,14 +7032,11 @@ it({
         at: new Date().toISOString(),
       });
       await waitFor(
-        "command-result",
+        "command-outcome",
         () =>
-          framesOfType(socket, "command-result").find((f) =>
+          framesOfType(socket, "command-outcome").find((f) =>
             (f as { id?: string }).id === "cmd-ping"
-          ) ??
-            framesOfType(socket, "command-ack").find((f) =>
-              (f as { id?: string }).id === "cmd-ping"
-            ),
+          ),
       );
 
       // Make ws.send throw on the tunnel-token-result so #runSocketHandler catch fires.
@@ -7096,8 +7093,11 @@ it({
         );
       socket.receive(ping("cmd-live"));
       await waitFor(
-        "ack on the live socket",
-        () => acked("cmd-live") || undefined,
+        "outcome on the live socket",
+        () =>
+          framesOfType(socket, "command-outcome").some((f) =>
+            (f as { id?: string }).id === "cmd-live"
+          ) || undefined,
       );
 
       // The synthetic close from closeAndAbandon, then the real one.
@@ -7151,7 +7151,7 @@ it({
         "re-ack",
         () => count("command-ack") > acksBefore || undefined,
       );
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await waitFor("outcome", () => count("command-outcome") || undefined);
     } finally {
       await restore();
       restoreHooks();
