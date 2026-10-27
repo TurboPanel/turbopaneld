@@ -107,9 +107,16 @@ async function startServer(
 }
 
 async function waitForSql(name: string): Promise<void> {
+  // On first start the image entrypoint runs a temporary server that answers
+  // on the socket only (skip_networking) and then shuts it down for the real
+  // one, so a bare socket login can succeed just before the socket vanishes.
+  // Only the real server has networking on.
   await waitFor(
-    `${name} to accept TCP logins`,
-    async () => (await sql(name, "SELECT 1")).success,
+    `${name} to run its real server`,
+    async () => {
+      const probe = await sql(name, "SELECT @@skip_networking");
+      return probe.success && probe.stdout.trim() === "0";
+    },
     { timeoutMs: 120_000, intervalMs: 500 },
   );
 }

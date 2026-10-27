@@ -27,6 +27,7 @@ const NOTHING_NEEDED: DeployStepNeeds = {
   sourceBuilds: false,
   composeBuild: false,
   certificates: false,
+  nativeApps: false,
 };
 
 const NOTHING_PRESENT: DeployPresence = {
@@ -52,6 +53,7 @@ const FULL_NEEDS: DeployStepNeeds = {
   sourceBuilds: true,
   composeBuild: false,
   certificates: true,
+  nativeApps: false,
 };
 
 function idsAndStates(needs: DeployStepNeeds, presence: DeployPresence) {
@@ -89,6 +91,27 @@ test("a fresh host plans every install as pending, in execution order", () => {
     "Check it answers",
   ]);
   assertEquals(steps.every((s) => s.state === "pending"), true);
+});
+
+test("a deploy with native apps starts the new release beside the old, then switches", () => {
+  const steps = planDeploySteps(
+    { ...NOTHING_NEEDED, sourceBuilds: true, nativeApps: true },
+    NOTHING_PRESENT,
+  );
+  assertEquals(steps.map((s) => s.label), [
+    "Fetch the code",
+    "Build",
+    "Start the new release",
+    "Check it answers",
+    "Switch traffic",
+    "Stop the old release",
+  ]);
+  assertEquals(steps.map((s) => s.id).slice(-4), [
+    "start",
+    "health",
+    "switch",
+    "stop-old",
+  ]);
 });
 
 test("a host with everything present plans the installs as ready", () => {
@@ -269,7 +292,10 @@ test("needs from a container payload: docker, build on a cacheless rebuild, cert
     "start",
     "certificates",
     "health",
+    "switch",
+    "stop-old",
   ]);
+  assertEquals(rich.nativeApps, true);
 });
 
 test("probeDeployPresence runs only the probes the plan needs and treats a throw as absent", async () => {

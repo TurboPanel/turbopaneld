@@ -20,6 +20,7 @@ import { join } from "@std/path";
 import type {
   CommandProgress,
   CommandRecoveryReport,
+  DaemonMessage,
 } from "../contracts/cell-messages.ts";
 import { COMMAND_RECOVERY_FEATURE } from "../instance/version-wire.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -35,7 +36,14 @@ type OutcomeMessage =
 type OutboxSocket = Pick<WebSocket, "readyState" | "send">;
 
 /** What the outbox needs to know about the attached control plane. */
-export type OutboxPeer = { supports(feature: string): boolean };
+export type OutboxPeer = {
+  supports(feature: string): boolean;
+  /**
+   * False while the current socket's attach frame (which carries the feature
+   * list) has not arrived. Absent means always known.
+   */
+  known?(): boolean;
+};
 
 /** How often unconfirmed outcomes are sent again while any are waiting. */
 export const RESEND_INTERVAL_MS = 30_000;
@@ -43,9 +51,20 @@ export const RESEND_INTERVAL_MS = 30_000;
 /** The journaled step plan is rewritten at most this often when only text changed. */
 export const PROGRESS_JOURNAL_INTERVAL_MS = 30_000;
 
-/** An unconfirmed outcome older than this, or beyond the entry cap, is dropped. */
+/**
+ * An unconfirmed outcome older than this, or beyond the entry cap, is dropped.
+ * The cap matches {@link REPORT_MAX_IDS}, so `hello` can list every one.
+ */
 export const UNACKED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-export const UNACKED_MAX_ENTRIES = 200;
+export const UNACKED_MAX_ENTRIES = 64;
+
+/**
+ * Kept outcomes sent on one socket per {@link RESEND_INTERVAL_MS} window; the
+ * rest wait for the next window. The control plane closes a socket that sends
+ * more than 120 frames in 60 s, so resends stay at 60 at most in any 60 s and
+ * presence, progress and new results always fit beside them.
+ */
+export const OUTCOME_BURST_MAX = 20;
 
 /** Wire bounds for {@link CommandRecoveryReport}. */
 export const REPORT_MAX_IDS = 64;
@@ -53,6 +72,9 @@ export const REPORT_MAX_ID_CHARS = 64;
 
 /** The step that shows the new release was made live (`deploy-progress.ts` PHASE_STEPS). */
 const PROMOTE_STEP_ID = "start";
+/** Where a native app's checked release takes traffic, and where the old one stops. */
+const SWITCH_STEP_ID = "switch";
+const STOP_OLD_STEP_ID = "stop-old";
 
 const UNSAFE_ID = /[^A-Za-z0-9_-]/;
 
@@ -98,9 +120,44 @@ const writeChains = new Map<string, Promise<void>>();
 let currentSocket: OutboxSocket | undefined;
 let currentPeer: OutboxPeer | undefined;
 let resendTimer: unknown;
+/** Outcome ids sent on the current socket, with when; cleared on a new socket. */
+const sentOnSocket = new Map<string, number>();
+/** Kept outcomes sent in the current window (see {@link OUTCOME_BURST_MAX}). */
+let burstWindow = { start: 0, used: 0 };
+/** When an outcome answered from a dead daemon's journal was first recorded. */
+const keptSince = new Map<string, number>();
+
+/** Make `ws` the session socket; a different socket starts with nothing sent. */
+function useSocket(ws: OutboxSocket): void {
+  if (ws === currentSocket) return;
+  currentSocket = ws;
+  sentOnSocket.clear();
+  burstWindow = { start: timers.now(), used: 0 };
+}
+
+function burstLeft(): number {
+  const now = timers.now();
+  if (now - burstWindow.start >= RESEND_INTERVAL_MS) {
+    burstWindow = { start: now, used: 0 };
+  }
+  return OUTCOME_BURST_MAX - burstWindow.used;
+}
+
+function noteSent(id: string): void {
+  sentOnSocket.set(id, timers.now());
+  burstWindow.used += 1;
+}
 
 function recovers(): boolean {
   return currentPeer?.supports(COMMAND_RECOVERY_FEATURE) === true;
+}
+
+/**
+ * Keep a result until the control plane confirms it: it says it confirms
+ * results, or it has not said yet on this socket (features unknown).
+ */
+function keepsUntilAck(): boolean {
+  return recovers() || currentPeer?.known?.() === false;
 }
 
 /** True when the attached control plane keeps command results until it confirms them. */
@@ -176,15 +233,55 @@ export async function markCommandInFlight(id: string): Promise<void> {
 /**
  * A dispatch for a command this daemon already accepted (still running, or
  * finished with its outcome kept) must not run it again. Returns true when the
- * id is known; a kept outcome is sent again on `ws`, and a running command
- * will report as usual.
+ * id is known. The control plane asks again because it is still waiting, so it
+ * gets an answer on the socket the dispatch came in on: the kept outcome, or
+ * the latest step plan of a command that is still running. That socket just
+ * delivered a frame, so it also becomes the one later outcomes and resends use.
+ * A kept outcome stays kept: only a `command-outcome-ack` clears it.
  */
-export function answerRepeatedDispatch(ws: OutboxSocket, id: string): boolean {
-  if (running.has(id)) return true;
+export function answerRepeatedDispatch(
+  ws: OutboxSocket,
+  id: string,
+  commandId: string = id,
+): boolean {
+  if (ws.readyState === WebSocket.OPEN) useSocket(ws);
+  if (running.has(id)) {
+    const latest = lastProgress.get(id);
+    if (latest) {
+      sendCommandFrame(ws, progressFrame(id, commandId, latest.progress));
+    }
+    return true;
+  }
   const kept = held.get(id) ?? unacked.get(id);
   if (kept === undefined) return false;
   sendOutcome(ws, kept);
   return true;
+}
+
+function progressFrame(
+  id: string,
+  commandId: string,
+  progress: CommandProgress,
+): DaemonMessage {
+  return {
+    type: "command-progress",
+    id,
+    commandId,
+    at: new Date(timers.now()).toISOString(),
+    progress,
+  } satisfies DaemonMessage;
+}
+
+/**
+ * Send a frame for a running command on the live session socket, falling back
+ * to the socket it was dispatched on. A command outlives its socket: after a
+ * reconnect its step plan must reach the control plane on the new one.
+ */
+export function sendCommandFrame(
+  ws: OutboxSocket,
+  message: DaemonMessage,
+): boolean {
+  return trySend(currentSocket, message) || trySend(ws, message);
 }
 
 function planSignature(progress: CommandProgress): string {
@@ -230,10 +327,30 @@ function trySend(ws: OutboxSocket | undefined, message: object): boolean {
   }
 }
 
-/** Send on the newest attached socket, falling back to `ws`. */
+/** Send on the newest attached socket, falling back to `ws`. Not paced. */
+function sendLive(ws: OutboxSocket | undefined, outcome: OutcomeMessage) {
+  if (trySend(currentSocket, outcome)) {
+    noteSent(outcome.id);
+    return true;
+  }
+  return trySend(ws, outcome);
+}
+
+/** {@link sendLive} with the send time stamped. */
 function sendOutcome(ws: OutboxSocket | undefined, outcome: OutcomeMessage) {
+  return sendLive(ws, {
+    ...outcome,
+    at: new Date(timers.now()).toISOString(),
+  });
+}
+
+/** Send a kept outcome on the session socket while this window allows. */
+function sendKept(outcome: OutcomeMessage): boolean {
+  if (burstLeft() <= 0) return false;
   const fresh = { ...outcome, at: new Date(timers.now()).toISOString() };
-  return trySend(currentSocket, fresh) || trySend(ws, fresh);
+  if (!trySend(currentSocket, fresh)) return false;
+  noteSent(outcome.id);
+  return true;
 }
 
 /**
@@ -256,8 +373,8 @@ export async function deliverCommandOutcome(
   });
   await queueWrite(outcome.id, () => writeJournalAtomic(entry));
   acceptedAt.delete(outcome.id);
-  const sent = trySend(currentSocket, outcome) || trySend(ws, outcome);
-  if (recovers()) {
+  const sent = sendLive(ws, outcome);
+  if (keepsUntilAck()) {
     unacked.set(outcome.id, outcome);
     scheduleResend();
     return;
@@ -277,22 +394,40 @@ export async function acknowledgeCommandOutcome(id: string): Promise<void> {
   if (running.has(id)) return;
   unacked.delete(id);
   held.delete(id);
+  keptSince.delete(id);
   writeChains.delete(id);
   await removeJournal(id);
 }
 
 function scheduleResend(): void {
-  if (resendTimer !== undefined || unacked.size === 0) return;
+  if (resendTimer !== undefined || (unacked.size === 0 && held.size === 0)) {
+    return;
+  }
   resendTimer = timers.setTimer(() => {
     resendTimer = undefined;
-    resendUnacked();
+    resendUnacked(RESEND_INTERVAL_MS);
+    // An older control plane gets what one window could not carry now.
+    if (!keepsUntilAck()) void flushHeld();
     scheduleResend();
   }, RESEND_INTERVAL_MS);
 }
 
-function resendUnacked(): void {
+/**
+ * Send unconfirmed outcomes not sent on this socket in the last `minAgeMs`
+ * (never sent first, then the longest ago), as far as the window allows.
+ */
+function resendUnacked(minAgeMs: number): void {
   if (currentSocket?.readyState !== WebSocket.OPEN) return;
-  for (const outcome of unacked.values()) sendOutcome(currentSocket, outcome);
+  const now = timers.now();
+  const sentAt = (id: string) => sentOnSocket.get(id) ?? -1;
+  const due = [...unacked.values()]
+    .filter((outcome) =>
+      !sentOnSocket.has(outcome.id) || now - sentAt(outcome.id) >= minAgeMs
+    )
+    .sort((a, b) => sentAt(a.id) - sentAt(b.id));
+  for (const outcome of due) {
+    if (!sendKept(outcome)) return;
+  }
 }
 
 async function readJournalEntry(id: string): Promise<JournalEntry | undefined> {
@@ -357,11 +492,37 @@ export function interruptedFacts(progress: CommandProgress | undefined): {
 }
 
 /**
+ * A plan with native apps moves traffic in its own step: `switch` done (or the
+ * old release already being stopped) means yes, unless the next app's start or
+ * check is running again (some apps switched, not all: unknown); still pending
+ * means no unless something else was started first, and running is unknown.
+ */
+function trafficSwitched(
+  progress: CommandProgress,
+  switchStep: CommandProgress["steps"][number],
+): boolean | undefined {
+  const stopOld = progress.steps.find((step) => step.id === STOP_OLD_STEP_ID);
+  const start = progress.steps.find((step) => step.id === PROMOTE_STEP_ID);
+  const health = progress.steps.find((step) => step.id === "health");
+  const switched = switchStep.state === "done" ||
+    (stopOld !== undefined && stopOld.state !== "pending");
+  // Several apps run these steps in turn: a start or check running again after
+  // a switch is the next app's, so only some of them were switched.
+  const nextAppUnderWay = start?.state === "running" ||
+    health?.state === "running";
+  if (switched) return nextAppUnderWay ? undefined : true;
+  if (switchStep.state !== "pending") return undefined;
+  return start?.state === "pending" ? false : undefined;
+}
+
+/**
  * Was the new release made live? `start` covers the switch-over, so done (or a
  * health check already begun) means yes, still pending means no, and running
- * is unknown.
+ * is unknown. A plan with a `switch` step answers from that step instead.
  */
 function releasePromoted(progress: CommandProgress): boolean | undefined {
+  const switchStep = progress.steps.find((step) => step.id === SWITCH_STEP_ID);
+  if (switchStep) return trafficSwitched(progress, switchStep);
   const start = progress.steps.find((step) => step.id === PROMOTE_STEP_ID);
   if (!start) return undefined;
   const health = progress.steps.find((step) => step.id === "health");
@@ -406,34 +567,48 @@ function orphanReply(id: string, entry: JournalEntry | undefined) {
   };
 }
 
-/** Send held outcomes (control plane without the feature). */
-async function flushHeld(ws: OutboxSocket): Promise<void> {
+/**
+ * Send held outcomes. With a control plane that confirms results they become
+ * unconfirmed (journal kept until the ack; sent by the resend that follows);
+ * without one a sent outcome is done. One already sent on this socket (when
+ * it opened) is not sent again; what the window cannot carry stays held.
+ */
+async function flushHeld(): Promise<void> {
+  if (recovers()) {
+    for (const [id, outcome] of held) {
+      unacked.set(id, outcome);
+      held.delete(id);
+    }
+    return;
+  }
   const sent: string[] = [];
   for (const [id, outcome] of held) {
-    if (
-      !trySend(ws, { ...outcome, at: new Date(timers.now()).toISOString() })
-    ) {
-      break;
-    }
+    if (!sentOnSocket.has(id) && !sendKept(outcome)) break;
     held.delete(id);
     sent.push(id);
   }
   await Promise.all(sent.map(removeJournal));
 }
 
+/** When a dead daemon's journal entry was recorded, if it says so readably. */
+function entryRecordedMs(entry: JournalEntry | undefined): number | undefined {
+  const times = [entry?.journaledAt, entry?.outcome?.at, entry?.acceptedAt];
+  for (const time of times) {
+    const ms = typeof time === "string" ? Date.parse(time) : Number.NaN;
+    if (Number.isFinite(ms)) return ms;
+  }
+  return undefined;
+}
+
 /** Answer journal entries of a daemon that died, then keep or clear them. */
-async function answerOrphans(ws: OutboxSocket): Promise<void> {
+async function answerOrphans(): Promise<void> {
   const ids = await orphanedIds();
   const entries = await Promise.all(ids.map((id) => readJournalEntry(id)));
   const keep = recovers();
-  const answered: string[] = [];
   ids.forEach((id, index) => {
-    const reply = orphanReply(id, entries[index]);
-    if (keep) {
-      unacked.set(id, reply);
-      return;
-    }
-    if (trySend(ws, reply)) answered.push(id);
+    const recorded = entryRecordedMs(entries[index]);
+    if (recorded !== undefined) keptSince.set(id, recorded);
+    (keep ? unacked : held).set(id, orphanReply(id, entries[index]));
   });
   if (keep) {
     await Promise.all(ids.map((id, index) => {
@@ -451,7 +626,7 @@ async function answerOrphans(ws: OutboxSocket): Promise<void> {
     }));
     return;
   }
-  await Promise.all(answered.map(removeJournal));
+  await flushHeld();
 }
 
 /** When an outcome message says it was sent, if that is a readable timestamp. */
@@ -464,20 +639,30 @@ function outcomeTimeIso(
     : undefined;
 }
 
+/**
+ * When an unconfirmed outcome was recorded: its journal entry's time for one
+ * answered after a restart (its message is stamped when it is sent), else the
+ * outcome's own time.
+ */
+function recordedAtMs(id: string): number | undefined {
+  const since = keptSince.get(id);
+  if (since !== undefined) return since;
+  const at = outcomeTimeIso(unacked.get(id));
+  return at === undefined ? undefined : Date.parse(at);
+}
+
 /** Drop unconfirmed entries that are too old or beyond the cap, with a warning. */
 async function pruneUnacked(): Promise<void> {
   const cutoff = timers.now() - UNACKED_RETENTION_MS;
   const ids = [...unacked.keys()];
   // An outcome without a readable time is kept; only the entry cap drops it.
   const stale = ids.filter((id) => {
-    const at = outcomeTimeIso(unacked.get(id));
-    return at !== undefined && Date.parse(at) < cutoff;
+    const at = recordedAtMs(id);
+    return at !== undefined && at < cutoff;
   });
   // Beyond the cap the oldest outcomes go first; one without a readable time counts as oldest.
-  const recordedMs = (id: string) => {
-    const at = outcomeTimeIso(unacked.get(id));
-    return at === undefined ? Number.NEGATIVE_INFINITY : Date.parse(at);
-  };
+  const recordedMs = (id: string) =>
+    recordedAtMs(id) ?? Number.NEGATIVE_INFINITY;
   const overflow = ids.filter((id) => !stale.includes(id))
     .sort((a, b) => recordedMs(a) - recordedMs(b))
     .slice(0, Math.max(0, ids.length - stale.length - UNACKED_MAX_ENTRIES));
@@ -491,6 +676,36 @@ async function pruneUnacked(): Promise<void> {
 }
 
 /**
+ * A socket just opened, before its attach frame says what the control plane
+ * supports. Held and unconfirmed outcomes go out on it at once, but every
+ * journal is kept: only the attach frame ({@link flushCommandOutcomes}) or a
+ * `command-outcome-ack` may clear one. Interrupted commands are left to the
+ * attach frame too.
+ */
+export function noteSessionOpen(ws: OutboxSocket, peer?: OutboxPeer): void {
+  currentPeer = peer ?? currentPeer;
+  if (ws.readyState !== WebSocket.OPEN) return;
+  useSocket(ws);
+  for (const outcome of [...unacked.values(), ...held.values()]) {
+    if (!sendKept(outcome)) break;
+  }
+  scheduleResend();
+}
+
+/**
+ * Outcomes kept while the features were unknown, now that the attach frame
+ * says the control plane does not confirm results: handled like any outcome
+ * for such a control plane (sent, then cleared).
+ */
+function releaseForOlderPeer(): void {
+  if (recovers()) return;
+  for (const [id, outcome] of unacked) {
+    held.set(id, outcome);
+    unacked.delete(id);
+  }
+}
+
+/**
  * On a new session: send held outcomes, send unconfirmed ones again, then
  * answer journaled commands that are neither running nor held (their daemon
  * died mid-command) with their journaled outcome, or as interrupted when none
@@ -500,13 +715,15 @@ export async function flushCommandOutcomes(
   ws: OutboxSocket,
   peer?: OutboxPeer,
 ): Promise<void> {
-  currentSocket = ws;
+  useSocket(ws);
   currentPeer = peer ?? currentPeer;
-  await flushHeld(ws);
+  releaseForOlderPeer();
+  await flushHeld();
   if (ws.readyState !== WebSocket.OPEN) return;
-  await answerOrphans(ws);
+  await answerOrphans();
   await pruneUnacked();
-  resendUnacked();
+  // What went out when this socket opened is not sent a second time now.
+  resendUnacked(Number.POSITIVE_INFINITY);
   scheduleResend();
 }
 
@@ -544,6 +761,9 @@ export function resetCommandOutboxForTests(
   acceptedAt.clear();
   lastProgress.clear();
   writeChains.clear();
+  sentOnSocket.clear();
+  keptSince.clear();
+  burstWindow = { start: 0, used: 0 };
   currentSocket = undefined;
   currentPeer = undefined;
   timers = { ...defaultTimers, ...override };
