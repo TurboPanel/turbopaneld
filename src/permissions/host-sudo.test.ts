@@ -118,6 +118,8 @@ test("every tp-host verb the daemon names is routed through tp-host", async () =
       m[1].split("|")
     ),
   );
+  // A renamed dispatch must not leave this test checking nothing.
+  assertEquals(accepted.has("publish-keep") && accepted.has("systemctl"), true);
   const named = new Set<string>();
   for await (const path of sourceFiles(root)) {
     if (path.endsWith(".test.ts") || path.includes("/testing/")) continue;

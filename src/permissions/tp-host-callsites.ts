@@ -1122,6 +1122,26 @@ const SITES: CallSite[] = [
         ],
       },
     },
+    {
+      argv: [
+        "publish-keep",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        FOLDER_PUBLISH_ID,
+      ],
+      setup: {
+        files: {
+          [`${FOLDER_STAGING}/index.html`]: "<h1>hi</h1>\n",
+        },
+        dirs: [
+          `${FOLDER_SERVICE}/releases`,
+          `${FOLDER_SERVICE}/shared`,
+        ],
+      },
+    },
   ),
   tpHost(
     'src/deploy/unchanged-deploy.ts|["-n","systemctl","is-active","--quiet",unit]',
@@ -1162,14 +1182,45 @@ const SITES: CallSite[] = [
       links: [["releases/20260927-120000", `${SITE}/current`]],
     },
   }),
-  tpHost('src/deploy/release/promote.ts|["-n","rm","-f","--",tmpLink]', {
-    argv: ["rm", "-f", "--", `${SITE}/current.tmp`],
-    setup: dir(SITE),
-  }),
-  tpHost('src/deploy/release/promote.ts|["-n","ln","-s","--",target,tmpLink]', {
-    argv: ["ln", "-s", "--", "releases/20260927-120000", `${SITE}/current.tmp`],
-    setup: dir(RELEASE),
-  }),
+  tpHost(
+    'src/deploy/release/promote.ts|["-n","rm","-f","--",tmpLink]',
+    {
+      argv: ["rm", "-f", "--", `${SITE}/current.tmp`],
+      setup: dir(SITE),
+    },
+    {
+      argv: [
+        "rm",
+        "-f",
+        "--",
+        `${FOLDER_SERVICE}/current.tmp.${FOLDER_RELEASE_ID}`,
+      ],
+      setup: dir(`${FOLDER_SERVICE}/releases`),
+    },
+  ),
+  tpHost(
+    'src/deploy/release/promote.ts|["-n","ln","-s","--",target,tmpLink]',
+    {
+      argv: [
+        "ln",
+        "-s",
+        "--",
+        "releases/20260927-120000",
+        `${SITE}/current.tmp`,
+      ],
+      setup: dir(RELEASE),
+    },
+    {
+      argv: [
+        "ln",
+        "-s",
+        "--",
+        `releases/${FOLDER_RELEASE_ID}`,
+        `${FOLDER_SERVICE}/current.tmp.${FOLDER_RELEASE_ID}`,
+      ],
+      setup: dir(`${FOLDER_SERVICE}/releases/${FOLDER_RELEASE_ID}`),
+    },
+  ),
   tpHost(
     'src/deploy/release/promote.ts|["-n","mv","-Tf","--",tmpLink,currentLink]',
     {
@@ -1177,6 +1228,22 @@ const SITES: CallSite[] = [
       setup: {
         dirs: [RELEASE],
         links: [["releases/20260927-120000", `${SITE}/current.tmp`]],
+      },
+    },
+    {
+      argv: [
+        "mv",
+        "-Tf",
+        "--",
+        `${FOLDER_SERVICE}/current.tmp.${FOLDER_RELEASE_ID}`,
+        `${FOLDER_SERVICE}/current`,
+      ],
+      setup: {
+        dirs: [`${FOLDER_SERVICE}/releases/${FOLDER_RELEASE_ID}`],
+        links: [[
+          `releases/${FOLDER_RELEASE_ID}`,
+          `${FOLDER_SERVICE}/current.tmp.${FOLDER_RELEASE_ID}`,
+        ]],
       },
     },
   ),
