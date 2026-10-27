@@ -4910,7 +4910,7 @@ it({
       );
       assertExists(failedProgress);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -4973,7 +4973,7 @@ it({
       assertEquals(result.errorCode, "preflight_manifest");
       assertEquals(result.upgradeId, "up-sig");
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5020,7 +5020,7 @@ it({
       assertEquals(result.upgradeId, "up-legacy");
       assertEquals(framesOfType(socket, "update-progress").length, 0);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5094,7 +5094,7 @@ it({
       assertEquals(result.ok, true);
       assertEquals(reconcileCalls, 0);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5161,7 +5161,7 @@ it({
         );
         assertExists(rolled);
       } finally {
-        restore();
+        await restore();
         restoreHooks();
         for (const key of envKeys) {
           setOptionalEnv(key, prior[key]);
@@ -5242,7 +5242,7 @@ it({
       assertEquals(result.errorCode, "preflight_manifest");
       assertEquals(reconcileCalls, 0);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5304,7 +5304,7 @@ it({
       assertEquals(resolveCalls, 1);
       assertEquals(reconciledManifest, "https://dl.example/manifest-1.json");
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5375,7 +5375,7 @@ it({
       assertEquals(resolvedFrom, target);
       assertEquals(reconciledManifest, target);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
     }
@@ -5443,7 +5443,7 @@ it({
       // channel and rewrote daemon.env without the hold).
       assertEquals(reconciledManifest, tagPin);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
     }
@@ -5524,7 +5524,7 @@ it({
       assertEquals(captured?.script, undefined);
       assertEquals(downloads, 0);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5616,7 +5616,7 @@ it({
           ),
       );
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5679,7 +5679,7 @@ it({
       );
       assertExists(done);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_RUN_DIR", originalRunDir);
       await Deno.remove(runDir, { recursive: true });
@@ -5748,7 +5748,7 @@ it({
       );
       assertExists(failed);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5829,7 +5829,7 @@ it({
       );
       assert(failed.detail?.includes("exited 1"));
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5890,7 +5890,7 @@ it({
       );
       assertExists(done);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -5962,7 +5962,7 @@ it({
         true,
       );
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -6060,7 +6060,7 @@ it({
       );
       assertExists(failedStage);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -6126,7 +6126,7 @@ it({
       assertEquals(refused.upgradeId, "upg-second");
     } finally {
       releaseFirst?.();
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -6150,7 +6150,7 @@ async function startConnectedClient(
   socket: MockWebSocket;
   /** Every socket the client opened, in order (reconnects append). */
   sockets: MockWebSocket[];
-  restore: () => void;
+  restore: () => Promise<void>;
 }> {
   const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
   const originalStateRoot = Deno.env.get("TURBOPANEL_STATE_DIR");
@@ -6225,8 +6225,11 @@ async function startConnectedClient(
     client,
     socket,
     sockets,
-    restore: () => {
+    restore: async () => {
       client.stop();
+      // Journal writes started by a dispatch land in the fixture; let them
+      // finish before the state env is restored and the folder goes.
+      await settleCommandJournalWrites();
       restoreFetch();
       restoreWebSocket();
       restoreDisk();
@@ -6617,7 +6620,7 @@ it({
 
       assertEquals(rehydrateCalls >= 1, true);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -6788,7 +6791,7 @@ it({
       assertEquals(opts.caPath, undefined);
       assertEquals(opts.insecureTls, false);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_INSTANCE_URL", originalInstanceUrl);
     }
@@ -6891,7 +6894,7 @@ it({
       // The script was never fetched, so no curl — insecure or otherwise.
       assertEquals(downloads, []);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_INSTANCE_URL", saved.instanceUrl);
       setOptionalEnv("TURBOPANEL_DL_BASE", saved.dlBase);
@@ -6951,7 +6954,7 @@ it({
       assertEquals(downloads[0]?.url, "https://huey.lan:8443/run.sh");
       assertEquals(downloads[0]?.opts, { insecureTls: false, caPath });
     } finally {
-      restore();
+      await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_INSTANCE_URL", saved.instanceUrl);
       setOptionalEnv("TURBOPANEL_DL_BASE", saved.dlBase);
@@ -7029,14 +7032,11 @@ it({
         at: new Date().toISOString(),
       });
       await waitFor(
-        "command-result",
+        "command-outcome",
         () =>
-          framesOfType(socket, "command-result").find((f) =>
+          framesOfType(socket, "command-outcome").find((f) =>
             (f as { id?: string }).id === "cmd-ping"
-          ) ??
-            framesOfType(socket, "command-ack").find((f) =>
-              (f as { id?: string }).id === "cmd-ping"
-            ),
+          ),
       );
 
       // Make ws.send throw on the tunnel-token-result so #runSocketHandler catch fires.
@@ -7056,7 +7056,7 @@ it({
       await flushMicrotasks();
       await new Promise((resolve) => setTimeout(resolve, 20));
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -7093,8 +7093,11 @@ it({
         );
       socket.receive(ping("cmd-live"));
       await waitFor(
-        "ack on the live socket",
-        () => acked("cmd-live") || undefined,
+        "outcome on the live socket",
+        () =>
+          framesOfType(socket, "command-outcome").some((f) =>
+            (f as { id?: string }).id === "cmd-live"
+          ) || undefined,
       );
 
       // The synthetic close from closeAndAbandon, then the real one.
@@ -7106,7 +7109,7 @@ it({
       await new Promise((resolve) => setTimeout(resolve, 20));
       assertEquals(acked("cmd-late"), false);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -7148,9 +7151,9 @@ it({
         "re-ack",
         () => count("command-ack") > acksBefore || undefined,
       );
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await waitFor("outcome", () => count("command-outcome") || undefined);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -7204,7 +7207,7 @@ it({
         () => outcomes() > before || undefined,
       );
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -7305,7 +7308,7 @@ it({
       });
     } finally {
       release();
-      restore();
+      await restore();
       restorePorts();
       restoreTime();
       restoreHooks();
@@ -7952,7 +7955,7 @@ it({
         },
       ]);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -8005,7 +8008,7 @@ it({
       assertEquals(String(result.error).includes("could not be opened"), true);
       assertEquals(applyCalls, 0);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },
@@ -8069,7 +8072,7 @@ it({
 
       assertEquals(written, [OPENED_TUNNEL_TOKEN, "legacy-plaintext-token"]);
     } finally {
-      restore();
+      await restore();
       restoreHooks();
     }
   },

@@ -144,6 +144,7 @@ test({
       assertEquals(types.filter((t) => t === "command-outcome").length, 1);
     } finally {
       gate.resetBootConvergeForTests();
+      await outbox.settleCommandJournalWrites();
       outbox.resetCommandOutboxForTests();
       if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
       else Deno.env.set("TURBOPANEL_STATE_DIR", previous);

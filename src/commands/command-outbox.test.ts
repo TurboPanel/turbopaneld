@@ -38,6 +38,9 @@ async function withState(fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
   } finally {
+    // Progress journals are written in the background; let them land before
+    // the folder goes, or the remove races a late write.
+    await settleCommandJournalWrites();
     if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
     else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
     await Deno.remove(dir, { recursive: true });
