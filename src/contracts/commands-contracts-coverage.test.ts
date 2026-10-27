@@ -511,6 +511,24 @@ test("parseEnvironmentDeployPayload round-trips nativeAppServices appMode, enabl
   assertEquals(bare.nativeAppServices?.[0]?.startupFile, undefined);
 });
 
+test("parseEnvironmentDeployPayload accepts a custom nativeAppServices appMode", () => {
+  for (
+    const appMode of ["staging", "test", "qa_2", "pre-prod.eu", "a".repeat(64)]
+  ) {
+    const payload = parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      nativeAppServices: [{
+        composeServiceName: "api",
+        serviceId: "svc-native-1",
+        listenPort: 13000,
+        framework: "node",
+        appMode,
+      }],
+    });
+    assertEquals(payload.nativeAppServices?.[0]?.appMode, appMode);
+  }
+});
+
 test("parseEnvironmentDeployPayload rejects invalid nativeAppServices appMode, enabled, and startupFile", () => {
   const base = {
     composeServiceName: "api",
@@ -518,15 +536,26 @@ test("parseEnvironmentDeployPayload rejects invalid nativeAppServices appMode, e
     listenPort: 13000,
     framework: "node",
   };
-  assertThrows(
-    () =>
-      parseEnvironmentDeployPayload({
-        ...DEPLOY_BASE,
-        nativeAppServices: [{ ...base, appMode: "staging" }],
-      }),
-    TypeError,
-    "Invalid nativeAppServices appMode",
-  );
+  for (
+    const appMode of [
+      "",
+      "my mode",
+      "-staging",
+      "stage$1",
+      "a".repeat(65),
+      7,
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          nativeAppServices: [{ ...base, appMode }],
+        }),
+      TypeError,
+      "Invalid nativeAppServices appMode",
+    );
+  }
   assertThrows(
     () =>
       parseEnvironmentDeployPayload({

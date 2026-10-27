@@ -64,6 +64,7 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "site-caddy-mounts",
   "publish-open",
   "publish",
+  "publish-keep",
   "php-loopback-sync",
   "app-env-install",
   "app-env-remove",

@@ -5,6 +5,7 @@ import {
   markCommandInFlight,
   noteCommandProgress,
   recoveryEnabled,
+  sendCommandFrame,
 } from "./command-outbox.ts";
 import { errorText, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
@@ -46,10 +47,7 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
-import {
-  createDeployStepReporter,
-  sendOverOpenSocket,
-} from "./deploy-progress.ts";
+import { createDeployStepReporter } from "./deploy-progress.ts";
 import { handleManagedApply } from "../managed/apply.ts";
 import {
   beginManagedCommandIntent,
@@ -248,7 +246,7 @@ export async function handleCommandDispatch(
   }
 
   // The same command sent again (a lost link, a control plane restart) never runs twice.
-  if (answerRepeatedDispatch(ws, message.id)) {
+  if (answerRepeatedDispatch(ws, message.id, message.commandId)) {
     logWarn(
       "commands",
       `command ${
@@ -406,7 +404,7 @@ export async function handleCommandDispatch(
         const progress = createDeployStepReporter({
           id: message.id,
           commandId: message.commandId,
-          send: (progressMessage) => sendOverOpenSocket(ws, progressMessage),
+          send: (progressMessage) => sendCommandFrame(ws, progressMessage),
           onSnapshot: (snapshot) => noteCommandProgress(message.id, snapshot),
           keepalive: () => recoveryEnabled(),
         });

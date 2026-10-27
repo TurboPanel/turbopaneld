@@ -235,8 +235,25 @@ export type CommandPorts = {
     ws: WebSocket,
     peer: { supports(feature: string): boolean },
   ) => Promise<void>;
+  /**
+   * A session socket opened (before its attach frame): send held results on
+   * it without clearing anything.
+   */
+  handleSessionOpen?: (
+    ws: WebSocket,
+    peer: { supports(feature: string): boolean; known(): boolean },
+  ) => void;
   /** The control plane stored a command's outcome (`command-outcome-ack`). */
   handleCommandOutcomeAck?: (id: string) => Promise<void>;
+  /**
+   * A dispatch for a command already accepted: answer it with the kept
+   * outcome, or the latest step plan of one still running.
+   */
+  handleRepeatedDispatch?: (
+    ws: WebSocket,
+    id: string,
+    commandId: string,
+  ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
 };
@@ -644,12 +661,20 @@ export class InstanceClient {
     this.#updateProgress.reportStage(unit ?? "daemon", stage, rest);
   }
 
+  /** What the command outbox may ask about the attached control plane. */
+  #commandPeer(): { supports(feature: string): boolean; known(): boolean } {
+    return {
+      supports: (feature) => this.instanceSupports(feature),
+      known: () => this.#peerFeaturesKnown,
+    };
+  }
+
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
     const sessionAttach = commandPorts.handleSessionAttach;
     if (sessionAttach) {
       this.#runSocketHandler(
         "session-attach",
-        sessionAttach(ws, { supports: (f) => this.instanceSupports(f) }),
+        sessionAttach(ws, this.#commandPeer()),
       );
     }
     const pending = this.#pendingInstanceUpdateResult;
@@ -1546,7 +1571,12 @@ export class InstanceClient {
         logWarn("instance", "authentication rejected");
       }
       if (sessionRegistered) {
-        logInfo("instance", "websocket closed after registration");
+        logInfo(
+          "instance",
+          "websocket closed after registration",
+          `code=${event.code}`,
+          `reason=${sanitizeForLog(event.reason || "-")}`,
+        );
       } else {
         logDebug("instance", "websocket closed before registration");
       }
@@ -1577,6 +1607,13 @@ export class InstanceClient {
       // collector holds its batches while `readyToSend()` is false and ships
       // them once the transport is back; only an org toggle stops it.
     };
+
+    // Held and unconfirmed command outcomes go out as soon as the socket is
+    // open, not only when the attach `version` frame arrives: a result must
+    // never wait on one frame that may be lost with the upgrade. Nothing is
+    // cleared until the attach frame says the control plane confirms results
+    // (or it confirms one); a repeat send is harmless.
+    commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
       ws.addEventListener("close", (event) => resolve(event as CloseEvent), {
@@ -1868,6 +1905,11 @@ export class InstanceClient {
         // resolves to unknown.
         this.#noteInstanceVersion(message.instanceVersion);
         this.#notePeerFeatures(message.features);
+        logInfo(
+          "instance",
+          "attach frame received",
+          `features=${this.#peerFeatures.length}`,
+        );
         void this.#afterAttachVersion(ws);
         break;
       case "echo":
@@ -1885,7 +1927,8 @@ export class InstanceClient {
             "ignored repeated command-dispatch",
             sanitizeForLog(message.id),
           );
-          // Re-ack so the control plane stops waiting on an ack it missed.
+          // Re-ack so the control plane stops waiting on an ack it missed,
+          // then answer with what this daemon already knows about it.
           if (ws.readyState === WebSocket.OPEN) {
             const at = new Date().toISOString();
             ws.send(JSON.stringify({
@@ -1895,6 +1938,11 @@ export class InstanceClient {
               daemonReceivedAt: at,
             }));
           }
+          commandPorts.handleRepeatedDispatch?.(
+            ws,
+            message.id,
+            message.commandId,
+          );
           break;
         }
         this.#runSocketHandler(

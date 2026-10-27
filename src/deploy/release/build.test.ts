@@ -352,6 +352,14 @@ test("buildEnvironment threads the native runtime onto PATH, NODE_ENV, and corep
   assertEquals(env.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0");
 });
 
+test("buildEnvironment passes a custom application mode through as NODE_ENV", () => {
+  const env = buildEnvironment({ kind: "native" }, "/work", {
+    nodeBinDir: "/opt/turbopanel/vendor/node-app/24/current/bin",
+    nodeEnv: "staging",
+  });
+  assertEquals(env.NODE_ENV, "staging");
+});
+
 test("deriveNodeInstallCommand returns undefined without a package.json", async () => {
   await withWorkingDir(async (workingDir) => {
     assertEquals(await deriveNodeInstallCommand({ workingDir }), undefined);

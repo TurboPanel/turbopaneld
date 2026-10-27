@@ -5,20 +5,27 @@
  * an injectable IO seam so the whole path is testable without a host, render a
  * candidate, compare it against what is installed through a privileged `cmp`,
  * install **only** when the bytes differ, and `daemon-reload` only when a file
- * actually changed. An ordinary redeploy that moves nothing but the `current`
- * symlink therefore writes nothing and reloads nothing — it restarts the unit
- * so the new release is picked up, and that is all.
+ * actually changed. An ordinary redeploy never rewrites the app's own unit
+ * (it points at the `current` symlink); it reloads only for the check copy
+ * below, which comes and goes with the deploy.
  *
  * Sequencing per apply, after `applySourceReleases` has resolved `current`:
  *
  * 1. install/refresh every principal's parent slice (only the changed ones);
- * 2. install/refresh every app unit (only the changed ones);
+ * 2. per app with nothing serving yet: install/refresh its unit (only when
+ *    changed); per app with a release serving: point `current` back at that
+ *    release and install a **check copy** of the new one instead;
  * 3. `systemctl daemon-reload` — **once**, after every file is on disk, and
  *    only when at least one slice or unit actually changed;
- * 4. per app: `enable --now` (first deploy) / `restart` (release moved);
- * 5. per app: probe `127.0.0.1:<listenPort>` until it answers;
- * 6. on probe failure, repoint `current` back at the previous release and
- *    restart, then fail the command.
+ * 4. per app with nothing serving yet: `enable --now`, then probe
+ *    `127.0.0.1:<listenPort>` until it answers; on probe failure, repoint
+ *    `current` back at the previous release and restart, then fail;
+ * 5. per app with a release serving: start the check copy on a spare loopback
+ *    port and probe it; only once it answers write the app's own unit, move
+ *    `current`, restart the app's own unit on its port (traffic moves) and
+ *    remove the check copy. A check copy that never answers is removed and the
+ *    deploy fails, while the old release keeps serving: the new one never took
+ *    traffic.
  *
  * Steps 1–3 are strictly ordered against each other: writing files first and
  * reloading once afterwards is the only sequence in which systemd is guaranteed
@@ -27,19 +34,20 @@
  * in step 4 would then start the app from the unit contents systemd loaded
  * *before* this deploy rewrote them.
  *
- * The rollback is the reason step 6 exists at all: `promoteRelease` already
- * guarantees a failed *build* leaves `current` untouched, but a release that
- * builds and promotes cleanly can still fail to *start*, and leaving a wedged
- * `current` behind would be a silent outage.
+ * The rollback in step 4 (and after a switch that fails) exists because
+ * `promoteRelease` guarantees a failed *build* leaves `current` untouched, but
+ * a release that builds and promotes cleanly can still fail to *start*, and
+ * leaving a wedged `current` behind would be a silent outage.
  */
 
 import { join } from "@std/path";
+import { COMMAND_LOG_PHASES } from "../../logs/contracts.ts";
 import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { FolderRefParts } from "../../contracts/directory-names.ts";
-import type { LayoutPaths } from "../../paths/layout.ts";
+import { type LayoutPaths, serviceTree } from "../../paths/layout.ts";
 import {
   devOwnershipPlaybookExtraArgs,
   runLocalPlaybook,
@@ -71,6 +79,9 @@ import { redactCommandSummary } from "../../logs/redactor.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import type { NativeAppStart } from "./start-entry.ts";
 import {
+  nativeAppCheckCopyId,
+  nativeAppCheckCopyStageDir,
+  nativeAppCheckCopyStagedPath,
   nativeAppConfigDir,
   nativeAppRuntimeKind,
   nativeAppStagedFilePrefix,
@@ -118,6 +129,12 @@ export type NativeAppProbeFn = (port: number) => Promise<boolean>;
 /** Injectable clock/sleep so tests never wait on a real backoff. */
 export type NativeAppSleepFn = (ms: number) => Promise<void>;
 
+/** Injectable spare loopback port for a check copy. */
+export type NativeAppPortPickFn = () => number | Promise<number>;
+
+/** Injectable transcript phase setter (the deploy's sink). */
+export type NativeAppPhaseFn = (phase: string) => void;
+
 /**
  * The Git release tree one native app runs out of, resolved by the caller from
  * `sourceMaterial[]` — the same binding shape site uses, so this
@@ -131,8 +148,13 @@ export type NativeAppRelease = {
   previousReleaseId?: string | null;
   /** `x-turbopanel.source.startCommand`, when the author declared one. */
   startCommand?: string;
-  /** The release this deploy put live (`current`), when one was applied. */
+  /** The release this deploy published, when one was applied. */
   releaseId?: string;
+  /**
+   * True when `releaseId` was published without moving `current` (the app
+   * was serving then): this apply moves `current` to it.
+   */
+  heldCurrent?: boolean;
   /**
    * How that release starts when the author typed no start command, as the
    * build (or, on a rollback, the release record) decided it.
@@ -158,6 +180,17 @@ export type ApplyNativeAppsOpts = {
   probe?: NativeAppProbeFn;
   /** Test seam: sleep between probe attempts. */
   sleep?: NativeAppSleepFn;
+  /**
+   * Test seam: the spare loopback port a check copy listens on. The default
+   * asks the kernel for a free one, which comes from its ephemeral range, far
+   * above the 18080-19799 band the control plane hands sites and apps.
+   */
+  pickPort?: NativeAppPortPickFn;
+  /**
+   * Moves the deploy transcript (and the step rail with it) through
+   * `start-release`, `health`, `switch-traffic` and `stop-old-release`.
+   */
+  setPhase?: NativeAppPhaseFn;
   /** Test seam: systemd unit directory (defaults to `/etc/systemd/system`). */
   systemdUnitDir?: string;
   /**
@@ -263,11 +296,43 @@ function sleepDefault(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * The control plane's loopback band for sites and apps (listen ports, then
+ * Apache's ports behind nginx). A check copy never takes one, even on a host
+ * whose ephemeral range was widened over it.
+ */
+const ALLOCATED_PORT_MIN = 18_080;
+const ALLOCATED_PORT_MAX = 19_799;
+const PORT_PICK_ATTEMPTS = 20;
+
+/** One loopback port free right now, as the kernel picks it. */
+function freeLoopbackPort(): number {
+  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  try {
+    return listener.addr.port;
+  } finally {
+    listener.close();
+  }
+}
+
+/** A free loopback port outside the control plane's band. */
+export function pickPortDefault(pick: () => number = freeLoopbackPort): number {
+  for (let attempt = 0; attempt < PORT_PICK_ATTEMPTS; attempt++) {
+    const port = pick();
+    if (port < ALLOCATED_PORT_MIN || port > ALLOCATED_PORT_MAX) return port;
+  }
+  throw new Error(
+    `the kernel offered only ports in ${ALLOCATED_PORT_MIN}-${ALLOCATED_PORT_MAX}`,
+  );
+}
+
 type NativeAppIo = {
   run: NativeAppRunFn;
   runPlaybook: NativeAppPlaybookFn;
   probe: NativeAppProbeFn;
   sleep: NativeAppSleepFn;
+  pickPort: NativeAppPortPickFn;
+  setPhase: NativeAppPhaseFn;
   onOutput?: ReleaseOutputHandler;
 };
 
@@ -279,6 +344,8 @@ function resolveIo(
     runPlaybook: resolvePlaybookRunner(opts),
     probe: opts?.probe ?? probeDefault,
     sleep: opts?.sleep ?? sleepDefault,
+    pickPort: opts?.pickPort ?? (() => pickPortDefault()),
+    setPhase: opts?.setPhase ?? (() => {}),
     ...(opts?.onOutput === undefined ? {} : { onOutput: opts.onOutput }),
   };
 }
@@ -367,6 +434,14 @@ async function systemctl(
   args: string[],
 ): Promise<RunResult> {
   return await io.run("sudo", hostSudoArgs(["-n", "systemctl", ...args]));
+}
+
+/** Remove one installed unit file (absent is fine). */
+async function removeUnitFile(
+  io: NativeAppIo,
+  path: string,
+): Promise<RunResult> {
+  return await io.run("sudo", hostSudoArgs(["-n", "rm", "-f", "--", path]));
 }
 
 /** True when the unit is currently active (a redeploy restarts, not enables). */
@@ -680,6 +755,30 @@ type PreparedNativeApp = {
    * start (a rollback). Returns whether the installed unit changed.
    */
   reinstallUnit?: (start: RecordedStart) => Promise<boolean>;
+  /**
+   * Whether the app's own unit loads a variables file. Unset until the app's
+   * own files are written, which for an app with a check copy is the switch.
+   */
+  environmentFile?: boolean;
+  /** Set when a release is already serving: the new one is checked beside it. */
+  checkCopy?: CheckCopy;
+};
+
+/**
+ * The new release, started beside the one serving under its own unit and on
+ * its own loopback port, so it can answer before it takes any traffic.
+ */
+type CheckCopy = {
+  /** The app as the check copy runs: its own id and the spare port. */
+  app: EnvironmentDeployNativeAppService;
+  unit: string;
+  environmentId: string;
+  systemdUnitDir: string;
+  /**
+   * Write the app's own variables file and unit for the new release (the
+   * switch). Returns whether the unit changed.
+   */
+  takeOver: () => Promise<boolean>;
 };
 
 /**
@@ -698,15 +797,16 @@ async function installNativeAppUnit(
     binding: NativeAppRelease;
     systemdUnitDir: string;
     environmentFile: boolean;
+    /** Render the app's check copy (`app` already carries its id and port). */
+    checkCopy?: { workingDirectory: string };
   },
 ): Promise<boolean> {
   const { app, binding } = params;
+  const stagedPath = params.checkCopy === undefined
+    ? nativeAppStagedPath(layout, params.environmentId, app.serviceId)
+    : nativeAppCheckCopyStagedPath(layout, params.environmentId, app.serviceId);
   return await installUnitFile(io, {
-    stagedPath: nativeAppStagedPath(
-      layout,
-      params.environmentId,
-      app.serviceId,
-    ),
+    stagedPath,
     installedPath: nativeAppUnitPath(app.serviceId, params.systemdUnitDir),
     contents: nativeAppUnitContent({
       layout,
@@ -715,12 +815,11 @@ async function installNativeAppUnit(
       folder: binding.folder,
       environmentId: params.environmentId,
       environmentFile: params.environmentFile,
-      ...(binding.startCommand === undefined
-        ? {}
-        : { startCommand: binding.startCommand }),
-      ...(binding.nativeStart === undefined
-        ? {}
-        : { nativeStart: binding.nativeStart }),
+      ...definedFields({
+        startCommand: binding.startCommand,
+        nativeStart: binding.nativeStart,
+        checkCopy: params.checkCopy,
+      }),
     }),
   });
 }
@@ -793,12 +892,14 @@ async function disableNativeApp(
 
 /**
  * Start (or restart) one prepared app and wait for it to answer, rolling
- * `current` back when it never does.
+ * `current` back when it never does. The probe's transcript lines go under
+ * `probePhase`.
  */
 async function startNativeApp(
   io: NativeAppIo,
   layout: LayoutPaths,
   prepared: PreparedNativeApp,
+  options: { probePhase: string; recoverStartFailure?: boolean },
 ): Promise<void> {
   const { app, unit } = prepared;
 
@@ -819,11 +920,14 @@ async function startNativeApp(
     : await systemctl(io, ["enable", "--now", unit]);
   if (!result.success) {
     await emitNativeAppJournal(io, unit);
-    throw new Error(
-      result.stderr || `Failed to start native app unit ${unit}`,
-    );
+    const outcome = options.recoverStartFailure === true
+      ? await recoverFailedNativeApp(io, layout, prepared)
+      : "";
+    const reason = result.stderr || `Failed to start native app unit ${unit}`;
+    throw new Error(`${reason}${outcome}`);
   }
 
+  io.setPhase(options.probePhase);
   if (await waitForNativeApp(io, app.listenPort, unit)) {
     io.onOutput?.(
       "stdout",
@@ -846,6 +950,462 @@ async function startNativeApp(
     `native app ${app.composeServiceName} did not answer on 127.0.0.1:${app.listenPort} within ${
       NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
     }s${outcome}${journalDetail(journal)}`,
+  );
+}
+
+/** The release this deploy moved `current` away from, and the one it moved to. */
+function movedRelease(
+  binding: NativeAppRelease,
+): { previous: string; next: string } | null {
+  const previous = binding.previousReleaseId;
+  const next = binding.releaseId;
+  if (!previous || !next || previous === next) return null;
+  return { previous, next };
+}
+
+/** Point the app's `current` at one of its releases. */
+async function pointCurrentAt(
+  layout: LayoutPaths,
+  prepared: Pick<PreparedNativeApp, "app" | "binding">,
+  releaseId: string,
+): Promise<void> {
+  await swapCurrentSymlink(resolveReleasePaths(layout, {
+    username: prepared.binding.username,
+    serviceId: prepared.app.serviceId,
+    releaseId,
+    folder: prepared.binding.folder,
+  }));
+}
+
+/**
+ * A release published without moving `current` whose app stopped serving
+ * since (a crash, a kill, a restart caught half-way): with nothing to check
+ * it beside, `current` moves to it now, so the start below runs it and not
+ * the release it replaces.
+ */
+async function catchUpHeldRelease(
+  layout: LayoutPaths,
+  prepared: Pick<PreparedNativeApp, "app" | "binding">,
+): Promise<void> {
+  const { heldCurrent, releaseId } = prepared.binding;
+  if (heldCurrent === true && releaseId) {
+    await pointCurrentAt(layout, prepared, releaseId);
+  }
+}
+
+/** The folder the check copy runs out of: the new release itself. */
+function newReleaseDir(
+  layout: LayoutPaths,
+  app: EnvironmentDeployNativeAppService,
+  binding: NativeAppRelease,
+): string {
+  if (!binding.releaseId) {
+    // Nothing was published by this deploy, so `current` is the release.
+    return serviceTree(layout, {
+      serviceId: app.serviceId,
+      username: binding.username,
+      folder: binding.folder,
+    }).currentLink;
+  }
+  return resolveReleasePaths(layout, {
+    username: binding.username,
+    serviceId: app.serviceId,
+    releaseId: binding.releaseId,
+    folder: binding.folder,
+  }).releaseDir;
+}
+
+/** A spare loopback port for the check copy, or a clear refusal. */
+async function pickCheckPort(
+  io: NativeAppIo,
+  app: EnvironmentDeployNativeAppService,
+): Promise<number> {
+  try {
+    return await io.pickPort();
+  } catch (err) {
+    throw new Error(
+      `native app ${app.composeServiceName}: no free loopback port to start the new release on beside the one serving (${
+        err instanceof Error ? err.message : String(err)
+      }); nothing was switched and the release that was serving keeps serving`,
+    );
+  }
+}
+
+/**
+ * The apps (by compose service name) that are switched on and serving now.
+ * Each one's `current` is put back on the release it serves before any app
+ * is prepared: publishing leaves it there already (`keepCurrent`), and when
+ * it could not, no failure while preparing one app may leave another on a
+ * release that never answered.
+ */
+async function servingNativeApps(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  apps: readonly EnvironmentDeployNativeAppService[],
+  bindings: NativeAppBindings,
+): Promise<Set<string>> {
+  const serving = new Set<string>();
+  await forEachSequential(apps, async (app) => {
+    const binding = bindings.get(app.composeServiceName);
+    if (!binding || app.enabled === false) return;
+    if (!(await unitIsActive(io, nativeAppUnitName(app.serviceId)))) return;
+    serving.add(app.composeServiceName);
+    const moved = movedRelease(binding);
+    if (moved) await pointCurrentAt(layout, { app, binding }, moved.previous);
+  });
+  return serving;
+}
+
+type PrepareContext = {
+  environmentId: string;
+  systemdUnitDir: string;
+  opts: Pick<ApplyNativeAppsOpts, "variableMaterial" | "decryptSecrets">;
+};
+
+/**
+ * Write one app's files before the single `daemon-reload`. With nothing
+ * serving (a first deploy, or a unit that is down) that is its own variables
+ * and unit, started directly afterwards. With a release serving, only the
+ * check copy's files are written: the app's own unit, its variables file and
+ * `current` keep describing the release that serves until the switch.
+ * Returns the prepared app and whether a unit file changed.
+ */
+async function prepareNativeApp(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  ctx: PrepareContext,
+  app: EnvironmentDeployNativeAppService,
+  binding: NativeAppRelease,
+  serving: boolean,
+): Promise<{ prepared: PreparedNativeApp; changed: boolean }> {
+  const unit = nativeAppUnitName(app.serviceId);
+  const installOwn = (environmentFile: boolean, start?: RecordedStart) =>
+    installNativeAppUnit(io, layout, {
+      environmentId: ctx.environmentId,
+      ...(start === undefined
+        ? { app, binding }
+        : withRecordedStart(binding, app, start)),
+      systemdUnitDir: ctx.systemdUnitDir,
+      environmentFile,
+    });
+  const prepared: PreparedNativeApp = {
+    app,
+    binding,
+    unit,
+    reinstallUnit: (start) =>
+      installOwn(prepared.environmentFile === true, start),
+  };
+  if (!serving) {
+    await catchUpHeldRelease(layout, prepared);
+    prepared.environmentFile = await applyNativeAppVariables(
+      io,
+      layout,
+      app,
+      ctx.opts,
+    );
+    return {
+      prepared,
+      changed: await installOwn(prepared.environmentFile),
+    };
+  }
+
+  const checkApp = {
+    ...app,
+    serviceId: nativeAppCheckCopyId(app.serviceId),
+    listenPort: await pickCheckPort(io, app),
+  };
+  // The staged unit marks a check copy that may exist; it is written before
+  // anything of the copy (its variables included), so a deploy that stops
+  // half-way always leaves the marker the cleanup looks for.
+  await Deno.mkdir(nativeAppCheckCopyStageDir(layout), {
+    recursive: true,
+    mode: 0o750,
+  });
+  await Deno.writeTextFile(
+    nativeAppCheckCopyStagedPath(
+      layout,
+      ctx.environmentId,
+      checkApp.serviceId,
+    ),
+    "",
+    { mode: 0o640 },
+  );
+  const changed = await installNativeAppUnit(io, layout, {
+    environmentId: ctx.environmentId,
+    app: checkApp,
+    binding,
+    systemdUnitDir: ctx.systemdUnitDir,
+    environmentFile: await applyNativeAppVariables(
+      io,
+      layout,
+      checkApp,
+      ctx.opts,
+    ),
+    checkCopy: { workingDirectory: newReleaseDir(layout, app, binding) },
+  });
+  prepared.checkCopy = {
+    app: checkApp,
+    unit: nativeAppUnitName(checkApp.serviceId),
+    environmentId: ctx.environmentId,
+    systemdUnitDir: ctx.systemdUnitDir,
+    takeOver: async () => {
+      const variables = await materializeNativeAppVariables(
+        layout,
+        app,
+        ctx.opts.variableMaterial ?? [],
+        ctx.opts.decryptSecrets,
+        io.run,
+      );
+      prepared.environmentFile = variables.environmentFile;
+      return await installOwn(variables.environmentFile);
+    },
+  };
+  return { prepared, changed };
+}
+
+/**
+ * Stop a check copy and remove its unit, variables copy and staged file, then
+ * reload. Best-effort: a copy left behind holds a spare port and nothing
+ * routes to it; the staged file stays when the copy could not be stopped or
+ * its unit removed, so the next deploy (or stop) tries again.
+ */
+async function retireCheckCopy(
+  io: NativeAppIo,
+  layout: Pick<LayoutPaths, "configDir">,
+  params: { environmentId: string; checkId: string; systemdUnitDir: string },
+): Promise<void> {
+  const unit = nativeAppUnitName(params.checkId);
+  const stop = await systemctl(io, ["stop", unit]);
+  if (!stop.success) {
+    // Leave the unit and its marker for the next deploy to stop: removing the
+    // file of a process still running would leave nothing to stop it by.
+    logWarn(
+      "deploy",
+      `native app check copy stop failed unit=${unit}: ${stop.stderr}`,
+    );
+    return;
+  }
+  const rm = await removeUnitFile(
+    io,
+    nativeAppUnitPath(params.checkId, params.systemdUnitDir),
+  );
+  if (!rm.success) {
+    logWarn(
+      "deploy",
+      `native app check copy removal failed unit=${unit}: ${rm.stderr}`,
+    );
+    return;
+  }
+  await dropStaleEnvironmentFiles(io, layout, [params.checkId]);
+  await removeStagedFile(
+    nativeAppCheckCopyStagedPath(layout, params.environmentId, params.checkId),
+  );
+  const reload = await systemctl(io, ["daemon-reload"]);
+  if (!reload.success) {
+    logWarn(
+      "deploy",
+      `systemctl daemon-reload after removing ${unit} failed: ${reload.stderr}`,
+    );
+  }
+}
+
+/** {@link retireCheckCopy} for a prepared app's own check copy. */
+async function retirePreparedCheckCopy(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  check: CheckCopy,
+): Promise<void> {
+  await retireCheckCopy(io, layout, {
+    environmentId: check.environmentId,
+    checkId: check.app.serviceId,
+    systemdUnitDir: check.systemdUnitDir,
+  });
+}
+
+/**
+ * Remove every check copy this environment still has staged: what a deploy
+ * the daemon did not finish (it restarted mid-deploy) left behind.
+ */
+async function retireLeftoverCheckCopies(
+  io: NativeAppIo,
+  layout: Pick<LayoutPaths, "configDir">,
+  environmentId: string,
+  systemdUnitDir: string,
+): Promise<void> {
+  const checkIds = await listStagedUnitIds(
+    nativeAppCheckCopyStageDir(layout),
+    environmentId,
+  );
+  await forEachSequential(checkIds, async (checkId) => {
+    io.onOutput?.(
+      "stdout",
+      `removing ${
+        nativeAppUnitName(checkId)
+      }, left by a deploy that did not finish`,
+    );
+    await retireCheckCopy(io, layout, {
+      environmentId,
+      checkId,
+      systemdUnitDir,
+    });
+  });
+}
+
+/**
+ * The check copy did not start or did not answer: copy its journal into the
+ * transcript, remove it, and fail. Nothing of the app's own was touched, so
+ * the release that was serving keeps serving.
+ */
+async function failCheckCopy(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+  check: CheckCopy,
+  startError: string | null,
+): Promise<never> {
+  const { app } = prepared;
+  const address = `127.0.0.1:${check.app.listenPort}`;
+  const what = startError === null
+    ? `did not answer on ${address} within ${
+      NATIVE_APP_HEALTH_TIMEOUT_MS / 1000
+    }s`
+    : `could not be started (${startError})`;
+  io.onOutput?.("stderr", `${app.composeServiceName}: the new release ${what}`);
+  const journal = await emitNativeAppJournal(io, check.unit);
+  await retirePreparedCheckCopy(io, layout, check);
+  throw new Error(
+    `native app ${app.composeServiceName}: the new release ${what}, so it never took traffic; the release that was serving keeps serving${
+      journalDetail(journal)
+    }`,
+  );
+}
+
+/**
+ * Move traffic to the checked release: write the app's own variables and unit
+ * for it, point `current` at it and restart the app's own unit on its port
+ * (the old release's process stops there), then probe it again. A unit that
+ * does not start or answer rolls back to the previous release
+ * ({@link recoverFailedNativeApp}).
+ */
+async function switchTraffic(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+  check: CheckCopy,
+): Promise<void> {
+  io.setPhase(COMMAND_LOG_PHASES.SWITCH_TRAFFIC);
+  if (await check.takeOver()) {
+    const reload = await systemctl(io, ["daemon-reload"]);
+    if (!reload.success) {
+      throw new Error(reload.stderr || "systemctl daemon-reload failed");
+    }
+  }
+  // The copy shares the account's ceilings with the release serving; it has
+  // answered, so it goes before the app's own unit starts the same release.
+  await systemctl(io, ["stop", check.unit]);
+  const moved = movedRelease(prepared.binding);
+  if (moved) await pointCurrentAt(layout, prepared, moved.next);
+  await startNativeApp(io, layout, prepared, {
+    probePhase: COMMAND_LOG_PHASES.SWITCH_TRAFFIC,
+    recoverStartFailure: true,
+  });
+  const target = prepared.binding.releaseId
+    ? `release ${prepared.binding.releaseId}`
+    : "the new release";
+  io.onOutput?.(
+    "stdout",
+    `${prepared.app.composeServiceName}: traffic now goes to ${target}`,
+  );
+}
+
+/**
+ * Deploy an app that already serves a release: the new release starts beside
+ * it (check copy, spare port), must answer, and only then takes the app's own
+ * port. The check copy is removed whatever happens.
+ */
+async function deployBesideServing(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+  check: CheckCopy,
+): Promise<void> {
+  const { app } = prepared;
+  const address = `127.0.0.1:${check.app.listenPort}`;
+  io.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
+  io.onOutput?.(
+    "stdout",
+    `systemctl restart ${check.unit} (the new release, beside the one serving, on ${address})`,
+  );
+  await systemctl(io, ["reset-failed", check.unit]);
+  const started = await systemctl(io, ["restart", check.unit]);
+  io.setPhase(COMMAND_LOG_PHASES.HEALTH);
+  if (!started.success) {
+    await failCheckCopy(
+      io,
+      layout,
+      prepared,
+      check,
+      started.stderr || "systemd refused it",
+    );
+  }
+  if (!(await waitForNativeApp(io, check.app.listenPort, check.unit))) {
+    await failCheckCopy(io, layout, prepared, check, null);
+  }
+  io.onOutput?.(
+    "stdout",
+    `${app.composeServiceName}: the new release answered on ${address}`,
+  );
+
+  try {
+    await switchTraffic(io, layout, prepared, check);
+  } catch (err) {
+    await retirePreparedCheckCopy(io, layout, check);
+    throw err;
+  }
+  io.setPhase(COMMAND_LOG_PHASES.STOP_OLD_RELEASE);
+  await retirePreparedCheckCopy(io, layout, check);
+  const moved = movedRelease(prepared.binding);
+  const kept = moved
+    ? `; release ${moved.previous} stays on disk for a rollback`
+    : "";
+  io.onOutput?.(
+    "stdout",
+    `${app.composeServiceName}: the old release stopped when the new one took over 127.0.0.1:${app.listenPort}, and the copy started for the check is removed${kept}`,
+  );
+}
+
+/** The switch and stop steps of an app that had nothing to switch from. */
+function noteNothingToSwitch(io: NativeAppIo, why: string): void {
+  io.setPhase(COMMAND_LOG_PHASES.SWITCH_TRAFFIC);
+  io.onOutput?.("stdout", why);
+  io.setPhase(COMMAND_LOG_PHASES.STOP_OLD_RELEASE);
+  io.onOutput?.("stdout", "no old release to stop");
+}
+
+/** Phase 3 for one app: disable, start directly, or check beside the one serving. */
+async function runPreparedNativeApp(
+  io: NativeAppIo,
+  layout: LayoutPaths,
+  prepared: PreparedNativeApp,
+): Promise<void> {
+  const name = prepared.app.composeServiceName;
+  if (prepared.app.enabled === false) {
+    io.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
+    await disableNativeApp(io, prepared);
+    noteNothingToSwitch(io, `${name} is turned off, so nothing takes traffic`);
+    return;
+  }
+  if (prepared.checkCopy) {
+    await deployBesideServing(io, layout, prepared, prepared.checkCopy);
+    return;
+  }
+  io.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
+  await startNativeApp(io, layout, prepared, {
+    probePhase: COMMAND_LOG_PHASES.HEALTH,
+  });
+  noteNothingToSwitch(
+    io,
+    `${name}: nothing was serving before, so the new release took traffic as soon as it answered`,
   );
 }
 
@@ -1044,9 +1604,15 @@ export async function applyNativeAppServices(
   assertSafeId(environmentId, "environmentId");
   for (const app of apps) {
     assertSafeId(app.serviceId, "serviceId");
+    // The check copy's id is `<serviceId>-new`: an app id of that shape could
+    // be another app's check copy.
+    if (app.serviceId.endsWith("-new")) {
+      throw new Error("native app serviceId must not end in -new");
+    }
   }
 
   const io = resolveIo(opts);
+  io.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
   await ensureNativeAppRuntime(apps, io);
   await Deno.mkdir(nativeAppConfigDir(layout), {
     recursive: true,
@@ -1054,6 +1620,7 @@ export async function applyNativeAppServices(
   });
 
   const systemdUnitDir = opts.systemdUnitDir ?? SYSTEMD_UNIT_DIR;
+  await retireLeftoverCheckCopies(io, layout, environmentId, systemdUnitDir);
 
   // Phase 1 — write every changed file. `filesChanged` is latched across both
   // slices and units on purpose: a deploy that changes an account ceiling *and*
@@ -1066,10 +1633,9 @@ export async function applyNativeAppServices(
     systemdUnitDir,
   );
 
+  const serving = await servingNativeApps(io, layout, apps, opts.bindings);
   const prepared: PreparedNativeApp[] = [];
-  // Apps with no variables: their root-owned copy (left by an earlier deploy)
-  // goes only once the unit that no longer loads it is running.
-  const withoutVariables: string[] = [];
+  const context: PrepareContext = { environmentId, systemdUnitDir, opts };
   await forEachSequential(apps, async (app) => {
     const binding = opts.bindings.get(app.composeServiceName);
     if (!binding) {
@@ -1079,33 +1645,16 @@ export async function applyNativeAppServices(
       );
       return;
     }
-    const environmentFile = await applyNativeAppVariables(
+    const entry = await prepareNativeApp(
       io,
       layout,
+      context,
       app,
-      opts,
+      binding,
+      serving.has(app.composeServiceName),
     );
-    const unitChanged = await installNativeAppUnit(io, layout, {
-      environmentId,
-      app,
-      binding,
-      systemdUnitDir,
-      environmentFile,
-    });
-    if (unitChanged) filesChanged = true;
-    if (!environmentFile) withoutVariables.push(app.serviceId);
-    prepared.push({
-      app,
-      binding,
-      unit: nativeAppUnitName(app.serviceId),
-      reinstallUnit: (start) =>
-        installNativeAppUnit(io, layout, {
-          environmentId,
-          ...withRecordedStart(binding, app, start),
-          systemdUnitDir,
-          environmentFile,
-        }),
-    });
+    if (entry.changed) filesChanged = true;
+    prepared.push(entry.prepared);
   });
 
   // Phase 2 — one `daemon-reload`, after every file is installed and before any
@@ -1117,19 +1666,24 @@ export async function applyNativeAppServices(
     }
   }
 
-  // Phase 3 — start / restart and health-probe each app; an operator-disabled
-  // app is stopped and disabled instead, and still counts as applied.
+  // Phase 3 — start and health-probe each app (beside the release serving,
+  // when there is one); an operator-disabled app is stopped and disabled
+  // instead, and still counts as applied.
   const applied: string[] = [];
   await forEachSequential(prepared, async (entry) => {
-    if (entry.app.enabled === false) {
-      await disableNativeApp(io, entry);
-    } else {
-      await startNativeApp(io, layout, entry);
-    }
+    await runPreparedNativeApp(io, layout, entry);
     applied.push(entry.app.composeServiceName);
   });
 
-  await dropStaleEnvironmentFiles(io, layout, withoutVariables);
+  // Apps with no variables: their root-owned copy (left by an earlier deploy)
+  // goes only once the unit that no longer loads it is running.
+  await dropStaleEnvironmentFiles(
+    io,
+    layout,
+    prepared
+      .filter((entry) => entry.environmentFile === false)
+      .map((entry) => entry.app.serviceId),
+  );
 
   logInfo(
     "deploy",
@@ -1140,13 +1694,41 @@ export async function applyNativeAppServices(
   return { applied };
 }
 
+/**
+ * True when the payload runs this compose service as a native app that is
+ * switched on and whose unit is active now: its new release is published
+ * without moving `current` (see `promoteRelease`'s `keepCurrent`).
+ */
+export async function nativeAppIsServing(
+  apps: readonly EnvironmentDeployNativeAppService[],
+  service: { composeServiceName: string; serviceId: string },
+  deps?: { run?: NativeAppRunFn },
+): Promise<boolean> {
+  const app = apps.find((entry) =>
+    entry.composeServiceName === service.composeServiceName
+  );
+  if (!app || app.enabled === false) return false;
+  if (!SAFE_ID_RE.test(service.serviceId)) return false;
+  return await unitIsActive(
+    resolveIo(deps),
+    nativeAppUnitName(service.serviceId),
+  );
+}
+
 /** Service ids this environment currently has a staged unit for. */
 export async function listEnvironmentNativeAppServiceIds(
   layout: Pick<LayoutPaths, "configDir">,
   environmentId: string,
 ): Promise<string[]> {
+  return await listStagedUnitIds(nativeAppConfigDir(layout), environmentId);
+}
+
+/** Ids of the `tp-<environmentId>-<id>.service` files staged in `dir`. */
+async function listStagedUnitIds(
+  dir: string,
+  environmentId: string,
+): Promise<string[]> {
   const prefix = nativeAppStagedFilePrefix(environmentId);
-  const dir = nativeAppConfigDir(layout);
   let ids: string[] = [];
   try {
     const entries = await Array.fromAsync(Deno.readDir(dir));
@@ -1174,9 +1756,18 @@ export async function applyNativeAppLifecycle(
   layout: Pick<LayoutPaths, "configDir">,
   environmentId: string,
   action: NativeAppLifecycleAction,
-  deps?: { run?: NativeAppRunFn },
+  deps?: { run?: NativeAppRunFn; systemdUnitDir?: string },
 ): Promise<string[]> {
   const io = resolveIo(deps);
+  if (action === "stop") {
+    // A stopped environment runs nothing: a check copy a deploy left goes too.
+    await retireLeftoverCheckCopies(
+      io,
+      layout,
+      environmentId,
+      deps?.systemdUnitDir ?? SYSTEMD_UNIT_DIR,
+    );
+  }
   const serviceIds = await listEnvironmentNativeAppServiceIds(
     layout,
     environmentId,
@@ -1212,6 +1803,12 @@ export async function removeNativeAppServices(
   deps?: { run?: NativeAppRunFn; systemdUnitDir?: string },
 ): Promise<number> {
   const io = resolveIo(deps);
+  await retireLeftoverCheckCopies(
+    io,
+    layout,
+    environmentId,
+    deps?.systemdUnitDir ?? SYSTEMD_UNIT_DIR,
+  );
   const serviceIds = await listEnvironmentNativeAppServiceIds(
     layout,
     environmentId,
@@ -1228,15 +1825,9 @@ export async function removeNativeAppServices(
         `native app disable failed unit=${unit}: ${disable.stderr}`,
       );
     }
-    const rm = await io.run(
-      "sudo",
-      hostSudoArgs([
-        "-n",
-        "rm",
-        "-f",
-        "--",
-        nativeAppUnitPath(serviceId, deps?.systemdUnitDir),
-      ]),
+    const rm = await removeUnitFile(
+      io,
+      nativeAppUnitPath(serviceId, deps?.systemdUnitDir),
     );
     if (!rm.success) {
       logWarn(
@@ -1298,6 +1889,7 @@ export function nativeAppBindingsFromPayload(
         previousReleaseId: previous,
         startCommand: entry.build.startCommand,
         releaseId: applied?.releaseId,
+        heldCurrent: applied?.heldCurrent,
         nativeStart: applied?.nativeStart,
       }),
     );
@@ -1308,6 +1900,8 @@ export function nativeAppBindingsFromPayload(
 /** The facts about this deploy's release that the unit needs. */
 export type AppliedNativeRelease = {
   releaseId: string;
+  /** Published without moving `current` (see {@link NativeAppRelease}). */
+  heldCurrent?: boolean;
   nativeStart?: NativeAppStart;
   /** The runtime the live release runs on; absent keeps the payload's. */
   runtime?: "node" | "deno";

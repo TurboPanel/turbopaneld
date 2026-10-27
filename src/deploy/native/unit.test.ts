@@ -285,6 +285,15 @@ test("nativeAppUnitContent sets NODE_ENV from appMode and defaults to production
   });
   assertStringIncludes(dev, "Environment=NODE_ENV=development");
 
+  const staging = nativeAppUnitContent({
+    layout,
+    app: { ...app, appMode: "staging" },
+    username: "appuser",
+    folder: folderFor("appuser"),
+    environmentId: "env-1",
+  });
+  assertStringIncludes(staging, "Environment=NODE_ENV=staging");
+
   const prod = nativeAppUnitContent({
     layout,
     app,

@@ -4,6 +4,7 @@ import {
   BACKUP_S3_COPY_FEATURE,
   COMMAND_RECOVERY_FEATURE,
   compareSemver,
+  CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
@@ -290,6 +291,12 @@ test("site-db-bindings-v1 is advertised on the wire and raised no floor", () => 
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
+test("custom-node-app-mode-v1 is advertised last and raised no floor", () => {
+  assertEquals(CUSTOM_NODE_APP_MODE_FEATURE, "custom-node-app-mode-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), CUSTOM_NODE_APP_MODE_FEATURE);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
 test("deno-native-apps-v1 is advertised on the wire and raised no floor", () => {
   assertEquals(DENO_NATIVE_APPS_FEATURE, "deno-native-apps-v1");
   assertEquals(
@@ -338,8 +345,13 @@ test("backup-s3-copy-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("deploy-hostings-only-v1 is advertised last and raised no floor", () => {
+test("deploy-hostings-only-v1 is advertised and raised no floor", () => {
   assertEquals(DEPLOY_HOSTINGS_ONLY_FEATURE, "deploy-hostings-only-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), DEPLOY_HOSTINGS_ONLY_FEATURE);
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      DEPLOY_HOSTINGS_ONLY_FEATURE,
+    ),
+    true,
+  );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

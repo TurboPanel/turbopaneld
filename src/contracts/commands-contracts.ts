@@ -1217,8 +1217,12 @@ export type EnvironmentDeployNativeAppService = {
   nodeVersion?: string;
   /** Deno series ("2", "2.9", "2.9.7"); only read when `runtime` is `deno`. */
   denoVersion?: string;
-  /** `NODE_ENV` for the generated unit. Omitted means `production`. */
-  appMode?: "production" | "development";
+  /**
+   * `NODE_ENV` for the build and the generated unit. Omitted means
+   * `production`. Usually `production` or `development`; any other value
+   * matching {@link NATIVE_APP_MODE_RE} (`staging`, `test`, ...) is allowed.
+   */
+  appMode?: string;
   /**
    * Omitted means `true`. When `false` the unit is installed but stopped and
    * disabled instead of started — the release stays promoted.
@@ -5029,10 +5033,13 @@ const NATIVE_APP_RUNTIMES: ReadonlySet<string> = new Set(["node", "deno"]);
 /** Same shape as the instance parser — a range or tag is not a pin. */
 const NATIVE_APP_NODE_VERSION_RE = /^\d{1,3}(\.\d{1,3}){0,2}$/;
 
-const NATIVE_APP_MODES: ReadonlySet<string> = new Set([
-  "production",
-  "development",
-]);
+/**
+ * Application mode (`NODE_ENV`) shape: 1-64 letters, digits, `.`, `_` or `-`,
+ * starting with a letter or digit. Same rule as the instance parser. Kept
+ * tight because the value is written unquoted into the unit's
+ * `Environment=NODE_ENV=` line.
+ */
+const NATIVE_APP_MODE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Compose `restart_policy.condition` vocabulary — never systemd's. */
 const NATIVE_APP_RESTART_CONDITIONS: ReadonlySet<string> = new Set([
@@ -5150,10 +5157,10 @@ function parseNativeAppMode(
   value: unknown,
 ): EnvironmentDeployNativeAppService["appMode"] | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string" || !NATIVE_APP_MODES.has(value)) {
+  if (typeof value !== "string" || !NATIVE_APP_MODE_RE.test(value)) {
     throw new TypeError("Invalid nativeAppServices appMode");
   }
-  return value as EnvironmentDeployNativeAppService["appMode"];
+  return value;
 }
 
 function parseNativeAppRestartDuration(

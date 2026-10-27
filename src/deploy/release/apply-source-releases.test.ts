@@ -17,7 +17,7 @@ import {
   resolveDaemonReleasePaths,
   resolveReleasePaths,
 } from "./release-layout.ts";
-import { swapCurrentSymlink } from "./promote.ts";
+import { readCurrentReleaseId, swapCurrentSymlink } from "./promote.ts";
 import {
   applySourceReleases,
   resolveReleaseServiceId,
@@ -418,6 +418,225 @@ test("applySourceReleases promotes native releases with injected checkout/build/
       } catch (err) {
         if (!(err instanceof Deno.errors.NotFound)) throw err;
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases publishes a serving Node app's release without moving current", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c000005";
+      const paths = resolveReleasePaths(layout, {
+        username: "appuser",
+        serviceId,
+        folder: folderOf(serviceId),
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+      });
+      await mkdirReleaseTree(paths);
+
+      const asked: string[] = [];
+      const keepCurrent: boolean[] = [];
+      const log = fakeLogSink();
+      const applied = await applySourceReleases(
+        layout,
+        basePayload({
+          hostings: [{
+            hostingId: "host-native",
+            composeServiceName: "web",
+            serviceId,
+            hostnames: ["app.example.com"],
+          }],
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "web",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+              releaseServiceId: serviceId,
+              principal: {
+                principalId: "pr-1",
+                username: "appuser",
+                uid: 2000,
+                gid: 2001,
+              },
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "web",
+            serviceId,
+            listenPort: 3000,
+            framework: "next",
+          }],
+        }),
+        {
+          logSink: log.sink,
+          decryptSecrets: undefined,
+          now: () => "2026-01-01T00:00:00.000Z",
+          runFn: folderRun,
+          checkoutReleaseFn: async (params) => {
+            const workingDir = join(params.scratchDir, "source");
+            await Deno.mkdir(workingDir, { recursive: true });
+            await Deno.writeTextFile(join(workingDir, "index.html"), "built");
+            return { workingDir, commitSha: "resolved-commit" };
+          },
+          runReleaseBuildFn: () => Promise.resolve(),
+          prepareNativeAppBuildOutputFn: () =>
+            Promise.resolve({
+              standaloneOutput: true,
+              staticExport: false,
+              outputDirectory: undefined,
+            }),
+          holdCurrent: (service) => {
+            asked.push(service.composeServiceName + "/" + service.serviceId);
+            return Promise.resolve(true);
+          },
+          promoteReleaseFn: async (params) => {
+            keepCurrent.push(params.keepCurrent === true);
+            await Deno.writeTextFile(
+              join(params.paths.releaseDir, "index.html"),
+              "published",
+            );
+            await writeReleaseManifest(params.paths.releaseDir, {
+              version: 1,
+              serviceId,
+              composeServiceName: "web",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+              sourceId: "src-1",
+              commitSha: "resolved-commit",
+              ref: "main",
+              promotedAt: "2026-01-01T00:00:00.000Z",
+              standaloneOutput: true,
+              staticExport: false,
+            });
+            if (params.keepCurrent !== true) {
+              await swapCurrentSymlink(params.paths);
+            }
+            return params.paths.releaseDir;
+          },
+          pruneReleasesFn: () =>
+            Promise.resolve(["019e0a1b-7c3d-7a52-9b4e-3f1a2c000007"]),
+        },
+      );
+
+      assertEquals(applied.length, 1);
+      // Serving: published beside, `current` left on the release serving.
+      assertEquals(asked, [`web/${serviceId}`]);
+      assertEquals(keepCurrent, [true]);
+      assertEquals(applied[0].heldCurrent, true);
+      assertEquals(await readCurrentReleaseId(paths), null);
+      assertEquals(
+        log.lines.some((line) =>
+          line.message.includes("takes traffic once it answers")
+        ),
+        true,
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});
+
+test("applySourceReleases never holds current for a static export", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c000005";
+      const paths = resolveReleasePaths(layout, {
+        username: "appuser",
+        serviceId,
+        folder: folderOf(serviceId),
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+      });
+      await mkdirReleaseTree(paths);
+
+      const asked: string[] = [];
+      const keepCurrent: boolean[] = [];
+      const log = fakeLogSink();
+      const applied = await applySourceReleases(
+        layout,
+        basePayload({
+          hostings: [{
+            hostingId: "host-native",
+            composeServiceName: "web",
+            serviceId,
+            hostnames: ["app.example.com"],
+          }],
+          sourceMaterial: [
+            baseSource({
+              composeServiceName: "web",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+              releaseServiceId: serviceId,
+              principal: {
+                principalId: "pr-1",
+                username: "appuser",
+                uid: 2000,
+                gid: 2001,
+              },
+            }),
+          ],
+          nativeAppServices: [{
+            composeServiceName: "web",
+            serviceId,
+            listenPort: 3000,
+            framework: "next",
+          }],
+        }),
+        {
+          logSink: log.sink,
+          decryptSecrets: undefined,
+          now: () => "2026-01-01T00:00:00.000Z",
+          runFn: folderRun,
+          checkoutReleaseFn: async (params) => {
+            const workingDir = join(params.scratchDir, "source");
+            await Deno.mkdir(workingDir, { recursive: true });
+            await Deno.writeTextFile(join(workingDir, "index.html"), "built");
+            return { workingDir, commitSha: "resolved-commit" };
+          },
+          runReleaseBuildFn: () => Promise.resolve(),
+          prepareNativeAppBuildOutputFn: () =>
+            Promise.resolve({
+              standaloneOutput: false,
+              staticExport: true,
+              outputDirectory: undefined,
+            }),
+          holdCurrent: (service) => {
+            asked.push(service.composeServiceName + "/" + service.serviceId);
+            return Promise.resolve(true);
+          },
+          promoteReleaseFn: async (params) => {
+            keepCurrent.push(params.keepCurrent === true);
+            await Deno.writeTextFile(
+              join(params.paths.releaseDir, "index.html"),
+              "published",
+            );
+            await writeReleaseManifest(params.paths.releaseDir, {
+              version: 1,
+              serviceId,
+              composeServiceName: "web",
+              releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+              sourceId: "src-1",
+              commitSha: "resolved-commit",
+              ref: "main",
+              promotedAt: "2026-01-01T00:00:00.000Z",
+              standaloneOutput: true,
+              staticExport: false,
+            });
+            if (params.keepCurrent !== true) {
+              await swapCurrentSymlink(params.paths);
+            }
+            return params.paths.releaseDir;
+          },
+          pruneReleasesFn: () =>
+            Promise.resolve(["019e0a1b-7c3d-7a52-9b4e-3f1a2c000007"]),
+        },
+      );
+
+      assertEquals(applied.length, 1);
+      // A static export leaves the Node app lane: never held.
+      assertEquals(asked, []);
+      assertEquals(keepCurrent, [false]);
+      assertEquals(applied[0].heldCurrent, undefined);
     } finally {
       await fixture.cleanup();
     }
