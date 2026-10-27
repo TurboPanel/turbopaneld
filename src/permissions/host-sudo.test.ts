@@ -104,3 +104,40 @@ test("every `sudo -n <tp-host verb>` literal in src goes through hostSudoArgs", 
   }
   assertEquals(offenders, []);
 });
+
+test("every tp-host verb the daemon names is routed through tp-host", async () => {
+  // A verb tp-host accepts but this list misses runs as a bare `sudo -n
+  // <verb>`, which sudoers refuses on a managed host (and only there).
+  const root = join(dirname(fromFileUrl(import.meta.url)), "..");
+  const script = await Deno.readTextFile(
+    join(root, "..", "orchestration", "scripts", "tp-host"),
+  );
+  const dispatch = script.slice(script.lastIndexOf('case "$_verb" in'));
+  const accepted = new Set(
+    [...dispatch.matchAll(/^ {2}([a-z0-9|-]+)\)/gm)].flatMap((m) =>
+      m[1].split("|")
+    ),
+  );
+  const named = new Set<string>();
+  for await (const path of sourceFiles(root)) {
+    if (path.endsWith(".test.ts") || path.includes("/testing/")) continue;
+    const source = await Deno.readTextFile(path);
+    for (const verb of accepted) {
+      if (source.includes(`"${verb}"`)) named.add(verb);
+    }
+  }
+  const unrouted = [...named].filter((verb) => !TP_HOST_VERBS.has(verb));
+  assertEquals(unrouted.sort(), []);
+});
+
+test("the publish verbs go through tp-host on a managed host", () => {
+  for (const verb of ["publish-open", "publish", "publish-keep"]) {
+    const args = ["-n", verb, "alice", "production", "web", "s1", "r1", "p1"];
+    assertEquals(hostSudoArgs(args, MANAGED), [
+      "-n",
+      "--",
+      "/opt/turbopanel/lib/tp-host",
+      ...args.slice(1),
+    ]);
+  }
+});
