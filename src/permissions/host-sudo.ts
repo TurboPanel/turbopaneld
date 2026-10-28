@@ -68,6 +68,8 @@ export const TP_HOST_VERBS: ReadonlySet<string> = new Set([
   "php-loopback-sync",
   "app-env-install",
   "app-env-remove",
+  "tunnel-env-install",
+  "tunnel-env-remove",
 ]);
 
 export type HostSudoOptions = Parameters<typeof playbooksNeedRootHelper>[0] & {

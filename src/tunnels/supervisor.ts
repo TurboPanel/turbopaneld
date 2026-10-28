@@ -1,43 +1,37 @@
 import { join } from "@std/path";
-import { ensureCloudflared } from "../orchestration/cloudflared.ts";
-import { TUNNELS_DIR } from "../orchestration/assets.ts";
+import {
+  type ConnectorIo,
+  defaultConnectorIo,
+  installConnector,
+  removeConnector,
+} from "./connector-service.ts";
+import {
+  INSTANCE_TUNNEL_ID,
+  isTunnelId,
+  TUNNEL_TOKEN_RE,
+} from "./connector-unit.ts";
 import { logError, logInfo, logWarn } from "../util/logger.ts";
 
 /**
- * Cloudflare tunnel supervisor.
+ * Cloudflare tunnel connectors.
  *
- * Each `*.token` file in {@link TUNNELS_DIR} describes one tunnel: the file holds
- * a tunnel token (paste it in) and the basename is the tunnel's name. Every
- * configured tunnel is run with `cloudflared tunnel run` with the token in `TUNNEL_TOKEN` (never argv,
- * which any local user can read via `ps`) and
- * restarted if it exits. Multiple tunnels run side by side -- drop in more files
- * to add accounts/tunnels later.
+ * Every tunnel runs as its own systemd service (see `connector-service.ts`),
+ * not as a child of the daemon, so a daemon restart (every automatic update,
+ * every crash) leaves the connectors running.
+ *
+ * Older hosts held a tunnel as a `<name>.token` file in the tunnels folder that
+ * the daemon turned into a child process. On start, each such file whose name
+ * is a tunnel id (`instance`, `default`, or a UUID) becomes a service and the
+ * file is deleted once its service is up; any other name is left alone with a
+ * warning. A host that never had a token file does nothing here, so the
+ * connector program is not even downloaded.
  */
-
-interface TunnelConfig {
-  name: string;
-  token: string;
-}
-
-const CLOUDFLARE_TUNNELS_ENABLED = false;
 
 /** Injected hooks for host-free unit tests. Production leaves this unset. */
 export type TunnelsTestHooks = {
-  enabled?: boolean;
+  io?: ConnectorIo;
+  /** Folder of legacy `*.token` files. */
   tunnelsDir?: string;
-  ensureCloudflared?: () => Promise<string>;
-  /** Override the 5s restart backoff (tests use 0). */
-  delay?: (ms: number) => Promise<void>;
-  /**
-   * Replace `Deno.Command` spawn for one tunnel run. Resolves with the process
-   * exit code; should respect `signal` abort.
-   */
-  runTunnel?: (
-    bin: string,
-    args: string[],
-    signal: AbortSignal,
-    env: Record<string, string>,
-  ) => Promise<{ code: number }>;
 };
 
 let testHooks: TunnelsTestHooks | null = null;
@@ -47,189 +41,101 @@ export function setTunnelsTestHooks(hooks: TunnelsTestHooks | null): void {
   testHooks = hooks;
 }
 
-/** Test-only: clear parent/run abort state between suites. */
-export function resetTunnelsRuntimeForTests(): void {
-  parentSignal = null;
-  runAbort?.abort();
-  runAbort = null;
+function resolveIo(): ConnectorIo {
+  return testHooks?.io ?? defaultConnectorIo();
 }
 
-function tunnelsEnabled(): boolean {
-  return testHooks?.enabled ?? CLOUDFLARE_TUNNELS_ENABLED;
+function resolveTunnelsDir(io: ConnectorIo): string {
+  return testHooks?.tunnelsDir ?? io.workDir;
 }
 
-function resolveTunnelsDir(): string {
-  return testHooks?.tunnelsDir ?? TUNNELS_DIR;
-}
-
-async function resolveCloudflaredBin(): Promise<string> {
-  if (testHooks?.ensureCloudflared) return await testHooks.ensureCloudflared();
-  return await ensureCloudflared();
-}
-
-function delay(ms: number): Promise<void> {
-  if (testHooks?.delay) return testHooks.delay(ms);
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function readTunnelConfigs(): Promise<TunnelConfig[]> {
-  const configs: TunnelConfig[] = [];
-  const dir = resolveTunnelsDir();
+/**
+ * Turn every legacy token file into a service. Returns the ids that were
+ * migrated. A failure for one file is logged (never with the token) and leaves
+ * that file in place for the next start; the others still migrate.
+ */
+export async function migrateLegacyTokenFiles(
+  io: ConnectorIo = resolveIo(),
+  dir: string = resolveTunnelsDir(io),
+): Promise<string[]> {
+  const names: string[] = [];
   try {
     for await (const entry of Deno.readDir(dir)) {
-      if (!entry.isFile || !entry.name.endsWith(".token")) continue;
-      const token = (await Deno.readTextFile(join(dir, entry.name)))
-        .trim();
-      if (!token) {
-        logWarn("tunnels", `${entry.name} is empty; skipping`);
+      if (entry.isFile && entry.name.endsWith(".token")) {
+        names.push(entry.name);
+      }
+    }
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+  names.sort();
+
+  const migrated: string[] = [];
+  for (const fileName of names) {
+    const id = fileName.slice(0, -".token".length);
+    if (!isTunnelId(id)) {
+      logWarn(
+        "tunnels",
+        `${fileName} is not named for a tunnel id; leaving it in place`,
+      );
+      continue;
+    }
+    const path = join(dir, fileName);
+    try {
+      const token = (await Deno.readTextFile(path)).trim();
+      if (!TUNNEL_TOKEN_RE.test(token)) {
+        logWarn("tunnels", `${fileName} does not hold a token; skipping`);
         continue;
       }
-      configs.push({ name: entry.name.replace(/\.token$/, ""), token });
+      await installConnector(io, id, token);
+      await Deno.remove(path);
+      migrated.push(id);
+      logInfo("tunnels", `tunnel ${id} now runs as its own service`);
+    } catch (err) {
+      logError(
+        "tunnels",
+        `could not move ${fileName} to a service:`,
+        err instanceof Error ? err.message : "failed",
+      );
     }
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  return configs;
+  return migrated;
 }
 
-function superviseTunnel(
-  bin: string,
-  config: TunnelConfig,
-  signal: AbortSignal,
-): void {
-  // Each supervise-restart cycle schedules the next one detached (not
-  // awaited), so a tunnel that restarts for the daemon's lifetime never builds
-  // an ever-deeper chain of pending promises.
-  const cycle = async (): Promise<void> => {
-    if (signal.aborted) return;
-    logInfo("tunnels", `starting tunnel "${config.name}"`);
-    const args = [
-      "--no-autoupdate",
-      "tunnel",
-      "run",
-    ];
-    // cloudflared reads the token from TUNNEL_TOKEN; keep it out of argv.
-    const env = { TUNNEL_TOKEN: config.token };
-
-    let status: { code: number };
-    if (testHooks?.runTunnel) {
-      status = await testHooks.runTunnel(bin, args, signal, env);
-    } else {
-      const command = new Deno.Command(bin, {
-        args,
-        env,
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      const child = command.spawn();
-
-      const onAbort = () => {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          // already exited
-        }
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-
-      status = await child.status;
-      signal.removeEventListener("abort", onAbort);
-    }
-
-    if (signal.aborted) return;
-    logWarn(
-      "tunnels",
-      `tunnel "${config.name}" exited (code ${status.code}); restarting in 5s`,
-    );
-    await delay(5_000);
-    void cycle();
-  };
-  void cycle();
-}
-
-/** Token filename for the self-hosted instance's own Cloudflare tunnel. */
-const INSTANCE_TUNNEL_NAME = "instance";
-
-/** Parent signal from the daemon process; tunnels stop when it aborts. */
-let parentSignal: AbortSignal | null = null;
-/** Abort controller for the current supervisor set (relaunchable at runtime). */
-let runAbort: AbortController | null = null;
-
-/** (Re)launch supervisors for all currently configured tunnels. */
-async function launchTunnels(): Promise<void> {
-  runAbort?.abort();
-  if (!parentSignal || parentSignal.aborted) return;
-
-  const ac = new AbortController();
-  runAbort = ac;
-  parentSignal.addEventListener("abort", () => ac.abort(), { once: true });
-
-  const dir = resolveTunnelsDir();
-  const configs = await readTunnelConfigs();
-  if (configs.length === 0) {
-    logInfo("tunnels", `no tunnel tokens in ${dir}; skipping`);
-    return;
-  }
-
-  let bin: string;
-  try {
-    bin = await resolveCloudflaredBin();
-  } catch (err) {
+/**
+ * Move any legacy token files to services. Returns at once: the work (which
+ * may download the connector program) runs in the background and is never
+ * fatal, so the daemon never waits on it.
+ */
+export function startTunnels(_signal?: AbortSignal): Promise<void> {
+  void migrateLegacyTokenFiles().catch((err) => {
     logError(
       "tunnels",
-      "cloudflared install failed; tunnels disabled:",
-      err instanceof Error ? err.message : err,
+      "tunnel migration failed:",
+      err instanceof Error ? err.message : "failed",
     );
-    return;
-  }
-
-  logInfo("tunnels", `supervising ${configs.length} tunnel(s)`);
-  for (const config of configs) {
-    superviseTunnel(bin, config, ac.signal);
-  }
+  });
+  return Promise.resolve();
 }
 
 /**
- * Start every configured Cloudflare tunnel. Downloads cloudflared on demand (only
- * when at least one tunnel is configured) and supervises each process until the
- * given signal aborts. Non-fatal: logs and returns if cloudflared can't be
- * installed.
- */
-export async function startTunnels(signal: AbortSignal): Promise<void> {
-  if (!tunnelsEnabled()) {
-    logInfo("tunnels", "Cloudflare tunnels disabled; skipping");
-    return;
-  }
-
-  parentSignal = signal;
-  await launchTunnels();
-}
-
-/**
- * Set (or clear) the self-hosted instance's Cloudflare tunnel token and
- * (re)launch the supervisor. Called by the co-located daemon when the instance
- * pushes a `tunnel-token` message, so external nodes can reach this instance.
- * An empty token removes the tunnel.
+ * Set (or clear) the self-hosted instance's Cloudflare tunnel token. Called by
+ * the co-located daemon when the instance pushes a `tunnel-token` message, so
+ * external nodes can reach this instance. An empty token removes the tunnel.
+ * Throws when the service cannot be installed, so the instance is told.
  */
 export async function writeInstanceTunnelToken(token: string): Promise<void> {
-  if (!tunnelsEnabled()) {
-    logInfo("tunnels", "Cloudflare tunnels disabled; ignoring tunnel token");
-    return;
-  }
-
+  const io = resolveIo();
   const trimmed = token.trim();
-  const dir = resolveTunnelsDir();
-  await Deno.mkdir(dir, { recursive: true });
-  const path = join(dir, `${INSTANCE_TUNNEL_NAME}.token`);
-
-  if (!trimmed) {
-    await Deno.remove(path).catch(() => {});
-    logInfo("tunnels", "instance tunnel token cleared");
-  } else {
-    await Deno.writeTextFile(path, `${trimmed}\n`);
-    await Deno.chmod(path, 0o600).catch(() => {});
+  if (trimmed) {
+    await installConnector(io, INSTANCE_TUNNEL_ID, trimmed);
     logInfo("tunnels", "instance tunnel token updated");
+  } else {
+    await removeConnector(io, INSTANCE_TUNNEL_ID);
+    logInfo("tunnels", "instance tunnel token cleared");
   }
-
-  await launchTunnels();
+  // A legacy token file for the same tunnel must not be migrated back later.
+  await Deno.remove(join(resolveTunnelsDir(io), `${INSTANCE_TUNNEL_ID}.token`))
+    .catch(() => undefined);
 }

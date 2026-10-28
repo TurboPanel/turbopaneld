@@ -78,6 +78,19 @@ R_APPENV="$R_CONFIG/node-app-env"
 # Largest variables file tp-host will copy (NATIVE_APP_ENV_MAX_BYTES in
 # src/deploy/native/variables-runtime.ts; a test keeps the two equal).
 TP_APPENV_MAX=1048576
+# A tunnel connector's token as systemd reads it (EnvironmentFile=): the same
+# arrangement as the variables above, in a folder of its own. The daemon stages
+# <state>/cloudflared/tunnels/<id>.env; tunnel-env-install checks and copies it.
+R_TUNNELENV="$R_CONFIG/tunnel-env"
+R_TUNNEL_STAGE="$R_STATE/cloudflared/tunnels"
+# Longest run token tunnel-env-install accepts (TUNNEL_TOKEN_RE in
+# src/tunnels/connector-unit.ts; a test keeps the two equal).
+TP_TUNNEL_TOKEN_MAX=2048
+# The loopback band a connector's metrics address may use
+# (TUNNEL_METRICS_PORT_MIN/MAX in src/tunnels/connector-unit.ts; kept equal by
+# a test).
+TP_TUNNEL_PORT_MIN=20300
+TP_TUNNEL_PORT_MAX=20899
 R_UNITS="$P/etc/systemd/system"
 R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
 R_WG="$P/etc/wireguard"
@@ -198,6 +211,7 @@ tp_path_class() {
   # them, so no generic verb may name this folder or anything in it.
   case "$_pc" in
     "$R_APPENV"|"$R_APPENV"/*) return 1 ;;
+    "$R_TUNNELENV"|"$R_TUNNELENV"/*) return 1 ;;
   esac
   # State that belongs to an engine account or to a root service, though it sits
   # in the state tree: the hosting Caddy's store (tpedge) and the Docker gate's
@@ -1096,6 +1110,10 @@ tp_unit_ok() {
     turbopanel-backup-*)
       _uk_backup="$(tp_backup_unit_id "$_uk_name")" || return 1
       ;;
+    turbopanel-tunnel-*)
+      tp_tunnel_unit_ok "$_uk_file" "$_uk_name"
+      return
+      ;;
     *) ;;
   esac
   _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v hostcap="$HOSTING_CADDY_CAP" '
@@ -1216,6 +1234,103 @@ tp_unit_ok() {
   [ "$_uk_nnp" = "yes" ] || return 1
   [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
   return 0
+}
+
+# A Cloudflare tunnel connector's id: a lower-case UUID, or one of the two
+# names the daemon has always used for the instance's own tunnel (`instance`,
+# and `default` from the installer's --tunnel-token). Kept equal to
+# isTunnelId in src/tunnels/connector-unit.ts.
+tp_tunnel_id_ok() {
+  case "$1" in
+    instance|default) return 0 ;;
+  esac
+  printf '%s\n' "$1" |
+    LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+# The expected text of the connector unit for ID, VERSION and PORT, exactly as
+# renderTunnelUnit in src/tunnels/connector-unit.ts writes it. A unit is not
+# checked line by line against an allowlist: it must BE this text, so nothing
+# else (another ExecStart, User=, a capability, a different EnvironmentFile=)
+# can ride along. A test installs the daemon's own rendering through this and
+# refuses every one-line change to it.
+tp_tunnel_unit_text() {
+  _tt_id="$1"
+  _tt_ver="$2"
+  _tt_port="$3"
+  printf '%s\n' \
+    '[Unit]' \
+    "Description=TurboPanel tunnel connector $_tt_id" \
+    'After=network-online.target' \
+    'Wants=network-online.target' \
+    'StartLimitIntervalSec=0' \
+    '' \
+    '[Service]' \
+    'Type=simple' \
+    'DynamicUser=yes' \
+    "EnvironmentFile=$R_TUNNELENV/$_tt_id.env" \
+    "ExecStart=$INSTALL_ROOT/vendor/cloudflared/$_tt_ver/cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:$_tt_port" \
+    'Restart=always' \
+    'RestartSec=5' \
+    'NoNewPrivileges=yes' \
+    'PrivateTmp=yes' \
+    'ProtectSystem=strict' \
+    'ProtectHome=yes' \
+    'ProtectKernelTunables=yes' \
+    'ProtectKernelModules=yes' \
+    'ProtectControlGroups=yes' \
+    'RestrictSUIDSGID=yes' \
+    'RestrictRealtime=yes' \
+    'LockPersonality=yes' \
+    'CapabilityBoundingSet=' \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
+    "SyslogIdentifier=turbopanel-tunnel-$_tt_id" \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target'
+}
+
+# turbopanel-tunnel-<id>.service. The id comes from the name; the connector
+# version and metrics port from the one ExecStart line (version digits and dots,
+# port inside the band); the rest must match tp_tunnel_unit_text exactly. The
+# unit runs as a throwaway systemd account (DynamicUser=), never as the daemon's
+# or the hosting Caddy's, with no capability, and reads its token from a copy
+# only root can write.
+tp_tunnel_unit_ok() {
+  _tu_file="$1"
+  _tu_name="$2"
+  _tu_id="${_tu_name#turbopanel-tunnel-}"
+  [ "$_tu_id" != "$_tu_name" ] || return 1
+  _tu_id="${_tu_id%.service}"
+  [ "$_tu_id.service" = "${_tu_name#turbopanel-tunnel-}" ] || return 1
+  tp_tunnel_id_ok "$_tu_id" || return 1
+  _tu_exec=""
+  _tu_n=0
+  while IFS= read -r _tu_line || [ -n "$_tu_line" ]; do
+    case "$_tu_line" in
+      ExecStart=*) _tu_exec="$_tu_line"; _tu_n=$((_tu_n + 1)) ;;
+    esac
+  done < "$_tu_file"
+  [ "$_tu_n" -eq 1 ] || return 1
+  _tu_rest="${_tu_exec#ExecStart=$INSTALL_ROOT/vendor/cloudflared/}"
+  [ "$_tu_rest" != "$_tu_exec" ] || return 1
+  _tu_ver="${_tu_rest%%/*}"
+  case "$_tu_ver" in
+    ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+  esac
+  _tu_port="${_tu_rest#"$_tu_ver"/cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:}"
+  [ "$_tu_port" != "$_tu_rest" ] || return 1
+  case "$_tu_port" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  [ "${#_tu_port}" -le 5 ] || return 1
+  [ "$_tu_port" -ge "$TP_TUNNEL_PORT_MIN" ] && [ "$_tu_port" -le "$TP_TUNNEL_PORT_MAX" ] || return 1
+  # The trailing "x" keeps command substitution from eating the last newline,
+  # so a file with extra blank lines at the end differs too.
+  _tu_have="$(cat -- "$_tu_file"; printf x)"
+  _tu_want="$(tp_tunnel_unit_text "$_tu_id" "$_tu_ver" "$_tu_port"; printf x)"
+  [ "$_tu_have" = "$_tu_want" ]
 }
 
 # A native app unit's one allowed EnvironmentFile=: its own variables copy,
@@ -4689,14 +4804,16 @@ tp_appenv_id_ok() {
   [ "${#1}" -le 128 ]
 }
 
-# Enter the root-owned variables folder, creating it (root:root 0700) when
-# absent, and refuse unless it and its parent are what the checks assume.
+# Enter a root-owned variables folder (DIR, default the native apps' one),
+# creating it (root:root 0700) when absent, and refuse unless it and its parent
+# are what the checks assume.
 tp_appenv_enter() {
-  tp_mkdir_pinned "$R_APPENV" 0700
+  _ae_dir="${1:-$R_APPENV}"
+  tp_mkdir_pinned "$_ae_dir" 0700
   [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
-    tp_die "refusing $R_APPENV: not a root-owned 0700 directory"
+    tp_die "refusing $_ae_dir: not a root-owned 0700 directory"
   tp_dir_sealed_at .. ||
-    tp_die "refusing $R_APPENV: its parent is not sealed (root-owned, not group- or world-writable)"
+    tp_die "refusing $_ae_dir: its parent is not sealed (root-owned, not group- or world-writable)"
 }
 
 # Copy the daemon's staged variables file for service ID to $TP_STAGE/envsrc.
@@ -4705,10 +4822,12 @@ tp_appenv_enter() {
 # can stall neither root nor the verb.
 tp_appenv_read_staged() {
   _ar_id="$1"
-  tp_pin_dir "$R_CONFIG/node-apps/envs" ||
-    tp_die "app-env-install: no staging directory $R_CONFIG/node-apps/envs"
+  _ar_stage="${2:-$R_CONFIG/node-apps/envs}"
+  _ar_max="${3:-$TP_APPENV_MAX}"
+  tp_pin_dir "$_ar_stage" ||
+    tp_die "no staging directory $_ar_stage"
   [ "$(stat -c '%u' .)" = "$CALLER_UID" ] ||
-    tp_die "refusing $R_CONFIG/node-apps/envs: not owned by the calling account"
+    tp_die "refusing $_ar_stage: not owned by the calling account"
   _ar_real="$(pwd -P)"
   tp_as "$CALLER_UID" "$CALLER_GID" timeout 10 sh -c '
     exec 3< "./$1.env" || { echo "tp-host: cannot open the staged file" >&2; exit 1; }
@@ -4723,10 +4842,10 @@ tp_appenv_read_staged() {
       *) echo "tp-host: refusing the staged file: owner, links or type ($meta)" >&2; exit 1 ;;
     esac
     head -c "$4" <&3
-  ' sh "$_ar_id" "$_ar_real" "$CALLER_UID" "$((TP_APPENV_MAX + 1))" > "$TP_STAGE/envsrc" ||
+  ' sh "$_ar_id" "$_ar_real" "$CALLER_UID" "$((_ar_max + 1))" > "$TP_STAGE/envsrc" ||
     tp_die "refusing the staged variables file for $_ar_id"
-  [ "$(wc -c < "$TP_STAGE/envsrc")" -le "$TP_APPENV_MAX" ] ||
-    tp_die "refusing the variables file for $_ar_id: over $TP_APPENV_MAX bytes"
+  [ "$(wc -c < "$TP_STAGE/envsrc")" -le "$_ar_max" ] ||
+    tp_die "refusing the variables file for $_ar_id: over $_ar_max bytes"
 }
 
 # The file holds exactly what the daemon renders: blank lines, `#`/`;` comment
@@ -4805,6 +4924,52 @@ tp_verb_app_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# --- tunnel connector token (EnvironmentFile=) --------------------------------
+# A tunnel's run token reaches its connector the way a native app's variables
+# reach the app (see above): the daemon stages <state>/cloudflared/tunnels/<id>.env
+# (0600, its own), and tunnel-env-install checks it and copies it to
+# <config>/tunnel-env/<id>.env (root:root 0600, in a root:root 0700 folder) for
+# the unit to name. The connector runs as a throwaway account that cannot read
+# the copy: systemd reads it as root. The file holds exactly one line,
+# TUNNEL_TOKEN='<token>', with the token in base64 or its URL-safe form.
+
+tp_tunnel_env_content_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk -v max="$TP_TUNNEL_TOKEN_MAX" '
+    function fail(msg) {
+      print "tp-host: token file: " msg > "/dev/stderr"
+      bad = 1; exit 1
+    }
+    {
+      if (NR > 1) fail("more than one line")
+      if ($0 !~ /^TUNNEL_TOKEN=\047[A-Za-z0-9+\/=_-]+\047$/) fail("not TUNNEL_TOKEN=<token>")
+      if (length($0) > max + 15) fail("token too long")
+    }
+    END { if (!bad && NR != 1) { print "tp-host: token file: empty" > "/dev/stderr"; exit 1 } }
+  ' "$1"
+}
+
+tp_verb_tunnel_env_install() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-install: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-install: refusing tunnel id $1"
+  tp_stage_dir
+  tp_appenv_read_staged "$1" "$R_TUNNEL_STAGE" "$((TP_TUNNEL_TOKEN_MAX + 64))"
+  tp_tunnel_env_content_ok "$TP_STAGE/envsrc" ||
+    tp_die "refusing the token file for $1: content outside the allowed shape"
+  tp_appenv_enter "$R_TUNNELENV"
+  tp_put_file "$R_TUNNELENV/$1.env" 600 < "$TP_STAGE/envsrc"
+}
+
+tp_verb_tunnel_env_remove() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-remove: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-remove: refusing tunnel id $1"
+  # No folder yet: no tunnel has had a token, nothing to remove.
+  tp_pin_dir "$R_TUNNELENV" || return 0
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
+    tp_die "refusing $R_TUNNELENV: not a root-owned 0700 directory"
+  rm -f -- "./$1.env"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -4869,5 +5034,7 @@ case "$_verb" in
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   app-env-install) tp_verb_app_env_install "$@" ;;
   app-env-remove) tp_verb_app_env_remove "$@" ;;
+  tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
+  tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

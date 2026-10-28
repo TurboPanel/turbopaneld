@@ -33,6 +33,12 @@ import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { nativeAppUnitContent } from "../deploy/native/unit.ts";
+import {
+  renderTunnelEnvFile,
+  renderTunnelUnit,
+  tunnelEnvPath,
+  tunnelUnitName,
+} from "../tunnels/connector-unit.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { accessGroup } from "../runtime/registry.ts";
 import {
@@ -158,6 +164,16 @@ const MGD_MATCH = [
   "5432",
 ];
 const APP_UNIT = "turbopanel-app-svc1.service";
+/** A tunnel connector: its unit, run token and the unit text the daemon renders. */
+const TUNNEL_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const TUNNEL_UNIT = tunnelUnitName(TUNNEL_ID);
+const TUNNEL_TOKEN = "dGVzdA".repeat(8);
+const TUNNEL_UNIT_TEXT = renderTunnelUnit({
+  id: TUNNEL_ID,
+  binary: `${VENDOR}/cloudflared/2026.5.2/cloudflared`,
+  port: 20300,
+  envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
+});
 /** The check copy of svc1: its new release, started beside the one serving. */
 const CHECK_UNIT = "turbopanel-app-svc1-new.service";
 const PROBE =
@@ -936,7 +952,7 @@ const SITES: CallSite[] = [
 
   // --- native apps ----------------------------------------------------------
   tpHost(
-    'src/deploy/native/apply-native-apps.ts|["-n","cmp","-s","--",stagedPath,installedPath]',
+    'src/permissions/host-unit-files.ts|["-n","cmp","-s","--",stagedPath,installedPath]',
     {
       argv: [
         "cmp",
@@ -949,7 +965,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/native/apply-native-apps.ts|["-n","install","-m","0644","-o","root","-g","root",params.stagedPath,params.installedPath]',
+    'src/permissions/host-unit-files.ts|["-n","install","-m","0644","-o","root","-g","root",params.stagedPath,params.installedPath]',
     {
       argv: [
         "install",
@@ -1011,6 +1027,21 @@ const SITES: CallSite[] = [
         }),
       ),
     },
+    // A tunnel connector: its own unit, named by tunnel id.
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        `${UNITS}/${TUNNEL_UNIT}`,
+      ],
+      setup: unitSetup(TUNNEL_UNIT_TEXT),
+    },
   ),
   tpHost(
     'src/deploy/native/variables-runtime.ts|["-n","app-env-install",serviceId]',
@@ -1070,6 +1101,75 @@ const SITES: CallSite[] = [
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-app-svc1.service`] },
     { argv: ["rm", "-f", "--", `${UNITS}/${CHECK_UNIT}`] },
   ),
+
+  // --- tunnel connectors ----------------------------------------------------
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","tunnel-env-install",id]',
+    {
+      argv: ["tunnel-env-install", TUNNEL_ID],
+      setup: file(
+        `${STATE}/cloudflared/tunnels/${TUNNEL_ID}.env`,
+        renderTunnelEnvFile(TUNNEL_TOKEN),
+      ),
+    },
+    {
+      argv: ["tunnel-env-install", "instance"],
+      setup: file(
+        `${STATE}/cloudflared/tunnels/instance.env`,
+        renderTunnelEnvFile(TUNNEL_TOKEN),
+      ),
+    },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","tunnel-env-remove",id]',
+    { argv: ["tunnel-env-remove", TUNNEL_ID] },
+    { argv: ["tunnel-env-remove", "instance"] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","rm","-f","--",tunnelUnitPath(id)]',
+    { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT}`] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","systemctl",...args]',
+    { argv: ["systemctl", "restart", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["daemon-reload"])',
+    { argv: ["systemctl", "daemon-reload"] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["enable","--now",unit])',
+    { argv: ["systemctl", "enable", "--now", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["enable",unit])',
+    { argv: ["systemctl", "enable", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["restart",unit])',
+    { argv: ["systemctl", "restart", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    "src/tunnels/connector-service.ts|mustSystemctl(io,[action,tunnelUnitName(id)])",
+    ...["start", "stop", "restart", "enable", "disable"].map((action) => ({
+      argv: ["systemctl", action, TUNNEL_UNIT],
+    })),
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["disable","--now",unit])',
+    { argv: ["systemctl", "disable", "--now", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["is-active",tunnelUnitName(id)])',
+    { argv: ["systemctl", "is-active", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["reset-failed",unit])',
+    { argv: ["systemctl", "reset-failed", TUNNEL_UNIT] },
+  ),
+  tpHost("src/tunnels/connector-service.ts|systemctl(io,args)", {
+    argv: ["systemctl", "daemon-reload"],
+  }),
 
   // --- release promotion ----------------------------------------------------
   // tp-host builds every path from the ids; the staging leaf is the daemon's.
