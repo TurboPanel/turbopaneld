@@ -28,6 +28,7 @@ export const COMMAND_TYPES = [
   "server.backups.test-target",
   "server.folders.remove",
   "server.tunnel.routes",
+  "server.tunnel.connectors",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -7034,6 +7035,106 @@ export function parseTunnelRoutesResult(value: unknown): TunnelRoutesResult {
     routeCount: value.routeCount,
     dropped: value.dropped as string[],
     warnings: value.warnings as string[],
+  };
+}
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorInstall = {
+  /** The provider's tunnel id (lower-case UUID). */
+  tunnelId: string;
+  /** `tpdaemon.` envelope holding the run token. */
+  tokenEnvelope: string;
+};
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorsPayload = {
+  install: TunnelConnectorInstall[];
+  remove: string[];
+};
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorsResult = {
+  /** Ids whose connector this command installed. */
+  installed: string[];
+  /** Ids whose connector already ran and was left as it was. */
+  unchanged: string[];
+  /** Ids whose connector was removed (or was not there). */
+  removed: string[];
+};
+
+const MAX_TUNNEL_CONNECTORS = 64;
+/** A sealed run token is a few hundred characters; this leaves a wide margin. */
+const MAX_TUNNEL_TOKEN_ENVELOPE_LENGTH = 8192;
+const TUNNEL_PROVIDER_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isTunnelProviderId(value: unknown): value is string {
+  return typeof value === "string" && TUNNEL_PROVIDER_ID_RE.test(value);
+}
+
+function parseTunnelConnectorInstall(value: unknown): TunnelConnectorInstall {
+  if (
+    !isRecord(value) || !isTunnelProviderId(value.tunnelId) ||
+    typeof value.tokenEnvelope !== "string" ||
+    !value.tokenEnvelope.startsWith("tpdaemon.") ||
+    value.tokenEnvelope.length === "tpdaemon.".length ||
+    value.tokenEnvelope.length > MAX_TUNNEL_TOKEN_ENVELOPE_LENGTH
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors install entry");
+  }
+  return { tunnelId: value.tunnelId, tokenEnvelope: value.tokenEnvelope };
+}
+
+function parseTunnelProviderIdList(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value) || value.length > MAX_TUNNEL_CONNECTORS ||
+    !value.every(isTunnelProviderId)
+  ) {
+    throw new TypeError(`Invalid server.tunnel.connectors ${label}`);
+  }
+  return value;
+}
+
+/** Parse `server.tunnel.connectors`. */
+export function parseTunnelConnectorsPayload(
+  value: unknown,
+): TunnelConnectorsPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid server.tunnel.connectors payload");
+  }
+  if (
+    !Array.isArray(value.install) ||
+    value.install.length > MAX_TUNNEL_CONNECTORS
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors install");
+  }
+  const install = value.install.map(parseTunnelConnectorInstall);
+  const remove = parseTunnelProviderIdList(value.remove, "remove");
+  const named = [...install.map((entry) => entry.tunnelId), ...remove];
+  if (named.length === 0 || new Set(named).size !== named.length) {
+    throw new TypeError(
+      "Invalid server.tunnel.connectors: name each tunnel once, at least one",
+    );
+  }
+  return { install, remove };
+}
+
+export function parseTunnelConnectorsResult(
+  value: unknown,
+): TunnelConnectorsResult {
+  if (
+    !isRecord(value) || !Array.isArray(value.installed) ||
+    !value.installed.every(isTunnelProviderId) ||
+    !Array.isArray(value.unchanged) ||
+    !value.unchanged.every(isTunnelProviderId) ||
+    !Array.isArray(value.removed) || !value.removed.every(isTunnelProviderId)
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors result");
+  }
+  return {
+    installed: value.installed as string[],
+    unchanged: value.unchanged as string[],
+    removed: value.removed as string[],
   };
 }
 
