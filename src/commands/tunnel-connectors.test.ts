@@ -112,6 +112,37 @@ test("a removed tunnel's connector is stopped and its token copy deleted", async
   });
 });
 
+test("removing a connector that was never installed is not an error", async () => {
+  await withIo(async (io) => {
+    const result = await handleTunnelConnectors(
+      payload({ install: [], remove: [ID_B] }),
+      "now",
+      { io },
+    );
+    assertEquals(result, { installed: [], unchanged: [], removed: [ID_B] });
+  });
+});
+
+test("a removal the host refuses fails the command", async () => {
+  await withIo(async (io) => {
+    const refusing: ConnectorIo = {
+      ...io,
+      run: (_command, args) =>
+        Promise.resolve(
+          args.includes("tunnel-env-remove")
+            ? { success: false, stdout: "", stderr: "refused" }
+            : { success: true, stdout: "", stderr: "" },
+        ),
+    };
+    const error = await assertRejects(() =>
+      handleTunnelConnectors(payload({ install: [], remove: [ID_B] }), "now", {
+        io: refusing,
+      })
+    );
+    assert(String(error).includes(ID_B));
+  });
+});
+
 test("a token that cannot be unsealed fails the command and names only the tunnel", async () => {
   await withIo(async (io) => {
     const error = await assertRejects(() =>
