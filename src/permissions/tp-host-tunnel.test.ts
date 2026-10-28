@@ -268,6 +268,18 @@ test("tunnel-env-install copies a checked token into a root-only folder", async 
   });
 });
 
+test("tunnel-env-install and tunnel-env-remove accept the legacy names", async () => {
+  await withHost(async (host) => {
+    for (const id of ["default", "instance"]) {
+      await stageToken(host, renderTunnelEnvFile(TOKEN), id);
+      assertEquals((await host.run(["tunnel-env-install", id])).code, 0);
+      const copy = host.path(`${COPY_DIR}/${id}.env`);
+      assertEquals(await Deno.readTextFile(copy), renderTunnelEnvFile(TOKEN));
+      assertEquals((await host.run(["tunnel-env-remove", id])).code, 0);
+    }
+  });
+});
+
 test("tunnel-env-install refuses every line the daemon never writes", async () => {
   await withHost(async (host) => {
     const bad = [

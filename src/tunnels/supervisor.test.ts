@@ -150,3 +150,30 @@ test("the instance token becomes the instance service and an empty one removes i
     assert(calls.some((c) => c.includes("tunnel-env-remove instance")));
   });
 });
+
+test("a file whose service fails to start stays in place for the next start", async () => {
+  await withTunnelsDir(async (dir, io) => {
+    await Deno.writeTextFile(join(dir, "instance.token"), TOKEN);
+    const run = io.run;
+    io.run = (command, args) =>
+      args.includes("restart")
+        ? Promise.resolve({ success: false, stdout: "", stderr: "no" })
+        : run(command, args);
+    assertEquals(await migrateLegacyTokenFiles(io), []);
+    assertEquals((await Deno.stat(join(dir, "instance.token"))).isFile, true);
+  });
+});
+
+test("a stale file never overwrites a service that already exists", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeInstanceTunnelToken(TOKEN);
+    await Deno.writeTextFile(join(dir, "instance.token"), `${TOKEN}AA`);
+    calls.length = 0;
+    assertEquals(await migrateLegacyTokenFiles(io), []);
+    assertEquals(calls, []);
+    assertEquals(
+      await Deno.stat(join(dir, "instance.token")).catch(() => null),
+      null,
+    );
+  });
+});

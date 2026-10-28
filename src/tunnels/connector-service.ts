@@ -226,11 +226,27 @@ async function installConnectorNow(
         envFile: tunnelEnvPath(io.layout, id),
       }),
     });
+  } catch (err) {
+    // A token copy no unit names is a secret left for nothing; a tunnel that
+    // already ran keeps the copy its unit still points at.
+    if (!previous) await removeEnvCopy(io, id).catch(() => undefined);
+    throw err;
   } finally {
     await Deno.remove(stagedUnit).catch(() => undefined);
   }
   if (unitChanged) await mustSystemctl(io, ["daemon-reload"]);
 
+  const unit = tunnelUnitName(id);
+  await systemctl(io, ["reset-failed", unit]);
+  if (previous && !unitChanged && previous.tokenDigest === tokenDigest) {
+    await mustSystemctl(io, ["enable", "--now", unit]);
+  } else {
+    await mustSystemctl(io, ["enable", unit]);
+    await mustSystemctl(io, ["restart", unit]);
+  }
+
+  // Only after the service is enabled and (re)started: a failed attempt leaves
+  // the old record, so a retry sees the old token digest and restarts again.
   const record: ConnectorRecord = {
     id,
     port,
@@ -242,15 +258,6 @@ async function installConnectorNow(
     `${id}.json`,
     `${JSON.stringify(record)}\n`,
   );
-
-  const unit = tunnelUnitName(id);
-  await systemctl(io, ["reset-failed", unit]);
-  if (previous && !unitChanged && previous.tokenDigest === tokenDigest) {
-    await mustSystemctl(io, ["enable", "--now", unit]);
-  } else {
-    await mustSystemctl(io, ["enable", unit]);
-    await mustSystemctl(io, ["restart", unit]);
-  }
   logInfo("tunnels", `connector ${id} is installed as ${unit}`);
 }
 
@@ -269,6 +276,20 @@ export async function installConnector(
   return await serialized(() => installConnectorNow(io, id, token));
 }
 
+async function removeEnvCopy(io: ConnectorIo, id: string): Promise<void> {
+  const env = await io.run(
+    "sudo",
+    hostSudoArgs(["-n", "tunnel-env-remove", id]),
+  );
+  if (!env.success) {
+    throw new Error(
+      `removing the token file for tunnel ${id} failed: ${
+        env.stderr || "tp-host refused it"
+      }`,
+    );
+  }
+}
+
 async function removeConnectorNow(io: ConnectorIo, id: string): Promise<void> {
   const unit = tunnelUnitName(id);
   // Not-installed units answer with an error; nothing to stop is fine.
@@ -283,17 +304,7 @@ async function removeConnectorNow(io: ConnectorIo, id: string): Promise<void> {
   await mustSystemctl(io, ["daemon-reload"]);
   await systemctl(io, ["reset-failed", unit]);
   // A secret left on disk for a tunnel that is gone is an error.
-  const env = await io.run(
-    "sudo",
-    hostSudoArgs(["-n", "tunnel-env-remove", id]),
-  );
-  if (!env.success) {
-    throw new Error(
-      `removing the token file for tunnel ${id} failed: ${
-        env.stderr || "tp-host refused it"
-      }`,
-    );
-  }
+  await removeEnvCopy(io, id);
   await Promise.all(
     [`${id}.env`, `${id}.service`, `${id}.json`].map((name) =>
       Deno.remove(join(io.workDir, name)).catch(() => undefined)

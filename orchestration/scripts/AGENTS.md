@@ -55,7 +55,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     copy it made in root's scratch directory line by line against what the
     daemon renders, then places it `0600 root:root` with `mv -T`; the folder
     is `root:root 0700` under a sealed config root, checked on every run) and
-    `app-env-remove <id>` empties it; `tp_path_class` refuses the folder to
+    `app-env-remove <id>` empties it; tunnel connector tokens work the same
+    way in `<config>/tunnel-env/` (`tunnel-env-install <id>` reads the daemon's
+    staged `<state>/cloudflared/tunnels/<id>.env`, which must be exactly one
+    `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
+    <id>`), and a `turbopanel-tunnel-<id>.service` unit is installed only if it
+    equals `tp_tunnel_unit_text` (a throwaway `DynamicUser=` account, no
+    capability); `tp_path_class` refuses the folder to
     every generic verb. Checking the text of a daemon-writable path is not
     enough: the daemon could swap it for a link to any root-only file after
     the check;

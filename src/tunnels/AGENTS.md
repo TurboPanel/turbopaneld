@@ -33,12 +33,17 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
 - Readiness is the connector's own `/ready` on its metrics address (200 with
   `readyConnections` when at least one edge connection is up, 503 otherwise);
   `/healthcheck` always answers OK and is never used.
-- The vendored folder `<vendor>/cloudflared` is `0751` (the `turbopanel-user`
-  role and `makeVendorDirTraversable`) so the connector account can reach the
-  binary.
+- The connector account is not the daemon's user, so it must be able to walk to
+  the binary. The `turbopanel-user` role makes `<vendor>/cloudflared` `0751`;
+  the daemon (`makeVendorDirTraversable`) makes the version folder
+  `<vendor>/cloudflared/<version>` `0751`; the binary is `0755`. `/opt/turbopanel`
+  and `<vendor>` are not set by this code, so a canary check must confirm both
+  are traversable by other users (`namei -m` on the binary path as a non-tp user)
+  before calling the feature proven.
 - Hosts that held a tunnel as `<id>.token` in the tunnels folder migrate on
   daemon start: the file becomes a service and is deleted once the service is
-  up. Files not named for a tunnel id are left alone with a warning.
+  enabled and (re)started (not once `/ready` passes; status shows that). If a
+  service already exists for that id the stale file is dropped, never installed. Files not named for a tunnel id are left alone with a warning.
 - Purge needs no tunnel-specific code: it stops and removes every `turbopanel*`
   unit and removes `/etc/turbopanel`, `/var/lib/turbopanel` and
   `/opt/turbopanel/vendor` whole; `scripts/purge.test.ts` pins that for tunnel

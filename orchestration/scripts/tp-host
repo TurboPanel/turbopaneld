@@ -1282,6 +1282,14 @@ tp_tunnel_unit_text() {
     'RestrictSUIDSGID=yes' \
     'RestrictRealtime=yes' \
     'LockPersonality=yes' \
+    'UMask=0077' \
+    'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX' \
+    'PrivateDevices=yes' \
+    'ProtectKernelLogs=yes' \
+    'ProtectClock=yes' \
+    'ProtectHostname=yes' \
+    'ProcSubset=pid' \
+    'SystemCallArchitectures=native' \
     'CapabilityBoundingSet=' \
     'StandardOutput=journal' \
     'StandardError=journal' \

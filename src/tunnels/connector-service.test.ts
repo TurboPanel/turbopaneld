@@ -277,3 +277,49 @@ test("the list ignores files that are not records of a tunnel id", async () => {
     assertEquals(await listConnectorIds(h.io), [ID_B]);
   });
 });
+
+test("the record is written only after the service starts, and a retry restarts it", async () => {
+  await withHarness(async (h) => {
+    h.state.fail.add("systemctl restart");
+    await assertRejects(() => installConnector(h.io, ID_A, TOKEN));
+    assertEquals(await listConnectorIds(h.io), []);
+    h.state.fail.clear();
+    h.state.unchanged = true;
+    h.calls.length = 0;
+    await installConnector(h.io, ID_A, TOKEN);
+    assert(h.calls.some((c) => c.startsWith("systemctl restart")));
+    assertEquals(await listConnectorIds(h.io), [ID_A]);
+  });
+});
+
+test("a retry after a failed token change restarts even though the unit is unchanged", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.state.unchanged = true;
+    h.state.fail.add("systemctl restart");
+    await assertRejects(() => installConnector(h.io, ID_A, `${TOKEN}AA`));
+    h.state.fail.clear();
+    h.calls.length = 0;
+    await installConnector(h.io, ID_A, `${TOKEN}AA`);
+    assert(h.calls.some((c) => c.startsWith("systemctl restart")));
+  });
+});
+
+test("a failed unit install removes the token copy of a tunnel that never ran", async () => {
+  await withHarness(async (h) => {
+    h.state.fail.add("install ");
+    await assertRejects(() => installConnector(h.io, ID_A, TOKEN));
+    assert(h.calls.includes(`tunnel-env-remove ${ID_A}`));
+    assertEquals([...Deno.readDirSync(h.io.workDir)].length, 0);
+  });
+});
+
+test("a failed unit install keeps the token copy of a tunnel that already runs", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.calls.length = 0;
+    h.state.fail.add("install ");
+    await assertRejects(() => installConnector(h.io, ID_A, `${TOKEN}AA`));
+    assert(!h.calls.includes(`tunnel-env-remove ${ID_A}`));
+  });
+});

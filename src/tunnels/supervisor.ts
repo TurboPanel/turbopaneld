@@ -3,6 +3,7 @@ import {
   type ConnectorIo,
   defaultConnectorIo,
   installConnector,
+  listConnectorIds,
   removeConnector,
 } from "./connector-service.ts";
 import {
@@ -82,6 +83,16 @@ async function migrateOne(
     const token = (await Deno.readTextFile(path)).trim();
     if (!TUNNEL_TOKEN_RE.test(token)) {
       logWarn("tunnels", `${fileName} does not hold a token; skipping`);
+      return null;
+    }
+    if ((await listConnectorIds(io)).includes(id)) {
+      // A service already runs for this id (for instance a token pushed by the
+      // instance): the old file is stale and must not overwrite it.
+      await Deno.remove(path);
+      logInfo(
+        "tunnels",
+        `tunnel ${id} already runs as a service; dropped ${fileName}`,
+      );
       return null;
     }
     await installConnector(io, id, token);
