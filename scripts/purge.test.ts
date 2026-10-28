@@ -1101,6 +1101,14 @@ test("the hosting Caddy state folder is inside the state tree and goes with it",
   assertEquals(source.includes("/var/lib/turbopanel-hosting-caddy"), false);
 });
 
+test("the tunnel forwarding files live in the config tree and go with it", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
+  // 10-tunnels.caddy, tunnel-routes.json and the peer certificate folder sit
+  // under /etc/turbopanel/hosting, so no separate purge entry exists for them.
+  assertStringIncludes(trees, " /etc/turbopanel ");
+});
+
 test("the Docker gate build group is removed by exact name even though its gid is outside the service band", async () => {
   const stub = await stubBin(
     "getent",

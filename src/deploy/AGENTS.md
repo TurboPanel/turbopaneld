@@ -1116,6 +1116,23 @@ slot frees.
 
 `environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.
 
+## Tunnel forwarding (`server.tunnel.routes`)
+
+A tunnel connector reaches hosting Caddy on `https://localhost`; Caddy decides.
+Names that run here are locked (`hostings[].tunnel`, `siteSnippet`): only
+loopback and the listed peer addresses are answered, everyone else is dropped.
+Names that run on other servers have forward blocks in the reserved
+`sites/10-tunnels.caddy` (`tunnel-caddy.ts`), written by `tunnel-apply.ts` from
+the whole-server table and re-rendered by every environment deploy and removal
+(`tunnel-state.ts`, table in `hosting/tunnel-routes.json`), which drops any name
+now served here so Caddy never sees a name twice. The hop uses the
+organization's certificate: material under `hosting/peer/<id>/`, trusted only for
+the fixed name `tp-peer.internal`, which a small reserved site loads on the
+receiving server (Caddy picks a certificate by the connecting name). Visitor
+addresses are trusted per `reverse_proxy` (loopback and peers), never
+server-wide. A tunnel block never asks for a public certificate. All files are
+under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
+
 ## Deploy Hooks
 
 - **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the

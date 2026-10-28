@@ -34,6 +34,7 @@ import {
   SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   TLS_CAPTURE_FEATURE,
+  TUNNEL_FORWARDING_FEATURE,
 } from "./version-wire.ts";
 
 /**
@@ -291,9 +292,14 @@ test("site-db-bindings-v1 is advertised on the wire and raised no floor", () => 
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("custom-node-app-mode-v1 is advertised last and raised no floor", () => {
+test("custom-node-app-mode-v1 is advertised and raised no floor", () => {
   assertEquals(CUSTOM_NODE_APP_MODE_FEATURE, "custom-node-app-mode-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), CUSTOM_NODE_APP_MODE_FEATURE);
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      CUSTOM_NODE_APP_MODE_FEATURE,
+    ),
+    true,
+  );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
@@ -353,5 +359,11 @@ test("deploy-hostings-only-v1 is advertised and raised no floor", () => {
     ),
     true,
   );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("tunnel-forwarding-v1 is advertised last and raised no floor", () => {
+  assertEquals(TUNNEL_FORWARDING_FEATURE, "tunnel-forwarding-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_FORWARDING_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
