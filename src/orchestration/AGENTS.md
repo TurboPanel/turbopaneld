@@ -63,3 +63,20 @@ dispatch (after the ack) until that converge has finished, passed or failed, so
 no command runs a playbook on top of it. The fabric, forwarding, PHP and
 background checks that normally precede the connection run after a successful
 converge on that path.
+
+## Runtime Integrity
+
+- **Runtime integrity** — `deno-runtime` / `node-runtime` / `caddy` defaults
+  carry `deno_sha256` / `node_sha256` / `corepack_sha256` / `caddy_sha256`
+  tables keyed by version; those roles download with `get_url checksum:` and
+  assert a digest exists for the pinned version + host arch, corepack installs
+  from the verified tarball (`corepack_version`), hosting Caddy direct-download
+  paths verify SHA-256 before extraction (`ensure-hosting-caddy.ts`,
+  `install-hosting-caddy.sh`, instance `download-caddy.mjs`), and `run.sh`
+  mirrors the Deno digests (`TP_DENO_SHA256_*`, checked before extraction).
+  `src/orchestration/assets.test.ts` fails a version bump that lands without
+  its digests, and it requires the hosting Caddy version plus both arch
+  digests to match across the role default, `ensure-hosting-caddy.ts`,
+  `install-hosting-caddy.sh`, and instance `download-caddy.mjs` (sibling
+  checkout, or the trunk copy CI places at `.ci-instance-caddy-pin`). A
+  missing instance downloader fails those tests.

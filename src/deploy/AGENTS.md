@@ -1115,3 +1115,15 @@ slot frees.
 ## Hostname takeover (`takeoverHostnames`)
 
 `environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.
+
+## Deploy Hooks
+
+- **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
+  service container** (`docker compose run --rm --no-deps -T --entrypoint sh`
+  before `up`, `compose exec -T … sh -c` after), never via a host shell; the
+  contract requires `confinement: "compose-service"` on any command-bearing
+  hook and `deploy-environment.ts` refuses hooks naming a service the deploy
+  does not run (`assertHooksConfined`). The control plane only emits hooks
+  when the organization's owner enabled `deployHooksEnabled`
+  (`PUT /organizations/:id/deploy-hooks`; `parseServiceOptions` drops the
+  command fields otherwise).
