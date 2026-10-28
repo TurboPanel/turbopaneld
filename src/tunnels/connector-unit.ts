@@ -49,10 +49,36 @@ export function assertTunnelId(value: unknown): asserts value is string {
   }
 }
 
-/** `turbopanel-tunnel-<id>.service`. */
-export function tunnelUnitName(id: string): string {
+/**
+ * Which of a tunnel's two units. A connector update starts the new version in
+ * the other slot beside the running one (both are replicas of the same tunnel,
+ * so the provider sends traffic to either), and stops the old one once the new
+ * one reports it is connected. Slot "a" keeps the name every earlier install
+ * used; slot "b" adds `-b`. The recorded slot is the one that carries the
+ * tunnel; the other slot's unit exists only while a switch is under way.
+ */
+export type ConnectorSlot = "a" | "b";
+
+export function isConnectorSlot(value: unknown): value is ConnectorSlot {
+  return value === "a" || value === "b";
+}
+
+export function otherSlot(slot: ConnectorSlot): ConnectorSlot {
+  return slot === "a" ? "b" : "a";
+}
+
+/** `-b` for slot "b", nothing for slot "a". Kept equal to `tp-host`. */
+export function slotSuffix(slot: ConnectorSlot): string {
+  return slot === "b" ? "-b" : "";
+}
+
+/** `turbopanel-tunnel-<id>.service` (slot "a") or `...-<id>-b.service`. */
+export function tunnelUnitName(
+  id: string,
+  slot: ConnectorSlot = "a",
+): string {
   assertTunnelId(id);
-  return `${TUNNEL_UNIT_PREFIX}${id}.service`;
+  return `${TUNNEL_UNIT_PREFIX}${id}${slotSuffix(slot)}.service`;
 }
 
 /** Real unit directory; `tp-host` installs only here. */
@@ -61,8 +87,9 @@ export const SYSTEMD_UNIT_DIR = "/etc/systemd/system";
 export function tunnelUnitPath(
   id: string,
   unitDir: string = SYSTEMD_UNIT_DIR,
+  slot: ConnectorSlot = "a",
 ): string {
-  return join(unitDir, tunnelUnitName(id));
+  return join(unitDir, tunnelUnitName(id, slot));
 }
 
 /**
@@ -138,9 +165,10 @@ export function renderTunnelUnit(params: {
   binary: string;
   port: number;
   envFile: string;
+  slot?: ConnectorSlot;
 }): string {
   assertTunnelId(params.id);
-  const unit = tunnelUnitName(params.id);
+  const unit = tunnelUnitName(params.id, params.slot ?? "a");
   return [
     "[Unit]",
     `Description=TurboPanel tunnel connector ${params.id}`,
@@ -194,6 +222,8 @@ export type ConnectorRecord = {
   version: string;
   /** SHA-256 of the token, so an unchanged token does not restart the unit. */
   tokenDigest: string;
+  /** The slot whose unit carries the tunnel (records before updates are "a"). */
+  slot: ConnectorSlot;
 };
 
 export function parseConnectorRecord(text: string): ConnectorRecord | null {
@@ -209,7 +239,8 @@ export function parseConnectorRecord(text: string): ConnectorRecord | null {
     !isTunnelId(r.id) || typeof r.port !== "number" ||
     !Number.isInteger(r.port) || r.port < TUNNEL_METRICS_PORT_MIN ||
     r.port > TUNNEL_METRICS_PORT_MAX || typeof r.version !== "string" ||
-    typeof r.tokenDigest !== "string"
+    typeof r.tokenDigest !== "string" ||
+    (r.slot !== undefined && !isConnectorSlot(r.slot))
   ) {
     return null;
   }
@@ -218,6 +249,7 @@ export function parseConnectorRecord(text: string): ConnectorRecord | null {
     port: r.port,
     version: r.version,
     tokenDigest: r.tokenDigest,
+    slot: isConnectorSlot(r.slot) ? r.slot : "a",
   };
 }
 

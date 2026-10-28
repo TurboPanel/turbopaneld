@@ -33,16 +33,23 @@ const TOKEN = "dGVzdA".repeat(8);
 const STAGE_DIR = "var/lib/turbopanel/cloudflared/tunnels";
 const COPY_DIR = "etc/turbopanel/tunnel-env";
 
-function unitFor(host: Host, id = ID, port = TUNNEL_METRICS_PORT_MIN): string {
+function unitFor(
+  host: Host,
+  id = ID,
+  port = TUNNEL_METRICS_PORT_MIN,
+  slot: "a" | "b" = "a",
+): string {
   return renderTunnelUnit({
     id,
     binary: host.path("opt/turbopanel/vendor/cloudflared/2026.5.2/cloudflared"),
     port,
     envFile: host.path(`${COPY_DIR}/${id}.env`),
+    slot,
   });
 }
 
-const unitName = (id = ID) => `turbopanel-tunnel-${id}.service`;
+const unitName = (id = ID, slot: "a" | "b" = "a") =>
+  `turbopanel-tunnel-${id}${slot === "b" ? "-b" : ""}.service`;
 
 async function installUnit(host: Host, name: string, content: string) {
   await Deno.writeTextFile(host.path("tmp/unit"), content);
@@ -87,6 +94,29 @@ test("the unit the daemon renders is accepted, for an id and for the two legacy 
     }
     const last = unitFor(host, OTHER_ID, TUNNEL_METRICS_PORT_MAX);
     assertEquals((await installUnit(host, unitName(OTHER_ID), last)).code, 0);
+  });
+});
+
+test("the second unit of a tunnel (a connector update) is accepted under its own name only", async () => {
+  await withHost(async (host) => {
+    for (const id of [ID, "instance", "default"]) {
+      const result = await installUnit(
+        host,
+        unitName(id, "b"),
+        unitFor(host, id, TUNNEL_METRICS_PORT_MIN + 1, "b"),
+      );
+      assertEquals(result.code, 0, result.stderr);
+    }
+    const second = unitFor(host, ID, TUNNEL_METRICS_PORT_MIN + 1, "b");
+    const first = unitFor(host, ID);
+    // The two units are not interchangeable.
+    await refusedUnit(host, unitName(ID), second);
+    await refusedUnit(host, unitName(ID, "b"), first);
+    // Only one suffix, only "-b", and the id before it must still be an id.
+    await refusedUnit(host, `turbopanel-tunnel-${ID}-b-b.service`, second);
+    await refusedUnit(host, `turbopanel-tunnel-${ID}-c.service`, second);
+    await refusedUnit(host, "turbopanel-tunnel-other-b.service", second);
+    await refusedUnit(host, "turbopanel-tunnel--b.service", second);
   });
 });
 

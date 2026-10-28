@@ -48,3 +48,42 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   unit and removes `/etc/turbopanel`, `/var/lib/turbopanel` and
   `/opt/turbopanel/vendor` whole; `scripts/purge.test.ts` pins that for tunnel
   units, token copies and the connector folder.
+
+## Connector updates (blue/green)
+
+- The daemon pins one connector version (`CLOUDFLARED_VERSION`, with checksums in
+  `assets.ts`) and the permission list names that exact file, so a newer
+  connector reaches servers only with a daemon release. After a daemon update,
+  `startTunnels` migrates legacy token files and then runs
+  `runConnectorUpdates`: every tunnel whose recorded version differs from the pin
+  is moved by `updateConnector`, one tunnel at a time.
+- A tunnel has two possible units: slot `a` (`turbopanel-tunnel-<id>.service`,
+  the name every earlier install used) and slot `b`
+  (`turbopanel-tunnel-<id>-b.service`). The record's `slot` names the one that
+  carries the tunnel; the other exists only while a switch runs. An id never
+  ends in `-b`, so `tp-host` reads the suffix unambiguously (`tp_tunnel_unit_ok`
+  accepts `-b` only after a valid id; `slotSuffix` and the unit text's
+  `SyslogIdentifier` must stay in step with `tp_tunnel_unit_text`).
+- The switch: download the pinned version into its own folder (checksum
+  verified, `ensureCloudflared`), install the other slot's unit on a new metrics
+  port with the same root-only token copy (the daemon never touches the token),
+  start it, poll its own `/ready` (default 90 s, every 2 s). Connected: write the
+  record (new slot, port, version), then stop and remove the old unit. Not
+  connected, or any step failing: remove the new unit and leave the old one
+  untouched (`rolled-back`). Both units are replicas of the same tunnel, so
+  Cloudflare sends traffic to either during the overlap.
+- A crash between writing the record and stopping the old unit leaves a stray
+  unit of the non-recorded slot; the next `updateConnector` removes it first.
+  `removeConnector` drops both slots.
+- A token change on a running tunnel restarts the unit in the slot that carries
+  it, in place (a restart, not a switch).
+- An admin pauses updates on a server by creating `updates.paused` in the
+  tunnels folder (`CONNECTOR_UPDATES_PAUSED_FILE`); removing it resumes. There is
+  no wire command for pause or "update now" yet.
+- `server.tunnel.status` (feature `tunnel-status-v1`) is read-only: it answers
+  `{ pinnedVersion, connectors: [{ tunnelId, status, version, slot }] }`. The
+  control plane polls it to show the version per server and an update-pending
+  notice (running version differs from the pinned one).
+- Not proven on a real host yet: the overlap on one tunnel across two metrics
+  ports, the 90 s window against a real edge connection time, and the traversal
+  of the new version folder by the throwaway account.

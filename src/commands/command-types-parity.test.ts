@@ -62,6 +62,7 @@ const INSTANCE_COMMAND_TYPES = [
   "server.backups.test-target",
   "server.folders.remove",
   "server.tunnel.routes",
+  "server.tunnel.status",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",

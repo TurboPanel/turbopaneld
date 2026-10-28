@@ -28,6 +28,7 @@ export const COMMAND_TYPES = [
   "server.backups.test-target",
   "server.folders.remove",
   "server.tunnel.routes",
+  "server.tunnel.status",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -7034,6 +7035,84 @@ export function parseTunnelRoutesResult(value: unknown): TunnelRoutesResult {
     routeCount: value.routeCount,
     dropped: value.dropped as string[],
     warnings: value.warnings as string[],
+  };
+}
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusConnector = {
+  /** A lower-case UUID, or `instance` / `default` for the instance's own tunnel. */
+  tunnelId: string;
+  status: "not-installed" | "connected" | "connecting" | "stopped" | "failed";
+  /** Connector program version the carrying unit runs. */
+  version: string;
+  /** Which of the tunnel's two units carries it (the other exists only during an update). */
+  slot: "a" | "b";
+};
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusResult = {
+  /** The connector version this daemon is pinned to and moves every tunnel to. */
+  pinnedVersion: string;
+  connectors: TunnelStatusConnector[];
+};
+
+const TUNNEL_STATUS_VALUES = new Set([
+  "not-installed",
+  "connected",
+  "connecting",
+  "stopped",
+  "failed",
+]);
+/** The metrics band (`20300` to `20899`) holds 600 connectors. */
+const MAX_TUNNEL_STATUS_CONNECTORS = 600;
+const TUNNEL_CONNECTOR_VERSION_RE = /^[0-9]+(?:\.[0-9]+){0,4}$/;
+
+function isTunnelConnectorVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 32 &&
+    TUNNEL_CONNECTOR_VERSION_RE.test(value);
+}
+
+/** Parse `server.tunnel.status`: it takes no input, so the payload is empty. */
+export function parseTunnelStatusPayload(
+  value: unknown,
+): Record<string, never> {
+  if (!isRecord(value) || Object.keys(value).length > 0) {
+    throw new TypeError("Invalid server.tunnel.status payload");
+  }
+  return {};
+}
+
+function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
+  if (
+    !isRecord(value) || typeof value.tunnelId !== "string" ||
+    !(value.tunnelId === "instance" || value.tunnelId === "default" ||
+      TUNNEL_UUID_RE.test(value.tunnelId)) ||
+    typeof value.status !== "string" ||
+    !TUNNEL_STATUS_VALUES.has(value.status) ||
+    !isTunnelConnectorVersion(value.version) ||
+    (value.slot !== "a" && value.slot !== "b")
+  ) {
+    throw new TypeError("Invalid server.tunnel.status connector");
+  }
+  return {
+    tunnelId: value.tunnelId,
+    status: value.status as TunnelStatusConnector["status"],
+    version: value.version,
+    slot: value.slot,
+  };
+}
+
+export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
+  if (
+    !isRecord(value) || !isTunnelConnectorVersion(value.pinnedVersion) ||
+    !Array.isArray(value.connectors) ||
+    value.connectors.length > MAX_TUNNEL_STATUS_CONNECTORS
+  ) {
+    throw new TypeError("Invalid server.tunnel.status result");
+  }
+  return {
+    pinnedVersion: value.pinnedVersion,
+    connectors: value.connectors.map(parseTunnelStatusConnector),
   };
 }
 

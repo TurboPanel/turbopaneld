@@ -3,7 +3,9 @@ import { join } from "@std/path";
 import type { RunResult } from "../deploy/ensure-principal.ts";
 import type { ConnectorIo } from "./connector-service.ts";
 import {
+  CONNECTOR_UPDATES_PAUSED_FILE,
   migrateLegacyTokenFiles,
+  runConnectorUpdates,
   setTunnelsTestHooks,
   startTunnels,
   writeInstanceTunnelToken,
@@ -175,5 +177,52 @@ test("a stale file never overwrites a service that already exists", async () => 
       await Deno.stat(join(dir, "instance.token")).catch(() => null),
       null,
     );
+  });
+});
+
+async function writeOldRecord(dir: string): Promise<void> {
+  await Deno.writeTextFile(
+    join(dir, `${UUID}.json`),
+    JSON.stringify({
+      id: UUID,
+      port: 20300,
+      version: "2026.5.0",
+      tokenDigest: "ab",
+      slot: "a",
+    }),
+  );
+}
+
+test("a host with no tunnels is left alone by the update run, not even a download", async () => {
+  await withTunnelsDir(async (_dir, io, calls) => {
+    assertEquals(await runConnectorUpdates(io), []);
+    assertEquals(calls, []);
+  }, {
+    ensureBinary: () => {
+      throw new TypeError("the connector program must not be fetched");
+    },
+  });
+});
+
+test("the update run moves an older tunnel to the pinned version", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeOldRecord(dir);
+    io.probe = () => Promise.resolve({ kind: "ready", connections: 4 });
+    io.unitExists = () => Promise.resolve(false);
+    io.sleep = () => Promise.resolve();
+    const results = await runConnectorUpdates(io);
+    assertEquals(results?.map((r) => [r.id, r.outcome.kind]), [
+      [UUID, "updated"],
+    ]);
+    assert(calls.some((c) => c.includes(`start turbopanel-tunnel-${UUID}-b`)));
+  });
+});
+
+test("a paused server keeps the connector versions it runs", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeOldRecord(dir);
+    await Deno.writeTextFile(join(dir, CONNECTOR_UPDATES_PAUSED_FILE), "");
+    assertEquals(await runConnectorUpdates(io), null);
+    assertEquals(calls, []);
   });
 });

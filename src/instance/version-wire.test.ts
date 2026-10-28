@@ -35,6 +35,7 @@ import {
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   TLS_CAPTURE_FEATURE,
   TUNNEL_FORWARDING_FEATURE,
+  TUNNEL_STATUS_FEATURE,
 } from "./version-wire.ts";
 
 /**
@@ -362,8 +363,19 @@ test("deploy-hostings-only-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("tunnel-forwarding-v1 is advertised last and raised no floor", () => {
+test("tunnel-forwarding-v1 is advertised and raised no floor", () => {
   assertEquals(TUNNEL_FORWARDING_FEATURE, "tunnel-forwarding-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_FORWARDING_FEATURE);
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      TUNNEL_FORWARDING_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("tunnel-status-v1 is advertised last and raised no floor", () => {
+  assertEquals(TUNNEL_STATUS_FEATURE, "tunnel-status-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_STATUS_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
