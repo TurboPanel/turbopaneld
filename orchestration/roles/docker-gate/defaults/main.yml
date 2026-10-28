@@ -51,7 +51,7 @@ docker_gate_deny_prefixes_extra:
   - "{{ turbopanel_install_root }}"
 # Trees the platform's own containers (ProxySQL, orchestrator, managed engines)
 # may bind: config trees read-only, state trees any mode. A false-positive
-# remover for observe mode, not a boundary (see AGENTS.md).
+# remover for observe mode, not a boundary (see roles/docker-gate/AGENTS.md).
 docker_gate_platform_ro_roots:
   - "{{ turbopanel_config_dir }}/proxysql"
   - "{{ turbopanel_config_dir }}/orchestrator"
