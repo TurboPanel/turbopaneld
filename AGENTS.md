@@ -16,7 +16,7 @@ Run from the repo root (in the guest VM when the host checkout has no usable Den
 
 ```sh
 deno task verify:static        # fmt:check, lint, check, check:layout, check:vocabulary, check:contract-drift
-deno task verify               # verify:static plus the test suite (no orchestration)
+deno task verify               # verify:static, notices:check and the test suite (no orchestration)
 deno task verify:ci            # guest mirror of CI: verify:static, notices:check, check:orchestration, test:coverage
 deno task test                 # tests only; test:coverage also writes the LCOV file
 deno task check:orchestration  # ansible syntax check + ansible-lint (needs the Ansible toolchain on PATH)

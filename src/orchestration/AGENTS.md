@@ -35,11 +35,11 @@ even outside the sanitizer.
 
 **Apple Silicon VM note:** `runtimeEnv()` sets `OPENSSL_armcap=0` so ansible's
 cryptography wheel does not SIGILL when the hypervisor advertises SVE2 without
-implementing it (UTM/Parallels). See root `AGENTS.md`.
+implementing it (UTM/Parallels). See `../../orchestration/AGENTS.md` (Vendored Runtimes and Ansible Environment).
 
 **Debian dash:** `ansibleEnv()` sets `ANSIBLE_EXECUTABLE=/bin/bash` because
 Debian `/bin/sh` is dash and rejects `set -o pipefail` in role `shell:`
-snippets. See root `AGENTS.md`.
+snippets. See `../../orchestration/AGENTS.md` (Vendored Runtimes and Ansible Environment).
 
 **Logs:** when the presenter is **inactive** (normal daemon converge /
 `daemon.log`), structured logs keep full vendor detail. When the presenter is

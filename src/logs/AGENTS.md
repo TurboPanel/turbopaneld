@@ -11,7 +11,7 @@ with deploy/managed handlers live in `src/deploy/AGENTS.md` (Streamed
 transcript capture). Container stdout is a live on-demand tail
 (`container-tail.ts`, `docker container logs`) and is never stored.
 
-Root context: `../../AGENTS.md` (Command execution logs).
+Root context: `../../AGENTS.md`. Scope summary: bottom of this file.
 
 ## Layout
 

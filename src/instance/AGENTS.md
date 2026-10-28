@@ -370,7 +370,7 @@ table).
 **Instance version floor** (`src/instance/version-wire.ts`):
 `MIN_SUPPORTED_INSTANCE_VERSION` is the mirror of the control plane's
 `MIN_SUPPORTED_DAEMON_VERSION`. Bump them together and say why in both
-Versions-on-the-wires notes (root `AGENTS.md` and
+Versions-on-the-wires notes (this file and
 `../turbopanel/AGENTS.md`). The daemon learns the peer from
 `x-turbopanel-version` on every `DaemonApiClient` response (including non-OK
 and the 401 before a refresh) and from `instanceVersion` on the cell attach
@@ -826,7 +826,7 @@ not re-implement semver comparison. An unknown peer version is not supported
 for a feature. The first entry is `instance-cert-sources-per-hostname` at
 daemon **`0.1.1`**, the release that renders per-hostname certificate sources
 in `orchestration/roles/instance-launch/templates/Caddyfile.j2`. Operational detail:
-`src/instance/AGENTS.md`.
+the rest of this file.
 
 ## Scope Summary (Former Root Index Entry)
 
