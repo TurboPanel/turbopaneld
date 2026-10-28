@@ -55,3 +55,17 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   unit and removes `/etc/turbopanel`, `/var/lib/turbopanel` and
   `/opt/turbopanel/vendor` whole; `scripts/purge.test.ts` pins that for tunnel
   units, token copies and the connector folder.
+
+## Installing and removing connectors (`server.tunnel.connectors`)
+
+The control plane tells each carrying server which organization tunnels to run
+(feature `tunnel-connector-v1`, `src/commands/tunnel-connectors.ts`). Each entry
+is the provider's tunnel id plus the run token as a `tpdaemon.` envelope; the
+handler unseals only the tokens of tunnels that have no connector yet, then
+calls `installConnector`. A connector that already runs is left as it is, so a
+resend never restarts it. `remove` entries call `removeConnector`. Only the ids
+named in the command are touched, and the contract refuses `instance` and
+`default`, so the instance's own tunnel and legacy token files are never
+reached from here. One tunnel failing does not stop the others; the command
+then fails with the tunnel ids and plain reasons (never a token or an
+envelope) and the control plane sends the list again.

@@ -91,6 +91,7 @@ export const DAEMON_WIRE_FEATURES = [
   "deploy-hostings-only-v1",
   "custom-node-app-mode-v1",
   "tunnel-forwarding-v1",
+  "tunnel-connector-v1",
 ] as const;
 
 /**
@@ -126,6 +127,10 @@ export const CUSTOM_NODE_APP_MODE_FEATURE: DaemonWireFeature =
 /** The daemon applies `server.tunnel.routes` and `hostings[].tunnel`. */
 export const TUNNEL_FORWARDING_FEATURE: DaemonWireFeature =
   "tunnel-forwarding-v1";
+
+/** The daemon applies `server.tunnel.connectors` (installs and removes tunnel connectors). */
+export const TUNNEL_CONNECTOR_FEATURE: DaemonWireFeature =
+  "tunnel-connector-v1";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`
