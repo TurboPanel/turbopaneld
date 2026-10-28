@@ -180,9 +180,9 @@ export function renderTunnelUnit(params: {
     "Type=simple",
     "DynamicUser=yes",
     `EnvironmentFile=${params.envFile}`,
-    `ExecStart=${params.binary} tunnel run --no-autoupdate --metrics ${
+    `ExecStart=${params.binary} --no-autoupdate tunnel --metrics ${
       tunnelMetricsAddress(params.port)
-    }`,
+    } run`,
     "Restart=always",
     "RestartSec=5",
     "NoNewPrivileges=yes",
