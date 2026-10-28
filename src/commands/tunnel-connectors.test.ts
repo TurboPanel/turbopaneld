@@ -6,7 +6,11 @@ import {
   type TunnelConnectorsPayload,
 } from "../contracts/commands-contracts.ts";
 import type { RunResult } from "../deploy/ensure-principal.ts";
-import type { ConnectorIo } from "../tunnels/connector-service.ts";
+import {
+  type ConnectorIo,
+  installConnector,
+  updateConnector,
+} from "../tunnels/connector-service.ts";
 import { handleTunnelConnectors } from "./tunnel-connectors.ts";
 
 /**
@@ -211,4 +215,76 @@ test("the result parser keeps the three lists", () => {
   const result = { installed: [ID_A], unchanged: [], removed: [ID_B] };
   assertEquals(parseTunnelConnectorsResult(result), result);
   assertThrows(() => parseTunnelConnectorsResult({ installed: [ID_A] }));
+});
+
+/** An io whose second connector reports connected at once, so an update can finish. */
+function updatable(io: ConnectorIo, calls: string[]): ConnectorIo {
+  return {
+    ...io,
+    probe: () => Promise.resolve({ kind: "ready", connections: 4 }),
+    portFree: () => Promise.resolve(true),
+    unitExists: () => Promise.resolve(false),
+    sleep: () => Promise.resolve(),
+    run: (command, args) => {
+      calls.push([command, ...args].join(" "));
+      return Promise.resolve({
+        success: true,
+        stdout: args.includes("is-active") ? "active" : "",
+        stderr: "",
+      });
+    },
+  };
+}
+
+test("a tunnel moved to its second unit by an update is still present, so a resend leaves it alone", async () => {
+  await withIo(async (base, calls) => {
+    const io = updatable(base, calls);
+    await installConnector(io, ID_A, TOKEN);
+    io.version = "2026.6.0";
+    assertEquals((await updateConnector(io, ID_A)).kind, "updated");
+    calls.length = 0;
+    const seen: string[][] = [];
+    const result = await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(seen),
+    });
+    assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
+    assertEquals(seen, []);
+    assertEquals(calls, []);
+  });
+});
+
+test("removing a tunnel whose connector moved to its second unit stops both units", async () => {
+  await withIo(async (base, calls) => {
+    const io = updatable(base, calls);
+    await installConnector(io, ID_A, TOKEN);
+    io.version = "2026.6.0";
+    await updateConnector(io, ID_A);
+    calls.length = 0;
+    const result = await handleTunnelConnectors(
+      { install: [], remove: [ID_A] },
+      "now",
+      { io, decryptSecrets: unseal() },
+    );
+    assertEquals(result, { installed: [], unchanged: [], removed: [ID_A] });
+    for (const unit of [`${ID_A}.service`, `${ID_A}-b.service`]) {
+      assert(
+        calls.some((c) =>
+          c.includes(`disable --now turbopanel-tunnel-${unit}`)
+        ),
+        unit,
+      );
+      assert(calls.some((c) => c.includes(`rm -f`) && c.includes(unit)), unit);
+    }
+    assert(calls.some((c) => c.includes(`tunnel-env-remove ${ID_A}`)));
+    // Nothing remembers the tunnel any more.
+    assertEquals(
+      (await handleTunnelConnectors(
+        { install: [], remove: [ID_A] },
+        "now",
+        { io },
+      )).removed,
+      [ID_A],
+    );
+  });
 });

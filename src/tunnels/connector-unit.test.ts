@@ -8,6 +8,7 @@ import {
   allocateMetricsPort,
   isTunnelId,
   mapConnectorStatus,
+  otherSlot,
   parseConnectorRecord,
   renderTunnelEnvFile,
   renderTunnelUnit,
@@ -135,8 +136,16 @@ test("a record round-trips and a damaged one is ignored", () => {
     port: 20310,
     version: "2026.5.2",
     tokenDigest: "ab",
+    slot: "a" as const,
   };
   assertEquals(parseConnectorRecord(JSON.stringify(record)), record);
+  // A record written before updates existed has no slot and is slot "a".
+  const { slot: _slot, ...old } = record;
+  assertEquals(parseConnectorRecord(JSON.stringify(old)), record);
+  assertEquals(
+    parseConnectorRecord(JSON.stringify({ ...record, slot: "c" })),
+    null,
+  );
   assertEquals(parseConnectorRecord("{"), null);
   assertEquals(parseConnectorRecord("null"), null);
   assertEquals(
@@ -164,4 +173,29 @@ test("status comes from the service state and the connector's own readiness", ()
   assertEquals(mapConnectorStatus("unknown", null), "not-installed");
   assertEquals(mapConnectorStatus("", null), "not-installed");
   assertEquals(mapConnectorStatus("active\n", ready), "connected");
+});
+
+test("the second slot has its own unit name, path and log name, and the first keeps the old ones", () => {
+  assertEquals(tunnelUnitName(ID), `turbopanel-tunnel-${ID}.service`);
+  assertEquals(tunnelUnitName(ID, "b"), `turbopanel-tunnel-${ID}-b.service`);
+  assertEquals(
+    tunnelUnitPath(ID, "/units", "b"),
+    `/units/turbopanel-tunnel-${ID}-b.service`,
+  );
+  assertEquals(otherSlot("a"), "b");
+  assertEquals(otherSlot("b"), "a");
+  const params = { id: ID, binary: BIN, port: TUNNEL_METRICS_PORT_MIN };
+  const first = renderTunnelUnit({ ...params, envFile: "/e/x.env" });
+  const second = renderTunnelUnit({
+    ...params,
+    envFile: "/e/x.env",
+    slot: "b",
+  });
+  assertStringIncludes(first, `SyslogIdentifier=turbopanel-tunnel-${ID}\n`);
+  assertStringIncludes(second, `SyslogIdentifier=turbopanel-tunnel-${ID}-b\n`);
+  // Both read the same token copy and differ only in the log name.
+  assertEquals(
+    first.replace(`turbopanel-tunnel-${ID}\n`, `turbopanel-tunnel-${ID}-b\n`),
+    second,
+  );
 });

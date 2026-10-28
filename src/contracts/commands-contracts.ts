@@ -29,6 +29,7 @@ export const COMMAND_TYPES = [
   "server.folders.remove",
   "server.tunnel.routes",
   "server.tunnel.connectors",
+  "server.tunnel.status",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -7135,6 +7136,110 @@ export function parseTunnelConnectorsResult(
     installed: value.installed as string[],
     unchanged: value.unchanged as string[],
     removed: value.removed as string[],
+  };
+}
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusConnector = {
+  /** A lower-case UUID, or `instance` / `default` for the instance's own tunnel. */
+  tunnelId: string;
+  status: "not-installed" | "connected" | "connecting" | "stopped" | "failed";
+  /** Connector program version the carrying unit runs. */
+  version: string;
+  /** Which of the tunnel's two units carries it (the other exists only during an update). */
+  slot: "a" | "b";
+  /** How the last connector update ended; absent before any attempt. */
+  lastUpdate?: {
+    outcome: "updated" | "rolled-back";
+    /** ISO-8601 time of the attempt. */
+    at: string;
+    /** Why a rolled-back attempt stopped (at most 300 characters). */
+    reason?: string;
+  };
+};
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusResult = {
+  /** The connector version this daemon is pinned to and moves every tunnel to. */
+  pinnedVersion: string;
+  connectors: TunnelStatusConnector[];
+};
+
+const TUNNEL_STATUS_VALUES = new Set([
+  "not-installed",
+  "connected",
+  "connecting",
+  "stopped",
+  "failed",
+]);
+/** The metrics band (`20300` to `20899`) holds 600 connectors. */
+const MAX_TUNNEL_STATUS_CONNECTORS = 600;
+const TUNNEL_CONNECTOR_VERSION_RE = /^\d+(?:\.\d+){0,4}$/;
+
+function isTunnelConnectorVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 32 &&
+    TUNNEL_CONNECTOR_VERSION_RE.test(value);
+}
+
+/** Parse `server.tunnel.status`: it takes no input, so the payload is empty. */
+export function parseTunnelStatusPayload(
+  value: unknown,
+): Record<string, never> {
+  if (!isRecord(value) || Object.keys(value).length > 0) {
+    throw new TypeError("Invalid server.tunnel.status payload");
+  }
+  return {};
+}
+
+function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
+  if (
+    !isRecord(value) || typeof value.tunnelId !== "string" ||
+    !(value.tunnelId === "instance" || value.tunnelId === "default" ||
+      TUNNEL_UUID_RE.test(value.tunnelId)) ||
+    typeof value.status !== "string" ||
+    !TUNNEL_STATUS_VALUES.has(value.status) ||
+    !isTunnelConnectorVersion(value.version) ||
+    (value.slot !== "a" && value.slot !== "b")
+  ) {
+    throw new TypeError("Invalid server.tunnel.status connector");
+  }
+  const connector: TunnelStatusConnector = {
+    tunnelId: value.tunnelId,
+    status: value.status as TunnelStatusConnector["status"],
+    version: value.version,
+    slot: value.slot,
+  };
+  const last = value.lastUpdate;
+  if (last !== undefined) {
+    if (
+      !isRecord(last) ||
+      (last.outcome !== "updated" && last.outcome !== "rolled-back") ||
+      typeof last.at !== "string" || !TUNNEL_ISO_TIMESTAMP_RE.test(last.at) ||
+      (last.reason !== undefined &&
+        (typeof last.reason !== "string" || last.reason.length > 300))
+    ) {
+      throw new TypeError("Invalid server.tunnel.status lastUpdate");
+    }
+    connector.lastUpdate = {
+      outcome: last.outcome,
+      at: last.at,
+      ...(last.reason === undefined ? {} : { reason: last.reason }),
+    };
+  }
+  return connector;
+}
+
+export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
+  if (
+    !isRecord(value) || !isTunnelConnectorVersion(value.pinnedVersion) ||
+    !Array.isArray(value.connectors) ||
+    value.connectors.length > MAX_TUNNEL_STATUS_CONNECTORS
+  ) {
+    throw new TypeError("Invalid server.tunnel.status result");
+  }
+  return {
+    pinnedVersion: value.pinnedVersion,
+    connectors: value.connectors.map(parseTunnelStatusConnector),
   };
 }
 

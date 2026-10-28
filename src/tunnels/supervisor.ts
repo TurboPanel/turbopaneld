@@ -1,10 +1,12 @@
 import { join } from "@std/path";
 import {
   type ConnectorIo,
+  type ConnectorUpdateOutcome,
   defaultConnectorIo,
   installConnector,
   listConnectorIds,
   removeConnector,
+  updateAllConnectors,
 } from "./connector-service.ts";
 import {
   INSTANCE_TUNNEL_ID,
@@ -127,18 +129,98 @@ export async function migrateLegacyTokenFiles(
 }
 
 /**
- * Move any legacy token files to services. Returns at once: the work (which
- * may download the connector program) runs in the background and is never
- * fatal, so the daemon never waits on it.
+ * An admin pauses connector updates on a server by creating this file in the
+ * tunnels folder (`<state>/cloudflared/tunnels/updates.paused`) and resumes by
+ * removing it. A paused server keeps the connector versions it runs.
+ */
+export const CONNECTOR_UPDATES_PAUSED_FILE = "updates.paused";
+
+/**
+ * After a daemon update the pinned connector version may be newer than the one
+ * each tunnel runs. Move every tunnel to it, one at a time, each by starting
+ * the new version beside the old one and stopping the old one only once the
+ * new one is connected (see `updateConnector`). Returns `null` when updates are
+ * paused on this server.
+ */
+export async function runConnectorUpdates(
+  io: ConnectorIo = resolveIo(),
+): Promise<Array<{ id: string; outcome: ConnectorUpdateOutcome }> | null> {
+  try {
+    await Deno.stat(join(resolveTunnelsDir(io), CONNECTOR_UPDATES_PAUSED_FILE));
+    logInfo("tunnels", "connector updates are paused on this server");
+    return null;
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  const results = await updateAllConnectors(io);
+  for (const { id, outcome } of results) {
+    if (outcome.kind === "updated") {
+      logInfo(
+        "tunnels",
+        `tunnel ${id}: connector ${outcome.from} to ${outcome.to}`,
+      );
+    } else if (outcome.kind === "rolled-back") {
+      logWarn(
+        "tunnels",
+        `tunnel ${id}: connector update failed: ${outcome.reason}`,
+      );
+    }
+  }
+  return results;
+}
+
+/** How often a server tries again to bring its connectors to the pinned version. */
+export const CONNECTOR_UPDATE_RETRY_MS = 60 * 60 * 1000;
+
+/**
+ * Run `run` every `intervalMs` until the returned function is called, never two
+ * at once (an update can wait a minute or more for a connector). A rolled-back
+ * update, a download that failed offline and a pause file that was removed all
+ * heal on a later round. The timer does not keep the process alive.
+ */
+export function startUpdateLoop(
+  run: () => Promise<unknown>,
+  intervalMs: number = CONNECTOR_UPDATE_RETRY_MS,
+): () => void {
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    run()
+      .catch((err) =>
+        logError(
+          "tunnels",
+          "connector update round failed:",
+          err instanceof Error ? err.message : "failed",
+        )
+      )
+      .finally(() => {
+        running = false;
+      });
+  }, intervalMs);
+  Deno.unrefTimer(timer);
+  return () => clearInterval(timer);
+}
+
+/**
+ * Move any legacy token files to services, then bring connectors up to the
+ * pinned version, and try again every hour. Returns at once: the work (which may download the connector
+ * program) runs in the background and is never fatal, so the daemon never waits
+ * on it.
  */
 export function startTunnels(_signal?: AbortSignal): Promise<void> {
-  void migrateLegacyTokenFiles().catch((err) => {
-    logError(
-      "tunnels",
-      "tunnel migration failed:",
-      err instanceof Error ? err.message : "failed",
-    );
-  });
+  void migrateLegacyTokenFiles()
+    .then(() => runConnectorUpdates())
+    .then(() => {
+      startUpdateLoop(() => runConnectorUpdates());
+    })
+    .catch((err) => {
+      logError(
+        "tunnels",
+        "tunnel migration or update failed:",
+        err instanceof Error ? err.message : "failed",
+      );
+    });
   return Promise.resolve();
 }
 
