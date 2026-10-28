@@ -4,7 +4,7 @@ TurboPanel **daemon** — Ansible-driven host daemon; connects to the instance o
 HTTPS/WSS (or Unix socket when co-located).
 Daemon source is Deno/TypeScript under `src/`; the Ansible layer is under `orchestration/`; shell and release tooling are under `scripts/`.
 
-**How this guide works.** This root holds only what applies to every directory. The nearest `AGENTS.md` to the file you edit wins: read the matching guide in the index below before editing that area. Do not add `CLAUDE.md` files; this repo uses `AGENTS.md` only.
+**How this guide works.** This root holds only what applies to every directory. The nearest `AGENTS.md` to the file you edit wins: read the matching guide in the index below before editing that area. The only `CLAUDE.md` is the root one-line import of this file; add no others.
 
 ## Releases
 
