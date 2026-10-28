@@ -35,11 +35,11 @@ even outside the sanitizer.
 
 **Apple Silicon VM note:** `runtimeEnv()` sets `OPENSSL_armcap=0` so ansible's
 cryptography wheel does not SIGILL when the hypervisor advertises SVE2 without
-implementing it (UTM/Parallels). See root `AGENTS.md`.
+implementing it (UTM/Parallels). See `../../orchestration/AGENTS.md` (Vendored Runtimes and Ansible Environment).
 
 **Debian dash:** `ansibleEnv()` sets `ANSIBLE_EXECUTABLE=/bin/bash` because
 Debian `/bin/sh` is dash and rejects `set -o pipefail` in role `shell:`
-snippets. See root `AGENTS.md`.
+snippets. See `../../orchestration/AGENTS.md` (Vendored Runtimes and Ansible Environment).
 
 **Logs:** when the presenter is **inactive** (normal daemon converge /
 `daemon.log`), structured logs keep full vendor detail. When the presenter is
@@ -63,3 +63,26 @@ dispatch (after the ack) until that converge has finished, passed or failed, so
 no command runs a playbook on top of it. The fabric, forwarding, PHP and
 background checks that normally precede the connection run after a successful
 converge on that path.
+
+## Runtime Integrity
+
+- **Runtime integrity** — `deno-runtime` / `node-runtime` / `caddy` defaults
+  carry `deno_sha256` / `node_sha256` / `corepack_sha256` / `caddy_sha256`
+  tables keyed by version; those roles download with `get_url checksum:` and
+  assert a digest exists for the pinned version + host arch, corepack installs
+  from the verified tarball (`corepack_version`), hosting Caddy direct-download
+  paths verify SHA-256 before extraction (`ensure-hosting-caddy.ts`,
+  `install-hosting-caddy.sh`, instance `download-caddy.mjs`), and `run.sh`
+  mirrors the Deno digests (`TP_DENO_SHA256_*`, checked before extraction).
+  `src/orchestration/assets.test.ts` fails a version bump that lands without
+  its digests, and it requires the hosting Caddy version plus both arch
+  digests to match across the role default, `ensure-hosting-caddy.ts`,
+  `install-hosting-caddy.sh`, and instance `download-caddy.mjs` (sibling
+  checkout, or the trunk copy CI places at `.ci-instance-caddy-pin`). A
+  missing instance downloader fails those tests.
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |

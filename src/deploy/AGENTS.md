@@ -1132,3 +1132,21 @@ receiving server (Caddy picks a certificate by the connecting name). Visitor
 addresses are trusted per `reverse_proxy` (loopback and peers), never
 server-wide. A tunnel block never asks for a public certificate. All files are
 under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
+
+## Deploy Hooks
+
+- **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
+  service container** (`docker compose run --rm --no-deps -T --entrypoint sh`
+  before `up`, `compose exec -T … sh -c` after), never via a host shell; the
+  contract requires `confinement: "compose-service"` on any command-bearing
+  hook and `deploy-environment.ts` refuses hooks naming a service the deploy
+  does not run (`assertHooksConfined`). The control plane only emits hooks
+  when the organization's owner enabled `deployHooksEnabled`
+  (`PUT /organizations/:id/deploy-hooks`; `parseServiceOptions` drops the
+  command fields otherwise).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH) |
