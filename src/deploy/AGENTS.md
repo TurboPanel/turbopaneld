@@ -223,8 +223,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    with a `Caddyfile.next` that imports it, and `tpedge` runs the pinned
    `caddy validate --adapter caddyfile --config …/Caddyfile.next` (sudoers
    `TP_HOSTING_CADDY_VALIDATE`; the candidate keeps its throwaway CA under
-   `/var/lib/turbopanel-hosting-caddy/validate` because the account has no
-   home). A set Caddy refuses (the same hostname in two environments, a bad
+   `<state>/hosting-caddy/validate`, inside the unit's `StateDirectory=`, which
+   systemd makes the first time the unit starts, because the account has no
+   home; an empty candidate on a host whose unit has never started is not
+   validated, since nothing is hosted yet and the folder is not there to
+   write). A set Caddy refuses (the same hostname in two environments, a bad
    line, a certificate file that is missing or unreadable) fails the deploy
    with Caddy's message and changes nothing. A validated snippet goes in through
    `<env>.caddy.tpnew` and an atomic rename, with the old one kept as
