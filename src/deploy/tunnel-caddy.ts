@@ -102,7 +102,8 @@ export function formatTunnelTarget(address: string, port: number): string {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new ConfigValueError("tunnel port", "must be a port number");
   }
-  return `${address.includes(":") ? `[${address}]` : address}:${port}`;
+  const host = address.includes(":") ? `[${address}]` : address;
+  return `${host}:${port}`;
 }
 
 /** Loopback plus the exact peer addresses: who is trusted to say who the visitor is. */
@@ -140,14 +141,14 @@ export function peerUpstreamText(upstream: PeerUpstream): string {
     throw new ConfigValueError("tunnel upstream", "needs a target");
   }
   const targets = upstream.targets.map((target) => {
-    if (!/^(\[[0-9A-Fa-f:.]+\]|[0-9.]+):[0-9]{1,5}$/.test(target)) {
+    if (!/^(\[[\dA-Fa-f:.]+\]|[\d.]+):\d{1,5}$/.test(target)) {
       throw new ConfigValueError("tunnel target", "must be address:port");
     }
     return target;
   });
   const trust = assertPath("tunnel trust file", upstream.trustFile);
   upstream.trustedProxies.forEach((range) => {
-    if (!/^[0-9A-Fa-f:.]+(\/[0-9]{1,3})?$/.test(range)) {
+    if (!/^[\dA-Fa-f:.]+(\/\d{1,3})?$/.test(range)) {
       throw new ConfigValueError("tunnel trusted range", "must be an address");
     }
   });

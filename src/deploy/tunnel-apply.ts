@@ -113,12 +113,11 @@ async function prunePeerMaterial(
     if (err instanceof Deno.errors.NotFound) return;
     throw err;
   }
-  for (const entry of entries) {
-    if (entry.name === keep) continue;
-    await Deno.remove(join(root, entry.name), { recursive: true }).catch(
-      () => {},
-    );
-  }
+  await Promise.all(
+    entries.filter((entry) => entry.name !== keep).map((entry) =>
+      Deno.remove(join(root, entry.name), { recursive: true }).catch(() => {})
+    ),
+  );
   if (keep === undefined) await Deno.remove(root).catch(() => {});
 }
 
@@ -132,6 +131,79 @@ export function applyTunnelRoutes(
   );
 }
 
+/** The result for a table that is already in place. */
+async function unchangedResult(
+  hostingDir: string,
+  sitesDir: string,
+  payload: TunnelRoutesPayload,
+  prior: TunnelState | undefined,
+  live: string | undefined,
+): Promise<TunnelRoutesResult | undefined> {
+  if (prior?.hash !== payload.hash) return undefined;
+  const same = await renderStoredTunnelFile(hostingDir, sitesDir, prior);
+  const filesOk = prior.peerId === undefined ||
+    await peerFilesPresent(hostingDir, prior.peerId);
+  if (!filesOk || (live ?? "") !== same.contents) return undefined;
+  return {
+    hash: payload.hash,
+    applied: false,
+    routeCount: same.forwarded.length,
+    dropped: same.dropped,
+    warnings: [],
+  };
+}
+
+/** Judge, swap in and reload the new file; nothing happens when it is unchanged. */
+async function swapTunnelFile(
+  layout: LayoutPaths,
+  paths: { hostingDir: string; sitesDir: string; livePath: string },
+  contents: string,
+  live: string | undefined,
+  grantRead: (hostingDir: string) => Promise<void>,
+): Promise<void> {
+  // Nothing to judge or reload when the file was never there and stays so.
+  if (contents === (live ?? "") || (contents === "" && live === undefined)) {
+    return;
+  }
+  await validateHostingCaddyCandidate(
+    layout,
+    paths.hostingDir,
+    paths.sitesDir,
+    TUNNEL_SITE_FILE,
+    contents,
+    grantRead,
+  );
+  if (contents !== "") await enableHostingCaddy();
+  await activateHostingSites([{ live: paths.livePath, contents }]);
+  // Caddy no longer loads anything from it (the empty file loaded).
+  if (contents === "") await Deno.remove(paths.livePath).catch(() => {});
+}
+
+function tunnelStateFor(
+  payload: TunnelRoutesPayload,
+  peerId: string | undefined,
+): TunnelState {
+  return {
+    hash: payload.hash,
+    routes: payload.routes,
+    peerAddresses: payload.peerAddresses,
+    ...(payload.listenAddresses
+      ? { listenAddresses: payload.listenAddresses }
+      : {}),
+    ...(peerId === undefined ? {} : { peerId }),
+  };
+}
+
+/** Write or clear the stored table once the file is in place. */
+async function recordTunnelState(
+  hostingDir: string,
+  state: TunnelState,
+  empty: boolean,
+): Promise<void> {
+  if (empty) await removeTunnelState(hostingDir);
+  else await writeTunnelState(hostingDir, state);
+}
+
 async function applyTunnelRoutesLocked(
   layout: LayoutPaths,
   payload: TunnelRoutesPayload,
@@ -141,77 +213,44 @@ async function applyTunnelRoutesLocked(
   const sitesDir = join(hostingDir, "sites");
   const livePath = join(sitesDir, TUNNEL_SITE_FILE);
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
-  const grantRead = deps.grantRead ?? grantHostingCaddyRead;
   const empty = payload.routes.length === 0 &&
     payload.peerAddresses.length === 0;
   const live = await readTextIfPresent(livePath);
   const prior = await readTunnelState(hostingDir);
 
   // An unchanged table with the file in place changes nothing.
-  if (prior?.hash === payload.hash) {
-    const same = await renderStoredTunnelFile(hostingDir, sitesDir, prior);
-    const filesOk = prior.peerId === undefined ||
-      await peerFilesPresent(hostingDir, prior.peerId);
-    if (filesOk && (live ?? "") === same.contents) {
-      return {
-        hash: payload.hash,
-        applied: false,
-        routeCount: same.forwarded.length,
-        dropped: same.dropped,
-        warnings: [],
-      };
-    }
-  }
+  const unchanged = await unchangedResult(
+    hostingDir,
+    sitesDir,
+    payload,
+    prior,
+    live,
+  );
+  if (unchanged) return unchanged;
 
-  const peerId = !empty && payload.peerMaterial
-    ? await peerMaterialId(
-      payload.peerMaterial.certificatePem,
-      payload.peerMaterial.caCertPem,
-    )
+  const material = empty ? undefined : payload.peerMaterial;
+  const peerId = material
+    ? await peerMaterialId(material.certificatePem, material.caCertPem)
     : undefined;
-  const createdMaterial = peerId !== undefined &&
+  const createdMaterial = material !== undefined &&
     await ensurePeerMaterial(
       hostingDir,
-      peerId,
-      payload.peerMaterial!,
+      peerId!,
+      material,
       deps.decryptSecrets,
     );
-  const state: TunnelState = {
-    hash: payload.hash,
-    routes: payload.routes,
-    peerAddresses: payload.peerAddresses,
-    ...(payload.listenAddresses
-      ? { listenAddresses: payload.listenAddresses }
-      : {}),
-    ...(peerId === undefined ? {} : { peerId }),
-  };
+  const state = tunnelStateFor(payload, peerId);
 
   try {
     const rendered = await renderStoredTunnelFile(hostingDir, sitesDir, state);
-    if (rendered.contents !== (live ?? "")) {
-      // Nothing to judge or reload when the file was never there and stays so.
-      if (rendered.contents !== "" || live !== undefined) {
-        await validateHostingCaddyCandidate(
-          layout,
-          hostingDir,
-          sitesDir,
-          TUNNEL_SITE_FILE,
-          rendered.contents,
-          grantRead,
-        );
-        if (rendered.contents !== "") await enableHostingCaddy();
-        await activateHostingSites([{
-          live: livePath,
-          contents: rendered.contents,
-        }]);
-        // Caddy no longer loads anything from it (the empty file loaded).
-        if (rendered.contents === "") {
-          await Deno.remove(livePath).catch(() => {});
-        }
-      }
-    }
-    if (empty) await removeTunnelState(hostingDir);
-    else await writeTunnelState(hostingDir, state);
+    await swapTunnelFile(
+      layout,
+      { hostingDir, sitesDir, livePath },
+      rendered.contents,
+      live,
+      deps.grantRead ?? grantHostingCaddyRead,
+    );
+    await recordTunnelState(hostingDir, state, empty);
     await prunePeerMaterial(hostingDir, peerId);
     logInfo(
       "tunnels",
@@ -226,8 +265,8 @@ async function applyTunnelRoutesLocked(
     };
   } catch (err) {
     // A refused table must not leave new key files behind.
-    if (createdMaterial && peerId !== undefined && prior?.peerId !== peerId) {
-      await Deno.remove(tunnelPeerPaths(hostingDir, peerId).dir, {
+    if (createdMaterial && prior?.peerId !== peerId) {
+      await Deno.remove(tunnelPeerPaths(hostingDir, peerId!).dir, {
         recursive: true,
       }).catch(() => {});
     }

@@ -104,12 +104,14 @@ export async function servedNames(
     if (err instanceof Deno.errors.NotFound) return names;
     throw err;
   }
-  for (const entry of entries) {
-    if (
-      !entry.isFile || !entry.name.endsWith(".caddy") ||
-      skip.has(entry.name) || isDaemonReservedHostingSite(entry.name)
-    ) continue;
-    const text = await Deno.readTextFile(join(sitesDir, entry.name));
+  const files = entries.filter((entry) =>
+    entry.isFile && entry.name.endsWith(".caddy") && !skip.has(entry.name) &&
+    !isDaemonReservedHostingSite(entry.name)
+  );
+  const texts = await Promise.all(
+    files.map((entry) => Deno.readTextFile(join(sitesDir, entry.name))),
+  );
+  for (const text of texts) {
     for (const address of snippetSiteAddresses(text)) {
       names.add(foldHostname(address));
     }

@@ -2143,16 +2143,19 @@ export function siteSnippet(options: SiteSnippetOptions): string {
     httpsBody = `  ${blocks.https}\n`;
   }
 
-  const httpBlock = tunnel?.lock ? "" : https
-    ? `http://${hostname} {
+  let httpBlock = "";
+  if (!tunnel?.lock) {
+    httpBlock = https
+      ? `http://${hostname} {
 ${bindLine}  redir https://{host}{uri} permanent
 }
 
 `
-    : `http://${hostname} {
+      : `http://${hostname} {
 ${bindLine}${httpBody}}
 
 `;
+  }
 
   const httpsBlock = https
     ? `${hostname} {
@@ -2226,7 +2229,7 @@ function mergeSiteTunnel(
   hostname: string,
 ): SiteTunnel | undefined {
   const tunnel = hosting.tunnel;
-  if (!tunnel || !tunnel.hostnames.includes(hostname)) return existing;
+  if (!tunnel?.hostnames.includes(hostname)) return existing;
   const open = tunnel.openHostnames?.includes(hostname) === true;
   return {
     // One open route unlocks the name: the public side must answer everyone.
@@ -2881,9 +2884,9 @@ export async function validateHostingCaddyCandidate(
   siteFile: string,
   contents: string,
   grantRead: (hostingDir: string) => Promise<void>,
-  fallbackContents?: string,
-  tunnelContents?: string,
+  staged: { fallback?: string; tunnel?: string } = {},
 ): Promise<void> {
+  const { fallback: fallbackContents, tunnel: tunnelContents } = staged;
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
     const others = (await liveSnippetNames(sitesDir)).filter((name) =>
@@ -3368,8 +3371,7 @@ async function rewriteHostingCaddySitesLocked(
       siteFile,
       siteContent,
       grantRead,
-      fallbackContent,
-      tunnelContents,
+      { fallback: fallbackContent, tunnel: tunnelContents },
     );
   } catch (err) {
     if (tunnelContents === undefined || tunnelContents === "") throw err;
@@ -3388,8 +3390,7 @@ async function rewriteHostingCaddySitesLocked(
       siteFile,
       siteContent,
       grantRead,
-      fallbackContent,
-      "",
+      { fallback: fallbackContent, tunnel: "" },
     );
   }
 
