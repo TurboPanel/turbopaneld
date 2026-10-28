@@ -1730,6 +1730,48 @@ test("rewriteHostingCaddySites validates empty content as before when Caddy is s
   }
 });
 
+test("rewriteHostingCaddySites skips validation when Caddy is set up but its unit never started", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  // The state folder only exists once the unit has started: this host is set
+  // up (binary, account, guard) but nothing was ever hosted on it.
+  await Deno.remove(join(layout.stateDir, "hosting-caddy"), {
+    recursive: true,
+  });
+  const calls: string[][] = [];
+  const restoreHost = setIngressHostCommandForTest((_command, args) => {
+    calls.push(args);
+    if (args.includes("validate")) {
+      return Promise.resolve({
+        success: false,
+        stderr:
+          "provisioning CA 'local': generating root: saving root certificate: mkdir /var/lib/turbopanel/hosting-caddy: permission denied",
+      });
+    }
+    if (args.includes("start")) {
+      return Promise.resolve({
+        success: false,
+        stderr:
+          "Failed to start turbopanel-hosting-caddy.service: Unit not found.",
+      });
+    }
+    return Promise.resolve({ success: true, stderr: "" });
+  });
+  const restoreReady = setHostingCaddyReadyForTest(() => Promise.resolve(true));
+  try {
+    await rewriteHostingCaddySites(
+      layout,
+      noHostnamesPayload(),
+      undefined,
+      noGrant,
+    );
+    assertEquals(calls.some((args) => args.includes("validate")), false);
+  } finally {
+    restoreReady();
+    restoreHost();
+    await cleanup();
+  }
+});
+
 test("rewriteHostingCaddySites names a missing hosting Caddy account plainly", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restoreHost = setIngressHostCommandForTest((_command, args) =>

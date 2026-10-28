@@ -2429,23 +2429,40 @@ function hostingCaddyStateRoot(layout: LayoutPaths): string {
 }
 
 /**
+ * True when the unit's state folder exists, so the validating account can keep
+ * its throwaway certificate authority there. Systemd makes the folder when the
+ * unit first starts; a host that is set up (binary, account, guard) but never
+ * hosted anything has no such folder. A check that cannot tell counts as yes,
+ * so a stat error never silently skips validation.
+ */
+async function hostingCaddyStateExists(layout: LayoutPaths): Promise<boolean> {
+  return await Deno.stat(hostingCaddyStateRoot(layout)).then(
+    () => true,
+    (err) => {
+      if (!(err instanceof Deno.errors.NotFound)) {
+        logWarn(
+          "deploy",
+          `hosting Caddy state folder not checked: ${errorText(err)}`,
+        );
+        return true;
+      }
+      return false;
+    },
+  );
+}
+
+/**
  * The validating account keeps its throwaway certificate authority under the
  * unit's state folder, which systemd creates when the unit starts. A host whose
  * unit has never started gets it started once (the deploy path normally did
- * that already), so the folder exists before Caddy is asked to use it.
+ * that already), so the folder exists before Caddy is asked to use it. When
+ * that start is not possible (the unit was never installed), the caller decides
+ * whether anything needs judging: validation of an empty set is skipped, and a
+ * set that needs the edge installs the unit first.
  */
 async function ensureValidationStorage(layout: LayoutPaths): Promise<string> {
   const state = hostingCaddyStateRoot(layout);
-  const exists = await Deno.stat(state).then(() => true, (err) => {
-    if (!(err instanceof Deno.errors.NotFound)) {
-      logWarn(
-        "deploy",
-        `hosting Caddy state folder not checked: ${errorText(err)}`,
-      );
-      return true;
-    }
-    return false;
-  });
+  const exists = await hostingCaddyStateExists(layout);
   if (!exists) {
     const start = await run(
       "sudo",
@@ -2897,11 +2914,14 @@ export async function validateHostingCaddyCandidate(
     ) {
       await ensureHostingCaddyRuntimeBeforeValidate(layout);
     } else if (
-      !await (hostingCaddyReadyOverride ?? hostingCaddyReady)(layout)
+      !await (hostingCaddyReadyOverride ?? hostingCaddyReady)(layout) ||
+      !await hostingCaddyStateExists(layout)
     ) {
-      // Nothing needs Caddy and the hosting Caddy account and binary do not
-      // exist yet (host setup never ran): there is nothing to judge, and
-      // validating would run as an account that is not there.
+      // Nothing needs Caddy and either the hosting Caddy account and binary do
+      // not exist yet (host setup never ran) or its unit has never started, so
+      // its state folder was never made: there is nothing to judge, and
+      // validating would run as an account that is not there, or one that
+      // cannot make its throwaway certificate authority.
       return;
     }
     await Promise.all(
