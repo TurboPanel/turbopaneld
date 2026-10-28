@@ -27,6 +27,7 @@ export const COMMAND_TYPES = [
   "server.backups.reconcile",
   "server.backups.test-target",
   "server.folders.remove",
+  "server.tunnel.routes",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -822,6 +823,12 @@ export type EnvironmentDeployHosting = {
    * private IP, or loopback). Omitted when bind is public with no pin.
    */
   bindAddress?: string;
+  /**
+   * Tunnel names of this hosting and who may reach them. When present the
+   * server answers those names only to local connectors and the listed peer
+   * addresses, and also listens on `extraBind`. Absent = no tunnel names.
+   */
+  tunnel?: EnvironmentDeployHostingTunnel;
   /**
    * `http` (default/omitted) routes `hostnames` through Traefik + hosting Caddy.
    * `tcp` / `udp` publish `ports[]` straight through Traefik — no hostname/TLS
@@ -4452,6 +4459,16 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const tlsMode = parseHostingTlsMode(value.tlsMode);
   const proxy = parseHostingProxy(value.proxy);
   const bindAddress = parseHostingBindAddress(value.bindAddress);
+  const hostnames = parseHostingHostnames(value.hostnames);
+  const tunnel = parseHostingTunnel(value.tunnel, hostnames);
+  if (
+    tunnel && tlsMode === "acme" &&
+    tunnel.hostnames.some((name) => !tunnel.openHostnames?.includes(name))
+  ) {
+    throw new TypeError(
+      "Invalid hostings[].tunnel: tlsMode acme needs every tunnel name open",
+    );
+  }
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
@@ -4463,13 +4480,14 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     hostingId: parseNonEmptyString(value, "hostingId"),
     serviceId: parseNonEmptyString(value, "serviceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
-    hostnames: parseHostingHostnames(value.hostnames),
+    hostnames,
     ...(pathPrefix === undefined ? {} : { pathPrefix }),
     ...(targetPort === undefined ? {} : { targetPort }),
     ...(tlsId === undefined ? {} : { tlsId }),
     ...(tlsMode === undefined ? {} : { tlsMode }),
     ...(proxy === undefined ? {} : { proxy }),
     ...(bindAddress === undefined ? {} : { bindAddress }),
+    ...(tunnel === undefined ? {} : { tunnel }),
     ...(protocol === undefined ? {} : { protocol }),
     ...(ports === undefined ? {} : { ports }),
     ...(web === undefined ? {} : { web }),
@@ -6674,6 +6692,342 @@ function parseFolderRemoval(value: unknown): FolderRemoval {
     entry.assetId = value.assetId;
   }
   return entry;
+}
+
+// ---------------------------------------------------------------------------
+// Tunnel traffic between servers of one datacenter. Twin of the instance
+// `src/contracts/commands/tunnel-routes.ts`; both are optional on the wire.
+// ---------------------------------------------------------------------------
+
+/** The fixed certificate name of the hop between servers. Same on both sides. */
+export const TUNNEL_PEER_TLS_NAME = "tp-peer.internal";
+
+const MAX_TUNNEL_HOSTNAMES = 256;
+const MAX_TUNNEL_ADDRESSES = 64;
+const MAX_TUNNEL_ROUTES = 2000;
+const MAX_TUNNEL_UPSTREAMS = 16;
+const MAX_TUNNEL_UPSTREAM_ADDRESSES = 8;
+const TUNNEL_SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const TUNNEL_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TUNNEL_ENVELOPE_PREFIX = "tpdaemon.";
+
+/** A bare address (no prefix length, no brackets). Peers are exact addresses, never ranges. */
+function parseTunnelAddressList(
+  value: unknown,
+  label: string,
+  min: number,
+  max: number,
+): string[] {
+  if (
+    !Array.isArray(value) || value.length < min || value.length > max ||
+    !value.every((entry) =>
+      typeof entry === "string" && !entry.includes("/") &&
+      (isValidIpv4Literal(entry) || isValidIpv6Literal(entry))
+    ) || new Set(value).size !== value.length
+  ) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  return value as string[];
+}
+
+function parseTunnelHostnameList(
+  value: unknown,
+  label: string,
+  min: number,
+): string[] {
+  if (
+    !Array.isArray(value) || value.length < min ||
+    value.length > MAX_TUNNEL_HOSTNAMES || !value.every(isValidHostname) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  return value as string[];
+}
+
+/**
+ * `environment.deploy` hostings[].tunnel: the tunnel names this hosting
+ * answers, and who may reach them.
+ */
+export type EnvironmentDeployHostingTunnel = {
+  /** Tunnel names of this hosting; each is also in the hosting's `hostnames`. */
+  hostnames: string[];
+  /**
+   * Tunnel names that are also public names on this server. Listed in
+   * `hostnames` too; the local-only lock is off for them.
+   */
+  openHostnames?: string[];
+  /** Exact datacenter addresses of the servers that may forward to this one. */
+  peers: string[];
+  /** Addresses the web server must also listen on so peers can reach it. */
+  extraBind?: string[];
+};
+
+function parseHostingTunnel(
+  value: unknown,
+  siteHostnames: readonly string[],
+): EnvironmentDeployHostingTunnel | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new TypeError("Invalid hostings[].tunnel");
+  const hostnames = parseTunnelHostnameList(
+    value.hostnames,
+    "hostings[].tunnel hostnames",
+    1,
+  );
+  const own = new Set(siteHostnames);
+  if (!hostnames.every((name) => own.has(name))) {
+    throw new TypeError("Invalid hostings[].tunnel hostnames");
+  }
+  const tunnel: EnvironmentDeployHostingTunnel = {
+    hostnames,
+    peers: parseTunnelAddressList(
+      value.peers,
+      "hostings[].tunnel peers",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    ),
+  };
+  if (value.openHostnames !== undefined) {
+    const open = parseTunnelHostnameList(
+      value.openHostnames,
+      "hostings[].tunnel openHostnames",
+      1,
+    );
+    if (!open.every((name) => hostnames.includes(name))) {
+      throw new TypeError("Invalid hostings[].tunnel openHostnames");
+    }
+    tunnel.openHostnames = open;
+  }
+  if (value.extraBind !== undefined) {
+    tunnel.extraBind = parseTunnelAddressList(
+      value.extraBind,
+      "hostings[].tunnel extraBind",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  return tunnel;
+}
+
+/** One server that runs a copy of a site, and where to reach its web server. */
+export type TunnelRouteUpstream = {
+  serverId: string;
+  /** Every datacenter address of the server, the preferred family first. */
+  addresses: string[];
+  /** Port of the server's web server on those addresses. Default 443. */
+  port?: number;
+};
+
+export type TunnelRoute = {
+  hostname: string;
+  /** The site runs on this server: left out of the forwarding file. */
+  local: boolean;
+  /**
+   * True = only local connectors and listed peers are answered; anyone else is
+   * dropped. False = the name is also public on this server.
+   */
+  lock: boolean;
+  /** Servers that run the site. At least one unless `local` is true. */
+  upstreams: TunnelRouteUpstream[];
+};
+
+/** A leaf of the organization's CA for the peer hop; the key is sealed for this daemon. */
+export type TunnelPeerMaterial = {
+  certificatePem: string;
+  privateKeyEnvelope: string;
+  caCertPem: string;
+  notAfter?: string;
+};
+
+/** Must stay in sync with the instance `server.tunnel.routes` shape. */
+export type TunnelRoutesPayload = {
+  /** Lower-case sha256 of the desired state. */
+  hash: string;
+  routes: TunnelRoute[];
+  /** Exact datacenter addresses of the servers that may forward to this one. */
+  peerAddresses: string[];
+  /** This server's own addresses the peer-facing site must listen on. */
+  listenAddresses?: string[];
+  /** Required when `routes` or `peerAddresses` is not empty. */
+  peerMaterial?: TunnelPeerMaterial;
+};
+
+/** Must stay in sync with the instance `server.tunnel.routes` shape. */
+export type TunnelRoutesResult = {
+  hash: string;
+  /** The files were written (or removed). False when already current. */
+  applied: boolean;
+  /** Forwarded names now in the file. */
+  routeCount: number;
+  /** Names left out because the site runs on this server. */
+  dropped: string[];
+  warnings: string[];
+};
+
+function parseTunnelUpstream(value: unknown): TunnelRouteUpstream {
+  if (
+    !isRecord(value) || typeof value.serverId !== "string" ||
+    !TUNNEL_UUID_RE.test(value.serverId)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes upstream");
+  }
+  const upstream: TunnelRouteUpstream = {
+    serverId: value.serverId,
+    addresses: parseTunnelAddressList(
+      value.addresses,
+      "server.tunnel.routes upstream addresses",
+      1,
+      MAX_TUNNEL_UPSTREAM_ADDRESSES,
+    ),
+  };
+  if (value.port !== undefined) {
+    if (
+      typeof value.port !== "number" || !Number.isInteger(value.port) ||
+      value.port < 1 || value.port > 65535
+    ) {
+      throw new TypeError("Invalid server.tunnel.routes upstream port");
+    }
+    upstream.port = value.port;
+  }
+  return upstream;
+}
+
+function parseTunnelRoute(value: unknown): TunnelRoute {
+  if (
+    !isRecord(value) || !isValidHostname(value.hostname) ||
+    typeof value.local !== "boolean" || typeof value.lock !== "boolean" ||
+    !Array.isArray(value.upstreams) ||
+    value.upstreams.length > MAX_TUNNEL_UPSTREAMS
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes route");
+  }
+  const upstreams = value.upstreams.map(parseTunnelUpstream);
+  if (!value.local && upstreams.length === 0) {
+    throw new TypeError(
+      "Invalid server.tunnel.routes route: a remote site needs an upstream",
+    );
+  }
+  if (
+    new Set(upstreams.map((upstream) => upstream.serverId)).size !==
+      upstreams.length
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes route upstreams");
+  }
+  return {
+    hostname: value.hostname as string,
+    local: value.local,
+    lock: value.lock,
+    upstreams,
+  };
+}
+
+function parseTunnelPeerMaterial(value: unknown): TunnelPeerMaterial {
+  if (
+    !isRecord(value) || typeof value.certificatePem !== "string" ||
+    !value.certificatePem.includes("BEGIN CERTIFICATE") ||
+    typeof value.privateKeyEnvelope !== "string" ||
+    !value.privateKeyEnvelope.startsWith(TUNNEL_ENVELOPE_PREFIX) ||
+    typeof value.caCertPem !== "string" ||
+    !value.caCertPem.includes("BEGIN CERTIFICATE")
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes peerMaterial");
+  }
+  const material: TunnelPeerMaterial = {
+    certificatePem: value.certificatePem,
+    privateKeyEnvelope: value.privateKeyEnvelope,
+    caCertPem: value.caCertPem,
+  };
+  if (value.notAfter !== undefined) {
+    if (
+      typeof value.notAfter !== "string" ||
+      Number.isNaN(Date.parse(value.notAfter))
+    ) {
+      throw new TypeError("Invalid server.tunnel.routes peerMaterial notAfter");
+    }
+    material.notAfter = value.notAfter;
+  }
+  return material;
+}
+
+/** Parse `server.tunnel.routes`. */
+export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid server.tunnel.routes payload");
+  }
+  if (
+    typeof value.hash !== "string" || !TUNNEL_SHA256_HEX_RE.test(value.hash)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes hash");
+  }
+  if (!Array.isArray(value.routes) || value.routes.length > MAX_TUNNEL_ROUTES) {
+    throw new TypeError("Invalid server.tunnel.routes routes");
+  }
+  const routes = value.routes.map(parseTunnelRoute);
+  if (new Set(routes.map((route) => route.hostname)).size !== routes.length) {
+    throw new TypeError("Invalid server.tunnel.routes routes");
+  }
+  const peerAddresses =
+    Array.isArray(value.peerAddresses) && value.peerAddresses.length === 0
+      ? []
+      : parseTunnelAddressList(
+        value.peerAddresses,
+        "server.tunnel.routes peerAddresses",
+        1,
+        MAX_TUNNEL_ADDRESSES,
+      );
+  const payload: TunnelRoutesPayload = {
+    hash: value.hash,
+    routes,
+    peerAddresses,
+  };
+  if (value.listenAddresses !== undefined) {
+    payload.listenAddresses = parseTunnelAddressList(
+      value.listenAddresses,
+      "server.tunnel.routes listenAddresses",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  if (value.peerMaterial !== undefined) {
+    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (
+    (routes.length > 0 || peerAddresses.length > 0) && !payload.peerMaterial
+  ) {
+    throw new TypeError(
+      "Invalid server.tunnel.routes peerMaterial: required with routes or peers",
+    );
+  }
+  if (routes.some((route) => !route.local) && peerAddresses.length === 0) {
+    throw new TypeError(
+      "Invalid server.tunnel.routes peerAddresses: required for forwarding",
+    );
+  }
+  return payload;
+}
+
+export function parseTunnelRoutesResult(value: unknown): TunnelRoutesResult {
+  if (
+    !isRecord(value) || typeof value.hash !== "string" ||
+    !TUNNEL_SHA256_HEX_RE.test(value.hash) ||
+    typeof value.applied !== "boolean" ||
+    typeof value.routeCount !== "number" ||
+    !Number.isInteger(value.routeCount) || value.routeCount < 0 ||
+    !Array.isArray(value.dropped) ||
+    !value.dropped.every((name) => typeof name === "string") ||
+    !Array.isArray(value.warnings) ||
+    !value.warnings.every((warning) => typeof warning === "string")
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes result");
+  }
+  return {
+    hash: value.hash,
+    applied: value.applied,
+    routeCount: value.routeCount,
+    dropped: value.dropped as string[],
+    warnings: value.warnings as string[],
+  };
 }
 
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */

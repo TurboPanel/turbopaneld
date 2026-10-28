@@ -10,6 +10,7 @@
  */
 
 import { dirname, join } from "@std/path";
+import { TUNNEL_SITE_FILE } from "./tunnel-caddy.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import type { InstanceAcmeWireSettings } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -112,6 +113,7 @@ export const DAEMON_RESERVED_HOSTING_SITES = new Set([
   "00-empty.caddy",
   HOSTING_FALLBACK_SITE,
   INSTANCE_ACME_HTTP01_SITE,
+  TUNNEL_SITE_FILE,
 ]);
 
 export const INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX =

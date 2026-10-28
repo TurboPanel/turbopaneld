@@ -9,6 +9,15 @@ import {
   trimSnippetSites,
 } from "./caddy-snippet.ts";
 import { foldHostname } from "./hostname-fold.ts";
+import { plannedTunnelContents } from "./tunnel-state.ts";
+import {
+  type PeerUpstream,
+  peerUpstreamText,
+  TUNNEL_SITE_FILE,
+  tunnelLockLines,
+  tunnelTrustedRanges,
+  withTrustedProxies,
+} from "./tunnel-caddy.ts";
 import { removeStaleNetworkContainers } from "./ingress-stale-network.ts";
 import {
   type EnvironmentDeployContainer,
@@ -1771,16 +1780,22 @@ export function assertValidBindAddress(value: string): void {
   }
 }
 
-function formatBindDirective(bindAddress: string): string {
-  assertValidBindAddress(bindAddress);
-  // Bracket IPv6 so Caddyfile does not treat `:` as a port separator.
-  const rendered = bindAddress.includes(":") ? `[${bindAddress}]` : bindAddress;
-  return `  bind ${rendered}\n`;
+function formatBindDirective(bindAddress: string | readonly string[]): string {
+  const addresses = typeof bindAddress === "string"
+    ? [bindAddress]
+    : bindAddress;
+  const rendered = addresses.map((address) => {
+    assertValidBindAddress(address);
+    // Bracket IPv6 so Caddyfile does not treat `:` as a port separator.
+    return address.includes(":") ? `[${address}]` : address;
+  });
+  return `  bind ${rendered.join(" ")}\n`;
 }
 
 export type CaddyUpstream =
   | { kind: "traefik" }
-  | { kind: "http"; host: string; port: number };
+  | { kind: "http"; host: string; port: number }
+  | PeerUpstream;
 
 const DEFAULT_TRAEFIK_UPSTREAM: CaddyUpstream = { kind: "traefik" };
 
@@ -1791,9 +1806,21 @@ export type CaddySiteRoute = {
   stripPrefix?: string;
 };
 
+/**
+ * A name that also arrives through a tunnel connector. Only loopback (the
+ * connector) and the listed peers may use it unless `lock` is false (the name
+ * is also public on this server).
+ */
+export type SiteTunnel = Readonly<{
+  lock: boolean;
+  peers: readonly string[];
+  extraBind: readonly string[];
+}>;
+
 type HostnameSite = {
   forceHttps: boolean;
   bindAddress?: string;
+  tunnel?: SiteTunnel;
   routes: CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
   /** Set on a `www` redirect name: send every request to `<redirectTo>`. */
@@ -1876,11 +1903,15 @@ function formatRouteHandleBlock(
 function formatRouteHandlers(
   routes: readonly CaddySiteRoute[],
   hop: "http" | "https",
+  trustedProxies?: string,
 ): string {
   const sorted = sortCaddySiteRoutes(routes);
   let blocks = "";
   for (const route of sorted) {
-    const { http, https } = resolveUpstreamBlocks(route.upstream);
+    const { http, https } = resolveUpstreamBlocks(
+      route.upstream,
+      trustedProxies,
+    );
     const upstreamLine = hop === "https" ? https : http;
     blocks += formatRouteHandleBlock(route, upstreamLine);
   }
@@ -1906,17 +1937,26 @@ export function caddyHttpUpstream(host: string, port: number): string {
 
 function resolveUpstreamBlocks(
   upstream: CaddyUpstream = DEFAULT_TRAEFIK_UPSTREAM,
+  trustedProxies?: string,
 ): {
   http: string;
   https: string;
 } {
+  const trust = (line: string) =>
+    trustedProxies === undefined
+      ? line
+      : withTrustedProxies(line, trustedProxies);
+  if (upstream.kind === "peer") {
+    const line = peerUpstreamText(upstream);
+    return { http: line, https: line };
+  }
   if (upstream.kind === "http") {
-    const line = caddyHttpUpstream(upstream.host, upstream.port);
+    const line = trust(caddyHttpUpstream(upstream.host, upstream.port));
     return { http: line, https: line };
   }
   return {
-    http: caddyTraefikUpstream("http"),
-    https: caddyTraefikUpstream("https"),
+    http: trust(caddyTraefikUpstream("http")),
+    https: trust(caddyTraefikUpstream("https")),
   };
 }
 
@@ -1930,6 +1970,8 @@ export type SiteSnippetOptions = Readonly<{
   upstream?: CaddyUpstream;
   routes?: readonly CaddySiteRoute[];
   tlsMode?: EnvironmentDeployHosting["tlsMode"];
+  /** Set for a name that also arrives through a tunnel connector. */
+  tunnel?: SiteTunnel;
   /**
    * Serve this name as a permanent redirect to `<redirectTo>` (path and query
    * kept) instead of proxying. With `forceHttps` (the default) both plain HTTP
@@ -1993,7 +2035,7 @@ ${hide}  respond "" 200
 
 /** The bind line plus, when asked, the header removal that follows it. */
 function siteBlockPreamble(
-  bindAddress: string | undefined,
+  bindAddress: string | readonly string[] | undefined,
   hideWebServerNames: boolean | undefined,
 ): string {
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
@@ -2022,6 +2064,31 @@ ${bindLine}${tlsLine}${redirect}}
 `;
 }
 
+/**
+ * Where a tunnel name listens. A site with no `bind` already listens on every
+ * address; one that binds to a single address also needs loopback (the
+ * connector dials `https://localhost`) and the addresses peers use.
+ */
+function tunnelBindAddresses(
+  bindAddress: string | undefined,
+  tunnel: SiteTunnel | undefined,
+): string | string[] | undefined {
+  if (bindAddress === undefined || tunnel === undefined) return bindAddress;
+  return [...new Set([bindAddress, "127.0.0.1", ...tunnel.extraBind])];
+}
+
+/** The pieces a tunnel name adds to its HTTPS site block. */
+function tunnelSiteParts(tunnel: SiteTunnel | undefined): {
+  lock: string;
+  trustedProxies: string | undefined;
+} {
+  if (tunnel === undefined) return { lock: "", trustedProxies: undefined };
+  return {
+    lock: tunnel.lock ? tunnelLockLines(tunnel.peers) : "",
+    trustedProxies: tunnelTrustedRanges(tunnel.peers).join(" "),
+  };
+}
+
 export function siteSnippet(options: SiteSnippetOptions): string {
   if (options.redirectTo !== undefined) return redirectSiteSnippet(options);
   const {
@@ -2034,66 +2101,63 @@ export function siteSnippet(options: SiteSnippetOptions): string {
     routes,
     tlsMode,
     hideWebServerNames,
+    tunnel,
   } = options;
   const effectiveRoutes: CaddySiteRoute[] = routes?.length
     ? [...routes]
     : [{ upstream }];
 
-  if (!usesMultiRouteRouting(effectiveRoutes)) {
+  // A locked tunnel name never asks for a public certificate: automatic
+  // issuance is for names visitors reach directly, so it gets the pinned pair
+  // or `tls internal` whatever the mode says.
+  const tlsLine = hostingTlsDirective(
+    tunnel?.lock && tlsMode === "acme" ? undefined : tlsMode,
+    tlsId,
+    tlsDir,
+  );
+  const bindLine = siteBlockPreamble(
+    tunnelBindAddresses(bindAddress, tunnel),
+    hideWebServerNames,
+  );
+  // The connector speaks HTTPS to localhost, so a tunnel name always has an
+  // HTTPS site; a locked one has no HTTP site at all (the catch-all answers
+  // plain HTTP like any unknown name).
+  const https = emitHttpsSite(forceHttps, tlsMode) || tunnel !== undefined;
+  const { lock, trustedProxies } = tunnelSiteParts(tunnel);
+  const multi = usesMultiRouteRouting(effectiveRoutes);
+
+  let httpBody: string;
+  let httpsBody: string;
+  if (multi) {
+    // The handlers end in a newline and the block adds one more, as before.
+    httpBody = `${
+      formatRouteHandlers(effectiveRoutes, "http", trustedProxies)
+    }\n`;
+    httpsBody = `${
+      formatRouteHandlers(effectiveRoutes, "https", trustedProxies)
+    }\n`;
+  } else {
     const single = effectiveRoutes[0]?.upstream ?? upstream;
-    const { http: httpUpstream, https: httpsUpstream } = resolveUpstreamBlocks(
-      single,
-    );
-    const tlsLine = hostingTlsDirective(tlsMode, tlsId, tlsDir);
-    const bindLine = siteBlockPreamble(bindAddress, hideWebServerNames);
-    const https = emitHttpsSite(forceHttps, tlsMode);
-
-    const httpBlock = https
-      ? `http://${hostname} {
-${bindLine}  redir https://{host}{uri} permanent
-}
-
-`
-      : `http://${hostname} {
-${bindLine}  ${httpUpstream}
-}
-
-`;
-
-    const httpsBlock = https
-      ? `${hostname} {
-${bindLine}${tlsLine}
-  ${httpsUpstream}
-}
-`
-      : "";
-
-    return httpBlock + httpsBlock;
+    const blocks = resolveUpstreamBlocks(single, trustedProxies);
+    httpBody = `  ${blocks.http}\n`;
+    httpsBody = `  ${blocks.https}\n`;
   }
 
-  const tlsLine = hostingTlsDirective(tlsMode, tlsId, tlsDir);
-  const bindLine = siteBlockPreamble(bindAddress, hideWebServerNames);
-  const httpsHandlers = formatRouteHandlers(effectiveRoutes, "https");
-  const httpHandlers = formatRouteHandlers(effectiveRoutes, "http");
-  const https = emitHttpsSite(forceHttps, tlsMode);
-
-  const httpBlock = https
+  const httpBlock = tunnel?.lock ? "" : https
     ? `http://${hostname} {
 ${bindLine}  redir https://{host}{uri} permanent
 }
 
 `
     : `http://${hostname} {
-${bindLine}${httpHandlers}
-}
+${bindLine}${httpBody}}
 
 `;
 
   const httpsBlock = https
     ? `${hostname} {
 ${bindLine}${tlsLine}
-${httpsHandlers}
-}
+${lock}${httpsBody}}
 `
     : "";
 
@@ -2155,11 +2219,33 @@ function getOrCreateHostnameSite(
   return site;
 }
 
+/** The tunnel facts for one name of a hosting, merged with what an earlier hosting set. */
+function mergeSiteTunnel(
+  existing: SiteTunnel | undefined,
+  hosting: EnvironmentDeployHosting,
+  hostname: string,
+): SiteTunnel | undefined {
+  const tunnel = hosting.tunnel;
+  if (!tunnel || !tunnel.hostnames.includes(hostname)) return existing;
+  const open = tunnel.openHostnames?.includes(hostname) === true;
+  return {
+    // One open route unlocks the name: the public side must answer everyone.
+    lock: (existing?.lock ?? true) && !open,
+    peers: [...new Set([...(existing?.peers ?? []), ...tunnel.peers])],
+    extraBind: [
+      ...new Set([...(existing?.extraBind ?? []), ...(tunnel.extraBind ?? [])]),
+    ],
+  };
+}
+
 function mergeHostingIntoHostnameSite(
   site: HostnameSite,
   hosting: EnvironmentDeployHosting,
   route: CaddySiteRoute,
+  hostname: string,
 ): void {
+  const tunnel = mergeSiteTunnel(site.tunnel, hosting, hostname);
+  if (tunnel) site.tunnel = tunnel;
   if (hosting.tlsMode === "acme") {
     site.tlsMode = "acme";
   }
@@ -2195,7 +2281,7 @@ export function buildCaddyHostnameRoutes(
     const route = buildCaddySiteRoute(hosting, loopbackByService);
     for (const hostname of hostingServedNames(hosting)) {
       const site = getOrCreateHostnameSite(byHostname, hostname);
-      mergeHostingIntoHostnameSite(site, hosting, route);
+      mergeHostingIntoHostnameSite(site, hosting, route, hostname);
     }
   }
 
@@ -2325,7 +2411,7 @@ async function readAcmeHostnamesManifest(
  */
 let hostingSitesTail: Promise<unknown> = Promise.resolve();
 
-function withHostingSitesLock<T>(work: () => Promise<T>): Promise<T> {
+export function withHostingSitesLock<T>(work: () => Promise<T>): Promise<T> {
   const result = hostingSitesTail.then(work, work);
   hostingSitesTail = result.catch(() => {});
   return result;
@@ -2775,7 +2861,20 @@ async function ensureHostingCaddyRuntimeBeforeValidate(
   await ensureHostingCaddyRuntime(layout);
 }
 
-async function validateHostingCaddyCandidate(
+/** Stage the reserved tunnel file in the candidate set; `undefined` leaves the live one in. */
+async function stageTunnelContents(
+  candidate: HostingCandidate,
+  tunnelContents: string | undefined,
+): Promise<void> {
+  if (tunnelContents === undefined) return;
+  await Deno.writeTextFile(
+    join(candidate.sitesDir, TUNNEL_SITE_FILE),
+    tunnelContents,
+    { mode: 0o640 },
+  );
+}
+
+export async function validateHostingCaddyCandidate(
   layout: LayoutPaths,
   hostingDir: string,
   sitesDir: string,
@@ -2783,6 +2882,7 @@ async function validateHostingCaddyCandidate(
   contents: string,
   grantRead: (hostingDir: string) => Promise<void>,
   fallbackContents?: string,
+  tunnelContents?: string,
 ): Promise<void> {
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
@@ -2816,6 +2916,7 @@ async function validateHostingCaddyCandidate(
     await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
+    await stageTunnelContents(candidate, tunnelContents);
     // After staging, so the account can read everything staged (the grant also
     // sets the folder defaults the live snippets inherit).
     await grantRead(hostingDir);
@@ -2844,6 +2945,7 @@ async function validateHostingCaddyCandidate(
     await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
+    await stageTunnelContents(candidate, tunnelContents);
     refusal = await hostingCandidateRefusal(layout, candidate);
     if (refusal !== null) {
       throw new Error(
@@ -3102,7 +3204,7 @@ async function restoreSwappedSites(
  * validated files: it loads them on its next start. If a swap itself fails,
  * those already done are put back before the error is thrown.
  */
-async function activateHostingSites(
+export async function activateHostingSites(
   sites: readonly { live: string; contents: string }[],
 ): Promise<void> {
   const swapped: SwappedSite[] = [];
@@ -3149,6 +3251,44 @@ async function activateHostingSites(
       reload.stderr || "reload failed"
     }`,
   );
+}
+
+/**
+ * The instance ACME window may have just disabled hosting Caddy after seeing
+ * only its own reserved site (it does not wait for deploys): a site must end
+ * with Caddy running and enabled at boot, not rely on a reload of a stopped
+ * unit. A refusal is logged, not thrown.
+ */
+export async function enableHostingCaddy(): Promise<void> {
+  const enable = await run(
+    "sudo",
+    hostSudoArgs(["-n", "systemctl", "enable", "--now", CADDY_SERVICE]),
+  );
+  if (!enable.success) {
+    logWarn("deploy", `hosting Caddy enable skipped: ${enable.stderr}`);
+  }
+}
+
+/**
+ * The reserved tunnel file as it should be once `siteFile` holds `contents`,
+ * or `undefined` when there is no stored table or nothing changes. A stored
+ * table that cannot be rendered is logged and left as it is.
+ */
+async function plannedTunnelFile(
+  hostingDir: string,
+  sitesDir: string,
+  siteFile: string,
+  contents: string,
+): Promise<string | undefined> {
+  try {
+    return await plannedTunnelContents(hostingDir, sitesDir, {
+      file: siteFile,
+      contents,
+    });
+  } catch (err) {
+    logWarn("deploy", `tunnel forwarding left as it was: ${errorText(err)}`);
+    return undefined;
+  }
 }
 
 /**
@@ -3201,6 +3341,7 @@ async function rewriteHostingCaddySitesLocked(
         tlsMode: site.tlsMode,
         redirectTo: site.redirectTo,
         hideWebServerNames: payload.hideWebServerNames === true,
+        tunnel: site.tunnel,
       });
     })
     .join("\n");
@@ -3208,33 +3349,58 @@ async function rewriteHostingCaddySitesLocked(
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
   );
-  await validateHostingCaddyCandidate(
-    layout,
+  // Tunnel names that run on other servers have forward blocks in a reserved
+  // file. Which names run here just changed, so that file is re-rendered with
+  // the new site and judged in the same set: a name that moved here leaves it,
+  // one that left comes back, and Caddy never sees a name twice.
+  const tunnelContents = await plannedTunnelFile(
     hostingDir,
     sitesDir,
     siteFile,
     siteContent,
-    grantRead,
-    fallbackContent,
   );
-
-  if (hostnames.length > 0) {
-    // The instance ACME window may have just disabled hosting Caddy after
-    // seeing only its own reserved site (it does not wait for deploys): a
-    // tenant site must end with Caddy running and enabled at boot, not rely
-    // on a reload of a stopped unit.
-    const enable = await run(
-      "sudo",
-      hostSudoArgs(["-n", "systemctl", "enable", "--now", CADDY_SERVICE]),
+  let tunnelToWrite = tunnelContents;
+  try {
+    await validateHostingCaddyCandidate(
+      layout,
+      hostingDir,
+      sitesDir,
+      siteFile,
+      siteContent,
+      grantRead,
+      fallbackContent,
+      tunnelContents,
     );
-    if (!enable.success) {
-      logWarn("deploy", `hosting Caddy enable skipped: ${enable.stderr}`);
-    }
+  } catch (err) {
+    if (tunnelContents === undefined || tunnelContents === "") throw err;
+    // The forward blocks must never stop a site from deploying: put the
+    // reserved file down to nothing until the control plane sends the table
+    // again, and judge the site alone.
+    logWarn(
+      "deploy",
+      `tunnel forwarding set aside for this deploy: ${errorText(err)}`,
+    );
+    tunnelToWrite = "";
+    await validateHostingCaddyCandidate(
+      layout,
+      hostingDir,
+      sitesDir,
+      siteFile,
+      siteContent,
+      grantRead,
+      fallbackContent,
+      "",
+    );
   }
+
+  if (hostnames.length > 0) await enableHostingCaddy();
 
   await activateHostingSites([
     { live: join(sitesDir, siteFile), contents: siteContent },
     { live: join(sitesDir, HOSTING_FALLBACK_SITE), contents: fallbackContent },
+    ...(tunnelToWrite === undefined
+      ? []
+      : [{ live: join(sitesDir, TUNNEL_SITE_FILE), contents: tunnelToWrite }]),
   ]);
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
@@ -3297,6 +3463,8 @@ async function removeHostingCaddySiteLocked(
     }
   }
 
+  await refreshTunnelFileAfterRemoval(layout);
+
   const reload = await run(
     "sudo",
     hostSudoArgs([
@@ -3308,6 +3476,40 @@ async function removeHostingCaddySiteLocked(
   );
   if (!reload.success) {
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
+  }
+}
+
+/**
+ * Names the removed environment served are now served from elsewhere: give the
+ * reserved tunnel file the forward blocks for them. Best effort, because
+ * removing a site must not fail on forwarding; the next table from the control
+ * plane repairs what this cannot.
+ */
+async function refreshTunnelFileAfterRemoval(
+  layout: LayoutPaths,
+): Promise<void> {
+  const hostingDir = join(layout.configDir, "hosting");
+  const sitesDir = join(hostingDir, "sites");
+  try {
+    const planned = await plannedTunnelContents(hostingDir, sitesDir);
+    if (planned === undefined) return;
+    await validateHostingCaddyCandidate(
+      layout,
+      hostingDir,
+      sitesDir,
+      TUNNEL_SITE_FILE,
+      planned,
+      grantHostingCaddyRead,
+    );
+    await activateHostingSites([{
+      live: join(sitesDir, TUNNEL_SITE_FILE),
+      contents: planned,
+    }]);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `tunnel forwarding not refreshed after a removal: ${errorText(err)}`,
+    );
   }
 }
 

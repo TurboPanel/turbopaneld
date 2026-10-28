@@ -44,6 +44,7 @@ import {
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
   parseTlsTrustReconcilePayload,
+  parseTunnelRoutesPayload,
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
@@ -78,6 +79,7 @@ import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFoldersRemove } from "./remove-folders.ts";
+import { handleTunnelRoutes } from "./tunnel-routes.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
@@ -133,6 +135,7 @@ export type CommandRouterHandlerOverrides = {
   handleBackupsReconcile?: typeof handleBackupsReconcile;
   handleBackupTargetTest?: typeof handleBackupTargetTest;
   handleFoldersRemove?: typeof handleFoldersRemove;
+  handleTunnelRoutes?: typeof handleTunnelRoutes;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -380,6 +383,16 @@ export async function handleCommandDispatch(
           "handleFoldersRemove",
           handleFoldersRemove,
         )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.tunnel.routes": {
+        const payload = parseTunnelRoutesPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleTunnelRoutes",
+          handleTunnelRoutes,
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
