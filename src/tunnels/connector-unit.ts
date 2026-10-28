@@ -49,36 +49,10 @@ export function assertTunnelId(value: unknown): asserts value is string {
   }
 }
 
-/**
- * Which of a tunnel's two units. A connector update starts the new version in
- * the other slot beside the running one (both are replicas of the same tunnel,
- * so the provider sends traffic to either), and stops the old one once the new
- * one reports it is connected. Slot "a" keeps the name every earlier install
- * used; slot "b" adds `-b`. The recorded slot is the one that carries the
- * tunnel; the other slot's unit exists only while a switch is under way.
- */
-export type ConnectorSlot = "a" | "b";
-
-export function isConnectorSlot(value: unknown): value is ConnectorSlot {
-  return value === "a" || value === "b";
-}
-
-export function otherSlot(slot: ConnectorSlot): ConnectorSlot {
-  return slot === "a" ? "b" : "a";
-}
-
-/** `-b` for slot "b", nothing for slot "a". Kept equal to `tp-host`. */
-export function slotSuffix(slot: ConnectorSlot): string {
-  return slot === "b" ? "-b" : "";
-}
-
-/** `turbopanel-tunnel-<id>.service` (slot "a") or `...-<id>-b.service`. */
-export function tunnelUnitName(
-  id: string,
-  slot: ConnectorSlot = "a",
-): string {
+/** `turbopanel-tunnel-<id>.service`. */
+export function tunnelUnitName(id: string): string {
   assertTunnelId(id);
-  return `${TUNNEL_UNIT_PREFIX}${id}${slotSuffix(slot)}.service`;
+  return `${TUNNEL_UNIT_PREFIX}${id}.service`;
 }
 
 /** Real unit directory; `tp-host` installs only here. */
@@ -87,9 +61,8 @@ export const SYSTEMD_UNIT_DIR = "/etc/systemd/system";
 export function tunnelUnitPath(
   id: string,
   unitDir: string = SYSTEMD_UNIT_DIR,
-  slot: ConnectorSlot = "a",
 ): string {
-  return join(unitDir, tunnelUnitName(id, slot));
+  return join(unitDir, tunnelUnitName(id));
 }
 
 /**
@@ -165,10 +138,9 @@ export function renderTunnelUnit(params: {
   binary: string;
   port: number;
   envFile: string;
-  slot?: ConnectorSlot;
 }): string {
   assertTunnelId(params.id);
-  const unit = tunnelUnitName(params.id, params.slot ?? "a");
+  const unit = tunnelUnitName(params.id);
   return [
     "[Unit]",
     `Description=TurboPanel tunnel connector ${params.id}`,
@@ -196,12 +168,11 @@ export function renderTunnelUnit(params: {
     "RestrictRealtime=yes",
     "LockPersonality=yes",
     "UMask=0077",
-    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
     "PrivateDevices=yes",
     "ProtectKernelLogs=yes",
     "ProtectClock=yes",
     "ProtectHostname=yes",
-    "ProcSubset=pid",
     "SystemCallArchitectures=native",
     "CapabilityBoundingSet=",
     "StandardOutput=journal",
@@ -222,37 +193,7 @@ export type ConnectorRecord = {
   version: string;
   /** SHA-256 of the token, so an unchanged token does not restart the unit. */
   tokenDigest: string;
-  /** The slot whose unit carries the tunnel (records before updates are "a"). */
-  slot: ConnectorSlot;
-  /** How the last connector update for this tunnel ended (nothing secret). */
-  lastUpdate?: ConnectorLastUpdate;
 };
-
-/** The result of the last update attempt, kept so the control plane can say why. */
-export type ConnectorLastUpdate = {
-  outcome: "updated" | "rolled-back";
-  /** ISO-8601 time of the attempt. */
-  at: string;
-  /** Why a rolled-back attempt stopped; at most 300 characters. */
-  reason?: string;
-};
-
-export const MAX_LAST_UPDATE_REASON = 300;
-
-function parseLastUpdate(value: unknown): ConnectorLastUpdate | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const v = value as Record<string, unknown>;
-  if (
-    (v.outcome !== "updated" && v.outcome !== "rolled-back") ||
-    typeof v.at !== "string" || v.at.length > 40
-  ) {
-    return undefined;
-  }
-  const reason = typeof v.reason === "string"
-    ? v.reason.slice(0, MAX_LAST_UPDATE_REASON)
-    : undefined;
-  return { outcome: v.outcome, at: v.at, ...(reason ? { reason } : {}) };
-}
 
 export function parseConnectorRecord(text: string): ConnectorRecord | null {
   let raw: unknown;
@@ -267,8 +208,7 @@ export function parseConnectorRecord(text: string): ConnectorRecord | null {
     !isTunnelId(r.id) || typeof r.port !== "number" ||
     !Number.isInteger(r.port) || r.port < TUNNEL_METRICS_PORT_MIN ||
     r.port > TUNNEL_METRICS_PORT_MAX || typeof r.version !== "string" ||
-    typeof r.tokenDigest !== "string" ||
-    (r.slot !== undefined && !isConnectorSlot(r.slot))
+    typeof r.tokenDigest !== "string"
   ) {
     return null;
   }
@@ -277,10 +217,6 @@ export function parseConnectorRecord(text: string): ConnectorRecord | null {
     port: r.port,
     version: r.version,
     tokenDigest: r.tokenDigest,
-    slot: isConnectorSlot(r.slot) ? r.slot : "a",
-    ...(parseLastUpdate(r.lastUpdate)
-      ? { lastUpdate: parseLastUpdate(r.lastUpdate) }
-      : {}),
   };
 }
 

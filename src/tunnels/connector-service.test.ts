@@ -13,9 +13,6 @@ import {
   installConnector,
   listConnectorIds,
   removeConnector,
-  reportConnectors,
-  updateAllConnectors,
-  updateConnector,
 } from "./connector-service.ts";
 import type { ReadyProbe } from "./connector-unit.ts";
 
@@ -30,6 +27,7 @@ const test = Deno.test.bind(Deno);
 const ID_A = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const ID_B = "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e";
 const TOKEN = "dGVzdA".repeat(8);
+const BIN = "/opt/turbopanel/vendor/cloudflared/2026.5.2/cloudflared";
 
 type Harness = {
   io: ConnectorIo;
@@ -39,12 +37,8 @@ type Harness = {
   /** Unit text at the moment tp-host was asked to install it. */
   installedUnits: string[];
   state: { unit: string; unchanged: boolean; fail: Set<string> };
-  probe: { value: ReadyProbe; byPort: Map<number, ReadyProbe> };
+  probe: { value: ReadyProbe };
   binaryCalls: { count: number };
-  /** Unit paths `io.unitExists` reports as present. */
-  onDisk: Set<string>;
-  /** Loopback ports something else already listens on. */
-  busyPorts: Set<number>;
 };
 
 /** Command text without the sudo / tp-host wrapping. */
@@ -63,29 +57,17 @@ async function withHarness(
   const stagedEnv: { mode: number; text: string }[] = [];
   const installedUnits: string[] = [];
   const state = { unit: "active", unchanged: false, fail: new Set<string>() };
-  const probe = {
-    value: { kind: "ready", connections: 4 } as ReadyProbe,
-    byPort: new Map<number, ReadyProbe>(),
-  };
+  const probe = { value: { kind: "ready", connections: 4 } as ReadyProbe };
   const binaryCalls = { count: 0 };
-  const onDisk = new Set<string>();
-  const busyPorts = new Set<number>();
   const io: ConnectorIo = {
     layout: { configDir: join(root, "etc") },
     workDir,
     version: "2026.5.2",
     ensureBinary: () => {
       binaryCalls.count++;
-      return Promise.resolve(
-        `/opt/turbopanel/vendor/cloudflared/${io.version}/cloudflared`,
-      );
+      return Promise.resolve(BIN);
     },
-    probe: (port) => Promise.resolve(probe.byPort.get(port) ?? probe.value),
-    unitExists: (path) => Promise.resolve(onDisk.has(path)),
-    portFree: (port) => Promise.resolve(!busyPorts.has(port)),
-    readyTimeoutMs: 4,
-    readyPollMs: 2,
-    sleep: () => Promise.resolve(),
+    probe: () => Promise.resolve(probe.value),
     run: async (command, args): Promise<RunResult> => {
       const text = describeCall(command, args);
       calls.push(text);
@@ -122,8 +104,6 @@ async function withHarness(
       state,
       probe,
       binaryCalls,
-      onDisk,
-      busyPorts,
     });
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -234,15 +214,11 @@ test("remove stops the service, deletes the unit and the token copy, and forgets
     h.calls.length = 0;
     await removeConnector(h.io, ID_A);
     const unit = `turbopanel-tunnel-${ID_A}.service`;
-    const second = `turbopanel-tunnel-${ID_A}-b.service`;
     assertEquals(h.calls, [
       `systemctl disable --now ${unit}`,
       `rm -f /etc/systemd/system/${unit}`,
-      `systemctl reset-failed ${unit}`,
-      `systemctl disable --now ${second}`,
-      `rm -f /etc/systemd/system/${second}`,
-      `systemctl reset-failed ${second}`,
       "systemctl daemon-reload",
+      `systemctl reset-failed ${unit}`,
       `tunnel-env-remove ${ID_A}`,
     ]);
     assertEquals(await listConnectorIds(h.io), []);
@@ -345,275 +321,5 @@ test("a failed unit install keeps the token copy of a tunnel that already runs",
     h.state.fail.add("install ");
     await assertRejects(() => installConnector(h.io, ID_A, `${TOKEN}AA`));
     assert(!h.calls.includes(`tunnel-env-remove ${ID_A}`));
-  });
-});
-
-const unitOf = (id: string, slot: "a" | "b" = "a") =>
-  `turbopanel-tunnel-${id}${slot === "b" ? "-b" : ""}.service`;
-const NEW = "2026.6.0";
-
-async function readRecordFile(h: Harness, id: string) {
-  return JSON.parse(await Deno.readTextFile(join(h.io.workDir, `${id}.json`)));
-}
-
-test("an update starts the new version in the other slot and moves only after it connects", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    h.calls.length = 0;
-    h.installedUnits.length = 0;
-
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome, { kind: "updated", from: "2026.5.2", to: NEW });
-
-    assertEquals(h.installedUnits.length, 1);
-    assertStringIncludes(
-      h.installedUnits[0],
-      `ExecStart=/opt/turbopanel/vendor/cloudflared/${NEW}/cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:20301`,
-    );
-    assertStringIncludes(
-      h.installedUnits[0],
-      `SyslogIdentifier=turbopanel-tunnel-${ID_A}-b`,
-    );
-    // The new unit reads the same root-only token copy; no token is handled.
-    assertStringIncludes(
-      h.installedUnits[0],
-      `EnvironmentFile=${h.io.layout.configDir}/tunnel-env/${ID_A}.env`,
-    );
-    assert(h.calls.every((c) => !c.startsWith("tunnel-env-install")));
-    assert(h.calls.every((c) => !c.includes(TOKEN)));
-
-    const second = unitOf(ID_A, "b");
-    const first = unitOf(ID_A);
-    const order = h.calls.filter((c) => c.startsWith("systemctl"));
-    const startNew = order.indexOf(`systemctl start ${second}`);
-    const stopOld = order.indexOf(`systemctl disable --now ${first}`);
-    assert(startNew >= 0 && stopOld > startNew, order.join("\n"));
-
-    const record = await readRecordFile(h, ID_A);
-    assertEquals(record.slot, "b");
-    assertEquals(record.version, NEW);
-    assertEquals(record.port, 20301);
-    assertEquals(await listConnectorIds(h.io), [ID_A]);
-  });
-});
-
-test("a new connector that never connects is removed and the old one is not touched", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    h.probe.byPort.set(20301, { kind: "not-ready", connections: 0 });
-    h.calls.length = 0;
-
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome.kind, "rolled-back");
-    if (outcome.kind === "rolled-back") {
-      assertEquals(outcome.version, "2026.5.2");
-      assertStringIncludes(outcome.reason, "did not report connected");
-    }
-    const second = unitOf(ID_A, "b");
-    assert(h.calls.includes(`systemctl disable --now ${second}`));
-    assert(h.calls.includes(`rm -f /etc/systemd/system/${second}`));
-    // Nothing was done to the running unit.
-    assert(h.calls.every((c) => !c.includes(unitOf(ID_A))));
-    const record = await readRecordFile(h, ID_A);
-    assertEquals(record.slot, "a");
-    assertEquals(record.version, "2026.5.2");
-    assertEquals(record.port, 20300);
-  });
-});
-
-test("a new unit that cannot start rolls back and keeps the old connector", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    h.state.fail.add(`systemctl start ${unitOf(ID_A, "b")}`);
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome.kind, "rolled-back");
-    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
-  });
-});
-
-test("an update that cannot be installed rolls back", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    h.state.fail.add("install ");
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome.kind, "rolled-back");
-    assertEquals((await readRecordFile(h, ID_A)).version, "2026.5.2");
-  });
-});
-
-test("a connector already on the pinned version is left alone, and an unknown tunnel is reported", async () => {
-  await withHarness(async (h) => {
-    assertEquals(await updateConnector(h.io, ID_A), { kind: "not-installed" });
-    await installConnector(h.io, ID_A, TOKEN);
-    h.calls.length = 0;
-    assertEquals(await updateConnector(h.io, ID_A), {
-      kind: "current",
-      version: "2026.5.2",
-    });
-    assertEquals(h.calls, []);
-  });
-});
-
-test("a second unit left by an interrupted switch is removed first", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    const second = unitOf(ID_A, "b");
-    h.onDisk.add(`/etc/systemd/system/${second}`);
-    h.calls.length = 0;
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome.kind, "current");
-    assert(h.calls.includes(`systemctl disable --now ${second}`));
-    assert(h.calls.includes(`rm -f /etc/systemd/system/${second}`));
-    assert(h.calls.includes("systemctl daemon-reload"));
-  });
-});
-
-test("the verbs follow the recorded slot, and the next update goes back to slot a", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    await updateConnector(h.io, ID_A);
-    h.calls.length = 0;
-    await controlConnector(h.io, ID_A, "restart");
-    await connectorStatus(h.io, ID_A);
-    assertEquals(h.calls, [
-      `systemctl restart ${unitOf(ID_A, "b")}`,
-      `systemctl is-active ${unitOf(ID_A, "b")}`,
-    ]);
-
-    h.io.version = "2026.7.0";
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome, { kind: "updated", from: NEW, to: "2026.7.0" });
-    const record = await readRecordFile(h, ID_A);
-    assertEquals(record.slot, "a");
-    assertEquals(record.port, 20300);
-  });
-});
-
-test("a token change on an updated tunnel restarts the unit in the slot that carries it", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    await updateConnector(h.io, ID_A);
-    h.calls.length = 0;
-    await installConnector(h.io, ID_A, "b3RoZXI".repeat(6));
-    const second = unitOf(ID_A, "b");
-    assert(h.calls.includes(`systemctl restart ${second}`), h.calls.join("\n"));
-    assertEquals((await readRecordFile(h, ID_A)).slot, "b");
-  });
-});
-
-test("updating every tunnel goes one at a time and one failure does not stop the others", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    await installConnector(h.io, ID_B, TOKEN);
-    h.io.version = NEW;
-    h.state.fail.add(`systemctl start ${unitOf(ID_A, "b")}`);
-    const results = await updateAllConnectors(h.io);
-    assertEquals(results.map((r) => [r.id, r.outcome.kind]), [
-      [ID_A, "rolled-back"],
-      [ID_B, "updated"],
-    ]);
-  });
-});
-
-test("the report lists each connector with status, version and slot, and the pinned version", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    await installConnector(h.io, ID_B, TOKEN);
-    h.io.version = NEW;
-    await updateConnector(h.io, ID_B);
-    const report = await reportConnectors(h.io);
-    assertEquals(report.pinnedVersion, NEW);
-    assertEquals(
-      report.connectors.map((c) => [c.tunnelId, c.status, c.version, c.slot]),
-      [
-        [ID_A, "connected", "2026.5.2", "a"],
-        [ID_B, "connected", NEW, "b"],
-      ],
-    );
-    assertEquals(report.connectors[0].lastUpdate, undefined);
-    assertEquals(report.connectors[1].lastUpdate?.outcome, "updated");
-  });
-});
-
-test("a port something else already listens on is never given to the new connector", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    h.busyPorts.add(20301);
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome.kind, "updated");
-    assertEquals((await readRecordFile(h, ID_A)).port, 20302);
-  });
-});
-
-test("a readiness answer alone is not enough: the unit must be running and hold a connection", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-
-    // Something answers "ready" with no connection behind it.
-    h.probe.byPort.set(20301, { kind: "ready", connections: 0 });
-    assertEquals((await updateConnector(h.io, ID_A)).kind, "rolled-back");
-
-    // The answer is real-looking but the new unit is not running.
-    h.probe.byPort.clear();
-    h.state.unit = "activating";
-    const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome.kind, "rolled-back");
-    if (outcome.kind === "rolled-back") {
-      assertStringIncludes(outcome.reason, "not running as its own service");
-    }
-    const record = await readRecordFile(h, ID_A);
-    assertEquals(record.slot, "a");
-    assertEquals(record.version, "2026.5.2");
-  });
-});
-
-test("how the last update ended is kept for the report, with the reason", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    h.probe.byPort.set(20301, { kind: "not-ready", connections: 0 });
-    await updateConnector(h.io, ID_A);
-    let report = await reportConnectors(h.io);
-    assertEquals(report.connectors[0].lastUpdate?.outcome, "rolled-back");
-    assertStringIncludes(
-      report.connectors[0].lastUpdate?.reason ?? "",
-      "did not report connected",
-    );
-
-    h.probe.byPort.clear();
-    await updateConnector(h.io, ID_A);
-    report = await reportConnectors(h.io);
-    assertEquals(report.connectors[0].lastUpdate?.outcome, "updated");
-    assertEquals(report.connectors[0].lastUpdate?.reason, undefined);
-    assertEquals(report.connectors[0].version, NEW);
-  });
-});
-
-test("the report is answered while an update is still waiting for a connector", async () => {
-  await withHarness(async (h) => {
-    await installConnector(h.io, ID_A, TOKEN);
-    h.io.version = NEW;
-    h.probe.byPort.set(20301, { kind: "not-ready", connections: 0 });
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    h.io.sleep = () => gate;
-    const update = updateConnector(h.io, ID_A);
-    // Let the update reach its first wait.
-    while (!h.calls.some((c) => c.startsWith(`systemctl start`))) {
-      await new Promise((r) => setTimeout(r, 1));
-    }
-    const report = await reportConnectors(h.io);
-    assertEquals(report.connectors.map((c) => c.tunnelId), [ID_A]);
-    assertEquals(await connectorStatus(h.io, ID_A), "connected");
-    release();
-    assertEquals((await update).kind, "rolled-back");
   });
 });

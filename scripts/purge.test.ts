@@ -707,8 +707,6 @@ const TUNNEL_UNITS = [
   "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.service",
   "turbopanel-tunnel-1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e.service",
   "turbopanel-tunnel-instance.service",
-  // The second unit a connector update starts beside the first.
-  "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d-b.service",
 ];
 
 test("every tunnel connector service is stopped, disabled and its unit file removed", async () => {
