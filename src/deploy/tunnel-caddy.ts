@@ -205,10 +205,12 @@ function forwardBlock(route: TunnelRoute, inputs: TunnelFileInputs): string {
     trustFile: material.trust,
     trustedProxies: tunnelTrustedRanges(inputs.peerAddresses),
   }).split("\n").map((line) => `    ${line}`).join("\n");
-  const peers = inputs.peerAddresses.join(" ");
   // A request that came from a peer is never passed on again, so a moved site
-  // with a stale table shows the error page instead of looping.
-  const peerRule = `  ${PEER_MATCHER} remote_ip ${peers}
+  // with a stale table shows the error page instead of looping. A server that
+  // only carries tunnels has no peers sending to it, so it has no such rule.
+  const peerRule = inputs.peerAddresses.length === 0
+    ? ""
+    : `  ${PEER_MATCHER} remote_ip ${inputs.peerAddresses.join(" ")}
   handle ${PEER_MATCHER} {
     error 421
   }

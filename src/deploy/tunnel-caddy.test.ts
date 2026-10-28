@@ -384,3 +384,15 @@ test("no tunnel block can ask for a certificate: every one names its own tls", (
   });
   assertStringIncludes(locked, "  tls internal\n");
 });
+
+test("a server that only carries tunnels gets forward blocks with no peer rule and no peer site", () => {
+  const rendered = renderTunnelFile(
+    [ROUTES[1]!],
+    { peerAddresses: [], material: PEER_DIR },
+    new Set(),
+  );
+  assertStringIncludes(rendered.contents, "app.example.com {");
+  assertEquals(rendered.contents.includes("@tp_peer"), false);
+  assertEquals(rendered.contents.includes("tp-peer.internal {"), false);
+  assertStringIncludes(rendered.contents, "trusted_proxies 127.0.0.0/8 ::1\n");
+});

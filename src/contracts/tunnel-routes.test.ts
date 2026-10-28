@@ -46,7 +46,6 @@ test("server.tunnel.routes refuses bad tables", () => {
     null,
     { ...GOOD, hash: "x" },
     { ...GOOD, peerMaterial: undefined },
-    { ...GOOD, peerAddresses: [] },
     { ...GOOD, peerAddresses: ["10.0.0.0/24"] },
     {
       ...GOOD,
@@ -137,7 +136,6 @@ test("server.tunnel.routes: material, peers and size limits", () => {
   }];
   const cases: unknown[] = [
     { ...GOOD, peerMaterial: undefined, routes: [] },
-    { ...GOOD, peerAddresses: [] },
     { ...GOOD, routes: Array.from({ length: 2001 }, (_, i) => route(i)) },
     { ...GOOD, peerAddresses: ips(65) },
     {
@@ -230,4 +228,9 @@ test("hostings[].tunnel: upper-case names and size limits are refused", () => {
   assertThrows(() =>
     entry({ hostnames: ["app.example.com"], peers }, ["app.example.com"])
   );
+});
+
+test("server.tunnel.routes: a carrier-only server may send no peer addresses", () => {
+  const parsed = parseTunnelRoutesPayload({ ...GOOD, peerAddresses: [] });
+  assertEquals(parsed.peerAddresses, []);
 });

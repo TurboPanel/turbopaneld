@@ -7011,11 +7011,6 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
       "Invalid server.tunnel.routes peerMaterial: required with routes or peers",
     );
   }
-  if (routes.some((route) => !route.local) && peerAddresses.length === 0) {
-    throw new TypeError(
-      "Invalid server.tunnel.routes peerAddresses: required for forwarding",
-    );
-  }
   return payload;
 }
 
