@@ -49,15 +49,7 @@ function resolveTunnelsDir(io: ConnectorIo): string {
   return testHooks?.tunnelsDir ?? io.workDir;
 }
 
-/**
- * Turn every legacy token file into a service. Returns the ids that were
- * migrated. A failure for one file is logged (never with the token) and leaves
- * that file in place for the next start; the others still migrate.
- */
-export async function migrateLegacyTokenFiles(
-  io: ConnectorIo = resolveIo(),
-  dir: string = resolveTunnelsDir(io),
-): Promise<string[]> {
+async function legacyTokenFileNames(dir: string): Promise<string[]> {
   const names: string[] = [];
   try {
     for await (const entry of Deno.readDir(dir)) {
@@ -66,41 +58,61 @@ export async function migrateLegacyTokenFiles(
       }
     }
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return [];
-    throw err;
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  names.sort();
+  return names.sort((a, b) => a.localeCompare(b));
+}
 
-  const migrated: string[] = [];
-  for (const fileName of names) {
-    const id = fileName.slice(0, -".token".length);
-    if (!isTunnelId(id)) {
-      logWarn(
-        "tunnels",
-        `${fileName} is not named for a tunnel id; leaving it in place`,
-      );
-      continue;
-    }
-    const path = join(dir, fileName);
-    try {
-      const token = (await Deno.readTextFile(path)).trim();
-      if (!TUNNEL_TOKEN_RE.test(token)) {
-        logWarn("tunnels", `${fileName} does not hold a token; skipping`);
-        continue;
-      }
-      await installConnector(io, id, token);
-      await Deno.remove(path);
-      migrated.push(id);
-      logInfo("tunnels", `tunnel ${id} now runs as its own service`);
-    } catch (err) {
-      logError(
-        "tunnels",
-        `could not move ${fileName} to a service:`,
-        err instanceof Error ? err.message : "failed",
-      );
-    }
+/** Move one legacy file to a service. Returns the id, or null if it stays. */
+async function migrateOne(
+  io: ConnectorIo,
+  dir: string,
+  fileName: string,
+): Promise<string | null> {
+  const id = fileName.slice(0, -".token".length);
+  if (!isTunnelId(id)) {
+    logWarn(
+      "tunnels",
+      `${fileName} is not named for a tunnel id; leaving it in place`,
+    );
+    return null;
   }
-  return migrated;
+  const path = join(dir, fileName);
+  try {
+    const token = (await Deno.readTextFile(path)).trim();
+    if (!TUNNEL_TOKEN_RE.test(token)) {
+      logWarn("tunnels", `${fileName} does not hold a token; skipping`);
+      return null;
+    }
+    await installConnector(io, id, token);
+    await Deno.remove(path);
+    logInfo("tunnels", `tunnel ${id} now runs as its own service`);
+    return id;
+  } catch (err) {
+    logError(
+      "tunnels",
+      `could not move ${fileName} to a service:`,
+      err instanceof Error ? err.message : "failed",
+    );
+    return null;
+  }
+}
+
+/**
+ * Turn every legacy token file into a service. Returns the ids that were
+ * migrated. A failure for one file is logged (never with the token) and leaves
+ * that file in place for the next start; the others still migrate. Installs
+ * queue behind each other inside the connector module, in file-name order.
+ */
+export async function migrateLegacyTokenFiles(
+  io: ConnectorIo = resolveIo(),
+  dir: string = resolveTunnelsDir(io),
+): Promise<string[]> {
+  const names = await legacyTokenFileNames(dir);
+  const results = await Promise.all(
+    names.map((name) => migrateOne(io, dir, name)),
+  );
+  return results.filter((id): id is string => id !== null);
 }
 
 /**

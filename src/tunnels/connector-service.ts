@@ -294,9 +294,11 @@ async function removeConnectorNow(io: ConnectorIo, id: string): Promise<void> {
       }`,
     );
   }
-  for (const name of [`${id}.env`, `${id}.service`, `${id}.json`]) {
-    await Deno.remove(join(io.workDir, name)).catch(() => undefined);
-  }
+  await Promise.all(
+    [`${id}.env`, `${id}.service`, `${id}.json`].map((name) =>
+      Deno.remove(join(io.workDir, name)).catch(() => undefined)
+    ),
+  );
   logInfo("tunnels", `connector ${id} removed`);
 }
 
