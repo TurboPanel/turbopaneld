@@ -194,16 +194,6 @@ function tunnelStateFor(
   };
 }
 
-/** Write or clear the stored table once the file is in place. */
-async function recordTunnelState(
-  hostingDir: string,
-  state: TunnelState,
-  empty: boolean,
-): Promise<void> {
-  if (empty) await removeTunnelState(hostingDir);
-  else await writeTunnelState(hostingDir, state);
-}
-
 async function applyTunnelRoutesLocked(
   layout: LayoutPaths,
   payload: TunnelRoutesPayload,
@@ -250,7 +240,9 @@ async function applyTunnelRoutesLocked(
       live,
       deps.grantRead ?? grantHostingCaddyRead,
     );
-    await recordTunnelState(hostingDir, state, empty);
+    await (empty
+      ? removeTunnelState(hostingDir)
+      : writeTunnelState(hostingDir, state));
     await prunePeerMaterial(hostingDir, peerId);
     logInfo(
       "tunnels",
