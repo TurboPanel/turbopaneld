@@ -44,6 +44,7 @@ import {
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
   parseTlsTrustReconcilePayload,
+  parseTunnelConnectorsPayload,
   parseTunnelRoutesPayload,
   parseTunnelStatusPayload,
 } from "../contracts/commands-contracts.ts";
@@ -80,6 +81,7 @@ import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFoldersRemove } from "./remove-folders.ts";
+import { handleTunnelConnectors } from "./tunnel-connectors.ts";
 import { handleTunnelRoutes } from "./tunnel-routes.ts";
 import { handleTunnelStatus } from "./tunnel-status.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
@@ -138,6 +140,7 @@ export type CommandRouterHandlerOverrides = {
   handleBackupTargetTest?: typeof handleBackupTargetTest;
   handleFoldersRemove?: typeof handleFoldersRemove;
   handleTunnelRoutes?: typeof handleTunnelRoutes;
+  handleTunnelConnectors?: typeof handleTunnelConnectors;
   handleTunnelStatus?: typeof handleTunnelStatus;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
@@ -395,6 +398,16 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleTunnelRoutes",
           handleTunnelRoutes,
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.tunnel.connectors": {
+        const payload = parseTunnelConnectorsPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleTunnelConnectors",
+          handleTunnelConnectors,
         )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();

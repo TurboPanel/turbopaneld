@@ -34,6 +34,7 @@ import {
   SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   TLS_CAPTURE_FEATURE,
+  TUNNEL_CONNECTOR_FEATURE,
   TUNNEL_FORWARDING_FEATURE,
   TUNNEL_STATUS_FEATURE,
 } from "./version-wire.ts";
@@ -368,6 +369,17 @@ test("tunnel-forwarding-v1 is advertised and raised no floor", () => {
   assertEquals(
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(
       TUNNEL_FORWARDING_FEATURE,
+    ),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("tunnel-connector-v1 is advertised and raised no floor", () => {
+  assertEquals(TUNNEL_CONNECTOR_FEATURE, "tunnel-connector-v1");
+  assertEquals(
+    (DAEMON_WIRE_FEATURES as readonly string[]).includes(
+      TUNNEL_CONNECTOR_FEATURE,
     ),
     true,
   );
