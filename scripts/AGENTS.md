@@ -278,3 +278,9 @@ immutable source commit (the SHA before `+`). Remotes skip reconcile when
 make **U** a no-op until HEAD moves. Production `release` stores the full
 40-character git SHA in `BUILD_INFO.commit`, `BUILD_INFO.sourceUrl`, and
 `ChannelManifest.commit` (short SHA is only for `buildId` / logs).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Installer script hosting** | this file → *Installer script hosting* | **turbopanel.sh** = a redirect (served outside this repo) to `scripts/run.sh` on `live`; dev overlay catalog notes |

@@ -80,3 +80,9 @@ converge on that path.
   `install-hosting-caddy.sh`, and instance `download-caddy.mjs` (sibling
   checkout, or the trunk copy CI places at `.ci-instance-caddy-pin`). A
   missing instance downloader fails those tests.
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Installer presentation** | `src/orchestration/AGENTS.md` | Installer presenter + sanitizer / vocabulary map for `run.sh` install & converge |

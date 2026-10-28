@@ -68,3 +68,9 @@ when either list is not empty, and a running deploy repeats its step plan every
 30 s. Transcript chunks the control plane has not taken are kept and resent in
 order (retry every 5 s, resync from the `nextSeq` of a `409`; see
 `../logs/sink.ts`).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Command handlers** | `src/commands/AGENTS.md` | Daemon command implementations (`command-router.ts`); injected into `InstanceClient` from `src/entry/run.ts` so transport never imports handlers |

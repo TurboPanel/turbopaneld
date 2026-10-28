@@ -15,12 +15,12 @@ in the guest), and **`test:coverage`** (the LCOV Sonar imports).
 offline sanity pass. Fleet-wide from the host `dev` checkout:
 `./scripts/ci-verify.sh` (re-execs via `vagrant ssh`). Individual tasks
 (`test`, `test:coverage`, `fmt:check`, `lint`, `check`, `check:layout`,
-`check:vocabulary`) remain available. See **Guards / tests** above for the
+`check:vocabulary`) remain available. See **Guards / tests** in `.github/AGENTS.md` for the
 `-A` grant, per-test `permissions:` rule, and Sonar-way **80% new-code** floor.
 
 **Test style:** use the mandatory `const test = Deno.test.bind(Deno);` alias and
 `new TypeError()` for shape assertions — both under TypeScript style
-(SonarQube) above; do not restate them here.
+(SonarQube) in `src/AGENTS.md`; do not restate them here.
 
 **Coverage dir must stay absolute.** `test:coverage` passes
 `--coverage=$PWD/coverage/profile`, not a relative path. Several suites (and

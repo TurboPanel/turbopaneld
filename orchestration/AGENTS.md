@@ -785,3 +785,9 @@ the host firewall, decided 2026-09-20; every step moves the kernel toward
 ACCEPT so it cannot lock a host out); Redis is vendored by
 extracting the official `packages.redis.io` `.deb` with `dpkg-deb -x` (no
 compile toolchain).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |

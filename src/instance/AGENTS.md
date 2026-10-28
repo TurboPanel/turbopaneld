@@ -2,7 +2,7 @@
 
 The daemon's authenticated link to the control plane (`src/instance/client.ts`): WSS or co-located Unix socket to `/ws/daemon/v1`, idle presence + heartbeats, reconnect / parked backoff, JWKS-based JWT verification, and the daemon-side TLS trust model.
 
-Root context: `../../AGENTS.md` (Filesystem layout & path model). Host metrics scheduler: `../metrics/AGENTS.md`. Cross-repo `../<repo>/AGENTS.md` links are relative to the repo root (sibling repos under `$HOME`).
+Root context: `../../AGENTS.md`; path model in `../paths/AGENTS.md`. Host metrics scheduler: `../metrics/AGENTS.md`. Cross-repo `../<repo>/AGENTS.md` links are relative to the repo root (sibling repos under `$HOME`).
 
 ## Instance client (`src/instance/client.ts`)
 
@@ -827,3 +827,9 @@ for a feature. The first entry is `instance-cert-sources-per-hostname` at
 daemon **`0.1.1`**, the release that renders per-hostname certificate sources
 in `orchestration/roles/instance-launch/templates/Caddyfile.j2`. Operational detail:
 `src/instance/AGENTS.md`.
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |

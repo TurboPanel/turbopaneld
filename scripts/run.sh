@@ -12,7 +12,7 @@
 # (bin/turbopaneld, optional bin/turbopaneld.js, share/orchestration/), probes
 # native binary executability, bootstraps orchestration runtimes, and runs
 # daemon-install.yml via Ansible (turbopaneld.service — native or Deno JS
-# runtime; see AGENTS.md).
+# runtime; see orchestration/AGENTS.md).
 #
 # Config: /etc/turbopanel  State: /var/lib/turbopanel  Runtime: /run/turbopanel
 #
