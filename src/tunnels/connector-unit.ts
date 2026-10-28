@@ -224,7 +224,35 @@ export type ConnectorRecord = {
   tokenDigest: string;
   /** The slot whose unit carries the tunnel (records before updates are "a"). */
   slot: ConnectorSlot;
+  /** How the last connector update for this tunnel ended (nothing secret). */
+  lastUpdate?: ConnectorLastUpdate;
 };
+
+/** The result of the last update attempt, kept so the control plane can say why. */
+export type ConnectorLastUpdate = {
+  outcome: "updated" | "rolled-back";
+  /** ISO-8601 time of the attempt. */
+  at: string;
+  /** Why a rolled-back attempt stopped; at most 300 characters. */
+  reason?: string;
+};
+
+export const MAX_LAST_UPDATE_REASON = 300;
+
+function parseLastUpdate(value: unknown): ConnectorLastUpdate | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const v = value as Record<string, unknown>;
+  if (
+    (v.outcome !== "updated" && v.outcome !== "rolled-back") ||
+    typeof v.at !== "string" || v.at.length > 40
+  ) {
+    return undefined;
+  }
+  const reason = typeof v.reason === "string"
+    ? v.reason.slice(0, MAX_LAST_UPDATE_REASON)
+    : undefined;
+  return { outcome: v.outcome, at: v.at, ...(reason ? { reason } : {}) };
+}
 
 export function parseConnectorRecord(text: string): ConnectorRecord | null {
   let raw: unknown;
@@ -250,6 +278,9 @@ export function parseConnectorRecord(text: string): ConnectorRecord | null {
     version: r.version,
     tokenDigest: r.tokenDigest,
     slot: isConnectorSlot(r.slot) ? r.slot : "a",
+    ...(parseLastUpdate(r.lastUpdate)
+      ? { lastUpdate: parseLastUpdate(r.lastUpdate) }
+      : {}),
   };
 }
 

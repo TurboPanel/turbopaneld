@@ -8,6 +8,7 @@ import {
   runConnectorUpdates,
   setTunnelsTestHooks,
   startTunnels,
+  startUpdateLoop,
   writeInstanceTunnelToken,
 } from "./supervisor.ts";
 
@@ -208,7 +209,13 @@ test("the update run moves an older tunnel to the pinned version", async () => {
   await withTunnelsDir(async (dir, io, calls) => {
     await writeOldRecord(dir);
     io.probe = () => Promise.resolve({ kind: "ready", connections: 4 });
+    io.portFree = () => Promise.resolve(true);
     io.unitExists = () => Promise.resolve(false);
+    const run = io.run;
+    io.run = (command, args) =>
+      args.includes("is-active")
+        ? Promise.resolve({ success: true, stdout: "active", stderr: "" })
+        : run(command, args);
     io.sleep = () => Promise.resolve();
     const results = await runConnectorUpdates(io);
     assertEquals(results?.map((r) => [r.id, r.outcome.kind]), [
@@ -225,4 +232,35 @@ test("a paused server keeps the connector versions it runs", async () => {
     assertEquals(await runConnectorUpdates(io), null);
     assertEquals(calls, []);
   });
+});
+
+test("the update loop runs again later and never overlaps itself", async () => {
+  let started = 0;
+  let active = 0;
+  let overlapped = false;
+  const stop = startUpdateLoop(async () => {
+    started++;
+    active++;
+    if (active > 1) overlapped = true;
+    await new Promise((r) => setTimeout(r, 25));
+    active--;
+  }, 5);
+  await new Promise((r) => setTimeout(r, 120));
+  stop();
+  const after = started;
+  await new Promise((r) => setTimeout(r, 40));
+  assert(after >= 2, `ran ${after} times`);
+  assertEquals(overlapped, false);
+  assertEquals(started, after);
+});
+
+test("a failing round does not stop the loop", async () => {
+  let started = 0;
+  const stop = startUpdateLoop(() => {
+    started++;
+    return Promise.reject(new Error("offline"));
+  }, 5);
+  await new Promise((r) => setTimeout(r, 60));
+  stop();
+  assert(started >= 2, `ran ${started} times`);
 });

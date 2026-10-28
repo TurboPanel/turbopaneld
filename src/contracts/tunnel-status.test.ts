@@ -36,6 +36,38 @@ test("server.tunnel.status parses a result and an empty one", () => {
   );
 });
 
+test("server.tunnel.status carries how the last update ended", () => {
+  const withLast = (lastUpdate: unknown) => ({
+    ...GOOD,
+    connectors: [{ ...GOOD.connectors[0], lastUpdate }],
+  });
+  const rolled = {
+    outcome: "rolled-back",
+    at: "2026-10-28T12:00:00.000Z",
+    reason: "the new connector did not report connected in time",
+  };
+  assertEquals(
+    parseTunnelStatusResult(withLast(rolled)) as unknown,
+    withLast(rolled),
+  );
+  const updated = { outcome: "updated", at: "2026-10-28T12:00:00Z" };
+  assertEquals(
+    parseTunnelStatusResult(withLast(updated)) as unknown,
+    withLast(updated),
+  );
+  for (
+    const bad of [
+      { ...rolled, outcome: "paused" },
+      { ...rolled, at: "yesterday" },
+      { ...rolled, reason: "x".repeat(301) },
+      { ...rolled, reason: 5 },
+      "rolled-back",
+    ]
+  ) {
+    assertThrows(() => parseTunnelStatusResult(withLast(bad)));
+  }
+});
+
 test("server.tunnel.status refuses a malformed result", () => {
   const bad = (patch: Record<string, unknown>) =>
     assertThrows(() => parseTunnelStatusResult({ ...GOOD, ...patch }));

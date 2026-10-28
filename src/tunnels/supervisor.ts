@@ -169,15 +169,51 @@ export async function runConnectorUpdates(
   return results;
 }
 
+/** How often a server tries again to bring its connectors to the pinned version. */
+export const CONNECTOR_UPDATE_RETRY_MS = 60 * 60 * 1000;
+
+/**
+ * Run `run` every `intervalMs` until the returned function is called, never two
+ * at once (an update can wait a minute or more for a connector). A rolled-back
+ * update, a download that failed offline and a pause file that was removed all
+ * heal on a later round. The timer does not keep the process alive.
+ */
+export function startUpdateLoop(
+  run: () => Promise<unknown>,
+  intervalMs: number = CONNECTOR_UPDATE_RETRY_MS,
+): () => void {
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    run()
+      .catch((err) =>
+        logError(
+          "tunnels",
+          "connector update round failed:",
+          err instanceof Error ? err.message : "failed",
+        )
+      )
+      .finally(() => {
+        running = false;
+      });
+  }, intervalMs);
+  Deno.unrefTimer(timer);
+  return () => clearInterval(timer);
+}
+
 /**
  * Move any legacy token files to services, then bring connectors up to the
- * pinned version. Returns at once: the work (which may download the connector
+ * pinned version, and try again every hour. Returns at once: the work (which may download the connector
  * program) runs in the background and is never fatal, so the daemon never waits
  * on it.
  */
 export function startTunnels(_signal?: AbortSignal): Promise<void> {
   void migrateLegacyTokenFiles()
     .then(() => runConnectorUpdates())
+    .then(() => {
+      startUpdateLoop(() => runConnectorUpdates());
+    })
     .catch((err) => {
       logError(
         "tunnels",

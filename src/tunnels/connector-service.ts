@@ -30,11 +30,13 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import {
   allocateMetricsPort,
   assertTunnelId,
+  type ConnectorLastUpdate,
   type ConnectorRecord,
   type ConnectorSlot,
   type ConnectorStatus,
   isTunnelId,
   mapConnectorStatus,
+  MAX_LAST_UPDATE_REASON,
   otherSlot,
   parseConnectorRecord,
   type ReadyProbe,
@@ -57,6 +59,8 @@ export type ConnectorIo = {
   version: string;
   /** Ask the connector's own `/ready` endpoint. */
   probe: (port: number) => Promise<ReadyProbe>;
+  /** Whether nothing listens on this loopback port (default: try to bind it). */
+  portFree?: (port: number) => Promise<boolean>;
   /** Whether a unit file exists (default: the real file system). */
   unitExists?: (path: string) => Promise<boolean>;
   /** How long a new connector may take to report connected (default 90 s). */
@@ -151,6 +155,17 @@ async function readRecord(
     if (err instanceof Deno.errors.NotFound) return null;
     throw err;
   }
+}
+
+async function writeRecord(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+): Promise<void> {
+  await writePrivateFileAtomic(
+    io.workDir,
+    `${record.id}.json`,
+    `${JSON.stringify(record)}\n`,
+  );
 }
 
 async function listRecords(io: ConnectorIo): Promise<ConnectorRecord[]> {
@@ -381,20 +396,27 @@ export async function connectorStatus(
   id: string,
 ): Promise<ConnectorStatus> {
   assertTunnelId(id);
-  return await serialized(async () => {
-    const record = await readRecord(io, id);
-    if (!record) return "not-installed";
-    const state = await systemctl(io, [
-      "is-active",
-      tunnelUnitName(id, record.slot),
-    ]);
-    // `is-active` exits non-zero for anything but "active" and prints the state.
-    const unitState = state.stdout.split("\n")[0] ?? "";
-    const probe = unitState.trim() === "active"
-      ? await io.probe(record.port)
-      : null;
-    return mapConnectorStatus(unitState, probe);
-  });
+  // Read-only, so it never waits behind an install or an update that is
+  // holding the queue for a minute or more (a record is written atomically).
+  const record = await readRecord(io, id);
+  if (!record) return "not-installed";
+  return await statusOfRecord(io, record);
+}
+
+async function statusOfRecord(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+): Promise<ConnectorStatus> {
+  const state = await systemctl(io, [
+    "is-active",
+    tunnelUnitName(record.id, record.slot),
+  ]);
+  // `is-active` exits non-zero for anything but "active" and prints the state.
+  const unitState = state.stdout.split("\n")[0] ?? "";
+  const probe = unitState.trim() === "active"
+    ? await io.probe(record.port)
+    : null;
+  return mapConnectorStatus(unitState, probe);
 }
 
 /** What an update attempt for one tunnel did. */
@@ -407,6 +429,21 @@ export type ConnectorUpdateOutcome =
   | { kind: "rolled-back"; version: string; reason: string };
 
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * A free port is one we can bind on loopback right now. A local user who
+ * already listens on the next port in the band must not be picked: the new
+ * connector could not bind it, and the squatter could answer "ready".
+ */
+function defaultPortFree(port: number): Promise<boolean> {
+  try {
+    const listener = Deno.listen({ hostname: "127.0.0.1", port });
+    listener.close();
+    return Promise.resolve(true);
+  } catch {
+    return Promise.resolve(false);
+  }
+}
 
 async function defaultUnitExists(path: string): Promise<boolean> {
   try {
@@ -424,7 +461,8 @@ async function waitUntilReady(io: ConnectorIo, port: number): Promise<boolean> {
   const poll = io.readyPollMs ?? DEFAULT_READY_POLL_MS;
   const sleep = io.sleep ?? realSleep;
   for (let waited = 0; waited <= timeout; waited += poll) {
-    if ((await io.probe(port)).kind === "ready") return true;
+    const probe = await io.probe(port);
+    if (probe.kind === "ready" && probe.connections > 0) return true;
     await sleep(poll);
   }
   return false;
@@ -471,14 +509,27 @@ async function updateConnectorNow(
       "tunnels",
       `connector ${id} stays on ${record.version}: ${reason}`,
     );
+    await writeRecord(io, {
+      ...record,
+      lastUpdate: {
+        outcome: "rolled-back",
+        at: new Date().toISOString(),
+        reason: reason.slice(0, MAX_LAST_UPDATE_REASON),
+      },
+    }).catch(() => undefined);
     return { kind: "rolled-back", version: record.version, reason };
   };
 
   let port: number;
   try {
     const binary = await io.ensureBinary();
-    const taken = (await listRecords(io)).map((r) => r.port);
-    port = allocateMetricsPort(taken);
+    const taken = new Set((await listRecords(io)).map((r) => r.port));
+    const portFree = io.portFree ?? defaultPortFree;
+    for (;;) {
+      port = allocateMetricsPort(taken);
+      if (await portFree(port)) break;
+      taken.add(port);
+    }
     await installUnitFile(io.run, {
       stagedPath: stagedUnit,
       installedPath: tunnelUnitPath(id, undefined, next),
@@ -507,20 +558,23 @@ async function updateConnectorNow(
       `the new connector (${io.version}) did not report connected in time`,
     );
   }
+  // Something local could answer on the port, so the unit itself must be
+  // running too before the old connector is allowed to stop.
+  const running = await systemctl(io, ["is-active", nextUnit]);
+  if (!running.success || running.stdout.split("\n")[0]?.trim() !== "active") {
+    return await abandon(
+      `the new connector (${io.version}) is not running as its own service`,
+    );
+  }
 
   // Commit: the new unit carries the tunnel from here on.
-  await writePrivateFileAtomic(
-    io.workDir,
-    `${id}.json`,
-    `${
-      JSON.stringify({
-        ...record,
-        port,
-        version: io.version,
-        slot: next,
-      })
-    }\n`,
-  );
+  await writeRecord(io, {
+    ...record,
+    port,
+    version: io.version,
+    slot: next,
+    lastUpdate: { outcome: "updated", at: new Date().toISOString() },
+  });
   await dropSlotUnit(io, id, record.slot);
   await mustSystemctl(io, ["daemon-reload"]);
   logInfo(
@@ -572,20 +626,27 @@ export type ConnectorReport = {
   /** Connector program version the carrying unit runs. */
   version: string;
   slot: ConnectorSlot;
+  /** How the last update attempt ended, so "update pending" can say why. */
+  lastUpdate?: ConnectorLastUpdate;
 };
 
-/** Every connector on this host with its status and version. */
+/**
+ * Every connector on this host with its status and version. Read-only and
+ * outside the install queue, so a control-plane poll is answered while an
+ * update waits for a new connector to connect.
+ */
 export async function reportConnectors(
   io: ConnectorIo,
 ): Promise<{ pinnedVersion: string; connectors: ConnectorReport[] }> {
-  const records = await serialized(() => listRecords(io));
+  const records = await listRecords(io);
   const connectors: ConnectorReport[] = [];
   for (const record of records) {
     connectors.push({
       tunnelId: record.id,
-      status: await connectorStatus(io, record.id),
+      status: await statusOfRecord(io, record),
       version: record.version,
       slot: record.slot,
+      ...(record.lastUpdate ? { lastUpdate: record.lastUpdate } : {}),
     });
   }
   return { pinnedVersion: io.version, connectors };

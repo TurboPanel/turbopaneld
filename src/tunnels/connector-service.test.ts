@@ -43,6 +43,8 @@ type Harness = {
   binaryCalls: { count: number };
   /** Unit paths `io.unitExists` reports as present. */
   onDisk: Set<string>;
+  /** Loopback ports something else already listens on. */
+  busyPorts: Set<number>;
 };
 
 /** Command text without the sudo / tp-host wrapping. */
@@ -67,6 +69,7 @@ async function withHarness(
   };
   const binaryCalls = { count: 0 };
   const onDisk = new Set<string>();
+  const busyPorts = new Set<number>();
   const io: ConnectorIo = {
     layout: { configDir: join(root, "etc") },
     workDir,
@@ -79,6 +82,7 @@ async function withHarness(
     },
     probe: (port) => Promise.resolve(probe.byPort.get(port) ?? probe.value),
     unitExists: (path) => Promise.resolve(onDisk.has(path)),
+    portFree: (port) => Promise.resolve(!busyPorts.has(port)),
     readyTimeoutMs: 4,
     readyPollMs: 2,
     sleep: () => Promise.resolve(),
@@ -119,6 +123,7 @@ async function withHarness(
       probe,
       binaryCalls,
       onDisk,
+      busyPorts,
     });
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -523,12 +528,92 @@ test("the report lists each connector with status, version and slot, and the pin
     h.io.version = NEW;
     await updateConnector(h.io, ID_B);
     const report = await reportConnectors(h.io);
-    assertEquals(report, {
-      pinnedVersion: NEW,
-      connectors: [
-        { tunnelId: ID_A, status: "connected", version: "2026.5.2", slot: "a" },
-        { tunnelId: ID_B, status: "connected", version: NEW, slot: "b" },
+    assertEquals(report.pinnedVersion, NEW);
+    assertEquals(
+      report.connectors.map((c) => [c.tunnelId, c.status, c.version, c.slot]),
+      [
+        [ID_A, "connected", "2026.5.2", "a"],
+        [ID_B, "connected", NEW, "b"],
       ],
-    });
+    );
+    assertEquals(report.connectors[0].lastUpdate, undefined);
+    assertEquals(report.connectors[1].lastUpdate?.outcome, "updated");
+  });
+});
+
+test("a port something else already listens on is never given to the new connector", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.busyPorts.add(20301);
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome.kind, "updated");
+    assertEquals((await readRecordFile(h, ID_A)).port, 20302);
+  });
+});
+
+test("a readiness answer alone is not enough: the unit must be running and hold a connection", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+
+    // Something answers "ready" with no connection behind it.
+    h.probe.byPort.set(20301, { kind: "ready", connections: 0 });
+    assertEquals((await updateConnector(h.io, ID_A)).kind, "rolled-back");
+
+    // The answer is real-looking but the new unit is not running.
+    h.probe.byPort.clear();
+    h.state.unit = "activating";
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome.kind, "rolled-back");
+    if (outcome.kind === "rolled-back") {
+      assertStringIncludes(outcome.reason, "not running as its own service");
+    }
+    const record = await readRecordFile(h, ID_A);
+    assertEquals(record.slot, "a");
+    assertEquals(record.version, "2026.5.2");
+  });
+});
+
+test("how the last update ended is kept for the report, with the reason", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.probe.byPort.set(20301, { kind: "not-ready", connections: 0 });
+    await updateConnector(h.io, ID_A);
+    let report = await reportConnectors(h.io);
+    assertEquals(report.connectors[0].lastUpdate?.outcome, "rolled-back");
+    assertStringIncludes(
+      report.connectors[0].lastUpdate?.reason ?? "",
+      "did not report connected",
+    );
+
+    h.probe.byPort.clear();
+    await updateConnector(h.io, ID_A);
+    report = await reportConnectors(h.io);
+    assertEquals(report.connectors[0].lastUpdate?.outcome, "updated");
+    assertEquals(report.connectors[0].lastUpdate?.reason, undefined);
+    assertEquals(report.connectors[0].version, NEW);
+  });
+});
+
+test("the report is answered while an update is still waiting for a connector", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.probe.byPort.set(20301, { kind: "not-ready", connections: 0 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    h.io.sleep = () => gate;
+    const update = updateConnector(h.io, ID_A);
+    // Let the update reach its first wait.
+    while (!h.calls.some((c) => c.startsWith(`systemctl start`))) {
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    const report = await reportConnectors(h.io);
+    assertEquals(report.connectors.map((c) => c.tunnelId), [ID_A]);
+    assertEquals(await connectorStatus(h.io, ID_A), "connected");
+    release();
+    assertEquals((await update).kind, "rolled-back");
   });
 });

@@ -72,6 +72,17 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   connected, or any step failing: remove the new unit and leave the old one
   untouched (`rolled-back`). Both units are replicas of the same tunnel, so
   Cloudflare sends traffic to either during the overlap.
+- Safety checks before the old unit may stop: the new unit's metrics port must be
+  bindable on loopback when chosen (so a local user listening on the next port
+  cannot be mistaken for the connector), `/ready` must show at least one edge
+  connection, and `systemctl is-active` of the new unit must say `active`. A
+  rolled-back attempt is kept in the record (`lastUpdate`: outcome, time, reason
+  of at most 300 characters) and reported.
+- Updates run at daemon start and again every hour (`startUpdateLoop`, never two
+  rounds at once), so a missed window or an offline download heals on a later
+  round; the pause file is read at the start of each round.
+- The status report reads records directly and is not held up by an update that
+  is waiting for a connector.
 - A crash between writing the record and stopping the old unit leaves a stray
   unit of the non-recorded slot; the next `updateConnector` removes it first.
   `removeConnector` drops both slots.
@@ -81,7 +92,7 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   tunnels folder (`CONNECTOR_UPDATES_PAUSED_FILE`); removing it resumes. There is
   no wire command for pause or "update now" yet.
 - `server.tunnel.status` (feature `tunnel-status-v1`) is read-only: it answers
-  `{ pinnedVersion, connectors: [{ tunnelId, status, version, slot }] }`. The
+  `{ pinnedVersion, connectors: [{ tunnelId, status, version, slot, lastUpdate? }] }`. The
   control plane polls it to show the version per server and an update-pending
   notice (running version differs from the pinned one).
 - Not proven on a real host yet: the overlap on one tunnel across two metrics

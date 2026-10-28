@@ -7047,6 +7047,14 @@ export type TunnelStatusConnector = {
   version: string;
   /** Which of the tunnel's two units carries it (the other exists only during an update). */
   slot: "a" | "b";
+  /** How the last connector update ended; absent before any attempt. */
+  lastUpdate?: {
+    outcome: "updated" | "rolled-back";
+    /** ISO-8601 time of the attempt. */
+    at: string;
+    /** Why a rolled-back attempt stopped (at most 300 characters). */
+    reason?: string;
+  };
 };
 
 /** Must stay in sync with the instance `server.tunnel.status` shape. */
@@ -7094,12 +7102,30 @@ function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
   ) {
     throw new TypeError("Invalid server.tunnel.status connector");
   }
-  return {
+  const connector: TunnelStatusConnector = {
     tunnelId: value.tunnelId,
     status: value.status as TunnelStatusConnector["status"],
     version: value.version,
     slot: value.slot,
   };
+  const last = value.lastUpdate;
+  if (last !== undefined) {
+    if (
+      !isRecord(last) ||
+      (last.outcome !== "updated" && last.outcome !== "rolled-back") ||
+      typeof last.at !== "string" || !TUNNEL_ISO_TIMESTAMP_RE.test(last.at) ||
+      (last.reason !== undefined &&
+        (typeof last.reason !== "string" || last.reason.length > 300))
+    ) {
+      throw new TypeError("Invalid server.tunnel.status lastUpdate");
+    }
+    connector.lastUpdate = {
+      outcome: last.outcome,
+      at: last.at,
+      ...(last.reason === undefined ? {} : { reason: last.reason }),
+    };
+  }
+  return connector;
 }
 
 export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
