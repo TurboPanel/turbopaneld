@@ -1201,8 +1201,12 @@ const SITES: CallSite[] = [
     { argv: ["systemctl", "disable", "--now", TUNNEL_UNIT] },
   ),
   tpHost(
-    'src/tunnels/connector-service.ts|systemctl(io,["is-active",tunnelUnitName(id,record.slot)])',
+    'src/tunnels/connector-service.ts|systemctl(io,["is-active",tunnelUnitName(record.id,record.slot)])',
     { argv: ["systemctl", "is-active", TUNNEL_UNIT] },
+    { argv: ["systemctl", "is-active", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["is-active",nextUnit])',
     { argv: ["systemctl", "is-active", TUNNEL_UNIT_B] },
   ),
   tpHost(
