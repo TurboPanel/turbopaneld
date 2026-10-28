@@ -369,7 +369,7 @@ test("an update starts the new version in the other slot and moves only after it
     assertEquals(h.installedUnits.length, 1);
     assertStringIncludes(
       h.installedUnits[0],
-      `ExecStart=/opt/turbopanel/vendor/cloudflared/${NEW}/cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:20301`,
+      `ExecStart=/opt/turbopanel/vendor/cloudflared/${NEW}/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20301 run`,
     );
     assertStringIncludes(
       h.installedUnits[0],
@@ -450,11 +450,16 @@ test("a connector already on the pinned version is left alone, and an unknown tu
     assertEquals(await updateConnector(h.io, ID_A), { kind: "not-installed" });
     await installConnector(h.io, ID_A, TOKEN);
     h.calls.length = 0;
+    // The installed unit is the text this daemon renders: nothing to replace.
+    h.state.unchanged = true;
     assertEquals(await updateConnector(h.io, ID_A), {
       kind: "current",
       version: "2026.5.2",
     });
-    assertEquals(h.calls, []);
+    assertEquals(
+      h.calls.filter((c) => !c.startsWith("cmp ")),
+      [],
+    );
   });
 });
 
@@ -615,5 +620,53 @@ test("the report is answered while an update is still waiting for a connector", 
     assertEquals(await connectorStatus(h.io, ID_A), "connected");
     release();
     assertEquals((await update).kind, "rolled-back");
+  });
+});
+
+test("a unit installed with the old command line is replaced and restarted at the same version", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.calls.length = 0;
+    h.installedUnits.length = 0;
+    // `cmp` fails: the unit on disk differs from the text this daemon renders.
+    h.state.unchanged = false;
+
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome, { kind: "current", version: "2026.5.2" });
+
+    assertEquals(h.installedUnits.length, 1);
+    assertStringIncludes(
+      h.installedUnits[0],
+      "cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20300 run\n",
+    );
+    const unit = unitOf(ID_A);
+    const order = h.calls.filter((c) => c.startsWith("systemctl"));
+    const reload = order.indexOf("systemctl daemon-reload");
+    const restart = order.indexOf(`systemctl restart ${unit}`);
+    assert(reload >= 0 && restart > reload, order.join("\n"));
+    // The token is not handled: both versions read the same root-only copy.
+    assert(h.calls.every((c) => !c.startsWith("tunnel-env-install")));
+    assert(h.calls.every((c) => !c.includes(TOKEN)));
+  });
+});
+
+test("a unit that already matches is left running at the same version", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.calls.length = 0;
+    h.installedUnits.length = 0;
+    h.state.unchanged = true;
+
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome, { kind: "current", version: "2026.5.2" });
+
+    assertEquals(h.installedUnits.length, 0);
+    assert(
+      h.calls.every((c) =>
+        !c.startsWith("systemctl restart") &&
+        !c.startsWith("systemctl daemon-reload")
+      ),
+      h.calls.join("\n"),
+    );
   });
 });

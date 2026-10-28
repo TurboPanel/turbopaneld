@@ -1272,7 +1272,7 @@ tp_tunnel_unit_text() {
     'Type=simple' \
     'DynamicUser=yes' \
     "EnvironmentFile=$R_TUNNELENV/$_tt_id.env" \
-    "ExecStart=$INSTALL_ROOT/vendor/cloudflared/$_tt_ver/cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:$_tt_port" \
+    "ExecStart=$INSTALL_ROOT/vendor/cloudflared/$_tt_ver/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:$_tt_port run" \
     'Restart=always' \
     'RestartSec=5' \
     'NoNewPrivileges=yes' \
@@ -1339,8 +1339,12 @@ tp_tunnel_unit_ok() {
   case "$_tu_ver" in
     ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
   esac
-  _tu_port="${_tu_rest#"$_tu_ver"/cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:}"
+  _tu_port="${_tu_rest#"$_tu_ver"/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:}"
   [ "$_tu_port" != "$_tu_rest" ] || return 1
+  # The command ends in " run": the port is what is left before it.
+  _tu_run="${_tu_port% run}"
+  [ "$_tu_run" != "$_tu_port" ] || return 1
+  _tu_port="$_tu_run"
   case "$_tu_port" in
     ''|*[!0-9]*|0*) return 1 ;;
   esac

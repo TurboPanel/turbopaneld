@@ -79,7 +79,7 @@ test("the unit is its own service with the token in a file, never on the command
   assertStringIncludes(text, `EnvironmentFile=${envFile}\n`);
   assertStringIncludes(
     text,
-    `ExecStart=${BIN} tunnel run --no-autoupdate --metrics 127.0.0.1:20301\n`,
+    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 run\n`,
   );
   assertStringIncludes(text, "Restart=always\nRestartSec=5\n");
   assertStringIncludes(text, "DynamicUser=yes\n");
@@ -198,4 +198,64 @@ test("the second slot has its own unit name, path and log name, and the first ke
     first.replace(`turbopanel-tunnel-${ID}\n`, `turbopanel-tunnel-${ID}-b\n`),
     second,
   );
+});
+
+test("the connector command line keeps the order the pinned program accepts", () => {
+  const text = renderTunnelUnit({
+    id: ID,
+    binary: BIN,
+    port: 20301,
+    envFile: "/e",
+  });
+  const exec = text.split("\n").filter((l) => l.startsWith("ExecStart="));
+  // `--no-autoupdate` is a global flag (before `tunnel`); `--metrics` belongs
+  // to `tunnel` (before `run`). The old order made the program print its usage
+  // and exit, so no connector ever ran.
+  assertEquals(exec, [
+    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 run`,
+  ]);
+});
+
+// Runs the real connector program, so it only runs where one is named (never
+// in CI): TP_CLOUDFLARED_BIN=/opt/turbopanel/vendor/cloudflared/<version>/cloudflared
+test({
+  name: "the real connector program accepts the argument order the unit uses",
+  ignore: !Deno.env.get("TP_CLOUDFLARED_BIN"),
+  fn: async () => {
+    const bin = Deno.env.get("TP_CLOUDFLARED_BIN")!;
+    const accepted = await new Deno.Command(bin, {
+      args: [
+        "--no-autoupdate",
+        "tunnel",
+        "--metrics",
+        "127.0.0.1:20399",
+        "run",
+        "--help",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const out = new TextDecoder().decode(accepted.stdout) +
+      new TextDecoder().decode(accepted.stderr);
+    assert(accepted.success, out);
+    assert(!out.includes("Incorrect Usage"), out);
+    assertStringIncludes(out, "cloudflared tunnel run");
+
+    // The order the daemon used to write is refused by the same program.
+    const old = await new Deno.Command(bin, {
+      args: [
+        "tunnel",
+        "run",
+        "--no-autoupdate",
+        "--metrics",
+        "127.0.0.1:20399",
+        "--help",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const oldOut = new TextDecoder().decode(old.stdout) +
+      new TextDecoder().decode(old.stderr);
+    assertStringIncludes(oldOut, "Incorrect Usage");
+  },
 });

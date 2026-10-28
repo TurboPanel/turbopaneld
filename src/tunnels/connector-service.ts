@@ -477,6 +477,45 @@ async function waitUntilReady(io: ConnectorIo, port: number): Promise<boolean> {
 }
 
 /**
+ * A unit written by an older daemon can carry a command line the pinned
+ * connector rejects, so it crash-loops and never connects. Render the unit as
+ * this daemon would, and when the installed text differs, replace it and
+ * restart that one unit. A unit that already matches is left running.
+ */
+async function refreshStaleUnit(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+): Promise<void> {
+  const binary = await io.ensureBinary();
+  const staged = join(
+    io.workDir,
+    `${record.id}${slotSuffix(record.slot)}.service`,
+  );
+  let changed: boolean;
+  try {
+    changed = await installUnitFile(io.run, {
+      stagedPath: staged,
+      installedPath: tunnelUnitPath(record.id, undefined, record.slot),
+      contents: renderTunnelUnit({
+        id: record.id,
+        binary,
+        port: record.port,
+        envFile: tunnelEnvPath(io.layout, record.id),
+        slot: record.slot,
+      }),
+    });
+  } finally {
+    await Deno.remove(staged).catch(() => undefined);
+  }
+  if (!changed) return;
+  await mustSystemctl(io, ["daemon-reload"]);
+  const unit = tunnelUnitName(record.id, record.slot);
+  await systemctl(io, ["reset-failed", unit]);
+  await mustSystemctl(io, ["restart", unit]);
+  logInfo("tunnels", `connector ${record.id}: replaced an out-of-date unit`);
+}
+
+/**
  * Move one tunnel to the pinned connector version without a gap.
  *
  * The new version starts in the other slot beside the running one. Both are
@@ -504,6 +543,7 @@ async function updateConnectorNow(
     await mustSystemctl(io, ["daemon-reload"]);
   }
   if (record.version === io.version) {
+    await refreshStaleUnit(io, record);
     return { kind: "current", version: record.version };
   }
 

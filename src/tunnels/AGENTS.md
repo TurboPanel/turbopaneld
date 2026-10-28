@@ -12,13 +12,22 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   stop, restart, enable, disable, status, list), one operation at a time.
 - The unit is one file per tunnel (not an `@` template) so each has its own
   metrics port and, during a connector update, its own pinned version. It runs
-  `<vendor>/cloudflared/<version>/cloudflared tunnel run --no-autoupdate
-  --metrics 127.0.0.1:<port>` under `DynamicUser=yes`: a throwaway account that
+  `<vendor>/cloudflared/<version>/cloudflared --no-autoupdate tunnel
+  --metrics 127.0.0.1:<port> run` under `DynamicUser=yes`: a throwaway account that
   is neither the daemon's user (it would reach daemon state and sockets) nor the
   hosting Caddy's (TLS keys), with no capability and no inbound port. Ports come
   from 20300-20899, chosen by the daemon and recorded in
   `<state>/cloudflared/tunnels/<id>.json` (no secret; the record also answers
   "which tunnels exist").
+- Argument order is part of the contract with the pinned program:
+  `--no-autoupdate` is a global flag (before `tunnel`) and `--metrics` belongs
+  to `tunnel` (before `run`). Any other order makes it print its usage and
+  exit, so the unit restarts every five seconds and no connector ever runs. A
+  test pins the exact order, and one more runs the real program when
+  `TP_CLOUDFLARED_BIN` names it (never in CI). A unit an older daemon wrote with
+  another command line is replaced and restarted by the next update round, even
+  at the same version (`refreshStaleUnit`); a unit that already matches is left
+  running.
 - The run token is never on a command line. The daemon stages
   `<state>/cloudflared/tunnels/<id>.env` (`0600`), `tp-host tunnel-env-install
   <id>` checks it (one line, `TUNNEL_TOKEN='<base64>'`) and copies it to
