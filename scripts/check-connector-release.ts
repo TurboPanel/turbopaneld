@@ -84,6 +84,19 @@ export function checksumsOf(release: Release): Record<string, string | null> {
   return out;
 }
 
+const code = (value: string) => `\`${value}\``;
+
+/** One checksum line: the new digest and, when there is one, today's pin. */
+function assetLine(
+  name: string,
+  digest: string | null | undefined,
+  pin: string | undefined,
+): string {
+  const now = digest ? code(digest) : "not listed by the release";
+  const was = pin ? ` (pinned today: ${code(pin)})` : "";
+  return `- ${code(name)}: ${now}${was}`;
+}
+
 /** The issue body: what is new and exactly what a daemon release must change. */
 export function renderReport(
   current: string,
@@ -98,11 +111,7 @@ export function renderReport(
     "",
     "Checksums of the Linux files (SHA-256, as the release reports them):",
     "",
-    ...ASSETS.map((name) =>
-      `- \`${name}\`: ${
-        sums[name] ? `\`${sums[name]}\`` : "not listed by the release"
-      }${pinned[name] ? ` (pinned today: \`${pinned[name]}\`)` : ""}`
-    ),
+    ...ASSETS.map((name) => assetLine(name, sums[name], pinned[name])),
     "",
     "Nothing has changed on any server and no pin was edited. A new connector reaches servers only with a daemon release. To move to it, a pull request changes these together:",
     "",

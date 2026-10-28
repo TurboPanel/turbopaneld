@@ -7073,7 +7073,7 @@ const TUNNEL_STATUS_VALUES = new Set([
 ]);
 /** The metrics band (`20300` to `20899`) holds 600 connectors. */
 const MAX_TUNNEL_STATUS_CONNECTORS = 600;
-const TUNNEL_CONNECTOR_VERSION_RE = /^[0-9]+(?:\.[0-9]+){0,4}$/;
+const TUNNEL_CONNECTOR_VERSION_RE = /^\d+(?:\.\d+){0,4}$/;
 
 function isTunnelConnectorVersion(value: unknown): value is string {
   return typeof value === "string" && value.length <= 32 &&

@@ -27,6 +27,7 @@ import {
 } from "../permissions/host-unit-files.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { mapSequential, repeatSequential } from "../util/sequential.ts";
 import {
   allocateMetricsPort,
   assertTunnelId,
@@ -460,12 +461,19 @@ async function waitUntilReady(io: ConnectorIo, port: number): Promise<boolean> {
   const timeout = io.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const poll = io.readyPollMs ?? DEFAULT_READY_POLL_MS;
   const sleep = io.sleep ?? realSleep;
-  for (let waited = 0; waited <= timeout; waited += poll) {
+  let waited = 0;
+  let connected = false;
+  await repeatSequential(async () => {
     const probe = await io.probe(port);
-    if (probe.kind === "ready" && probe.connections > 0) return true;
+    if (probe.kind === "ready" && probe.connections > 0) {
+      connected = true;
+      return false;
+    }
     await sleep(poll);
-  }
-  return false;
+    waited += poll;
+    return waited <= timeout;
+  });
+  return connected;
 }
 
 /**
@@ -601,22 +609,20 @@ export async function updateConnector(
 export async function updateAllConnectors(
   io: ConnectorIo,
 ): Promise<Array<{ id: string; outcome: ConnectorUpdateOutcome }>> {
-  const results: Array<{ id: string; outcome: ConnectorUpdateOutcome }> = [];
-  for (const id of await listConnectorIds(io)) {
+  return await mapSequential(await listConnectorIds(io), async (id) => {
     try {
-      results.push({ id, outcome: await updateConnector(io, id) });
+      return { id, outcome: await updateConnector(io, id) };
     } catch (err) {
-      results.push({
+      return {
         id,
         outcome: {
-          kind: "rolled-back",
+          kind: "rolled-back" as const,
           version: "unknown",
           reason: err instanceof Error ? err.message : "failed",
         },
-      });
+      };
     }
-  }
-  return results;
+  });
 }
 
 /** What the control plane is told about one connector on this server. */
@@ -639,15 +645,15 @@ export async function reportConnectors(
   io: ConnectorIo,
 ): Promise<{ pinnedVersion: string; connectors: ConnectorReport[] }> {
   const records = await listRecords(io);
-  const connectors: ConnectorReport[] = [];
-  for (const record of records) {
-    connectors.push({
+  const connectors = await mapSequential(
+    records,
+    async (record): Promise<ConnectorReport> => ({
       tunnelId: record.id,
       status: await statusOfRecord(io, record),
       version: record.version,
       slot: record.slot,
       ...(record.lastUpdate ? { lastUpdate: record.lastUpdate } : {}),
-    });
-  }
+    }),
+  );
   return { pinnedVersion: io.version, connectors };
 }
