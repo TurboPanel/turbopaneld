@@ -45,37 +45,42 @@ export async function handleTunnelConnectors(
   const tokens = wanted.length > 0
     ? await deps.decryptSecrets!(wanted.map((e) => e.tokenEnvelope))
     : [];
-  const result: TunnelConnectorsResult = {
-    installed: [],
-    unchanged: unchanged.map((e) => e.tunnelId),
-    removed: [],
-  };
-  const failures: string[] = [];
-  for (const [index, entry] of wanted.entries()) {
+  const installs = await Promise.allSettled(wanted.map(async (entry, index) => {
     const token = tokens[index];
     if (typeof token !== "string" || token.length === 0) {
-      failures.push(`${entry.tunnelId}: could not unseal the run token`);
-      continue;
+      throw new Error("could not unseal the run token");
     }
-    try {
-      await installConnector(io, entry.tunnelId, token);
-      result.installed.push(entry.tunnelId);
-    } catch (err) {
-      failures.push(`${entry.tunnelId}: ${reasonOf(err)}`);
-    }
-  }
-  for (const id of payload.remove) {
-    try {
-      await removeConnector(io, id);
-      result.removed.push(id);
-    } catch (err) {
-      failures.push(`${id}: ${reasonOf(err)}`);
-    }
-  }
+    await installConnector(io, entry.tunnelId, token);
+  }));
+  // Both lists go through the connector module's own queue, one at a time.
+  const removals = await Promise.allSettled(
+    payload.remove.map((id) => removeConnector(io, id)),
+  );
+  const installed = settledIds(wanted.map((e) => e.tunnelId), installs);
+  const removed = settledIds(payload.remove, removals);
   // Report a partial failure as a failed command so the control plane repeats
   // the list; what did work is not redone (installs of running ones are no-ops).
+  const failures = [...installed.failures, ...removed.failures];
   if (failures.length > 0) {
     throw new Error(`tunnel connectors: ${failures.join("; ")}`);
   }
-  return result;
+  return {
+    installed: installed.ok,
+    unchanged: unchanged.map((e) => e.tunnelId),
+    removed: removed.ok,
+  };
+}
+
+/** Split settled results into the ids that worked and a plain line per failure. */
+function settledIds(
+  ids: readonly string[],
+  settled: readonly PromiseSettledResult<unknown>[],
+): { ok: string[]; failures: string[] } {
+  const ok: string[] = [];
+  const failures: string[] = [];
+  settled.forEach((outcome, index) => {
+    if (outcome.status === "fulfilled") ok.push(ids[index]);
+    else failures.push(`${ids[index]}: ${reasonOf(outcome.reason)}`);
+  });
+  return { ok, failures };
 }
