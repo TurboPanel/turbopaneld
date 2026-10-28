@@ -109,13 +109,17 @@
 # DAEMON_WRITABLE_VENDOR_DIRS in src/permissions/daemon-permissions.ts (pinned by
 # src/orchestration/sudoers-contract.test.ts): uv's download cache and the
 # cloudflared connector the daemon vendors on demand for its own tunnels.
+# The connector runs as its own systemd service under a throwaway account that
+# is neither the daemon's user nor in its group, so the cloudflared folder is
+# traversable (0751, no listing) and the binary inside it is 0755; the other
+# folder stays 0750.
 - name: Ensure the daemon-writable vendor cache directories
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
     owner: "{{ turbopanel_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "0750"
+    mode: "{{ '0751' if (item | basename) == 'cloudflared' else '0750' }}"
     follow: false
   loop: "{{ turbopanel_daemon_vendor_cache_dirs }}"
 

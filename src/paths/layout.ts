@@ -654,6 +654,11 @@ export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
     name: "node-app-env",
     madeBy: "tp-host app-env-install, root:root 0700; the unit reads it",
   },
+  {
+    root: "config",
+    name: "tunnel-env",
+    madeBy: "tp-host tunnel-env-install, root:root 0700; the unit reads it",
+  },
   { root: "config", name: "instance", madeBy: "instance-launch role" },
   { root: "config", name: "caddy", madeBy: "instance-launch role" },
   { root: "config", name: "site-caddy", madeBy: "site-caddy role" },

@@ -44,6 +44,7 @@ import { join } from "@std/path";
 import { COMMAND_LOG_PHASES } from "../../logs/contracts.ts";
 import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { installUnitFile as installUnitFileShared } from "../../permissions/host-unit-files.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { FolderRefParts } from "../../contracts/directory-names.ts";
@@ -366,67 +367,17 @@ async function removeStagedFile(path: string): Promise<void> {
 }
 
 /**
- * True when `installedPath` already holds exactly the staged bytes.
- *
- * Compared through the privileged runner rather than `Deno.readTextFile` for
- * the same reason the site path does it: `/etc/systemd/system` is
- * root-owned and the daemon is not root, so a direct read would fail and report
- * "changed" on every single deploy — the churn this exists to prevent. A `cmp`
- * that cannot answer reports **changed**, so the worst case is a redundant
- * install.
- */
-async function installedFileMatches(
-  io: NativeAppIo,
-  stagedPath: string,
-  installedPath: string,
-): Promise<boolean> {
-  const cmp = await io.run(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      "cmp",
-      "-s",
-      "--",
-      stagedPath,
-      installedPath,
-    ]),
-  );
-  return cmp.success;
-}
-
-/**
  * Stage `contents`, diff it against the installed unit, and install only on a
- * real difference. Returns whether the installed file **changed**.
+ * real difference (see `permissions/host-unit-files.ts`). Compared through the
+ * privileged runner rather than `Deno.readTextFile`: `/etc/systemd/system` is
+ * root-owned and the daemon is not root, so a direct read would report
+ * "changed" on every single deploy, the churn this exists to prevent.
  */
-async function installUnitFile(
+function installUnitFile(
   io: NativeAppIo,
   params: { stagedPath: string; installedPath: string; contents: string },
 ): Promise<boolean> {
-  await Deno.writeTextFile(params.stagedPath, params.contents, { mode: 0o640 });
-  if (await installedFileMatches(io, params.stagedPath, params.installedPath)) {
-    return false;
-  }
-  const install = await io.run(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      "install",
-      "-m",
-      "0644",
-      "-o",
-      "root",
-      "-g",
-      "root",
-      params.stagedPath,
-      params.installedPath,
-    ]),
-  );
-  if (!install.success) {
-    throw new Error(
-      install.stderr || `Failed to install unit ${params.installedPath}`,
-    );
-  }
-  return true;
+  return installUnitFileShared(io.run, params);
 }
 
 async function systemctl(

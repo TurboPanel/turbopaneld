@@ -66,7 +66,8 @@ const DOCKER_SOCKETS = [
 /**
  * Vendor subtrees the daemon process itself writes at runtime: uv's download
  * cache and the cloudflared connector it vendors on demand for its own
- * tunnels (run as the daemon, never as root). Everything else under the
+ * tunnels (the daemon downloads and verifies it; each connector then runs
+ * as its own service under a throwaway account, never as the daemon or root). Everything else under the
  * install root is root-owned and immutable to the daemon
  * (`orchestration/roles/turbopanel-user`, mirrored as
  * `turbopanel_daemon_vendor_cache_dirs`), so a compromised daemon cannot

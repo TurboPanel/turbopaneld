@@ -59,6 +59,7 @@ Read the matching file before editing that area. Paths are relative to the repo 
 | `src/deploy/` | `src/deploy/AGENTS.md` | Tenant deploy, Compose, Traefik, hosting Caddy, deploy hooks; nested `release/`, `native/`, `site/`, `cron/`, `ssh/` guides |
 | `src/managed/` | `src/managed/AGENTS.md` | Managed engines, shared ProxySQL ingress, engine registry |
 | `src/backups/` | `src/backups/AGENTS.md` | Scheduled backups |
+| `src/tunnels/` | `src/tunnels/AGENTS.md` | Tunnel connectors as their own services, token copies, readiness |
 | `src/firewall/` | `src/firewall/AGENTS.md` | Managed host firewall (daemon side) |
 | `src/orchestration/` | `src/orchestration/AGENTS.md` | Installer presenter and sanitizer, runtime integrity digests |
 | `orchestration/` | `orchestration/AGENTS.md` | Ansible style, vendored runtimes, Galaxy content, host-base prerequisites; role guides under `orchestration/roles/*/` |

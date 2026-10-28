@@ -24,7 +24,9 @@ turbopanel_install_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | defa
 # Production orchestration tree (run.sh installs it; the sudoers allowlist names
 # its tp-orchestrate helper). Overridden by daemon-install.yml / run.sh vars.
 turbopanel_orchestration_dir: "{{ turbopanel_install_root }}/share/orchestration"
-# Vendor subtrees the daemon process itself may write at runtime. Everything
+# Vendor subtrees the daemon process itself may write at runtime (the
+# cloudflared one is also traversable by the connector services' throwaway
+# account, see tasks/main.yml). Everything
 # else under the install root is root-owned. Keep in step with
 # DAEMON_WRITABLE_VENDOR_DIRS in src/permissions/daemon-permissions.ts.
 turbopanel_daemon_vendor_cache_dirs:

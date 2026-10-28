@@ -250,6 +250,13 @@ const OWNED_PATHS = [
   "/var/lib/docker",
   "/etc/docker",
   "/etc/systemd/system/turbopaneld.service.d",
+  // Tunnel connectors: the root-only token copies, the connector program and
+  // the daemon's staged files and records.
+  "/etc/turbopanel/tunnel-env",
+  "/etc/turbopanel/tunnel-env/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.env",
+  "/opt/turbopanel/vendor/cloudflared",
+  "/opt/turbopanel/vendor/cloudflared/2026.5.2/cloudflared",
+  "/var/lib/turbopanel/cloudflared/tunnels",
 ];
 
 test("tp_path_is_safe refuses every path outside TurboPanel's own trees", async () => {
@@ -694,6 +701,84 @@ test("the build slice is stopped and its unit file removed although it is not tu
   assertStringIncludes(result.stdout, "tpbuild.slice\n", result.stderr);
   assertEquals(await exists(join(units, "tpbuild.slice")), false);
   assertEquals(await exists(join(units, "tpother.slice")), true);
+});
+
+const TUNNEL_UNITS = [
+  "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.service",
+  "turbopanel-tunnel-1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e.service",
+  "turbopanel-tunnel-instance.service",
+];
+
+test("every tunnel connector service is stopped, disabled and its unit file removed", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  for (const name of TUNNEL_UNITS) {
+    await Deno.writeTextFile(join(units, name), "[Service]\n");
+  }
+  await Deno.writeTextFile(join(units, "unrelated.service"), "[Service]\n");
+  const log = join(units, "systemctl.log");
+  const stub = await stubBin(
+    "systemctl",
+    [
+      `log=${log}`,
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo active ;;",
+      "  is-active*) echo active ;;",
+      "  is-enabled*) echo enabled ;;",
+      "  *list-units*) cat <<'LIST'",
+      ...TUNNEL_UNITS.map((u) =>
+        `${u} loaded active running TurboPanel tunnel connector`
+      ),
+      "LIST",
+      "  ;;",
+      '  stop*|disable*) echo "$*" >> "$log" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_unit_present",
+      "tp_list_has_word",
+      "tp_collect_unit_names",
+      "tp_stop_disable_unit",
+      "tp_stop_units_matching",
+      "tp_remove_unit_files",
+    ],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      "TP_LEGACY_UNITS=",
+      "TP_OTHER_UNITS=",
+      "tp_collect_unit_names",
+      'cat "$TP_TMP/work.unitnames"',
+      "tp_stop_units_matching service",
+      "tp_remove_unit_files",
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  for (const name of TUNNEL_UNITS) {
+    assertStringIncludes(result.stdout, `${name}\n`, result.stderr);
+    assertEquals(await exists(join(units, name)), false, name);
+  }
+  const calls = (await Deno.readTextFile(log)).split("\n");
+  for (const name of TUNNEL_UNITS) {
+    assert(calls.includes(`stop ${name}`), `stop ${name}\n${calls.join("\n")}`);
+    assert(calls.includes(`disable ${name}`), `disable ${name}`);
+  }
+  assertEquals(await exists(join(units, "unrelated.service")), true);
+});
+
+test("the connector program and the token copies are inside trees purge removes whole", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = (extractConstant(source, "TP_OWNED_TREES") ?? "")
+    .replace(/^[A-Z_]+="/, "")
+    .replace(/"$/, "")
+    .split(" ");
+  for (
+    const tree of ["/opt/turbopanel", "/etc/turbopanel", "/var/lib/turbopanel"]
+  ) {
+    assert(trees.includes(tree), tree);
+  }
 });
 
 async function stubBin(name: string, script: string): Promise<string> {
