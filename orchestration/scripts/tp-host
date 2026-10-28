@@ -1248,7 +1248,9 @@ tp_tunnel_id_ok() {
     LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 }
 
-# The expected text of the connector unit for ID, VERSION and PORT, exactly as
+# The expected text of the connector unit for ID, VERSION, PORT and SLOT suffix
+# ("" for the first unit, "-b" for the second one that runs beside it during a
+# connector update; renderTunnelUnit's slot), exactly as
 # renderTunnelUnit in src/tunnels/connector-unit.ts writes it. A unit is not
 # checked line by line against an allowlist: it must BE this text, so nothing
 # else (another ExecStart, User=, a capability, a different EnvironmentFile=)
@@ -1258,6 +1260,7 @@ tp_tunnel_unit_text() {
   _tt_id="$1"
   _tt_ver="$2"
   _tt_port="$3"
+  _tt_suffix="$4"
   printf '%s\n' \
     '[Unit]' \
     "Description=TurboPanel tunnel connector $_tt_id" \
@@ -1292,13 +1295,15 @@ tp_tunnel_unit_text() {
     'CapabilityBoundingSet=' \
     'StandardOutput=journal' \
     'StandardError=journal' \
-    "SyslogIdentifier=turbopanel-tunnel-$_tt_id" \
+    "SyslogIdentifier=turbopanel-tunnel-$_tt_id$_tt_suffix" \
     '' \
     '[Install]' \
     'WantedBy=multi-user.target'
 }
 
-# turbopanel-tunnel-<id>.service. The id comes from the name; the connector
+# turbopanel-tunnel-<id>.service or turbopanel-tunnel-<id>-b.service (the second
+# unit of a tunnel during a connector update; an id never ends in "-b", so the
+# suffix is unambiguous). The id comes from the name; the connector
 # version and metrics port from the one ExecStart line (version digits and dots,
 # port inside the band); the rest must match tp_tunnel_unit_text exactly. The
 # unit runs as a throwaway systemd account (DynamicUser=), never as the daemon's
@@ -1311,7 +1316,15 @@ tp_tunnel_unit_ok() {
   [ "$_tu_id" != "$_tu_name" ] || return 1
   _tu_id="${_tu_id%.service}"
   [ "$_tu_id.service" = "${_tu_name#turbopanel-tunnel-}" ] || return 1
-  tp_tunnel_id_ok "$_tu_id" || return 1
+  _tu_suffix=""
+  if tp_tunnel_id_ok "$_tu_id"; then
+    :
+  elif [ "${_tu_id%-b}" != "$_tu_id" ] && tp_tunnel_id_ok "${_tu_id%-b}"; then
+    _tu_id="${_tu_id%-b}"
+    _tu_suffix="-b"
+  else
+    return 1
+  fi
   _tu_exec=""
   _tu_n=0
   while IFS= read -r _tu_line || [ -n "$_tu_line" ]; do
@@ -1336,7 +1349,7 @@ tp_tunnel_unit_ok() {
   # The trailing "x" keeps command substitution from eating the last newline,
   # so a file with extra blank lines at the end differs too.
   _tu_have="$(cat -- "$_tu_file"; printf x)"
-  _tu_want="$(tp_tunnel_unit_text "$_tu_id" "$_tu_ver" "$_tu_port"; printf x)"
+  _tu_want="$(tp_tunnel_unit_text "$_tu_id" "$_tu_ver" "$_tu_port" "$_tu_suffix"; printf x)"
   [ "$_tu_have" = "$_tu_want" ]
 }
 
