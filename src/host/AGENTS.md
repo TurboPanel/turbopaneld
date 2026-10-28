@@ -150,3 +150,8 @@ change-detected heartbeats.
   is `subnet` (renamed from `bridge`) — the **compose-bridge** subnet
   (`tpn_*` routed bridge per host), not a datacenter routing-domain subnet.
 
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |

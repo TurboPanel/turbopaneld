@@ -48,6 +48,7 @@ test("every curl command on turbopanel.sh printed by this repo follows redirects
       "scripts/purge.sh",
       "README.md",
       "AGENTS.md",
+      "scripts/AGENTS.md",
       "src/instance/AGENTS.md",
     ]
   ) {

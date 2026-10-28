@@ -87,7 +87,7 @@ test("the instance floor is a semver no newer than this daemon", () => {
   const mine = parseSemver(DAEMON_VERSION);
   if (!floor || !mine) throw new TypeError("unparsable floor");
   assertEquals(compareSemver(floor, mine) <= 0, true);
-  // Pin. Changing it requires the Versions-on-the-wires note in both AGENTS.md files.
+  // Pin. Changing it requires the Versions-on-the-wires note in `src/instance/AGENTS.md` and the control plane's AGENTS.md.
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

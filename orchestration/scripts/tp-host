@@ -24,8 +24,8 @@
 #   as the principal with no capabilities, and nothing gets a `+`/`!` exec
 #   prefix.
 #
-# What this does not contain (see AGENTS.md → Managed-host privilege
-# boundary): Docker (the daemon account is in the `docker` group) and root
+# What this does not contain (see src/permissions/AGENTS.md → Managed-host
+# privilege boundary): Docker (the daemon account is in the `docker` group) and root
 # engine config validation.
 set -eu
 umask 077

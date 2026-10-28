@@ -371,7 +371,7 @@ points to). Rules that are not obvious:
   `turbopanel-app-<id>.service`, only equal to the root copy's path for the same
   `<id>`, and only `app-env-install` / `app-env-remove` (a service id, never a
   path) touch that folder; no generic verb accepts a path in it (see the
-  `tp-host` bullet in `../../../AGENTS.md`). A new `tp-host` is needed before the
+  `tp-host` bullet in `../../../orchestration/scripts/AGENTS.md`). A new `tp-host` is needed before the
   daemon that calls the verbs (the update playbooks install it first).
 - Unlike the compose secret files (tmpfs `/run`, rehydrated after a reboot),
   the copy lives on disk under `/etc` so the unit can start at boot before the

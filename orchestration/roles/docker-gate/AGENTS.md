@@ -1,6 +1,6 @@
 # Docker gate (`docker-gate`) — AGENTS.md
 
-Root context: `../../../AGENTS.md` → **Managed-host privilege boundary**
+Root context: `../../../src/permissions/AGENTS.md` → **Managed-host privilege boundary**
 ("Docker" is the first of the three root-equivalent routes of the daemon
 account `tp`). This role is **stage 3 of 5** of closing it.
 
