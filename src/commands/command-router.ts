@@ -177,6 +177,35 @@ function pickCommandRouterHandler<
 }
 
 /**
+ * The two tunnel connector commands share one switch case (the switch is at its
+ * size limit), so each one's parse-and-run lives here.
+ */
+async function runTunnelConnectors(
+  rawPayload: unknown,
+  daemonReceivedAt: string,
+  decryptSecrets:
+    | ((ciphertexts: string[]) => Promise<(string | null)[]>)
+    | undefined,
+): Promise<unknown> {
+  const payload = parseTunnelConnectorsPayload(rawPayload);
+  return await pickCommandRouterHandler(
+    "handleTunnelConnectors",
+    handleTunnelConnectors,
+  )(payload, daemonReceivedAt, { decryptSecrets });
+}
+
+async function runTunnelStatus(
+  rawPayload: unknown,
+  daemonReceivedAt: string,
+): Promise<unknown> {
+  parseTunnelStatusPayload(rawPayload);
+  return await pickCommandRouterHandler(
+    "handleTunnelStatus",
+    handleTunnelStatus,
+  )(daemonReceivedAt);
+}
+
+/**
  * Build the per-command transcript sink. One sink per command execution, keyed
  * on the dispatch envelope's own command id; `finalize()` runs in the `finally`
  * beside the WS `command-outcome` send so an upload failure can never affect
@@ -403,22 +432,15 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
-      case "server.tunnel.connectors": {
-        const payload = parseTunnelConnectorsPayload(message.payload);
-        result = await pickCommandRouterHandler(
-          "handleTunnelConnectors",
-          handleTunnelConnectors,
-        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
-        ok = true;
-        daemonRespondedAt = new Date().toISOString();
-        break;
-      }
+      case "server.tunnel.connectors":
       case "server.tunnel.status": {
-        parseTunnelStatusPayload(message.payload);
-        result = await pickCommandRouterHandler(
-          "handleTunnelStatus",
-          handleTunnelStatus,
-        )(daemonReceivedAt);
+        result = message.commandType === "server.tunnel.status"
+          ? await runTunnelStatus(message.payload, daemonReceivedAt)
+          : await runTunnelConnectors(
+            message.payload,
+            daemonReceivedAt,
+            deps?.decryptSecrets,
+          );
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
