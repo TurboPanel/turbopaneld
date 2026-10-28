@@ -30,6 +30,13 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   `renderTunnelUnit` and `tp_tunnel_unit_text` together (a test installs the
   daemon's text and refuses every one-line change). The port band is in both
   (`TUNNEL_METRICS_PORT_*`, `TP_TUNNEL_PORT_*`).
+- The unit carries extra limits (`UMask`, `RestrictAddressFamilies` with netlink
+  because the Go program lists interfaces that way, `PrivateDevices`,
+  `ProtectKernelLogs`, `ProtectClock`, `ProtectHostname`,
+  `SystemCallArchitectures`). They are unproven against the real connector under
+  systemd: after the update, a canary check must confirm the unit reaches
+  `/ready` 200 on its metrics port; if not, drop one restriction at a time (in
+  `renderTunnelUnit` and `tp_tunnel_unit_text` together) until it does.
 - Readiness is the connector's own `/ready` on its metrics address (200 with
   `readyConnections` when at least one edge connection is up, 503 otherwise);
   `/healthcheck` always answers OK and is never used.
