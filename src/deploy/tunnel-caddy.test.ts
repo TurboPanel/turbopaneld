@@ -104,7 +104,6 @@ ${PROXY_TAIL}
 }
 
 tp-peer.internal {
-  bind 10.0.0.7
   tls /etc/turbopanel/hosting/peer/abc123/leaf.pem /etc/turbopanel/hosting/peer/abc123/leaf.key
   @tp_outside not remote_ip 10.0.0.5 10.0.0.6 fd00::5
   handle @tp_outside {
@@ -395,4 +394,60 @@ test("a server that only carries tunnels gets forward blocks with no peer rule a
   assertEquals(rendered.contents.includes("@tp_peer"), false);
   assertEquals(rendered.contents.includes("tp-peer.internal {"), false);
   assertStringIncludes(rendered.contents, "trusted_proxies 127.0.0.0/8 ::1\n");
+});
+
+test("the peer site never binds, so it shares the server of the sites that listen everywhere", () => {
+  const withListen = renderTunnelFile(ROUTES, INPUTS, new Set()).contents;
+  const without = renderTunnelFile(
+    ROUTES,
+    { peerAddresses: INPUTS.peerAddresses, material: PEER_DIR },
+    new Set(),
+  ).contents;
+  // Listen addresses from the control plane are accepted but change nothing.
+  assertEquals(withListen, without);
+  const peerBlock = withListen.slice(withListen.indexOf("tp-peer.internal {"));
+  assertEquals(/^\s*bind\b/m.test(peerBlock), false);
+  // A bound peer site would be a Caddy server of its own that holds only this
+  // name and would answer a forwarded request for a real hostname with nothing.
+  assertEquals(/^\s*bind\b/m.test(withListen), false);
+});
+
+// Runs only where a real Caddy is named (TP_TEST_CADDY=/path/to/caddy), as the
+// other real-Caddy tests do. `caddy adapt` shows how Caddy groups the sites
+// into servers: the peer site and a normal site must share one.
+test({
+  name: "a real Caddy puts the peer site and a normal site in one server",
+  ignore: !Deno.env.get("TP_TEST_CADDY"),
+  fn: async () => {
+    const rendered = renderTunnelFile(ROUTES, INPUTS, new Set()).contents;
+    const site =
+      'plain.example.com {\n  tls internal\n  respond "app" 200\n}\n';
+    const child = new Deno.Command(Deno.env.get("TP_TEST_CADDY")!, {
+      args: ["adapt", "--adapter", "caddyfile", "--config", "/dev/stdin"],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(`${site}\n${rendered}`));
+    await writer.close();
+    const out = await child.output();
+    assertEquals(out.success, true, new TextDecoder().decode(out.stderr));
+    const config = JSON.parse(new TextDecoder().decode(out.stdout));
+    const servers = Object.values(
+      config.apps.http.servers as Record<
+        string,
+        { listen: string[]; routes: { match?: { host?: string[] }[] }[] }
+      >,
+    );
+    const serverOf = (host: string) =>
+      servers.filter((server) =>
+        server.routes.some((route) =>
+          route.match?.some((m) => m.host?.includes(host))
+        )
+      );
+    assertEquals(serverOf("tp-peer.internal").length, 1);
+    assertEquals(serverOf("plain.example.com"), serverOf("tp-peer.internal"));
+    assertEquals(serverOf("app.example.com"), serverOf("tp-peer.internal"));
+  },
 });
