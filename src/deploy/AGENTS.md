@@ -1131,7 +1131,16 @@ the whole-server table and re-rendered by every environment deploy and removal
 now served here so Caddy never sees a name twice. The hop uses the
 organization's certificate: material under `hosting/peer/<id>/`, trusted only for
 the fixed name `tp-peer.internal`, which a small reserved site loads on the
-receiving server (Caddy picks a certificate by the connecting name). Visitor
+receiving server (Caddy picks a certificate by the connecting name). That site
+has no `bind`: Caddy makes one server per set of listen addresses, so a bound
+peer site would be a server of its own holding only that name, and a forwarded
+request for a real hostname arriving on the bound address would get an empty
+answer. It shares the everywhere-listening server instead, and its `remote_ip`
+check lets only the listed peers in (`listenAddresses` is still accepted on the
+wire and changes nothing). A site that binds to one address (`bindAddress`)
+listens on its own address set, so a peer reaching it needs that set to include
+the peer-facing address (`extraBind`); the peer name is not served there yet.
+Visitor
 addresses are trusted per `reverse_proxy` (loopback and peers), never
 server-wide. A tunnel block never asks for a public certificate. All files are
 under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.

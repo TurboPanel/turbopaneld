@@ -179,7 +179,10 @@ export function withTrustedProxies(upstream: string, ranges: string): string {
 export type TunnelFileInputs = Readonly<{
   /** Exact addresses of the servers allowed to forward to this one. */
   peerAddresses: readonly string[];
-  /** This server's own addresses the peer-facing site listens on. */
+  /**
+   * Accepted from the control plane for wire compatibility. The peer site no
+   * longer binds to them (see {@link peerSite}), so nothing here changes the file.
+   */
   listenAddresses?: readonly string[];
   /** Absent when the table has nothing to receive or forward. */
   material?: Readonly<{ certificate: string; key: string; trust: string }>;
@@ -245,22 +248,21 @@ ${peerRule}${forward}  handle_errors {
  * connecting name, not by the Host header, so without a site that loads the
  * certificate the sender would be shown the wrong one and refuse it. Only
  * listed peers get any answer.
+ *
+ * The site has no `bind`. Caddy makes one server per set of listen addresses,
+ * so a site bound to this server's own address would become a server of its own
+ * that holds only this name, and a forwarded request for a real hostname that
+ * arrives on that address would find no route and get an empty answer. Without
+ * a `bind` it shares the server of the other sites that listen everywhere, and
+ * the `remote_ip` check below is what keeps everyone but the listed peers out.
  */
 function peerSite(inputs: TunnelFileInputs): string {
   const material = inputs.material!;
-  const bind = inputs.listenAddresses?.length
-    ? `  bind ${
-      inputs.listenAddresses.map((address) => {
-        assertAddress(address);
-        return address.includes(":") ? `[${address}]` : address;
-      }).join(" ")
-    }\n`
-    : "";
   const certificate = assertPath("tunnel certificate", material.certificate);
   const key = assertPath("tunnel key", material.key);
   const peers = inputs.peerAddresses.join(" ");
   return `${TUNNEL_PEER_TLS_NAME} {
-${bind}  tls ${certificate} ${key}
+  tls ${certificate} ${key}
   ${OUTSIDE_MATCHER} not remote_ip ${peers}
   handle ${OUTSIDE_MATCHER} {
     abort
