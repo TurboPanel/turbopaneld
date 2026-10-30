@@ -295,6 +295,24 @@ async function removeDaemonDeploymentFiles(
   });
 }
 
+/**
+ * Only a delete removes the whole deployment dir, with whatever a relative bind
+ * wrote there. A Destroy or a drained server keeps that data for the next
+ * deploy and drops only the daemon's own files.
+ */
+async function reclaimDeploymentDir(
+  payload: EnvironmentStopPayload,
+  deploymentDir: string,
+  runFn: RunFn,
+): Promise<void> {
+  if (payload.removeDeploymentDir !== true) {
+    await removeDaemonDeploymentFiles(deploymentDir);
+    return;
+  }
+  await removeDeploymentDir(deploymentDir, runFn);
+  await removeEmptyProjectDeploymentDir(deploymentDir);
+}
+
 function retirementSummary(
   stopped: string,
   retirement: { retired: string[]; failed: Array<{ username: string }> },
@@ -511,17 +529,11 @@ async function stopEnvironmentLocked(
     { runDocker: run },
   );
 
-  // Only a delete removes the whole dir, with whatever a relative bind wrote
-  // there. A Destroy or a drained server keeps that data for the next deploy.
-  if (parsedPayload.removeDeploymentDir === true) {
-    await removeDeploymentDir(
-      deploymentDir,
-      deps?.runPrivileged ?? runPrivileged,
-    );
-    await removeEmptyProjectDeploymentDir(deploymentDir);
-  } else {
-    await removeDaemonDeploymentFiles(deploymentDir);
-  }
+  await reclaimDeploymentDir(
+    parsedPayload,
+    deploymentDir,
+    deps?.runPrivileged ?? runPrivileged,
+  );
 
   await removeSecretTree(
     layout,
