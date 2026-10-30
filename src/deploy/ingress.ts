@@ -2066,6 +2066,15 @@ function proofImportLine(
   return pattern === null ? "" : `  import ${pattern}\n`;
 }
 
+/**
+ * The redirect lines of a plain HTTP block. With a proof import the redirect sits
+ * in a `handle` so the imported proof-path `handle` wins over it.
+ */
+function wrapRedirectForProof(proofLine: string, redirect: string): string {
+  if (proofLine === "") return redirect;
+  return `${proofLine}  handle {\n  ${redirect}  }\n`;
+}
+
 /** A name that only redirects, under its own certificate on the HTTPS side. */
 function redirectSiteSnippet(options: SiteSnippetOptions): string {
   const { hostname, tlsDir, tlsId, bindAddress, tlsMode } = options;
@@ -2081,9 +2090,7 @@ function redirectSiteSnippet(options: SiteSnippetOptions): string {
     : "http";
   const redirect = `  redir ${scheme}://${target}{uri} permanent\n`;
   const proofLine = proofImportLine(options.proofDir, hostname);
-  const httpRedirect = proofLine === ""
-    ? redirect
-    : `${proofLine}  handle {\n  ${redirect}  }\n`;
+  const httpRedirect = wrapRedirectForProof(proofLine, redirect);
   return `http://${hostname} {
 ${bindLine}${httpRedirect}}
 
@@ -2175,13 +2182,10 @@ export function siteSnippet(options: SiteSnippetOptions): string {
   if (!tunnel?.lock) {
     const proofLine = proofImportLine(options.proofDir, hostname);
     const redirectLine = "  redir https://{host}{uri} permanent\n";
+    const redirectLines = wrapRedirectForProof(proofLine, redirectLine);
     httpBlock = https
       ? `http://${hostname} {
-${bindLine}${
-        proofLine === ""
-          ? redirectLine
-          : `${proofLine}  handle {\n  ${redirectLine}  }\n`
-      }}
+${bindLine}${redirectLines}}
 
 `
       : `http://${hostname} {

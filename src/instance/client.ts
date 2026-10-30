@@ -1968,6 +1968,7 @@ export class InstanceClient {
   // Identity is established locally (enrollment + server.id) and confirmed via
   // verified JWT `sub` in DaemonTokenManager — no socket message adopts serverId.
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
+    if (this.#handleCentralCertificateMessage(message)) return;
     // The control plane answers the daemon's wire ping with `{type:"pong"}`
     // (a Workers auto-response); it carries nothing to act on.
     if ((message as { type?: unknown }).type === "pong") return;
@@ -2083,24 +2084,6 @@ export class InstanceClient {
       case "dev-sync-end":
         this.#endDevSync(message.id, ws);
         break;
-      case "acme-issue-request":
-        this.#runSocketHandler(
-          "acme-issue-request",
-          this.#ensureAcmeIssue().handleRequest(message),
-        );
-        break;
-      case "acme-proof-forward":
-        this.#runSocketHandler(
-          "acme-proof-forward",
-          this.#ensureProofForward().handleForward(message),
-        );
-        break;
-      case "acme-proof-forward-end":
-        this.#runSocketHandler(
-          "acme-proof-forward-end",
-          this.#ensureProofForward().handleEnd(message),
-        );
-        break;
       case "tunnel-token":
         this.#runSocketHandler(
           "tunnel-token",
@@ -2154,6 +2137,35 @@ export class InstanceClient {
           }`,
         );
         break;
+    }
+  }
+
+  /**
+   * The central certificate messages (`acme-issue-v1`). Kept out of the main
+   * switch below, which is at the size limit; true when `message` was one.
+   */
+  #handleCentralCertificateMessage(message: DaemonMessage): boolean {
+    switch (message.type) {
+      case "acme-issue-request":
+        this.#runSocketHandler(
+          "acme-issue-request",
+          this.#ensureAcmeIssue().handleRequest(message),
+        );
+        return true;
+      case "acme-proof-forward":
+        this.#runSocketHandler(
+          "acme-proof-forward",
+          this.#ensureProofForward().handleForward(message),
+        );
+        return true;
+      case "acme-proof-forward-end":
+        this.#runSocketHandler(
+          "acme-proof-forward-end",
+          this.#ensureProofForward().handleEnd(message),
+        );
+        return true;
+      default:
+        return false;
     }
   }
 
