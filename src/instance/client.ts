@@ -16,12 +16,12 @@ import {
   type InstanceConfig,
   instanceUrl,
   instanceWebSocketUrl,
-  normalizeCaFingerprint,
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
 } from "./sockets.ts";
+import { caPinMismatch, CaPinMismatchError } from "./ca-pin.ts";
 import { runServerNetworkCheck } from "../host/network-check.ts";
 import {
   collectServerIps,
@@ -522,6 +522,8 @@ export class InstanceClient {
   #peerFeaturesKnown = false;
   /** Last unsupported version we already logged, so reconnects do not repeat it. */
   #loggedUnsupportedInstanceVersion: string | undefined;
+  /** Why the trust files do not match the pinned CA list; null when they do. */
+  #caPinMismatch: string | null = null;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
   /** Command ids already dispatched, so a repeated frame never runs twice. */
@@ -753,27 +755,24 @@ export class InstanceClient {
       this.#jwksClient = undefined;
       this.#apiClient = undefined;
     }
-    await this.#logCaFingerprintMismatch(caCertPath, env);
+    await this.#checkCaPin(env);
   }
 
-  async #logCaFingerprintMismatch(
-    caCertPath: string | undefined,
-    env: Record<string, string | undefined>,
-  ): Promise<void> {
-    const expected = env.TURBOPANEL_INSTANCE_CA_FINGERPRINT?.trim();
-    if (!expected || !caCertPath) return;
-    try {
-      const pem = await Deno.readTextFile(caCertPath);
-      const actual = await fingerprintPemCertificate(pem);
-      if (normalizeCaFingerprint(expected) !== actual) {
-        logWarn(
-          "instance",
-          `tls-trust: expected CA fingerprint ${expected} but ${caCertPath} is ${actual}`,
-        );
-      }
-    } catch {
-      // Handshake classification reports unreadable CA material.
+  /**
+   * Hard check against `TURBOPANEL_INSTANCE_CA_FINGERPRINT`: a trust file
+   * holding a CA outside the pinned list makes every connect attempt fail
+   * (see {@link #connectOnce}) until the files or the list are put right.
+   * No list configured means no check.
+   */
+  async #checkCaPin(env: Record<string, string | undefined>): Promise<void> {
+    const mismatch = await caPinMismatch(env);
+    if (mismatch && mismatch !== this.#caPinMismatch) {
+      logError(
+        "instance",
+        `tls-trust: refusing to connect: ${mismatch}. Something other than the installer or the control plane changed this server's trust files. Restore them, or re-run the installer with a fresh command from Add Server`,
+      );
     }
+    this.#caPinMismatch = mismatch;
   }
 
   #fetchInit(
@@ -1394,6 +1393,11 @@ export class InstanceClient {
 
   async #connectOnce(): Promise<void> {
     await this.refreshPlatformCaClient();
+    if (this.#caPinMismatch) {
+      // Before any credential is sent: never authenticate to a control plane
+      // reached through a CA this server was not told to trust.
+      throw new CaPinMismatchError(this.#caPinMismatch);
+    }
     await this.#waitForConnectPreconditions();
 
     // Do not close the active socket here: by the time #connectOnce() is called

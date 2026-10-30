@@ -777,8 +777,39 @@ control plane keeps the existing CA and the install continues (the daemon
 adds that file to the system roots, so nothing is lost), and a co-located
 daemon refresh skips the fetch entirely (`HOST_URL` is empty there). Before
 2026-09-28 the unverified case was `exit 1`, which is how canary's
-co-located refresh failed after its Let's Encrypt switch. `TURBOPANEL_INSTANCE_CA_FINGERPRINT` in `daemon.env`
-is the expected first-cert fingerprint for startup mismatch logs.
+co-located refresh failed after its Let's Encrypt switch.
+
+**CA fingerprint pin.** A self-hosted install command that bootstraps
+insecure TLS carries `TURBOPANEL_INSTANCE_CA_FINGERPRINT` (SHA-256 of each
+certificate's DER, lowercase hex, comma-separated; `run.sh` also takes
+`--instance-ca-fingerprint` and passes it across the sudo re-exec). Every
+Platform CA or private issuer `run.sh` is about to install — over `-k`, the
+pinned leg, or the system-roots refetch — must have every certificate in that
+list, or the install stops and nothing is written (`tp_check_fetched_trust`).
+A host that already carries a list (`daemon.env` plus
+`<state>/tls/instance-ca-pin`) keeps it when a run brings none: downloads over
+the `-k` leg must match it, so re-running an old command cannot downgrade a
+pinned host; verified legs are authenticated by that trust already. An
+operator's `--instance-ca` must match a fingerprint the command gave. With no
+list anywhere the old behaviour stays and a `-k` download prints one
+"trusted on first use" line. `run.sh` then writes the fingerprints of every
+certificate in `instance-ca.pem` and `instance-uploaded-trust.pem` into
+`daemon.env` (0600, daemon account). At runtime (`ca-pin.ts`) a trust file
+holding any certificate outside that list, or one that cannot be decoded,
+is a hard failure: the connect
+attempt throws `CaPinMismatchError` before any credential is sent and the
+client parks as `tls-trust`. No list means no check. The only other writer of
+the list is `server.tls.trust.reconcile` (`src/commands/tls-trust.ts`), which
+arrives over a session already verified against the pinned CA and
+authenticated with this server's key; it records the new bundle plus the
+stored issuer in `<state>/tls/instance-ca-pin` (first together with the old
+bundle, then the CA file, then narrowed, so no failure leaves an unlisted CA
+on disk), which the check accepts
+alongside `daemon.env` (the config root is root-owned and `daemon.env` is the
+installer's, so the daemon does not rewrite it). A host with no list never
+gets one from a reconcile. Upgrades re-run `run.sh`, which
+rewrites the list from the files on disk, so hosts installed with the older
+single first-certificate value are healed before the new binary starts.
 
 ## Versions on the wires
 
