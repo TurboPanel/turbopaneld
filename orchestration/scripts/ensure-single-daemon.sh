@@ -18,14 +18,15 @@ RUN_DIR="${TURBOPANEL_RUN_DIR:-/run/turbopanel}"
 LOCK_FILE="$RUN_DIR/daemon.lock"
 RUN_OWNER="${TURBOPANEL_RUNTIME_SOCKET_OWNER:-tp}"
 RUN_GROUP="${TURBOPANEL_RUNTIME_SOCKET_GROUP:-tp}"
-RUN_MODE="${TURBOPANEL_RUNTIME_SOCKET_MODE:-2770}"
+RUN_MODE="${TURBOPANEL_RUNTIME_SOCKET_MODE:-3770}"
 
 if ! command -v flock >/dev/null 2>&1; then
   echo "ensure-single-daemon: flock (util-linux) is required but not installed" >&2
   exit 1
 fi
 
-# Group-writable + setgid so the in-group instance user can also bind sockets.
+# Group-writable + setgid so the in-group instance user can also bind sockets;
+# sticky so only a socket's owner (or tp) can remove or replace it.
 install -d -m "$RUN_MODE" -o "$RUN_OWNER" -g "$RUN_GROUP" "$RUN_DIR"
 
 # Probe lock liveness via flock — never delete a held lock (avoids psmisc/fuser).
