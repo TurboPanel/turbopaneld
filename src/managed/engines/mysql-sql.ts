@@ -140,11 +140,16 @@ export const {
     accountAt,
     // SHOW_ROUTINE and FLUSH_TABLES are dynamic privileges and exist only at
     // global level. SHOW_ROUTINE reads every stored routine's definition.
-    // FLUSH_TABLES lets `mysqldump --single-transaction` run the
-    // `FLUSH LOCAL TABLES` it issues before its snapshot on a server with
-    // GTIDs on (every managed MySQL server); without it the dump stops with
-    // 1227. Deliberately not RELOAD, which also flushes logs, hosts and
-    // privileges.
+    // FLUSH_TABLES: on a server with GTIDs on (every managed MySQL server)
+    // `mysqldump --single-transaction` takes `FLUSH TABLES WITH READ LOCK`
+    // around the start of its snapshot, then `UNLOCK TABLES`; without the
+    // right the dump stops with 1227. Each dump holds that lock for a moment,
+    // after waiting for running statements to finish, so one long query holds
+    // writers up for that long. The right also lets the login take the global
+    // read lock by hand, which blocks every write on the server until it
+    // unlocks or disconnects: treat the backup password like an admin
+    // password. Deliberately not RELOAD, which also flushes logs, hosts and
+    // privileges. An existing backup login gets it on the next apply.
     backupPrivileges: [
       "SELECT",
       "SHOW VIEW",

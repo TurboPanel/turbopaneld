@@ -216,6 +216,14 @@ for (const engine of ENGINES) {
           .split("\n")
           .map((line) => line.replace(/ IDENTIFIED BY PASSWORD '[^']*'$/, ""));
         assertEquals(grants, engine.grants);
+
+        if (engine.image.startsWith("mysql:")) {
+          // Without FLUSH_TABLES the dump stops at its global read lock.
+          await sql("REVOKE FLUSH_TABLES ON *.* FROM nightly@localhost");
+          const blocked = await dumpAs("shop");
+          assertEquals(blocked.success, false, "dump without FLUSH_TABLES");
+          assertStringIncludes(blocked.stderr, "(1227)");
+        }
       } finally {
         await docker(["rm", "-f", name]);
       }
