@@ -40,8 +40,12 @@ test("every automatic-update consumer fetches run.sh with -L, so the redirect is
   );
 });
 
-test("every curl command on turbopanel.sh printed by this repo follows redirects", async () => {
-  const bare = /curl\s+(-[A-Za-z]*)\s+(?:staging\.|testing\.)?turbopanel\.sh/g;
+test("every curl command on turbopanel.sh printed by this repo uses https and follows redirects", async () => {
+  // A bare host makes curl's first request plain HTTP; whoever answers it
+  // picks the script that runs as root.
+  const bare = /curl\s+-[A-Za-z]*\s+(?:staging\.|testing\.)?turbopanel\.sh/g;
+  const secure =
+    /curl\s+(-[A-Za-z]*)\s+https:\/\/(?:staging\.|testing\.)?turbopanel\.sh/g;
   for (
     const file of [
       "scripts/run.sh",
@@ -55,8 +59,18 @@ test("every curl command on turbopanel.sh printed by this repo follows redirects
     const text = await Deno.readTextFile(join(ROOT, file));
     for (const match of text.matchAll(bare)) {
       assert(
+        false,
+        `${file}: "${match[0]}" fetches the installer over plain HTTP`,
+      );
+    }
+    for (const match of text.matchAll(secure)) {
+      assert(
         match[1].includes("L"),
         `${file}: "${match[0]}" does not follow redirects (needs -L)`,
+      );
+      assert(
+        !match[1].includes("k"),
+        `${file}: "${match[0]}" skips TLS checks for the installer host`,
       );
     }
   }

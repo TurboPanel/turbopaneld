@@ -69,7 +69,7 @@ Pair daemon builds with a compatible control plane channel. See [compatibility m
 Obtain a license from your TurboPanel organization, then run the official installer:
 
 ```sh
-curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<base64url-license> sh
+curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=<base64url-license> sh
 ```
 
 For self-hosted control planes, add `TURBOPANEL_HOST=https://<instance-host>:8443`.

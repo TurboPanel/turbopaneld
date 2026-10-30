@@ -19,14 +19,14 @@
 # Run as root or as a sudo-capable user (self-escalates via sudo when available).
 #
 # Typical install (production):
-#   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
+#   curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
 # Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL (default release),
 # TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public rail).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
 # Self-hosted control plane — the one door, chosen by what you pass:
-#   curl -fsSL turbopanel.sh | sh                        # nothing → panel install
-#   curl -fsSL turbopanel.sh | TURBOPANEL_INSTANCE=1 sh  # the same, said explicitly
+#   curl -fsSL https://turbopanel.sh | sh                        # nothing → panel install
+#   curl -fsSL https://turbopanel.sh | TURBOPANEL_INSTANCE=1 sh  # the same, said explicitly
 # Decided 2026-09-17: with no license and no daemon arguments the script
 # installs the control plane. It prints a short welcome (and, on a non-release
 # channel, a yellow non-stable warning) then proceeds; Ctrl-C or q at the
@@ -2254,7 +2254,7 @@ tp_print_nonstable_channel_warning() {
       ;;
   esac
   printf '\n'
-  tp_print_styled_line "33" "   Supported release:  curl -fsSL turbopanel.sh | sh"
+  tp_print_styled_line "33" "   Supported release:  curl -fsSL https://turbopanel.sh | sh"
   tp_print_styled_line "1;33" "$_rule"
 }
 
@@ -2382,7 +2382,7 @@ while [ $# -gt 0 ]; do
 done
 
 # Piped install form prefers env vars so the copy-paste command stays clean:
-#   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh
+#   curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=… sh
 # Explicit flags win when both are set. The sudo re-exec hands the license and
 # tunnel token over in these variables, never as flags: argv is world-readable
 # (ps, /proc) and sudo logs it.
