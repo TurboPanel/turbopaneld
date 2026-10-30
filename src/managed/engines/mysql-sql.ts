@@ -149,7 +149,8 @@ export const {
     // read lock by hand, which blocks every write on the server until it
     // unlocks or disconnects: treat the backup password like an admin
     // password. Deliberately not RELOAD, which also flushes logs, hosts and
-    // privileges. An existing backup login gets it on the next apply.
+    // privileges. An existing backup login gets it on the next apply of its
+    // cluster, not when the daemon is updated.
     backupPrivileges: [
       "SELECT",
       "SHOW VIEW",
