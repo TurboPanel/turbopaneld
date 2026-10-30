@@ -1490,7 +1490,7 @@ tp_inventory_wireguard() {
 }
 
 tp_inventory_host_files() {
-  for _ih_pattern in /etc/sysctl.d/99-turbopanel-*.conf /etc/udev/rules.d/99-turbopanel-*.rules /etc/sudoers.d/turbopanel-*; do
+  for _ih_pattern in /etc/sysctl.d/99-turbopanel-*.conf /etc/udev/rules.d/99-turbopanel-*.rules /etc/sudoers.d/turbopanel-* /etc/modules-load.d/turbopanel-*.conf; do
     for _ih_file in $_ih_pattern; do
       [ -e "$_ih_file" ] || continue
       tp_file_add "$TP_TMP/inv.hostfiles" "$_ih_file"
@@ -1502,6 +1502,7 @@ tp_inventory_host_files() {
     /etc/tmpfiles.d/turbopanel-hosting-caddy.conf \
     /etc/sudoers.d/tp \
     /etc/ssh/sshd_config.d/60-turbopanel.conf \
+    /etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev \
     /usr/local/bin/php
   do
     if [ -e "$_ih_file" ]; then
@@ -2490,6 +2491,11 @@ tp_lan_route_entry_ok() {
   tp_lan_nic_ok "$_lre_dev"
 }
 
+# The wrapper's other rule for a route (the next hop is a host on a subnet
+# the kernel says is connected to that interface) is not repeated here: the
+# exact-route match below only passes for a route the kernel accepted, and the
+# kernel only accepts a next hop it can reach on that interface.
+#
 # state.json is writable by the daemon account, so nothing in it is trusted:
 # a route is deleted only when its fields pass the wrapper's rules (so a
 # default route or a public range is never touched) and the kernel shows
@@ -2556,6 +2562,12 @@ tp_sshd_bin() {
 
 tp_remove_sshd_dropin() {
   _rsd=/etc/ssh/sshd_config.d/60-turbopanel.conf
+  # The copy the daemon keeps while it swaps the drop-in. sshd never reads it
+  # (its Include takes *.conf), so it goes without a config test.
+  _rsd_prev=/etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev
+  if [ -e "$_rsd_prev" ] || [ -L "$_rsd_prev" ]; then
+    tp_run "remove $_rsd_prev" rm -f "$_rsd_prev" || true
+  fi
   [ -f "$_rsd" ] || return 0
   _rsd_bin=$(tp_sshd_bin || true)
   _rsd_bak=$TP_TMP/sshd-dropin.bak
@@ -2655,6 +2667,10 @@ tp_remove_host_config() {
     fi
   done
   tp_remove_glob '/etc/sudoers.d/turbopanel-*' || true
+  # The drive temperature sensor's boot-time module load (metrics). The module
+  # already loaded stays until the next restart; unloading it could pull a
+  # module the operator also uses.
+  tp_remove_glob '/etc/modules-load.d/turbopanel-*.conf' || true
   tp_remove_sshd_dropin
   if [ -e /usr/local/bin/php ]; then
     tp_run "remove /usr/local/bin/php" rm -f /usr/local/bin/php || true
@@ -3925,6 +3941,24 @@ tp_print_reinstall_commands() {
   tp_say "  curl -fsSL https://turbopanel.sh | sh"
 }
 
+# The Raspberry Pi 4 KiB page-size line tp-kernel-features adds stays: taking
+# it out changes the kernel the board boots. Its marker stays too, so a later
+# `tp-kernel-features undo` still knows the line was TurboPanel's and not the
+# operator's.
+tp_note_kernel_boot_line() {
+  [ -f "$TP_KERNEL_MARKER_DIR/pi-4k-pagesize.applied" ] || return 0
+  [ -f "$TP_PI_BOOT_CONFIG" ] || return 0
+  grep -qx '[[:space:]]*kernel=kernel8.img[[:space:]]*' "$TP_PI_BOOT_CONFIG" 2>/dev/null || return 0
+  tp_say "The Raspberry Pi boot setting kernel=kernel8.img in $TP_PI_BOOT_CONFIG was left on purpose; to undo it, delete that line from $TP_PI_BOOT_CONFIG, then reboot."
+}
+
+# The fabric's and Docker's forwarding drop-ins are gone, but the running
+# kernel keeps the value they set until the next restart.
+tp_note_ip_forward() {
+  [ "$(cat "$TP_IP_FORWARD_FILE" 2>/dev/null)" = 1 ] || return 0
+  tp_say "IPv4 forwarding (net.ipv4.ip_forward) stays on until this host reboots (longer if another setting on this host turns it on)."
+}
+
 tp_print_purge_notes() {
   tp_print_group "Packages kept" "$TP_TMP/kept-packages"
   tp_say "Other packages stay installed by design (curl, git, acl, gnupg, iptables, openssl, wireguard-tools, build tools, ...); this purge never runs autoremove."
@@ -3932,6 +3966,8 @@ tp_print_purge_notes() {
   if [ "$TP_NET_LEFT" = true ]; then
     tp_say "Some Docker bridges or firewall chains could not be removed; reboot this host to clear them."
   fi
+  tp_note_ip_forward
+  tp_note_kernel_boot_line
 }
 
 tp_print_summary() {
@@ -4158,6 +4194,9 @@ TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/tur
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge
+TP_KERNEL_MARKER_DIR=/var/lib/turbopanel-kernel
+TP_PI_BOOT_CONFIG=/boot/firmware/config.txt
+TP_IP_FORWARD_FILE=/proc/sys/net/ipv4/ip_forward
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
 TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker

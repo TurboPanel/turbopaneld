@@ -746,6 +746,329 @@ test("LAN routes the daemon recorded are removed only when the kernel shows exac
   ]);
 });
 
+/** An IPv4 literal built from its octets, so no address sits in source. */
+function v4(...octets: number[]): string {
+  return octets.join(".");
+}
+
+/** Runs shell functions lifted from `file` and prints one verdict per input. */
+async function verdicts(
+  file: string,
+  functions: string[],
+  check: string,
+  inputs: string[],
+): Promise<string[]> {
+  const source = await Deno.readTextFile(file);
+  const parts: string[] = [];
+  for (const name of functions) {
+    const fn = extractFunction(source, name);
+    assert(fn, `${name} is missing from ${file}`);
+    parts.push(fn);
+  }
+  parts.push(
+    'for _in in "$@"; do',
+    `  if ${check} "$_in"; then echo yes; else echo no; fi`,
+    "done",
+  );
+  const out = await new Deno.Command("sh", {
+    args: ["-c", parts.join("\n"), "sh", ...inputs],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+  return new TextDecoder().decode(out.stdout).trim().split("\n");
+}
+
+const tpHostPath = join(here, "..", "orchestration", "scripts", "tp-host");
+
+test("the purge judges LAN route fields exactly as the host wrapper does", async () => {
+  const cidrs = [
+    `${v4(10, 193, 5, 0)}/24`,
+    `${v4(10, 0, 0, 0)}/8`,
+    `${v4(10, 0, 0, 0)}/7`,
+    `${v4(10, 1, 2, 0)}/32`,
+    `${v4(10, 1, 2, 0)}/33`,
+    `${v4(10, 1, 2, 0)}/08`,
+    `${v4(10, 1, 2, 0)}/024`,
+    `${v4(10, 1, 2, 0)}/`,
+    `${v4(10, 1, 2, 0)}/24/1`,
+    `${v4(10, 1, 2, 0)}/8x`,
+    v4(10, 1, 2, 0),
+    `${v4(10, 1, 2)}/24`,
+    `${v4(10, 1, 2, 0)}.1/24`,
+    `10.01.2.0/24`,
+    `${v4(256, 1, 1, 0)}/24`,
+    `${v4(172, 16, 0, 0)}/12`,
+    `${v4(172, 16, 0, 0)}/11`,
+    `${v4(172, 15, 0, 0)}/16`,
+    `${v4(172, 32, 0, 0)}/16`,
+    `${v4(192, 168, 1, 0)}/24`,
+    `${v4(192, 168, 0, 0)}/15`,
+    `${v4(192, 169, 0, 0)}/16`,
+    `${v4(100, 64, 0, 0)}/10`,
+    `${v4(100, 64, 0, 0)}/9`,
+    `${v4(100, 63, 0, 0)}/16`,
+    `${v4(100, 128, 0, 0)}/16`,
+    `${v4(8, 8, 8, 0)}/24`,
+    `${v4(0, 0, 0, 0)}/0`,
+    "/24",
+    "",
+    ";rm",
+  ];
+  const vias = [
+    v4(10, 0, 0, 12),
+    v4(192, 168, 1, 1),
+    v4(0, 0, 0, 0),
+    v4(255, 255, 255, 255),
+    v4(256, 0, 0, 1),
+    v4(10, 0, 0),
+    `${v4(10, 0, 0, 1)}.`,
+    "10.00.0.1",
+    "10..0.1",
+    `${v4(10, 0, 0, 1)};rm`,
+    "",
+  ];
+  const nics = [
+    "eth0",
+    "eth1.100",
+    "enp3s0f1",
+    "bond0_a",
+    "e-1",
+    "tp0",
+    "lo",
+    "docker0",
+    "br-0a1b2c",
+    "veth12ab",
+    "tpn_web",
+    "-eth0",
+    ".",
+    "..",
+    "a".repeat(15),
+    "a".repeat(16),
+    "eth 0",
+    "eth0;rm",
+    "",
+  ];
+  const octet = ["tp_ipv4_octet_ok", "tp_ipv4_literal_ok"];
+  const route = [...octet, "tp_fabric_route_v4_private"];
+  assertEquals(
+    await verdicts(
+      purgePath,
+      [...route, "tp_fabric_route_v4_cidr_ok"],
+      "tp_fabric_route_v4_cidr_ok",
+      cidrs,
+    ),
+    await verdicts(
+      tpHostPath,
+      [...route, "tp_fabric_route_cidr_ok"],
+      "tp_fabric_route_cidr_ok",
+      cidrs,
+    ),
+  );
+  assertEquals(
+    await verdicts(purgePath, octet, "tp_ipv4_literal_ok", vias),
+    await verdicts(tpHostPath, octet, "tp_ipv4_literal_ok", vias),
+  );
+  assertEquals(
+    await verdicts(purgePath, ["tp_lan_nic_ok"], "tp_lan_nic_ok", nics),
+    await verdicts(tpHostPath, ["tp_lan_nic_ok"], "tp_lan_nic_ok", nics),
+  );
+  // The corpus must hold both verdicts, or the comparison proves nothing.
+  const sample = await verdicts(
+    purgePath,
+    ["tp_lan_nic_ok"],
+    "tp_lan_nic_ok",
+    nics,
+  );
+  assert(sample.includes("yes") && sample.includes("no"), sample.join(" "));
+});
+
+/** A fake iptables: fixed listings, every call logged. */
+async function fakeIptables(
+  save: string,
+  lists: Record<string, string>,
+): Promise<{ bin: string; calls: string }> {
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-fw-" });
+  const calls = join(bin, "calls");
+  const cases = Object.entries(lists).map(([chain, text]) =>
+    `  "-w 5 -L ${chain} -n --line-numbers") printf '%s\\n' ${
+      text.split("\n").map((l) => `'${l}'`).join(" ")
+    } ;;`
+  );
+  await Deno.writeTextFile(
+    join(bin, "iptables"),
+    [
+      "#!/bin/sh",
+      `echo "$*" >> ${calls}`,
+      'case "$*" in',
+      `  "-w 5 -S") printf '%s\\n' ${
+        save.split("\n").map((l) => `'${l}'`).join(" ")
+      } ;;`,
+      ...cases,
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await Deno.writeTextFile(calls, "");
+  return { bin, calls };
+}
+
+async function firewallRun(
+  save: string,
+  lists: Record<string, string>,
+): Promise<string[]> {
+  const { bin, calls } = await fakeIptables(save, lists);
+  const result = await runPurgeSh(
+    [
+      "tp_firewall_delete_jumps",
+      "tp_firewall_try_delete",
+      "tp_firewall_family",
+    ],
+    "tp_firewall_family iptables",
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  return (await Deno.readTextFile(calls)).trim().split("\n").filter(Boolean);
+}
+
+const LAN_RANGE = `${v4(10, 193, 5, 0)}/24`;
+const BRIDGE_RANGE = `${v4(10, 192, 1, 0)}/24`;
+const OPERATOR_RANGE = `${v4(192, 168, 7, 0)}/24`;
+const ANY = `${v4(0, 0, 0, 0)}/0`;
+const HEADER = "num  target     prot opt source               destination";
+
+test("TurboFabric's TP-FORWARD chain, its jumps and its LAN pairs go; an operator's rules stay", async () => {
+  const save = [
+    "-P INPUT ACCEPT",
+    "-P FORWARD DROP",
+    "-N DOCKER-USER",
+    "-N TP-FORWARD",
+    "-A FORWARD -j TP-FORWARD",
+    "-A FORWARD -s " + OPERATOR_RANGE + " -j ACCEPT",
+    "-A DOCKER-USER -j TP-FORWARD",
+    "-A DOCKER-USER -s " + OPERATOR_RANGE + " -j ACCEPT",
+    "-A TP-FORWARD -i tp0 -o tp0 -j DROP",
+    `-A TP-FORWARD -s ${BRIDGE_RANGE} -d ${LAN_RANGE} -o eth1 -j ACCEPT`,
+    `-A TP-FORWARD -s ${LAN_RANGE} -d ${BRIDGE_RANGE} -i eth1 -j ACCEPT`,
+  ].join("\n");
+  const calls = await firewallRun(save, {
+    INPUT: ["Chain INPUT (policy ACCEPT)", HEADER].join("\n"),
+    FORWARD: [
+      "Chain FORWARD (policy DROP)",
+      HEADER,
+      `1    TP-FORWARD  all  --  ${ANY}  ${ANY}`,
+      `2    ACCEPT     all  --  ${OPERATOR_RANGE}  ${ANY}`,
+    ].join("\n"),
+    "DOCKER-USER": [
+      "Chain DOCKER-USER (1 references)",
+      HEADER,
+      `1    ACCEPT     all  --  ${OPERATOR_RANGE}  ${ANY}`,
+      `2    TP-FORWARD  all  --  ${ANY}  ${ANY}`,
+    ].join("\n"),
+  });
+  const changes = calls.filter((c) => / -[DFX] /.test(c));
+  assertEquals(changes, [
+    "-w 5 -D FORWARD 1",
+    "-w 5 -D DOCKER-USER 2",
+    "-w 5 -F TP-FORWARD",
+    "-w 5 -X TP-FORWARD",
+  ]);
+});
+
+/**
+ * A fake iptables/ip6tables that keeps its rules in a file: `-S` prints them,
+ * `-L CHAIN` numbers that chain's rules, and `-D CHAIN N`, `-F` and `-X`
+ * change the file. Every changing call is logged with the binary's name.
+ */
+async function statefulFirewall(
+  rules: string,
+): Promise<{ bin: string; log: string }> {
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-fwstate-" });
+  const log = join(bin, "calls");
+  await Deno.writeTextFile(log, "");
+  const script = [
+    "#!/bin/sh",
+    'name=$(basename "$0")',
+    `state=${bin}/$name.rules`,
+    '[ "$1" = "-w" ] && shift 2',
+    'case "$1" in',
+    '  -S) cat "$state" ;;',
+    "  -L)",
+    '    echo "Chain $2"',
+    '    echo "num  target     prot opt source               destination"',
+    '    awk -v c="$2" \'$1 == "-A" && $2 == c { n++; t = "-"; for (i = 3; i < NF; i++) if ($i == "-j") t = $(i + 1); print n "    " t "  all  --" }\' "$state"',
+    "    ;;",
+    "  -D)",
+    `    echo "$name $*" >> ${log}`,
+    '    awk -v c="$2" -v k="$3" \'$1 == "-A" && $2 == c { n++; if (n == k) next } { print }\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "  -F)",
+    `    echo "$name $*" >> ${log}`,
+    '    awk -v c="$2" \'!($1 == "-A" && $2 == c)\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "  -X)",
+    `    echo "$name $*" >> ${log}`,
+    '    if grep -q -- "-j $2\\( \\|$\\)" "$state"; then exit 1; fi',
+    '    awk -v c="$2" \'!($1 == "-N" && $2 == c)\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "esac",
+    "",
+  ].join("\n");
+  for (const name of ["iptables", "ip6tables"]) {
+    await Deno.writeTextFile(join(bin, name), script, { mode: 0o755 });
+    await Deno.writeTextFile(join(bin, `${name}.rules`), `${rules}\n`);
+  }
+  return { bin, log };
+}
+
+async function firewallPass(bin: string): Promise<void> {
+  const result = await runPurgeSh(
+    [
+      "tp_firewall_delete_jumps",
+      "tp_firewall_try_delete",
+      "tp_firewall_family",
+    ],
+    "tp_firewall_family iptables\ntp_firewall_family ip6tables",
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+}
+
+test("both firewall families end with only the operator's rules, and a second pass changes nothing", async () => {
+  const operator = `-A DOCKER-USER -s ${OPERATOR_RANGE} -j ACCEPT`;
+  const { bin, log } = await statefulFirewall(
+    [
+      "-P FORWARD DROP",
+      "-N DOCKER-USER",
+      "-N TP-FORWARD",
+      "-N TP-FWD",
+      "-A FORWARD -j TP-FORWARD",
+      "-A DOCKER-USER -j TP-FORWARD",
+      operator,
+      "-A DOCKER-USER -j TP-FWD",
+      "-A TP-FORWARD -i tp0 -o tp0 -j DROP",
+      `-A TP-FORWARD -s ${BRIDGE_RANGE} -d ${LAN_RANGE} -o eth1 -j ACCEPT`,
+      "-A TP-FWD -j TP-FORWARD",
+    ].join("\n"),
+  );
+  await firewallPass(bin);
+  for (const name of ["iptables", "ip6tables"]) {
+    assertEquals(
+      (await Deno.readTextFile(join(bin, `${name}.rules`))).trim().split("\n"),
+      ["-P FORWARD DROP", "-N DOCKER-USER", operator],
+    );
+  }
+  const first = (await Deno.readTextFile(log)).trim().split("\n");
+  assert(
+    first.some((c) => c.startsWith("ip6tables -X TP-FORWARD")),
+    first.join("\n"),
+  );
+  await Deno.writeTextFile(log, "");
+  await firewallPass(bin);
+  assertEquals(await Deno.readTextFile(log), "");
+});
+
 test("the Docker gate folders are owned trees and are removed with the other folders", async () => {
   const source = await Deno.readTextFile(purgePath);
   const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
@@ -2159,4 +2482,76 @@ test("an operator's FORWARD rule, or a policy that is not DROP, leaves the polic
   assert(!kept.includes("-P FORWARD ACCEPT"), kept);
   const accept = await forwardPolicyRun("-P FORWARD ACCEPT\\n");
   assert(!accept.includes("-P FORWARD ACCEPT"), accept);
+});
+
+async function purgeNotes(
+  marker: boolean,
+  bootLines: string[] | null,
+  forward: string,
+): Promise<string> {
+  const root = await Deno.makeTempDir({ prefix: "tp-purge-notes-" });
+  const markers = join(root, "kernel");
+  await Deno.mkdir(markers);
+  if (marker) {
+    await Deno.writeTextFile(join(markers, "pi-4k-pagesize.applied"), "x\n");
+  }
+  const boot = join(root, "config.txt");
+  if (bootLines) await Deno.writeTextFile(boot, bootLines.join("\n") + "\n");
+  const fwd = join(root, "ip_forward");
+  await Deno.writeTextFile(fwd, `${forward}\n`);
+  const result = await runPurgeSh(
+    [
+      "tp_print_group",
+      "tp_note_ip_forward",
+      "tp_note_kernel_boot_line",
+      "tp_print_purge_notes",
+    ],
+    [
+      `TP_KERNEL_MARKER_DIR=${markers}`,
+      `TP_PI_BOOT_CONFIG=${boot}`,
+      `TP_IP_FORWARD_FILE=${fwd}`,
+      "TP_NET_LEFT=false",
+      ': > "$TP_TMP/kept-packages"',
+      "tp_print_purge_notes",
+    ].join("\n"),
+  );
+  assertEquals(result.code, 0, result.stderr);
+  return result.stdout;
+}
+
+test("the Pi page-size boot line is left on purpose and the summary says how to undo it", async () => {
+  const out = await purgeNotes(true, [
+    "kernel=kernel8.img",
+    "[all]",
+    "dtparam=audio=on",
+  ], "0");
+  assertStringIncludes(out, "boot setting kernel=kernel8.img");
+  assertStringIncludes(out, "was left on purpose");
+  assertStringIncludes(out, "delete that line from");
+  assertStringIncludes(out, "then reboot");
+  // Nothing to say without TurboPanel's marker, or once the line is gone.
+  assert(
+    !(await purgeNotes(false, ["kernel=kernel8.img"], "0")).includes("kernel8"),
+  );
+  assert(!(await purgeNotes(true, ["[all]"], "0")).includes("kernel8"));
+  assert(!(await purgeNotes(true, null, "0")).includes("kernel8"));
+});
+
+test("the purge never edits the Pi boot file and keeps the kernel-features marker", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const code = source.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  assert(!/(rm|sed|mv|tee)[^\n]*TP_PI_BOOT_CONFIG/.test(code));
+  assert(!/(rm|rmdir)[^\n]*TP_KERNEL_MARKER_DIR/.test(code));
+  const owned = source.match(/^TP_OWNED_TREES="([^"]*)"/m);
+  assert(
+    owned && !owned[1].split(/\s+/).includes("/var/lib/turbopanel-kernel"),
+  );
+});
+
+test("the summary says IPv4 forwarding stays on until a reboot only when it is on", async () => {
+  assertStringIncludes(
+    await purgeNotes(false, null, "1"),
+    "net.ipv4.ip_forward) stays on until this host reboots",
+  );
+  assert(!(await purgeNotes(false, null, "0")).includes("ip_forward"));
 });
