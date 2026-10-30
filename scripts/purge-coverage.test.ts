@@ -569,3 +569,243 @@ test("the purge selects every package a role holds when dpkg reports it held", a
     new TextDecoder().decode(out.stderr),
   );
 });
+
+// Host drop-in folders the install side or the running daemon writes into
+// (kernel, module, device, boot-time file, sudo, WireGuard and SSH settings).
+// The daemon writes some of them itself through the host wrapper (the fabric's
+// sysctl drop-in and tp0.conf, the drive temperature module load), so its own
+// source is scanned too, not only the roles and the installer.
+const DROPIN_DIRS = [
+  "etc/sysctl.d",
+  "etc/modules-load.d",
+  "etc/modprobe.d",
+  "etc/udev/rules.d",
+  "etc/tmpfiles.d",
+  "etc/sudoers.d",
+  "etc/wireguard",
+  "etc/ssh/sshd_config.d",
+  "etc/cron.d",
+  "etc/logrotate.d",
+  "etc/profile.d",
+  "etc/security/limits.d",
+];
+const DROPIN_RE = new RegExp(
+  `/(?:${
+    DROPIN_DIRS.map((d) => d.replace(/[./]/g, "\\$&")).join("|")
+  })/[A-Za-z0-9_.@+*{}$-]+`,
+  "g",
+);
+
+/** Drops `//` and block comments from TypeScript, roughly but enough here. */
+function stripTsComments(text: string): string {
+  return text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .map((line) => line.replace(/(^|[^:"'`])\/\/.*$/, "$1"))
+    .join("\n");
+}
+
+/** The daemon's own non-test source files. */
+async function daemonSourceFiles(): Promise<string[]> {
+  const files: string[] = [];
+  await walk(join(repo, "src"), files);
+  return files
+    .filter((f) => f.endsWith(".ts") && !/[._]test\.ts$/.test(f))
+    .filter((f) => !/\/(testdata|fixtures)\//.test(f))
+    .sort();
+}
+
+/** `const NAME = "literal"` values, to expand `${NAME}` in a path. */
+function stringConstants(texts: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const text of texts) {
+    for (
+      const m of text.matchAll(
+        /\bconst\s+([A-Z][A-Z0-9_]*)\s*=\s*"([^"\n]*)"/g,
+      )
+    ) {
+      out.set(m[1], m[2]);
+    }
+  }
+  return out;
+}
+
+/** Expands `${NAME}` through the constants; null when one is unknown. */
+function expandTemplate(
+  path: string,
+  constants: Map<string, string>,
+): string | null {
+  let unknown = false;
+  const out = path.replace(/\$\{([A-Za-z_]\w*)\}/g, (_, name: string) => {
+    const value = constants.get(name);
+    if (value === undefined) unknown = true;
+    return value ?? "";
+  });
+  return unknown || /[{}$]/.test(out) ? null : out;
+}
+
+/** Drop-in paths in one file, comments removed. */
+function dropinPaths(text: string, ts: boolean): string[] {
+  const clean = ts ? stripTsComments(text) : stripComments(text);
+  return [...new Set([...clean.matchAll(DROPIN_RE)].map((m) => m[0]))].sort();
+}
+
+/**
+ * What the purge removes under the drop-in folders: the literal paths and
+ * globs named inside its `tp_remove_*` functions (an inventory listing alone
+ * does not count).
+ */
+function purgeRemovals(
+  code: string,
+): { literals: Set<string>; globs: RegExp[] } {
+  const literals = new Set<string>();
+  const globs: RegExp[] = [];
+  const bodies = code.match(/^tp_remove_\w+\(\) \{[\s\S]*?^\}$/gm) ?? [];
+  for (const body of bodies) {
+    for (const m of body.matchAll(DROPIN_RE)) {
+      const path = m[0].replace(/[.]+$/, "");
+      if (path.includes("*")) {
+        const escaped = path.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+        globs.push(new RegExp(`^${escaped.replace(/\*/g, "[^/]*")}$`));
+      } else {
+        literals.add(path);
+      }
+    }
+  }
+  return { literals, globs };
+}
+
+// Drop-in paths a file names that are not files TurboPanel writes. Each needs
+// a reason.
+const DROPIN_NOT_INSTALLED: Record<string, string> = {
+  // The kernel-features tool describes a backend no feature uses yet.
+  "/etc/modules-load.d/turbopanel-": "a name prefix in a usage note",
+  // The sshd check reads every drop-in to find the administrator's settings.
+  "/etc/ssh/sshd_config.d/*.conf": "read, never written",
+};
+
+async function findDropinGaps(): Promise<{ gaps: Gap[]; seen: string[] }> {
+  const { literals, globs } = purgeRemovals(
+    stripComments(await Deno.readTextFile(purgePath)),
+  );
+  const install = await installFiles();
+  const daemon = await daemonSourceFiles();
+  const texts = new Map<string, string>();
+  for (const file of [...install, ...daemon]) {
+    texts.set(file, await Deno.readTextFile(file));
+  }
+  const constants = stringConstants(
+    daemon.map((f) => stripTsComments(texts.get(f) ?? "")),
+  );
+  const gaps: Gap[] = [];
+  const seen = new Set<string>();
+  for (const [file, text] of texts) {
+    const rel = relative(repo, file);
+    for (const raw of dropinPaths(text, file.endsWith(".ts"))) {
+      if (raw in DROPIN_NOT_INSTALLED) continue;
+      const path = raw.includes("${") ? expandTemplate(raw, constants) : raw;
+      if (path === null || path.includes("{{")) {
+        gaps.push({
+          file: rel,
+          path: raw,
+          why: "templated drop-in path; name it in full",
+        });
+        continue;
+      }
+      seen.add(path);
+      if (literals.has(path) || globs.some((g) => g.test(path))) continue;
+      gaps.push({ file: rel, path, why: "drop-in purge.sh does not remove" });
+    }
+  }
+  return { gaps, seen: [...seen].sort() };
+}
+
+test("the drop-in scan reads the daemon's own host writes and skips comments", async () => {
+  const { seen } = await findDropinGaps();
+  // If these vanish the scan stopped reading the daemon or the roles.
+  for (
+    const expected of [
+      "/etc/sysctl.d/99-turbopanel-fabric.conf",
+      "/etc/wireguard/tp0.conf",
+      "/etc/modules-load.d/turbopanel-drivetemp.conf",
+      "/etc/sysctl.d/99-turbopanel-redis.conf",
+      "/etc/sudoers.d/tp",
+    ]
+  ) {
+    assert(seen.includes(expected), `the scan no longer finds ${expected}`);
+  }
+  assertEquals(
+    dropinPaths(
+      [
+        "// writes /etc/sysctl.d/commented.conf",
+        "/* and /etc/cron.d/block-comment */",
+        'const P = "/etc/cron.d/turbopanel-x";',
+      ].join("\n"),
+      true,
+    ),
+    ["/etc/cron.d/turbopanel-x"],
+  );
+  assertEquals(
+    expandTemplate(
+      "/etc/wireguard/${IFACE}.conf",
+      new Map([["IFACE", "tp0"]]),
+    ),
+    "/etc/wireguard/tp0.conf",
+  );
+  assertEquals(expandTemplate("/etc/wireguard/${X}.conf", new Map()), null);
+});
+
+test("every drop-in the install or the daemon writes is removed by purge.sh", async () => {
+  const { gaps } = await findDropinGaps();
+  assertEquals(
+    gaps.map((g) => `${g.file}: ${g.path} (${g.why})`),
+    [],
+    "remove the file in a tp_remove_* function of purge.sh (by name or by a " +
+      "turbopanel glob) and list it in the inventory",
+  );
+});
+
+// Builtin and Docker chains the daemon only adds jumps to; purge.sh deletes
+// the TP-* jumps from these.
+const PARENT_CHAINS = ["INPUT", "FORWARD", "DOCKER-USER"];
+
+test("every firewall chain the daemon or a role names is a TP-* chain or a parent purge.sh cleans", async () => {
+  const code = stripComments(await Deno.readTextFile(purgePath));
+  const parents = code.match(
+    /for _ff_chain in ([A-Z -]+); do\n\s*tp_firewall_delete_jumps/,
+  );
+  assert(parents, "the purge's jump cleanup loop is missing");
+  assertEquals(
+    parents[1].trim().split(/\s+/).sort(),
+    [...PARENT_CHAINS].sort(),
+  );
+  const bad: string[] = [];
+  for (const file of await daemonSourceFiles()) {
+    const text = stripTsComments(await Deno.readTextFile(file));
+    for (
+      const m of text.matchAll(
+        /\bconst\s+(?:[A-Z0-9]+_)*CHAIN(?:_[A-Z0-9]+)*\s*=\s*"([^"]+)"/g,
+      )
+    ) {
+      const chain = m[1];
+      if (/^TP-[A-Za-z0-9_-]+$/.test(chain) || PARENT_CHAINS.includes(chain)) {
+        continue;
+      }
+      bad.push(`${relative(repo, file)}: ${chain}`);
+    }
+  }
+  for (const file of await installFiles()) {
+    const text = stripComments(await Deno.readTextFile(file));
+    for (
+      const m of text.matchAll(/(?:iptables|ip6tables)\b[^\n]*\s-N\s+(\S+)/g)
+    ) {
+      if (!/^"?TP-/.test(m[1])) bad.push(`${relative(repo, file)}: ${m[1]}`);
+    }
+  }
+  assertEquals(
+    bad,
+    [],
+    "name new chains TP-* (purge.sh flushes and deletes every TP-* chain) " +
+      "or teach purge.sh to remove them",
+  );
+});

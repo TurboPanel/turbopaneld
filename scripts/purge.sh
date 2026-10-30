@@ -1490,7 +1490,7 @@ tp_inventory_wireguard() {
 }
 
 tp_inventory_host_files() {
-  for _ih_pattern in /etc/sysctl.d/99-turbopanel-*.conf /etc/udev/rules.d/99-turbopanel-*.rules /etc/sudoers.d/turbopanel-*; do
+  for _ih_pattern in /etc/sysctl.d/99-turbopanel-*.conf /etc/udev/rules.d/99-turbopanel-*.rules /etc/sudoers.d/turbopanel-* /etc/modules-load.d/turbopanel-*.conf; do
     for _ih_file in $_ih_pattern; do
       [ -e "$_ih_file" ] || continue
       tp_file_add "$TP_TMP/inv.hostfiles" "$_ih_file"
@@ -2655,6 +2655,10 @@ tp_remove_host_config() {
     fi
   done
   tp_remove_glob '/etc/sudoers.d/turbopanel-*' || true
+  # The drive temperature sensor's boot-time module load (metrics). The module
+  # already loaded stays until the next restart; unloading it could pull a
+  # module the operator also uses.
+  tp_remove_glob '/etc/modules-load.d/turbopanel-*.conf' || true
   tp_remove_sshd_dropin
   if [ -e /usr/local/bin/php ]; then
     tp_run "remove /usr/local/bin/php" rm -f /usr/local/bin/php || true

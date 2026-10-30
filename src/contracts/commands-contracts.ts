@@ -365,7 +365,7 @@ export type FirewallPolicy = {
  * can tell which desired state a report describes.
  *
  * `controlPlane.tcpPorts` names the co-located control plane's entrypoint
- * (8443 by default; 80 and 443 under `lets_encrypt`). The daemon treats those
+ * (always 8443; 80 and 443 belong to hosting). The daemon treats those
  * as invariants — accepted before any rule — and refuses a default-drop apply
  * on a host where `turbopanel-instance.service` is active and the list is
  * absent, because a panel that forgot its own port must not lock its wizard
