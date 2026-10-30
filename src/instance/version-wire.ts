@@ -94,6 +94,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-connector-v1",
   "tunnel-status-v1",
   "managed-backup-login-v1",
+  "fabric-retain-keys-v1",
 ] as const;
 
 /**
@@ -143,6 +144,16 @@ export const TUNNEL_STATUS_FEATURE: DaemonWireFeature = "tunnel-status-v1";
  */
 export const MANAGED_BACKUP_LOGIN_FEATURE: DaemonWireFeature =
   "managed-backup-login-v1";
+
+/**
+ * This daemon understands `server.fabric.reconcile` `{ enabled: false,
+ * retainKeys: true }`: it takes `tp0` down and keeps its key, routed bridges
+ * and forwarding rules, so turning TurboFabric back on is instant. Without it
+ * the control plane refuses to pause (an older daemon would read the message
+ * as a full tear down and drop its key); removing TurboFabric still works.
+ */
+export const FABRIC_RETAIN_KEYS_FEATURE: DaemonWireFeature =
+  "fabric-retain-keys-v1";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`

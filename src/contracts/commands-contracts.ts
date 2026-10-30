@@ -714,10 +714,13 @@ export type FabricReconcileNetwork = {
 /**
  * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
  * `{ enabled: false }` is a **tear down** (`tp0`, routed bridges, `TP-FORWARD`,
- * keys, state) — not a no-op.
+ * keys, state) — not a no-op. `retainKeys: true` (daemons that advertise
+ * `fabric-retain-keys-v1`) only pauses: `tp0` and its routes go, the key,
+ * bridges and forwarding stay, and the next enable reuses the same key.
  */
 export type FabricReconcileDisabledPayload = {
   enabled: false;
+  retainKeys?: boolean;
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
@@ -3815,7 +3818,7 @@ export function ipLiteralToBigInt(value: string): bigint | null {
   return out;
 }
 
-type ParsedCidrLiteral = {
+export type ParsedCidrLiteral = {
   version: 4 | 6;
   prefix: number;
   /** Network address (host bits cleared). */
@@ -4112,7 +4115,9 @@ export function parseFabricReconcilePayload(
     throw new TypeError("Invalid fabric enabled");
   }
   if (!record.enabled) {
-    return { enabled: false };
+    return typeof record.retainKeys === "boolean"
+      ? { enabled: false, retainKeys: record.retainKeys }
+      : { enabled: false };
   }
   return parseEnabledFabricPayload(record);
 }

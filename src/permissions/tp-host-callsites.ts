@@ -137,21 +137,6 @@ const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
 const FABRIC_SYSCTL = `${P}/etc/sysctl.d/99-turbopanel-fabric.conf`;
 /** A WireGuard key's shape (32 bytes, base64), built so no key sits in source. */
 const WG_KEY = `${"A".repeat(43)}=`;
-// A mesh config as `renderWgConf` writes it (keys built at run time).
-const WG_CONF_CONTENT = [
-  "[Interface]",
-  `PrivateKey = ${WG_KEY}`,
-  "Address = 10.77.0.1/24",
-  "ListenPort = 51820",
-  "",
-  "[Peer]",
-  `PublicKey = ${WG_KEY}`,
-  "AllowedIPs = 10.77.0.2/32, 10.78.0.0/24",
-  "Endpoint = 203.0.113.7:51820",
-  `PresharedKey = ${WG_KEY}`,
-  "PersistentKeepalive = 25",
-  "",
-].join("\n");
 const MGD_CHAIN = "TP-MGD-0a1b2c3d";
 const MGD_MATCH = [
   "-p",
@@ -2072,10 +2057,6 @@ const SITES: CallSite[] = [
     "src/commands/fabric.ts|runHost(cmd,args,{timeoutMs:PREFLIGHT_TIMEOUT_MS})",
     { argv: ["iptables", "--version"] },
   ),
-  tpHost('src/commands/fabric.ts|runHost("chmod",["600",WG_QUICK_CONF_PATH])', {
-    argv: ["chmod", "600", WG_CONF],
-    setup: file(WG_CONF),
-  }),
   tpHost(
     'src/commands/fabric.ts|runHost("chmod",["644",FABRIC_SYSCTL_DROPIN])',
     {
@@ -2083,13 +2064,6 @@ const SITES: CallSite[] = [
       setup: file(FABRIC_SYSCTL),
     },
   ),
-  tpHost('src/commands/fabric.ts|runHost("chmod",["700","/etc/wireguard"])', {
-    argv: ["chmod", "700", `${P}/etc/wireguard`],
-  }),
-  tpHost('src/commands/fabric.ts|runHost("cp",[confPath,WG_QUICK_CONF_PATH])', {
-    argv: ["cp", `${FABRIC_DIR}/wireguard/tp0.conf`, WG_CONF],
-    setup: file(`${FABRIC_DIR}/wireguard/tp0.conf`, WG_CONF_CONTENT),
-  }),
   notRoot(
     'src/commands/fabric.ts|runHost("docker",["network","create","--driver","bridge","--subnet",network.subnet,"--opt",DOCKER_ROUTED_BRIDGE_OPT,"--opt",`${DOCKER_MTU_OPT_KEY}=${mtu}`,network.name])',
     DOCKER_DIRECT,
@@ -2121,6 +2095,27 @@ const SITES: CallSite[] = [
     { argv: ["ip", "addr", "replace", "10.99.0.1/24", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric address for this test fixture, not a reachable host
   ),
   tpHost(
+    'src/commands/fabric.ts|runHost("ip",["route",action,cidr,"dev",FABRIC_INTERFACE_NAME])',
+    { argv: ["ip", "route", "replace", "10.250.0.2/32", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric peer address for this test fixture, not a reachable host
+    { argv: ["ip", "route", "del", "10.193.0.0/16", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric container range for this test fixture, not a reachable host
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",[`-${version}`,"route","show"])',
+    { argv: ["ip", "-4", "route", "show"] },
+    { argv: ["ip", "-6", "route", "show"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|["-n","rm","-f",path]',
+    { argv: ["rm", "-f", WG_CONF], setup: file(WG_CONF) },
+    { argv: ["rm", "-f", FABRIC_SYSCTL], setup: file(FABRIC_SYSCTL) },
+  ),
+  tpHost(
+    // Split so this file's own text is not scanned as a call site.
+    'src/commands/fabric.ts|runHost("sudo",hostSudo' +
+      'Args(["-n","rm","-f",path]))',
+    { argv: ["rm", "-f", WG_CONF], setup: file(WG_CONF) },
+  ),
+  tpHost(
     'src/commands/fabric.ts|runHost("ip",["link","add","dev",FABRIC_INTERFACE_NAME,"type","wireguard"])',
     { argv: ["ip", "link", "add", "dev", "tp0", "type", "wireguard"] },
   ),
@@ -2146,9 +2141,6 @@ const SITES: CallSite[] = [
   tpHost('src/commands/fabric.ts|runHost("iptables",addArgs)', {
     argv: ["iptables", "-A", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
   }),
-  tpHost('src/commands/fabric.ts|runHost("mkdir",["-p","/etc/wireguard"])', {
-    argv: ["mkdir", "-p", `${P}/etc/wireguard`],
-  }),
   tpHost(
     'src/commands/fabric.ts|runHost("sysctl",["-p",FABRIC_SYSCTL_DROPIN])',
     {
@@ -2166,18 +2158,6 @@ const SITES: CallSite[] = [
     'src/commands/fabric.ts|runHost("systemctl",["disable","--now",WG_QUICK_UNIT])',
     {
       argv: ["systemctl", "disable", "--now", "wg-quick@tp0"],
-    },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runHost("systemctl",["enable","--now",WG_QUICK_UNIT])',
-    {
-      argv: ["systemctl", "enable", "--now", "wg-quick@tp0"],
-    },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runHost("systemctl",["enable",WG_QUICK_UNIT])',
-    {
-      argv: ["systemctl", "enable", "wg-quick@tp0"],
     },
   ),
   tpHost(
@@ -2253,17 +2233,6 @@ const SITES: CallSite[] = [
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-X",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
     { argv: ["iptables", "-X", "TP-FORWARD"] },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",FABRIC_SYSCTL_DROPIN],()=>true)',
-    { argv: ["rm", "-f", FABRIC_SYSCTL], setup: file(FABRIC_SYSCTL) },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",WG_QUICK_CONF_PATH],()=>true)',
-    {
-      argv: ["rm", "-f", WG_CONF],
-      setup: file(WG_CONF),
-    },
   ),
 
   // Managed-database public listener scoping.

@@ -9,10 +9,16 @@
  * `wireguard/psk/`, inlined into the mode-0600 `tp0.conf`, then deleted.
  *
  * `{ enabled: false }` tears down `tp0`, routed bridges, `TP-FORWARD`, keys,
- * and local state. The mesh is durable across reboots via `wg-quick@tp0`, a
- * `sysctl.d` drop-in, persisted `state.json`, and a daemon-start re-reconcile
- * that reuses PSK-bearing durable `tp0.conf` instead of rewriting peers without
- * a PSK. `TP-FORWARD` accepts same-subnet bridge traffic and bidirectional
+ * and local state. `{ enabled: false, retainKeys: true }` only pauses: `tp0`
+ * (and its routes) goes, everything else stays and `state.json` is marked
+ * `suspended` so a reboot does not bring the tunnel back; the next enable
+ * reuses the same key. The daemon is the only owner of `tp0`: it creates the
+ * interface, syncs peers, installs one kernel route per peer `AllowedIPs`
+ * entry (`fabric-routes.ts`) and disables any `wg-quick@tp0` left from older
+ * releases. The mesh is durable across reboots via a `sysctl.d` drop-in,
+ * persisted `state.json`, and a daemon-start re-reconcile that reuses
+ * PSK-bearing durable `tp0.conf` instead of rewriting peers without a PSK.
+ * `TP-FORWARD` accepts same-subnet bridge traffic and bidirectional
  * local-bridge ↔ remote peer prefix (non-/32) forwarding.
  */
 import { encodeHex } from "@std/encoding/hex";
@@ -26,9 +32,18 @@ import { collectServerIps } from "../host/server-addresses.ts";
 import { FABRIC_INTERFACE_NAME } from "../host/fabric-interface.ts";
 import type { ServerReportedIp } from "../contracts/server-reported-ip.ts";
 import { stampObservedPeerInterfaces } from "./fabric-peer-interface.ts";
+import {
+  desiredFabricRoutes,
+  type FabricRoutePlan,
+  fabricRoutePlanIsEmpty,
+  type ObservedRoute,
+  parseRouteShow,
+  planFabricRoutes,
+} from "./fabric-routes.ts";
 import { fabricNetworkDir, resolveLayout } from "../paths/layout.ts";
 import {
   type FabricPeerHealth,
+  type FabricReconcileDisabledPayload,
   type FabricReconcileEnabledPayload,
   type FabricReconcileNetwork,
   type FabricReconcileObservedPeer,
@@ -103,6 +118,8 @@ type FabricStateJson = {
   gateway?: boolean;
   peers: FabricStatePeerJson[];
   networks: FabricReconcileNetwork[];
+  /** Paused by `retainKeys`: keys and bridges kept, `tp0` stays down. */
+  suspended?: boolean;
 };
 
 let networkDirOverride: string | null = null;
@@ -179,6 +196,11 @@ function isActiveEndpointsText(result: FabricRunResult): boolean {
   const text = `${result.stderr} ${result.stdout}`.toLowerCase();
   return text.includes("has active endpoints") ||
     text.includes("active endpoints");
+}
+
+function isMissingRouteText(result: FabricRunResult): boolean {
+  const text = `${result.stderr} ${result.stdout}`.toLowerCase();
+  return text.includes("no such process") || isMissingDeviceText(result);
 }
 
 function isMissingIptablesText(result: FabricRunResult): boolean {
@@ -718,49 +740,118 @@ async function syncFabricPeers(
   }
 }
 
-async function installHostWgQuickConfig(confPath: string): Promise<void> {
-  const mkdir = await runHost("mkdir", ["-p", "/etc/wireguard"]);
-  if (!mkdir.success) {
-    throw new Error(mkdir.stderr || "failed to create /etc/wireguard");
-  }
-  await runHost("chmod", ["700", "/etc/wireguard"]);
-  const copy = await runHost("cp", [confPath, WG_QUICK_CONF_PATH]);
-  if (!copy.success) {
-    throw new Error(
-      copy.stderr || `failed to install ${WG_QUICK_CONF_PATH}`,
-    );
-  }
-  const chmod = await runHost("chmod", ["600", WG_QUICK_CONF_PATH]);
-  if (!chmod.success) {
-    throw new Error(chmod.stderr || `failed to chmod ${WG_QUICK_CONF_PATH}`);
-  }
+/**
+ * Remove a root file through the host wrapper (`rm` is not a direct spawn
+ * target of the daemon). Best effort: a failure is logged, never thrown.
+ */
+async function removeRootFileBestEffort(path: string): Promise<void> {
+  const result = await runHost("sudo", hostSudoArgs(["-n", "rm", "-f", path]));
+  if (result.success) return;
+  logWarn(
+    "commands",
+    `TurboFabric could not remove ${path}: ${
+      result.stderr || result.stdout || `exit ${result.code}`
+    }`,
+  );
 }
 
-async function ensureWgQuickUnit(): Promise<void> {
+/**
+ * The daemon is the only owner of `tp0`. Older releases enabled
+ * `wg-quick@tp0`, which races the daemon at boot and refuses to start when
+ * `tp0` exists. Disable it when it is enabled or running; `--now` deletes a
+ * `tp0` it brought up, so callers create the interface after this.
+ */
+async function retireWgQuickUnit(): Promise<void> {
   const enabled = await runHost("systemctl", ["is-enabled", WG_QUICK_UNIT]);
   const active = await runHost("systemctl", ["is-active", WG_QUICK_UNIT]);
-  if (enabled.success && active.success) return;
-  if (active.success) {
-    const enableOnly = await runHost("systemctl", ["enable", WG_QUICK_UNIT]);
-    if (!enableOnly.success) {
+  if (!enabled.success && !active.success) return;
+  await disableWgQuickUnit();
+}
+
+async function readRouteFamily(
+  version: 4 | 6,
+  required: boolean,
+): Promise<ObservedRoute[]> {
+  const result = await runHost("ip", [`-${version}`, "route", "show"]);
+  if (result.success) return parseRouteShow(result.stdout, version);
+  // A host without IPv6 may refuse the read; that only matters when a peer
+  // wants an IPv6 route.
+  if (!required) return [];
+  throw new Error(
+    result.stderr || `failed to read IPv${version} routes`,
+  );
+}
+
+async function planTp0Routes(
+  payload: FabricReconcileEnabledPayload,
+): Promise<FabricRoutePlan> {
+  const desired = desiredFabricRoutes(payload);
+  const needs = (version: 4 | 6) =>
+    desired.some((route) => route.parsed.version === version);
+  const table = [
+    ...await readRouteFamily(4, needs(4)),
+    ...await readRouteFamily(6, needs(6)),
+  ];
+  return planFabricRoutes(desired, table);
+}
+
+async function changeTp0Route(
+  action: "replace" | "del",
+  cidr: string,
+): Promise<FabricRunResult> {
+  return await runHost("ip", [
+    "route",
+    action,
+    cidr,
+    "dev",
+    FABRIC_INTERFACE_NAME,
+  ]);
+}
+
+/**
+ * Make the kernel routes on `tp0` match the peers' `AllowedIPs`: add what is
+ * missing, remove `tp0` routes no peer wants, skip a range another interface
+ * already routes. Runs after every successful `wg syncconf`.
+ */
+async function reconcileFabricRoutes(
+  payload: FabricReconcileEnabledPayload,
+): Promise<void> {
+  const plan = await planTp0Routes(payload);
+  for (const skipped of plan.skipped) {
+    logWarn(
+      "commands",
+      `TurboFabric route ${skipped.cidr} not installed on ${FABRIC_INTERFACE_NAME}: ${skipped.dev} already routes it`,
+    );
+  }
+  await forEachSequential(plan.add, async (cidr) => {
+    const added = await changeTp0Route("replace", cidr);
+    if (!added.success) {
       throw new Error(
-        enableOnly.stderr || `failed to enable ${WG_QUICK_UNIT}`,
+        added.stderr ||
+          `failed to add route ${cidr} on ${FABRIC_INTERFACE_NAME}`,
       );
     }
-    return;
-  }
-  const enableNow = await runHost("systemctl", [
-    "enable",
-    "--now",
-    WG_QUICK_UNIT,
-  ]);
-  if (enableNow.success) return;
-  // Interface may already exist from `ensureTp0Interface` — enable without start.
-  const enableOnly = await runHost("systemctl", ["enable", WG_QUICK_UNIT]);
-  if (!enableOnly.success) {
-    throw new Error(
-      enableOnly.stderr || `failed to enable ${WG_QUICK_UNIT}`,
+  });
+  await forEachSequential(plan.remove, async (cidr) => {
+    const removed = await changeTp0Route("del", cidr);
+    if (removed.success || isMissingRouteText(removed)) return;
+    logWarn(
+      "commands",
+      `TurboFabric could not remove route ${cidr}: ${
+        removed.stderr || `exit ${removed.code}`
+      }`,
     );
+  });
+}
+
+/** `tp0` routes already match the payload (a failed read is a mismatch). */
+async function fabricRoutesMatch(
+  payload: FabricReconcileEnabledPayload,
+): Promise<boolean> {
+  try {
+    return fabricRoutePlanIsEmpty(await planTp0Routes(payload));
+  } catch {
+    return false;
   }
 }
 
@@ -994,13 +1085,33 @@ export function fabricCrossSubnetForwardPairs(
   return pairs;
 }
 
+function forwardAcceptMatch(source: string, dest: string): string[] {
+  return [FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"];
+}
+
 async function ensureForwardAccept(
   source: string,
   dest: string,
 ): Promise<void> {
-  await ensureIptablesRule(
-    [FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"],
-    ["-A", FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"],
+  const match = forwardAcceptMatch(source, dest);
+  await ensureIptablesRule(match, ["-A", ...match]);
+}
+
+/**
+ * Remove the local bridge ↔ peer range ACCEPT pairs a running fabric
+ * installed for these peers (best effort; a missing rule is fine).
+ */
+async function removePeerForwardPairs(state: FabricStateJson): Promise<void> {
+  await forEachSequential(
+    fabricCrossSubnetForwardPairs(
+      state.networks.map((network) => network.subnet),
+      fabricOwnedPeerPrefixes(state.peers),
+    ),
+    async (pair) => {
+      await removeIptablesRuleBestEffort(
+        forwardAcceptMatch(pair.source, pair.dest),
+      );
+    },
   );
 }
 
@@ -1209,6 +1320,7 @@ function parseFabricStateJson(raw: string): FabricStateJson | null {
     if (typeof record.gateway === "boolean") {
       state.gateway = record.gateway;
     }
+    if (record.suspended === true) state.suspended = true;
     return state;
   } catch {
     return null;
@@ -1483,10 +1595,11 @@ async function liveInterfaceMatchesDesired(
   payload: FabricReconcileEnabledPayload,
 ): Promise<boolean> {
   if (!await wgShowInterface()) return false;
-  return await observedTp0MatchesDesired(
+  const tp0 = await observedTp0MatchesDesired(
     payload.address,
     resolvePayloadMtu(payload),
   );
+  return tp0 && await fabricRoutesMatch(payload);
 }
 
 async function probeFabricTool(cmd: string, args: string[]): Promise<void> {
@@ -1565,6 +1678,47 @@ async function disableWgQuickUnit(): Promise<void> {
   );
 }
 
+/** Stop `wg-quick@tp0` and delete `tp0`; its routes go with it. */
+async function takeTp0Down(): Promise<void> {
+  await disableWgQuickUnit();
+  await runTeardownBestEffort(
+    "ip",
+    ["link", "delete", FABRIC_INTERFACE_NAME],
+    isMissingDeviceText,
+  );
+}
+
+/**
+ * `retainKeys` pause: the tunnel goes down, the private key, PSK-bearing
+ * `tp0.conf` and routed bridges stay, and `state.json` is marked `suspended`
+ * so a reboot does not bring `tp0` back. `TP-FORWARD` keeps only the local
+ * bridge rules, as boot restore of a paused fabric builds it: the peer range
+ * pairs come out and `tp0` transit is dropped. The apply stamp goes, so the
+ * next enable re-applies with the same key.
+ */
+async function handleFabricPause(
+  networkDir: string,
+): Promise<FabricReconcileResult> {
+  const state = await readFabricState(networkDir);
+  logInfo(
+    "commands",
+    `TurboFabric pause iface=${FABRIC_INTERFACE_NAME}${
+      state ? ` pubkey=${state.publicKey}` : ""
+    }`,
+  );
+  await takeTp0Down();
+  await removePathBestEffort(applyStampPath(networkDir));
+  if (state) {
+    const suspended = { ...state, suspended: true };
+    if (state.suspended !== true) {
+      await writeFabricStateJson(networkDir, suspended);
+    }
+    await removePeerForwardPairs(state);
+    await reconcileForwardingFromState(suspended);
+  }
+  return { summary: "TurboFabric paused; keys kept" };
+}
+
 async function handleFabricTeardown(
   networkDir: string,
 ): Promise<FabricReconcileResult> {
@@ -1576,19 +1730,14 @@ async function handleFabricTeardown(
     );
   }
 
-  await disableWgQuickUnit();
-  await runTeardownBestEffort(
-    "ip",
-    ["link", "delete", FABRIC_INTERFACE_NAME],
-    isMissingDeviceText,
-  );
+  await takeTp0Down();
   const left = await removeAllFabricBridges(
     networkDir,
     (state?.networks ?? []).map((network) => network.name),
   );
   await teardownIptables();
-  await runTeardownBestEffort("rm", ["-f", WG_QUICK_CONF_PATH], () => true);
-  await runTeardownBestEffort("rm", ["-f", FABRIC_SYSCTL_DROPIN], () => true);
+  await removeRootFileBestEffort(WG_QUICK_CONF_PATH);
+  await removeRootFileBestEffort(FABRIC_SYSCTL_DROPIN);
 
   await removePathBestEffort(privateKeyPath(networkDir));
   await removePathBestEffort(pskDir(networkDir));
@@ -1641,20 +1790,60 @@ async function retryPendingFabricTeardown(networkDir: string): Promise<void> {
   }
 }
 
+/**
+ * Boot restore: a route that cannot be installed (e.g. IPv6 turned off on
+ * the host) is logged, never a reason to leave local bridges down.
+ */
+async function reconcileFabricRoutesBestEffort(
+  payload: FabricReconcileEnabledPayload,
+): Promise<void> {
+  try {
+    await reconcileFabricRoutes(payload);
+  } catch (err) {
+    logWarn(
+      "commands",
+      `TurboFabric routes on ${FABRIC_INTERFACE_NAME} not fully restored: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Shared by live apply and boot restore: retire `wg-quick@tp0`, create and
+ * address `tp0`, sync peers, drop the stale wg-quick copy of the config (read
+ * by the caller first, for PSKs), ensure routed bridges, reconcile routes.
+ * Bridges come before routes so a failed route never keeps them down; at boot
+ * (`routesBestEffort`) a route failure is only logged.
+ */
+async function bringUpFabric(
+  networkDir: string,
+  payload: FabricReconcileEnabledPayload,
+  pskByPublicKey: ReadonlyMap<string, string>,
+  routesBestEffort = false,
+): Promise<void> {
+  const mtu = resolvePayloadMtu(payload);
+  await retireWgQuickUnit();
+  await ensureTp0Interface(payload.address);
+  await applyMtu(mtu);
+  await enableIpv4Forwarding();
+  await syncFabricPeers(networkDir, payload, pskByPublicKey);
+  await removeRootFileBestEffort(WG_QUICK_CONF_PATH);
+  await ensureFabricDockerNetworks(payload.networks ?? [], mtu);
+  if (routesBestEffort) {
+    await reconcileFabricRoutesBestEffort(payload);
+    return;
+  }
+  await reconcileFabricRoutes(payload);
+}
+
 async function applyEnabledFabric(
   networkDir: string,
   payload: FabricReconcileEnabledPayload,
   pskByPublicKey: ReadonlyMap<string, string>,
 ): Promise<void> {
   const previous = await readFabricState(networkDir);
-  const mtu = resolvePayloadMtu(payload);
-  await ensureTp0Interface(payload.address);
-  await applyMtu(mtu);
-  await enableIpv4Forwarding();
-  await syncFabricPeers(networkDir, payload, pskByPublicKey);
-  await installHostWgQuickConfig(wgConfPath(networkDir));
-  await ensureWgQuickUnit();
-  await ensureFabricDockerNetworks(payload.networks ?? [], mtu);
+  await bringUpFabric(networkDir, payload, pskByPublicKey);
   const desired = new Set(
     (payload.networks ?? []).map((network) => network.name),
   );
@@ -1737,19 +1926,32 @@ async function handleFabricEnable(
 }
 
 /**
- * Re-install `TP-FORWARD` + `DOCKER-USER` jump when fabric is enabled on this
- * host (`state.json` present). Idempotent; safe after dockerd rebuilds
- * `DOCKER-USER`.
+ * `TP-FORWARD` from `state.json`. A paused fabric keeps only the local bridge
+ * rules: with no tunnel there is no reason to accept traffic between local
+ * bridges and remote peer ranges, which would otherwise reach the default
+ * route.
+ */
+async function reconcileForwardingFromState(
+  state: FabricStateJson,
+): Promise<void> {
+  const paused = state.suspended === true;
+  await reconcileFabricForwarding(
+    state.networks,
+    paused ? [] : state.peers,
+    !paused && state.gateway === true,
+  );
+}
+
+/**
+ * Re-install `TP-FORWARD` + `DOCKER-USER` jump when fabric is enabled (or
+ * paused) on this host (`state.json` present). Idempotent; safe after dockerd
+ * rebuilds `DOCKER-USER`.
  */
 export async function reinstallFabricForwardingIfEnabled(): Promise<void> {
   const state = await readFabricState(resolveNetworkDir());
   if (!state) return;
   try {
-    await reconcileFabricForwarding(
-      state.networks,
-      state.peers,
-      state.gateway === true,
-    );
+    await reconcileForwardingFromState(state);
   } catch (err) {
     logWarn(
       "commands",
@@ -1758,6 +1960,23 @@ export async function reinstallFabricForwardingIfEnabled(): Promise<void> {
       }`,
     );
   }
+}
+
+/**
+ * Boot with a paused fabric: `tp0` stays down; local bridges and their
+ * forwarding rules come back so local container networks keep working.
+ */
+async function restorePausedFabric(state: FabricStateJson): Promise<void> {
+  await retireWgQuickUnit();
+  await ensureFabricDockerNetworks(
+    state.networks,
+    state.mtu ?? FABRIC_DEFAULT_MTU,
+  );
+  await reconcileForwardingFromState(state);
+  logInfo(
+    "commands",
+    `TurboFabric paused; ${FABRIC_INTERFACE_NAME} left down pubkey=${state.publicKey}`,
+  );
 }
 
 /**
@@ -1774,25 +1993,16 @@ export async function restoreFabricFromPersistedState(): Promise<void> {
     return;
   }
   try {
+    if (state.suspended === true) {
+      await restorePausedFabric(state);
+      return;
+    }
     const payload = enabledPayloadFromState(state);
     const policyError = fabricAllowedIpsPolicyError(payload);
     if (policyError) throw new Error(policyError);
-    const mtu = resolvePayloadMtu(payload);
-    await ensureTp0Interface(payload.address);
-    await applyMtu(mtu);
-    await enableIpv4Forwarding();
-    if (payload.peers.length > 0) {
-      const pskByPublicKey = await loadPersistedPeerPresharedKeys(networkDir);
-      await syncFabricPeers(networkDir, payload, pskByPublicKey);
-      await installHostWgQuickConfig(wgConfPath(networkDir));
-    }
-    await ensureWgQuickUnit();
-    await ensureFabricDockerNetworks(payload.networks ?? [], mtu);
-    await reconcileFabricForwarding(
-      payload.networks ?? [],
-      payload.peers,
-      payload.gateway === true,
-    );
+    const pskByPublicKey = await loadPersistedPeerPresharedKeys(networkDir);
+    await bringUpFabric(networkDir, payload, pskByPublicKey, true);
+    await reconcileForwardingFromState(state);
     logInfo(
       "commands",
       `TurboFabric restored from state iface=${FABRIC_INTERFACE_NAME} pubkey=${state.publicKey}`,
@@ -2089,6 +2299,14 @@ export async function handleFabricPathProbe(
   return observations;
 }
 
+async function handleFabricDisable(
+  networkDir: string,
+  payload: FabricReconcileDisabledPayload,
+): Promise<FabricReconcileResult> {
+  if (payload.retainKeys === true) return await handleFabricPause(networkDir);
+  return await handleFabricTeardown(networkDir);
+}
+
 export async function handleFabricReconcile(
   payload: FabricReconcilePayload,
   _daemonReceivedAt: string,
@@ -2097,6 +2315,6 @@ export async function handleFabricReconcile(
   const parsed = parseFabricReconcilePayload(payload);
   await preflightFabricTools();
   const networkDir = resolveNetworkDir();
-  if (!parsed.enabled) return await handleFabricTeardown(networkDir);
+  if (!parsed.enabled) return await handleFabricDisable(networkDir, parsed);
   return await handleFabricEnable(parsed, deps);
 }
