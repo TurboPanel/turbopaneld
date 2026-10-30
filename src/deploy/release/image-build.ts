@@ -37,7 +37,7 @@
  * manifest digest) and pulls the same image into Docker's store; the build names
  * `ghcr.io/railwayapp/railpack-frontend:<tag>@<digest>`, so a mutable upstream tag
  * can never change what built a release, and two releases recorded with the same
- * `railpackFrontendVersion` always used the same frontend bytes. If the image
+ * `builderFrontendVersion` always used the same frontend bytes. If the image
  * was pruned from the store, the Engine fetches exactly that digest again.
  *
  * **Tenant isolation is the `cache-key`.** The Engine's build cache is per host
@@ -80,14 +80,14 @@ import {
 } from "./image-prepare-sandbox.ts";
 
 /** Keep in step with orchestration/roles/buildkit/defaults/main.yml. */
-export const RAILPACK_VERSION = "0.9.0";
+export const IMAGE_BUILD_VERSION = "0.9.0";
 /**
- * SHA-256 of the release tarball per architecture, for {@link RAILPACK_VERSION}.
+ * SHA-256 of the release tarball per architecture, for {@link IMAGE_BUILD_VERSION}.
  * Source: the digest GitHub reports for each release asset, equal to the
  * SHA-256 of the file downloaded from the release. Keep in step with
  * `railpack_sha256` in orchestration/roles/buildkit/defaults/main.yml.
  */
-export const RAILPACK_SHA256: Readonly<Record<"amd64" | "arm64", string>> = {
+export const IMAGE_BUILD_SHA256: Readonly<Record<"amd64" | "arm64", string>> = {
   amd64: "ae91e74d80b8f2e2f519821172d639f6d33555938e0c26416272a56be4302bef",
   arm64: "ee39088f1879efa913f3d9a76e19b1832a3019d0625c0e8a1dfb4eac8a109600",
 };
@@ -99,37 +99,38 @@ export const RAILPACK_SHA256: Readonly<Record<"amd64" | "arm64", string>> = {
  * vendored layout by digest, not this reference. Keeping the name here is what
  * lets an operator re-vendor the same frontend on a new host.
  */
-export const RAILPACK_FRONTEND_IMAGE = "ghcr.io/railwayapp/railpack-frontend";
+export const IMAGE_BUILD_FRONTEND_IMAGE =
+  "ghcr.io/railwayapp/railpack-frontend";
 /**
  * Pinned Railpack BuildKit gateway frontend version.
  *
- * Recorded on every release it produced ({@link RailpackBuildResult}) so a
+ * Recorded on every release it produced ({@link ImageBuildBuildResult}) so a
  * rollback can say which frontend built the image it is restoring — the image
  * itself is opaque about that, and an upgrade here changes build output.
  */
-export const RAILPACK_FRONTEND_VERSION = RAILPACK_VERSION;
+export const IMAGE_BUILD_FRONTEND_VERSION = IMAGE_BUILD_VERSION;
 /**
- * Registry tag of {@link RAILPACK_FRONTEND_VERSION}. Upstream publishes the
+ * Registry tag of {@link IMAGE_BUILD_FRONTEND_VERSION}. Upstream publishes the
  * frontend as `v<version>` only; the bare version is a 404 on ghcr.io. Keep in
  * step with `railpack_frontend_tag` in orchestration/roles/buildkit.
  */
-export const RAILPACK_FRONTEND_TAG = `v${RAILPACK_FRONTEND_VERSION}`;
+export const IMAGE_BUILD_FRONTEND_TAG = `v${IMAGE_BUILD_FRONTEND_VERSION}`;
 
 /** A layout manifest digest — the only frontend reference a build accepts. */
 const FRONTEND_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
 /** Build ceiling. Matches the native lane's — a cold image build is not quick. */
-export const RAILPACK_BUILD_TIMEOUT_MS = 1_800_000;
+export const IMAGE_BUILD_BUILD_TIMEOUT_MS = 1_800_000;
 
 /** How many trailing lines of a failed build's output the error carries. */
 const FAILURE_TAIL_LINES = 20;
 
 /** Repository namespace every Railpack-built image is tagged under. */
-export const RAILPACK_IMAGE_NAMESPACE = "turbopanel-app";
+export const IMAGE_BUILD_IMAGE_NAMESPACE = "turbopanel-app";
 
 /** Scratch subdirectories the build owns (siblings of the checkout). */
-const RAILPACK_PLAN_FILENAME = "railpack-plan.json";
-const RAILPACK_FRONTEND_TAR_FILENAME = "railpack-frontend.tar";
+const IMAGE_BUILD_PLAN_FILENAME = "railpack-plan.json";
+const IMAGE_BUILD_FRONTEND_TAR_FILENAME = "railpack-frontend.tar";
 
 /**
  * Keys that make a language runtime or tool load code from a path the tenant
@@ -178,18 +179,18 @@ const TOOL_CONFIG_ENV_PREFIXES = [
 ];
 
 /** Whether a tenant `build.env` key may reach the Railpack tools' environment. */
-export function railpackToolAcceptsEnvKey(key: string): boolean {
+export function imageBuildToolAcceptsEnvKey(key: string): boolean {
   return isSpecEnvName(key) && !isReservedBuildEnvKey(key) &&
     !TOOL_CODE_LOADING_ENV_KEYS.has(key) &&
     !TOOL_CONFIG_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
 /** The tenant `build.env` names the Railpack lane leaves out, for the build log. */
-export function droppedRailpackEnvNames(
+export function droppedImageBuildEnvNames(
   build: EnvironmentDeploySourceBuild,
 ): string[] {
   return Object.keys(build.env ?? {}).filter((key) =>
-    !railpackToolAcceptsEnvKey(key)
+    !imageBuildToolAcceptsEnvKey(key)
   ).sort((a, b) => a.localeCompare(b));
 }
 
@@ -198,23 +199,23 @@ const decoder = new TextDecoder();
 const defaultSummaryRedactor: CommandSummaryRedactor = (text) =>
   redactCommandSummary(text);
 
-export function railpackBinaryPath(runtimesDir: string): string {
+export function imageBuildBinaryPath(runtimesDir: string): string {
   return join(runtimesDir, "railpack", "current", "railpack");
 }
 
 /** Vendored gateway frontend root — `<vendor>/railpack-frontend/current`. */
-export function railpackFrontendDir(runtimesDir: string): string {
+export function imageBuildFrontendDir(runtimesDir: string): string {
   return join(runtimesDir, "railpack-frontend", "current");
 }
 
 /** The vendored OCI image layout (`oci-layout`/`index.json`/`blobs`). */
-export function railpackFrontendLayoutDir(runtimesDir: string): string {
-  return join(railpackFrontendDir(runtimesDir), "image");
+export function imageBuildFrontendLayoutDir(runtimesDir: string): string {
+  return join(imageBuildFrontendDir(runtimesDir), "image");
 }
 
 /** File holding the layout's single manifest digest, written at install time. */
-export function railpackFrontendDigestPath(runtimesDir: string): string {
-  return join(railpackFrontendDir(runtimesDir), "digest");
+export function imageBuildFrontendDigestPath(runtimesDir: string): string {
+  return join(imageBuildFrontendDir(runtimesDir), "digest");
 }
 
 /**
@@ -223,7 +224,7 @@ export function railpackFrontendDigestPath(runtimesDir: string): string {
  * one tenant's build from reading or poisoning another's on the shared Engine
  * builder.
  */
-export function railpackCacheKey(projectId: string): string {
+export function imageBuildCacheKey(projectId: string): string {
   return assertSafeCacheSegment(projectId);
 }
 
@@ -231,8 +232,8 @@ export function railpackCacheKey(projectId: string): string {
  * The frontend image a build names: by digest only, so a repointed upstream tag
  * can never change which frontend a build runs.
  */
-export function railpackFrontendRef(digest: string): string {
-  return `${RAILPACK_FRONTEND_IMAGE}@${digest}`;
+export function imageBuildFrontendRef(digest: string): string {
+  return `${IMAGE_BUILD_FRONTEND_IMAGE}@${digest}`;
 }
 
 /**
@@ -257,7 +258,7 @@ function assertSafeCacheSegment(value: string): string {
  * `-`. The **tag** half is the release id verbatim: it is already constrained to
  * the same charset a docker tag allows, and it is the id a rollback addresses.
  */
-export function railpackImageTag(
+export function imageBuildImageTag(
   serviceId: string,
   releaseId: string,
 ): string {
@@ -272,7 +273,7 @@ export function railpackImageTag(
     throw new Error(`serviceId has no usable image repository: ${serviceId}`);
   }
   const repository = folded.slice(first, last + 1);
-  return `${RAILPACK_IMAGE_NAMESPACE}/${repository}:${releaseId}`;
+  return `${IMAGE_BUILD_IMAGE_NAMESPACE}/${repository}:${releaseId}`;
 }
 
 async function fileExists(path: string): Promise<boolean> {
@@ -310,8 +311,8 @@ function resolveArchDefault(): "arm64" | "amd64" {
   throw new Error(`Unsupported CPU architecture for Railpack builds: ${arch}`);
 }
 
-/** Optional test seams for {@link ensureBuildkitRailpack}. */
-export type EnsureBuildkitRailpackDeps = {
+/** Optional test seams for {@link ensureBuildkitImageBuild}. */
+export type EnsureBuildkitImageBuildDeps = {
   runBuildkitSetup?: () => Promise<void>;
   /** Playbook events from the default setup, for the deploy transcript. */
   onEvent?: AnsibleEventHandler;
@@ -322,11 +323,11 @@ export type EnsureBuildkitRailpackDeps = {
   ) => Promise<{ success: boolean; stderr: string }>;
   resolveArch?: () => "arm64" | "amd64";
   /** Overrides the pinned tarball digest (tests serve fixture bytes). */
-  railpackSha256?: string;
+  imageBuildSha256?: string;
 };
 
-export type BuildkitRailpackTools = {
-  railpack: string;
+export type BuildkitImageBuildTools = {
+  planner: string;
   /** Vendored gateway frontend layout — never a registry reference. */
   frontendLayoutDir: string;
   /** That layout's manifest digest; what `--opt source=` addresses. */
@@ -343,14 +344,14 @@ async function readVendoredFrontendDigest(
 ): Promise<string | undefined> {
   if (
     !(await fileExists(
-      join(railpackFrontendLayoutDir(runtimesDir), "index.json"),
+      join(imageBuildFrontendLayoutDir(runtimesDir), "index.json"),
     ))
   ) {
     return undefined;
   }
   let raw: string;
   try {
-    raw = await Deno.readTextFile(railpackFrontendDigestPath(runtimesDir));
+    raw = await Deno.readTextFile(imageBuildFrontendDigestPath(runtimesDir));
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return undefined;
     throw err;
@@ -368,14 +369,14 @@ async function readVendoredFrontendDigest(
  */
 async function resolveTools(
   runtimesDir: string,
-): Promise<BuildkitRailpackTools | undefined> {
-  const railpack = railpackBinaryPath(runtimesDir);
+): Promise<BuildkitImageBuildTools | undefined> {
+  const railpack = imageBuildBinaryPath(runtimesDir);
   if (!(await fileExists(railpack))) return undefined;
   const frontendDigest = await readVendoredFrontendDigest(runtimesDir);
   if (frontendDigest === undefined) return undefined;
   return {
-    railpack,
-    frontendLayoutDir: railpackFrontendLayoutDir(runtimesDir),
+    planner: railpack,
+    frontendLayoutDir: imageBuildFrontendLayoutDir(runtimesDir),
     frontendDigest,
   };
 }
@@ -385,19 +386,19 @@ async function resolveTools(
  * is missing from an older managed orchestration tree or Ansible fails. Mirrors
  * `downloadHostingCaddy` — same "playbook first, tarball second" order.
  */
-async function downloadBuildkitRailpack(
+async function downloadBuildkitImageBuild(
   runtimesDir: string,
   deps:
     & Required<
-      Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
+      Pick<EnsureBuildkitImageBuildDeps, "runCommand" | "resolveArch">
     >
-    & Pick<EnsureBuildkitRailpackDeps, "railpackSha256">,
+    & Pick<EnsureBuildkitImageBuildDeps, "imageBuildSha256">,
 ): Promise<void> {
   const arch = deps.resolveArch();
   const tmp = await Deno.makeTempDir({ prefix: "tp-railpack-" });
   try {
-    await installRailpack(runtimesDir, arch, tmp, deps);
-    await installRailpackFrontend(runtimesDir, tmp, deps);
+    await installImageBuild(runtimesDir, arch, tmp, deps);
+    await installImageBuildFrontend(runtimesDir, tmp, deps);
   } finally {
     await Deno.remove(tmp, { recursive: true }).catch(() => {});
   }
@@ -433,10 +434,10 @@ async function readLayoutManifestDigest(indexPath: string): Promise<string> {
  * this lane (the built image is `docker load`ed at the end of every build), and
  * it writes a host-platform OCI layout — no second registry client to install.
  */
-async function installRailpackFrontend(
+async function installImageBuildFrontend(
   runtimesDir: string,
   tmp: string,
-  deps: Required<Pick<EnsureBuildkitRailpackDeps, "runCommand">>,
+  deps: Required<Pick<EnsureBuildkitImageBuildDeps, "runCommand">>,
 ): Promise<void> {
   const ref = pinnedImage("railpackFrontend");
   logInfo("deploy", `vendoring Railpack frontend ${ref}`);
@@ -451,7 +452,7 @@ async function installRailpackFrontend(
   }
 
   const toolDir = join(runtimesDir, "railpack-frontend");
-  const versionDir = join(toolDir, RAILPACK_FRONTEND_VERSION);
+  const versionDir = join(toolDir, IMAGE_BUILD_FRONTEND_VERSION);
   const imageDir = join(versionDir, "image");
   await Deno.remove(imageDir, { recursive: true }).catch(() => {});
   await Deno.mkdir(imageDir, { recursive: true, mode: 0o750 });
@@ -493,26 +494,26 @@ async function refreshCurrentSymlink(
  * like BuildKit; the old `-linux-<arch>` name 404'd. Keep in step with the
  * `Install Railpack` task in orchestration/roles/buildkit/tasks/main.yml.
  */
-export function railpackAssetName(arch: "arm64" | "amd64"): string {
+export function imageBuildAssetName(arch: "arm64" | "amd64"): string {
   const triple = arch === "amd64" ? "x86_64" : "arm64";
-  return `railpack-v${RAILPACK_VERSION}-${triple}-unknown-linux-musl.tar.gz`;
+  return `railpack-v${IMAGE_BUILD_VERSION}-${triple}-unknown-linux-musl.tar.gz`;
 }
 
-async function installRailpack(
+async function installImageBuild(
   runtimesDir: string,
   arch: "arm64" | "amd64",
   tmp: string,
   deps:
     & Required<
-      Pick<EnsureBuildkitRailpackDeps, "runCommand" | "resolveArch">
+      Pick<EnsureBuildkitImageBuildDeps, "runCommand" | "resolveArch">
     >
-    & Pick<EnsureBuildkitRailpackDeps, "railpackSha256">,
+    & Pick<EnsureBuildkitImageBuildDeps, "imageBuildSha256">,
 ): Promise<void> {
-  const asset = railpackAssetName(arch);
+  const asset = imageBuildAssetName(arch);
   const url =
-    `https://github.com/railwayapp/railpack/releases/download/v${RAILPACK_VERSION}/${asset}`;
+    `https://github.com/railwayapp/railpack/releases/download/v${IMAGE_BUILD_VERSION}/${asset}`;
   const tarball = join(tmp, asset);
-  logInfo("deploy", `downloading Railpack ${RAILPACK_VERSION}`);
+  logInfo("deploy", `downloading Railpack ${IMAGE_BUILD_VERSION}`);
   const curl = await deps.runCommand("/usr/bin/curl", [
     "-fsSL",
     "-o",
@@ -524,9 +525,9 @@ async function installRailpack(
   }
   await assertFileSha256(
     tarball,
-    deps.railpackSha256 ?? RAILPACK_SHA256[arch],
-    `Railpack ${RAILPACK_VERSION} (${asset})`,
-    "RAILPACK_SHA256 in src/deploy/release/railpack-build.ts and railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml",
+    deps.imageBuildSha256 ?? IMAGE_BUILD_SHA256[arch],
+    `Railpack ${IMAGE_BUILD_VERSION} (${asset})`,
+    "IMAGE_BUILD_SHA256 in src/deploy/release/image-build.ts and railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml",
   );
   const extractDir = join(tmp, "railpack");
   await Deno.mkdir(extractDir, { recursive: true });
@@ -541,7 +542,7 @@ async function installRailpack(
   }
 
   const toolDir = join(runtimesDir, "railpack");
-  const versionDir = join(toolDir, RAILPACK_VERSION);
+  const versionDir = join(toolDir, IMAGE_BUILD_VERSION);
   await Deno.mkdir(versionDir, { recursive: true, mode: 0o750 });
   await Deno.copyFile(
     join(extractDir, "railpack"),
@@ -573,10 +574,10 @@ export async function buildToolPresent(runtimesDir: string): Promise<boolean> {
  * the build names the frontend by that digest, so the bytes it runs are the
  * bytes already on disk.
  */
-export async function ensureBuildkitRailpack(
+export async function ensureBuildkitImageBuild(
   layout: LayoutPaths,
-  deps?: EnsureBuildkitRailpackDeps,
-): Promise<BuildkitRailpackTools> {
+  deps?: EnsureBuildkitImageBuildDeps,
+): Promise<BuildkitImageBuildTools> {
   const runSetup = deps?.runBuildkitSetup ??
     (() => defaultRunBuildkitSetup(deps?.onEvent));
   const runCommand = deps?.runCommand ?? runDefault;
@@ -600,10 +601,10 @@ export async function ensureBuildkitRailpack(
   if (installed) return installed;
 
   try {
-    await downloadBuildkitRailpack(layout.runtimesDir, {
+    await downloadBuildkitImageBuild(layout.runtimesDir, {
       runCommand,
       resolveArch,
-      railpackSha256: deps?.railpackSha256,
+      imageBuildSha256: deps?.imageBuildSha256,
     });
   } catch (err) {
     // On a managed host the vendor tree is root-owned and outside the daemon's
@@ -622,13 +623,13 @@ export async function ensureBuildkitRailpack(
 
   throw new Error(
     `Railpack build runtime is missing: ${
-      railpackBinaryPath(layout.runtimesDir)
-    } / ${railpackFrontendLayoutDir(layout.runtimesDir)}`,
+      imageBuildBinaryPath(layout.runtimesDir)
+    } / ${imageBuildFrontendLayoutDir(layout.runtimesDir)}`,
   );
 }
 
 /** Minimal, credential-free environment for the vendored build tools. */
-export function railpackToolEnvironment(
+export function imageBuildToolEnvironment(
   build: EnvironmentDeploySourceBuild,
   workingDir: string,
 ): Record<string, string> {
@@ -641,7 +642,7 @@ export function railpackToolEnvironment(
   // The same filter as the native lanes (one place decides what is the
   // sandbox), plus the names that load code into a tool run as the daemon.
   for (const [key, value] of Object.entries(build.env ?? {})) {
-    if (!railpackToolAcceptsEnvKey(key)) continue;
+    if (!imageBuildToolAcceptsEnvKey(key)) continue;
     env[key] = value;
   }
   return { ...env, ...builderCommandOverrides(build) };
@@ -656,9 +657,9 @@ function builderCommandOverrides(
   build: EnvironmentDeploySourceBuild,
 ): Record<string, string> {
   const env: Record<string, string> = {};
-  if (build.installCommand) env.RAILPACK_INSTALL_CMD = build.installCommand;
-  if (build.buildCommand) env.RAILPACK_BUILD_CMD = build.buildCommand;
-  if (build.startCommand) env.RAILPACK_START_CMD = build.startCommand;
+  if (build.installCommand) env.IMAGE_BUILD_INSTALL_CMD = build.installCommand;
+  if (build.buildCommand) env.IMAGE_BUILD_BUILD_CMD = build.buildCommand;
+  if (build.startCommand) env.IMAGE_BUILD_START_CMD = build.startCommand;
   return env;
 }
 
@@ -671,14 +672,14 @@ async function runToolStreamed(
     label: string;
     onOutput?: ReleaseOutputHandler;
     redactSummary?: CommandSummaryRedactor;
-    /** Test-only override; production keeps {@link RAILPACK_BUILD_TIMEOUT_MS}. */
+    /** Test-only override; production keeps {@link IMAGE_BUILD_BUILD_TIMEOUT_MS}. */
     timeoutMs?: number;
     /** Cancel signal of the deploy; aborting it kills the tool. */
     signal?: AbortSignal;
   },
 ): Promise<void> {
   const redactSummary = options.redactSummary ?? defaultSummaryRedactor;
-  const timeoutMs = options.timeoutMs ?? RAILPACK_BUILD_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? IMAGE_BUILD_BUILD_TIMEOUT_MS;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const signal = withCancelSignal(controller.signal, options.signal);
@@ -728,17 +729,17 @@ async function runToolStreamed(
   throwIfAborted(options.signal, `while ${options.label} was running`);
 }
 
-export type RailpackBuildParams = {
+export type ImageBuildBuildParams = {
   build: EnvironmentDeploySourceBuild;
   /** Checked-out working tree (checkout root + `subdirectory`). */
   workingDir: string;
   /** Scratch dir the plan file and logs may be written into (never the checkout). */
   scratchDir: string;
-  /** Railpack mount-cache prefix for the project ({@link railpackCacheKey}). */
+  /** Railpack mount-cache prefix for the project ({@link imageBuildCacheKey}). */
   cacheKey: string;
-  /** Image tag to produce ({@link railpackImageTag}). */
+  /** Image tag to produce ({@link imageBuildImageTag}). */
   imageTag: string;
-  tools: BuildkitRailpackTools;
+  tools: BuildkitImageBuildTools;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: CommandSummaryRedactor;
   /** Cancel signal of the deploy; aborting it stops the build. */
@@ -751,8 +752,8 @@ export type RailpackBuildParams = {
   sandbox?: ImagePrepareSandbox;
 };
 
-/** Optional test seams for {@link runRailpackBuild}. */
-export type RunRailpackBuildDeps = {
+/** Optional test seams for {@link runImageBuildBuild}. */
+export type RunImageBuildBuildDeps = {
   runTool?: (
     bin: string,
     args: string[],
@@ -769,23 +770,23 @@ export type RunRailpackBuildDeps = {
   /** Every `docker` call; defaults to the shared CLI path ({@link runDockerStreamed}). */
   runDocker?: RunDockerStreamedFn;
   /** Non-docker helper commands (`tar`); defaults to a plain spawn. */
-  runCommand?: EnsureBuildkitRailpackDeps["runCommand"];
+  runCommand?: EnsureBuildkitImageBuildDeps["runCommand"];
   inspectImage?: (imageTag: string) => Promise<string | undefined>;
   /** Test-only override for streamed-tool and build wall clock. */
   toolTimeoutMs?: number;
 };
 
-export type RailpackBuildResult = {
+export type ImageBuildBuildResult = {
   imageTag: string;
   /** Local image id (`sha256:…`), when `docker image inspect` could report it. */
   imageDigest?: string;
-  railpackFrontendVersion: string;
+  builderFrontendVersion: string;
   /**
    * Schema version of the plan `railpack prepare` emitted, when the plan
    * declares one; otherwise the CLI version that produced it. Recorded next to
    * the frontend version so a release's build inputs are reconstructable.
    */
-  railpackPlanVersion: string;
+  builderPlanVersion: string;
 };
 
 /**
@@ -809,7 +810,7 @@ export async function readPlanVersion(planPath: string): Promise<string> {
     // Unreadable or unparsable plan — the build below will fail loudly on its
     // own; there is nothing useful to say about a version here.
   }
-  return RAILPACK_VERSION;
+  return IMAGE_BUILD_VERSION;
 }
 
 /** The last {@link FAILURE_TAIL_LINES} non-empty lines of `text`. */
@@ -856,11 +857,11 @@ async function assertBuildxAvailable(
  * only ever fetch exactly the vendored bytes.
  */
 async function ensureFrontendImage(
-  params: RailpackBuildParams,
+  params: ImageBuildBuildParams,
   runDocker: RunDockerStreamedFn,
-  runCommand: NonNullable<EnsureBuildkitRailpackDeps["runCommand"]>,
+  runCommand: NonNullable<EnsureBuildkitImageBuildDeps["runCommand"]>,
 ): Promise<void> {
-  const ref = railpackFrontendRef(params.tools.frontendDigest);
+  const ref = imageBuildFrontendRef(params.tools.frontendDigest);
   const present = await runDocker([
     "image",
     "inspect",
@@ -870,7 +871,7 @@ async function ensureFrontendImage(
   ]);
   if (present.success) return;
   params.onOutput?.("stdout", `loading vendored Railpack frontend ${ref}`);
-  const tarball = join(params.scratchDir, RAILPACK_FRONTEND_TAR_FILENAME);
+  const tarball = join(params.scratchDir, IMAGE_BUILD_FRONTEND_TAR_FILENAME);
   try {
     const tar = await runCommand("/usr/bin/tar", [
       "-cf",
@@ -896,9 +897,9 @@ async function ensureFrontendImage(
 }
 
 /** `docker buildx build` argv for one Railpack build (Engine builder, `--load`). */
-export function railpackBuildxArgs(
+export function imageBuildBuildxArgs(
   params: Pick<
-    RailpackBuildParams,
+    ImageBuildBuildParams,
     "workingDir" | "cacheKey" | "imageTag" | "tools"
   >,
   planPath: string,
@@ -915,7 +916,7 @@ export function railpackBuildxArgs(
     "--provenance=false",
     "--sbom=false",
     "--build-arg",
-    `BUILDKIT_SYNTAX=${railpackFrontendRef(params.tools.frontendDigest)}`,
+    `BUILDKIT_SYNTAX=${imageBuildFrontendRef(params.tools.frontendDigest)}`,
     "--build-arg",
     `cache-key=${params.cacheKey}`,
     "--file",
@@ -995,13 +996,13 @@ async function resolveBuiltImageDigest(
  * `GIT_CONFIG_*`, …) and the runner sets its own `PATH`, `HOME` and `TMPDIR`.
  */
 async function prepareInSandbox(
-  params: RailpackBuildParams,
+  params: ImageBuildBuildParams,
   sandbox: ImagePrepareSandbox,
   planPath: string,
 ): Promise<void> {
   await prepareImagePlanInSandbox(definedFields({
     sandbox,
-    tool: params.tools.railpack,
+    tool: params.tools.planner,
     toolName: "image-builder",
     args: ["prepare", "."],
     planFlag: "--plan-out",
@@ -1029,19 +1030,19 @@ async function prepareInSandbox(
  * records all of it on the release manifest, which is what makes a rollback to
  * a Railpack release a pure "re-run this tag" operation with no rebuild.
  *
- * The docker CLI never sees {@link railpackToolEnvironment}: that environment
+ * The docker CLI never sees {@link imageBuildToolEnvironment}: that environment
  * carries tenant `build.env` keys and `HOME=<checkout>`, and the CLI resolves
  * plugins and its config from `DOCKER_CONFIG` / `$HOME/.docker`, so a checkout
  * shipping `.docker/cli-plugins/docker-buildx` would run as the daemon user.
  * It inherits the daemon's own environment, exactly as compose builds do.
  */
-export async function runRailpackBuild(
-  params: RailpackBuildParams,
-  deps?: RunRailpackBuildDeps,
-): Promise<RailpackBuildResult> {
-  const env = railpackToolEnvironment(params.build, params.workingDir);
+export async function runImageBuildBuild(
+  params: ImageBuildBuildParams,
+  deps?: RunImageBuildBuildDeps,
+): Promise<ImageBuildBuildResult> {
+  const env = imageBuildToolEnvironment(params.build, params.workingDir);
   // Names only, never a value: why a variable the user set has no effect.
-  for (const name of droppedRailpackEnvNames(params.build)) {
+  for (const name of droppedImageBuildEnvNames(params.build)) {
     params.onOutput?.(
       "stderr",
       `build variable ${
@@ -1049,11 +1050,11 @@ export async function runRailpackBuild(
       } was not passed to the build: the build tools do not accept this name from a site (it is reserved or changes how the build host itself runs)`,
     );
   }
-  const planPath = join(params.scratchDir, RAILPACK_PLAN_FILENAME);
+  const planPath = join(params.scratchDir, IMAGE_BUILD_PLAN_FILENAME);
   const runTool = deps?.runTool ?? runToolStreamed;
   const runDocker = deps?.runDocker ?? runDockerStreamed;
   const redact = params.redactSummary ?? defaultSummaryRedactor;
-  const timeoutMs = deps?.toolTimeoutMs ?? RAILPACK_BUILD_TIMEOUT_MS;
+  const timeoutMs = deps?.toolTimeoutMs ?? IMAGE_BUILD_BUILD_TIMEOUT_MS;
   const toolOptions = {
     cwd: params.workingDir,
     env,
@@ -1075,7 +1076,7 @@ export async function runRailpackBuild(
     await prepareInSandbox(params, params.sandbox, planPath);
   } else {
     await runTool(
-      params.tools.railpack,
+      params.tools.planner,
       ["prepare", params.workingDir, "--plan-out", planPath],
       { ...toolOptions, label: "railpack prepare" },
     );
@@ -1087,11 +1088,11 @@ export async function runRailpackBuild(
     deps?.runCommand ?? runDefault,
   );
 
-  const args = railpackBuildxArgs(params, planPath);
+  const args = imageBuildBuildxArgs(params, planPath);
   params.onOutput?.(
     "stdout",
     `$ docker buildx build (${
-      railpackFrontendRef(params.tools.frontendDigest)
+      imageBuildFrontendRef(params.tools.frontendDigest)
     })`,
   );
   await runBuildx(runDocker, args, {
@@ -1107,7 +1108,7 @@ export async function runRailpackBuild(
   return {
     imageTag: params.imageTag,
     ...(imageDigest === undefined ? {} : { imageDigest }),
-    railpackFrontendVersion: RAILPACK_FRONTEND_VERSION,
-    railpackPlanVersion: await readPlanVersion(planPath),
+    builderFrontendVersion: IMAGE_BUILD_FRONTEND_VERSION,
+    builderPlanVersion: await readPlanVersion(planPath),
   };
 }

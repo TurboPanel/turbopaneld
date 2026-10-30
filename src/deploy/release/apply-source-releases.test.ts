@@ -1111,7 +1111,7 @@ test("applySourceReleases fails rollback when the target release is missing", as
   });
 });
 
-test("applySourceReleases rolls back railpack releases from daemon record manifests", async () => {
+test("applySourceReleases rolls back image-build releases from daemon record manifests", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
@@ -1133,8 +1133,8 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
         imageTag:
           "turbopanel-app/019e0a1b-7c3d-7a52-9b4e-3f1a2c00000c:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000d",
         imageDigest: "sha256:abc",
-        railpackFrontendVersion: "0.2.0",
-        railpackPlanVersion: "0.1.0",
+        builderFrontendVersion: "0.2.0",
+        builderPlanVersion: "0.1.0",
       });
 
       let promoteExistingCalled = false;
@@ -1171,13 +1171,13 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
       assertEquals(promoteExistingCalled, false);
       assertEquals(applied.length, 1);
       const row = applied[0];
-      if (!row) throw new TypeError("expected railpack rollback row");
+      if (!row) throw new TypeError("expected image-build rollback row");
       assertEquals(
         row.imageTag,
         "turbopanel-app/019e0a1b-7c3d-7a52-9b4e-3f1a2c00000c:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000d",
       );
       assertEquals(row.commitSha, "rail-commit");
-      assertEquals(row.railpackFrontendVersion, "0.2.0");
+      assertEquals(row.builderFrontendVersion, "0.2.0");
       assertEquals(
         log.lines.some((line) =>
           line.message.includes("(image turbopanel-app")
@@ -1190,7 +1190,7 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
   });
 });
 
-test("applySourceReleases builds railpack releases without a project principal", async () => {
+test("applySourceReleases builds image-build releases without a project principal", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
@@ -1210,7 +1210,7 @@ test("applySourceReleases builds railpack releases without a project principal",
               composeServiceName: "api",
               releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000f",
               releaseServiceId: serviceId,
-              build: { kind: "railpack" },
+              build: { kind: "image" },
             }),
           ],
         }),
@@ -1226,9 +1226,9 @@ test("applySourceReleases builds railpack releases without a project principal",
             await Deno.mkdir(workingDir, { recursive: true });
             return { workingDir, commitSha: "pack-commit" };
           },
-          ensureBuildkitRailpackFn: () =>
+          ensureBuildkitImageBuildFn: () =>
             Promise.resolve({
-              railpack: "/tmp/railpack",
+              planner: "/tmp/railpack",
               buildctl: "/tmp/buildctl",
               buildkitd: "/tmp/buildkitd",
               frontendLayoutDir: "/tmp/frontend",
@@ -1236,15 +1236,15 @@ test("applySourceReleases builds railpack releases without a project principal",
             }),
           // A development host: the prepare step runs unsandboxed here.
           sandboxedBuilds: false,
-          runRailpackBuildFn: () =>
+          runImageBuildBuildFn: () =>
             Promise.resolve({
               imageTag:
                 "turbopanel-app/api:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000f",
               imageDigest: "sha256:pack",
-              railpackFrontendVersion: "0.3.0",
-              railpackPlanVersion: "0.2.0",
+              builderFrontendVersion: "0.3.0",
+              builderPlanVersion: "0.2.0",
             }),
-          recordRailpackReleaseFn: async ({ paths: record, manifest }) => {
+          recordImageBuildReleaseFn: async ({ paths: record, manifest }) => {
             await Deno.mkdir(
               join(record.releaseDir, RELEASE_METADATA_DIRNAME),
               { recursive: true },
@@ -1261,7 +1261,7 @@ test("applySourceReleases builds railpack releases without a project principal",
 
       assertEquals(applied.length, 1);
       const row = applied[0];
-      if (!row) throw new TypeError("expected railpack row");
+      if (!row) throw new TypeError("expected image-build row");
       assertEquals(
         row.imageTag,
         "turbopanel-app/api:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000f",

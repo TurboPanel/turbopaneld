@@ -733,8 +733,8 @@ export async function runCaddySetup(
 /**
  * Vendor Railpack and its BuildKit frontend for the Railpack build lane.
  *
- * Called on demand from `ensureBuildkitRailpack` when a deploy asks for
- * `build.kind: railpack`, never from `daemon-converge` or
+ * Called on demand from `ensureBuildkitImageBuild` when a deploy asks for
+ * `build.kind: image`, never from `daemon-converge` or
  * `instance-dev-install`. The build runs on the Docker Engine's own BuildKit
  * and lands in its image store, so the playbook installs the container runtime
  * first (the `docker` role).

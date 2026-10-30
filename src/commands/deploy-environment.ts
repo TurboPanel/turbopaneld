@@ -49,7 +49,7 @@ import {
   retirePreviousProjects,
 } from "../deploy/retire-previous-projects.ts";
 import {
-  applyRailpackImagesToComposeYaml,
+  applyImageBuildImagesToComposeYaml,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
 } from "../deploy/compose-overlay.ts";
@@ -77,7 +77,7 @@ import {
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
-import { ensureBuildkitRailpack } from "../deploy/release/railpack-build.ts";
+import { ensureBuildkitImageBuild } from "../deploy/release/image-build.ts";
 import { observeBuildSlot } from "../deploy/release/build-sandbox.ts";
 import { nativeAppRuntimeKind } from "../deploy/native/unit.ts";
 import {
@@ -965,16 +965,16 @@ function releasesForManifest(
 }
 
 /**
- * Compose service name → the image a Railpack release built for it.
+ * Compose service name → the image an image-build release built for it.
  *
  * Only entries that actually produced an image are in the map, so a deploy with
- * no Railpack services yields an empty map and
- * {@link applyRailpackImagesToComposeYaml} is a no-op. Rollbacks are included:
+ * no image-build services yields an empty map and
+ * {@link applyImageBuildImagesToComposeYaml} is a no-op. Rollbacks are included:
  * `applySourceReleases` reads the tag back off the target release's manifest,
- * so restoring a Railpack release is the same "write this tag into compose"
+ * so restoring an image-build release is the same "write this tag into compose"
  * operation a fresh build is.
  */
-function railpackImagesByService(
+function imageBuildImagesByService(
   applied: readonly AppliedRelease[],
 ): Map<string, string> {
   const images = new Map<string, string>();
@@ -990,9 +990,9 @@ function railpackImagesByService(
  *
  * The control plane's release-history and rollback surface reads this instead
  * of asking the host again. It is deliberately generic across both lanes: a
- * native release reports its commit, a Railpack release additionally reports
+ * native release reports its commit, an image-build release additionally reports
  * the image tag and the pinned frontend / plan versions that produced it,
- * because "which directory" is not an identity a Railpack release has.
+ * because "which directory" is not an identity an image-build release has.
  */
 function deployResultReleases(
   applied: readonly AppliedRelease[],
@@ -1003,12 +1003,12 @@ function deployResultReleases(
     releaseId: release.releaseId,
     commitSha: release.commitSha,
     ...(release.imageTag === undefined ? {} : { imageTag: release.imageTag }),
-    ...(release.railpackFrontendVersion === undefined
+    ...(release.builderFrontendVersion === undefined
       ? {}
-      : { railpackFrontendVersion: release.railpackFrontendVersion }),
-    ...(release.railpackPlanVersion === undefined
+      : { builderFrontendVersion: release.builderFrontendVersion }),
+    ...(release.builderPlanVersion === undefined
       ? {}
-      : { railpackPlanVersion: release.railpackPlanVersion }),
+      : { builderPlanVersion: release.builderPlanVersion }),
   }));
 }
 
@@ -2022,13 +2022,13 @@ async function deployContainerServices(
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
-      // Railpack-built services get their `image` here, before anything reads
+      // image-built services get their `image` here, before anything reads
       // the document: `docker compose config` below would otherwise validate a
       // service whose image does not exist yet (or act on an authored `build:`
-      // that the Railpack lane has already superseded).
-      applyRailpackImagesToComposeYaml(
+      // that the image-build lane has already superseded).
+      applyImageBuildImagesToComposeYaml(
         resolveRuntimeComposeYaml(files),
-        railpackImagesByService(appliedReleases),
+        imageBuildImagesByService(appliedReleases),
       ),
       layout,
       parsedPayload,
@@ -2975,13 +2975,13 @@ async function deployEnvironmentHolding(
         service,
         deps?.nativeAppIo,
       ),
-    ensureBuildkitRailpackFn: (releaseLayout) =>
+    ensureBuildkitImageBuildFn: (releaseLayout) =>
       runInstallStep(
         runtime,
         ["install-build-tool"],
         COMMAND_LOG_PHASES.INSTALL_BUILD_TOOL,
         () =>
-          ensureBuildkitRailpack(releaseLayout, {
+          ensureBuildkitImageBuild(releaseLayout, {
             onEvent: installEvents(
               runtime,
               ["install-build-tool"],

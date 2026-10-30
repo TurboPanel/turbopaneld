@@ -1151,16 +1151,17 @@ export type EnvironmentDeploySite = {
  * `env` is a **non-secret** build-time map only — build secrets ride
  * `variableMaterial[]` / `secretPlan[]`.
  *
- * `native` checks out, builds, and promotes a directory release. `railpack`
- * builds an OCI image with Railpack + BuildKit instead: nothing is promoted, no
+ * `native` checks out, builds, and promotes a directory release. `image`
+ * builds an OCI image with BuildKit instead: nothing is promoted, no
  * `current` symlink moves, and the resulting image tag is written back into
  * runtime compose as `services.<name>.image`. `outputDirectory` is meaningless
- * for `railpack` and is ignored rather than rejected, so a stale value left by
+ * for `image` and is ignored rather than rejected, so a stale value left by
  * a mode switch still parses. `kind: 'static'` is reserved for the
- * site release phase and is not produced today.
+ * site release phase and is not produced today. The old value of
+ * `image` is still accepted and means the same thing.
  */
 export type EnvironmentDeploySourceBuild = {
-  kind: "native" | "static" | "railpack";
+  kind: "native" | "static" | "image" | "railpack";
   /**
    * Package manager for a `kind: 'native'` node-app install. Omitted means
    * auto-detect from the lockfile after checkout. An explicit
@@ -1667,12 +1668,17 @@ export type EnvironmentDeployContainer = {
   role: "service" | "ingress" | "turbopanel";
 };
 
+/** True for the image-build kind, under its new value and the old one. */
+export function isImageBuildKind(kind: string): boolean {
+  return kind === "image" || kind === "railpack";
+}
+
 /**
  * One Git-backed release this deploy put live, as reported back to the control
  * plane.
  *
  * Enough for the release-history / rollback surface to name a release without
- * a second round trip to the host. A **Railpack** release has no promoted
+ * a second round trip to the host. An **image-built** release has no promoted
  * directory and no commit-backed tree to point at, so its identity on that
  * surface is the image tag plus the pinned tools that produced it; a native
  * release simply omits those three fields.
@@ -1690,8 +1696,8 @@ export type EnvironmentDeployResultRelease = {
   releaseId: string;
   commitSha: string;
   imageTag?: string;
-  railpackFrontendVersion?: string;
-  railpackPlanVersion?: string;
+  builderFrontendVersion?: string;
+  builderPlanVersion?: string;
 };
 
 /**
@@ -5637,7 +5643,9 @@ const SOURCE_RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const SOURCE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
 
 const SOURCE_PROVIDERS = new Set(["github", "gitlab", "git"]);
-const SOURCE_BUILD_KINDS = new Set(["native", "static", "railpack"]);
+// The old spelling of `image` is still accepted while the control plane sends
+// it.
+const SOURCE_BUILD_KINDS = new Set(["native", "static", "image", "railpack"]);
 
 /** Cap mirrors compose `SOURCE_COMMAND_MAX_LENGTH`. */
 const MAX_SOURCE_COMMAND_CHARS = 1000;
