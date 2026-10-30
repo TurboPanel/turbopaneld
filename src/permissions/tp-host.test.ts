@@ -1536,6 +1536,59 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
   });
 });
 
+test("ip route accepts only fabric routes on tp0 and route reads", async () => {
+  await withHost(async (host) => {
+    for (
+      const args of [
+        ["ip", "route", "replace", "10.250.0.12/32", "dev", "tp0"],
+        ["ip", "route", "del", "10.193.0.0/16", "dev", "tp0"],
+        ["ip", "route", "replace", "10.0.0.0/8", "dev", "tp0"],
+        ["ip", "route", "replace", "fd00:1:0:0:0:0:0:0/48", "dev", "tp0"],
+        ["ip", "route", "del", "fd00:1::5/128", "dev", "tp0"],
+        ["ip", "-4", "route", "show"],
+        ["ip", "-6", "route", "show"],
+        ["ip", "-4", "route", "show", "dev", "tp0"],
+        ["ip", "-6", "route", "show", "dev", "tp0"],
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+    for (
+      const args of [
+        ["ip", "route", "replace", "0.0.0.0/0", "dev", "tp0"],
+        ["ip", "route", "replace", "default", "dev", "tp0"],
+        ["ip", "route", "replace", "10.0.0.0/7", "dev", "tp0"],
+        ["ip", "route", "replace", "256.1.1.1/32", "dev", "tp0"],
+        ["ip", "route", "replace", "01.2.3.4/32", "dev", "tp0"],
+        ["ip", "route", "replace", "10.1.2/24", "dev", "tp0"],
+        ["ip", "route", "replace", "10.1.2.3", "dev", "tp0"],
+        ["ip", "route", "replace", "10.1.2.3/33", "dev", "tp0"],
+        ["ip", "route", "replace", "fd00::/47", "dev", "tp0"],
+        ["ip", "route", "replace", "fd00:::1/64", "dev", "tp0"],
+        ["ip", "route", "replace", "10.250.0.12/32", "dev", "eth0"],
+        ["ip", "route", "add", "10.250.0.12/32", "dev", "tp0"],
+        ["ip", "route", "flush", "dev", "tp0"],
+        [
+          "ip",
+          "route",
+          "replace",
+          "10.250.0.12/32",
+          "dev",
+          "tp0",
+          "table",
+          "local",
+        ],
+        ["ip", "route", "replace", "10.250.0.12/32", "via", "10.0.0.1"],
+        ["ip", "route", "show", "table", "all"],
+      ]
+    ) {
+      await refused(host, args);
+    }
+  });
+});
+
 test("accounts: only principals are created or changed, and only into registry groups", async () => {
   await withHost(async (host) => {
     const home = host.path("srv/users/carol/home");

@@ -3150,14 +3150,59 @@ tp_verb_xtables() {
   tp_exec "$_xt_bin" "$@"
 }
 
-# Only the fabric interface, only these shapes.
+# One IPv4 octet: 1-3 digits, no leading zero, at most 255.
+tp_ipv4_octet_ok() {
+  case "$1" in
+    ''|*[!0-9]*|0?*) [ "$1" = "0" ] ;;
+    ????*) return 1 ;;
+    *) [ "$1" -le 255 ] ;;
+  esac
+}
+
+# A fabric route: IPv4 a.b.c.d/8-32 or IPv6 hex/colon /48-128 (the daemon's
+# AllowedIPs policy refuses anything broader), always with a prefix.
+tp_fabric_route_cidr_ok() {
+  case "$1" in */*/*) return 1 ;; */*) ;; *) return 1 ;; esac
+  _frc_addr="${1%/*}"
+  _frc_bits="${1#*/}"
+  case "$_frc_bits" in ''|*[!0-9]*|0?*|????*) return 1 ;; esac
+  case "$_frc_addr" in
+    *:*)
+      case "$_frc_addr" in *[!0-9A-Fa-f:]*|*:::*|*::*::*) return 1 ;; esac
+      [ "${#_frc_addr}" -le 39 ] || return 1
+      [ "$_frc_bits" -ge 48 ] && [ "$_frc_bits" -le 128 ]
+      ;;
+    *)
+      case "$_frc_addr" in *[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+      _frc_rest="$_frc_addr"
+      _frc_n=0
+      while [ -n "$_frc_rest" ]; do
+        _frc_oct="${_frc_rest%%.*}"
+        tp_ipv4_octet_ok "$_frc_oct" || return 1
+        _frc_n=$((_frc_n + 1))
+        case "$_frc_rest" in *.*) _frc_rest="${_frc_rest#*.}" ;; *) _frc_rest="" ;; esac
+      done
+      [ "$_frc_n" -eq 4 ] || return 1
+      [ "$_frc_bits" -ge 8 ] && [ "$_frc_bits" -le 32 ]
+      ;;
+  esac
+}
+
+# Only the fabric interface, only these shapes. Route reads cover the whole
+# main table (read-only) so the daemon can see ranges other interfaces route.
 tp_verb_ip() {
   case "$*" in
     "link add dev tp0 type wireguard"|"link set dev tp0 up"|\
-"-o -4 addr show dev tp0"|"-o link show dev tp0"|"link delete tp0")
+"-o -4 addr show dev tp0"|"-o link show dev tp0"|"link delete tp0"|\
+"-4 route show"|"-6 route show"|"-4 route show dev tp0"|"-6 route show dev tp0")
       tp_exec ip "$@"
       ;;
   esac
+  if [ "$#" -eq 5 ] && [ "$4 $5" = "dev tp0" ] && [ "$1" = "route" ]; then
+    case "$2" in replace|del) ;; *) tp_die "ip: unsupported command" ;; esac
+    tp_fabric_route_cidr_ok "$3" || tp_die "ip: bad route $3"
+    tp_exec ip "$@"
+  fi
   if [ "$#" -eq 6 ] && [ "$1 $2 $3 $4" = "link set dev tp0" ] && [ "$5" = "mtu" ]; then
     case "$6" in ''|*[!0-9]*) tp_die "ip: bad mtu" ;; esac
     tp_exec ip "$@"
