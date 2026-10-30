@@ -2306,3 +2306,21 @@ test("parseFabricReconcileResult carries warnings and refuses malformed ones", (
     );
   }
 });
+
+test("a dial-in peer (no endpoint) is configured without an Endpoint line", async () => {
+  await withFabricDir("tp-fabric-dial-in-", async (networkDir) => {
+    const raw = enabledPayload();
+    const peers = raw.peers as Record<string, unknown>[];
+    const { endpoint: _endpoint, ...dialIn } = peers[0] ?? {};
+    const result = await handleFabricReconcile(
+      enabledFrom({ ...raw, peers: [dialIn] }),
+      new Date().toISOString(),
+    );
+    assertEquals(result.summary, "TurboFabric reconciled");
+    const conf = await Deno.readTextFile(
+      join(networkDir, "wireguard", "tp0.conf"),
+    );
+    assertEquals(conf.includes(`PublicKey = ${WG_PUBKEY_B}`), true);
+    assertEquals(conf.includes("Endpoint ="), false);
+  });
+});
