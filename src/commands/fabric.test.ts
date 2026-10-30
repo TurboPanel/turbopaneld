@@ -2029,3 +2029,88 @@ test("boot restore leaves a paused fabric down and keeps only local bridge forwa
     },
   );
 });
+
+test("a live pause strips peer ranges and tp0 transit from TP-FORWARD and keeps local bridge rules", async () => {
+  await withFabricDir(
+    "tp-fabric-pause-forward-",
+    async (_dir, invocations) => {
+      const parsed = parseFabricReconcilePayload({
+        ...enabledPayload(),
+        gateway: true,
+      });
+      if (!parsed.enabled) throw new TypeError("expected enabled payload");
+      const when = new Date().toISOString();
+      await handleFabricReconcile(parsed, when);
+      const enabled = invocations.join("\n");
+      assertEquals(
+        enabled.includes(
+          "iptables -A TP-FORWARD -s 10.192.11.0/24 -d 10.193.0.0/16 -j ACCEPT",
+        ),
+        true,
+      );
+      invocations.length = 0;
+      await handleFabricReconcile({ enabled: false, retainKeys: true }, when);
+      for (
+        const rule of [
+          "-s 10.192.11.0/24 -d 10.193.0.0/16 -j ACCEPT",
+          "-s 10.193.0.0/16 -d 10.192.11.0/24 -j ACCEPT",
+          "-i tp0 -o tp0 -j ACCEPT",
+        ]
+      ) {
+        assertEquals(
+          invocations.includes(`iptables -D TP-FORWARD ${rule}`),
+          true,
+          rule,
+        );
+      }
+      assertEquals(
+        invocations.includes("iptables -I TP-FORWARD 1 -i tp0 -o tp0 -j DROP"),
+        true,
+      );
+      assertEquals(
+        invocations.some((line) =>
+          line.startsWith("iptables -A") && line.includes("10.193.0.0/16")
+        ),
+        false,
+      );
+      assertEquals(
+        invocations.includes(
+          "iptables -D TP-FORWARD -s 10.192.11.0/24 -d 10.192.11.0/24 -j ACCEPT",
+        ),
+        false,
+      );
+    },
+    trackingIptablesExtras(),
+  );
+});
+
+test("boot restore brings up bridges and forwarding when a route cannot be installed", async () => {
+  await withFabricDir("tp-fabric-restore-route-fail-", async (networkDir) => {
+    await handleFabricReconcile(
+      enabledFrom(enabledPayload()),
+      new Date().toISOString(),
+    );
+    const invocations: string[] = [];
+    setFabricNetworkDirForTests(networkDir);
+    setFabricRunForTests(
+      recordingRun(
+        invocations,
+        (cmd, args) =>
+          cmd === "ip" && args[0] === "route" && args[1] === "replace" &&
+            args[2] === "10.193.0.0/16"
+            ? fail("RTNETLINK answers: Operation not supported")
+            : null,
+      ),
+    );
+    await restoreFabricFromPersistedState();
+    const joined = invocations.join("\n");
+    assertEquals(joined.includes("ip route replace 10.193.0.0/16"), true);
+    assertEquals(joined.includes("docker network create"), true);
+    assertEquals(
+      joined.includes(
+        "iptables -A TP-FORWARD -s 10.192.11.0/24 -d 10.192.11.0/24 -j ACCEPT",
+      ),
+      true,
+    );
+  });
+});

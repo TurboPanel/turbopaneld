@@ -1085,13 +1085,33 @@ export function fabricCrossSubnetForwardPairs(
   return pairs;
 }
 
+function forwardAcceptMatch(source: string, dest: string): string[] {
+  return [FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"];
+}
+
 async function ensureForwardAccept(
   source: string,
   dest: string,
 ): Promise<void> {
-  await ensureIptablesRule(
-    [FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"],
-    ["-A", FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"],
+  const match = forwardAcceptMatch(source, dest);
+  await ensureIptablesRule(match, ["-A", ...match]);
+}
+
+/**
+ * Remove the local bridge ↔ peer range ACCEPT pairs a running fabric
+ * installed for these peers (best effort; a missing rule is fine).
+ */
+async function removePeerForwardPairs(state: FabricStateJson): Promise<void> {
+  await forEachSequential(
+    fabricCrossSubnetForwardPairs(
+      state.networks.map((network) => network.subnet),
+      fabricOwnedPeerPrefixes(state.peers),
+    ),
+    async (pair) => {
+      await removeIptablesRuleBestEffort(
+        forwardAcceptMatch(pair.source, pair.dest),
+      );
+    },
   );
 }
 
@@ -1670,9 +1690,11 @@ async function takeTp0Down(): Promise<void> {
 
 /**
  * `retainKeys` pause: the tunnel goes down, the private key, PSK-bearing
- * `tp0.conf`, routed bridges and `TP-FORWARD` stay, and `state.json` is
- * marked `suspended` so a reboot does not bring `tp0` back. The apply stamp
- * goes, so the next enable re-applies with the same key.
+ * `tp0.conf` and routed bridges stay, and `state.json` is marked `suspended`
+ * so a reboot does not bring `tp0` back. `TP-FORWARD` keeps only the local
+ * bridge rules, as boot restore of a paused fabric builds it: the peer range
+ * pairs come out and `tp0` transit is dropped. The apply stamp goes, so the
+ * next enable re-applies with the same key.
  */
 async function handleFabricPause(
   networkDir: string,
@@ -1686,8 +1708,13 @@ async function handleFabricPause(
   );
   await takeTp0Down();
   await removePathBestEffort(applyStampPath(networkDir));
-  if (state && state.suspended !== true) {
-    await writeFabricStateJson(networkDir, { ...state, suspended: true });
+  if (state) {
+    const suspended = { ...state, suspended: true };
+    if (state.suspended !== true) {
+      await writeFabricStateJson(networkDir, suspended);
+    }
+    await removePeerForwardPairs(state);
+    await reconcileForwardingFromState(suspended);
   }
   return { summary: "TurboFabric paused; keys kept" };
 }
@@ -1764,14 +1791,36 @@ async function retryPendingFabricTeardown(networkDir: string): Promise<void> {
 }
 
 /**
+ * Boot restore: a route that cannot be installed (e.g. IPv6 turned off on
+ * the host) is logged, never a reason to leave local bridges down.
+ */
+async function reconcileFabricRoutesBestEffort(
+  payload: FabricReconcileEnabledPayload,
+): Promise<void> {
+  try {
+    await reconcileFabricRoutes(payload);
+  } catch (err) {
+    logWarn(
+      "commands",
+      `TurboFabric routes on ${FABRIC_INTERFACE_NAME} not fully restored: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
  * Shared by live apply and boot restore: retire `wg-quick@tp0`, create and
  * address `tp0`, sync peers, drop the stale wg-quick copy of the config (read
- * by the caller first, for PSKs), reconcile routes, ensure routed bridges.
+ * by the caller first, for PSKs), ensure routed bridges, reconcile routes.
+ * Bridges come before routes so a failed route never keeps them down; at boot
+ * (`routesBestEffort`) a route failure is only logged.
  */
 async function bringUpFabric(
   networkDir: string,
   payload: FabricReconcileEnabledPayload,
   pskByPublicKey: ReadonlyMap<string, string>,
+  routesBestEffort = false,
 ): Promise<void> {
   const mtu = resolvePayloadMtu(payload);
   await retireWgQuickUnit();
@@ -1780,8 +1829,12 @@ async function bringUpFabric(
   await enableIpv4Forwarding();
   await syncFabricPeers(networkDir, payload, pskByPublicKey);
   await removeRootFileBestEffort(WG_QUICK_CONF_PATH);
-  await reconcileFabricRoutes(payload);
   await ensureFabricDockerNetworks(payload.networks ?? [], mtu);
+  if (routesBestEffort) {
+    await reconcileFabricRoutesBestEffort(payload);
+    return;
+  }
+  await reconcileFabricRoutes(payload);
 }
 
 async function applyEnabledFabric(
@@ -1948,7 +2001,7 @@ export async function restoreFabricFromPersistedState(): Promise<void> {
     const policyError = fabricAllowedIpsPolicyError(payload);
     if (policyError) throw new Error(policyError);
     const pskByPublicKey = await loadPersistedPeerPresharedKeys(networkDir);
-    await bringUpFabric(networkDir, payload, pskByPublicKey);
+    await bringUpFabric(networkDir, payload, pskByPublicKey, true);
     await reconcileForwardingFromState(state);
     logInfo(
       "commands",
