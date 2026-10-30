@@ -152,3 +152,50 @@ test("hostingsOnly is refused where the environment has no web server config yet
     assertEquals(docker, []);
   });
 });
+
+test("a full deploy keeps the certificate line after the step is done", async () => {
+  await withLayout(async () => {
+    const sent: CommandProgressMessage[] = [];
+    const progress = createDeployStepReporter({
+      id: "dispatch-2",
+      commandId: "command-2",
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    const gatewayDocker = (args: string[]): Promise<DockerCliResult> =>
+      Promise.resolve({
+        success: true,
+        stdout: args.includes("config") && args.includes("--format")
+          ? JSON.stringify({ services: { web: { image: "nginx" } } })
+          : args.includes("network") && args.includes("inspect")
+          ? JSON.stringify([{
+            IPAM: {
+              Config: [{ Subnet: "172.30.0.0/16", Gateway: "172.30.0.1" }],
+            },
+          }])
+          : args.includes("ps")
+          ? "[]"
+          : "",
+        stderr: "",
+        code: 0,
+      });
+    const { hostingsOnly: _skip, ...payload } = hostingsOnlyPayload();
+    await handleEnvironmentDeploy(payload, new Date().toISOString(), {
+      runDocker: gatewayDocker,
+      ensureDocker: () => Promise.resolve(),
+      ensureExternalDockerNetworks: () => Promise.resolve(),
+      ensureFabricDockerNetworks: () => Promise.resolve(),
+      progress,
+    });
+    const last = sent.at(-1)?.progress.steps.find((step) =>
+      step.id === "certificates"
+    );
+    assertEquals(last?.state, "done");
+    assertStringIncludes(last?.detail ?? "", "Requested in the background");
+    assertStringIncludes(last?.detail ?? "", "shop.example.com");
+  });
+});
