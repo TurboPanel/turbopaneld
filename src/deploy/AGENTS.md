@@ -1083,14 +1083,14 @@ depends on has changed.** The first step that changes what is serving calls
 `token.commit(where)` (synchronous, atomic with the abort check). After it the
 deploy runs to its normal end and a cancel answers `too_late`. Commit points, in
 the order they occur: the first release switch inside `applySourceReleases`
-(native promote, rollback / re-cut-over; a Railpack image record is not a switch);
+(native promote, rollback / re-cut-over; an image-build record is not a switch);
 the host-native phase (reclaim of removed release trees, sites, native apps, the
 cron sweep) when the deploy has any of that to do (`hostNativeCutoverPending`;
 any doubt counts as yes); retiring an earlier compose project or the zero-service
 removal; pre-deploy hooks; the sequential engine's `commit` step (before the old
 version is stopped); and right before `compose up` on the in-place path. Before
 the first of them everything is cancellable: ingress and principals, git clone,
-the source build (sandbox unit), the Railpack image build, `docker compose
+the source build (sandbox unit), the image build, `docker compose
 build` / `pull`.
 
 On a cancel the deploy throws `DeployCancelledError`, whose message always starts
@@ -1102,7 +1102,7 @@ path), `revertPublishedCompose` puts `previous/` back, or removes the published
 files on a first deploy.
 
 Children are stopped through an `AbortSignal` (`AbortSignal.any` with each tool's
-own timeout): git, the unsandboxed build shell, the Railpack tools and every
+own timeout): git, the unsandboxed build shell, the image-build tools and every
 streamed docker call. A sandboxed build is stopped the way its timeout stops it
 (kill the `sudo` client, then `systemctl stop` the build unit, then take the work
 tree back). A cancel for a command that has not started yet answers
