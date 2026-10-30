@@ -83,6 +83,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-database-owner-v1",
   "managed-database-convert-v1",
   "tls-capture-v1",
+  "acme-issue-v1",
   "command-recovery-v1",
   "managed-switchover-final-position-v1",
   "host-capacity-v1",
@@ -192,6 +193,14 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
  * feature too.
  */
 export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
+
+/**
+ * The control plane may ask this daemon to place a certificate order for a name
+ * set from this server's own addresses (`acme-issue-request`) and to pass the
+ * HTTP proof path on for another server (`acme-proof-forward`). No message
+ * carries the certificate or key.
+ */
+export const ACME_ISSUE_FEATURE: DaemonWireFeature = "acme-issue-v1";
 
 /**
  * Planned Postgres switchover: the fence stop reports the old primary's final
