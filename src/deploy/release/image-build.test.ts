@@ -3,21 +3,21 @@ import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import { withTempLayout } from "../../testing/temp-layout.ts";
 import {
-  droppedRailpackEnvNames,
-  ensureBuildkitRailpack,
-  type EnsureBuildkitRailpackDeps,
-  RAILPACK_FRONTEND_IMAGE,
-  RAILPACK_FRONTEND_TAG,
-  RAILPACK_FRONTEND_VERSION,
-  RAILPACK_SHA256,
-  RAILPACK_VERSION,
-  railpackAssetName,
-  railpackBinaryPath,
-  railpackFrontendDigestPath,
-  railpackFrontendLayoutDir,
-  railpackImageTag,
-  railpackToolEnvironment,
-} from "./railpack-build.ts";
+  droppedImageBuildEnvNames,
+  ensureBuildkitImageBuild,
+  type EnsureBuildkitImageBuildDeps,
+  IMAGE_BUILD_FRONTEND_IMAGE,
+  IMAGE_BUILD_FRONTEND_TAG,
+  IMAGE_BUILD_FRONTEND_VERSION,
+  IMAGE_BUILD_SHA256,
+  IMAGE_BUILD_VERSION,
+  imageBuildAssetName,
+  imageBuildBinaryPath,
+  imageBuildFrontendDigestPath,
+  imageBuildFrontendLayoutDir,
+  imageBuildImageTag,
+  imageBuildToolEnvironment,
+} from "./image-build.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -55,16 +55,16 @@ async function plantVendorTools(
   runtimesDir: string,
   opts: {
     digest?: string;
-    skipRailpack?: boolean;
+    skipImageBuild?: boolean;
     skipIndex?: boolean;
     skipDigest?: boolean;
-    railpackIsDir?: boolean;
+    imageBuildIsDir?: boolean;
     digestContents?: string;
   } = {},
 ): Promise<void> {
-  if (!opts.skipRailpack) {
-    const versionDir = join(runtimesDir, "railpack", RAILPACK_VERSION);
-    if (opts.railpackIsDir) {
+  if (!opts.skipImageBuild) {
+    const versionDir = join(runtimesDir, "railpack", IMAGE_BUILD_VERSION);
+    if (opts.imageBuildIsDir) {
       await Deno.mkdir(join(versionDir, "railpack"), { recursive: true });
     } else {
       await writeFile(join(versionDir, "railpack"));
@@ -74,7 +74,7 @@ async function plantVendorTools(
   const frontendVersionDir = join(
     runtimesDir,
     "railpack-frontend",
-    RAILPACK_FRONTEND_VERSION,
+    IMAGE_BUILD_FRONTEND_VERSION,
   );
   const imageDir = join(frontendVersionDir, "image");
   if (!opts.skipIndex) {
@@ -109,10 +109,10 @@ function mockDownloadCommands(opts: {
     | "frontend-tar";
   emptyStderr?: boolean;
   frontendIndex?: string;
-  wipeRailpackAfterFrontend?: boolean;
+  wipeImageBuildAfterFrontend?: boolean;
   runtimesDir?: string;
   record?: string[];
-} = {}): NonNullable<EnsureBuildkitRailpackDeps["runCommand"]> {
+} = {}): NonNullable<EnsureBuildkitImageBuildDeps["runCommand"]> {
   const stderrFor = (fallback: string) =>
     opts.emptyStderr === true ? "" : fallback;
   return async (command, args) => {
@@ -157,7 +157,7 @@ function mockDownloadCommands(opts: {
         opts.frontendIndex ??
           JSON.stringify({ manifests: [{ digest: VALID_DIGEST }] }),
       );
-      if (opts.wipeRailpackAfterFrontend === true && opts.runtimesDir) {
+      if (opts.wipeImageBuildAfterFrontend === true && opts.runtimesDir) {
         await Deno.remove(join(opts.runtimesDir, "railpack"), {
           recursive: true,
         }).catch(() => {});
@@ -187,53 +187,53 @@ function mockDownloadCommands(opts: {
   };
 }
 
-test("railpackImageTag namespaces the service and tags the release", () => {
+test("imageBuildImageTag namespaces the service and tags the release", () => {
   assertEquals(
-    railpackImageTag("11111111-2222-3333-4444-555555555555", "rel-42"),
+    imageBuildImageTag("11111111-2222-3333-4444-555555555555", "rel-42"),
     "turbopanel-app/11111111-2222-3333-4444-555555555555:rel-42",
   );
 });
 
-test("railpackImageTag folds a compose service name into a docker repository", () => {
+test("imageBuildImageTag folds a compose service name into a docker repository", () => {
   // The release engine's service segment may be a compose service name, which
   // docker repository names cannot carry verbatim: they are lowercase-only, and
   // `_` `.` `-` are the only separators allowed between alphanumerics.
   assertEquals(
-    railpackImageTag("Web_API", "rel-1"),
+    imageBuildImageTag("Web_API", "rel-1"),
     "turbopanel-app/web_api:rel-1",
   );
   assertEquals(
-    railpackImageTag("web:api+v2", "rel-1"),
+    imageBuildImageTag("web:api+v2", "rel-1"),
     "turbopanel-app/web-api-v2:rel-1",
   );
 });
 
-test("railpackImageTag refuses a serviceId with no usable repository", () => {
-  assertThrows(() => railpackImageTag("___", "rel-1"));
+test("imageBuildImageTag refuses a serviceId with no usable repository", () => {
+  assertThrows(() => imageBuildImageTag("___", "rel-1"));
 });
 
 test("the gateway frontend resolves inside the vendored runtime tree", () => {
   // The build names the frontend by the digest recorded next to this layout,
   // so a repointed upstream tag cannot change what a host builds.
   assertEquals(
-    railpackFrontendLayoutDir("/opt/turbopanel/vendor"),
+    imageBuildFrontendLayoutDir("/opt/turbopanel/vendor"),
     "/opt/turbopanel/vendor/railpack-frontend/current/image",
   );
   assertEquals(
-    railpackFrontendDigestPath("/opt/turbopanel/vendor"),
+    imageBuildFrontendDigestPath("/opt/turbopanel/vendor"),
     "/opt/turbopanel/vendor/railpack-frontend/current/digest",
   );
 });
 
 test({
-  name: "ensureBuildkitRailpack returns already-present tools without setup",
+  name: "ensureBuildkitImageBuild returns already-present tools without setup",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await plantVendorTools(layout.runtimesDir);
       let setupCalls = 0;
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => {
           setupCalls += 1;
           return Promise.resolve();
@@ -246,10 +246,10 @@ test({
       assertEquals(tools.frontendDigest, VALID_DIGEST);
       assertEquals(
         tools.frontendLayoutDir,
-        railpackFrontendLayoutDir(layout.runtimesDir),
+        imageBuildFrontendLayoutDir(layout.runtimesDir),
       );
       assertEquals(
-        tools.railpack,
+        tools.planner,
         join(layout.runtimesDir, "railpack", "current", "railpack"),
       );
     });
@@ -257,7 +257,7 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack accepts a trimmed frontend digest",
+  name: "ensureBuildkitImageBuild accepts a trimmed frontend digest",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -265,7 +265,7 @@ test({
       await plantVendorTools(layout.runtimesDir, {
         digestContents: `  ${VALID_DIGEST}  \n`,
       });
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => {
           throw new TypeError("setup must not run");
         },
@@ -276,18 +276,18 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack treats a missing digest as not installed",
+  name: "ensureBuildkitImageBuild treats a missing digest as not installed",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await plantVendorTools(layout.runtimesDir, { skipDigest: true });
       let setupCalls = 0;
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: async () => {
           setupCalls += 1;
           await writeFile(
-            railpackFrontendDigestPath(layout.runtimesDir),
+            imageBuildFrontendDigestPath(layout.runtimesDir),
             `${VALID_DIGEST}\n`,
             0o640,
           );
@@ -303,7 +303,7 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack rejects a digest that is not sha256 + 64 hex",
+  name: "ensureBuildkitImageBuild rejects a digest that is not sha256 + 64 hex",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -311,10 +311,10 @@ test({
       await plantVendorTools(layout.runtimesDir, {
         digestContents: "sha256:not-a-real-digest\n",
       });
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => Promise.resolve(),
         resolveArch: () => "amd64",
-        railpackSha256: FAKE_TARBALL_SHA256,
+        imageBuildSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands(),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -323,7 +323,7 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack ignores an uppercase SHA256 digest",
+  name: "ensureBuildkitImageBuild ignores an uppercase SHA256 digest",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -331,10 +331,10 @@ test({
       await plantVendorTools(layout.runtimesDir, {
         digestContents: `sha256:${"AB".repeat(32)}\n`,
       });
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => Promise.resolve(),
         resolveArch: () => "amd64",
-        railpackSha256: FAKE_TARBALL_SHA256,
+        imageBuildSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands(),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -343,18 +343,18 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack requires index.json beside the digest",
+  name: "ensureBuildkitImageBuild requires index.json beside the digest",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await plantVendorTools(layout.runtimesDir, { skipIndex: true });
       let setupCalls = 0;
-      await ensureBuildkitRailpack(layout, {
+      await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: async () => {
           setupCalls += 1;
           await writeFile(
-            join(railpackFrontendLayoutDir(layout.runtimesDir), "index.json"),
+            join(imageBuildFrontendLayoutDir(layout.runtimesDir), "index.json"),
             "{}",
             0o640,
           );
@@ -369,14 +369,14 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack requires the railpack binary as a file",
+  name: "ensureBuildkitImageBuild requires the railpack binary as a file",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
-      await plantVendorTools(layout.runtimesDir, { railpackIsDir: true });
+      await plantVendorTools(layout.runtimesDir, { imageBuildIsDir: true });
       let setupCalls = 0;
-      await ensureBuildkitRailpack(layout, {
+      await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: async () => {
           setupCalls += 1;
           await Deno.remove(
@@ -396,12 +396,12 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack returns after a successful playbook",
+  name: "ensureBuildkitImageBuild returns after a successful playbook",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => plantVendorTools(layout.runtimesDir),
         runCommand: () => {
           throw new TypeError("download must not run after setup installs");
@@ -413,7 +413,7 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack downloads after the playbook fails",
+  name: "ensureBuildkitImageBuild downloads after the playbook fails",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -428,16 +428,16 @@ test({
         join(
           layout.runtimesDir,
           "railpack-frontend",
-          RAILPACK_FRONTEND_VERSION,
+          IMAGE_BUILD_FRONTEND_VERSION,
           "image",
         ),
         { recursive: true },
       );
       const record: string[] = [];
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => Promise.reject(new Error("playbook missing")),
         resolveArch: () => "amd64",
-        railpackSha256: FAKE_TARBALL_SHA256,
+        imageBuildSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -447,7 +447,7 @@ test({
       assertEquals(
         record.some((line) =>
           line.includes(
-            `railpack-v${RAILPACK_VERSION}-x86_64-unknown-linux-musl.tar.gz`,
+            `railpack-v${IMAGE_BUILD_VERSION}-x86_64-unknown-linux-musl.tar.gz`,
           )
         ),
         true,
@@ -455,7 +455,7 @@ test({
       assertEquals(
         record.some((line) =>
           line.includes(
-            `docker pull ${RAILPACK_FRONTEND_IMAGE}:v${RAILPACK_FRONTEND_VERSION}`,
+            `docker pull ${IMAGE_BUILD_FRONTEND_IMAGE}:v${IMAGE_BUILD_FRONTEND_VERSION}`,
           )
         ),
         true,
@@ -465,7 +465,7 @@ test({
 });
 
 test("the frontend tag is v-prefixed in the daemon and the buildkit role", async () => {
-  assertEquals(RAILPACK_FRONTEND_TAG, `v${RAILPACK_FRONTEND_VERSION}`);
+  assertEquals(IMAGE_BUILD_FRONTEND_TAG, `v${IMAGE_BUILD_FRONTEND_VERSION}`);
   const roles = new URL(
     "../../../orchestration/roles/buildkit/",
     import.meta.url,
@@ -478,7 +478,7 @@ test("the frontend tag is v-prefixed in the daemon and the buildkit role", async
   );
   assertEquals(
     /^railpack_frontend_version: "(.+)"$/m.exec(defaults)?.[1],
-    RAILPACK_FRONTEND_VERSION,
+    IMAGE_BUILD_FRONTEND_VERSION,
   );
   assertEquals(
     tasks.includes(
@@ -490,18 +490,18 @@ test("the frontend tag is v-prefixed in the daemon and the buildkit role", async
 
 test({
   name:
-    "ensureBuildkitRailpack reports the playbook failure when the fallback fails too",
+    "ensureBuildkitImageBuild reports the playbook failure when the fallback fails too",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       const err = await assertRejects(
         () =>
-          ensureBuildkitRailpack(layout, {
+          ensureBuildkitImageBuild(layout, {
             runBuildkitSetup: () =>
               Promise.reject(new Error("frontend task: non-zero return code")),
             resolveArch: () => "amd64",
-            railpackSha256: FAKE_TARBALL_SHA256,
+            imageBuildSha256: FAKE_TARBALL_SHA256,
             runCommand: mockDownloadCommands({ fail: "railpack-curl" }),
           }),
         Error,
@@ -513,15 +513,15 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack downloads after a non-Error playbook failure",
+  name: "ensureBuildkitImageBuild downloads after a non-Error playbook failure",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => Promise.reject("setup blew up"),
         resolveArch: () => "arm64",
-        railpackSha256: FAKE_TARBALL_SHA256,
+        imageBuildSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands(),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -531,16 +531,16 @@ test({
 
 test({
   name:
-    "ensureBuildkitRailpack downloads when setup succeeds without installing",
+    "ensureBuildkitImageBuild downloads when setup succeeds without installing",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       const record: string[] = [];
-      const tools = await ensureBuildkitRailpack(layout, {
+      const tools = await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => Promise.resolve(),
         resolveArch: () => "amd64",
-        railpackSha256: FAKE_TARBALL_SHA256,
+        imageBuildSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(tools.frontendDigest, VALID_DIGEST);
@@ -553,20 +553,21 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack uses the host arch when resolveArch is omitted",
+  name:
+    "ensureBuildkitImageBuild uses the host arch when resolveArch is omitted",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       const expectedArch = Deno.build.arch === "aarch64" ? "arm64" : "amd64";
       const record: string[] = [];
-      await ensureBuildkitRailpack(layout, {
+      await ensureBuildkitImageBuild(layout, {
         runBuildkitSetup: () => Promise.resolve(),
-        railpackSha256: FAKE_TARBALL_SHA256,
+        imageBuildSha256: FAKE_TARBALL_SHA256,
         runCommand: mockDownloadCommands({ record }),
       });
       assertEquals(
-        record.some((line) => line.includes(railpackAssetName(expectedArch))),
+        record.some((line) => line.includes(imageBuildAssetName(expectedArch))),
         true,
       );
     });
@@ -575,42 +576,42 @@ test({
 
 test({
   name:
-    "ensureBuildkitRailpack throws when download still leaves tools missing",
+    "ensureBuildkitImageBuild throws when download still leaves tools missing",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await assertRejects(
         () =>
-          ensureBuildkitRailpack(layout, {
+          ensureBuildkitImageBuild(layout, {
             runBuildkitSetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
-            railpackSha256: FAKE_TARBALL_SHA256,
+            imageBuildSha256: FAKE_TARBALL_SHA256,
             runCommand: mockDownloadCommands({
-              wipeRailpackAfterFrontend: true,
+              wipeImageBuildAfterFrontend: true,
               runtimesDir: layout.runtimesDir,
             }),
           }),
         Error,
-        "Railpack build runtime is missing",
+        "image build runtime is missing",
       );
     });
   },
 });
 
 test({
-  name: "ensureBuildkitRailpack surfaces a thrown resolveArch",
+  name: "ensureBuildkitImageBuild surfaces a thrown resolveArch",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await assertRejects(
         () =>
-          ensureBuildkitRailpack(layout, {
+          ensureBuildkitImageBuild(layout, {
             runBuildkitSetup: () => Promise.resolve(),
             resolveArch: () => {
               throw new Error(
-                "Unsupported CPU architecture for Railpack builds: riscv64",
+                "Unsupported CPU architecture for image builds: riscv64",
               );
             },
             runCommand: () => {
@@ -618,21 +619,22 @@ test({
             },
           }),
         Error,
-        "Unsupported CPU architecture for Railpack builds: riscv64",
+        "Unsupported CPU architecture for image builds: riscv64",
       );
     });
   },
 });
 
 test({
-  name: "ensureBuildkitRailpack refuses a tarball whose SHA-256 is not the pin",
+  name:
+    "ensureBuildkitImageBuild refuses a tarball whose SHA-256 is not the pin",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await assertRejects(
         () =>
-          ensureBuildkitRailpack(layout, {
+          ensureBuildkitImageBuild(layout, {
             runBuildkitSetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
             runCommand: mockDownloadCommands(),
@@ -645,16 +647,16 @@ test({
 });
 
 test({
-  name: "the pinned Railpack digests cover both architectures",
+  name: "the pinned image builder digests cover both architectures",
   fn: () => {
     for (const arch of ["amd64", "arm64"] as const) {
-      assertEquals(/^[0-9a-f]{64}$/.test(RAILPACK_SHA256[arch]), true);
+      assertEquals(/^[0-9a-f]{64}$/.test(IMAGE_BUILD_SHA256[arch]), true);
     }
   },
 });
 
 test({
-  name: "downloadBuildkitRailpack surfaces curl / tar / docker failures",
+  name: "downloadBuildkitImageBuild surfaces curl / tar / docker failures",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     const cases: Array<{
@@ -693,10 +695,10 @@ test({
         const layout = layoutOf(fixture.env);
         await assertRejects(
           () =>
-            ensureBuildkitRailpack(layout, {
+            ensureBuildkitImageBuild(layout, {
               runBuildkitSetup: () => Promise.resolve(),
               resolveArch: () => "amd64",
-              railpackSha256: FAKE_TARBALL_SHA256,
+              imageBuildSha256: FAKE_TARBALL_SHA256,
               runCommand: mockDownloadCommands({
                 fail: c.fail,
                 emptyStderr: c.empty === true,
@@ -711,7 +713,8 @@ test({
 });
 
 test({
-  name: "installRailpackFrontend rejects a layout that is not a single digest",
+  name:
+    "installImageBuildFrontend rejects a layout that is not a single digest",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     const indexes = [
@@ -729,10 +732,10 @@ test({
         const layout = layoutOf(fixture.env);
         await assertRejects(
           () =>
-            ensureBuildkitRailpack(layout, {
+            ensureBuildkitImageBuild(layout, {
               runBuildkitSetup: () => Promise.resolve(),
               resolveArch: () => "amd64",
-              railpackSha256: FAKE_TARBALL_SHA256,
+              imageBuildSha256: FAKE_TARBALL_SHA256,
               runCommand: mockDownloadCommands({ frontendIndex }),
             }),
           Error,
@@ -743,7 +746,7 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack runDefault path via mocked Deno.Command",
+  name: "ensureBuildkitImageBuild runDefault path via mocked Deno.Command",
   permissions: { read: true, write: true, run: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -780,9 +783,9 @@ test({
         }
       };
       try {
-        const tools = await ensureBuildkitRailpack(layout, {
+        const tools = await ensureBuildkitImageBuild(layout, {
           runBuildkitSetup: () => Promise.resolve(),
-          railpackSha256: FAKE_TARBALL_SHA256,
+          imageBuildSha256: FAKE_TARBALL_SHA256,
         });
         assertEquals(tools.frontendDigest, VALID_DIGEST);
       } finally {
@@ -794,18 +797,18 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack rethrows a non-NotFound digest read",
+  name: "ensureBuildkitImageBuild rethrows a non-NotFound digest read",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await plantVendorTools(layout.runtimesDir);
-      const digestPath = railpackFrontendDigestPath(layout.runtimesDir);
+      const digestPath = imageBuildFrontendDigestPath(layout.runtimesDir);
       await Deno.remove(digestPath);
       await Deno.mkdir(digestPath);
       await assertRejects(
         () =>
-          ensureBuildkitRailpack(layout, {
+          ensureBuildkitImageBuild(layout, {
             runBuildkitSetup: () => Promise.resolve(),
             runCommand: () => {
               throw new TypeError("download must not run");
@@ -818,14 +821,14 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack rethrows a non-NotFound tool stat",
+  name: "ensureBuildkitImageBuild rethrows a non-NotFound tool stat",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const layout = layoutOf(fixture.env);
       await plantVendorTools(layout.runtimesDir);
       const originalStat = Deno.stat;
-      const railpack = railpackBinaryPath(layout.runtimesDir);
+      const railpack = imageBuildBinaryPath(layout.runtimesDir);
       Deno.stat = ((path: string | URL) => {
         if (String(path) === railpack) {
           return Promise.reject(new TypeError("stat busy"));
@@ -835,7 +838,7 @@ test({
       try {
         await assertRejects(
           () =>
-            ensureBuildkitRailpack(layout, {
+            ensureBuildkitImageBuild(layout, {
               runBuildkitSetup: () => Promise.resolve(),
               runCommand: () => {
                 throw new TypeError("download must not run");
@@ -852,7 +855,7 @@ test({
 });
 
 test({
-  name: "ensureBuildkitRailpack rethrows when current cannot be replaced",
+  name: "ensureBuildkitImageBuild rethrows when current cannot be replaced",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -862,10 +865,10 @@ test({
       await Deno.writeTextFile(join(current, "nested", "keep"), "x");
       await assertRejects(
         () =>
-          ensureBuildkitRailpack(layout, {
+          ensureBuildkitImageBuild(layout, {
             runBuildkitSetup: () => Promise.resolve(),
             resolveArch: () => "amd64",
-            railpackSha256: FAKE_TARBALL_SHA256,
+            imageBuildSha256: FAKE_TARBALL_SHA256,
             runCommand: mockDownloadCommands(),
           }),
         Error,
@@ -874,8 +877,8 @@ test({
   },
 });
 
-test("the Railpack tools get tenant build.env without any name that loads code or is the sandbox", () => {
-  const env = railpackToolEnvironment({
+test("the image builder tools get tenant build.env without any name that loads code or is the sandbox", () => {
+  const env = imageBuildToolEnvironment({
     kind: "railpack",
     env: {
       NEXT_PUBLIC_SITE_URL: "https://example.test",
@@ -922,8 +925,8 @@ test("the Railpack tools get tenant build.env without any name that loads code o
   assertEquals(env.CI, "1");
 });
 
-test("the names the Railpack lane drops are listed, by name only, and include tool config families", () => {
-  const dropped = droppedRailpackEnvNames({
+test("the names the image build lane drops are listed, by name only, and include tool config families", () => {
+  const dropped = droppedImageBuildEnvNames({
     kind: "railpack",
     env: {
       NEXT_PUBLIC_SITE_URL: "https://example.test",
@@ -946,7 +949,7 @@ test("the names the Railpack lane drops are listed, by name only, and include to
     "PIP_INDEX_URL",
   ]);
   assertEquals(
-    droppedRailpackEnvNames({ kind: "railpack", env: { OK_NAME: "1" } }),
+    droppedImageBuildEnvNames({ kind: "railpack", env: { OK_NAME: "1" } }),
     [],
   );
 });

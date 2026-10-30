@@ -11,7 +11,10 @@
  * never name a vendor platform.
  */
 import { join } from "@std/path";
-import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
+import {
+  type EnvironmentDeployPayload,
+  isImageBuildKind,
+} from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { dockerReady } from "../deploy/ensure-docker.ts";
 import { hostingCaddyReady } from "../deploy/ensure-hosting-caddy.ts";
@@ -20,7 +23,7 @@ import {
   nativeAppDenoVersions,
   nativeAppNodeVersions,
 } from "../deploy/native/apply-native-apps.ts";
-import { buildToolPresent } from "../deploy/release/railpack-build.ts";
+import { buildToolPresent } from "../deploy/release/image-build.ts";
 import type { SiteEngineId } from "../deploy/site/engine-driver.ts";
 import { phpSeriesForDeploy, resolveSiteEngineNeeds } from "../deploy/site.ts";
 import {
@@ -130,7 +133,7 @@ export function deployStepNeeds(
     phpSeries: phpSeriesForDeploy(sites),
     phpFpm: engineNeeds.phpFpm,
     lsphp: engineNeeds.openlitespeedLsphp,
-    buildTool: builds.some((entry) => entry.build.kind === "railpack"),
+    buildTool: builds.some((entry) => isImageBuildKind(entry.build.kind)),
     sourceBuilds: builds.length > 0,
     composeBuild: edge.hasContainers &&
       (payload.noCache === true || payload.deployStrategy === "sequential"),

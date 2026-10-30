@@ -21,7 +21,7 @@ import {
   promoteExistingRelease,
   promoteRelease,
   readCurrentReleaseId,
-  recordRailpackRelease,
+  recordImageBuildRelease,
   resolveReleaseSourceDir,
   stageRelease,
   swapCurrentSymlink,
@@ -335,7 +335,7 @@ test("promoteExistingRelease rejects missing and unsealed trees", async () => {
   }
 });
 
-test("recordRailpackRelease writes the manifest without sealing", async () => {
+test("recordImageBuildRelease writes the manifest without sealing", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-railpack-record-" });
   try {
     const paths = resolveDaemonReleasePaths(
@@ -349,13 +349,13 @@ test("recordRailpackRelease writes the manifest without sealing", async () => {
       ...MANIFEST,
       imageTag: "tp-svc-1:019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
       imageDigest: "sha256:abc",
-      railpackFrontendVersion: "0.9.0",
-      railpackPlanVersion: "1",
+      builderFrontendVersion: "0.9.0",
+      builderPlanVersion: "1",
     };
-    const dir = await recordRailpackRelease({ paths, manifest });
+    const dir = await recordImageBuildRelease({ paths, manifest });
     assertEquals(dir, paths.releaseDir);
     assertEquals(await readReleaseManifest(paths.releaseDir), manifest);
-    // No current symlink is created — Railpack cutover is compose image: only.
+    // No current symlink is created — image-build cutover is compose image: only.
     assertEquals(await readCurrentReleaseId(paths), null);
   } finally {
     await Deno.remove(root, { recursive: true });

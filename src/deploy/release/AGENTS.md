@@ -486,10 +486,19 @@ set plus that record. The recorded side stays current-only so it cannot grow
 without bound — once a redeploy has reclaimed a removed tree on the host, the
 record written by that same deploy no longer names it.
 
-## Image-Built Releases (`build.kind: railpack`)
+## Image-Built Releases (`build.kind: image`)
 
-A source binding may set `x-turbopanel.source.buildKind: railpack`, which
-deploy-prepare passes straight through as `sourceMaterial[].build.kind`. That is
+A source binding may set `x-turbopanel.source.buildKind: image`, which
+deploy-prepare passes straight through as `sourceMaterial[].build.kind`.
+**Both spellings are accepted** while the rename rolls out: `image` is the new
+value and the old one still parses and behaves the same
+(`isImageBuildKind` in `commands-contracts.ts` is the one check). Likewise the
+two version fields are written as `builderFrontendVersion` /
+`builderPlanVersion`; `readReleaseManifest` still reads the old field names from
+manifests sealed earlier and maps them to the new ones, so a rollback to an old
+release keeps working. A daemon older than this change still reads a manifest
+written with the new names (it ignores unknown keys) and only loses the two
+version fields when it reports the release. That is
 the **fourth deploy pattern** on this host, alongside compose, site,
 and native app — and the four differ only in what a release *is*:
 
@@ -500,7 +509,7 @@ and native app — and the four differ only in what a release *is*:
 | native app | a promoted directory | a generated systemd unit runs out of `current` |
 | **Image build** | **an OCI image tag** | `docker compose up` on that tag |
 
-Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
+Concretely (`release/image-build.ts`, branch in `apply-source-releases.ts`):
 
 - Checkout is identical — `checkout.ts` unchanged, same scratch dir, same
   credential handling.
@@ -529,7 +538,7 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
   same image in Docker's store. The build names
   `<frontend image>@<digest>`, so a repointed upstream tag
   cannot change what two releases recorded with the same
-  `railpackFrontendVersion` were built by. If the store lost the image, the
+  `builderFrontendVersion` were built by. If the store lost the image, the
   vendored layout is `docker load`ed back first; if even that fails the Engine
   can only fetch exactly that digest.
 - Output goes straight into the image store (`--load`): no tarball handoff.
@@ -552,11 +561,11 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
   `releases/<releaseId>/.turbopanel/release.json` under the daemon-owned
   `<daemonStateDir>/release-records/` root (`resolveDaemonReleasePaths`), so both
   lanes keep release history in one place and one shape. It carries `imageTag`,
-  `imageDigest`, `railpackFrontendVersion`, and `railpackPlanVersion`.
+  `imageDigest`, `builderFrontendVersion`, and `builderPlanVersion`.
 
 **Feeding the image into compose.** `deploy-environment.ts` builds a
 `composeServiceName → imageTag` map from the returned `AppliedRelease[]` and
-`applyRailpackImagesToComposeYaml` sets `services.<name>.image` (dropping any
+`applyImageBuildImagesToComposeYaml` sets `services.<name>.image` (dropping any
 authored `build:`) on the compiled runtime document **before**
 `docker compose config` validates it. This is a pre-processing pass on the same
 compose document, deliberately not a second orchestration path: Traefik labels,
@@ -580,12 +589,12 @@ container** — the container keeps running under the still-tagged image until a
 later deploy supersedes it. Pruning it does mean that release id can no longer
 be rolled back to, which is the same guarantee the native lane gives.
 
-**Provisioning is on demand.** `ensureBuildkitRailpack` follows the
+**Provisioning is on demand.** `ensureBuildkitImageBuild` follows the
 `ensureDocker` / `ensureHostingCaddy` pattern exactly: check the vendor tree →
 `buildkit-setup.yml` (`runBuildkitSetup`) → direct download of railpack and the
-frontend → re-check → throw. It is called only when a `railpack` build is
+frontend → re-check → throw. It is called only when an `image` build is
 actually requested, never from `daemon-converge` or `instance-dev-install`.
-`RAILPACK_VERSION` in `railpack-build.ts` is pinned in step with
+`IMAGE_BUILD_VERSION` in `image-build.ts` is pinned in step with
 `orchestration/roles/buildkit/defaults/main.yml`; bumping one without the other
 leaves the daemon looking for a version directory that was never vendored. The
 role still vendors `buildctl` / `buildkitd`; the daemon no longer runs them.

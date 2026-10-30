@@ -264,7 +264,7 @@ test("needs from a container payload: docker, build on a cacheless rebuild, cert
       noCache: true,
       tlsMaterial: [{ tlsId: "t1" }],
       sourceMaterial: [
-        { composeServiceName: "api", build: { kind: "railpack" } },
+        { composeServiceName: "api", build: { kind: "image" } },
         {
           composeServiceName: "old",
           build: { kind: "native" },

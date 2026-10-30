@@ -201,7 +201,7 @@ function appliedRelease(overrides: Partial<AppliedRelease>): AppliedRelease {
   };
 }
 
-async function seedRailpackReleaseManifest(
+async function seedImageBuildReleaseManifest(
   daemonStateDir: string,
   serviceId: string,
   releaseId: string,
@@ -266,8 +266,8 @@ test("shapeEnvironmentDeployResult includes releases and omits empty services", 
     releaseId: "rel-1",
     commitSha: "b".repeat(40),
     imageTag: "registry.example.test/web:rel-1",
-    railpackFrontendVersion: "0.2.0",
-    railpackPlanVersion: "0.1.0",
+    builderFrontendVersion: "0.2.0",
+    builderPlanVersion: "0.1.0",
   }];
   const result = shapeEnvironmentDeployResult({
     projectName: "demo",
@@ -949,7 +949,7 @@ test({
 
 test({
   name:
-    "handleEnvironmentDeploy applies railpack rollback image tags into compose.yaml",
+    "handleEnvironmentDeploy applies image-build rollback image tags into compose.yaml",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     await withDeployEnv(async ({ stateDir }) => {
@@ -960,7 +960,7 @@ test({
       const rollbackReleaseId = "rel-old";
       const imageTag = "registry.example.test/web:rel-old";
 
-      await seedRailpackReleaseManifest(
+      await seedImageBuildReleaseManifest(
         stateDir,
         serviceId,
         rollbackReleaseId,
