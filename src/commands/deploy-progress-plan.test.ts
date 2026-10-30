@@ -2,6 +2,8 @@ import { assertEquals } from "@std/assert";
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
+  automaticCertificateDetail,
+  automaticCertificateHostnames,
   type DeployPresence,
   type DeployStepNeeds,
   deployStepNeeds,
@@ -262,7 +264,7 @@ test("needs from a container payload: docker, build on a cacheless rebuild, cert
       noCache: true,
       tlsMaterial: [{ tlsId: "t1" }],
       sourceMaterial: [
-        { composeServiceName: "api", build: { kind: "railpack" } },
+        { composeServiceName: "api", build: { kind: "image" } },
         {
           composeServiceName: "old",
           build: { kind: "native" },
@@ -367,4 +369,40 @@ test("probeDeployPresence runs only the probes the plan needs and treats a throw
     buildTool: () => Promise.resolve(false),
   });
   assertEquals(noDocker.sharedIngress, false);
+});
+
+test("a deploy whose names get an automatic certificate plans the certificates step and says where to watch", () => {
+  const payload = {
+    hostings: [
+      { hostnames: ["b.example.com", "a.example.com"], tlsMode: "acme" },
+      { hostnames: ["internal.example.com"], tlsMode: "internal" },
+      { hostnames: ["a.example.com"], tlsMode: "acme" },
+    ],
+  } as unknown as EnvironmentDeployPayload;
+  assertEquals(automaticCertificateHostnames(payload), [
+    "a.example.com",
+    "b.example.com",
+  ]);
+  assertEquals(
+    automaticCertificateDetail(payload),
+    "Requested in the background; the Certificate panel shows progress: a.example.com, b.example.com",
+  );
+  const needs = deployStepNeeds(payload, {
+    hasContainers: false,
+    sharedIngress: false,
+    publicEdge: true,
+  });
+  assertEquals(needs.certificates, true);
+  assertEquals(
+    planDeploySteps(needs, NOTHING_PRESENT).some((s) =>
+      s.id === "certificates"
+    ),
+    true,
+  );
+  assertEquals(
+    automaticCertificateDetail(
+      { hostings: [] } as unknown as EnvironmentDeployPayload,
+    ),
+    undefined,
+  );
 });

@@ -309,7 +309,9 @@ The control plane names one Compose project per **environment** (it used to be o
 ## Git-backed releases
 
 Moved to [`release/AGENTS.md`](./release/AGENTS.md) — clone/fetch flow, release
-directories, deploy keys, build/run hooks.
+directories, deploy keys, build/run hooks. The image-built lane takes
+`build.kind: image` (the old value is still accepted) and reports
+`builderFrontendVersion` / `builderPlanVersion` on its release records.
 
 ## Streamed transcript capture (execution logs)
 

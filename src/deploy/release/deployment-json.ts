@@ -84,10 +84,10 @@ export type ReleaseManifestV1 = {
   startCommand?: string;
   startupFile?: string;
   /**
-   * Railpack lane only: the OCI image this release produced, and the pinned
+   * image-build lane only: the OCI image this release produced, and the pinned
    * tools that produced it.
    *
-   * A Railpack release has **no promoted code tree** — nothing is copied into
+   * An image-build release has **no promoted code tree** — nothing is copied into
    * the release directory and `current` never moves for it. The manifest is
    * still written here so release history lives in exactly one place for both
    * lanes, and these fields are what make it useful: a rollback reads
@@ -102,9 +102,28 @@ export type ReleaseManifestV1 = {
    */
   imageTag?: string;
   imageDigest?: string;
-  railpackFrontendVersion?: string;
-  railpackPlanVersion?: string;
+  builderFrontendVersion?: string;
+  builderPlanVersion?: string;
 };
+
+/**
+ * Pre-rename spellings of the two build-tool version fields. Manifests sealed
+ * by an earlier daemon carry these; they stay readable so a rollback to such a
+ * release keeps working. New manifests are always written with the new names.
+ */
+const LEGACY_VERSION_FIELDS = [
+  ["railpackFrontendVersion", "builderFrontendVersion"],
+  ["railpackPlanVersion", "builderPlanVersion"],
+] as const;
+
+/** Move a legacy-named version field to its new name (the new name wins). */
+function normalizeLegacyVersionFields(record: Record<string, unknown>): void {
+  for (const [legacy, current] of LEGACY_VERSION_FIELDS) {
+    if (record[legacy] === undefined) continue;
+    if (record[current] === undefined) record[current] = record[legacy];
+    delete record[legacy];
+  }
+}
 
 /** Every named field is absent or passes `ok`. */
 function optionalFieldsOk(
@@ -155,8 +174,9 @@ function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
         "startupFile",
         "imageTag",
         "imageDigest",
-        "railpackFrontendVersion",
-        "railpackPlanVersion",
+        "builderFrontendVersion",
+        "builderPlanVersion",
+        ...LEGACY_VERSION_FIELDS.flat(),
       ],
       (field) => typeof field === "string",
     );
@@ -200,5 +220,7 @@ export async function readReleaseManifest(
   } catch {
     return null;
   }
-  return isReleaseManifestV1(parsed) ? parsed : null;
+  if (!isReleaseManifestV1(parsed)) return null;
+  normalizeLegacyVersionFields(parsed as Record<string, unknown>);
+  return parsed;
 }

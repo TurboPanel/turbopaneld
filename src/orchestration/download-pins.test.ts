@@ -3,7 +3,7 @@ import { parse } from "yaml";
 import { join } from "@std/path";
 import { isSha256Hex } from "./download-verify.ts";
 import { CLOUDFLARED_SHA256 } from "./assets.ts";
-import { RAILPACK_SHA256 } from "../deploy/release/railpack-build.ts";
+import { IMAGE_BUILD_SHA256 } from "../deploy/release/image-build.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -59,7 +59,7 @@ test("cloudflared and the build tool pin both architectures in code", () => {
   for (const digest of Object.values(CLOUDFLARED_SHA256)) {
     assert(isSha256Hex(digest));
   }
-  for (const digest of Object.values(RAILPACK_SHA256)) {
+  for (const digest of Object.values(IMAGE_BUILD_SHA256)) {
     assert(isSha256Hex(digest));
   }
 });

@@ -121,7 +121,7 @@ async function scanSite(
 
 /**
  * Check the release every site's `current` serves. Sites with nothing
- * published (Railpack services, daemon-owned web roots) are skipped. Never
+ * published (image-build services, daemon-owned web roots) are skipped. Never
  * throws for one site: a site that cannot be checked is a finding too.
  */
 export async function scanLiveReleaseLinks(

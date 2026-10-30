@@ -13,8 +13,8 @@
  * rather than a command type of its own, so every stage after the promote —
  * native-app supervision, `deployment.json`, retention — consumes it unchanged.
  *
- * A `build.kind: 'railpack'` entry takes a third branch
- * ({@link applyRailpackRelease}): checkout is identical, but the build produces
+ * A `build.kind: 'image'` entry takes a third branch
+ * ({@link applyImageBuildRelease}): checkout is identical, but the build produces
  * an **OCI image** rather than a tree, so nothing is staged, nothing is sealed,
  * and `current` never moves. The image tag is returned on the
  * {@link AppliedRelease} and `deploy-environment.ts` writes it into the compiled
@@ -39,10 +39,11 @@ import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
 } from "../../logs/contracts.ts";
-import type {
-  EnvironmentDeployNativeAppService,
-  EnvironmentDeployPayload,
-  EnvironmentDeploySource,
+import {
+  type EnvironmentDeployNativeAppService,
+  type EnvironmentDeployPayload,
+  type EnvironmentDeploySource,
+  isImageBuildKind,
 } from "../../contracts/commands-contracts.ts";
 import type { DecryptSecretsFn } from "../materialize-tls.ts";
 import { ensureAssetFolder } from "../asset-folders.ts";
@@ -78,16 +79,16 @@ import {
   nativeAppRuntimeTarget,
 } from "../native/unit.ts";
 import {
-  ensureBuildkitRailpack,
-  railpackCacheKey,
-  railpackImageTag,
-  runRailpackBuild,
-} from "./railpack-build.ts";
+  ensureBuildkitImageBuild,
+  imageBuildCacheKey,
+  imageBuildImageTag,
+  runImageBuildBuild,
+} from "./image-build.ts";
 import {
   promoteExistingRelease,
   promoteRelease,
   readCurrentReleaseId,
-  recordRailpackRelease,
+  recordImageBuildRelease,
   releasePathExists,
 } from "./promote.ts";
 import {
@@ -139,7 +140,7 @@ export type AppliedRelease = {
   commitAuthor?: string;
   releaseDir: string;
   /**
-   * Railpack lane only: the OCI image this release resolved to, and the pinned
+   * image-build lane only: the OCI image this release resolved to, and the pinned
    * tools that produced it.
    *
    * Deliberately **not** on the wire payload — the image does not exist until
@@ -147,13 +148,13 @@ export type AppliedRelease = {
    * back on the result instead: `deploy-environment.ts` turns `imageTag` into
    * `services.<name>.image` before `docker compose config`, and the two version
    * fields are carried into the command result so the release-history surface
-   * can name a Railpack release by its image rather than by a directory it does
+   * can name an image-build release by its image rather than by a directory it does
    * not have. `undefined` on every native-lane release.
    */
   imageTag?: string;
   imageDigest?: string;
-  railpackFrontendVersion?: string;
-  railpackPlanVersion?: string;
+  builderFrontendVersion?: string;
+  builderPlanVersion?: string;
   /**
    * Release `current` pointed at **before** this promote, or `null` on a first
    * deploy. The native-runtime apply rolls back to it when a promoted release
@@ -279,10 +280,10 @@ export type ApplySourceReleasesDeps = {
   promoteExistingReleaseFn?: typeof promoteExistingRelease;
   /** Test seam — defaults to {@link pruneReleases}. */
   pruneReleasesFn?: typeof pruneReleases;
-  /** Test seam — defaults to {@link recordRailpackRelease}. */
-  recordRailpackReleaseFn?: typeof recordRailpackRelease;
-  /** Test seam — defaults to {@link runRailpackBuild}. */
-  runRailpackBuildFn?: typeof runRailpackBuild;
+  /** Test seam — defaults to {@link recordImageBuildRelease}. */
+  recordImageBuildReleaseFn?: typeof recordImageBuildRelease;
+  /** Test seam — defaults to {@link runImageBuildBuild}. */
+  runImageBuildBuildFn?: typeof runImageBuildBuild;
   /**
    * True when this service is a Node app that is serving now: its release is
    * published without moving `current`, which the native apply moves only
@@ -292,8 +293,8 @@ export type ApplySourceReleasesDeps = {
   holdCurrent?: (
     service: { composeServiceName: string; serviceId: string },
   ) => Promise<boolean>;
-  /** Test seam — defaults to {@link ensureBuildkitRailpack}. */
-  ensureBuildkitRailpackFn?: typeof ensureBuildkitRailpack;
+  /** Test seam — defaults to {@link ensureBuildkitImageBuild}. */
+  ensureBuildkitImageBuildFn?: typeof ensureBuildkitImageBuild;
   /** Test seam — defaults to {@link ensureDaemonReleaseRecordDir}. */
   ensureDaemonReleaseRecordDirFn?: typeof ensureDaemonReleaseRecordDir;
   /**
@@ -331,12 +332,12 @@ function imageRollbackResult(
     ...(recordedManifest.imageDigest === undefined
       ? {}
       : { imageDigest: recordedManifest.imageDigest }),
-    ...(recordedManifest.railpackFrontendVersion === undefined ? {} : {
-      railpackFrontendVersion: recordedManifest.railpackFrontendVersion,
+    ...(recordedManifest.builderFrontendVersion === undefined ? {} : {
+      builderFrontendVersion: recordedManifest.builderFrontendVersion,
     }),
-    ...(recordedManifest.railpackPlanVersion === undefined
+    ...(recordedManifest.builderPlanVersion === undefined
       ? {}
-      : { railpackPlanVersion: recordedManifest.railpackPlanVersion }),
+      : { builderPlanVersion: recordedManifest.builderPlanVersion }),
     previousReleaseId,
     standaloneOutput: false,
     staticExport: false,
@@ -377,7 +378,7 @@ async function rollbackOneRelease(
   logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
   const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
 
-  // A Railpack release published no tree, so there is no sealed directory to
+  // An image-build release published no tree, so there is no sealed directory to
   // validate and no `current` to swap: the daemon record *is* the rollback.
   // Deciding from the record rather than from `entry.build.kind` is deliberate
   // — what matters is how the release being restored was built, not what the
@@ -446,7 +447,7 @@ async function rollbackOneRelease(
 }
 
 /**
- * Build one Railpack release: checkout → image → manifest.
+ * Build one image-build release: checkout → image → manifest.
  *
  * Everything the native lane does after the build is deliberately *not* done
  * here. There is no tree to stage, seal, or link `shared` into, and no `current`
@@ -460,7 +461,7 @@ async function rollbackOneRelease(
  * lane: scratch, or on a managed host the build sandbox's work tree, where the
  * prepare step runs as a throwaway build user.
  */
-async function applyRailpackRelease(
+async function applyImageBuildRelease(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
@@ -478,15 +479,16 @@ async function applyRailpackRelease(
   const { deps, onOutput, serviceId } = params;
   const { logSink } = deps;
 
-  const tools = await (deps.ensureBuildkitRailpackFn ?? ensureBuildkitRailpack)(
-    layout,
-  );
-  const imageTag = railpackImageTag(serviceId, entry.releaseId);
-  const built = await (deps.runRailpackBuildFn ?? runRailpackBuild)({
+  const tools =
+    await (deps.ensureBuildkitImageBuildFn ?? ensureBuildkitImageBuild)(
+      layout,
+    );
+  const imageTag = imageBuildImageTag(serviceId, entry.releaseId);
+  const built = await (deps.runImageBuildBuildFn ?? runImageBuildBuild)({
     build: entry.build,
     workingDir: params.buildWorkingDir,
     scratchDir: paths.scratchDir,
-    cacheKey: railpackCacheKey(payload.projectId),
+    cacheKey: imageBuildCacheKey(payload.projectId),
     imageTag,
     tools,
     onOutput,
@@ -518,11 +520,11 @@ async function applyRailpackRelease(
     ...(built.imageDigest === undefined
       ? {}
       : { imageDigest: built.imageDigest }),
-    railpackFrontendVersion: built.railpackFrontendVersion,
-    railpackPlanVersion: built.railpackPlanVersion,
+    builderFrontendVersion: built.builderFrontendVersion,
+    builderPlanVersion: built.builderPlanVersion,
   };
   const releaseDir =
-    await (deps.recordRailpackReleaseFn ?? recordRailpackRelease)({
+    await (deps.recordImageBuildReleaseFn ?? recordImageBuildRelease)({
       paths,
       manifest,
     });
@@ -556,9 +558,9 @@ async function applyRailpackRelease(
     ...(built.imageDigest === undefined
       ? {}
       : { imageDigest: built.imageDigest }),
-    railpackFrontendVersion: built.railpackFrontendVersion,
-    railpackPlanVersion: built.railpackPlanVersion,
-    // A Railpack release never moved `current`, so there is nothing for the
+    builderFrontendVersion: built.builderFrontendVersion,
+    builderPlanVersion: built.builderPlanVersion,
+    // An image-build release never moved `current`, so there is nothing for the
     // native-runtime apply to roll back to — and nothing that would supervise
     // it if there were.
     previousReleaseId: null,
@@ -583,7 +585,7 @@ async function resentPublishedRelease(
   params: { principalPaths: ReleasePaths | null; runFn: RunFn | undefined },
 ): Promise<RollbackTarget | null> {
   const paths = params.principalPaths;
-  if (!paths || entry.build.kind === "railpack") return null;
+  if (!paths || isImageBuildKind(entry.build.kind)) return null;
   const record = await readFinalizedRecord(
     resolveDaemonReleasePaths(layout, {
       serviceId,
@@ -604,7 +606,7 @@ async function resentPublishedRelease(
 /**
  * The release a rollback is addressing, as this host's daemon recorded it.
  *
- * Every published release — native or Railpack — leaves a manifest under the
+ * Every published release — native or image-build — leaves a manifest under the
  * daemon-owned record root ({@link resolveDaemonReleasePaths}), and that record
  * is the **only** thing a rollback trusts. The copy inside a native release
  * tree lives in the principal's home, which the principal owns and can
@@ -613,7 +615,7 @@ async function resentPublishedRelease(
  * another host — fails here with the fix spelled out, rather than falling back
  * to that tree.
  *
- * The record also identifies the lane: an `imageTag` means a Railpack release,
+ * The record also identifies the lane: an `imageTag` means an image-build release,
  * restored from the record root itself; anything else is a native tree in the
  * principal home (`null` when there is no principal to own one).
  */
@@ -798,11 +800,11 @@ function buildWorkingDirFor(
 }
 
 /**
- * The Railpack lane: check out, then build an OCI image. It publishes no
+ * The image-build lane: check out, then build an OCI image. It publishes no
  * filesystem tree, so the record root is daemon-owned and the scratch dir is
  * the only thing to clean up.
  */
-async function buildRailpackRelease(
+async function buildImageBuildRelease(
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
@@ -844,7 +846,7 @@ async function buildRailpackRelease(
     // their image did not build.
     logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
     if (work) await assertCheckoutCredentialsRemoved(paths.scratchDir);
-    return await applyRailpackRelease(layout, payload, entry, paths, {
+    return await applyImageBuildRelease(layout, payload, entry, paths, {
       serviceId,
       buildWorkingDir: buildWorkingDirFor(entry, checkout.workingDir),
       commitSha: checkout.commitSha,
@@ -1264,20 +1266,20 @@ async function applyOneRelease(
     `before ${entry.composeServiceName} was built`,
   );
 
-  const railpack = entry.build.kind === "railpack";
+  const imageBuild = isImageBuildKind(entry.build.kind);
   const principal = entry.principal;
 
   // Without a project principal there is no home to publish a release into.
   // Skip loudly rather than inventing an owner — ownership is assigned in the
   // control plane, not guessed on the host.
   //
-  // The Railpack lane is exempt, and deliberately so: it publishes an OCI image
+  // The image-build lane is exempt, and deliberately so: it publishes an OCI image
   // and no filesystem tree, so there is nothing for a Unix account to own. The
   // built image runs as an ordinary container under whatever service-level
   // limits already apply to it, and refusing to build one because nobody
   // assigned a host account it would never use would be a guard protecting
   // nothing.
-  if (!principal && !railpack) {
+  if (!principal && !imageBuild) {
     logSink.onLine(
       "stderr",
       `release skipped for ${entry.composeServiceName}: no project principal assigned`,
@@ -1297,10 +1299,10 @@ async function applyOneRelease(
       folder: serviceFolderFromPayload(payload, serviceId),
     })
     : null;
-  // Railpack history is always daemon-owned, principal or not: one service must
+  // image-build history is always daemon-owned, principal or not: one service must
   // not move its release history between two roots because an unrelated
   // ownership assignment changed.
-  const paths = railpack
+  const paths = imageBuild
     ? resolveDaemonReleasePaths(layout, {
       serviceId,
       releaseId: targetReleaseId,
@@ -1331,7 +1333,7 @@ async function applyOneRelease(
 
   if (!paths) {
     // Unreachable — the guard above returns for a native entry with no
-    // principal, and the Railpack branch always resolves a record root.
+    // principal, and the image-build branch always resolves a record root.
     throw new Error(
       `release for ${entry.composeServiceName} has no release paths`,
     );
@@ -1355,8 +1357,8 @@ async function applyOneRelease(
     });
   }
 
-  if (railpack) {
-    return await buildRailpackRelease(layout, payload, entry, paths, {
+  if (imageBuild) {
+    return await buildImageBuildRelease(layout, payload, entry, paths, {
       serviceId,
       deps,
       onOutput,

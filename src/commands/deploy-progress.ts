@@ -70,7 +70,12 @@ export type DeployStepReporter = {
    * keeps that step running and hands `current` back to it afterwards.
    */
   start(ids: string | readonly string[], options?: { nested?: boolean }): void;
-  done(ids: string | readonly string[]): void;
+  /**
+   * Mark steps done. A `note` stays on the finished step as its line (a
+   * running step's ticker text is otherwise dropped when it ends), for
+   * something the user should still read afterwards.
+   */
+  done(ids: string | readonly string[], options?: { note?: string }): void;
   /**
    * The step(s) failed. A `ready` step whose ensure still failed is marked
    * failed too; a running step this one was nested in goes back to pending
@@ -290,8 +295,8 @@ class DeployStepReporterImpl implements DeployStepReporter {
     this.#sendNow();
   }
 
-  done(ids: string | readonly string[]): void {
-    this.#finishSteps(ids, "done");
+  done(ids: string | readonly string[], options: { note?: string } = {}): void {
+    this.#finishSteps(ids, "done", options.note);
   }
 
   fail(ids: string | readonly string[]): void {
@@ -433,6 +438,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
   #finishSteps(
     ids: string | readonly string[],
     state: "done" | "failed",
+    note?: string,
   ): void {
     const at = this.#now().toISOString();
     let changed = false;
@@ -442,9 +448,17 @@ class DeployStepReporterImpl implements DeployStepReporter {
       const failedWhileReady = state === "failed" && step.state === "ready";
       if (step.state !== "running" && !failedWhileReady) continue;
       this.#close(step, state, at);
+      const kept = note?.trim();
+      if (kept) step.detail = clip(kept, COMMAND_PROGRESS_MAX_DETAIL_CHARS);
       changed = true;
     }
     if (!changed) return;
+    this.#settleResume(state);
+    this.#sendNow();
+  }
+
+  /** After nested steps finish: hand `current` back to the enclosing step, or undo it on a failure. */
+  #settleResume(state: "done" | "failed"): void {
     const resume = this.#resume === null ? undefined : this.#find(this.#resume);
     if (resume?.state === "running") {
       if (state === "failed") {
@@ -456,7 +470,6 @@ class DeployStepReporterImpl implements DeployStepReporter {
       }
     }
     if (this.#current === null) this.#resume = null;
-    this.#sendNow();
   }
 
   #cancelFlush(): void {

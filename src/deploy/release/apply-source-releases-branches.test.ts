@@ -1,5 +1,5 @@
 /**
- * Extra apply-source-releases branches: rollback metadata, railpack prune,
+ * Extra apply-source-releases branches: rollback metadata, image-build prune,
  * subdirectory checkout, decrypted credentials, and principal-less skip.
  */
 
@@ -270,7 +270,7 @@ test("resolveReleaseServiceId ignores hostings when releaseServiceId is absent",
   );
 });
 
-test("applySourceReleases fails a railpack rollback with no release record", async () => {
+test("applySourceReleases fails a image-build rollback with no release record", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
@@ -515,7 +515,7 @@ test("applySourceReleases rollback restores standaloneOutput and commit metadata
   });
 });
 
-test("applySourceReleases railpack rollback omits optional image fields when absent", async () => {
+test("applySourceReleases image-build rollback omits optional image fields when absent", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
@@ -551,7 +551,7 @@ test("applySourceReleases railpack rollback omits optional image fields when abs
       );
 
       const row = applied[0];
-      if (!row) throw new TypeError("expected railpack rollback row");
+      if (!row) throw new TypeError("expected image-build rollback row");
       assertEquals(
         row.imageTag,
         "turbopanel-app/web:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000a",
@@ -565,7 +565,7 @@ test("applySourceReleases railpack rollback omits optional image fields when abs
   });
 });
 
-test("applySourceReleases railpack prune logs superseded releases and optional metadata", async () => {
+test("applySourceReleases image-build prune logs superseded releases and optional metadata", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
@@ -594,9 +594,9 @@ test("applySourceReleases railpack prune logs superseded releases and optional m
             await Deno.mkdir(workingDir, { recursive: true });
             return { workingDir, commitSha: "pack-commit" };
           },
-          ensureBuildkitRailpackFn: () =>
+          ensureBuildkitImageBuildFn: () =>
             Promise.resolve({
-              railpack: "/tmp/railpack",
+              planner: "/tmp/railpack",
               buildctl: "/tmp/buildctl",
               buildkitd: "/tmp/buildkitd",
               frontendLayoutDir: "/tmp/frontend",
@@ -604,16 +604,16 @@ test("applySourceReleases railpack prune logs superseded releases and optional m
             }),
           // A development host: the prepare step runs unsandboxed here.
           sandboxedBuilds: false,
-          runRailpackBuildFn: (params) => {
+          runImageBuildBuildFn: (params) => {
             assertEquals(params.redactSummary?.("token"), "token");
             return Promise.resolve({
               imageTag:
                 "turbopanel-app/api:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000b",
-              railpackFrontendVersion: "0.3.0",
-              railpackPlanVersion: "0.2.0",
+              builderFrontendVersion: "0.3.0",
+              builderPlanVersion: "0.2.0",
             });
           },
-          recordRailpackReleaseFn: async ({ paths: record, manifest }) => {
+          recordImageBuildReleaseFn: async ({ paths: record, manifest }) => {
             await Deno.mkdir(
               join(record.releaseDir, RELEASE_METADATA_DIRNAME),
               { recursive: true },
@@ -627,7 +627,7 @@ test("applySourceReleases railpack prune logs superseded releases and optional m
       );
 
       const row = applied[0];
-      if (!row) throw new TypeError("expected railpack row");
+      if (!row) throw new TypeError("expected image-build row");
       assertEquals(row.commitMessage, "image ship");
       assertEquals(row.commitAuthor, "bot@example.com");
       assertEquals("imageDigest" in row, false);
