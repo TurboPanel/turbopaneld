@@ -1,8 +1,9 @@
 /**
  * The backup login's rights against real MySQL and MariaDB servers when Docker
  * is available: the generated grants let `mysqldump` / `mariadb-dump` copy a
- * database with its views, triggers, events and routines, and nothing more
- * (no writes, no other database). Containers are removed afterwards.
+ * database with its views, triggers, events and routines, including a
+ * database made later with plain SQL, and nothing more (no writes, no
+ * creating or dropping tables or databases). Containers are removed afterwards.
  */
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
@@ -10,12 +11,11 @@ import { docker, dockerReachable } from "../../testing/docker-run.ts";
 import { grantBackupPrivileges } from "./grant-databases.ts";
 import {
   createClientAccountSql as mariadbAccountSql,
-  grantBackupDatabaseSql as mariadbBackupSql,
+  grantBackupSql as mariadbBackupSql,
 } from "./mariadb-sql.ts";
 import {
   createClientAccountSql as mysqlAccountSql,
-  grantBackupDatabaseSql as mysqlBackupSql,
-  grantBackupGlobalSql as mysqlBackupGlobalSql,
+  grantBackupSql as mysqlBackupSql,
 } from "./mysql-sql.ts";
 
 const test = Deno.test.bind(Deno);
@@ -31,7 +31,6 @@ const ENGINES = [
     dump: "mysqldump",
     accountSql: mysqlAccountSql,
     grantSql: mysqlBackupSql,
-    globalSql: mysqlBackupGlobalSql,
     dumpFlags: ["--set-gtid-purged=OFF"],
   },
   {
@@ -41,7 +40,6 @@ const ENGINES = [
     dump: "mariadb-dump",
     accountSql: mariadbAccountSql,
     grantSql: mariadbBackupSql,
-    globalSql: undefined,
     dumpFlags: [] as string[],
   },
 ];
@@ -59,7 +57,7 @@ for (const engine of ENGINES) {
       `the backup login dumps a whole database and writes nothing on ${engine.image}`,
     ignore: !DOCKER_AVAILABLE,
     fn: async () => {
-      const name = `tp-backup-login-${crypto.randomUUID().slice(0, 8)}`;
+      const name = `tp-bk-login-${crypto.randomUUID().slice(0, 8)}`;
       const run = await docker([
         "run",
         "-d",
@@ -90,9 +88,24 @@ for (const engine of ENGINES) {
         return result.stdout;
       };
       try {
+        // Over TCP: the image's first-start server listens on the socket
+        // only and is restarted afterwards, so a socket answer can come from
+        // the server that is about to go away.
+        const probe = () =>
+          docker([
+            "exec",
+            name,
+            engine.client,
+            "--protocol=TCP",
+            "-h127.0.0.1",
+            "-uroot",
+            `-p${ROOT_PASSWORD}`,
+            "-e",
+            "SELECT 1",
+          ]);
         let ready = false;
         for (let attempt = 0; attempt < 90 && !ready; attempt++) {
-          ready = (await as("root", ROOT_PASSWORD, "SELECT 1")).success;
+          ready = (await probe()).success;
           if (!ready) await new Promise((resolve) => setTimeout(resolve, 1000));
         }
         if (!ready) throw new Error("engine did not become ready");
@@ -110,31 +123,37 @@ for (const engine of ENGINES) {
         await sql(engine.accountSql("nightly", BACKUP_PASSWORD, hosts));
         const apply = () =>
           grantBackupPrivileges({
-            databases: ["shop"],
             username: "nightly",
             hosts,
             grantSql: engine.grantSql,
-            globalSql: engine.globalSql,
             run: sql,
           });
         await apply();
         // A repeated apply is a no-op, not an error.
         await apply();
 
-        const dump = await docker([
-          "exec",
-          name,
-          engine.dump,
-          "-unightly",
-          `-p${BACKUP_PASSWORD}`,
-          "--single-transaction",
-          "--no-tablespaces",
-          "--routines",
-          "--triggers",
-          "--events",
-          ...engine.dumpFlags,
-          "shop",
-        ]);
+        // A database made with plain SQL after the grant is covered too.
+        await sql(
+          "CREATE DATABASE later_db; " +
+            "CREATE TABLE later_db.notes (id INT PRIMARY KEY); " +
+            "INSERT INTO later_db.notes VALUES (7);",
+        );
+        const dumpAs = (database: string) =>
+          docker([
+            "exec",
+            name,
+            engine.dump,
+            "-unightly",
+            `-p${BACKUP_PASSWORD}`,
+            "--single-transaction",
+            "--no-tablespaces",
+            "--routines",
+            "--triggers",
+            "--events",
+            ...engine.dumpFlags,
+            database,
+          ]);
+        const dump = await dumpAs("shop");
         assertEquals(dump.success, true, dump.stderr);
         assertStringIncludes(dump.stdout, "INSERT INTO `orders` VALUES");
         // MariaDB writes one row per line; MySQL writes them on one line.
@@ -143,25 +162,29 @@ for (const engine of ENGINES) {
         assertStringIncludes(dump.stdout, "TRIGGER");
         assertStringIncludes(dump.stdout, "EVENT `nightly`");
         assertStringIncludes(dump.stdout, "PROCEDURE `order_count`");
+        const later = await dumpAs("later_db");
+        assertEquals(later.success, true, later.stderr);
+        assertStringIncludes(later.stdout, "INSERT INTO `notes` VALUES");
+        assertStringIncludes(later.stdout, "(7)");
 
-        const write = await as(
-          "nightly",
-          BACKUP_PASSWORD,
-          "INSERT INTO shop.orders VALUES (3, 30)",
-        );
-        assertEquals(write.success, false, "the backup login must not write");
-        const other = await as(
-          "nightly",
-          BACKUP_PASSWORD,
-          "SELECT * FROM closed.secret",
-        );
-        assertEquals(other.success, false, "an unlisted database stays closed");
-        const accounts = await as(
-          "nightly",
-          BACKUP_PASSWORD,
-          "SELECT COUNT(*) FROM mysql.user",
-        );
-        assertEquals(accounts.success, false, "the account table stays closed");
+        for (
+          const statement of [
+            "INSERT INTO shop.orders VALUES (3, 30)",
+            "UPDATE later_db.notes SET id = 8",
+            "DELETE FROM shop.orders",
+            "CREATE TABLE shop.extra (id INT)",
+            "DROP TABLE later_db.notes",
+            "CREATE DATABASE made_by_backup",
+            "CREATE USER other_login",
+          ]
+        ) {
+          const refused = await as("nightly", BACKUP_PASSWORD, statement);
+          assertEquals(
+            refused.success,
+            false,
+            `the backup login must not run: ${statement}`,
+          );
+        }
       } finally {
         await docker(["rm", "-f", name]);
       }
