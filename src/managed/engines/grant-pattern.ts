@@ -29,8 +29,8 @@ export type GrantQuoting = {
   /** Database-level privileges only this dialect has: [name, `mysql.db` column]. */
   extraPrivileges?: ReadonlyArray<readonly [string, string]>;
   /**
-   * What the backup login holds on each database in this dialect (a logical
-   * dump of rows, views, triggers, events and routine definitions).
+   * What the backup login holds on every database (`*.*`) in this dialect: a
+   * logical dump of rows, views, triggers, events and routine definitions.
    */
   backupPrivileges: readonly string[];
 };
@@ -283,24 +283,19 @@ function revokeAllButSql(
 }
 
 /**
- * The backup login's `GRANT` on one database for one account (the dialect's
- * {@link GrantQuoting.backupPrivileges}), followed by the revokes that take
- * back anything else on that database.
+ * The backup login's one `GRANT` for one account: the dialect's
+ * {@link GrantQuoting.backupPrivileges} at global level (`*.*`), so it reads
+ * every database, including one made later with plain `CREATE DATABASE`. It
+ * holds no write, DDL or administrative right anywhere.
  */
-export function grantBackupOnDatabaseSql(
+export function grantBackupOnAllSql(
   quoting: GrantQuoting,
-  database: string,
   username: string,
   host: string,
 ): string {
-  const db = quoteGrantSchema(quoting, database);
-  const held = quoting.backupPrivileges;
-  return [
-    `GRANT ${held.join(", ")} ON ${db}.* TO ${
-      quoting.accountAt(username, host)
-    };`,
-    revokeAllButSql(quoting, db.slice(1, -1), database, username, host, held),
-  ].join("\n");
+  return `GRANT ${quoting.backupPrivileges.join(", ")} ON *.* TO ${
+    quoting.accountAt(username, host)
+  };`;
 }
 
 /** Both grant builders bound to one dialect's quoting and default host. */
@@ -316,15 +311,11 @@ export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
     username: string,
     host?: string,
   ) => string;
-  grantBackupDatabaseSql: (
-    database: string,
-    username: string,
-    host?: string,
-  ) => string;
+  grantBackupSql: (username: string, host?: string) => string;
 } {
   return {
-    grantBackupDatabaseSql: (database, username, host = defaultHost) =>
-      grantBackupOnDatabaseSql(quoting, database, username, host),
+    grantBackupSql: (username, host = defaultHost) =>
+      grantBackupOnAllSql(quoting, username, host),
     grantDatabaseSql: (database, username, privilege, host = defaultHost) =>
       grantOnDatabaseSql(quoting, database, username, privilege, host),
     revokePlainDatabaseGrantSql: (database, username, host = defaultHost) =>

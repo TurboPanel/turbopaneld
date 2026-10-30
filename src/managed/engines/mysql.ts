@@ -53,8 +53,7 @@ import {
   ensureSocketAdminSql,
   flushPrivilegesLocalSql,
   followReplicationSourceSql,
-  grantBackupDatabaseSql,
-  grantBackupGlobalSql,
+  grantBackupSql,
   grantDatabaseSql,
   grantRootSql,
   installAuthSocketPluginSql,
@@ -417,11 +416,9 @@ async function applyOneCredential(
   if (isBackupCredential(credential)) {
     // Fixed read-only dump rights on every database, whatever else was sent.
     await grantBackupPrivileges({
-      databases: credential.databases,
       username: credential.username,
       hosts: ctx.clientSourceHosts ?? [],
-      grantSql: grantBackupDatabaseSql,
-      globalSql: grantBackupGlobalSql,
+      grantSql: grantBackupSql,
       run: (sql) => runMysql(ctx, sql),
     });
     await runMysql(ctx, "FLUSH PRIVILEGES;");

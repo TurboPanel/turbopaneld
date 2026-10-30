@@ -122,25 +122,22 @@ export function isBackupCredential(credential: {
 }
 
 /**
- * The backup login's rights on MySQL and MariaDB: the dialect's backup set on
- * every listed database, then (MySQL) its global rights, each for the
- * wildcard account and every client source host, one statement per step in
- * order. `privileges` and `grantMode` play no part: the rights are fixed.
+ * The backup login's rights on MySQL and MariaDB: the dialect's read and dump
+ * set at global level, for the wildcard account and every client source host,
+ * in one statement batch. Global, not per database, so a database made with
+ * plain SQL is covered too; the credential's `databases`, `privileges` and
+ * `grantMode` play no part. Database-level grants an older daemon wrote are a
+ * subset of it and stay.
  */
 export function grantBackupPrivileges(options: {
-  databases: readonly string[];
   username: string;
   hosts: readonly string[];
-  grantSql: (database: string, username: string, host?: string) => string;
-  globalSql?: (username: string, host?: string) => string;
+  grantSql: (username: string, host?: string) => string;
   run: (sql: string) => Promise<unknown>;
-}): Promise<void> {
-  const { username, hosts, grantSql, globalSql, run } = options;
-  const forEveryHost = (build: (host?: string) => string) =>
-    [build(), ...hosts.map((host) => build(host))].join("\n");
-  const steps = [...new Set(options.databases)].map((database) =>
-    forEveryHost((host) => grantSql(database, username, host))
+}): Promise<unknown> {
+  const { username, hosts, grantSql, run } = options;
+  return run(
+    [grantSql(username), ...hosts.map((host) => grantSql(username, host))]
+      .join("\n"),
   );
-  if (globalSql) steps.push(forEveryHost((host) => globalSql(username, host)));
-  return forEachSequential(steps, (sql) => run(sql));
 }
