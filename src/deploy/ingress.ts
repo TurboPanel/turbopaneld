@@ -9,6 +9,7 @@ import {
   trimSnippetSites,
 } from "./caddy-snippet.ts";
 import { foldHostname } from "./hostname-fold.ts";
+import { removeUnreferencedTlsFolders } from "./tls-cleanup.ts";
 import {
   dropReservedProofSitesFor,
   proofDir,
@@ -3470,6 +3471,9 @@ async function rewriteHostingCaddySitesLocked(
     JSON.stringify(acmeHostnames),
     { mode: 0o640 },
   );
+  // A pin that moved or went away leaves its folder behind: clear what no site
+  // on this server uses, now that this one is live.
+  await removeUnreferencedTlsFolders(layout);
 }
 
 /** Remove the per-environment hosting site snippet and best-effort reload Caddy. */
@@ -3531,7 +3535,11 @@ async function removeHostingCaddySiteLocked(
   );
   if (!reload.success) {
     logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
+    return;
   }
+  // The environment's certificates went with its site: only after Caddy let go
+  // of the files does the cleanup remove them.
+  await removeUnreferencedTlsFolders(layout);
 }
 
 /**
