@@ -121,7 +121,7 @@ export function dropDatabaseSql(name: string): string {
 export const {
   grantDatabaseSql,
   revokePlainDatabaseGrantSql,
-  grantBackupDatabaseSql,
+  grantBackupSql,
 } = grantSqlFor(
   {
     quoteIdentifier,

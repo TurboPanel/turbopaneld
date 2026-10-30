@@ -9,9 +9,9 @@
  * allows).
  *
  * A range that already has a route on another interface (an equal route, or a
- * connected subnet that holds it, e.g. a gateway's LAN on a server that sits
- * on that LAN) is skipped: taking it over through `tp0` would cut this host
- * off from its own network. Only routes with `dev tp0` are ever removed, and
+ * connected subnet that holds it or sits inside it, e.g. a gateway's LAN on a
+ * server that sits on that LAN) is skipped, as `tp-host` refuses it: taking
+ * it over through `tp0` would cut this host off from its own network. Only routes with `dev tp0` are ever removed, and
  * never one the kernel made (`proto kernel`), a link-local or multicast range,
  * or a range broader than the policy allows (`fabric-allowed-ips.ts`).
  */
@@ -69,6 +69,10 @@ export type FabricRoute = {
 export type ObservedRoute = FabricRoute & {
   dev: string | null;
   kernel: boolean;
+  /** Next hop (`via`), when the route has one. */
+  via: string | null;
+  /** The kernel marks the route `linkdown` (its interface has no carrier). */
+  linkdown: boolean;
 };
 
 export type FabricRoutePlan = {
@@ -109,7 +113,7 @@ export function fabricRoute(value: string): FabricRoute | null {
   };
 }
 
-function rangeInside(
+export function rangeInside(
   inner: ParsedCidrLiteral,
   outer: ParsedCidrLiteral,
 ): boolean {
@@ -117,7 +121,15 @@ function rangeInside(
     inner.last <= outer.last;
 }
 
-function withHostPrefix(destination: string, version: 4 | 6): string {
+/** One range equals, contains or sits inside the other. */
+export function rangesShare(
+  a: ParsedCidrLiteral,
+  b: ParsedCidrLiteral,
+): boolean {
+  return rangeInside(a, b) || rangeInside(b, a);
+}
+
+export function withHostPrefix(destination: string, version: 4 | 6): string {
   if (destination.includes("/")) return destination;
   return `${destination}/${HOST_PREFIX[version]}`;
 }
@@ -142,6 +154,8 @@ function parseRouteLine(line: string, version: 4 | 6): ObservedRoute | null {
     ...route,
     dev: tokenAfter(tokens, "dev"),
     kernel: isKernelRoute(tokens),
+    via: tokenAfter(tokens, "via"),
+    linkdown: tokens.includes("linkdown"),
   };
 }
 
@@ -164,11 +178,11 @@ export function parseRouteShow(
  */
 export function desiredFabricRoutes(
   payload: {
-    address: string;
+    address?: string;
     peers: readonly { allowedIPs: readonly string[] }[];
   },
 ): FabricRoute[] {
-  const ownAddress = payload.address.split("/")[0] ?? "";
+  const ownAddress = payload.address?.split("/")[0] ?? "";
   const own = fabricRoute(
     withHostPrefix(ownAddress, ownAddress.includes(":") ? 6 : 4),
   );
@@ -190,7 +204,7 @@ function conflictingDev(
 ): string | null {
   for (const other of others) {
     const equal = other.key === route.key;
-    const connected = other.kernel && rangeInside(route.parsed, other.parsed);
+    const connected = other.kernel && rangesShare(route.parsed, other.parsed);
     if (equal || connected) return other.dev ?? "another interface";
   }
   return null;

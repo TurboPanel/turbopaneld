@@ -1,13 +1,10 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals } from "@std/assert";
 import {
   grantBackupPrivileges,
   isBackupCredential,
 } from "./grant-databases.ts";
-import { grantBackupDatabaseSql as mariadbBackupSql } from "./mariadb-sql.ts";
-import {
-  grantBackupDatabaseSql as mysqlBackupSql,
-  grantBackupGlobalSql,
-} from "./mysql-sql.ts";
+import { grantBackupSql as mariadbBackupSql } from "./mariadb-sql.ts";
+import { grantBackupSql as mysqlBackupSql } from "./mysql-sql.ts";
 import { backupLoginAttributesSql } from "./postgres-sql.ts";
 
 /**
@@ -34,64 +31,36 @@ test("Postgres backup login: read all data, see past row security, nothing else"
   );
 });
 
-test("MySQL backup login grants the dump set per database and revokes the rest", () => {
-  const sql = mysqlBackupSql("shop_db", "nightly");
-  assertStringIncludes(
-    sql,
-    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON `shop\\_db`.* TO `nightly`@'172.16.0.0/255.240.0.0';",
-  );
-  // Everything else on the database is taken back, LOCK TABLES included.
-  assertStringIncludes(sql, "IF(Lock_tables_priv = 'Y', 'LOCK TABLES', NULL)");
-  assertStringIncludes(sql, "IF(Insert_priv = 'Y', 'INSERT', NULL)");
-  assertEquals(sql.includes("IF(Select_priv"), false);
+test("MySQL backup login reads every database at global level, nothing else", () => {
   assertEquals(
-    grantBackupGlobalSql("nightly", "10.0.0.%"),
-    "GRANT SHOW_ROUTINE ON *.* TO `nightly`@'10.0.0.%';",
+    mysqlBackupSql("nightly"),
+    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE ON *.* TO `nightly`@'172.16.0.0/255.240.0.0';",
+  );
+  assertEquals(
+    mysqlBackupSql("nightly", "10.0.0.%"),
+    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE ON *.* TO `nightly`@'10.0.0.%';",
   );
 });
 
-test("MariaDB backup login adds LOCK TABLES and SHOW CREATE ROUTINE per database", () => {
-  const sql = mariadbBackupSql("shop", "nightly", "10.0.0.%");
-  assertStringIncludes(
-    sql,
-    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, SHOW CREATE ROUTINE ON `shop`.* TO `nightly`@'10.0.0.%';",
-  );
-  assertEquals(sql.includes("IF(Lock_tables_priv"), false);
-  assertStringIncludes(
-    sql,
-    "IF(Delete_history_priv = 'Y', 'DELETE HISTORY', NULL)",
+test("MariaDB backup login adds LOCK TABLES and SHOW CREATE ROUTINE at global level", () => {
+  assertEquals(
+    mariadbBackupSql("nightly", "10.0.0.%"),
+    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, SHOW CREATE ROUTINE ON *.* TO `nightly`@'10.0.0.%';",
   );
 });
 
-test("grantBackupPrivileges grants every database and the globals for every host, in order", async () => {
+test("grantBackupPrivileges grants the wildcard account and every host in one batch", async () => {
   const ran: string[] = [];
   await grantBackupPrivileges({
-    databases: ["a", "b", "a"],
     username: "nightly",
-    hosts: ["10.0.0.5"],
-    grantSql: (database, username, host) =>
-      `db ${database} ${username} ${host ?? "net"}`,
-    globalSql: (username, host) => `global ${username} ${host ?? "net"}`,
+    hosts: ["10.0.0.5", "10.0.0.6"],
+    grantSql: (username, host) => `grant ${username} ${host ?? "net"}`,
     run: (sql) => {
       ran.push(sql);
       return Promise.resolve();
     },
   });
   assertEquals(ran, [
-    "db a nightly net\ndb a nightly 10.0.0.5",
-    "db b nightly net\ndb b nightly 10.0.0.5",
-    "global nightly net\nglobal nightly 10.0.0.5",
+    "grant nightly net\ngrant nightly 10.0.0.5\ngrant nightly 10.0.0.6",
   ]);
-  const withoutGlobals: string[] = [];
-  await grantBackupPrivileges({
-    databases: ["a"],
-    username: "nightly",
-    hosts: [],
-    grantSql: (database) => `db ${database}`,
-    run: (sql) => {
-      withoutGlobals.push(sql);
-      return Promise.resolve();
-    },
-  });
-  assertEquals(withoutGlobals, ["db a"]);
 });

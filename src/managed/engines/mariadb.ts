@@ -50,7 +50,7 @@ import {
   ensureSocketAdminSql,
   flushPrivilegesLocalSql,
   followReplicationSourceSql,
-  grantBackupDatabaseSql,
+  grantBackupSql,
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
@@ -460,10 +460,9 @@ async function applyOneCredential(
   if (isBackupCredential(credential)) {
     // Fixed read-only dump rights on every database, whatever else was sent.
     await grantBackupPrivileges({
-      databases: credential.databases,
       username: credential.username,
       hosts: ctx.clientSourceHosts ?? [],
-      grantSql: grantBackupDatabaseSql,
+      grantSql: grantBackupSql,
       run: (sql) => runMariadb(ctx, sql),
     });
     await runMariadb(ctx, "FLUSH PRIVILEGES;");
