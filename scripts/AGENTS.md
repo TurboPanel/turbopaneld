@@ -252,8 +252,8 @@ reaches new installs at release cadence, matching the `release` channel the
 script installs by default. **Keep `scripts/run.sh` at that path on `live`** —
 the redirect points straight at the file. Any of 301/302/307/308 works (every
 consumer follows it); prefer 307 so a later change of target is not cached by
-browsers and proxies. `curl -fsSL turbopanel.sh | sh` works because `-L` follows
-the redirect (a bare `curl turbopanel.sh | sh` does not), and every automatic-update consumer already
+browsers and proxies. `curl -fsSL https://turbopanel.sh | sh` works because `-L` follows
+the redirect (`curl https://turbopanel.sh | sh` without `-L` does not). Always print the `https://` form: a bare host makes curl's first request plain HTTP, and whoever answers it picks the script that runs as root, and every automatic-update consumer already
 fetches with `-L`: `tp-orchestrate update` (`CDN_RUN_SCRIPT`), the daemon's
 `downloadRunScript` (`src/instance/run-reconcile.ts`), and run.sh's own
 re-exec. Threat model is unchanged: a party who could tamper with the domain

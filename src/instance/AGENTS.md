@@ -483,7 +483,7 @@ checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
 
 **Managed updates:** the running daemon reconciles in-place via `run.sh`
 when triggered from the control-plane UI or manually with the same piped
-installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
+installer (`curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 `TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). On a **managed host** the
 daemon does not download or pipe the script itself: it resolves the trust
 regime (`resolveAutomaticUpdateTrust` — public TLS or the

@@ -3920,9 +3920,9 @@ tp_report_remaining() {
 tp_print_reinstall_commands() {
   tp_say ""
   tp_say "Install a daemon again:"
-  tp_say "  curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<license> sh"
+  tp_say "  curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=<license> sh"
   tp_say "Install a self-hosted control plane again:"
-  tp_say "  curl -fsSL turbopanel.sh | sh"
+  tp_say "  curl -fsSL https://turbopanel.sh | sh"
 }
 
 tp_print_purge_notes() {
