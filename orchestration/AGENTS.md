@@ -424,7 +424,7 @@ key. The daemon restarts the unit when its rendered content changes
 
 The control-plane Let's Encrypt window (co-located instance) proxies
 HTTP-01 challenges to `unix/<run dir>/instance-acme.sock`. Connecting needs
-`x` on `/run/turbopanel` (`tp:tp` `2770`) and `w` on the socket. The role
+`x` on `/run/turbopanel` (`tp:tp` `3770`) and `w` on the socket. The role
 grants `tpedge` traverse only (`u:tpedge:x`, no listing, no default entry) on
 the run directory, and because `/run` is tmpfs it also writes
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf` (`a+ … u:tpedge:x`) so the

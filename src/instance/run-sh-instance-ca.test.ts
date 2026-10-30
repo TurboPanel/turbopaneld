@@ -313,6 +313,24 @@ test("run.sh never fetches trust material over unverified TLS unless --insecure-
   }
 });
 
+test("the sudo re-exec only skips TLS checks for the instance's own host, never the public installer host", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const start = source.indexOf(
+    '  _curl="$TP_CURL_FETCH"\n  if [ -n "$DL_BASE" ]',
+  );
+  const end = source.indexOf("| sudo sh -s --", start);
+  assertEquals(start >= 0 && end > start, true, "re-exec block not found");
+  const block = source.slice(start, end);
+  const split = block.indexOf("\n  else\n");
+  assertEquals(split > 0, true, "re-exec DL_BASE branch not found");
+  const ownHost = block.slice(0, split);
+  const publicHost = block.slice(split);
+  assertStringIncludes(ownHost, '_REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"');
+  assertStringIncludes(ownHost, '_curl="$TP_CURL_FETCH_INSECURE"');
+  assertStringIncludes(publicHost, "tp_installer_host_for_channel");
+  assertEquals(publicHost.includes("TP_CURL_FETCH_INSECURE"), false);
+});
+
 test("a pinned 200 installs directly and a pinned 404 clears the CA", async () => {
   const source = await Deno.readTextFile(runShPath);
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });

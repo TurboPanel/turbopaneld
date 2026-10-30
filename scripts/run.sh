@@ -80,9 +80,11 @@ TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
 # `--insecure-tls` only relaxes trust for the self-hosted *instance* bootstrap
-# legs (the initial run.sh re-exec, the instance CA fetch, and the private
-# uploaded-issuer fetch) — it must never
-# weaken release/CDN trust, so bootstrapping a self-signed instance cannot
+# legs (the run.sh re-exec from the instance's own host when a
+# TURBOPANEL_DL_BASE overlay is in use, the instance CA fetch, and the private
+# uploaded-issuer fetch). The re-exec from a public installer host always
+# verifies TLS: that host has a public certificate and its body is piped into
+# `sudo sh`. It must never weaken release/CDN trust, so bootstrapping a self-signed instance cannot
 # silently disable verification of the code we execute. If a genuine
 # release-download TLS emergency ever arises, TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE=1
 # is a deliberately undocumented, operator-only escape hatch: it is never derived
@@ -2555,12 +2557,16 @@ if ! tp_is_root; then
   if [ "$_sudo_rc" -ne 0 ]; then
     tp_install_privilege_denied sudo_failed
   fi
+  _curl="$TP_CURL_FETCH"
   if [ -n "$DL_BASE" ]; then
     if [ -z "$HOST_URL" ]; then
       tp_print_error "TURBOPANEL_DL_BASE requires TURBOPANEL_HOST (or --host)"
       exit 1
     fi
     _REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
+    # The instance's own host may serve a self-signed certificate; only this
+    # leg honours --insecure-tls. The public installer host always verifies.
+    [ "$INSECURE_TLS" = true ] && _curl="$TP_CURL_FETCH_INSECURE"
   else
     _REEXEC_SCRIPT_URL="https://$(tp_installer_host_for_channel "${TURBOPANEL_UPDATE_CHANNEL:-release}")"
   fi
@@ -2589,8 +2595,6 @@ if ! tp_is_root; then
   [ "$SKIP_DAEMON_PACKAGE" = true ] && set -- "$@" --skip-daemon-package
   [ "$PROGRESS_MARKERS" = true ] && set -- "$@" --progress-markers
   [ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] && set -- "$@" --channel "$TURBOPANEL_UPDATE_CHANNEL"
-  _curl="$TP_CURL_FETCH"
-  [ "$INSECURE_TLS" = true ] && _curl="$TP_CURL_FETCH_INSECURE"
   # Re-run the script under sudo. `exec` cannot be used here: in a pipeline
   # each command runs in its own subshell, so `exec` would only replace the
   # curl subshell, not this shell — leaving the original non-root shell to

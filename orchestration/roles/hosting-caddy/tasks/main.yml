@@ -49,7 +49,7 @@
 
 # A co-located control plane on Let's Encrypt has hosting Caddy proxy HTTP-01
 # challenges to <run dir>/instance-acme.sock. Traverse only (no listing) on the
-# tp:tp 2770 run directory; the socket is re-created on every bind, so its one
+# tp:tp 3770 run directory; the socket is re-created on every bind, so its one
 # ACL entry (u:tpedge:rw) comes from tp-host right after the daemon or the
 # issuer binds it. Never group tp. /run is tmpfs: the tmpfiles.d line puts the
 # entry back on every boot, after runtime-sockets' line creates the directory.
