@@ -2,7 +2,7 @@
  * Topology discovery types — the daemon-side identity/generation contract
  * that later phases (adapters, Cloudflare packer/query reconstruction) build
  * on. This module only discovers and assigns stable identity; it does not
- * collect telemetry for any of these entities (see `../AGENTS.md`).
+ * collect telemetry for any of these entities (see `../metrics/AGENTS.md`).
  *
  * A `TopologyDeviceId`/`FilesystemId`/`GpuId`/`SignalId` is an opaque stable
  * string, derived by `identity.ts` — never a bare kernel/interface name,

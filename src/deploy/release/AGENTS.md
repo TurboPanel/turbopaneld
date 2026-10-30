@@ -193,7 +193,7 @@ A missing target directory **fails** rather than skipping: "the release you
 asked for was pruned on this host" is exactly what the operator needs told.
 
 **A rollback trusts only the daemon's own release record.** Every successful
-promote — native or Railpack — leaves a copy of its manifest under the
+promote — native or image-built — leaves a copy of its manifest under the
 daemon-owned `<daemonStateDir>/release-records/` root
 (`<serviceId>/<releaseId>/`, `resolveDaemonReleasePaths`); for the native lane it is written **before** the
 promote, under a `.pending` marker, so a write failure fails the deploy with
@@ -486,7 +486,7 @@ set plus that record. The recorded side stays current-only so it cannot grow
 without bound — once a redeploy has reclaimed a removed tree on the host, the
 record written by that same deploy no longer names it.
 
-## Railpack image releases (`build.kind: railpack`)
+## Image-Built Releases (`build.kind: railpack`)
 
 A source binding may set `x-turbopanel.source.buildKind: railpack`, which
 deploy-prepare passes straight through as `sourceMaterial[].build.kind`. That is
@@ -498,14 +498,14 @@ and native app — and the four differ only in what a release *is*:
 | compose | nothing (no source) | `docker compose up` on the authored image/build |
 | site | a promoted directory | a host engine vhost serves `current` |
 | native app | a promoted directory | a generated systemd unit runs out of `current` |
-| **Railpack** | **an OCI image tag** | `docker compose up` on that tag |
+| **Image build** | **an OCI image tag** | `docker compose up` on that tag |
 
 Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
 
 - Checkout is identical — `checkout.ts` unchanged, same scratch dir, same
   credential handling.
 - `railpack prepare` writes a build plan; `docker buildx build` hands that
-  plan to the pinned Railpack **BuildKit gateway frontend** on the **Docker
+  plan to the pinned build-tool **BuildKit gateway frontend** on the **Docker
   Engine's own BuildKit** (`--builder default`, `BUILDKIT_SYNTAX=<frontend>`,
   `-f <plan>`, `--load`), through the same `docker` CLI path and sudo ladder as
   compose builds (`runDockerStreamed`). A `docker buildx version` preflight
@@ -527,13 +527,13 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
   OCI layout at `<runtimesDir>/railpack-frontend/<version>/image` (with a
   `current` symlink) plus its manifest digest, and its `docker pull` leaves the
   same image in Docker's store. The build names
-  `ghcr.io/railwayapp/railpack-frontend@<digest>`, so a repointed upstream tag
+  `<frontend image>@<digest>`, so a repointed upstream tag
   cannot change what two releases recorded with the same
   `railpackFrontendVersion` were built by. If the store lost the image, the
   vendored layout is `docker load`ed back first; if even that fails the Engine
   can only fetch exactly that digest.
 - Output goes straight into the image store (`--load`): no tarball handoff.
-- **Tenant isolation is `cache-key=<projectId>`**, which Railpack prefixes to
+- **Tenant isolation is `cache-key=<projectId>`**, which the build tool prefixes to
   every mount cache id (package-manager stores, `node_modules`). Mount caches
   are writable and shared by id, so without it one tenant could read or poison
   another's. The Engine's layer cache is per host, as it is for compose builds
@@ -544,7 +544,7 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
   (follow-up), never values on argv.
 - Everything the native lane does *after* the build is skipped. Nothing is
   staged, sealed, or linked, and `current` never moves. There is no promoted
-  tree, so a Railpack release needs **no project principal** — the guard that
+  tree, so an image-built release needs **no project principal** — the guard that
   skips a principal-less entry is relaxed for this branch only, because there is
   no filesystem tree for a Unix account to own. The image runs as an ordinary
   container under whatever service-level limits already apply.
@@ -561,7 +561,7 @@ authored `build:`) on the compiled runtime document **before**
 `docker compose config` validates it. This is a pre-processing pass on the same
 compose document, deliberately not a second orchestration path: Traefik labels,
 hosting Caddy, storage mounts, and `docker compose ps` container reporting all
-go on treating the service as the ordinary container it is. A Railpack service
+go on treating the service as the ordinary container it is. An image-built service
 is **not** host-native and never appears in `hostNativeComposeServiceNames()` /
 `resolveHostNativeLanes` — it stays `serviceKind: container` and never enters
 `sites[]` / `nativeAppServices[]`.
@@ -574,7 +574,7 @@ what lets a service that switched build modes still roll back to a release built
 the old way.
 
 **Retention.** `pruneReleases` walks `releases/` by directory listing and is
-unchanged. A Railpack release directory contains only
+unchanged. An image-built release directory contains only
 `.turbopanel/release.json`, so pruning one removes **its manifest, not a running
 container** — the container keeps running under the still-tagged image until a
 later deploy supersedes it. Pruning it does mean that release id can no longer

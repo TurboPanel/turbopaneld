@@ -94,7 +94,7 @@ it regresses:
   go through `installVendorExecutable` (`cp` + `chmod`). And **`Deno.symlink()`
   requires *unscoped* read and write**: a link's target is only resolved on
   traversal, so no path-scoped grant covers it however wide, and every
-  `current` link — vendor runtimes, release promote, railpack, hosting Caddy —
+  `current` link — vendor runtimes, release promote, the image build, hosting Caddy —
   goes through `createSymlink` (`ln -sfn`). Neither is reported at compile
   time: the first broke the first canary install after this hardening, the
   second silently skipped every vendor `current` symlink on the same run.
