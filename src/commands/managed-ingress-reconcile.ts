@@ -357,6 +357,47 @@ function emptyIngressResult(
   };
 }
 
+/**
+ * Remove the stack's `proxysql-data` volume once the last cluster is gone.
+ * `compose down` keeps named volumes, so it was left on the host for good. The
+ * saved proxysql.db is rebuilt from the desired state on the next provision.
+ * Best effort: a volume still in use, or one that is already gone, is logged
+ * and never fails the teardown. The project comes from the saved descriptor
+ * (it survives teardown), so a host torn down by an older build is cleaned up
+ * too, and no other project's volume of that name is touched.
+ */
+async function removeProxySqlDataVolume(
+  layout: LayoutPaths,
+  run: RunDockerFn,
+): Promise<void> {
+  try {
+    const descriptor = await readSystemComponentDescriptor(
+      layout,
+      SYSTEM_MANAGED_INGRESS_COMPONENT,
+    );
+    if (!descriptor) return;
+    const volume = `${proxysqlProject(descriptor.serviceId)}_proxysql-data`;
+    const inspect = await run(["volume", "inspect", volume]);
+    if (!inspect.success) return;
+    const rm = await run(["volume", "rm", volume]);
+    if (!rm.success) {
+      logInfo(
+        "commands",
+        `managed.ingress.reconcile left volume ${volume}: ${
+          rm.stderr || "rm failed"
+        }`,
+      );
+    }
+  } catch (err) {
+    logInfo(
+      "commands",
+      `managed.ingress.reconcile proxysql volume cleanup failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 async function tearDownProxySqlStack(
   layout: LayoutPaths,
   serverId: string,
@@ -370,6 +411,7 @@ async function tearDownProxySqlStack(
     // Still sweep the managed bridge: a prior teardown (or a manual cleanup)
     // may have removed the compose file while the external network lingered.
     await removeUnusedManagedDockerNetwork(managedNetwork, run);
+    await removeProxySqlDataVolume(layout, run);
     logInfo(
       "commands",
       `managed.ingress.reconcile teardown skipped (no compose) serverId=${serverId} received=${daemonReceivedAt}`,
@@ -400,6 +442,7 @@ async function tearDownProxySqlStack(
   // zero-container network here is the org's last managed footprint on the
   // host — drop it (skipped whenever anything is still attached).
   await removeUnusedManagedDockerNetwork(managedNetwork, run);
+  await removeProxySqlDataVolume(layout, run);
   logInfo(
     "commands",
     `managed.ingress.reconcile teardown completed serverId=${serverId} received=${daemonReceivedAt}`,

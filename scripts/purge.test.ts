@@ -44,6 +44,7 @@ const CONSTANTS = [
   "TP_SYSTEMD_DIRS",
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
+  "TP_TIMER_STAMP_DIR",
   "TP_DOCKER_PACKAGES",
   "TP_DOCKER_ENGINE_PACKAGES",
   "TP_DPKG_ON_DISK",
@@ -1848,6 +1849,110 @@ test("purge keeps an orphan's group that still has members or is a primary group
   );
   assert(!primary.stdout.includes("groupdel"), primary.stdout);
   assertStringIncludes(primary.stdout, "KEPT_HOME=yes");
+});
+
+test("a dry run does not let the account it would delete block its own group", async () => {
+  const dry = await purgeGroups(
+    ["frank:x:15007:"],
+    ["frank:x:15007:15007::/srv/users/frank:/bin/sh"],
+    `{ DRY_RUN=true; tp_purge_principal_groups frank /srv/users/frank account; }`,
+  );
+  assertStringIncludes(dry.stdout, "groupdel frank");
+  assertStringIncludes(dry.stdout, "KEPT_HOME=no");
+  assert(!dry.stdout.includes("primary group"), dry.stdout);
+
+  // Another account with the group as its primary group still blocks it, in a
+  // dry run as well as a real one.
+  const other = await purgeGroups(
+    ["frank:x:15007:"],
+    [
+      "frank:x:15007:15007::/srv/users/frank:/bin/sh",
+      "gina:x:15008:15007::/home/gina:/bin/sh",
+    ],
+    `{ DRY_RUN=true; tp_purge_principal_groups frank /srv/users/frank account; }`,
+  );
+  assert(!other.stdout.includes("groupdel"), other.stdout);
+  assertStringIncludes(other.stdout, "KEPT_HOME=yes");
+});
+
+async function timerStampDir(): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-timers-" });
+  for (
+    const name of [
+      "stamp-turbopanel-backup-a1.timer",
+      "stamp-turbopanel-postgres-backup.timer",
+      "stamp-fstrim.timer",
+      "stamp-apt-daily.timer",
+      "stamp-turbopanel-backup-a1.service",
+      "turbopanel-backup-a1.timer",
+    ]
+  ) await Deno.writeTextFile(join(dir, name), "");
+  return dir;
+}
+
+const TIMER_GLOB =
+  `tp_remove_glob "$TP_TIMER_STAMP_DIR/stamp-turbopanel-*.timer"`;
+
+test("purge removes TurboPanel's persistent timer stamps and leaves other stamp files alone", async () => {
+  const dir = await timerStampDir();
+  const result = await runPurgeSh(
+    ["tp_remove_glob"],
+    `TP_TIMER_STAMP_DIR=${dir}\n${TIMER_GLOB}`,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(
+    await exists(join(dir, "stamp-turbopanel-backup-a1.timer")),
+    false,
+  );
+  assertEquals(
+    await exists(join(dir, "stamp-turbopanel-postgres-backup.timer")),
+    false,
+  );
+  for (
+    const kept of [
+      "stamp-fstrim.timer",
+      "stamp-apt-daily.timer",
+      "stamp-turbopanel-backup-a1.service",
+      "turbopanel-backup-a1.timer",
+    ]
+  ) assertEquals(await exists(join(dir, kept)), true, kept);
+});
+
+test("a dry run leaves the timer stamps in place, and the real step uses the stamp directory", async () => {
+  const dir = await timerStampDir();
+  const result = await runPurgeSh(
+    ["tp_remove_glob"],
+    `TP_TIMER_STAMP_DIR=${dir}\nDRY_RUN=true\n${TIMER_GLOB}`,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(
+    await exists(join(dir, "stamp-turbopanel-backup-a1.timer")),
+    true,
+  );
+
+  const source = await Deno.readTextFile(purgePath);
+  assertEquals(
+    extractConstant(source, "TP_TIMER_STAMP_DIR"),
+    "TP_TIMER_STAMP_DIR=/var/lib/systemd/timers",
+  );
+  assertStringIncludes(
+    extractFunction(source, "tp_remove_host_config") ?? "",
+    TIMER_GLOB,
+  );
+});
+
+test("the inventory lists TurboPanel's timer stamps and nothing else from that folder", async () => {
+  const dir = await timerStampDir();
+  const result = await runPurgeSh(
+    ["tp_inventory_host_files"],
+    `TP_TIMER_STAMP_DIR=${dir}\n: > "$TP_TMP/inv.hostfiles"\ntp_inventory_host_files\ncat "$TP_TMP/inv.hostfiles"`,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertStringIncludes(result.stdout, "stamp-turbopanel-backup-a1.timer");
+  assertStringIncludes(result.stdout, "stamp-turbopanel-postgres-backup.timer");
+  assertEquals(result.stdout.includes("stamp-fstrim"), false);
+  assertEquals(result.stdout.includes("stamp-apt-daily"), false);
+  assertEquals(result.stdout.includes(".service"), false);
 });
 
 test("purge never touches a group named root or tp*", async () => {

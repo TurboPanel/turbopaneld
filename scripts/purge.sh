@@ -1496,6 +1496,10 @@ tp_inventory_host_files() {
       tp_file_add "$TP_TMP/inv.hostfiles" "$_ih_file"
     done
   done
+  for _ih_pattern in "$TP_TIMER_STAMP_DIR"/stamp-turbopanel-*.timer; do
+    [ -e "$_ih_pattern" ] || continue
+    tp_file_add "$TP_TMP/inv.hostfiles" "$_ih_pattern"
+  done
   for _ih_file in \
     /etc/tmpfiles.d/turbopanel.conf \
     /etc/tmpfiles.d/turbopanel-docker-gate.conf \
@@ -2667,6 +2671,9 @@ tp_remove_host_config() {
     fi
   done
   tp_remove_glob '/etc/sudoers.d/turbopanel-*' || true
+  # systemd keeps one stamp file per persistent timer; the unit files are gone
+  # but the stamps stay. Only files with TurboPanel's own prefix.
+  tp_remove_glob "$TP_TIMER_STAMP_DIR/stamp-turbopanel-*.timer" || true
   # The drive temperature sensor's boot-time module load (metrics). The module
   # already loaded stays until the next restart; unloading it could pull a
   # module the operator also uses.
@@ -3723,8 +3730,12 @@ tp_principal_band_gid() {
 }
 
 # True when some account still has gid $1 as its primary group.
+# With $2 = a user name, that account is not counted (the dry run does not
+# run userdel, so it would otherwise block its own group and home).
 tp_gid_is_primary() {
-  getent passwd | awk -F: -v gid="$1" '$4 == gid { found = 1 } END { exit !found }'
+  _gip_gid=$1
+  _gip_skip=${2:-}
+  getent passwd | awk -F: -v gid="$_gip_gid" -v skip="$_gip_skip" '$4 == gid && $1 != skip { found = 1 } END { exit !found }'
 }
 
 # Remove a site owner's own group: `<name>`, and `<name>-grp` from hosts set
@@ -3736,6 +3747,8 @@ tp_purge_principal_groups() {
   _ppg_name=$1
   _ppg_home=$2
   _ppg_mode=$3
+  _ppg_skip=
+  [ "$DRY_RUN" = true ] && [ "$_ppg_mode" = account ] && _ppg_skip=$_ppg_name
   case "$_ppg_name" in
     ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 0 ;;
   esac
@@ -3745,7 +3758,7 @@ tp_purge_principal_groups() {
       tp_record_skip "kept group ${_ppg} (its id is outside ${TP_PRINCIPAL_ID_MIN}-${TP_PRINCIPAL_ID_MAX})"
       continue
     fi
-    if tp_gid_is_primary "$_ppg_gid"; then
+    if tp_gid_is_primary "$_ppg_gid" "$_ppg_skip"; then
       tp_principal_leave_home "$_ppg_home" "${_ppg} is still an account's primary group"
       return 1
     fi
@@ -4191,6 +4204,9 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
 TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
+# Where systemd keeps the stamp files of persistent timers (outside the owned
+# trees; only stamp-turbopanel-*.timer is ever removed from it).
+TP_TIMER_STAMP_DIR=/var/lib/systemd/timers
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge
