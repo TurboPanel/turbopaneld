@@ -31,14 +31,14 @@ test("Postgres backup login: read all data, see past row security, nothing else"
   );
 });
 
-test("MySQL backup login reads every database at global level, nothing else", () => {
+test("MySQL backup login reads every database at global level and may flush tables, nothing else", () => {
   assertEquals(
     mysqlBackupSql("nightly"),
-    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE ON *.* TO `nightly`@'172.16.0.0/255.240.0.0';",
+    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE, FLUSH_TABLES ON *.* TO `nightly`@'172.16.0.0/255.240.0.0';",
   );
   assertEquals(
     mysqlBackupSql("nightly", "10.0.0.%"),
-    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE ON *.* TO `nightly`@'10.0.0.%';",
+    "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE, FLUSH_TABLES ON *.* TO `nightly`@'10.0.0.%';",
   );
 });
 

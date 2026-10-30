@@ -138,14 +138,20 @@ export const {
     quoteIdentifier,
     quoteLiteral,
     accountAt,
-    // SHOW_ROUTINE is a dynamic privilege: it reads every stored routine's
-    // definition, and exists only at global level.
+    // SHOW_ROUTINE and FLUSH_TABLES are dynamic privileges and exist only at
+    // global level. SHOW_ROUTINE reads every stored routine's definition.
+    // FLUSH_TABLES lets `mysqldump --single-transaction` run the
+    // `FLUSH LOCAL TABLES` it issues before its snapshot on a server with
+    // GTIDs on (every managed MySQL server); without it the dump stops with
+    // 1227. Deliberately not RELOAD, which also flushes logs, hosts and
+    // privileges.
     backupPrivileges: [
       "SELECT",
       "SHOW VIEW",
       "TRIGGER",
       "EVENT",
       "SHOW_ROUTINE",
+      "FLUSH_TABLES",
     ],
   },
   MANAGED_DOCKER_NETWORK_HOST,

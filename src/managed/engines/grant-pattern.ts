@@ -286,7 +286,8 @@ function revokeAllButSql(
  * The backup login's one `GRANT` for one account: the dialect's
  * {@link GrantQuoting.backupPrivileges} at global level (`*.*`), so it reads
  * every database, including one made later with plain `CREATE DATABASE`. It
- * holds no write, DDL or administrative right anywhere.
+ * holds no write, DDL or account right anywhere; the only administrative right
+ * is MySQL's `FLUSH_TABLES`, which a consistent `mysqldump` needs.
  */
 export function grantBackupOnAllSql(
   quoting: GrantQuoting,
