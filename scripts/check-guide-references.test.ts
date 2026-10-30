@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   type AllowlistEntry,
+  collectGuideProblems,
   extractReferences,
   resolveReference,
 } from "./check-guide-references.ts";
@@ -93,4 +94,26 @@ Deno.test("extracts links and path-like backticks, ignoring code fences and pros
     extractReferences(text).map((r) => `${r.line}:${r.kind}:${r.target}`),
     ["1:link:./docs/setup.md", "1:code:src/AGENTS.md", "1:code:../ui/x.ts"],
   );
+});
+
+Deno.test("collectGuideProblems scans guides on disk and reports only missing files", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${root}/docs`);
+    await Deno.mkdir(`${root}/node_modules`);
+    await Deno.writeTextFile(`${root}/docs/real.md`, "ok");
+    await Deno.writeTextFile(
+      `${root}/AGENTS.md`,
+      "[good](./docs/real.md) [bad](./docs/gone.md#x)\n`../sibling/AGENTS.md`\n",
+    );
+    await Deno.writeTextFile(
+      `${root}/node_modules/AGENTS.md`,
+      "[bad](./nope.md)",
+    );
+    assertEquals(await collectGuideProblems(root), [
+      "AGENTS.md:1: ./docs/gone.md#x",
+    ]);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
 });

@@ -115,9 +115,15 @@ export function stripFences(text: string): string {
     .join("\n");
 }
 
+/** Drop a `#anchor` or `?query` tail. */
+function stripSuffix(value: string): string {
+  const i = value.search(/[#?]/);
+  return i < 0 ? value : value.slice(0, i);
+}
+
 function looksLikeBacktickedPath(token: string): boolean {
   if (token.includes("...") || /[\s<>*{}|…$():]/.test(token)) return false;
-  const bare = token.replace(/[#?].*$/, "");
+  const bare = stripSuffix(token);
   if (bare.startsWith("./") || bare.startsWith("../")) return true;
   return bare.includes("/") && bare.endsWith(".md") && !bare.startsWith("/");
 }
@@ -157,7 +163,7 @@ export function resolveReference(opts: {
   if (/^[a-z][a-z0-9+.-]*:/i.test(target)) {
     return { status: "skipped-external" };
   }
-  const bare = target.replace(/[#?].*$/, "");
+  const bare = stripSuffix(target);
   if (bare === "") return { status: "skipped-anchor" };
 
   const root = opts.repoRoot;
@@ -205,10 +211,13 @@ function pathExists(p: string): boolean {
 }
 
 export async function collectGuideProblems(root: string): Promise<string[]> {
+  const files = (await collectGuides(root)).sort((a, b) => a.localeCompare(b));
+  const texts = await Promise.all(
+    files.map((file) => Deno.readTextFile(join(root, file))),
+  );
   const problems: string[] = [];
-  for (const file of (await collectGuides(root)).sort()) {
-    const text = await Deno.readTextFile(join(root, file));
-    for (const ref of extractReferences(text)) {
+  files.forEach((file, i) => {
+    for (const ref of extractReferences(texts[i])) {
       const { status } = resolveReference({
         ...ref,
         file,
@@ -219,7 +228,7 @@ export async function collectGuideProblems(root: string): Promise<string[]> {
         problems.push(`${file}:${ref.line}: ${ref.target}`);
       }
     }
-  }
+  });
   return problems;
 }
 
