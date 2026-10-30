@@ -280,6 +280,13 @@ on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
   bind worked; a failed probe fails the reconcile. Staging uses no admin
   connect retries, so a missing or stuck container costs nothing. The same path also applies a
   changed listener port on a host whose `proxysql.db` predates it.
+- **Teardown removes the data volume.** When the last cluster goes
+  (`managed.ingress.reconcile` with no clusters), `compose down` keeps the
+  named `proxysql-data` volume, so the handler then removes
+  `<serviceId>_proxysql-data` itself, best effort (in use or already gone is
+  logged, never a failure). The project comes from the saved descriptor, so a
+  host torn down by an older build is cleaned up on the next empty reconcile.
+  The next provision rebuilds `proxysql.db` from the desired state.
 - **Upgrade path.** The next `managed.ingress.reconcile` on a server publishing
   `::` re-renders compose and recreates the container onto the new network
   (data volume kept) with the IPv6 listeners already saved: one short listener

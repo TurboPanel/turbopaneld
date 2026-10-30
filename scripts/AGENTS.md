@@ -61,6 +61,11 @@ Four maintenance rules:
    `TP_OWNED_TREES` (or be a `turbopanel*` unit drop-in), or be added to that
    list. `tp_path_is_safe` refuses everything else.
 
+systemd keeps a stamp file per persistent timer in `/var/lib/systemd/timers`
+(outside `TP_OWNED_TREES`). The purge removes only `stamp-turbopanel-*.timer`
+there (`TP_TIMER_STAMP_DIR`, listed in the host-file inventory) and never any
+other stamp file or the folder.
+
 The purge runs the removal steps, then `tp_purge_hosted_data`. Detection
 still only changes labels; the purge runs for every server type. Each step
 checks what is actually present and is safe to run again after an earlier run
@@ -147,7 +152,9 @@ Purge order:
    15001-60000), its name is plain and not `root`/`tp*`, and no account still
    has it as primary group: without the old suffix a directory called `sudo`
    or `staff` must never cost the host its real group, and a group of that
-   name outside the band is only reported as kept. A directory in the root
+   name outside the band is only reported as kept. In a dry run the account about
+   to be deleted does not count as a primary-group holder, so the report says
+   what the real run does. A directory in the root
    with no account (an earlier run already deleted the user) gets the same
    treatment, and additionally keeps a group that still lists any member.
    Homes are removed after the groups, with `tp_safe_rm_tree`, so a stopped

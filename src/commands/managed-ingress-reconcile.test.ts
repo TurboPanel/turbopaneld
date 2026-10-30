@@ -180,6 +180,11 @@ function isManagedNetworkRm(args: string[]): boolean {
     args[2] === MANAGED_NETWORK;
 }
 
+function isProxySqlVolumeRm(args: string[]): boolean {
+  return args[0] === "volume" && args[1] === "rm" &&
+    args[2] === `${PROXYSQL_SERVICE_ID}_proxysql-data`;
+}
+
 function decryptSecretsEcho(
   ciphertexts: string[],
 ): Promise<(string | null)[]> {
@@ -952,6 +957,60 @@ test({
         // The managed bridge is compose-`external`, so `down` never removes
         // it — teardown must drop the now-unused network itself.
         assertEquals(dockerArgs.some(isManagedNetworkRm), true);
+        // `compose down` keeps named volumes, so the data volume is removed
+        // by name once the stack is down.
+        assertEquals(dockerArgs.filter(isProxySqlVolumeRm).length, 1);
+        const downAt = dockerArgs.findIndex((args) => args.includes("down"));
+        assertEquals(downAt < dockerArgs.findIndex(isProxySqlVolumeRm), true);
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "empty clusters teardown still completes when the data volume cannot be removed",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      const layout = resolveLayout(fixture.env);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        await Deno.writeTextFile(
+          proxysqlComposePath(layout),
+          "services:\n  proxysql:\n    image: proxysql/proxysql:3.0.2\n",
+        );
+        const dockerArgs: string[][] = [];
+        const result = await handleManagedIngressReconcile(
+          {
+            serverId: SERVER_ID,
+            managedNetwork: MANAGED_NETWORK,
+            clusters: [],
+          },
+          new Date().toISOString(),
+          {
+            runDocker: (args, options) => {
+              dockerArgs.push([...args]);
+              if (isProxySqlVolumeRm(args)) {
+                return Promise.resolve({
+                  success: false,
+                  stdout: "",
+                  stderr: "volume is in use",
+                  code: 1,
+                });
+              }
+              return fakeRun()(args, options);
+            },
+            ensureDocker: () => Promise.resolve(),
+          },
+        );
+        assertEquals(result.containers, []);
+        assertEquals(dockerArgs.some(isProxySqlVolumeRm), true);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
@@ -1053,10 +1112,14 @@ test({
           false,
         );
         assertEquals(
-          dockerArgs.every((args) => args[0] === "network"),
+          dockerArgs.every((args) =>
+            args[0] === "network" || args[0] === "volume"
+          ),
           true,
         );
         assertEquals(dockerArgs.some(isManagedNetworkRm), true);
+        // A volume left by an earlier teardown is cleaned up too.
+        assertEquals(dockerArgs.filter(isProxySqlVolumeRm).length, 1);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
