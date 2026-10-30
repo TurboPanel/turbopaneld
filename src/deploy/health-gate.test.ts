@@ -67,7 +67,12 @@ test("passes when every service with a healthcheck is healthy", async () => {
     ),
   ]);
   const result = await waitForHealthGate(options);
-  assertEquals(result, { ok: true, services: ["db", "web"] });
+  assertEquals(result, {
+    ok: true,
+    services: ["db", "web"],
+    elapsedMs: 1_000,
+    unchecked: [],
+  });
 });
 
 test("fails immediately on an unhealthy container", async () => {
@@ -90,6 +95,51 @@ test("a service without a healthcheck must stay running for the stable window", 
   assertEquals(result.ok, true);
   // Seen at t=0, passes at t=3000: polls at 0,1000,2000,3000.
   assertEquals(polls(), 4);
+});
+
+test("a pass without a health check names the service and how long it took", async () => {
+  const running = ps(
+    { Service: "worker", State: "running", Health: "" },
+    { Service: "web", State: "running", Health: "healthy" },
+  );
+  const result = await waitForHealthGate(harness([running]).options);
+  assertEquals(result, {
+    ok: true,
+    services: ["web", "worker"],
+    elapsedMs: 3_000,
+    unchecked: ["worker"],
+  });
+});
+
+test("the same waiting reason is written to the transcript once, with a live tick per poll", async () => {
+  const running = ps({ Service: "worker", State: "running", Health: "" });
+  const ticks: { attempt: number; elapsedMs: number }[] = [];
+  const { options, progress } = harness([running], {
+    onTick: (t) => ticks.push({ attempt: t.attempt, elapsedMs: t.elapsedMs }),
+  });
+  await waitForHealthGate(options);
+  assertEquals(progress.length, 1);
+  assertEquals(
+    progress[0],
+    "worker (worker-id) has no health check configured; checking that it stays running for 3 s instead",
+  );
+  assertEquals(ticks, [
+    { attempt: 1, elapsedMs: 0 },
+    { attempt: 2, elapsedMs: 1_000 },
+    { attempt: 3, elapsedMs: 2_000 },
+  ]);
+});
+
+test("a timeout says how long it waited and the last status", async () => {
+  const starting = ps({ Service: "web", State: "running", Health: "starting" });
+  const result = await waitForHealthGate(
+    harness([starting], { timeoutMs: 3_000 }).options,
+  );
+  assertEquals(result.ok, false);
+  assertEquals(
+    !result.ok && result.detail,
+    "did not become healthy within 3 s; last status: web (web-id) health check is starting",
+  );
 });
 
 test("mode none trusts a running container on the first poll", async () => {
@@ -144,7 +194,7 @@ test("times out and names what was still pending", async () => {
   if (!result.ok) {
     assertEquals(result.reason, "timeout");
     assertEquals(result.detail.includes("web"), true);
-    assertEquals(result.detail.includes("10s"), true);
+    assertEquals(result.detail.includes("10 s"), true);
   }
 });
 

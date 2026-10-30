@@ -109,6 +109,42 @@ export interface CommandOutputSink {
   redactSummary(text: string): string;
   /** Flush + drop the spool file. Idempotent; never throws. */
   finalize(): Promise<void>;
+  /**
+   * The health step of a deploy plan, when the sink has one (the deploy's
+   * progress-following sink). Absent everywhere else, so callers use `?.`.
+   */
+  health?: HealthStepReport;
+}
+
+/** Titles the health step takes when it ends; book title case. */
+export const HEALTH_RESULT_TITLES = {
+  /** Docker reported `healthy` for the service's own health check. */
+  healthy: "Service Is Healthy",
+  /** No health check is configured; the container stayed running. */
+  running: "Service Is Running",
+  /** A native app answered an HTTP request on its loopback port. */
+  reachable: "Service Is Reachable",
+  /** The deploy strategy never waits for a check. */
+  notChecked: "Service Health Not Checked",
+  /** The wait ended without a pass. */
+  unhealthy: "Service Did Not Become Healthy",
+  /** A native app never answered. */
+  silent: "Service Did Not Answer",
+} as const;
+
+/**
+ * What the check that a new version answers tells the health step: a single
+ * live line while it waits, then one result that names the step.
+ */
+export interface HealthStepReport {
+  /** The live line (attempt count, time waited); replaces the last one. */
+  waiting(text: string): void;
+  /** The check ended well: `title` names the result, `note` says how and how fast. */
+  done(title: string, note: string): void;
+  /** The check ended without a pass: `note` carries the last failure reason. */
+  failed(title: string, note: string): void;
+  /** True once a result was reported since the step last started. */
+  ended(): boolean;
 }
 
 /**

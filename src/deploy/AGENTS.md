@@ -385,6 +385,17 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   (`running` → `failed` / `skipped`, `pending` → `skipped`) goes out before
   `command-outcome`. The planner only runs when the router supplied a sender;
   hermetic callers get the no-op reporter and never probe the host.
+  Step titles are book title case ("Set Up Certificates", "Check Service
+  Health"); detail lines are sentence case. The health step ends under the
+  title of its result, sent as a renamed step with the same id (receivers
+  keep showing a title they do not know): *Service Is Healthy* only when
+  Docker reported `healthy` ("Healthy after 12 s"), *Service Is Running* when
+  no health check is configured and the container stayed up for the stable
+  window, *Service Is Reachable* for a native app that answered an HTTP
+  request, *Service Health Not Checked* for an in-place deploy (no gate), and
+  *Service Did Not Become Healthy* / *Service Did Not Answer* on a timeout.
+  While waiting it shows one updating line ("Attempt 4, 6 s of up to 120 s");
+  the transcript gets a line only when the waiting reason changes.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
   zero-based and gap-free per command (the first upload is always `seq = 0`),
   and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.

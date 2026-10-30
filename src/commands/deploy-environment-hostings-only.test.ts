@@ -129,7 +129,7 @@ test("hostingsOnly sends the certificate step with its line kept after it is don
     const last = sent.at(-1)?.progress.steps.find((step) =>
       step.id === "certificates"
     );
-    assertEquals(last?.label, "Set up certificates");
+    assertEquals(last?.label, "Set Up Certificates");
     assertEquals(last?.state, "done");
     assertStringIncludes(last?.detail ?? "", "Requested in the background");
     assertStringIncludes(last?.detail ?? "", "shop.example.com");

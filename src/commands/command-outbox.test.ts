@@ -298,8 +298,8 @@ const plan = (start: "pending" | "running" | "done"): CommandProgress => ({
   version: 1,
   steps: [
     { id: "build", label: "Build", state: "done" },
-    { id: "start", label: "Start the app", state: start },
-    { id: "health", label: "Check it answers", state: "pending" },
+    { id: "start", label: "Start the App", state: start },
+    { id: "health", label: "Check Service Health", state: "pending" },
   ],
   current: start === "running" ? "start" : null,
   updatedAt: "2026-10-22T10:00:00.000Z",
@@ -429,7 +429,7 @@ test("interrupted facts read the release state from the step plan", () => {
   assertEquals(interruptedFacts(undefined), {});
   assertEquals(interruptedFacts(plan("done")).releasePromoted, true);
   assertEquals(interruptedFacts(plan("running")).releasePromoted, undefined);
-  assertEquals(interruptedFacts(plan("running")).lastStep, "Start the app");
+  assertEquals(interruptedFacts(plan("running")).lastStep, "Start the App");
 });
 
 test("a plan with a traffic switch is live only once the switch is done", () => {
@@ -438,12 +438,12 @@ test("a plan with a traffic switch is live only once the switch is done", () => 
   ) =>
     ({
       steps: [
-        { id: "start", label: "Start the new release", state: states.start },
-        { id: "health", label: "Check it answers", state: states.health },
-        { id: "switch", label: "Switch traffic", state: states.switch },
+        { id: "start", label: "Start the New Release", state: states.start },
+        { id: "health", label: "Check Service Health", state: states.health },
+        { id: "switch", label: "Switch Traffic", state: states.switch },
         {
           id: "stop-old",
-          label: "Stop the old release",
+          label: "Stop the Old Release",
           state: states.stopOld,
         },
       ],

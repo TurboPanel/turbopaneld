@@ -57,6 +57,13 @@ export type PlannedDeployStep = Pick<CommandProgressStep, "id" | "label"> & {
   state: "ready" | "pending";
 };
 
+/**
+ * What a step leaves behind when it ends. `label` renames the step to its
+ * result ("Service Is Healthy"); the planned title comes back if the step runs
+ * again. A receiver that ignores the change just keeps showing the title.
+ */
+export type StepResultOptions = { note?: string; label?: string };
+
 export type DeployProgressOutcome = "succeeded" | "failed" | "cancelled";
 
 export type DeployStepReporter = {
@@ -75,13 +82,13 @@ export type DeployStepReporter = {
    * running step's ticker text is otherwise dropped when it ends), for
    * something the user should still read afterwards.
    */
-  done(ids: string | readonly string[], options?: { note?: string }): void;
+  done(ids: string | readonly string[], options?: StepResultOptions): void;
   /**
    * The step(s) failed. A `ready` step whose ensure still failed is marked
    * failed too; a running step this one was nested in goes back to pending
    * (it never ran), so the final payload shows it skipped.
    */
-  fail(ids: string | readonly string[]): void;
+  fail(ids: string | readonly string[], options?: StepResultOptions): void;
   /**
    * Live ticker text; throttled on the wire. When `id` is not the running
    * step (a grouped install whose first step was already `ready`) the text
@@ -223,6 +230,8 @@ class DeployStepReporterImpl implements DeployStepReporter {
   readonly #setTimer: (fn: () => void, ms: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
   #steps: CommandProgressStep[] = [];
+  /** The planned title of each step, restored when a renamed step runs again. */
+  #plannedLabels = new Map<string, string>();
   #current: string | null = null;
   /** The phase step a nested install interrupted; `current` returns to it. */
   #resume: string | null = null;
@@ -256,6 +265,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
       label: step.label,
       state: step.state,
     }));
+    this.#plannedLabels = new Map(this.#steps.map((s) => [s.id, s.label]));
     this.#current = null;
     this.#resume = null;
     this.#sendNow();
@@ -288,6 +298,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
       const step = this.#find(id);
       if (!step) continue;
       step.state = "running";
+      step.label = this.#plannedLabels.get(id) ?? step.label;
       step.startedAt = at;
       delete step.finishedAt;
     }
@@ -295,12 +306,12 @@ class DeployStepReporterImpl implements DeployStepReporter {
     this.#sendNow();
   }
 
-  done(ids: string | readonly string[], options: { note?: string } = {}): void {
-    this.#finishSteps(ids, "done", options.note);
+  done(ids: string | readonly string[], options: StepResultOptions = {}): void {
+    this.#finishSteps(ids, "done", options);
   }
 
-  fail(ids: string | readonly string[]): void {
-    this.#finishSteps(ids, "failed");
+  fail(ids: string | readonly string[], options: StepResultOptions = {}): void {
+    this.#finishSteps(ids, "failed", options);
   }
 
   detail(id: string, text: string): void {
@@ -438,7 +449,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
   #finishSteps(
     ids: string | readonly string[],
     state: "done" | "failed",
-    note?: string,
+    result: StepResultOptions = {},
   ): void {
     const at = this.#now().toISOString();
     let changed = false;
@@ -448,8 +459,10 @@ class DeployStepReporterImpl implements DeployStepReporter {
       const failedWhileReady = state === "failed" && step.state === "ready";
       if (step.state !== "running" && !failedWhileReady) continue;
       this.#close(step, state, at);
-      const kept = note?.trim();
+      const kept = result.note?.trim();
       if (kept) step.detail = clip(kept, COMMAND_PROGRESS_MAX_DETAIL_CHARS);
+      const label = result.label?.trim();
+      if (label) step.label = clip(label, COMMAND_PROGRESS_MAX_LABEL_CHARS);
       changed = true;
     }
     if (!changed) return;

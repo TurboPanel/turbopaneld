@@ -41,7 +41,11 @@
  */
 
 import { join } from "@std/path";
-import { COMMAND_LOG_PHASES } from "../../logs/contracts.ts";
+import {
+  COMMAND_LOG_PHASES,
+  HEALTH_RESULT_TITLES,
+  type HealthStepReport,
+} from "../../logs/contracts.ts";
 import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { installUnitFile as installUnitFileShared } from "../../permissions/host-unit-files.ts";
@@ -177,6 +181,8 @@ export type ApplyNativeAppsOpts = {
    * deploy transcript. Ignored by a custom `runPlaybook`.
    */
   onEvent?: AnsibleEventHandler;
+  /** The deploy's health step: told how the wait for each new release ended. */
+  health?: HealthStepReport;
   /** Test seam: loopback health probe. */
   probe?: NativeAppProbeFn;
   /** Test seam: sleep between probe attempts. */
@@ -335,6 +341,8 @@ type NativeAppIo = {
   pickPort: NativeAppPortPickFn;
   setPhase: NativeAppPhaseFn;
   onOutput?: ReleaseOutputHandler;
+  /** The deploy's health step, when it has one. */
+  health?: HealthStepReport;
 };
 
 function resolveIo(
@@ -348,6 +356,7 @@ function resolveIo(
     pickPort: opts?.pickPort ?? (() => pickPortDefault()),
     setPhase: opts?.setPhase ?? (() => {}),
     ...(opts?.onOutput === undefined ? {} : { onOutput: opts.onOutput }),
+    ...(opts?.health === undefined ? {} : { health: opts.health }),
   };
 }
 
@@ -425,19 +434,51 @@ async function waitForNativeApp(
   port: number,
   unit: string,
   timeoutMs = NATIVE_APP_HEALTH_TIMEOUT_MS,
+  report = false,
 ): Promise<boolean> {
   const attempts = Math.max(
     1,
     Math.ceil(timeoutMs / NATIVE_APP_HEALTH_INTERVAL_MS),
   );
+  const address = `127.0.0.1:${port}`;
+  const startedAt = Date.now();
+  const elapsed = () => `${Math.round((Date.now() - startedAt) / 1000)} s`;
+  const health = report ? io.health : undefined;
+  if (health) {
+    io.onOutput?.(
+      "stdout",
+      `no health check is configured for a native app; waiting for ${address} to answer an HTTP request (any status code counts)`,
+    );
+  }
   const pollFrom = async (attempt: number): Promise<boolean> => {
     if (attempt >= attempts) return false;
     if (await io.probe(port)) return true;
     if (await unitIsFailed(io, unit)) return false;
+    health?.waiting(
+      `Attempt ${
+        attempt + 1
+      } of ${attempts}, ${elapsed()}: ${address} has not answered yet`,
+    );
     if (attempt < attempts - 1) await io.sleep(NATIVE_APP_HEALTH_INTERVAL_MS);
     return await pollFrom(attempt + 1);
   };
-  return await pollFrom(0);
+  const answered = await pollFrom(0);
+  if (health) {
+    if (answered) {
+      health.done(
+        HEALTH_RESULT_TITLES.reachable,
+        `Answered HTTP on ${address} after ${elapsed()} (no health check is configured; any status code counts)`,
+      );
+    } else {
+      health.failed(
+        HEALTH_RESULT_TITLES.silent,
+        `Did not answer HTTP on ${address} within ${
+          Math.round(timeoutMs / 1000)
+        } s`,
+      );
+    }
+  }
+  return answered;
 }
 
 /**
@@ -879,7 +920,15 @@ async function startNativeApp(
   }
 
   io.setPhase(options.probePhase);
-  if (await waitForNativeApp(io, app.listenPort, unit)) {
+  if (
+    await waitForNativeApp(
+      io,
+      app.listenPort,
+      unit,
+      NATIVE_APP_HEALTH_TIMEOUT_MS,
+      true,
+    )
+  ) {
     io.onOutput?.(
       "stdout",
       `${app.composeServiceName} answered on 127.0.0.1:${app.listenPort}`,
@@ -1299,7 +1348,14 @@ async function deployBesideServing(
       started.stderr || "systemd refused it",
     );
   }
-  if (!(await waitForNativeApp(io, check.app.listenPort, check.unit))) {
+  const answered = await waitForNativeApp(
+    io,
+    check.app.listenPort,
+    check.unit,
+    NATIVE_APP_HEALTH_TIMEOUT_MS,
+    true,
+  );
+  if (!answered) {
     await failCheckCopy(io, layout, prepared, check, null);
   }
   io.onOutput?.(

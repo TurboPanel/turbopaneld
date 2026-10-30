@@ -91,6 +91,8 @@ import {
   certificatesStep,
   type DeployPresenceProbes,
   deployStepNeeds,
+  HEALTH_RESULT_TITLES,
+  HEALTH_STEP_ID,
   installStepIds,
   planDeploySteps,
   probeDeployPresence,
@@ -131,6 +133,8 @@ import {
   composePsForGate,
   HEALTH_GATE_DEFAULT_POLL_MS,
   HEALTH_GATE_DEFAULT_STABLE_MS,
+  type HealthGateResult,
+  type HealthGateTick,
   waitForHealthGate,
 } from "../deploy/health-gate.ts";
 import {
@@ -1575,6 +1579,7 @@ async function applyDeployNativeApps(
       ...io,
       onOutput: io?.onOutput ??
         ((stream, line) => logSink.onLine(stream, line)),
+      ...(logSink.health === undefined ? {} : { health: logSink.health }),
       bindings: nativeAppBindingsFromPayload(
         parsedPayload,
         previousReleaseByService,
@@ -1876,14 +1881,18 @@ async function deploySequentially(
         onOutput: (stream, line) => logSink.onLine(stream, line),
         redactSummary: (text) => logSink.redactSummary(text),
       }),
-    gate: (paths) =>
-      waitForHealthGate({
+    gate: async (paths) => {
+      const result = await waitForHealthGate({
         ps: composePsForGate(run, projectName, paths),
         timeoutMs,
         stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
         pollMs: HEALTH_GATE_DEFAULT_POLL_MS,
         onProgress: (message) => logSink.onLine("stdout", message),
-      }),
+        onTick: (tick) => logSink.health?.waiting(waitingLine(tick, timeoutMs)),
+      });
+      reportHealthGate(logSink, result);
+      return result;
+    },
     restorePrevious: () => restorePreviousDeployment(deploymentDir),
     commit: () => input.cancel?.commit("before the old version was stopped"),
     composeArgs: (paths) => composeFileArgs(projectName, paths),
@@ -1911,6 +1920,54 @@ async function deploySequentially(
     });
   }
   return { serviceNames: labeledServices, composePaths: chain };
+}
+
+/** Whole seconds, with the unit: "12 s". */
+function seconds(ms: number): string {
+  return `${Math.round(ms / 1000)} s`;
+}
+
+/** The one live line of the health step while the gate waits. */
+export function waitingLine(tick: HealthGateTick, timeoutMs: number): string {
+  const head = `Attempt ${tick.attempt}, ${seconds(tick.elapsedMs)} of up to ${
+    seconds(timeoutMs)
+  }`;
+  return `${head}: ${tick.pending[0] ?? "waiting"}`;
+}
+
+/**
+ * Write the gate's verdict to the transcript and to the health step, so the
+ * step ends with a result instead of just stopping. "Healthy" is only said
+ * when Docker reported `healthy`; a container with no health check passed by
+ * staying up, and the step says exactly that.
+ */
+export function reportHealthGate(
+  logSink: CommandOutputSink,
+  result: HealthGateResult,
+): void {
+  if (!result.ok) {
+    const note = result.reason === "timeout"
+      ? `${result.detail.charAt(0).toUpperCase()}${result.detail.slice(1)}`
+      : `Stopped waiting: ${result.detail}`;
+    logSink.onLine("stderr", note);
+    logSink.health?.failed(HEALTH_RESULT_TITLES.unhealthy, note);
+    return;
+  }
+  const after = seconds(result.elapsedMs);
+  if (result.unchecked.length === 0) {
+    const note = `Healthy after ${after}`;
+    logSink.onLine("stdout", `${result.services.join(", ")}: ${note}`);
+    logSink.health?.done(HEALTH_RESULT_TITLES.healthy, note);
+    return;
+  }
+  const note = `${result.unchecked.join(", ")} stayed running for ${after}; ` +
+    `no health check is configured, so that is all that was checked`;
+  logSink.onLine("stdout", note);
+  const mixed = result.unchecked.length < result.services.length;
+  logSink.health?.done(
+    HEALTH_RESULT_TITLES.running,
+    mixed ? `Other services healthy. ${note}` : note,
+  );
 }
 
 const SEQUENTIAL_PHASES = {
@@ -2457,9 +2514,11 @@ function progressFollowingSink(
   progress: DeployStepReporter,
 ): { logSink: CommandOutputSink; currentPhase: () => string } {
   let phase: string = COMMAND_LOG_PHASES.PREPARE;
+  let healthEnded = false;
   const logSink: CommandOutputSink = {
     onLine: (stream, message) => inner.onLine(stream, message),
     setPhase: (next) => {
+      if (next === COMMAND_LOG_PHASES.HEALTH) healthEnded = false;
       phase = next;
       inner.setPhase(next);
       progress.phase(next);
@@ -2467,6 +2526,18 @@ function progressFollowingSink(
     addSecrets: (values) => inner.addSecrets(values),
     redactSummary: (text) => inner.redactSummary(text),
     finalize: () => inner.finalize(),
+    health: {
+      waiting: (text) => progress.detail(HEALTH_STEP_ID, text),
+      done: (title, note) => {
+        healthEnded = true;
+        progress.done(HEALTH_STEP_ID, { label: title, note });
+      },
+      failed: (title, note) => {
+        healthEnded = true;
+        progress.fail(HEALTH_STEP_ID, { label: title, note });
+      },
+      ended: () => healthEnded,
+    },
   };
   return { logSink, currentPhase: () => phase };
 }
@@ -3103,9 +3174,9 @@ async function deployEnvironmentHolding(
   // Native apps come last of the host-native lanes: the release is published
   // and the vhost tree is settled, so a new release that does not answer fails
   // only its own app. The apply walks the transcript through "start the new
-  // release", "check it answers", "switch traffic" and "stop the old release"
-  // itself. A deploy without native apps keeps `prepare`, so the step rail
-  // does not show "Check it answers" before anything started.
+  // release", "check service health", "switch traffic" and "stop the old
+  // release" itself. A deploy without native apps keeps `prepare`, so the step
+  // rail does not show "Check Service Health" before anything started.
   if (nativeAppServicesForHost.length > 0) {
     runtime.logSink.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
     await applyDeployNativeApps(
@@ -3175,7 +3246,10 @@ async function deployEnvironmentHolding(
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
   finishCertificatesStep(runtime.progress, parsedPayload);
 
-  runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+  // The sequential gate and the native apps already ended the health step with
+  // their own result; only a deploy that checked nothing says so here.
+  const healthEnded = runtime.logSink.health?.ended() === true;
+  if (!healthEnded) runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({
     hasContainers,
     projectName: parsedPayload.projectName,
@@ -3185,6 +3259,14 @@ async function deployEnvironmentHolding(
     layout,
     run: runtime.run,
   });
+  if (!healthEnded) {
+    runtime.logSink.health?.done(
+      HEALTH_RESULT_TITLES.notChecked,
+      hasContainers
+        ? "In-place deploys start the containers without waiting for their health checks; the sequential strategy waits for them"
+        : "Nothing in this deploy reports its own health",
+    );
+  }
 
   // Last of the changes to the host, after the health phase: the containers
   // are up, the health gates have passed (they run inside the publish above;
