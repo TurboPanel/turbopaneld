@@ -65,6 +65,7 @@ test({
       const overlap = `${next.trim()}\n${current.trim()}\n`;
 
       const written: string[] = [];
+      const repinned: string[] = [];
       let invalidated = false;
       const result = await handleTlsTrust(
         { bundlePem: overlap, fingerprint: nextFp },
@@ -75,6 +76,10 @@ test({
             written.push(contents);
             return Promise.resolve();
           },
+          repin: (bundlePem) => {
+            repinned.push(bundlePem);
+            return Promise.resolve();
+          },
           invalidate: () => {
             invalidated = true;
           },
@@ -83,6 +88,7 @@ test({
       assertEquals(result.applied, true);
       assertEquals(result.fingerprint, nextFp);
       assertEquals(written.length, 1);
+      assertEquals(repinned, [overlap]);
       assertEquals(splitPemBundle(written[0] ?? []).length, 2);
       assertEquals(invalidated, true);
 

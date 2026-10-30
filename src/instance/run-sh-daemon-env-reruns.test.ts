@@ -1,5 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { ACME_LEAF_CERT_BY_TAG } from "../testing/acme-leaf-fixtures.ts";
+import { pemFingerprints } from "./ca-pin.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -79,6 +81,10 @@ function layoutAssignments(root: string): string {
     STATE_DIR: join(root, "var/lib/turbopanel"),
     ENV_FILE: join(root, "etc/turbopanel/daemon.env"),
     CA_PATH: join(root, "etc/turbopanel/instance-ca.pem"),
+    UPLOADED_TRUST_PATH: join(
+      root,
+      "etc/turbopanel/instance-uploaded-trust.pem",
+    ),
     DENO_BIN: join(root, "opt/turbopanel/vendor/deno/current/deno"),
     DAEMON_EXEC_MODE: "native",
     TP_EXEC_MODE_NATIVE: "native",
@@ -113,9 +119,17 @@ async function remoteInstallVars(
     "printf 'turbopanel_instance_url: %s\\n' \"$HOST_URL\"",
     "$VARS_FILE",
   );
+  const pinHelpers = [
+    "tp_ca_fingerprint",
+    "tp_fingerprint_hex",
+    "tp_cert_fingerprint_hex",
+    "tp_split_pem_bundle",
+    "tp_pem_files_pin",
+  ].map((name) => shellFunction(source, name));
   const script = [
     "set -eu",
     STUBS,
+    ...pinHelpers,
     layoutAssignments(root),
     `HOST_URL=${quote(HOST_URL)}`,
     `MANIFEST_URL=${quote(options.manifestUrl ?? "")}`,
@@ -377,6 +391,44 @@ test({
         await remoteInstallVars(root, { channel: "canary" }),
       );
       assertEquals(updatedAgain, enrolled);
+    }),
+});
+
+test({
+  name:
+    "remote node: daemon.env pins every trusted CA certificate, including an uploaded issuer alone",
+  ignore: !PYTHON,
+  fn: () =>
+    withRoot(async (root) => {
+      const [platformPem, issuerPem] = Object.values(ACME_LEAF_CERT_BY_TAG);
+      const configDir = join(root, "etc/turbopanel");
+      await Deno.mkdir(configDir, { recursive: true });
+      const uploaded = join(configDir, "instance-uploaded-trust.pem");
+      await Deno.writeTextFile(uploaded, `${issuerPem}\n`);
+      const [issuerFp] = await pemFingerprints(`${issuerPem}\n`);
+      const uploadedOnly = await renderDaemonEnv(
+        "daemon-install.yml",
+        await remoteInstallVars(root, { channel: "canary" }),
+      );
+      assertEquals(uploadedOnly.has("TURBOPANEL_INSTANCE_CA"), false);
+      assertEquals(
+        uploadedOnly.get("TURBOPANEL_INSTANCE_CA_FINGERPRINT"),
+        issuerFp,
+      );
+
+      await Deno.writeTextFile(
+        join(configDir, "instance-ca.pem"),
+        `${platformPem}\n`,
+      );
+      const [platformFp] = await pemFingerprints(`${platformPem}\n`);
+      const both = await renderDaemonEnv(
+        "daemon-install.yml",
+        await remoteInstallVars(root, { channel: "canary" }),
+      );
+      assertEquals(
+        both.get("TURBOPANEL_INSTANCE_CA_FINGERPRINT"),
+        `${platformFp},${issuerFp}`,
+      );
     }),
 });
 

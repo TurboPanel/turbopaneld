@@ -6,6 +6,13 @@
  * (env override when that file exists, else the canonical layout path), then
  * invalidates the cached HTTP client so the next reconnect trusts the new
  * (possibly overlapping) bundle.
+ *
+ * When this host carries a pinned CA list (`TURBOPANEL_INSTANCE_CA_FINGERPRINT`),
+ * the new bundle is recorded as expected in the same step
+ * (`<state>/tls/instance-ca-pin`, see `instance/ca-pin.ts`). That is allowed here
+ * because the payload arrived over a session already verified against the
+ * pinned CA and authenticated with this server's key; nothing unauthenticated
+ * can change the list.
  */
 
 import { resolveLayout } from "../paths/layout.ts";
@@ -22,6 +29,7 @@ import type {
   TlsTrustReconcileResult,
 } from "../contracts/commands-contracts.ts";
 import { parseTlsTrustReconcilePayload } from "../contracts/commands-contracts.ts";
+import { repinAfterReconcile } from "../instance/ca-pin.ts";
 
 const CA_FILE_MODE = 0o640;
 
@@ -30,6 +38,7 @@ export type TlsTrustHandlerDeps = {
   readTextFile?: (path: string) => Promise<string>;
   writeAtomic?: (path: string, contents: string) => Promise<void>;
   invalidate?: () => void;
+  repin?: (bundlePem: string) => Promise<unknown>;
 };
 
 async function defaultReadTextFile(path: string): Promise<string> {
@@ -106,6 +115,7 @@ export async function handleTlsTrust(
 
   const writeAtomic = deps.writeAtomic ?? atomicWritePem;
   await writeAtomic(caPath, payload.bundlePem);
+  await (deps.repin ?? repinAfterReconcile)(payload.bundlePem);
 
   const invalidate = deps.invalidate ?? invalidatePlatformCaHttpClient;
   invalidate();
