@@ -197,12 +197,10 @@ export const rawProofGet: ProofGet = async (
       `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\nUser-Agent: turbopaneld\r\n\r\n`;
     await conn.write(new TextEncoder().encode(request));
     const decoder = new TextDecoder();
-    const buf = new Uint8Array(4096);
     let text = "";
-    while (text.length < 65_536) {
-      const n = await conn.read(buf);
-      if (n === null) break;
-      text += decoder.decode(buf.subarray(0, n), { stream: true });
+    for await (const chunk of conn.readable) {
+      text += decoder.decode(chunk, { stream: true });
+      if (text.length >= 65_536) break;
     }
     return parseProofResponse(text);
   } finally {
@@ -241,10 +239,10 @@ async function answersLocally(
   host: string,
   nonce: string,
 ): Promise<boolean> {
-  for (const address of addresses) {
-    if (await answersNonce(get, address, host, nonce)) return true;
-  }
-  return false;
+  const answers = await Promise.all(
+    addresses.map((address) => answersNonce(get, address, host, nonce)),
+  );
+  return answers.some(Boolean);
 }
 
 /** Loopback first, then every other address the server has (never link-local). */
@@ -349,25 +347,26 @@ async function pairsReady(
   nowMs: number,
   run: InstanceAcmeCommand,
 ): Promise<Found[] | null> {
-  const found: Found[] = [];
-  for (const host of request.names) {
-    const pair = await findIssuedPair(
-      tenantAcmeCertificateRoot(layout),
-      host,
-      issuerKey,
-    );
-    if (!pair) return null;
-    const pem = new TextDecoder().decode(
-      await readFilePrivileged(pair.crt, run),
-    );
-    const info = inspectIssuerCertificatePem(pem, nowMs);
-    if (!info?.valid) return null;
-    found.push({ host, ...pair, notAfterMs: Date.parse(info.notAfter) });
-  }
-  return found;
+  const found = await Promise.all(
+    request.names.map(async (host): Promise<Found | null> => {
+      const pair = await findIssuedPair(
+        tenantAcmeCertificateRoot(layout),
+        host,
+        issuerKey,
+      );
+      if (!pair) return null;
+      const pem = new TextDecoder().decode(
+        await readFilePrivileged(pair.crt, run),
+      );
+      const info = inspectIssuerCertificatePem(pem, nowMs);
+      if (!info?.valid) return null;
+      return { host, ...pair, notAfterMs: Date.parse(info.notAfter) };
+    }),
+  );
+  return found.every((pair) => pair !== null) ? found : null;
 }
 
-async function waitForPairs(
+function waitForPairs(
   layout: LayoutPaths,
   request: AcmeIssueRequestMessage,
   issuerKey: string,
@@ -378,10 +377,10 @@ async function waitForPairs(
   const sleep = deps.sleep ?? delay;
   const timeoutMs = deps.timeoutMs ?? INSTANCE_ACME_ISSUE_TIMEOUT_MS;
   const started = now();
-  for (;;) {
-    const log = await (deps.readLog ??
-      (() => readLogFile(tenantAcmeLogPath(layout, request.requestId))))();
-    const failure = instanceAcmeIssuerFailureLine(log);
+  const readLog = deps.readLog ??
+    (() => readLogFile(tenantAcmeLogPath(layout, request.requestId)));
+  const poll = async (): Promise<Found[]> => {
+    const failure = instanceAcmeIssuerFailureLine(await readLog());
     if (failure) throw new Error(`issuer failed: ${failure}`);
     const ready = await pairsReady(layout, request, issuerKey, now(), run);
     if (ready) return ready;
@@ -389,7 +388,9 @@ async function waitForPairs(
       throw new Error("instance ACME issuer timed out");
     }
     await sleep(POLL_MS);
-  }
+    return poll();
+  };
+  return poll();
 }
 
 async function readLogFile(path: string): Promise<string> {
@@ -437,7 +438,7 @@ async function proveRoutes(
   );
   const skipped: string[] = [];
   const serve = deps.preflightServer ?? withPreflightServer;
-  for (const host of request.names) {
+  await forEachSequential(request.names, async (host) => {
     const nonce = (deps.nonce ?? instanceAcmePreflightNonce)();
     await serve(
       tenantAcmeSocketPath(layout, request.requestId),
@@ -462,7 +463,7 @@ async function proveRoutes(
         }
       },
     );
-  }
+  });
   return skipped;
 }
 
