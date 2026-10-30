@@ -87,6 +87,8 @@ import {
   type PlannedDeployStep,
 } from "./deploy-progress.ts";
 import {
+  automaticCertificateDetail,
+  certificatesStep,
   type DeployPresenceProbes,
   deployStepNeeds,
   installStepIds,
@@ -2692,12 +2694,16 @@ export async function applyHostingsOnly(
   }
   const runtime = resolveEnvironmentDeployRuntime(deps);
   await assertHostingNamesFree(layout, parsedPayload);
+  // One step, so the run shows the certificate line like a full deploy does.
+  runtime.progress.plan([certificatesStep()]);
+  runtime.progress.start("certificates");
   const hostnameTls = await materializeDeployTls(
     layout,
     parsedPayload,
     runtime.decryptSecrets,
   );
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
+  finishCertificatesStep(runtime.progress, parsedPayload);
   logInfo(
     "commands",
     `environment.deploy hostings only env=${parsedPayload.environmentId}`,
@@ -2708,6 +2714,19 @@ export async function applyHostingsOnly(
       `Web server settings applied for environment ${parsedPayload.environmentId}: no build, no restart`,
     unchanged: true,
   };
+}
+
+/**
+ * Finish the certificates step. For names the web server gets a certificate
+ * for by itself, the step keeps a line saying so, which stays readable after
+ * the step is done.
+ */
+function finishCertificatesStep(
+  progress: DeployStepReporter,
+  parsedPayload: EnvironmentDeployPayload,
+): void {
+  const note = automaticCertificateDetail(parsedPayload);
+  progress.done("certificates", note === undefined ? {} : { note });
 }
 
 /**
@@ -3144,7 +3163,8 @@ async function deployEnvironmentHolding(
     ...(cancel === undefined ? {} : { cancel }),
   });
 
-  // Planned only when the payload carries certificate material.
+  // Planned when the payload carries certificate files or names the web
+  // server gets a certificate for by itself; otherwise these calls do nothing.
   runtime.progress.start("certificates");
   const hostnameTls = await materializeDeployTls(
     layout,
@@ -3153,7 +3173,7 @@ async function deployEnvironmentHolding(
   );
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
-  runtime.progress.done("certificates");
+  finishCertificatesStep(runtime.progress, parsedPayload);
 
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({

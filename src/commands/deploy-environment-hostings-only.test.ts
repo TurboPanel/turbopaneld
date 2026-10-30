@@ -3,6 +3,8 @@ import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import { createDeployStepReporter } from "./deploy-progress.ts";
+import type { CommandProgressMessage } from "../contracts/cell-messages.ts";
 import "../testing/stub-hosting-caddy-host.ts";
 
 /**
@@ -97,6 +99,40 @@ test("hostingsOnly rewrites the web server config and builds or restarts nothing
       ),
     );
     assertEquals(acme, ["shop.example.com"]);
+  });
+});
+
+test("hostingsOnly sends the certificate step with its line kept after it is done", async () => {
+  await withLayout(async (configDir) => {
+    const sitesDir = join(configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, `${ENVIRONMENT_ID}.caddy`),
+      "shop.example.com {\n  tls internal\n}\n",
+    );
+    const sent: CommandProgressMessage[] = [];
+    const progress = createDeployStepReporter({
+      id: "dispatch-1",
+      commandId: "command-1",
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    await handleEnvironmentDeploy(
+      hostingsOnlyPayload(),
+      new Date().toISOString(),
+      { runDocker: recordingDocker([]), progress },
+    );
+    const last = sent.at(-1)?.progress.steps.find((step) =>
+      step.id === "certificates"
+    );
+    assertEquals(last?.label, "Set up certificates");
+    assertEquals(last?.state, "done");
+    assertStringIncludes(last?.detail ?? "", "Requested in the background");
+    assertStringIncludes(last?.detail ?? "", "shop.example.com");
   });
 });
 
