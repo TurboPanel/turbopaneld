@@ -593,7 +593,7 @@ test({
             }),
           }),
         Error,
-        "Railpack build runtime is missing",
+        "image build runtime is missing",
       );
     });
   },
@@ -611,7 +611,7 @@ test({
             runBuildkitSetup: () => Promise.resolve(),
             resolveArch: () => {
               throw new Error(
-                "Unsupported CPU architecture for Railpack builds: riscv64",
+                "Unsupported CPU architecture for image builds: riscv64",
               );
             },
             runCommand: () => {
@@ -619,7 +619,7 @@ test({
             },
           }),
         Error,
-        "Unsupported CPU architecture for Railpack builds: riscv64",
+        "Unsupported CPU architecture for image builds: riscv64",
       );
     });
   },
@@ -647,7 +647,7 @@ test({
 });
 
 test({
-  name: "the pinned Railpack digests cover both architectures",
+  name: "the pinned image builder digests cover both architectures",
   fn: () => {
     for (const arch of ["amd64", "arm64"] as const) {
       assertEquals(/^[0-9a-f]{64}$/.test(IMAGE_BUILD_SHA256[arch]), true);
@@ -877,7 +877,7 @@ test({
   },
 });
 
-test("the Railpack tools get tenant build.env without any name that loads code or is the sandbox", () => {
+test("the image builder tools get tenant build.env without any name that loads code or is the sandbox", () => {
   const env = imageBuildToolEnvironment({
     kind: "railpack",
     env: {
@@ -925,7 +925,7 @@ test("the Railpack tools get tenant build.env without any name that loads code o
   assertEquals(env.CI, "1");
 });
 
-test("the names the Railpack lane drops are listed, by name only, and include tool config families", () => {
+test("the names the image build lane drops are listed, by name only, and include tool config families", () => {
   const dropped = droppedImageBuildEnvNames({
     kind: "railpack",
     env: {

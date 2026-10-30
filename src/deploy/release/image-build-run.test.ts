@@ -380,7 +380,7 @@ test({
         true,
       );
       assertEquals(
-        lines.some((line) => line.includes("loading vendored Railpack")),
+        lines.some((line) => line.includes("loading vendored image builder")),
         true,
       );
     });

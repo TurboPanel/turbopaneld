@@ -496,8 +496,9 @@ value and the old one still parses and behaves the same
 two version fields are written as `builderFrontendVersion` /
 `builderPlanVersion`; `readReleaseManifest` still reads the old field names from
 manifests sealed earlier and maps them to the new ones, so a rollback to an old
-release keeps working. A daemon older than this change cannot read a manifest
-written with the new names. That is
+release keeps working. A daemon older than this change still reads a manifest
+written with the new names (it ignores unknown keys) and only loses the two
+version fields when it reports the release. That is
 the **fourth deploy pattern** on this host, alongside compose, site,
 and native app — and the four differ only in what a release *is*:
 
@@ -591,7 +592,7 @@ be rolled back to, which is the same guarantee the native lane gives.
 **Provisioning is on demand.** `ensureBuildkitImageBuild` follows the
 `ensureDocker` / `ensureHostingCaddy` pattern exactly: check the vendor tree →
 `buildkit-setup.yml` (`runBuildkitSetup`) → direct download of railpack and the
-frontend → re-check → throw. It is called only when a `image` build is
+frontend → re-check → throw. It is called only when an `image` build is
 actually requested, never from `daemon-converge` or `instance-dev-install`.
 `IMAGE_BUILD_VERSION` in `image-build.ts` is pinned in step with
 `orchestration/roles/buildkit/defaults/main.yml`; bumping one without the other

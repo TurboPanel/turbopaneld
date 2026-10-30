@@ -217,6 +217,29 @@ test("readReleaseManifest maps the old version field names to the new ones", asy
   });
 });
 
+test("readReleaseManifest keeps the new version names when both sets are present", async () => {
+  await withReleaseDir(async (releaseDir) => {
+    await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      releaseManifestPath(releaseDir),
+      JSON.stringify({
+        ...BASE,
+        railpackFrontendVersion: "old-f",
+        railpackPlanVersion: "old-p",
+        builderFrontendVersion: "new-f",
+        builderPlanVersion: "new-p",
+      }),
+    );
+    assertEquals(await readReleaseManifest(releaseDir), {
+      ...BASE,
+      builderFrontendVersion: "new-f",
+      builderPlanVersion: "new-p",
+    });
+  });
+});
+
 test("readReleaseManifest rejects non-string railpack version fields", async () => {
   await withReleaseDir(async (releaseDir) => {
     await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {

@@ -731,7 +731,7 @@ export async function runCaddySetup(
 }
 
 /**
- * Vendor Railpack and its BuildKit frontend for the Railpack build lane.
+ * Vendor the image builder and its BuildKit frontend for the image build lane.
  *
  * Called on demand from `ensureBuildkitImageBuild` when a deploy asks for
  * `build.kind: image`, never from `daemon-converge` or

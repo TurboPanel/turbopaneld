@@ -1,5 +1,5 @@
 /**
- * The Railpack build lane: turn a checkout into an OCI image instead of a
+ * The image build lane: turn a checkout into an OCI image instead of a
  * promoted directory tree.
  *
  * This is a **fourth deploy pattern** sitting beside compose, site,
@@ -15,8 +15,8 @@
  * - `railpack` reads the checkout and emits a build **plan** (`railpack
  *   prepare`). Zero-config detection is the point of it — `installCommand` /
  *   `buildCommand` from the payload ride along as `RAILPACK_*_CMD` overrides,
- *   which Railpack may or may not honor depending on what it detected.
- * - The pinned Railpack BuildKit **gateway frontend** turns that plan into an
+ *   which the image builder may or may not honor depending on what it detected.
+ * - The pinned image builder BuildKit **gateway frontend** turns that plan into an
  *   image. It runs on the **Docker Engine's own BuildKit**, driven by `docker
  *   buildx build` with `BUILDKIT_SYNTAX` — the invocation upstream documents for
  *   platforms — through the same `docker` CLI path (and sudo ladder) every other
@@ -42,7 +42,7 @@
  *
  * **Tenant isolation is the `cache-key`.** The Engine's build cache is per host
  * (as it is for compose builds, and as the old private `buildkitd` was), so the
- * lever that matters is Railpack's mount caches (`node_modules`, package
+ * lever that matters is the image builder's mount caches (`node_modules`, package
  * managers): those are writable and shared by id. `cache-key=<projectId>`
  * prefixes every mount cache id, so one tenant's build can never read or poison
  * another's.
@@ -102,7 +102,7 @@ export const IMAGE_BUILD_SHA256: Readonly<Record<"amd64" | "arm64", string>> = {
 export const IMAGE_BUILD_FRONTEND_IMAGE =
   "ghcr.io/railwayapp/railpack-frontend";
 /**
- * Pinned Railpack BuildKit gateway frontend version.
+ * Pinned image builder BuildKit gateway frontend version.
  *
  * Recorded on every release it produced ({@link ImageBuildBuildResult}) so a
  * rollback can say which frontend built the image it is restoring — the image
@@ -125,7 +125,7 @@ export const IMAGE_BUILD_BUILD_TIMEOUT_MS = 1_800_000;
 /** How many trailing lines of a failed build's output the error carries. */
 const FAILURE_TAIL_LINES = 20;
 
-/** Repository namespace every Railpack-built image is tagged under. */
+/** Repository namespace every image-built image is tagged under. */
 export const IMAGE_BUILD_IMAGE_NAMESPACE = "turbopanel-app";
 
 /** Scratch subdirectories the build owns (siblings of the checkout). */
@@ -134,7 +134,7 @@ const IMAGE_BUILD_FRONTEND_TAR_FILENAME = "railpack-frontend.tar";
 
 /**
  * Keys that make a language runtime or tool load code from a path the tenant
- * chooses. The Railpack tools run as the daemon, unsandboxed, so these are
+ * chooses. The image builder tools run as the daemon, unsandboxed, so these are
  * refused here on top of the shared build filter ({@link isReservedBuildEnvKey}).
  */
 const TOOL_CODE_LOADING_ENV_KEYS = new Set([
@@ -163,7 +163,7 @@ const TOOL_CODE_LOADING_ENV_KEYS = new Set([
 /**
  * Name prefixes of package-manager and version-manager configuration (mise,
  * asdf, npm, Bundler, pip). In this lane the variables reach only the host-side
- * tools (Railpack and the image builder client), never the application's own
+ * tools (the planner and the build client), never the application's own
  * build inside the image, so none of these has a legitimate use here: package
  * manager settings belong in the repository's own files (`.npmrc`, `Gemfile`
  * config, `pip.conf`), which the image build reads.
@@ -178,14 +178,14 @@ const TOOL_CONFIG_ENV_PREFIXES = [
   "PIP_",
 ];
 
-/** Whether a tenant `build.env` key may reach the Railpack tools' environment. */
+/** Whether a tenant `build.env` key may reach the image builder tools' environment. */
 export function imageBuildToolAcceptsEnvKey(key: string): boolean {
   return isSpecEnvName(key) && !isReservedBuildEnvKey(key) &&
     !TOOL_CODE_LOADING_ENV_KEYS.has(key) &&
     !TOOL_CONFIG_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
-/** The tenant `build.env` names the Railpack lane leaves out, for the build log. */
+/** The tenant `build.env` names the image build lane leaves out, for the build log. */
 export function droppedImageBuildEnvNames(
   build: EnvironmentDeploySourceBuild,
 ): string[] {
@@ -219,7 +219,7 @@ export function imageBuildFrontendDigestPath(runtimesDir: string): string {
 }
 
 /**
- * Railpack's `cache-key` for one project: the prefix of every mount cache id
+ * The image builder's `cache-key` for one project: the prefix of every mount cache id
  * its builds use (package manager stores, `node_modules`), which is what keeps
  * one tenant's build from reading or poisoning another's on the shared Engine
  * builder.
@@ -308,7 +308,7 @@ function resolveArchDefault(): "arm64" | "amd64" {
   const arch = Deno.build.arch;
   if (arch === "aarch64") return "arm64";
   if (arch === "x86_64") return "amd64";
-  throw new Error(`Unsupported CPU architecture for Railpack builds: ${arch}`);
+  throw new Error(`Unsupported CPU architecture for image builds: ${arch}`);
 }
 
 /** Optional test seams for {@link ensureBuildkitImageBuild}. */
@@ -412,7 +412,7 @@ async function readLayoutManifestDigest(indexPath: string): Promise<string> {
     : undefined;
   if (!Array.isArray(manifests) || manifests.length !== 1) {
     throw new Error(
-      "Railpack frontend layout is not single-platform: expected exactly one manifest",
+      "image builder frontend layout is not single-platform: expected exactly one manifest",
     );
   }
   const entry = manifests[0];
@@ -420,7 +420,9 @@ async function readLayoutManifestDigest(indexPath: string): Promise<string> {
     ? (entry as { digest?: unknown }).digest
     : undefined;
   if (typeof digest !== "string" || !FRONTEND_DIGEST_RE.test(digest)) {
-    throw new Error("Railpack frontend layout has no usable manifest digest");
+    throw new Error(
+      "image builder frontend layout has no usable manifest digest",
+    );
   }
   return digest;
 }
@@ -440,7 +442,7 @@ async function installImageBuildFrontend(
   deps: Required<Pick<EnsureBuildkitImageBuildDeps, "runCommand">>,
 ): Promise<void> {
   const ref = pinnedImage("railpackFrontend");
-  logInfo("deploy", `vendoring Railpack frontend ${ref}`);
+  logInfo("deploy", `vendoring image builder frontend ${ref}`);
   const pull = await deps.runCommand("docker", ["pull", ref]);
   if (!pull.success) {
     throw new Error(`docker pull failed: ${pull.stderr || "pull error"}`);
@@ -489,7 +491,7 @@ async function refreshCurrentSymlink(
 }
 
 /**
- * Railpack's release asset for `arch`. Upstream names Linux builds by Rust
+ * the image builder's release asset for `arch`. Upstream names Linux builds by Rust
  * target triple (`x86_64-unknown-linux-musl`), not Go-style `linux-amd64`
  * like BuildKit; the old `-linux-<arch>` name 404'd. Keep in step with the
  * `Install Railpack` task in orchestration/roles/buildkit/tasks/main.yml.
@@ -513,7 +515,7 @@ async function installImageBuild(
   const url =
     `https://github.com/railwayapp/railpack/releases/download/v${IMAGE_BUILD_VERSION}/${asset}`;
   const tarball = join(tmp, asset);
-  logInfo("deploy", `downloading Railpack ${IMAGE_BUILD_VERSION}`);
+  logInfo("deploy", `downloading the image builder ${IMAGE_BUILD_VERSION}`);
   const curl = await deps.runCommand("/usr/bin/curl", [
     "-fsSL",
     "-o",
@@ -526,7 +528,7 @@ async function installImageBuild(
   await assertFileSha256(
     tarball,
     deps.imageBuildSha256 ?? IMAGE_BUILD_SHA256[arch],
-    `Railpack ${IMAGE_BUILD_VERSION} (${asset})`,
+    `Image builder ${IMAGE_BUILD_VERSION} (${asset})`,
     "IMAGE_BUILD_SHA256 in src/deploy/release/image-build.ts and railpack_sha256 in orchestration/roles/buildkit/defaults/main.yml",
   );
   const extractDir = join(tmp, "railpack");
@@ -567,7 +569,7 @@ export async function buildToolPresent(runtimesDir: string): Promise<boolean> {
  *
  * Called from the deploy path **only when a `railpack` build is actually
  * requested** — never from `daemon-converge` or `instance-dev-install`. A host
- * that never runs a Railpack build never pays for BuildKit, which is the same
+ * that never runs a image build never pays for BuildKit, which is the same
  * on-demand contract Docker and hosting Caddy already follow.
  *
  * The returned tools carry the frontend's layout directory and manifest digest:
@@ -622,7 +624,7 @@ export async function ensureBuildkitImageBuild(
   if (downloaded) return downloaded;
 
   throw new Error(
-    `Railpack build runtime is missing: ${
+    `image build runtime is missing: ${
       imageBuildBinaryPath(layout.runtimesDir)
     } / ${imageBuildFrontendLayoutDir(layout.runtimesDir)}`,
   );
@@ -735,7 +737,7 @@ export type ImageBuildBuildParams = {
   workingDir: string;
   /** Scratch dir the plan file and logs may be written into (never the checkout). */
   scratchDir: string;
-  /** Railpack mount-cache prefix for the project ({@link imageBuildCacheKey}). */
+  /** Image builder mount-cache prefix for the project ({@link imageBuildCacheKey}). */
   cacheKey: string;
   /** Image tag to produce ({@link imageBuildImageTag}). */
   imageTag: string;
@@ -841,7 +843,7 @@ async function assertBuildxAvailable(
   const probe = await runDocker(["buildx", "version"]);
   if (probe.success) return;
   throw new Error(
-    `Railpack builds run on the Docker Engine's BuildKit and need the buildx CLI plugin (Debian/Ubuntu package docker-buildx-plugin); \`docker buildx version\` failed: ${
+    `image builds run on the Docker Engine's BuildKit and need the buildx CLI plugin (Debian/Ubuntu package docker-buildx-plugin); \`docker buildx version\` failed: ${
       dockerFailureDetail(probe, redact)
     }`,
   );
@@ -870,7 +872,7 @@ async function ensureFrontendImage(
     ref,
   ]);
   if (present.success) return;
-  params.onOutput?.("stdout", `loading vendored Railpack frontend ${ref}`);
+  params.onOutput?.("stdout", `loading vendored image builder frontend ${ref}`);
   const tarball = join(params.scratchDir, IMAGE_BUILD_FRONTEND_TAR_FILENAME);
   try {
     const tar = await runCommand("/usr/bin/tar", [
@@ -886,7 +888,7 @@ async function ensureFrontendImage(
     if (!load.success) {
       logWarn(
         "deploy",
-        `could not load the vendored Railpack frontend; the Engine will fetch ${ref}: ${
+        `could not load the vendored image builder frontend; the Engine will fetch ${ref}: ${
           load.stderr || "load error"
         }`,
       );
@@ -896,7 +898,7 @@ async function ensureFrontendImage(
   }
 }
 
-/** `docker buildx build` argv for one Railpack build (Engine builder, `--load`). */
+/** `docker buildx build` argv for one image build (Engine builder, `--load`). */
 export function imageBuildBuildxArgs(
   params: Pick<
     ImageBuildBuildParams,
@@ -1023,12 +1025,12 @@ async function prepareInSandbox(
 }
 
 /**
- * `railpack prepare` → `docker buildx build` (Railpack gateway frontend on the
+ * `railpack prepare` → `docker buildx build` (the image builder gateway frontend on the
  * Engine's BuildKit, `--load`ed into the image store).
  *
  * Returns the tag and the pinned tool versions that produced it. The caller
  * records all of it on the release manifest, which is what makes a rollback to
- * a Railpack release a pure "re-run this tag" operation with no rebuild.
+ * a image-build release a pure "re-run this tag" operation with no rebuild.
  *
  * The docker CLI never sees {@link imageBuildToolEnvironment}: that environment
  * carries tenant `build.env` keys and `HOME=<checkout>`, and the CLI resolves

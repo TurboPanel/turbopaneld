@@ -10,6 +10,7 @@ import { resolveLayout } from "../../paths/layout.ts";
 import { createTempLayout } from "../../testing/temp-layout.ts";
 import {
   readReleaseManifest,
+  releaseManifestPath,
   writeReleaseManifest,
 } from "./deployment-json.ts";
 import {
@@ -1189,6 +1190,83 @@ test("applySourceReleases rolls back image-build releases from daemon record man
     }
   });
 });
+
+for (
+  const [label, names] of [
+    ["old", ["railpackFrontendVersion", "railpackPlanVersion"]],
+    ["new", ["builderFrontendVersion", "builderPlanVersion"]],
+  ] as const
+) {
+  test(`applySourceReleases reports only the new version names from a manifest with the ${label} names`, async () => {
+    await createTempLayout().then(async (fixture) => {
+      try {
+        const layout = layoutFromFixture(fixture);
+        const serviceId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000c";
+        const releaseId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000d";
+        const recordPaths = resolveDaemonReleasePaths(layout, {
+          serviceId,
+          releaseId,
+        });
+        await Deno.mkdir(
+          join(recordPaths.releaseDir, RELEASE_METADATA_DIRNAME),
+          {
+            recursive: true,
+          },
+        );
+        await Deno.writeTextFile(
+          releaseManifestPath(recordPaths.releaseDir),
+          JSON.stringify({
+            version: 1,
+            serviceId,
+            composeServiceName: "web",
+            releaseId,
+            sourceId: "src-1",
+            commitSha: "rail-commit",
+            ref: "main",
+            promotedAt: "2026-01-01T00:00:00.000Z",
+            imageTag: `turbopanel-app/${serviceId}:${releaseId}`,
+            [names[0]]: "0.2.0",
+            [names[1]]: "0.1.0",
+          }),
+        );
+        const applied = await applySourceReleases(
+          layout,
+          basePayload({
+            hostings: [{
+              hostingId: "host-rail",
+              composeServiceName: "web",
+              serviceId,
+              hostnames: ["rail.example.com"],
+            }],
+            sourceMaterial: [
+              baseSource({
+                composeServiceName: "web",
+                releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+                rollbackToReleaseId: releaseId,
+                releaseServiceId: serviceId,
+                build: { kind: "image" },
+              }),
+            ],
+          }),
+          {
+            logSink: fakeLogSink().sink,
+            decryptSecrets: undefined,
+            promoteExistingReleaseFn: () =>
+              Promise.resolve(recordPaths.releaseDir),
+          },
+        );
+        const row = applied[0];
+        if (!row) throw new TypeError("expected image-build rollback row");
+        assertEquals(row.builderFrontendVersion, "0.2.0");
+        assertEquals(row.builderPlanVersion, "0.1.0");
+        assertEquals("railpackFrontendVersion" in row, false);
+        assertEquals("railpackPlanVersion" in row, false);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  });
+}
 
 test("applySourceReleases builds image-build releases without a project principal", async () => {
   await createTempLayout().then(async (fixture) => {
