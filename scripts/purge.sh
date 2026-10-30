@@ -3733,7 +3733,9 @@ tp_principal_band_gid() {
 # With $2 = a user name, that account is not counted (the dry run does not
 # run userdel, so it would otherwise block its own group and home).
 tp_gid_is_primary() {
-  getent passwd | awk -F: -v gid="$1" -v skip="${2:-}" '$4 == gid && $1 != skip { found = 1 } END { exit !found }'
+  _gip_gid=$1
+  _gip_skip=${2:-}
+  getent passwd | awk -F: -v gid="$_gip_gid" -v skip="$_gip_skip" '$4 == gid && $1 != skip { found = 1 } END { exit !found }'
 }
 
 # Remove a site owner's own group: `<name>`, and `<name>-grp` from hosts set

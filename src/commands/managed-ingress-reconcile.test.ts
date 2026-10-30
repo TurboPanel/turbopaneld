@@ -1019,6 +1019,78 @@ test({
   },
 });
 
+for (
+  const scenario of [
+    {
+      name: "there is no saved ingress identity",
+      seed: false,
+      inspectOk: true,
+      throws: false,
+      removes: false,
+    },
+    {
+      name: "the data volume is already gone",
+      seed: true,
+      inspectOk: false,
+      throws: false,
+      removes: false,
+    },
+    {
+      name: "the volume lookup throws",
+      seed: true,
+      inspectOk: true,
+      throws: true,
+      removes: false,
+    },
+  ]
+) {
+  test({
+    name:
+      `empty clusters teardown completes and skips the data volume when ${scenario.name}`,
+    permissions: { env: true, read: true, write: true, run: false },
+    fn: async () => {
+      await withTempLayout(async (fixture) => {
+        if (scenario.seed) await seedFixture(fixture);
+        const layout = resolveLayout(fixture.env);
+        Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+        try {
+          const dockerArgs: string[][] = [];
+          await handleManagedIngressReconcile(
+            {
+              serverId: SERVER_ID,
+              managedNetwork: MANAGED_NETWORK,
+              clusters: [],
+            },
+            new Date().toISOString(),
+            {
+              runDocker: (args, options) => {
+                dockerArgs.push([...args]);
+                if (args[0] === "volume") {
+                  if (scenario.throws) throw new Error("docker unavailable");
+                  return Promise.resolve({
+                    success: scenario.inspectOk,
+                    stdout: "",
+                    stderr: "",
+                    code: scenario.inspectOk ? 0 : 1,
+                  });
+                }
+                return fakeRun()(args, options);
+              },
+              ensureDocker: () => Promise.resolve(),
+            },
+          );
+          assertEquals(dockerArgs.some(isProxySqlVolumeRm), scenario.removes);
+          assertEquals(layout.configDir.length > 0, true);
+        } finally {
+          Deno.env.delete("TURBOPANEL_STATE_DIR");
+          Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+        }
+      });
+    },
+  });
+}
+
 test({
   name:
     "empty clusters teardown keeps a managed network that still has containers",
