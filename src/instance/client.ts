@@ -162,6 +162,7 @@ import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { BackupCopier } from "../backups/copier.ts";
 import { BackupCopyReporter } from "../backups/copy-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
+import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
@@ -539,6 +540,7 @@ export class InstanceClient {
   #backupCopier: BackupCopier | undefined;
   #backupCopyReporter: BackupCopyReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
+  #proofForward: ProofForwardHandler | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
   #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
@@ -1541,6 +1543,7 @@ export class InstanceClient {
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
+    this.#ensureProofForward();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -1758,6 +1761,25 @@ export class InstanceClient {
       peerSupports: () => this.instanceSupports(BACKUP_S3_COPY_FEATURE),
     });
     return this.#backupCopyReporter;
+  }
+
+  /**
+   * The helper side of central certificate issuance. The first use also sweeps
+   * any forward a restart left behind past its stated time.
+   */
+  #ensureProofForward(): ProofForwardHandler {
+    if (this.#proofForward) return this.#proofForward;
+    const handler = new ProofForwardHandler({
+      layout: resolveLayout(Deno.env.toObject()),
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+    });
+    this.#proofForward = handler;
+    this.#runSocketHandler("acme-proof-forward sweep", handler.sweepExpired());
+    return handler;
   }
 
   #ensureAcmeObserver(): void {
@@ -2037,6 +2059,18 @@ export class InstanceClient {
         break;
       case "dev-sync-end":
         this.#endDevSync(message.id, ws);
+        break;
+      case "acme-proof-forward":
+        this.#runSocketHandler(
+          "acme-proof-forward",
+          this.#ensureProofForward().handleForward(message),
+        );
+        break;
+      case "acme-proof-forward-end":
+        this.#runSocketHandler(
+          "acme-proof-forward-end",
+          this.#ensureProofForward().handleEnd(message),
+        );
         break;
       case "tunnel-token":
         this.#runSocketHandler(
