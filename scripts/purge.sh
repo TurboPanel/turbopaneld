@@ -2404,7 +2404,8 @@ tp_remove_firewall() {
 # each. Only IPv4 private-looking shapes survive the character classes; the
 # daemon writes the keys in this order.
 tp_lan_routes_from_state() {
-  tr -d ' \t\r\n' < "$1" 2>/dev/null |
+  _lrs_state=$1
+  tr -d ' \t\r\n' < "$_lrs_state" 2>/dev/null |
     sed -n 's/.*"installedLanRoutes":\[\([^]]*\)\].*/\1/p' |
     tr '}' '\n' |
     sed -n 's/.*"cidr":"\([0-9./]*\)","via":"\([0-9.]*\)","dev":"\([A-Za-z0-9._-]*\)".*/\1 \2 \3/p'
@@ -2421,7 +2422,7 @@ tp_remove_lan_routes() {
     tp_lan_routes_from_state "$_rlr_state" > "$TP_TMP/lan.routes" || continue
     while read -r _rlr_cidr _rlr_via _rlr_dev; do
       case "$_rlr_cidr" in */*) ;; *) continue ;; esac
-      case "$_rlr_dev" in ''|-*|tp0|lo) continue ;; esac
+      case "$_rlr_dev" in ''|-*|tp0|lo) continue ;; *) ;; esac
       ip -4 route show exact "$_rlr_cidr" dev "$_rlr_dev" 2>/dev/null |
         sed 's/$/ /' | grep -qF "via $_rlr_via " || continue
       tp_run "remove TurboFabric LAN route $_rlr_cidr via $_rlr_via" \

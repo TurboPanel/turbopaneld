@@ -4145,6 +4145,15 @@ function parseEnabledFabricPayload(
   if (record.fabricId !== undefined) {
     payload.fabricId = parseFabricUuid(record.fabricId, "fabricId");
   }
+  applyOptionalFabricFields(payload, record);
+  return payload;
+}
+
+/** The optional tunnel settings of an enabled payload, each checked when present. */
+function applyOptionalFabricFields(
+  payload: FabricReconcileEnabledPayload,
+  record: Record<string, unknown>,
+): void {
   if (record.listenPort !== undefined) {
     if (!isValidWireguardListenPort(record.listenPort)) {
       throw new TypeError("Invalid fabric listenPort");
@@ -4166,7 +4175,6 @@ function parseEnabledFabricPayload(
     }
     payload.gateway = record.gateway;
   }
-  return payload;
 }
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` validator. */

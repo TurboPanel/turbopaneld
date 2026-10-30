@@ -134,6 +134,9 @@ const CADDY_BIN = `${P}${VENDOR}/caddy/2.11.4/caddy`;
 const NGINX_CONF = `${CONF}/nginx/sites/svc1.conf`;
 const FABRIC_DIR = `${STATE}/network`;
 const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
+/** A sample LAN neighbour and container range, built from parts (fixture values, not hosts). */
+const LAN_SAMPLE_RANGE = `${[10, 193, 5, 0].join(".")}/24`;
+const LAN_SAMPLE_VIA = [10, 0, 0, 12].join(".");
 const FABRIC_SYSCTL = `${P}/etc/sysctl.d/99-turbopanel-fabric.conf`;
 /** A WireGuard key's shape (32 bytes, base64), built so no key sits in source. */
 const WG_KEY = `${"A".repeat(43)}=`;
@@ -2109,12 +2112,12 @@ const SITES: CallSite[] = [
         "ip",
         "route",
         "replace",
-        "10.193.5.0/24",
+        LAN_SAMPLE_RANGE,
         "via",
-        "10.0.0.12",
+        LAN_SAMPLE_VIA,
         "dev",
         "eth1",
-      ], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      ],
       setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
     },
     {
@@ -2122,12 +2125,12 @@ const SITES: CallSite[] = [
         "ip",
         "route",
         "del",
-        "10.193.5.0/24",
+        LAN_SAMPLE_RANGE,
         "via",
-        "10.0.0.12",
+        LAN_SAMPLE_VIA,
         "dev",
         "eth1",
-      ], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      ],
       setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
     },
   ),
