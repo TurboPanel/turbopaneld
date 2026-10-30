@@ -96,15 +96,46 @@ function invocationKey(cmd: string, args: string[]): string {
   return `${cmd} ${args.join(" ")}`;
 }
 
+/** `ip route show` line the kernel prints for a route on `tp0`. */
+function tp0RouteLine(cidr: string): string {
+  const shown = cidr.endsWith("/32") || cidr.endsWith("/128")
+    ? cidr.slice(0, cidr.lastIndexOf("/"))
+    : cidr;
+  return `${shown} dev ${FABRIC_INTERFACE_NAME} scope link`;
+}
+
+/** Stateful fake of the `tp0` routes `ip route replace|del` changes. */
+function fakeRouteTable(): (args: string[]) => FabricRunResult | null {
+  const routes = new Set<string>();
+  return (args) => {
+    if (args[0] === "route" && args[3] === "dev") {
+      if (args[1] === "replace") routes.add(args[2] ?? "");
+      if (args[1] === "del") routes.delete(args[2] ?? "");
+      return ok();
+    }
+    if (args[1] === "route" && args[2] === "show") {
+      const v6 = args[0] === "-6";
+      return ok(
+        [...routes].filter((cidr) => cidr.includes(":") === v6)
+          .map(tp0RouteLine).join("\n"),
+      );
+    }
+    return null;
+  };
+}
+
 function recordingRun(
   invocations: string[],
   extras?: (cmd: string, args: string[]) => FabricRunResult | null,
 ): FabricRunFn {
+  const routeTable = fakeRouteTable();
   return async (cmd, args) => {
     await Promise.resolve();
     invocations.push(invocationKey(cmd, args));
     const extra = extras?.(cmd, args);
     if (extra) return extra;
+    const route = cmd === "ip" ? routeTable(args) : null;
+    if (route) return route;
     if (cmd === "wg" && args[0] === "genkey") return ok(WG_PRIVKEY);
     if (cmd === "wg" && args[0] === "pubkey") return ok(WG_PUBKEY);
     if (cmd === "wg" && args[0] === "show" && args[2] === "dump") {
@@ -319,7 +350,7 @@ test("reconcile result names the local NIC that carries each peer endpoint", asy
   });
 });
 
-test("enabled fabric reconcile writes key/state and applies mtu/keepalive/wg-quick", async () => {
+test("enabled fabric reconcile writes key/state, applies mtu/keepalive and installs peer routes", async () => {
   await withFabricDir("tp-fabric-on-", async (networkDir, invocations) => {
     const parsed = parseFabricReconcilePayload(enabledPayload());
     if (!parsed.enabled) {
@@ -394,7 +425,19 @@ test("enabled fabric reconcile writes key/state and applies mtu/keepalive/wg-qui
       true,
     );
     assertEquals(joined.includes("sysctl -p"), true);
-    assertEquals(joined.includes("systemctl enable --now wg-quick@tp0"), true);
+    assertEquals(joined.includes("systemctl enable"), false);
+    assertEquals(joined.includes("cp "), false);
+    assertEquals(
+      joined.includes("sudo -n rm -f /etc/wireguard/tp0.conf"),
+      true,
+    );
+    assertEquals(
+      invocations.filter((line) => line.startsWith("ip route replace")),
+      [
+        "ip route replace 10.250.0.12/32 dev tp0",
+        "ip route replace 10.193.0.0/16 dev tp0",
+      ],
+    );
     assertEquals(joined.includes("DOCKER-USER"), true);
     assertEquals(joined.includes("TP-FORWARD"), true);
     assertEquals(joined.includes(FABRIC_INTERFACE_NAME), true);
@@ -1756,6 +1799,233 @@ test("handleFabricReconcile surfaces wg syncconf failures", async () => {
         return fail("wg syncconf failed");
       }
       return null;
+    },
+  );
+});
+
+function enabledFrom(
+  record: Record<string, unknown>,
+): FabricReconcileEnabledPayload {
+  const parsed = parseFabricReconcilePayload(record);
+  if (!parsed.enabled) throw new TypeError("expected enabled fabric payload");
+  return parsed;
+}
+
+function routeChanges(invocations: readonly string[]): string[] {
+  return invocations.filter((line) =>
+    line.startsWith("ip route replace") || line.startsWith("ip route del")
+  );
+}
+
+test("parseFabricReconcilePayload keeps a boolean retainKeys and ignores anything else", () => {
+  assertEquals(
+    parseFabricReconcilePayload({ enabled: false, retainKeys: true }),
+    { enabled: false, retainKeys: true },
+  );
+  assertEquals(
+    parseFabricReconcilePayload({ enabled: false, retainKeys: false }),
+    { enabled: false, retainKeys: false },
+  );
+  assertEquals(
+    parseFabricReconcilePayload({ enabled: false, retainKeys: "yes" }),
+    { enabled: false },
+  );
+  assertEquals(parseFabricReconcilePayload({ enabled: false }), {
+    enabled: false,
+  });
+});
+
+test("a peer change adds the new routes and removes the old ones on tp0", async () => {
+  await withFabricDir("tp-fabric-route-change-", async (_dir, invocations) => {
+    const when = new Date().toISOString();
+    await handleFabricReconcile(enabledFrom(enabledPayload()), when);
+    invocations.length = 0;
+    await handleFabricReconcile(
+      enabledFrom({
+        ...enabledPayload(),
+        peers: [
+          {
+            publicKey: WG_PUBKEY_B,
+            endpoint: "203.0.113.1:51820",
+            allowedIPs: ["10.250.0.12/32", "10.194.0.0/16"],
+          },
+          {
+            publicKey: WG_PUBKEY_C,
+            endpoint: "203.0.113.2:51820",
+            allowedIPs: ["10.250.0.13/32"],
+          },
+        ],
+      }),
+      when,
+    );
+    assertEquals(routeChanges(invocations), [
+      "ip route replace 10.194.0.0/16 dev tp0",
+      "ip route replace 10.250.0.13/32 dev tp0",
+      "ip route del 10.193.0.0/16 dev tp0",
+    ]);
+  });
+});
+
+test("apply-stamp fast path repairs routes a host lost", async () => {
+  let routesLost = false;
+  await withFabricDir(
+    "tp-fabric-route-repair-",
+    async (_dir, invocations) => {
+      const parsed = enabledFrom(enabledPayload());
+      const when = new Date().toISOString();
+      await handleFabricReconcile(parsed, when);
+      routesLost = true;
+      invocations.length = 0;
+      const second = await handleFabricReconcile(parsed, when);
+      assertEquals(second.skipped, undefined);
+      assertEquals(routeChanges(invocations), [
+        "ip route replace 10.250.0.12/32 dev tp0",
+        "ip route replace 10.193.0.0/16 dev tp0",
+      ]);
+    },
+    (cmd, args) =>
+      routesLost && cmd === "ip" && args[1] === "route" && args[2] === "show"
+        ? ok("")
+        : null,
+  );
+});
+
+test("a range another interface already routes is not taken over by tp0", async () => {
+  await withFabricDir(
+    "tp-fabric-route-conflict-",
+    async (_dir, invocations) => {
+      await handleFabricReconcile(
+        enabledFrom(enabledPayload()),
+        new Date().toISOString(),
+      );
+      assertEquals(routeChanges(invocations), [
+        "ip route replace 10.250.0.12/32 dev tp0",
+      ]);
+    },
+    (cmd, args) =>
+      cmd === "ip" && args[0] === "-4" && args[1] === "route"
+        ? ok(
+          [
+            "default via 192.0.2.1 dev eth0 proto dhcp",
+            "10.193.0.0/16 dev eth1 proto kernel scope link src 10.193.0.5",
+          ].join("\n"),
+        )
+        : null,
+  );
+});
+
+test("boot restore disables wg-quick@tp0 before creating tp0 and installs routes", async () => {
+  await withFabricDir(
+    "tp-fabric-restore-routes-",
+    async (_dir, invocations) => {
+      await handleFabricReconcile(
+        enabledFrom(enabledPayload()),
+        new Date().toISOString(),
+      );
+      invocations.length = 0;
+      await restoreFabricFromPersistedState();
+      const disable = invocations.indexOf(
+        "systemctl disable --now wg-quick@tp0",
+      );
+      const create = invocations.indexOf(
+        "ip link add dev tp0 type wireguard",
+      );
+      assertEquals(disable >= 0 && create > disable, true);
+      assertEquals(
+        invocations.some((line) => line.includes("enable --now")),
+        false,
+      );
+      assertEquals(invocations.includes("ip -4 route show"), true);
+    },
+    (cmd, args) =>
+      cmd === "systemctl" && args[0] === "is-active" ? ok("active") : null,
+  );
+});
+
+test("boot restore on a fresh table installs every peer route", async () => {
+  await withFabricDir("tp-fabric-restore-fresh-", async (networkDir) => {
+    await handleFabricReconcile(
+      enabledFrom(enabledPayload()),
+      new Date().toISOString(),
+    );
+    const invocations: string[] = [];
+    setFabricNetworkDirForTests(networkDir);
+    setFabricRunForTests(recordingRun(invocations));
+    await restoreFabricFromPersistedState();
+    assertEquals(routeChanges(invocations), [
+      "ip route replace 10.250.0.12/32 dev tp0",
+      "ip route replace 10.193.0.0/16 dev tp0",
+    ]);
+  });
+});
+
+test("retainKeys pauses: tp0 goes, key, bridges and forwarding stay, and enable reuses the key", async () => {
+  await withFabricDir("tp-fabric-pause-", async (networkDir, invocations) => {
+    const parsed = enabledFrom(enabledPayload());
+    const when = new Date().toISOString();
+    const first = await handleFabricReconcile(parsed, when);
+    const keyPath = join(networkDir, "wireguard", "private.key");
+    const keyBefore = await Deno.readTextFile(keyPath);
+
+    invocations.length = 0;
+    const paused = await handleFabricReconcile(
+      { enabled: false, retainKeys: true },
+      when,
+    );
+    assertEquals(paused.summary, "TurboFabric paused; keys kept");
+    assertEquals(invocations.includes("ip link delete tp0"), true);
+    assertEquals(
+      invocations.some((line) =>
+        line.startsWith("docker network rm") ||
+        line.startsWith("iptables -F") || line.startsWith("iptables -X") ||
+        line.includes("rm -f")
+      ),
+      false,
+    );
+    assertEquals(await Deno.readTextFile(keyPath), keyBefore);
+    assertEquals(
+      await pathExists(join(networkDir, "wireguard", "tp0.conf")),
+      true,
+    );
+    assertEquals(await pathExists(join(networkDir, "apply.stamp")), false);
+    const state = JSON.parse(
+      await Deno.readTextFile(join(networkDir, "state.json")),
+    ) as { suspended?: boolean };
+    assertEquals(state.suspended, true);
+
+    invocations.length = 0;
+    const again = await handleFabricReconcile(parsed, when);
+    assertEquals(again.skipped, undefined);
+    assertEquals(again.publicKey, first.publicKey);
+    assertEquals(invocations.includes("wg genkey"), false);
+    assertEquals(await Deno.readTextFile(keyPath), keyBefore);
+    const resumed = JSON.parse(
+      await Deno.readTextFile(join(networkDir, "state.json")),
+    ) as { suspended?: boolean };
+    assertEquals(resumed.suspended, undefined);
+  });
+});
+
+test("boot restore leaves a paused fabric down and keeps only local bridge forwarding", async () => {
+  await withFabricDir(
+    "tp-fabric-pause-boot-",
+    async (_dir, invocations) => {
+      const when = new Date().toISOString();
+      await handleFabricReconcile(enabledFrom(enabledPayload()), when);
+      await handleFabricReconcile({ enabled: false, retainKeys: true }, when);
+      invocations.length = 0;
+      await restoreFabricFromPersistedState();
+      const joined = invocations.join("\n");
+      assertEquals(joined.includes("ip link add"), false);
+      assertEquals(joined.includes("wg syncconf"), false);
+      assertEquals(joined.includes("ip route"), false);
+      assertEquals(
+        joined.includes(
+          "iptables -A TP-FORWARD -s 10.192.11.0/24 -d 10.192.11.0/24 -j ACCEPT",
+        ),
+        true,
+      );
+      assertEquals(joined.includes("10.193.0.0/16"), false);
     },
   );
 });

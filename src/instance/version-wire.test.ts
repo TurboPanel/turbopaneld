@@ -10,6 +10,7 @@ import {
   DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
   DEPLOY_HOSTINGS_ONLY_FEATURE,
+  FABRIC_RETAIN_KEYS_FEATURE,
   HOST_CAPACITY_FEATURE,
   instanceUnsupportedReason,
   MANAGED_BACKUP_LOGIN_FEATURE,
@@ -387,9 +388,18 @@ test("tunnel-connector-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("managed-backup-login-v1 is advertised last", () => {
+test("managed-backup-login-v1 is advertised", () => {
   assertEquals(MANAGED_BACKUP_LOGIN_FEATURE, "managed-backup-login-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), MANAGED_BACKUP_LOGIN_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(MANAGED_BACKUP_LOGIN_FEATURE),
+    true,
+  );
+});
+
+test("fabric-retain-keys-v1 is advertised last and raised no floor", () => {
+  assertEquals(FABRIC_RETAIN_KEYS_FEATURE, "fabric-retain-keys-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), FABRIC_RETAIN_KEYS_FEATURE);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
 test("tunnel-status-v1 is advertised and raised no floor", () => {
