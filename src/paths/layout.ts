@@ -559,6 +559,7 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "backup", mode: "0750" },
   { name: "spool", mode: "0700" },
   { name: "network", mode: "0700" },
+  { name: "tenant-acme", mode: "0750" },
   { name: "cloudflared/tunnels", mode: "0750" },
   { name: "tls", mode: "0750" },
   { name: "orchestrator", mode: "0750" },

@@ -1,0 +1,30 @@
+[Unit]
+Description=TurboPanel certificate issuer for request %i
+Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/src/deploy/AGENTS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The daemon starts and stops this per certificate order; it is never enabled.
+# It runs as the daemon's own account: the daemon writes its config and storage
+# and reads the finished pair itself, so no root read and no new account are
+# needed, and the process can do nothing the daemon cannot. The HTTP server is
+# a Unix socket in the run directory (hosting Caddy on port 80 forwards only the
+# proof path to it), so it needs no capability.
+User={{ hosting_caddy_config_owner }}
+Group={{ turbopanel_group }}
+WorkingDirectory=-{{ turbopanel_state_dir }}/tenant-acme
+# One shared store for every request: it keeps this server's ACME account, so a
+# later order reuses it. The daemon deletes each order's certificates and keys
+# after the pair is reported.
+Environment=HOME={{ turbopanel_state_dir }}/tenant-acme
+Environment=XDG_DATA_HOME={{ turbopanel_state_dir }}/tenant-acme
+Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/tenant-acme
+NoNewPrivileges=true
+AmbientCapabilities=
+CapabilityBoundingSet=
+PrivateTmp=true
+ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_state_dir }}/tenant-acme/requests/%i.json
+TimeoutStopSec=20
+Restart=no

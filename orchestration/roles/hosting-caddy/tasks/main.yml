@@ -179,6 +179,24 @@
     mode: "0640"
   register: _ingress_guard_dropin
 
+# The one-shot issuer for a hosted name's certificate order. A template unit
+# (turbopanel-tenant-acme@<request id>.service): the daemon starts and stops one
+# instance per order and never enables it. See the unit file for why it runs as
+# the daemon's own account.
+- name: Install the certificate issuer template unit
+  ansible.builtin.template:
+    src: turbopanel-tenant-acme@.service.j2
+    dest: /etc/systemd/system/turbopanel-tenant-acme@.service
+    owner: root
+    group: root
+    mode: "0640"
+  register: _tenant_acme_unit
+
+- name: Reload systemd after the certificate issuer unit changed
+  when: _tenant_acme_unit.changed
+  ansible.builtin.systemd:
+    daemon_reload: true
+
 - name: Enable and start the ingress guard
   ansible.builtin.systemd:
     name: turbopanel-ingress-guard.service

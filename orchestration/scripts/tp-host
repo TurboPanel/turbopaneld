@@ -2602,13 +2602,28 @@ tp_verb_chmod() {
   fi
 }
 
-# The control plane's HTTP-01 issuer socket. Hosting Caddy (not in group tp)
+# The control plane's HTTP-01 issuer socket (and, one per request, a certificate
+# order's issuer socket for a hosted name). Hosting Caddy (not in group tp)
 # proxies challenges to it; whoever binds it (the daemon's preflight listener,
 # or the issuer Caddy as tpcaddy) cannot name another user in an ACL, so root
 # adds exactly this one entry. The issuer binds shortly after systemd reports
 # it started, hence the bounded wait. -P never follows a swapped-in symlink.
 tp_setfacl_acme_socket() {
-  [ "$1" = "$R_RUN/instance-acme.sock" ] || tp_die "setfacl: only the instance ACME socket"
+  case "$1" in
+    "$R_RUN/instance-acme.sock") ;;
+    # One certificate order's issuer socket: tenant-acme-<request id>.sock, the
+    # id being the control plane's request id (letters, digits, - and _, 64 at
+    # most), so no other name or sub-path ever matches.
+    "$R_RUN"/tenant-acme-?*.sock)
+      _sa_id="${1#"$R_RUN"/tenant-acme-}"
+      _sa_id="${_sa_id%.sock}"
+      case "$_sa_id" in
+        ''|*[!A-Za-z0-9_-]*) tp_die "setfacl: refusing issuer socket $1" ;;
+      esac
+      [ "${#_sa_id}" -le 64 ] || tp_die "setfacl: refusing issuer socket $1"
+      ;;
+    *) tp_die "setfacl: only the instance ACME socket or a certificate issuer socket" ;;
+  esac
   tp_pin_parent "$1" || tp_die "no such directory ${1%/*}"
   _sa_wait=0
   until [ -S "$PIN_NAME" ] && [ ! -L "$PIN_NAME" ]; do

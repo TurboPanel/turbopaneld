@@ -852,6 +852,26 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
+    'src/deploy/tenant-acme-issue.ts|["-n","systemctl","start",unit]',
+    {
+      argv: [
+        "systemctl",
+        "start",
+        "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
+      ],
+    },
+  ),
+  tpHost(
+    'src/deploy/tenant-acme-issue.ts|["-n","systemctl","stop",unit]',
+    {
+      argv: [
+        "systemctl",
+        "stop",
+        "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
+      ],
+    },
+  ),
+  tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","stop",INSTANCE_ACME_SERVICE]',
     { argv: ["systemctl", "stop", "turbopanel-instance-acme.service"] },
   ),

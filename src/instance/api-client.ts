@@ -372,7 +372,13 @@ export class DaemonApiClient {
    * again (the same certificate sent twice).
    */
   async reportIssuedCertificate(
-    input: { hostname: string; certificatePem: string; privateKeyPem: string },
+    input: {
+      hostname: string;
+      certificatePem: string;
+      privateKeyPem: string;
+      /** Set when the pair answers an `acme-issue-request`. */
+      requestId?: string;
+    },
   ): Promise<{ stored: boolean }> {
     const body = await this.#requestJson<{ ok?: boolean; stored?: unknown }>(
       "/api/daemon/v1/tls/issued",
@@ -382,6 +388,9 @@ export class DaemonApiClient {
           hostname: input.hostname,
           certificatePem: input.certificatePem,
           privateKeyPem: input.privateKeyPem,
+          ...(input.requestId === undefined
+            ? {}
+            : { requestId: input.requestId }),
         }),
       },
       { auth: true },
