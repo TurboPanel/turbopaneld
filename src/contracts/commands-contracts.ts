@@ -1827,6 +1827,13 @@ export type EnvironmentStopPayload = {
    * teardown; a plain stop never carries it.
    */
   retirePrincipals?: Array<{ username: string }>;
+  /**
+   * Remove the whole deployment dir
+   * (`<stateDir>/deployments/<projectId>/<environmentId>`), including anything a
+   * relative bind such as `./data` wrote there. Only an environment or project
+   * delete sets it; without it the daemon removes only its own compose files.
+   */
+  removeDeploymentDir?: true;
 };
 
 export type EnvironmentStopResult = {
@@ -7433,6 +7440,9 @@ export function parseEnvironmentStopPayload(
     ...(siteReleases === undefined ? {} : { siteReleases }),
     ...(releaseCleanup === undefined ? {} : { releaseCleanup }),
     ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
+    ...(value.removeDeploymentDir === true
+      ? { removeDeploymentDir: true as const }
+      : {}),
   };
 }
 

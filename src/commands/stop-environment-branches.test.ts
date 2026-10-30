@@ -229,7 +229,12 @@ test({
       await assertRejects(
         () =>
           handleEnvironmentStop(
-            { environmentId, projectId: "proj-1", projectName },
+            {
+              environmentId,
+              projectId: "proj-1",
+              projectName,
+              removeDeploymentDir: true,
+            },
             new Date().toISOString(),
             {
               runDocker: (): Promise<DockerCliResult> =>
