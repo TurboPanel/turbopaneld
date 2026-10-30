@@ -134,6 +134,9 @@ const CADDY_BIN = `${P}${VENDOR}/caddy/2.11.4/caddy`;
 const NGINX_CONF = `${CONF}/nginx/sites/svc1.conf`;
 const FABRIC_DIR = `${STATE}/network`;
 const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
+/** A sample LAN neighbour and container range, built from parts (fixture values, not hosts). */
+const LAN_SAMPLE_RANGE = `${[10, 193, 5, 0].join(".")}/24`;
+const LAN_SAMPLE_VIA = [10, 0, 0, 12].join(".");
 const FABRIC_SYSCTL = `${P}/etc/sysctl.d/99-turbopanel-fabric.conf`;
 /** A WireGuard key's shape (32 bytes, base64), built so no key sits in source. */
 const WG_KEY = `${"A".repeat(43)}=`;
@@ -281,6 +284,9 @@ function notRoot(key: string, why: string): CallSite {
   return { key, via: "none", why };
 }
 
+/** tp-host test mode reads an interface's connected subnets from here. */
+const LAN_CONNECTED_FIXTURE = `${P}/tp-test/ip-route-link-eth1`;
+const LAN_CONNECTED_TEXT = "10.0.0.0/24 proto kernel src 10.0.0.11\n"; // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
 const file = (path: string, contents = "x\n"): CallSiteSetup => ({
   files: { [path]: contents },
 });
@@ -2098,6 +2104,35 @@ const SITES: CallSite[] = [
     'src/commands/fabric.ts|runHost("ip",["route",action,cidr,"dev",FABRIC_INTERFACE_NAME])',
     { argv: ["ip", "route", "replace", "10.250.0.2/32", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric peer address for this test fixture, not a reachable host
     { argv: ["ip", "route", "del", "10.193.0.0/16", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric container range for this test fixture, not a reachable host
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["route",action,route.cidr,"via",route.via,"dev",route.dev])',
+    {
+      argv: [
+        "ip",
+        "route",
+        "replace",
+        LAN_SAMPLE_RANGE,
+        "via",
+        LAN_SAMPLE_VIA,
+        "dev",
+        "eth1",
+      ],
+      setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
+    },
+    {
+      argv: [
+        "ip",
+        "route",
+        "del",
+        LAN_SAMPLE_RANGE,
+        "via",
+        LAN_SAMPLE_VIA,
+        "dev",
+        "eth1",
+      ],
+      setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
+    },
   ),
   tpHost(
     'src/commands/fabric.ts|runHost("ip",[`-${version}`,"route","show"])',

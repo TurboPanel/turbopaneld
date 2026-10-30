@@ -28,17 +28,17 @@ const PRIVATE_BLOCKS: readonly string[] = [
   .concat(["fc00", "7"].join("::/"));
 
 type PolicyPayload = {
-  address: string;
+  address?: string;
   prefix: string;
   peers: readonly { allowedIPs: readonly string[] }[];
 };
 
-function rangesOverlap(a: string, b: string): boolean {
+export function rangesOverlap(a: string, b: string): boolean {
   return cidrLiteralContains(a, b) || cidrLiteralContains(b, a);
 }
 
 /** Why one range is unacceptable on its own, or `null`. */
-function rangeProblem(cidr: string): string | null {
+export function fabricRangeProblem(cidr: string): string | null {
   const parsed = parseCidrLiteral(cidr);
   if (!parsed) return `${cidr} is not a valid range`;
   const min = parsed.version === 4 ? MIN_PREFIX_V4 : MIN_PREFIX_V6;
@@ -51,10 +51,14 @@ function rangeProblem(cidr: string): string | null {
   return null;
 }
 
-function claimsOwnAddress(cidr: string, payload: PolicyPayload): boolean {
-  const own = [payload.address, payload.prefix].map((value) =>
-    value.includes("/") ? value : `${value}/32`
-  );
+/** The range overlaps this server's own fabric address or the fabric range. */
+export function claimsOwnAddress(
+  cidr: string,
+  payload: Pick<PolicyPayload, "address" | "prefix">,
+): boolean {
+  const own = [payload.address, payload.prefix].filter((value) =>
+    value !== undefined
+  ).map((value) => value.includes("/") ? value : `${value}/32`);
   return own.some((range) => rangesOverlap(cidr, range));
 }
 
@@ -84,7 +88,7 @@ export function fabricAllowedIpsPolicyError(
 ): string | null {
   for (const [index, peer] of payload.peers.entries()) {
     for (const cidr of peer.allowedIPs) {
-      const problem = rangeProblem(cidr);
+      const problem = fabricRangeProblem(cidr);
       if (problem) return `TurboFabric refused a peer route: ${problem}`;
       if (claimsOwnAddress(cidr, payload)) {
         return `TurboFabric refused a peer route: ${cidr} overlaps this server's own fabric range`;
