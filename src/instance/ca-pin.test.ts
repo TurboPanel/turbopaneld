@@ -159,3 +159,20 @@ test({
     assertEquals(wrote, false);
   },
 });
+
+test({
+  name:
+    "a trust file with an undecodable certificate is a mismatch, not skipped",
+  permissions: PERMS,
+  fn: async () => {
+    const broken =
+      "-----BEGIN CERTIFICATE-----\n!!not base64!!\n-----END CERTIFICATE-----\n";
+    await withCaFiles({ ca: `${CURRENT}${broken}` }, async (env) => {
+      const mismatch = await caPinMismatch({
+        ...env,
+        [CA_PIN_ENV]: await fp(CURRENT),
+      });
+      assertStringIncludes(mismatch ?? "", "cannot be read");
+    });
+  },
+});

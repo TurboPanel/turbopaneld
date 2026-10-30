@@ -115,6 +115,7 @@ const PIN_HELPERS = [
   "tp_cert_fingerprint_hex",
   "tp_split_pem_bundle",
   "tp_normalize_ca_pin",
+  "tp_host_ca_pin",
   "tp_pem_files_pin",
   "tp_pem_matches_ca_pin",
   "tp_check_fetched_trust",
@@ -574,15 +575,86 @@ test("a private issuer outside the fingerprint list is never stored", async () =
   }
 });
 
-test("the fingerprint survives the sudo re-exec and a bad one stops the install", async () => {
+test("an old command on a pinned host is checked against the CA it already trusts", async () => {
   const source = await Deno.readTextFile(runShPath);
-  assertStringIncludes(
-    source,
-    '[ -n "$CA_PIN" ] && set -- "$@" --instance-ca-fingerprint "$CA_PIN"',
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const real = await selfSignedCa(dir, "PlatformCA");
+    const rotated = await selfSignedCa(dir, "RotatedPlatformCA");
+    const rogue = await selfSignedCa(dir, "RogueCA");
+    const realFp = hexFingerprint(await fingerprint(real));
+    const rotatedFp = hexFingerprint(await fingerprint(rotated));
+    const envFile = `${dir}/daemon.env`;
+    const reconciled = `${dir}/instance-ca-pin`;
+    await Deno.writeTextFile(
+      envFile,
+      `TURBOPANEL_INSTANCE_URL=https://panel.example:8443\nTURBOPANEL_INSTANCE_CA_FINGERPRINT=${realFp}\n`,
+    );
+    await Deno.writeTextFile(reconciled, `${rotatedFp}\n`);
+    const seeded = await runPinHelpers(
+      source,
+      `tp_host_ca_pin '${envFile}' '${reconciled}'`,
+    );
+    assertEquals(seeded.stdout, `${realFp},${rotatedFp}`);
+    const none = await runPinHelpers(
+      source,
+      `tp_host_ca_pin '${dir}/missing.env' '${dir}/missing-pin'`,
+    );
+    assertEquals(none.status, 0);
+    assertEquals(none.stdout, "");
+
+    const caPath = `${dir}/instance-ca.pem`;
+    const refused = await fetchCa(source, {
+      INSECURE_TLS: "true",
+      CA_PIN: seeded.stdout,
+      CA_PIN_SOURCE: "host",
+      TP_TEST_INSECURE: "200",
+      TP_TEST_SERVED_CA: rogue,
+    }, caPath);
+    assertEquals(refused.status === 0, false);
+    assertStringIncludes(refused.stderr, "the CA this server already trusts");
+    assertEquals(await exists(caPath), false);
+
+    const accepted = await fetchCa(source, {
+      INSECURE_TLS: "true",
+      CA_PIN: seeded.stdout,
+      CA_PIN_SOURCE: "host",
+      TP_TEST_INSECURE: "200",
+      TP_TEST_SERVED_CA: rotated,
+    }, caPath);
+    assertEquals(accepted.status, 0, accepted.stderr);
+    assertEquals(await fingerprint(caPath), await fingerprint(rotated));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a host's own list does not block a CA that a verified connection serves", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const old = await selfSignedCa(dir, "OldPlatformCA");
+    const next = await selfSignedCa(dir, "NextPlatformCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    const out = await fetchCa(source, {
+      CA_PIN: hexFingerprint(await fingerprint(old)),
+      CA_PIN_SOURCE: "host",
+      TP_TEST_SYSTEM: "200",
+      TP_TEST_SERVED_CA: next,
+    }, caPath);
+    assertEquals(out.status, 0, out.stderr);
+    assertEquals(await fingerprint(caPath), await fingerprint(next));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("an operator-supplied --instance-ca is checked against a fingerprint the command gave", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const branch = source.slice(
+    source.indexOf('elif [ -n "$INSTANCE_CA" ]; then'),
+    source.indexOf('install -m 0640 "$INSTANCE_CA" "$CA_PATH"'),
   );
-  assertStringIncludes(
-    source,
-    '[ -n "$CA_PIN" ] || CA_PIN="${TURBOPANEL_INSTANCE_CA_FINGERPRINT:-}"',
-  );
-  assertStringIncludes(source, "if ! tp_fetch_instance_ca; then\n    exit 1");
+  assertStringIncludes(branch, 'tp_pem_matches_ca_pin "$INSTANCE_CA"');
+  assertStringIncludes(branch, "exit 1");
 });

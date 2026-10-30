@@ -83,7 +83,8 @@ async function readOptional(
 /**
  * Why the trust files do not match the pinned list, or null when they do,
  * when no list is configured, or when a file cannot be read (the TLS
- * handshake reports unreadable trust material on its own).
+ * handshake reports unreadable trust material on its own). A file that
+ * reads but holds an undecodable certificate is a mismatch.
  */
 export async function caPinMismatch(
   env: Record<string, string | undefined>,
@@ -101,11 +102,20 @@ export async function caPinMismatch(
   }
   const expected = new Set([...installed, ...reconciled]);
   for (const path of resolveInstanceTrustPaths(env)) {
+    let pem: string;
+    try {
+      pem = await readTextFile(path);
+    } catch {
+      // The TLS handshake reports unreadable trust material on its own.
+      continue;
+    }
     let fingerprints: string[];
     try {
-      fingerprints = await pemFingerprints(await readTextFile(path));
+      fingerprints = await pemFingerprints(pem);
     } catch {
-      continue;
+      // A block that cannot be decoded is not one the list names. Failing
+      // closed: skipping it would let the rest of the file through unchecked.
+      return `${path} holds a certificate that cannot be read, so it cannot be matched against the expected fingerprints`;
     }
     const stray = fingerprints.find((fp) => !expected.has(fp));
     if (stray) {
@@ -131,6 +141,7 @@ export type CaPinWriteDeps = {
 export async function repinAfterReconcile(
   bundlePem: string,
   deps: CaPinWriteDeps = {},
+  keepPem?: string,
 ): Promise<string[] | null> {
   const env = deps.env ?? Deno.env.toObject();
   if (parseCaPin(env[CA_PIN_ENV]).length === 0) return null;
@@ -142,6 +153,7 @@ export async function repinAfterReconcile(
   const next = [
     ...new Set([
       ...await pemFingerprints(bundlePem),
+      ...(keepPem ? await pemFingerprints(keepPem) : []),
       ...(uploaded ? await pemFingerprints(uploaded) : []),
     ]),
   ];

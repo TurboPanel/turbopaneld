@@ -65,7 +65,7 @@ test({
       const overlap = `${next.trim()}\n${current.trim()}\n`;
 
       const written: string[] = [];
-      const repinned: string[] = [];
+      const repinned: { bundle: string; keep?: string }[] = [];
       let invalidated = false;
       const result = await handleTlsTrust(
         { bundlePem: overlap, fingerprint: nextFp },
@@ -76,8 +76,8 @@ test({
             written.push(contents);
             return Promise.resolve();
           },
-          repin: (bundlePem) => {
-            repinned.push(bundlePem);
+          repin: (bundlePem, keepPem) => {
+            repinned.push({ bundle: bundlePem, keep: keepPem });
             return Promise.resolve();
           },
           invalidate: () => {
@@ -88,7 +88,10 @@ test({
       assertEquals(result.applied, true);
       assertEquals(result.fingerprint, nextFp);
       assertEquals(written.length, 1);
-      assertEquals(repinned, [overlap]);
+      assertEquals(repinned, [
+        { bundle: overlap, keep: current },
+        { bundle: overlap, keep: undefined },
+      ]);
       assertEquals(splitPemBundle(written[0] ?? []).length, 2);
       assertEquals(invalidated, true);
 
@@ -265,6 +268,48 @@ test({
       const written = await Deno.readTextFile(caPath);
       assertEquals(written.endsWith("\n"), true);
       assertEquals(splitPemBundle(written).length, 1);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "handleTlsTrust leaves the CA file alone when the expected list cannot be written",
+  permissions: TLS_TRUST_PERMS,
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-tls-trust-" });
+    try {
+      const current = await mintCert(dir, "current");
+      const next = await mintCert(dir, "next");
+      const caPath = join(dir, "instance-ca.pem");
+      await Deno.writeTextFile(caPath, current);
+      const nextFp = await fingerprintPemCertificate(next);
+      let written = false;
+      await assertRejects(
+        () =>
+          handleTlsTrust(
+            {
+              bundlePem: `${next.trim()}\n${current.trim()}\n`,
+              fingerprint: nextFp,
+            },
+            new Date().toISOString(),
+            {
+              caPath,
+              writeAtomic: () => {
+                written = true;
+                return Promise.resolve();
+              },
+              repin: () => Promise.reject(new Error("state folder read-only")),
+              invalidate: () => {},
+            },
+          ),
+        Error,
+        "state folder read-only",
+      );
+      assertEquals(written, false);
+      assertEquals(await Deno.readTextFile(caPath), current);
     } finally {
       await Deno.remove(dir, { recursive: true });
     }

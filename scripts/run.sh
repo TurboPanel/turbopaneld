@@ -198,19 +198,46 @@ tp_pem_matches_ca_pin() {
   return 0
 }
 
+# The expected list a host already carries: the installer's line in
+# daemon.env plus what an authenticated CA reconcile recorded. Empty when the
+# host has none (or it cannot be parsed).
+tp_host_ca_pin() {
+  _hp_env="$1"
+  _hp_reconciled="$2"
+  _hp_seed=""
+  if [ -f "$_hp_env" ]; then
+    _hp_seed="$(sed -n 's/^TURBOPANEL_INSTANCE_CA_FINGERPRINT=//p' "$_hp_env" | tail -n 1)"
+  fi
+  if [ -f "$_hp_reconciled" ]; then
+    _hp_seed="${_hp_seed:+${_hp_seed},}$(head -n 1 "$_hp_reconciled")"
+  fi
+  [ -n "$_hp_seed" ] || return 0
+  tp_normalize_ca_pin "$_hp_seed" || true
+}
+
 # Gate for every CA or issuer document from the control plane before it is
-# installed. With CA_PIN (from the install command) it must match or nothing
-# is installed. Without one, today's behaviour stays, and a document that
-# came over the unverified bootstrap leg is called out once.
+# installed. With CA_PIN from the install command it must match or nothing is
+# installed. With CA_PIN taken from this host's own list (CA_PIN_SOURCE=host:
+# a re-run without a fingerprint, such as an old command), downloads over the
+# unverified leg must match it, so an old command cannot replace a pinned CA;
+# a verified leg is already authenticated by that trust. Without any list,
+# today's behaviour stays, and an unverified download is called out once.
 tp_check_fetched_trust() {
   _ct_src="$1"
   _ct_what="$2"
   _ct_leg="$3"
-  if [ -n "${CA_PIN:-}" ]; then
+  if [ -n "${CA_PIN:-}" ] &&
+    { [ "${CA_PIN_SOURCE:-command}" != host ] || [ "$_ct_leg" = insecure ]; }
+  then
     if tp_pem_matches_ca_pin "$_ct_src"; then
       return 0
     fi
-    tp_print_error "The ${_ct_what} downloaded from ${HOST_URL} does not match the fingerprint in the install command (got $(tp_pem_files_pin "$_ct_src"); expected ${CA_PIN}). Nothing was installed. Someone may be intercepting this connection, or the panel's certificates changed after the command was copied. Copy a fresh command from Add Server and try again."
+    if [ "${CA_PIN_SOURCE:-command}" = host ]; then
+      _ct_expected="the CA this server already trusts"
+    else
+      _ct_expected="the fingerprint in the install command"
+    fi
+    tp_print_error "The ${_ct_what} downloaded from ${HOST_URL} does not match ${_ct_expected} (got $(tp_pem_files_pin "$_ct_src"); expected ${CA_PIN}). Nothing was installed. Someone may be intercepting this connection, or the panel's certificates changed. Copy a fresh command from Add Server and try again."
     return 1
   fi
   if [ "$_ct_leg" = insecure ] && [ "${TP_TOFU_WARNED:-false}" != true ]; then
@@ -2525,6 +2552,7 @@ done
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
 [ -n "$CA_PIN" ] || CA_PIN="${TURBOPANEL_INSTANCE_CA_FINGERPRINT:-}"
+CA_PIN_SOURCE="command"
 if [ -n "$CA_PIN" ] && ! CA_PIN="$(tp_normalize_ca_pin "$CA_PIN")"; then
   tp_print_error "TURBOPANEL_INSTANCE_CA_FINGERPRINT must be one or more SHA-256 fingerprints separated by commas. Copy the install command again from Add Server."
   exit 1
@@ -2764,6 +2792,13 @@ RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
+# A host that already carries an expected CA list keeps it when this run
+# brings none, so re-running an old command cannot downgrade it to trust on
+# first use.
+if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
+  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin")"
+  [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
+fi
 # Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
 # tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
 LICENSE_STAGING_DIR="/var/lib/turbopanel-license-staging"
@@ -2918,6 +2953,13 @@ if [ "$INSTANCE_INSTALL" = true ] || [ "$_colocated_daemon_refresh" = true ]; th
   # HOST_URL is empty here, so a fetch could only ever fail.
   :
 elif [ -n "$INSTANCE_CA" ]; then
+  # An operator-supplied CA must still match a fingerprint the command gave.
+  if [ -n "$CA_PIN" ] && [ "$CA_PIN_SOURCE" = command ] &&
+    ! tp_pem_matches_ca_pin "$INSTANCE_CA"
+  then
+    tp_print_error "--instance-ca ${INSTANCE_CA} does not match the CA fingerprint given to the installer (got $(tp_pem_files_pin "$INSTANCE_CA"); expected ${CA_PIN}). Nothing was installed."
+    exit 1
+  fi
   # Compare resolved paths, not raw strings: a symlink or path-variant (e.g. a
   # trailing slash or relative form) pointing at the canonical CA otherwise
   # slips past a string-only check and makes `install` fail with

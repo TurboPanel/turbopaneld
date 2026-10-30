@@ -786,17 +786,25 @@ certificate's DER, lowercase hex, comma-separated; `run.sh` also takes
 Platform CA or private issuer `run.sh` is about to install — over `-k`, the
 pinned leg, or the system-roots refetch — must have every certificate in that
 list, or the install stops and nothing is written (`tp_check_fetched_trust`).
-Without a list the old behaviour stays and a `-k` download prints one
+A host that already carries a list (`daemon.env` plus
+`<state>/tls/instance-ca-pin`) keeps it when a run brings none: downloads over
+the `-k` leg must match it, so re-running an old command cannot downgrade a
+pinned host; verified legs are authenticated by that trust already. An
+operator's `--instance-ca` must match a fingerprint the command gave. With no
+list anywhere the old behaviour stays and a `-k` download prints one
 "trusted on first use" line. `run.sh` then writes the fingerprints of every
 certificate in `instance-ca.pem` and `instance-uploaded-trust.pem` into
 `daemon.env` (0600, daemon account). At runtime (`ca-pin.ts`) a trust file
-holding any certificate outside that list is a hard failure: the connect
+holding any certificate outside that list, or one that cannot be decoded,
+is a hard failure: the connect
 attempt throws `CaPinMismatchError` before any credential is sent and the
 client parks as `tls-trust`. No list means no check. The only other writer of
 the list is `server.tls.trust.reconcile` (`src/commands/tls-trust.ts`), which
 arrives over a session already verified against the pinned CA and
 authenticated with this server's key; it records the new bundle plus the
-stored issuer in `<state>/tls/instance-ca-pin`, which the check accepts
+stored issuer in `<state>/tls/instance-ca-pin` (first together with the old
+bundle, then the CA file, then narrowed, so no failure leaves an unlisted CA
+on disk), which the check accepts
 alongside `daemon.env` (the config root is root-owned and `daemon.env` is the
 installer's, so the daemon does not rewrite it). A host with no list never
 gets one from a reconcile. Upgrades re-run `run.sh`, which
