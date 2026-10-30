@@ -889,6 +889,11 @@ test(
       /trusted_proxies static 127\.0\.0\.0\/8 ::1/,
       "loopback peers are trusted so {client_ip} survives the hosting hop",
     );
+    assertMatch(
+      caddyfile,
+      /trusted_proxies static 127\.0\.0\.0\/8 ::1\n\s+trusted_proxies_strict\n/,
+      "X-Forwarded-For is read from the right, so a client cannot forge the leftmost entry",
+    );
     assertEquals(
       (caddyfile.match(/header_up X-Real-IP \{client_ip\}/g) ?? []).length,
       3,
