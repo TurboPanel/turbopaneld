@@ -77,6 +77,8 @@ Orchestrator self-heal: `restart: always` does not bring back a container that w
 
 Backup restore skips per-login schemas on an owner-role database; a restored table is handed to the owner role in the same transaction.
 
+**Backup login (`credentials[].kind: "backup"`, feature `managed-backup-login-v1`).** The control plane sends the cluster's backup login as `role: "user"` with `kind: "backup"`, every database of the cluster and no privileges; an unknown `kind` is ignored (an ordinary login). Its rights are fixed whatever `privileges` or `grantMode` say: PostgreSQL `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS` + `GRANT pg_read_all_data` + `CONNECT` on exactly the listed databases (it is kept out of the per-level reconcile, so no table grants, owner-role rights or schema of its own); MySQL `SELECT, SHOW VIEW, TRIGGER, EVENT` per database (every other database privilege revoked) + global `SHOW_ROUTINE`; MariaDB `SELECT, SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, SHOW CREATE ROUTINE` per database. No `RELOAD` / `REPLICATION CLIENT` (binlog position) and no PostgreSQL large-object grants yet. On ProxySQL it is a tool login (writer hostgroup, no split rules) and every tool login's user row says `transaction_persistent=1`, so a dump in one transaction stays on one backend. `backup-login-sql.test.ts` pins the SQL; `backup-login.docker.test.ts` (MySQL 8.4, MariaDB 11.8) and `postgres-grants.real-pg.test.ts` (Postgres 16 and 18) dump through the real engines as that login.
+
 ## State tree
 
 ```
