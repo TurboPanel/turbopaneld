@@ -453,6 +453,12 @@ class DeployStepReporterImpl implements DeployStepReporter {
       changed = true;
     }
     if (!changed) return;
+    this.#settleResume(state);
+    this.#sendNow();
+  }
+
+  /** After nested steps finish: hand `current` back to the enclosing step, or undo it on a failure. */
+  #settleResume(state: "done" | "failed"): void {
     const resume = this.#resume === null ? undefined : this.#find(this.#resume);
     if (resume?.state === "running") {
       if (state === "failed") {
@@ -464,7 +470,6 @@ class DeployStepReporterImpl implements DeployStepReporter {
       }
     }
     if (this.#current === null) this.#resume = null;
-    this.#sendNow();
   }
 
   #cancelFlush(): void {
