@@ -153,7 +153,7 @@ function chunkedBody(raw: string): string {
   for (;;) {
     const eol = rest.indexOf("\r\n");
     if (eol < 0) return out;
-    const size = parseInt(rest.slice(0, eol), 16);
+    const size = Number.parseInt(rest.slice(0, eol), 16);
     if (!Number.isFinite(size) || size === 0) return out;
     out += rest.slice(eol + 2, eol + 2 + size);
     rest = rest.slice(eol + 2 + size + 2);
@@ -572,8 +572,7 @@ async function runOrder(
 
 function plainReason(err: unknown): string {
   if (err instanceof IssueStop) return err.message;
-  const raw = err instanceof Error ? err.message : String(err);
-  return plainInstanceAcmeFailure(raw);
+  return plainInstanceAcmeFailure(err instanceof Error ? err.message : "");
 }
 
 async function cleanUp(
