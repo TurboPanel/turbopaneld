@@ -3,7 +3,9 @@
  * is available: the generated grants let `mysqldump` / `mariadb-dump` copy a
  * database with its views, triggers, events and routines, including a
  * database made later with plain SQL, and nothing more (no writes, no
- * creating or dropping tables or databases). Containers are removed afterwards.
+ * creating or dropping tables or databases). MySQL runs with GTIDs on, as a
+ * managed server does, and dumps with the standard flags: that is when
+ * `mysqldump` needs `FLUSH_TABLES`. Containers are removed afterwards.
  */
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
@@ -31,7 +33,13 @@ const ENGINES = [
     dump: "mysqldump",
     accountSql: mysqlAccountSql,
     grantSql: mysqlBackupSql,
-    dumpFlags: ["--set-gtid-purged=OFF"],
+    serverArgs: ["--gtid-mode=ON", "--enforce-gtid-consistency=ON"],
+    // The server orders static rights its own way and lists dynamic ones on
+    // a line of their own.
+    grants: [
+      "GRANT SELECT, SHOW VIEW, EVENT, TRIGGER ON *.* TO `nightly`@`localhost`",
+      "GRANT FLUSH_TABLES,SHOW_ROUTINE ON *.* TO `nightly`@`localhost`",
+    ],
   },
   {
     image: "mariadb:11.8",
@@ -40,7 +48,10 @@ const ENGINES = [
     dump: "mariadb-dump",
     accountSql: mariadbAccountSql,
     grantSql: mariadbBackupSql,
-    dumpFlags: [] as string[],
+    serverArgs: [] as string[],
+    grants: [
+      "GRANT SELECT, LOCK TABLES, SHOW VIEW, EVENT, TRIGGER, SHOW CREATE ROUTINE ON *.* TO `nightly`@`localhost`",
+    ],
   },
 ];
 
@@ -67,6 +78,7 @@ for (const engine of ENGINES) {
         "-e",
         `${engine.rootEnv}=${ROOT_PASSWORD}`,
         engine.image,
+        ...engine.serverArgs,
       ]);
       if (!run.success) throw new Error(`docker run failed: ${run.stderr}`);
       // Over the local socket, so the `localhost` account is the one used.
@@ -150,7 +162,6 @@ for (const engine of ENGINES) {
             "--routines",
             "--triggers",
             "--events",
-            ...engine.dumpFlags,
             database,
           ]);
         const dump = await dumpAs("shop");
@@ -176,6 +187,7 @@ for (const engine of ENGINES) {
             "DROP TABLE later_db.notes",
             "CREATE DATABASE made_by_backup",
             "CREATE USER other_login",
+            "FLUSH PRIVILEGES",
           ]
         ) {
           const refused = await as("nightly", BACKUP_PASSWORD, statement);
@@ -184,6 +196,33 @@ for (const engine of ENGINES) {
             false,
             `the backup login must not run: ${statement}`,
           );
+          assertStringIncludes(refused.stderr.toLowerCase(), "denied");
+        }
+
+        // The documented scope includes the `mysql` schema: the account rows
+        // a full restore needs.
+        const accounts = await as(
+          "nightly",
+          BACKUP_PASSWORD,
+          "SELECT host FROM mysql.user WHERE user = 'nightly' AND host = 'localhost'",
+        );
+        assertEquals(accounts.success, true, accounts.stderr);
+        assertEquals(accounts.stdout.trim(), "localhost");
+
+        // Exactly the intended rights, nothing an earlier step left behind.
+        // MariaDB appends the password hash to its grant line.
+        const grants = (await sql("SHOW GRANTS FOR nightly@localhost"))
+          .trim()
+          .split("\n")
+          .map((line) => line.replace(/ IDENTIFIED BY PASSWORD '[^']*'$/, ""));
+        assertEquals(grants, engine.grants);
+
+        if (engine.image.startsWith("mysql:")) {
+          // Without FLUSH_TABLES the dump stops at its first `FLUSH TABLES`.
+          await sql("REVOKE FLUSH_TABLES ON *.* FROM nightly@localhost");
+          const blocked = await dumpAs("shop");
+          assertEquals(blocked.success, false, "dump without FLUSH_TABLES");
+          assertStringIncludes(blocked.stderr, "(1227)");
         }
       } finally {
         await docker(["rm", "-f", name]);
