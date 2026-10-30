@@ -11,6 +11,7 @@ import {
   DEPLOY_CANCEL_FEATURE,
   DEPLOY_HOSTINGS_ONLY_FEATURE,
   FABRIC_LAN_ROUTES_FEATURE,
+  FABRIC_PEER_REPORT_FEATURE,
   FABRIC_RETAIN_KEYS_FEATURE,
   HOST_CAPACITY_FEATURE,
   instanceUnsupportedReason,
@@ -397,9 +398,15 @@ test("managed-backup-login-v1 is advertised", () => {
   );
 });
 
-test("fabric-retain-keys-v1 is advertised just before fabric-lan-routes-v1", () => {
+test("fabric-retain-keys-v1 is advertised and raised no floor", () => {
   assertEquals(FABRIC_RETAIN_KEYS_FEATURE, "fabric-retain-keys-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-2), FABRIC_RETAIN_KEYS_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(FABRIC_RETAIN_KEYS_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("fabric-peer-report-v1 is advertised just before fabric-lan-routes-v1", () => {
+  assertEquals(FABRIC_PEER_REPORT_FEATURE, "fabric-peer-report-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-2), FABRIC_PEER_REPORT_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

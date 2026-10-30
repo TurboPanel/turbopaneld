@@ -95,6 +95,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-status-v1",
   "managed-backup-login-v1",
   "fabric-retain-keys-v1",
+  "fabric-peer-report-v1",
   "fabric-lan-routes-v1",
 ] as const;
 
@@ -155,6 +156,16 @@ export const MANAGED_BACKUP_LOGIN_FEATURE: DaemonWireFeature =
  */
 export const FABRIC_RETAIN_KEYS_FEATURE: DaemonWireFeature =
   "fabric-retain-keys-v1";
+
+/**
+ * This daemon pushes `fabric-peers-report` (every `tp0` peer's handshake
+ * reading from the 60 s refresh) when a peer's health class changes, and at
+ * most every 5 minutes otherwise, so the control plane's tunnel health never
+ * goes stale between reconciles. It sends one only to a control plane that
+ * lists this feature.
+ */
+export const FABRIC_PEER_REPORT_FEATURE: DaemonWireFeature =
+  "fabric-peer-report-v1";
 
 /**
  * This daemon understands `server.fabric.reconcile` `tunnel` and `lanRoutes`:
