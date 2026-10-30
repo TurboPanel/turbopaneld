@@ -145,6 +145,8 @@ export interface HealthStepReport {
   failed(title: string, note: string): void;
   /** True once a result was reported since the step last started. */
   ended(): boolean;
+  /** True while the health step itself is the one running. */
+  active(): boolean;
 }
 
 /**

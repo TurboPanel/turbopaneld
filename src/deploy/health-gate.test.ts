@@ -72,6 +72,7 @@ test("passes when every service with a healthcheck is healthy", async () => {
     services: ["db", "web"],
     elapsedMs: 1_000,
     unchecked: [],
+    reported: ["db", "web"],
   });
 });
 
@@ -108,6 +109,7 @@ test("a pass without a health check names the service and how long it took", asy
     services: ["web", "worker"],
     elapsedMs: 3_000,
     unchecked: ["worker"],
+    reported: ["web"],
   });
 });
 

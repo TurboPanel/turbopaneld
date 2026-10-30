@@ -371,6 +371,7 @@ function healthRecorder() {
       failed: (title: string, note: string) =>
         events.push(`failed: ${title} | ${note}`),
       ended: () => events.some((e) => !e.startsWith("waiting")),
+      active: () => true,
     },
   };
 }

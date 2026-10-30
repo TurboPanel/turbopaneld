@@ -45,6 +45,8 @@ export type HealthGateResult =
      * `healthy` (or finished as a one-shot job).
      */
     unchecked: string[];
+    /** Services whose container reported `healthy`. */
+    reported: string[];
   }
   | {
     ok: false;
@@ -185,7 +187,22 @@ type Observation = {
   services: string[];
   /** Services with a running container that reports no health check. */
   unchecked: string[];
+  /** Services with a running container that reports `healthy`. */
+  reported: string[];
 };
+
+/** Services with a running container whose `Health` is exactly `health`. */
+function namesWhere(
+  containers: readonly ContainerView[],
+  health: string,
+): string[] {
+  return [
+    ...new Set(
+      containers.filter((c) => c.state === "running" && c.health === health)
+        .map((c) => c.service),
+    ),
+  ].toSorted((a, b) => a.localeCompare(b));
+}
 
 function observe(
   containers: readonly ContainerView[],
@@ -217,12 +234,8 @@ function observe(
   return {
     verdicts,
     services: [...new Set(containers.map((c) => c.service))].toSorted(byName),
-    unchecked: [
-      ...new Set(
-        containers.filter((c) => c.state === "running" && c.health === "")
-          .map((c) => c.service),
-      ),
-    ].toSorted(byName),
+    unchecked: namesWhere(containers, ""),
+    reported: namesWhere(containers, "healthy"),
   };
 }
 
@@ -363,6 +376,7 @@ function evaluatePoll(
         services: obs.services,
         elapsedMs: 0,
         unchecked: obs.unchecked,
+        reported: obs.reported,
       },
     };
   }

@@ -17,6 +17,7 @@ const OK: HealthGateResult = {
   services: ["web"],
   elapsedMs: 0,
   unchecked: [],
+  reported: ["web"],
 };
 
 type Script = {

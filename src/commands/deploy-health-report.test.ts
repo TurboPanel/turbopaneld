@@ -21,6 +21,7 @@ function recorder() {
     done: (title, note) => steps.push(`done ${title} | ${note}`),
     failed: (title, note) => steps.push(`failed ${title} | ${note}`),
     ended: () => steps.length > 0,
+    active: () => true,
   };
   const sink = {
     ...createNoopCommandOutputSink(),
@@ -37,6 +38,7 @@ test("a pass where Docker said healthy ends the step as healthy with the time it
     services: ["db", "web"],
     elapsedMs: 12_400,
     unchecked: [],
+    reported: ["db", "web"],
   });
   assertEquals(steps, ["done Service Is Healthy | Healthy after 12 s"]);
   assertEquals(lines, ["db, web: Healthy after 12 s"]);
@@ -49,9 +51,24 @@ test("a pass without a health check says so and never claims healthy", () => {
     services: ["worker"],
     elapsedMs: 30_000,
     unchecked: ["worker"],
+    reported: [],
   });
   assertEquals(steps, [
     "done Service Is Running | worker stayed running for 30 s; no health check is configured, so that is all that was checked",
+  ]);
+});
+
+test("a stack of finished jobs is not called healthy", () => {
+  const { sink, steps } = recorder();
+  reportHealthGate(sink, {
+    ok: true,
+    services: ["migrate"],
+    elapsedMs: 1_000,
+    unchecked: [],
+    reported: [],
+  });
+  assertEquals(steps, [
+    "done Service Health Not Checked | Every service is a job that finished with exit code 0; none reports a health check",
   ]);
 });
 

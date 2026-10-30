@@ -1945,25 +1945,37 @@ export function reportHealthGate(
   logSink: CommandOutputSink,
   result: HealthGateResult,
 ): void {
+  // A rollback runs the gate again for the previous version, after the step
+  // already ended: its lines say so instead of passing for the new version.
+  const prior = logSink.health?.active() === false ? "Previous version: " : "";
+  const line = (stream: "stdout" | "stderr", text: string) =>
+    logSink.onLine(stream, `${prior}${text}`);
   if (!result.ok) {
     const note = result.reason === "timeout"
       ? `${result.detail.charAt(0).toUpperCase()}${result.detail.slice(1)}`
       : `Stopped waiting: ${result.detail}`;
-    logSink.onLine("stderr", note);
+    line("stderr", note);
     logSink.health?.failed(HEALTH_RESULT_TITLES.unhealthy, note);
     return;
   }
   const after = seconds(result.elapsedMs);
+  if (result.unchecked.length === 0 && result.reported.length === 0) {
+    const note =
+      "Every service is a job that finished with exit code 0; none reports a health check";
+    line("stdout", note);
+    logSink.health?.done(HEALTH_RESULT_TITLES.notChecked, note);
+    return;
+  }
   if (result.unchecked.length === 0) {
     const note = `Healthy after ${after}`;
-    logSink.onLine("stdout", `${result.services.join(", ")}: ${note}`);
+    line("stdout", `${result.reported.join(", ")}: ${note}`);
     logSink.health?.done(HEALTH_RESULT_TITLES.healthy, note);
     return;
   }
   const note = `${result.unchecked.join(", ")} stayed running for ${after}; ` +
     `no health check is configured, so that is all that was checked`;
-  logSink.onLine("stdout", note);
-  const mixed = result.unchecked.length < result.services.length;
+  line("stdout", note);
+  const mixed = result.reported.length > 0;
   logSink.health?.done(
     HEALTH_RESULT_TITLES.running,
     mixed ? `Other services healthy. ${note}` : note,
@@ -2515,6 +2527,10 @@ function progressFollowingSink(
 ): { logSink: CommandOutputSink; currentPhase: () => string } {
   let phase: string = COMMAND_LOG_PHASES.PREPARE;
   let healthEnded = false;
+  const healthRunning = () =>
+    progress.snapshot().steps.some((s) =>
+      s.id === HEALTH_STEP_ID && s.state === "running"
+    );
   const logSink: CommandOutputSink = {
     onLine: (stream, message) => inner.onLine(stream, message),
     setPhase: (next) => {
@@ -2527,7 +2543,11 @@ function progressFollowingSink(
     redactSummary: (text) => inner.redactSummary(text),
     finalize: () => inner.finalize(),
     health: {
-      waiting: (text) => progress.detail(HEALTH_STEP_ID, text),
+      waiting: (text) => {
+        // A rollback's gate runs after the step already failed: its ticks
+        // must not land on whatever step is running then.
+        if (healthRunning()) progress.detail(HEALTH_STEP_ID, text);
+      },
       done: (title, note) => {
         healthEnded = true;
         progress.done(HEALTH_STEP_ID, { label: title, note });
@@ -2537,6 +2557,7 @@ function progressFollowingSink(
         progress.fail(HEALTH_STEP_ID, { label: title, note });
       },
       ended: () => healthEnded,
+      active: healthRunning,
     },
   };
   return { logSink, currentPhase: () => phase };
