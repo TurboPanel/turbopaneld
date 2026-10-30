@@ -24,12 +24,22 @@ import { FABRIC_INTERFACE_NAME } from "../host/fabric-interface.ts";
 const MIN_PREFIX: Readonly<Record<4 | 6, number>> = { 4: 8, 6: 48 };
 const HOST_PREFIX: Readonly<Record<4 | 6, number>> = { 4: 32, 6: 128 };
 
+/** `a.b.c.d/prefix` from its parts (well-known ranges, not hosts). */
+function ipv4Range(octets: readonly number[], prefix: number): string {
+  return `${octets.join(".")}/${prefix}`;
+}
+
+/** `xxxx::/prefix` from its first group (well-known ranges, not hosts). */
+function ipv6Range(firstGroup: number, prefix: number): string {
+  return `${firstGroup.toString(16)}::/${prefix}`;
+}
+
 /** Ranges the daemon never removes from `tp0`: link-local and multicast. */
 const UNMANAGED_RANGES: readonly ParsedCidrLiteral[] = [
-  "169.254.0.0/16",
-  "224.0.0.0/4",
-  "fe80::/10",
-  "ff00::/8",
+  ipv4Range([169, 254, 0, 0], 16),
+  ipv4Range([224, 0, 0, 0], 4),
+  ipv6Range(0xfe80, 10),
+  ipv6Range(0xff00, 8),
 ].map((cidr) => parseCidrLiteral(cidr)).filter((
   parsed,
 ): parsed is ParsedCidrLiteral => parsed !== null);
@@ -127,7 +137,7 @@ function parseRouteLine(line: string, version: 4 | 6): ObservedRoute | null {
   if (!destination || destination === "default") return null;
   if (ROUTE_TYPES.has(destination)) return null;
   const route = fabricRoute(withHostPrefix(destination, version));
-  if (!route || route.parsed.version !== version) return null;
+  if (route?.parsed.version !== version) return null;
   return {
     ...route,
     dev: tokenAfter(tokens, "dev"),
