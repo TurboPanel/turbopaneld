@@ -137,21 +137,6 @@ const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
 const FABRIC_SYSCTL = `${P}/etc/sysctl.d/99-turbopanel-fabric.conf`;
 /** A WireGuard key's shape (32 bytes, base64), built so no key sits in source. */
 const WG_KEY = `${"A".repeat(43)}=`;
-// A mesh config as `renderWgConf` writes it (keys built at run time).
-const WG_CONF_CONTENT = [
-  "[Interface]",
-  `PrivateKey = ${WG_KEY}`,
-  "Address = 10.77.0.1/24",
-  "ListenPort = 51820",
-  "",
-  "[Peer]",
-  `PublicKey = ${WG_KEY}`,
-  "AllowedIPs = 10.77.0.2/32, 10.78.0.0/24",
-  "Endpoint = 203.0.113.7:51820",
-  `PresharedKey = ${WG_KEY}`,
-  "PersistentKeepalive = 25",
-  "",
-].join("\n");
 const MGD_CHAIN = "TP-MGD-0a1b2c3d";
 const MGD_MATCH = [
   "-p",
