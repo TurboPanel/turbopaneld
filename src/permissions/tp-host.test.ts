@@ -1589,6 +1589,55 @@ test("ip route accepts only fabric routes on tp0 and route reads", async () => {
   });
 });
 
+test("ip route on tp0 takes only private ranges", async () => {
+  await withHost(async (host) => {
+    const route = (
+      cidr: string,
+    ) => ["ip", "route", "replace", cidr, "dev", "tp0"];
+    for (
+      const cidr of [
+        "10.0.0.0/8",
+        "10.255.1.0/24",
+        "172.16.0.0/12",
+        "172.31.255.0/24",
+        "192.168.0.0/16",
+        "192.168.4.0/24",
+        "100.64.0.0/10",
+        "100.127.0.0/16",
+        "fc00:0:0:0:0:0:0:0/48",
+        "fd12:3456:789a::/48",
+        "FD00::1/128",
+      ]
+    ) {
+      const answer = await host.run(route(cidr));
+      assertEquals(answer.code, 0, `${cidr}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+    for (
+      const cidr of [
+        "8.8.8.0/24",
+        "1.1.1.1/32",
+        "11.0.0.0/8",
+        "172.15.0.0/16",
+        "172.32.0.0/16",
+        "172.16.0.0/11",
+        "192.167.0.0/16",
+        "192.168.0.0/15",
+        "100.63.0.0/16",
+        "100.128.0.0/16",
+        "100.64.0.0/9",
+        "2600::/48",
+        "2a00:1450::/48",
+        "fe80::/64",
+        "fc::/48",
+        "::/48",
+      ]
+    ) {
+      await refused(host, route(cidr));
+    }
+  });
+});
+
 test("accounts: only principals are created or changed, and only into registry groups", async () => {
   await withHost(async (host) => {
     const home = host.path("srv/users/carol/home");

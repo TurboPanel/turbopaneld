@@ -3159,8 +3159,22 @@ tp_ipv4_octet_ok() {
   esac
 }
 
-# A fabric route: IPv4 a.b.c.d/8-32 or IPv6 hex/colon /48-128 (the daemon's
-# AllowedIPs policy refuses anything broader), always with a prefix.
+# A fabric IPv4 route stays inside a private block (first octet $1, second
+# $2, prefix $3): RFC 1918 10/8, 172.16/12, 192.168/16 and RFC 6598
+# 100.64/10, the same blocks as the daemon's AllowedIPs policy.
+tp_fabric_route_v4_private() {
+  case "$1" in
+    10) return 0 ;;
+    172) [ "$2" -ge 16 ] && [ "$2" -le 31 ] && [ "$3" -ge 12 ] ;;
+    192) [ "$2" -eq 168 ] && [ "$3" -ge 16 ] ;;
+    100) [ "$2" -ge 64 ] && [ "$2" -le 127 ] && [ "$3" -ge 10 ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# A fabric route: IPv4 a.b.c.d/8-32 inside a private block or IPv6 ULA
+# (fc00::/7, the first group written in full) /48-128 (the daemon's
+# AllowedIPs policy refuses anything broader or public), always with a prefix.
 tp_fabric_route_cidr_ok() {
   case "$1" in */*/*) return 1 ;; */*) ;; *) return 1 ;; esac
   _frc_addr="${1%/*}"
@@ -3170,6 +3184,7 @@ tp_fabric_route_cidr_ok() {
     *:*)
       case "$_frc_addr" in *[!0-9A-Fa-f:]*|*:::*|*::*::*) return 1 ;; esac
       [ "${#_frc_addr}" -le 39 ] || return 1
+      case "${_frc_addr%%:*}" in [Ff][CcDd][0-9A-Fa-f][0-9A-Fa-f]) ;; *) return 1 ;; esac
       [ "$_frc_bits" -ge 48 ] && [ "$_frc_bits" -le 128 ]
       ;;
     *)
@@ -3179,11 +3194,13 @@ tp_fabric_route_cidr_ok() {
       while [ -n "$_frc_rest" ]; do
         _frc_oct="${_frc_rest%%.*}"
         tp_ipv4_octet_ok "$_frc_oct" || return 1
+        case "$_frc_n" in 0) _frc_o1="$_frc_oct" ;; 1) _frc_o2="$_frc_oct" ;; esac
         _frc_n=$((_frc_n + 1))
         case "$_frc_rest" in *.*) _frc_rest="${_frc_rest#*.}" ;; *) _frc_rest="" ;; esac
       done
       [ "$_frc_n" -eq 4 ] || return 1
-      [ "$_frc_bits" -ge 8 ] && [ "$_frc_bits" -le 32 ]
+      [ "$_frc_bits" -ge 8 ] && [ "$_frc_bits" -le 32 ] || return 1
+      tp_fabric_route_v4_private "$_frc_o1" "$_frc_o2" "$_frc_bits"
       ;;
   esac
 }
