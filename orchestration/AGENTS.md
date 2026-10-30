@@ -424,7 +424,7 @@ key. The daemon restarts the unit when its rendered content changes
 
 The control-plane Let's Encrypt window (co-located instance) proxies
 HTTP-01 challenges to `unix/<run dir>/instance-acme.sock`. Connecting needs
-`x` on `/run/turbopanel` (`tp:tp` `2770`) and `w` on the socket. The role
+`x` on `/run/turbopanel` (`tp:tp` `3770`) and `w` on the socket. The role
 grants `tpedge` traverse only (`u:tpedge:x`, no listing, no default entry) on
 the run directory, and because `/run` is tmpfs it also writes
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf` (`a+ … u:tpedge:x`) so the
@@ -433,7 +433,10 @@ daemon's preflight listener (as `tp`) or the issuer Caddy (as `tpcaddy`),
 neither of which can name another user in an ACL, so the daemon then calls
 `tp-host setfacl -P -m u:tpedge:rw <run dir>/instance-acme.sock`. That shape
 accepts only that path and that entry, waits up to 5 s for the issuer to
-bind, refuses a symlink, and never follows one (`-P`). `tpedge` is never put
+bind, refuses a symlink, and never follows one (`-P`). The run directory is
+sticky, so the issuer cannot replace a preflight socket the daemon left
+behind; before starting the issuer the daemon removes a socket owned by the
+directory's owner (itself) and leaves any other. `tpedge` is never put
 in group `tp`. Residual: traverse lets `tpedge` open anything directly in
 the run directory whose own mode grants "other" access (today the empty
 `daemon.lock`, `0644`); no socket there is world-writable.

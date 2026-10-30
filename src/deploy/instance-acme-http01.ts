@@ -781,6 +781,7 @@ export async function issueInstanceLetsEncryptCertificates(
   const now = deps.now ?? Date.now;
   const issuerKey = instanceAcmeIssuerKey(instanceAcme);
   const had = await snapshotIssued(layout, hosts, now(), issuerKey, run);
+  await removeLeftoverPreflightSocket(instanceAcmeSocketPath(layout));
   await startIssuer(run);
   let failed = true;
   let stopError: Error | null = null;
@@ -1374,6 +1375,28 @@ async function directoryExists(path: string): Promise<boolean> {
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) return false;
     throw err;
+  }
+}
+
+/**
+ * The run folder is sticky, so the issuer (its own account) cannot replace a
+ * socket the daemon left behind when it stopped mid-preflight. A socket owned
+ * by the folder's owner (the daemon) is that leftover: remove it. One owned by
+ * anyone else is the issuer's and stays.
+ */
+async function removeLeftoverPreflightSocket(
+  socketPath: string,
+): Promise<void> {
+  let socketUid: number | null;
+  try {
+    socketUid = (await Deno.lstat(socketPath)).uid;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    throw err;
+  }
+  const folderUid = (await Deno.stat(dirname(socketPath))).uid;
+  if (socketUid !== null && socketUid === folderUid) {
+    await removeSite(socketPath);
   }
 }
 
