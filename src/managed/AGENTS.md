@@ -7,10 +7,10 @@ access for managed engines is **one shared ProxySQL** per server
 (project = the `managed-ingress` `serviceId`), not per-service Traefik.
 
 Root context: `../../AGENTS.md`. Instance engine specs:
-`../../turbopanel/src/features/managed/AGENTS.md`. Command contracts:
+`../../../turbopanel/src/features/managed/AGENTS.md`. Command contracts:
 `../contracts/commands-contracts.ts`. Host prerequisites:
 `../../orchestration/roles/proxysql/AGENTS.md`.
-Certificate authorities: `../../turbopanel/src/lib/tls/AGENTS.md`.
+Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
 
 ## Module map
 
