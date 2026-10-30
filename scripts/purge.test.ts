@@ -2400,3 +2400,75 @@ test("an operator's FORWARD rule, or a policy that is not DROP, leaves the polic
   const accept = await forwardPolicyRun("-P FORWARD ACCEPT\\n");
   assert(!accept.includes("-P FORWARD ACCEPT"), accept);
 });
+
+async function purgeNotes(
+  marker: boolean,
+  bootLines: string[] | null,
+  forward: string,
+): Promise<string> {
+  const root = await Deno.makeTempDir({ prefix: "tp-purge-notes-" });
+  const markers = join(root, "kernel");
+  await Deno.mkdir(markers);
+  if (marker) {
+    await Deno.writeTextFile(join(markers, "pi-4k-pagesize.applied"), "x\n");
+  }
+  const boot = join(root, "config.txt");
+  if (bootLines) await Deno.writeTextFile(boot, bootLines.join("\n") + "\n");
+  const fwd = join(root, "ip_forward");
+  await Deno.writeTextFile(fwd, `${forward}\n`);
+  const result = await runPurgeSh(
+    [
+      "tp_print_group",
+      "tp_note_ip_forward",
+      "tp_note_kernel_boot_line",
+      "tp_print_purge_notes",
+    ],
+    [
+      `TP_KERNEL_MARKER_DIR=${markers}`,
+      `TP_PI_BOOT_CONFIG=${boot}`,
+      `TP_IP_FORWARD_FILE=${fwd}`,
+      "TP_NET_LEFT=false",
+      ': > "$TP_TMP/kept-packages"',
+      "tp_print_purge_notes",
+    ].join("\n"),
+  );
+  assertEquals(result.code, 0, result.stderr);
+  return result.stdout;
+}
+
+test("the Pi page-size boot line is left on purpose and the summary says how to undo it", async () => {
+  const out = await purgeNotes(true, [
+    "kernel=kernel8.img",
+    "[all]",
+    "dtparam=audio=on",
+  ], "0");
+  assertStringIncludes(out, "boot setting kernel=kernel8.img");
+  assertStringIncludes(out, "was left on purpose");
+  assertStringIncludes(out, "delete that line from");
+  assertStringIncludes(out, "then reboot");
+  // Nothing to say without TurboPanel's marker, or once the line is gone.
+  assert(
+    !(await purgeNotes(false, ["kernel=kernel8.img"], "0")).includes("kernel8"),
+  );
+  assert(!(await purgeNotes(true, ["[all]"], "0")).includes("kernel8"));
+  assert(!(await purgeNotes(true, null, "0")).includes("kernel8"));
+});
+
+test("the purge never edits the Pi boot file and keeps the kernel-features marker", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const code = source.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  assert(!/(rm|sed|mv|tee)[^\n]*TP_PI_BOOT_CONFIG/.test(code));
+  assert(!/(rm|rmdir)[^\n]*TP_KERNEL_MARKER_DIR/.test(code));
+  const owned = source.match(/^TP_OWNED_TREES="([^"]*)"/m);
+  assert(
+    owned && !owned[1].split(/\s+/).includes("/var/lib/turbopanel-kernel"),
+  );
+});
+
+test("the summary says IPv4 forwarding stays on until a reboot only when it is on", async () => {
+  assertStringIncludes(
+    await purgeNotes(false, null, "1"),
+    "net.ipv4.ip_forward) stays on until this host reboots",
+  );
+  assert(!(await purgeNotes(false, null, "0")).includes("ip_forward"));
+});

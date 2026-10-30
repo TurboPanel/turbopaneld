@@ -3929,6 +3929,24 @@ tp_print_reinstall_commands() {
   tp_say "  curl -fsSL https://turbopanel.sh | sh"
 }
 
+# The Raspberry Pi 4 KiB page-size line tp-kernel-features adds stays: taking
+# it out changes the kernel the board boots. Its marker stays too, so a later
+# `tp-kernel-features undo` still knows the line was TurboPanel's and not the
+# operator's.
+tp_note_kernel_boot_line() {
+  [ -f "$TP_KERNEL_MARKER_DIR/pi-4k-pagesize.applied" ] || return 0
+  [ -f "$TP_PI_BOOT_CONFIG" ] || return 0
+  grep -qx '[[:space:]]*kernel=kernel8.img[[:space:]]*' "$TP_PI_BOOT_CONFIG" 2>/dev/null || return 0
+  tp_say "The Raspberry Pi boot setting kernel=kernel8.img in $TP_PI_BOOT_CONFIG was left on purpose; to undo it, delete that line from $TP_PI_BOOT_CONFIG, then reboot."
+}
+
+# The fabric's and Docker's forwarding drop-ins are gone, but the running
+# kernel keeps the value they set until the next restart.
+tp_note_ip_forward() {
+  [ "$(cat "$TP_IP_FORWARD_FILE" 2>/dev/null)" = 1 ] || return 0
+  tp_say "IPv4 forwarding (net.ipv4.ip_forward) stays on until this host reboots (longer if another setting on this host turns it on)."
+}
+
 tp_print_purge_notes() {
   tp_print_group "Packages kept" "$TP_TMP/kept-packages"
   tp_say "Other packages stay installed by design (curl, git, acl, gnupg, iptables, openssl, wireguard-tools, build tools, ...); this purge never runs autoremove."
@@ -3936,6 +3954,8 @@ tp_print_purge_notes() {
   if [ "$TP_NET_LEFT" = true ]; then
     tp_say "Some Docker bridges or firewall chains could not be removed; reboot this host to clear them."
   fi
+  tp_note_ip_forward
+  tp_note_kernel_boot_line
 }
 
 tp_print_summary() {
@@ -4162,6 +4182,9 @@ TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/tur
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge
+TP_KERNEL_MARKER_DIR=/var/lib/turbopanel-kernel
+TP_PI_BOOT_CONFIG=/boot/firmware/config.txt
+TP_IP_FORWARD_FILE=/proc/sys/net/ipv4/ip_forward
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
 TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker
