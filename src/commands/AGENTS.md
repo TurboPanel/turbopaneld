@@ -3,9 +3,10 @@
 Handlers live under `src/commands/`. `src/instance/client.ts` is transport
 only: it never imports this directory. `src/entry/run.ts` calls
 `wireCommandPorts` (`src/commands/wire.ts`) before it connects, which
-registers all eight client ports: command dispatch, the fabric path probe,
+registers all nine client ports: command dispatch, the fabric path probe,
 drivetemp enable, session open and attach (resend kept results), the result
-ack, repeated dispatches and the `hello` report. Nothing is passed as client
+ack, repeated dispatches, the `hello` report and the 60 s TurboFabric peer
+readings (`subscribeFabricPeers`). Nothing is passed as client
 options any more. Tests that construct the client call `wireCommandPorts` (or
 `registerCommandPorts`) the same way.
 

@@ -143,6 +143,19 @@ exists because health was only read when someone asked: a quiet cluster aged
 past the control plane's freshness window and a stopped replica kept its last
 `streaming` line.
 
+**Pushed TurboFabric peers (`fabric-peer-report-v1`).** While `tp0` exists,
+`commands/fabric-peer-refresh.ts` re-reads `wg show tp0 dump` every 60 s (one
+timer, armed at boot by `entry/run.ts`, stopped when a read finds no `tp0` or
+on pause/teardown; no timer with fabric off). `FabricPeerReporter`
+(`fabric-peer-reporter.ts`) hears each reading through the
+`subscribeFabricPeers` command port and sends one `fabric-peers-report`
+frame (`peers[]`, at most 256, plus `observedAt`) to a control plane that lists
+the feature, only when a peer's health class changed or 5 minutes passed since
+the last frame on this connection (the first reading after a connect always
+goes). Fire-and-forget and read-only. It exists because the control plane's
+`relay.metadata.observed` only moved on a reconcile, so healthy tunnels read
+as stale minutes after each apply.
+
 **Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
 replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded
 opaque text, 4096 chars max) and `fullyApplied` (computed on the daemon from the

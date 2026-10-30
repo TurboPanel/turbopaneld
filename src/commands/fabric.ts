@@ -33,6 +33,11 @@ import { FABRIC_INTERFACE_NAME } from "../host/fabric-interface.ts";
 import type { ServerReportedIp } from "../contracts/server-reported-ip.ts";
 import { stampObservedPeerInterfaces } from "./fabric-peer-interface.ts";
 import {
+  type FabricPeerReading,
+  type FabricPeerReadingListener,
+  FabricPeerRefresher,
+} from "./fabric-peer-refresh.ts";
+import {
   desiredFabricRoutes,
   type FabricRoutePlan,
   fabricRoutePlanIsEmpty,
@@ -166,6 +171,9 @@ export function resetFabricTestOverrides(): void {
   runOverride = null;
   enableIpForwardingOverride = null;
   skipRealSyscalls = false;
+  peerRefresher.reset();
+  lastObservedFabricPeers = [];
+  lastObservedFabricPeersAt = null;
 }
 
 function resolveNetworkDir(): string {
@@ -1503,19 +1511,27 @@ function stampObservedPeerHealth(
 }
 
 /**
- * Last `wg show tp0 dump` observation, refreshed opportunistically whenever
- * {@link collectFabricPeerState} runs (instance-initiated reconcile/path
- * probe) — never a new subprocess of its own. `events/fabric-state.ts` reads
- * this via {@link getLastObservedFabricPeers} to detect peer availability
- * transitions without violating the collector's no-subprocess-per-interval
- * rule; an empty cache (no reconcile/probe has run yet this process) yields
- * `[]`, matching every other "no telemetry wired" default in `collector/`.
+ * Last `wg show tp0 dump` observation. Refreshed whenever
+ * {@link collectFabricPeerState} runs: on every reconcile and path probe, and
+ * every 60 s while `tp0` exists ({@link peerRefresher},
+ * `fabric-peer-refresh.ts`). `events/fabric-state.ts` reads this via
+ * {@link getLastObservedFabricPeers} to detect peer availability transitions
+ * without a subprocess of its own; an empty cache (no read yet this process)
+ * yields `[]`, matching every other "no telemetry wired" default in
+ * `collector/`.
  */
 let lastObservedFabricPeers: FabricReconcileObservedPeer[] = [];
+/** When {@link lastObservedFabricPeers} was read (epoch ms); null before any read. */
+let lastObservedFabricPeersAt: number | null = null;
 
 /** See {@link lastObservedFabricPeers}. */
 export function getLastObservedFabricPeers(): FabricReconcileObservedPeer[] {
   return lastObservedFabricPeers;
+}
+
+/** When the cached peers were read (epoch ms), or null before any read. */
+export function getLastObservedFabricPeersAtMs(): number | null {
+  return lastObservedFabricPeersAt;
 }
 
 /**
@@ -1533,17 +1549,63 @@ function observedPeerAddresses(): ServerReportedIp[] {
   }
 }
 
-async function collectFabricPeerState(): Promise<
-  FabricReconcileObservedPeer[]
-> {
+/**
+ * Read `wg show tp0 dump` into the cache; null when the dump fails (no
+ * `tp0`). A successful read also starts the 60 s refresh (a no-op until the
+ * daemon armed it at boot, or when already running).
+ */
+async function readFabricPeerState(): Promise<FabricPeerReading | null> {
   const dump = await runHost("wg", ["show", FABRIC_INTERFACE_NAME, "dump"]);
-  if (!dump.success) return [];
+  if (!dump.success) return null;
+  const nowMs = Date.now();
   const peers = stampObservedPeerInterfaces(
-    stampObservedPeerHealth(parseWgDumpPeers(dump.stdout)),
+    stampObservedPeerHealth(parseWgDumpPeers(dump.stdout), nowMs),
     observedPeerAddresses(),
   );
   lastObservedFabricPeers = peers;
-  return peers;
+  lastObservedFabricPeersAt = nowMs;
+  peerRefresher.start();
+  return { peers, observedAt: new Date(nowMs).toISOString() };
+}
+
+async function collectFabricPeerState(): Promise<
+  FabricReconcileObservedPeer[]
+> {
+  return (await readFabricPeerState())?.peers ?? [];
+}
+
+/**
+ * The one process-wide peer refresher. Its tick re-reads the dump; a failed
+ * read (no `tp0`) stops it.
+ */
+const peerRefresher = new FabricPeerRefresher({
+  refresh: readFabricPeerState,
+});
+
+/**
+ * Let the 60 s peer refresh run (called once at daemon boot, before the
+ * fabric is restored). Until then a successful read starts no timer, so
+ * tests that apply a fabric never leave an interval behind.
+ */
+export function armFabricPeerRefresh(): void {
+  peerRefresher.arm();
+}
+
+/** Hear every refreshed reading (the control-plane reporter). */
+export function subscribeFabricPeerReadings(
+  listener: FabricPeerReadingListener,
+): () => void {
+  return peerRefresher.subscribe(listener);
+}
+
+/** True while the 60 s refresh timer runs (tests and diagnostics). */
+export function isFabricPeerRefreshRunning(): boolean {
+  return peerRefresher.running;
+}
+
+/** Run one refresh now (tests). */
+export function refreshFabricPeersForTests(): Promise<void> {
+  return peerRefresher.tick();
 }
 
 async function wgShowInterface(): Promise<boolean> {
@@ -1706,6 +1768,7 @@ async function handleFabricPause(
       state ? ` pubkey=${state.publicKey}` : ""
     }`,
   );
+  peerRefresher.stop();
   await takeTp0Down();
   await removePathBestEffort(applyStampPath(networkDir));
   if (state) {
@@ -1730,6 +1793,7 @@ async function handleFabricTeardown(
     );
   }
 
+  peerRefresher.stop();
   await takeTp0Down();
   const left = await removeAllFabricBridges(
     networkDir,
@@ -2003,6 +2067,8 @@ export async function restoreFabricFromPersistedState(): Promise<void> {
     const pskByPublicKey = await loadPersistedPeerPresharedKeys(networkDir);
     await bringUpFabric(networkDir, payload, pskByPublicKey, true);
     await reconcileForwardingFromState(state);
+    // First reading after boot; starts the 60 s refresh while tp0 is up.
+    await readFabricPeerState();
     logInfo(
       "commands",
       `TurboFabric restored from state iface=${FABRIC_INTERFACE_NAME} pubkey=${state.publicKey}`,

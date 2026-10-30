@@ -7,6 +7,7 @@ import {
 import { connectInstance, hasEnrolledServerId } from "../instance/client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
+  armFabricPeerRefresh,
   reinstallFabricForwardingIfEnabled,
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
@@ -398,6 +399,9 @@ async function afterOrchestration(
   io: DaemonRunIo,
   reinstallForwardingJumps: () => Promise<void>,
 ): Promise<void> {
+  // The real host keeps tp0 peer readings fresh every 60 s; a test that
+  // stands in its own restore never starts that timer.
+  if (!io.restoreFabricFromPersistedState) armFabricPeerRefresh();
   await (io.restoreFabricFromPersistedState ??
     restoreFabricFromPersistedState)();
   await reinstallForwardingJumps();
