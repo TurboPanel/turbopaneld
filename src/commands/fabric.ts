@@ -1768,8 +1768,8 @@ async function handleFabricPause(
       state ? ` pubkey=${state.publicKey}` : ""
     }`,
   );
-  peerRefresher.stop();
   await takeTp0Down();
+  peerRefresher.stop();
   await removePathBestEffort(applyStampPath(networkDir));
   if (state) {
     const suspended = { ...state, suspended: true };
@@ -1793,8 +1793,8 @@ async function handleFabricTeardown(
     );
   }
 
-  peerRefresher.stop();
   await takeTp0Down();
+  peerRefresher.stop();
   const left = await removeAllFabricBridges(
     networkDir,
     (state?.networks ?? []).map((network) => network.name),

@@ -167,6 +167,9 @@ function closeDockerClient(client: DockerClientLike | undefined): void {
 async function connectControlPlane(
   io: DaemonRunIo,
 ): Promise<{ stop(): void }> {
+  // Also armed here: a host whose boot converge failed skips the boot
+  // restore but can still bring tp0 up through a reconcile.
+  if (!io.wireCommandPorts) armFabricPeerRefresh();
   const unwire = (io.wireCommandPorts ?? wireCommandPorts)();
   let instance: { stop(): void };
   try {
