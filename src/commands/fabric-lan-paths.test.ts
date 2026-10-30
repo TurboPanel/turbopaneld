@@ -129,8 +129,28 @@ class FakeHost {
     return this.routes.has(line);
   }
 
-  accepts(source: string, dest: string): boolean {
-    return this.rules.has(`TP-FORWARD -s ${source} -d ${dest} -j ACCEPT`);
+  accepts(
+    source: string,
+    dest: string,
+    scope: { inDev?: string; outDev?: string } = {},
+  ): boolean {
+    const devs = [
+      ...(scope.inDev ? ["-i", scope.inDev] : []),
+      ...(scope.outDev ? ["-o", scope.outDev] : []),
+    ];
+    return this.rules.has(
+      ["TP-FORWARD", ...devs, "-s", source, "-d", dest, "-j", "ACCEPT"].join(
+        " ",
+      ),
+    );
+  }
+
+  /** How many of the two LAN pairs (out of and in from `eth1`) are present. */
+  lanAccepts(): number {
+    return [
+      this.accepts(BRIDGE, LAN_REMOTE, { outDev: "eth1" }),
+      this.accepts(LAN_REMOTE, BRIDGE, { inDev: "eth1" }),
+    ].filter(Boolean).length;
   }
 }
 
@@ -220,8 +240,10 @@ test("tunnel:false creates no tp0 and no key, and routes the LAN subnet", async 
       ),
       true,
     );
-    assertEquals(host.accepts(BRIDGE, LAN_REMOTE), true);
-    assertEquals(host.accepts(LAN_REMOTE, BRIDGE), true);
+    assertEquals(host.lanAccepts(), 2);
+    // LAN pairs are always scoped to the LAN interface.
+    assertEquals(host.accepts(BRIDGE, LAN_REMOTE), false);
+    assertEquals(host.accepts(LAN_REMOTE, BRIDGE), false);
     const state = await readState(networkDir);
     assertEquals(state.tunnel, false);
     assertEquals(state.address, undefined);
@@ -257,7 +279,7 @@ test("tunnel:false keeps an existing key and deletes tp0", async () => {
     assertEquals(host.calls.filter((c) => c === "wg genkey").length, 1);
     // The peer pairs went with the tunnel; the LAN pairs stay.
     assertEquals(host.accepts(BRIDGE, TUNNEL_REMOTE), false);
-    assertEquals(host.accepts(BRIDGE, LAN_REMOTE), true);
+    assertEquals(host.lanAccepts(), 2);
   });
 });
 
@@ -266,10 +288,9 @@ test("a mixed payload routes some subnets over the LAN and others over tp0", asy
     await handleFabricReconcile(mixedPayload(), "t");
     assertEquals(host.hasRoute(LAN_ROUTE_LINE), true);
     assertEquals(host.hasRoute(`${TUNNEL_REMOTE} dev tp0 scope link`), true);
-    for (const remote of [LAN_REMOTE, TUNNEL_REMOTE]) {
-      assertEquals(host.accepts(BRIDGE, remote), true);
-      assertEquals(host.accepts(remote, BRIDGE), true);
-    }
+    assertEquals(host.lanAccepts(), 2);
+    assertEquals(host.accepts(BRIDGE, TUNNEL_REMOTE), true);
+    assertEquals(host.accepts(TUNNEL_REMOTE, BRIDGE), true);
   });
 });
 
@@ -280,7 +301,7 @@ test("a LAN route nothing wants any more is removed, other routes are not", asyn
     await handleFabricReconcile(lanOnlyPayload([]), "t");
     assertEquals(host.hasRoute(LAN_ROUTE_LINE), false);
     assertEquals(host.hasRoute("10.193.6.0/24 via 10.0.0.1 dev eth1"), true); // NOSONAR typescript:S1313 — sample operator route for this test fixture, not a reachable host
-    assertEquals(host.accepts(BRIDGE, LAN_REMOTE), false);
+    assertEquals(host.lanAccepts(), 0);
     assertEquals((await readState(networkDir)).installedLanRoutes, undefined);
   });
 });
@@ -298,6 +319,11 @@ test("a LAN route is skipped without a connected subnet, a foreign route or a br
     );
     assertEquals(
       host.calls.some((c) => c.startsWith("ip route replace")),
+      false,
+    );
+    // A skipped route gets no forwarding pair either.
+    assertEquals(
+      [...host.rules].some((rule) => rule.includes("10.193.")),
       false,
     );
     assertEquals((await readState(networkDir)).installedLanRoutes, undefined);
@@ -318,7 +344,7 @@ test("boot restore of a tunnel-less state brings back LAN routes, never tp0", as
       false,
     );
     assertEquals(host.hasRoute(LAN_ROUTE_LINE), true);
-    assertEquals(host.accepts(BRIDGE, LAN_REMOTE), true);
+    assertEquals(host.lanAccepts(), 2);
   });
 });
 
@@ -328,7 +354,7 @@ test("pause keeps LAN routes and their accepts; teardown removes them", async ()
     await handleFabricReconcile({ enabled: false, retainKeys: true }, "t");
     assertEquals(host.tp0, false);
     assertEquals(host.hasRoute(LAN_ROUTE_LINE), true);
-    assertEquals(host.accepts(BRIDGE, LAN_REMOTE), true);
+    assertEquals(host.lanAccepts(), 2);
     assertEquals(host.accepts(BRIDGE, TUNNEL_REMOTE), false);
 
     // Boot while paused restores the LAN routes too.

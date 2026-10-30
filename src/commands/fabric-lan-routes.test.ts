@@ -185,14 +185,51 @@ test("planLanRoutes skips what it cannot route safely", () => {
   assertStringIncludes(reasons[4] ?? "", "IPv6");
 });
 
-test("lanRoutePrefixes keeps IPv4 ranges in canonical form", () => {
+test("lanRoutePrefixes takes installed IPv4 routes in canonical form, with their interface", () => {
   assertEquals(
     lanRoutePrefixes([
-      { cidr: "10.193.5.7/24", via: NEIGHBOUR },
-      { cidr: REMOTE, via: NEIGHBOUR },
-      { cidr: "fd00:7::/64", via: "fd00:9::12" },
+      { cidr: "10.193.5.7/24", via: NEIGHBOUR, dev: "eth1" },
+      { cidr: REMOTE, via: NEIGHBOUR, dev: "eth1" },
+      { cidr: "fd00:7::/64", via: "fd00:9::12", dev: "eth1" },
     ]),
-    [REMOTE],
+    [{ cidr: REMOTE, dev: "eth1" }],
   );
   assertEquals(lanRoutePrefixes(undefined), []);
+});
+
+test("connectedDevFor skips container-side interfaces and a subnet's network or broadcast address", () => {
+  const routes = table(
+    "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1", // NOSONAR typescript:S1313 — docker0's usual subnet, test fixture only
+    "10.30.0.0/24 dev br-0123 proto kernel scope link src 10.30.0.1",
+    "10.31.0.0/24 dev veth9 proto kernel scope link",
+    "10.32.0.0/24 dev tpn-a proto kernel scope link",
+    LAN_SUBNET,
+    "10.0.5.0/31 dev eth3 proto kernel scope link src 10.0.5.0", // NOSONAR typescript:S1313 — sample point-to-point link, test fixture only
+  );
+  for (const via of ["172.17.0.5", "10.30.0.5", "10.31.0.5", "10.32.0.5"]) { // NOSONAR typescript:S1313 — container-side samples, test fixture only
+    assertEquals(connectedDevFor(via, routes), null, via);
+  }
+  assertEquals(connectedDevFor("10.0.0.0", routes), null); // NOSONAR typescript:S1313 — network address, test fixture only
+  assertEquals(connectedDevFor("10.0.0.255", routes), null); // NOSONAR typescript:S1313 — broadcast address, test fixture only
+  assertEquals(connectedDevFor("10.0.0.254", routes), "eth1"); // NOSONAR typescript:S1313 — sample LAN neighbour, test fixture only
+  assertEquals(connectedDevFor("10.0.5.1", routes), "eth3"); // NOSONAR typescript:S1313 — a /31 has no network or broadcast address
+});
+
+test("planLanRoutes skips a range that contains a connected subnet and names a refused interface", () => {
+  const plan = planLanRoutes({
+    desired: [
+      { cidr: "10.0.0.0/16", via: NEIGHBOUR },
+      { cidr: REMOTE, via: "172.17.0.5" }, // NOSONAR typescript:S1313 — on docker0, test fixture only
+    ],
+    table: table(
+      LAN_SUBNET,
+      "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1", // NOSONAR typescript:S1313 — docker0's usual subnet, test fixture only
+    ),
+    bridgeSubnets: [],
+    installed: [],
+  });
+  assertEquals(plan.add, []);
+  const reasons = plan.skipped.map((skip) => skip.reason);
+  assertStringIncludes(reasons[0] ?? "", "eth1 already routes it");
+  assertStringIncludes(reasons[1] ?? "", "docker0");
 });

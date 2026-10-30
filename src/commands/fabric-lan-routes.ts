@@ -10,7 +10,8 @@
  *
  * Safety, as for the `tp0` routes (`fabric-routes.ts`): a range another
  * interface already routes (an equal route that is not ours, or a connected
- * subnet that holds it) is skipped, and so is a range that overlaps a local
+ * subnet that holds it or sits inside it, which `tp-host` refuses too) is
+ * skipped, and so is a range that overlaps a local
  * bridge subnet. Only routes the daemon recorded as installed are removed, and
  * only when the table still shows exactly that route (`cidr`, `via`, `dev`).
  *
@@ -37,6 +38,7 @@ import {
   fabricRoute,
   type ObservedRoute,
   rangeInside,
+  rangesShare,
 } from "./fabric-routes.ts";
 import { FABRIC_INTERFACE_NAME } from "../host/fabric-interface.ts";
 
@@ -66,8 +68,14 @@ type LanPolicyPayload = {
   lanRoutes?: readonly FabricReconcileLanRoute[];
 };
 
-/** Interfaces a LAN route never uses. */
+/** Interfaces a LAN route never uses (the same list `tp-host` refuses). */
 const NEVER_LAN_DEVS = new Set([FABRIC_INTERFACE_NAME, "lo"]);
+const NEVER_LAN_DEV_PREFIXES = ["docker", "br-", "veth", "tpn"];
+
+function isNeverLanDev(dev: string): boolean {
+  return NEVER_LAN_DEVS.has(dev) ||
+    NEVER_LAN_DEV_PREFIXES.some((prefix) => dev.startsWith(prefix));
+}
 
 function sameRange(a: string, b: string): boolean {
   const left = fabricRoute(a)?.key;
@@ -137,13 +145,26 @@ function isUsableConnectedRoute(
   bridgeKeys: ReadonlySet<string>,
 ): boolean {
   if (!route.kernel || route.linkdown || !route.dev) return false;
-  if (NEVER_LAN_DEVS.has(route.dev)) return false;
+  if (isNeverLanDev(route.dev)) return false;
   return !bridgeKeys.has(route.key);
 }
 
 /**
+ * `host` is a usable address of the connected `route`: inside it, and not its
+ * IPv4 network or broadcast address (a /31 or /32 has neither).
+ */
+function holdsHost(route: ObservedRoute, host: FabricRoute): boolean {
+  if (!rangeInside(host.parsed, route.parsed)) return false;
+  if (route.parsed.version !== 4 || route.parsed.prefix >= 31) return true;
+  const address = host.parsed.base;
+  return address !== route.parsed.base && address !== route.parsed.last;
+}
+
+/**
  * The local interface whose connected subnet holds `via` (the most specific
- * one), never `tp0`, `lo`, an interface without carrier or a local bridge.
+ * one), never `tp0`, `lo`, a container-side interface (`docker*`, `br-*`,
+ * `veth*`, `tpn*`), an interface without carrier or a local bridge, and never
+ * when `via` is that subnet's network or broadcast address.
  */
 export function connectedDevFor(
   via: string,
@@ -158,10 +179,32 @@ export function connectedDevFor(
   let best: ObservedRoute | null = null;
   for (const route of table) {
     if (!isUsableConnectedRoute(route, bridgeKeys)) continue;
-    if (!rangeInside(host.parsed, route.parsed)) continue;
+    if (!holdsHost(route, host)) continue;
     if (route.parsed.prefix > (best?.parsed.prefix ?? -1)) best = route;
   }
   return best?.dev ?? null;
+}
+
+/** A refused interface (container-side, `tp0`, `lo`) whose subnet holds `via`. */
+function refusedDevHolding(
+  via: string,
+  table: readonly ObservedRoute[],
+): string | null {
+  const host = hostRange(via);
+  if (!host) return null;
+  const route = table.find((observed) =>
+    observed.kernel && observed.dev !== null && isNeverLanDev(observed.dev) &&
+    rangeInside(host.parsed, observed.parsed)
+  );
+  return route?.dev ?? null;
+}
+
+function noDevReason(via: string, table: readonly ObservedRoute[]): string {
+  const refused = refusedDevHolding(via, table);
+  if (refused) {
+    return `${via} is on ${refused}, which never carries a LAN route`;
+  }
+  return `no connected subnet holds ${via} as a host address`;
 }
 
 function isExactly(
@@ -195,7 +238,7 @@ function routedElsewhere(
   installed: readonly InstalledLanRoute[],
 ): string | null {
   for (const other of table) {
-    const connected = other.kernel && rangeInside(route.parsed, other.parsed);
+    const connected = other.kernel && rangesShare(route.parsed, other.parsed);
     const equal = other.key === route.key && !wasInstalled(other, installed);
     if (connected || equal) {
       return `${other.dev ?? "another interface"} already routes it`;
@@ -237,7 +280,7 @@ function placeLanRoute(
   const bridge = overlappingBridge(route, input.bridgeSubnets);
   if (bridge) return { skip: `it overlaps the local bridge subnet ${bridge}` };
   const dev = connectedDevFor(wanted.via, input.table, input.bridgeSubnets);
-  if (!dev) return { skip: `no connected subnet holds ${wanted.via}` };
+  if (!dev) return { skip: noDevReason(wanted.via, input.table) };
   const conflict = routedElsewhere(route, input.table, input.installed);
   const exact = input.table.some((observed) =>
     isExactly(observed, route, wanted.via, dev)
@@ -287,14 +330,24 @@ export function lanRoutePlanIsEmpty(plan: LanRoutePlan): boolean {
   return plan.add.length === 0 && plan.remove.length === 0;
 }
 
-/** Container prefixes reached over a LAN (IPv4 only, like forwarding). */
+/** A container prefix reached over a LAN and the interface it goes out of. */
+export type LanForwardPrefix = { cidr: string; dev: string };
+
+/**
+ * Container prefixes reached over a LAN, from the routes actually installed
+ * (IPv4 only, like forwarding): a skipped route gets no forwarding rule.
+ */
 export function lanRoutePrefixes(
-  lanRoutes: readonly FabricReconcileLanRoute[] | undefined,
-): string[] {
-  const prefixes = new Set<string>();
-  for (const route of lanRoutes ?? []) {
+  installed: readonly InstalledLanRoute[] | undefined,
+): LanForwardPrefix[] {
+  const prefixes = new Map<string, LanForwardPrefix>();
+  for (const route of installed ?? []) {
     const parsed = fabricRoute(route.cidr);
-    if (parsed?.parsed.version === 4) prefixes.add(parsed.cidr);
+    if (parsed?.parsed.version !== 4) continue;
+    prefixes.set(`${parsed.cidr}@${route.dev}`, {
+      cidr: parsed.cidr,
+      dev: route.dev,
+    });
   }
-  return [...prefixes];
+  return [...prefixes.values()];
 }

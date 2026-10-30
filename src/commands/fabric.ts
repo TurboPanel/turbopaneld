@@ -41,6 +41,7 @@ import { stampObservedPeerInterfaces } from "./fabric-peer-interface.ts";
 import {
   fabricLanRoutesPolicyError,
   type InstalledLanRoute,
+  type LanForwardPrefix,
   type LanRoutePlan,
   lanRoutePlanIsEmpty,
   lanRoutePrefixes,
@@ -1233,54 +1234,98 @@ export function fabricCrossSubnetForwardPairs(
   return pairs;
 }
 
-function forwardAcceptMatch(source: string, dest: string): string[] {
-  return [FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"];
+/** A `TP-FORWARD` ACCEPT pair; a LAN pair also names its LAN interface. */
+export type ForwardPair = {
+  source: string;
+  dest: string;
+  /** `-i`: traffic arrives on this interface. */
+  inDev?: string;
+  /** `-o`: traffic leaves on this interface. */
+  outDev?: string;
+};
+
+/**
+ * Bidirectional local-bridge ↔ LAN-route-prefix ACCEPT pairs, scoped to the
+ * LAN interface the route uses: out of it toward the remote prefix, in from it
+ * back to the local bridge (no same-CIDR).
+ */
+export function fabricLanForwardPairs(
+  localSubnets: readonly string[],
+  lanPrefixes: readonly LanForwardPrefix[],
+): ForwardPair[] {
+  const pairs: ForwardPair[] = [];
+  for (const local of localSubnets) {
+    for (const remote of lanPrefixes) {
+      if (local === remote.cidr) continue;
+      pairs.push(
+        { source: local, dest: remote.cidr, outDev: remote.dev },
+        { source: remote.cidr, dest: local, inDev: remote.dev },
+      );
+    }
+  }
+  return pairs;
 }
 
-async function ensureForwardAccept(
-  source: string,
-  dest: string,
-): Promise<void> {
-  const match = forwardAcceptMatch(source, dest);
+function forwardAcceptMatch(pair: ForwardPair): string[] {
+  return [
+    FABRIC_FORWARD_CHAIN,
+    ...(pair.inDev ? ["-i", pair.inDev] : []),
+    ...(pair.outDev ? ["-o", pair.outDev] : []),
+    "-s",
+    pair.source,
+    "-d",
+    pair.dest,
+    "-j",
+    "ACCEPT",
+  ];
+}
+
+async function ensureForwardAccept(pair: ForwardPair): Promise<void> {
+  const match = forwardAcceptMatch(pair);
   await ensureIptablesRule(match, ["-A", ...match]);
 }
 
 /**
- * Remote prefixes local bridges may exchange traffic with: peer container
- * ranges (over `tp0`) and LAN route ranges (over a shared LAN). The accept
- * rules match on addresses only, never on an interface, so the same rule lets
- * traffic in from `tp0` or from the LAN interface. `TP-FORWARD` is jumped to
- * first from `DOCKER-USER`, and an `ACCEPT` there ends the `FORWARD` walk, so
- * Docker's own routed-bridge rules (published ports only) never see it.
+ * Pairs between local bridges and remote prefixes: peer container ranges
+ * (over `tp0`, matched on addresses only) and the LAN routes actually
+ * installed (over a shared LAN, matched on the LAN interface too).
+ * `TP-FORWARD` is jumped to first from `DOCKER-USER`, and an `ACCEPT` there
+ * ends the `FORWARD` walk, so Docker's own routed-bridge rules (published
+ * ports only) never see it.
  */
-function remoteForwardPrefixes(
+function remoteForwardPairs(
+  localSubnets: readonly string[],
   peers: readonly { allowedIPs: readonly string[] }[],
-  lanRoutes: readonly FabricReconcileLanRoute[] | undefined,
-): string[] {
+  installedLanRoutes: readonly InstalledLanRoute[] | undefined,
+): ForwardPair[] {
   return [
-    ...new Set([
-      ...fabricOwnedPeerPrefixes(peers),
-      ...lanRoutePrefixes(lanRoutes),
-    ]),
-  ].sort((a, b) => a.localeCompare(b));
+    ...fabricCrossSubnetForwardPairs(
+      localSubnets,
+      fabricOwnedPeerPrefixes(peers),
+    ),
+    ...fabricLanForwardPairs(
+      localSubnets,
+      lanRoutePrefixes(installedLanRoutes),
+    ),
+  ];
 }
 
-function forwardPairKey(pair: { source: string; dest: string }): string {
-  return `${pair.source}>${pair.dest}`;
+function forwardPairKey(pair: ForwardPair): string {
+  return [pair.inDev ?? "", pair.source, pair.dest, pair.outDev ?? ""].join(
+    ">",
+  );
 }
 
 /** Remove ACCEPT pairs (best effort) that are not in `keep`. */
 async function removeForwardPairsExcept(
-  pairs: readonly { source: string; dest: string }[],
-  keep: readonly { source: string; dest: string }[],
+  pairs: readonly ForwardPair[],
+  keep: readonly ForwardPair[],
 ): Promise<void> {
   const kept = new Set(keep.map(forwardPairKey));
   await forEachSequential(
     pairs.filter((pair) => !kept.has(forwardPairKey(pair))),
     async (pair) => {
-      await removeIptablesRuleBestEffort(
-        forwardAcceptMatch(pair.source, pair.dest),
-      );
+      await removeIptablesRuleBestEffort(forwardAcceptMatch(pair));
     },
   );
 }
@@ -1288,10 +1333,22 @@ async function removeForwardPairsExcept(
 function stateForwardPairs(
   state: FabricStateJson,
   withPeers: boolean,
-): Array<{ source: string; dest: string }> {
-  return fabricCrossSubnetForwardPairs(
+): ForwardPair[] {
+  return remoteForwardPairs(
     state.networks.map((network) => network.subnet),
-    remoteForwardPrefixes(withPeers ? state.peers : [], state.lanRoutes),
+    withPeers ? state.peers : [],
+    state.installedLanRoutes,
+  );
+}
+
+/** Boot restore: drop the LAN pairs of routes that did not come back. */
+async function removeDroppedLanForwardPairs(
+  before: FabricStateJson,
+  after: FabricStateJson,
+): Promise<void> {
+  await removeForwardPairsExcept(
+    stateForwardPairs(before, false),
+    stateForwardPairs(after, false),
   );
 }
 
@@ -1311,13 +1368,15 @@ async function removePeerForwardPairs(state: FabricStateJson): Promise<void> {
 async function removeStaleForwardPairs(
   previous: FabricStateJson | null,
   payload: FabricReconcileEnabledPayload,
+  installedLanRoutes: readonly InstalledLanRoute[],
 ): Promise<void> {
   if (!previous) return;
   await removeForwardPairsExcept(
     stateForwardPairs(previous, previous.suspended !== true),
-    fabricCrossSubnetForwardPairs(
+    remoteForwardPairs(
       (payload.networks ?? []).map((network) => network.subnet),
-      remoteForwardPrefixes(payload.peers, payload.lanRoutes),
+      payload.peers,
+      installedLanRoutes,
     ),
   );
 }
@@ -1326,7 +1385,7 @@ async function reconcileFabricForwarding(
   networks: readonly FabricReconcileNetwork[],
   peers: readonly { allowedIPs: readonly string[] }[] = [],
   gateway = false,
-  lanRoutes: readonly FabricReconcileLanRoute[] = [],
+  installedLanRoutes: readonly InstalledLanRoute[] = [],
 ): Promise<void> {
   await ensureIptablesChain(FABRIC_FORWARD_CHAIN);
   await ensureIptablesRule(
@@ -1355,16 +1414,13 @@ async function reconcileFabricForwarding(
     ],
   );
   await forEachSequential(networks, async (network) => {
-    await ensureForwardAccept(network.subnet, network.subnet);
+    await ensureForwardAccept({ source: network.subnet, dest: network.subnet });
   });
   const localSubnets = networks.map((network) => network.subnet);
   await forEachSequential(
-    fabricCrossSubnetForwardPairs(
-      localSubnets,
-      remoteForwardPrefixes(peers, lanRoutes),
-    ),
+    remoteForwardPairs(localSubnets, peers, installedLanRoutes),
     async (pair) => {
-      await ensureForwardAccept(pair.source, pair.dest);
+      await ensureForwardAccept(pair);
     },
   );
   await reconcileTp0Transit(gateway);
@@ -2245,12 +2301,12 @@ async function applyEnabledFabric(
     .filter((name) => !desired.has(name));
   await removeFabricDockerNetworks(stale);
   await forgetPendingTeardown(networkDir, desired);
-  await removeStaleForwardPairs(previous, payload);
+  await removeStaleForwardPairs(previous, payload, installed);
   await reconcileFabricForwarding(
     payload.networks ?? [],
     payload.peers,
     payload.gateway === true,
-    payload.lanRoutes,
+    installed,
   );
   return installed;
 }
@@ -2383,7 +2439,7 @@ async function reconcileForwardingFromState(
     state.networks,
     paused ? [] : state.peers,
     !paused && state.gateway === true,
-    state.lanRoutes,
+    state.installedLanRoutes,
   );
 }
 
@@ -2414,18 +2470,24 @@ function sameInstalledLanRoutes(
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/** Record the LAN routes boot restore left in place, when they changed. */
+/**
+ * Record the LAN routes boot restore left in place, when they changed, drop
+ * the forwarding pairs of routes that did not come back, and return the state
+ * now on disk.
+ */
 async function recordRestoredLanRoutes(
   networkDir: string,
   state: FabricStateJson,
   installed: readonly InstalledLanRoute[],
-): Promise<void> {
-  if (sameInstalledLanRoutes(state.installedLanRoutes ?? [], installed)) return;
+): Promise<FabricStateJson> {
+  if (sameInstalledLanRoutes(state.installedLanRoutes ?? [], installed)) {
+    return state;
+  }
   const { installedLanRoutes: _old, ...rest } = state;
-  await writeFabricStateJson(networkDir, {
-    ...rest,
-    ...lanStateFields(undefined, installed),
-  });
+  const current = { ...rest, ...lanStateFields(undefined, installed) };
+  await writeFabricStateJson(networkDir, current);
+  await removeDroppedLanForwardPairs(state, current);
+  return current;
 }
 
 /**
@@ -2447,8 +2509,8 @@ async function restoreFabricWithoutTunnel(
     installed: state.installedLanRoutes ?? [],
     networks: state.networks,
   });
-  await recordRestoredLanRoutes(networkDir, state, installed);
-  await reconcileForwardingFromState(state);
+  const current = await recordRestoredLanRoutes(networkDir, state, installed);
+  await reconcileForwardingFromState(current);
   logInfo(
     "commands",
     `TurboFabric ${
@@ -2472,8 +2534,8 @@ async function restoreFabricWithTunnel(
     state,
     true,
   );
-  await recordRestoredLanRoutes(networkDir, state, installed);
-  await reconcileForwardingFromState(state);
+  const current = await recordRestoredLanRoutes(networkDir, state, installed);
+  await reconcileForwardingFromState(current);
   // First reading after boot; starts the 60 s refresh while tp0 is up.
   await readFabricPeerState();
   logInfo(
