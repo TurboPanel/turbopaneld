@@ -1,12 +1,13 @@
 /**
  * TurboFabric mesh peer availability: diffs the daemon's already-tracked
  * `wg show tp0 dump` observation (`getLastObservedFabricPeers` —
- * `src/commands/fabric.ts`, refreshed opportunistically by
- * instance-initiated reconcile/path-probe calls) tick-over-tick, re-running
- * `classifyPeerHandshakeHealth` against the current clock so a
- * `healthy` → `stale` transition surfaces purely from time passing, even with
- * no new dump. This never runs its own `wg` subprocess — an empty cache (no
- * reconcile/probe has happened yet this process) yields `[]`.
+ * `src/commands/fabric.ts`, refreshed every 60 s while `tp0` exists and on
+ * every reconcile/path probe) tick-over-tick, re-running
+ * `classifyPeerHandshakeHealth` against the current clock. This never runs
+ * its own `wg` subprocess — an empty cache (no read yet this process) yields
+ * `[]`. A reading older than `FABRIC_PEER_READING_MAX_AGE_MS` (the refresh
+ * stopped, e.g. `tp0` went away) raises nothing and keeps the last state:
+ * an old handshake time is not proof that a healthy tunnel went stale.
  *
  * Endpoint (the wg dump's `host:port`, this peer's current network path) is
  * tracked alongside health so a peer that migrates to a different
@@ -16,7 +17,9 @@
 import {
   classifyPeerHandshakeHealth,
   getLastObservedFabricPeers,
+  getLastObservedFabricPeersAtMs,
 } from "../../../commands/fabric.ts";
+import { FABRIC_PEER_READING_MAX_AGE_MS } from "../../../commands/fabric-peer-refresh.ts";
 import type {
   FabricPeerHealth,
   FabricReconcileObservedPeer,
@@ -26,6 +29,8 @@ import { makeEvent } from "./types.ts";
 import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export type FabricStateReader = () => FabricReconcileObservedPeer[];
+/** When the reading was taken (epoch ms); null when unknown. */
+export type FabricStateReadingAge = () => number | null;
 
 type ObservedPeerState = {
   health: FabricPeerHealth;
@@ -38,13 +43,26 @@ function isUnavailableHealth(health: FabricPeerHealth): boolean {
 
 export class FabricStateEventCollector implements EventCollector {
   readonly #reader: FabricStateReader;
+  readonly #observedAtMs: FabricStateReadingAge;
   readonly #previousState = new Map<string, ObservedPeerState>();
 
-  constructor(deps?: { reader?: FabricStateReader }) {
+  constructor(
+    deps?: { reader?: FabricStateReader; observedAtMs?: FabricStateReadingAge },
+  ) {
     this.#reader = deps?.reader ?? getLastObservedFabricPeers;
+    // An injected reader without an age is always fresh.
+    this.#observedAtMs = deps?.observedAtMs ??
+      (deps?.reader ? () => null : getLastObservedFabricPeersAtMs);
+  }
+
+  #readingIsOld(nowMs: number): boolean {
+    const observedAtMs = this.#observedAtMs();
+    return observedAtMs !== null &&
+      nowMs - observedAtMs > FABRIC_PEER_READING_MAX_AGE_MS;
   }
 
   detect(ctx: EventDetectContext): MetricEvent[] {
+    if (this.#readingIsOld(ctx.nowMs)) return [];
     const peers = this.#reader();
     const events: MetricEvent[] = [];
     const seen = new Set<string>();

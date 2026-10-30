@@ -154,6 +154,10 @@ import {
   PgStandbySampler,
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
+import {
+  FabricPeerReporter,
+  type FabricPeerSubscribe,
+} from "./fabric-peer-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { BackupCopier } from "../backups/copier.ts";
 import { BackupCopyReporter } from "../backups/copy-reporter.ts";
@@ -163,6 +167,7 @@ import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   BACKUP_S3_COPY_FEATURE,
+  FABRIC_PEER_REPORT_FEATURE,
   HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
@@ -256,6 +261,8 @@ export type CommandPorts = {
   ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
+  /** Hear every 60 s `tp0` peer reading (`fabric-peers-report`). */
+  subscribeFabricPeers?: FabricPeerSubscribe;
 };
 
 let commandPorts: CommandPorts = {};
@@ -525,6 +532,7 @@ export class InstanceClient {
   #pgStandbySampler: PgStandbySampler | undefined;
   #mysqlFamilySampler: PgStandbySampler | undefined;
   #managedHealthReporter: ManagedHealthReporter | undefined;
+  #fabricPeerReporter: FabricPeerReporter | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #backupCopier: BackupCopier | undefined;
   #backupCopyReporter: BackupCopyReporter | undefined;
@@ -979,6 +987,7 @@ export class InstanceClient {
     this.#pgStandbySampler?.detach();
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
+    this.#fabricPeerReporter?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -1068,6 +1077,7 @@ export class InstanceClient {
     this.#pgStandbySampler?.detach();
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
+    this.#fabricPeerReporter?.detach();
     this.#backupReporter?.detach();
     this.#backupCopier?.stop();
     this.#backupCopyReporter?.detach();
@@ -1522,6 +1532,7 @@ export class InstanceClient {
     });
     this.#mysqlFamilySampler.attach();
     this.#ensureManagedHealthReporter().attach();
+    this.#ensureFabricPeerReporter().attach();
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
@@ -1592,6 +1603,7 @@ export class InstanceClient {
       this.#pgStandbySampler?.detach();
       this.#mysqlFamilySampler?.detach();
       this.#managedHealthReporter?.detach();
+      this.#fabricPeerReporter?.detach();
       this.#backupReporter?.detach();
       this.#backupCopier?.stop();
       this.#backupCopyReporter?.detach();
@@ -1692,6 +1704,20 @@ export class InstanceClient {
         this.instanceSupports(MANAGED_HEALTH_REPORT_FEATURE),
     });
     return this.#managedHealthReporter;
+  }
+
+  #ensureFabricPeerReporter(): FabricPeerReporter {
+    this.#fabricPeerReporter ??= new FabricPeerReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsReport: () =>
+        this.instanceSupports(FABRIC_PEER_REPORT_FEATURE),
+      subscribe: () => commandPorts.subscribeFabricPeers,
+    });
+    return this.#fabricPeerReporter;
   }
 
   #ensureBackupReporter(): BackupResultReporter {

@@ -7,6 +7,7 @@ import {
 import { connectInstance, hasEnrolledServerId } from "../instance/client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
+  armFabricPeerRefresh,
   reinstallFabricForwardingIfEnabled,
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
@@ -166,6 +167,9 @@ function closeDockerClient(client: DockerClientLike | undefined): void {
 async function connectControlPlane(
   io: DaemonRunIo,
 ): Promise<{ stop(): void }> {
+  // Also armed here: a host whose boot converge failed skips the boot
+  // restore but can still bring tp0 up through a reconcile.
+  if (!io.wireCommandPorts) armFabricPeerRefresh();
   const unwire = (io.wireCommandPorts ?? wireCommandPorts)();
   let instance: { stop(): void };
   try {
@@ -398,6 +402,9 @@ async function afterOrchestration(
   io: DaemonRunIo,
   reinstallForwardingJumps: () => Promise<void>,
 ): Promise<void> {
+  // The real host keeps tp0 peer readings fresh every 60 s; a test that
+  // stands in its own restore never starts that timer.
+  if (!io.restoreFabricFromPersistedState) armFabricPeerRefresh();
   await (io.restoreFabricFromPersistedState ??
     restoreFabricFromPersistedState)();
   await reinstallForwardingJumps();

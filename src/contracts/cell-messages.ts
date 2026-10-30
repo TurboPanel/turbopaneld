@@ -11,6 +11,7 @@
 import type { ServerReportedIp } from "./server-reported-ip.ts";
 import type {
   DrivetempEnableResult,
+  FabricReconcileObservedPeer,
   ManagedMemberObservedResult,
 } from "./commands-contracts.ts";
 import type { HardwareProfile } from "../metrics/collector/types.ts";
@@ -513,6 +514,18 @@ export type DaemonMessage =
      */
     type: "managed-health-report";
     members: ManagedHealthReportMember[];
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget: every `tp0` peer as read by the 60 s
+     * refresh (`wg show tp0 dump`). Sent when a peer's health class changed,
+     * otherwise at most every 5 minutes, only to a control plane advertising
+     * `fabric-peer-report-v1`. `observedAt` is when the dump was read.
+     */
+    type: "fabric-peers-report";
+    peers: FabricReconcileObservedPeer[];
+    observedAt: string;
     at: string;
   }
   | {
