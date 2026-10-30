@@ -129,10 +129,31 @@ export function dropDatabaseSql(name: string): string {
   return `DROP DATABASE IF EXISTS ${db};`;
 }
 
-export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
-  { quoteIdentifier, quoteLiteral, accountAt },
+export const {
+  grantDatabaseSql,
+  revokePlainDatabaseGrantSql,
+  grantBackupDatabaseSql,
+} = grantSqlFor(
+  {
+    quoteIdentifier,
+    quoteLiteral,
+    accountAt,
+    // Plus the global SHOW_ROUTINE ({@link grantBackupGlobalSql}).
+    backupPrivileges: ["SELECT", "SHOW VIEW", "TRIGGER", "EVENT"],
+  },
   MANAGED_DOCKER_NETWORK_HOST,
 );
+
+/**
+ * The backup login's one global right: read every stored routine's
+ * definition (`SHOW_ROUTINE` is a dynamic privilege, so global only).
+ */
+export function grantBackupGlobalSql(
+  username: string,
+  host: string = MANAGED_DOCKER_NETWORK_HOST,
+): string {
+  return `GRANT SHOW_ROUTINE ON *.* TO ${accountAt(username, host)};`;
+}
 
 export function grantRootSql(
   username: string,
