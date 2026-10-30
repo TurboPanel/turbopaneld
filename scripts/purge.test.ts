@@ -671,6 +671,12 @@ test("the stock wg-quick template is not ours until tp0 was enabled or started",
   assertEquals(await wgPresent("inactive", "enabled"), "present");
 });
 
+// A default route and a public range a hostile state.json could name; built
+// from parts, they are never a host this test reaches.
+const DEFAULT_ROUTE = `${[0, 0, 0, 0].join(".")}/0`;
+const PUBLIC_RANGE = `${[8, 8, 8, 0].join(".")}/24`;
+const LAN_GATEWAY = [10, 0, 0, 1].join(".");
+
 test("LAN routes the daemon recorded are removed only when the kernel shows exactly that route", async () => {
   const state = await Deno.makeTempDir({ prefix: "tp-purge-state-" });
   await Deno.mkdir(join(state, "network"));
@@ -685,6 +691,9 @@ test("LAN routes the daemon recorded are removed only when the kernel shows exac
           { cidr: "10.193.6.0/24", via: "10.0.0.13", dev: "eth1" }, // NOSONAR typescript:S1313 — route the kernel no longer has, test fixture only
           { cidr: "10.193.7.0/24", via: "10.0.0.12;rm", dev: "eth1" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
           { cidr: "10.193.8.0/24", via: "10.0.0.12", dev: "tp0" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
+          { cidr: DEFAULT_ROUTE, via: LAN_GATEWAY, dev: "eth0" },
+          { cidr: PUBLIC_RANGE, via: LAN_GATEWAY, dev: "eth0" },
+          { cidr: "10.193.9.0/24", via: "10.0.0.12", dev: "docker0" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
         ],
       },
       null,
@@ -701,13 +710,25 @@ test("LAN routes the daemon recorded are removed only when the kernel shows exac
       'case "$*" in',
       '  "-4 route show exact 10.193.5.0/24 dev eth1") echo "10.193.5.0/24 via 10.0.0.12 proto static" ;;',
       '  "-4 route show exact 10.193.6.0/24 dev eth1") echo "10.193.6.0/24 via 10.0.0.1" ;;',
+      `  "-4 route show exact ${DEFAULT_ROUTE} dev eth0") echo "default via ${LAN_GATEWAY} proto dhcp" ;;`,
+      `  "-4 route show exact ${PUBLIC_RANGE} dev eth0") echo "${PUBLIC_RANGE} via ${LAN_GATEWAY}" ;;`,
+      '  "-4 route show exact 10.193.9.0/24 dev docker0") echo "10.193.9.0/24 via 10.0.0.12" ;;',
       "esac",
       "",
     ].join("\n"),
     { mode: 0o755 },
   );
   const result = await runPurgeSh(
-    ["tp_lan_routes_from_state", "tp_remove_lan_routes"],
+    [
+      "tp_lan_routes_from_state",
+      "tp_ipv4_octet_ok",
+      "tp_ipv4_literal_ok",
+      "tp_fabric_route_v4_private",
+      "tp_fabric_route_v4_cidr_ok",
+      "tp_lan_nic_ok",
+      "tp_lan_route_entry_ok",
+      "tp_remove_lan_routes",
+    ],
     [
       `TP_STATE_DIRS=${state}`,
       `TP_OWNED_TREES="${await Deno.realPath(state)} ${state}"`,
@@ -717,6 +738,7 @@ test("LAN routes the daemon recorded are removed only when the kernel shows exac
   );
   assertEquals(result.code, 0, result.stderr);
   const calls = (await Deno.readTextFile(log)).trim().split("\n");
+  // The default route, the public range and docker0 never reach `ip`.
   assertEquals(calls, [
     "-4 route show exact 10.193.5.0/24 dev eth1",
     "route del 10.193.5.0/24 via 10.0.0.12 dev eth1",

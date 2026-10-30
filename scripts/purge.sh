@@ -2411,9 +2411,89 @@ tp_lan_routes_from_state() {
     sed -n 's/.*"cidr":"\([0-9./]*\)","via":"\([0-9.]*\)","dev":"\([A-Za-z0-9._-]*\)".*/\1 \2 \3/p'
 }
 
+# The LAN route rules of the host wrapper, copied here because this script
+# stands alone (orchestration/scripts/tp-host: tp_ipv4_octet_ok,
+# tp_ipv4_literal_ok, tp_fabric_route_v4_private, the IPv4 half of
+# tp_fabric_route_cidr_ok and tp_lan_nic_ok). Keep them identical in behaviour
+# to the wrapper's: the purge must never delete a route the wrapper would not
+# have let the daemon add.
+
+# One IPv4 octet: 1-3 digits, no leading zero, at most 255.
+tp_ipv4_octet_ok() {
+  _ioo_oct=$1
+  case "$_ioo_oct" in
+    ''|*[!0-9]*|0?*) [ "$_ioo_oct" = "0" ] ;;
+    ????*) return 1 ;;
+    *) [ "$_ioo_oct" -le 255 ] ;;
+  esac
+}
+
+# A plain IPv4 literal: four octets, no leading zeros, nothing else.
+tp_ipv4_literal_ok() {
+  _ilo_rest=$1
+  case "$_ilo_rest" in *[!0-9.]*|.*|*.|*..*|'') return 1 ;; *) ;; esac
+  _ilo_n=0
+  while [ -n "$_ilo_rest" ]; do
+    tp_ipv4_octet_ok "${_ilo_rest%%.*}" || return 1
+    _ilo_n=$((_ilo_n + 1))
+    case "$_ilo_rest" in *.*) _ilo_rest="${_ilo_rest#*.}" ;; *) _ilo_rest="" ;; esac
+  done
+  [ "$_ilo_n" -eq 4 ]
+}
+
+# A private IPv4 block (first octet, second octet, prefix): 10/8, 172.16/12,
+# 192.168/16 and 100.64/10.
+tp_fabric_route_v4_private() {
+  _frp_o1=$1
+  _frp_o2=$2
+  _frp_bits=$3
+  case "$_frp_o1" in
+    10) return 0 ;;
+    172) [ "$_frp_o2" -ge 16 ] && [ "$_frp_o2" -le 31 ] && [ "$_frp_bits" -ge 12 ] ;;
+    192) [ "$_frp_o2" -eq 168 ] && [ "$_frp_bits" -ge 16 ] ;;
+    100) [ "$_frp_o2" -ge 64 ] && [ "$_frp_o2" -le 127 ] && [ "$_frp_bits" -ge 10 ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# A fabric IPv4 route: a.b.c.d/8-32 inside a private block, always with a
+# prefix (the wrapper's tp_fabric_route_cidr_ok for IPv4).
+tp_fabric_route_v4_cidr_ok() {
+  _frc_cidr=$1
+  case "$_frc_cidr" in */*/*) return 1 ;; */*) ;; *) return 1 ;; esac
+  _frc_addr="${_frc_cidr%/*}"
+  _frc_bits="${_frc_cidr#*/}"
+  case "$_frc_bits" in ''|*[!0-9]*|0?*|????*) return 1 ;; *) ;; esac
+  tp_ipv4_literal_ok "$_frc_addr" || return 1
+  [ "$_frc_bits" -ge 8 ] && [ "$_frc_bits" -le 32 ] || return 1
+  _frc_o2="${_frc_addr#*.}"
+  tp_fabric_route_v4_private "${_frc_addr%%.*}" "${_frc_o2%%.*}" "$_frc_bits"
+}
+
+# A LAN interface name: 1-15 of letters, digits, `.`, `-`, `_`, never the
+# fabric interface, loopback or a container-side link.
+tp_lan_nic_ok() {
+  _lno_nic=$1
+  case "$_lno_nic" in ''|*[!A-Za-z0-9._-]*|-*|.|..) return 1 ;; *) ;; esac
+  [ "${#_lno_nic}" -le 15 ] || return 1
+  case "$_lno_nic" in tp0|lo|docker*|br-*|veth*|tpn*) return 1 ;; *) ;; esac
+}
+
+# One recorded LAN route passes the wrapper's rules: an IPv4 private range
+# (/8-/32), a plain IPv4 next hop and a plain LAN interface.
+tp_lan_route_entry_ok() {
+  _lre_cidr=$1
+  _lre_via=$2
+  _lre_dev=$3
+  tp_fabric_route_v4_cidr_ok "$_lre_cidr" || return 1
+  tp_ipv4_literal_ok "$_lre_via" || return 1
+  tp_lan_nic_ok "$_lre_dev"
+}
+
 # state.json is writable by the daemon account, so nothing in it is trusted:
-# a route is deleted only when its fields have the expected shape and the
-# kernel shows exactly that route (same range, next hop and interface).
+# a route is deleted only when its fields pass the wrapper's rules (so a
+# default route or a public range is never touched) and the kernel shows
+# exactly that route (same range, next hop and interface).
 tp_remove_lan_routes() {
   for _rlr_dir in $TP_STATE_DIRS; do
     _rlr_state="$_rlr_dir/network/state.json"
@@ -2421,8 +2501,7 @@ tp_remove_lan_routes() {
     tp_path_is_safe "$_rlr_state" || continue
     tp_lan_routes_from_state "$_rlr_state" > "$TP_TMP/lan.routes" || continue
     while read -r _rlr_cidr _rlr_via _rlr_dev; do
-      case "$_rlr_cidr" in */*) ;; *) continue ;; esac
-      case "$_rlr_dev" in ''|-*|tp0|lo) continue ;; *) ;; esac
+      tp_lan_route_entry_ok "$_rlr_cidr" "$_rlr_via" "$_rlr_dev" || continue
       ip -4 route show exact "$_rlr_cidr" dev "$_rlr_dev" 2>/dev/null |
         sed 's/$/ /' | grep -qF "via $_rlr_via " || continue
       tp_run "remove TurboFabric LAN route $_rlr_cidr via $_rlr_via" \

@@ -1610,7 +1610,7 @@ test("ip route takes LAN routes only via a connected subnet of a plain interface
       const args of [
         lan("replace", "10.193.5.0/24", "10.0.0.12"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
         lan("del", "10.193.5.0/24", "10.0.0.12"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
-        lan("replace", "172.20.1.0/24", "10.0.0.255"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "172.20.1.0/24", "10.0.0.254"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
         lan("replace", "192.168.7.0/24", "10.0.8.9"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
       ]
     ) {
@@ -1631,6 +1631,8 @@ test("ip route takes LAN routes only via a connected subnet of a plain interface
         lan("replace", "10.193.5.0/24", "10.0.0.12", "br-1234"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
         lan("replace", "10.193.5.0/24", "10.0.0.12", "eth1/x"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
         lan("replace", "10.193.5.0/24", "10.0.0.12", "abcdefghijklmnop"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "10.193.5.0/24", "10.0.0.255"), // NOSONAR typescript:S1313 — the subnet's broadcast address, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.0.0"), // NOSONAR typescript:S1313 — the subnet's network address, test fixture only
         lan("replace", "10.193.5.0/24", "10.0.0.012"), // NOSONAR typescript:S1313 — leading zero, test fixture only
         lan("replace", "10.193.5.0/24", "10.0.0"), // NOSONAR typescript:S1313 — short address, test fixture only
         lan("replace", "10.193.5.0/24", "10.0.0.0/24"), // NOSONAR typescript:S1313 — a range is not a next hop, test fixture only
@@ -1701,6 +1703,71 @@ test("ip route on tp0 takes only private ranges", async () => {
       ]
     ) {
       await refused(host, route(cidr));
+    }
+  });
+});
+
+test("ip route replace never takes over a connected subnet on any interface", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("tp-test"), { recursive: true });
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-link-eth1"),
+      "10.0.0.0/24 proto kernel src 10.0.0.11\n", // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
+    );
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-kernel"),
+      [
+        "10.0.0.0/24 dev eth1 proto kernel scope link src 10.0.0.11", // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
+        "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown", // NOSONAR typescript:S1313 — docker0's usual subnet, test fixture only
+        "10.250.0.0/16 dev tp0 proto kernel scope link", // NOSONAR typescript:S1313 — sample fabric subnet for this test fixture
+        "",
+      ].join("\n"),
+    );
+    const lan = (action: string, cidr: string) => [
+      "ip",
+      "route",
+      action,
+      cidr,
+      "via",
+      "10.0.0.12", // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      "dev",
+      "eth1",
+    ];
+    const tp0 = (action: string, cidr: string) => [
+      "ip",
+      "route",
+      action,
+      cidr,
+      "dev",
+      "tp0",
+    ];
+    const taken = [
+      "10.0.0.0/24", // equal to the LAN's own subnet
+      "10.0.0.0/16", // contains it
+      "10.0.0.128/25", // sits inside it
+      "172.17.0.0/16", // equal to docker0's
+      "172.16.0.0/12", // contains it
+      "172.17.5.0/24", // sits inside it
+    ];
+    for (const cidr of taken) {
+      await refused(host, lan("replace", cidr));
+      await refused(host, tp0("replace", cidr));
+    }
+    // A LAN route checks every interface, tp0 included.
+    await refused(host, lan("replace", "10.250.5.0/24"));
+    for (
+      const args of [
+        lan("replace", "10.193.5.0/24"),
+        lan("del", "10.0.0.128/25"),
+        tp0("replace", "10.193.5.0/24"),
+        tp0("replace", "10.250.0.12/32"),
+        tp0("replace", "fd12:3456:789a::/48"),
+        tp0("del", "10.0.0.0/24"),
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
     }
   });
 });
