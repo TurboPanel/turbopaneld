@@ -23,6 +23,7 @@ import {
   handleFabricPathProbe,
   handleFabricReconcile,
   isFabricBridgeName,
+  isFabricRunRefused,
   isFreshProbeHandshake,
   parsePeerPresharedKeysFromWgConf,
   parseWgDumpPeers,
@@ -783,10 +784,33 @@ test("isFabricBridgeName accepts only tpn_<uuid>", () => {
   assertEquals(isFabricBridgeName(`${NETWORK_NAME}x`), false);
 });
 
-test("teardown fails when wg-quick unit cannot be disabled", async () => {
+/** A `wg-quick@tp0` that is enabled, and refuses `disable` with `stderr`. */
+function refusingWgQuickUnit(
+  stderr: string,
+): (cmd: string, args: string[]) => FabricRunResult | null {
+  return (cmd, args) => {
+    if (cmd !== "systemctl") return null;
+    if (args[0] === "is-enabled") return ok("enabled");
+    if (args[0] === "disable") return fail(stderr);
+    return null;
+  };
+}
+
+test("teardown deletes tp0 and state even when wg-quick cannot be disabled, then reports it", async () => {
   await withFabricDir(
     "tp-fabric-teardown-disable-",
-    async () => {
+    async (networkDir, invocations) => {
+      await handleFabricReconcile(
+        enabledFrom(enabledPayload()),
+        new Date().toISOString(),
+      );
+      invocations.length = 0;
+      setFabricRunForTests(
+        recordingRun(
+          invocations,
+          refusingWgQuickUnit("Failed to disable unit: Access denied"),
+        ),
+      );
       await assertRejects(
         () =>
           handleFabricReconcile(
@@ -794,15 +818,161 @@ test("teardown fails when wg-quick unit cannot be disabled", async () => {
             new Date().toISOString(),
           ),
         Error,
-        "Failed to disable unit: Access denied",
+        "TurboFabric teardown did not finish: stop wg-quick@tp0: Failed to disable unit: Access denied",
+      );
+      assertEquals(invocations.includes("ip link delete tp0"), true);
+      assertEquals(await pathExists(join(networkDir, "state.json")), false);
+    },
+  );
+});
+
+test("a pause marks the state paused and deletes tp0 when wg-quick cannot be disabled, and boot keeps it down", async () => {
+  await withFabricDir(
+    "tp-fabric-pause-disable-",
+    async (networkDir, invocations) => {
+      const when = new Date().toISOString();
+      await handleFabricReconcile(enabledFrom(enabledPayload()), when);
+      invocations.length = 0;
+      setFabricRunForTests(
+        recordingRun(
+          invocations,
+          refusingWgQuickUnit("Interactive authentication required."),
+        ),
+      );
+      await assertRejects(
+        () => handleFabricReconcile({ enabled: false, retainKeys: true }, when),
+        Error,
+        "TurboFabric pause did not finish",
+      );
+      assertEquals(invocations.includes("ip link delete tp0"), true);
+      const state = JSON.parse(
+        await Deno.readTextFile(join(networkDir, "state.json")),
+      ) as { suspended?: boolean };
+      assertEquals(state.suspended, true);
+
+      invocations.length = 0;
+      await restoreFabricFromPersistedState();
+      assertEquals(invocations.includes("ip link delete tp0"), true);
+      assertEquals(
+        invocations.some((line) => line.startsWith("ip link add")),
+        false,
+      );
+    },
+  );
+});
+
+test("a paused fabric with a disabled wg-quick unit pauses without touching the unit", async () => {
+  await withFabricDir(
+    "tp-fabric-pause-unit-off-",
+    async (_dir, invocations) => {
+      const when = new Date().toISOString();
+      await handleFabricReconcile(enabledFrom(enabledPayload()), when);
+      invocations.length = 0;
+      await handleFabricReconcile({ enabled: false, retainKeys: true }, when);
+      assertEquals(
+        invocations.some((line) => line.startsWith("systemctl disable")),
+        false,
+      );
+      assertEquals(invocations.includes("ip link delete tp0"), true);
+    },
+  );
+});
+
+test("boot with no state removes a tp0 a failed teardown left behind", async () => {
+  await withFabricDir("tp-fabric-boot-leftover-", async (_dir, invocations) => {
+    await restoreFabricFromPersistedState();
+    assertEquals(invocations.includes("ip -o link show dev tp0"), true);
+    assertEquals(invocations.includes("ip link delete tp0"), true);
+  });
+});
+
+test("boot with no state and no tp0 deletes nothing", async () => {
+  await withFabricDir(
+    "tp-fabric-boot-clean-",
+    async (_dir, invocations) => {
+      await restoreFabricFromPersistedState();
+      assertEquals(invocations.includes("ip link delete tp0"), false);
+    },
+    (cmd, args) =>
+      cmd === "ip" && args.join(" ") === "-o link show dev tp0"
+        ? fail('Device "tp0" does not exist.')
+        : null,
+  );
+});
+
+test("systemd and kernel refusals both go to the host wrapper", () => {
+  for (
+    const stderr of [
+      "Failed to disable unit: Access denied",
+      "Interactive authentication required.",
+      "RTNETLINK answers: Operation not permitted",
+      "open /etc/wireguard: permission denied",
+    ]
+  ) {
+    assertEquals(isFabricRunRefused(fail(stderr)), true, stderr);
+  }
+  assertEquals(isFabricRunRefused(fail("Unit not found.")), false);
+});
+
+test("a host without Docker joins: no docker preflight, bridges wait with a warning, TP-FORWARD hangs off FORWARD", async () => {
+  await withFabricDir(
+    "tp-fabric-no-docker-",
+    async (_dir, invocations) => {
+      const result = await handleFabricReconcile(
+        enabledFrom(enabledPayload()),
+        new Date().toISOString(),
+      );
+      assertEquals(result.summary, "TurboFabric reconciled");
+      assertEquals(result.warnings?.length, 1);
+      assertEquals(result.warnings?.[0]?.includes("Docker"), true);
+      assertEquals(
+        invocations.some((line) => line.startsWith("docker network")),
+        false,
+      );
+      assertEquals(
+        invocations.includes("ip link add dev tp0 type wireguard"),
+        true,
+      );
+      assertEquals(
+        invocations.includes("iptables -I FORWARD 1 -j TP-FORWARD"),
+        true,
+      );
+      assertEquals(
+        invocations.some((line) => line.includes("-I DOCKER-USER")),
+        false,
       );
     },
     (cmd, args) => {
-      if (cmd === "systemctl" && args[0] === "disable") {
-        return fail("Failed to disable unit: Access denied");
+      if (cmd === "docker") return fail("docker: command not found");
+      if (cmd === "iptables" && args.join(" ") === "-S DOCKER-USER") {
+        return fail("iptables: No chain/target/match by that name.");
       }
       return null;
     },
+  );
+});
+
+test("with Docker the TP-FORWARD jump sits on DOCKER-USER and a FORWARD jump is moved off", async () => {
+  await withFabricDir(
+    "tp-fabric-docker-jump-",
+    async (_dir, invocations) => {
+      await handleFabricReconcile(
+        enabledFrom(enabledPayload()),
+        new Date().toISOString(),
+      );
+      assertEquals(
+        invocations.includes("iptables -I DOCKER-USER 1 -j TP-FORWARD"),
+        true,
+      );
+      assertEquals(
+        invocations.includes("iptables -D FORWARD -j TP-FORWARD"),
+        true,
+      );
+    },
+    (cmd, args) =>
+      cmd === "iptables" && args.join(" ") === "-C FORWARD -j TP-FORWARD"
+        ? ok()
+        : null,
   );
 });
 
@@ -2112,5 +2282,45 @@ test("boot restore brings up bridges and forwarding when a route cannot be insta
       ),
       true,
     );
+  });
+});
+
+test("parseFabricReconcileResult carries warnings and refuses malformed ones", () => {
+  const warning =
+    "LAN route 10.194.0.0/16 via 10.10.3.86 not installed: eth0 already routes it";
+  assertEquals(
+    parseFabricReconcileResult({
+      summary: "TurboFabric reconciled",
+      warnings: [warning],
+    }).warnings,
+    [warning],
+  );
+  for (
+    const warnings of ["one", [""], [7], Array.from({ length: 65 }, () => "x")]
+  ) {
+    assertThrows(() =>
+      parseFabricReconcileResult({
+        summary: "TurboFabric reconciled",
+        warnings,
+      })
+    );
+  }
+});
+
+test("a dial-in peer (no endpoint) is configured without an Endpoint line", async () => {
+  await withFabricDir("tp-fabric-dial-in-", async (networkDir) => {
+    const raw = enabledPayload();
+    const peers = raw.peers as Record<string, unknown>[];
+    const { endpoint: _endpoint, ...dialIn } = peers[0] ?? {};
+    const result = await handleFabricReconcile(
+      enabledFrom({ ...raw, peers: [dialIn] }),
+      new Date().toISOString(),
+    );
+    assertEquals(result.summary, "TurboFabric reconciled");
+    const conf = await Deno.readTextFile(
+      join(networkDir, "wireguard", "tp0.conf"),
+    );
+    assertEquals(conf.includes(`PublicKey = ${WG_PUBKEY_B}`), true);
+    assertEquals(conf.includes("Endpoint ="), false);
   });
 });

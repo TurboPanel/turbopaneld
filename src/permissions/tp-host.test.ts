@@ -1485,6 +1485,17 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
       ok.stdout,
       "EXEC [systemctl] [--no-pager] [enable] [--now]",
     );
+    // TurboFabric retires a wg-quick@tp0 left from older releases.
+    for (
+      const args of [
+        ["systemctl", "is-enabled", "wg-quick@tp0"],
+        ["systemctl", "is-active", "wg-quick@tp0"],
+        ["systemctl", "disable", "--now", "wg-quick@tp0"],
+      ]
+    ) {
+      const unit = await host.run(args);
+      assertEquals(unit.code, 0, `${args.join(" ")}: ${unit.stderr}`);
+    }
     for (
       const args of [
         ["systemctl", "link", host.path("tmp/evil.service")],
@@ -4351,6 +4362,11 @@ test("iptables and ip6tables: only the options the daemon sends, in no spelling 
           ["-F", "TP-FORWARD"],
           ["-X", "TP-FORWARD"],
           ["-D", "DOCKER-USER", "-j", "TP-FORWARD"],
+          // A host without Docker hangs TP-FORWARD off FORWARD instead.
+          ["-S", "DOCKER-USER"],
+          ["-C", "FORWARD", "-j", "TP-FORWARD"],
+          ["-I", "FORWARD", "1", "-j", "TP-FORWARD"],
+          ["-D", "FORWARD", "-j", "TP-FORWARD"],
           ["--version"],
           ["-V"],
         ]

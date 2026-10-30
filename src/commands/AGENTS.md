@@ -62,6 +62,24 @@ installed (forwarding is IPv4 only). Strict reverse-path filtering passes
 because the LAN route sends replies out of the interface the traffic came in
 on, so no `rp_filter` change is made.
 
+A skipped LAN or `tp0` route is reported in the result's `warnings` (plain
+sentences, at most 20), not only logged (warnings go to `daemon.err.log`), and
+the apply stamp is not written, so the next reconcile retries it. Docker is
+not a fabric prerequisite: without it the tunnel and routes come up, the
+routed bridges wait (a `warnings` entry says so) and are created when Docker
+becomes reachable, and `TP-FORWARD` hangs off `FORWARD` until `DOCKER-USER`
+exists.
+
+## TurboFabric pause and teardown
+
+The daemon is the only owner of `tp0`. Taking it down runs every step even
+when one fails (retire a `wg-quick@tp0` that is enabled or running, delete
+`tp0`, forwarding rules, files) and then fails the command with one error
+naming the failed steps. A pause writes `suspended` first, so a restart keeps
+the tunnel down. Boot with a paused state, or with no state at all, deletes a
+leftover `tp0`. Host calls refused with systemd's "Access denied" are retried
+through `tp-host`, like "Operation not permitted".
+
 ## Command results survive a lost link (`command-recovery-v1`)
 
 `command-outbox.ts` journals every accepted command under

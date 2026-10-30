@@ -2045,7 +2045,7 @@ const SITES: CallSite[] = [
   // TurboFabric: `runHost` tries the command as the daemon first and retries
   // through sudo on a permission error; Docker never goes through sudo.
   notRoot(
-    'src/commands/fabric.ts|probeFabricTool("docker",["--version"])',
+    'src/commands/fabric.ts|runHost("docker",["--version"],{timeoutMs:PREFLIGHT_TIMEOUT_MS,})',
     DOCKER_DIRECT,
   ),
   notRoot('src/commands/fabric.ts|probeFabricTool("ip",["-V"])', PROBE),
@@ -2254,12 +2254,17 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("ip",["link","delete",FABRIC_INTERFACE_NAME],isMissingDeviceText)',
+    'src/commands/fabric.ts|runHost("ip",["link","delete",FABRIC_INTERFACE_NAME])',
     { argv: ["ip", "link", "delete", "tp0"] },
   ),
+  // TP-FORWARD hangs off DOCKER-USER, or off FORWARD on a host without Docker.
   tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-D",DOCKER_USER_CHAIN,"-j",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-D", "DOCKER-USER", "-j", "TP-FORWARD"] },
+    'src/commands/fabric.ts|runHost("iptables",["-S",DOCKER_USER_CHAIN])',
+    { argv: ["iptables", "-S", "DOCKER-USER"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-D",parent,"-j",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
+    { argv: ["iptables", "-D", "FORWARD", "-j", "TP-FORWARD"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-F",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
