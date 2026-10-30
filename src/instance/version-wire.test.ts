@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import {
+  ACME_ISSUE_FEATURE,
   BACKUP_S3_COPY_FEATURE,
   COMMAND_RECOVERY_FEATURE,
   compareSemver,
@@ -218,6 +219,12 @@ test("managed-database-convert-v1 is advertised", () => {
 test("tls-capture-v1 is advertised and raised no floor", () => {
   assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(TLS_CAPTURE_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("acme-issue-v1 is advertised and raised no floor", () => {
+  assertEquals(ACME_ISSUE_FEATURE, "acme-issue-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(ACME_ISSUE_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
