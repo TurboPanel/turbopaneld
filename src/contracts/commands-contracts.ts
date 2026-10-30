@@ -791,6 +791,12 @@ export type FabricReconcileResult = {
   publicKey?: string;
   skipped?: boolean;
   peers?: FabricReconcileObservedPeer[];
+  /**
+   * Plain sentences about what an apply that worked had to leave out (a LAN
+   * or `tp0` route another interface already holds, container bridges that
+   * wait for Docker). Absent when nothing was left out.
+   */
+  warnings?: string[];
 };
 
 export type EnvironmentDeployHostingProxy = {
@@ -4230,7 +4236,28 @@ export function parseFabricReconcileResult(
     }
     result.peers = record.peers.map(parseFabricObservedPeer);
   }
+  if (record.warnings !== undefined) {
+    result.warnings = parseFabricResultWarnings(record.warnings);
+  }
   return result;
+}
+
+const FABRIC_RESULT_WARNINGS_MAX = 64;
+const FABRIC_RESULT_WARNING_MAX_LENGTH = 500;
+
+function parseFabricResultWarnings(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > FABRIC_RESULT_WARNINGS_MAX) {
+    throw new TypeError("Invalid fabric reconcile result warnings");
+  }
+  return value.map((entry) => {
+    if (
+      typeof entry !== "string" || entry.length === 0 ||
+      entry.length > FABRIC_RESULT_WARNING_MAX_LENGTH
+    ) {
+      throw new TypeError("Invalid fabric reconcile result warning");
+    }
+    return entry;
+  });
 }
 
 function parseNonNegativeInteger(value: unknown, field: string): number {

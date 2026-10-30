@@ -309,14 +309,22 @@ test("a LAN route nothing wants any more is removed, other routes are not", asyn
 test("a LAN route is skipped without a connected subnet, a foreign route or a bridge overlap", async () => {
   await withHost(async (host, networkDir) => {
     host.routes.add("10.193.6.0/24 via 10.0.0.1 dev eth1"); // NOSONAR typescript:S1313 — sample operator route for this test fixture, not a reachable host
-    await handleFabricReconcile(
-      lanOnlyPayload([
-        { cidr: "10.193.7.0/24", via: "10.5.0.12" },
-        { cidr: "10.193.6.0/24", via: NEIGHBOUR },
-        { cidr: "10.194.1.128/25", via: NEIGHBOUR },
-      ]),
-      "t",
-    );
+    const payload = lanOnlyPayload([
+      { cidr: "10.193.7.0/24", via: "10.5.0.12" },
+      { cidr: "10.193.6.0/24", via: NEIGHBOUR },
+      { cidr: "10.194.1.128/25", via: NEIGHBOUR },
+    ]);
+    const result = await handleFabricReconcile(payload, "t");
+    // Every skip is reported to the control plane, not only logged.
+    assertEquals(result.warnings, [
+      "LAN route 10.193.7.0/24 via 10.5.0.12 not installed: no connected subnet holds 10.5.0.12 as a host address",
+      "LAN route 10.193.6.0/24 via 10.0.0.12 not installed: eth1 already routes it",
+      "LAN route 10.194.1.128/25 via 10.0.0.12 not installed: it overlaps the local bridge subnet 10.194.1.0/24",
+    ]);
+    // No apply stamp: the next reconcile tries again and reports it again.
+    const again = await handleFabricReconcile(payload, "t");
+    assertEquals(again.skipped, undefined);
+    assertEquals(again.warnings?.length, 3);
     assertEquals(
       host.calls.some((c) => c.startsWith("ip route replace")),
       false,
