@@ -111,30 +111,35 @@ tp_ca_parses() {
 
 # A fingerprint as the daemon compares it: lowercase hex, no colons.
 tp_fingerprint_hex() {
-  printf '%s' "$1" | tr 'A-F' 'a-f' | tr -d ': '
+  _fh_value="$1"
+  printf '%s' "$_fh_value" | tr 'A-F' 'a-f' | tr -d ': '
 }
 
 tp_cert_fingerprint_hex() {
-  tp_fingerprint_hex "$(tp_ca_fingerprint "$1")"
+  _cfh_path="$1"
+  tp_fingerprint_hex "$(tp_ca_fingerprint "$_cfh_path")"
 }
 
 # Write each CERTIFICATE block of PEM to DIR/c1.pem, DIR/c2.pem, ...
 tp_split_pem_bundle() {
-  awk -v dir="$2" '
+  _spb_src="$1"
+  _spb_dir="$2"
+  awk -v dir="$_spb_dir" '
     /-----BEGIN CERTIFICATE-----/ { n++; file = dir "/c" n ".pem" }
     n > 0 { print >> file }
     /-----END CERTIFICATE-----/ { if (file != "") close(file) }
-  ' "$1"
+  ' "$_spb_src"
 }
 
 # Normalise a comma-separated fingerprint list. Fails on anything that is not
 # a SHA-256 fingerprint, so a mangled command stops instead of installing
 # unpinned.
 tp_normalize_ca_pin() {
+  _pin_in="$1"
   _pin_out=""
   _pin_ifs="$IFS"
   IFS=','
-  for _pin_item in $1; do
+  for _pin_item in $_pin_in; do
     _pin_item="$(tp_fingerprint_hex "$_pin_item")"
     [ -n "$_pin_item" ] || continue
     case "$_pin_item" in
@@ -178,7 +183,8 @@ tp_pem_files_pin() {
 # CA_PIN. The daemon trusts every certificate in its trust files, so one
 # extra certificate is as bad as a wrong one.
 tp_pem_matches_ca_pin() {
-  _pm_found="$(tp_pem_files_pin "$1")"
+  _pm_src="$1"
+  _pm_found="$(tp_pem_files_pin "$_pm_src")"
   [ -n "$_pm_found" ] || return 1
   _pm_ifs="$IFS"
   IFS=','
@@ -469,7 +475,8 @@ tp_fetch_uploaded_trust() {
 
 tp_install_instance_ca() {
   _new_ca="$1"
-  if ! tp_check_fetched_trust "$_new_ca" "Platform CA" "${2:-$(tp_bootstrap_leg)}"; then
+  _new_ca_leg="${2:-$(tp_bootstrap_leg)}"
+  if ! tp_check_fetched_trust "$_new_ca" "Platform CA" "$_new_ca_leg"; then
     return 1
   fi
   _old_fp=""
@@ -2518,11 +2525,9 @@ done
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
 [ -n "$CA_PIN" ] || CA_PIN="${TURBOPANEL_INSTANCE_CA_FINGERPRINT:-}"
-if [ -n "$CA_PIN" ]; then
-  if ! CA_PIN="$(tp_normalize_ca_pin "$CA_PIN")"; then
-    tp_print_error "TURBOPANEL_INSTANCE_CA_FINGERPRINT must be one or more SHA-256 fingerprints separated by commas. Copy the install command again from Add Server."
-    exit 1
-  fi
+if [ -n "$CA_PIN" ] && ! CA_PIN="$(tp_normalize_ca_pin "$CA_PIN")"; then
+  tp_print_error "TURBOPANEL_INSTANCE_CA_FINGERPRINT must be one or more SHA-256 fingerprints separated by commas. Copy the install command again from Add Server."
+  exit 1
 fi
 DL_BASE="$(tp_strip_trailing_slashes "$DL_BASE")"
 if [ -n "$HOST_URL" ]; then
