@@ -6,6 +6,7 @@
  */
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
+import { docker, dockerReachable } from "../../testing/docker-run.ts";
 import { grantBackupPrivileges } from "./grant-databases.ts";
 import {
   createClientAccountSql as mariadbAccountSql,
@@ -44,30 +45,6 @@ const ENGINES = [
     dumpFlags: [] as string[],
   },
 ];
-
-type Run = { success: boolean; stdout: string; stderr: string };
-
-async function docker(args: string[]): Promise<Run> {
-  const out = await new Deno.Command("docker", {
-    args,
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
-  return {
-    success: out.success,
-    stdout: decode(out.stdout),
-    stderr: decode(out.stderr),
-  };
-}
-
-async function dockerReachable(): Promise<boolean> {
-  try {
-    return (await docker(["info"])).success;
-  } catch {
-    return false;
-  }
-}
 
 const DOCKER_AVAILABLE = await dockerReachable();
 if (!DOCKER_AVAILABLE) {
