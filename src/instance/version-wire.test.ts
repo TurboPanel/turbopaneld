@@ -12,6 +12,7 @@ import {
   DEPLOY_HOSTINGS_ONLY_FEATURE,
   HOST_CAPACITY_FEATURE,
   instanceUnsupportedReason,
+  MANAGED_BACKUP_LOGIN_FEATURE,
   MANAGED_DATA_ONLY_READWRITE_FEATURE,
   MANAGED_DATABASE_CONVERT_FEATURE,
   MANAGED_DATABASE_OWNER_FEATURE,
@@ -386,8 +387,13 @@ test("tunnel-connector-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("tunnel-status-v1 is advertised last and raised no floor", () => {
+test("managed-backup-login-v1 is advertised last", () => {
+  assertEquals(MANAGED_BACKUP_LOGIN_FEATURE, "managed-backup-login-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), MANAGED_BACKUP_LOGIN_FEATURE);
+});
+
+test("tunnel-status-v1 is advertised and raised no floor", () => {
   assertEquals(TUNNEL_STATUS_FEATURE, "tunnel-status-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_STATUS_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(TUNNEL_STATUS_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

@@ -20,7 +20,9 @@ import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
   grantableDatabases,
+  grantBackupPrivileges,
   grantDatabasePrivileges,
+  isBackupCredential,
 } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
@@ -51,6 +53,8 @@ import {
   ensureSocketAdminSql,
   flushPrivilegesLocalSql,
   followReplicationSourceSql,
+  grantBackupDatabaseSql,
+  grantBackupGlobalSql,
   grantDatabaseSql,
   grantRootSql,
   installAuthSocketPluginSql,
@@ -409,6 +413,20 @@ async function applyOneCredential(
       ctx.clientSourceHosts ?? [],
     ),
   );
+
+  if (isBackupCredential(credential)) {
+    // Fixed read-only dump rights on every database, whatever else was sent.
+    await grantBackupPrivileges({
+      databases: credential.databases,
+      username: credential.username,
+      hosts: ctx.clientSourceHosts ?? [],
+      grantSql: grantBackupDatabaseSql,
+      globalSql: grantBackupGlobalSql,
+      run: (sql) => runMysql(ctx, sql),
+    });
+    await runMysql(ctx, "FLUSH PRIVILEGES;");
+    return;
+  }
 
   // A login the site owner manages by hand keeps its account and password
   // but never has its grants written or reset here.

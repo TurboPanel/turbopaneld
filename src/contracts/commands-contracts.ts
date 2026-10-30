@@ -1956,9 +1956,19 @@ export type ManagedApplyCredential = {
    * never resets or revokes anything below the database.
    */
   grantMode?: ManagedGrantMode;
+  /**
+   * `backup`: the cluster's backup login. `role` stays `user`; the daemon
+   * gives it the read-only rights a full logical dump needs on every listed
+   * database (per engine) and nothing else, whatever `privileges` and
+   * `grantMode` say. Absent (or a value this daemon does not know) means an
+   * ordinary login.
+   */
+  kind?: ManagedCredentialKind;
   /** Daemon-recipient sealed password (`tpdaemon.…`). */
   password: string;
 };
+
+export type ManagedCredentialKind = "backup";
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyDatabaseOp = {
@@ -8070,6 +8080,8 @@ function parseManagedApplyCredentialEntry(
     ...(entry.grantMode === undefined
       ? {}
       : { grantMode: entry.grantMode as ManagedGrantMode }),
+    // Expand-only: a kind this daemon does not know is ignored, never refused.
+    ...(entry.kind === "backup" ? { kind: "backup" as const } : {}),
   };
 }
 

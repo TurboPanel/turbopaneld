@@ -112,3 +112,35 @@ export function grantableDatabases(credential: {
     ? credential.databases
     : [];
 }
+
+/** The cluster's backup login: an ordinary `user` credential sent with `kind: "backup"`. */
+export function isBackupCredential(credential: {
+  role: string;
+  kind?: string;
+}): boolean {
+  return credential.role === "user" && credential.kind === "backup";
+}
+
+/**
+ * The backup login's rights on MySQL and MariaDB: the dialect's backup set on
+ * every listed database, then (MySQL) its global rights, each for the
+ * wildcard account and every client source host, one statement per step in
+ * order. `privileges` and `grantMode` play no part: the rights are fixed.
+ */
+export function grantBackupPrivileges(options: {
+  databases: readonly string[];
+  username: string;
+  hosts: readonly string[];
+  grantSql: (database: string, username: string, host?: string) => string;
+  globalSql?: (username: string, host?: string) => string;
+  run: (sql: string) => Promise<unknown>;
+}): Promise<void> {
+  const { username, hosts, grantSql, globalSql, run } = options;
+  const forEveryHost = (build: (host?: string) => string) =>
+    [build(), ...hosts.map((host) => build(host))].join("\n");
+  const steps = [...new Set(options.databases)].map((database) =>
+    forEveryHost((host) => grantSql(database, username, host))
+  );
+  if (globalSql) steps.push(forEveryHost((host) => globalSql(username, host)));
+  return forEachSequential(steps, (sql) => run(sql));
+}

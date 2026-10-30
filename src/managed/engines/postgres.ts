@@ -15,6 +15,7 @@ import { logError, logInfo, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
   applyFollowedPrimaryConninfoSql,
+  backupLoginAttributesSql,
   connectionCensusSql,
   createDatabaseSql,
   createOrAlterRoleSql,
@@ -105,6 +106,7 @@ import {
   type FinalWalPosition,
   finalWalPositionFromOutput,
 } from "./postgres-wal.ts";
+import { isBackupCredential } from "./grant-databases.ts";
 
 /**
  * Validate `database` with the same identifier guard used by SQL callers
@@ -311,15 +313,19 @@ async function applyOneCredential(
       superuser: false,
     }),
   );
+  if (isBackupCredential(credential)) {
+    await runPsql(ctx, backupLoginAttributesSql(credential.username));
+    return;
+  }
   if (isDatabaseAdmin(credential)) {
     // A tool login holds no attribute that reaches beyond its databases.
     await runPsql(ctx, databaseAdminAttributesSql(credential.username));
   }
 }
 
-/** The Database admin login: its `privileges` name `admin`. */
+/** The Database admin login: its `privileges` name `admin` (never the backup login). */
 function isDatabaseAdmin(credential: ManagedApplyCredential): boolean {
-  return credential.role === "user" &&
+  return credential.role === "user" && !isBackupCredential(credential) &&
     (credential.privileges ?? []).includes("admin");
 }
 
@@ -337,14 +343,21 @@ function userAccessList(
   usernames: Map<string, string[]>;
   selfManaged: { username: string; databases: string[] }[];
   admins: { username: string; databases: string[] }[];
+  backups: { username: string; databases: string[] }[];
 } {
   const granted: UserAccess[] = [];
   const usernames = new Map<string, string[]>();
   const selfManaged: { username: string; databases: string[] }[] = [];
   const admins: { username: string; databases: string[] }[] = [];
+  const backups: { username: string; databases: string[] }[] = [];
   for (const credential of credentials) {
     if (credential.role !== "user") continue;
     const databases = [...new Set(credential.databases)];
+    if (isBackupCredential(credential)) {
+      // Reads through `pg_read_all_data`; only CONNECT is per database.
+      backups.push({ username: credential.username, databases });
+      continue;
+    }
     if (isDatabaseAdmin(credential)) {
       // Its rights are fixed by the panel whatever the grant mode says.
       admins.push({ username: credential.username, databases });
@@ -362,7 +375,7 @@ function userAccessList(
       granted.push({ username: credential.username, level, databases });
     }
   }
-  return { granted, usernames, selfManaged, admins };
+  return { granted, usernames, selfManaged, admins, backups };
 }
 
 /** Who may create, write and read inside one database. */
@@ -410,7 +423,7 @@ async function reconcileDatabaseAccess(
   ownerRoleCandidates: readonly string[] = [],
   ownerLogins: Readonly<Record<string, string>> = {},
 ): Promise<void> {
-  const { granted, usernames, selfManaged, admins } = userAccessList(
+  const { granted, usernames, selfManaged, admins, backups } = userAccessList(
     credentials,
   );
   // Databases that may belong to an owner role: the ones the control plane
@@ -527,6 +540,19 @@ async function reconcileDatabaseAccess(
       entry.databases,
       (database) => runPsql(ctx, grantConnectOnlySql(database, entry.username)),
     ));
+
+  // The backup login connects to exactly the databases listed (every database
+  // of the cluster), and reads them through `pg_read_all_data`.
+  await forEachSequential(backups, async (entry) => {
+    await runPsql(
+      ctx,
+      revokeUnlistedDatabasesSql(entry.username, entry.databases),
+    );
+    await forEachSequential(
+      entry.databases,
+      (database) => runPsql(ctx, grantConnectOnlySql(database, entry.username)),
+    );
+  });
 
   // After the explicit grants, so no login that holds one is ever without it.
   await runPsql(ctx, revokePublicDatabaseAccessSql());
