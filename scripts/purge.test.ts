@@ -671,6 +671,59 @@ test("the stock wg-quick template is not ours until tp0 was enabled or started",
   assertEquals(await wgPresent("inactive", "enabled"), "present");
 });
 
+test("LAN routes the daemon recorded are removed only when the kernel shows exactly that route", async () => {
+  const state = await Deno.makeTempDir({ prefix: "tp-purge-state-" });
+  await Deno.mkdir(join(state, "network"));
+  await Deno.writeTextFile(
+    join(state, "network", "state.json"),
+    JSON.stringify(
+      {
+        prefix: "10.192.0.0/16",
+        tunnel: false,
+        installedLanRoutes: [
+          { cidr: "10.193.5.0/24", via: "10.0.0.12", dev: "eth1" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+          { cidr: "10.193.6.0/24", via: "10.0.0.13", dev: "eth1" }, // NOSONAR typescript:S1313 — route the kernel no longer has, test fixture only
+          { cidr: "10.193.7.0/24", via: "10.0.0.12;rm", dev: "eth1" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
+          { cidr: "10.193.8.0/24", via: "10.0.0.12", dev: "tp0" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-bin-" });
+  const log = join(bin, "calls");
+  await Deno.writeTextFile(
+    join(bin, "ip"),
+    [
+      "#!/bin/sh",
+      `echo "$*" >> ${log}`,
+      'case "$*" in',
+      '  "-4 route show exact 10.193.5.0/24 dev eth1") echo "10.193.5.0/24 via 10.0.0.12 proto static" ;;',
+      '  "-4 route show exact 10.193.6.0/24 dev eth1") echo "10.193.6.0/24 via 10.0.0.1" ;;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const result = await runPurgeSh(
+    ["tp_lan_routes_from_state", "tp_remove_lan_routes"],
+    [
+      `TP_STATE_DIRS=${state}`,
+      `TP_OWNED_TREES="${await Deno.realPath(state)} ${state}"`,
+      "tp_remove_lan_routes",
+    ].join("\n"),
+    { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  const calls = (await Deno.readTextFile(log)).trim().split("\n");
+  assertEquals(calls, [
+    "-4 route show exact 10.193.5.0/24 dev eth1",
+    "route del 10.193.5.0/24 via 10.0.0.12 dev eth1",
+    "-4 route show exact 10.193.6.0/24 dev eth1",
+  ]);
+});
+
 test("the Docker gate folders are owned trees and are removed with the other folders", async () => {
   const source = await Deno.readTextFile(purgePath);
   const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";

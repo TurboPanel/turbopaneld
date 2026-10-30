@@ -47,6 +47,20 @@ Root context: `../../AGENTS.md`. Transport: `../instance/AGENTS.md`.
   networking, ACME observe, HA observe, managed logs) stay as a documented
   one-way DAG — not fully hexagonalized in this pass.
 
+## TurboFabric LAN paths (`fabric-lan-routes-v1`)
+
+`server.fabric.reconcile` may carry `tunnel: false` (no `tp0`: it is taken
+down like a pause, the key is kept and never created; `peers` must be empty,
+`address` may be absent) and `lanRoutes` (`{ cidr, via }`: a member's
+container subnet routed via its LAN address on the interface whose connected
+subnet holds it; `fabric-lan-routes.ts`). Installed LAN routes are recorded in
+`state.json` (`installedLanRoutes`) and are the only ones ever removed. A
+pause keeps LAN routes and their `TP-FORWARD` accepts; a teardown removes
+them, and so does `scripts/purge.sh`. IPv6 entries are validated but not
+installed (forwarding is IPv4 only). Strict reverse-path filtering passes
+because the LAN route sends replies out of the interface the traffic came in
+on, so no `rp_filter` change is made.
+
 ## Command results survive a lost link (`command-recovery-v1`)
 
 `command-outbox.ts` journals every accepted command under

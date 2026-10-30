@@ -723,17 +723,35 @@ export type FabricReconcileDisabledPayload = {
   retainKeys?: boolean;
 };
 
-/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * A member's container subnet reached over a shared trusted LAN, routed via
+ * that member's LAN address (`fabric-lan-routes-v1`).
+ */
+export type FabricReconcileLanRoute = {
+  cidr: string;
+  via: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * `tunnel: false` (`fabric-lan-routes-v1`; absent means `true`): this server
+ * needs no tunnel, so `tp0` is not created (and is taken down when present,
+ * keeping its key), `peers` must be empty and `address` may be absent.
+ */
 export type FabricReconcileEnabledPayload = {
   enabled: true;
   fabricId?: string;
   listenPort?: number;
   mtu?: number;
-  address: string;
+  /** Absent only when `tunnel` is `false`. */
+  address?: string;
   prefix: string;
   peers: FabricReconcilePeer[];
   networks?: FabricReconcileNetwork[];
   gateway?: boolean;
+  tunnel?: boolean;
+  lanRoutes?: FabricReconcileLanRoute[];
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
@@ -4056,13 +4074,55 @@ function parseFabricNetworkEntry(value: unknown): FabricReconcileNetwork {
   return network;
 }
 
+function parseFabricLanRouteEntry(value: unknown): FabricReconcileLanRoute {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric lanRoutes entry");
+  }
+  const record = value as Record<string, unknown>;
+  const { cidr, via } = record;
+  if (typeof cidr !== "string" || !isValidWireguardAllowedIp(cidr.trim())) {
+    throw new TypeError("Invalid fabric lanRoutes cidr");
+  }
+  if (
+    typeof via !== "string" ||
+    !(isValidIpv4Literal(via.trim()) || isValidIpv6Literal(via.trim()))
+  ) {
+    throw new TypeError("Invalid fabric lanRoutes via");
+  }
+  return { cidr: cidr.trim(), via: via.trim() };
+}
+
+function parseFabricTunnelFlag(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new TypeError("Invalid fabric tunnel");
+  return value;
+}
+
+/** `address` is required unless the payload asks for no tunnel. */
+function parseFabricAddress(
+  value: unknown,
+  tunnel: boolean | undefined,
+): string | undefined {
+  if (value === undefined && tunnel === false) return undefined;
+  if (typeof value !== "string" || !isValidWireguardAllowedIp(value)) {
+    throw new TypeError("Invalid fabric address");
+  }
+  return value.trim();
+}
+
+function parseFabricLanRoutes(
+  value: unknown,
+): FabricReconcileLanRoute[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new TypeError("Invalid fabric lanRoutes");
+  return value.map(parseFabricLanRouteEntry);
+}
+
 function parseEnabledFabricPayload(
   record: Record<string, unknown>,
 ): FabricReconcileEnabledPayload {
-  const address = record.address;
-  if (typeof address !== "string" || !isValidWireguardAllowedIp(address)) {
-    throw new TypeError("Invalid fabric address");
-  }
+  const tunnel = parseFabricTunnelFlag(record.tunnel);
+  const address = parseFabricAddress(record.address, tunnel);
   const prefix = record.prefix;
   if (typeof prefix !== "string" || !isValidWireguardAllowedIp(prefix)) {
     throw new TypeError("Invalid fabric prefix");
@@ -4070,12 +4130,18 @@ function parseEnabledFabricPayload(
   if (!Array.isArray(record.peers)) {
     throw new TypeError("Invalid fabric peers");
   }
+  if (tunnel === false && record.peers.length > 0) {
+    throw new TypeError("Invalid fabric peers: a payload with no tunnel");
+  }
   const payload: FabricReconcileEnabledPayload = {
     enabled: true,
-    address: address.trim(),
+    ...(address === undefined ? {} : { address }),
     prefix: prefix.trim(),
     peers: record.peers.map(parseFabricPeerEntry),
   };
+  if (tunnel !== undefined) payload.tunnel = tunnel;
+  const lanRoutes = parseFabricLanRoutes(record.lanRoutes);
+  if (lanRoutes) payload.lanRoutes = lanRoutes;
   if (record.fabricId !== undefined) {
     payload.fabricId = parseFabricUuid(record.fabricId, "fabricId");
   }

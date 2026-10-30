@@ -281,6 +281,9 @@ function notRoot(key: string, why: string): CallSite {
   return { key, via: "none", why };
 }
 
+/** tp-host test mode reads an interface's connected subnets from here. */
+const LAN_CONNECTED_FIXTURE = `${P}/tp-test/ip-route-link-eth1`;
+const LAN_CONNECTED_TEXT = "10.0.0.0/24 proto kernel src 10.0.0.11\n"; // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
 const file = (path: string, contents = "x\n"): CallSiteSetup => ({
   files: { [path]: contents },
 });
@@ -2098,6 +2101,35 @@ const SITES: CallSite[] = [
     'src/commands/fabric.ts|runHost("ip",["route",action,cidr,"dev",FABRIC_INTERFACE_NAME])',
     { argv: ["ip", "route", "replace", "10.250.0.2/32", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric peer address for this test fixture, not a reachable host
     { argv: ["ip", "route", "del", "10.193.0.0/16", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric container range for this test fixture, not a reachable host
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["route",action,route.cidr,"via",route.via,"dev",route.dev])',
+    {
+      argv: [
+        "ip",
+        "route",
+        "replace",
+        "10.193.5.0/24",
+        "via",
+        "10.0.0.12",
+        "dev",
+        "eth1",
+      ], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
+    },
+    {
+      argv: [
+        "ip",
+        "route",
+        "del",
+        "10.193.5.0/24",
+        "via",
+        "10.0.0.12",
+        "dev",
+        "eth1",
+      ], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
+    },
   ),
   tpHost(
     'src/commands/fabric.ts|runHost("ip",[`-${version}`,"route","show"])',

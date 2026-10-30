@@ -2399,12 +2399,44 @@ tp_remove_firewall() {
   tp_firewall_family ip6tables
 }
 
+# LAN routes TurboFabric installed to other members' container subnets
+# (`installedLanRoutes` in <state>/network/state.json), one "cidr via dev" line
+# each. Only IPv4 private-looking shapes survive the character classes; the
+# daemon writes the keys in this order.
+tp_lan_routes_from_state() {
+  tr -d ' \t\r\n' < "$1" 2>/dev/null |
+    sed -n 's/.*"installedLanRoutes":\[\([^]]*\)\].*/\1/p' |
+    tr '}' '\n' |
+    sed -n 's/.*"cidr":"\([0-9./]*\)","via":"\([0-9.]*\)","dev":"\([A-Za-z0-9._-]*\)".*/\1 \2 \3/p'
+}
+
+# state.json is writable by the daemon account, so nothing in it is trusted:
+# a route is deleted only when its fields have the expected shape and the
+# kernel shows exactly that route (same range, next hop and interface).
+tp_remove_lan_routes() {
+  for _rlr_dir in $TP_STATE_DIRS; do
+    _rlr_state="$_rlr_dir/network/state.json"
+    [ -f "$_rlr_state" ] && [ ! -L "$_rlr_state" ] || continue
+    tp_path_is_safe "$_rlr_state" || continue
+    tp_lan_routes_from_state "$_rlr_state" > "$TP_TMP/lan.routes" || continue
+    while read -r _rlr_cidr _rlr_via _rlr_dev; do
+      case "$_rlr_cidr" in */*) ;; *) continue ;; esac
+      case "$_rlr_dev" in ''|-*|tp0|lo) continue ;; esac
+      ip -4 route show exact "$_rlr_cidr" dev "$_rlr_dev" 2>/dev/null |
+        sed 's/$/ /' | grep -qF "via $_rlr_via " || continue
+      tp_run "remove TurboFabric LAN route $_rlr_cidr via $_rlr_via" \
+        ip route del "$_rlr_cidr" via "$_rlr_via" dev "$_rlr_dev" || true
+    done < "$TP_TMP/lan.routes"
+  done
+}
+
 tp_remove_wireguard() {
   tp_print_step "▸" "WireGuard"
   if tp_has_tool ip; then
     if ip link show tp0 >/dev/null 2>&1; then
       tp_run "delete WireGuard interface tp0" ip link del tp0 || true
     fi
+    tp_remove_lan_routes
   else
     tp_record_skip "ip not installed"
   fi

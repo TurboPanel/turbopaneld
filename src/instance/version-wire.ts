@@ -95,6 +95,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-status-v1",
   "managed-backup-login-v1",
   "fabric-retain-keys-v1",
+  "fabric-lan-routes-v1",
 ] as const;
 
 /**
@@ -154,6 +155,16 @@ export const MANAGED_BACKUP_LOGIN_FEATURE: DaemonWireFeature =
  */
 export const FABRIC_RETAIN_KEYS_FEATURE: DaemonWireFeature =
   "fabric-retain-keys-v1";
+
+/**
+ * This daemon understands `server.fabric.reconcile` `tunnel` and `lanRoutes`:
+ * with `tunnel: false` it keeps `tp0` down (key kept), and it routes each
+ * `lanRoutes` container subnet via the member's LAN address on the interface
+ * that holds it, with the matching forwarding accepts. Without it the control
+ * plane keeps planning a tunnel to every member.
+ */
+export const FABRIC_LAN_ROUTES_FEATURE: DaemonWireFeature =
+  "fabric-lan-routes-v1";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`

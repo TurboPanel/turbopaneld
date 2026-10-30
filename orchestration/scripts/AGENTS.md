@@ -120,7 +120,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
-    xtables without `--modprobe` or rule files.
+    xtables without `--modprobe` or rule files. The one `ip` route form off
+    `tp0` is a TurboFabric LAN route, `route replace|del <CIDR> via <ADDR> dev
+    <NIC>`: IPv4 only, the CIDR in the same private blocks and prefix limits as
+    a `tp0` route, `<NIC>` a plain name (not `tp0`, `lo`, `docker*`, `br-*`,
+    `veth*`, `tpn*`), and `<ADDR>` inside a connected subnet the wrapper itself
+    reads (`ip -4 route show dev <NIC> scope link proto kernel`; test mode reads
+    `$P/tp-test/ip-route-link-<NIC>`).
   - starts tenant builds only through
     `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
     owner is the site owner's Linux user, an existing principal with a uid

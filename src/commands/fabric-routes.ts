@@ -69,6 +69,10 @@ export type FabricRoute = {
 export type ObservedRoute = FabricRoute & {
   dev: string | null;
   kernel: boolean;
+  /** Next hop (`via`), when the route has one. */
+  via: string | null;
+  /** The kernel marks the route `linkdown` (its interface has no carrier). */
+  linkdown: boolean;
 };
 
 export type FabricRoutePlan = {
@@ -109,7 +113,7 @@ export function fabricRoute(value: string): FabricRoute | null {
   };
 }
 
-function rangeInside(
+export function rangeInside(
   inner: ParsedCidrLiteral,
   outer: ParsedCidrLiteral,
 ): boolean {
@@ -117,7 +121,7 @@ function rangeInside(
     inner.last <= outer.last;
 }
 
-function withHostPrefix(destination: string, version: 4 | 6): string {
+export function withHostPrefix(destination: string, version: 4 | 6): string {
   if (destination.includes("/")) return destination;
   return `${destination}/${HOST_PREFIX[version]}`;
 }
@@ -142,6 +146,8 @@ function parseRouteLine(line: string, version: 4 | 6): ObservedRoute | null {
     ...route,
     dev: tokenAfter(tokens, "dev"),
     kernel: isKernelRoute(tokens),
+    via: tokenAfter(tokens, "via"),
+    linkdown: tokens.includes("linkdown"),
   };
 }
 
@@ -164,11 +170,11 @@ export function parseRouteShow(
  */
 export function desiredFabricRoutes(
   payload: {
-    address: string;
+    address?: string;
     peers: readonly { allowedIPs: readonly string[] }[];
   },
 ): FabricRoute[] {
-  const ownAddress = payload.address.split("/")[0] ?? "";
+  const ownAddress = payload.address?.split("/")[0] ?? "";
   const own = fabricRoute(
     withHostPrefix(ownAddress, ownAddress.includes(":") ? 6 : 4),
   );

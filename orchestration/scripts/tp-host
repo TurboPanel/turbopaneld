@@ -3205,8 +3205,83 @@ tp_fabric_route_cidr_ok() {
   esac
 }
 
-# Only the fabric interface, only these shapes. Route reads cover the whole
-# main table (read-only) so the daemon can see ranges other interfaces route.
+# A plain IPv4 literal: four octets, no leading zeros, nothing else.
+tp_ipv4_literal_ok() {
+  case "$1" in *[!0-9.]*|.*|*.|*..*|'') return 1 ;; esac
+  _ilo_rest="$1"
+  _ilo_n=0
+  while [ -n "$_ilo_rest" ]; do
+    tp_ipv4_octet_ok "${_ilo_rest%%.*}" || return 1
+    _ilo_n=$((_ilo_n + 1))
+    case "$_ilo_rest" in *.*) _ilo_rest="${_ilo_rest#*.}" ;; *) _ilo_rest="" ;; esac
+  done
+  [ "$_ilo_n" -eq 4 ]
+}
+
+# A checked IPv4 literal as one integer.
+tp_ipv4_int() {
+  _iin_rest="$1"
+  _iin_val=0
+  while [ -n "$_iin_rest" ]; do
+    _iin_val=$((_iin_val * 256 + ${_iin_rest%%.*}))
+    case "$_iin_rest" in *.*) _iin_rest="${_iin_rest#*.}" ;; *) _iin_rest="" ;; esac
+  done
+  printf '%s\n' "$_iin_val"
+}
+
+# A LAN interface name: what the kernel takes (1-15 of letters, digits, `.`,
+# `-`, `_`), never the fabric interface, loopback or a container-side link.
+tp_lan_nic_ok() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*|-*|.|..) return 1 ;; esac
+  [ "${#1}" -le 15 ] || return 1
+  case "$1" in tp0|lo|docker*|br-*|veth*|tpn*) return 1 ;; esac
+}
+
+# The kernel's connected IPv4 subnets on one interface (`proto kernel scope
+# link` routes). Test mode reads a fixture file instead of the host.
+tp_lan_connected_routes() {
+  if [ -n "$TP_TEST" ]; then
+    cat "$P/tp-test/ip-route-link-$1" 2>/dev/null || true
+    return 0
+  fi
+  ip -4 route show dev "$1" scope link proto kernel 2>/dev/null || true
+}
+
+# ADDR (a checked IPv4 literal) lies inside a connected subnet of NIC.
+tp_lan_via_connected() {
+  _lvc_addr=$(tp_ipv4_int "$1")
+  _lvc_found=1
+  _lvc_routes=$(tp_lan_connected_routes "$2")
+  for _lvc_dst in $(printf '%s\n' "$_lvc_routes" | awk '{ print $1 }'); do
+    case "$_lvc_dst" in */*) _lvc_net="${_lvc_dst%/*}"; _lvc_bits="${_lvc_dst#*/}" ;; *) _lvc_net="$_lvc_dst"; _lvc_bits=32 ;; esac
+    tp_ipv4_literal_ok "$_lvc_net" || continue
+    case "$_lvc_bits" in ''|*[!0-9]*) continue ;; esac
+    [ "$_lvc_bits" -ge 1 ] && [ "$_lvc_bits" -le 32 ] || continue
+    _lvc_shift=$((32 - _lvc_bits))
+    _lvc_netint=$(tp_ipv4_int "$_lvc_net")
+    if [ $((_lvc_addr >> _lvc_shift)) -eq $((_lvc_netint >> _lvc_shift)) ]; then
+      _lvc_found=0
+      break
+    fi
+  done
+  return "$_lvc_found"
+}
+
+# `route replace|del CIDR via ADDR dev NIC`: a member's container subnet over a
+# shared LAN. IPv4 only (container forwarding is IPv4), the CIDR in the same
+# private blocks and prefix limits as a tp0 route, ADDR inside a subnet the
+# kernel says is connected to NIC, NIC a plain interface that is not tp0 or lo.
+tp_lan_route_ok() {
+  case "$1" in *:*) tp_die "ip: LAN routes are IPv4 only" ;; esac
+  tp_fabric_route_cidr_ok "$1" || tp_die "ip: bad route $1"
+  tp_ipv4_literal_ok "$2" || tp_die "ip: bad next hop $2"
+  tp_lan_nic_ok "$3" || tp_die "ip: bad interface $3"
+  tp_lan_via_connected "$2" "$3" || tp_die "ip: $2 is not on a connected subnet of $3"
+}
+
+# Only the fabric interface, only these shapes, plus LAN routes to members'
+# container subnets. Route reads cover the whole main table (read-only) so the
+# daemon can see ranges other interfaces route.
 tp_verb_ip() {
   case "$*" in
     "link add dev tp0 type wireguard"|"link set dev tp0 up"|\
@@ -3218,6 +3293,11 @@ tp_verb_ip() {
   if [ "$#" -eq 5 ] && [ "$4 $5" = "dev tp0" ] && [ "$1" = "route" ]; then
     case "$2" in replace|del) ;; *) tp_die "ip: unsupported command" ;; esac
     tp_fabric_route_cidr_ok "$3" || tp_die "ip: bad route $3"
+    tp_exec ip "$@"
+  fi
+  if [ "$#" -eq 7 ] && [ "$1" = "route" ] && [ "$4" = "via" ] && [ "$6" = "dev" ]; then
+    case "$2" in replace|del) ;; *) tp_die "ip: unsupported command" ;; esac
+    tp_lan_route_ok "$3" "$5" "$7"
     tp_exec ip "$@"
   fi
   if [ "$#" -eq 6 ] && [ "$1 $2 $3 $4" = "link set dev tp0" ] && [ "$5" = "mtu" ]; then
