@@ -57,7 +57,7 @@ for (const engine of ENGINES) {
       `the backup login dumps a whole database and writes nothing on ${engine.image}`,
     ignore: !DOCKER_AVAILABLE,
     fn: async () => {
-      const name = `tp-backup-login-${crypto.randomUUID().slice(0, 8)}`;
+      const name = `tp-bk-login-${crypto.randomUUID().slice(0, 8)}`;
       const run = await docker([
         "run",
         "-d",
@@ -88,9 +88,24 @@ for (const engine of ENGINES) {
         return result.stdout;
       };
       try {
+        // Over TCP: the image's first-start server listens on the socket
+        // only and is restarted afterwards, so a socket answer can come from
+        // the server that is about to go away.
+        const probe = () =>
+          docker([
+            "exec",
+            name,
+            engine.client,
+            "--protocol=TCP",
+            "-h127.0.0.1",
+            "-uroot",
+            `-p${ROOT_PASSWORD}`,
+            "-e",
+            "SELECT 1",
+          ]);
         let ready = false;
         for (let attempt = 0; attempt < 90 && !ready; attempt++) {
-          ready = (await as("root", ROOT_PASSWORD, "SELECT 1")).success;
+          ready = (await probe()).success;
           if (!ready) await new Promise((resolve) => setTimeout(resolve, 1000));
         }
         if (!ready) throw new Error("engine did not become ready");
