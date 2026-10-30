@@ -87,6 +87,8 @@ import {
   type PlannedDeployStep,
 } from "./deploy-progress.ts";
 import {
+  automaticCertificateDetail,
+  certificatesStep,
   type DeployPresenceProbes,
   deployStepNeeds,
   installStepIds,
@@ -2692,12 +2694,17 @@ export async function applyHostingsOnly(
   }
   const runtime = resolveEnvironmentDeployRuntime(deps);
   await assertHostingNamesFree(layout, parsedPayload);
+  // One step, so the run shows the certificate line like a full deploy does.
+  if (runtime.progress.enabled) runtime.progress.plan([certificatesStep()]);
+  runtime.progress.start("certificates");
   const hostnameTls = await materializeDeployTls(
     layout,
     parsedPayload,
     runtime.decryptSecrets,
   );
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
+  noteAutomaticCertificates(runtime.progress, parsedPayload);
+  runtime.progress.done("certificates");
   logInfo(
     "commands",
     `environment.deploy hostings only env=${parsedPayload.environmentId}`,
@@ -2708,6 +2715,15 @@ export async function applyHostingsOnly(
       `Web server settings applied for environment ${parsedPayload.environmentId}: no build, no restart`,
     unchanged: true,
   };
+}
+
+/** Say under the certificates step which names the web server now gets a certificate for by itself. */
+function noteAutomaticCertificates(
+  progress: DeployStepReporter,
+  parsedPayload: EnvironmentDeployPayload,
+): void {
+  const detail = automaticCertificateDetail(parsedPayload);
+  if (detail !== undefined) progress.detail("certificates", detail);
 }
 
 /**
@@ -3153,6 +3169,7 @@ async function deployEnvironmentHolding(
   );
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
+  noteAutomaticCertificates(runtime.progress, parsedPayload);
   runtime.progress.done("certificates");
 
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);

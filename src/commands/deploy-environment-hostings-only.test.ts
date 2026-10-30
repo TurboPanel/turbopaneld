@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import type { DeployStepReporter } from "./deploy-progress.ts";
 import "../testing/stub-hosting-caddy-host.ts";
 
 /**
@@ -97,6 +98,58 @@ test("hostingsOnly rewrites the web server config and builds or restarts nothing
       ),
     );
     assertEquals(acme, ["shop.example.com"]);
+  });
+});
+
+/** Records every reporter call as `method:args`. */
+function recordingProgress(calls: string[]): DeployStepReporter {
+  const record = (method: string) => (...args: unknown[]) => {
+    calls.push(`${method}:${JSON.stringify(args)}`);
+  };
+  return {
+    enabled: true,
+    plan: record("plan"),
+    start: record("start"),
+    done: record("done"),
+    fail: record("fail"),
+    detail: record("detail"),
+    phase: record("phase"),
+    finish: record("finish"),
+    running: record("running"),
+    snapshot: () =>
+      ({ steps: [] }) as unknown as ReturnType<
+        DeployStepReporter["snapshot"]
+      >,
+  };
+}
+
+test("hostingsOnly shows the certificate step, with where to watch the automatic certificate", async () => {
+  await withLayout(async (configDir) => {
+    const sitesDir = join(configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, `${ENVIRONMENT_ID}.caddy`),
+      "shop.example.com {\n  tls internal\n}\n",
+    );
+    const calls: string[] = [];
+    await handleEnvironmentDeploy(
+      hostingsOnlyPayload(),
+      new Date().toISOString(),
+      { runDocker: recordingDocker([]), progress: recordingProgress(calls) },
+    );
+    const certificateCalls = calls.filter((call) =>
+      call.includes("certificates") || call.startsWith("plan:")
+    );
+    assertEquals(certificateCalls[0]?.startsWith("plan:"), true);
+    assertStringIncludes(certificateCalls[0] ?? "", "Set up certificates");
+    assertEquals(certificateCalls.includes('start:["certificates"]'), true);
+    assertEquals(
+      certificateCalls.some((call) =>
+        call.startsWith("detail:") && call.includes("shop.example.com")
+      ),
+      true,
+    );
+    assertEquals(certificateCalls.at(-1), 'done:["certificates"]');
   });
 });
 
