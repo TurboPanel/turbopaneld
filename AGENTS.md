@@ -15,7 +15,7 @@ How changes ship: squash-merge into `trunk`, then two bot-opened pull requests (
 Run from the repo root (in the guest VM when the host checkout has no usable Deno tree; see `src/testing/AGENTS.md`).
 
 ```sh
-deno task verify:static        # fmt:check, lint, check, check:layout, check:vocabulary, check:contract-drift
+deno task verify:static        # fmt:check, lint, check, check:layout, check:vocabulary, check:guide-references, check:contract-drift
 deno task verify               # verify:static, notices:check and the test suite (no orchestration)
 deno task verify:ci            # guest mirror of CI: verify:static, notices:check, check:orchestration, test:coverage
 deno task test                 # tests only; test:coverage also writes the LCOV file

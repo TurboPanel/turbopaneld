@@ -837,7 +837,7 @@ window and a `0.0.x` peer is not. The window may trail the current release by
 several minor versions. There is no fixed upgrade order. Bump
 `MIN_SUPPORTED_DAEMON_VERSION` and `MIN_SUPPORTED_INSTANCE_VERSION` together,
 in the same change, and record why in this section and in
-`turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
+`../turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
 silently. A release that introduces a new wire message leaves both floors
 where they are. Each new message is feature-gated: the peer advertises
 support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
