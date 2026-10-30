@@ -75,6 +75,8 @@ export function normalizeProofTarget(raw: string): string | null {
   if (family === 6) {
     if (text === "::" || text === "::1") return null;
     if (/^fe[89ab]/.test(text) || text.startsWith("ff")) return null;
+    // An IPv4 address in IPv6 clothes could name loopback or a private host.
+    if (text.startsWith("::ffff:") || text.startsWith("64:ff9b:")) return null;
     return text;
   }
   return null;
@@ -398,6 +400,27 @@ export async function withdrawProofForwards(
   await forEachSequential(doomed, (path) => removeSite(path).then(() => {}));
   await releaseHostingCaddy(layout, run);
   return doomed.length;
+}
+
+/** Every forward still on disk, with the time it stops being valid. */
+export async function listProofForwards(
+  layout: LayoutPaths,
+): Promise<Array<{ requestId: string; expiresAtMs: number }>> {
+  const found = new Map<string, number>();
+  const consider = async (path: string) => {
+    const parsed = parseProofHeader(await Deno.readTextFile(path));
+    if (parsed !== null) found.set(parsed.requestId, parsed.expiresAtMs);
+  };
+  await listFiles(proofDir(layout), () => true, consider);
+  await listFiles(
+    hostingSitesDir(layout),
+    (name) => name.startsWith(TENANT_PROOF_SITE_PREFIX),
+    consider,
+  );
+  return [...found].map(([requestId, expiresAtMs]) => ({
+    requestId,
+    expiresAtMs,
+  }));
 }
 
 async function listFiles(

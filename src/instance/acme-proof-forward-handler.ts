@@ -19,10 +19,11 @@ import {
   validateAcmeProofForwardFields,
 } from "../contracts/cell-messages.ts";
 import {
+  listProofForwards,
   startProofForward,
   withdrawProofForwards,
 } from "../deploy/acme-proof-forward.ts";
-import { withInstanceAcmeWindowLock } from "../deploy/instance-acme-http01.ts";
+import { withHostingSitesLock } from "../deploy/ingress.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
 
@@ -35,6 +36,7 @@ export type ProofForwardHandlerDeps = {
   setTimer?: (fn: () => void, ms: number) => () => void;
   start?: typeof startProofForward;
   withdraw?: typeof withdrawProofForwards;
+  list?: typeof listProofForwards;
 };
 
 /** A timer must not keep the daemon alive, and a delay past 24 days overflows. */
@@ -81,7 +83,7 @@ export class ProofForwardHandler {
     const start = this.#deps.start ?? startProofForward;
     let result;
     try {
-      result = await withInstanceAcmeWindowLock(() =>
+      result = await withHostingSitesLock(() =>
         start(this.#deps.layout, message)
       );
     } catch (err) {
@@ -111,11 +113,26 @@ export class ProofForwardHandler {
     await this.#withdraw({ requestId: message.requestId });
   }
 
-  /** Remove every forward whose time has passed, e.g. one left by a restart. */
+  /**
+   * After a restart: remove every forward whose time has passed and set an
+   * expiry timer for each one still valid, so none outlives its stated time.
+   */
   async sweepExpired(): Promise<void> {
-    await this.#withdraw({
-      expiredBeforeMs: (this.#deps.now ?? Date.now)(),
-    });
+    const now = (this.#deps.now ?? Date.now)();
+    await this.#withdraw({ expiredBeforeMs: now });
+    try {
+      const list = this.#deps.list ?? listProofForwards;
+      for (const item of await list(this.#deps.layout)) {
+        if (item.expiresAtMs > now && !this.#cancels.has(item.requestId)) {
+          this.#scheduleExpiry(
+            item.requestId,
+            new Date(item.expiresAtMs).toISOString(),
+          );
+        }
+      }
+    } catch (err) {
+      logWarn("deploy", "listing proof forwards failed:", err);
+    }
   }
 
   #scheduleExpiry(requestId: string, expiresAtIso: string): void {
@@ -139,9 +156,7 @@ export class ProofForwardHandler {
   ): Promise<void> {
     const withdraw = this.#deps.withdraw ?? withdrawProofForwards;
     try {
-      await withInstanceAcmeWindowLock(() =>
-        withdraw(this.#deps.layout, match)
-      );
+      await withHostingSitesLock(() => withdraw(this.#deps.layout, match));
     } catch (err) {
       logWarn("deploy", "withdrawing a proof forward failed:", err);
     }

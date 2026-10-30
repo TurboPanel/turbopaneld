@@ -23,7 +23,10 @@ function message(over: Partial<AcmeProofForwardMessage> = {}) {
   } as AcmeProofForwardMessage;
 }
 
-function harness(startOk = true) {
+function harness(
+  listed: Array<{ requestId: string; expiresAtMs: number }> = [],
+  startOk = true,
+) {
   const sent: AcmeProofForwardReportMessage[] = [];
   const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
   const withdrawn: unknown[] = [];
@@ -45,6 +48,7 @@ function harness(startOk = true) {
       Promise.resolve(
         startOk ? { ok: true as const } : { ok: false as const, reason: "no" },
       ),
+    list: () => Promise.resolve(listed),
     withdraw: (_layout, match) => {
       withdrawn.push(match);
       return Promise.resolve(1);
@@ -65,7 +69,7 @@ test("a started forward is answered ready and withdraws itself at the stated tim
 });
 
 test("a forward that cannot start is answered failed with the reason and sets no timer", async () => {
-  const { handler, sent, timers } = harness(false);
+  const { handler, sent, timers } = harness([], false);
   await handler.handleForward(message());
   assertEquals(sent[0].type, "acme-proof-forward-failed");
   assertEquals(sent[0].reason, "no");
@@ -91,8 +95,12 @@ test("the end message cancels the timer and withdraws the request", async () => 
   assertEquals(withdrawn, [{ requestId: "req_1" }]);
 });
 
-test("the start-up sweep withdraws everything already past its time", async () => {
-  const { handler, withdrawn } = harness();
+test("the start-up sweep withdraws what is past its time and re-arms the rest", async () => {
+  const { handler, withdrawn, timers } = harness([
+    { requestId: "req_live", expiresAtMs: NOW + 60_000 },
+    { requestId: "req_old", expiresAtMs: NOW - 1 },
+  ]);
   await handler.sweepExpired();
   assertEquals(withdrawn, [{ expiredBeforeMs: NOW }]);
+  assertEquals(timers.map((t) => t.ms), [60_000]);
 });

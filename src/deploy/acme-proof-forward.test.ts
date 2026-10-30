@@ -88,6 +88,7 @@ test("normalizeProofTarget keeps public addresses and refuses the rest", () => {
       "169.254.1.1",
       "224.0.0.1",
       "::1",
+      "::ffff:127.0.0.1",
       "::",
       "fe80::1",
       "ff02::1",
