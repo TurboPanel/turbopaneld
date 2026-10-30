@@ -241,24 +241,31 @@ export async function applyProofRoutes(
   );
   try {
     await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
+    const hostFiles: string[] = [];
     for (const host of request.names) {
-      const pattern = proofImportPattern(dir, host);
-      const state = proofSiteState(siteFiles, host, pattern);
+      const state = proofSiteState(
+        siteFiles,
+        host,
+        proofImportPattern(dir, host),
+      );
       if (state === "stale") {
         throw new Error(
           `the site for ${host} was written by an older version; deploy it again`,
         );
       }
-      if (state === "none") {
-        orphans.push(host);
-        continue;
-      }
-      const path = join(dir, `${host}${FILE_SUFFIX}`);
-      await Deno.writeTextFile(path, handler, { mode: 0o640 });
-      written.push(path);
+      if (state === "none") orphans.push(host);
+      else hostFiles.push(host);
     }
+    // Recorded before the writes, so a failed write is rolled back too.
+    written.push(
+      ...hostFiles.map((host) => join(dir, `${host}${FILE_SUFFIX}`)),
+    );
+    await Promise.all(
+      written.map((path) => Deno.writeTextFile(path, handler, { mode: 0o640 })),
+    );
     if (orphans.length > 0) {
       const path = join(sitesDir, reservedProofSiteName(request.requestId));
+      written.push(path);
       await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
       await Deno.writeTextFile(
         path,
@@ -270,12 +277,13 @@ export async function applyProofRoutes(
         ),
         { mode: 0o640 },
       );
-      written.push(path);
     }
     await loadIntoHostingCaddy(layout, run, deps);
     return { ok: true };
   } catch (err) {
-    for (const path of written) await removeSite(path).catch(() => undefined);
+    await Promise.all(
+      written.map((path) => removeSite(path).catch(() => undefined)),
+    );
     await releaseHostingCaddy(layout, run).catch((releaseErr) =>
       logWarn("deploy", "proof forward rollback reload failed:", releaseErr)
     );
@@ -284,8 +292,8 @@ export async function applyProofRoutes(
 }
 
 function failureReason(err: unknown): string {
-  const text = err instanceof Error ? err.message : String(err);
-  return text.trim().slice(0, 300) || "could not pass the check along";
+  const text = err instanceof Error ? err.message.trim() : "";
+  return text.slice(0, 300) || "could not pass the check along";
 }
 
 async function loadIntoHostingCaddy(
