@@ -106,6 +106,9 @@ jobs:
       - name: Check vocabulary (no daemon-as-agent phrasing)
         run: deno task check:vocabulary
 
+      - name: Check contributor guide references
+        run: deno task check:guide-references
+
       - name: Shellcheck the uninstall script and the root helpers
         run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-php-loopback orchestration/scripts/tp-build-runner orchestration/scripts/tp-update-guard orchestration/scripts/tp-firewall-guard
 

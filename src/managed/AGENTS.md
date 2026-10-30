@@ -236,7 +236,7 @@ side, so the daemon must treat them as data:
   `contracts.ts`): `1024`–`65535`, not `6032` / `6132`, not `45000`–`45999`. A
   looser daemon check would accept a payload the control plane considers
   invalid, which is how a half-configured ingress happens. Canonical rules:
-  `turbopanel/src/features/managed/AGENTS.md` → **Client listener ports**.
+  `../turbopanel/src/features/managed/AGENTS.md` → **Client listener ports**.
 
 ### Real client addresses (IPv6 network)
 
@@ -386,13 +386,13 @@ Frontend `default_hostgroup` comes from each user's `connectionRole`
 (`sortedReadSplitUsernames`) — read-only logins already default to the reader
 hostgroup. Do not reintroduce automatic read-split from `readEligible` alone; a
 blanket regex breaks read-after-write and locking reads for applications that
-never opted in. Canonical policy: `turbopanel/src/features/managed/AGENTS.md` →
+never opted in. Canonical policy: `../turbopanel/src/features/managed/AGENTS.md` →
 **Client routing**.
 
 Username frontend namespace is **server-wide** across every cluster hosted on that
 org's servers: `ManagedFrontendUserConflictError` when the same login would map
 to two managed ids. The instance enforces the same org-owner login uniqueness
-before enqueue (see `turbopanel/src/features/managed/AGENTS.md` → Login namespace).
+before enqueue (see `../turbopanel/src/features/managed/AGENTS.md` → Login namespace).
 
 ### Frontend TLS enforcement
 
@@ -415,7 +415,7 @@ The daemon does **not** know about SSL modes. The instance resolves the
 only the boolean; certificate *verification* (`verify-ca` / `verify-full`) is a
 client-side behavior the instance renders into DSNs, and there is nothing for
 ProxySQL to enforce. Canonical policy:
-`turbopanel/src/features/managed/AGENTS.md` → **Client TLS (SSL mode)**.
+`../turbopanel/src/features/managed/AGENTS.md` → **Client TLS (SSL mode)**.
 
 ## Rules
 
@@ -428,7 +428,7 @@ ProxySQL to enforce. Canonical policy:
    compose project (the `managed-ingress` `serviceId`) plus the `managed-ingress`
    system-component label. Distinct from engine ordinal names. Allocation still
    uses the `managed-ingress` system component, not engine ordinal slots.
-   Suffix contract: `turbopanel/AGENTS.md` → **Container name suffix contract**.
+   Suffix contract: `../turbopanel/AGENTS.md` → **Container name suffix contract**.
    `assertSafeManagedIdentifiers` guards Docker names with the
    hyphen-permitting regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
    resolution (`containers.ts`) still keys off `Service` / `State`, never
@@ -635,7 +635,7 @@ Orchestrator's image only has the MySQL driver, so it never sees Postgres and
 `managed-ha-event`, plus `sourceMemberId`, `detector: 'postgres-probe'` and
 bounded `evidence`. What the control plane then checks (same-org member
 reporter, current primary, cooldown, lag gate, fence, promote) is listed in
-`turbopanel/src/features/managed/AGENTS.md` → **Dead-primary detectors**;
+`../turbopanel/src/features/managed/AGENTS.md` → **Dead-primary detectors**;
 there is no raft-leader check on that path.
 
 - **Scope** (`DEAD_PRIMARY_DETECTION_SCOPE = 'engine-dead-host-alive'`): the

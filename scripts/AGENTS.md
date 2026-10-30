@@ -284,3 +284,17 @@ make **U** a no-op until HEAD moves. Production `release` stores the full
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Installer script hosting** | this file → *Installer script hosting* | **turbopanel.sh** = a redirect (served outside this repo) to `scripts/run.sh` on `live`; dev overlay catalog notes |
+
+## Contributor Guide Reference Check
+
+`deno task check:guide-references` (`check-guide-references.ts`) fails when any
+`AGENTS.md` or `docs/*.md` points at an in-repo file that does not exist, so a
+guide split or move cannot leave stale pointers. It reads markdown links
+(resolved from the guide) and backticked paths that start with `./` or `../` or
+are repo-root `.md` paths (resolved from the guide or the repo root). Only
+existence is checked, not headings. Paths into a sibling checkout
+(`../turbopanel/...`, `../dev/...`) are skipped when that checkout is absent, as
+in CI, and checked when it is present. A path that is not a repo file (a
+command run elsewhere, an installed path) goes in `ALLOWLIST` in the script
+with a reason. It is part of `deno task verify:static` and the `verify.yml`
+job.
