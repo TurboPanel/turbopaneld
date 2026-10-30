@@ -1502,6 +1502,7 @@ tp_inventory_host_files() {
     /etc/tmpfiles.d/turbopanel-hosting-caddy.conf \
     /etc/sudoers.d/tp \
     /etc/ssh/sshd_config.d/60-turbopanel.conf \
+    /etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev \
     /usr/local/bin/php
   do
     if [ -e "$_ih_file" ]; then
@@ -2490,6 +2491,11 @@ tp_lan_route_entry_ok() {
   tp_lan_nic_ok "$_lre_dev"
 }
 
+# The wrapper's other rule for a route (the next hop is a host on a subnet
+# the kernel says is connected to that interface) is not repeated here: the
+# exact-route match below only passes for a route the kernel accepted, and the
+# kernel only accepts a next hop it can reach on that interface.
+#
 # state.json is writable by the daemon account, so nothing in it is trusted:
 # a route is deleted only when its fields pass the wrapper's rules (so a
 # default route or a public range is never touched) and the kernel shows
@@ -2556,6 +2562,12 @@ tp_sshd_bin() {
 
 tp_remove_sshd_dropin() {
   _rsd=/etc/ssh/sshd_config.d/60-turbopanel.conf
+  # The copy the daemon keeps while it swaps the drop-in. sshd never reads it
+  # (its Include takes *.conf), so it goes without a config test.
+  _rsd_prev=/etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev
+  if [ -e "$_rsd_prev" ] || [ -L "$_rsd_prev" ]; then
+    tp_run "remove $_rsd_prev" rm -f "$_rsd_prev" || true
+  fi
   [ -f "$_rsd" ] || return 0
   _rsd_bin=$(tp_sshd_bin || true)
   _rsd_bak=$TP_TMP/sshd-dropin.bak

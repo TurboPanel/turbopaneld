@@ -976,14 +976,97 @@ test("TurboFabric's TP-FORWARD chain, its jumps and its LAN pairs go; an operato
   ]);
 });
 
-test("a second firewall pass on a clean table changes nothing", async () => {
-  const calls = await firewallRun(
-    ["-P INPUT ACCEPT", "-N DOCKER-USER", "-A DOCKER-USER -j RETURN"].join(
-      "\n",
-    ),
-    {},
+/**
+ * A fake iptables/ip6tables that keeps its rules in a file: `-S` prints them,
+ * `-L CHAIN` numbers that chain's rules, and `-D CHAIN N`, `-F` and `-X`
+ * change the file. Every changing call is logged with the binary's name.
+ */
+async function statefulFirewall(
+  rules: string,
+): Promise<{ bin: string; log: string }> {
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-fwstate-" });
+  const log = join(bin, "calls");
+  await Deno.writeTextFile(log, "");
+  const script = [
+    "#!/bin/sh",
+    'name=$(basename "$0")',
+    `state=${bin}/$name.rules`,
+    '[ "$1" = "-w" ] && shift 2',
+    'case "$1" in',
+    '  -S) cat "$state" ;;',
+    "  -L)",
+    '    echo "Chain $2"',
+    '    echo "num  target     prot opt source               destination"',
+    '    awk -v c="$2" \'$1 == "-A" && $2 == c { n++; t = "-"; for (i = 3; i < NF; i++) if ($i == "-j") t = $(i + 1); print n "    " t "  all  --" }\' "$state"',
+    "    ;;",
+    "  -D)",
+    `    echo "$name $*" >> ${log}`,
+    '    awk -v c="$2" -v k="$3" \'$1 == "-A" && $2 == c { n++; if (n == k) next } { print }\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "  -F)",
+    `    echo "$name $*" >> ${log}`,
+    '    awk -v c="$2" \'!($1 == "-A" && $2 == c)\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "  -X)",
+    `    echo "$name $*" >> ${log}`,
+    '    if grep -q -- "-j $2\\( \\|$\\)" "$state"; then exit 1; fi',
+    '    awk -v c="$2" \'!($1 == "-N" && $2 == c)\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "esac",
+    "",
+  ].join("\n");
+  for (const name of ["iptables", "ip6tables"]) {
+    await Deno.writeTextFile(join(bin, name), script, { mode: 0o755 });
+    await Deno.writeTextFile(join(bin, `${name}.rules`), `${rules}\n`);
+  }
+  return { bin, log };
+}
+
+async function firewallPass(bin: string): Promise<void> {
+  const result = await runPurgeSh(
+    [
+      "tp_firewall_delete_jumps",
+      "tp_firewall_try_delete",
+      "tp_firewall_family",
+    ],
+    "tp_firewall_family iptables\ntp_firewall_family ip6tables",
+    { PATH: `${bin}:${BASE_PATH}` },
   );
-  assertEquals(calls, ["-w 5 -S"]);
+  assertEquals(result.code, 0, result.stderr);
+}
+
+test("both firewall families end with only the operator's rules, and a second pass changes nothing", async () => {
+  const operator = `-A DOCKER-USER -s ${OPERATOR_RANGE} -j ACCEPT`;
+  const { bin, log } = await statefulFirewall(
+    [
+      "-P FORWARD DROP",
+      "-N DOCKER-USER",
+      "-N TP-FORWARD",
+      "-N TP-FWD",
+      "-A FORWARD -j TP-FORWARD",
+      "-A DOCKER-USER -j TP-FORWARD",
+      operator,
+      "-A DOCKER-USER -j TP-FWD",
+      "-A TP-FORWARD -i tp0 -o tp0 -j DROP",
+      `-A TP-FORWARD -s ${BRIDGE_RANGE} -d ${LAN_RANGE} -o eth1 -j ACCEPT`,
+      "-A TP-FWD -j TP-FORWARD",
+    ].join("\n"),
+  );
+  await firewallPass(bin);
+  for (const name of ["iptables", "ip6tables"]) {
+    assertEquals(
+      (await Deno.readTextFile(join(bin, `${name}.rules`))).trim().split("\n"),
+      ["-P FORWARD DROP", "-N DOCKER-USER", operator],
+    );
+  }
+  const first = (await Deno.readTextFile(log)).trim().split("\n");
+  assert(
+    first.some((c) => c.startsWith("ip6tables -X TP-FORWARD")),
+    first.join("\n"),
+  );
+  await Deno.writeTextFile(log, "");
+  await firewallPass(bin);
+  assertEquals(await Deno.readTextFile(log), "");
 });
 
 test("the Docker gate folders are owned trees and are removed with the other folders", async () => {
