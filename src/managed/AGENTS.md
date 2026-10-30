@@ -7,10 +7,10 @@ access for managed engines is **one shared ProxySQL** per server
 (project = the `managed-ingress` `serviceId`), not per-service Traefik.
 
 Root context: `../../AGENTS.md`. Instance engine specs:
-`../../../turbopanel/src/features/managed/AGENTS.md`. Command contracts:
+`../../turbopanel/src/features/managed/AGENTS.md`. Command contracts:
 `../contracts/commands-contracts.ts`. Host prerequisites:
 `../../orchestration/roles/proxysql/AGENTS.md`.
-Certificate authorities: `../../../turbopanel/src/lib/tls/AGENTS.md`.
+Certificate authorities: `../../turbopanel/src/lib/tls/AGENTS.md`.
 
 ## Module map
 
@@ -498,7 +498,7 @@ ProxySQL to enforce. Canonical policy:
    `MANAGED_ALLOWED_IMAGES_BY_ENGINE` in
    `../contracts/commands-contracts.ts` is the last stop before Docker runs a
    `managed.apply` image, so it must stay byte-identical to the instance release
-   catalog (`../../turbopanel/src/features/managed/releases.ts`) — including its
+   catalog (`../turbopanel/src/features/managed/releases.ts`) — including its
    ordering (default series first, default variant first). Adding or retiring a
    series is a three-repo change (instance catalog, this mirror, UI
    `ui/src/lib/managed-releases.ts`); `command-types-parity.test.ts` pins this
@@ -528,7 +528,7 @@ ProxySQL to enforce. Canonical policy:
    (a separate SUPERUSER/grant, not a rename of the connection identity).
    Never assume the payload's root credential username equals
    `ctx.rootUsername`. Canonical contract:
-   `../../turbopanel/src/features/managed/AGENTS.md` → "Login namespace".
+   `../turbopanel/src/features/managed/AGENTS.md` → "Login namespace".
 10. **Backup/restore (`backup.ts`).** Optional per engine via
    `ManagedEngineRuntime.backup` (`ManagedBackupNotSupportedError` when absent).
    - **Stream, never buffer.** Dump stdout pipes to a `<backupId>.<ext>.part`
