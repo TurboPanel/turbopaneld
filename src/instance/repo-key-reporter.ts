@@ -15,6 +15,7 @@ import type {
   RepoKeyChange,
   RepoKeyLedger,
 } from "../orchestration/repo-key-changes.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { logWarn } from "../util/logger.ts";
 
 export type RepoKeyReporterOptions = {
@@ -30,6 +31,7 @@ export class RepoKeyReporter {
   readonly #options: RepoKeyReporterOptions;
   #unsubscribe: (() => void) | undefined;
   #flushing: Promise<void> | undefined;
+  #running = false;
   #again = false;
 
   constructor(options: RepoKeyReporterOptions) {
@@ -57,36 +59,38 @@ export class RepoKeyReporter {
 
   /** Send every pending change once. Safe to call often; never rejects. */
   flush(): Promise<void> {
-    if (this.#flushing) {
+    if (this.#running && this.#flushing !== undefined) {
       this.#again = true;
       return this.#flushing;
     }
-    this.#flushing = this.#flushLoop().finally(() => {
-      this.#flushing = undefined;
+    this.#running = true;
+    const run = this.#flushLoop().finally(() => {
+      this.#running = false;
     });
-    return this.#flushing;
+    this.#flushing = run;
+    return run;
   }
 
   async #flushLoop(): Promise<void> {
-    do {
+    this.#again = true;
+    while (this.#again) {
       this.#again = false;
-      try {
-        await this.#flushOnce();
-      } catch (err) {
-        logWarn("instance", "repo key report failed:", String(err));
-      }
-    } while (this.#again);
+      await this.#flushOnce().catch((err) =>
+        logWarn("instance", "repo key report failed:", String(err))
+      );
+    }
   }
 
   async #flushOnce(): Promise<void> {
     if (!this.#options.peerSupportsReport()) return;
     const ledger = this.#options.ledger();
     const nowMs = this.#options.nowMs ?? Date.now;
-    for (const change of await ledger.pending()) {
-      const sent = this.#options.send(frameFor(change, nowMs()));
-      if (!sent) return;
-      await ledger.markSent(change);
-    }
+    let open = true;
+    await forEachSequential(await ledger.pending(), async (change) => {
+      if (!open) return;
+      open = this.#options.send(frameFor(change, nowMs()));
+      if (open) await ledger.markSent(change);
+    });
   }
 }
 

@@ -20,6 +20,7 @@ import { dirname, join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import type { AnsibleEvent, AnsibleTaskResultEvent } from "./ansible-events.ts";
+import { forEachSequential } from "../util/sequential.ts";
 import { logWarn } from "../util/logger.ts";
 
 export const REPO_KEY_CHANGED_MARKER = "turbopanel_repo_key_changed";
@@ -165,7 +166,7 @@ export class RepoKeyLedger {
       file.sent[id] = this.#now();
       const ids = Object.keys(file.sent);
       if (ids.length > MAX_SENT_REMEMBERED) {
-        const oldest = ids.sort((a, b) =>
+        const oldest = ids.toSorted((a, b) =>
           file.sent[a].localeCompare(file.sent[b])
         );
         for (const old of oldest.slice(0, ids.length - MAX_SENT_REMEMBERED)) {
@@ -244,7 +245,7 @@ export async function noteRepoKeyChanges(
   if (changes.length === 0) return;
   try {
     const target = ledger();
-    for (const change of changes) await target.record(change);
+    await forEachSequential(changes, (change) => target.record(change));
   } catch (err) {
     logWarn(
       "orchestration",
