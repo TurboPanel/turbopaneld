@@ -201,7 +201,7 @@ export class AnsibleRunSummaryCollector {
           ? `${this.#recap} (playbook exited with an error)`
           : this.#recap,
       );
-    } else if (opts.runFailed) {
+    } else if (opts.runFailed && !this.#firstFailure) {
       parts.push("playbook exited with an error before a recap");
     }
     if (this.#firstFailure) parts.push(this.#firstFailure);
