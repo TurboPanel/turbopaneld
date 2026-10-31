@@ -767,6 +767,7 @@ test("atomic deploy: staged load check, snapshot, probes, and a rollback that en
   const order = [
     "Stage the new gate source",
     "Load-check the staged gate",
+    "Run queued handlers (a pending Docker restart) before waiting for the engine",
     "Wait for the Docker engine to answer before swapping the gate",
     "Look for a running gate before the swap",
     "Snapshot them",
@@ -837,6 +838,9 @@ test("the gate deploy waits for the engine itself, bounded, and names the engine
     deploy.indexOf("Wait for the Docker engine"),
     deploy.indexOf("Look for a running gate before the swap"),
   );
+  // A queued Docker restart runs before the wait, not inside the gate probe.
+  const flushAt = deploy.indexOf("meta: flush_handlers");
+  assert(flushAt > 0 && flushAt < deploy.indexOf("Wait for the Docker engine"));
   // Probes the engine's own socket, not the gate's.
   assertStringIncludes(
     wait,

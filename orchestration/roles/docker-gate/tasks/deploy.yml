@@ -57,10 +57,15 @@
   changed_when: false
 
 # The gate forwards every request to the engine, so its probe (install.yml)
-# answers 502 for as long as dockerd is still coming up (a first converge on a
-# re-added server, or the daemon.json restart that runs just before this role).
-# Wait for the engine itself first, so a slow engine never reads as a broken
-# gate, and a missing engine fails with a message that names the engine.
+# answers 502 for as long as dockerd is down or restarting. On a re-added
+# server the docker role's daemon.json change queues a dockerd restart as a
+# handler, and the first handler flush in this role (install.yml) would run it
+# right before the probe, so the 30 s probe lost to a restarting engine. Run
+# the queued handlers now, then wait for the engine itself, so a slow engine
+# never reads as a broken gate and a missing engine fails naming the engine.
+- name: Run queued handlers (a pending Docker restart) before waiting for the engine
+  ansible.builtin.meta: flush_handlers
+
 - name: Wait for the Docker engine to answer before swapping the gate
   ansible.builtin.uri:
     url: http://localhost/_ping
