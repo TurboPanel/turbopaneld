@@ -1152,6 +1152,45 @@ test("setfacl grants tpedge the instance ACME socket and nothing else", async ()
   });
 });
 
+test("setfacl grants tpedge one certificate order's issuer socket by its request id and nothing near it", async () => {
+  await withHost(async (host) => {
+    const sock = host.path("run/turbopanel/tenant-acme-req_1-A.sock");
+    const other = host.path("run/turbopanel/tenant-other.sock");
+    const listeners = [sock, other].map((path) =>
+      Deno.listen({ transport: "unix", path })
+    );
+    try {
+      const ok = await host.run(["setfacl", "-P", "-m", "u:tpedge:rw", sock]);
+      assertEquals(ok.code, 0, ok.stderr);
+      assertEquals(
+        ok.stdout.trim(),
+        "EXEC [setfacl] [-P] [-m] [u:tpedge:rw] [--] [tenant-acme-req_1-A.sock]",
+      );
+      await refused(host, ["setfacl", "-P", "-m", "u:tpedge:rw", other]);
+      for (
+        const bad of [
+          "run/turbopanel/tenant-acme-.sock",
+          "run/turbopanel/tenant-acme-a.b.sock",
+          "run/turbopanel/tenant-acme-a b.sock",
+          `run/turbopanel/tenant-acme-${"a".repeat(65)}.sock`,
+          "run/turbopanel/sub/tenant-acme-a.sock",
+          "run/turbopanel/tenant-acme-a/b.sock",
+        ]
+      ) {
+        await refused(host, [
+          "setfacl",
+          "-P",
+          "-m",
+          "u:tpedge:rw",
+          host.path(bad),
+        ]);
+      }
+    } finally {
+      for (const listener of listeners) listener.close();
+    }
+  });
+});
+
 test("scheduled-backup units pass only in their exact shape; tenant units gain nothing", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({

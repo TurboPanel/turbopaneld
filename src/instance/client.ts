@@ -162,6 +162,7 @@ import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { BackupCopier } from "../backups/copier.ts";
 import { BackupCopyReporter } from "../backups/copy-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
+import { AcmeIssueHandler } from "./acme-issue-handler.ts";
 import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
@@ -541,6 +542,7 @@ export class InstanceClient {
   #backupCopyReporter: BackupCopyReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
   #proofForward: ProofForwardHandler | undefined;
+  #acmeIssue: AcmeIssueHandler | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
   #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
@@ -1544,6 +1546,7 @@ export class InstanceClient {
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
     this.#ensureProofForward();
+    this.#ensureAcmeIssue();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -1780,6 +1783,28 @@ export class InstanceClient {
     this.#proofForward = handler;
     this.#runSocketHandler("acme-proof-forward sweep", handler.sweepExpired());
     return handler;
+  }
+
+  /** The issuing side of central certificate issuance. */
+  #ensureAcmeIssue(): AcmeIssueHandler {
+    if (this.#acmeIssue) return this.#acmeIssue;
+    this.#acmeIssue = new AcmeIssueHandler({
+      layout: resolveLayout(Deno.env.toObject()),
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      report: (input) => {
+        const api = this.#apiClient;
+        if (api === undefined) {
+          return Promise.reject(new Error("control plane client not ready"));
+        }
+        return api.reportIssuedCertificate(input);
+      },
+    });
+    this.#runSocketHandler("acme-issue sweep", this.#acmeIssue.start());
+    return this.#acmeIssue;
   }
 
   #ensureAcmeObserver(): void {
@@ -2123,6 +2148,12 @@ export class InstanceClient {
    */
   #handleCentralCertificateMessage(message: DaemonMessage): boolean {
     switch (message.type) {
+      case "acme-issue-request":
+        this.#runSocketHandler(
+          "acme-issue-request",
+          this.#ensureAcmeIssue().handleRequest(message),
+        );
+        return true;
       case "acme-proof-forward":
         this.#runSocketHandler(
           "acme-proof-forward",
