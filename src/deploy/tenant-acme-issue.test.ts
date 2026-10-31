@@ -471,3 +471,32 @@ test("a connection that arrives after the bound is closed, not kept", async () =
   await Promise.resolve();
   assertEquals(closed, true);
 });
+
+test("a helper at a loopback, link-local, multicast or mapped address is never proven", async () => {
+  const bad = [
+    "127.0.0.1",
+    "169.254.1.1",
+    "224.0.0.1",
+    "::1",
+    "::ffff:127.0.0.1",
+    "0.0.0.0",
+  ];
+  await withHarness(async (h) => {
+    // The stub answers every address, so only the rule can leave these out.
+    const outcome = await issueTenantCertificates(
+      h.layout,
+      request({
+        helpers: [
+          ...bad.map((address, i) => ({ serverId: `bad${i}`, address })),
+          { serverId: "lan", address: "10.0.0.5" },
+          { serverId: "public", address: "203.0.113.9" },
+        ],
+      }),
+      h.deps,
+    );
+    assertEquals(outcome.ok, true);
+    if (outcome.ok) {
+      assertEquals(outcome.skippedHelpers, bad.map((_, i) => `bad${i}`));
+    }
+  });
+});

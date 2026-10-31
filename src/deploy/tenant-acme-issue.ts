@@ -273,6 +273,16 @@ async function answersNonce(
   }
 }
 
+async function answersHelper(
+  get: ProofGet,
+  address: string,
+  host: string,
+  nonce: string,
+): Promise<boolean> {
+  const target = normalizeProofTarget(address);
+  return target !== null && await answersNonce(get, target, host, nonce);
+}
+
 /** This server answers `host` on one of its own addresses (a site may bind to just one). */
 async function answersLocally(
   get: ProofGet,
@@ -504,7 +514,10 @@ async function proveRoutes(
         const helpers = await Promise.all(
           request.helpers.map(async (helper) => ({
             helper,
-            ok: await answersNonce(get, helper.address, host, nonce),
+            // Same rule as the forward target: loopback, link-local, multicast,
+            // unspecified and v4-mapped addresses never count as a proven helper
+            // (a helper at 127.0.0.1 would answer from this very server).
+            ok: await answersHelper(get, helper.address, host, nonce),
           })),
         );
         for (const { helper, ok } of helpers) {
