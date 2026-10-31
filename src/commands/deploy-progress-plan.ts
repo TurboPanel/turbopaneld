@@ -30,7 +30,6 @@ import {
   type HostRuntimeMetadata,
   readHostRuntimes,
 } from "../host/runtimes.ts";
-import { HEALTH_RESULT_TITLES } from "../logs/contracts.ts";
 import type { PlannedDeployStep } from "./deploy-progress.ts";
 
 /** What one deploy needs on the host, read off the payload. */
@@ -261,7 +260,7 @@ export function certificatesStep(): PlannedDeployStep {
  * reporter renames it to the result (see {@link HEALTH_RESULT_TITLES}), so a
  * finished step never claims more than was checked.
  */
-export { HEALTH_RESULT_TITLES };
+export { HEALTH_RESULT_TITLES } from "../logs/contracts.ts";
 export const HEALTH_STEP_ID = "health";
 export const HEALTH_STEP_LABEL = "Check Service Health";
 
