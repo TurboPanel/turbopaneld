@@ -6,6 +6,7 @@ import type {
   AnsibleTaskResultEvent,
   AnsibleTaskStartEvent,
 } from "./ansible-events.ts";
+import { formatPlaybookRecap } from "./ansible-events.ts";
 import { InstallPresenter } from "./install-presenter.ts";
 import {
   relabelComponent,
@@ -45,20 +46,6 @@ function hostMessages(
     }
   }
   return sanitizeStatusLine(messages.join("; "));
-}
-
-function buildRecap(stats: Record<string, Record<string, number>>): string {
-  let ok = 0;
-  let changed = 0;
-  let failed = 0;
-  let unreachable = 0;
-  for (const hostStats of Object.values(stats)) {
-    ok += hostStats.ok ?? 0;
-    changed += hostStats.changed ?? 0;
-    failed += hostStats.failures ?? hostStats.failed ?? 0;
-    unreachable += hostStats.unreachable ?? 0;
-  }
-  return `ok=${ok} changed=${changed} failed=${failed} unreachable=${unreachable}`;
 }
 
 /** Maps ansible.posix.jsonl events into {@link InstallPresenter} status lines. */
@@ -143,7 +130,7 @@ export class InstallEventPresenter {
 
       case "v2_playbook_on_stats": {
         const statsEvent = event as AnsiblePlayStatsEvent;
-        const recap = summarizeRecap(buildRecap(statsEvent.stats));
+        const recap = summarizeRecap(formatPlaybookRecap(statsEvent.stats));
         this.#presenter.pushStatus(recap, { force: true });
         break;
       }
