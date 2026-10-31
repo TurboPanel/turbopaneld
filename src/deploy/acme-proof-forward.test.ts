@@ -7,6 +7,7 @@ import {
   normalizeProofTarget,
   parseProofHeader,
   proofDir,
+  proofHandlerPath,
   proofImportPattern,
   proofSiteState,
   proofTargetUpstream,
@@ -109,7 +110,7 @@ test("proofTargetUpstream brackets IPv6", () => {
 test("proofImportPattern refuses names a glob could misread", () => {
   assertEquals(
     proofImportPattern("/c/hosting/proof", "example.com"),
-    "/c/hosting/proof/example.com.proof*",
+    "/c/hosting/proof/example.com/*.proof",
   );
   assertEquals(proofImportPattern("/c/p", "*.example.com"), null);
   assertEquals(proofImportPattern("/c/p", "a b"), null);
@@ -136,7 +137,7 @@ test("a site written with a proof directory imports the handler before the redir
     proofDir: "/c/hosting/proof",
   });
   const http = text.split("\n\n")[0];
-  assertStringIncludes(http, "import /c/hosting/proof/example.com.proof*");
+  assertStringIncludes(http, "import /c/hosting/proof/example.com/*.proof");
   assertStringIncludes(
     http,
     "handle {\n    redir https://{host}{uri} permanent",
@@ -162,7 +163,7 @@ test("a www redirect block and a plain-HTTP-only block both import the handler",
     proofDir: "/p",
     redirectTo: "example.com",
   });
-  assertStringIncludes(redirect, "import /p/www.example.com.proof*");
+  assertStringIncludes(redirect, "import /p/www.example.com/*.proof");
   assertStringIncludes(
     redirect,
     "handle {\n    redir https://example.com{uri} permanent",
@@ -175,12 +176,12 @@ test("a www redirect block and a plain-HTTP-only block both import the handler",
   });
   assertStringIncludes(
     plain,
-    "http://example.com {\n  import /p/example.com.proof*",
+    "http://example.com {\n  import /p/example.com/*.proof",
   );
 });
 
 test("proofSiteState tells a current block, an older block and no block apart", () => {
-  const pattern = "/p/example.com.proof*";
+  const pattern = "/p/example.com/*.proof";
   const current = `http://example.com {\n  import ${pattern}\n}\n`;
   const older =
     "http://example.com {\n  redir https://{host}{uri} permanent\n}\n";
@@ -207,7 +208,7 @@ test("startProofForward writes the handler into the per-host file and reloads", 
     });
     assertEquals(result, { ok: true });
     const written = await Deno.readTextFile(
-      join(proofDir(layout), "example.com.proof"),
+      proofHandlerPath(proofDir(layout), "example.com"),
     );
     assertStringIncludes(written, "reverse_proxy http://203.0.113.9:80");
     assertEquals(calls.some((c) => c.includes("systemctl reload")), true);
@@ -251,9 +252,10 @@ test("a site written before the import existed is refused and nothing stays writ
     }, { run, inspect: onPort80 });
     assertEquals(result.ok, false);
     assertEquals(
-      await Deno.stat(join(proofDir(layout), "old.example.com.proof")).catch(
-        () => null,
-      ),
+      await Deno.stat(proofHandlerPath(proofDir(layout), "old.example.com"))
+        .catch(
+          () => null,
+        ),
       null,
     );
   });
@@ -299,19 +301,20 @@ test("port 80 held by another program fails the forward with a plain reason", as
       expiresAtIso: EXPIRES,
     }, {
       run,
-      inspect: () => Promise.resolve({ kind: "other", process: "nginx" }),
+      inspect: () => Promise.resolve({ kind: "other", process: "otherserver" }),
     });
     assertEquals(result.ok, false);
-    if (!result.ok) assertStringIncludes(result.reason, "nginx");
+    if (!result.ok) assertStringIncludes(result.reason, "otherserver");
   });
 });
 
 test("withdrawProofForwards removes by request id and by expiry, and keeps the rest", async () => {
   await withLayout(async (layout) => {
     const dir = proofDir(layout);
-    await Deno.mkdir(dir, { recursive: true });
+    await Deno.mkdir(join(dir, "a.example.com"), { recursive: true });
+    await Deno.mkdir(join(dir, "b.example.com"), { recursive: true });
     await Deno.writeTextFile(
-      join(dir, "a.example.com.proof"),
+      proofHandlerPath(dir, "a.example.com"),
       renderProofHandler(
         "req_a",
         "2020-01-01T00:00:00Z",
@@ -319,7 +322,7 @@ test("withdrawProofForwards removes by request id and by expiry, and keeps the r
       ),
     );
     await Deno.writeTextFile(
-      join(dir, "b.example.com.proof"),
+      proofHandlerPath(dir, "b.example.com"),
       renderProofHandler("req_b", EXPIRES, "http://203.0.113.9:80"),
     );
     await writeSite(layout, "env.caddy", "# a site\n");
@@ -330,7 +333,7 @@ test("withdrawProofForwards removes by request id and by expiry, and keeps the r
       1,
     );
     assertEquals(
-      await Deno.stat(join(dir, "a.example.com.proof")).catch(() => null),
+      await Deno.stat(proofHandlerPath(dir, "a.example.com")).catch(() => null),
       null,
     );
     assertEquals(
@@ -340,6 +343,63 @@ test("withdrawProofForwards removes by request id and by expiry, and keeps the r
     assertEquals(
       await withdrawProofForwards(layout, { requestId: "req_b" }, { run }),
       1,
+    );
+  });
+});
+
+test("a host's import cannot match a longer lookalike name's handler", () => {
+  const dir = "/c/hosting/proof";
+  const victim = proofImportPattern(dir, "victim.com")!;
+  const lookalike = proofHandlerPath(dir, "victim.com.proof.evil.com");
+  // Glob `*` does not cross a `/`, and the host folder is spelled out exactly.
+  const re = new RegExp(
+    `^${victim.replace(/[.]/g, "\\.").replace("*", "[^/]*")}$`,
+  );
+  assertEquals(re.test(lookalike), false);
+  assertEquals(re.test(proofHandlerPath(dir, "victim.com")), true);
+});
+
+test("each host gets its own folder and a withdraw removes the folder too", async () => {
+  await withLayout(async (layout) => {
+    await writeSite(layout, "e.caddy", siteWithProof(layout, "victim.com"));
+    await writeSite(
+      layout,
+      "f.caddy",
+      siteWithProof(layout, "victim.com.proof.evil.com"),
+    );
+    const { run } = recorder();
+    for (
+      const [id, host] of [["r1", "victim.com"], [
+        "r2",
+        "victim.com.proof.evil.com",
+      ]]
+    ) {
+      const result = await applyProofRoutes(layout, {
+        requestId: id,
+        names: [host],
+        upstream: `http://203.0.113.${id === "r1" ? 9 : 10}:80`,
+        expiresAtIso: EXPIRES,
+      }, { run, inspect: onPort80 });
+      assertEquals(result, { ok: true });
+    }
+    const dir = proofDir(layout);
+    assertStringIncludes(
+      await Deno.readTextFile(proofHandlerPath(dir, "victim.com")),
+      "203.0.113.9",
+    );
+    assertEquals(
+      await withdrawProofForwards(layout, { requestId: "r1" }, { run }),
+      1,
+    );
+    assertEquals(
+      await Deno.stat(join(dir, "victim.com")).catch(() => null),
+      null,
+    );
+    assertStringIncludes(
+      await Deno.readTextFile(
+        proofHandlerPath(dir, "victim.com.proof.evil.com"),
+      ),
+      "203.0.113.10",
     );
   });
 });

@@ -20,7 +20,7 @@
  */
 
 import { isIP } from "node:net";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -43,7 +43,13 @@ import {
 
 export const PROOF_CHALLENGE_PATH = "/.well-known/acme-challenge/*";
 const HEADER_PREFIX = "# tp-proof-forward ";
-const FILE_SUFFIX = ".proof";
+/**
+ * One folder per host, one file in it. The import is `<dir>/<host>/*.proof`, so
+ * it can only ever match files in that exact host's folder: a flat
+ * `<host>.proof*` glob would also match a longer name's file (`victim.com`
+ * against `victim.com.proof.evil.com`), which another organization may own.
+ */
+const FILE_NAME = "forward.proof";
 
 /** Where the per-host handler files live; the hosting Caddy reads them through the folder's default ACL. */
 export function proofDir(layout: LayoutPaths): string {
@@ -56,12 +62,14 @@ export function proofImportPattern(
   host: string,
 ): string | null {
   if (/[*?[\]{}\s]/.test(host)) return null;
-  return `${dir}/${host}${FILE_SUFFIX}*`;
+  return `${dir}/${host}/*.proof`;
 }
 
 /**
  * A usable forward target: a real address that is not loopback, unspecified,
- * link-local or multicast. Returns the lower-case address, or null.
+ * link-local or multicast. Returns the lower-case address, or null. Private
+ * LAN ranges (10/8, 172.16/12, 192.168/16) stay allowed on purpose: helpers in
+ * one datacenter reach the issuing server by its private address.
  */
 export function normalizeProofTarget(raw: string): string | null {
   const text = raw.trim().toLowerCase();
@@ -240,7 +248,6 @@ export async function applyProofRoutes(
     request.upstream,
   );
   try {
-    await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
     const hostFiles: string[] = [];
     for (const host of request.names) {
       const state = proofSiteState(
@@ -257,11 +264,12 @@ export async function applyProofRoutes(
       else hostFiles.push(host);
     }
     // Recorded before the writes, so a failed write is rolled back too.
-    written.push(
-      ...hostFiles.map((host) => join(dir, `${host}${FILE_SUFFIX}`)),
-    );
+    written.push(...hostFiles.map((host) => proofHandlerPath(dir, host)));
     await Promise.all(
-      written.map((path) => Deno.writeTextFile(path, handler, { mode: 0o640 })),
+      written.map(async (path) => {
+        await Deno.mkdir(dirname(path), { recursive: true, mode: 0o750 });
+        await Deno.writeTextFile(path, handler, { mode: 0o640 });
+      }),
     );
     if (orphans.length > 0) {
       const path = join(sitesDir, reservedProofSiteName(request.requestId));
@@ -282,12 +290,24 @@ export async function applyProofRoutes(
     return { ok: true };
   } catch (err) {
     await Promise.all(
-      written.map((path) => removeSite(path).catch(() => undefined)),
+      written.map((path) => removeHandlerFile(dir, path)),
     );
     await releaseHostingCaddy(layout, run).catch((releaseErr) =>
       logWarn("deploy", "proof forward rollback reload failed:", releaseErr)
     );
     return { ok: false, reason: failureReason(err) };
+  }
+}
+
+export function proofHandlerPath(dir: string, host: string): string {
+  return join(dir, host, FILE_NAME);
+}
+
+/** Remove one handler file and, when it sits in a host folder, that folder if now empty. */
+async function removeHandlerFile(dir: string, path: string): Promise<void> {
+  await removeSite(path).catch(() => undefined);
+  if (dirname(dirname(path)) === dir) {
+    await Deno.remove(dirname(path)).catch(() => undefined);
   }
 }
 
@@ -398,14 +418,15 @@ export async function withdrawProofForwards(
       : parsed.expiresAtMs <= match.expiredBeforeMs;
     if (wanted) doomed.push(path);
   };
-  await listFiles(proofDir(layout), () => true, consider);
+  await listProofHandlers(layout, consider);
   await listFiles(
     hostingSitesDir(layout),
     (name) => name.startsWith(TENANT_PROOF_SITE_PREFIX),
     consider,
   );
   if (doomed.length === 0) return 0;
-  await forEachSequential(doomed, (path) => removeSite(path).then(() => {}));
+  const dir = proofDir(layout);
+  await forEachSequential(doomed, (path) => removeHandlerFile(dir, path));
   await releaseHostingCaddy(layout, run);
   return doomed.length;
 }
@@ -419,7 +440,7 @@ export async function listProofForwards(
     const parsed = parseProofHeader(await Deno.readTextFile(path));
     if (parsed !== null) found.set(parsed.requestId, parsed.expiresAtMs);
   };
-  await listFiles(proofDir(layout), () => true, consider);
+  await listProofHandlers(layout, consider);
   await listFiles(
     hostingSitesDir(layout),
     (name) => name.startsWith(TENANT_PROOF_SITE_PREFIX),
@@ -429,6 +450,27 @@ export async function listProofForwards(
     requestId,
     expiresAtMs,
   }));
+}
+
+/** Every handler file, one level down: `<proof>/<host>/*.proof`. */
+async function listProofHandlers(
+  layout: LayoutPaths,
+  each: (path: string) => Promise<void>,
+): Promise<void> {
+  const root = proofDir(layout);
+  const hosts: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(root)) {
+      if (entry.isDirectory) hosts.push(entry.name);
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  await forEachSequential(
+    hosts,
+    (host) =>
+      listFiles(join(root, host), (name) => name.endsWith(".proof"), each),
+  );
 }
 
 async function listFiles(
