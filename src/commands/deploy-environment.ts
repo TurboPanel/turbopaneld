@@ -1868,8 +1868,6 @@ async function deploySequentially(
   if (serviceHooks.length > 0) {
     assertHooksConfined(serviceHooks, labeledServices);
   }
-  const timeoutMs = (parsedPayload.healthTimeoutSeconds ??
-    DEFAULT_HEALTH_TIMEOUT_SECONDS) * 1000;
   const projectName = parsedPayload.projectName;
   const steps: SequentialDeploySteps = {
     prepare: () => prepareSequentialDeploy(input, chain, onLine),
@@ -3301,8 +3299,9 @@ async function deployEnvironmentHolding(
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
   finishCertificatesStep(runtime.progress, parsedPayload);
 
-  // The sequential gate and the native apps already ended the health step with
-  // their own result; only a deploy that checked nothing says so here.
+  // The container gate (sequential and in place) and the native apps already
+  // ended the health step with their own result; only a deploy that checked
+  // nothing says so here.
   const healthEnded = runtime.logSink.health?.ended() === true;
   if (!healthEnded) runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({
