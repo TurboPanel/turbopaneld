@@ -403,3 +403,49 @@ test("each host gets its own folder and a withdraw removes the folder too", asyn
     );
   });
 });
+
+const LOOPBACK_AND_FRIENDS_IN_ANY_SPELLING = [
+  "0:0:0:0:0:ffff:7f00:1",
+  "0::ffff:127.0.0.1",
+  "0:0:0:0:0:0:0:1",
+  "::0:1",
+  "0:0::0",
+  "::127.0.0.1",
+  "0064:ff9b::7f00:1",
+  "64:ff9b::7f00:1",
+  "64:ff9b:1::1",
+  "[::1]",
+  "[::ffff:127.0.0.1]",
+  "::1%lo",
+  "fe80:0:0:0::1",
+  "fe80::1%eth0",
+  "febf::1",
+  "FF02::1",
+  "ff00:0:0::1",
+  "::ffff:10.0.0.1",
+  "::ffff:0:127.0.0.1",
+  "127.1",
+  "2130706433",
+  "0177.0.0.1",
+  "255.255.255.255",
+  "1::2::3",
+  "12345::1",
+];
+
+test("no spelling of a loopback, mapped, NAT64, link-local or multicast address gets through", () => {
+  for (const bad of LOOPBACK_AND_FRIENDS_IN_ANY_SPELLING) {
+    assertEquals(normalizeProofTarget(bad), null, bad);
+  }
+});
+
+test("public and private LAN addresses stay allowed, brackets and zone ids dropped", () => {
+  assertEquals(normalizeProofTarget("2001:db8::1"), "2001:db8::1");
+  assertEquals(normalizeProofTarget("[2001:DB8::5]"), "2001:db8::5");
+  assertEquals(normalizeProofTarget("fd00::1"), "fd00::1");
+  assertEquals(normalizeProofTarget("fc00::1"), "fc00::1");
+  assertEquals(normalizeProofTarget("2001:db8::1.2.3.4"), "2001:db8::1.2.3.4");
+  assertEquals(normalizeProofTarget("10.0.0.5"), "10.0.0.5");
+  assertEquals(normalizeProofTarget("172.16.0.9"), "172.16.0.9");
+  assertEquals(normalizeProofTarget("192.168.1.1"), "192.168.1.1");
+  assertEquals(normalizeProofTarget("203.0.113.9"), "203.0.113.9");
+});

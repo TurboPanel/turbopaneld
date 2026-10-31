@@ -489,6 +489,7 @@ test("a helper at a loopback, link-local, multicast or mapped address is never p
         helpers: [
           ...bad.map((address, i) => ({ serverId: `bad${i}`, address })),
           { serverId: "lan", address: "10.0.0.5" },
+          { serverId: "ula", address: "fd00::5" },
           { serverId: "public", address: "203.0.113.9" },
         ],
       }),
