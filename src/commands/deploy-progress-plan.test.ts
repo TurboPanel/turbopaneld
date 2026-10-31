@@ -80,17 +80,17 @@ test("a fresh host plans every install as pending, in execution order", () => {
   ]);
   assertEquals(steps.map((s) => s.label), [
     "Install Docker",
-    "Set up the web gateway",
+    "Set Up the Web Gateway",
     "Install Node 22",
     "Install Deno 2",
     "Install Apache",
     "Install PHP 8.3",
-    "Install the build tool",
-    "Fetch the code",
+    "Install the Build Tool",
+    "Fetch the Source Code",
     "Build",
-    "Start the app",
-    "Set up certificates",
-    "Check it answers",
+    "Start the App",
+    "Set Up Certificates",
+    "Check Service Health",
   ]);
   assertEquals(steps.every((s) => s.state === "pending"), true);
 });
@@ -101,12 +101,12 @@ test("a deploy with native apps starts the new release beside the old, then swit
     NOTHING_PRESENT,
   );
   assertEquals(steps.map((s) => s.label), [
-    "Fetch the code",
+    "Fetch the Source Code",
     "Build",
-    "Start the new release",
-    "Check it answers",
-    "Switch traffic",
-    "Stop the old release",
+    "Start the New Release",
+    "Check Service Health",
+    "Switch Traffic",
+    "Stop the Old Release",
   ]);
   assertEquals(steps.map((s) => s.id).slice(-4), [
     "start",

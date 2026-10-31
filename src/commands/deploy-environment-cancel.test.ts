@@ -17,12 +17,14 @@ import {
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
 import "../testing/stub-hosting-caddy-host.ts";
+import { instantlyHealthy } from "../testing/instant-health-gate.ts";
 
 /** Jest/Mocha-shaped alias so Sonar sees real tests (see deploy-environment.test.ts). */
 const test = Deno.test.bind(Deno);
 
 const hermeticDeployDeps = {
   ensureDocker: () => Promise.resolve(),
+  waitForHealth: instantlyHealthy,
   ensureExternalDockerNetworks: () => Promise.resolve(),
   ensureFabricDockerNetworks: () => Promise.resolve(),
   hasCronUnits: () => Promise.resolve(false),

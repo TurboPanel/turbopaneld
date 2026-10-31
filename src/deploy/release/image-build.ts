@@ -556,7 +556,7 @@ async function installImageBuild(
 
 /**
  * True when the vendored build tool and its frontend are already on disk; the
- * deploy preflight plans "Install the build tool" as ready from this without
+ * deploy preflight plans "Install the Build Tool" as ready from this without
  * running the setup.
  */
 export async function buildToolPresent(runtimesDir: string): Promise<boolean> {

@@ -255,8 +255,17 @@ export function certificatesStep(): PlannedDeployStep {
   return step(CERTIFICATES_STEP_ID, CERTIFICATES_STEP_LABEL, false);
 }
 
+/**
+ * The health step. Its title says what is being waited on; when it ends the
+ * reporter renames it to the result (see {@link HEALTH_RESULT_TITLES}), so a
+ * finished step never claims more than was checked.
+ */
+export { HEALTH_RESULT_TITLES } from "../logs/contracts.ts";
+export const HEALTH_STEP_ID = "health";
+export const HEALTH_STEP_LABEL = "Check Service Health";
+
 const CERTIFICATES_STEP_ID = "certificates";
-const CERTIFICATES_STEP_LABEL = "Set up certificates";
+const CERTIFICATES_STEP_LABEL = "Set Up Certificates";
 
 function step(id: string, label: string, ready: boolean): PlannedDeployStep {
   return { id, label, state: ready ? "ready" : "pending" };
@@ -292,7 +301,7 @@ export function planDeploySteps(
   if (needs.sharedIngress || needs.publicEdge) {
     const ready = (!needs.sharedIngress || presence.sharedIngress) &&
       (!needs.publicEdge || presence.publicEdge);
-    steps.push(step("install-gateway", "Set up the web gateway", ready));
+    steps.push(step("install-gateway", "Set Up the Web Gateway", ready));
   }
   for (const series of needs.nodeSeries) {
     steps.push(step(
@@ -324,25 +333,27 @@ export function planDeploySteps(
   }
   if (needs.buildTool) {
     steps.push(
-      step("install-build-tool", "Install the build tool", presence.buildTool),
+      step("install-build-tool", "Install the Build Tool", presence.buildTool),
     );
   }
-  if (needs.sourceBuilds) steps.push(step("fetch", "Fetch the code", false));
+  if (needs.sourceBuilds) {
+    steps.push(step("fetch", "Fetch the Source Code", false));
+  }
   if (needs.sourceBuilds || needs.composeBuild) {
     steps.push(step("build", "Build", false));
   }
   const startLabel = needs.nativeApps
-    ? "Start the new release"
-    : "Start the app";
+    ? "Start the New Release"
+    : "Start the App";
   steps.push(step("start", startLabel, false));
   if (needs.certificates) {
     steps.push(certificatesStep());
   }
-  steps.push(step("health", "Check it answers", false));
+  steps.push(step(HEALTH_STEP_ID, HEALTH_STEP_LABEL, false));
   if (needs.nativeApps) {
     steps.push(
-      step("switch", "Switch traffic", false),
-      step("stop-old", "Stop the old release", false),
+      step("switch", "Switch Traffic", false),
+      step("stop-old", "Stop the Old Release", false),
     );
   }
   return steps;

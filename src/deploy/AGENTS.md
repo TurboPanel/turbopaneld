@@ -392,6 +392,31 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   (`running` → `failed` / `skipped`, `pending` → `skipped`) goes out before
   `command-outcome`. The planner only runs when the router supplied a sender;
   hermetic callers get the no-op reporter and never probe the host.
+  Step titles are book title case ("Set Up Certificates", "Check Service
+  Health"); detail lines are sentence case. The health step ends under the
+  title of its result, sent as a renamed step with the same id (receivers
+  keep showing a title they do not know): *Service Is Healthy* only when
+  Docker reported `healthy` ("Healthy after 12 s"), *Service Is Running* when
+  no health check is configured and the container stayed up for the stable
+  window, *Service Is Reachable* for a native app that answered an HTTP
+  request, *Service Health Not Checked* when nothing in the deploy reports
+  health (only finished one-shot jobs, or no containers), and
+  *Service Did Not Become Healthy* / *Service Did Not Answer* on a timeout.
+  The in-place strategy waits for health too (same gate, right after `up -d`,
+  before the post-deploy hooks); a failure fails the deploy with "The
+  containers started but …" and rolls nothing back, since the old version was
+  replaced in place and the new containers stay up for inspection.
+  Cost: a service with no health check adds at least the stable window (30 s)
+  to every in-place deploy, and a wait that never ends is capped by
+  `healthTimeoutSeconds` (default 120 s), which cannot be cancelled once the
+  deploy is past its commit point. The gate judges only the services
+  `compose config --services` lists (profile services that are off are not
+  there), ignores `compose run` leftovers, and skips the wait entirely when no
+  service is enabled. A stack that passed before can now fail: a job that
+  exits non-zero, a restart loop, or a health check that only passes after a
+  post-deploy hook (the gate runs before the hooks, as on sequential).
+  While waiting it shows one updating line ("Attempt 4, 6 s of up to 120 s");
+  the transcript gets a line only when the waiting reason changes.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
   zero-based and gap-free per command (the first upload is always `seq = 0`),
   and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.
