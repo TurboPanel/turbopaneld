@@ -172,21 +172,21 @@ export function mergeOverlayIntoComposeYaml(
 }
 
 /**
- * Point Railpack-built services at the image the release engine produced.
+ * Point image-built services at the image the release engine produced.
  *
  * Not an overlay fragment, because this has to **remove** as well as add: a
  * service whose image is minted at deploy time may carry an authored `build:`
  * (or a placeholder `image:`) that `docker compose config` would otherwise act
  * on, and merging can only ever add keys. Applying it as a pre-processing pass
  * on the same compose document — before validation, before the daemon overlay —
- * is what keeps the Railpack lane from becoming a second orchestration path:
+ * is what keeps the image-build lane from becoming a second orchestration path:
  * everything downstream (Traefik labels, hosting Caddy, storage mounts,
  * `compose ps` reporting) sees an ordinary container service with an `image`.
  *
  * Services named in the map but absent from the document are ignored; a
- * Railpack service the compile step stripped is not an error to raise here.
+ * image-build service the compile step stripped is not an error to raise here.
  */
-export function applyRailpackImagesToComposeYaml(
+export function applyImageBuildImagesToComposeYaml(
   baseYaml: string,
   images: ReadonlyMap<string, string>,
 ): string {

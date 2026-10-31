@@ -9,17 +9,17 @@ import {
   setDockerCliIoForTest,
 } from "../docker-cli.ts";
 import {
-  type BuildkitRailpackTools,
-  RAILPACK_FRONTEND_IMAGE,
-  RAILPACK_FRONTEND_VERSION,
-  RAILPACK_VERSION,
-  railpackBuildxArgs,
-  railpackCacheKey,
-  railpackFrontendLayoutDir,
-  railpackFrontendRef,
-  railpackImageTag,
-  runRailpackBuild,
-} from "./railpack-build.ts";
+  type BuildkitImageBuildTools,
+  IMAGE_BUILD_FRONTEND_IMAGE,
+  IMAGE_BUILD_FRONTEND_VERSION,
+  IMAGE_BUILD_VERSION,
+  imageBuildBuildxArgs,
+  imageBuildCacheKey,
+  imageBuildFrontendLayoutDir,
+  imageBuildFrontendRef,
+  imageBuildImageTag,
+  runImageBuildBuild,
+} from "./image-build.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -32,7 +32,7 @@ const test = Deno.test.bind(Deno);
 const VALID_DIGEST = `sha256:${"ab".repeat(32)}`;
 const IMAGE_ID =
   "sha256:loadedimage0123456789abcdef0123456789abcdef0123456789ab";
-const FRONTEND_REF = `${RAILPACK_FRONTEND_IMAGE}@${VALID_DIGEST}`;
+const FRONTEND_REF = `${IMAGE_BUILD_FRONTEND_IMAGE}@${VALID_DIGEST}`;
 
 async function writeExec(path: string, body: string): Promise<void> {
   await Deno.mkdir(dirname(path), { recursive: true });
@@ -51,26 +51,26 @@ async function linkCurrent(toolDir: string, versionDir: string): Promise<void> {
 
 async function plantFakeTools(
   runtimesDir: string,
-  railpackScript: string,
-): Promise<BuildkitRailpackTools> {
-  const railpackDir = join(runtimesDir, "railpack", RAILPACK_VERSION);
+  imageBuildScript: string,
+): Promise<BuildkitImageBuildTools> {
+  const imageBuildDir = join(runtimesDir, "railpack", IMAGE_BUILD_VERSION);
   const frontendDir = join(
     runtimesDir,
     "railpack-frontend",
-    RAILPACK_FRONTEND_VERSION,
+    IMAGE_BUILD_FRONTEND_VERSION,
   );
-  await writeExec(join(railpackDir, "railpack"), railpackScript);
+  await writeExec(join(imageBuildDir, "railpack"), imageBuildScript);
   await Deno.mkdir(join(frontendDir, "image"), { recursive: true });
   await Deno.writeTextFile(
     join(frontendDir, "image", "index.json"),
     JSON.stringify({ manifests: [{ digest: VALID_DIGEST }] }),
   );
   await Deno.writeTextFile(join(frontendDir, "digest"), `${VALID_DIGEST}\n`);
-  await linkCurrent(join(runtimesDir, "railpack"), railpackDir);
+  await linkCurrent(join(runtimesDir, "railpack"), imageBuildDir);
   await linkCurrent(join(runtimesDir, "railpack-frontend"), frontendDir);
   return {
-    railpack: join(runtimesDir, "railpack", "current", "railpack"),
-    frontendLayoutDir: railpackFrontendLayoutDir(runtimesDir),
+    planner: join(runtimesDir, "railpack", "current", "railpack"),
+    frontendLayoutDir: imageBuildFrontendLayoutDir(runtimesDir),
     frontendDigest: VALID_DIGEST,
   };
 }
@@ -79,7 +79,7 @@ function shLiteral(value: string): string {
   return JSON.stringify(value);
 }
 
-function railpackPrepareScript(captureDir: string, planBody: string): string {
+function imageBuildPrepareScript(captureDir: string, planBody: string): string {
   return `#!/bin/sh
 printf '%s\\n' "$@" > ${shLiteral(join(captureDir, "railpack.args"))}
 env | sort > ${shLiteral(join(captureDir, "railpack.env"))}
@@ -162,14 +162,14 @@ async function setup(
   return { layout, workingDir, scratchDir, captureDir };
 }
 
-const SEAM_TOOLS: BuildkitRailpackTools = {
-  railpack: "/missing/railpack",
+const SEAM_TOOLS: BuildkitImageBuildTools = {
+  planner: "/missing/railpack",
   frontendLayoutDir: "/missing/image",
   frontendDigest: VALID_DIGEST,
 };
 
-test("railpackBuildxArgs targets the Engine builder with the pinned frontend", () => {
-  const args = railpackBuildxArgs({
+test("imageBuildBuildxArgs targets the Engine builder with the pinned frontend", () => {
+  const args = imageBuildBuildxArgs({
     workingDir: "/w/checkout",
     cacheKey: "proj-1",
     imageTag: "turbopanel-app/web:rel-1",
@@ -200,16 +200,16 @@ test("railpackBuildxArgs targets the Engine builder with the pinned frontend", (
   assertEquals(args.some((arg) => arg.startsWith("--allow")), false);
 });
 
-test("railpackFrontendRef names the frontend by digest only", () => {
-  assertEquals(railpackFrontendRef(VALID_DIGEST), FRONTEND_REF);
+test("imageBuildFrontendRef names the frontend by digest only", () => {
+  assertEquals(imageBuildFrontendRef(VALID_DIGEST), FRONTEND_REF);
 });
 
-test("railpackCacheKey is the project id and refuses unsafe ones", () => {
-  assertEquals(railpackCacheKey("proj-1"), "proj-1");
+test("imageBuildCacheKey is the project id and refuses unsafe ones", () => {
+  assertEquals(imageBuildCacheKey("proj-1"), "proj-1");
   for (const bad of ["", "-lead", "../other", "a/b", "x".repeat(65)]) {
     let threw = false;
     try {
-      railpackCacheKey(bad);
+      imageBuildCacheKey(bad);
     } catch {
       threw = true;
     }
@@ -219,21 +219,21 @@ test("railpackCacheKey is the project id and refuses unsafe ones", () => {
 
 test({
   name:
-    "runRailpackBuild prepares with build env, then builds via docker buildx without it",
+    "runImageBuildBuild prepares with build env, then builds via docker buildx without it",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
       const { layout, workingDir, scratchDir, captureDir } = await setup(
         fixture,
       );
-      const imageTag = railpackImageTag("web-api", "rel-9");
+      const imageTag = imageBuildImageTag("web-api", "rel-9");
       const tools = await plantFakeTools(
         layout.runtimesDir,
-        railpackPrepareScript(captureDir, '{"version":"plan-7"}'),
+        imageBuildPrepareScript(captureDir, '{"version":"plan-7"}'),
       );
       const docker = fakeDocker();
       const lines: string[] = [];
-      const result = await runRailpackBuild({
+      const result = await runImageBuildBuild({
         build: {
           kind: "railpack",
           installCommand: "npm ci",
@@ -252,7 +252,7 @@ test({
         },
         workingDir,
         scratchDir,
-        cacheKey: railpackCacheKey("proj-railpack-1"),
+        cacheKey: imageBuildCacheKey("proj-railpack-1"),
         imageTag,
         tools,
         onOutput: (stream, line) => lines.push(`${stream}:${line}`),
@@ -260,30 +260,36 @@ test({
 
       assertEquals(result.imageTag, imageTag);
       assertEquals(result.imageDigest, IMAGE_ID);
-      assertEquals(result.railpackFrontendVersion, RAILPACK_FRONTEND_VERSION);
-      assertEquals(result.railpackPlanVersion, "plan-7");
+      assertEquals(result.builderFrontendVersion, IMAGE_BUILD_FRONTEND_VERSION);
+      assertEquals(result.builderPlanVersion, "plan-7");
 
-      const railpackEnv = await Deno.readTextFile(
+      const imageBuildEnv = await Deno.readTextFile(
         join(captureDir, "railpack.env"),
       );
-      assertEquals(railpackEnv.includes("FOO=bar"), true);
-      assertEquals(railpackEnv.includes("RAILPACK_INSTALL_CMD=npm ci"), true);
+      assertEquals(imageBuildEnv.includes("FOO=bar"), true);
       assertEquals(
-        railpackEnv.includes("RAILPACK_BUILD_CMD=npm run build"),
+        imageBuildEnv.includes("IMAGE_BUILD_INSTALL_CMD=npm ci"),
         true,
       );
       assertEquals(
-        railpackEnv.includes("RAILPACK_START_CMD=node server.js"),
+        imageBuildEnv.includes("IMAGE_BUILD_BUILD_CMD=npm run build"),
         true,
       );
-      assertEquals(railpackEnv.includes("CI=1"), true);
-      assertEquals(railpackEnv.includes("NODE_ENV=from-payload"), true);
-      assertEquals(railpackEnv.includes("GIT_ASKPASS=should-not-leak"), false);
-      assertEquals(railpackEnv.includes("GIT_SSH_COMMAND="), false);
-      assertEquals(railpackEnv.includes("LD_PRELOAD="), false);
-      assertEquals(railpackEnv.includes("LD_LIBRARY_PATH="), false);
-      assertEquals(railpackEnv.includes("PATH=/evil/bin"), false);
-      assertEquals(railpackEnv.includes(`HOME=${workingDir}`), true);
+      assertEquals(
+        imageBuildEnv.includes("IMAGE_BUILD_START_CMD=node server.js"),
+        true,
+      );
+      assertEquals(imageBuildEnv.includes("CI=1"), true);
+      assertEquals(imageBuildEnv.includes("NODE_ENV=from-payload"), true);
+      assertEquals(
+        imageBuildEnv.includes("GIT_ASKPASS=should-not-leak"),
+        false,
+      );
+      assertEquals(imageBuildEnv.includes("GIT_SSH_COMMAND="), false);
+      assertEquals(imageBuildEnv.includes("LD_PRELOAD="), false);
+      assertEquals(imageBuildEnv.includes("LD_LIBRARY_PATH="), false);
+      assertEquals(imageBuildEnv.includes("PATH=/evil/bin"), false);
+      assertEquals(imageBuildEnv.includes(`HOME=${workingDir}`), true);
 
       // Order: buildx probe, frontend presence, build, built-image inspect.
       assertEquals(docker.calls.map((call) => call.args.slice(0, 2)), [
@@ -295,7 +301,7 @@ test({
       const build = docker.calls[2];
       assertEquals(
         build?.args,
-        railpackBuildxArgs({
+        imageBuildBuildxArgs({
           workingDir,
           cacheKey: "proj-railpack-1",
           imageTag,
@@ -329,7 +335,7 @@ test({
 
 test({
   name:
-    "runRailpackBuild loads the vendored frontend when Docker's store lost it",
+    "runImageBuildBuild loads the vendored frontend when Docker's store lost it",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -338,12 +344,12 @@ test({
       );
       const tools = await plantFakeTools(
         layout.runtimesDir,
-        railpackPrepareScript(captureDir, "{}"),
+        imageBuildPrepareScript(captureDir, "{}"),
       );
       const docker = fakeDocker({ frontend: fail("No such image") });
       const commands: string[][] = [];
       const lines: string[] = [];
-      await runRailpackBuild({
+      await runImageBuildBuild({
         build: { kind: "railpack" },
         workingDir,
         scratchDir,
@@ -374,7 +380,7 @@ test({
         true,
       );
       assertEquals(
-        lines.some((line) => line.includes("loading vendored Railpack")),
+        lines.some((line) => line.includes("loading vendored image builder")),
         true,
       );
     });
@@ -383,7 +389,7 @@ test({
 
 test({
   name:
-    "runRailpackBuild still builds when the vendored frontend cannot be loaded",
+    "runImageBuildBuild still builds when the vendored frontend cannot be loaded",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -392,7 +398,7 @@ test({
       );
       const tools = await plantFakeTools(
         layout.runtimesDir,
-        railpackPrepareScript(captureDir, "{}"),
+        imageBuildPrepareScript(captureDir, "{}"),
       );
       const variants = [
         { tarOk: false, load: ok() },
@@ -403,7 +409,7 @@ test({
           frontend: fail("No such image"),
           load: variant.load,
         });
-        const result = await runRailpackBuild({
+        const result = await runImageBuildBuild({
           build: { kind: "railpack" },
           workingDir,
           scratchDir,
@@ -430,7 +436,7 @@ test({
 });
 
 test({
-  name: "runRailpackBuild names the missing buildx plugin before preparing",
+  name: "runImageBuildBuild names the missing buildx plugin before preparing",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -439,14 +445,14 @@ test({
       );
       const tools = await plantFakeTools(
         layout.runtimesDir,
-        railpackPrepareScript(captureDir, "{}"),
+        imageBuildPrepareScript(captureDir, "{}"),
       );
       const docker = fakeDocker({
         probe: fail("docker: 'buildx' is not a docker command."),
       });
       await assertRejects(
         () =>
-          runRailpackBuild({
+          runImageBuildBuild({
             build: { kind: "railpack" },
             workingDir,
             scratchDir,
@@ -464,7 +470,7 @@ test({
       // A probe that says nothing still names its exit code.
       await assertRejects(
         () =>
-          runRailpackBuild({
+          runImageBuildBuild({
             build: { kind: "railpack" },
             workingDir,
             scratchDir,
@@ -481,7 +487,7 @@ test({
 
 test({
   name:
-    "runRailpackBuild reports the redacted tail of BuildKit's own failure output",
+    "runImageBuildBuild reports the redacted tail of BuildKit's own failure output",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -490,7 +496,7 @@ test({
       );
       const tools = await plantFakeTools(
         layout.runtimesDir,
-        railpackPrepareScript(captureDir, "{}"),
+        imageBuildPrepareScript(captureDir, "{}"),
       );
       const noise = Array.from({ length: 40 }, (_, i) => `#${i} step`);
       const stderr = [...noise, "", "ERROR: token=supersecret denied"].join(
@@ -499,7 +505,7 @@ test({
       const failing = fakeDocker({ build: fail(stderr) });
       const err = await assertRejects(
         () =>
-          runRailpackBuild({
+          runImageBuildBuild({
             build: { kind: "railpack" },
             workingDir,
             scratchDir,
@@ -519,7 +525,7 @@ test({
       // Silent stderr falls back to stdout, then to the exit code.
       await assertRejects(
         () =>
-          runRailpackBuild({
+          runImageBuildBuild({
             build: { kind: "railpack" },
             workingDir,
             scratchDir,
@@ -532,7 +538,7 @@ test({
       );
       await assertRejects(
         () =>
-          runRailpackBuild({
+          runImageBuildBuild({
             build: { kind: "railpack" },
             workingDir,
             scratchDir,
@@ -549,7 +555,7 @@ test({
 
 test({
   name:
-    "runRailpackBuild records a numeric plan version and omits a blank inspect",
+    "runImageBuildBuild records a numeric plan version and omits a blank inspect",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -558,9 +564,9 @@ test({
       );
       const tools = await plantFakeTools(
         layout.runtimesDir,
-        railpackPrepareScript(captureDir, '{"version":3}'),
+        imageBuildPrepareScript(captureDir, '{"version":3}'),
       );
-      const result = await runRailpackBuild({
+      const result = await runImageBuildBuild({
         build: { kind: "railpack" },
         workingDir,
         scratchDir,
@@ -568,14 +574,15 @@ test({
         imageTag: "turbopanel-app/web:rel-1",
         tools,
       }, { runDocker: fakeDocker({ inspect: ok("  ") }).run });
-      assertEquals(result.railpackPlanVersion, "3");
+      assertEquals(result.builderPlanVersion, "3");
       assertEquals("imageDigest" in result, false);
     });
   },
 });
 
 test({
-  name: "runRailpackBuild falls back to the CLI version when the plan has none",
+  name:
+    "runImageBuildBuild falls back to the CLI version when the plan has none",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -587,9 +594,9 @@ test({
         async (planBody) => {
           const tools = await plantFakeTools(
             layout.runtimesDir,
-            railpackPrepareScript(captureDir, planBody),
+            imageBuildPrepareScript(captureDir, planBody),
           );
-          const result = await runRailpackBuild({
+          const result = await runImageBuildBuild({
             build: { kind: "railpack" },
             workingDir,
             scratchDir,
@@ -597,7 +604,7 @@ test({
             imageTag: "turbopanel-app/web:rel-1",
             tools,
           }, { runDocker: fakeDocker({ inspect: fail("no such image") }).run });
-          assertEquals(result.railpackPlanVersion, RAILPACK_VERSION);
+          assertEquals(result.builderPlanVersion, IMAGE_BUILD_VERSION);
           assertEquals(result.imageDigest, undefined);
         },
       );
@@ -607,7 +614,7 @@ test({
 
 test({
   name:
-    "runRailpackBuild uses stdout then the label when railpack prepare fails silently",
+    "runImageBuildBuild uses stdout then the label when railpack prepare fails silently",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -625,13 +632,13 @@ test({
         tools,
       };
       await assertRejects(
-        () => runRailpackBuild(params, { runDocker: fakeDocker().run }),
+        () => runImageBuildBuild(params, { runDocker: fakeDocker().run }),
         Error,
         "visible on stdout",
       );
-      await writeExec(tools.railpack, "#!/bin/sh\nexit 1\n");
+      await writeExec(tools.planner, "#!/bin/sh\nexit 1\n");
       await assertRejects(
-        () => runRailpackBuild(params, { runDocker: fakeDocker().run }),
+        () => runImageBuildBuild(params, { runDocker: fakeDocker().run }),
         Error,
         "railpack prepare failed",
       );
@@ -640,7 +647,7 @@ test({
 });
 
 test({
-  name: "runRailpackBuild injected seams skip real spawns",
+  name: "runImageBuildBuild injected seams skip real spawns",
   permissions: { read: true, write: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -650,7 +657,7 @@ test({
         JSON.stringify({ version: "from-file" }),
       );
       const calls: Array<{ args: string[]; env: Record<string, string> }> = [];
-      const result = await runRailpackBuild({
+      const result = await runImageBuildBuild({
         build: {
           kind: "railpack",
           env: { GIT_ASKPASS: "leak", VISIBLE: "ok" },
@@ -672,7 +679,7 @@ test({
         },
       });
       assertEquals(result.imageDigest, IMAGE_ID);
-      assertEquals(result.railpackPlanVersion, "from-file");
+      assertEquals(result.builderPlanVersion, "from-file");
       assertEquals(calls.length, 1);
       assertEquals(calls[0]?.env.GIT_ASKPASS, undefined);
       assertEquals(calls[0]?.env.VISIBLE, "ok");
@@ -681,7 +688,7 @@ test({
 });
 
 test({
-  name: "runRailpackBuild reports a streamed-tool AbortError as a timeout",
+  name: "runImageBuildBuild reports a streamed-tool AbortError as a timeout",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -695,7 +702,7 @@ test({
       try {
         await assertRejects(
           () =>
-            runRailpackBuild({
+            runImageBuildBuild({
               build: { kind: "railpack" },
               workingDir,
               scratchDir,
@@ -721,7 +728,7 @@ test({
  */
 test({
   name:
-    "runRailpackBuild drives the shared docker CLI path without tenant env and kills it on timeout",
+    "runImageBuildBuild drives the shared docker CLI path without tenant env and kills it on timeout",
   permissions: { read: true, write: true, run: true, env: true },
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -730,7 +737,7 @@ test({
       );
       const tools = await plantFakeTools(
         layout.runtimesDir,
-        railpackPrepareScript(captureDir, "{}"),
+        imageBuildPrepareScript(captureDir, "{}"),
       );
       const dockerBin = join(scratchDir, "bin", "docker");
       const marker = join(captureDir, "slow");
@@ -761,7 +768,7 @@ exit 0
           imageTag: "turbopanel-app/web:rel-1",
           tools,
         };
-        const result = await runRailpackBuild(params);
+        const result = await runImageBuildBuild(params);
         assertEquals(result.imageDigest, IMAGE_ID);
         const dockerEnv = await Deno.readTextFile(
           join(captureDir, "docker.env"),
@@ -781,7 +788,7 @@ exit 0
         await Deno.writeTextFile(marker, "");
         const started = Date.now();
         await assertRejects(
-          () => runRailpackBuild(params, { toolTimeoutMs: 300 }),
+          () => runImageBuildBuild(params, { toolTimeoutMs: 300 }),
           Error,
           "docker buildx build timed out after 300ms",
         );

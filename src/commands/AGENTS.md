@@ -3,9 +3,10 @@
 Handlers live under `src/commands/`. `src/instance/client.ts` is transport
 only: it never imports this directory. `src/entry/run.ts` calls
 `wireCommandPorts` (`src/commands/wire.ts`) before it connects, which
-registers all eight client ports: command dispatch, the fabric path probe,
+registers all nine client ports: command dispatch, the fabric path probe,
 drivetemp enable, session open and attach (resend kept results), the result
-ack, repeated dispatches and the `hello` report. Nothing is passed as client
+ack, repeated dispatches, the `hello` report and the 60 s TurboFabric peer
+readings (`subscribeFabricPeers`). Nothing is passed as client
 options any more. Tests that construct the client call `wireCommandPorts` (or
 `registerCommandPorts`) the same way.
 
@@ -47,6 +48,38 @@ Root context: `../../AGENTS.md`. Transport: `../instance/AGENTS.md`.
   networking, ACME observe, HA observe, managed logs) stay as a documented
   one-way DAG — not fully hexagonalized in this pass.
 
+## TurboFabric LAN paths (`fabric-lan-routes-v1`)
+
+`server.fabric.reconcile` may carry `tunnel: false` (no `tp0`: it is taken
+down like a pause, the key is kept and never created; `peers` must be empty,
+`address` may be absent) and `lanRoutes` (`{ cidr, via }`: a member's
+container subnet routed via its LAN address on the interface whose connected
+subnet holds it; `fabric-lan-routes.ts`). Installed LAN routes are recorded in
+`state.json` (`installedLanRoutes`) and are the only ones ever removed. A
+pause keeps LAN routes and their `TP-FORWARD` accepts; a teardown removes
+them, and so does `scripts/purge.sh`. IPv6 entries are validated but not
+installed (forwarding is IPv4 only). Strict reverse-path filtering passes
+because the LAN route sends replies out of the interface the traffic came in
+on, so no `rp_filter` change is made.
+
+A skipped LAN or `tp0` route is reported in the result's `warnings` (plain
+sentences, at most 20), not only logged (warnings go to `daemon.err.log`), and
+the apply stamp is not written, so the next reconcile retries it. Docker is
+not a fabric prerequisite: without it the tunnel and routes come up, the
+routed bridges wait (a `warnings` entry says so) and are created when Docker
+becomes reachable, and `TP-FORWARD` hangs off `FORWARD` until `DOCKER-USER`
+exists.
+
+## TurboFabric pause and teardown
+
+The daemon is the only owner of `tp0`. Taking it down runs every step even
+when one fails (retire a `wg-quick@tp0` that is enabled or running, delete
+`tp0`, forwarding rules, files) and then fails the command with one error
+naming the failed steps. A pause writes `suspended` first, so a restart keeps
+the tunnel down. Boot with a paused state, or with no state at all, deletes a
+leftover `tp0`. Host calls refused with systemd's "Access denied" are retried
+through `tp-host`, like "Operation not permitted".
+
 ## Command results survive a lost link (`command-recovery-v1`)
 
 `command-outbox.ts` journals every accepted command under
@@ -68,3 +101,9 @@ when either list is not empty, and a running deploy repeats its step plan every
 30 s. Transcript chunks the control plane has not taken are kept and resent in
 order (retry every 5 s, resync from the `nextSeq` of a `409`; see
 `../logs/sink.ts`).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Command handlers** | `src/commands/AGENTS.md` | Daemon command implementations (`command-router.ts`); injected into `InstanceClient` from `src/entry/run.ts` so transport never imports handlers |

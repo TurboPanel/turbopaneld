@@ -12,21 +12,22 @@
 # (bin/turbopaneld, optional bin/turbopaneld.js, share/orchestration/), probes
 # native binary executability, bootstraps orchestration runtimes, and runs
 # daemon-install.yml via Ansible (turbopaneld.service — native or Deno JS
-# runtime; see AGENTS.md).
+# runtime; see orchestration/AGENTS.md).
 #
 # Config: /etc/turbopanel  State: /var/lib/turbopanel  Runtime: /run/turbopanel
 #
 # Run as root or as a sudo-capable user (self-escalates via sudo when available).
 #
 # Typical install (production):
-#   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
+#   curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=<b64> sh
 # Optional: TURBOPANEL_HOST, TURBOPANEL_INSECURE_TLS=1, TURBOPANEL_UPDATE_CHANNEL (default release),
+# TURBOPANEL_INSTANCE_CA_FINGERPRINT (expected CA fingerprints, comma-separated),
 # TURBOPANEL_DL_BASE (dev overlay catalog; never falls back to the public rail).
 # Flags (--license, --host, …) remain supported for scripts and sudo re-exec.
 #
 # Self-hosted control plane — the one door, chosen by what you pass:
-#   curl -fsSL turbopanel.sh | sh                        # nothing → panel install
-#   curl -fsSL turbopanel.sh | TURBOPANEL_INSTANCE=1 sh  # the same, said explicitly
+#   curl -fsSL https://turbopanel.sh | sh                        # nothing → panel install
+#   curl -fsSL https://turbopanel.sh | TURBOPANEL_INSTANCE=1 sh  # the same, said explicitly
 # Decided 2026-09-17: with no license and no daemon arguments the script
 # installs the control plane. It prints a short welcome (and, on a non-release
 # channel, a yellow non-stable warning) then proceeds; Ctrl-C or q at the
@@ -80,9 +81,11 @@ TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
 # `--insecure-tls` only relaxes trust for the self-hosted *instance* bootstrap
-# legs (the initial run.sh re-exec, the instance CA fetch, and the private
-# uploaded-issuer fetch) — it must never
-# weaken release/CDN trust, so bootstrapping a self-signed instance cannot
+# legs (the run.sh re-exec from the instance's own host when a
+# TURBOPANEL_DL_BASE overlay is in use, the instance CA fetch, and the private
+# uploaded-issuer fetch). The re-exec from a public installer host always
+# verifies TLS: that host has a public certificate and its body is piped into
+# `sudo sh`. It must never weaken release/CDN trust, so bootstrapping a self-signed instance cannot
 # silently disable verification of the code we execute. If a genuine
 # release-download TLS emergency ever arises, TURBOPANEL_RELEASE_TLS_INSECURE_OVERRIDE=1
 # is a deliberately undocumented, operator-only escape hatch: it is never derived
@@ -104,6 +107,153 @@ tp_ca_fingerprint() {
 tp_ca_parses() {
   _parse_path="$1"
   openssl x509 -in "$_parse_path" -noout >/dev/null 2>&1
+}
+
+# A fingerprint as the daemon compares it: lowercase hex, no colons.
+tp_fingerprint_hex() {
+  _fh_value="$1"
+  printf '%s' "$_fh_value" | tr 'A-F' 'a-f' | tr -d ': '
+}
+
+tp_cert_fingerprint_hex() {
+  _cfh_path="$1"
+  tp_fingerprint_hex "$(tp_ca_fingerprint "$_cfh_path")"
+}
+
+# Write each CERTIFICATE block of PEM to DIR/c1.pem, DIR/c2.pem, ...
+tp_split_pem_bundle() {
+  _spb_src="$1"
+  _spb_dir="$2"
+  awk -v dir="$_spb_dir" '
+    /-----BEGIN CERTIFICATE-----/ { n++; file = dir "/c" n ".pem" }
+    n > 0 { print >> file }
+    /-----END CERTIFICATE-----/ { if (file != "") close(file) }
+  ' "$_spb_src"
+}
+
+# Normalise a comma-separated fingerprint list. Fails on anything that is not
+# a SHA-256 fingerprint, so a mangled command stops instead of installing
+# unpinned.
+tp_normalize_ca_pin() {
+  _pin_in="$1"
+  _pin_out=""
+  _pin_ifs="$IFS"
+  IFS=','
+  for _pin_item in $_pin_in; do
+    _pin_item="$(tp_fingerprint_hex "$_pin_item")"
+    [ -n "$_pin_item" ] || continue
+    case "$_pin_item" in
+      *[!0-9a-f]*) IFS="$_pin_ifs"; return 1 ;;
+      *) ;;
+    esac
+    [ "${#_pin_item}" -eq 64 ] || { IFS="$_pin_ifs"; return 1; }
+    _pin_out="${_pin_out:+${_pin_out},}${_pin_item}"
+  done
+  IFS="$_pin_ifs"
+  [ -n "$_pin_out" ] || return 1
+  printf '%s' "$_pin_out"
+}
+
+# Fingerprints of every certificate in the given PEM files, comma-separated
+# and de-duplicated. Missing files are skipped.
+tp_pem_files_pin() {
+  _pf_out=""
+  _pf_dir="$(mktemp -d)"
+  _pf_n=0
+  for _pf_src in "$@"; do
+    [ -f "$_pf_src" ] || continue
+    _pf_n=$((_pf_n + 1))
+    mkdir "$_pf_dir/$_pf_n"
+    tp_split_pem_bundle "$_pf_src" "$_pf_dir/$_pf_n"
+    for _pf_cert in "$_pf_dir/$_pf_n"/c*.pem; do
+      [ -f "$_pf_cert" ] || continue
+      _pf_fp="$(tp_cert_fingerprint_hex "$_pf_cert")"
+      [ -n "$_pf_fp" ] || continue
+      case ",${_pf_out}," in
+        *",${_pf_fp},"*) ;;
+        *) _pf_out="${_pf_out:+${_pf_out},}${_pf_fp}" ;;
+      esac
+    done
+  done
+  rm -rf "$_pf_dir"
+  printf '%s' "$_pf_out"
+}
+
+# True when SRC holds at least one certificate and every one of them is in
+# CA_PIN. The daemon trusts every certificate in its trust files, so one
+# extra certificate is as bad as a wrong one.
+tp_pem_matches_ca_pin() {
+  _pm_src="$1"
+  _pm_found="$(tp_pem_files_pin "$_pm_src")"
+  [ -n "$_pm_found" ] || return 1
+  _pm_ifs="$IFS"
+  IFS=','
+  for _pm_fp in $_pm_found; do
+    case ",${CA_PIN}," in
+      *",${_pm_fp},"*) ;;
+      *) IFS="$_pm_ifs"; return 1 ;;
+    esac
+  done
+  IFS="$_pm_ifs"
+  return 0
+}
+
+# The expected list a host already carries: the installer's line in
+# daemon.env plus what an authenticated CA reconcile recorded. Empty when the
+# host has none (or it cannot be parsed).
+tp_host_ca_pin() {
+  _hp_env="$1"
+  _hp_reconciled="$2"
+  _hp_seed=""
+  if [ -f "$_hp_env" ]; then
+    _hp_seed="$(sed -n 's/^TURBOPANEL_INSTANCE_CA_FINGERPRINT=//p' "$_hp_env" | tail -n 1)"
+  fi
+  if [ -f "$_hp_reconciled" ]; then
+    _hp_seed="${_hp_seed:+${_hp_seed},}$(head -n 1 "$_hp_reconciled")"
+  fi
+  [ -n "$_hp_seed" ] || return 0
+  tp_normalize_ca_pin "$_hp_seed" || true
+}
+
+# Gate for every CA or issuer document from the control plane before it is
+# installed. With CA_PIN from the install command it must match or nothing is
+# installed. With CA_PIN taken from this host's own list (CA_PIN_SOURCE=host:
+# a re-run without a fingerprint, such as an old command), downloads over the
+# unverified leg must match it, so an old command cannot replace a pinned CA;
+# a verified leg is already authenticated by that trust. Without any list,
+# today's behaviour stays, and an unverified download is called out once.
+tp_check_fetched_trust() {
+  _ct_src="$1"
+  _ct_what="$2"
+  _ct_leg="$3"
+  if [ -n "${CA_PIN:-}" ] &&
+    { [ "${CA_PIN_SOURCE:-command}" != host ] || [ "$_ct_leg" = insecure ]; }
+  then
+    if tp_pem_matches_ca_pin "$_ct_src"; then
+      return 0
+    fi
+    if [ "${CA_PIN_SOURCE:-command}" = host ]; then
+      _ct_expected="the CA this server already trusts"
+    else
+      _ct_expected="the fingerprint in the install command"
+    fi
+    tp_print_error "The ${_ct_what} downloaded from ${HOST_URL} does not match ${_ct_expected} (got $(tp_pem_files_pin "$_ct_src"); expected ${CA_PIN}). Nothing was installed. Someone may be intercepting this connection, or the panel's certificates changed. Copy a fresh command from Add Server and try again."
+    return 1
+  fi
+  if [ "$_ct_leg" = insecure ] && [ "${TP_TOFU_WARNED:-false}" != true ]; then
+    TP_TOFU_WARNED=true
+    tp_print_step "~" "No CA fingerprint in the install command: the ${_ct_what} was trusted on first use over an unverified connection"
+  fi
+  return 0
+}
+
+# Which leg a control-plane trust download used (see tp_instance_bootstrap_curl).
+tp_bootstrap_leg() {
+  if [ "${INSECURE_TLS:-false}" = true ]; then
+    printf '%s' insecure
+  else
+    printf '%s' verified
+  fi
 }
 
 # Run "$1 <args>" with curl's -w %{http_code} appended and print the code
@@ -168,11 +318,7 @@ tp_trust_has_distinct_issuer() {
   _trust="$1"
   _leaf_fp="$2"
   _dir="$(mktemp -d)"
-  awk -v dir="$_dir" '
-    /-----BEGIN CERTIFICATE-----/ { n++; file = dir "/c" n ".pem" }
-    n > 0 { print >> file }
-    /-----END CERTIFICATE-----/ { if (file != "") close(file) }
-  ' "$_trust"
+  tp_split_pem_bundle "$_trust" "$_dir"
   _distinct=1
   for _cert in "$_dir"/c*.pem; do
     [ -f "$_cert" ] || continue
@@ -193,11 +339,7 @@ tp_trust_issuers_only() {
   _leaf_fp="$2"
   _out="$3"
   _dir="$(mktemp -d)"
-  awk -v dir="$_dir" '
-    /-----BEGIN CERTIFICATE-----/ { n++; file = dir "/c" n ".pem" }
-    n > 0 { print >> file }
-    /-----END CERTIFICATE-----/ { if (file != "") close(file) }
-  ' "$_trust"
+  tp_split_pem_bundle "$_trust" "$_dir"
   : >"$_out"
   for _cert in "$_dir"/c*.pem; do
     [ -f "$_cert" ] || continue
@@ -264,6 +406,9 @@ tp_capture_presented_leaf() {
 # Never copied onto the Platform CA path.
 tp_install_verified_uploaded_trust() {
   _src="$1"
+  if ! tp_check_fetched_trust "$_src" "private uploaded issuer" "$(tp_bootstrap_leg)"; then
+    return 1
+  fi
   _host="$(tp_url_host "$HOST_URL")"
   _presented="$(mktemp)"
   if ! tp_capture_presented_leaf "$_presented" "$_host"; then
@@ -357,6 +502,10 @@ tp_fetch_uploaded_trust() {
 
 tp_install_instance_ca() {
   _new_ca="$1"
+  _new_ca_leg="${2:-$(tp_bootstrap_leg)}"
+  if ! tp_check_fetched_trust "$_new_ca" "Platform CA" "$_new_ca_leg"; then
+    return 1
+  fi
   _old_fp=""
   if [ -f "$CA_PATH" ]; then
     _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
@@ -370,12 +519,13 @@ tp_install_instance_ca() {
   fi
 }
 
-# Fetch the control plane's Platform CA into CA_PATH. Never fatal: a host
-# that cannot re-fetch the CA keeps the one it has. The daemon adds that file
-# to the system roots at runtime, so a control plane that moved to a publicly
-# trusted certificate keeps validating either way, and an unreachable one is
-# reported by the daemon itself — never by refusing the install. Only a
-# fetched PEM that parses and validates the live leaf is ever installed.
+# Fetch the control plane's Platform CA into CA_PATH. Not fatal when the CA
+# cannot be fetched: a host that cannot re-fetch the CA keeps the one it has.
+# The daemon adds that file to the system roots at runtime, so a control
+# plane that moved to a publicly trusted certificate keeps validating either
+# way, and an unreachable one is reported by the daemon itself. The one fatal
+# case: the install command named the expected CA fingerprints and the
+# fetched CA is not among them (returns 1; nothing is installed).
 tp_fetch_instance_ca() {
   _curl_base="$(tp_instance_bootstrap_curl)"
   _ca_tmp="$(mktemp)"
@@ -384,7 +534,10 @@ tp_fetch_instance_ca() {
   _ca_http_code=$(tp_curl_http_code $_curl_base -o "$_ca_tmp" "${HOST_URL%/}/api/daemon/v1/instance/ca")
   case "$_ca_http_code" in
     200)
-      tp_install_instance_ca "$_ca_tmp"
+      if ! tp_install_instance_ca "$_ca_tmp"; then
+        rm -f "$_ca_tmp"
+        return 1
+      fi
       ;;
     404)
       # Not a Platform CA leaf. A public upload or Let's Encrypt name uses
@@ -394,7 +547,10 @@ tp_fetch_instance_ca() {
       ;;
     000)
       if [ -f "$CA_PATH" ]; then
-        tp_refetch_instance_ca_unpinned
+        if ! tp_refetch_instance_ca_unpinned; then
+          rm -f "$_ca_tmp"
+          return 1
+        fi
       else
         tp_print_step "~" "Could not download the Platform CA (HTTP ${_ca_http_code}) — keeping existing CA if present"
       fi
@@ -413,7 +569,9 @@ tp_fetch_instance_ca() {
 # roots. Nothing else is tried: the pin is never replaced from an unverified
 # (-k) fetch, since an on-path attacker would choose the replacement and its
 # leaf. The existing CA stays unless public trust authenticates a new one; a
-# real rotation is applied by the operator with --instance-ca.
+# real rotation is applied by the operator with --instance-ca. A CA that
+# public trust authenticated still has to match CA_PIN when the command
+# carried one.
 tp_refetch_instance_ca_unpinned() {
   _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
   _ca_retry="$(mktemp)"
@@ -426,9 +584,10 @@ tp_refetch_instance_ca_unpinned() {
       ;;
     200)
       if tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
-        tp_install_instance_ca "$_ca_retry"
+        _install_rc=0
+        tp_install_instance_ca "$_ca_retry" verified || _install_rc=1
         rm -f "$_ca_retry"
-        return 0
+        return "$_install_rc"
       fi
       ;;
     *) ;;
@@ -2252,7 +2411,7 @@ tp_print_nonstable_channel_warning() {
       ;;
   esac
   printf '\n'
-  tp_print_styled_line "33" "   Supported release:  curl -fsSL turbopanel.sh | sh"
+  tp_print_styled_line "33" "   Supported release:  curl -fsSL https://turbopanel.sh | sh"
   tp_print_styled_line "1;33" "$_rule"
 }
 
@@ -2321,6 +2480,7 @@ LICENSE=""
 HOST_URL=""
 DL_BASE=""
 INSTANCE_CA=""
+CA_PIN=""
 TUNNEL_TOKEN=""
 INSECURE_TLS=false
 NO_START=false
@@ -2345,6 +2505,9 @@ while [ $# -gt 0 ]; do
     --instance-ca)
       [ $# -ge 2 ] || { tp_print_error "--instance-ca requires an argument"; exit 1; }
       INSTANCE_CA="$2"; shift 2 ;;
+    --instance-ca-fingerprint)
+      [ $# -ge 2 ] || { tp_print_error "--instance-ca-fingerprint requires an argument"; exit 1; }
+      CA_PIN="$2"; shift 2 ;;
     --tunnel-token)
       [ $# -ge 2 ] || { tp_print_error "--tunnel-token requires an argument"; exit 1; }
       TUNNEL_TOKEN="$2"; shift 2 ;;
@@ -2380,7 +2543,7 @@ while [ $# -gt 0 ]; do
 done
 
 # Piped install form prefers env vars so the copy-paste command stays clean:
-#   curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh
+#   curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=… sh
 # Explicit flags win when both are set. The sudo re-exec hands the license and
 # tunnel token over in these variables, never as flags: argv is world-readable
 # (ps, /proc) and sudo logs it.
@@ -2388,6 +2551,12 @@ done
 [ -n "$TUNNEL_TOKEN" ] || TUNNEL_TOKEN="${TURBOPANEL_TUNNEL_TOKEN:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
+[ -n "$CA_PIN" ] || CA_PIN="${TURBOPANEL_INSTANCE_CA_FINGERPRINT:-}"
+CA_PIN_SOURCE="command"
+if [ -n "$CA_PIN" ] && ! CA_PIN="$(tp_normalize_ca_pin "$CA_PIN")"; then
+  tp_print_error "TURBOPANEL_INSTANCE_CA_FINGERPRINT must be one or more SHA-256 fingerprints separated by commas. Copy the install command again from Add Server."
+  exit 1
+fi
 DL_BASE="$(tp_strip_trailing_slashes "$DL_BASE")"
 if [ -n "$HOST_URL" ]; then
   case "$HOST_URL" in
@@ -2469,7 +2638,7 @@ fi
 # non-stable-channel warning) print from tp_print_header once privileges are
 # settled, so a sudo re-exec does not show the banner twice.
 if [ "$DAEMON_ONLY" != true ] && [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
-  && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$DL_BASE" ] \
+  && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$CA_PIN" ] && [ -z "$DL_BASE" ] \
   && [ -z "$MANIFEST_URL" ] && [ -z "$INSTANCE_MANIFEST_URL" ] \
   && [ -z "$UI_MANIFEST_URL" ]; then
   INSTANCE_INSTALL=true
@@ -2555,12 +2724,16 @@ if ! tp_is_root; then
   if [ "$_sudo_rc" -ne 0 ]; then
     tp_install_privilege_denied sudo_failed
   fi
+  _curl="$TP_CURL_FETCH"
   if [ -n "$DL_BASE" ]; then
     if [ -z "$HOST_URL" ]; then
       tp_print_error "TURBOPANEL_DL_BASE requires TURBOPANEL_HOST (or --host)"
       exit 1
     fi
     _REEXEC_SCRIPT_URL="${HOST_URL%/}/run.sh"
+    # The instance's own host may serve a self-signed certificate; only this
+    # leg honours --insecure-tls. The public installer host always verifies.
+    [ "$INSECURE_TLS" = true ] && _curl="$TP_CURL_FETCH_INSECURE"
   else
     _REEXEC_SCRIPT_URL="https://$(tp_installer_host_for_channel "${TURBOPANEL_UPDATE_CHANNEL:-release}")"
   fi
@@ -2584,13 +2757,14 @@ if ! tp_is_root; then
   [ -n "$DL_BASE" ] && set -- "$@" --dl-base "$DL_BASE"
   [ -n "$DL_BASE" ] && [ "${TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST:-}" = "1" ] && set -- "$@" --dev-allow-unsigned
   [ -n "$INSTANCE_CA" ] && set -- "$@" --instance-ca "$INSTANCE_CA"
+  # Not a secret, and it must survive sudo's environment reset: without it
+  # the root run would trust whatever CA answers.
+  [ -n "$CA_PIN" ] && set -- "$@" --instance-ca-fingerprint "$CA_PIN"
   [ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
   [ "$NO_START" = true ] && set -- "$@" --no-start
   [ "$SKIP_DAEMON_PACKAGE" = true ] && set -- "$@" --skip-daemon-package
   [ "$PROGRESS_MARKERS" = true ] && set -- "$@" --progress-markers
   [ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] && set -- "$@" --channel "$TURBOPANEL_UPDATE_CHANNEL"
-  _curl="$TP_CURL_FETCH"
-  [ "$INSECURE_TLS" = true ] && _curl="$TP_CURL_FETCH_INSECURE"
   # Re-run the script under sudo. `exec` cannot be used here: in a pipeline
   # each command runs in its own subshell, so `exec` would only replace the
   # curl subshell, not this shell — leaving the original non-root shell to
@@ -2618,6 +2792,13 @@ RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
+# A host that already carries an expected CA list keeps it when this run
+# brings none, so re-running an old command cannot downgrade it to trust on
+# first use.
+if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
+  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin")"
+  [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
+fi
 # Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
 # tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
 LICENSE_STAGING_DIR="/var/lib/turbopanel-license-staging"
@@ -2772,6 +2953,13 @@ if [ "$INSTANCE_INSTALL" = true ] || [ "$_colocated_daemon_refresh" = true ]; th
   # HOST_URL is empty here, so a fetch could only ever fail.
   :
 elif [ -n "$INSTANCE_CA" ]; then
+  # An operator-supplied CA must still match a fingerprint the command gave.
+  if [ -n "$CA_PIN" ] && [ "$CA_PIN_SOURCE" = command ] &&
+    ! tp_pem_matches_ca_pin "$INSTANCE_CA"
+  then
+    tp_print_error "--instance-ca ${INSTANCE_CA} does not match the CA fingerprint given to the installer (got $(tp_pem_files_pin "$INSTANCE_CA"); expected ${CA_PIN}). Nothing was installed."
+    exit 1
+  fi
   # Compare resolved paths, not raw strings: a symlink or path-variant (e.g. a
   # trailing slash or relative form) pointing at the canonical CA otherwise
   # slips past a string-only check and makes `install` fail with
@@ -2783,7 +2971,9 @@ elif [ -n "$INSTANCE_CA" ]; then
   fi
 else
   tp_print_step "▸" "Fetching the Platform CA…"
-  tp_fetch_instance_ca
+  if ! tp_fetch_instance_ca; then
+    exit 1
+  fi
 fi
 if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
   tp_print_step "▸" "Fetching private uploaded issuer…"
@@ -2963,10 +3153,13 @@ trap 'rm -f "$VARS_FILE"' EXIT
   printf 'turbopanel_service_name: %s\n' "$(tp_daemon_binary_name)"
   if [ -f "$CA_PATH" ]; then
     printf 'turbopanel_instance_ca: %s\n' "$CA_PATH"
-    _ca_fp="$(openssl x509 -in "$CA_PATH" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' | tr 'A-F' 'a-f' | tr -d ':')"
-    if [ -n "$_ca_fp" ]; then
-      printf 'turbopanel_instance_ca_fingerprint: %s\n' "$_ca_fp"
-    fi
+  fi
+  # Every certificate the daemon will trust for the control plane. When the
+  # command carried CA_PIN these files were checked against it above; the
+  # daemon refuses to connect if they later drift from this list.
+  _ca_fp="$(tp_pem_files_pin "$CA_PATH" "$UPLOADED_TRUST_PATH")"
+  if [ -n "$_ca_fp" ]; then
+    printf 'turbopanel_instance_ca_fingerprint: %s\n' "$_ca_fp"
   fi
   printf 'turbopanel_update_channel: %s\n' "${TURBOPANEL_UPDATE_CHANNEL:-$(tp_default_update_channel)}"
   if [ -n "$DL_BASE" ]; then

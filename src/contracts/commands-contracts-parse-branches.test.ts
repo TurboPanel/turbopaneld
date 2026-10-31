@@ -307,6 +307,99 @@ test("parseFabricReconcilePayload rejects invalid peer keepalive and mtu", () =>
   );
 });
 
+test("parseFabricReconcilePayload accepts tunnel and lanRoutes", () => {
+  const payload = {
+    enabled: true,
+    prefix: "10.192.0.0/16",
+    peers: [],
+    tunnel: false,
+    lanRoutes: [
+      { cidr: " 10.193.5.0/24 ", via: "10.0.0.12" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      { cidr: "fd00:1::/64", via: "fd00:2::12" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+    ],
+    futureField: "ignored",
+  };
+  assertEquals(parseFabricReconcilePayload(payload), {
+    enabled: true,
+    prefix: "10.192.0.0/16",
+    peers: [],
+    tunnel: false,
+    lanRoutes: [
+      { cidr: "10.193.5.0/24", via: "10.0.0.12" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      { cidr: "fd00:1::/64", via: "fd00:2::12" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+    ],
+  });
+  const withTunnel = parseFabricReconcilePayload({
+    enabled: true,
+    address: "10.192.0.2/32",
+    prefix: "10.192.0.0/16",
+    peers: [],
+    tunnel: true,
+    lanRoutes: [],
+  });
+  assertEquals(withTunnel, {
+    enabled: true,
+    address: "10.192.0.2/32",
+    prefix: "10.192.0.0/16",
+    peers: [],
+    tunnel: true,
+    lanRoutes: [],
+  });
+});
+
+test("parseFabricReconcilePayload rejects bad tunnel and lanRoutes shapes", () => {
+  const base = { enabled: true, prefix: "10.192.0.0/16", peers: [] };
+  const cases: Array<[Record<string, unknown>, string]> = [
+    [{ ...base, tunnel: "no" }, "Invalid fabric tunnel"],
+    [{ ...base }, "Invalid fabric address"],
+    [{ ...base, tunnel: true }, "Invalid fabric address"],
+    [{ ...base, lanRoutes: {} }, "Invalid fabric address"],
+    [{ ...base, tunnel: false, lanRoutes: {} }, "Invalid fabric lanRoutes"],
+    [{ ...base, tunnel: false, lanRoutes: ["10.1.0.0/24"] }, "lanRoutes entry"],
+    [{ ...base, tunnel: false, lanRoutes: [null] }, "lanRoutes entry"],
+    [{ ...base, tunnel: false, lanRoutes: [[]] }, "lanRoutes entry"],
+    [
+      { ...base, tunnel: false, lanRoutes: [{ cidr: 5, via: "10.0.0.1" }] },
+      "lanRoutes cidr",
+    ],
+    [
+      {
+        ...base,
+        tunnel: false,
+        lanRoutes: [{ cidr: "10.1.0.0", via: "10.0.0.1" }],
+      },
+      "lanRoutes cidr",
+    ],
+    [
+      {
+        ...base,
+        tunnel: false,
+        lanRoutes: [{ cidr: "10.1.0.0/24", via: "10.0.0.1/32" }],
+      },
+      "lanRoutes via",
+    ],
+    [
+      { ...base, tunnel: false, lanRoutes: [{ cidr: "10.1.0.0/24" }] },
+      "lanRoutes via",
+    ],
+    [
+      {
+        ...base,
+        tunnel: false,
+        peers: [{ publicKey: WG_PUBKEY, allowedIPs: ["10.193.0.0/24"] }],
+      },
+      "a payload with no tunnel",
+    ],
+  ];
+  for (const [payload, message] of cases) {
+    assertThrows(
+      () => parseFabricReconcilePayload(payload),
+      TypeError,
+      message,
+    );
+  }
+});
+
 test("parseEnvironmentStopPayload rejects invalid fabric network names", () => {
   assertThrows(
     () =>

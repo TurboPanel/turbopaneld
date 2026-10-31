@@ -424,7 +424,7 @@ key. The daemon restarts the unit when its rendered content changes
 
 The control-plane Let's Encrypt window (co-located instance) proxies
 HTTP-01 challenges to `unix/<run dir>/instance-acme.sock`. Connecting needs
-`x` on `/run/turbopanel` (`tp:tp` `2770`) and `w` on the socket. The role
+`x` on `/run/turbopanel` (`tp:tp` `3770`) and `w` on the socket. The role
 grants `tpedge` traverse only (`u:tpedge:x`, no listing, no default entry) on
 the run directory, and because `/run` is tmpfs it also writes
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf` (`a+ … u:tpedge:x`) so the
@@ -433,7 +433,10 @@ daemon's preflight listener (as `tp`) or the issuer Caddy (as `tpcaddy`),
 neither of which can name another user in an ACL, so the daemon then calls
 `tp-host setfacl -P -m u:tpedge:rw <run dir>/instance-acme.sock`. That shape
 accepts only that path and that entry, waits up to 5 s for the issuer to
-bind, refuses a symlink, and never follows one (`-P`). `tpedge` is never put
+bind, refuses a symlink, and never follows one (`-P`). The run directory is
+sticky, so the issuer cannot replace a preflight socket the daemon left
+behind; before starting the issuer the daemon removes a socket owned by the
+directory's owner (itself) and leaves any other. `tpedge` is never put
 in group `tp`. Residual: traverse lets `tpedge` open anything directly in
 the run directory whose own mode grants "other" access (today the empty
 `daemon.lock`, `0644`); no socket there is world-writable.
@@ -639,3 +642,155 @@ and the control-plane compose (`system-compose`) only take the digest on first
 create, on a deliberate tag change, or when the stored image already carries a
 digest and the table's digest changed. Existing databases therefore keep their
 current image until a deliberate change.
+
+## Ansible style (SonarQube)
+
+- Prefer **`mode: "0640"`** / **`0750"`** with explicit **`owner`** /
+  **`group`** over world-readable modes (`ansible:S2612`).
+
+## Deno Version Pin
+
+**Deno version pin:** `DENO_VERSION` (`src/orchestration/assets.ts`) =
+**`2.9.8`**. Keep it in step with `deno_version` in
+`orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
+`scripts/run.sh`, and `DENO_VERSION` in
+[TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
+console bootstrap fallback + status label). `src/orchestration/assets.test.ts`
+pins the const to the role default. Bumping the pin is a fleet-wide rollout:
+`deno-runtime` runs on the install/converge path (`daemon-install.yml`,
+`daemon-converge.yml`) and on the instance-launch refresh path
+(`instance-launch-only.yml`, ahead of `instance-launch`), because instance and
+mailer units ExecStart through the vendored Deno path — it is not only the
+daemon's JS-fallback concern. `src/orchestration/assets.test.ts` pins that
+ordering too.
+
+## Vendored Runtimes and Ansible Environment
+
+**Vendored Node/Deno layout:** Ansible roles install pinned runtimes under
+`/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see
+`node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node`
+(`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and
+`turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible
+tasks). Node **26.7.0** is pinned in `node-runtime/defaults/main.yml` — keep in
+step with `NODE_VERSION` in [TurboPanel/dev](https://github.com/TurboPanel/dev)
+`scripts/lib/paths.sh`. Node 25+ no longer ships Corepack; the `node-runtime`
+role installs it with vendored `npm install -g corepack` into the versioned
+prefix, then `corepack enable pnpm`. The vendored runtime root is defined once in
+`src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`);
+shell helpers live in `scripts/lib/runtime-paths.sh`.
+
+**Manual troubleshooting (retired `/opt/turbopanel/runtimes` shell-rc line):**
+an old Deno bootstrap may have appended a line like
+`. "/opt/turbopanel/runtimes/deno/.install/env"` to `~/.bashrc` / `~/.profile` /
+similar. That path is gone after the vendor rename, so every login prints "No
+such file or directory". Managed install/converge does **not** rewrite shell
+profiles — remove the stale line by hand (or reset the dev environment) if it
+appears.
+
+**Ansible home (no root pollution):** `ansibleEnv()` /
+`devOrchestrationAnsibleEnv()` set `ANSIBLE_HOME` to `/tmp/turbopanel-ansible`
+(alongside `ANSIBLE_LOCAL_TEMP` under `vendor/uv/cache/ansible-tmp`). Galaxy
+download cache is disposable scratch — first-party roles live under FHS
+`share/orchestration/roles`; Galaxy collections live under
+`vendor/ansible/galaxy-collections`. Managed
+`run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
+accidental `/root/.ansible` after install. Runtime orchestration runs as
+`tp` (dev: the current dev user).
+
+**Galaxy content ships in the package, nothing is downloaded:** the exact
+`ansible.posix` release tarball is committed under
+`orchestration/vendor/galaxy/` (version recorded in
+`orchestration/requirements.yml`, digest pinned as `GALAXY_POSIX_SHA256`).
+Bootstrap (`ensureGalaxyCollections`) checks the digest and installs it
+offline, only collections, under
+`vendor/ansible/galaxy-collections` — needed for the JSONL callback and
+`ansible.posix.sysctl` on every playbook. **No Galaxy role is used:** Docker
+Engine is installed by our own `docker` role (`orchestration/roles/docker/tasks/install.yml`,
+shipped in the release package with the rest of `orchestration/roles/`) from
+Docker's official apt repository when a host first needs the container runtime
+(`runDockerSetup` / co-located dev converge / postgres|rabbitmq|proxysql setup),
+so fresh daemon installs and pre-Docker hosts never fetch it and a host with a
+healthy Docker (including an offline one) is left alone. The signing key is
+fetched over HTTPS at install time and refused unless it carries the
+fingerprint pinned in `roles/docker/vars/main.yml`; a release Docker has not
+published packages for yet falls back to the newest published suite.
+Do not vend Galaxy content into the repo — Sonar would scan third-party
+`mode: 0644`/`0755` as false vulnerabilities; release hosts reinstall
+collections at bootstrap. Keep leftover checkout copies (`orchestration/.ansible/`)
+out of ansible-lint / the Ansible IDE extension via `exclude_paths`.
+
+**Upstream licenses:** Ansible Core, `ansible-lint`, the `ansible.posix`
+collection, and any packages these
+playbooks install remain under their upstream licenses (pins in
+`orchestration/requirements.txt` (constraints),
+`orchestration/requirements.lock.txt` (CI hash lock),
+and `orchestration/requirements.yml`). Installing them on a host is a
+different licensing event from redistributing them. Any TurboPanel-published
+appliance, VM/OCI image, or offline bundle that ships copies must carry the
+applicable upstream license, copyright, notice, and source-compliance
+material. Canonical copy of this boundary: `orchestration/AGENTS.md`.
+
+**Apple Silicon VMs (UTM / Parallels) + ansible cryptography:** hypervisors often
+advertise SVE2 in the guest without implementing it. cryptography 47+ ships
+OpenSSL that probes those features at import and **SIGILL**s (`ansible-playbook
+--version` exits 132). Orchestration `runtimeEnv()` and shell
+`scripts/lib/runtime-paths.sh` always set `OPENSSL_armcap=0` so OpenSSL skips
+ARM CPU probing (harmless on real aarch64 and x86_64). The Vagrant guest profile
+exports the same for interactive shells. Shell wrappers that invoke ansible under
+`sudo` must source `runtime-paths.sh` (or export the var explicitly) because
+`sudo` resets the user environment.
+
+**Debian `/bin/sh` is dash:** `ansible.builtin.shell` defaults to `/bin/sh`.
+Dash rejects `set -o pipefail` (`set: Illegal option -o pipefail`), which is
+how cache/Deno/Caddy/… install snippets start — the task then fails with
+“non-zero return code” before curl/dpkg run. Runtime `ansible.cfg` sets
+`executable = /bin/bash`, and `ansibleEnv()` / `devOrchestrationAnsibleEnv()`
+export `ANSIBLE_EXECUTABLE=/bin/bash`. Keep those in step; do not drop
+`pipefail` from bash snippets that actually pipe (password generators).
+
+**`instance-dev-install --if-needed`:** `scripts/run-orchestration-action.ts`
+accepts an `--if-needed` flag on `instance-dev-install`. When set, it calls
+`coLocatedInstanceServiceEnabled()` + `emitDevConvergeSkippedIfNeeded()`
+(`src/orchestration/converge-stamp.ts`) and, when the stamp matches, emits a
+single `dev_converge_skipped` JSONL event and exits **before**
+`ensureAnsible` / the playbook run. Unflagged
+invocations (and any flow with `TURBOPANEL_FORCE_CONVERGE=1` set) behave
+exactly as before via `shouldSkipDevConverge()` / `forceConvergeRequested()`.
+The [dev](https://github.com/TurboPanel/dev) console threads this as
+`installDevEnvironment(..., mode)` with `mode: "if-needed" | "force"` —
+`"if-needed"` only for the post-daemon-install chain; `"force"` (and
+`TURBOPANEL_FORCE_CONVERGE=1`) for Developer → Converge / re-converge and
+legacy reset/provisioner callers. Optional co-located tooling arrives as
+**one** structured payload — `TURBOPANEL_DEV_CONVERGE_OPTIONS`, JSON
+`{ "optionalServices": { "<stem>": bool } }` keyed by Ansible stem, built from
+the dev console's single catalog (`dev/src/lib/optional-dev-services.ts`).
+`src/orchestration/dev-converge-options.ts` parses it once per
+`instance-dev-install` and emits a single `-e '{"turbopanel_optional_<stem>": …}'`
+extra-vars object; the same normalised payload is folded into the converge
+stamp. No payload means no optional extra-vars (playbook `vars:` and role
+`| default()` filters decide). Drizzle Studio, Mailpit, Expo UI, website, and
+Redis Insight start only when selected; units are still installed so the TUI
+can enable them later.
+
+## Host-Base Prerequisite Boundary
+
+**Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
+Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via
+orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set is
+**sudo, curl, ca-certificates, tar, python3-minimal** (`run.sh` may apt-install
+these only when absent). `python3-minimal` extracts Deno release zips without
+apt `unzip`. The `daemon-prereqs` role covers the broader managed-host set (git,
+gnupg, pamtester, xz-utils, iptables, …) once Ansible can converge, and
+**removes the distribution firewall front-ends** — ufw, firewalld,
+iptables-persistent/netfilter-persistent purged, nftables.service disabled — on
+every converge of every host (`tasks/firewall-takeover.yml`; TurboPanel owns
+the host firewall, decided 2026-09-20; every step moves the kernel toward
+ACCEPT so it cannot lock a host out); Redis is vendored by
+extracting the official `packages.redis.io` `.deb` with `dpkg-deb -x` (no
+compile toolchain).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |

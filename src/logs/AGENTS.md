@@ -11,7 +11,7 @@ with deploy/managed handlers live in `src/deploy/AGENTS.md` (Streamed
 transcript capture). Container stdout is a live on-demand tail
 (`container-tail.ts`, `docker container logs`) and is never stored.
 
-Root context: `../../AGENTS.md` (Command execution logs).
+Root context: `../../AGENTS.md`. Scope summary: bottom of this file.
 
 ## Layout
 
@@ -26,3 +26,9 @@ Root context: `../../AGENTS.md` (Command execution logs).
 | `uploader.ts` | Batched POST of sealed/unsealed chunks |
 | `orphan-sweep.ts` | Delete spool files whose command is gone |
 | `container-tail.ts` | On-demand `docker container logs` (not this store) |
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Command execution logs** | `src/logs/` | Streamed command transcripts: redaction deny-set, `<stateDir>/spool/execution-logs/` spool, batched upload to `POST /api/daemon/v1/commands/:commandId/log`, orphan sweep. Control-plane side: `../turbopanel/src/features/execution-logs/AGENTS.md`; capture details in `src/deploy/AGENTS.md` (Streamed transcript capture). This is the **only** log class uploaded and retained. |

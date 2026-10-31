@@ -19,7 +19,9 @@ import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
   grantableDatabases,
+  grantBackupPrivileges,
   grantDatabasePrivileges,
+  isBackupCredential,
 } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
 import {
@@ -48,6 +50,7 @@ import {
   ensureSocketAdminSql,
   flushPrivilegesLocalSql,
   followReplicationSourceSql,
+  grantBackupSql,
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
@@ -453,6 +456,18 @@ async function applyOneCredential(
       ctx.clientSourceHosts ?? [],
     ),
   );
+
+  if (isBackupCredential(credential)) {
+    // Fixed read-only dump rights on every database, whatever else was sent.
+    await grantBackupPrivileges({
+      username: credential.username,
+      hosts: ctx.clientSourceHosts ?? [],
+      grantSql: grantBackupSql,
+      run: (sql) => runMariadb(ctx, sql),
+    });
+    await runMariadb(ctx, "FLUSH PRIVILEGES;");
+    return;
+  }
 
   // A login the site owner manages by hand keeps its account and password
   // but never has its grants written or reset here.

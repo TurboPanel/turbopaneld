@@ -62,14 +62,14 @@ export const RELEASE_METADATA_DIRNAME = ".turbopanel";
  * principal's home, which the principal owns — nothing privileged or
  * trust-bearing is ever read back out of it.
  *
- * A Railpack release produces an OCI image; nothing is copied into a directory
+ * An image-build release produces an OCI image; nothing is copied into a directory
  * and no runtime user ever reads one, so it needs no principal home — and
  * requiring one would mean refusing to build a container service just because
  * nobody assigned it a Unix account it would never use. Its manifest instead
  * lands under `<daemonStateDir>/release-records/<serviceId>/<releaseId>/`: one
  * folder per service, one per release, nothing else in the tree.
  *
- * A Railpack service keeps its history here whether or not it has a principal
+ * An image-build service keeps its history here whether or not it has a principal
  * — one service should not move its history between two roots depending on an
  * unrelated assignment.
  */

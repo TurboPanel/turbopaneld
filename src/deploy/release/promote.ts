@@ -633,9 +633,9 @@ export async function promoteExistingRelease(
 }
 
 /**
- * Record a Railpack release without publishing a tree.
+ * Record an image-build release without publishing a tree.
  *
- * The Railpack lane produces an OCI image, not a directory: there is nothing to
+ * The image-build lane produces an OCI image, not a directory: there is nothing to
  * stage, nothing to seal, and no `current` symlink to swap — the "cutover" is
  * `docker compose up` picking up the new `image:` tag. What it still needs is a
  * durable, per-release record, so the manifest is written into
@@ -647,7 +647,7 @@ export async function promoteExistingRelease(
  * it, so the "runtime user must not be able to rewrite what it runs" rule that
  * governs {@link sealPublishedRelease} has nothing to protect here.
  */
-export async function recordRailpackRelease(
+export async function recordImageBuildRelease(
   params: { paths: ReleasePaths; manifest: ReleaseManifestV1 },
 ): Promise<string> {
   const releaseDir = params.paths.releaseDir;

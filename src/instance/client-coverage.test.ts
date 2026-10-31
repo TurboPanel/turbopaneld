@@ -390,7 +390,7 @@ it({
 
 it({
   name:
-    "refreshPlatformCaClient logs fingerprint mismatch and reuses a cache hit",
+    "refreshPlatformCaClient checks the pinned CA list and reuses a cache hit",
   permissions: {
     env: true,
     read: true,

@@ -20,7 +20,7 @@ import {
   prepareImagePlanInSandbox,
   takePlan,
 } from "./image-prepare-sandbox.ts";
-import { readPlanVersion, runRailpackBuild } from "./railpack-build.ts";
+import { readPlanVersion, runImageBuildBuild } from "./image-build.ts";
 import { UnsafeTreeError } from "./safe-copy.ts";
 
 /**
@@ -190,7 +190,7 @@ test("an image build on a managed host prepares in the sandbox with the build's 
     const docker: string[][] = [];
     let daemonRan = 0;
     const scratchDir = join(root, "scratch");
-    const result = await runRailpackBuild({
+    const result = await runImageBuildBuild({
       build: {
         kind: "railpack",
         installCommand: "npm ci",
@@ -208,7 +208,7 @@ test("an image build on a managed host prepares in the sandbox with the build's 
       cacheKey: "p1",
       imageTag: "turbopanel-app/web:r1",
       tools: {
-        railpack: tool,
+        planner: tool,
         frontendLayoutDir: "/x",
         frontendDigest: DIGEST,
       },
@@ -231,7 +231,7 @@ test("an image build on a managed host prepares in the sandbox with the build's 
     });
     assertEquals(daemonRan, 0);
     assertEquals(seen.length, 1);
-    assertEquals(result.railpackPlanVersion, "plan-3");
+    assertEquals(result.builderPlanVersion, "plan-3");
     const env = await Deno.readTextFile(join(capture, "env"));
     for (const leaked of ["LD_PRELOAD", "BASH_ENV", "GIT_ASKPASS", "/evil"]) {
       assertEquals(env.includes(leaked), false, leaked);

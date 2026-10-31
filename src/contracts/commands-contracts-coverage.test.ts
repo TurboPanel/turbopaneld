@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
   getManagedReservedEnvKeys,
+  isImageBuildKind,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -365,6 +366,17 @@ test("parseEnvironmentDeployPayload round-trips railpack sourceMaterial options"
   assertEquals(source?.rollbackToReleaseId, "prev-rel");
   assertEquals(source?.build.kind, "railpack");
   assertEquals(source?.subdirectory, "apps/web");
+});
+
+test("parseEnvironmentDeployPayload accepts the image build kind", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sourceMaterial: [{ ...SOURCE_ENTRY, build: { kind: "image" } }],
+  });
+  assertEquals(payload.sourceMaterial?.[0]?.build.kind, "image");
+  assertEquals(isImageBuildKind("image"), true);
+  assertEquals(isImageBuildKind("railpack"), true);
+  assertEquals(isImageBuildKind("native"), false);
 });
 
 test("parseEnvironmentDeployPayload rejects credential-bearing cloneUrl", () => {

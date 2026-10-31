@@ -124,5 +124,5 @@ other Compose project — they have no `container` row, and their health/restart
 surface is the server **Control** tab / system-component control API on the
 instance, not a container table. Rationale for why those four stay host-native
 (PAM, `systemctl`/`git` update access, socket uid/gid, unix-socket
-permissions) is canonical in `../../turbopanel/AGENTS.md` → "Self-host system
+permissions) is canonical in `../turbopanel/AGENTS.md` → "Self-host system
 inventory" — do not duplicate it here.

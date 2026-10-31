@@ -2,7 +2,7 @@
 
 The daemon's authenticated link to the control plane (`src/instance/client.ts`): WSS or co-located Unix socket to `/ws/daemon/v1`, idle presence + heartbeats, reconnect / parked backoff, JWKS-based JWT verification, and the daemon-side TLS trust model.
 
-Root context: `../../AGENTS.md` (Filesystem layout & path model). Host metrics scheduler: `../metrics/AGENTS.md`. Cross-repo `../<repo>/AGENTS.md` links are relative to the repo root (sibling repos under `$HOME`).
+Root context: `../../AGENTS.md`; path model in `../paths/AGENTS.md`. Host metrics scheduler: `../metrics/AGENTS.md`. Cross-repo `../<repo>/AGENTS.md` links are relative to the repo root (sibling repos under `$HOME`).
 
 ## Instance client (`src/instance/client.ts`)
 
@@ -142,6 +142,19 @@ control plane lets the old reading age out. Fire-and-forget and read-only. It
 exists because health was only read when someone asked: a quiet cluster aged
 past the control plane's freshness window and a stopped replica kept its last
 `streaming` line.
+
+**Pushed TurboFabric peers (`fabric-peer-report-v1`).** While `tp0` exists,
+`commands/fabric-peer-refresh.ts` re-reads `wg show tp0 dump` every 60 s (one
+timer, armed at boot by `entry/run.ts`, stopped when a read finds no `tp0` or
+on pause/teardown; no timer with fabric off). `FabricPeerReporter`
+(`fabric-peer-reporter.ts`) hears each reading through the
+`subscribeFabricPeers` command port and sends one `fabric-peers-report`
+frame (`peers[]`, at most 256, plus `observedAt`) to a control plane that lists
+the feature, only when a peer's health class changed or 5 minutes passed since
+the last frame on this connection (the first reading after a connect always
+goes). Fire-and-forget and read-only. It exists because the control plane's
+`relay.metadata.observed` only moved on a reconcile, so healthy tunnels read
+as stale minutes after each apply.
 
 **Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
 replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded
@@ -370,7 +383,7 @@ table).
 **Instance version floor** (`src/instance/version-wire.ts`):
 `MIN_SUPPORTED_INSTANCE_VERSION` is the mirror of the control plane's
 `MIN_SUPPORTED_DAEMON_VERSION`. Bump them together and say why in both
-Versions-on-the-wires notes (root `AGENTS.md` and
+Versions-on-the-wires notes (this file and
 `../turbopanel/AGENTS.md`). The daemon learns the peer from
 `x-turbopanel-version` on every `DaemonApiClient` response (including non-OK
 and the 401 before a refresh) and from `instanceVersion` on the cell attach
@@ -470,7 +483,7 @@ checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
 
 **Managed updates:** the running daemon reconciles in-place via `run.sh`
 when triggered from the control-plane UI or manually with the same piped
-installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
+installer (`curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 `TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). On a **managed host** the
 daemon does not download or pipe the script itself: it resolves the trust
 regime (`resolveAutomaticUpdateTrust` — public TLS or the
@@ -764,6 +777,103 @@ control plane keeps the existing CA and the install continues (the daemon
 adds that file to the system roots, so nothing is lost), and a co-located
 daemon refresh skips the fetch entirely (`HOST_URL` is empty there). Before
 2026-09-28 the unverified case was `exit 1`, which is how canary's
-co-located refresh failed after its Let's Encrypt switch. `TURBOPANEL_INSTANCE_CA_FINGERPRINT` in `daemon.env`
-is the expected first-cert fingerprint for startup mismatch logs.
+co-located refresh failed after its Let's Encrypt switch.
 
+**CA fingerprint pin.** A self-hosted install command that bootstraps
+insecure TLS carries `TURBOPANEL_INSTANCE_CA_FINGERPRINT` (SHA-256 of each
+certificate's DER, lowercase hex, comma-separated; `run.sh` also takes
+`--instance-ca-fingerprint` and passes it across the sudo re-exec). Every
+Platform CA or private issuer `run.sh` is about to install — over `-k`, the
+pinned leg, or the system-roots refetch — must have every certificate in that
+list, or the install stops and nothing is written (`tp_check_fetched_trust`).
+A host that already carries a list (`daemon.env` plus
+`<state>/tls/instance-ca-pin`) keeps it when a run brings none: downloads over
+the `-k` leg must match it, so re-running an old command cannot downgrade a
+pinned host; verified legs are authenticated by that trust already. An
+operator's `--instance-ca` must match a fingerprint the command gave. With no
+list anywhere the old behaviour stays and a `-k` download prints one
+"trusted on first use" line. `run.sh` then writes the fingerprints of every
+certificate in `instance-ca.pem` and `instance-uploaded-trust.pem` into
+`daemon.env` (0600, daemon account). At runtime (`ca-pin.ts`) a trust file
+holding any certificate outside that list, or one that cannot be decoded,
+is a hard failure: the connect
+attempt throws `CaPinMismatchError` before any credential is sent and the
+client parks as `tls-trust`. No list means no check. The only other writer of
+the list is `server.tls.trust.reconcile` (`src/commands/tls-trust.ts`), which
+arrives over a session already verified against the pinned CA and
+authenticated with this server's key; it records the new bundle plus the
+stored issuer in `<state>/tls/instance-ca-pin` (first together with the old
+bundle, then the CA file, then narrowed, so no failure leaves an unlisted CA
+on disk), which the check accepts
+alongside `daemon.env` (the config root is root-owned and `daemon.env` is the
+installer's, so the daemon does not rewrite it). A host with no list never
+gets one from a reconcile. Upgrades re-run `run.sh`, which
+rewrites the list from the files on disk, so hosts installed with the older
+single first-certificate value are healed before the new binary starts.
+
+## Versions on the wires
+
+Two-way peer support. The control plane holds `daemonBuild.version` against
+`MIN_SUPPORTED_DAEMON_VERSION` (`turbopanel/src/lib/version-wire.ts`) and keeps
+an unsupported daemon connected while refusing its command dispatches. This
+daemon holds the control plane's version against
+`MIN_SUPPORTED_INSTANCE_VERSION` in `src/instance/version-wire.ts`.
+
+Capture points: `x-turbopanel-version` on every `DaemonApiClient` response,
+including non-OK responses and the 401 that precedes a session refresh
+(enrollment, session, JWKS, and later calls — before cell traffic), and the
+attach acknowledgement `{ type: "version", instanceVersion }` on
+`/ws/daemon/v1` for a socket-only session. A response or attach frame that
+omits the version is the current peer: the daemon clears the last observation
+back to `unknown`. `InstanceClient.connectionState` exposes the resolved
+status. `unknown` (no header and no field) passes silently. `unsupported`
+logs once, greppable as `instance-version: … flagged — the daemon keeps
+reconnecting`, and does **not** close the socket or stop retrying. It is a
+flag, not a park.
+
+Each floor tolerates every peer semver at or above the constant. Today both
+floors are **`0.1.0`** against package **`0.1.3`**, so a `0.1.x` peer is in
+window and a `0.0.x` peer is not. The window may trail the current release by
+several minor versions. There is no fixed upgrade order. Bump
+`MIN_SUPPORTED_DAEMON_VERSION` and `MIN_SUPPORTED_INSTANCE_VERSION` together,
+in the same change, and record why in this section and in
+`../turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
+silently. A release that introduces a new wire message leaves both floors
+where they are. Each new message is feature-gated: the peer advertises
+support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
+`version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
+before treating the peer as able to speak it. `update-progress`
+(`update-progress-v1`) is the worked example — fire-and-forget progress,
+ignored by a peer that does not list the feature. `command-progress` (the
+deploy step plan, `src/commands/deploy-progress.ts`) is fire-and-forget too
+but carries no feature of its own: both control-plane inbound paths drop an
+unknown message type, so an older peer just never draws the step rail. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
+`php.mode` (FastCGI or php-fpm on nginx and Apache); the control plane refuses to
+deploy any mode but php-fpm to a daemon without it. OpenLiteSpeed and Caddy sites
+still ignore `php.mode` (the lsphp work is turbopaneld#250). `managed-health-v1` is the
+worked example of a control-plane-initiated correlated request
+(`managed-health-request` / `managed-health-result`): this daemon advertises it
+in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
+daemon whose `hello.features` lists it, falling back to its stored observation
+otherwise. `managed-permissions-read-v1` follows the same pattern for
+`managed-permissions-request` / `managed-permissions-result` (a login's current
+permissions, read only). A control-plane update the daemon is about to install is refused
+when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
+daemon's own self-update does not consult that floor, and the control plane
+does not gate `instance-update` on the daemon version.
+
+`DAEMON_FEATURE_MIN_VERSIONS` (kept equal in both `version-wire.ts` files) is
+the peer-version feature gate — not the metrics hardware-profile capability
+plan. A panel-visible admin feature that depends on a daemon-rendered artifact
+adds an entry here. The UI phase calls `resolveDaemonCapabilities` and does
+not re-implement semver comparison. An unknown peer version is not supported
+for a feature. The first entry is `instance-cert-sources-per-hostname` at
+daemon **`0.1.1`**, the release that renders per-hostname certificate sources
+in `orchestration/roles/instance-launch/templates/Caddyfile.j2`. Operational detail:
+the rest of this file.
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |

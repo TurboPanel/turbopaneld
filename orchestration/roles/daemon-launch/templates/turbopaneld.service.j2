@@ -24,7 +24,7 @@ EnvironmentFile=-{{ turbopanel_daemon_env_file }}
 Environment=TURBOPANEL_RUN_DIR={{ runtime_socket_dir | default('/run/turbopanel') }}
 Environment=TURBOPANEL_RUNTIME_SOCKET_OWNER={{ runtime_socket_owner | default(turbopanel_user) }}
 Environment=TURBOPANEL_RUNTIME_SOCKET_GROUP={{ runtime_socket_group | default(turbopanel_group) }}
-Environment=TURBOPANEL_RUNTIME_SOCKET_MODE={{ runtime_socket_mode | default('2770') }}
+Environment=TURBOPANEL_RUNTIME_SOCKET_MODE={{ runtime_socket_mode | default('3770') }}
 ExecStartPre={{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh
 {% if turbopanel_daemon_exec_mode | default('source') == 'native' %}
 ExecStart=/usr/bin/flock -n {{ runtime_socket_dir }}/daemon.lock {{ turbopanel_daemon_bin }}

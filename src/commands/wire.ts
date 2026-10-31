@@ -15,7 +15,10 @@ import {
   noteSessionOpen,
 } from "./command-outbox.ts";
 import { handleDrivetempEnable } from "./drivetemp.ts";
-import { handleFabricPathProbe } from "./fabric.ts";
+import {
+  handleFabricPathProbe,
+  subscribeFabricPeerReadings,
+} from "./fabric.ts";
 import { registerCommandPorts } from "../instance/client.ts";
 
 export function wireCommandPorts(): () => void {
@@ -28,5 +31,6 @@ export function wireCommandPorts(): () => void {
     handleCommandOutcomeAck: acknowledgeCommandOutcome,
     handleRepeatedDispatch: answerRepeatedDispatch,
     commandReport: commandRecoveryReport,
+    subscribeFabricPeers: subscribeFabricPeerReadings,
   });
 }

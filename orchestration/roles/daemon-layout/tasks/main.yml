@@ -54,7 +54,9 @@
       }
     - {
         path: "{{ turbopanel_run_dir | default('/run/turbopanel') }}",
-        mode: "2770",
+        # setgid + sticky: group tp shares the folder, but only a file's owner
+        # (or tp, the folder's owner) can remove or replace a socket in it.
+        mode: "3770",
       }
 
 # The folders the daemon writes directly (P1-1: the config and state roots

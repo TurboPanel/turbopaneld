@@ -1,4 +1,5 @@
 import { DaemonApiError } from "./api-client.ts";
+import { CaPinMismatchError } from "./ca-pin.ts";
 import { errorText } from "../util/logger.ts";
 
 export type ConnectFailureClass =
@@ -136,6 +137,7 @@ const TLS_TRUST_ERROR_NEEDLES = [
 ] as const;
 
 function isTlsTrustFailure(err: unknown): boolean {
+  if (err instanceof CaPinMismatchError) return true;
   if (err instanceof DaemonApiError) return false;
   const lowered = errorText(err).toLowerCase();
   return TLS_TRUST_ERROR_NEEDLES.some((needle) => lowered.includes(needle));

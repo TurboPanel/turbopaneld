@@ -16,12 +16,12 @@ import {
   type InstanceConfig,
   instanceUrl,
   instanceWebSocketUrl,
-  normalizeCaFingerprint,
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
 } from "./sockets.ts";
+import { caPinMismatch, CaPinMismatchError } from "./ca-pin.ts";
 import { runServerNetworkCheck } from "../host/network-check.ts";
 import {
   collectServerIps,
@@ -154,15 +154,22 @@ import {
   PgStandbySampler,
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
+import {
+  FabricPeerReporter,
+  type FabricPeerSubscribe,
+} from "./fabric-peer-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { BackupCopier } from "../backups/copier.ts";
 import { BackupCopyReporter } from "../backups/copy-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
+import { AcmeIssueHandler } from "./acme-issue-handler.ts";
+import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   BACKUP_S3_COPY_FEATURE,
+  FABRIC_PEER_REPORT_FEATURE,
   HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
@@ -256,6 +263,8 @@ export type CommandPorts = {
   ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
+  /** Hear every 60 s `tp0` peer reading (`fabric-peers-report`). */
+  subscribeFabricPeers?: FabricPeerSubscribe;
 };
 
 let commandPorts: CommandPorts = {};
@@ -515,6 +524,8 @@ export class InstanceClient {
   #peerFeaturesKnown = false;
   /** Last unsupported version we already logged, so reconnects do not repeat it. */
   #loggedUnsupportedInstanceVersion: string | undefined;
+  /** Why the trust files do not match the pinned CA list; null when they do. */
+  #caPinMismatch: string | null = null;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
   /** Command ids already dispatched, so a repeated frame never runs twice. */
@@ -525,10 +536,13 @@ export class InstanceClient {
   #pgStandbySampler: PgStandbySampler | undefined;
   #mysqlFamilySampler: PgStandbySampler | undefined;
   #managedHealthReporter: ManagedHealthReporter | undefined;
+  #fabricPeerReporter: FabricPeerReporter | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #backupCopier: BackupCopier | undefined;
   #backupCopyReporter: BackupCopyReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
+  #proofForward: ProofForwardHandler | undefined;
+  #acmeIssue: AcmeIssueHandler | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
   #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
@@ -745,27 +759,24 @@ export class InstanceClient {
       this.#jwksClient = undefined;
       this.#apiClient = undefined;
     }
-    await this.#logCaFingerprintMismatch(caCertPath, env);
+    await this.#checkCaPin(env);
   }
 
-  async #logCaFingerprintMismatch(
-    caCertPath: string | undefined,
-    env: Record<string, string | undefined>,
-  ): Promise<void> {
-    const expected = env.TURBOPANEL_INSTANCE_CA_FINGERPRINT?.trim();
-    if (!expected || !caCertPath) return;
-    try {
-      const pem = await Deno.readTextFile(caCertPath);
-      const actual = await fingerprintPemCertificate(pem);
-      if (normalizeCaFingerprint(expected) !== actual) {
-        logWarn(
-          "instance",
-          `tls-trust: expected CA fingerprint ${expected} but ${caCertPath} is ${actual}`,
-        );
-      }
-    } catch {
-      // Handshake classification reports unreadable CA material.
+  /**
+   * Hard check against `TURBOPANEL_INSTANCE_CA_FINGERPRINT`: a trust file
+   * holding a CA outside the pinned list makes every connect attempt fail
+   * (see {@link #connectOnce}) until the files or the list are put right.
+   * No list configured means no check.
+   */
+  async #checkCaPin(env: Record<string, string | undefined>): Promise<void> {
+    const mismatch = await caPinMismatch(env);
+    if (mismatch && mismatch !== this.#caPinMismatch) {
+      logError(
+        "instance",
+        `tls-trust: refusing to connect: ${mismatch}. Something other than the installer or the control plane changed this server's trust files. Restore them, or re-run the installer with a fresh command from Add Server`,
+      );
     }
+    this.#caPinMismatch = mismatch;
   }
 
   #fetchInit(
@@ -979,6 +990,7 @@ export class InstanceClient {
     this.#pgStandbySampler?.detach();
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
+    this.#fabricPeerReporter?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -1068,6 +1080,7 @@ export class InstanceClient {
     this.#pgStandbySampler?.detach();
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
+    this.#fabricPeerReporter?.detach();
     this.#backupReporter?.detach();
     this.#backupCopier?.stop();
     this.#backupCopyReporter?.detach();
@@ -1384,6 +1397,11 @@ export class InstanceClient {
 
   async #connectOnce(): Promise<void> {
     await this.refreshPlatformCaClient();
+    if (this.#caPinMismatch) {
+      // Before any credential is sent: never authenticate to a control plane
+      // reached through a CA this server was not told to trust.
+      throw new CaPinMismatchError(this.#caPinMismatch);
+    }
     await this.#waitForConnectPreconditions();
 
     // Do not close the active socket here: by the time #connectOnce() is called
@@ -1522,10 +1540,13 @@ export class InstanceClient {
     });
     this.#mysqlFamilySampler.attach();
     this.#ensureManagedHealthReporter().attach();
+    this.#ensureFabricPeerReporter().attach();
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
+    this.#ensureProofForward();
+    this.#ensureAcmeIssue();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -1592,6 +1613,7 @@ export class InstanceClient {
       this.#pgStandbySampler?.detach();
       this.#mysqlFamilySampler?.detach();
       this.#managedHealthReporter?.detach();
+      this.#fabricPeerReporter?.detach();
       this.#backupReporter?.detach();
       this.#backupCopier?.stop();
       this.#backupCopyReporter?.detach();
@@ -1694,6 +1716,20 @@ export class InstanceClient {
     return this.#managedHealthReporter;
   }
 
+  #ensureFabricPeerReporter(): FabricPeerReporter {
+    this.#fabricPeerReporter ??= new FabricPeerReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsReport: () =>
+        this.instanceSupports(FABRIC_PEER_REPORT_FEATURE),
+      subscribe: () => commandPorts.subscribeFabricPeers,
+    });
+    return this.#fabricPeerReporter;
+  }
+
   #ensureBackupReporter(): BackupResultReporter {
     this.#backupReporter ??= new BackupResultReporter({
       send: (message) => {
@@ -1728,6 +1764,47 @@ export class InstanceClient {
       peerSupports: () => this.instanceSupports(BACKUP_S3_COPY_FEATURE),
     });
     return this.#backupCopyReporter;
+  }
+
+  /**
+   * The helper side of central certificate issuance. The first use also sweeps
+   * any forward a restart left behind past its stated time.
+   */
+  #ensureProofForward(): ProofForwardHandler {
+    if (this.#proofForward) return this.#proofForward;
+    const handler = new ProofForwardHandler({
+      layout: resolveLayout(Deno.env.toObject()),
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+    });
+    this.#proofForward = handler;
+    this.#runSocketHandler("acme-proof-forward sweep", handler.sweepExpired());
+    return handler;
+  }
+
+  /** The issuing side of central certificate issuance. */
+  #ensureAcmeIssue(): AcmeIssueHandler {
+    if (this.#acmeIssue) return this.#acmeIssue;
+    this.#acmeIssue = new AcmeIssueHandler({
+      layout: resolveLayout(Deno.env.toObject()),
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      report: (input) => {
+        const api = this.#apiClient;
+        if (api === undefined) {
+          return Promise.reject(new Error("control plane client not ready"));
+        }
+        return api.reportIssuedCertificate(input);
+      },
+    });
+    this.#runSocketHandler("acme-issue sweep", this.#acmeIssue.start());
+    return this.#acmeIssue;
   }
 
   #ensureAcmeObserver(): void {
@@ -1893,6 +1970,7 @@ export class InstanceClient {
   // Identity is established locally (enrollment + server.id) and confirmed via
   // verified JWT `sub` in DaemonTokenManager — no socket message adopts serverId.
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
+    if (this.#handleCentralCertificateMessage(message)) return;
     // The control plane answers the daemon's wire ping with `{type:"pong"}`
     // (a Workers auto-response); it carries nothing to act on.
     if ((message as { type?: unknown }).type === "pong") return;
@@ -2061,6 +2139,35 @@ export class InstanceClient {
           }`,
         );
         break;
+    }
+  }
+
+  /**
+   * The central certificate messages (`acme-issue-v1`). Kept out of the main
+   * switch below, which is at the size limit; true when `message` was one.
+   */
+  #handleCentralCertificateMessage(message: DaemonMessage): boolean {
+    switch (message.type) {
+      case "acme-issue-request":
+        this.#runSocketHandler(
+          "acme-issue-request",
+          this.#ensureAcmeIssue().handleRequest(message),
+        );
+        return true;
+      case "acme-proof-forward":
+        this.#runSocketHandler(
+          "acme-proof-forward",
+          this.#ensureProofForward().handleForward(message),
+        );
+        return true;
+      case "acme-proof-forward-end":
+        this.#runSocketHandler(
+          "acme-proof-forward-end",
+          this.#ensureProofForward().handleEnd(message),
+        );
+        return true;
+      default:
+        return false;
     }
   }
 

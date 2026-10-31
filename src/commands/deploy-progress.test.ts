@@ -28,10 +28,10 @@ const test = Deno.test.bind(Deno);
 const PLAN: PlannedDeployStep[] = [
   { id: "install-docker", label: "Install Docker", state: "ready" },
   { id: "install-php:8.3", label: "Install PHP 8.3", state: "pending" },
-  { id: "fetch", label: "Fetch the code", state: "pending" },
+  { id: "fetch", label: "Fetch the Source Code", state: "pending" },
   { id: "build", label: "Build", state: "pending" },
-  { id: "start", label: "Start the app", state: "pending" },
-  { id: "health", label: "Check it answers", state: "pending" },
+  { id: "start", label: "Start the App", state: "pending" },
+  { id: "health", label: "Check Service Health", state: "pending" },
 ];
 
 function harness(startMs = 1_000_000) {
@@ -145,6 +145,33 @@ test("transcript phases drive fetch / build / start / health and reopen a repeat
   assertEquals(h.states().health, "running");
 });
 
+test("a step can end under the title of its result, and gets its planned title back when it runs again", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  h.reporter.phase(COMMAND_LOG_PHASES.HEALTH);
+  h.reporter.detail("health", "Attempt 3, 4 s of up to 120 s: web is starting");
+  h.reporter.done("health", {
+    label: "Service Is Healthy",
+    note: "Healthy after 12 s",
+  });
+  const done = h.last().steps.find((s) => s.id === "health");
+  assertEquals(done?.label, "Service Is Healthy");
+  assertEquals(done?.detail, "Healthy after 12 s");
+  assertEquals(done?.state, "done");
+  h.reporter.phase(COMMAND_LOG_PHASES.HEALTH);
+  const again = h.last().steps.find((s) => s.id === "health");
+  assertEquals(again?.label, "Check Service Health");
+  assertEquals(again?.state, "running");
+  h.reporter.fail("health", {
+    label: "Service Did Not Become Healthy",
+    note: "Did not become healthy within 120 s",
+  });
+  const failed = h.last().steps.find((s) => s.id === "health");
+  assertEquals(failed?.label, "Service Did Not Become Healthy");
+  assertEquals(failed?.state, "failed");
+  assertEquals(failed?.detail, "Did not become healthy within 120 s");
+});
+
 test("detail is throttled to one message per interval and rides the next transition", () => {
   const h = harness();
   h.reporter.plan(PLAN);
@@ -221,7 +248,7 @@ test("a nested install keeps the enclosing step running and hands current back",
   h.reporter.plan([
     {
       id: "install-build-tool",
-      label: "Install the build tool",
+      label: "Install the Build Tool",
       state: "pending",
     },
     ...PLAN,
@@ -242,7 +269,7 @@ test("a nested install keeps the enclosing step running and hands current back",
   failing.reporter.plan([
     {
       id: "install-build-tool",
-      label: "Install the build tool",
+      label: "Install the Build Tool",
       state: "pending",
     },
     ...PLAN,

@@ -4,7 +4,8 @@
  *
  * Used by the sequential deploy strategy (`sequential-deploy.ts`), which calls
  * {@link waitForHealthGate} after `up -d` and rolls back when it reports a
- * failure. In-place deploys do not gate.
+ * failure. In-place deploys call it too, and a failure there fails the deploy
+ * without a rollback (there is no previous version to restore).
  *
  * Rules (per container, grouped by compose service):
  * - `Health: healthy` passes; `unhealthy` fails at once; `starting` keeps
@@ -15,6 +16,8 @@
  *   finished one-shot job and passes. `restarting` fails (a crash loop).
  * - Every service must have at least one container, or the gate fails.
  * - The gate fails on `healthTimeoutSeconds` and names what was still pending.
+ * - A pass reports how long it took and which services passed without a health
+ *   check, so the step can say "healthy" only when Docker said so.
  */
 
 import { composeFileArgs } from "./compose-files.ts";
@@ -32,7 +35,20 @@ export type HealthGateFailureReason =
   | "ps-failed";
 
 export type HealthGateResult =
-  | { ok: true; services: string[] }
+  | {
+    ok: true;
+    services: string[];
+    /** Milliseconds from the first poll to the verdict. */
+    elapsedMs: number;
+    /**
+     * Services that passed without a health check, because the container had
+     * stayed running for the stable window. Empty when every one reported
+     * `healthy` (or finished as a one-shot job).
+     */
+    unchecked: string[];
+    /** Services whose container reported `healthy`. */
+    reported: string[];
+  }
   | {
     ok: false;
     reason: HealthGateFailureReason;
@@ -55,8 +71,25 @@ export type HealthGateOptions = {
   /** Injectable clock and sleeper for tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
-  /** One line per poll that changed nothing to report. */
+  /** One transcript line each time what the gate is waiting on changes. */
   onProgress?: (message: string) => void;
+  /**
+   * Compose services this deploy runs (`config --services`, so profile
+   * services that are not enabled are absent). Containers of any other
+   * service, such as a leftover from an earlier run, are not judged.
+   */
+  services?: readonly string[];
+  /** Every poll that is still waiting: the live line of the health step. */
+  onTick?: (tick: HealthGateTick) => void;
+};
+
+/** One poll that did not settle yet. */
+export type HealthGateTick = {
+  /** One-based poll count. */
+  attempt: number;
+  elapsedMs: number;
+  /** What is still pending, one entry per container. */
+  pending: string[];
 };
 
 /** Defaults: the plan's 120 s gate and 30 s no-healthcheck window. */
@@ -84,9 +117,28 @@ function firstNonEmpty(values: readonly unknown[]): string | undefined {
   return values.find((v): v is string => typeof v === "string" && v.length > 0);
 }
 
+/** `docker compose run` leaves containers that are not part of the project's services. */
+function isOneOff(entry: Record<string, unknown>): boolean {
+  const labels = entry.Labels;
+  if (typeof labels === "string") {
+    return labels.split(",").some((pair) =>
+      pair.trim().toLowerCase() === "com.docker.compose.oneoff=true"
+    );
+  }
+  if (labels !== null && typeof labels === "object") {
+    const value = (labels as Record<string, unknown>)[
+      "com.docker.compose.oneoff"
+    ];
+    return value === true ||
+      (typeof value === "string" && value.toLowerCase() === "true");
+  }
+  return false;
+}
+
 function toContainerView(entry: Record<string, unknown>): ContainerView | null {
   const service = entry.Service;
   if (typeof service !== "string" || service.length === 0) return null;
+  if (isOneOff(entry)) return null;
   const id = firstNonEmpty([entry.ID, entry.Name]) ?? service;
   const exit = entry.ExitCode;
   return {
@@ -140,20 +192,43 @@ function judgeRunning(
     return {
       kind: "fail",
       reason: "unhealthy",
-      detail: `${label} failed its healthcheck`,
+      detail: `${label} failed its health check`,
     };
   }
   if (c.health === "starting") {
-    return { kind: "wait", why: `${label} healthcheck is starting` };
+    return { kind: "wait", why: `${label} health check is starting` };
   }
   if (runningSinceMs >= stableMs) return { kind: "pass" };
-  return { kind: "wait", why: `${label} has no healthcheck, settling` };
+  return {
+    kind: "wait",
+    why:
+      `${label} has no health check configured; checking that it stays running for ${
+        Math.round(stableMs / 1000)
+      } s instead`,
+  };
 }
 
 type Observation = {
   verdicts: { service: string; verdict: Verdict }[];
   services: string[];
+  /** Services with a running container that reports no health check. */
+  unchecked: string[];
+  /** Services with a running container that reports `healthy`. */
+  reported: string[];
 };
+
+/** Services with a running container whose `Health` is exactly `health`. */
+function namesWhere(
+  containers: readonly ContainerView[],
+  health: string,
+): string[] {
+  return [
+    ...new Set(
+      containers.filter((c) => c.state === "running" && c.health === health)
+        .map((c) => c.service),
+    ),
+  ].toSorted((a, b) => a.localeCompare(b));
+}
 
 function observe(
   containers: readonly ContainerView[],
@@ -181,11 +256,12 @@ function observe(
   for (const id of runningSince.keys()) {
     if (!live.has(id)) runningSince.delete(id);
   }
+  const byName = (a: string, b: string) => a.localeCompare(b);
   return {
     verdicts,
-    services: [...new Set(containers.map((c) => c.service))].toSorted((a, b) =>
-      a.localeCompare(b)
-    ),
+    services: [...new Set(containers.map((c) => c.service))].toSorted(byName),
+    unchecked: namesWhere(containers, ""),
+    reported: namesWhere(containers, "healthy"),
   };
 }
 
@@ -228,6 +304,11 @@ export function waitForHealthGate(
     startedAt: clock.now(),
     stableMs: options.mode === "none" ? 0 : options.stableMs,
     runningSince: new Map<string, number>(),
+    attempt: 0,
+    lastPending: "",
+    ...(options.services === undefined
+      ? {}
+      : { services: new Set(options.services) }),
   });
 }
 
@@ -240,6 +321,9 @@ type GateState = {
   startedAt: number;
   stableMs: number;
   runningSince: Map<string, number>;
+  attempt: number;
+  lastPending: string;
+  services?: ReadonlySet<string>;
 };
 
 /**
@@ -259,17 +343,37 @@ async function pollGate(
       pending: ["docker compose ps failed"],
       reason: "ps-failed",
     }
-    : evaluatePoll(stdout, state.runningSince, nowMs, state.stableMs);
-  if (poll.done) return poll.result;
-  const first = poll.pending[0];
-  if (first !== undefined) options.onProgress?.(first);
+    : evaluatePoll(
+      stdout,
+      state.runningSince,
+      nowMs,
+      state.stableMs,
+      state.services,
+    );
+  const elapsedMs = nowMs - state.startedAt;
+  if (poll.done) {
+    return poll.result.ok ? { ...poll.result, elapsedMs } : poll.result;
+  }
+  state.attempt++;
+  // The transcript only gets a line when the reason changes; the count and the
+  // clock go to the single live line.
+  const key = poll.pending[0] ?? "";
+  if (key !== state.lastPending) {
+    state.lastPending = key;
+    if (poll.pending[0] !== undefined) options.onProgress?.(poll.pending[0]);
+  }
+  options.onTick?.({
+    attempt: state.attempt,
+    elapsedMs,
+    pending: poll.pending,
+  });
   if (nowMs - state.startedAt + options.pollMs > options.timeoutMs) {
     return {
       ok: false,
       reason: poll.reason,
-      detail: `health gate timed out after ${
+      detail: `did not become healthy within ${
         Math.round(options.timeoutMs / 1000)
-      }s: ${poll.pending.join("; ")}`,
+      } s; last status: ${poll.pending.join("; ")}`,
     };
   }
   await clock.sleep(options.pollMs);
@@ -285,10 +389,13 @@ function evaluatePoll(
   runningSince: Map<string, number>,
   nowMs: number,
   stableMs: number,
+  services?: ReadonlySet<string>,
 ): PollOutcome {
   const containers = parseComposePsEntries(stdout)
     .map(toContainerView)
-    .filter((c): c is ContainerView => c !== null);
+    .filter((c): c is ContainerView =>
+      c !== null && (services === undefined || services.has(c.service))
+    );
   if (containers.length === 0) {
     return {
       done: false,
@@ -301,7 +408,16 @@ function evaluatePoll(
   if (failure) return { done: true, result: failure };
   const pending = pendingReasons(obs);
   if (pending.length === 0) {
-    return { done: true, result: { ok: true, services: obs.services } };
+    return {
+      done: true,
+      result: {
+        ok: true,
+        services: obs.services,
+        elapsedMs: 0,
+        unchecked: obs.unchecked,
+        reported: obs.reported,
+      },
+    };
   }
   return { done: false, pending, reason: "timeout" };
 }

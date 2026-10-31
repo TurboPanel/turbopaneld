@@ -80,14 +80,30 @@ change-detected heartbeats.
   is off; an enable that uses the bridge again takes it off that list. The daemon owns apply (no Ansible round-trip): it persists the private
   key at `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
   `fabricNetworkDir`), writes mode-0600 `tp0.conf` (PSK plaintext inlined, temp
-  `psk/` files deleted after apply), `wg syncconf`, enables `wg-quick@tp0` for
-  reboot durability, writes `/etc/sysctl.d/99-turbopanel-fabric.conf`, creates
+  `psk/` files deleted after apply), `wg syncconf`, then reconciles one main-table
+  kernel route per peer `AllowedIPs` entry on `tp0` (`fabric-routes.ts`:
+  `ip route replace|del <cidr> dev tp0`, read back with `ip -4|-6 route show`;
+  a range another interface already routes, equal or inside a connected
+  subnet, is skipped with a warning; only `dev tp0` routes the daemon could
+  have made are removed; the stamp fast path re-applies when routes drifted),
+  writes `/etc/sysctl.d/99-turbopanel-fabric.conf`, creates
   listed Docker routed-bridge networks, and hangs a `TP-FORWARD` chain off
   `DOCKER-USER`. Reconcile is authoritative over `state.json.networks`: bridges
   present in the previous state but absent from the incoming payload are
   removed (best-effort; missing / active-endpoint errors are logged). Durable
   `tp0.conf` stays in `wg-quick` format (`Address`);
-  `wg syncconf` is fed a stripped `wg setconf` config. Daemon start restores
+  `wg syncconf` is fed a stripped `wg setconf` config. The daemon is the only
+  owner of `tp0`: `wg-quick@tp0` is no longer enabled or fed a config (it
+  raced the daemon at boot and refused to start once `tp0` existed, so no
+  route was ever installed). Live apply and boot restore disable an enabled or
+  running `wg-quick@tp0` before creating `tp0`, and remove the stale
+  `/etc/wireguard/tp0.conf` after a successful sync (boot restore reads its
+  PSKs first). `{ enabled: false, retainKeys: true }` (`fabric-retain-keys-v1`)
+  is a pause: `tp0` (and its routes) goes and the apply stamp is dropped; key,
+  `tp0.conf`, bridges and `TP-FORWARD` stay; `state.json` gets `suspended:
+  true`, so boot restore leaves `tp0` down and reinstalls only the local bridge
+  forwarding rules (no remote peer range is accepted without a tunnel). The
+  next enable reuses the key and clears `suspended`. Daemon start restores
   from `state.json` and re-installs `TP-FORWARD`, **reusing PSK plaintext from
   durable `tp0.conf`** (do not rewrite peers with an empty PSK map).   `TP-FORWARD`
   ACCEPTs same-subnet bridge traffic and bidirectional forwarding between local
@@ -150,3 +166,8 @@ change-detected heartbeats.
   is `subnet` (renamed from `bridge`) — the **compose-bridge** subnet
   (`tpn_*` routed bridge per host), not a datacenter routing-domain subnet.
 
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |

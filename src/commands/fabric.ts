@@ -9,11 +9,23 @@
  * `wireguard/psk/`, inlined into the mode-0600 `tp0.conf`, then deleted.
  *
  * `{ enabled: false }` tears down `tp0`, routed bridges, `TP-FORWARD`, keys,
- * and local state. The mesh is durable across reboots via `wg-quick@tp0`, a
- * `sysctl.d` drop-in, persisted `state.json`, and a daemon-start re-reconcile
- * that reuses PSK-bearing durable `tp0.conf` instead of rewriting peers without
- * a PSK. `TP-FORWARD` accepts same-subnet bridge traffic and bidirectional
- * local-bridge ↔ remote peer prefix (non-/32) forwarding.
+ * and local state. `{ enabled: false, retainKeys: true }` only pauses: `tp0`
+ * (and its routes) goes, everything else stays and `state.json` is marked
+ * `suspended` so a reboot does not bring the tunnel back; the next enable
+ * reuses the same key. The daemon is the only owner of `tp0`: it creates the
+ * interface, syncs peers, installs one kernel route per peer `AllowedIPs`
+ * entry (`fabric-routes.ts`) and disables any `wg-quick@tp0` left from older
+ * releases. The mesh is durable across reboots via a `sysctl.d` drop-in,
+ * persisted `state.json`, and a daemon-start re-reconcile that reuses
+ * PSK-bearing durable `tp0.conf` instead of rewriting peers without a PSK.
+ * `TP-FORWARD` accepts same-subnet bridge traffic and bidirectional
+ * local-bridge ↔ remote peer prefix (non-/32) and LAN route forwarding.
+ *
+ * Servers on a shared trusted LAN have no tunnel between them: `lanRoutes`
+ * routes their container subnets via the member's LAN address
+ * (`fabric-lan-routes.ts`), and `tunnel: false` keeps `tp0` down entirely
+ * (the key is kept, never created). A pause keeps LAN routes; a teardown
+ * removes them.
  */
 import { encodeHex } from "@std/encoding/hex";
 import { fabricAllowedIpsPolicyError } from "./fabric-allowed-ips.ts";
@@ -26,15 +38,42 @@ import { collectServerIps } from "../host/server-addresses.ts";
 import { FABRIC_INTERFACE_NAME } from "../host/fabric-interface.ts";
 import type { ServerReportedIp } from "../contracts/server-reported-ip.ts";
 import { stampObservedPeerInterfaces } from "./fabric-peer-interface.ts";
+import {
+  fabricLanRoutesPolicyError,
+  type InstalledLanRoute,
+  type LanForwardPrefix,
+  type LanRoutePlan,
+  lanRoutePlanIsEmpty,
+  lanRoutePrefixes,
+  planLanRoutes,
+} from "./fabric-lan-routes.ts";
+import {
+  type FabricPeerReading,
+  type FabricPeerReadingListener,
+  FabricPeerRefresher,
+} from "./fabric-peer-refresh.ts";
+import {
+  desiredFabricRoutes,
+  type FabricRoutePlan,
+  fabricRoutePlanIsEmpty,
+  type ObservedRoute,
+  parseRouteShow,
+  planFabricRoutes,
+} from "./fabric-routes.ts";
 import { fabricNetworkDir, resolveLayout } from "../paths/layout.ts";
 import {
   type FabricPeerHealth,
+  type FabricReconcileDisabledPayload,
   type FabricReconcileEnabledPayload,
+  type FabricReconcileLanRoute,
   type FabricReconcileNetwork,
   type FabricReconcileObservedPeer,
   type FabricReconcilePayload,
   type FabricReconcilePeer,
   type FabricReconcileResult,
+  isValidIpv4Literal,
+  isValidIpv6Literal,
+  isValidWireguardAllowedIp,
   isValidWireguardEndpoint,
   isValidWireguardPublicKey,
   parseFabricReconcilePayload,
@@ -66,6 +105,8 @@ const PREFLIGHT_TIMEOUT_MS = 5_000;
  */
 export const FABRIC_HANDSHAKE_HEALTHY_MS = 195_000;
 const FABRIC_PROBE_KEEPALIVE = 25;
+/** At most this many result warnings (the contract accepts more). */
+const FABRIC_RESULT_WARNINGS_SENT = 20;
 const WG_DUMP_ENDPOINT_NONE = "(none)";
 
 export type FabricRunResult = {
@@ -95,14 +136,24 @@ type FabricStatePeerJson = {
 };
 
 type FabricStateJson = {
-  publicKey: string;
-  address: string;
+  /** Absent only for a tunnel-less state on a host that never had a key. */
+  publicKey?: string;
+  /** Absent only when `tunnel` is `false`. */
+  address?: string;
   prefix: string;
   listenPort?: number;
   mtu?: number;
   gateway?: boolean;
   peers: FabricStatePeerJson[];
   networks: FabricReconcileNetwork[];
+  /** Paused by `retainKeys`: keys and bridges kept, `tp0` stays down. */
+  suspended?: boolean;
+  /** `false`: no tunnel wanted, `tp0` stays down (absent means `true`). */
+  tunnel?: boolean;
+  /** Desired LAN routes, restored at boot (a skipped one is retried). */
+  lanRoutes?: FabricReconcileLanRoute[];
+  /** LAN routes this daemon installed; the only ones it ever removes. */
+  installedLanRoutes?: InstalledLanRoute[];
 };
 
 let networkDirOverride: string | null = null;
@@ -149,6 +200,9 @@ export function resetFabricTestOverrides(): void {
   runOverride = null;
   enableIpForwardingOverride = null;
   skipRealSyscalls = false;
+  peerRefresher.reset();
+  lastObservedFabricPeers = [];
+  lastObservedFabricPeersAt = null;
 }
 
 function resolveNetworkDir(): string {
@@ -161,10 +215,17 @@ function alreadyExistsText(result: FabricRunResult): boolean {
   return text.includes("already exists") || text.includes("file exists");
 }
 
-function isPermissionDenied(result: FabricRunResult): boolean {
+/**
+ * The unprivileged call was refused, so it is retried through the host
+ * wrapper. systemd says "Access denied" (or asks for interactive
+ * authentication) where the kernel tools say "Operation not permitted".
+ */
+export function isFabricRunRefused(result: FabricRunResult): boolean {
   const text = `${result.stderr} ${result.stdout}`.toLowerCase();
   return text.includes("permission denied") ||
-    text.includes("operation not permitted");
+    text.includes("operation not permitted") ||
+    text.includes("access denied") ||
+    text.includes("interactive authentication required");
 }
 
 function isMissingDeviceText(result: FabricRunResult): boolean {
@@ -179,6 +240,11 @@ function isActiveEndpointsText(result: FabricRunResult): boolean {
   const text = `${result.stderr} ${result.stdout}`.toLowerCase();
   return text.includes("has active endpoints") ||
     text.includes("active endpoints");
+}
+
+function isMissingRouteText(result: FabricRunResult): boolean {
+  const text = `${result.stderr} ${result.stdout}`.toLowerCase();
+  return text.includes("no such process") || isMissingDeviceText(result);
 }
 
 function isMissingIptablesText(result: FabricRunResult): boolean {
@@ -269,7 +335,7 @@ async function runDefault(
     options?.timeoutMs,
   );
   if (direct.success) return direct;
-  if (!isPermissionDenied(direct)) return direct;
+  if (!isFabricRunRefused(direct)) return direct;
   return await spawnCommand(
     "sudo",
     hostSudoArgs(["-n", cmd, ...args]),
@@ -718,49 +784,235 @@ async function syncFabricPeers(
   }
 }
 
-async function installHostWgQuickConfig(confPath: string): Promise<void> {
-  const mkdir = await runHost("mkdir", ["-p", "/etc/wireguard"]);
-  if (!mkdir.success) {
-    throw new Error(mkdir.stderr || "failed to create /etc/wireguard");
+/**
+ * Remove a root file through the host wrapper (`rm` is not a direct spawn
+ * target of the daemon). Best effort: a failure is logged, never thrown.
+ */
+async function removeRootFileBestEffort(path: string): Promise<void> {
+  const result = await runHost("sudo", hostSudoArgs(["-n", "rm", "-f", path]));
+  if (result.success) return;
+  logWarn(
+    "commands",
+    `TurboFabric could not remove ${path}: ${
+      result.stderr || result.stdout || `exit ${result.code}`
+    }`,
+  );
+}
+
+/**
+ * The daemon is the only owner of `tp0`. Older releases enabled
+ * `wg-quick@tp0`, which races the daemon at boot and refuses to start when
+ * `tp0` exists. Disable it when it is enabled or running; `--now` deletes a
+ * `tp0` it brought up, so callers create the interface after this.
+ */
+async function retireWgQuickUnit(): Promise<void> {
+  const enabled = await runHost("systemctl", ["is-enabled", WG_QUICK_UNIT]);
+  const active = await runHost("systemctl", ["is-active", WG_QUICK_UNIT]);
+  if (!enabled.success && !active.success) return;
+  await disableWgQuickUnit();
+}
+
+async function readRouteFamily(
+  version: 4 | 6,
+  required: boolean,
+): Promise<ObservedRoute[]> {
+  const result = await runHost("ip", [`-${version}`, "route", "show"]);
+  if (result.success) return parseRouteShow(result.stdout, version);
+  // A host without IPv6 may refuse the read; that only matters when a peer
+  // wants an IPv6 route.
+  if (!required) return [];
+  throw new Error(
+    result.stderr || `failed to read IPv${version} routes`,
+  );
+}
+
+async function planTp0Routes(
+  payload: FabricReconcileEnabledPayload,
+): Promise<FabricRoutePlan> {
+  const desired = desiredFabricRoutes(payload);
+  const needs = (version: 4 | 6) =>
+    desired.some((route) => route.parsed.version === version);
+  const table = [
+    ...await readRouteFamily(4, needs(4)),
+    ...await readRouteFamily(6, needs(6)),
+  ];
+  return planFabricRoutes(desired, table);
+}
+
+async function changeTp0Route(
+  action: "replace" | "del",
+  cidr: string,
+): Promise<FabricRunResult> {
+  return await runHost("ip", [
+    "route",
+    action,
+    cidr,
+    "dev",
+    FABRIC_INTERFACE_NAME,
+  ]);
+}
+
+/**
+ * Make the kernel routes on `tp0` match the peers' `AllowedIPs`: add what is
+ * missing, remove `tp0` routes no peer wants, skip a range another interface
+ * already routes. Runs after every successful `wg syncconf`.
+ */
+async function reconcileFabricRoutes(
+  payload: FabricReconcileEnabledPayload,
+  warnings?: string[],
+): Promise<void> {
+  const plan = await planTp0Routes(payload);
+  for (const skipped of plan.skipped) {
+    const text =
+      `Route ${skipped.cidr} not installed on ${FABRIC_INTERFACE_NAME}: ${skipped.dev} already routes it`;
+    logWarn("commands", `TurboFabric ${text}`);
+    warnings?.push(text);
   }
-  await runHost("chmod", ["700", "/etc/wireguard"]);
-  const copy = await runHost("cp", [confPath, WG_QUICK_CONF_PATH]);
-  if (!copy.success) {
-    throw new Error(
-      copy.stderr || `failed to install ${WG_QUICK_CONF_PATH}`,
+  await forEachSequential(plan.add, async (cidr) => {
+    const added = await changeTp0Route("replace", cidr);
+    if (!added.success) {
+      throw new Error(
+        added.stderr ||
+          `failed to add route ${cidr} on ${FABRIC_INTERFACE_NAME}`,
+      );
+    }
+  });
+  await forEachSequential(plan.remove, async (cidr) => {
+    const removed = await changeTp0Route("del", cidr);
+    if (removed.success || isMissingRouteText(removed)) return;
+    logWarn(
+      "commands",
+      `TurboFabric could not remove route ${cidr}: ${
+        removed.stderr || `exit ${removed.code}`
+      }`,
     );
-  }
-  const chmod = await runHost("chmod", ["600", WG_QUICK_CONF_PATH]);
-  if (!chmod.success) {
-    throw new Error(chmod.stderr || `failed to chmod ${WG_QUICK_CONF_PATH}`);
+  });
+}
+
+/** `tp0` routes already match the payload (a failed read is a mismatch). */
+async function fabricRoutesMatch(
+  payload: FabricReconcileEnabledPayload,
+): Promise<boolean> {
+  try {
+    return fabricRoutePlanIsEmpty(await planTp0Routes(payload));
+  } catch {
+    return false;
   }
 }
 
-async function ensureWgQuickUnit(): Promise<void> {
-  const enabled = await runHost("systemctl", ["is-enabled", WG_QUICK_UNIT]);
-  const active = await runHost("systemctl", ["is-active", WG_QUICK_UNIT]);
-  if (enabled.success && active.success) return;
-  if (active.success) {
-    const enableOnly = await runHost("systemctl", ["enable", WG_QUICK_UNIT]);
-    if (!enableOnly.success) {
+/** What a LAN route reconcile needs: the wanted list and what is ours. */
+type LanRouteInput = {
+  lanRoutes: readonly FabricReconcileLanRoute[];
+  installed: readonly InstalledLanRoute[];
+  networks: readonly FabricReconcileNetwork[];
+};
+
+function lanRouteInput(
+  payload: FabricReconcileEnabledPayload,
+  previous: FabricStateJson | null,
+): LanRouteInput {
+  return {
+    lanRoutes: payload.lanRoutes ?? [],
+    installed: previous?.installedLanRoutes ?? [],
+    networks: payload.networks ?? [],
+  };
+}
+
+async function planHostLanRoutes(input: LanRouteInput): Promise<LanRoutePlan> {
+  const needed = input.lanRoutes.length > 0 || input.installed.length > 0;
+  const table = needed ? await readRouteFamily(4, true) : [];
+  return planLanRoutes({
+    desired: input.lanRoutes,
+    table,
+    bridgeSubnets: input.networks.map((network) => network.subnet),
+    installed: input.installed,
+  });
+}
+
+async function changeLanRoute(
+  action: "replace" | "del",
+  route: InstalledLanRoute,
+): Promise<FabricRunResult> {
+  return await runHost("ip", [
+    "route",
+    action,
+    route.cidr,
+    "via",
+    route.via,
+    "dev",
+    route.dev,
+  ]);
+}
+
+async function removeLanRoutesBestEffort(
+  routes: readonly InstalledLanRoute[],
+): Promise<void> {
+  await forEachSequential(routes, async (route) => {
+    const removed = await changeLanRoute("del", route);
+    if (removed.success || isMissingRouteText(removed)) return;
+    logWarn(
+      "commands",
+      `TurboFabric could not remove LAN route ${route.cidr} via ${route.via}: ${
+        removed.stderr || `exit ${removed.code}`
+      }`,
+    );
+  });
+}
+
+/**
+ * Make the LAN routes match `lanRoutes`: add what is missing (via the
+ * interface whose connected subnet holds the next hop), remove the ones this
+ * daemon installed that nothing wants, skip (with a warning) what cannot be
+ * routed safely. Returns the LAN routes now installed.
+ */
+async function reconcileLanRoutes(
+  input: LanRouteInput,
+  warnings?: string[],
+): Promise<InstalledLanRoute[]> {
+  const plan = await planHostLanRoutes(input);
+  for (const skipped of plan.skipped) {
+    const text =
+      `LAN route ${skipped.cidr} via ${skipped.via} not installed: ${skipped.reason}`;
+    logWarn("commands", `TurboFabric ${text}`);
+    warnings?.push(text);
+  }
+  await removeLanRoutesBestEffort(plan.remove);
+  await forEachSequential(plan.add, async (route) => {
+    const added = await changeLanRoute("replace", route);
+    if (!added.success) {
       throw new Error(
-        enableOnly.stderr || `failed to enable ${WG_QUICK_UNIT}`,
+        added.stderr ||
+          `failed to add LAN route ${route.cidr} via ${route.via} dev ${route.dev}`,
       );
     }
-    return;
-  }
-  const enableNow = await runHost("systemctl", [
-    "enable",
-    "--now",
-    WG_QUICK_UNIT,
-  ]);
-  if (enableNow.success) return;
-  // Interface may already exist from `ensureTp0Interface` — enable without start.
-  const enableOnly = await runHost("systemctl", ["enable", WG_QUICK_UNIT]);
-  if (!enableOnly.success) {
-    throw new Error(
-      enableOnly.stderr || `failed to enable ${WG_QUICK_UNIT}`,
+  });
+  return [...plan.keep, ...plan.add];
+}
+
+/** Boot restore: a LAN route failure is logged; returns what is in place. */
+async function reconcileLanRoutesBestEffort(
+  input: LanRouteInput,
+  warnings?: string[],
+): Promise<InstalledLanRoute[]> {
+  try {
+    return await reconcileLanRoutes(input, warnings);
+  } catch (err) {
+    logWarn(
+      "commands",
+      `TurboFabric LAN routes not fully restored: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
     );
+    return [...input.installed];
+  }
+}
+
+/** LAN routes already match (a failed read is a mismatch). */
+async function lanRoutesMatch(input: LanRouteInput): Promise<boolean> {
+  try {
+    return lanRoutePlanIsEmpty(await planHostLanRoutes(input));
+  } catch {
+    return false;
   }
 }
 
@@ -808,7 +1060,14 @@ async function warnIfDockerNetworkMtuDiffers(
 export async function ensureFabricDockerNetworks(
   networks: readonly FabricReconcileNetwork[],
   defaultMtu: number,
+  warnings?: string[],
 ): Promise<void> {
+  if (networks.length === 0) return;
+  if (!await dockerCliPresent()) {
+    logWarn("commands", `TurboFabric: ${DOCKER_MISSING_WARNING}`);
+    warnings?.push(DOCKER_MISSING_WARNING);
+    return;
+  }
   await forEachSequential(networks, async (network) => {
     const mtu = resolveNetworkMtu(network, defaultMtu);
     const create = await runHost("docker", [
@@ -836,6 +1095,22 @@ export async function ensureFabricDockerNetworks(
 }
 
 /**
+ * A host without Docker still joins TurboFabric: only its routed container
+ * bridges wait until Docker is installed (the next apply, or the Docker
+ * reachability change that re-runs `reinstallFabricForwardingIfEnabled`,
+ * creates them).
+ */
+const DOCKER_MISSING_WARNING =
+  "Container networks that span servers wait until Docker is installed on this server. The tunnel works without it.";
+
+async function dockerCliPresent(): Promise<boolean> {
+  const result = await runHost("docker", ["--version"], {
+    timeoutMs: PREFLIGHT_TIMEOUT_MS,
+  });
+  return result.success;
+}
+
+/**
  * Best-effort `docker network rm`; never throws. A missing network counts as
  * removed. Returns the names still present (containers still attached, or
  * any other failure, which is logged) so the caller can retry them later.
@@ -844,6 +1119,8 @@ export async function removeFabricDockerNetworks(
   names: readonly string[],
 ): Promise<string[]> {
   const left: string[] = [];
+  // Without Docker there is no bridge to remove.
+  if (names.length === 0 || !await dockerCliPresent()) return left;
   await forEachSequential(names, async (name) => {
     const result = await runHost("docker", ["network", "rm", name]);
     if (result.success || isMissingDeviceText(result)) return;
@@ -994,13 +1271,174 @@ export function fabricCrossSubnetForwardPairs(
   return pairs;
 }
 
-async function ensureForwardAccept(
-  source: string,
-  dest: string,
+/** A `TP-FORWARD` ACCEPT pair; a LAN pair also names its LAN interface. */
+export type ForwardPair = {
+  source: string;
+  dest: string;
+  /** `-i`: traffic arrives on this interface. */
+  inDev?: string;
+  /** `-o`: traffic leaves on this interface. */
+  outDev?: string;
+};
+
+/**
+ * Bidirectional local-bridge ↔ LAN-route-prefix ACCEPT pairs, scoped to the
+ * LAN interface the route uses: out of it toward the remote prefix, in from it
+ * back to the local bridge (no same-CIDR).
+ */
+export function fabricLanForwardPairs(
+  localSubnets: readonly string[],
+  lanPrefixes: readonly LanForwardPrefix[],
+): ForwardPair[] {
+  const pairs: ForwardPair[] = [];
+  for (const local of localSubnets) {
+    for (const remote of lanPrefixes) {
+      if (local === remote.cidr) continue;
+      pairs.push(
+        { source: local, dest: remote.cidr, outDev: remote.dev },
+        { source: remote.cidr, dest: local, inDev: remote.dev },
+      );
+    }
+  }
+  return pairs;
+}
+
+function forwardAcceptMatch(pair: ForwardPair): string[] {
+  return [
+    FABRIC_FORWARD_CHAIN,
+    ...(pair.inDev ? ["-i", pair.inDev] : []),
+    ...(pair.outDev ? ["-o", pair.outDev] : []),
+    "-s",
+    pair.source,
+    "-d",
+    pair.dest,
+    "-j",
+    "ACCEPT",
+  ];
+}
+
+async function ensureForwardAccept(pair: ForwardPair): Promise<void> {
+  const match = forwardAcceptMatch(pair);
+  await ensureIptablesRule(match, ["-A", ...match]);
+}
+
+/**
+ * Pairs between local bridges and remote prefixes: peer container ranges
+ * (over `tp0`, matched on addresses only) and the LAN routes actually
+ * installed (over a shared LAN, matched on the LAN interface too).
+ * `TP-FORWARD` is jumped to first from `DOCKER-USER`, and an `ACCEPT` there
+ * ends the `FORWARD` walk, so Docker's own routed-bridge rules (published
+ * ports only) never see it.
+ */
+function remoteForwardPairs(
+  localSubnets: readonly string[],
+  peers: readonly { allowedIPs: readonly string[] }[],
+  installedLanRoutes: readonly InstalledLanRoute[] | undefined,
+): ForwardPair[] {
+  return [
+    ...fabricCrossSubnetForwardPairs(
+      localSubnets,
+      fabricOwnedPeerPrefixes(peers),
+    ),
+    ...fabricLanForwardPairs(
+      localSubnets,
+      lanRoutePrefixes(installedLanRoutes),
+    ),
+  ];
+}
+
+function forwardPairKey(pair: ForwardPair): string {
+  return [pair.inDev ?? "", pair.source, pair.dest, pair.outDev ?? ""].join(
+    ">",
+  );
+}
+
+/** Remove ACCEPT pairs (best effort) that are not in `keep`. */
+async function removeForwardPairsExcept(
+  pairs: readonly ForwardPair[],
+  keep: readonly ForwardPair[],
 ): Promise<void> {
+  const kept = new Set(keep.map(forwardPairKey));
+  await forEachSequential(
+    pairs.filter((pair) => !kept.has(forwardPairKey(pair))),
+    async (pair) => {
+      await removeIptablesRuleBestEffort(forwardAcceptMatch(pair));
+    },
+  );
+}
+
+function stateForwardPairs(
+  state: FabricStateJson,
+  withPeers: boolean,
+): ForwardPair[] {
+  return remoteForwardPairs(
+    state.networks.map((network) => network.subnet),
+    withPeers ? state.peers : [],
+    state.installedLanRoutes,
+  );
+}
+
+/** Boot restore: drop the LAN pairs of routes that did not come back. */
+async function removeDroppedLanForwardPairs(
+  before: FabricStateJson,
+  after: FabricStateJson,
+): Promise<void> {
+  await removeForwardPairsExcept(
+    stateForwardPairs(before, false),
+    stateForwardPairs(after, false),
+  );
+}
+
+/**
+ * Pause: remove the local bridge ↔ peer range ACCEPT pairs a running fabric
+ * installed for these peers (best effort; a missing rule is fine). The LAN
+ * route pairs stay: LAN traffic does not need the tunnel.
+ */
+async function removePeerForwardPairs(state: FabricStateJson): Promise<void> {
+  await removeForwardPairsExcept(
+    stateForwardPairs(state, true),
+    stateForwardPairs(state, false),
+  );
+}
+
+/** Enable: drop the pairs of the previous state the new payload no longer wants. */
+async function removeStaleForwardPairs(
+  previous: FabricStateJson | null,
+  payload: FabricReconcileEnabledPayload,
+  installedLanRoutes: readonly InstalledLanRoute[],
+): Promise<void> {
+  if (!previous) return;
+  await removeForwardPairsExcept(
+    stateForwardPairs(previous, previous.suspended !== true),
+    remoteForwardPairs(
+      (payload.networks ?? []).map((network) => network.subnet),
+      payload.peers,
+      installedLanRoutes,
+    ),
+  );
+}
+
+const FORWARD_CHAIN = "FORWARD";
+
+/**
+ * Hang `TP-FORWARD` off `DOCKER-USER` (first, so Docker's own rules never see
+ * fabric traffic), or off `FORWARD` on a host without Docker, where
+ * `DOCKER-USER` does not exist. Once Docker makes its chain, the next run
+ * (Docker reachability change, apply or boot) moves the jump there.
+ */
+async function ensureForwardChainJump(): Promise<void> {
+  const dockerUser = await runHost("iptables", ["-S", DOCKER_USER_CHAIN]);
+  const parent = dockerUser.success ? DOCKER_USER_CHAIN : FORWARD_CHAIN;
+  if (parent === DOCKER_USER_CHAIN) {
+    await removeIptablesRuleBestEffort([
+      FORWARD_CHAIN,
+      "-j",
+      FABRIC_FORWARD_CHAIN,
+    ]);
+  }
   await ensureIptablesRule(
-    [FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"],
-    ["-A", FABRIC_FORWARD_CHAIN, "-s", source, "-d", dest, "-j", "ACCEPT"],
+    [parent, "-j", FABRIC_FORWARD_CHAIN],
+    ["-I", parent, "1", "-j", FABRIC_FORWARD_CHAIN],
   );
 }
 
@@ -1008,12 +1446,10 @@ async function reconcileFabricForwarding(
   networks: readonly FabricReconcileNetwork[],
   peers: readonly { allowedIPs: readonly string[] }[] = [],
   gateway = false,
+  installedLanRoutes: readonly InstalledLanRoute[] = [],
 ): Promise<void> {
   await ensureIptablesChain(FABRIC_FORWARD_CHAIN);
-  await ensureIptablesRule(
-    [DOCKER_USER_CHAIN, "-j", FABRIC_FORWARD_CHAIN],
-    ["-I", DOCKER_USER_CHAIN, "1", "-j", FABRIC_FORWARD_CHAIN],
-  );
+  await ensureForwardChainJump();
   await ensureIptablesRule(
     [
       FABRIC_FORWARD_CHAIN,
@@ -1036,16 +1472,13 @@ async function reconcileFabricForwarding(
     ],
   );
   await forEachSequential(networks, async (network) => {
-    await ensureForwardAccept(network.subnet, network.subnet);
+    await ensureForwardAccept({ source: network.subnet, dest: network.subnet });
   });
   const localSubnets = networks.map((network) => network.subnet);
   await forEachSequential(
-    fabricCrossSubnetForwardPairs(
-      localSubnets,
-      fabricOwnedPeerPrefixes(peers),
-    ),
+    remoteForwardPairs(localSubnets, peers, installedLanRoutes),
     async (pair) => {
-      await ensureForwardAccept(pair.source, pair.dest);
+      await ensureForwardAccept(pair);
     },
   );
   await reconcileTp0Transit(gateway);
@@ -1172,21 +1605,79 @@ function parseStateNetwork(value: unknown): FabricReconcileNetwork | null {
   return network;
 }
 
+function optionalStateString(
+  value: unknown,
+  required: boolean,
+): string | undefined | null {
+  if (typeof value === "string") return value;
+  return value === undefined && !required ? undefined : null;
+}
+
+/**
+ * `prefix` is always required; `publicKey` and `address` only for a state
+ * with a tunnel (`tunnel` absent or `true`).
+ */
 function fabricStateCore(
   record: Record<string, unknown>,
-): Pick<FabricStateJson, "publicKey" | "address" | "prefix"> | null {
+): Pick<FabricStateJson, "publicKey" | "address" | "prefix" | "tunnel"> | null {
+  if (typeof record.prefix !== "string") return null;
+  const tunnel = record.tunnel !== false;
+  const publicKey = optionalStateString(record.publicKey, tunnel);
+  const address = optionalStateString(record.address, tunnel);
+  if (publicKey === null || address === null) return null;
+  return {
+    prefix: record.prefix,
+    ...(publicKey === undefined ? {} : { publicKey }),
+    ...(address === undefined ? {} : { address }),
+    ...(tunnel ? {} : { tunnel: false }),
+  };
+}
+
+const LAN_DEV_RE = /^[A-Za-z0-9._-]{1,15}$/;
+
+function isIpLiteral(value: unknown): value is string {
+  return typeof value === "string" &&
+    (isValidIpv4Literal(value) || isValidIpv6Literal(value));
+}
+
+function parseStateLanRoute(value: unknown): FabricReconcileLanRoute | null {
+  const record = asJsonObject(value);
   if (
-    typeof record.publicKey !== "string" ||
-    typeof record.address !== "string" ||
-    typeof record.prefix !== "string"
+    typeof record?.cidr !== "string" ||
+    !isValidWireguardAllowedIp(record.cidr) || !isIpLiteral(record.via)
   ) {
     return null;
   }
-  return {
-    publicKey: record.publicKey,
-    address: record.address,
-    prefix: record.prefix,
-  };
+  return { cidr: record.cidr, via: record.via };
+}
+
+function parseStateInstalledLanRoute(value: unknown): InstalledLanRoute | null {
+  const route = parseStateLanRoute(value);
+  const dev = asJsonObject(value)?.dev;
+  if (route === null || typeof dev !== "string" || !LAN_DEV_RE.test(dev)) {
+    return null;
+  }
+  if (dev === FABRIC_INTERFACE_NAME || dev === "lo") return null;
+  return { ...route, dev };
+}
+
+function applyOptionalStateFields(
+  state: FabricStateJson,
+  record: Record<string, unknown>,
+): void {
+  if (typeof record.listenPort === "number") {
+    state.listenPort = record.listenPort;
+  }
+  if (typeof record.mtu === "number") state.mtu = record.mtu;
+  if (typeof record.gateway === "boolean") state.gateway = record.gateway;
+  if (record.suspended === true) state.suspended = true;
+  const lanRoutes = parseStateList(record.lanRoutes, parseStateLanRoute);
+  if (lanRoutes.length > 0) state.lanRoutes = lanRoutes;
+  const installed = parseStateList(
+    record.installedLanRoutes,
+    parseStateInstalledLanRoute,
+  );
+  if (installed.length > 0) state.installedLanRoutes = installed;
 }
 
 function parseFabricStateJson(raw: string): FabricStateJson | null {
@@ -1200,15 +1691,7 @@ function parseFabricStateJson(raw: string): FabricStateJson | null {
       peers: parseStateList(record.peers, parseStatePeer),
       networks: parseStateList(record.networks, parseStateNetwork),
     };
-    if (typeof record.listenPort === "number") {
-      state.listenPort = record.listenPort;
-    }
-    if (typeof record.mtu === "number") {
-      state.mtu = record.mtu;
-    }
-    if (typeof record.gateway === "boolean") {
-      state.gateway = record.gateway;
-    }
+    applyOptionalStateFields(state, record);
     return state;
   } catch {
     return null;
@@ -1251,21 +1734,43 @@ async function writeFabricStateJson(
   );
 }
 
+type AppliedFabric = {
+  publicKey: string | undefined;
+  installedLanRoutes: readonly InstalledLanRoute[];
+  /** Keep a pause: a tunnel-less payload on a paused state leaves it paused. */
+  suspended: boolean;
+};
+
+function lanStateFields(
+  lanRoutes: readonly FabricReconcileLanRoute[] | undefined,
+  installed: readonly InstalledLanRoute[],
+): Pick<FabricStateJson, "lanRoutes" | "installedLanRoutes"> {
+  return {
+    ...(lanRoutes?.length ? { lanRoutes: [...lanRoutes] } : {}),
+    ...(installed.length > 0 ? { installedLanRoutes: [...installed] } : {}),
+  };
+}
+
 async function writeFabricState(
   networkDir: string,
-  publicKey: string,
   payload: FabricReconcileEnabledPayload,
+  applied: AppliedFabric,
 ): Promise<void> {
   const state: FabricStateJson = {
-    publicKey,
-    address: payload.address,
+    ...(applied.publicKey === undefined
+      ? {}
+      : { publicKey: applied.publicKey }),
+    ...(payload.address === undefined ? {} : { address: payload.address }),
     prefix: payload.prefix,
     peers: statePeersFromPayload(payload.peers),
     networks: [...(payload.networks ?? [])],
+    ...lanStateFields(payload.lanRoutes, applied.installedLanRoutes),
   };
   if (payload.listenPort !== undefined) state.listenPort = payload.listenPort;
   if (payload.mtu !== undefined) state.mtu = payload.mtu;
   if (payload.gateway !== undefined) state.gateway = payload.gateway;
+  if (payload.tunnel === false) state.tunnel = false;
+  if (applied.suspended) state.suspended = true;
   await writeFabricStateJson(networkDir, state);
 }
 
@@ -1292,7 +1797,7 @@ function enabledPayloadFromState(
 ): FabricReconcileEnabledPayload {
   const payload: FabricReconcileEnabledPayload = {
     enabled: true,
-    address: state.address,
+    ...(state.address === undefined ? {} : { address: state.address }),
     prefix: state.prefix,
     peers: state.peers.filter((peer) => peer.allowedIPs.length > 0).map(
       (peer) => {
@@ -1310,6 +1815,8 @@ function enabledPayloadFromState(
   if (state.listenPort !== undefined) payload.listenPort = state.listenPort;
   if (state.mtu !== undefined) payload.mtu = state.mtu;
   if (state.gateway !== undefined) payload.gateway = state.gateway;
+  if (state.tunnel === false) payload.tunnel = false;
+  if (state.lanRoutes) payload.lanRoutes = state.lanRoutes;
   return payload;
 }
 
@@ -1391,19 +1898,27 @@ function stampObservedPeerHealth(
 }
 
 /**
- * Last `wg show tp0 dump` observation, refreshed opportunistically whenever
- * {@link collectFabricPeerState} runs (instance-initiated reconcile/path
- * probe) — never a new subprocess of its own. `events/fabric-state.ts` reads
- * this via {@link getLastObservedFabricPeers} to detect peer availability
- * transitions without violating the collector's no-subprocess-per-interval
- * rule; an empty cache (no reconcile/probe has run yet this process) yields
- * `[]`, matching every other "no telemetry wired" default in `collector/`.
+ * Last `wg show tp0 dump` observation. Refreshed whenever
+ * {@link collectFabricPeerState} runs: on every reconcile and path probe, and
+ * every 60 s while `tp0` exists ({@link peerRefresher},
+ * `fabric-peer-refresh.ts`). `events/fabric-state.ts` reads this via
+ * {@link getLastObservedFabricPeers} to detect peer availability transitions
+ * without a subprocess of its own; an empty cache (no read yet this process)
+ * yields `[]`, matching every other "no telemetry wired" default in
+ * `collector/`.
  */
 let lastObservedFabricPeers: FabricReconcileObservedPeer[] = [];
+/** When {@link lastObservedFabricPeers} was read (epoch ms); null before any read. */
+let lastObservedFabricPeersAt: number | null = null;
 
 /** See {@link lastObservedFabricPeers}. */
 export function getLastObservedFabricPeers(): FabricReconcileObservedPeer[] {
   return lastObservedFabricPeers;
+}
+
+/** When the cached peers were read (epoch ms), or null before any read. */
+export function getLastObservedFabricPeersAtMs(): number | null {
+  return lastObservedFabricPeersAt;
 }
 
 /**
@@ -1421,17 +1936,63 @@ function observedPeerAddresses(): ServerReportedIp[] {
   }
 }
 
-async function collectFabricPeerState(): Promise<
-  FabricReconcileObservedPeer[]
-> {
+/**
+ * Read `wg show tp0 dump` into the cache; null when the dump fails (no
+ * `tp0`). A successful read also starts the 60 s refresh (a no-op until the
+ * daemon armed it at boot, or when already running).
+ */
+async function readFabricPeerState(): Promise<FabricPeerReading | null> {
   const dump = await runHost("wg", ["show", FABRIC_INTERFACE_NAME, "dump"]);
-  if (!dump.success) return [];
+  if (!dump.success) return null;
+  const nowMs = Date.now();
   const peers = stampObservedPeerInterfaces(
-    stampObservedPeerHealth(parseWgDumpPeers(dump.stdout)),
+    stampObservedPeerHealth(parseWgDumpPeers(dump.stdout), nowMs),
     observedPeerAddresses(),
   );
   lastObservedFabricPeers = peers;
-  return peers;
+  lastObservedFabricPeersAt = nowMs;
+  peerRefresher.start();
+  return { peers, observedAt: new Date(nowMs).toISOString() };
+}
+
+async function collectFabricPeerState(): Promise<
+  FabricReconcileObservedPeer[]
+> {
+  return (await readFabricPeerState())?.peers ?? [];
+}
+
+/**
+ * The one process-wide peer refresher. Its tick re-reads the dump; a failed
+ * read (no `tp0`) stops it.
+ */
+const peerRefresher = new FabricPeerRefresher({
+  refresh: readFabricPeerState,
+});
+
+/**
+ * Let the 60 s peer refresh run (called once at daemon boot, before the
+ * fabric is restored). Until then a successful read starts no timer, so
+ * tests that apply a fabric never leave an interval behind.
+ */
+export function armFabricPeerRefresh(): void {
+  peerRefresher.arm();
+}
+
+/** Hear every refreshed reading (the control-plane reporter). */
+export function subscribeFabricPeerReadings(
+  listener: FabricPeerReadingListener,
+): () => void {
+  return peerRefresher.subscribe(listener);
+}
+
+/** True while the 60 s refresh timer runs (tests and diagnostics). */
+export function isFabricPeerRefreshRunning(): boolean {
+  return peerRefresher.running;
+}
+
+/** Run one refresh now (tests). */
+export function refreshFabricPeersForTests(): Promise<void> {
+  return peerRefresher.tick();
 }
 
 async function wgShowInterface(): Promise<boolean> {
@@ -1479,14 +2040,41 @@ async function observedTp0MatchesDesired(
   return linkShowMtu(link.stdout) === mtu;
 }
 
+/** The `tp0` address of a payload with a tunnel (the parser requires it). */
+function tunnelAddress(payload: FabricReconcileEnabledPayload): string {
+  if (payload.address === undefined) {
+    throw new Error("TurboFabric address missing for a tunnel");
+  }
+  return payload.address;
+}
+
+function wantsTunnel(payload: FabricReconcileEnabledPayload): boolean {
+  return payload.tunnel !== false;
+}
+
 async function liveInterfaceMatchesDesired(
   payload: FabricReconcileEnabledPayload,
 ): Promise<boolean> {
   if (!await wgShowInterface()) return false;
-  return await observedTp0MatchesDesired(
-    payload.address,
+  const tp0 = await observedTp0MatchesDesired(
+    tunnelAddress(payload),
     resolvePayloadMtu(payload),
   );
+  return tp0 && await fabricRoutesMatch(payload);
+}
+
+/**
+ * The host already looks like the payload: `tp0` up and right (or absent for
+ * a tunnel-less payload) and the LAN routes in place.
+ */
+async function liveHostMatchesDesired(
+  payload: FabricReconcileEnabledPayload,
+  previous: FabricStateJson | null,
+): Promise<boolean> {
+  const tunnelOk = wantsTunnel(payload)
+    ? await liveInterfaceMatchesDesired(payload)
+    : !await wgShowInterface();
+  return tunnelOk && await lanRoutesMatch(lanRouteInput(payload, previous));
 }
 
 async function probeFabricTool(cmd: string, args: string[]): Promise<void> {
@@ -1499,11 +2087,14 @@ async function probeFabricTool(cmd: string, args: string[]): Promise<void> {
   );
 }
 
-async function preflightFabricTools(): Promise<void> {
-  await probeFabricTool("wg", ["--version"]);
+/**
+ * The tools the tunnel itself needs. Docker is not one of them: a host
+ * without it joins, and only its container bridges wait for Docker.
+ */
+async function preflightFabricTools(needsWg: boolean): Promise<void> {
+  if (needsWg) await probeFabricTool("wg", ["--version"]);
   await probeFabricTool("ip", ["-V"]);
   await probeFabricTool("iptables", ["--version"]);
-  await probeFabricTool("docker", ["--version"]);
 }
 
 async function removePathBestEffort(path: string): Promise<void> {
@@ -1536,10 +2127,15 @@ async function runTeardownBestEffort(
 }
 
 async function teardownIptables(): Promise<void> {
-  await runTeardownBestEffort(
-    "iptables",
-    ["-D", DOCKER_USER_CHAIN, "-j", FABRIC_FORWARD_CHAIN],
-    isMissingIptablesText,
+  await forEachSequential(
+    [DOCKER_USER_CHAIN, FORWARD_CHAIN],
+    async (parent) => {
+      await runTeardownBestEffort(
+        "iptables",
+        ["-D", parent, "-j", FABRIC_FORWARD_CHAIN],
+        isMissingIptablesText,
+      );
+    },
   );
   await runTeardownBestEffort(
     "iptables",
@@ -1565,6 +2161,112 @@ async function disableWgQuickUnit(): Promise<void> {
   );
 }
 
+function errorText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return typeof err === "string" ? err : "unknown error";
+}
+
+/**
+ * One step of taking the fabric down. A failure is logged and collected,
+ * never a reason to skip the steps after it.
+ */
+async function downStep(
+  failures: string[],
+  label: string,
+  step: () => Promise<void>,
+): Promise<void> {
+  try {
+    await step();
+  } catch (err) {
+    const message = errorText(err);
+    logWarn("commands", `TurboFabric ${label} failed: ${message}`);
+    failures.push(`${label}: ${message}`);
+  }
+}
+
+/** One error naming every step that failed; nothing when all of them worked. */
+function throwIfStepsFailed(what: string, failures: readonly string[]): void {
+  if (failures.length === 0) return;
+  throw new Error(`${what} did not finish: ${failures.join("; ")}`);
+}
+
+async function deleteTp0(): Promise<void> {
+  const result = await runHost("ip", ["link", "delete", FABRIC_INTERFACE_NAME]);
+  if (result.success || isMissingDeviceText(result)) return;
+  throw new Error(
+    result.stderr || result.stdout || `exit ${result.code}`,
+  );
+}
+
+/**
+ * Stop a `wg-quick@tp0` left from older releases (only when it is enabled or
+ * running) and delete `tp0`; its routes go with it. Each step runs even when
+ * the one before it failed.
+ */
+async function takeTp0Down(failures: string[]): Promise<void> {
+  await downStep(failures, `stop ${WG_QUICK_UNIT}`, retireWgQuickUnit);
+  await downStep(
+    failures,
+    `delete ${FABRIC_INTERFACE_NAME}`,
+    deleteTp0,
+  );
+}
+
+/** {@link takeTp0Down}, throwing one error when a step failed. */
+async function takeTp0DownOrThrow(what: string): Promise<void> {
+  const failures: string[] = [];
+  await takeTp0Down(failures);
+  throwIfStepsFailed(what, failures);
+}
+
+/**
+ * `retainKeys` pause: the tunnel goes down, the private key, PSK-bearing
+ * `tp0.conf` and routed bridges stay, and `state.json` is marked `suspended`
+ * so a reboot does not bring `tp0` back. The mark is written first, so a
+ * daemon restart after a step that failed still keeps the tunnel down. LAN
+ * routes stay: traffic over a shared LAN does not need the tunnel.
+ * `TP-FORWARD` keeps the local bridge and LAN route rules, as boot restore of
+ * a paused fabric builds it: the peer range pairs come out and `tp0` transit
+ * is dropped. The apply stamp goes, so the next enable re-applies with the
+ * same key. Every step runs; the result is an error naming the ones that
+ * failed.
+ */
+async function handleFabricPause(
+  networkDir: string,
+): Promise<FabricReconcileResult> {
+  const state = await readFabricState(networkDir);
+  logInfo(
+    "commands",
+    `TurboFabric pause iface=${FABRIC_INTERFACE_NAME}${
+      state?.publicKey ? ` pubkey=${state.publicKey}` : ""
+    }`,
+  );
+  const failures: string[] = [];
+  const suspended = state ? { ...state, suspended: true } : null;
+  if (state && suspended && state.suspended !== true) {
+    await downStep(failures, "mark the fabric paused", async () => {
+      await writeFabricStateJson(networkDir, suspended);
+    });
+  }
+  await takeTp0Down(failures);
+  peerRefresher.stop();
+  await removePathBestEffort(applyStampPath(networkDir));
+  if (state && suspended) {
+    await downStep(failures, "update forwarding rules", async () => {
+      await removePeerForwardPairs(state);
+      await reconcileForwardingFromState(suspended);
+    });
+  }
+  throwIfStepsFailed("TurboFabric pause", failures);
+  return { summary: "TurboFabric paused; keys kept" };
+}
+
+/**
+ * Full teardown: `tp0`, LAN routes, bridges, `TP-FORWARD`, keys and state.
+ * Every step runs even when one before it failed; `state.json` goes last, and
+ * boot removes a `tp0` left without state, so a restart never brings the
+ * tunnel back. The result is an error naming the steps that failed.
+ */
 async function handleFabricTeardown(
   networkDir: string,
 ): Promise<FabricReconcileResult> {
@@ -1572,29 +2274,33 @@ async function handleFabricTeardown(
   if (state) {
     logInfo(
       "commands",
-      `TurboFabric teardown iface=${FABRIC_INTERFACE_NAME} pubkey=${state.publicKey}`,
+      `TurboFabric teardown iface=${FABRIC_INTERFACE_NAME} pubkey=${
+        state.publicKey ?? "none"
+      }`,
     );
   }
 
-  await disableWgQuickUnit();
-  await runTeardownBestEffort(
-    "ip",
-    ["link", "delete", FABRIC_INTERFACE_NAME],
-    isMissingDeviceText,
-  );
-  const left = await removeAllFabricBridges(
-    networkDir,
-    (state?.networks ?? []).map((network) => network.name),
-  );
+  const failures: string[] = [];
+  await takeTp0Down(failures);
+  await removeLanRoutesBestEffort(state?.installedLanRoutes ?? []);
+  peerRefresher.stop();
+  let left: string[] = [];
+  await downStep(failures, "remove container bridges", async () => {
+    left = await removeAllFabricBridges(
+      networkDir,
+      (state?.networks ?? []).map((network) => network.name),
+    );
+  });
   await teardownIptables();
-  await runTeardownBestEffort("rm", ["-f", WG_QUICK_CONF_PATH], () => true);
-  await runTeardownBestEffort("rm", ["-f", FABRIC_SYSCTL_DROPIN], () => true);
+  await removeRootFileBestEffort(WG_QUICK_CONF_PATH);
+  await removeRootFileBestEffort(FABRIC_SYSCTL_DROPIN);
 
   await removePathBestEffort(privateKeyPath(networkDir));
   await removePathBestEffort(pskDir(networkDir));
   await removePathBestEffort(wgConfPath(networkDir));
   await removePathBestEffort(applyStampPath(networkDir));
   await removePathBestEffort(stateFilePath(networkDir));
+  throwIfStepsFailed("TurboFabric teardown", failures);
 
   if (left.length > 0) {
     return {
@@ -1622,6 +2328,27 @@ async function forgetPendingTeardown(
 }
 
 /**
+ * Daemon start with no fabric state (never on, or removed): a `tp0` still
+ * here is left from a teardown that could not delete it. The daemon is its
+ * only owner, so it goes. Never throws.
+ */
+async function removeLeftoverTp0(): Promise<void> {
+  const shown = await runHost("ip", [
+    "-o",
+    "link",
+    "show",
+    "dev",
+    FABRIC_INTERFACE_NAME,
+  ]);
+  if (!shown.success) return;
+  logInfo(
+    "commands",
+    `TurboFabric has no state; removing leftover ${FABRIC_INTERFACE_NAME}`,
+  );
+  await takeTp0Down([]);
+}
+
+/**
  * Daemon start with fabric off: retry the bridges an earlier teardown could
  * not remove (their containers may be gone now). Never throws.
  */
@@ -1641,20 +2368,90 @@ async function retryPendingFabricTeardown(networkDir: string): Promise<void> {
   }
 }
 
-async function applyEnabledFabric(
+/**
+ * Boot restore: a route that cannot be installed (e.g. IPv6 turned off on
+ * the host) is logged, never a reason to leave local bridges down.
+ */
+async function reconcileFabricRoutesBestEffort(
+  payload: FabricReconcileEnabledPayload,
+): Promise<void> {
+  try {
+    await reconcileFabricRoutes(payload);
+  } catch (err) {
+    logWarn(
+      "commands",
+      `TurboFabric routes on ${FABRIC_INTERFACE_NAME} not fully restored: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/** Retire `wg-quick@tp0`, create and address `tp0`, sync peers. */
+async function bringUpTunnel(
   networkDir: string,
   payload: FabricReconcileEnabledPayload,
   pskByPublicKey: ReadonlyMap<string, string>,
 ): Promise<void> {
-  const previous = await readFabricState(networkDir);
-  const mtu = resolvePayloadMtu(payload);
-  await ensureTp0Interface(payload.address);
-  await applyMtu(mtu);
+  await retireWgQuickUnit();
+  await ensureTp0Interface(tunnelAddress(payload));
+  await applyMtu(resolvePayloadMtu(payload));
   await enableIpv4Forwarding();
   await syncFabricPeers(networkDir, payload, pskByPublicKey);
-  await installHostWgQuickConfig(wgConfPath(networkDir));
-  await ensureWgQuickUnit();
-  await ensureFabricDockerNetworks(payload.networks ?? [], mtu);
+  await removeRootFileBestEffort(WG_QUICK_CONF_PATH);
+}
+
+/**
+ * Shared by live apply and boot restore: bring `tp0` up (or, for a
+ * tunnel-less payload, take it down the way a pause does, keeping the key),
+ * drop the stale wg-quick copy of the config (read by the caller first, for
+ * PSKs), ensure routed bridges, reconcile `tp0` routes, then LAN routes on a
+ * fresh table read. Bridges come before routes so a failed route never keeps
+ * them down; at boot (`routesBestEffort`) a route failure is only logged.
+ * Returns the LAN routes now installed.
+ */
+async function bringUpFabric(
+  networkDir: string,
+  payload: FabricReconcileEnabledPayload,
+  pskByPublicKey: ReadonlyMap<string, string>,
+  previous: FabricStateJson | null,
+  options: { routesBestEffort?: boolean; warnings?: string[] } = {},
+): Promise<InstalledLanRoute[]> {
+  const { routesBestEffort = false, warnings } = options;
+  if (wantsTunnel(payload)) {
+    await bringUpTunnel(networkDir, payload, pskByPublicKey);
+  } else {
+    await takeTp0DownOrThrow("TurboFabric taking the tunnel down");
+    await enableIpv4Forwarding();
+  }
+  await ensureFabricDockerNetworks(
+    payload.networks ?? [],
+    resolvePayloadMtu(payload),
+    warnings,
+  );
+  const lan = lanRouteInput(payload, previous);
+  if (routesBestEffort) {
+    if (wantsTunnel(payload)) await reconcileFabricRoutesBestEffort(payload);
+    return await reconcileLanRoutesBestEffort(lan, warnings);
+  }
+  if (wantsTunnel(payload)) await reconcileFabricRoutes(payload, warnings);
+  return await reconcileLanRoutes(lan, warnings);
+}
+
+async function applyEnabledFabric(
+  networkDir: string,
+  payload: FabricReconcileEnabledPayload,
+  pskByPublicKey: ReadonlyMap<string, string>,
+  previous: FabricStateJson | null,
+  warnings: string[],
+): Promise<InstalledLanRoute[]> {
+  const installed = await bringUpFabric(
+    networkDir,
+    payload,
+    pskByPublicKey,
+    previous,
+    { warnings },
+  );
   const desired = new Set(
     (payload.networks ?? []).map((network) => network.name),
   );
@@ -1663,93 +2460,175 @@ async function applyEnabledFabric(
     .filter((name) => !desired.has(name));
   await removeFabricDockerNetworks(stale);
   await forgetPendingTeardown(networkDir, desired);
+  await removeStaleForwardPairs(previous, payload, installed);
   await reconcileFabricForwarding(
     payload.networks ?? [],
     payload.peers,
     payload.gateway === true,
+    installed,
   );
+  return installed;
+}
+
+/**
+ * The public key to report: a tunnel makes sure a key exists; a tunnel-less
+ * payload only reports a key that is already there and never makes one.
+ */
+async function fabricPublicKey(
+  networkDir: string,
+  payload: FabricReconcileEnabledPayload,
+  previous: FabricStateJson | null,
+): Promise<string | undefined> {
+  if (wantsTunnel(payload)) return await ensureFabricKeypair(networkDir);
+  const existing = await readExistingPrivateKey(privateKeyPath(networkDir));
+  if (!existing) return undefined;
+  try {
+    return await wgPubkeyFromPrivate(existing);
+  } catch {
+    return previous?.publicKey;
+  }
+}
+
+function fabricPolicyError(
+  payload: FabricReconcileEnabledPayload,
+): string | null {
+  return fabricAllowedIpsPolicyError(payload) ??
+    fabricLanRoutesPolicyError(payload);
+}
+
+async function decryptPayloadPresharedKeys(
+  networkDir: string,
+  payload: FabricReconcileEnabledPayload,
+  deps?: FabricHandlerDeps,
+): Promise<{ pskByPublicKey: Map<string, string>; pskFiles: string[] }> {
+  const needsDecrypt = payload.peers.some((peer) =>
+    Boolean(peer.presharedKeyEnvelope)
+  );
+  if (!needsDecrypt) return { pskByPublicKey: new Map(), pskFiles: [] };
+  if (!deps?.decryptSecrets) {
+    throw new Error(
+      "TurboFabric preshared keys present but secrets decrypt is unavailable",
+    );
+  }
+  return await materializePeerPresharedKeys(
+    networkDir,
+    payload,
+    deps.decryptSecrets,
+  );
+}
+
+function enableResult(
+  publicKey: string | undefined,
+  peers: FabricReconcileObservedPeer[],
+  skipped: boolean,
+  warnings: readonly string[] = [],
+): FabricReconcileResult {
+  return {
+    summary: "TurboFabric reconciled",
+    ...(publicKey === undefined ? {} : { publicKey }),
+    ...(skipped ? { skipped: true } : {}),
+    ...(peers.length > 0 ? { peers } : {}),
+    ...(warnings.length > 0
+      ? { warnings: warnings.slice(0, FABRIC_RESULT_WARNINGS_SENT) }
+      : {}),
+  };
+}
+
+async function observedPeersFor(
+  payload: FabricReconcileEnabledPayload,
+): Promise<FabricReconcileObservedPeer[]> {
+  return wantsTunnel(payload) ? await collectFabricPeerState() : [];
 }
 
 async function handleFabricEnable(
   payload: FabricReconcileEnabledPayload,
   deps?: FabricHandlerDeps,
 ): Promise<FabricReconcileResult> {
-  const policyError = fabricAllowedIpsPolicyError(payload);
+  const policyError = fabricPolicyError(payload);
   if (policyError) throw new Error(policyError);
   const networkDir = resolveNetworkDir();
-  const publicKey = await ensureFabricKeypair(networkDir);
-  const currentStamp = await computeFabricApplyStamp(payload, publicKey);
+  const previous = await readFabricState(networkDir);
+  const publicKey = await fabricPublicKey(networkDir, payload, previous);
+  const iface = `iface=${FABRIC_INTERFACE_NAME} pubkey=${publicKey ?? "none"}`;
+  const currentStamp = await computeFabricApplyStamp(payload, publicKey ?? "");
   const storedStamp = await readStamp(applyStampPath(networkDir));
   if (
-    storedStamp === currentStamp && await liveInterfaceMatchesDesired(payload)
+    storedStamp === currentStamp &&
+    await liveHostMatchesDesired(payload, previous)
   ) {
-    const peers = await collectFabricPeerState();
-    logInfo(
-      "commands",
-      `TurboFabric reconcile skipped (stamp match) iface=${FABRIC_INTERFACE_NAME} pubkey=${publicKey}`,
-    );
-    return {
-      summary: "TurboFabric reconciled",
-      publicKey,
-      skipped: true,
-      ...(peers.length > 0 ? { peers } : {}),
-    };
+    const peers = await observedPeersFor(payload);
+    logInfo("commands", `TurboFabric reconcile skipped (stamp match) ${iface}`);
+    return enableResult(publicKey, peers, true);
   }
 
-  const needsDecrypt = payload.peers.some((peer) =>
-    Boolean(peer.presharedKeyEnvelope)
+  const { pskByPublicKey, pskFiles } = await decryptPayloadPresharedKeys(
+    networkDir,
+    payload,
+    deps,
   );
-  let pskByPublicKey = new Map<string, string>();
-  let pskFiles: string[] = [];
-  if (needsDecrypt) {
-    if (!deps?.decryptSecrets) {
-      throw new Error(
-        "TurboFabric preshared keys present but secrets decrypt is unavailable",
-      );
-    }
-    const materialized = await materializePeerPresharedKeys(
+  const warnings: string[] = [];
+  try {
+    const installedLanRoutes = await applyEnabledFabric(
       networkDir,
       payload,
-      deps.decryptSecrets,
+      pskByPublicKey,
+      previous,
+      warnings,
     );
-    pskByPublicKey = materialized.pskByPublicKey;
-    pskFiles = materialized.pskFiles;
-  }
-
-  try {
-    await applyEnabledFabric(networkDir, payload, pskByPublicKey);
-    await writeFabricState(networkDir, publicKey, payload);
-    await writeStamp(applyStampPath(networkDir), currentStamp);
+    await writeFabricState(networkDir, payload, {
+      publicKey,
+      installedLanRoutes,
+      suspended: previous?.suspended === true && !wantsTunnel(payload),
+    });
+    // A warning (a route or bridge left out) means the host is not fully
+    // there yet: no stamp, so the next reconcile tries again and reports it.
+    if (warnings.length === 0) {
+      await writeStamp(applyStampPath(networkDir), currentStamp);
+    } else {
+      await removePathBestEffort(applyStampPath(networkDir));
+    }
   } finally {
     await removeFilesBestEffort(pskFiles);
   }
 
-  const peers = await collectFabricPeerState();
-  logInfo(
-    "commands",
-    `TurboFabric reconciled iface=${FABRIC_INTERFACE_NAME} pubkey=${publicKey}`,
-  );
-  return {
-    summary: "TurboFabric reconciled",
-    publicKey,
-    ...(peers.length > 0 ? { peers } : {}),
-  };
+  const peers = await observedPeersFor(payload);
+  logInfo("commands", `TurboFabric reconciled ${iface}`);
+  return enableResult(publicKey, peers, false, warnings);
 }
 
 /**
- * Re-install `TP-FORWARD` + `DOCKER-USER` jump when fabric is enabled on this
- * host (`state.json` present). Idempotent; safe after dockerd rebuilds
- * `DOCKER-USER`.
+ * `TP-FORWARD` from `state.json`. A paused fabric keeps the local bridge and
+ * LAN route rules: with no tunnel there is no reason to accept traffic
+ * between local bridges and remote peer ranges, which would otherwise reach
+ * the default route.
+ */
+async function reconcileForwardingFromState(
+  state: FabricStateJson,
+): Promise<void> {
+  const paused = state.suspended === true;
+  await reconcileFabricForwarding(
+    state.networks,
+    paused ? [] : state.peers,
+    !paused && state.gateway === true,
+    state.installedLanRoutes,
+  );
+}
+
+/**
+ * Re-install `TP-FORWARD` + its jump when fabric is enabled (or paused) on
+ * this host (`state.json` present), and create the routed bridges a host
+ * without Docker had to leave out. Idempotent; safe after dockerd rebuilds
+ * `DOCKER-USER`, and runs again when Docker becomes reachable.
  */
 export async function reinstallFabricForwardingIfEnabled(): Promise<void> {
   const state = await readFabricState(resolveNetworkDir());
   if (!state) return;
   try {
-    await reconcileFabricForwarding(
+    await ensureFabricDockerNetworks(
       state.networks,
-      state.peers,
-      state.gateway === true,
+      state.mtu ?? FABRIC_DEFAULT_MTU,
     );
+    await reconcileForwardingFromState(state);
   } catch (err) {
     logWarn(
       "commands",
@@ -1760,43 +2639,111 @@ export async function reinstallFabricForwardingIfEnabled(): Promise<void> {
   }
 }
 
+function sameInstalledLanRoutes(
+  a: readonly InstalledLanRoute[],
+  b: readonly InstalledLanRoute[],
+): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 /**
- * Restore `tp0`, forwarding, Docker networks, and `TP-FORWARD` from
- * `state.json` after reboot. Peer PSKs are read from durable `tp0.conf`
+ * Record the LAN routes boot restore left in place, when they changed, drop
+ * the forwarding pairs of routes that did not come back, and return the state
+ * now on disk.
+ */
+async function recordRestoredLanRoutes(
+  networkDir: string,
+  state: FabricStateJson,
+  installed: readonly InstalledLanRoute[],
+): Promise<FabricStateJson> {
+  if (sameInstalledLanRoutes(state.installedLanRoutes ?? [], installed)) {
+    return state;
+  }
+  const { installedLanRoutes: _old, ...rest } = state;
+  const current = { ...rest, ...lanStateFields(undefined, installed) };
+  await writeFabricStateJson(networkDir, current);
+  await removeDroppedLanForwardPairs(state, current);
+  return current;
+}
+
+/**
+ * Boot with a paused or tunnel-less fabric: `tp0` stays down; local bridges,
+ * LAN routes and their forwarding rules come back so container networks on
+ * this host and over a shared LAN keep working.
+ */
+async function restoreFabricWithoutTunnel(
+  networkDir: string,
+  state: FabricStateJson,
+): Promise<void> {
+  // A pause that failed half way may have left `tp0` up.
+  await takeTp0Down([]);
+  await ensureFabricDockerNetworks(
+    state.networks,
+    state.mtu ?? FABRIC_DEFAULT_MTU,
+  );
+  const installed = await reconcileLanRoutesBestEffort({
+    lanRoutes: state.lanRoutes ?? [],
+    installed: state.installedLanRoutes ?? [],
+    networks: state.networks,
+  });
+  const current = await recordRestoredLanRoutes(networkDir, state, installed);
+  await reconcileForwardingFromState(current);
+  logInfo(
+    "commands",
+    `TurboFabric ${
+      state.suspended === true ? "paused" : "has no tunnel"
+    }; ${FABRIC_INTERFACE_NAME} left down pubkey=${state.publicKey ?? "none"}`,
+  );
+}
+
+async function restoreFabricWithTunnel(
+  networkDir: string,
+  state: FabricStateJson,
+): Promise<void> {
+  const payload = enabledPayloadFromState(state);
+  const policyError = fabricPolicyError(payload);
+  if (policyError) throw new Error(policyError);
+  const pskByPublicKey = await loadPersistedPeerPresharedKeys(networkDir);
+  const installed = await bringUpFabric(
+    networkDir,
+    payload,
+    pskByPublicKey,
+    state,
+    { routesBestEffort: true },
+  );
+  const current = await recordRestoredLanRoutes(networkDir, state, installed);
+  await reconcileForwardingFromState(current);
+  // First reading after boot; starts the 60 s refresh while tp0 is up.
+  await readFabricPeerState();
+  logInfo(
+    "commands",
+    `TurboFabric restored from state iface=${FABRIC_INTERFACE_NAME} pubkey=${
+      state.publicKey ?? "none"
+    }`,
+  );
+}
+
+/**
+ * Restore `tp0`, forwarding, Docker networks, LAN routes and `TP-FORWARD`
+ * from `state.json` after reboot. Peer PSKs are read from durable `tp0.conf`
  * (daemon-state or `/etc/wireguard/tp0.conf`) so boot restore does not
- * rewrite PSK-protected peers with an empty PSK map.
+ * rewrite PSK-protected peers with an empty PSK map. A paused or tunnel-less
+ * state never brings `tp0` up.
  */
 export async function restoreFabricFromPersistedState(): Promise<void> {
   const networkDir = resolveNetworkDir();
   const state = await readFabricState(networkDir);
   if (!state) {
+    await removeLeftoverTp0();
     await retryPendingFabricTeardown(networkDir);
     return;
   }
   try {
-    const payload = enabledPayloadFromState(state);
-    const policyError = fabricAllowedIpsPolicyError(payload);
-    if (policyError) throw new Error(policyError);
-    const mtu = resolvePayloadMtu(payload);
-    await ensureTp0Interface(payload.address);
-    await applyMtu(mtu);
-    await enableIpv4Forwarding();
-    if (payload.peers.length > 0) {
-      const pskByPublicKey = await loadPersistedPeerPresharedKeys(networkDir);
-      await syncFabricPeers(networkDir, payload, pskByPublicKey);
-      await installHostWgQuickConfig(wgConfPath(networkDir));
+    if (state.suspended === true || state.tunnel === false) {
+      await restoreFabricWithoutTunnel(networkDir, state);
+      return;
     }
-    await ensureWgQuickUnit();
-    await ensureFabricDockerNetworks(payload.networks ?? [], mtu);
-    await reconcileFabricForwarding(
-      payload.networks ?? [],
-      payload.peers,
-      payload.gateway === true,
-    );
-    logInfo(
-      "commands",
-      `TurboFabric restored from state iface=${FABRIC_INTERFACE_NAME} pubkey=${state.publicKey}`,
-    );
+    await restoreFabricWithTunnel(networkDir, state);
   } catch (err) {
     logWarn(
       "commands",
@@ -2089,14 +3036,22 @@ export async function handleFabricPathProbe(
   return observations;
 }
 
+async function handleFabricDisable(
+  networkDir: string,
+  payload: FabricReconcileDisabledPayload,
+): Promise<FabricReconcileResult> {
+  if (payload.retainKeys === true) return await handleFabricPause(networkDir);
+  return await handleFabricTeardown(networkDir);
+}
+
 export async function handleFabricReconcile(
   payload: FabricReconcilePayload,
   _daemonReceivedAt: string,
   deps?: FabricHandlerDeps,
 ): Promise<FabricReconcileResult> {
   const parsed = parseFabricReconcilePayload(payload);
-  await preflightFabricTools();
+  await preflightFabricTools(!parsed.enabled || parsed.tunnel !== false);
   const networkDir = resolveNetworkDir();
-  if (!parsed.enabled) return await handleFabricTeardown(networkDir);
+  if (!parsed.enabled) return await handleFabricDisable(networkDir, parsed);
   return await handleFabricEnable(parsed, deps);
 }

@@ -2,6 +2,14 @@
 
 The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy on `:8443` only), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting. While the control plane obtains a Let's Encrypt certificate, hosting Caddy forwards only `/.well-known/acme-challenge/*` for those names to the issuer socket (`00-instance-acme-http01.caddy`). That file is written **before** the first `enable --now`: the unit is `Type=simple`, so systemd reports it active before admin `127.0.0.1:2029` exists, and an immediate `systemctl reload` fails with connection refused then rolls the unit back. A first start loads the snippet as the initial config and does not reload; an already-running hosting Caddy still reloads. The file is removed when issuance finishes. Hosting Caddy runs as `tpedge` (not in group `tp`), so each time the socket is bound (preflight listener, then the issuer) the daemon has tp-host add `u:tpedge:rw` to that one socket (`grantInstanceAcmeSocket`); the hosting-caddy role grants traverse on the run directory. Hosting Caddy does not terminate panel HTTPS.
 
+**Proof forwarding for central certificate issuance (`acme-issue-v1`, `acme-proof-forward.ts`).** When the control plane has one server place a certificate order, every other serving server in the name's DNS answers the HTTP-proof path by forwarding it to the issuing server's public address, keeping the `Host` header. The handler goes inside each site's own `http://<host>` block, never a second block for the same host (that is a duplicate-site error): the block imports `<config>/hosting/proof/<host>/*.proof` (a glob, so a missing file is a no-op and only logs a warning; one folder per host with the host spelled out, because a flat `<host>.proof*` glob would also match a longer lookalike name's file, which another organization may own), written ahead of the redirect, and the redirect sits in a `handle { }` so the imported `handle` for the proof path wins (`redir` would otherwise run first whatever the written order). A site written by an older daemon has no import line: the forward is answered `acme-proof-forward-failed` ("deploy it again") rather than patched in place. Only a name with no site block yet gets a reserved site (`00-tenant-acme-proof-<request>.caddy`, listed as reserved so sweeps keep it; a deploy that brings its own block for the name removes it first). Every snippet starts with a `# tp-proof-forward request=<id> expires=<iso>` line, so the file is its own record: the end message, an expiry timer and the sweep at attach all find it from the file alone. The target must be a real, non-loopback, non-link-local address that is not one of this server's own.
+
+**Certificate orders for hosted names (`acme-issue-v1`, `tenant-acme-issue.ts`, `instance/acme-issue-handler.ts`).** `acme-issue-request` makes this server place one order from its own addresses over the HTTP proof, with a one-shot Caddy started for that request only: the template unit `turbopanel-tenant-acme@<request id>.service` (installed by the `hosting-caddy` role, never enabled; it runs as the daemon's own account, so the daemon writes its config and reads the finished pair without root). It is deliberately not the hosting web server's built-in client, which retries and renews on its own schedule: the control plane owns the schedule. Steps, under the one window lock: clear any storage left for the names (so a pair found later is new and has a fresh key), route the proof path for the names to the issuer socket inside each site's own block (same mechanism as the helper forward, `applyProofRoutes`), answer a nonce on the per-request socket (`<run>/tenant-acme-<id>.sock`, opened to the hosting Caddy by `tp-host setfacl`, which accepts exactly that name shape) and fetch it through this server and through every helper's address with the right `Host` header (Deno's `fetch` ignores a custom `Host`, so `rawProofGet` speaks the request itself; a helper that does not pass it on is left out, a server that does not answer its own check fails the order before the authority is asked), start the unit, wait for a pair per name, then `POST /api/daemon/v1/tls/issued` once per name with the request id (Caddy issues one certificate per name, so the control plane gets one pair per name), and finally stop the unit, withdraw the routes and delete the certificates and keys. Config, log and the shared store sit under `<state>/tenant-acme` (`requests/<id>.json`, `caddy/`); the store keeps this server's one ACME account (made on first use) and only the certificates are deleted. Events: `acme-issue-event` `started`, then `issued` (with the earliest expiry) or `failed` with a plain reason (`plainInstanceAcmeFailure`); nothing logs or sends the pair except the capture call.
+
+Restart safety of an order: the unit has `RuntimeMaxSec=600` (above the 3-minute wait for a pair, below the 15 minutes the local proof routes live), and at start-up, before any request is taken, `sweepTenantAcme` stops every `turbopanel-tenant-acme@*` unit and deletes the per-request configs, stored certificates and keys and leftover sockets; the shared account store (`caddy/acme`) is kept. A re-send with the id of an order whose issuer is still running is refused with "already running" before anything is cleared or any socket touched. A `started` event the link could not carry begins nothing. A rate-limit failure is reported in the words "rate limited" because the control plane's one-hour wait keys on them.
+
+**Certificate folder cleanup (`tls-cleanup.ts`).** `materializeTlsCertificates` only ever wrote `<tlsDir>/<tlsId>/`, so a pin that moved or an environment that was torn down left its key on the server. After a site is live (deploy) and after an environment's site is removed and hosting Caddy reloaded, `removeUnreferencedTlsFolders` deletes a folder only when its name is a certificate UUID, no file of any name in `hosting/sites` (environment, reserved, tunnel, quarantined) mentions the id, and nothing in it is newer than ten minutes (a deploy materializes before it writes the site). If the sites folder cannot be read, nothing is removed. Both calls run inside the hosting sites lock. `scripts/purge.sh` needed no change for the issuer and the proof handlers: they sit in trees it removes whole (`/etc/turbopanel/hosting/proof`, `/var/lib/turbopanel/tenant-acme`, `/run/turbopanel/tenant-acme-*.sock`) and its `turbopanel*` unit patterns already stop the issuer instances and remove the template unit (tests added).
+
 **Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned
 compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no
 hosting Caddy, no tenant Traefik / hosting-ingress network, no user compose merge,
@@ -223,8 +231,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    with a `Caddyfile.next` that imports it, and `tpedge` runs the pinned
    `caddy validate --adapter caddyfile --config …/Caddyfile.next` (sudoers
    `TP_HOSTING_CADDY_VALIDATE`; the candidate keeps its throwaway CA under
-   `/var/lib/turbopanel-hosting-caddy/validate` because the account has no
-   home). A set Caddy refuses (the same hostname in two environments, a bad
+   `<state>/hosting-caddy/validate`, inside the unit's `StateDirectory=`, which
+   systemd makes the first time the unit starts, because the account has no
+   home; an empty candidate on a host whose unit has never started is not
+   validated, since nothing is hosted yet and the folder is not there to
+   write). A set Caddy refuses (the same hostname in two environments, a bad
    line, a certificate file that is missing or unreadable) fails the deploy
    with Caddy's message and changes nothing. A validated snippet goes in through
    `<env>.caddy.tpnew` and an atomic rename, with the old one kept as
@@ -306,7 +317,9 @@ The control plane names one Compose project per **environment** (it used to be o
 ## Git-backed releases
 
 Moved to [`release/AGENTS.md`](./release/AGENTS.md) — clone/fetch flow, release
-directories, deploy keys, build/run hooks.
+directories, deploy keys, build/run hooks. The image-built lane takes
+`build.kind: image` (the old value is still accepted) and reports
+`builderFrontendVersion` / `builderPlanVersion` on its release records.
 
 ## Streamed transcript capture (execution logs)
 
@@ -380,6 +393,31 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   (`running` → `failed` / `skipped`, `pending` → `skipped`) goes out before
   `command-outcome`. The planner only runs when the router supplied a sender;
   hermetic callers get the no-op reporter and never probe the host.
+  Step titles are book title case ("Set Up Certificates", "Check Service
+  Health"); detail lines are sentence case. The health step ends under the
+  title of its result, sent as a renamed step with the same id (receivers
+  keep showing a title they do not know): *Service Is Healthy* only when
+  Docker reported `healthy` ("Healthy after 12 s"), *Service Is Running* when
+  no health check is configured and the container stayed up for the stable
+  window, *Service Is Reachable* for a native app that answered an HTTP
+  request, *Service Health Not Checked* when nothing in the deploy reports
+  health (only finished one-shot jobs, or no containers), and
+  *Service Did Not Become Healthy* / *Service Did Not Answer* on a timeout.
+  The in-place strategy waits for health too (same gate, right after `up -d`,
+  before the post-deploy hooks); a failure fails the deploy with "The
+  containers started but …" and rolls nothing back, since the old version was
+  replaced in place and the new containers stay up for inspection.
+  Cost: a service with no health check adds at least the stable window (30 s)
+  to every in-place deploy, and a wait that never ends is capped by
+  `healthTimeoutSeconds` (default 120 s), which cannot be cancelled once the
+  deploy is past its commit point. The gate judges only the services
+  `compose config --services` lists (profile services that are off are not
+  there), ignores `compose run` leftovers, and skips the wait entirely when no
+  service is enabled. A stack that passed before can now fail: a job that
+  exits non-zero, a restart loop, or a health check that only passes after a
+  post-deploy hook (the gate runs before the hooks, as on sequential).
+  While waiting it shows one updating line ("Attempt 4, 6 s of up to 120 s");
+  the transcript gets a line only when the waiting reason changes.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
   zero-based and gap-free per command (the first upload is always `seq = 0`),
   and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.
@@ -1080,14 +1118,14 @@ depends on has changed.** The first step that changes what is serving calls
 `token.commit(where)` (synchronous, atomic with the abort check). After it the
 deploy runs to its normal end and a cancel answers `too_late`. Commit points, in
 the order they occur: the first release switch inside `applySourceReleases`
-(native promote, rollback / re-cut-over; a Railpack image record is not a switch);
+(native promote, rollback / re-cut-over; an image-build record is not a switch);
 the host-native phase (reclaim of removed release trees, sites, native apps, the
 cron sweep) when the deploy has any of that to do (`hostNativeCutoverPending`;
 any doubt counts as yes); retiring an earlier compose project or the zero-service
 removal; pre-deploy hooks; the sequential engine's `commit` step (before the old
 version is stopped); and right before `compose up` on the in-place path. Before
 the first of them everything is cancellable: ingress and principals, git clone,
-the source build (sandbox unit), the Railpack image build, `docker compose
+the source build (sandbox unit), the image build, `docker compose
 build` / `pull`.
 
 On a cancel the deploy throws `DeployCancelledError`, whose message always starts
@@ -1099,7 +1137,7 @@ path), `revertPublishedCompose` puts `previous/` back, or removes the published
 files on a first deploy.
 
 Children are stopped through an `AbortSignal` (`AbortSignal.any` with each tool's
-own timeout): git, the unsandboxed build shell, the Railpack tools and every
+own timeout): git, the unsandboxed build shell, the image-build tools and every
 streamed docker call. A sandboxed build is stopped the way its timeout stops it
 (kill the `sudo` client, then `systemctl stop` the build unit, then take the work
 tree back). A cancel for a command that has not started yet answers
@@ -1115,3 +1153,47 @@ slot frees.
 ## Hostname takeover (`takeoverHostnames`)
 
 `environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.
+
+## Tunnel forwarding (`server.tunnel.routes`)
+
+A tunnel connector reaches hosting Caddy on `https://localhost`; Caddy decides.
+Names that run here are locked (`hostings[].tunnel`, `siteSnippet`): only
+loopback and the listed peer addresses are answered, everyone else is dropped.
+Names that run on other servers have forward blocks in the reserved
+`sites/10-tunnels.caddy` (`tunnel-caddy.ts`), written by `tunnel-apply.ts` from
+the whole-server table and re-rendered by every environment deploy and removal
+(`tunnel-state.ts`, table in `hosting/tunnel-routes.json`), which drops any name
+now served here so Caddy never sees a name twice. The hop uses the
+organization's certificate: material under `hosting/peer/<id>/`, trusted only for
+the fixed name `tp-peer.internal`, which a small reserved site loads on the
+receiving server (Caddy picks a certificate by the connecting name). That site
+has no `bind`: Caddy makes one server per set of listen addresses, so a bound
+peer site would be a server of its own holding only that name, and a forwarded
+request for a real hostname arriving on the bound address would get an empty
+answer. It shares the everywhere-listening server instead, and its `remote_ip`
+check lets only the listed peers in (`listenAddresses` is still accepted on the
+wire and changes nothing). A site that binds to one address (`bindAddress`)
+listens on its own address set, so a peer reaching it needs that set to include
+the peer-facing address (`extraBind`); the peer name is not served there yet.
+Visitor
+addresses are trusted per `reverse_proxy` (loopback and peers), never
+server-wide. A tunnel block never asks for a public certificate. All files are
+under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
+
+## Deploy Hooks
+
+- **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
+  service container** (`docker compose run --rm --no-deps -T --entrypoint sh`
+  before `up`, `compose exec -T … sh -c` after), never via a host shell; the
+  contract requires `confinement: "compose-service"` on any command-bearing
+  hook and `deploy-environment.ts` refuses hooks naming a service the deploy
+  does not run (`assertHooksConfined`). The control plane only emits hooks
+  when the organization's owner enabled `deployHooksEnabled`
+  (`PUT /organizations/:id/deploy-hooks`; `parseServiceOptions` drops the
+  command fields otherwise).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH) |
