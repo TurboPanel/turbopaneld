@@ -1,6 +1,7 @@
 import { logDebug, logError, logInfo } from "../util/logger.ts";
 import { logComponent, presentStatusLine } from "./presentation.ts";
 import { runStreamingLines } from "./exec.ts";
+import { noteRepoKeyChanges, type RepoKeyLedger } from "./repo-key-changes.ts";
 import { privilegedPlaybookInvocation } from "./privileged.ts";
 import {
   ansibleFailureLine,
@@ -319,6 +320,8 @@ export interface PlaybookStreamingOptions {
    * installer presenters instead of being dropped.
    */
   onRawLine?: (stream: AnsibleRawLineStream, line: string) => void;
+  /** Test seam: where repository key changes seen in task results are remembered. */
+  repoKeyLedger?: () => RepoKeyLedger;
 }
 
 /**
@@ -344,6 +347,9 @@ export async function runPlaybookStreaming(
       const event = parseAnsibleJsonlLine(line);
       if (event) {
         failure.handleEvent(event);
+        // Structured warnings (a changed package signing key) are kept for the
+        // control plane whether or not the run is quiet.
+        void noteRepoKeyChanges(event, options.repoKeyLedger);
         if (!quiet) logAnsibleEvent(event);
         if (options.onEvent) options.onEvent(event);
         return;

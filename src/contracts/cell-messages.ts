@@ -592,6 +592,19 @@ export type DaemonMessage =
     at: string;
   }
   | {
+    /**
+     * Daemon-initiated, fire-and-forget: a package source's signing key
+     * (`got`, hex) is not in the `expected` list. The install went on (apt
+     * still checks every package signature). Sent once per key name and
+     * fingerprint, only to a control plane advertising `repo-key-report-v1`.
+     */
+    type: "repo-key-changed";
+    keyName: string;
+    expected: string[];
+    got: string;
+    at: string;
+  }
+  | {
     type: "container-logs-request";
     id: string;
     containerId: string;

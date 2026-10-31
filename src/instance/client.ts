@@ -154,6 +154,8 @@ import {
   PgStandbySampler,
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
+import { RepoKeyReporter } from "./repo-key-reporter.ts";
+import { repoKeyLedgerFor } from "../orchestration/repo-key-changes.ts";
 import {
   FabricPeerReporter,
   type FabricPeerSubscribe,
@@ -174,6 +176,7 @@ import {
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
+  REPO_KEY_REPORT_FEATURE,
   resolveDaemonCapabilities,
   TLS_CAPTURE_FEATURE,
 } from "./version-wire.ts";
@@ -536,6 +539,7 @@ export class InstanceClient {
   #pgStandbySampler: PgStandbySampler | undefined;
   #mysqlFamilySampler: PgStandbySampler | undefined;
   #managedHealthReporter: ManagedHealthReporter | undefined;
+  #repoKeyReporter: RepoKeyReporter | undefined;
   #fabricPeerReporter: FabricPeerReporter | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #backupCopier: BackupCopier | undefined;
@@ -821,6 +825,8 @@ export class InstanceClient {
     }
     this.#peerFeatures = accepted;
     setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
+    // A change kept for an older control plane goes out once this one lists the feature.
+    void this.#repoKeyReporter?.flush();
   }
 
   #apiClientVersionHook(): {
@@ -991,6 +997,7 @@ export class InstanceClient {
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
     this.#fabricPeerReporter?.detach();
+    this.#repoKeyReporter?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -1541,6 +1548,7 @@ export class InstanceClient {
     this.#mysqlFamilySampler.attach();
     this.#ensureManagedHealthReporter().attach();
     this.#ensureFabricPeerReporter().attach();
+    this.#ensureRepoKeyReporter().attach();
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
@@ -1714,6 +1722,19 @@ export class InstanceClient {
         this.instanceSupports(MANAGED_HEALTH_REPORT_FEATURE),
     });
     return this.#managedHealthReporter;
+  }
+
+  #ensureRepoKeyReporter(): RepoKeyReporter {
+    this.#repoKeyReporter ??= new RepoKeyReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsReport: () => this.instanceSupports(REPO_KEY_REPORT_FEATURE),
+      ledger: () => repoKeyLedgerFor(),
+    });
+    return this.#repoKeyReporter;
   }
 
   #ensureFabricPeerReporter(): FabricPeerReporter {
