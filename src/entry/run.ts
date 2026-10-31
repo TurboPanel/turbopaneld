@@ -411,12 +411,6 @@ async function bestEffort(
 }
 
 /**
- * What a host does once its orchestration runtime is ready: put back its
- * fabric and forwarding rules, start site PHP runtimes, and kick off the
- * background checks. Runs before the connection on an enrolled host, and after
- * the boot converge on a new one.
- */
-/**
  * A failed boot converge is retried in the background (bounded, growing
  * pauses) instead of leaving the daemon unverified until its next restart.
  * Not when orchestration is switched off on purpose. A late success runs the
@@ -452,6 +446,12 @@ function scheduleBootRetry(
   });
 }
 
+/**
+ * What a host does once its orchestration runtime is ready: put back its
+ * fabric and forwarding rules, start site PHP runtimes, and kick off the
+ * background checks. Runs before the connection on an enrolled host, and after
+ * the boot converge on a new one.
+ */
 async function afterOrchestration(
   io: DaemonRunIo,
   reinstallForwardingJumps: () => Promise<void>,

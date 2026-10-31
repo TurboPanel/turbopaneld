@@ -82,7 +82,9 @@ export async function retryBootConverge(
     );
     const run = opts.attempt().catch(() => false);
     trackBootConverge(run);
-    if (await run) {
+    const ok = await run;
+    if (ok && opts.signal.aborted) return false;
+    if (ok) {
       state = "verified";
       opts.log("boot converge succeeded on retry");
       try {

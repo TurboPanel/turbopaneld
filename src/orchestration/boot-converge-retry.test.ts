@@ -131,3 +131,26 @@ test("the retry budget is bounded and grows", () => {
   assertEquals(d.length <= 6, true);
   assertEquals(d.every((v, i) => i === 0 || v >= d[i - 1]!), true);
 });
+
+test("a retry that works after shutdown began does not run the recovery steps", async () => {
+  resetBootConvergeForTests();
+  resetRuntimeVerificationForTests();
+  const controller = new AbortController();
+  let recovered = 0;
+  const ok = await retryBootConverge({
+    attempt: () => {
+      controller.abort();
+      return Promise.resolve(true);
+    },
+    onRecovered: () => {
+      recovered += 1;
+      return Promise.resolve();
+    },
+    signal: controller.signal,
+    sleep: () => Promise.resolve(),
+    log: () => {},
+    delaysMs: [1],
+  });
+  assertEquals(ok, false);
+  assertEquals(recovered, 0);
+});
