@@ -9,6 +9,11 @@ import {
   trimSnippetSites,
 } from "./caddy-snippet.ts";
 import { foldHostname } from "./hostname-fold.ts";
+import {
+  dropReservedProofSitesFor,
+  proofDir,
+  proofImportPattern,
+} from "./acme-proof-forward.ts";
 import { plannedTunnelContents } from "./tunnel-state.ts";
 import {
   type PeerUpstream,
@@ -1984,6 +1989,14 @@ export type SiteSnippetOptions = Readonly<{
    * and whatever the upstream sent), so nothing names the web server.
    */
   hideWebServerNames?: boolean;
+  /**
+   * The folder of per-host proof handlers (`proofDir()`). When set, the plain
+   * HTTP block imports that host's handler (a glob, so a missing file is a
+   * no-op) ahead of everything else, and wraps its redirect in a `handle` so the
+   * imported `handle` for the certificate proof path wins: `redir` would
+   * otherwise run first whatever the written order.
+   */
+  proofDir?: string;
 }>;
 
 /**
@@ -2042,6 +2055,25 @@ function siteBlockPreamble(
   return hideWebServerNames ? bindLine + HIDE_WEB_SERVER_NAMES_BLOCK : bindLine;
 }
 
+/** The import line for a host's proof handler, or "" when the block takes none. */
+function proofImportLine(
+  proofDir: string | undefined,
+  hostname: string,
+): string {
+  if (proofDir === undefined) return "";
+  const pattern = proofImportPattern(proofDir, hostname);
+  return pattern === null ? "" : `  import ${pattern}\n`;
+}
+
+/**
+ * The redirect lines of a plain HTTP block. With a proof import the redirect sits
+ * in a `handle` so the imported proof-path `handle` wins over it.
+ */
+function wrapRedirectForProof(proofLine: string, redirect: string): string {
+  if (proofLine === "") return redirect;
+  return `${proofLine}  handle {\n  ${redirect}  }\n`;
+}
+
 /** A name that only redirects, under its own certificate on the HTTPS side. */
 function redirectSiteSnippet(options: SiteSnippetOptions): string {
   const { hostname, tlsDir, tlsId, bindAddress, tlsMode } = options;
@@ -2056,8 +2088,10 @@ function redirectSiteSnippet(options: SiteSnippetOptions): string {
     ? "https"
     : "http";
   const redirect = `  redir ${scheme}://${target}{uri} permanent\n`;
+  const proofLine = proofImportLine(options.proofDir, hostname);
+  const httpRedirect = wrapRedirectForProof(proofLine, redirect);
   return `http://${hostname} {
-${bindLine}${redirect}}
+${bindLine}${httpRedirect}}
 
 ${hostname} {
 ${bindLine}${tlsLine}${redirect}}
@@ -2145,14 +2179,16 @@ export function siteSnippet(options: SiteSnippetOptions): string {
 
   let httpBlock = "";
   if (!tunnel?.lock) {
+    const proofLine = proofImportLine(options.proofDir, hostname);
+    const redirectLine = "  redir https://{host}{uri} permanent\n";
+    const redirectLines = wrapRedirectForProof(proofLine, redirectLine);
     httpBlock = https
       ? `http://${hostname} {
-${bindLine}  redir https://{host}{uri} permanent
-}
+${bindLine}${redirectLines}}
 
 `
       : `http://${hostname} {
-${bindLine}${httpBody}}
+${bindLine}${proofLine}${httpBody}}
 
 `;
   }
@@ -2601,6 +2637,7 @@ export async function assertHostingNamesFree(
     if (err instanceof Deno.errors.NotFound) return;
     throw err;
   }
+  await dropReservedProofSitesFor(sitesDir, wanted);
   const own = `${payload.environmentId}.caddy`;
   const others = names.filter((name) =>
     name !== own && !isDaemonReservedHostingSite(name)
@@ -3365,6 +3402,7 @@ async function rewriteHostingCaddySitesLocked(
         redirectTo: site.redirectTo,
         hideWebServerNames: payload.hideWebServerNames === true,
         tunnel: site.tunnel,
+        proofDir: proofDir(layout),
       });
     })
     .join("\n");
