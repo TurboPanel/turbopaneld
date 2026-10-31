@@ -140,6 +140,11 @@ function allowedIpv6(b: Uint8Array): boolean {
     b.subarray(from, to).every((v) => v === 0);
   if (zero(0, 12)) return false; // ::, ::1 and v4-compatible
   if (zero(0, 10) && b[10] === 0xff && b[11] === 0xff) return false; // v4-mapped
+  if (
+    zero(0, 8) && b[8] === 0xff && b[9] === 0xff && b[10] === 0 && b[11] === 0
+  ) {
+    return false; // ::ffff:0:0/96 translated form
+  }
   if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
     if (zero(4, 12)) return false; // 64:ff9b::/96
     if (b[4] === 0x00 && b[5] === 0x01) return false; // 64:ff9b:1::/48

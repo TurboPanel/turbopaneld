@@ -423,6 +423,7 @@ const LOOPBACK_AND_FRIENDS_IN_ANY_SPELLING = [
   "FF02::1",
   "ff00:0:0::1",
   "::ffff:10.0.0.1",
+  "::ffff:0:127.0.0.1",
   "127.1",
   "2130706433",
   "0177.0.0.1",
