@@ -392,8 +392,13 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   Docker reported `healthy` ("Healthy after 12 s"), *Service Is Running* when
   no health check is configured and the container stayed up for the stable
   window, *Service Is Reachable* for a native app that answered an HTTP
-  request, *Service Health Not Checked* for an in-place deploy (no gate), and
+  request, *Service Health Not Checked* when nothing in the deploy reports
+  health (only finished one-shot jobs, or no containers), and
   *Service Did Not Become Healthy* / *Service Did Not Answer* on a timeout.
+  The in-place strategy waits for health too (same gate, right after `up -d`,
+  before the post-deploy hooks); a failure fails the deploy with "The
+  containers started but …" and rolls nothing back, since the old version was
+  replaced in place and the new containers stay up for inspection.
   While waiting it shows one updating line ("Attempt 4, 6 s of up to 120 s");
   the transcript gets a line only when the waiting reason changes.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is

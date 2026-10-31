@@ -124,7 +124,7 @@ export const HEALTH_RESULT_TITLES = {
   running: "Service Is Running",
   /** A native app answered an HTTP request on its loopback port. */
   reachable: "Service Is Reachable",
-  /** The deploy strategy never waits for a check. */
+  /** Nothing in the deploy reports health (only finished one-shot jobs). */
   notChecked: "Service Health Not Checked",
   /** The wait ended without a pass. */
   unhealthy: "Service Did Not Become Healthy",

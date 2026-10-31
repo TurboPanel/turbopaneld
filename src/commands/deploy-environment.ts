@@ -402,6 +402,8 @@ export type EnvironmentDeployDeps = {
    * Ansible install on hermetic suite paths that still exercise compose.
    */
   ensureDocker?: () => Promise<void>;
+  /** Test seam — defaults to {@link waitForHealthGate} (real polling and sleeps). */
+  waitForHealth?: typeof waitForHealthGate;
   /**
    * Test seam — defaults to {@link defaultEnsureExternalDockerNetworks}.
    * When omitted, the default uses `runDocker` from these deps. Receives one
@@ -1669,6 +1671,7 @@ function buildDaemonOverlayFragment(
 }
 
 type DeployContainerServicesInput = {
+  waitForHealth?: typeof waitForHealthGate;
   layout: LayoutPaths;
   parsedPayload: EnvironmentDeployPayload;
   /** What the release engine actually promoted, for `deployment.json`. */
@@ -1881,18 +1884,7 @@ async function deploySequentially(
         onOutput: (stream, line) => logSink.onLine(stream, line),
         redactSummary: (text) => logSink.redactSummary(text),
       }),
-    gate: async (paths) => {
-      const result = await waitForHealthGate({
-        ps: composePsForGate(run, projectName, paths),
-        timeoutMs,
-        stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
-        pollMs: HEALTH_GATE_DEFAULT_POLL_MS,
-        onProgress: (message) => logSink.onLine("stdout", message),
-        onTick: (tick) => logSink.health?.waiting(waitingLine(tick, timeoutMs)),
-      });
-      reportHealthGate(logSink, result);
-      return result;
-    },
+    gate: (paths) => gateComposeHealth(input, paths),
     restorePrevious: () => restorePreviousDeployment(deploymentDir),
     commit: () => input.cancel?.commit("before the old version was stopped"),
     composeArgs: (paths) => composeFileArgs(projectName, paths),
@@ -1920,6 +1912,30 @@ async function deploySequentially(
     });
   }
   return { serviceNames: labeledServices, composePaths: chain };
+}
+
+/**
+ * Wait for the project's containers to be healthy, writing the live line and
+ * the result to the health step. Shared by the sequential strategy (which
+ * rolls back on a failure) and the in-place one (which fails the deploy).
+ */
+async function gateComposeHealth(
+  input: DeployContainerServicesInput,
+  paths: readonly string[],
+): Promise<HealthGateResult> {
+  const { parsedPayload, run, logSink } = input;
+  const timeoutMs = (parsedPayload.healthTimeoutSeconds ??
+    DEFAULT_HEALTH_TIMEOUT_SECONDS) * 1000;
+  const result = await (input.waitForHealth ?? waitForHealthGate)({
+    ps: composePsForGate(run, parsedPayload.projectName, paths),
+    timeoutMs,
+    stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
+    pollMs: HEALTH_GATE_DEFAULT_POLL_MS,
+    onProgress: (message) => logSink.onLine("stdout", message),
+    onTick: (tick) => logSink.health?.waiting(waitingLine(tick, timeoutMs)),
+  });
+  reportHealthGate(logSink, result);
+  return result;
 }
 
 /** Whole seconds, with the unit: "12 s". */
@@ -2359,6 +2375,19 @@ async function deployContainerServices(
       );
     }
 
+    // In place there is no previous version to go back to: a service that
+    // does not become healthy fails the deploy, and the new containers stay up
+    // for inspection (the sequential strategy rolls back instead).
+    logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+    const gate = await gateComposeHealth(input, chain);
+    if (!gate.ok) {
+      throw new Error(
+        logSink.redactSummary(
+          `The containers started but ${gate.detail}`,
+        ),
+      );
+    }
+
     if (serviceHooks.length > 0) {
       logSink.setPhase(COMMAND_LOG_PHASES.POST_DEPLOY);
       await runPostDeployHooks(serviceHooks, {
@@ -2578,6 +2607,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     EnvironmentDeployDeps["ensureFabricDockerNetworks"]
   >;
   runPrivileged: RunFn;
+  waitForHealth: typeof waitForHealthGate | undefined;
 } {
   const run = deps?.runDocker ?? defaultRunDocker;
   const progress = deps?.progress ?? createNoopDeployStepReporter();
@@ -2613,6 +2643,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     ensureFabricDockerNetworks: deps?.ensureFabricDockerNetworks ??
       defaultEnsureFabricDockerNetworks,
     runPrivileged: deps?.runPrivileged ?? defaultRunPrivileged,
+    waitForHealth: deps?.waitForHealth,
   };
 }
 
@@ -3251,6 +3282,9 @@ async function deployEnvironmentHolding(
     decryptSecrets: runtime.decryptSecrets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
+    ...(runtime.waitForHealth === undefined
+      ? {}
+      : { waitForHealth: runtime.waitForHealth }),
     runPrivileged: runtime.runPrivileged,
     ...(cancel === undefined ? {} : { cancel }),
   });
@@ -3283,9 +3317,7 @@ async function deployEnvironmentHolding(
   if (!healthEnded) {
     runtime.logSink.health?.done(
       HEALTH_RESULT_TITLES.notChecked,
-      hasContainers
-        ? "In-place deploys start the containers without waiting for their health checks; the sequential strategy waits for them"
-        : "Nothing in this deploy reports its own health",
+      "Nothing in this deploy reports its own health",
     );
   }
 

@@ -4,7 +4,8 @@
  *
  * Used by the sequential deploy strategy (`sequential-deploy.ts`), which calls
  * {@link waitForHealthGate} after `up -d` and rolls back when it reports a
- * failure. In-place deploys do not gate.
+ * failure. In-place deploys call it too, and a failure there fails the deploy
+ * without a rollback (there is no previous version to restore).
  *
  * Rules (per container, grouped by compose service):
  * - `Health: healthy` passes; `unhealthy` fails at once; `starting` keeps
