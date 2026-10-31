@@ -1936,6 +1936,24 @@ async function gateComposeHealth(
   return result;
 }
 
+/**
+ * In place there is no previous version to go back to: a service that does not
+ * become healthy fails the deploy, and the new containers stay up for
+ * inspection (the sequential strategy rolls back instead).
+ */
+async function assertInPlaceHealthy(
+  input: DeployContainerServicesInput,
+  paths: readonly string[],
+): Promise<void> {
+  input.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+  const gate = await gateComposeHealth(input, paths);
+  if (!gate.ok) {
+    throw new Error(
+      input.logSink.redactSummary(`The containers started but ${gate.detail}`),
+    );
+  }
+}
+
 /** Whole seconds, with the unit: "12 s". */
 function seconds(ms: number): string {
   return `${Math.round(ms / 1000)} s`;
@@ -2373,18 +2391,7 @@ async function deployContainerServices(
       );
     }
 
-    // In place there is no previous version to go back to: a service that
-    // does not become healthy fails the deploy, and the new containers stay up
-    // for inspection (the sequential strategy rolls back instead).
-    logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
-    const gate = await gateComposeHealth(input, chain);
-    if (!gate.ok) {
-      throw new Error(
-        logSink.redactSummary(
-          `The containers started but ${gate.detail}`,
-        ),
-      );
-    }
+    await assertInPlaceHealthy(input, chain);
 
     if (serviceHooks.length > 0) {
       logSink.setPhase(COMMAND_LOG_PHASES.POST_DEPLOY);
