@@ -72,13 +72,11 @@ export class RepoKeyReporter {
   }
 
   async #flushLoop(): Promise<void> {
-    this.#again = true;
-    while (this.#again) {
-      this.#again = false;
-      await this.#flushOnce().catch((err) =>
-        logWarn("instance", "repo key report failed:", String(err))
-      );
-    }
+    this.#again = false;
+    await this.#flushOnce().catch((err) =>
+      logWarn("instance", "repo key report failed:", String(err))
+    );
+    if (this.#again) await this.#flushLoop();
   }
 
   async #flushOnce(): Promise<void> {
