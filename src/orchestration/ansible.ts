@@ -413,7 +413,7 @@ export async function runSetHostname(
   try {
     await runLocalPlaybook(SET_HOSTNAME_PLAYBOOK, extraArgs, eventHandler);
   } catch {
-    const summary = collector.build();
+    const summary = collector.build({ runFailed: true });
     throw new Error(
       summary.length > 0
         ? `set-hostname playbook failed: ${summary}`
@@ -504,7 +504,7 @@ export async function runTimeSyncApply(
   try {
     await runLocalPlaybook(TIME_SYNC_APPLY_PLAYBOOK, args, eventHandler);
   } catch {
-    const summary = collector.build();
+    const summary = collector.build({ runFailed: true });
     throw new Error(
       summary.length > 0
         ? `time-sync-apply playbook failed: ${summary}`
