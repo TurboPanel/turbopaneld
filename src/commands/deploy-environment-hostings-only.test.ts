@@ -6,6 +6,7 @@ import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { createDeployStepReporter } from "./deploy-progress.ts";
 import type { CommandProgressMessage } from "../contracts/cell-messages.ts";
 import "../testing/stub-hosting-caddy-host.ts";
+import { instantlyHealthy } from "../testing/instant-health-gate.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -129,7 +130,7 @@ test("hostingsOnly sends the certificate step with its line kept after it is don
     const last = sent.at(-1)?.progress.steps.find((step) =>
       step.id === "certificates"
     );
-    assertEquals(last?.label, "Set up certificates");
+    assertEquals(last?.label, "Set Up Certificates");
     assertEquals(last?.state, "done");
     assertStringIncludes(last?.detail ?? "", "Requested in the background");
     assertStringIncludes(last?.detail ?? "", "shop.example.com");
@@ -187,6 +188,7 @@ test("a full deploy keeps the certificate line after the step is done", async ()
     await handleEnvironmentDeploy(payload, new Date().toISOString(), {
       runDocker: gatewayDocker,
       ensureDocker: () => Promise.resolve(),
+      waitForHealth: instantlyHealthy,
       ensureExternalDockerNetworks: () => Promise.resolve(),
       ensureFabricDockerNetworks: () => Promise.resolve(),
       progress,
