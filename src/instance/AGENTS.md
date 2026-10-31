@@ -132,6 +132,16 @@ and closes a connection (`src/host/network-check.ts`), at most 3 s per target,
 and refuses loopback, link-local and public addresses. Nothing is sent on the
 connection, nothing is stored, no command row.
 
+**Changed package signing keys (`repo-key-report-v1`).** The playbook runner
+(`orchestration/repo-key-changes.ts`) keeps each structured key change in
+`<daemonStateDir>/spool/repo-key-reports.json` as pending, once per key name and
+fingerprint. `RepoKeyReporter` (`repo-key-reporter.ts`) sends one fire-and-forget
+`repo-key-changed` frame per pending change, only to a control plane listing the
+feature, and marks it sent only after the frame went out on an open socket (so a
+converge that ran before the socket was up, or against an older control plane,
+is not lost). It flushes on attach, on a new pending change and when the attach
+frame's features arrive.
+
 **Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
 (`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
 (all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends

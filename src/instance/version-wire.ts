@@ -98,6 +98,7 @@ export const DAEMON_WIRE_FEATURES = [
   "fabric-retain-keys-v1",
   "fabric-peer-report-v1",
   "fabric-lan-routes-v1",
+  "repo-key-report-v1",
 ] as const;
 
 /**
@@ -177,6 +178,14 @@ export const FABRIC_PEER_REPORT_FEATURE: DaemonWireFeature =
  */
 export const FABRIC_LAN_ROUTES_FEATURE: DaemonWireFeature =
   "fabric-lan-routes-v1";
+
+/**
+ * This daemon reports `repo-key-changed` (a package source's signing key is
+ * not one it expects). It sends the frame only to a control plane that lists
+ * this feature; an older one is never sent it, and the daemon keeps the
+ * report until one does.
+ */
+export const REPO_KEY_REPORT_FEATURE: DaemonWireFeature = "repo-key-report-v1";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`
