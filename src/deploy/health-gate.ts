@@ -126,9 +126,11 @@ function isOneOff(entry: Record<string, unknown>): boolean {
     );
   }
   if (labels !== null && typeof labels === "object") {
-    return String(
-      (labels as Record<string, unknown>)["com.docker.compose.oneoff"],
-    ).toLowerCase() === "true";
+    const value = (labels as Record<string, unknown>)[
+      "com.docker.compose.oneoff"
+    ];
+    return value === true ||
+      (typeof value === "string" && value.toLowerCase() === "true");
   }
   return false;
 }

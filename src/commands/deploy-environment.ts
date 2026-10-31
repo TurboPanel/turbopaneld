@@ -1973,7 +1973,7 @@ async function assertInPlaceHealthy(
   if (!gate.ok) {
     throw new Error(
       input.logSink.redactSummary(
-        `The containers started but ${gate.detail}. They were left running and nothing was rolled back; the hostings and certificates were not updated.`,
+        `The containers started but ${gate.detail}. Nothing was stopped or rolled back; the hostings and certificates were not updated.`,
       ),
     );
   }

@@ -166,7 +166,7 @@ test({
       );
       assert(err.message.startsWith("The containers started but "));
       assert(err.message.includes("failed its health check"));
-      assert(err.message.includes("nothing was rolled back"));
+      assert(err.message.includes("Nothing was stopped or rolled back"));
       assert(!(err instanceof SequentialDeployError));
       // The new containers stay up and the new compose file stays live.
       const live = await Deno.readTextFile(join(dir, RUNTIME_COMPOSE_FILENAME));
