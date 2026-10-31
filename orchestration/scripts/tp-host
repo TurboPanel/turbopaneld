@@ -3252,24 +3252,41 @@ tp_lan_nic_ok() {
   case "$1" in tp0|lo|docker*|br-*|veth*|tpn*) return 1 ;; esac
 }
 
-# The kernel's connected IPv4 subnets on one interface (`proto kernel scope
-# link` routes). Test mode reads a fixture file instead of the host.
-tp_lan_connected_routes() {
-  if [ -n "$TP_TEST" ]; then
-    cat "$P/tp-test/ip-route-link-$1" 2>/dev/null || true
-    return 0
-  fi
-  ip -4 route show dev "$1" scope link proto kernel 2>/dev/null || true
+# A connected network is a device route without a next hop that says `scope
+# link`, whoever made it: the kernel (`proto kernel`), a DHCP client, a static
+# config. Output lines on stdin; keep the ones with no `via` token.
+tp_lan_no_via() {
+  awk '{ for (i = 2; i <= NF; i++) if ($i == "via") next; print }'
 }
 
-# Every connected IPv4 subnet the kernel made, on any interface. Test mode
-# reads a fixture file instead of the host.
-tp_kernel_routes() {
+# The connected IPv4 networks on one interface (`scope link` routes with no
+# next hop, any `proto`). Test mode reads a fixture file instead of the host.
+tp_lan_connected_routes() {
   if [ -n "$TP_TEST" ]; then
-    cat "$P/tp-test/ip-route-kernel" 2>/dev/null || true
+    { cat "$P/tp-test/ip-route-link-$1" 2>/dev/null || true; } | tp_lan_no_via
     return 0
   fi
-  ip -4 route show proto kernel 2>/dev/null || true
+  { ip -4 route show dev "$1" scope link 2>/dev/null || true; } | tp_lan_no_via
+}
+
+# Every connected IPv4 network on any interface: what the kernel made (`proto
+# kernel`, `tp0`'s own subnet included) plus `scope link` routes with no next
+# hop and any `proto`, except `dev tp0` (the routes this host puts there are
+# `scope link` too). Test mode reads a fixture file instead of the host.
+tp_kernel_routes() {
+  if [ -n "$TP_TEST" ]; then
+    _tkr_all=$(cat "$P/tp-test/ip-route-kernel" 2>/dev/null || true)
+  else
+    _tkr_all=$(ip -4 route show 2>/dev/null || true)
+  fi
+  printf '%s\n' "$_tkr_all" | tp_lan_no_via | awk '
+    { kernel = 0; link = 0; tp0 = 0
+      for (i = 2; i <= NF; i++) {
+        if ($i == "proto" && $(i + 1) == "kernel") kernel = 1
+        if ($i == "scope" && $(i + 1) == "link") link = 1
+        if ($i == "dev" && $(i + 1) == "tp0") tp0 = 1
+      }
+      if (kernel || (link && !tp0)) print }'
 }
 
 # A route destination as `ip route` prints it (a bare address is a /32), split
@@ -3339,8 +3356,8 @@ tp_route_hits_kernel() {
 
 # `route replace|del CIDR via ADDR dev NIC`: a member's container subnet over a
 # shared LAN. IPv4 only (container forwarding is IPv4), the CIDR in the same
-# private blocks and prefix limits as a tp0 route, ADDR a host inside a subnet
-# the kernel says is connected to NIC, NIC a plain interface that is not tp0 or
+# private blocks and prefix limits as a tp0 route, ADDR a host inside a connected
+# network of NIC (`scope link`, no next hop, any proto), NIC a plain interface that is not tp0 or
 # lo. A replace is refused when the CIDR overlaps any connected subnet; a del
 # is not, so a route the daemon installed can still be removed.
 tp_lan_route_ok() {

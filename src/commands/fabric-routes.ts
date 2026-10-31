@@ -69,6 +69,15 @@ export type FabricRoute = {
 export type ObservedRoute = FabricRoute & {
   dev: string | null;
   kernel: boolean;
+  /**
+   * A network this host is directly attached to: a device route without a
+   * next hop that the kernel made (`proto kernel`) or that says `scope link`
+   * (a DHCP, static or router-advert connected subnet; an IPv6 device
+   * route has no scope, so any one without a next hop counts), never one on `tp0`
+   * (the daemon's own routes there are `scope link` too). Wider than `kernel`,
+   * which stays the "never touch" mark.
+   */
+  connected: boolean;
   /** Next hop (`via`), when the route has one. */
   via: string | null;
   /** The kernel marks the route `linkdown` (its interface has no carrier). */
@@ -143,6 +152,19 @@ function isKernelRoute(tokens: readonly string[]): boolean {
   return tokenAfter(tokens, "proto") === "kernel";
 }
 
+function isConnectedRoute(
+  tokens: readonly string[],
+  dev: string | null,
+  via: string | null,
+  version: 4 | 6,
+): boolean {
+  if (dev === null || via !== null) return false;
+  if (isKernelRoute(tokens)) return true;
+  if (dev === FABRIC_INTERFACE_NAME) return false;
+  // IPv6 device routes never print a scope: no next hop means on-link.
+  return version === 6 || tokenAfter(tokens, "scope") === "link";
+}
+
 function parseRouteLine(line: string, version: 4 | 6): ObservedRoute | null {
   const tokens = line.trim().split(/\s+/);
   const destination = tokens[0];
@@ -150,11 +172,14 @@ function parseRouteLine(line: string, version: 4 | 6): ObservedRoute | null {
   if (ROUTE_TYPES.has(destination)) return null;
   const route = fabricRoute(withHostPrefix(destination, version));
   if (route?.parsed.version !== version) return null;
+  const dev = tokenAfter(tokens, "dev");
+  const via = tokenAfter(tokens, "via");
   return {
     ...route,
-    dev: tokenAfter(tokens, "dev"),
+    dev,
     kernel: isKernelRoute(tokens),
-    via: tokenAfter(tokens, "via"),
+    connected: isConnectedRoute(tokens, dev, via, version),
+    via,
     linkdown: tokens.includes("linkdown"),
   };
 }
@@ -204,7 +229,8 @@ function conflictingDev(
 ): string | null {
   for (const other of others) {
     const equal = other.key === route.key;
-    const connected = other.kernel && rangesShare(route.parsed, other.parsed);
+    const connected = other.connected &&
+      rangesShare(route.parsed, other.parsed);
     if (equal || connected) return other.dev ?? "another interface";
   }
   return null;

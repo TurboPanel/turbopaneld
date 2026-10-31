@@ -125,11 +125,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     <NIC>`: IPv4 only, the CIDR in the same private blocks and prefix limits as
     a `tp0` route, `<NIC>` a plain name (not `tp0`, `lo`, `docker*`, `br-*`,
     `veth*`, `tpn*`), and `<ADDR>` a host (not the network or broadcast
-    address) inside a connected subnet the wrapper itself reads
-    (`ip -4 route show dev <NIC> scope link proto kernel`; test mode reads
+    address) inside a connected network of `<NIC>` that the wrapper itself
+    reads: a `scope link` route with no `via`, whoever made it (`proto kernel`,
+    `dhcp`, `static`, ...; `ip -4 route show dev <NIC> scope link`, test mode
     `$P/tp-test/ip-route-link-<NIC>`). A `replace` (LAN or `tp0`) is refused
-    when its IPv4 CIDR equals, contains or sits inside any connected subnet the
-    kernel made (`ip -4 route show proto kernel`, test mode
+    when its IPv4 CIDR equals, contains or sits inside any connected network
+    on any interface (`proto kernel` routes, plus `scope link` routes with no
+    `via` that are not on `tp0`; `ip -4 route show`, test mode
     `$P/tp-test/ip-route-kernel`; for `tp0` routes, `tp0`'s own subnet is
     left out), so a route can never take over the LAN's subnet or `docker0`'s.
     A `del` skips that check so installed routes can still be removed.
