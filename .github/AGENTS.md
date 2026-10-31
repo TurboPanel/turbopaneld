@@ -89,6 +89,12 @@ to the repo root.
 - **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
   reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
   promotion re-verifies artifact hashes only (no new compile from source).
+- **Scheduled checks live in the control plane repository.** Issues are enabled
+  only there, so the tunnel connector release check and the repository signing
+  key check run as workflows in `TurboPanel/turbopanel`, which fetch this repo's
+  `trunk` and run `scripts/check-connector-release.ts` and
+  `scripts/check-repo-keys.ts` (exit codes in that script's header). Do not add
+  a workflow here that files issues.
 
 ## Gate Matrix and Promotion
 
