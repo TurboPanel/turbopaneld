@@ -16,9 +16,11 @@ import type {
 import { validateAcmeIssueRequestFields } from "../contracts/cell-messages.ts";
 import {
   issueTenantCertificates,
+  sweepTenantAcme,
   type TenantIssueDeps,
 } from "../deploy/tenant-acme-issue.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
+import { logWarn } from "../util/logger.ts";
 
 export type AcmeIssueHandlerDeps = {
   layout: LayoutPaths;
@@ -28,6 +30,8 @@ export type AcmeIssueHandlerDeps = {
   report: TenantIssueDeps["report"];
   now?: () => number;
   issue?: typeof issueTenantCertificates;
+  /** Start-up clean-up of issuers and files a restart left behind. */
+  sweep?: () => Promise<void>;
 };
 
 const MAX_REASON_CHARS = 1000;
@@ -35,17 +39,31 @@ const MAX_REASON_CHARS = 1000;
 export class AcmeIssueHandler {
   readonly #deps: AcmeIssueHandlerDeps;
   readonly #open = new Set<string>();
+  #ready: Promise<void> = Promise.resolve();
 
   constructor(deps: AcmeIssueHandlerDeps) {
     this.#deps = deps;
+  }
+
+  /**
+   * Clear what a restart left behind. Requests wait for it, so the sweep can
+   * never stop the issuer of an order this process has just taken.
+   */
+  start(): Promise<void> {
+    const sweep = this.#deps.sweep ??
+      (() => sweepTenantAcme(this.#deps.layout));
+    this.#ready = sweep().catch((err) =>
+      logWarn("deploy", "certificate issuer start-up sweep failed:", err)
+    );
+    return this.#ready;
   }
 
   #event(
     requestId: string,
     stage: AcmeIssueEventMessage["stage"],
     extra: { reason?: string; notAfterIso?: string } = {},
-  ): void {
-    this.#deps.send({
+  ): boolean {
+    return this.#deps.send({
       type: "acme-issue-event",
       requestId,
       stage,
@@ -70,11 +88,14 @@ export class AcmeIssueHandler {
       }
       return;
     }
+    await this.#ready;
     // The same request arriving twice (a re-send after a blip) is one order.
     if (this.#open.has(message.requestId)) return;
     this.#open.add(message.requestId);
     try {
-      this.#event(message.requestId, "started");
+      // A started report the link dropped is not a report: the control plane
+      // will ask again (or another server), so nothing is begun here.
+      if (!this.#event(message.requestId, "started")) return;
       const issue = this.#deps.issue ?? issueTenantCertificates;
       const outcome = await issue(this.#deps.layout, message, {
         report: this.#deps.report,

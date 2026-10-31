@@ -1546,6 +1546,7 @@ export class InstanceClient {
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
     this.#ensureProofForward();
+    this.#ensureAcmeIssue();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -1802,6 +1803,7 @@ export class InstanceClient {
         return api.reportIssuedCertificate(input);
       },
     });
+    this.#runSocketHandler("acme-issue sweep", this.#acmeIssue.start());
     return this.#acmeIssue;
   }
 
