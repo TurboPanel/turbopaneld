@@ -68,7 +68,7 @@ on the host, which is Ansible's own requirement for the apt module in check mode
   hosts); `bundled` never fetches. A key expiring within 60 days warns.
   `scripts/check-repo-keys.ts` (`deno task check:repo-keys`) compares the
   shipped copy with the live key and exits non-zero on drift or near-expiry; a
-  weekly workflow for it is a separate step. Other third-party repository keys
+  weekly workflow (`.github/workflows/repo-key-check.yml`) runs it and files or updates one issue on drift (exit 1); a failed download alone (exit 2) is retried and never files an issue. Other third-party repository keys
   can reuse `roles/repo-key` (inputs `repo_key_*`).
   TODO: the warning is only in the run output, not yet a control-plane notice.
 - **Version and upgrades**: `turbopanel_docker_version` (apt version glob,
