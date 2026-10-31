@@ -317,7 +317,7 @@ test("a LAN route is skipped without a connected subnet, a foreign route or a br
     const result = await handleFabricReconcile(payload, "t");
     // Every skip is reported to the control plane, not only logged.
     assertEquals(result.warnings, [
-      "LAN route 10.193.7.0/24 via 10.5.0.12 not installed: no connected subnet holds 10.5.0.12 as a host address",
+      "LAN route 10.193.7.0/24 via 10.5.0.12 not installed: no directly connected network holds 10.5.0.12 as a host address (checked: eth1 10.0.0.0/24)",
       "LAN route 10.193.6.0/24 via 10.0.0.12 not installed: eth1 already routes it",
       "LAN route 10.194.1.128/25 via 10.0.0.12 not installed: it overlaps the local bridge subnet 10.194.1.0/24",
     ]);

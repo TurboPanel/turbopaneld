@@ -144,7 +144,7 @@ function isUsableConnectedRoute(
   route: ObservedRoute,
   bridgeKeys: ReadonlySet<string>,
 ): boolean {
-  if (!route.kernel || route.linkdown || !route.dev) return false;
+  if (!route.connected || route.linkdown || !route.dev) return false;
   if (isNeverLanDev(route.dev)) return false;
   return !bridgeKeys.has(route.key);
 }
@@ -193,10 +193,20 @@ function refusedDevHolding(
   const host = hostRange(via);
   if (!host) return null;
   const route = table.find((observed) =>
-    observed.kernel && observed.dev !== null && isNeverLanDev(observed.dev) &&
+    observed.connected && observed.dev !== null &&
+    isNeverLanDev(observed.dev) &&
     rangeInside(host.parsed, observed.parsed)
   );
   return route?.dev ?? null;
+}
+
+/** The usable connected networks, for the warning: `checked: eth0 10.10.0.0/22`. */
+function connectedList(table: readonly ObservedRoute[]): string {
+  const seen = table.filter((route) =>
+    route.connected && route.dev !== null && !route.linkdown &&
+    !isNeverLanDev(route.dev)
+  ).map((route) => `${route.dev} ${route.cidr}`);
+  return seen.length === 0 ? "checked: none" : `checked: ${seen.join(", ")}`;
 }
 
 function noDevReason(via: string, table: readonly ObservedRoute[]): string {
@@ -204,7 +214,9 @@ function noDevReason(via: string, table: readonly ObservedRoute[]): string {
   if (refused) {
     return `${via} is on ${refused}, which never carries a LAN route`;
   }
-  return `no connected subnet holds ${via} as a host address`;
+  return `no directly connected network holds ${via} as a host address (${
+    connectedList(table)
+  })`;
 }
 
 function isExactly(
@@ -238,7 +250,8 @@ function routedElsewhere(
   installed: readonly InstalledLanRoute[],
 ): string | null {
   for (const other of table) {
-    const connected = other.kernel && rangesShare(route.parsed, other.parsed);
+    const connected = other.connected &&
+      rangesShare(route.parsed, other.parsed);
     const equal = other.key === route.key && !wasInstalled(other, installed);
     if (connected || equal) {
       return `${other.dev ?? "another interface"} already routes it`;

@@ -1783,6 +1783,87 @@ test("ip route replace never takes over a connected subnet on any interface", as
   });
 });
 
+test("ip route accepts a connected network whoever made it, and nothing that is not one", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("tp-test"), { recursive: true });
+    // `ip route show dev eth0 scope link` as a DHCP host prints it (no `dev`).
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-link-eth0"),
+      [
+        "10.10.0.0/22 proto dhcp scope link src 10.10.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+        "10.20.0.0/24 proto static scope link", // NOSONAR typescript:S1313 — sample static LAN for this test fixture, not a reachable host
+        "10.30.0.0/24 via 10.10.0.1 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
+        "default proto dhcp scope link",
+        "blackhole 10.40.0.0/24 proto static",
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-kernel"),
+      [
+        "10.10.0.0/22 dev eth0 proto dhcp scope link src 10.10.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+        "10.30.0.0/24 via 10.10.0.1 dev eth0 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
+        "10.250.5.0/24 dev tp0 proto boot scope link",
+        "",
+      ].join("\n"),
+    );
+    const lan = (cidr: string, via: string, dev = "eth0") => [
+      "ip",
+      "route",
+      "replace",
+      cidr,
+      "via",
+      via,
+      "dev",
+      dev,
+    ];
+    for (
+      const args of [
+        lan("10.194.0.0/16", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("10.195.0.0/16", "10.20.0.7"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        [
+          "ip",
+          "route",
+          "del",
+          "10.194.0.0/16",
+          "via",
+          "10.10.3.86",
+          "dev",
+          "eth0",
+        ], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+    for (
+      const args of [
+        lan("10.194.0.0/16", "10.30.0.9"), // NOSONAR typescript:S1313 — behind a gateway, not on a connected network
+        lan("10.194.0.0/16", "10.40.0.9"), // NOSONAR typescript:S1313 — blackhole, not a connected network
+        lan("10.194.0.0/16", "10.10.0.0"), // NOSONAR typescript:S1313 — the network address
+        lan("10.194.0.0/16", "10.10.3.86", "eth1"), // NOSONAR typescript:S1313 — no connected network on eth1
+        lan("10.194.0.0/16", "10.10.3.86", "tp0"), // NOSONAR typescript:S1313 — never tp0
+        lan("0.0.0.0/0", "10.10.3.86"), // NOSONAR typescript:S1313 — never the default route
+        lan("10.10.0.0/22", "10.10.3.86"), // NOSONAR typescript:S1313 — the connected network itself
+        lan("10.10.1.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — inside the connected network
+      ]
+    ) {
+      await refused(host, args);
+    }
+    // A routed network and `tp0`'s own routes do not count as connected.
+    for (
+      const args of [
+        lan("10.30.0.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("10.250.5.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+    }
+  });
+});
+
 test("accounts: only principals are created or changed, and only into registry groups", async () => {
   await withHost(async (host) => {
     const home = host.path("srv/users/carol/home");
