@@ -767,6 +767,8 @@ test("atomic deploy: staged load check, snapshot, probes, and a rollback that en
   const order = [
     "Stage the new gate source",
     "Load-check the staged gate",
+    "Make sure the docker system group exists",
+    "Start Docker when it is installed but stopped",
     "Wait for the Docker engine to answer before swapping the gate",
     "Look for a running gate before the swap",
     "Snapshot them",

@@ -61,6 +61,27 @@
 # re-added server, or the daemon.json restart that runs just before this role).
 # Wait for the engine itself first, so a slow engine never reads as a broken
 # gate, and a missing engine fails with a message that names the engine.
+# Same recovery the docker role applies to an installed but stopped engine:
+# docker.socket names the docker group and fails with 216/GROUP when it is
+# missing, and a burst of restarts leaves systemd's start-limit lockout that
+# only reset-failed clears. A running engine is left alone.
+- name: Make sure the docker system group exists
+  ansible.builtin.group:
+    name: docker
+    system: true
+    state: present
+
+- name: Clear a systemd start-limit lockout on a stopped Docker  # noqa: command-instead-of-module
+  ansible.builtin.command: systemctl reset-failed docker.service docker.socket
+  changed_when: false
+  failed_when: false
+
+- name: Start Docker when it is installed but stopped
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+  failed_when: false
+
 - name: Wait for the Docker engine to answer before swapping the gate
   ansible.builtin.uri:
     url: http://localhost/_ping
