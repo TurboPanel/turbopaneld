@@ -12,6 +12,7 @@ import {
   LETS_ENCRYPT_STAGING_DIRECTORY_URL,
 } from "./instance-acme-issuer.ts";
 import {
+  connectWithin,
   issueTenantCertificates,
   localProofAddresses,
   parseProofResponse,
@@ -445,15 +446,28 @@ test("the start-up sweep stops issuers and clears requests, stored pairs and soc
   });
 });
 
-test("a blackholed address is given up on within the bound, connect included", async () => {
-  const started = Date.now();
-  let failed = false;
+test("a connect that never answers is given up on within the bound", async () => {
+  let failed = "";
   try {
-    // A non-routable address: the connect either fails or hangs; both must end quickly.
-    await rawProofGet("10.255.255.1", "example.com", "/x", 1_000);
-  } catch {
-    failed = true;
+    await connectWithin("203.0.113.1", 80, 20, () => new Promise(() => {}));
+  } catch (err) {
+    failed = err instanceof Error ? err.message : "";
   }
-  assert(failed);
-  assert(Date.now() - started < 5_000);
+  assertEquals(failed, "connect timed out");
+});
+
+test("a connection that arrives after the bound is closed, not kept", async () => {
+  let closed = false;
+  const late = { close: () => (closed = true) } as unknown as Deno.Conn;
+  let arrive: (conn: Deno.Conn) => void = () => {};
+  const result = connectWithin(
+    "203.0.113.1",
+    80,
+    5,
+    () => new Promise<Deno.Conn>((resolve) => (arrive = resolve)),
+  ).catch(() => "timed out");
+  assertEquals(await result, "timed out");
+  arrive(late);
+  await Promise.resolve();
+  assertEquals(closed, true);
 });

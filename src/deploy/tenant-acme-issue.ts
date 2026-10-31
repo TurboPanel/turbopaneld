@@ -179,10 +179,14 @@ export function parseProofResponse(text: string): ProofResponse {
  * custom `Host`, and the whole point is to reach a server by address while
  * asking for a name, so this speaks the request itself.
  */
-function connectWithin(
+type Connect = (opts: { hostname: string; port: number }) => Promise<Deno.Conn>;
+
+/** Connect, giving up after `ms`; a connection that arrives late is closed. */
+export function connectWithin(
   hostname: string,
   port: number,
   ms: number,
+  connect: Connect = Deno.connect,
 ): Promise<Deno.Conn> {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -190,7 +194,7 @@ function connectWithin(
       settled = true;
       reject(new Error("connect timed out"));
     }, ms);
-    Deno.connect({ hostname, port }).then((conn) => {
+    connect({ hostname, port }).then((conn) => {
       if (settled) {
         conn.close();
         return;
