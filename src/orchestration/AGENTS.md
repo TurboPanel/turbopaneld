@@ -64,6 +64,15 @@ no command runs a playbook on top of it. The fabric, forwarding, PHP and
 background checks that normally precede the connection run after a successful
 converge on that path.
 
+A boot converge that fails (or a tools bootstrap that fails) is retried in the
+background by `boot-converge-retry.ts`: five tries after 1, 2, 5, 10 and 15
+minutes, each registered with the command gate so commands wait only while a
+playbook runs. A late success runs the fabric, forwarding and PHP steps; the
+Docker monitor is wired into the sentinel at start-up, so it still waits for
+the next restart. `runtimeVerification()` reads `verified`, `retrying` or
+`not-verified`; it is not on the wire yet (a presence field would be an
+expand-only twin: panel first, then daemon).
+
 ## Runtime Integrity
 
 - **Runtime integrity** — `deno-runtime` / `node-runtime` / `caddy` defaults
