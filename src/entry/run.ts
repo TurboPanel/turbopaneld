@@ -573,7 +573,9 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     orchestrationReady =
       await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)();
 
-    if (orchestrationReady) {
+    if (!orchestrationReady) {
+      scheduleBootRetry(io, reinstallForwardingJumps, abort.signal);
+    } else {
       const converge = (io.runBootConverge ?? runBootConverge)();
       trackBootConverge(converge);
       void converge.then(async (ok) => {

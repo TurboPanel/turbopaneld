@@ -966,3 +966,21 @@ test("no retry is scheduled when orchestration is switched off", async () => {
   stop();
   await done;
 });
+
+test("a failed tools bootstrap on the connect-first path is retried too", async () => {
+  let scheduled = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    bootstrapOrchestration: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => false,
+    retryBootConverge: () => {
+      scheduled += 1;
+      return Promise.resolve(false);
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(scheduled, 1);
+  stop();
+  await done;
+});
