@@ -65,11 +65,11 @@ test("a good order sends started and then issued with the expiry, never a pair",
 test("a failed order sends started and then failed with the plain reason", async () => {
   const { handler, sent } = harness({
     ok: false,
-    reason: "port 80 is held by nginx",
+    reason: "port 80 is held by otherserver",
   });
   await handler.handleRequest(request());
   assertEquals(sent.map((m) => m.stage), ["started", "failed"]);
-  assertEquals(sent[1].reason, "port 80 is held by nginx");
+  assertEquals(sent[1].reason, "port 80 is held by otherserver");
 });
 
 test("a malformed request is answered failed and starts nothing", async () => {
