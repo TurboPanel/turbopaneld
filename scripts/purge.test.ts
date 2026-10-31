@@ -1169,6 +1169,85 @@ test("every tunnel connector service is stopped, disabled and its unit file remo
   assertEquals(await exists(join(units, "unrelated.service")), true);
 });
 
+const TENANT_ACME_TEMPLATE = "turbopanel-tenant-acme@.service";
+// Instances exist only in memory (started from the template), so systemd lists
+// them but there is no file for them.
+const TENANT_ACME_INSTANCES = [
+  "turbopanel-tenant-acme@req_1.service",
+  "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
+];
+
+test("a running certificate issuer is stopped and the template unit file is removed", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  await Deno.writeTextFile(join(units, TENANT_ACME_TEMPLATE), "[Service]\n");
+  await Deno.writeTextFile(join(units, "unrelated.service"), "[Service]\n");
+  const log = join(units, "systemctl.log");
+  const stub = await stubBin(
+    "systemctl",
+    [
+      `log=${log}`,
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo active ;;",
+      "  is-active*) echo active ;;",
+      "  is-enabled*) echo static ;;",
+      "  *list-units*) cat <<'LIST'",
+      ...TENANT_ACME_INSTANCES.map((u) =>
+        `${u} loaded active running TurboPanel certificate issuer`
+      ),
+      "LIST",
+      "  ;;",
+      '  stop*|disable*) echo "$*" >> "$log" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_unit_present",
+      "tp_list_has_word",
+      "tp_collect_unit_names",
+      "tp_stop_disable_unit",
+      "tp_stop_units_matching",
+      "tp_remove_unit_files",
+    ],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      "TP_LEGACY_UNITS=",
+      "TP_OTHER_UNITS=",
+      "tp_collect_unit_names",
+      'cat "$TP_TMP/work.unitnames"',
+      "tp_stop_units_matching service",
+      "tp_remove_unit_files",
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  for (const name of TENANT_ACME_INSTANCES) {
+    assertStringIncludes(result.stdout, `${name}\n`, result.stderr);
+  }
+  const calls = (await Deno.readTextFile(log)).split("\n");
+  for (const name of TENANT_ACME_INSTANCES) {
+    assert(calls.includes(`stop ${name}`), `stop ${name}\n${calls.join("\n")}`);
+  }
+  assertEquals(await exists(join(units, TENANT_ACME_TEMPLATE)), false);
+  assertEquals(await exists(join(units, "unrelated.service")), true);
+});
+
+test("the issuer's storage, requests, sockets and proof handlers sit in trees purge removes whole", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = (extractConstant(source, "TP_OWNED_TREES") ?? "")
+    .replace(/^[A-Z_]+="/, "")
+    .replace(/"$/, "")
+    .split(" ");
+  // <state>/tenant-acme (account, requests, logs), <config>/hosting/proof and
+  // the reserved proof sites, and <run>/tenant-acme-<id>.sock.
+  for (
+    const tree of ["/etc/turbopanel", "/var/lib/turbopanel", "/run/turbopanel"]
+  ) {
+    assert(trees.includes(tree), tree);
+  }
+});
+
 test("the connector program and the token copies are inside trees purge removes whole", async () => {
   const source = await Deno.readTextFile(purgePath);
   const trees = (extractConstant(source, "TP_OWNED_TREES") ?? "")
