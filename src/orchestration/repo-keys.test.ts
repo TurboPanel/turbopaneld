@@ -5,6 +5,7 @@ import {
   checkKey,
   exitCodeFor,
   type KeyMeta,
+  type KeyReport,
   renderIssueBody,
   runKeyChecks,
 } from "../../scripts/check-repo-keys.ts";
@@ -197,6 +198,27 @@ test("runKeyChecks passes when the live key matches and flags a missing or chang
   assertStringIncludes(body, "### docker");
   assertStringIncludes(body, "live key fingerprint");
   assertEquals(renderIssueBody(same).includes("###"), false);
+  const expiring: KeyReport[] = [
+    { name: "docker", problems: ["key expires in 12 days (x)"], notes: [] },
+  ];
+  assertEquals(exitCodeFor(expiring), 3);
+  assertStringIncludes(renderIssueBody(expiring), "expires soon");
+  assertEquals(
+    exitCodeFor([...expiring, {
+      name: "b",
+      problems: ["could not fetch u"],
+      notes: [],
+    }]),
+    3,
+  );
+  assertEquals(
+    exitCodeFor([...expiring, {
+      name: "c",
+      problems: ["live key fingerprint x"],
+      notes: [],
+    }]),
+    1,
+  );
 });
 
 test("the key reader handles old-format, long and five-byte packet lengths", async () => {

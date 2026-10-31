@@ -128,21 +128,31 @@ export async function runKeyChecks(
   }));
 }
 
+/** Start of the problem line for a key that is close to its expiry date. */
+export const EXPIRES_SOON = "key expires in";
+
 /**
- * Exit status: 0 clean, 1 real drift (or a mismatching copy, or a key near
- * expiry), 2 when the only problems are failed downloads (a network blip, not
- * a reason to tell anyone the key changed).
+ * Exit status: 0 clean; 1 real drift (the live key differs, or the shipped
+ * copy does not match its metadata); 3 the only problem is a key near its
+ * expiry; 2 when the only problems are failed downloads (a network blip, not a
+ * reason to tell anyone the key changed). Any other status is a crash.
  */
 export function exitCodeFor(reports: KeyReport[]): number {
   const problems = reports.flatMap((r) => r.problems);
   if (problems.length === 0) return 0;
-  return problems.every((p) => p.startsWith(FETCH_FAILED)) ? 2 : 1;
+  const isFetch = (p: string) => p.startsWith(FETCH_FAILED);
+  const isExpiry = (p: string) => p.startsWith(EXPIRES_SOON);
+  if (!problems.every((p) => isFetch(p) || isExpiry(p))) return 1;
+  return problems.some(isExpiry) ? 3 : 2;
 }
 
 /** The text of the tracking issue: one section per key with a problem. */
 export function renderIssueBody(reports: KeyReport[]): string {
+  const expiryOnly = exitCodeFor(reports) === 3;
   const lines = [
-    "The weekly repository key check found a difference between the keys shipped with the daemon and the keys the vendors publish now.",
+    expiryOnly
+      ? "The weekly repository key check found a key shipped with the daemon that expires soon."
+      : "The weekly repository key check found a difference between the keys shipped with the daemon and the keys the vendors publish now.",
     "Installs are not blocked: hosts fetch the live key and fall back to the shipped copy. Update the shipped copy, its metadata and the expected fingerprint list in the next release.",
     "",
   ];
@@ -151,7 +161,9 @@ export function renderIssueBody(reports: KeyReport[]): string {
     for (const problem of report.problems) lines.push(`- ${problem}`);
     lines.push("");
   }
-  lines.push("Reproduce with `deno task check:repo-keys`.");
+  lines.push(
+    "Reproduce with `deno task check:repo-keys` in the daemon repository.",
+  );
   return lines.join("\n") + "\n";
 }
 
@@ -163,8 +175,8 @@ if (import.meta.main) {
     for (const problem of report.problems) console.log(`  ! ${problem}`);
   }
   const code = exitCodeFor(reports);
-  // Optional first argument: where to write the issue text when there is drift.
-  if (code === 1 && Deno.args[0]) {
+  // Optional first argument: where to write the issue text (drift or expiry).
+  if ((code === 1 || code === 3) && Deno.args[0]) {
     await Deno.writeTextFile(Deno.args[0], renderIssueBody(reports));
   }
   Deno.exit(code);
