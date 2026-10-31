@@ -45,8 +45,14 @@ import {
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
   shouldRunDaemonConverge,
+  shouldSkipOrchestration,
 } from "../orchestration/setup.ts";
 import { trackBootConverge } from "../orchestration/boot-converge-gate.ts";
+import {
+  abortableSleep,
+  markRuntimeUnverified,
+  retryBootConverge,
+} from "../orchestration/boot-converge-retry.ts";
 import {
   createMetricsCollector,
   stopHostStorageSamplers,
@@ -98,6 +104,18 @@ export type DaemonRunIo = {
   bootstrapOrchestration?: () => Promise<boolean>;
   /** The slow boot converge used on the connect-first path. */
   runBootConverge?: () => Promise<boolean>;
+  /**
+   * Background retry after a failed boot converge; defaults to
+   * {@link retryBootConverge} with the real timer. Receives the attempt and
+   * the steps to run once an attempt works.
+   */
+  retryBootConverge?: (
+    attempt: () => Promise<boolean>,
+    onRecovered: () => Promise<void>,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
+  /** Defaults to {@link shouldSkipOrchestration}. */
+  shouldSkipOrchestration?: () => boolean;
   restoreFabricFromPersistedState?: () => Promise<void>;
   /** Boot-time live-release link scan; defaults to {@link scanLiveReleases}. */
   scanLiveReleases?: () => Promise<void>;
@@ -398,6 +416,42 @@ async function bestEffort(
  * background checks. Runs before the connection on an enrolled host, and after
  * the boot converge on a new one.
  */
+/**
+ * A failed boot converge is retried in the background (bounded, growing
+ * pauses) instead of leaving the daemon unverified until its next restart.
+ * Not when orchestration is switched off on purpose. A late success runs the
+ * steps that need a converged host; the Docker monitor is wired into the
+ * sentinel when it is created, so it still waits for the next restart.
+ */
+function scheduleBootRetry(
+  io: DaemonRunIo,
+  reinstallForwardingJumps: () => Promise<void>,
+  signal: AbortSignal,
+): void {
+  if ((io.shouldSkipOrchestration ?? shouldSkipOrchestration)()) return;
+  markRuntimeUnverified();
+  const attempt = async () =>
+    (await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)()) &&
+    (await (io.runBootConverge ?? runBootConverge)());
+  const onRecovered = () => afterOrchestration(io, reinstallForwardingJumps);
+  const run = io.retryBootConverge ??
+    ((a, r, s) =>
+      retryBootConverge({
+        attempt: a,
+        onRecovered: r,
+        signal: s,
+        sleep: abortableSleep,
+        log: (message) => (io.logWarn ?? logWarn)("orchestration", message),
+      }));
+  void run(attempt, onRecovered, signal).catch((err) => {
+    (io.logWarn ?? logWarn)(
+      "orchestration",
+      "boot converge retry stopped:",
+      err instanceof Error ? err.message : String(err),
+    );
+  });
+}
+
 async function afterOrchestration(
   io: DaemonRunIo,
   reinstallForwardingJumps: () => Promise<void>,
@@ -523,7 +577,11 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       const converge = (io.runBootConverge ?? runBootConverge)();
       trackBootConverge(converge);
       void converge.then(async (ok) => {
-        if (!ok || abort.signal.aborted) return;
+        if (abort.signal.aborted) return;
+        if (!ok) {
+          scheduleBootRetry(io, reinstallForwardingJumps, abort.signal);
+          return;
+        }
         try {
           await afterOrchestration(io, reinstallForwardingJumps);
         } catch (err) {
@@ -539,6 +597,8 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     orchestrationReady = await (io.initOrchestration ?? initOrchestration)();
     if (orchestrationReady) {
       await afterOrchestration(io, reinstallForwardingJumps);
+    } else {
+      scheduleBootRetry(io, reinstallForwardingJumps, abort.signal);
     }
   }
 
