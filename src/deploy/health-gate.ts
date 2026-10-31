@@ -73,6 +73,12 @@ export type HealthGateOptions = {
   sleep?: (ms: number) => Promise<void>;
   /** One transcript line each time what the gate is waiting on changes. */
   onProgress?: (message: string) => void;
+  /**
+   * Compose services this deploy runs (`config --services`, so profile
+   * services that are not enabled are absent). Containers of any other
+   * service, such as a leftover from an earlier run, are not judged.
+   */
+  services?: readonly string[];
   /** Every poll that is still waiting: the live line of the health step. */
   onTick?: (tick: HealthGateTick) => void;
 };
@@ -111,9 +117,26 @@ function firstNonEmpty(values: readonly unknown[]): string | undefined {
   return values.find((v): v is string => typeof v === "string" && v.length > 0);
 }
 
+/** `docker compose run` leaves containers that are not part of the project's services. */
+function isOneOff(entry: Record<string, unknown>): boolean {
+  const labels = entry.Labels;
+  if (typeof labels === "string") {
+    return labels.split(",").some((pair) =>
+      pair.trim().toLowerCase() === "com.docker.compose.oneoff=true"
+    );
+  }
+  if (labels !== null && typeof labels === "object") {
+    return String(
+      (labels as Record<string, unknown>)["com.docker.compose.oneoff"],
+    ).toLowerCase() === "true";
+  }
+  return false;
+}
+
 function toContainerView(entry: Record<string, unknown>): ContainerView | null {
   const service = entry.Service;
   if (typeof service !== "string" || service.length === 0) return null;
+  if (isOneOff(entry)) return null;
   const id = firstNonEmpty([entry.ID, entry.Name]) ?? service;
   const exit = entry.ExitCode;
   return {
@@ -281,6 +304,9 @@ export function waitForHealthGate(
     runningSince: new Map<string, number>(),
     attempt: 0,
     lastPending: "",
+    ...(options.services === undefined
+      ? {}
+      : { services: new Set(options.services) }),
   });
 }
 
@@ -295,6 +321,7 @@ type GateState = {
   runningSince: Map<string, number>;
   attempt: number;
   lastPending: string;
+  services?: ReadonlySet<string>;
 };
 
 /**
@@ -314,7 +341,13 @@ async function pollGate(
       pending: ["docker compose ps failed"],
       reason: "ps-failed",
     }
-    : evaluatePoll(stdout, state.runningSince, nowMs, state.stableMs);
+    : evaluatePoll(
+      stdout,
+      state.runningSince,
+      nowMs,
+      state.stableMs,
+      state.services,
+    );
   const elapsedMs = nowMs - state.startedAt;
   if (poll.done) {
     return poll.result.ok ? { ...poll.result, elapsedMs } : poll.result;
@@ -322,7 +355,7 @@ async function pollGate(
   state.attempt++;
   // The transcript only gets a line when the reason changes; the count and the
   // clock go to the single live line.
-  const key = poll.pending.join("\n");
+  const key = poll.pending[0] ?? "";
   if (key !== state.lastPending) {
     state.lastPending = key;
     if (poll.pending[0] !== undefined) options.onProgress?.(poll.pending[0]);
@@ -354,10 +387,13 @@ function evaluatePoll(
   runningSince: Map<string, number>,
   nowMs: number,
   stableMs: number,
+  services?: ReadonlySet<string>,
 ): PollOutcome {
   const containers = parseComposePsEntries(stdout)
     .map(toContainerView)
-    .filter((c): c is ContainerView => c !== null);
+    .filter((c): c is ContainerView =>
+      c !== null && (services === undefined || services.has(c.service))
+    );
   if (containers.length === 0) {
     return {
       done: false,

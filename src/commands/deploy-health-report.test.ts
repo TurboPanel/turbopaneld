@@ -68,7 +68,7 @@ test("a stack of finished jobs is not called healthy", () => {
     reported: [],
   });
   assertEquals(steps, [
-    "done Service Health Not Checked | Every service is a job that finished with exit code 0; none reports a health check",
+    "done Service Health Not Checked | Nothing in this deploy reports its own health: no service is running, or every one is a job that finished with exit code 0",
   ]);
 });
 

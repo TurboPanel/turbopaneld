@@ -144,6 +144,60 @@ test("a timeout says how long it waited and the last status", async () => {
   );
 });
 
+test("containers of services this deploy does not run are not judged", async () => {
+  const snapshot = ps(
+    { Service: "web", State: "running", Health: "healthy" },
+    { Service: "tool", State: "exited", ExitCode: 1 },
+  );
+  const judged = await waitForHealthGate(harness([snapshot]).options);
+  assertEquals(judged.ok, false);
+  const scoped = await waitForHealthGate(
+    harness([snapshot], { services: ["web"] }).options,
+  );
+  assertEquals(scoped.ok, true);
+  assertEquals(scoped.ok && scoped.services, ["web"]);
+});
+
+test("a one-off container left by compose run is not judged", async () => {
+  const snapshot = JSON.stringify([
+    { ID: "a", Service: "web", State: "running", Health: "healthy" },
+    {
+      ID: "b",
+      Service: "web",
+      State: "exited",
+      ExitCode: 2,
+      Labels: "com.docker.compose.project=x,com.docker.compose.oneoff=True",
+    },
+  ]);
+  const result = await waitForHealthGate(harness([snapshot]).options);
+  assertEquals(result.ok, true);
+});
+
+test("a job that exited cleanly beside a healthy service passes at once", async () => {
+  const { options, polls } = harness([
+    ps(
+      { Service: "migrate", State: "exited", ExitCode: 0 },
+      { Service: "web", State: "running", Health: "healthy" },
+    ),
+  ]);
+  assertEquals((await waitForHealthGate(options)).ok, true);
+  assertEquals(polls(), 1);
+});
+
+test("the transcript line repeats only when the printed reason changes", async () => {
+  const a = ps(
+    { Service: "a", State: "running", Health: "starting" },
+    { Service: "b", State: "running", Health: "starting" },
+  );
+  const b = ps(
+    { Service: "a", State: "running", Health: "starting" },
+    { Service: "b", State: "created" },
+  );
+  const { options, progress } = harness([a, b, a]);
+  await waitForHealthGate({ ...options, timeoutMs: 3_000 });
+  assertEquals(progress.length, 1);
+});
+
 test("mode none trusts a running container on the first poll", async () => {
   const { options, polls } = harness(
     [ps({ Service: "worker", State: "running" })],

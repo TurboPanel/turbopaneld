@@ -401,6 +401,15 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   before the post-deploy hooks); a failure fails the deploy with "The
   containers started but …" and rolls nothing back, since the old version was
   replaced in place and the new containers stay up for inspection.
+  Cost: a service with no health check adds at least the stable window (30 s)
+  to every in-place deploy, and a wait that never ends is capped by
+  `healthTimeoutSeconds` (default 120 s), which cannot be cancelled once the
+  deploy is past its commit point. The gate judges only the services
+  `compose config --services` lists (profile services that are off are not
+  there), ignores `compose run` leftovers, and skips the wait entirely when no
+  service is enabled. A stack that passed before can now fail: a job that
+  exits non-zero, a restart loop, or a health check that only passes after a
+  post-deploy hook (the gate runs before the hooks, as on sequential).
   While waiting it shows one updating line ("Attempt 4, 6 s of up to 120 s");
   the transcript gets a line only when the waiting reason changes.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is

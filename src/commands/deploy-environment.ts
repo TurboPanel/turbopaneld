@@ -1924,7 +1924,30 @@ async function gateComposeHealth(
   const { parsedPayload, run, logSink } = input;
   const timeoutMs = (parsedPayload.healthTimeoutSeconds ??
     DEFAULT_HEALTH_TIMEOUT_SECONDS) * 1000;
+  // The services this deploy runs. A stack whose services are all behind
+  // compose profiles has none, and waiting the whole timeout for containers
+  // that will never exist would only delay the same answer.
+  const listed = await run([
+    ...composeFileArgs(parsedPayload.projectName, paths),
+    "config",
+    "--services",
+  ]);
+  const services = listed.success
+    ? listed.stdout.split("\n").map((name) => name.trim()).filter(Boolean)
+    : undefined;
+  if (services?.length === 0) {
+    const none: HealthGateResult = {
+      ok: true,
+      services: [],
+      elapsedMs: 0,
+      unchecked: [],
+      reported: [],
+    };
+    reportHealthGate(logSink, none);
+    return none;
+  }
   const result = await (input.waitForHealth ?? waitForHealthGate)({
+    ...(services === undefined ? {} : { services }),
     ps: composePsForGate(run, parsedPayload.projectName, paths),
     timeoutMs,
     stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
@@ -1949,7 +1972,9 @@ async function assertInPlaceHealthy(
   const gate = await gateComposeHealth(input, paths);
   if (!gate.ok) {
     throw new Error(
-      input.logSink.redactSummary(`The containers started but ${gate.detail}`),
+      input.logSink.redactSummary(
+        `The containers started but ${gate.detail}. They were left running and nothing was rolled back; the hostings and certificates were not updated.`,
+      ),
     );
   }
 }
@@ -1993,7 +2018,7 @@ export function reportHealthGate(
   const after = seconds(result.elapsedMs);
   if (result.unchecked.length === 0 && result.reported.length === 0) {
     const note =
-      "Every service is a job that finished with exit code 0; none reports a health check";
+      "Nothing in this deploy reports its own health: no service is running, or every one is a job that finished with exit code 0";
     line("stdout", note);
     logSink.health?.done(HEALTH_RESULT_TITLES.notChecked, note);
     return;
