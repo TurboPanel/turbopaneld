@@ -16,6 +16,7 @@ import {
   localProofAddresses,
   parseProofResponse,
   rawProofGet,
+  sweepTenantAcme,
   tenantAcmeCertificateRoot,
   tenantAcmeConfigPath,
   tenantAcmeIssuerConfig,
@@ -124,6 +125,7 @@ async function withHarness(
         );
       }
     },
+    isUnitActive: () => Promise.resolve(false),
     stopUnit: (unit) => {
       stopped.push(unit);
       return Promise.resolve(null);
@@ -303,7 +305,8 @@ test("an authority failure becomes a plain reason, and the issuer is still stopp
     const outcome = await issueTenantCertificates(h.layout, request(), h.deps);
     assertEquals(outcome.ok, false);
     if (!outcome.ok) {
-      assertStringIncludes(outcome.reason, "limiting requests");
+      assertStringIncludes(outcome.reason, "rate limited");
+      assert(/rate ?limit/i.test(outcome.reason));
       assert(!outcome.reason.includes("urn:ietf"));
     }
     assertEquals(h.stopped.length, 1);
@@ -359,4 +362,98 @@ test("a request past its start-by time or with an unsafe id is refused untouched
     assertEquals(unsafe.ok, false);
     assertEquals(h.calls, []);
   });
+});
+
+test("a re-send while this request's issuer is running touches nothing", async () => {
+  await withHarness(async (h) => {
+    const live = join(tenantAcmeCertificateRoot(h.layout), ISSUER_KEY, HOST);
+    await writeFixtureLeafPair(
+      live,
+      HOST,
+      "20260923000000Z",
+      "20270923000000Z",
+    );
+    const socket = tenantAcmeSocketPath(h.layout, "req_1");
+    await Deno.mkdir(h.layout.runDir, { recursive: true });
+    await Deno.writeTextFile(socket, "live");
+    const outcome = await issueTenantCertificates(h.layout, request(), {
+      ...h.deps,
+      isUnitActive: () => Promise.resolve(true),
+    });
+    assertEquals(outcome, {
+      ok: false,
+      reason: "an order for this request is already running",
+    });
+    assertEquals(await exists(live), true);
+    assertEquals(await exists(socket), true);
+    assertEquals(h.stopped, []);
+    assert(!h.calls.some((c) => c.startsWith("start ")));
+  });
+});
+
+test("the start-up sweep stops issuers and clears requests, stored pairs and sockets but keeps the account", async () => {
+  await withHarness(async (h) => {
+    const { layout } = h;
+    const pair = join(tenantAcmeCertificateRoot(layout), ISSUER_KEY, HOST);
+    await writeFixtureLeafPair(
+      pair,
+      HOST,
+      "20260923000000Z",
+      "20270923000000Z",
+    );
+    const account = join(
+      layout.stateDir,
+      "tenant-acme",
+      "caddy",
+      "acme",
+      "directory",
+      "users",
+      "account.json",
+    );
+    await Deno.mkdir(join(account, ".."), { recursive: true });
+    await Deno.writeTextFile(account, "{}");
+    await Deno.mkdir(join(layout.stateDir, "tenant-acme", "requests"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(tenantAcmeConfigPath(layout, "old"), "{}");
+    await Deno.mkdir(layout.runDir, { recursive: true });
+    await Deno.writeTextFile(tenantAcmeSocketPath(layout, "old"), "");
+    await Deno.writeTextFile(join(layout.runDir, "instance.sock"), "");
+    const stopped: string[] = [];
+    await sweepTenantAcme(layout, {
+      run: () =>
+        Promise.resolve({
+          ok: true,
+          stdout:
+            "turbopanel-tenant-acme@old.service loaded active running x\nturbopanel-tenant-acme@old2.service loaded failed failed x\n",
+          stderr: "",
+        }),
+      stopUnit: (unit) => {
+        stopped.push(unit);
+        return Promise.resolve(null);
+      },
+    });
+    assertEquals(stopped, [
+      "turbopanel-tenant-acme@old.service",
+      "turbopanel-tenant-acme@old2.service",
+    ]);
+    assertEquals(await exists(pair), false);
+    assertEquals(await exists(tenantAcmeConfigPath(layout, "old")), false);
+    assertEquals(await exists(tenantAcmeSocketPath(layout, "old")), false);
+    assertEquals(await exists(join(layout.runDir, "instance.sock")), true);
+    assertEquals(await exists(account), true);
+  });
+});
+
+test("a blackholed address is given up on within the bound, connect included", async () => {
+  const started = Date.now();
+  let failed = false;
+  try {
+    // A non-routable address: the connect either fails or hangs; both must end quickly.
+    await rawProofGet("10.255.255.1", "example.com", "/x", 1_000);
+  } catch {
+    failed = true;
+  }
+  assert(failed);
+  assert(Date.now() - started < 5_000);
 });

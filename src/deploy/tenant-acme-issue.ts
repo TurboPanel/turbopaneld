@@ -55,6 +55,7 @@ import {
   instanceAcmeIssuerConfig,
   instanceAcmeIssuerFailureLine,
   instanceAcmeIssuerKey,
+  instanceAcmeProblem,
   LETS_ENCRYPT_DIRECTORY_URL,
   LETS_ENCRYPT_STAGING_DIRECTORY_URL,
 } from "./instance-acme-issuer.ts";
@@ -64,6 +65,7 @@ export const TENANT_ACME_SERVICE_PREFIX = "turbopanel-tenant-acme@";
 /** How long the local proof routes of one request may stay (the order takes minutes). */
 const LOCAL_ROUTE_TTL_MS = 15 * 60 * 1000;
 const PROOF_FETCH_TIMEOUT_MS = 8_000;
+const CONNECT_TIMEOUT_MS = 10_000;
 const POLL_MS = 500;
 const CHALLENGE_PATH = "/.well-known/acme-challenge/";
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -177,6 +179,34 @@ export function parseProofResponse(text: string): ProofResponse {
  * custom `Host`, and the whole point is to reach a server by address while
  * asking for a name, so this speaks the request itself.
  */
+function connectWithin(
+  hostname: string,
+  port: number,
+  ms: number,
+): Promise<Deno.Conn> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      reject(new Error("connect timed out"));
+    }, ms);
+    Deno.connect({ hostname, port }).then((conn) => {
+      if (settled) {
+        conn.close();
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve(conn);
+    }, (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 export const rawProofGet: ProofGet = async (
   address,
   host,
@@ -184,14 +214,21 @@ export const rawProofGet: ProofGet = async (
   timeoutMs,
   port = 80,
 ) => {
-  const conn = await Deno.connect({ hostname: address, port });
+  // One bound for the whole request, connect included: a blackholed address
+  // must not hold the order for the system's own connect timeout.
+  const started = Date.now();
+  const conn = await connectWithin(
+    address,
+    port,
+    Math.min(timeoutMs, CONNECT_TIMEOUT_MS),
+  );
   const timer = setTimeout(() => {
     try {
       conn.close();
     } catch {
       // already closed
     }
-  }, timeoutMs);
+  }, Math.max(1, timeoutMs - (Date.now() - started)));
   try {
     const request =
       `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\nUser-Agent: turbopaneld\r\n\r\n`;
@@ -277,6 +314,8 @@ export type TenantIssueDeps = {
   preflightServer?: typeof withPreflightServer;
   startUnit?: (unit: string, run: InstanceAcmeCommand) => Promise<void>;
   stopUnit?: (unit: string, run: InstanceAcmeCommand) => Promise<Error | null>;
+  /** True while this request's issuer unit is running. */
+  isUnitActive?: (unit: string, run: InstanceAcmeCommand) => Promise<boolean>;
 };
 
 export type TenantIssueOutcome =
@@ -313,6 +352,14 @@ async function defaultStop(
 ): Promise<Error | null> {
   const problem = await systemctlUnit("stop", unit, run);
   return problem === null ? null : new Error(problem);
+}
+
+async function defaultIsActive(
+  unit: string,
+  run: InstanceAcmeCommand,
+): Promise<boolean> {
+  const result = await run("systemctl", ["is-active", unit]);
+  return ["active", "activating", "reloading"].includes(result.stdout.trim());
 }
 
 async function removeIfPresent(path: string, recursive = false): Promise<void> {
@@ -519,6 +566,15 @@ async function runOrder(
     return { ok: false, reason: "the request was not started in time" };
   }
   const unit = tenantAcmeUnit(request.requestId);
+  // A live issuer for this very request (a re-send while it works): leave it,
+  // its socket and its files alone. Starting again would do nothing, and
+  // clearing the leftover socket would cut the live issuer off.
+  if (await (deps.isUnitActive ?? defaultIsActive)(unit, run)) {
+    return {
+      ok: false,
+      reason: "an order for this request is already running",
+    };
+  }
   const stop = deps.stopUnit ?? defaultStop;
   const routes = deps.applyRoutes ?? applyProofRoutes;
   let routesApplied = false;
@@ -570,8 +626,21 @@ async function runOrder(
   }
 }
 
+/**
+ * The control plane waits about an hour on a reason that says "rate limited", so
+ * orders from this server say it in those words (the shared text for the
+ * control plane's own names reads differently).
+ */
+const RATE_LIMITED_REASON =
+  "Let's Encrypt has rate limited this name; it will be retried in about an hour (a week for repeated certificates)";
+
 function plainReason(err: unknown): string {
   if (err instanceof IssueStop) return err.message;
+  if (
+    err instanceof Error && instanceAcmeProblem(err.message) === "rate-limited"
+  ) {
+    return RATE_LIMITED_REASON;
+  }
   return plainInstanceAcmeFailure(err instanceof Error ? err.message : "");
 }
 
@@ -617,4 +686,57 @@ async function cleanUp(
     await removeIfPresent(tenantAcmeLogPath(layout, request.requestId));
     await removeIfPresent(tenantAcmeSocketPath(layout, request.requestId));
   });
+}
+
+/**
+ * At start-up, before any request is taken: a daemon restart (the hourly update
+ * check restarts it) can leave an issuer running with nobody to stop it, which
+ * would keep retrying after its proof routes expire and leave a private key on
+ * disk. Stop every issuer unit and delete the per-request config and logs, the
+ * stored certificates and keys and the leftover sockets. The shared account
+ * store (`caddy/acme`) stays, so the server keeps its one ACME account.
+ */
+export async function sweepTenantAcme(
+  layout: LayoutPaths,
+  deps: {
+    run?: InstanceAcmeCommand;
+    stopUnit?: TenantIssueDeps["stopUnit"];
+  } = {},
+): Promise<void> {
+  const run = deps.run ?? defaultCommand;
+  const stop = deps.stopUnit ?? defaultStop;
+  await withInstanceAcmeWindowLock(async () => {
+    const listed = await run("systemctl", [
+      "list-units",
+      "--all",
+      "--plain",
+      "--no-legend",
+      `${TENANT_ACME_SERVICE_PREFIX}*`,
+    ]);
+    const units = listed.stdout.split("\n")
+      .map((line) => line.trim().split(/\s+/)[0] ?? "")
+      .filter((name) =>
+        name.startsWith(TENANT_ACME_SERVICE_PREFIX) &&
+        /^[A-Za-z0-9_@.-]+$/.test(name)
+      );
+    await forEachSequential(units, async (unit) => {
+      const problem = await stop(unit, run);
+      if (problem) logWarn("deploy", `stopping ${unit} failed:`, problem);
+    });
+    await removeIfPresent(join(tenantAcmeDataDir(layout), "requests"), true);
+    await removeIfPresent(tenantAcmeCertificateRoot(layout), true);
+    await removeSockets(layout.runDir);
+  });
+}
+
+async function removeSockets(runDir: string): Promise<void> {
+  try {
+    for await (const entry of Deno.readDir(runDir)) {
+      if (/^tenant-acme-[A-Za-z0-9_-]+\.sock$/.test(entry.name)) {
+        await removeIfPresent(join(runDir, entry.name));
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
 }

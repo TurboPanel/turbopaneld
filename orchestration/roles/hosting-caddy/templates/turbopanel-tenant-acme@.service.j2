@@ -26,5 +26,9 @@ AmbientCapabilities=
 CapabilityBoundingSet=
 PrivateTmp=true
 ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_state_dir }}/tenant-acme/requests/%i.json
+# Longer than the daemon's wait for a pair (3 minutes) and shorter than the
+# 15 minutes its proof routes live: an issuer a restarted daemon forgot about
+# stops itself before the routes expire instead of retrying with no route.
+RuntimeMaxSec=600
 TimeoutStopSec=20
 Restart=no

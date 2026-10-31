@@ -101,3 +101,46 @@ test("the same request arriving twice at once is one order", async () => {
   await first;
   assertEquals(runs, 1);
 });
+
+test("requests wait for the start-up sweep", async () => {
+  const order: string[] = [];
+  let finish: () => void = () => {};
+  const handler = new AcmeIssueHandler({
+    layout: {} as LayoutPaths,
+    send: () => true,
+    report: () => Promise.resolve(),
+    sweep: () =>
+      new Promise<void>((resolve) => {
+        finish = () => {
+          order.push("swept");
+          resolve();
+        };
+      }),
+    issue: () => {
+      order.push("issued");
+      return Promise.resolve({ ok: false, reason: "x" });
+    },
+  });
+  void handler.start();
+  const pending = handler.handleRequest(request());
+  await Promise.resolve();
+  assertEquals(order, []);
+  finish();
+  await pending;
+  assertEquals(order, ["swept", "issued"]);
+});
+
+test("nothing is begun when the started report could not be sent", async () => {
+  let runs = 0;
+  const handler = new AcmeIssueHandler({
+    layout: {} as LayoutPaths,
+    send: () => false,
+    report: () => Promise.resolve(),
+    issue: () => {
+      runs += 1;
+      return Promise.resolve({ ok: false, reason: "x" });
+    },
+  });
+  await handler.handleRequest(request());
+  assertEquals(runs, 0);
+});
