@@ -67,27 +67,85 @@ export function proofImportPattern(
 
 /**
  * A usable forward target: a real address that is not loopback, unspecified,
- * link-local or multicast. Returns the lower-case address, or null. Private
+ * link-local or multicast, in any spelling (brackets and a zone id are dropped;
+ * IPv6 is judged on its bytes). Returns the lower-case address, or null. Private
  * LAN ranges (10/8, 172.16/12, 192.168/16) stay allowed on purpose: helpers in
  * one datacenter reach the issuing server by its private address.
  */
 export function normalizeProofTarget(raw: string): string | null {
-  const text = raw.trim().toLowerCase();
-  const family = isIP(text);
-  if (family === 4) {
-    const [a, b] = text.split(".").map(Number);
-    if (a === 0 || a === 127 || a >= 224) return null;
-    if (a === 169 && b === 254) return null;
-    return text;
+  let text = raw.trim().toLowerCase();
+  if (text.startsWith("[") && text.endsWith("]")) text = text.slice(1, -1);
+  const zone = text.indexOf("%");
+  if (zone >= 0) text = text.slice(0, zone);
+  if (isIP(text) === 4) return allowedIpv4(text) ? text : null;
+  const bytes = parseIpv6Bytes(text);
+  return bytes !== null && allowedIpv6(bytes) ? text : null;
+}
+
+function allowedIpv4(text: string): boolean {
+  const [a, b] = text.split(".").map(Number);
+  if (a === 0 || a === 127 || a >= 224) return false;
+  return !(a === 169 && b === 254);
+}
+
+/** The 16 bytes of an IPv6 text (`::` and a trailing dotted IPv4 handled), or null. */
+export function parseIpv6Bytes(text: string): Uint8Array | null {
+  if (isIP(text) !== 6) return null;
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (part: string): number[] | null => {
+    if (part === "") return [];
+    const out: number[] = [];
+    const pieces = part.split(":");
+    for (const [i, piece] of pieces.entries()) {
+      if (piece.includes(".")) {
+        const octets = piece.split(".").map(Number);
+        if (i !== pieces.length - 1 || octets.length !== 4) return null;
+        out.push(octets[0] * 256 + octets[1], octets[2] * 256 + octets[3]);
+      } else {
+        out.push(Number.parseInt(piece, 16));
+      }
+    }
+    return out.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff)
+      ? out
+      : null;
+  };
+  const head = groups(halves[0]);
+  const tail = halves.length === 2 ? groups(halves[1]) : [];
+  if (head === null || tail === null) return null;
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 2 ? fill < 1 : fill !== 0) return null;
+  const all = [
+    ...head,
+    ...new Array<number>(Math.max(fill, 0)).fill(0),
+    ...tail,
+  ];
+  const bytes = new Uint8Array(16);
+  all.forEach((group, i) => {
+    bytes[i * 2] = group >> 8;
+    bytes[i * 2 + 1] = group & 0xff;
+  });
+  return bytes;
+}
+
+/**
+ * IPv6 rules on the bytes, so no spelling gets round them: unspecified,
+ * loopback and every address that embeds an IPv4 one (v4-compatible `::a.b.c.d`,
+ * v4-mapped `::ffff:a.b.c.d`, NAT64 `64:ff9b::/96` and `64:ff9b:1::/48`) are
+ * refused outright, as are link-local `fe80::/10` and multicast `ff00::/8`.
+ * Unique-local `fc00::/7` stays allowed (LAN).
+ */
+function allowedIpv6(b: Uint8Array): boolean {
+  const zero = (from: number, to: number) =>
+    b.subarray(from, to).every((v) => v === 0);
+  if (zero(0, 12)) return false; // ::, ::1 and v4-compatible
+  if (zero(0, 10) && b[10] === 0xff && b[11] === 0xff) return false; // v4-mapped
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
+    if (zero(4, 12)) return false; // 64:ff9b::/96
+    if (b[4] === 0x00 && b[5] === 0x01) return false; // 64:ff9b:1::/48
   }
-  if (family === 6) {
-    if (text === "::" || text === "::1") return null;
-    if (/^fe[89ab]/.test(text) || text.startsWith("ff")) return null;
-    // An IPv4 address in IPv6 clothes could name loopback or a private host.
-    if (text.startsWith("::ffff:") || text.startsWith("64:ff9b:")) return null;
-    return text;
-  }
-  return null;
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return false; // link-local
+  return b[0] !== 0xff; // multicast
 }
 
 /** `http://1.2.3.4:80` or `http://[::1]:80`. */
