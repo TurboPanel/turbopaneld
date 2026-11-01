@@ -29,60 +29,72 @@ export type PanelIdentityPin = {
 
 const FINGERPRINT = /^[A-Za-z0-9_-]{43}$/;
 const PINNED_BY: readonly string[] = ["install", "upgrade", "unsafe"];
-const KEYS = ["current", "next", "keyset", "urls", "pinned_by", "updated"];
+const KEYS = [
+  "current",
+  "next",
+  "keyset",
+  "urls",
+  "pinned_by",
+  "updated",
+] as const;
 
-function fields(text: string): Map<string, string> {
+type PinFields = Record<(typeof KEYS)[number], string>;
+
+function fields(text: string): PinFields {
   const map = new Map<string, string>();
   for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
     const at = line.indexOf("=");
     if (at < 1) throw new TypeError(`panel-identity: bad line "${line}"`);
     const key = line.slice(0, at);
-    if (!KEYS.includes(key) || map.has(key)) {
+    if (!(KEYS as readonly string[]).includes(key) || map.has(key)) {
       throw new TypeError(`panel-identity: unexpected key "${key}"`);
     }
     map.set(key, line.slice(at + 1));
   }
+  const found: Partial<PinFields> = {};
   for (const key of KEYS) {
-    if (!map.has(key)) throw new TypeError(`panel-identity: missing ${key}`);
+    const value = map.get(key);
+    if (value === undefined) {
+      throw new TypeError(`panel-identity: missing ${key}`);
+    }
+    found[key] = value;
   }
-  return map;
+  return found as PinFields;
 }
 
 /** Parse the pin file; throws a TypeError naming the first problem. */
 export function parsePanelIdentityPin(text: string): PanelIdentityPin {
-  const map = fields(text);
-  const pinnedBy = map.get("pinned_by")!;
+  const values = fields(text);
+  const pinnedBy = values.pinned_by;
   if (!PINNED_BY.includes(pinnedBy)) {
     throw new TypeError(
       "panel-identity: pinned_by is not install, upgrade or unsafe",
     );
   }
-  const current = map.get("current")!;
+  const current = values.current;
   const unsafe = pinnedBy === "unsafe";
   if (current === "" ? !unsafe : !FINGERPRINT.test(current)) {
     throw new TypeError(
       "panel-identity: current is not a 43-character fingerprint",
     );
   }
-  const next = map.get("next")!;
+  const next = values.next;
   if (next !== "" && !FINGERPRINT.test(next)) {
     throw new TypeError(
       "panel-identity: next is not a 43-character fingerprint",
     );
   }
-  const keysetText = map.get("keyset")!;
-  if (!/^\d+$/.test(keysetText)) {
+  if (!/^\d+$/.test(values.keyset)) {
     throw new TypeError("panel-identity: keyset is not an integer");
   }
-  const urlsText = map.get("urls")!;
   return {
     current,
     next: next === "" ? null : next,
-    keyset: Number(keysetText),
-    urls: urlsText === "" ? [] : urlsText.split(","),
+    keyset: Number(values.keyset),
+    urls: values.urls === "" ? [] : values.urls.split(","),
     pinnedBy: pinnedBy as PanelPinnedBy,
-    updated: map.get("updated")!,
+    updated: values.updated,
   };
 }
 

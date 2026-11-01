@@ -337,6 +337,19 @@ test("the same key again rewrites only urls and the time", async () => {
   assertStringIncludes(text, `current=${FP_A}`);
 });
 
+test("a verified token pins a host that was installed without a key", async () => {
+  const state = await pinState(
+    `printf 'current=\\nnext=\\nkeyset=0\\nurls=\\npinned_by=unsafe\\nupdated=x\\n' > "$INSTALL_ROOT/lib/panel-identity"
+printf 'host=h\\nhosts=h\\npanel_key=\\n' > "$INSTALL_ROOT/lib/update-origin"`,
+    `PANEL_FINGERPRINT=${FP_A}; PANEL_NEXT_FINGERPRINT=''; PANEL_KEYSET=1; PANEL_URLS=https://p.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false`,
+  );
+  assertEquals(state.code, 0, state.stderr);
+  assertStringIncludes(state.stdout, "action=write");
+  const text = await Deno.readTextFile(join(state.root, "lib/panel-identity"));
+  assertStringIncludes(text, `current=${FP_A}`);
+  assertStringIncludes(text, "pinned_by=install");
+});
+
 test("a different key, an unsafe downgrade or a disagreeing origin is refused", async () => {
   let state = await pinState(
     EXISTING(FP_A),

@@ -3284,6 +3284,13 @@ tp_resolve_panel_pin() {
     tp_print_error "The panel key pin and the update origin disagree; refusing to continue."
     return 1
   fi
+  if [ "$_pp_have_file" = true ] && [ -z "$_pp_cur" ] && [ -n "$PANEL_FINGERPRINT" ]; then
+    # Installed with --unsafe-no-panel-key, nothing pinned: a verified token
+    # with a key pins it now.
+    PIN_ACTION=write
+    PIN_HOSTS="$PANEL_URLS"
+    return 0
+  fi
   if [ "$_pp_have_file" = true ]; then
     if [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -n "$_pp_cur" ]; then
       tp_print_error "This server is pinned to a panel key; --unsafe-no-panel-key cannot remove it."
