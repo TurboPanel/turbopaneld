@@ -95,6 +95,9 @@ R_UNITS="$P/etc/systemd/system"
 R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
 R_WG="$P/etc/wireguard"
 R_SYSCTL="$P/etc/sysctl.d"
+# systemd keeps one stamp file per persistent timer here; `rm` may remove only
+# TurboPanel's own (stamp-turbopanel-*.timer), so a deleted timer leaves none.
+R_TIMER_STAMPS="$P/var/lib/systemd/timers"
 # A principal home root the operator moved is recorded root-side, next to this
 # script — never taken from the daemon's own environment.
 if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
@@ -254,6 +257,12 @@ tp_path_class() {
   if [ "$_pc" = "$R_WG" ] || [ "$_pc" = "$R_WG/tp0.conf" ]; then
     echo wireguard
     return 0
+  fi
+  if [ "$_pc_parent" = "$R_TIMER_STAMPS" ]; then
+    case "$_pc_name" in
+      stamp-turbopanel-*.timer) tp_unit_name_ok "${_pc_name#stamp-}" && { echo timerstamp; return 0; } ;;
+    esac
+    return 1
   fi
   if [ "$_pc_parent" = "$R_SYSCTL" ]; then
     case "$_pc_name" in
@@ -2364,7 +2373,7 @@ tp_verb_rm() {
   [ $# -eq 1 ] || tp_die "rm takes one path"
   _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
   case "$_rm_class" in
-    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir) ;;
+    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir|timerstamp) ;;
     # TurboFabric teardown removes the tp0 config, never the directory.
     wireguard) [ "$1" = "$R_WG/tp0.conf" ] || tp_die "refusing path $1" ;;
     *) tp_die "refusing path $1" ;;

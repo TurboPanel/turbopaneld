@@ -46,6 +46,9 @@ export type UnitSetResult = {
   removed: string[];
 };
 
+/** Where systemd keeps the stamp file of each persistent timer. */
+export const TIMER_STAMP_DIR = "/var/lib/systemd/timers";
+
 const decoder = new TextDecoder();
 
 /** Run a host command directly (the default for {@link RunFn}). */
@@ -138,6 +141,7 @@ async function removeUnit(
   unitDir: string,
   unit: string,
   family: UnitSetFamily,
+  stampDir: string,
 ): Promise<void> {
   // `disable --now` stops the timer as well as unlinking it from timers.target;
   // deleting the file first would leave a running timer systemd can no longer
@@ -149,16 +153,17 @@ async function removeUnit(
       `${family.label} timer disable failed unit=${unit}: ${disable.stderr}`,
     );
   }
-  await forEachSequential([".timer", ".service"], async (suffix) => {
+  // The persistent timer's stamp file survives the stop and the unit files;
+  // remove it too, after the stop so systemd cannot write it back.
+  const paths = [
+    join(unitDir, `${unit}.timer`),
+    join(unitDir, `${unit}.service`),
+    join(stampDir, `stamp-${unit}.timer`),
+  ];
+  await forEachSequential(paths, async (path) => {
     const rm = await runFn(
       "sudo",
-      hostSudoArgs([
-        "-n",
-        "rm",
-        "-f",
-        "--",
-        join(unitDir, `${unit}${suffix}`),
-      ]),
+      hostSudoArgs(["-n", "rm", "-f", "--", path]),
     );
     if (!rm.success) {
       logWarn(
@@ -178,6 +183,7 @@ export async function applyUnitSet(
   family: UnitSetFamily,
   runFn: RunFn,
   unitDir: string,
+  stampDir: string = TIMER_STAMP_DIR,
 ): Promise<UnitSetResult> {
   const desired = new Map<string, { changed: boolean }>();
   // Phase 1 — install every file. Nothing is reloaded or enabled yet, so a
@@ -198,7 +204,7 @@ export async function applyUnitSet(
   const stale = installed.filter((unit) => !desired.has(unit));
   await forEachSequential(
     stale,
-    (unit) => removeUnit(runFn, unitDir, unit, family),
+    (unit) => removeUnit(runFn, unitDir, unit, family, stampDir),
   );
 
   const changed = [...desired]
@@ -231,12 +237,13 @@ export async function removeUnitSet(
   family: UnitSetFamily,
   runFn: RunFn,
   unitDir: string,
+  stampDir: string = TIMER_STAMP_DIR,
 ): Promise<number> {
   const installed = await installedTimerUnits(runFn, unitDir, family.prefix);
   if (installed.length === 0) return 0;
   await forEachSequential(
     installed,
-    (unit) => removeUnit(runFn, unitDir, unit, family),
+    (unit) => removeUnit(runFn, unitDir, unit, family, stampDir),
   );
   const reload = await systemctl(runFn, ["daemon-reload"]);
   if (!reload.success) {

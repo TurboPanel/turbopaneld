@@ -4816,6 +4816,35 @@ test("the sysctl drop-in: only the forwarding switch, through install and tee", 
   });
 });
 
+test("rm removes only TurboPanel's own timer stamp files", async () => {
+  const exists = (path: string) =>
+    Deno.lstat(path).then(() => true, () => false);
+  await withHost(async (host) => {
+    const dir = host.path("var/lib/systemd/timers");
+    await Deno.mkdir(dir, { recursive: true });
+    const own =
+      `${dir}/stamp-turbopanel-backup-0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b.timer`;
+    await Deno.writeTextFile(own, "");
+    await Deno.writeTextFile(`${dir}/stamp-fstrim.timer`, "");
+    await Deno.writeTextFile(`${dir}/stamp-turbopanel-x.service`, "");
+    const ok = await host.run(["rm", "-f", "--", own]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(await exists(own), false);
+    for (
+      const path of [
+        `${dir}/stamp-fstrim.timer`,
+        `${dir}/stamp-turbopanel-x.service`,
+        `${dir}/stamp-turbopanel-../x.timer`,
+        `${dir}/sub/stamp-turbopanel-x.timer`,
+        dir,
+      ]
+    ) await refused(host, ["rm", "-f", "--", path]);
+    for (const kept of ["stamp-fstrim.timer", "stamp-turbopanel-x.service"]) {
+      assertEquals(await exists(`${dir}/${kept}`), true, kept);
+    }
+  });
+});
+
 test("the sshd drop-in: only the renderer's Match blocks, never a global or root-capable directive", async () => {
   await withHost(async (host) => {
     const dest = host.path("etc/ssh/sshd_config.d/60-turbopanel.conf");

@@ -27,7 +27,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     recorded root-side in `lib/tp-host.conf`, never read from `daemon.env` —
     `/etc/ssh/turbopanel`) plus named files (`turbopanel-*` units,
     `60-turbopanel.conf`, `/etc/wireguard/tp0.conf`,
-    `/etc/sysctl.d/99-turbopanel-*.conf`, operator storage under
+    `/etc/sysctl.d/99-turbopanel-*.conf`, `rm` of `/var/lib/systemd/timers/stamp-turbopanel-*.timer` (a deleted timer's stamp file, nothing else in that folder), operator storage under
     `/mnt|/media|/data|/srv` for principal-owned volumes);
   - pins every path (`cd -P` + `pwd -P` equality, so no component is a
     symlink) and works relative to the pinned directory; writes go through a

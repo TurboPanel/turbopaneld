@@ -206,6 +206,8 @@ const CRON_TIMER = cronTimerPath(
 const BACKUP_POLICY = "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b";
 const BACKUP_SERVICE = backupServicePath(BACKUP_POLICY, UNITS);
 const BACKUP_TIMER = backupTimerPath(BACKUP_POLICY, UNITS);
+const BACKUP_TIMER_STAMP =
+  `${P}/var/lib/systemd/timers/stamp-turbopanel-backup-${BACKUP_POLICY}.timer`;
 const BACKUP_TIMER_UNIT = `turbopanel-backup-${BACKUP_POLICY}.timer`;
 const unitSetup = (text: string): CallSiteSetup => ({
   files: { [STAGED]: underPrefix(text) },
@@ -626,10 +628,11 @@ const SITES: CallSite[] = [
     argv: ["ls", "-1", "--", UNITS],
   }),
   tpHost(
-    'src/deploy/systemd-unit-set.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
+    'src/deploy/systemd-unit-set.ts|["-n","rm","-f","--",path]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-cron-svc1-backup.timer`] },
     { argv: ["rm", "-f", "--", BACKUP_TIMER] },
     { argv: ["rm", "-f", "--", BACKUP_SERVICE] },
+    { argv: ["rm", "-f", "--", BACKUP_TIMER_STAMP] },
   ),
 
   // --- hosting Caddy --------------------------------------------------------

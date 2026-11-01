@@ -66,6 +66,16 @@ systemd keeps a stamp file per persistent timer in `/var/lib/systemd/timers`
 there (`TP_TIMER_STAMP_DIR`, listed in the host-file inventory) and never any
 other stamp file or the folder.
 
+The purge also deletes TurboPanel's own nftables tables by exact name
+(`TP_NFT_TABLES`: `inet turbopanel_ingress_guard`, `turbopanel_build` and
+`turbopanel_php`), listed in the firewall inventory and removed by
+`tp_remove_nft_tables` after the units are gone. It never flushes the ruleset
+or touches any other table; a missing `nft` is a skip. A role, host script or
+daemon code that loads a new table must add its name to `TP_NFT_TABLES`;
+`scripts/purge-coverage.test.ts` fails otherwise. The iptables-nft tables
+that Docker and the host firewall share (the Docker note above) are a
+different thing and stay.
+
 The purge runs the removal steps, then `tp_purge_hosted_data`. Detection
 still only changes labels; the purge runs for every server type. Each step
 checks what is actually present and is safe to run again after an earlier run

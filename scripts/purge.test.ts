@@ -45,6 +45,7 @@ const CONSTANTS = [
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
   "TP_TIMER_STAMP_DIR",
+  "TP_NFT_TABLES",
   "TP_DOCKER_PACKAGES",
   "TP_DOCKER_ENGINE_PACKAGES",
   "TP_DPKG_ON_DISK",
@@ -2738,4 +2739,99 @@ test("the summary says IPv4 forwarding stays on until a reboot only when it is o
     "net.ipv4.ip_forward) stays on until this host reboots",
   );
   assert(!(await purgeNotes(false, null, "0")).includes("ip_forward"));
+});
+
+// A stateful fake `nft`: `list tables` prints the loaded tables, `delete table`
+// drops one and logs the call.
+async function fakeNft(
+  tables: string[],
+): Promise<{ bin: string; log: string }> {
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-nft-" });
+  const log = join(bin, "calls");
+  const state = join(bin, "nft.tables");
+  await Deno.writeTextFile(log, "");
+  await Deno.writeTextFile(state, tables.map((t) => `table ${t}\n`).join(""));
+  const script = [
+    "#!/bin/sh",
+    'case "$1 $2" in',
+    `  "list tables") cat ${state} ;;`,
+    '  "delete table")',
+    `    echo "nft $*" >> ${log}`,
+    `    grep -vx "table $3 $4" ${state} > ${state}.new; mv ${state}.new ${state}`,
+    "    ;;",
+    "esac",
+    "",
+  ].join("\n");
+  await Deno.writeTextFile(join(bin, "nft"), script, { mode: 0o755 });
+  return { bin, log };
+}
+
+const NFT_FUNCTIONS = ["tp_remove_nft_tables"];
+
+test("purge deletes TurboPanel's nft tables by name and leaves every other table alone", async () => {
+  const { bin, log } = await fakeNft([
+    "inet turbopanel_ingress_guard",
+    "inet turbopanel_build",
+    "inet turbopanel_php",
+    "inet filter",
+    "ip nat",
+    "inet turbopanel_operator_own",
+  ]);
+  const result = await runPurgeSh(NFT_FUNCTIONS, "tp_remove_nft_tables", {
+    PATH: `${bin}:${BASE_PATH}`,
+  });
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals((await Deno.readTextFile(log)).trim().split("\n"), [
+    "nft delete table inet turbopanel_ingress_guard",
+    "nft delete table inet turbopanel_build",
+    "nft delete table inet turbopanel_php",
+  ]);
+  assertEquals(
+    (await Deno.readTextFile(join(bin, "nft.tables"))).trim().split("\n"),
+    ["table inet filter", "table ip nat", "table inet turbopanel_operator_own"],
+  );
+  // A second pass finds nothing to delete.
+  await Deno.writeTextFile(log, "");
+  const again = await runPurgeSh(NFT_FUNCTIONS, "tp_remove_nft_tables", {
+    PATH: `${bin}:${BASE_PATH}`,
+  });
+  assertEquals(again.code, 0, again.stderr);
+  assertEquals(await Deno.readTextFile(log), "");
+});
+
+test("a dry run deletes no nft table", async () => {
+  const { bin, log } = await fakeNft(["inet turbopanel_php"]);
+  const result = await runPurgeSh(
+    NFT_FUNCTIONS,
+    "DRY_RUN=true\ntp_remove_nft_tables",
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(await Deno.readTextFile(log), "");
+});
+
+test("without nft the table step is skipped, not failed", async () => {
+  const empty = await Deno.makeTempDir({ prefix: "tp-purge-nonft-" });
+  const result = await runPurgeSh(
+    NFT_FUNCTIONS,
+    'tp_remove_nft_tables\necho "fail=$TP_FAIL_COUNT"',
+    { PATH: `${empty}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertStringIncludes(result.stdout, "fail=0");
+});
+
+test("the inventory lists only TurboPanel's nft tables", async () => {
+  const { bin } = await fakeNft([
+    "inet turbopanel_php",
+    "inet filter",
+    "inet turbopanel_operator_own",
+  ]);
+  const result = await runPurgeSh(
+    ["tp_inventory_nft_tables", "tp_inv_skip", "tp_inv_warn"],
+    ': > "$TP_TMP/inv.chains"\ntp_inventory_nft_tables\ncat "$TP_TMP/inv.chains"',
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(result.stdout.trim(), "nft inet turbopanel_php");
 });

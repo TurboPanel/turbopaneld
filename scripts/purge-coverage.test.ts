@@ -947,6 +947,47 @@ test("every firewall chain the daemon or a role names is a TP-* chain or a paren
   );
 });
 
+// Every nftables table the install loads must be one purge.sh deletes by name
+// (TP_NFT_TABLES). A table nobody removes keeps filtering after the purge.
+const NFT_TABLE_RE =
+  /\btable\s+(?:inet|ip6?|arp|bridge|netdev)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+
+async function nftTablesNamed(): Promise<Map<string, string[]>> {
+  const found = new Map<string, string[]>();
+  const files = [...await installFiles(), ...await daemonSourceFiles()];
+  for (const file of files) {
+    const text = file.endsWith(".ts")
+      ? stripTsComments(await Deno.readTextFile(file))
+      : stripComments(await Deno.readTextFile(file));
+    for (const m of text.matchAll(NFT_TABLE_RE)) {
+      found.set(m[1], [...(found.get(m[1]) ?? []), relative(repo, file)]);
+    }
+  }
+  return found;
+}
+
+test("every nft table the install or the daemon loads is deleted by purge.sh", async () => {
+  const listed = shellList(await purgeCode(), "TP_NFT_TABLES");
+  const named = await nftTablesNamed();
+  for (
+    const expected of [
+      "turbopanel_ingress_guard",
+      "turbopanel_build",
+      "turbopanel_php",
+    ]
+  ) {
+    assert(named.has(expected), `the scan no longer sees ${expected}`);
+  }
+  const missing = [...named].filter(([name]) => !listed.includes(name)).map((
+    [name, files],
+  ) => `${name} (${[...new Set(files)].join(", ")})`);
+  assertEquals(
+    missing,
+    [],
+    "add the table's exact name to TP_NFT_TABLES in purge.sh",
+  );
+});
+
 test("a drop-in built from a folder constant or variable is guarded too", async () => {
   const texts = await scannedTexts();
   const purge = await Deno.readTextFile(purgePath);
