@@ -2362,13 +2362,23 @@ export class InstanceClient {
   ): Promise<void> {
     let ok = false;
     let error: string | undefined;
-    try {
-      const token = await this.#resolveTunnelToken(message);
-      await clientTestHooks.writeInstanceTunnelToken(token);
-      ok = true;
-    } catch (err) {
-      error = err instanceof Error ? err.message : String(err);
-      logError("tunnel-token", "failed:", sanitizeForLog(error));
+    if (this.#isColocatedSocketMode()) {
+      try {
+        const token = await this.#resolveTunnelToken(message);
+        await clientTestHooks.writeInstanceTunnelToken(token);
+        ok = true;
+      } catch (err) {
+        error = err instanceof Error ? err.message : String(err);
+        logError("tunnel-token", "failed:", sanitizeForLog(error));
+      }
+    } else {
+      // The control plane's own tunnel runs only beside it: a remote server
+      // never starts a connector for it, whoever sends the token.
+      error = TUNNEL_TOKEN_REMOTE_REFUSAL;
+      logWarn(
+        "tunnel-token",
+        "refused: this daemon is not on the control plane host",
+      );
     }
 
     const result: DaemonMessage = {
@@ -3769,6 +3779,10 @@ export function fullJitterMs(floor: number, ceiling: number): number {
   if (hi <= lo) return lo;
   return lo + Math.floor(Math.random() * (hi - lo + 1)); // NOSONAR typescript:S2245 — jitter timing only, not a security context
 }
+
+/** The answer a remote server gives to a control plane tunnel token. */
+export const TUNNEL_TOKEN_REMOTE_REFUSAL =
+  "tunnel-token is accepted only on the control plane host";
 
 function isColocatedSocketMode(config: InstanceConfig): boolean {
   return config.kind === "socket";
