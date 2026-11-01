@@ -88,7 +88,7 @@ export async function loadOrCreateSealingKey(
 ): Promise<LoadedSealingKey> {
   const path = join(stateDir, SEALING_KEY_FILE);
   let file = await readSealingKeyFile(path);
-  if (file === null || file.serverKeyId !== serverKeyId) {
+  if (file?.serverKeyId !== serverKeyId) {
     file = await generateSealingKeyFile(serverKeyId);
     await ensureDaemonDir(stateDir, 0o750);
     await writeDaemonFile(path, JSON.stringify(file), 0o600);

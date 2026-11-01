@@ -1,3 +1,4 @@
+import { forEachSequential } from "../util/sequential.ts";
 import { PASSWORD_HASH_RE } from "./ensure-principal.ts";
 
 type DecryptSecretsFn = (
@@ -32,8 +33,11 @@ export async function openPrincipalPasswordEnvelopes<T extends PasswordCarrier>(
   }
   const envelopes = sealed.map((p) => p.passwordHashEnvelope as string);
   const opened = new Map<string, string>();
+  const batches: string[][] = [];
   for (let i = 0; i < envelopes.length; i += OPEN_BATCH) {
-    const batch = envelopes.slice(i, i + OPEN_BATCH);
+    batches.push(envelopes.slice(i, i + OPEN_BATCH));
+  }
+  await forEachSequential(batches, async (batch) => {
     const plaintexts = await decryptSecrets(batch);
     batch.forEach((envelope, index) => {
       const plain = plaintexts[index];
@@ -42,7 +46,7 @@ export async function openPrincipalPasswordEnvelopes<T extends PasswordCarrier>(
       }
       opened.set(envelope, plain);
     });
-  }
+  });
   return principals.map((principal) => {
     const envelope = principal.passwordHashEnvelope;
     if (envelope === undefined) return principal;

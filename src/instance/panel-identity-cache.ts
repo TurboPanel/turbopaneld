@@ -93,7 +93,7 @@ export async function parsePanelIdentity(
   const keys = doc && Array.isArray(doc.keys) ? doc.keys : [];
   const current = keys.map(record).find((entry) => entry?.role === "current");
   const seal = record(doc?.seal);
-  if (!doc || doc.v !== 1 || !current || !seal) return null;
+  if (doc?.v !== 1 || !current || !seal) return null;
   if (typeof doc.keyset !== "number" || !Number.isInteger(doc.keyset)) {
     return null;
   }

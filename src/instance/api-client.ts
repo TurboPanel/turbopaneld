@@ -6,6 +6,7 @@ import {
 } from "../crypto/hpke.ts";
 import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { logWarn } from "../util/logger.ts";
+import { mapSequential } from "../util/sequential.ts";
 import { retryTransient, type RetryView } from "../util/retry-fetch.ts";
 import {
   IDENTITY_DOCUMENT_PATH,
@@ -401,30 +402,14 @@ export class DaemonApiClient {
   ): Promise<(string | null)[]> {
     const sealing = this.#options.sealing;
     if (body.sealed !== undefined) {
-      if (
-        body.plaintexts !== undefined || !sealing ||
-        !Array.isArray(body.sealed) || body.sealed.length !== count
-      ) {
+      if (body.plaintexts !== undefined || !sealing) {
         throw new DaemonApiError(500, "Invalid secrets/decrypt response");
       }
-      const opened: (string | null)[] = [];
-      for (const entry of body.sealed) {
-        if (entry === null) {
-          opened.push(null);
-          continue;
-        }
-        if (!isHpkeEnvelope(entry)) {
-          throw new DaemonApiError(500, "Invalid secrets/decrypt response");
-        }
-        try {
-          opened.push(await sealing.open(entry));
-        } catch {
-          throw new DaemonApiError(
-            500,
-            "sealed secrets/decrypt answer could not be opened",
-          );
-        }
-      }
+      const opened = await this.#openSealedAnswers(
+        sealing,
+        body.sealed,
+        count,
+      );
       await sealing.markTrustSealed();
       return opened;
     }
@@ -441,6 +426,30 @@ export class DaemonApiClient {
     return body.plaintexts.map((entry) =>
       typeof entry === "string" ? entry : null
     );
+  }
+
+  async #openSealedAnswers(
+    sealing: DaemonSealingContext,
+    sealed: unknown,
+    count: number,
+  ): Promise<(string | null)[]> {
+    if (!Array.isArray(sealed) || sealed.length !== count) {
+      throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+    }
+    return await mapSequential(sealed, async (entry) => {
+      if (entry === null) return null;
+      if (!isHpkeEnvelope(entry)) {
+        throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+      }
+      try {
+        return await sealing.open(entry);
+      } catch {
+        throw new DaemonApiError(
+          500,
+          "sealed secrets/decrypt answer could not be opened",
+        );
+      }
+    });
   }
 
   /**
