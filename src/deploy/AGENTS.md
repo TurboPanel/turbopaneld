@@ -590,7 +590,7 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   before. Nothing is deleted on that signal. `environment.stop` removes the
   daemon's own files (manifest, compose files) right after the containers are
   down, before the remaining cleanup, so a later failure cannot leave a stopped
-  stack that the next start brings back; `./data` stays unless the stop is a
+  stack that the next start brings back; relative-bind data stays unless the stop is a
   delete (`removeDeploymentDir`).
   `environment.stop` deletes the `/run` tree. Build secrets belong on Compose
   `build.secrets`, not `build.args`.
