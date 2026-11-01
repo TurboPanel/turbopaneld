@@ -283,6 +283,18 @@ export type InstanceHostnameWireEntry = {
 };
 
 /**
+ * Edge address ranges for the control plane's Caddy on `public-urls-update`.
+ * `cidrs` is the union of `cloudflare` and `bunny`; `hash` identifies the set.
+ * Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type InstanceEdgeTrustWire = {
+  cidrs: string[];
+  hash: string;
+  cloudflare: string[];
+  bunny: string[];
+};
+
+/**
  * Instance → daemon: start (or, with an empty `token`, stop) the Cloudflare
  * tunnel. A non-empty token arrives as `tokenEnvelope` (`tpdaemon`) from a
  * control plane that sees `sealed-instance-secrets-v1`; `token` is the legacy
@@ -934,6 +946,8 @@ export type DaemonMessage =
     hostnames?: InstanceHostnameWireEntry[];
     /** Present when any hostname uses `lets-encrypt`. */
     instanceAcme?: InstanceAcmeWireSettings;
+    /** Present only when this daemon advertises `instance-edge-trust-v1`. */
+    edgeTrust?: InstanceEdgeTrustWire;
     at: string;
   }
   | {

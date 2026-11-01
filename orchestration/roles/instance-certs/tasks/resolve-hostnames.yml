@@ -25,6 +25,9 @@
           or the Caddy template reads it
           (got {{ turbopanel_hostnames | type_debug }}).
 
+- name: Resolve the edge address ranges
+  ansible.builtin.include_tasks: resolve-edge-trust.yml
+
 - name: Assert instance hostnames are a list
   ansible.builtin.assert:
     that:

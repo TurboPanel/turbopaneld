@@ -20,11 +20,13 @@ import {
 } from "../deploy/instance-acme-http01.ts";
 import type {
   InstanceAcmeWireSettings,
+  InstanceEdgeTrustWire,
   InstanceHostnameWireEntry,
 } from "../contracts/cell-messages.ts";
 import {
   isValidHostname,
   isValidNtpServer,
+  parseCidrLiteral,
 } from "../contracts/commands-contracts.ts";
 import {
   instanceAcmeCooldownError,
@@ -107,6 +109,34 @@ export function assertInstanceCertsApplyInputs(
       );
     }
   }
+}
+
+/**
+ * The ranges reach a root-run template, so every entry must be a CIDR literal
+ * and the per-provider lists must sit inside the union. Returns the compact
+ * JSON that travels as `turbopanel_edge_trust_json`.
+ */
+export function edgeTrustExtraVar(edgeTrust: InstanceEdgeTrustWire): string {
+  const lists = [edgeTrust.cidrs, edgeTrust.cloudflare, edgeTrust.bunny];
+  for (const entry of lists.flat()) {
+    if (parseCidrLiteral(entry) === null) {
+      throw new Error(`refusing edge range ${JSON.stringify(entry)}`);
+    }
+  }
+  if (!/^[0-9a-f]{64}$/.test(edgeTrust.hash)) {
+    throw new Error("refusing edge range set with a malformed hash");
+  }
+  const union = new Set(edgeTrust.cidrs);
+  if (
+    [...edgeTrust.cloudflare, ...edgeTrust.bunny].some((c) => !union.has(c))
+  ) {
+    throw new Error("refusing edge range set whose lists are not in the union");
+  }
+  return JSON.stringify({
+    hash: edgeTrust.hash,
+    cloudflare: edgeTrust.cloudflare,
+    bunny: edgeTrust.bunny,
+  });
 }
 
 function stripTrailingSlashes(path: string): string {
@@ -247,6 +277,7 @@ export async function runInstanceCertsApply(
   deps: {
     runPlaybook?: typeof runLocalPlaybook;
     instanceAcme?: InstanceAcmeWireSettings;
+    edgeTrust?: InstanceEdgeTrustWire;
     readForwardHosts?: () => string;
     env?: Record<string, string | undefined>;
   } = {},
@@ -277,6 +308,14 @@ export async function runInstanceCertsApply(
     deps.readForwardHosts ?? readDevForwardHostsFile,
   );
   if (publicUrls) args.push("-e", `turbopanel_public_urls=${publicUrls}`);
+  // Absent means "keep the persisted set" (resolve-edge-trust.yml reads the
+  // sidecar), so a hostname-only apply never drops the ranges.
+  if (deps.edgeTrust) {
+    args.push(
+      "-e",
+      `turbopanel_edge_trust_json=${edgeTrustExtraVar(deps.edgeTrust)}`,
+    );
+  }
   const email = deps.instanceAcme?.contactEmail.trim();
   if (email) args.push("-e", `turbopanel_acme_email=${email}`);
   const directory = deps.instanceAcme?.directoryUrl.trim();
@@ -293,6 +332,7 @@ export async function applyPublicUrls(
     runPlaybook?: typeof runLocalPlaybook;
     readForwardHosts?: () => string;
     instanceAcme?: InstanceAcmeWireSettings;
+    edgeTrust?: InstanceEdgeTrustWire;
     writeUploadedCerts?: typeof writeUploadedInstanceCerts;
     openWindow?: typeof openInstanceAcmeWindow;
     preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
@@ -311,6 +351,7 @@ export async function applyPublicUrls(
   const runCerts = deps.runCertsApply ?? runInstanceCertsApply;
   await runCerts(instanceDir, hostnames, {
     instanceAcme: deps.instanceAcme,
+    edgeTrust: deps.edgeTrust,
     readForwardHosts: deps.readForwardHosts,
     runPlaybook: deps.runPlaybook,
   });

@@ -1,0 +1,43 @@
+---
+# Edge address ranges the control-plane Caddy trusts for forwarded visitor
+# addresses (Cloudflare proxy, Bunny pull zone). public-urls apply passes
+# turbopanel_edge_trust_json; a caller that carries none (the update flow's
+# refresh, a bare re-converge) reads instance-edge-trust.json, which the apply
+# wrote last time, so a converge never renders a loopback-only Caddyfile and
+# drops visitor addresses until the next apply. An explicit value (even empty
+# lists) always wins, so an operator can still remove every range.
+- name: Read the persisted edge trust set
+  when: (turbopanel_edge_trust_json | default('')) | length == 0
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/caddy/instance-edge-trust.json"
+  register: _persisted_edge_trust
+  failed_when: false
+
+- name: Choose the edge trust set
+  block:
+    - name: Take the edge trust set from the extra-var or the sidecar
+      ansible.builtin.set_fact:
+        _edge_trust: >-
+          {{
+            (turbopanel_edge_trust_json | from_json)
+            if (turbopanel_edge_trust_json | default('')) | length > 0
+            else ((_persisted_edge_trust.content | b64decode | from_json)
+                  if _persisted_edge_trust.content is defined else {})
+          }}
+  rescue:
+    - name: Warn that the persisted edge trust set is unreadable
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the edge trust set is not valid JSON; trusting no edge
+          ranges ({{ turbopanel_config_dir }}/caddy/instance-edge-trust.json).
+
+    - name: Trust no edge ranges
+      ansible.builtin.set_fact:
+        _edge_trust: {}
+
+- name: Expose the edge ranges to the Caddyfile template
+  ansible.builtin.set_fact:
+    turbopanel_edge_cf_cidrs: "{{ _edge_trust.cloudflare | default([]) }}"
+    turbopanel_edge_bunny_cidrs: "{{ _edge_trust.bunny | default([]) }}"
+    turbopanel_edge_cidrs: "{{ ((_edge_trust.cloudflare | default([])) + (_edge_trust.bunny | default([]))) | unique | list }}"
+    turbopanel_edge_trust_effective_json: "{{ _edge_trust | to_json }}"

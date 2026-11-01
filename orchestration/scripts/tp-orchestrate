@@ -156,6 +156,17 @@ tp_extra_var_value_ok() {
       [ -z "$(printf '%s' "$_xv" | tr -d 'A-Za-z0-9{}":,._/\133\135-')" ] &&
         return 0
       ;;
+    turbopanel_edge_trust_json)
+      # Compact JSON object {hash, cloudflare, bunny}: hex, CIDR literals
+      # (IPv6 colons included) and structure only. The role renders each
+      # entry into the Caddyfile, so nothing else may pass.
+      case "$_xv" in
+        '{'*'}') ;;
+        *) return 1 ;;
+      esac
+      [ -z "$(printf '%s' "$_xv" | tr -d 'A-Za-z0-9{}":,./\133\135-')" ] &&
+        return 0
+      ;;
     turbopanel_acme_email)
       tp_email_ok "$_xv" && return 0
       ;;
