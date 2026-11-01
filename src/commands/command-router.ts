@@ -44,6 +44,9 @@ import {
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
   parseTlsTrustReconcilePayload,
+  parseTunnelConnectorsPayload,
+  parseTunnelRoutesPayload,
+  parseTunnelStatusPayload,
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
@@ -78,6 +81,9 @@ import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFoldersRemove } from "./remove-folders.ts";
+import { handleTunnelConnectors } from "./tunnel-connectors.ts";
+import { handleTunnelRoutes } from "./tunnel-routes.ts";
+import { handleTunnelStatus } from "./tunnel-status.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
@@ -133,6 +139,9 @@ export type CommandRouterHandlerOverrides = {
   handleBackupsReconcile?: typeof handleBackupsReconcile;
   handleBackupTargetTest?: typeof handleBackupTargetTest;
   handleFoldersRemove?: typeof handleFoldersRemove;
+  handleTunnelRoutes?: typeof handleTunnelRoutes;
+  handleTunnelConnectors?: typeof handleTunnelConnectors;
+  handleTunnelStatus?: typeof handleTunnelStatus;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -165,6 +174,35 @@ function pickCommandRouterHandler<
   return (override ?? fallback) as NonNullable<
     CommandRouterHandlerOverrides[K]
   >;
+}
+
+/**
+ * The two tunnel connector commands share one switch case (the switch is at its
+ * size limit), so each one's parse-and-run lives here.
+ */
+async function runTunnelConnectors(
+  rawPayload: unknown,
+  daemonReceivedAt: string,
+  decryptSecrets:
+    | ((ciphertexts: string[]) => Promise<(string | null)[]>)
+    | undefined,
+): Promise<unknown> {
+  const payload = parseTunnelConnectorsPayload(rawPayload);
+  return await pickCommandRouterHandler(
+    "handleTunnelConnectors",
+    handleTunnelConnectors,
+  )(payload, daemonReceivedAt, { decryptSecrets });
+}
+
+async function runTunnelStatus(
+  rawPayload: unknown,
+  daemonReceivedAt: string,
+): Promise<unknown> {
+  parseTunnelStatusPayload(rawPayload);
+  return await pickCommandRouterHandler(
+    "handleTunnelStatus",
+    handleTunnelStatus,
+  )(daemonReceivedAt);
 }
 
 /**
@@ -380,6 +418,29 @@ export async function handleCommandDispatch(
           "handleFoldersRemove",
           handleFoldersRemove,
         )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.tunnel.routes": {
+        const payload = parseTunnelRoutesPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleTunnelRoutes",
+          handleTunnelRoutes,
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.tunnel.connectors":
+      case "server.tunnel.status": {
+        result = message.commandType === "server.tunnel.status"
+          ? await runTunnelStatus(message.payload, daemonReceivedAt)
+          : await runTunnelConnectors(
+            message.payload,
+            daemonReceivedAt,
+            deps?.decryptSecrets,
+          );
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

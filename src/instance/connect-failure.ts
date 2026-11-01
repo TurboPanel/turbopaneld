@@ -1,4 +1,5 @@
 import { DaemonApiError } from "./api-client.ts";
+import { CaPinMismatchError } from "./ca-pin.ts";
 import { errorText } from "../util/logger.ts";
 
 export type ConnectFailureClass =
@@ -49,6 +50,16 @@ const MISSING_LICENSE_CREDENTIALS_MESSAGE =
 const SERVER_KEY_MISMATCH: StatusMessage = {
   status: 400,
   message: "Server key mismatch",
+};
+
+/**
+ * The panel already holds a different key for this server and refuses to
+ * replace it (first registered key wins). Same handling as an unknown key:
+ * keep the key files and wait for an administrator.
+ */
+const SERVER_KEY_ALREADY_REGISTERED: StatusMessage = {
+  status: 409,
+  message: "Server key already registered",
 };
 
 const INVALID_OR_EXPIRED_CHALLENGE: StatusMessage = {
@@ -117,7 +128,8 @@ export function isTransientConnectError(err: unknown): boolean {
 function isClassifierStaleIdentity(err: unknown): boolean {
   if (isStaleDaemonIdentityError(err)) return true;
   return err instanceof DaemonApiError &&
-    matchesExact(err, SERVER_KEY_MISMATCH);
+    (matchesExact(err, SERVER_KEY_MISMATCH) ||
+      matchesExact(err, SERVER_KEY_ALREADY_REGISTERED));
 }
 
 function failureReason(err: unknown): string {
@@ -136,6 +148,7 @@ const TLS_TRUST_ERROR_NEEDLES = [
 ] as const;
 
 function isTlsTrustFailure(err: unknown): boolean {
+  if (err instanceof CaPinMismatchError) return true;
   if (err instanceof DaemonApiError) return false;
   const lowered = errorText(err).toLowerCase();
   return TLS_TRUST_ERROR_NEEDLES.some((needle) => lowered.includes(needle));
@@ -173,4 +186,19 @@ export function temporaryAuthFailure(
   reason: string,
 ): ClassifiedConnectFailure {
   return { kind: "temporary-auth", reason };
+}
+
+/**
+ * What an operator should do about a permanent rejection. A used or expired
+ * install key (`401 Invalid license`) is the common one: the panel erases a
+ * key's token when its server binds and a join ticket works once for an hour,
+ * so a server that lost its key files needs an owner to issue a re-enroll
+ * token on the server's page and the installer re-run with it. The daemon
+ * keeps its license files and picks the new ones up by itself.
+ */
+export function permanentRejectionAdvice(reason: string): string {
+  if (reason.startsWith("401 Invalid license")) {
+    return "this install key was already used or has expired; for a server that lost its key, ask an owner to issue a re-enroll token on the server's page in the control plane and re-run the installer with it, or install a new server with a fresh key (Add Server)";
+  }
+  return "install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL at the correct control plane";
 }

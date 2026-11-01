@@ -413,7 +413,7 @@ export async function runSetHostname(
   try {
     await runLocalPlaybook(SET_HOSTNAME_PLAYBOOK, extraArgs, eventHandler);
   } catch {
-    const summary = collector.build();
+    const summary = collector.build({ runFailed: true });
     throw new Error(
       summary.length > 0
         ? `set-hostname playbook failed: ${summary}`
@@ -504,7 +504,7 @@ export async function runTimeSyncApply(
   try {
     await runLocalPlaybook(TIME_SYNC_APPLY_PLAYBOOK, args, eventHandler);
   } catch {
-    const summary = collector.build();
+    const summary = collector.build({ runFailed: true });
     throw new Error(
       summary.length > 0
         ? `time-sync-apply playbook failed: ${summary}`
@@ -731,10 +731,10 @@ export async function runCaddySetup(
 }
 
 /**
- * Vendor Railpack and its BuildKit frontend for the Railpack build lane.
+ * Vendor the image builder and its BuildKit frontend for the image build lane.
  *
- * Called on demand from `ensureBuildkitRailpack` when a deploy asks for
- * `build.kind: railpack`, never from `daemon-converge` or
+ * Called on demand from `ensureBuildkitImageBuild` when a deploy asks for
+ * `build.kind: image`, never from `daemon-converge` or
  * `instance-dev-install`. The build runs on the Docker Engine's own BuildKit
  * and lands in its image store, so the playbook installs the container runtime
  * first (the `docker` role).

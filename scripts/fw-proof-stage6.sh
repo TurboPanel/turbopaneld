@@ -12,7 +12,7 @@
 #
 # `--save` stores the filter-table rules (counters and comments of policy lines
 # stripped); `--compare` proves an observe reconcile changed no rule, SSH and
-# the control-plane port (8443, or 80/443) included.
+# the control-plane port (always 8443) included.
 #
 # Prints PASS / FAIL / SKIP lines and exits 1 when any line is FAIL.
 set -u
@@ -213,7 +213,7 @@ check_port_open() {
 }
 for port in $SSH_PORTS; do check_port_open "$port" "SSH"; done
 if systemctl is-active --quiet turbopanel-instance.service; then
-  if ss -Hltn 2>/dev/null | awk '{print $4}' | grep -q ':8443$'; then check_port_open 8443 "control-plane"; else skip "co-located panel is not on 8443 (80/443 under Let's Encrypt)"; fi
+  if ss -Hltn 2>/dev/null | awk '{print $4}' | grep -q ':8443$'; then check_port_open 8443 "control-plane"; else fail "co-located panel is not listening on 8443"; fi
 else
   skip "no co-located control plane on this host"
 fi

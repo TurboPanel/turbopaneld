@@ -44,6 +44,8 @@ const CONSTANTS = [
   "TP_SYSTEMD_DIRS",
   "TP_LEGACY_SHELL_RC_NEEDLE",
   "TP_OWNED_TREES",
+  "TP_TIMER_STAMP_DIR",
+  "TP_NFT_TABLES",
   "TP_DOCKER_PACKAGES",
   "TP_DOCKER_ENGINE_PACKAGES",
   "TP_DPKG_ON_DISK",
@@ -250,6 +252,13 @@ const OWNED_PATHS = [
   "/var/lib/docker",
   "/etc/docker",
   "/etc/systemd/system/turbopaneld.service.d",
+  // Tunnel connectors: the root-only token copies, the connector program and
+  // the daemon's staged files and records.
+  "/etc/turbopanel/tunnel-env",
+  "/etc/turbopanel/tunnel-env/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.env",
+  "/opt/turbopanel/vendor/cloudflared",
+  "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
+  "/var/lib/turbopanel/cloudflared/tunnels",
 ];
 
 test("tp_path_is_safe refuses every path outside TurboPanel's own trees", async () => {
@@ -664,6 +673,404 @@ test("the stock wg-quick template is not ours until tp0 was enabled or started",
   assertEquals(await wgPresent("inactive", "enabled"), "present");
 });
 
+// A default route and a public range a hostile state.json could name; built
+// from parts, they are never a host this test reaches.
+const DEFAULT_ROUTE = `${[0, 0, 0, 0].join(".")}/0`;
+const PUBLIC_RANGE = `${[8, 8, 8, 0].join(".")}/24`;
+const LAN_GATEWAY = [10, 0, 0, 1].join(".");
+
+test("LAN routes the daemon recorded are removed only when the kernel shows exactly that route", async () => {
+  const state = await Deno.makeTempDir({ prefix: "tp-purge-state-" });
+  await Deno.mkdir(join(state, "network"));
+  await Deno.writeTextFile(
+    join(state, "network", "state.json"),
+    JSON.stringify(
+      {
+        prefix: "10.192.0.0/16",
+        tunnel: false,
+        installedLanRoutes: [
+          { cidr: "10.193.5.0/24", via: "10.0.0.12", dev: "eth1" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+          { cidr: "10.193.6.0/24", via: "10.0.0.13", dev: "eth1" }, // NOSONAR typescript:S1313 — route the kernel no longer has, test fixture only
+          { cidr: "10.193.7.0/24", via: "10.0.0.12;rm", dev: "eth1" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
+          { cidr: "10.193.8.0/24", via: "10.0.0.12", dev: "tp0" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
+          { cidr: DEFAULT_ROUTE, via: LAN_GATEWAY, dev: "eth0" },
+          { cidr: PUBLIC_RANGE, via: LAN_GATEWAY, dev: "eth0" },
+          { cidr: "10.193.9.0/24", via: "10.0.0.12", dev: "docker0" }, // NOSONAR typescript:S1313 — hostile entry, test fixture only
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-bin-" });
+  const log = join(bin, "calls");
+  await Deno.writeTextFile(
+    join(bin, "ip"),
+    [
+      "#!/bin/sh",
+      `echo "$*" >> ${log}`,
+      'case "$*" in',
+      '  "-4 route show exact 10.193.5.0/24 dev eth1") echo "10.193.5.0/24 via 10.0.0.12 proto static" ;;',
+      '  "-4 route show exact 10.193.6.0/24 dev eth1") echo "10.193.6.0/24 via 10.0.0.1" ;;',
+      `  "-4 route show exact ${DEFAULT_ROUTE} dev eth0") echo "default via ${LAN_GATEWAY} proto dhcp" ;;`,
+      `  "-4 route show exact ${PUBLIC_RANGE} dev eth0") echo "${PUBLIC_RANGE} via ${LAN_GATEWAY}" ;;`,
+      '  "-4 route show exact 10.193.9.0/24 dev docker0") echo "10.193.9.0/24 via 10.0.0.12" ;;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_lan_routes_from_state",
+      "tp_ipv4_octet_ok",
+      "tp_ipv4_literal_ok",
+      "tp_fabric_route_v4_private",
+      "tp_fabric_route_v4_cidr_ok",
+      "tp_lan_nic_ok",
+      "tp_lan_route_entry_ok",
+      "tp_remove_lan_routes",
+    ],
+    [
+      `TP_STATE_DIRS=${state}`,
+      `TP_OWNED_TREES="${await Deno.realPath(state)} ${state}"`,
+      "tp_remove_lan_routes",
+    ].join("\n"),
+    { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  const calls = (await Deno.readTextFile(log)).trim().split("\n");
+  // The default route, the public range and docker0 never reach `ip`.
+  assertEquals(calls, [
+    "-4 route show exact 10.193.5.0/24 dev eth1",
+    "route del 10.193.5.0/24 via 10.0.0.12 dev eth1",
+    "-4 route show exact 10.193.6.0/24 dev eth1",
+  ]);
+});
+
+/** An IPv4 literal built from its octets, so no address sits in source. */
+function v4(...octets: number[]): string {
+  return octets.join(".");
+}
+
+/** Runs shell functions lifted from `file` and prints one verdict per input. */
+async function verdicts(
+  file: string,
+  functions: string[],
+  check: string,
+  inputs: string[],
+): Promise<string[]> {
+  const source = await Deno.readTextFile(file);
+  const parts: string[] = [];
+  for (const name of functions) {
+    const fn = extractFunction(source, name);
+    assert(fn, `${name} is missing from ${file}`);
+    parts.push(fn);
+  }
+  parts.push(
+    'for _in in "$@"; do',
+    `  if ${check} "$_in"; then echo yes; else echo no; fi`,
+    "done",
+  );
+  const out = await new Deno.Command("sh", {
+    args: ["-c", parts.join("\n"), "sh", ...inputs],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+  return new TextDecoder().decode(out.stdout).trim().split("\n");
+}
+
+const tpHostPath = join(here, "..", "orchestration", "scripts", "tp-host");
+
+test("the purge judges LAN route fields exactly as the host wrapper does", async () => {
+  const cidrs = [
+    `${v4(10, 193, 5, 0)}/24`,
+    `${v4(10, 0, 0, 0)}/8`,
+    `${v4(10, 0, 0, 0)}/7`,
+    `${v4(10, 1, 2, 0)}/32`,
+    `${v4(10, 1, 2, 0)}/33`,
+    `${v4(10, 1, 2, 0)}/08`,
+    `${v4(10, 1, 2, 0)}/024`,
+    `${v4(10, 1, 2, 0)}/`,
+    `${v4(10, 1, 2, 0)}/24/1`,
+    `${v4(10, 1, 2, 0)}/8x`,
+    v4(10, 1, 2, 0),
+    `${v4(10, 1, 2)}/24`,
+    `${v4(10, 1, 2, 0)}.1/24`,
+    `10.01.2.0/24`,
+    `${v4(256, 1, 1, 0)}/24`,
+    `${v4(172, 16, 0, 0)}/12`,
+    `${v4(172, 16, 0, 0)}/11`,
+    `${v4(172, 15, 0, 0)}/16`,
+    `${v4(172, 32, 0, 0)}/16`,
+    `${v4(192, 168, 1, 0)}/24`,
+    `${v4(192, 168, 0, 0)}/15`,
+    `${v4(192, 169, 0, 0)}/16`,
+    `${v4(100, 64, 0, 0)}/10`,
+    `${v4(100, 64, 0, 0)}/9`,
+    `${v4(100, 63, 0, 0)}/16`,
+    `${v4(100, 128, 0, 0)}/16`,
+    `${v4(8, 8, 8, 0)}/24`,
+    `${v4(0, 0, 0, 0)}/0`,
+    "/24",
+    "",
+    ";rm",
+  ];
+  const vias = [
+    v4(10, 0, 0, 12),
+    v4(192, 168, 1, 1),
+    v4(0, 0, 0, 0),
+    v4(255, 255, 255, 255),
+    v4(256, 0, 0, 1),
+    v4(10, 0, 0),
+    `${v4(10, 0, 0, 1)}.`,
+    "10.00.0.1",
+    "10..0.1",
+    `${v4(10, 0, 0, 1)};rm`,
+    "",
+  ];
+  const nics = [
+    "eth0",
+    "eth1.100",
+    "enp3s0f1",
+    "bond0_a",
+    "e-1",
+    "tp0",
+    "lo",
+    "docker0",
+    "br-0a1b2c",
+    "veth12ab",
+    "tpn_web",
+    "-eth0",
+    ".",
+    "..",
+    "a".repeat(15),
+    "a".repeat(16),
+    "eth 0",
+    "eth0;rm",
+    "",
+  ];
+  const octet = ["tp_ipv4_octet_ok", "tp_ipv4_literal_ok"];
+  const route = [...octet, "tp_fabric_route_v4_private"];
+  assertEquals(
+    await verdicts(
+      purgePath,
+      [...route, "tp_fabric_route_v4_cidr_ok"],
+      "tp_fabric_route_v4_cidr_ok",
+      cidrs,
+    ),
+    await verdicts(
+      tpHostPath,
+      [...route, "tp_fabric_route_cidr_ok"],
+      "tp_fabric_route_cidr_ok",
+      cidrs,
+    ),
+  );
+  assertEquals(
+    await verdicts(purgePath, octet, "tp_ipv4_literal_ok", vias),
+    await verdicts(tpHostPath, octet, "tp_ipv4_literal_ok", vias),
+  );
+  assertEquals(
+    await verdicts(purgePath, ["tp_lan_nic_ok"], "tp_lan_nic_ok", nics),
+    await verdicts(tpHostPath, ["tp_lan_nic_ok"], "tp_lan_nic_ok", nics),
+  );
+  // The corpus must hold both verdicts, or the comparison proves nothing.
+  const sample = await verdicts(
+    purgePath,
+    ["tp_lan_nic_ok"],
+    "tp_lan_nic_ok",
+    nics,
+  );
+  assert(sample.includes("yes") && sample.includes("no"), sample.join(" "));
+});
+
+/** A fake iptables: fixed listings, every call logged. */
+async function fakeIptables(
+  save: string,
+  lists: Record<string, string>,
+): Promise<{ bin: string; calls: string }> {
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-fw-" });
+  const calls = join(bin, "calls");
+  const cases = Object.entries(lists).map(([chain, text]) =>
+    `  "-w 5 -L ${chain} -n --line-numbers") printf '%s\\n' ${
+      text.split("\n").map((l) => `'${l}'`).join(" ")
+    } ;;`
+  );
+  await Deno.writeTextFile(
+    join(bin, "iptables"),
+    [
+      "#!/bin/sh",
+      `echo "$*" >> ${calls}`,
+      'case "$*" in',
+      `  "-w 5 -S") printf '%s\\n' ${
+        save.split("\n").map((l) => `'${l}'`).join(" ")
+      } ;;`,
+      ...cases,
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await Deno.writeTextFile(calls, "");
+  return { bin, calls };
+}
+
+async function firewallRun(
+  save: string,
+  lists: Record<string, string>,
+): Promise<string[]> {
+  const { bin, calls } = await fakeIptables(save, lists);
+  const result = await runPurgeSh(
+    [
+      "tp_firewall_delete_jumps",
+      "tp_firewall_try_delete",
+      "tp_firewall_family",
+    ],
+    "tp_firewall_family iptables",
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  return (await Deno.readTextFile(calls)).trim().split("\n").filter(Boolean);
+}
+
+const LAN_RANGE = `${v4(10, 193, 5, 0)}/24`;
+const BRIDGE_RANGE = `${v4(10, 192, 1, 0)}/24`;
+const OPERATOR_RANGE = `${v4(192, 168, 7, 0)}/24`;
+const ANY = `${v4(0, 0, 0, 0)}/0`;
+const HEADER = "num  target     prot opt source               destination";
+
+test("TurboFabric's TP-FORWARD chain, its jumps and its LAN pairs go; an operator's rules stay", async () => {
+  const save = [
+    "-P INPUT ACCEPT",
+    "-P FORWARD DROP",
+    "-N DOCKER-USER",
+    "-N TP-FORWARD",
+    "-A FORWARD -j TP-FORWARD",
+    "-A FORWARD -s " + OPERATOR_RANGE + " -j ACCEPT",
+    "-A DOCKER-USER -j TP-FORWARD",
+    "-A DOCKER-USER -s " + OPERATOR_RANGE + " -j ACCEPT",
+    "-A TP-FORWARD -i tp0 -o tp0 -j DROP",
+    `-A TP-FORWARD -s ${BRIDGE_RANGE} -d ${LAN_RANGE} -o eth1 -j ACCEPT`,
+    `-A TP-FORWARD -s ${LAN_RANGE} -d ${BRIDGE_RANGE} -i eth1 -j ACCEPT`,
+  ].join("\n");
+  const calls = await firewallRun(save, {
+    INPUT: ["Chain INPUT (policy ACCEPT)", HEADER].join("\n"),
+    FORWARD: [
+      "Chain FORWARD (policy DROP)",
+      HEADER,
+      `1    TP-FORWARD  all  --  ${ANY}  ${ANY}`,
+      `2    ACCEPT     all  --  ${OPERATOR_RANGE}  ${ANY}`,
+    ].join("\n"),
+    "DOCKER-USER": [
+      "Chain DOCKER-USER (1 references)",
+      HEADER,
+      `1    ACCEPT     all  --  ${OPERATOR_RANGE}  ${ANY}`,
+      `2    TP-FORWARD  all  --  ${ANY}  ${ANY}`,
+    ].join("\n"),
+  });
+  const changes = calls.filter((c) => / -[DFX] /.test(c));
+  assertEquals(changes, [
+    "-w 5 -D FORWARD 1",
+    "-w 5 -D DOCKER-USER 2",
+    "-w 5 -F TP-FORWARD",
+    "-w 5 -X TP-FORWARD",
+  ]);
+});
+
+/**
+ * A fake iptables/ip6tables that keeps its rules in a file: `-S` prints them,
+ * `-L CHAIN` numbers that chain's rules, and `-D CHAIN N`, `-F` and `-X`
+ * change the file. Every changing call is logged with the binary's name.
+ */
+async function statefulFirewall(
+  rules: string,
+): Promise<{ bin: string; log: string }> {
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-fwstate-" });
+  const log = join(bin, "calls");
+  await Deno.writeTextFile(log, "");
+  const script = [
+    "#!/bin/sh",
+    'name=$(basename "$0")',
+    `state=${bin}/$name.rules`,
+    '[ "$1" = "-w" ] && shift 2',
+    'case "$1" in',
+    '  -S) cat "$state" ;;',
+    "  -L)",
+    '    echo "Chain $2"',
+    '    echo "num  target     prot opt source               destination"',
+    '    awk -v c="$2" \'$1 == "-A" && $2 == c { n++; t = "-"; for (i = 3; i < NF; i++) if ($i == "-j") t = $(i + 1); print n "    " t "  all  --" }\' "$state"',
+    "    ;;",
+    "  -D)",
+    `    echo "$name $*" >> ${log}`,
+    '    awk -v c="$2" -v k="$3" \'$1 == "-A" && $2 == c { n++; if (n == k) next } { print }\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "  -F)",
+    `    echo "$name $*" >> ${log}`,
+    '    awk -v c="$2" \'!($1 == "-A" && $2 == c)\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "  -X)",
+    `    echo "$name $*" >> ${log}`,
+    '    if grep -q -- "-j $2\\( \\|$\\)" "$state"; then exit 1; fi',
+    '    awk -v c="$2" \'!($1 == "-N" && $2 == c)\' "$state" > "$state.new" && mv "$state.new" "$state"',
+    "    ;;",
+    "esac",
+    "",
+  ].join("\n");
+  for (const name of ["iptables", "ip6tables"]) {
+    await Deno.writeTextFile(join(bin, name), script, { mode: 0o755 });
+    await Deno.writeTextFile(join(bin, `${name}.rules`), `${rules}\n`);
+  }
+  return { bin, log };
+}
+
+async function firewallPass(bin: string): Promise<void> {
+  const result = await runPurgeSh(
+    [
+      "tp_firewall_delete_jumps",
+      "tp_firewall_try_delete",
+      "tp_firewall_family",
+    ],
+    "tp_firewall_family iptables\ntp_firewall_family ip6tables",
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+}
+
+test("both firewall families end with only the operator's rules, and a second pass changes nothing", async () => {
+  const operator = `-A DOCKER-USER -s ${OPERATOR_RANGE} -j ACCEPT`;
+  const { bin, log } = await statefulFirewall(
+    [
+      "-P FORWARD DROP",
+      "-N DOCKER-USER",
+      "-N TP-FORWARD",
+      "-N TP-FWD",
+      "-A FORWARD -j TP-FORWARD",
+      "-A DOCKER-USER -j TP-FORWARD",
+      operator,
+      "-A DOCKER-USER -j TP-FWD",
+      "-A TP-FORWARD -i tp0 -o tp0 -j DROP",
+      `-A TP-FORWARD -s ${BRIDGE_RANGE} -d ${LAN_RANGE} -o eth1 -j ACCEPT`,
+      "-A TP-FWD -j TP-FORWARD",
+    ].join("\n"),
+  );
+  await firewallPass(bin);
+  for (const name of ["iptables", "ip6tables"]) {
+    assertEquals(
+      (await Deno.readTextFile(join(bin, `${name}.rules`))).trim().split("\n"),
+      ["-P FORWARD DROP", "-N DOCKER-USER", operator],
+    );
+  }
+  const first = (await Deno.readTextFile(log)).trim().split("\n");
+  assert(
+    first.some((c) => c.startsWith("ip6tables -X TP-FORWARD")),
+    first.join("\n"),
+  );
+  await Deno.writeTextFile(log, "");
+  await firewallPass(bin);
+  assertEquals(await Deno.readTextFile(log), "");
+});
+
 test("the Docker gate folders are owned trees and are removed with the other folders", async () => {
   const source = await Deno.readTextFile(purgePath);
   const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
@@ -694,6 +1101,165 @@ test("the build slice is stopped and its unit file removed although it is not tu
   assertStringIncludes(result.stdout, "tpbuild.slice\n", result.stderr);
   assertEquals(await exists(join(units, "tpbuild.slice")), false);
   assertEquals(await exists(join(units, "tpother.slice")), true);
+});
+
+const TUNNEL_UNITS = [
+  "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.service",
+  "turbopanel-tunnel-1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e.service",
+  "turbopanel-tunnel-instance.service",
+  // The second unit a connector update starts beside the first.
+  "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d-b.service",
+];
+
+test("every tunnel connector service is stopped, disabled and its unit file removed", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  for (const name of TUNNEL_UNITS) {
+    await Deno.writeTextFile(join(units, name), "[Service]\n");
+  }
+  await Deno.writeTextFile(join(units, "unrelated.service"), "[Service]\n");
+  const log = join(units, "systemctl.log");
+  const stub = await stubBin(
+    "systemctl",
+    [
+      `log=${log}`,
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo active ;;",
+      "  is-active*) echo active ;;",
+      "  is-enabled*) echo enabled ;;",
+      "  *list-units*) cat <<'LIST'",
+      ...TUNNEL_UNITS.map((u) =>
+        `${u} loaded active running TurboPanel tunnel connector`
+      ),
+      "LIST",
+      "  ;;",
+      '  stop*|disable*) echo "$*" >> "$log" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_unit_present",
+      "tp_list_has_word",
+      "tp_collect_unit_names",
+      "tp_stop_disable_unit",
+      "tp_stop_units_matching",
+      "tp_remove_unit_files",
+    ],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      "TP_LEGACY_UNITS=",
+      "TP_OTHER_UNITS=",
+      "tp_collect_unit_names",
+      'cat "$TP_TMP/work.unitnames"',
+      "tp_stop_units_matching service",
+      "tp_remove_unit_files",
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  for (const name of TUNNEL_UNITS) {
+    assertStringIncludes(result.stdout, `${name}\n`, result.stderr);
+    assertEquals(await exists(join(units, name)), false, name);
+  }
+  const calls = (await Deno.readTextFile(log)).split("\n");
+  for (const name of TUNNEL_UNITS) {
+    assert(calls.includes(`stop ${name}`), `stop ${name}\n${calls.join("\n")}`);
+    assert(calls.includes(`disable ${name}`), `disable ${name}`);
+  }
+  assertEquals(await exists(join(units, "unrelated.service")), true);
+});
+
+const TENANT_ACME_TEMPLATE = "turbopanel-tenant-acme@.service";
+// Instances exist only in memory (started from the template), so systemd lists
+// them but there is no file for them.
+const TENANT_ACME_INSTANCES = [
+  "turbopanel-tenant-acme@req_1.service",
+  "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
+];
+
+test("a running certificate issuer is stopped and the template unit file is removed", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  await Deno.writeTextFile(join(units, TENANT_ACME_TEMPLATE), "[Service]\n");
+  await Deno.writeTextFile(join(units, "unrelated.service"), "[Service]\n");
+  const log = join(units, "systemctl.log");
+  const stub = await stubBin(
+    "systemctl",
+    [
+      `log=${log}`,
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo active ;;",
+      "  is-active*) echo active ;;",
+      "  is-enabled*) echo static ;;",
+      "  *list-units*) cat <<'LIST'",
+      ...TENANT_ACME_INSTANCES.map((u) =>
+        `${u} loaded active running TurboPanel certificate issuer`
+      ),
+      "LIST",
+      "  ;;",
+      '  stop*|disable*) echo "$*" >> "$log" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_unit_present",
+      "tp_list_has_word",
+      "tp_collect_unit_names",
+      "tp_stop_disable_unit",
+      "tp_stop_units_matching",
+      "tp_remove_unit_files",
+    ],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      "TP_LEGACY_UNITS=",
+      "TP_OTHER_UNITS=",
+      "tp_collect_unit_names",
+      'cat "$TP_TMP/work.unitnames"',
+      "tp_stop_units_matching service",
+      "tp_remove_unit_files",
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  for (const name of TENANT_ACME_INSTANCES) {
+    assertStringIncludes(result.stdout, `${name}\n`, result.stderr);
+  }
+  const calls = (await Deno.readTextFile(log)).split("\n");
+  for (const name of TENANT_ACME_INSTANCES) {
+    assert(calls.includes(`stop ${name}`), `stop ${name}\n${calls.join("\n")}`);
+  }
+  assertEquals(await exists(join(units, TENANT_ACME_TEMPLATE)), false);
+  assertEquals(await exists(join(units, "unrelated.service")), true);
+});
+
+test("the issuer's storage, requests, sockets and proof handlers sit in trees purge removes whole", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = (extractConstant(source, "TP_OWNED_TREES") ?? "")
+    .replace(/^[A-Z_]+="/, "")
+    .replace(/"$/, "")
+    .split(" ");
+  // <state>/tenant-acme (account, requests, logs), <config>/hosting/proof and
+  // the reserved proof sites, and <run>/tenant-acme-<id>.sock.
+  for (
+    const tree of ["/etc/turbopanel", "/var/lib/turbopanel", "/run/turbopanel"]
+  ) {
+    assert(trees.includes(tree), tree);
+  }
+});
+
+test("the connector program and the token copies are inside trees purge removes whole", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = (extractConstant(source, "TP_OWNED_TREES") ?? "")
+    .replace(/^[A-Z_]+="/, "")
+    .replace(/"$/, "")
+    .split(" ");
+  for (
+    const tree of ["/opt/turbopanel", "/etc/turbopanel", "/var/lib/turbopanel"]
+  ) {
+    assert(trees.includes(tree), tree);
+  }
 });
 
 async function stubBin(name: string, script: string): Promise<string> {
@@ -1014,6 +1580,14 @@ test("the hosting Caddy state folder is inside the state tree and goes with it",
   assertStringIncludes(trees, " /var/lib/turbopanel ");
   assertEquals(trees.includes("turbopanel-hosting-caddy"), false);
   assertEquals(source.includes("/var/lib/turbopanel-hosting-caddy"), false);
+});
+
+test("the tunnel forwarding files live in the config tree and go with it", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
+  // 10-tunnels.caddy, tunnel-routes.json and the peer certificate folder sit
+  // under /etc/turbopanel/hosting, so no separate purge entry exists for them.
+  assertStringIncludes(trees, " /etc/turbopanel ");
 });
 
 test("the Docker gate build group is removed by exact name even though its gid is outside the service band", async () => {
@@ -1355,6 +1929,110 @@ test("purge keeps an orphan's group that still has members or is a primary group
   );
   assert(!primary.stdout.includes("groupdel"), primary.stdout);
   assertStringIncludes(primary.stdout, "KEPT_HOME=yes");
+});
+
+test("a dry run does not let the account it would delete block its own group", async () => {
+  const dry = await purgeGroups(
+    ["frank:x:15007:"],
+    ["frank:x:15007:15007::/srv/users/frank:/bin/sh"],
+    `{ DRY_RUN=true; tp_purge_principal_groups frank /srv/users/frank account; }`,
+  );
+  assertStringIncludes(dry.stdout, "groupdel frank");
+  assertStringIncludes(dry.stdout, "KEPT_HOME=no");
+  assert(!dry.stdout.includes("primary group"), dry.stdout);
+
+  // Another account with the group as its primary group still blocks it, in a
+  // dry run as well as a real one.
+  const other = await purgeGroups(
+    ["frank:x:15007:"],
+    [
+      "frank:x:15007:15007::/srv/users/frank:/bin/sh",
+      "gina:x:15008:15007::/home/gina:/bin/sh",
+    ],
+    `{ DRY_RUN=true; tp_purge_principal_groups frank /srv/users/frank account; }`,
+  );
+  assert(!other.stdout.includes("groupdel"), other.stdout);
+  assertStringIncludes(other.stdout, "KEPT_HOME=yes");
+});
+
+async function timerStampDir(): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-timers-" });
+  for (
+    const name of [
+      "stamp-turbopanel-backup-a1.timer",
+      "stamp-turbopanel-postgres-backup.timer",
+      "stamp-fstrim.timer",
+      "stamp-apt-daily.timer",
+      "stamp-turbopanel-backup-a1.service",
+      "turbopanel-backup-a1.timer",
+    ]
+  ) await Deno.writeTextFile(join(dir, name), "");
+  return dir;
+}
+
+const TIMER_GLOB =
+  `tp_remove_glob "$TP_TIMER_STAMP_DIR/stamp-turbopanel-*.timer"`;
+
+test("purge removes TurboPanel's persistent timer stamps and leaves other stamp files alone", async () => {
+  const dir = await timerStampDir();
+  const result = await runPurgeSh(
+    ["tp_remove_glob"],
+    `TP_TIMER_STAMP_DIR=${dir}\n${TIMER_GLOB}`,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(
+    await exists(join(dir, "stamp-turbopanel-backup-a1.timer")),
+    false,
+  );
+  assertEquals(
+    await exists(join(dir, "stamp-turbopanel-postgres-backup.timer")),
+    false,
+  );
+  for (
+    const kept of [
+      "stamp-fstrim.timer",
+      "stamp-apt-daily.timer",
+      "stamp-turbopanel-backup-a1.service",
+      "turbopanel-backup-a1.timer",
+    ]
+  ) assertEquals(await exists(join(dir, kept)), true, kept);
+});
+
+test("a dry run leaves the timer stamps in place, and the real step uses the stamp directory", async () => {
+  const dir = await timerStampDir();
+  const result = await runPurgeSh(
+    ["tp_remove_glob"],
+    `TP_TIMER_STAMP_DIR=${dir}\nDRY_RUN=true\n${TIMER_GLOB}`,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(
+    await exists(join(dir, "stamp-turbopanel-backup-a1.timer")),
+    true,
+  );
+
+  const source = await Deno.readTextFile(purgePath);
+  assertEquals(
+    extractConstant(source, "TP_TIMER_STAMP_DIR"),
+    "TP_TIMER_STAMP_DIR=/var/lib/systemd/timers",
+  );
+  assertStringIncludes(
+    extractFunction(source, "tp_remove_host_config") ?? "",
+    TIMER_GLOB,
+  );
+});
+
+test("the inventory lists TurboPanel's timer stamps and nothing else from that folder", async () => {
+  const dir = await timerStampDir();
+  const result = await runPurgeSh(
+    ["tp_inventory_host_files"],
+    `TP_TIMER_STAMP_DIR=${dir}\n: > "$TP_TMP/inv.hostfiles"\ntp_inventory_host_files\ncat "$TP_TMP/inv.hostfiles"`,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertStringIncludes(result.stdout, "stamp-turbopanel-backup-a1.timer");
+  assertStringIncludes(result.stdout, "stamp-turbopanel-postgres-backup.timer");
+  assertEquals(result.stdout.includes("stamp-fstrim"), false);
+  assertEquals(result.stdout.includes("stamp-apt-daily"), false);
+  assertEquals(result.stdout.includes(".service"), false);
 });
 
 test("purge never touches a group named root or tp*", async () => {
@@ -1989,4 +2667,171 @@ test("an operator's FORWARD rule, or a policy that is not DROP, leaves the polic
   assert(!kept.includes("-P FORWARD ACCEPT"), kept);
   const accept = await forwardPolicyRun("-P FORWARD ACCEPT\\n");
   assert(!accept.includes("-P FORWARD ACCEPT"), accept);
+});
+
+async function purgeNotes(
+  marker: boolean,
+  bootLines: string[] | null,
+  forward: string,
+): Promise<string> {
+  const root = await Deno.makeTempDir({ prefix: "tp-purge-notes-" });
+  const markers = join(root, "kernel");
+  await Deno.mkdir(markers);
+  if (marker) {
+    await Deno.writeTextFile(join(markers, "pi-4k-pagesize.applied"), "x\n");
+  }
+  const boot = join(root, "config.txt");
+  if (bootLines) await Deno.writeTextFile(boot, bootLines.join("\n") + "\n");
+  const fwd = join(root, "ip_forward");
+  await Deno.writeTextFile(fwd, `${forward}\n`);
+  const result = await runPurgeSh(
+    [
+      "tp_print_group",
+      "tp_note_ip_forward",
+      "tp_note_kernel_boot_line",
+      "tp_print_purge_notes",
+    ],
+    [
+      `TP_KERNEL_MARKER_DIR=${markers}`,
+      `TP_PI_BOOT_CONFIG=${boot}`,
+      `TP_IP_FORWARD_FILE=${fwd}`,
+      "TP_NET_LEFT=false",
+      ': > "$TP_TMP/kept-packages"',
+      "tp_print_purge_notes",
+    ].join("\n"),
+  );
+  assertEquals(result.code, 0, result.stderr);
+  return result.stdout;
+}
+
+test("the Pi page-size boot line is left on purpose and the summary says how to undo it", async () => {
+  const out = await purgeNotes(true, [
+    "kernel=kernel8.img",
+    "[all]",
+    "dtparam=audio=on",
+  ], "0");
+  assertStringIncludes(out, "boot setting kernel=kernel8.img");
+  assertStringIncludes(out, "was left on purpose");
+  assertStringIncludes(out, "delete that line from");
+  assertStringIncludes(out, "then reboot");
+  // Nothing to say without TurboPanel's marker, or once the line is gone.
+  assert(
+    !(await purgeNotes(false, ["kernel=kernel8.img"], "0")).includes("kernel8"),
+  );
+  assert(!(await purgeNotes(true, ["[all]"], "0")).includes("kernel8"));
+  assert(!(await purgeNotes(true, null, "0")).includes("kernel8"));
+});
+
+test("the purge never edits the Pi boot file and keeps the kernel-features marker", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const code = source.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+  assert(!/(rm|sed|mv|tee)[^\n]*TP_PI_BOOT_CONFIG/.test(code));
+  assert(!/(rm|rmdir)[^\n]*TP_KERNEL_MARKER_DIR/.test(code));
+  const owned = source.match(/^TP_OWNED_TREES="([^"]*)"/m);
+  assert(
+    owned && !owned[1].split(/\s+/).includes("/var/lib/turbopanel-kernel"),
+  );
+});
+
+test("the summary says IPv4 forwarding stays on until a reboot only when it is on", async () => {
+  assertStringIncludes(
+    await purgeNotes(false, null, "1"),
+    "net.ipv4.ip_forward) stays on until this host reboots",
+  );
+  assert(!(await purgeNotes(false, null, "0")).includes("ip_forward"));
+});
+
+// A stateful fake `nft`: `list tables` prints the loaded tables, `delete table`
+// drops one and logs the call.
+async function fakeNft(
+  tables: string[],
+): Promise<{ bin: string; log: string }> {
+  const bin = await Deno.makeTempDir({ prefix: "tp-purge-nft-" });
+  const log = join(bin, "calls");
+  const state = join(bin, "nft.tables");
+  await Deno.writeTextFile(log, "");
+  await Deno.writeTextFile(state, tables.map((t) => `table ${t}\n`).join(""));
+  const script = [
+    "#!/bin/sh",
+    'case "$1 $2" in',
+    `  "list tables") cat ${state} ;;`,
+    '  "delete table")',
+    `    echo "nft $*" >> ${log}`,
+    `    grep -vx "table $3 $4" ${state} > ${state}.new; mv ${state}.new ${state}`,
+    "    ;;",
+    "esac",
+    "",
+  ].join("\n");
+  await Deno.writeTextFile(join(bin, "nft"), script, { mode: 0o755 });
+  return { bin, log };
+}
+
+const NFT_FUNCTIONS = ["tp_remove_nft_tables"];
+
+test("purge deletes TurboPanel's nft tables by name and leaves every other table alone", async () => {
+  const { bin, log } = await fakeNft([
+    "inet turbopanel_ingress_guard",
+    "inet turbopanel_build",
+    "inet turbopanel_php",
+    "inet filter",
+    "ip nat",
+    "inet turbopanel_operator_own",
+  ]);
+  const result = await runPurgeSh(NFT_FUNCTIONS, "tp_remove_nft_tables", {
+    PATH: `${bin}:${BASE_PATH}`,
+  });
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals((await Deno.readTextFile(log)).trim().split("\n"), [
+    "nft delete table inet turbopanel_ingress_guard",
+    "nft delete table inet turbopanel_build",
+    "nft delete table inet turbopanel_php",
+  ]);
+  assertEquals(
+    (await Deno.readTextFile(join(bin, "nft.tables"))).trim().split("\n"),
+    ["table inet filter", "table ip nat", "table inet turbopanel_operator_own"],
+  );
+  // A second pass finds nothing to delete.
+  await Deno.writeTextFile(log, "");
+  const again = await runPurgeSh(NFT_FUNCTIONS, "tp_remove_nft_tables", {
+    PATH: `${bin}:${BASE_PATH}`,
+  });
+  assertEquals(again.code, 0, again.stderr);
+  assertEquals(await Deno.readTextFile(log), "");
+});
+
+test("a dry run deletes no nft table", async () => {
+  const { bin, log } = await fakeNft(["inet turbopanel_php"]);
+  const result = await runPurgeSh(
+    NFT_FUNCTIONS,
+    "DRY_RUN=true\ntp_remove_nft_tables",
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(await Deno.readTextFile(log), "");
+});
+
+test("without nft the table step is skipped, not failed", async () => {
+  // The host under test may have a real nft, so the tool check is overridden.
+  const result = await runPurgeSh(
+    NFT_FUNCTIONS,
+    'tp_has_tool() { [ "$1" != nft ] && command -v "$1" >/dev/null 2>&1; }\ntp_remove_nft_tables\necho "fail=$TP_FAIL_COUNT"\ncat "$TP_TMP/skipped"',
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertStringIncludes(result.stdout, "fail=0");
+  assertStringIncludes(result.stdout, "SKIPPED: nft not installed");
+});
+
+test("the inventory lists only TurboPanel's nft tables", async () => {
+  const { bin } = await fakeNft([
+    "inet turbopanel_php",
+    "inet filter",
+    "inet turbopanel_operator_own",
+  ]);
+  const result = await runPurgeSh(
+    ["tp_inventory_nft_tables", "tp_inv_skip", "tp_inv_warn"],
+    ': > "$TP_TMP/inv.chains"\ntp_inventory_nft_tables\ncat "$TP_TMP/inv.chains"',
+    { PATH: `${bin}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(result.stdout.trim(), "nft inet turbopanel_php");
 });

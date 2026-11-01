@@ -4,5 +4,7 @@
   become: true
   gather_facts: true
   roles:
+    # The docker role installs the Docker gate, which runs on the vendored Deno.
+    - role: deno-runtime
     - role: docker
     - role: orchestrator

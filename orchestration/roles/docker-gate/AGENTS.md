@@ -1,6 +1,6 @@
 # Docker gate (`docker-gate`) — AGENTS.md
 
-Root context: `../../../AGENTS.md` → **Managed-host privilege boundary**
+Root context: `../../../src/permissions/AGENTS.md` → **Managed-host privilege boundary**
 ("Docker" is the first of the three root-equivalent routes of the daemon
 account `tp`). This role is **stage 3 of 5** of closing it.
 
@@ -18,9 +18,15 @@ the `docker` group. The only wire-visible refusals are framing ones (below).
 
 Installed on managed hosts only (`turbopanel_dev_user` empty), wherever Docker
 is: the `docker` role includes it at the end, and `daemon-converge.yml` runs it
-for hosts that already have Docker. The whole install is a block with a
-`rescue` that only prints a warning: **in stage 1 nothing depends on the gate,
-so a failure to install it must never block a Docker install or a converge.**
+for hosts that already have Docker. The gate runs on the vendored Deno, so every
+play that runs the `docker` role (`instance-install`, `docker-setup`,
+`orchestrator-setup`, `proxysql-setup`, `rabbitmq-setup`) runs `deno-runtime`
+first, unconditionally; a native-binary daemon needs it too. A missing Deno is
+reported as a `WARNING: Docker gate NOT installed` line in the play output (the
+installer recap shows only failure messages, so it is not in the recap), not a
+silent skip. The whole install is a block with a `rescue` that only prints a
+warning: **in stage 1 nothing depends on the gate, so a failure to install it
+must never block a Docker install or a converge.**
 A later stage that routes traffic through it flips this to fatal.
 
 ## Files (`files/`, dependency-free, no import map, no network)

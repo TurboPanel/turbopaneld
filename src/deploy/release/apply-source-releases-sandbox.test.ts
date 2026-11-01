@@ -436,13 +436,13 @@ function imageLaneDeps(
     ensureDaemonReleaseRecordDirFn: async (treePaths) => {
       await Deno.mkdir(treePaths.releaseDir, { recursive: true });
     },
-    ensureBuildkitRailpackFn: () =>
+    ensureBuildkitImageBuildFn: () =>
       Promise.resolve({
-        railpack: "/missing/tool",
+        planner: "/missing/tool",
         frontendLayoutDir: "/missing/frontend",
         frontendDigest: `sha256:${"ab".repeat(32)}`,
       }),
-    runRailpackBuildFn: async (params) => {
+    runImageBuildBuildFn: async (params) => {
       const sandbox = params.sandbox;
       if (!sandbox) {
         throw new TypeError("the prepare step ran outside the sandbox");
@@ -460,11 +460,11 @@ function imageLaneDeps(
       await Deno.stat(sandbox.work.checkoutDir);
       return {
         imageTag: params.imageTag,
-        railpackFrontendVersion: "f",
-        railpackPlanVersion: "p",
+        builderFrontendVersion: "f",
+        builderPlanVersion: "p",
       };
     },
-    recordRailpackReleaseFn: ({ paths }) => Promise.resolve(paths.releaseDir),
+    recordImageBuildReleaseFn: ({ paths }) => Promise.resolve(paths.releaseDir),
   };
 }
 
@@ -516,12 +516,12 @@ test("a development checkout prepares image builds as the developer, without the
         {
           ...imageLaneDeps(deps, []),
           sandboxedBuilds: false,
-          runRailpackBuildFn: (params) => {
+          runImageBuildBuildFn: (params) => {
             sandboxed = params.sandbox !== undefined;
             return Promise.resolve({
               imageTag: params.imageTag,
-              railpackFrontendVersion: "f",
-              railpackPlanVersion: "p",
+              builderFrontendVersion: "f",
+              builderPlanVersion: "p",
             });
           },
         },

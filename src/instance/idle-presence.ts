@@ -43,6 +43,35 @@ import {
 
 export const IDLE_PRESENCE_MS = 60_000;
 
+/** Bounds for a control-plane advised heartbeat (the `version` frame is unsigned). */
+export const HEARTBEAT_MIN_S = 15;
+export const HEARTBEAT_MAX_S = 120;
+
+/**
+ * Validates an advised heartbeat in seconds. Returns whole seconds, or null
+ * when the value is not a finite number inside [HEARTBEAT_MIN_S, HEARTBEAT_MAX_S].
+ */
+export function clampHeartbeatSeconds(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const seconds = Math.round(value);
+  if (seconds < HEARTBEAT_MIN_S || seconds > HEARTBEAT_MAX_S) return null;
+  return seconds;
+}
+
+/**
+ * Heartbeat to apply in ms for an advised value, or null to keep the default.
+ * A verified signed hello wins, so the unsigned advice is ignored once
+ * `pinnedHelloApplied` is true.
+ */
+export function advisedHeartbeatMs(
+  advised: unknown,
+  pinnedHelloApplied: boolean,
+): number | null {
+  if (pinnedHelloApplied) return null;
+  const seconds = clampHeartbeatSeconds(advised);
+  return seconds === null ? null : seconds * 1000;
+}
+
 /**
  * Floor cadence for the app-level `heartbeat`, independent of change detection.
  *
@@ -331,11 +360,11 @@ export function installIdlePresenceProviders(source: {
  * detected independent of how many pings we've successfully sent.
  */
 export class IdlePresence {
-  readonly #idleCheckIntervalMs: number;
-  readonly #idleThresholdMs: number;
-  readonly #minPresenceIntervalMs: number;
+  #idleCheckIntervalMs: number;
+  #idleThresholdMs: number;
+  #minPresenceIntervalMs: number;
   readonly #presenceRefreshIntervalMs: number;
-  readonly #staleConnectionMs: number;
+  #staleConnectionMs: number;
   readonly #onStaleConnection: (() => void) | undefined;
   readonly #baseMaxConnectionAgeMs: number;
   readonly #jitterMaxAge: boolean;
@@ -410,11 +439,31 @@ export class IdlePresence {
     this.#maxAgeReported = false;
     this.#lastPresenceFrameAt = 0;
     this.#sendHello();
+    this.#armIdleTimer();
+  }
+
+  #armIdleTimer(): void {
     this.#idleTimer = setInterval(() => {
       if (this.#checkMaxConnectionAge()) return;
       this.#checkStaleConnection();
       this.#maybeSendPresence();
     }, this.#idleCheckIntervalMs);
+  }
+
+  /**
+   * Applies an advised heartbeat: the ping cadence, its spacing and the
+   * stale-socket threshold (3x) all follow `ms`. The timer is re-armed when
+   * the socket is already attached, which is the normal order because the
+   * control plane's `version` frame arrives after `attach()`.
+   */
+  setIdleThresholdMs(ms: number): void {
+    this.#idleCheckIntervalMs = ms;
+    this.#idleThresholdMs = ms;
+    this.#minPresenceIntervalMs = ms;
+    this.#staleConnectionMs = ms * 3;
+    if (this.#idleTimer === undefined) return;
+    clearInterval(this.#idleTimer);
+    this.#armIdleTimer();
   }
 
   detach(): void {

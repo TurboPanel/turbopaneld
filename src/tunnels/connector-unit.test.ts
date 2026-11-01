@@ -1,0 +1,261 @@
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
+import {
+  allocateMetricsPort,
+  isTunnelId,
+  mapConnectorStatus,
+  otherSlot,
+  parseConnectorRecord,
+  renderTunnelEnvFile,
+  renderTunnelUnit,
+  TUNNEL_METRICS_PORT_MAX,
+  TUNNEL_METRICS_PORT_MIN,
+  tunnelEnvPath,
+  tunnelUnitName,
+  tunnelUnitPath,
+} from "./connector-unit.ts";
+
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
+const test = Deno.test.bind(Deno);
+
+const ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const BIN = "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared";
+
+test("a tunnel id is a lower-case UUID or one of the two legacy names", () => {
+  assert(isTunnelId(ID));
+  assert(isTunnelId("instance"));
+  assert(isTunnelId("default"));
+});
+
+test("an id that could become a path or a unit name is refused", () => {
+  const bad = [
+    "",
+    " ",
+    "..",
+    "../etc/passwd",
+    `${ID}/../x`,
+    `${ID}\n`,
+    `${ID} `,
+    `${ID}.service`,
+    ID.toUpperCase(),
+    ID.slice(1),
+    `${ID}0`,
+    "instance/../x",
+    "tunnel@x",
+    "a".repeat(36),
+    "turbopanel-tunnel-x",
+  ];
+  for (const value of bad) assertEquals(isTunnelId(value), false, value);
+  assertEquals(isTunnelId(undefined), false);
+  assertEquals(isTunnelId(5), false);
+  assertThrows(() => tunnelUnitName("../x"), TypeError);
+  assertThrows(() => tunnelEnvPath({ configDir: "/etc/turbopanel" }, ""));
+});
+
+test("unit and token copy are named after the id", () => {
+  assertEquals(tunnelUnitName(ID), `turbopanel-tunnel-${ID}.service`);
+  assertEquals(
+    tunnelUnitPath(ID),
+    `/etc/systemd/system/turbopanel-tunnel-${ID}.service`,
+  );
+  assertEquals(
+    tunnelEnvPath({ configDir: "/etc/turbopanel" }, ID),
+    `/etc/turbopanel/tunnel-env/${ID}.env`,
+  );
+});
+
+test("the unit is its own service with the token in a file, never on the command line", () => {
+  const envFile = tunnelEnvPath({ configDir: "/etc/turbopanel" }, ID);
+  const text = renderTunnelUnit({ id: ID, binary: BIN, port: 20301, envFile });
+  assertStringIncludes(text, `EnvironmentFile=${envFile}\n`);
+  assertStringIncludes(
+    text,
+    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 run\n`,
+  );
+  assertStringIncludes(text, "Restart=always\nRestartSec=5\n");
+  assertStringIncludes(text, "DynamicUser=yes\n");
+  assertStringIncludes(text, "NoNewPrivileges=yes\n");
+  assertStringIncludes(text, "CapabilityBoundingSet=\n");
+  assertStringIncludes(text, "WantedBy=multi-user.target\n");
+  assert(!/^User=/m.test(text));
+  assert(!/TUNNEL_TOKEN|--token/.test(text));
+  assert(!text.includes("\\"));
+});
+
+test("the unit text is byte-identical for the same inputs", () => {
+  const params = { id: ID, binary: BIN, port: 20300, envFile: "/e" };
+  assertEquals(renderTunnelUnit(params), renderTunnelUnit(params));
+});
+
+test("a metrics port outside the band is refused", () => {
+  const params = { id: ID, binary: BIN, envFile: "/e" };
+  for (const port of [0, 80, 20241, 19_799, 20_900, 32_768, 20_300.5, NaN]) {
+    assertThrows(() => renderTunnelUnit({ ...params, port }), RangeError);
+  }
+  renderTunnelUnit({ ...params, port: TUNNEL_METRICS_PORT_MIN });
+  renderTunnelUnit({ ...params, port: TUNNEL_METRICS_PORT_MAX });
+});
+
+test("the environment file holds exactly one quoted token line", () => {
+  assertEquals(
+    renderTunnelEnvFile("eyJhIjoiYWJj_-+/=="),
+    "TUNNEL_TOKEN='eyJhIjoiYWJj_-+/=='\n",
+  );
+  for (
+    const bad of ["", "a b", "a'b", "a\nb", '"x"', "$(x)", "a".repeat(2049)]
+  ) {
+    assertThrows(() => renderTunnelEnvFile(bad), TypeError, undefined, bad);
+  }
+});
+
+test("ports are handed out lowest first and skip the ones in use", () => {
+  assertEquals(allocateMetricsPort([]), TUNNEL_METRICS_PORT_MIN);
+  assertEquals(
+    allocateMetricsPort([20300, 20302]),
+    20301,
+  );
+  const all = Array.from(
+    { length: TUNNEL_METRICS_PORT_MAX - TUNNEL_METRICS_PORT_MIN + 1 },
+    (_, i) => TUNNEL_METRICS_PORT_MIN + i,
+  );
+  assertThrows(() => allocateMetricsPort(all));
+});
+
+test("a record round-trips and a damaged one is ignored", () => {
+  const record = {
+    id: ID,
+    port: 20310,
+    version: "2026.10.7",
+    tokenDigest: "ab",
+    slot: "a" as const,
+  };
+  assertEquals(parseConnectorRecord(JSON.stringify(record)), record);
+  // A record written before updates existed has no slot and is slot "a".
+  const { slot: _slot, ...old } = record;
+  assertEquals(parseConnectorRecord(JSON.stringify(old)), record);
+  assertEquals(
+    parseConnectorRecord(JSON.stringify({ ...record, slot: "c" })),
+    null,
+  );
+  assertEquals(parseConnectorRecord("{"), null);
+  assertEquals(parseConnectorRecord("null"), null);
+  assertEquals(
+    parseConnectorRecord(JSON.stringify({ ...record, id: "../x" })),
+    null,
+  );
+  assertEquals(
+    parseConnectorRecord(JSON.stringify({ ...record, port: 80 })),
+    null,
+  );
+});
+
+test("status comes from the service state and the connector's own readiness", () => {
+  const ready = { kind: "ready", connections: 4 } as const;
+  const notReady = { kind: "not-ready", connections: 0 } as const;
+  const unreachable = { kind: "unreachable" } as const;
+  assertEquals(mapConnectorStatus("active", ready), "connected");
+  assertEquals(mapConnectorStatus("active", notReady), "connecting");
+  assertEquals(mapConnectorStatus("active", unreachable), "connecting");
+  assertEquals(mapConnectorStatus("active", null), "connecting");
+  assertEquals(mapConnectorStatus("activating", ready), "connecting");
+  assertEquals(mapConnectorStatus("failed", ready), "failed");
+  assertEquals(mapConnectorStatus("inactive", ready), "stopped");
+  assertEquals(mapConnectorStatus("deactivating", null), "stopped");
+  assertEquals(mapConnectorStatus("unknown", null), "not-installed");
+  assertEquals(mapConnectorStatus("", null), "not-installed");
+  assertEquals(mapConnectorStatus("active\n", ready), "connected");
+});
+
+test("the second slot has its own unit name, path and log name, and the first keeps the old ones", () => {
+  assertEquals(tunnelUnitName(ID), `turbopanel-tunnel-${ID}.service`);
+  assertEquals(tunnelUnitName(ID, "b"), `turbopanel-tunnel-${ID}-b.service`);
+  assertEquals(
+    tunnelUnitPath(ID, "/units", "b"),
+    `/units/turbopanel-tunnel-${ID}-b.service`,
+  );
+  assertEquals(otherSlot("a"), "b");
+  assertEquals(otherSlot("b"), "a");
+  const params = { id: ID, binary: BIN, port: TUNNEL_METRICS_PORT_MIN };
+  const first = renderTunnelUnit({ ...params, envFile: "/e/x.env" });
+  const second = renderTunnelUnit({
+    ...params,
+    envFile: "/e/x.env",
+    slot: "b",
+  });
+  assertStringIncludes(first, `SyslogIdentifier=turbopanel-tunnel-${ID}\n`);
+  assertStringIncludes(second, `SyslogIdentifier=turbopanel-tunnel-${ID}-b\n`);
+  // Both read the same token copy and differ only in the log name.
+  assertEquals(
+    first.replace(`turbopanel-tunnel-${ID}\n`, `turbopanel-tunnel-${ID}-b\n`),
+    second,
+  );
+});
+
+test("the connector command line keeps the order the pinned program accepts", () => {
+  const text = renderTunnelUnit({
+    id: ID,
+    binary: BIN,
+    port: 20301,
+    envFile: "/e",
+  });
+  const exec = text.split("\n").filter((l) => l.startsWith("ExecStart="));
+  // `--no-autoupdate` is a global flag (before `tunnel`); `--metrics` belongs
+  // to `tunnel` (before `run`). The old order made the program print its usage
+  // and exit, so no connector ever ran.
+  assertEquals(exec, [
+    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 run`,
+  ]);
+});
+
+// Runs the real connector program, so it only runs where one is named (never
+// in CI): TP_CLOUDFLARED_BIN=/opt/turbopanel/vendor/cloudflared/<version>/cloudflared
+test({
+  name: "the real connector program accepts the argument order the unit uses",
+  ignore: !Deno.env.get("TP_CLOUDFLARED_BIN"),
+  fn: async () => {
+    const bin = Deno.env.get("TP_CLOUDFLARED_BIN")!;
+    const accepted = await new Deno.Command(bin, {
+      args: [
+        "--no-autoupdate",
+        "tunnel",
+        "--metrics",
+        "127.0.0.1:20399",
+        "run",
+        "--help",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const out = new TextDecoder().decode(accepted.stdout) +
+      new TextDecoder().decode(accepted.stderr);
+    assert(accepted.success, out);
+    assert(!out.includes("Incorrect Usage"), out);
+    assertStringIncludes(out, "cloudflared tunnel run");
+
+    // The order the daemon used to write is refused by the same program.
+    const old = await new Deno.Command(bin, {
+      args: [
+        "tunnel",
+        "run",
+        "--no-autoupdate",
+        "--metrics",
+        "127.0.0.1:20399",
+        "--help",
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const oldOut = new TextDecoder().decode(old.stdout) +
+      new TextDecoder().decode(old.stderr);
+    assertStringIncludes(oldOut, "Incorrect Usage");
+  },
+});

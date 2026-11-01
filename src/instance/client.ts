@@ -8,7 +8,7 @@ import {
 } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
-import { forEachSequential, repeatSequential } from "../util/sequential.ts";
+import { repeatSequential } from "../util/sequential.ts";
 import {
   createInstanceHttpClient,
   describeInstance,
@@ -16,12 +16,12 @@ import {
   type InstanceConfig,
   instanceUrl,
   instanceWebSocketUrl,
-  normalizeCaFingerprint,
   resolveInstanceCaPath,
   resolveInstanceConfig,
   resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
 } from "./sockets.ts";
+import { caPinMismatch, CaPinMismatchError } from "./ca-pin.ts";
 import { runServerNetworkCheck } from "../host/network-check.ts";
 import {
   collectServerIps,
@@ -79,15 +79,21 @@ import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
 import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
-import { removeDaemonFile } from "../permissions/daemon-files.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
-import { classifyConnectFailure } from "./connect-failure.ts";
+import {
+  classifyConnectFailure,
+  permanentRejectionAdvice,
+} from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
-import { IdlePresence } from "./idle-presence.ts";
+import {
+  advisedHeartbeatMs,
+  IDLE_PRESENCE_MS,
+  IdlePresence,
+} from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
 import { collectMetricsCapabilities } from "../metrics/collector/capabilities.ts";
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
@@ -154,19 +160,29 @@ import {
   PgStandbySampler,
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
+import { RepoKeyReporter } from "./repo-key-reporter.ts";
+import { repoKeyLedgerFor } from "../orchestration/repo-key-changes.ts";
+import {
+  FabricPeerReporter,
+  type FabricPeerSubscribe,
+} from "./fabric-peer-reporter.ts";
 import { BackupResultReporter } from "../backups/result-reporter.ts";
 import { BackupCopier } from "../backups/copier.ts";
 import { BackupCopyReporter } from "../backups/copy-reporter.ts";
 import { AcmeIssuanceObserver } from "./acme-observe.ts";
+import { AcmeIssueHandler } from "./acme-issue-handler.ts";
+import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   BACKUP_S3_COPY_FEATURE,
+  FABRIC_PEER_REPORT_FEATURE,
   HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
   MANAGED_HA_PROBE_FEATURE,
   MANAGED_HEALTH_REPORT_FEATURE,
+  REPO_KEY_REPORT_FEATURE,
   resolveDaemonCapabilities,
   TLS_CAPTURE_FEATURE,
 } from "./version-wire.ts";
@@ -256,6 +272,8 @@ export type CommandPorts = {
   ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
+  /** Hear every 60 s `tp0` peer reading (`fabric-peers-report`). */
+  subscribeFabricPeers?: FabricPeerSubscribe;
 };
 
 let commandPorts: CommandPorts = {};
@@ -447,29 +465,21 @@ function parseMessage(raw: string): DaemonMessage | null {
   }
 }
 
-/** Removes only `server-key.json` + `server-key-id`; keeps persisted `server.id`. */
-export async function clearDaemonKeyState(stateDir: string): Promise<void> {
-  await forEachSequential([SERVER_KEY_FILE, KEY_ID_FILE], async (file) => {
-    try {
-      await removeDaemonFile(`${stateDir}/${file}`);
-    } catch {
-      // Missing files are fine.
-    }
-  });
-}
-
 /**
  * Why the connect loop is parked (no reconnect backoff, periodic re-check):
  * `permanent` — the control plane rejected enrollment/auth; `tls-trust` — the
  * platform CA does not validate the control plane; `awaiting-license` — no
  * license credentials on disk yet (install wizard / installer still to run);
- * `awaiting-seat` — no purchased size is free for this server yet.
+ * `awaiting-seat` — no purchased size is free for this server yet;
+ * `awaiting-administrator` — the control plane does not know this server's
+ * key (key files are kept, nothing is re-enrolled).
  */
 type ParkedKind =
   | "permanent"
   | "tls-trust"
   | "awaiting-license"
-  | "awaiting-seat";
+  | "awaiting-seat"
+  | "awaiting-administrator";
 
 export class InstanceClient {
   readonly #config: InstanceConfig;
@@ -494,6 +504,7 @@ export class InstanceClient {
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
+  #unparkForcesEnroll = false;
   /** Orphan transcript sweep runs once per process, never on reconnect. */
   #orphanSweepStarted = false;
   #didCompleteSecretsRehydrate = false;
@@ -515,8 +526,12 @@ export class InstanceClient {
   #peerFeaturesKnown = false;
   /** Last unsupported version we already logged, so reconnects do not repeat it. */
   #loggedUnsupportedInstanceVersion: string | undefined;
+  /** Why the trust files do not match the pinned CA list; null when they do. */
+  #caPinMismatch: string | null = null;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
+  /** Always false until the signed-hello change lands; that change drops `readonly` and sets it, after which the unsigned advice is ignored. */
+  readonly #pinnedHelloApplied = false;
   /** Command ids already dispatched, so a repeated frame never runs twice. */
   readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
@@ -525,10 +540,14 @@ export class InstanceClient {
   #pgStandbySampler: PgStandbySampler | undefined;
   #mysqlFamilySampler: PgStandbySampler | undefined;
   #managedHealthReporter: ManagedHealthReporter | undefined;
+  #repoKeyReporter: RepoKeyReporter | undefined;
+  #fabricPeerReporter: FabricPeerReporter | undefined;
   #backupReporter: BackupResultReporter | undefined;
   #backupCopier: BackupCopier | undefined;
   #backupCopyReporter: BackupCopyReporter | undefined;
   #acmeObserver: AcmeIssuanceObserver | undefined;
+  #proofForward: ProofForwardHandler | undefined;
+  #acmeIssue: AcmeIssueHandler | undefined;
   /** Panel certificate renewal. Independent of `#acmeObserver`. */
   #instanceAcmeRenewal: InstanceAcmeRenewalScheduler | undefined;
   #metricsScheduler: MetricsScheduler | undefined;
@@ -745,27 +764,24 @@ export class InstanceClient {
       this.#jwksClient = undefined;
       this.#apiClient = undefined;
     }
-    await this.#logCaFingerprintMismatch(caCertPath, env);
+    await this.#checkCaPin(env);
   }
 
-  async #logCaFingerprintMismatch(
-    caCertPath: string | undefined,
-    env: Record<string, string | undefined>,
-  ): Promise<void> {
-    const expected = env.TURBOPANEL_INSTANCE_CA_FINGERPRINT?.trim();
-    if (!expected || !caCertPath) return;
-    try {
-      const pem = await Deno.readTextFile(caCertPath);
-      const actual = await fingerprintPemCertificate(pem);
-      if (normalizeCaFingerprint(expected) !== actual) {
-        logWarn(
-          "instance",
-          `tls-trust: expected CA fingerprint ${expected} but ${caCertPath} is ${actual}`,
-        );
-      }
-    } catch {
-      // Handshake classification reports unreadable CA material.
+  /**
+   * Hard check against `TURBOPANEL_INSTANCE_CA_FINGERPRINT`: a trust file
+   * holding a CA outside the pinned list makes every connect attempt fail
+   * (see {@link #connectOnce}) until the files or the list are put right.
+   * No list configured means no check.
+   */
+  async #checkCaPin(env: Record<string, string | undefined>): Promise<void> {
+    const mismatch = await caPinMismatch(env);
+    if (mismatch && mismatch !== this.#caPinMismatch) {
+      logError(
+        "instance",
+        `tls-trust: refusing to connect: ${mismatch}. Something other than the installer or the control plane changed this server's trust files. Restore them, or re-run the installer with a fresh command from Add Server`,
+      );
     }
+    this.#caPinMismatch = mismatch;
   }
 
   #fetchInit(
@@ -810,6 +826,8 @@ export class InstanceClient {
     }
     this.#peerFeatures = accepted;
     setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
+    // A change kept for an older control plane goes out once this one lists the feature.
+    void this.#repoKeyReporter?.flush();
   }
 
   #apiClientVersionHook(): {
@@ -924,6 +942,22 @@ export class InstanceClient {
     );
   }
 
+  #applyAdvisedHeartbeat(advised: unknown): void {
+    const ms = advisedHeartbeatMs(advised, this.#pinnedHelloApplied);
+    // IdlePresence is reused across reconnects: a frame without advice must
+    // put the default back, not keep the last advised cadence.
+    if (ms !== null) this.#idlePresence?.setIdleThresholdMs(ms);
+    else if (!this.#pinnedHelloApplied) {
+      this.#idlePresence?.setIdleThresholdMs(IDLE_PRESENCE_MS);
+    }
+    logInfo(
+      "presence",
+      ms === null
+        ? "heartbeat 60s (default)"
+        : `heartbeat ${ms / 1000}s (advised)`,
+    );
+  }
+
   async fetchVersion(): Promise<{ commit: string; branch: string }> {
     const response = await fetch(
       instanceUrl(this.#config, "/api/daemon/v1/version"),
@@ -979,6 +1013,8 @@ export class InstanceClient {
     this.#pgStandbySampler?.detach();
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
+    this.#fabricPeerReporter?.detach();
+    this.#repoKeyReporter?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -1068,6 +1104,7 @@ export class InstanceClient {
     this.#pgStandbySampler?.detach();
     this.#mysqlFamilySampler?.detach();
     this.#managedHealthReporter?.detach();
+    this.#fabricPeerReporter?.detach();
     this.#backupReporter?.detach();
     this.#backupCopier?.stop();
     this.#backupCopyReporter?.detach();
@@ -1082,6 +1119,8 @@ export class InstanceClient {
       await this.#enterParkedState(classified.reason, "awaiting-license");
     } else if (classified.kind === "awaiting-seat") {
       await this.#enterParkedState(classified.reason, "awaiting-seat");
+    } else if (classified.kind === "stale-identity") {
+      await this.#enterParkedState(classified.reason, "awaiting-administrator");
     } else {
       this.#increaseBackoff();
     }
@@ -1131,6 +1170,13 @@ export class InstanceClient {
       );
       return;
     }
+    if (kind === "awaiting-administrator") {
+      logWarn(
+        "instance",
+        `panel says this server's key is unknown; waiting for an administrator (${reason}); key files are kept and the check repeats with backoff`,
+      );
+      return;
+    }
     if (kind === "tls-trust") {
       const caPath = resolveInstanceCaPath() ?? "(none)";
       const uploadedTrust = resolveInstanceUploadedTrustPath() ?? "(none)";
@@ -1154,7 +1200,9 @@ export class InstanceClient {
     }
     logError(
       "instance",
-      `daemon control-plane permanently rejected enrollment (${reason}); parked — install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL at the correct control plane, then the daemon auto-recovers`,
+      `daemon control-plane permanently rejected enrollment (${reason}); parked — ${
+        permanentRejectionAdvice(reason)
+      }, then the daemon auto-recovers`,
     );
   }
 
@@ -1177,10 +1225,20 @@ export class InstanceClient {
   }
 
   async #shouldUnpark(): Promise<boolean> {
+    if (this.#parkedKind === "awaiting-administrator") {
+      // Retried on the timer with the same key. Only an action on this host
+      // (a new license written by the installer, or the force flag) asks for
+      // a fresh enrollment; nothing the panel answers can.
+      this.#unparkForcesEnroll =
+        isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL")) ||
+        (await this.#readLicenseStamp()) !== this.#licenseStamp;
+      return true;
+    }
     // Retried on the timer: a purchase changes the answer without any
     // change on this server.
     if (
-      this.#parkedKind === "tls-trust" || this.#parkedKind === "awaiting-seat"
+      this.#parkedKind === "tls-trust" ||
+      this.#parkedKind === "awaiting-seat"
     ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
     const stamp = await this.#readLicenseStamp();
@@ -1197,7 +1255,10 @@ export class InstanceClient {
     this.#resetBackoff();
     // A seat wait retries the same enroll or session; re-enrolling with a
     // new key would not change the answer.
-    if (kind !== "tls-trust" && kind !== "awaiting-seat") {
+    if (kind === "awaiting-administrator") {
+      this.#forceEnrollPending = this.#unparkForcesEnroll;
+      this.#unparkForcesEnroll = false;
+    } else if (kind !== "tls-trust" && kind !== "awaiting-seat") {
       this.#forceEnrollPending = true;
     }
     if (kind === "awaiting-license") {
@@ -1211,6 +1272,9 @@ export class InstanceClient {
         `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`;
     } else if (kind === "awaiting-seat") {
       message = `re-checking for a purchased size (${reason})`;
+    } else if (kind === "awaiting-administrator") {
+      message =
+        `re-checking whether the panel knows this server's key (${reason})`;
     }
     logDebug("instance", message);
   }
@@ -1369,21 +1433,13 @@ export class InstanceClient {
     }
   }
 
-  async #recoverFromStaleIdentity(stateDir: string): Promise<void> {
-    logWarn(
-      "instance",
-      "daemon identity is stale for this instance; clearing local key files and re-enrolling",
-    );
-    await clearDaemonKeyState(stateDir);
-    this.#tokenManager = undefined;
-    this.#apiClient = undefined;
-    this.#tokenServerId = undefined;
-    this.#tokenKeyId = undefined;
-    this.#forceEnrollPending = true;
-  }
-
   async #connectOnce(): Promise<void> {
     await this.refreshPlatformCaClient();
+    if (this.#caPinMismatch) {
+      // Before any credential is sent: never authenticate to a control plane
+      // reached through a CA this server was not told to trust.
+      throw new CaPinMismatchError(this.#caPinMismatch);
+    }
     await this.#waitForConnectPreconditions();
 
     // Do not close the active socket here: by the time #connectOnce() is called
@@ -1396,19 +1452,19 @@ export class InstanceClient {
     const machineKey = await readMachineKey();
     const hostname = Deno.hostname();
 
-    await this.#connectWithIdentity(stateDir, machineKey, hostname, 0);
+    await this.#connectWithIdentity(stateDir, machineKey, hostname);
   }
 
   /**
-   * Load (or enrol) the identity and open the websocket. A stale identity is
-   * cleared and re-enrolled once: attempt 0 may recover into attempt 1, whose
-   * failures always surface.
+   * Load (or enrol) the identity and open the websocket. Failures always
+   * surface. An unknown-key answer never deletes the key files: the panel
+   * saying it does not know this key is not proof, so the daemon parks and
+   * waits for an administrator instead of re-enrolling.
    */
   async #connectWithIdentity(
     stateDir: string,
     machineKey: string | undefined,
     hostname: string,
-    attempt: number,
   ): Promise<void> {
     const identity = await this.#loadOrEnrollIdentity(
       stateDir,
@@ -1431,20 +1487,8 @@ export class InstanceClient {
       hostname,
     );
 
-    try {
-      const jwt = await this.#tokenManager!.getToken();
-      await this.#openDaemonWebSocket(jwt, identity.serverId);
-    } catch (err) {
-      if (
-        attempt === 0 &&
-        classifyConnectFailure(err).kind === "stale-identity"
-      ) {
-        await this.#recoverFromStaleIdentity(stateDir);
-        await this.#connectWithIdentity(stateDir, machineKey, hostname, 1);
-        return;
-      }
-      throw err;
-    }
+    const jwt = await this.#tokenManager!.getToken();
+    await this.#openDaemonWebSocket(jwt, identity.serverId);
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
@@ -1522,10 +1566,14 @@ export class InstanceClient {
     });
     this.#mysqlFamilySampler.attach();
     this.#ensureManagedHealthReporter().attach();
+    this.#ensureFabricPeerReporter().attach();
+    this.#ensureRepoKeyReporter().attach();
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
+    this.#ensureProofForward();
+    this.#ensureAcmeIssue();
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -1592,6 +1640,7 @@ export class InstanceClient {
       this.#pgStandbySampler?.detach();
       this.#mysqlFamilySampler?.detach();
       this.#managedHealthReporter?.detach();
+      this.#fabricPeerReporter?.detach();
       this.#backupReporter?.detach();
       this.#backupCopier?.stop();
       this.#backupCopyReporter?.detach();
@@ -1694,6 +1743,33 @@ export class InstanceClient {
     return this.#managedHealthReporter;
   }
 
+  #ensureRepoKeyReporter(): RepoKeyReporter {
+    this.#repoKeyReporter ??= new RepoKeyReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsReport: () => this.instanceSupports(REPO_KEY_REPORT_FEATURE),
+      ledger: () => repoKeyLedgerFor(),
+    });
+    return this.#repoKeyReporter;
+  }
+
+  #ensureFabricPeerReporter(): FabricPeerReporter {
+    this.#fabricPeerReporter ??= new FabricPeerReporter({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupportsReport: () =>
+        this.instanceSupports(FABRIC_PEER_REPORT_FEATURE),
+      subscribe: () => commandPorts.subscribeFabricPeers,
+    });
+    return this.#fabricPeerReporter;
+  }
+
   #ensureBackupReporter(): BackupResultReporter {
     this.#backupReporter ??= new BackupResultReporter({
       send: (message) => {
@@ -1728,6 +1804,47 @@ export class InstanceClient {
       peerSupports: () => this.instanceSupports(BACKUP_S3_COPY_FEATURE),
     });
     return this.#backupCopyReporter;
+  }
+
+  /**
+   * The helper side of central certificate issuance. The first use also sweeps
+   * any forward a restart left behind past its stated time.
+   */
+  #ensureProofForward(): ProofForwardHandler {
+    if (this.#proofForward) return this.#proofForward;
+    const handler = new ProofForwardHandler({
+      layout: resolveLayout(Deno.env.toObject()),
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+    });
+    this.#proofForward = handler;
+    this.#runSocketHandler("acme-proof-forward sweep", handler.sweepExpired());
+    return handler;
+  }
+
+  /** The issuing side of central certificate issuance. */
+  #ensureAcmeIssue(): AcmeIssueHandler {
+    if (this.#acmeIssue) return this.#acmeIssue;
+    this.#acmeIssue = new AcmeIssueHandler({
+      layout: resolveLayout(Deno.env.toObject()),
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      report: (input) => {
+        const api = this.#apiClient;
+        if (api === undefined) {
+          return Promise.reject(new Error("control plane client not ready"));
+        }
+        return api.reportIssuedCertificate(input);
+      },
+    });
+    this.#runSocketHandler("acme-issue sweep", this.#acmeIssue.start());
+    return this.#acmeIssue;
   }
 
   #ensureAcmeObserver(): void {
@@ -1893,6 +2010,7 @@ export class InstanceClient {
   // Identity is established locally (enrollment + server.id) and confirmed via
   // verified JWT `sub` in DaemonTokenManager — no socket message adopts serverId.
   #handleMessage(message: DaemonMessage, ws: WebSocket): void {
+    if (this.#handleCentralCertificateMessage(message)) return;
     // The control plane answers the daemon's wire ping with `{type:"pong"}`
     // (a Workers auto-response); it carries nothing to act on.
     if ((message as { type?: unknown }).type === "pong") return;
@@ -1905,6 +2023,7 @@ export class InstanceClient {
         // resolves to unknown.
         this.#noteInstanceVersion(message.instanceVersion);
         this.#notePeerFeatures(message.features);
+        this.#applyAdvisedHeartbeat(message.heartbeatSeconds);
         logInfo(
           "instance",
           "attach frame received",
@@ -2061,6 +2180,35 @@ export class InstanceClient {
           }`,
         );
         break;
+    }
+  }
+
+  /**
+   * The central certificate messages (`acme-issue-v1`). Kept out of the main
+   * switch below, which is at the size limit; true when `message` was one.
+   */
+  #handleCentralCertificateMessage(message: DaemonMessage): boolean {
+    switch (message.type) {
+      case "acme-issue-request":
+        this.#runSocketHandler(
+          "acme-issue-request",
+          this.#ensureAcmeIssue().handleRequest(message),
+        );
+        return true;
+      case "acme-proof-forward":
+        this.#runSocketHandler(
+          "acme-proof-forward",
+          this.#ensureProofForward().handleForward(message),
+        );
+        return true;
+      case "acme-proof-forward-end":
+        this.#runSocketHandler(
+          "acme-proof-forward-end",
+          this.#ensureProofForward().handleEnd(message),
+        );
+        return true;
+      default:
+        return false;
     }
   }
 

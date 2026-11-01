@@ -1,7 +1,11 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
-import { RUNTIME_COMPOSE_FILENAME } from "../deploy/compose-files.ts";
+import {
+  listLocalDeploymentManifests,
+  RUNTIME_COMPOSE_FILENAME,
+  writeDeploymentManifest,
+} from "../deploy/compose-files.ts";
 import { handleEnvironmentStop } from "./stop-environment.ts";
 
 /**
@@ -204,6 +208,83 @@ test({
 
 test({
   name:
+    "handleEnvironmentStop leaves no manifest behind when a later cleanup step throws",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-later-fail-" });
+    const previous = snapshotEnv();
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+
+    const environmentId = "envstop09";
+    const projectName = "tp-demo-envstop9";
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+      "services:\n  web: {}\n",
+    );
+    await writeDeploymentManifest(deploymentDir, {
+      version: 3,
+      projectId: "proj-1",
+      environmentId,
+      serverId: "srv-1",
+      generation: 1,
+      projectName,
+      composeSha256: "a".repeat(64),
+      services: {},
+    });
+    const dataFile = join(deploymentDir, "data", "keep.txt");
+    await Deno.mkdir(join(deploymentDir, "data"));
+    await Deno.writeTextFile(dataFile, "kept");
+
+    try {
+      // The ingress state root is a plain file, so the ingress cleanup throws:
+      // after the containers are already down and before the folder step.
+      await Deno.writeTextFile(join(stateDir, "ingress"), "not a directory");
+      await assertRejects(
+        () =>
+          handleEnvironmentStop(
+            {
+              environmentId,
+              projectId: "proj-1",
+              projectName,
+              ingressServices: [{
+                serviceId: "11111111-1111-4111-8111-111111111111",
+              }],
+            } as never,
+            new Date().toISOString(),
+            {
+              runDocker: (): Promise<DockerCliResult> =>
+                Promise.resolve({
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                  code: 0,
+                }),
+            },
+          ),
+        Error,
+      );
+      // Nothing for the next daemon start to bring the stack back from, and the
+      // user's data is untouched.
+      assertEquals(await listLocalDeploymentManifests({ stateDir }), []);
+      assertEquals(await Deno.readTextFile(dataFile), "kept");
+    } finally {
+      restoreEnv(previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
     "handleEnvironmentStop surfaces a failed privileged removal of the deployment dir",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
@@ -222,6 +303,16 @@ test({
       join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
       "services:\n  web: {}\n",
     );
+    await writeDeploymentManifest(deploymentDir, {
+      version: 3,
+      projectId: "proj-1",
+      environmentId,
+      serverId: "srv-1",
+      generation: 1,
+      projectName,
+      composeSha256: "a".repeat(64),
+      services: {},
+    });
     await Deno.chmod(projectDir, 0o500);
     const privileged: string[][] = [];
 
@@ -229,7 +320,12 @@ test({
       await assertRejects(
         () =>
           handleEnvironmentStop(
-            { environmentId, projectId: "proj-1", projectName },
+            {
+              environmentId,
+              projectId: "proj-1",
+              projectName,
+              removeDeploymentDir: true,
+            },
             new Date().toISOString(),
             {
               runDocker: (): Promise<DockerCliResult> =>
@@ -254,6 +350,9 @@ test({
         "deployment dir removal failed: refused",
       );
       assertEquals(privileged, [["sudo", "rm", "-rf", "--", deploymentDir]]);
+      // The removal failed, but the containers are down: no manifest is left
+      // for the next daemon start to bring the stack back from.
+      assertEquals(await listLocalDeploymentManifests({ stateDir }), []);
     } finally {
       await Deno.chmod(projectDir, 0o750).catch(() => undefined);
       restoreEnv(previous);

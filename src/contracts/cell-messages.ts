@@ -11,6 +11,7 @@
 import type { ServerReportedIp } from "./server-reported-ip.ts";
 import type {
   DrivetempEnableResult,
+  FabricReconcileObservedPeer,
   ManagedMemberObservedResult,
 } from "./commands-contracts.ts";
 import type { HardwareProfile } from "../metrics/collector/types.ts";
@@ -53,6 +54,11 @@ export type CellAttachVersionMessage = {
    * the field; `instanceSupports` stays closed.
    */
   features?: string[];
+  /**
+   * Advised idle-ping cadence in seconds. The frame is unsigned, so the
+   * daemon clamps it to [15, 120]; pinned daemons use the signed hello.
+   */
+  heartbeatSeconds?: number;
 };
 
 /** One replica in a `managed-health-report`: `down`, or its reading. */
@@ -465,6 +471,69 @@ export type InstanceAcmeWireSettings = {
   useStaging: boolean;
 };
 
+/**
+ * Control plane to daemon (feature `acme-issue-v1`): place the certificate order
+ * for `names` from this server's own addresses over the HTTP proof. The finished
+ * pair is reported through `POST /api/daemon/v1/tls/issued` with `requestId`;
+ * no message ever carries the pair. Twin of the control plane's
+ * `AcmeIssueRequestMessage`.
+ */
+export type AcmeIssueRequestMessage = {
+  type: "acme-issue-request";
+  requestId: string;
+  tlsId: string;
+  names: string[];
+  directory: "production" | "staging";
+  contactEmail: string;
+  /** The request is open until this time (ISO 8601). */
+  startByIso: string;
+  /** Other servers that pass the proof path on; each is checked before the order. */
+  helpers: AcmeProofHelper[];
+  at: string;
+};
+
+export type AcmeProofHelper = { serverId: string; address: string };
+
+/** Control plane to daemon: pass `/.well-known/acme-challenge/*` for `names` to `targetAddress` until `expiresAtIso`. */
+export type AcmeProofForwardMessage = {
+  type: "acme-proof-forward";
+  requestId: string;
+  names: string[];
+  targetAddress: string;
+  expiresAtIso: string;
+  at: string;
+};
+
+/** Control plane to daemon: stop passing the proof path on for this request. */
+export type AcmeProofForwardEndMessage = {
+  type: "acme-proof-forward-end";
+  requestId: string;
+  at: string;
+};
+
+/**
+ * Daemon to control plane: how the order is going. Never carries the
+ * certificate or its key.
+ */
+export type AcmeIssueEventMessage = {
+  type: "acme-issue-event";
+  requestId: string;
+  stage: "started" | "issued" | "failed";
+  /** A plain reason when `stage` is `failed`. */
+  reason?: string;
+  /** Leaf expiry (ISO 8601) when `stage` is `issued`. */
+  notAfterIso?: string;
+  at: string;
+};
+
+/** Daemon to control plane: the proof path is passed on (`-ready`) or could not be (`-failed`). */
+export type AcmeProofForwardReportMessage = {
+  type: "acme-proof-forward-ready" | "acme-proof-forward-failed";
+  requestId: string;
+  reason?: string;
+  at: string;
+};
+
 export type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
   | CellAttachVersionMessage
@@ -513,6 +582,31 @@ export type DaemonMessage =
      */
     type: "managed-health-report";
     members: ManagedHealthReportMember[];
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget: every `tp0` peer as read by the 60 s
+     * refresh (`wg show tp0 dump`). Sent when a peer's health class changed,
+     * otherwise at most every 5 minutes, only to a control plane advertising
+     * `fabric-peer-report-v1`. `observedAt` is when the dump was read.
+     */
+    type: "fabric-peers-report";
+    peers: FabricReconcileObservedPeer[];
+    observedAt: string;
+    at: string;
+  }
+  | {
+    /**
+     * Daemon-initiated, fire-and-forget: a package source's signing key
+     * (`got`, hex) is not in the `expected` list. The install went on (apt
+     * still checks every package signature). Sent once per key name and
+     * fingerprint, only to a control plane advertising `repo-key-report-v1`.
+     */
+    type: "repo-key-changed";
+    keyName: string;
+    expected: string[];
+    got: string;
     at: string;
   }
   | {
@@ -814,6 +908,11 @@ export type DaemonMessage =
     at: string;
   }
   | TunnelTokenMessage
+  | AcmeIssueRequestMessage
+  | AcmeProofForwardMessage
+  | AcmeProofForwardEndMessage
+  | AcmeIssueEventMessage
+  | AcmeProofForwardReportMessage
   | {
     type: "tunnel-token-result";
     id: string;
@@ -882,3 +981,175 @@ export type DaemonMessage =
     daemonReceivedAt?: string;
     daemonRespondedAt?: string;
   };
+
+// --- acme-issue-v1 shape checks -------------------------------------------
+// Mirrors of the control plane's validators in `src/contracts/cell-protocol.ts`
+// (same names, same limits). Unknown optional fields are ignored (expand-only),
+// but a field that could carry the certificate or its key is always refused.
+
+export const MAX_ACME_ISSUE_NAMES = 100;
+export const MAX_ACME_ISSUE_HELPERS = 64;
+const MAX_WS_ID_CHARS = 128;
+const MAX_WS_ERROR_CHARS = 4 * 1024;
+
+const ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+/** A plain lower-case DNS name: no wildcard, no upper case, no trailing dot. */
+const ACME_NAME_RE =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+/** An IPv4 or IPv6 address literal as text. */
+const ACME_ADDRESS_RE = /^[0-9a-f:.]{2,45}$/;
+export const ACME_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** Field names that would carry certificate material; refused on every acme-issue message. */
+const ACME_FORBIDDEN_KEYS = [
+  "certificatePem",
+  "privateKeyPem",
+  "privateKey",
+  "certificate",
+  "key",
+  "pem",
+];
+
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 40 &&
+    ISO_TIMESTAMP_RE.test(value) && Number.isFinite(Date.parse(value));
+}
+
+function isBoundedId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 &&
+    value.length <= MAX_WS_ID_CHARS;
+}
+
+function validateOptionalError(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string") return "error must be a string";
+  return value.length > MAX_WS_ERROR_CHARS ? "error exceeds max length" : null;
+}
+
+function validateAcmeRequestId(value: unknown): string | null {
+  return typeof value === "string" && ACME_REQUEST_ID_RE.test(value)
+    ? null
+    : "invalid requestId";
+}
+
+function validateAcmeNames(value: unknown): string | null {
+  if (
+    !Array.isArray(value) || value.length === 0 ||
+    value.length > MAX_ACME_ISSUE_NAMES
+  ) {
+    return "invalid names";
+  }
+  const ok = value.every((n) =>
+    typeof n === "string" && n.length <= 253 && ACME_NAME_RE.test(n)
+  );
+  return ok ? null : "invalid names";
+}
+
+function validateAcmeAddress(value: unknown): boolean {
+  return typeof value === "string" && ACME_ADDRESS_RE.test(value);
+}
+
+function validateAcmeHelpers(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length > MAX_ACME_ISSUE_HELPERS) {
+    return "invalid helpers";
+  }
+  for (const item of value) {
+    const helper = item as { serverId?: unknown; address?: unknown } | null;
+    if (
+      typeof helper !== "object" || helper === null ||
+      !isBoundedId(helper.serverId)
+    ) {
+      return "invalid helpers";
+    }
+    if (!validateAcmeAddress(helper.address)) return "invalid helpers";
+  }
+  return null;
+}
+
+function acmeForbiddenKey(record: Record<string, unknown>): string | null {
+  return ACME_FORBIDDEN_KEYS.some((k) => k in record)
+    ? "must not carry certificate material"
+    : null;
+}
+
+function firstProblem(...problems: Array<string | null>): string | null {
+  return problems.find((p) => p !== null) ?? null;
+}
+
+/** Shape check for `acme-issue-request`. */
+export function validateAcmeIssueRequestFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    isBoundedId(record.tlsId) ? null : "invalid tlsId",
+    validateAcmeNames(record.names),
+    record.directory === "production" || record.directory === "staging"
+      ? null
+      : "invalid directory",
+    typeof record.contactEmail === "string" &&
+      record.contactEmail.length > 0 &&
+      record.contactEmail.length <= 254
+      ? null
+      : "invalid contactEmail",
+    isIsoTimestamp(record.startByIso) ? null : "invalid startByIso",
+    validateAcmeHelpers(record.helpers),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** Shape check for `acme-proof-forward`. */
+export function validateAcmeProofForwardFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    validateAcmeNames(record.names),
+    validateAcmeAddress(record.targetAddress) ? null : "invalid targetAddress",
+    isIsoTimestamp(record.expiresAtIso) ? null : "invalid expiresAtIso",
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** Shape check for `acme-proof-forward-end`. */
+export function validateAcmeProofForwardEndFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+  );
+}
+
+/** Shape check for `acme-issue-event`. Never accepts a pair. */
+export function validateAcmeIssueEventFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    record.stage === "started" || record.stage === "issued" ||
+      record.stage === "failed"
+      ? null
+      : "invalid stage",
+    record.notAfterIso === undefined || isIsoTimestamp(record.notAfterIso)
+      ? null
+      : "invalid notAfterIso",
+    validateOptionalError(record.reason),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** Shape check for `acme-proof-forward-ready` and `acme-proof-forward-failed`. */
+export function validateAcmeProofForwardReportFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    validateOptionalError(record.reason),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}

@@ -372,7 +372,13 @@ export class DaemonApiClient {
    * again (the same certificate sent twice).
    */
   async reportIssuedCertificate(
-    input: { hostname: string; certificatePem: string; privateKeyPem: string },
+    input: {
+      hostname: string;
+      certificatePem: string;
+      privateKeyPem: string;
+      /** Set when the pair answers an `acme-issue-request`. */
+      requestId?: string;
+    },
   ): Promise<{ stored: boolean }> {
     const body = await this.#requestJson<{ ok?: boolean; stored?: unknown }>(
       "/api/daemon/v1/tls/issued",
@@ -382,6 +388,9 @@ export class DaemonApiClient {
           hostname: input.hostname,
           certificatePem: input.certificatePem,
           privateKeyPem: input.privateKeyPem,
+          ...(input.requestId === undefined
+            ? {}
+            : { requestId: input.requestId }),
         }),
       },
       { auth: true },
@@ -406,12 +415,13 @@ export class DaemonApiClient {
       generation: number;
       secretPlan: unknown;
       variableMaterial: unknown;
-    }>
+    }> & { gone?: unknown }
   > {
     if (deployments.length === 0) return [];
     const body = await this.#requestJson<{
       ok?: boolean;
       deployments?: unknown;
+      gone?: unknown;
     }>(
       "/api/daemon/v1/deployments/secrets/rehydrate",
       {
@@ -423,13 +433,16 @@ export class DaemonApiClient {
     if (!Array.isArray(body.deployments)) {
       throw new DaemonApiError(500, "Invalid secrets/rehydrate response");
     }
-    const out: Array<{
-      projectId: string;
-      environmentId: string;
-      generation: number;
-      secretPlan: unknown;
-      variableMaterial: unknown;
-    }> = [];
+    const out:
+      & Array<{
+        projectId: string;
+        environmentId: string;
+        generation: number;
+        secretPlan: unknown;
+        variableMaterial: unknown;
+      }>
+      & { gone?: unknown } = [];
+    if (Array.isArray(body.gone)) out.gone = body.gone;
     for (const entry of body.deployments) {
       if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
         continue;

@@ -30,7 +30,7 @@ import {
  * True when local dev (console/converge) already manages the instance stack and the daemon
  * should only connect (no Ansible bootstrap on startup).
  */
-function shouldSkipOrchestration(): boolean {
+export function shouldSkipOrchestration(): boolean {
   const flag = Deno.env.get("TURBOPANEL_SKIP_ORCHESTRATION")?.trim()
     .toLowerCase();
   return flag === "1" || flag === "true" || flag === "yes";

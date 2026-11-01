@@ -3,7 +3,10 @@ import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { createTempLayout } from "../testing/temp-layout.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
+import { createDeployStepReporter } from "./deploy-progress.ts";
+import type { CommandProgressMessage } from "../contracts/cell-messages.ts";
 import "../testing/stub-hosting-caddy-host.ts";
+import { instantlyHealthy } from "../testing/instant-health-gate.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -100,6 +103,40 @@ test("hostingsOnly rewrites the web server config and builds or restarts nothing
   });
 });
 
+test("hostingsOnly sends the certificate step with its line kept after it is done", async () => {
+  await withLayout(async (configDir) => {
+    const sitesDir = join(configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, `${ENVIRONMENT_ID}.caddy`),
+      "shop.example.com {\n  tls internal\n}\n",
+    );
+    const sent: CommandProgressMessage[] = [];
+    const progress = createDeployStepReporter({
+      id: "dispatch-1",
+      commandId: "command-1",
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    await handleEnvironmentDeploy(
+      hostingsOnlyPayload(),
+      new Date().toISOString(),
+      { runDocker: recordingDocker([]), progress },
+    );
+    const last = sent.at(-1)?.progress.steps.find((step) =>
+      step.id === "certificates"
+    );
+    assertEquals(last?.label, "Set Up Certificates");
+    assertEquals(last?.state, "done");
+    assertStringIncludes(last?.detail ?? "", "Requested in the background");
+    assertStringIncludes(last?.detail ?? "", "shop.example.com");
+  });
+});
+
 test("hostingsOnly is refused where the environment has no web server config yet", async () => {
   await withLayout(async () => {
     const docker: string[][] = [];
@@ -114,5 +151,53 @@ test("hostingsOnly is refused where the environment has no web server config yet
       "deploy it first",
     );
     assertEquals(docker, []);
+  });
+});
+
+test("a full deploy keeps the certificate line after the step is done", async () => {
+  await withLayout(async () => {
+    const sent: CommandProgressMessage[] = [];
+    const progress = createDeployStepReporter({
+      id: "dispatch-2",
+      commandId: "command-2",
+      send: (message) => {
+        sent.push(message);
+        return true;
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    });
+    const gatewayDocker = (args: string[]): Promise<DockerCliResult> =>
+      Promise.resolve({
+        success: true,
+        stdout: args.includes("config") && args.includes("--format")
+          ? JSON.stringify({ services: { web: { image: "nginx" } } })
+          : args.includes("network") && args.includes("inspect")
+          ? JSON.stringify([{
+            IPAM: {
+              Config: [{ Subnet: "172.30.0.0/16", Gateway: "172.30.0.1" }],
+            },
+          }])
+          : args.includes("ps")
+          ? "[]"
+          : "",
+        stderr: "",
+        code: 0,
+      });
+    const { hostingsOnly: _skip, ...payload } = hostingsOnlyPayload();
+    await handleEnvironmentDeploy(payload, new Date().toISOString(), {
+      runDocker: gatewayDocker,
+      ensureDocker: () => Promise.resolve(),
+      waitForHealth: instantlyHealthy,
+      ensureExternalDockerNetworks: () => Promise.resolve(),
+      ensureFabricDockerNetworks: () => Promise.resolve(),
+      progress,
+    });
+    const last = sent.at(-1)?.progress.steps.find((step) =>
+      step.id === "certificates"
+    );
+    assertEquals(last?.state, "done");
+    assertStringIncludes(last?.detail ?? "", "Requested in the background");
+    assertStringIncludes(last?.detail ?? "", "shop.example.com");
   });
 });

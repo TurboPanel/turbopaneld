@@ -1,9 +1,15 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import {
+  COMPOSE_ENV_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
+  COMPOSE_STAGE_DIRNAME,
   composeFileArgs,
+  DAEMON_COMPOSE_FILENAME,
+  DEPLOYMENT_MANIFEST_FILENAME,
   readDeploymentManifest,
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
+  RUNTIME_COMPOSE_FILENAME,
 } from "../deploy/compose-files.ts";
 import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
@@ -255,6 +261,58 @@ async function removeDeploymentDir(
   }
 }
 
+/**
+ * What the daemon itself writes into a deployment dir. A stop that keeps the
+ * dir removes only these, so a reboot finds no manifest to start the stack
+ * again from, while everything a service wrote through a relative bind
+ * (`./data`) stays for the next deploy.
+ */
+const DAEMON_DEPLOYMENT_ENTRIES = [
+  RUNTIME_COMPOSE_FILENAME,
+  DAEMON_COMPOSE_FILENAME,
+  COMPOSE_ENV_FILENAME,
+  DEPLOYMENT_MANIFEST_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
+  COMPOSE_STAGE_DIRNAME,
+] as const;
+
+/**
+ * Remove the daemon's own compose files from `deploymentDir` and keep the rest.
+ * A deployment dir that is not a real directory (gone, or a symlink) is left
+ * alone, so nothing outside the state root is touched.
+ */
+async function removeDaemonDeploymentFiles(
+  deploymentDir: string,
+): Promise<void> {
+  const info = await Deno.lstat(deploymentDir).catch(() => null);
+  if (info === null || !info.isDirectory) return;
+  await forEachSequential(DAEMON_DEPLOYMENT_ENTRIES, async (name) => {
+    try {
+      await Deno.remove(join(deploymentDir, name), { recursive: true });
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  });
+}
+
+/**
+ * Only a delete removes the whole deployment dir, with whatever a relative bind
+ * wrote there. A Destroy or a drained server keeps that data for the next
+ * deploy and drops only the daemon's own files.
+ */
+async function reclaimDeploymentDir(
+  payload: EnvironmentStopPayload,
+  deploymentDir: string,
+  runFn: RunFn,
+): Promise<void> {
+  if (payload.removeDeploymentDir !== true) {
+    await removeDaemonDeploymentFiles(deploymentDir);
+    return;
+  }
+  await removeDeploymentDir(deploymentDir, runFn);
+  await removeEmptyProjectDeploymentDir(deploymentDir);
+}
+
 function retirementSummary(
   stopped: string,
   retirement: { retired: string[]; failed: Array<{ username: string }> },
@@ -354,8 +412,9 @@ async function removeEarlierNamedContainers(
 
 /**
  * Tear down a deployed environment stack (compose down + volumes + hosting site
- * + per-service release trees). Idempotent when the compose file is already
- * gone.
+ * + per-service release trees). The deployment dir keeps everything a service
+ * wrote there unless the payload sets `removeDeploymentDir` (a delete).
+ * Idempotent when the compose file is already gone.
  */
 export async function handleEnvironmentStop(
   payload: EnvironmentStopPayload,
@@ -419,6 +478,11 @@ async function stopEnvironmentLocked(
     await removeEarlierNamedContainers(parsedPayload, deploymentDir, run);
   }
 
+  // The containers are down, so the manifest must go now: a later step that
+  // throws would otherwise leave a stopped stack that the next daemon start
+  // brings back. Only the daemon's own files go; `./data` stays.
+  await removeDaemonDeploymentFiles(deploymentDir);
+
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
   if (fabricNetworks.length > 0 && dockerPresent) {
     try {
@@ -470,12 +534,11 @@ async function stopEnvironmentLocked(
     { runDocker: run },
   );
 
-  await removeDeploymentDir(
+  await reclaimDeploymentDir(
+    parsedPayload,
     deploymentDir,
     deps?.runPrivileged ?? runPrivileged,
   );
-
-  await removeEmptyProjectDeploymentDir(deploymentDir);
 
   await removeSecretTree(
     layout,

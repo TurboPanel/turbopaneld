@@ -359,6 +359,67 @@ test("applyNativeAppServices installs the unit, reloads, and enables it", async 
   }
 });
 
+/** A health step report that keeps what it was told. */
+function healthRecorder() {
+  const events: string[] = [];
+  return {
+    events,
+    health: {
+      waiting: (text: string) => events.push(`waiting: ${text}`),
+      done: (title: string, note: string) =>
+        events.push(`done: ${title} | ${note}`),
+      failed: (title: string, note: string) =>
+        events.push(`failed: ${title} | ${note}`),
+      ended: () => events.some((e) => !e.startsWith("waiting")),
+      active: () => true,
+    },
+  };
+}
+
+test("a native app that answers ends the health step as reachable, not healthy", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const { events, health } = healthRecorder();
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...applyOpts(host, mock),
+      health,
+    });
+    assertEquals(events.length, 1);
+    assertStringIncludes(
+      events[0] ?? "",
+      "done: Service Is Reachable | Answered HTTP on 127.0.0.1:18100 after ",
+    );
+    assertStringIncludes(events[0] ?? "", "any status code counts");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a native app that never answers ends the health step with the address and the wait", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const { events, health } = healthRecorder();
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          health,
+        }),
+      Error,
+    );
+    const ticks = events.filter((e) => e.startsWith("waiting: Attempt 1 of "));
+    assertEquals(ticks.length, 1);
+    assertEquals(
+      events.filter((e) => e.startsWith("failed:")),
+      ["failed: Service Did Not Answer | Did not answer HTTP on 127.0.0.1:18100 within 30 s"],
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("a second apply with identical content installs nothing and does not reload", async () => {
   const host = await makeTestHost();
   const first = createRunMock();

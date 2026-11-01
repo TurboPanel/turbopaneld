@@ -27,6 +27,9 @@ export const COMMAND_TYPES = [
   "server.backups.reconcile",
   "server.backups.test-target",
   "server.folders.remove",
+  "server.tunnel.routes",
+  "server.tunnel.connectors",
+  "server.tunnel.status",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -362,7 +365,7 @@ export type FirewallPolicy = {
  * can tell which desired state a report describes.
  *
  * `controlPlane.tcpPorts` names the co-located control plane's entrypoint
- * (8443 by default; 80 and 443 under `lets_encrypt`). The daemon treats those
+ * (always 8443; 80 and 443 belong to hosting). The daemon treats those
  * as invariants — accepted before any rule — and refuses a default-drop apply
  * on a host where `turbopanel-instance.service` is active and the list is
  * absent, because a panel that forgot its own port must not lock its wizard
@@ -711,23 +714,44 @@ export type FabricReconcileNetwork = {
 /**
  * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
  * `{ enabled: false }` is a **tear down** (`tp0`, routed bridges, `TP-FORWARD`,
- * keys, state) — not a no-op.
+ * keys, state) — not a no-op. `retainKeys: true` (daemons that advertise
+ * `fabric-retain-keys-v1`) only pauses: `tp0` and its routes go, the key,
+ * bridges and forwarding stay, and the next enable reuses the same key.
  */
 export type FabricReconcileDisabledPayload = {
   enabled: false;
+  retainKeys?: boolean;
 };
 
-/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * A member's container subnet reached over a shared trusted LAN, routed via
+ * that member's LAN address (`fabric-lan-routes-v1`).
+ */
+export type FabricReconcileLanRoute = {
+  cidr: string;
+  via: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * `tunnel: false` (`fabric-lan-routes-v1`; absent means `true`): this server
+ * needs no tunnel, so `tp0` is not created (and is taken down when present,
+ * keeping its key), `peers` must be empty and `address` may be absent.
+ */
 export type FabricReconcileEnabledPayload = {
   enabled: true;
   fabricId?: string;
   listenPort?: number;
   mtu?: number;
-  address: string;
+  /** Absent only when `tunnel` is `false`. */
+  address?: string;
   prefix: string;
   peers: FabricReconcilePeer[];
   networks?: FabricReconcileNetwork[];
   gateway?: boolean;
+  tunnel?: boolean;
+  lanRoutes?: FabricReconcileLanRoute[];
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
@@ -767,6 +791,12 @@ export type FabricReconcileResult = {
   publicKey?: string;
   skipped?: boolean;
   peers?: FabricReconcileObservedPeer[];
+  /**
+   * Plain sentences about what an apply that worked had to leave out (a LAN
+   * or `tp0` route another interface already holds, container bridges that
+   * wait for Docker). Absent when nothing was left out.
+   */
+  warnings?: string[];
 };
 
 export type EnvironmentDeployHostingProxy = {
@@ -822,6 +852,12 @@ export type EnvironmentDeployHosting = {
    * private IP, or loopback). Omitted when bind is public with no pin.
    */
   bindAddress?: string;
+  /**
+   * Tunnel names of this hosting and who may reach them. When present the
+   * server answers those names only to local connectors and the listed peer
+   * addresses, and also listens on `extraBind`. Absent = no tunnel names.
+   */
+  tunnel?: EnvironmentDeployHostingTunnel;
   /**
    * `http` (default/omitted) routes `hostnames` through Traefik + hosting Caddy.
    * `tcp` / `udp` publish `ports[]` straight through Traefik — no hostname/TLS
@@ -1142,16 +1178,17 @@ export type EnvironmentDeploySite = {
  * `env` is a **non-secret** build-time map only — build secrets ride
  * `variableMaterial[]` / `secretPlan[]`.
  *
- * `native` checks out, builds, and promotes a directory release. `railpack`
- * builds an OCI image with Railpack + BuildKit instead: nothing is promoted, no
+ * `native` checks out, builds, and promotes a directory release. `image`
+ * builds an OCI image with BuildKit instead: nothing is promoted, no
  * `current` symlink moves, and the resulting image tag is written back into
  * runtime compose as `services.<name>.image`. `outputDirectory` is meaningless
- * for `railpack` and is ignored rather than rejected, so a stale value left by
+ * for `image` and is ignored rather than rejected, so a stale value left by
  * a mode switch still parses. `kind: 'static'` is reserved for the
- * site release phase and is not produced today.
+ * site release phase and is not produced today. The old value of
+ * `image` is still accepted and means the same thing.
  */
 export type EnvironmentDeploySourceBuild = {
-  kind: "native" | "static" | "railpack";
+  kind: "native" | "static" | "image" | "railpack";
   /**
    * Package manager for a `kind: 'native'` node-app install. Omitted means
    * auto-detect from the lockfile after checkout. An explicit
@@ -1658,12 +1695,17 @@ export type EnvironmentDeployContainer = {
   role: "service" | "ingress" | "turbopanel";
 };
 
+/** True for the image-build kind, under its new value and the old one. */
+export function isImageBuildKind(kind: string): boolean {
+  return kind === "image" || kind === "railpack";
+}
+
 /**
  * One Git-backed release this deploy put live, as reported back to the control
  * plane.
  *
  * Enough for the release-history / rollback surface to name a release without
- * a second round trip to the host. A **Railpack** release has no promoted
+ * a second round trip to the host. An **image-built** release has no promoted
  * directory and no commit-backed tree to point at, so its identity on that
  * surface is the image tag plus the pinned tools that produced it; a native
  * release simply omits those three fields.
@@ -1681,8 +1723,8 @@ export type EnvironmentDeployResultRelease = {
   releaseId: string;
   commitSha: string;
   imageTag?: string;
-  railpackFrontendVersion?: string;
-  railpackPlanVersion?: string;
+  builderFrontendVersion?: string;
+  builderPlanVersion?: string;
 };
 
 /**
@@ -1785,6 +1827,13 @@ export type EnvironmentStopPayload = {
    * teardown; a plain stop never carries it.
    */
   retirePrincipals?: Array<{ username: string }>;
+  /**
+   * Remove the whole deployment dir
+   * (`<stateDir>/deployments/<projectId>/<environmentId>`), including anything a
+   * relative bind such as `./data` wrote there. Only an environment or project
+   * delete sets it; without it the daemon removes only its own compose files.
+   */
+  removeDeploymentDir?: true;
 };
 
 export type EnvironmentStopResult = {
@@ -1947,9 +1996,19 @@ export type ManagedApplyCredential = {
    * never resets or revokes anything below the database.
    */
   grantMode?: ManagedGrantMode;
+  /**
+   * `backup`: the cluster's backup login. `role` stays `user`; the daemon
+   * gives it the read-only rights a full logical dump needs on every listed
+   * database (per engine) and nothing else, whatever `privileges` and
+   * `grantMode` say. Absent (or a value this daemon does not know) means an
+   * ordinary login.
+   */
+  kind?: ManagedCredentialKind;
   /** Daemon-recipient sealed password (`tpdaemon.…`). */
   password: string;
 };
+
+export type ManagedCredentialKind = "backup";
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyDatabaseOp = {
@@ -3790,7 +3849,7 @@ export function ipLiteralToBigInt(value: string): bigint | null {
   return out;
 }
 
-type ParsedCidrLiteral = {
+export type ParsedCidrLiteral = {
   version: 4 | 6;
   prefix: number;
   /** Network address (host bits cleared). */
@@ -4028,13 +4087,55 @@ function parseFabricNetworkEntry(value: unknown): FabricReconcileNetwork {
   return network;
 }
 
+function parseFabricLanRouteEntry(value: unknown): FabricReconcileLanRoute {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric lanRoutes entry");
+  }
+  const record = value as Record<string, unknown>;
+  const { cidr, via } = record;
+  if (typeof cidr !== "string" || !isValidWireguardAllowedIp(cidr.trim())) {
+    throw new TypeError("Invalid fabric lanRoutes cidr");
+  }
+  if (
+    typeof via !== "string" ||
+    !(isValidIpv4Literal(via.trim()) || isValidIpv6Literal(via.trim()))
+  ) {
+    throw new TypeError("Invalid fabric lanRoutes via");
+  }
+  return { cidr: cidr.trim(), via: via.trim() };
+}
+
+function parseFabricTunnelFlag(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new TypeError("Invalid fabric tunnel");
+  return value;
+}
+
+/** `address` is required unless the payload asks for no tunnel. */
+function parseFabricAddress(
+  value: unknown,
+  tunnel: boolean | undefined,
+): string | undefined {
+  if (value === undefined && tunnel === false) return undefined;
+  if (typeof value !== "string" || !isValidWireguardAllowedIp(value)) {
+    throw new TypeError("Invalid fabric address");
+  }
+  return value.trim();
+}
+
+function parseFabricLanRoutes(
+  value: unknown,
+): FabricReconcileLanRoute[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new TypeError("Invalid fabric lanRoutes");
+  return value.map(parseFabricLanRouteEntry);
+}
+
 function parseEnabledFabricPayload(
   record: Record<string, unknown>,
 ): FabricReconcileEnabledPayload {
-  const address = record.address;
-  if (typeof address !== "string" || !isValidWireguardAllowedIp(address)) {
-    throw new TypeError("Invalid fabric address");
-  }
+  const tunnel = parseFabricTunnelFlag(record.tunnel);
+  const address = parseFabricAddress(record.address, tunnel);
   const prefix = record.prefix;
   if (typeof prefix !== "string" || !isValidWireguardAllowedIp(prefix)) {
     throw new TypeError("Invalid fabric prefix");
@@ -4042,15 +4143,30 @@ function parseEnabledFabricPayload(
   if (!Array.isArray(record.peers)) {
     throw new TypeError("Invalid fabric peers");
   }
+  if (tunnel === false && record.peers.length > 0) {
+    throw new TypeError("Invalid fabric peers: a payload with no tunnel");
+  }
   const payload: FabricReconcileEnabledPayload = {
     enabled: true,
-    address: address.trim(),
+    ...(address === undefined ? {} : { address }),
     prefix: prefix.trim(),
     peers: record.peers.map(parseFabricPeerEntry),
   };
+  if (tunnel !== undefined) payload.tunnel = tunnel;
+  const lanRoutes = parseFabricLanRoutes(record.lanRoutes);
+  if (lanRoutes) payload.lanRoutes = lanRoutes;
   if (record.fabricId !== undefined) {
     payload.fabricId = parseFabricUuid(record.fabricId, "fabricId");
   }
+  applyOptionalFabricFields(payload, record);
+  return payload;
+}
+
+/** The optional tunnel settings of an enabled payload, each checked when present. */
+function applyOptionalFabricFields(
+  payload: FabricReconcileEnabledPayload,
+  record: Record<string, unknown>,
+): void {
   if (record.listenPort !== undefined) {
     if (!isValidWireguardListenPort(record.listenPort)) {
       throw new TypeError("Invalid fabric listenPort");
@@ -4072,7 +4188,6 @@ function parseEnabledFabricPayload(
     }
     payload.gateway = record.gateway;
   }
-  return payload;
 }
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` validator. */
@@ -4087,7 +4202,9 @@ export function parseFabricReconcilePayload(
     throw new TypeError("Invalid fabric enabled");
   }
   if (!record.enabled) {
-    return { enabled: false };
+    return typeof record.retainKeys === "boolean"
+      ? { enabled: false, retainKeys: record.retainKeys }
+      : { enabled: false };
   }
   return parseEnabledFabricPayload(record);
 }
@@ -4126,7 +4243,28 @@ export function parseFabricReconcileResult(
     }
     result.peers = record.peers.map(parseFabricObservedPeer);
   }
+  if (record.warnings !== undefined) {
+    result.warnings = parseFabricResultWarnings(record.warnings);
+  }
   return result;
+}
+
+const FABRIC_RESULT_WARNINGS_MAX = 64;
+const FABRIC_RESULT_WARNING_MAX_LENGTH = 500;
+
+function parseFabricResultWarnings(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > FABRIC_RESULT_WARNINGS_MAX) {
+    throw new TypeError("Invalid fabric reconcile result warnings");
+  }
+  return value.map((entry) => {
+    if (
+      typeof entry !== "string" || entry.length === 0 ||
+      entry.length > FABRIC_RESULT_WARNING_MAX_LENGTH
+    ) {
+      throw new TypeError("Invalid fabric reconcile result warning");
+    }
+    return entry;
+  });
 }
 
 function parseNonNegativeInteger(value: unknown, field: string): number {
@@ -4452,6 +4590,16 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const tlsMode = parseHostingTlsMode(value.tlsMode);
   const proxy = parseHostingProxy(value.proxy);
   const bindAddress = parseHostingBindAddress(value.bindAddress);
+  const hostnames = parseHostingHostnames(value.hostnames);
+  const tunnel = parseHostingTunnel(value.tunnel, hostnames);
+  if (
+    tunnel && tlsMode === "acme" &&
+    tunnel.hostnames.some((name) => !tunnel.openHostnames?.includes(name))
+  ) {
+    throw new TypeError(
+      "Invalid hostings[].tunnel: tlsMode acme needs every tunnel name open",
+    );
+  }
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
@@ -4463,13 +4611,14 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     hostingId: parseNonEmptyString(value, "hostingId"),
     serviceId: parseNonEmptyString(value, "serviceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
-    hostnames: parseHostingHostnames(value.hostnames),
+    hostnames,
     ...(pathPrefix === undefined ? {} : { pathPrefix }),
     ...(targetPort === undefined ? {} : { targetPort }),
     ...(tlsId === undefined ? {} : { tlsId }),
     ...(tlsMode === undefined ? {} : { tlsMode }),
     ...(proxy === undefined ? {} : { proxy }),
     ...(bindAddress === undefined ? {} : { bindAddress }),
+    ...(tunnel === undefined ? {} : { tunnel }),
     ...(protocol === undefined ? {} : { protocol }),
     ...(ports === undefined ? {} : { ports }),
     ...(web === undefined ? {} : { web }),
@@ -5617,7 +5766,9 @@ const SOURCE_RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const SOURCE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
 
 const SOURCE_PROVIDERS = new Set(["github", "gitlab", "git"]);
-const SOURCE_BUILD_KINDS = new Set(["native", "static", "railpack"]);
+// The old spelling of `image` is still accepted while the control plane sends
+// it.
+const SOURCE_BUILD_KINDS = new Set(["native", "static", "image", "railpack"]);
 
 /** Cap mirrors compose `SOURCE_COMMAND_MAX_LENGTH`. */
 const MAX_SOURCE_COMMAND_CHARS = 1000;
@@ -6676,6 +6827,553 @@ function parseFolderRemoval(value: unknown): FolderRemoval {
   return entry;
 }
 
+// ---------------------------------------------------------------------------
+// Tunnel traffic between servers of one datacenter. Twin of the instance
+// `src/contracts/commands/tunnel-routes.ts`; both are optional on the wire.
+// ---------------------------------------------------------------------------
+
+/** The fixed certificate name of the hop between servers. Same on both sides. */
+export const TUNNEL_PEER_TLS_NAME = "tp-peer.internal";
+
+const MAX_TUNNEL_HOSTNAMES = 256;
+const MAX_TUNNEL_ADDRESSES = 64;
+const MAX_TUNNEL_ROUTES = 2000;
+const MAX_TUNNEL_UPSTREAMS = 16;
+const MAX_TUNNEL_UPSTREAM_ADDRESSES = 8;
+const TUNNEL_SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const TUNNEL_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TUNNEL_ENVELOPE_PREFIX = "tpdaemon.";
+/** Longest certificate, trust bundle or sealed key accepted (bytes of text). */
+const MAX_TUNNEL_PEM_LENGTH = 65_536;
+/** A strict ISO-8601 timestamp with a time zone, as `Date.toISOString` writes it. */
+const TUNNEL_ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** A certificate or bundle: sized, holds a certificate, and never a private key. */
+function isTunnelCertificateText(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_TUNNEL_PEM_LENGTH &&
+    value.includes("BEGIN CERTIFICATE") && !value.includes("PRIVATE KEY");
+}
+
+/** A bare address (no prefix length, no brackets). Peers are exact addresses, never ranges. */
+function parseTunnelAddressList(
+  value: unknown,
+  label: string,
+  min: number,
+  max: number,
+): string[] {
+  if (
+    !Array.isArray(value) || value.length < min || value.length > max ||
+    !value.every((entry) =>
+      typeof entry === "string" && !entry.includes("/") &&
+      (isValidIpv4Literal(entry) || isValidIpv6Literal(entry))
+    ) || new Set(value).size !== value.length
+  ) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  return value as string[];
+}
+
+function parseTunnelHostnameList(
+  value: unknown,
+  label: string,
+  min: number,
+): string[] {
+  if (
+    !Array.isArray(value) || value.length < min ||
+    value.length > MAX_TUNNEL_HOSTNAMES || !value.every(isValidHostname) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  return value as string[];
+}
+
+/**
+ * `environment.deploy` hostings[].tunnel: the tunnel names this hosting
+ * answers, and who may reach them.
+ */
+export type EnvironmentDeployHostingTunnel = {
+  /** Tunnel names of this hosting; each is also in the hosting's `hostnames`. */
+  hostnames: string[];
+  /**
+   * Tunnel names that are also public names on this server. Listed in
+   * `hostnames` too; the local-only lock is off for them.
+   */
+  openHostnames?: string[];
+  /** Exact datacenter addresses of the servers that may forward to this one. */
+  peers: string[];
+  /** Addresses the web server must also listen on so peers can reach it. */
+  extraBind?: string[];
+};
+
+function parseHostingTunnel(
+  value: unknown,
+  siteHostnames: readonly string[],
+): EnvironmentDeployHostingTunnel | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new TypeError("Invalid hostings[].tunnel");
+  const hostnames = parseTunnelHostnameList(
+    value.hostnames,
+    "hostings[].tunnel hostnames",
+    1,
+  );
+  const own = new Set(siteHostnames);
+  if (!hostnames.every((name) => own.has(name))) {
+    throw new TypeError("Invalid hostings[].tunnel hostnames");
+  }
+  const tunnel: EnvironmentDeployHostingTunnel = {
+    hostnames,
+    peers: parseTunnelAddressList(
+      value.peers,
+      "hostings[].tunnel peers",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    ),
+  };
+  if (value.openHostnames !== undefined) {
+    const open = parseTunnelHostnameList(
+      value.openHostnames,
+      "hostings[].tunnel openHostnames",
+      1,
+    );
+    if (!open.every((name) => hostnames.includes(name))) {
+      throw new TypeError("Invalid hostings[].tunnel openHostnames");
+    }
+    tunnel.openHostnames = open;
+  }
+  if (value.extraBind !== undefined) {
+    tunnel.extraBind = parseTunnelAddressList(
+      value.extraBind,
+      "hostings[].tunnel extraBind",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  return tunnel;
+}
+
+/** One server that runs a copy of a site, and where to reach its web server. */
+export type TunnelRouteUpstream = {
+  serverId: string;
+  /** Every datacenter address of the server, the preferred family first. */
+  addresses: string[];
+  /** Port of the server's web server on those addresses. Default 443. */
+  port?: number;
+};
+
+export type TunnelRoute = {
+  hostname: string;
+  /** The site runs on this server: left out of the forwarding file. */
+  local: boolean;
+  /**
+   * True = only local connectors and listed peers are answered; anyone else is
+   * dropped. False = the name is also public on this server.
+   */
+  lock: boolean;
+  /** Servers that run the site. At least one unless `local` is true. */
+  upstreams: TunnelRouteUpstream[];
+};
+
+/** A leaf of the organization's CA for the peer hop; the key is sealed for this daemon. */
+export type TunnelPeerMaterial = {
+  certificatePem: string;
+  privateKeyEnvelope: string;
+  caCertPem: string;
+  notAfter?: string;
+};
+
+/** Must stay in sync with the instance `server.tunnel.routes` shape. */
+export type TunnelRoutesPayload = {
+  /** Lower-case sha256 of the desired state. */
+  hash: string;
+  routes: TunnelRoute[];
+  /** Exact datacenter addresses of the servers that may forward to this one. */
+  peerAddresses: string[];
+  /** This server's own addresses the peer-facing site must listen on. */
+  listenAddresses?: string[];
+  /** Required when `routes` or `peerAddresses` is not empty. */
+  peerMaterial?: TunnelPeerMaterial;
+};
+
+/** Must stay in sync with the instance `server.tunnel.routes` shape. */
+export type TunnelRoutesResult = {
+  hash: string;
+  /** The files were written (or removed). False when already current. */
+  applied: boolean;
+  /** Forwarded names now in the file. */
+  routeCount: number;
+  /** Names left out because the site runs on this server. */
+  dropped: string[];
+  warnings: string[];
+};
+
+function parseTunnelUpstream(value: unknown): TunnelRouteUpstream {
+  if (
+    !isRecord(value) || typeof value.serverId !== "string" ||
+    !TUNNEL_UUID_RE.test(value.serverId)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes upstream");
+  }
+  const upstream: TunnelRouteUpstream = {
+    serverId: value.serverId,
+    addresses: parseTunnelAddressList(
+      value.addresses,
+      "server.tunnel.routes upstream addresses",
+      1,
+      MAX_TUNNEL_UPSTREAM_ADDRESSES,
+    ),
+  };
+  if (value.port !== undefined) {
+    if (
+      typeof value.port !== "number" || !Number.isInteger(value.port) ||
+      value.port < 1 || value.port > 65535
+    ) {
+      throw new TypeError("Invalid server.tunnel.routes upstream port");
+    }
+    upstream.port = value.port;
+  }
+  return upstream;
+}
+
+function parseTunnelRoute(value: unknown): TunnelRoute {
+  if (
+    !isRecord(value) || !isValidHostname(value.hostname) ||
+    typeof value.local !== "boolean" || typeof value.lock !== "boolean" ||
+    !Array.isArray(value.upstreams) ||
+    value.upstreams.length > MAX_TUNNEL_UPSTREAMS
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes route");
+  }
+  const upstreams = value.upstreams.map(parseTunnelUpstream);
+  if (!value.local && upstreams.length === 0) {
+    throw new TypeError(
+      "Invalid server.tunnel.routes route: a remote site needs an upstream",
+    );
+  }
+  if (
+    new Set(upstreams.map((upstream) => upstream.serverId)).size !==
+      upstreams.length
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes route upstreams");
+  }
+  return {
+    hostname: value.hostname as string,
+    local: value.local,
+    lock: value.lock,
+    upstreams,
+  };
+}
+
+function parseTunnelPeerMaterial(value: unknown): TunnelPeerMaterial {
+  if (
+    !isRecord(value) || !isTunnelCertificateText(value.certificatePem) ||
+    typeof value.privateKeyEnvelope !== "string" ||
+    value.privateKeyEnvelope.length > MAX_TUNNEL_PEM_LENGTH ||
+    !value.privateKeyEnvelope.startsWith(TUNNEL_ENVELOPE_PREFIX) ||
+    value.privateKeyEnvelope.length === TUNNEL_ENVELOPE_PREFIX.length ||
+    !isTunnelCertificateText(value.caCertPem)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes peerMaterial");
+  }
+  const material: TunnelPeerMaterial = {
+    certificatePem: value.certificatePem,
+    privateKeyEnvelope: value.privateKeyEnvelope,
+    caCertPem: value.caCertPem,
+  };
+  if (value.notAfter !== undefined) {
+    if (
+      typeof value.notAfter !== "string" ||
+      !TUNNEL_ISO_TIMESTAMP_RE.test(value.notAfter) ||
+      Number.isNaN(Date.parse(value.notAfter))
+    ) {
+      throw new TypeError("Invalid server.tunnel.routes peerMaterial notAfter");
+    }
+    material.notAfter = value.notAfter;
+  }
+  return material;
+}
+
+/** Parse `server.tunnel.routes`. */
+export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid server.tunnel.routes payload");
+  }
+  if (
+    typeof value.hash !== "string" || !TUNNEL_SHA256_HEX_RE.test(value.hash)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes hash");
+  }
+  if (!Array.isArray(value.routes) || value.routes.length > MAX_TUNNEL_ROUTES) {
+    throw new TypeError("Invalid server.tunnel.routes routes");
+  }
+  const routes = value.routes.map(parseTunnelRoute);
+  if (new Set(routes.map((route) => route.hostname)).size !== routes.length) {
+    throw new TypeError("Invalid server.tunnel.routes routes");
+  }
+  const peerAddresses =
+    Array.isArray(value.peerAddresses) && value.peerAddresses.length === 0
+      ? []
+      : parseTunnelAddressList(
+        value.peerAddresses,
+        "server.tunnel.routes peerAddresses",
+        1,
+        MAX_TUNNEL_ADDRESSES,
+      );
+  const payload: TunnelRoutesPayload = {
+    hash: value.hash,
+    routes,
+    peerAddresses,
+  };
+  if (value.listenAddresses !== undefined) {
+    payload.listenAddresses = parseTunnelAddressList(
+      value.listenAddresses,
+      "server.tunnel.routes listenAddresses",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  if (value.peerMaterial !== undefined) {
+    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (
+    (routes.length > 0 || peerAddresses.length > 0) && !payload.peerMaterial
+  ) {
+    throw new TypeError(
+      "Invalid server.tunnel.routes peerMaterial: required with routes or peers",
+    );
+  }
+  return payload;
+}
+
+export function parseTunnelRoutesResult(value: unknown): TunnelRoutesResult {
+  if (
+    !isRecord(value) || typeof value.hash !== "string" ||
+    !TUNNEL_SHA256_HEX_RE.test(value.hash) ||
+    typeof value.applied !== "boolean" ||
+    typeof value.routeCount !== "number" ||
+    !Number.isInteger(value.routeCount) || value.routeCount < 0 ||
+    !Array.isArray(value.dropped) ||
+    !value.dropped.every((name) => typeof name === "string") ||
+    !Array.isArray(value.warnings) ||
+    !value.warnings.every((warning) => typeof warning === "string")
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes result");
+  }
+  return {
+    hash: value.hash,
+    applied: value.applied,
+    routeCount: value.routeCount,
+    dropped: value.dropped as string[],
+    warnings: value.warnings as string[],
+  };
+}
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorInstall = {
+  /** The provider's tunnel id (lower-case UUID). */
+  tunnelId: string;
+  /** `tpdaemon.` envelope holding the run token. */
+  tokenEnvelope: string;
+};
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorsPayload = {
+  install: TunnelConnectorInstall[];
+  remove: string[];
+};
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorsResult = {
+  /** Ids whose connector this command installed. */
+  installed: string[];
+  /** Ids whose connector already ran and was left as it was. */
+  unchanged: string[];
+  /** Ids whose connector was removed (or was not there). */
+  removed: string[];
+};
+
+const MAX_TUNNEL_CONNECTORS = 64;
+/** A sealed run token is a few hundred characters; this leaves a wide margin. */
+const MAX_TUNNEL_TOKEN_ENVELOPE_LENGTH = 8192;
+const TUNNEL_PROVIDER_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isTunnelProviderId(value: unknown): value is string {
+  return typeof value === "string" && TUNNEL_PROVIDER_ID_RE.test(value);
+}
+
+function parseTunnelConnectorInstall(value: unknown): TunnelConnectorInstall {
+  if (
+    !isRecord(value) || !isTunnelProviderId(value.tunnelId) ||
+    typeof value.tokenEnvelope !== "string" ||
+    !value.tokenEnvelope.startsWith("tpdaemon.") ||
+    value.tokenEnvelope.length === "tpdaemon.".length ||
+    value.tokenEnvelope.length > MAX_TUNNEL_TOKEN_ENVELOPE_LENGTH
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors install entry");
+  }
+  return { tunnelId: value.tunnelId, tokenEnvelope: value.tokenEnvelope };
+}
+
+function parseTunnelProviderIdList(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value) || value.length > MAX_TUNNEL_CONNECTORS ||
+    !value.every(isTunnelProviderId)
+  ) {
+    throw new TypeError(`Invalid server.tunnel.connectors ${label}`);
+  }
+  return value;
+}
+
+/** Parse `server.tunnel.connectors`. */
+export function parseTunnelConnectorsPayload(
+  value: unknown,
+): TunnelConnectorsPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid server.tunnel.connectors payload");
+  }
+  if (
+    !Array.isArray(value.install) ||
+    value.install.length > MAX_TUNNEL_CONNECTORS
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors install");
+  }
+  const install = value.install.map(parseTunnelConnectorInstall);
+  const remove = parseTunnelProviderIdList(value.remove, "remove");
+  const named = [...install.map((entry) => entry.tunnelId), ...remove];
+  if (named.length === 0 || new Set(named).size !== named.length) {
+    throw new TypeError(
+      "Invalid server.tunnel.connectors: name each tunnel once, at least one",
+    );
+  }
+  return { install, remove };
+}
+
+export function parseTunnelConnectorsResult(
+  value: unknown,
+): TunnelConnectorsResult {
+  if (
+    !isRecord(value) || !Array.isArray(value.installed) ||
+    !value.installed.every(isTunnelProviderId) ||
+    !Array.isArray(value.unchanged) ||
+    !value.unchanged.every(isTunnelProviderId) ||
+    !Array.isArray(value.removed) || !value.removed.every(isTunnelProviderId)
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors result");
+  }
+  return {
+    installed: value.installed as string[],
+    unchanged: value.unchanged as string[],
+    removed: value.removed as string[],
+  };
+}
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusConnector = {
+  /** A lower-case UUID, or `instance` / `default` for the instance's own tunnel. */
+  tunnelId: string;
+  status: "not-installed" | "connected" | "connecting" | "stopped" | "failed";
+  /** Connector program version the carrying unit runs. */
+  version: string;
+  /** Which of the tunnel's two units carries it (the other exists only during an update). */
+  slot: "a" | "b";
+  /** How the last connector update ended; absent before any attempt. */
+  lastUpdate?: {
+    outcome: "updated" | "rolled-back";
+    /** ISO-8601 time of the attempt. */
+    at: string;
+    /** Why a rolled-back attempt stopped (at most 300 characters). */
+    reason?: string;
+  };
+};
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusResult = {
+  /** The connector version this daemon is pinned to and moves every tunnel to. */
+  pinnedVersion: string;
+  connectors: TunnelStatusConnector[];
+};
+
+const TUNNEL_STATUS_VALUES = new Set([
+  "not-installed",
+  "connected",
+  "connecting",
+  "stopped",
+  "failed",
+]);
+/** The metrics band (`20300` to `20899`) holds 600 connectors. */
+const MAX_TUNNEL_STATUS_CONNECTORS = 600;
+const TUNNEL_CONNECTOR_VERSION_RE = /^\d+(?:\.\d+){0,4}$/;
+
+function isTunnelConnectorVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 32 &&
+    TUNNEL_CONNECTOR_VERSION_RE.test(value);
+}
+
+/** Parse `server.tunnel.status`: it takes no input, so the payload is empty. */
+export function parseTunnelStatusPayload(
+  value: unknown,
+): Record<string, never> {
+  if (!isRecord(value) || Object.keys(value).length > 0) {
+    throw new TypeError("Invalid server.tunnel.status payload");
+  }
+  return {};
+}
+
+function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
+  if (
+    !isRecord(value) || typeof value.tunnelId !== "string" ||
+    !(value.tunnelId === "instance" || value.tunnelId === "default" ||
+      TUNNEL_UUID_RE.test(value.tunnelId)) ||
+    typeof value.status !== "string" ||
+    !TUNNEL_STATUS_VALUES.has(value.status) ||
+    !isTunnelConnectorVersion(value.version) ||
+    (value.slot !== "a" && value.slot !== "b")
+  ) {
+    throw new TypeError("Invalid server.tunnel.status connector");
+  }
+  const connector: TunnelStatusConnector = {
+    tunnelId: value.tunnelId,
+    status: value.status as TunnelStatusConnector["status"],
+    version: value.version,
+    slot: value.slot,
+  };
+  const last = value.lastUpdate;
+  if (last !== undefined) {
+    if (
+      !isRecord(last) ||
+      (last.outcome !== "updated" && last.outcome !== "rolled-back") ||
+      typeof last.at !== "string" || !TUNNEL_ISO_TIMESTAMP_RE.test(last.at) ||
+      (last.reason !== undefined &&
+        (typeof last.reason !== "string" || last.reason.length > 300))
+    ) {
+      throw new TypeError("Invalid server.tunnel.status lastUpdate");
+    }
+    connector.lastUpdate = {
+      outcome: last.outcome,
+      at: last.at,
+      ...(last.reason === undefined ? {} : { reason: last.reason }),
+    };
+  }
+  return connector;
+}
+
+export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
+  if (
+    !isRecord(value) || !isTunnelConnectorVersion(value.pinnedVersion) ||
+    !Array.isArray(value.connectors) ||
+    value.connectors.length > MAX_TUNNEL_STATUS_CONNECTORS
+  ) {
+    throw new TypeError("Invalid server.tunnel.status result");
+  }
+  return {
+    pinnedVersion: value.pinnedVersion,
+    connectors: value.connectors.map(parseTunnelStatusConnector),
+  };
+}
+
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */
 function parseRetirePrincipalEntry(value: unknown): { username: string } {
   if (
@@ -6742,6 +7440,9 @@ export function parseEnvironmentStopPayload(
     ...(siteReleases === undefined ? {} : { siteReleases }),
     ...(releaseCleanup === undefined ? {} : { releaseCleanup }),
     ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
+    ...(value.removeDeploymentDir === true
+      ? { removeDeploymentDir: true as const }
+      : {}),
   };
 }
 
@@ -7503,6 +8204,8 @@ function parseManagedApplyCredentialEntry(
     ...(entry.grantMode === undefined
       ? {}
       : { grantMode: entry.grantMode as ManagedGrantMode }),
+    // Expand-only: a kind this daemon does not know is ignored, never refused.
+    ...(entry.kind === "backup" ? { kind: "backup" as const } : {}),
   };
 }
 

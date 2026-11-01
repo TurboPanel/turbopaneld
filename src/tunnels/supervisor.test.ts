@@ -1,9 +1,14 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import type { RunResult } from "../deploy/ensure-principal.ts";
+import type { ConnectorIo } from "./connector-service.ts";
 import {
-  resetTunnelsRuntimeForTests,
+  CONNECTOR_UPDATES_PAUSED_FILE,
+  migrateLegacyTokenFiles,
+  runConnectorUpdates,
   setTunnelsTestHooks,
   startTunnels,
+  startUpdateLoop,
   writeInstanceTunnelToken,
 } from "./supervisor.ts";
 
@@ -15,394 +20,247 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
-async function withTempTunnelsDir<T>(
-  fn: (dir: string) => Promise<T>,
-): Promise<T> {
-  const dir = await Deno.makeTempDir({ prefix: "tunnels-test-" });
-  try {
-    return await fn(dir);
-  } finally {
-    await Deno.remove(dir, { recursive: true }).catch(() => {});
-  }
-}
+const UUID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const TOKEN = "dGVzdA".repeat(8);
 
-function cleanupHooks(): void {
-  resetTunnelsRuntimeForTests();
-  setTunnelsTestHooks(null);
-}
-
-test("startTunnels is a no-op while Cloudflare tunnels stay disabled", async () => {
-  cleanupHooks();
-  const controller = new AbortController();
-  await startTunnels(controller.signal);
-  controller.abort();
-  assertEquals(controller.signal.aborted, true);
-});
-
-test("writeInstanceTunnelToken ignores tokens while tunnels stay disabled", async () => {
-  cleanupHooks();
-  await writeInstanceTunnelToken("example-token");
-  await writeInstanceTunnelToken("");
-  assertEquals(true, true);
-});
-
-test("startTunnels skips when the tunnels dir is missing", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    const missing = join(dir, "missing-tunnels");
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: missing,
-      ensureCloudflared: () => {
-        throw new TypeError("ensureCloudflared must not run with no tokens");
-      },
-    });
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      controller.abort();
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels skips empty token files and non-token entries", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    await Deno.writeTextFile(join(dir, "empty.token"), "  \n");
-    await Deno.writeTextFile(join(dir, "notes.txt"), "not-a-token");
-    await Deno.mkdir(join(dir, "subdir"));
-
-    let ensureCalls = 0;
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      ensureCloudflared: () => {
-        ensureCalls += 1;
-        return Promise.resolve("/fake/cloudflared");
-      },
-    });
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      assertEquals(ensureCalls, 0);
-      controller.abort();
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels logs and returns when cloudflared install fails", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    await Deno.writeTextFile(join(dir, "edge.token"), "tok-edge\n");
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      ensureCloudflared: () => Promise.reject(new Error("download failed")),
-    });
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      controller.abort();
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels supervises configured tunnels until aborted", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    await Deno.writeTextFile(join(dir, "a.token"), "token-a\n");
-    await Deno.writeTextFile(join(dir, "b.token"), "token-b\n");
-
-    const runs: string[] = [];
-    const tokens: string[] = [];
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      delay: () => Promise.resolve(),
-      ensureCloudflared: () => Promise.resolve("/opt/fake/cloudflared"),
-      runTunnel: (bin, args, signal, env) => {
-        runs.push(`${bin} ${args.join(" ")}`);
-        tokens.push(env.TUNNEL_TOKEN ?? "");
-        return new Promise((resolve) => {
-          if (signal.aborted) {
-            resolve({ code: 0 });
-            return;
-          }
-          const onAbort = () => {
-            signal.removeEventListener("abort", onAbort);
-            resolve({ code: 0 });
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-      },
-    });
-
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      assertEquals(runs.length, 2);
-      assertEquals(runs.some((line) => line.includes("--token")), false);
-      assertEquals(runs.some((line) => line.includes("token-")), false);
-      assertEquals(tokens.sort(), ["token-a", "token-b"]);
-      controller.abort();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels restarts after a tunnel exits while still enabled", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    await Deno.writeTextFile(join(dir, "loop.token"), "token-loop\n");
-
-    let runCount = 0;
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      delay: () => Promise.resolve(),
-      ensureCloudflared: () => Promise.resolve("/fake/cloudflared"),
-      runTunnel: (_bin, _args, signal) => {
-        runCount += 1;
-        if (runCount === 1) return Promise.resolve({ code: 1 });
-        return new Promise((resolve) => {
-          const onAbort = () => resolve({ code: 0 });
-          if (signal.aborted) {
-            resolve({ code: 0 });
-            return;
-          }
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-      },
-    });
-
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      await waitFor(() => runCount >= 2);
-      assertEquals(runCount >= 2, true);
-      controller.abort();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("writeInstanceTunnelToken writes, relaunches, then clears the token", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    const tokenPath = join(dir, "instance.token");
-    const launches: number[] = [];
-
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      delay: () => Promise.resolve(),
-      ensureCloudflared: () => Promise.resolve("/fake/cloudflared"),
-      runTunnel: (_bin, _args, signal) => {
-        launches.push(Date.now());
-        return new Promise((resolve) => {
-          const onAbort = () => resolve({ code: 0 });
-          if (signal.aborted) {
-            resolve({ code: 0 });
-            return;
-          }
-          signal.addEventListener("abort", onAbort, { once: true });
-        });
-      },
-    });
-
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      assertEquals(launches.length, 0);
-
-      await writeInstanceTunnelToken("  instance-tok  ");
-      const written = await Deno.readTextFile(tokenPath);
-      assertEquals(written, "instance-tok\n");
-      await waitFor(() => launches.length >= 1);
-
-      await writeInstanceTunnelToken("");
-      await assertRejects(
-        () => Deno.stat(tokenPath),
-        Deno.errors.NotFound,
-      );
-
-      controller.abort();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("launchTunnels is a no-op when parent signal is already aborted", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    await Deno.writeTextFile(join(dir, "a.token"), "tok\n");
-    let ensureCalls = 0;
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      ensureCloudflared: () => {
-        ensureCalls += 1;
-        return Promise.resolve("/fake/cloudflared");
-      },
-    });
-    try {
-      const controller = new AbortController();
-      controller.abort();
-      await startTunnels(controller.signal);
-      assertEquals(ensureCalls, 0);
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels spawns a real local stub binary without network", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    const stub = join(dir, "cloudflared-stub.sh");
-    await Deno.writeTextFile(
-      stub,
-      "#!/bin/sh\n# host-free tunnel stub — exits after a short wait or on signal\ntrap 'exit 0' TERM INT\nsleep 30\nexit 0\n",
-    );
-    await Deno.chmod(stub, 0o700);
-    await Deno.writeTextFile(join(dir, "stub.token"), "stub-token\n");
-
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      delay: () => Promise.resolve(),
-      ensureCloudflared: () => Promise.resolve(stub),
-    });
-
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      controller.abort();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels handles an immediately-exiting stub then aborts on restart", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    const stub = join(dir, "cloudflared-exit.sh");
-    await Deno.writeTextFile(stub, "#!/bin/sh\nexit 7\n");
-    await Deno.chmod(stub, 0o700);
-    await Deno.writeTextFile(join(dir, "exit.token"), "exit-token\n");
-
-    let delayCalls = 0;
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      delay: () => {
-        delayCalls += 1;
-        return Promise.resolve();
-      },
-      ensureCloudflared: () => Promise.resolve(stub),
-    });
-
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      await waitFor(() => delayCalls >= 1);
-      controller.abort();
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels rethrows unexpected tunnel directory errors", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    const blocked = join(dir, "blocked");
-    await Deno.writeTextFile(blocked, "not-a-directory\n");
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: blocked,
-      ensureCloudflared: () => Promise.resolve("/fake/cloudflared"),
-    });
-    try {
-      const controller = new AbortController();
-      await assertRejects(
-        () => startTunnels(controller.signal),
-        Error,
-      );
-      controller.abort();
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels uses the default restart delay without a hook", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    await Deno.writeTextFile(join(dir, "delay.token"), "delay-token\n");
-
-    const originalSetTimeout = globalThis.setTimeout;
-    let capturedMs = -1;
-    globalThis.setTimeout = ((handler: () => void, ms?: number) => {
-      capturedMs = ms ?? 0;
-      return originalSetTimeout(handler, 0);
-    }) as typeof setTimeout;
-
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      ensureCloudflared: () => Promise.resolve("/fake/cloudflared"),
-      runTunnel: (_bin, _args, signal) => {
-        if (signal.aborted) return Promise.resolve({ code: 0 });
-        return Promise.resolve({ code: 1 });
-      },
-    });
-
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      await waitFor(() => capturedMs === 5_000);
-      assertEquals(capturedMs, 5_000);
-      controller.abort();
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    } finally {
-      globalThis.setTimeout = originalSetTimeout;
-      cleanupHooks();
-    }
-  });
-});
-
-test("startTunnels logs non-Error ensureCloudflared failures", async () => {
-  await withTempTunnelsDir(async (dir) => {
-    await Deno.writeTextFile(join(dir, "edge.token"), "tok\n");
-    setTunnelsTestHooks({
-      enabled: true,
-      tunnelsDir: dir,
-      ensureCloudflared: () => Promise.reject("string-failure"),
-    });
-    try {
-      const controller = new AbortController();
-      await startTunnels(controller.signal);
-      controller.abort();
-    } finally {
-      cleanupHooks();
-    }
-  });
-});
-
-async function waitFor(
-  predicate: () => boolean,
-  timeoutMs = 2_000,
+async function withTunnelsDir(
+  fn: (dir: string, io: ConnectorIo, calls: string[]) => Promise<void>,
+  opts: { ensureBinary?: () => Promise<string> } = {},
 ): Promise<void> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+  const dir = await Deno.makeTempDir({ prefix: "tunnels-test-" });
+  const calls: string[] = [];
+  const io: ConnectorIo = {
+    layout: { configDir: join(dir, "etc") },
+    workDir: dir,
+    version: "2026.10.7",
+    ensureBinary: opts.ensureBinary ??
+      (() =>
+        Promise.resolve("/opt/turbopanel/vendor/cloudflared/x/cloudflared")),
+    probe: () => Promise.resolve({ kind: "unreachable" }),
+    run: (command, args): Promise<RunResult> => {
+      calls.push([command, ...args].join(" "));
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    },
+  };
+  setTunnelsTestHooks({ io, tunnelsDir: dir });
+  try {
+    await fn(dir, io, calls);
+  } finally {
+    setTunnelsTestHooks(null);
+    await Deno.remove(dir, { recursive: true });
   }
-  throw new TypeError("timed out waiting for tunnels condition");
 }
+
+test("a host that never had a token file does nothing, not even a download", async () => {
+  await withTunnelsDir(async (_dir, io, calls) => {
+    assertEquals(await migrateLegacyTokenFiles(io), []);
+    assertEquals(calls, []);
+  }, {
+    ensureBinary: () => {
+      throw new TypeError("the connector program must not be fetched");
+    },
+  });
+});
+
+test("a missing tunnels folder is not an error", async () => {
+  await withTunnelsDir(async (dir, io) => {
+    assertEquals(await migrateLegacyTokenFiles(io, join(dir, "missing")), []);
+  });
+});
+
+test("legacy token files for the instance, the installer and a tunnel id become services", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    for (const name of ["instance", "default", UUID]) {
+      await Deno.writeTextFile(join(dir, `${name}.token`), `${TOKEN}\n`);
+    }
+    const migrated = await migrateLegacyTokenFiles(io);
+    assertEquals(migrated, ["default", "instance", UUID].sort());
+    assert(
+      calls.some((c) => c.includes(`enable turbopanel-tunnel-${UUID}.service`)),
+    );
+    const left = [...Deno.readDirSync(dir)].map((e) => e.name).filter((n) =>
+      n.endsWith(".token")
+    );
+    assertEquals(left, []);
+    assert(calls.every((c) => !c.includes(TOKEN)));
+  });
+});
+
+test("a file not named for a tunnel id, an empty one and a bad one stay where they are", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await Deno.writeTextFile(join(dir, "my tunnel.token"), TOKEN);
+    await Deno.writeTextFile(join(dir, "..token"), TOKEN);
+    await Deno.writeTextFile(join(dir, "instance.token"), "  \n");
+    await Deno.writeTextFile(
+      join(dir, `${UUID}.token`),
+      "has space and 'quote",
+    );
+    await Deno.writeTextFile(join(dir, "notes.txt"), "x");
+    assertEquals(await migrateLegacyTokenFiles(io), []);
+    assertEquals(calls, []);
+    assertEquals([...Deno.readDirSync(dir)].length, 5);
+  });
+});
+
+test("a file whose service cannot be installed stays for the next start, the others migrate", async () => {
+  await withTunnelsDir(async (dir, io) => {
+    await Deno.writeTextFile(join(dir, "default.token"), TOKEN);
+    await Deno.writeTextFile(join(dir, "instance.token"), TOKEN);
+    const run = io.run;
+    io.run = (command, args) =>
+      args.includes("default")
+        ? Promise.resolve({ success: false, stdout: "", stderr: "no" })
+        : run(command, args);
+    // `tunnel-env-install default` is refused; instance is fine.
+    const migrated = await migrateLegacyTokenFiles(io);
+    assertEquals(migrated, ["instance"]);
+    assertEquals(
+      (await Deno.stat(join(dir, "default.token"))).isFile,
+      true,
+    );
+  });
+});
+
+test("startTunnels returns at once and never throws", async () => {
+  await withTunnelsDir(async () => {
+    await startTunnels(new AbortController().signal);
+  }, {
+    ensureBinary: () => Promise.reject(new Error("download failed")),
+  });
+});
+
+test("the instance token becomes the instance service and an empty one removes it", async () => {
+  await withTunnelsDir(async (dir, _io, calls) => {
+    await Deno.writeTextFile(join(dir, "instance.token"), TOKEN);
+    await writeInstanceTunnelToken(`  ${TOKEN} \n`);
+    assert(
+      calls.some((c) =>
+        c.includes("enable turbopanel-tunnel-instance.service")
+      ),
+    );
+    // The old file must not be migrated back on the next start.
+    assertEquals(
+      await Deno.stat(join(dir, "instance.token")).catch(() => null),
+      null,
+    );
+    calls.length = 0;
+    await writeInstanceTunnelToken("");
+    assert(
+      calls.some((c) =>
+        c.includes("disable --now turbopanel-tunnel-instance.service")
+      ),
+    );
+    assert(calls.some((c) => c.includes("tunnel-env-remove instance")));
+  });
+});
+
+test("a file whose service fails to start stays in place for the next start", async () => {
+  await withTunnelsDir(async (dir, io) => {
+    await Deno.writeTextFile(join(dir, "instance.token"), TOKEN);
+    const run = io.run;
+    io.run = (command, args) =>
+      args.includes("restart")
+        ? Promise.resolve({ success: false, stdout: "", stderr: "no" })
+        : run(command, args);
+    assertEquals(await migrateLegacyTokenFiles(io), []);
+    assertEquals((await Deno.stat(join(dir, "instance.token"))).isFile, true);
+  });
+});
+
+test("a stale file never overwrites a service that already exists", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeInstanceTunnelToken(TOKEN);
+    await Deno.writeTextFile(join(dir, "instance.token"), `${TOKEN}AA`);
+    calls.length = 0;
+    assertEquals(await migrateLegacyTokenFiles(io), []);
+    assertEquals(calls, []);
+    assertEquals(
+      await Deno.stat(join(dir, "instance.token")).catch(() => null),
+      null,
+    );
+  });
+});
+
+async function writeOldRecord(dir: string): Promise<void> {
+  await Deno.writeTextFile(
+    join(dir, `${UUID}.json`),
+    JSON.stringify({
+      id: UUID,
+      port: 20300,
+      version: "2026.5.0",
+      tokenDigest: "ab",
+      slot: "a",
+    }),
+  );
+}
+
+test("a host with no tunnels is left alone by the update run, not even a download", async () => {
+  await withTunnelsDir(async (_dir, io, calls) => {
+    assertEquals(await runConnectorUpdates(io), []);
+    assertEquals(calls, []);
+  }, {
+    ensureBinary: () => {
+      throw new TypeError("the connector program must not be fetched");
+    },
+  });
+});
+
+test("the update run moves an older tunnel to the pinned version", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeOldRecord(dir);
+    io.probe = () => Promise.resolve({ kind: "ready", connections: 4 });
+    io.portFree = () => Promise.resolve(true);
+    io.unitExists = () => Promise.resolve(false);
+    const run = io.run;
+    io.run = (command, args) =>
+      args.includes("is-active")
+        ? Promise.resolve({ success: true, stdout: "active", stderr: "" })
+        : run(command, args);
+    io.sleep = () => Promise.resolve();
+    const results = await runConnectorUpdates(io);
+    assertEquals(results?.map((r) => [r.id, r.outcome.kind]), [
+      [UUID, "updated"],
+    ]);
+    assert(calls.some((c) => c.includes(`start turbopanel-tunnel-${UUID}-b`)));
+  });
+});
+
+test("a paused server keeps the connector versions it runs", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeOldRecord(dir);
+    await Deno.writeTextFile(join(dir, CONNECTOR_UPDATES_PAUSED_FILE), "");
+    assertEquals(await runConnectorUpdates(io), null);
+    assertEquals(calls, []);
+  });
+});
+
+test("the update loop runs again later and never overlaps itself", async () => {
+  let started = 0;
+  let active = 0;
+  let overlapped = false;
+  const stop = startUpdateLoop(async () => {
+    started++;
+    active++;
+    if (active > 1) overlapped = true;
+    await new Promise((r) => setTimeout(r, 25));
+    active--;
+  }, 5);
+  await new Promise((r) => setTimeout(r, 120));
+  stop();
+  const after = started;
+  await new Promise((r) => setTimeout(r, 40));
+  assert(after >= 2, `ran ${after} times`);
+  assertEquals(overlapped, false);
+  assertEquals(started, after);
+});
+
+test("a failing round does not stop the loop", async () => {
+  let started = 0;
+  const stop = startUpdateLoop(() => {
+    started++;
+    return Promise.reject(new Error("offline"));
+  }, 5);
+  await new Promise((r) => setTimeout(r, 60));
+  stop();
+  assert(started >= 2, `ran ${started} times`);
+});

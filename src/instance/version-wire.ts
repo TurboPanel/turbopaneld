@@ -83,6 +83,7 @@ export const DAEMON_WIRE_FEATURES = [
   "managed-database-owner-v1",
   "managed-database-convert-v1",
   "tls-capture-v1",
+  "acme-issue-v1",
   "command-recovery-v1",
   "managed-switchover-final-position-v1",
   "host-capacity-v1",
@@ -90,6 +91,14 @@ export const DAEMON_WIRE_FEATURES = [
   "backup-s3-copy-v1",
   "deploy-hostings-only-v1",
   "custom-node-app-mode-v1",
+  "tunnel-forwarding-v1",
+  "tunnel-connector-v1",
+  "tunnel-status-v1",
+  "managed-backup-login-v1",
+  "fabric-retain-keys-v1",
+  "fabric-peer-report-v1",
+  "fabric-lan-routes-v1",
+  "repo-key-report-v1",
 ] as const;
 
 /**
@@ -122,6 +131,62 @@ export const DEPLOY_HOSTINGS_ONLY_FEATURE: DaemonWireFeature =
 export const CUSTOM_NODE_APP_MODE_FEATURE: DaemonWireFeature =
   "custom-node-app-mode-v1";
 
+/** The daemon applies `server.tunnel.routes` and `hostings[].tunnel`. */
+export const TUNNEL_FORWARDING_FEATURE: DaemonWireFeature =
+  "tunnel-forwarding-v1";
+
+/** The daemon applies `server.tunnel.connectors` (installs and removes tunnel connectors). */
+export const TUNNEL_CONNECTOR_FEATURE: DaemonWireFeature =
+  "tunnel-connector-v1";
+/** The daemon answers `server.tunnel.status` with each connector's state and version. */
+export const TUNNEL_STATUS_FEATURE: DaemonWireFeature = "tunnel-status-v1";
+
+/**
+ * This daemon honours `credentials[].kind: "backup"` on `managed.apply`: it
+ * gives that login the read-only rights a full logical dump needs on every
+ * listed database, per engine, instead of an ordinary login's rights.
+ */
+export const MANAGED_BACKUP_LOGIN_FEATURE: DaemonWireFeature =
+  "managed-backup-login-v1";
+
+/**
+ * This daemon understands `server.fabric.reconcile` `{ enabled: false,
+ * retainKeys: true }`: it takes `tp0` down and keeps its key, routed bridges
+ * and forwarding rules, so turning TurboFabric back on is instant. Without it
+ * the control plane refuses to pause (an older daemon would read the message
+ * as a full tear down and drop its key); removing TurboFabric still works.
+ */
+export const FABRIC_RETAIN_KEYS_FEATURE: DaemonWireFeature =
+  "fabric-retain-keys-v1";
+
+/**
+ * This daemon pushes `fabric-peers-report` (every `tp0` peer's handshake
+ * reading from the 60 s refresh) when a peer's health class changes, and at
+ * most every 5 minutes otherwise, so the control plane's tunnel health never
+ * goes stale between reconciles. It sends one only to a control plane that
+ * lists this feature.
+ */
+export const FABRIC_PEER_REPORT_FEATURE: DaemonWireFeature =
+  "fabric-peer-report-v1";
+
+/**
+ * This daemon understands `server.fabric.reconcile` `tunnel` and `lanRoutes`:
+ * with `tunnel: false` it keeps `tp0` down (key kept), and it routes each
+ * `lanRoutes` container subnet via the member's LAN address on the interface
+ * that holds it, with the matching forwarding accepts. Without it the control
+ * plane keeps planning a tunnel to every member.
+ */
+export const FABRIC_LAN_ROUTES_FEATURE: DaemonWireFeature =
+  "fabric-lan-routes-v1";
+
+/**
+ * This daemon reports `repo-key-changed` (a package source's signing key is
+ * not one it expects). It sends the frame only to a control plane that lists
+ * this feature; an older one is never sent it, and the daemon keeps the
+ * report until one does.
+ */
+export const REPO_KEY_REPORT_FEATURE: DaemonWireFeature = "repo-key-report-v1";
+
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`
  * (`keyEnvelope`) and `tunnel-token` (`tokenEnvelope`), so the control plane
@@ -137,6 +202,14 @@ export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
  * feature too.
  */
 export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
+
+/**
+ * The control plane may ask this daemon to place a certificate order for a name
+ * set from this server's own addresses (`acme-issue-request`) and to pass the
+ * HTTP proof path on for another server (`acme-proof-forward`). No message
+ * carries the certificate or key.
+ */
+export const ACME_ISSUE_FEATURE: DaemonWireFeature = "acme-issue-v1";
 
 /**
  * Planned Postgres switchover: the fence stop reports the old primary's final

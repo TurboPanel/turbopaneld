@@ -1,7 +1,6 @@
 import { it } from "@std/testing/bdd";
 import { assertEquals } from "@std/assert";
 import {
-  clearDaemonKeyState,
   DEFAULT_INITIAL_BACKOFF_MS,
   installClientTestHooks,
   installClientTimeSource,
@@ -31,6 +30,7 @@ import {
   type TestSigningMaterial,
   withTempLayout,
 } from "../testing/index.ts";
+import { ACME_LEAF_CERT_BY_TAG } from "../testing/acme-leaf-fixtures.ts";
 
 wireCommandPorts();
 
@@ -126,16 +126,6 @@ const VALID_CAPABILITY_PLAN = {
   managedDockerEnabled: true,
   hardwareHealthEventsEnabled: true,
 };
-
-it({
-  name: "clearDaemonKeyState ignores missing key files",
-  permissions: { env: true, read: true, write: true },
-  fn: async () => {
-    await withTempLayout(async (fixture) => {
-      await clearDaemonKeyState(fixture.dirs.stateDir);
-    });
-  },
-});
 
 it({
   name:
@@ -1097,6 +1087,112 @@ it({
       restoreWebSocket();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name:
+    "a trust file outside the pinned CA list parks the client before any credential is sent",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const saved = Object.fromEntries(
+      [
+        "TURBOPANEL_DAEMON_STATE_DIR",
+        "TURBOPANEL_INSTANCE_CA",
+        "TURBOPANEL_INSTANCE_CA_FINGERPRINT",
+        "TURBOPANEL_FORCE_ENROLL",
+      ].map((key) => [key, Deno.env.get(key)]),
+    );
+    const { restore: restoreWebSocket } = installTrackingWebSocket();
+    const originalSetTimeout = globalThis.setTimeout;
+    const delays: number[] = [];
+    let restoreFetch: (() => void) | undefined;
+    globalThis.setTimeout = ((
+      handler: (...args: unknown[]) => void,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (
+        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+      ) {
+        delays.push(timeout);
+      }
+      return originalSetTimeout(handler, 0, ...args);
+    }) as typeof setTimeout;
+    try {
+      const credentialCalls: string[] = [];
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      for (
+        const path of [
+          "/api/daemon/v1/jwks.json",
+          "/api/daemon/v1/auth/challenge",
+          "/api/daemon/v1/auth/enroll",
+          "/api/daemon/v1/auth/session",
+        ]
+      ) {
+        api.script(path, () => {
+          credentialCalls.push(path);
+          return new Response("{}", { status: 500 });
+        });
+      }
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        const caPath = `${fixture.dirs.stateDir}/instance-ca.pem`;
+        await Deno.writeTextFile(
+          caPath,
+          `${Object.values(ACME_LEAF_CERT_BY_TAG)[0]}\n`,
+        );
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.set("TURBOPANEL_INSTANCE_CA", caPath);
+        Deno.env.set("TURBOPANEL_INSTANCE_CA_FINGERPRINT", "ab".repeat(32));
+        Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+        });
+        try {
+          client.start();
+          await waitFor(
+            "pin mismatch parks the client",
+            () =>
+              delays.some((d) => d >= PARKED_BACKOFF_MIN_MS) ? true : undefined,
+          );
+          assertEquals(credentialCalls, []);
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      restoreFetch?.();
+      restoreWebSocket();
+      for (const [key, value] of Object.entries(saved)) {
+        setOptionalEnv(key, value);
+      }
     }
   },
 });

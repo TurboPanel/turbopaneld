@@ -282,6 +282,11 @@ test("a disabled or dropped policy has its timer stopped and its units deleted",
           `disable --now ${backupUnitName(id)}.timer`,
         ),
       );
+      // The persistent timer's stamp file goes with the unit, after the stop.
+      const stamp = `rm -f -- /var/lib/systemd/timers/stamp-${
+        backupUnitName(id)
+      }.timer`;
+      assert(host.calls.some((call) => call.endsWith(stamp)), stamp);
     }
     assertEquals(result.nextRuns.map((run) => run.policyId), [A]);
   });

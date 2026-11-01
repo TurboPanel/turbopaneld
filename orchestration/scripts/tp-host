@@ -24,8 +24,8 @@
 #   as the principal with no capabilities, and nothing gets a `+`/`!` exec
 #   prefix.
 #
-# What this does not contain (see AGENTS.md → Managed-host privilege
-# boundary): Docker (the daemon account is in the `docker` group) and root
+# What this does not contain (see src/permissions/AGENTS.md → Managed-host
+# privilege boundary): Docker (the daemon account is in the `docker` group) and root
 # engine config validation.
 set -eu
 umask 077
@@ -78,10 +78,26 @@ R_APPENV="$R_CONFIG/node-app-env"
 # Largest variables file tp-host will copy (NATIVE_APP_ENV_MAX_BYTES in
 # src/deploy/native/variables-runtime.ts; a test keeps the two equal).
 TP_APPENV_MAX=1048576
+# A tunnel connector's token as systemd reads it (EnvironmentFile=): the same
+# arrangement as the variables above, in a folder of its own. The daemon stages
+# <state>/cloudflared/tunnels/<id>.env; tunnel-env-install checks and copies it.
+R_TUNNELENV="$R_CONFIG/tunnel-env"
+R_TUNNEL_STAGE="$R_STATE/cloudflared/tunnels"
+# Longest run token tunnel-env-install accepts (TUNNEL_TOKEN_RE in
+# src/tunnels/connector-unit.ts; a test keeps the two equal).
+TP_TUNNEL_TOKEN_MAX=2048
+# The loopback band a connector's metrics address may use
+# (TUNNEL_METRICS_PORT_MIN/MAX in src/tunnels/connector-unit.ts; kept equal by
+# a test).
+TP_TUNNEL_PORT_MIN=20300
+TP_TUNNEL_PORT_MAX=20899
 R_UNITS="$P/etc/systemd/system"
 R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
 R_WG="$P/etc/wireguard"
 R_SYSCTL="$P/etc/sysctl.d"
+# systemd keeps one stamp file per persistent timer here; `rm` may remove only
+# TurboPanel's own (stamp-turbopanel-*.timer), so a deleted timer leaves none.
+R_TIMER_STAMPS="$P/var/lib/systemd/timers"
 # A principal home root the operator moved is recorded root-side, next to this
 # script — never taken from the daemon's own environment.
 if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
@@ -198,6 +214,7 @@ tp_path_class() {
   # them, so no generic verb may name this folder or anything in it.
   case "$_pc" in
     "$R_APPENV"|"$R_APPENV"/*) return 1 ;;
+    "$R_TUNNELENV"|"$R_TUNNELENV"/*) return 1 ;;
   esac
   # State that belongs to an engine account or to a root service, though it sits
   # in the state tree: the hosting Caddy's store (tpedge) and the Docker gate's
@@ -240,6 +257,12 @@ tp_path_class() {
   if [ "$_pc" = "$R_WG" ] || [ "$_pc" = "$R_WG/tp0.conf" ]; then
     echo wireguard
     return 0
+  fi
+  if [ "$_pc_parent" = "$R_TIMER_STAMPS" ]; then
+    case "$_pc_name" in
+      stamp-turbopanel-*.timer) tp_unit_name_ok "${_pc_name#stamp-}" && { echo timerstamp; return 0; } ;;
+    esac
+    return 1
   fi
   if [ "$_pc_parent" = "$R_SYSCTL" ]; then
     case "$_pc_name" in
@@ -293,7 +316,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
   esac
   return 1
 }
@@ -1096,6 +1119,10 @@ tp_unit_ok() {
     turbopanel-backup-*)
       _uk_backup="$(tp_backup_unit_id "$_uk_name")" || return 1
       ;;
+    turbopanel-tunnel-*)
+      tp_tunnel_unit_ok "$_uk_file" "$_uk_name"
+      return
+      ;;
     *) ;;
   esac
   _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v hostcap="$HOSTING_CADDY_CAP" '
@@ -1216,6 +1243,127 @@ tp_unit_ok() {
   [ "$_uk_nnp" = "yes" ] || return 1
   [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
   return 0
+}
+
+# A Cloudflare tunnel connector's id: a lower-case UUID, or one of the two
+# names the daemon has always used for the instance's own tunnel (`instance`,
+# and `default` from the installer's --tunnel-token). Kept equal to
+# isTunnelId in src/tunnels/connector-unit.ts.
+tp_tunnel_id_ok() {
+  case "$1" in
+    instance|default) return 0 ;;
+  esac
+  printf '%s\n' "$1" |
+    LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+}
+
+# The expected text of the connector unit for ID, VERSION, PORT and SLOT suffix
+# ("" for the first unit, "-b" for the second one that runs beside it during a
+# connector update; renderTunnelUnit's slot), exactly as
+# renderTunnelUnit in src/tunnels/connector-unit.ts writes it. A unit is not
+# checked line by line against an allowlist: it must BE this text, so nothing
+# else (another ExecStart, User=, a capability, a different EnvironmentFile=)
+# can ride along. A test installs the daemon's own rendering through this and
+# refuses every one-line change to it.
+tp_tunnel_unit_text() {
+  _tt_id="$1"
+  _tt_ver="$2"
+  _tt_port="$3"
+  _tt_suffix="$4"
+  printf '%s\n' \
+    '[Unit]' \
+    "Description=TurboPanel tunnel connector $_tt_id" \
+    'After=network-online.target' \
+    'Wants=network-online.target' \
+    'StartLimitIntervalSec=0' \
+    '' \
+    '[Service]' \
+    'Type=simple' \
+    'DynamicUser=yes' \
+    "EnvironmentFile=$R_TUNNELENV/$_tt_id.env" \
+    "ExecStart=$INSTALL_ROOT/vendor/cloudflared/$_tt_ver/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:$_tt_port run" \
+    'Restart=always' \
+    'RestartSec=5' \
+    'NoNewPrivileges=yes' \
+    'PrivateTmp=yes' \
+    'ProtectSystem=strict' \
+    'ProtectHome=yes' \
+    'ProtectKernelTunables=yes' \
+    'ProtectKernelModules=yes' \
+    'ProtectControlGroups=yes' \
+    'RestrictSUIDSGID=yes' \
+    'RestrictRealtime=yes' \
+    'LockPersonality=yes' \
+    'UMask=0077' \
+    'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK' \
+    'PrivateDevices=yes' \
+    'ProtectKernelLogs=yes' \
+    'ProtectClock=yes' \
+    'ProtectHostname=yes' \
+    'SystemCallArchitectures=native' \
+    'CapabilityBoundingSet=' \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
+    "SyslogIdentifier=turbopanel-tunnel-$_tt_id$_tt_suffix" \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target'
+}
+
+# turbopanel-tunnel-<id>.service or turbopanel-tunnel-<id>-b.service (the second
+# unit of a tunnel during a connector update; an id never ends in "-b", so the
+# suffix is unambiguous). The id comes from the name; the connector
+# version and metrics port from the one ExecStart line (version digits and dots,
+# port inside the band); the rest must match tp_tunnel_unit_text exactly. The
+# unit runs as a throwaway systemd account (DynamicUser=), never as the daemon's
+# or the hosting Caddy's, with no capability, and reads its token from a copy
+# only root can write.
+tp_tunnel_unit_ok() {
+  _tu_file="$1"
+  _tu_name="$2"
+  _tu_id="${_tu_name#turbopanel-tunnel-}"
+  [ "$_tu_id" != "$_tu_name" ] || return 1
+  _tu_id="${_tu_id%.service}"
+  [ "$_tu_id.service" = "${_tu_name#turbopanel-tunnel-}" ] || return 1
+  _tu_suffix=""
+  if tp_tunnel_id_ok "$_tu_id"; then
+    :
+  elif [ "${_tu_id%-b}" != "$_tu_id" ] && tp_tunnel_id_ok "${_tu_id%-b}"; then
+    _tu_id="${_tu_id%-b}"
+    _tu_suffix="-b"
+  else
+    return 1
+  fi
+  _tu_exec=""
+  _tu_n=0
+  while IFS= read -r _tu_line || [ -n "$_tu_line" ]; do
+    case "$_tu_line" in
+      ExecStart=*) _tu_exec="$_tu_line"; _tu_n=$((_tu_n + 1)) ;;
+    esac
+  done < "$_tu_file"
+  [ "$_tu_n" -eq 1 ] || return 1
+  _tu_rest="${_tu_exec#ExecStart=$INSTALL_ROOT/vendor/cloudflared/}"
+  [ "$_tu_rest" != "$_tu_exec" ] || return 1
+  _tu_ver="${_tu_rest%%/*}"
+  case "$_tu_ver" in
+    ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+  esac
+  _tu_port="${_tu_rest#"$_tu_ver"/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:}"
+  [ "$_tu_port" != "$_tu_rest" ] || return 1
+  # The command ends in " run": the port is what is left before it.
+  _tu_run="${_tu_port% run}"
+  [ "$_tu_run" != "$_tu_port" ] || return 1
+  _tu_port="$_tu_run"
+  case "$_tu_port" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  [ "${#_tu_port}" -le 5 ] || return 1
+  [ "$_tu_port" -ge "$TP_TUNNEL_PORT_MIN" ] && [ "$_tu_port" -le "$TP_TUNNEL_PORT_MAX" ] || return 1
+  # The trailing "x" keeps command substitution from eating the last newline,
+  # so a file with extra blank lines at the end differs too.
+  _tu_have="$(cat -- "$_tu_file"; printf x)"
+  _tu_want="$(tp_tunnel_unit_text "$_tu_id" "$_tu_ver" "$_tu_port" "$_tu_suffix"; printf x)"
+  [ "$_tu_have" = "$_tu_want" ]
 }
 
 # A native app unit's one allowed EnvironmentFile=: its own variables copy,
@@ -2225,7 +2373,7 @@ tp_verb_rm() {
   [ $# -eq 1 ] || tp_die "rm takes one path"
   _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
   case "$_rm_class" in
-    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir) ;;
+    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir|timerstamp) ;;
     # TurboFabric teardown removes the tp0 config, never the directory.
     wireguard) [ "$1" = "$R_WG/tp0.conf" ] || tp_die "refusing path $1" ;;
     *) tp_die "refusing path $1" ;;
@@ -2463,13 +2611,28 @@ tp_verb_chmod() {
   fi
 }
 
-# The control plane's HTTP-01 issuer socket. Hosting Caddy (not in group tp)
+# The control plane's HTTP-01 issuer socket (and, one per request, a certificate
+# order's issuer socket for a hosted name). Hosting Caddy (not in group tp)
 # proxies challenges to it; whoever binds it (the daemon's preflight listener,
 # or the issuer Caddy as tpcaddy) cannot name another user in an ACL, so root
 # adds exactly this one entry. The issuer binds shortly after systemd reports
 # it started, hence the bounded wait. -P never follows a swapped-in symlink.
 tp_setfacl_acme_socket() {
-  [ "$1" = "$R_RUN/instance-acme.sock" ] || tp_die "setfacl: only the instance ACME socket"
+  case "$1" in
+    "$R_RUN/instance-acme.sock") ;;
+    # One certificate order's issuer socket: tenant-acme-<request id>.sock, the
+    # id being the control plane's request id (letters, digits, - and _, 64 at
+    # most), so no other name or sub-path ever matches.
+    "$R_RUN"/tenant-acme-?*.sock)
+      _sa_id="${1#"$R_RUN"/tenant-acme-}"
+      _sa_id="${_sa_id%.sock}"
+      case "$_sa_id" in
+        ''|*[!A-Za-z0-9_-]*) tp_die "setfacl: refusing issuer socket $1" ;;
+      esac
+      [ "${#_sa_id}" -le 64 ] || tp_die "setfacl: refusing issuer socket $1"
+      ;;
+    *) tp_die "setfacl: only the instance ACME socket or a certificate issuer socket" ;;
+  esac
   tp_pin_parent "$1" || tp_die "no such directory ${1%/*}"
   _sa_wait=0
   until [ -S "$PIN_NAME" ] && [ ! -L "$PIN_NAME" ]; do
@@ -3011,14 +3174,250 @@ tp_verb_xtables() {
   tp_exec "$_xt_bin" "$@"
 }
 
-# Only the fabric interface, only these shapes.
+# One IPv4 octet: 1-3 digits, no leading zero, at most 255.
+tp_ipv4_octet_ok() {
+  case "$1" in
+    ''|*[!0-9]*|0?*) [ "$1" = "0" ] ;;
+    ????*) return 1 ;;
+    *) [ "$1" -le 255 ] ;;
+  esac
+}
+
+# A fabric IPv4 route stays inside a private block (first octet $1, second
+# $2, prefix $3): RFC 1918 10/8, 172.16/12, 192.168/16 and RFC 6598
+# 100.64/10, the same blocks as the daemon's AllowedIPs policy.
+tp_fabric_route_v4_private() {
+  case "$1" in
+    10) return 0 ;;
+    172) [ "$2" -ge 16 ] && [ "$2" -le 31 ] && [ "$3" -ge 12 ] ;;
+    192) [ "$2" -eq 168 ] && [ "$3" -ge 16 ] ;;
+    100) [ "$2" -ge 64 ] && [ "$2" -le 127 ] && [ "$3" -ge 10 ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# A fabric route: IPv4 a.b.c.d/8-32 inside a private block or IPv6 ULA
+# (fc00::/7, the first group written in full) /48-128 (the daemon's
+# AllowedIPs policy refuses anything broader or public), always with a prefix.
+tp_fabric_route_cidr_ok() {
+  case "$1" in */*/*) return 1 ;; */*) ;; *) return 1 ;; esac
+  _frc_addr="${1%/*}"
+  _frc_bits="${1#*/}"
+  case "$_frc_bits" in ''|*[!0-9]*|0?*|????*) return 1 ;; esac
+  case "$_frc_addr" in
+    *:*)
+      case "$_frc_addr" in *[!0-9A-Fa-f:]*|*:::*|*::*::*) return 1 ;; esac
+      [ "${#_frc_addr}" -le 39 ] || return 1
+      case "${_frc_addr%%:*}" in [Ff][CcDd][0-9A-Fa-f][0-9A-Fa-f]) ;; *) return 1 ;; esac
+      [ "$_frc_bits" -ge 48 ] && [ "$_frc_bits" -le 128 ]
+      ;;
+    *)
+      case "$_frc_addr" in *[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+      _frc_rest="$_frc_addr"
+      _frc_n=0
+      while [ -n "$_frc_rest" ]; do
+        _frc_oct="${_frc_rest%%.*}"
+        tp_ipv4_octet_ok "$_frc_oct" || return 1
+        case "$_frc_n" in 0) _frc_o1="$_frc_oct" ;; 1) _frc_o2="$_frc_oct" ;; esac
+        _frc_n=$((_frc_n + 1))
+        case "$_frc_rest" in *.*) _frc_rest="${_frc_rest#*.}" ;; *) _frc_rest="" ;; esac
+      done
+      [ "$_frc_n" -eq 4 ] || return 1
+      [ "$_frc_bits" -ge 8 ] && [ "$_frc_bits" -le 32 ] || return 1
+      tp_fabric_route_v4_private "$_frc_o1" "$_frc_o2" "$_frc_bits"
+      ;;
+  esac
+}
+
+# A plain IPv4 literal: four octets, no leading zeros, nothing else.
+tp_ipv4_literal_ok() {
+  case "$1" in *[!0-9.]*|.*|*.|*..*|'') return 1 ;; esac
+  _ilo_rest="$1"
+  _ilo_n=0
+  while [ -n "$_ilo_rest" ]; do
+    tp_ipv4_octet_ok "${_ilo_rest%%.*}" || return 1
+    _ilo_n=$((_ilo_n + 1))
+    case "$_ilo_rest" in *.*) _ilo_rest="${_ilo_rest#*.}" ;; *) _ilo_rest="" ;; esac
+  done
+  [ "$_ilo_n" -eq 4 ]
+}
+
+# A checked IPv4 literal as one integer.
+tp_ipv4_int() {
+  _iin_rest="$1"
+  _iin_val=0
+  while [ -n "$_iin_rest" ]; do
+    _iin_val=$((_iin_val * 256 + ${_iin_rest%%.*}))
+    case "$_iin_rest" in *.*) _iin_rest="${_iin_rest#*.}" ;; *) _iin_rest="" ;; esac
+  done
+  printf '%s\n' "$_iin_val"
+}
+
+# A LAN interface name: what the kernel takes (1-15 of letters, digits, `.`,
+# `-`, `_`), never the fabric interface, loopback or a container-side link.
+tp_lan_nic_ok() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*|-*|.|..) return 1 ;; esac
+  [ "${#1}" -le 15 ] || return 1
+  case "$1" in tp0|lo|docker*|br-*|veth*|tpn*) return 1 ;; esac
+}
+
+# A connected network is a device route without a next hop that says `scope
+# link`, whoever made it: the kernel (`proto kernel`), a DHCP client, a static
+# config. Output lines on stdin; keep the ones with no `via` token.
+tp_lan_no_via() {
+  awk '{ for (i = 2; i <= NF; i++) if ($i == "via") next; print }'
+}
+
+# The connected IPv4 networks on one interface (`scope link` routes with no
+# next hop, any `proto`). Test mode reads a fixture file instead of the host.
+tp_lan_connected_routes() {
+  if [ -n "$TP_TEST" ]; then
+    { cat "$P/tp-test/ip-route-link-$1" 2>/dev/null || true; } | tp_lan_no_via
+    return 0
+  fi
+  { ip -4 route show dev "$1" scope link 2>/dev/null || true; } | tp_lan_no_via
+}
+
+# Every connected IPv4 network on any interface: what the kernel made (`proto
+# kernel`, `tp0`'s own subnet included) plus `scope link` routes with no next
+# hop and any `proto`, except `dev tp0` (the routes this host puts there are
+# `scope link` too). Test mode reads a fixture file instead of the host.
+tp_kernel_routes() {
+  if [ -n "$TP_TEST" ]; then
+    _tkr_all=$(cat "$P/tp-test/ip-route-kernel" 2>/dev/null || true)
+  else
+    _tkr_all=$(ip -4 route show 2>/dev/null || true)
+  fi
+  printf '%s\n' "$_tkr_all" | tp_lan_no_via | awk '
+    { kernel = 0; link = 0; tp0 = 0
+      for (i = 2; i <= NF; i++) {
+        if ($i == "proto" && $(i + 1) == "kernel") kernel = 1
+        if ($i == "scope" && $(i + 1) == "link") link = 1
+        if ($i == "dev" && $(i + 1) == "tp0") tp0 = 1
+      }
+      if (kernel || (link && !tp0)) print }'
+}
+
+# A route destination as `ip route` prints it (a bare address is a /32), split
+# into `_dst_net` and `_dst_bits`; fails unless it is a plain IPv4 range.
+tp_ipv4_dst_split() {
+  _dst_in=$1
+  case "$_dst_in" in
+    */*) _dst_net="${_dst_in%/*}"; _dst_bits="${_dst_in#*/}" ;;
+    *) _dst_net="$_dst_in"; _dst_bits=32 ;;
+  esac
+  tp_ipv4_literal_ok "$_dst_net" || return 1
+  case "$_dst_bits" in ''|*[!0-9]*|0?*) return 1 ;; *) ;; esac
+  [ "$_dst_bits" -ge 1 ] && [ "$_dst_bits" -le 32 ]
+}
+
+# Two IPv4 ranges (checked literals and prefix lengths) share addresses: one
+# equals, contains or sits inside the other. Compared on the shorter prefix.
+tp_ipv4_ranges_overlap() {
+  _iro_anet=$1
+  _iro_abits=$2
+  _iro_bnet=$3
+  _iro_bbits=$4
+  _iro_a=$(tp_ipv4_int "$_iro_anet")
+  _iro_b=$(tp_ipv4_int "$_iro_bnet")
+  _iro_bits=$_iro_abits
+  if [ "$_iro_bbits" -lt "$_iro_bits" ]; then _iro_bits=$_iro_bbits; fi
+  _iro_shift=$((32 - _iro_bits))
+  [ $((_iro_a >> _iro_shift)) -eq $((_iro_b >> _iro_shift)) ]
+}
+
+# ADDR (a checked IPv4 literal) is a usable host inside a connected subnet of
+# NIC: never the subnet's own network or broadcast address (a /31 or /32 has
+# neither).
+tp_lan_via_connected() {
+  _lvc_via=$1
+  _lvc_nic=$2
+  _lvc_addr=$(tp_ipv4_int "$_lvc_via")
+  _lvc_routes=$(tp_lan_connected_routes "$_lvc_nic")
+  for _lvc_dst in $(printf '%s\n' "$_lvc_routes" | awk '{ print $1 }'); do
+    tp_ipv4_dst_split "$_lvc_dst" || continue
+    tp_ipv4_ranges_overlap "$_lvc_via" 32 "$_dst_net" "$_dst_bits" || continue
+    [ "$_dst_bits" -ge 31 ] && return 0
+    _lvc_host=$((_lvc_addr & ((1 << (32 - _dst_bits)) - 1)))
+    if [ "$_lvc_host" -ne 0 ] && [ "$_lvc_host" -ne $(((1 << (32 - _dst_bits)) - 1)) ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# CIDR (a checked private IPv4 range) shares addresses with a connected subnet
+# the kernel made on an interface other than SKIP (an empty SKIP checks them
+# all). Replacing such a route would hijack the subnet, e.g. the LAN's own or
+# docker0's.
+tp_route_hits_kernel() {
+  _rhk_cidr=$1
+  _rhk_skip=$2
+  _rhk_pairs=$(tp_kernel_routes |
+    awk '{ for (i = 2; i < NF; i++) if ($i == "dev") { print $1 "@" $(i + 1); next } }')
+  for _rhk_pair in $_rhk_pairs; do
+    if [ -n "$_rhk_skip" ] && [ "${_rhk_pair#*@}" = "$_rhk_skip" ]; then continue; fi
+    tp_ipv4_dst_split "${_rhk_pair%@*}" || continue
+    tp_ipv4_ranges_overlap "${_rhk_cidr%/*}" "${_rhk_cidr#*/}" "$_dst_net" "$_dst_bits" && return 0
+  done
+  return 1
+}
+
+# `route replace|del CIDR via ADDR dev NIC`: a member's container subnet over a
+# shared LAN. IPv4 only (container forwarding is IPv4), the CIDR in the same
+# private blocks and prefix limits as a tp0 route, ADDR a host inside a connected
+# network of NIC (`scope link`, no next hop, any proto), NIC a plain interface that is not tp0 or
+# lo. A replace is refused when the CIDR overlaps any connected subnet; a del
+# is not, so a route the daemon installed can still be removed.
+tp_lan_route_ok() {
+  _lro_action=$1
+  _lro_cidr=$2
+  _lro_via=$3
+  _lro_nic=$4
+  case "$_lro_cidr" in *:*) tp_die "ip: LAN routes are IPv4 only" ;; *) ;; esac
+  tp_fabric_route_cidr_ok "$_lro_cidr" || tp_die "ip: bad route $_lro_cidr"
+  tp_ipv4_literal_ok "$_lro_via" || tp_die "ip: bad next hop $_lro_via"
+  tp_lan_nic_ok "$_lro_nic" || tp_die "ip: bad interface $_lro_nic"
+  tp_lan_via_connected "$_lro_via" "$_lro_nic" ||
+    tp_die "ip: $_lro_via is not a host on a connected subnet of $_lro_nic"
+  if [ "$_lro_action" = "replace" ] && tp_route_hits_kernel "$_lro_cidr" ""; then
+    tp_die "ip: $_lro_cidr overlaps a connected subnet"
+  fi
+}
+
+# `route replace|del CIDR dev tp0`. A replace of an IPv4 CIDR that overlaps a
+# connected subnet on another interface is refused (tp0's own subnet is fine).
+tp_tp0_route_ok() {
+  _tro_action=$1
+  _tro_cidr=$2
+  tp_fabric_route_cidr_ok "$_tro_cidr" || tp_die "ip: bad route $_tro_cidr"
+  case "$_tro_cidr" in *:*) return 0 ;; *) ;; esac
+  if [ "$_tro_action" = "replace" ] && tp_route_hits_kernel "$_tro_cidr" tp0; then
+    tp_die "ip: $_tro_cidr overlaps a connected subnet"
+  fi
+}
+
+# Only the fabric interface, only these shapes, plus LAN routes to members'
+# container subnets. Route reads cover the whole main table (read-only) so the
+# daemon can see ranges other interfaces route.
 tp_verb_ip() {
   case "$*" in
     "link add dev tp0 type wireguard"|"link set dev tp0 up"|\
-"-o -4 addr show dev tp0"|"-o link show dev tp0"|"link delete tp0")
+"-o -4 addr show dev tp0"|"-o link show dev tp0"|"link delete tp0"|\
+"-4 route show"|"-6 route show"|"-4 route show dev tp0"|"-6 route show dev tp0")
       tp_exec ip "$@"
       ;;
   esac
+  if [ "$#" -eq 5 ] && [ "$4 $5" = "dev tp0" ] && [ "$1" = "route" ]; then
+    case "$2" in replace|del) ;; *) tp_die "ip: unsupported command" ;; esac
+    tp_tp0_route_ok "$2" "$3"
+    tp_exec ip "$@"
+  fi
+  if [ "$#" -eq 7 ] && [ "$1" = "route" ] && [ "$4" = "via" ] && [ "$6" = "dev" ]; then
+    case "$2" in replace|del) ;; *) tp_die "ip: unsupported command" ;; esac
+    tp_lan_route_ok "$2" "$3" "$5" "$7"
+    tp_exec ip "$@"
+  fi
   if [ "$#" -eq 6 ] && [ "$1 $2 $3 $4" = "link set dev tp0" ] && [ "$5" = "mtu" ]; then
     case "$6" in ''|*[!0-9]*) tp_die "ip: bad mtu" ;; esac
     tp_exec ip "$@"
@@ -4689,14 +5088,16 @@ tp_appenv_id_ok() {
   [ "${#1}" -le 128 ]
 }
 
-# Enter the root-owned variables folder, creating it (root:root 0700) when
-# absent, and refuse unless it and its parent are what the checks assume.
+# Enter a root-owned variables folder (DIR, default the native apps' one),
+# creating it (root:root 0700) when absent, and refuse unless it and its parent
+# are what the checks assume.
 tp_appenv_enter() {
-  tp_mkdir_pinned "$R_APPENV" 0700
+  _ae_dir="${1:-$R_APPENV}"
+  tp_mkdir_pinned "$_ae_dir" 0700
   [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
-    tp_die "refusing $R_APPENV: not a root-owned 0700 directory"
+    tp_die "refusing $_ae_dir: not a root-owned 0700 directory"
   tp_dir_sealed_at .. ||
-    tp_die "refusing $R_APPENV: its parent is not sealed (root-owned, not group- or world-writable)"
+    tp_die "refusing $_ae_dir: its parent is not sealed (root-owned, not group- or world-writable)"
 }
 
 # Copy the daemon's staged variables file for service ID to $TP_STAGE/envsrc.
@@ -4705,10 +5106,12 @@ tp_appenv_enter() {
 # can stall neither root nor the verb.
 tp_appenv_read_staged() {
   _ar_id="$1"
-  tp_pin_dir "$R_CONFIG/node-apps/envs" ||
-    tp_die "app-env-install: no staging directory $R_CONFIG/node-apps/envs"
+  _ar_stage="${2:-$R_CONFIG/node-apps/envs}"
+  _ar_max="${3:-$TP_APPENV_MAX}"
+  tp_pin_dir "$_ar_stage" ||
+    tp_die "no staging directory $_ar_stage"
   [ "$(stat -c '%u' .)" = "$CALLER_UID" ] ||
-    tp_die "refusing $R_CONFIG/node-apps/envs: not owned by the calling account"
+    tp_die "refusing $_ar_stage: not owned by the calling account"
   _ar_real="$(pwd -P)"
   tp_as "$CALLER_UID" "$CALLER_GID" timeout 10 sh -c '
     exec 3< "./$1.env" || { echo "tp-host: cannot open the staged file" >&2; exit 1; }
@@ -4723,10 +5126,10 @@ tp_appenv_read_staged() {
       *) echo "tp-host: refusing the staged file: owner, links or type ($meta)" >&2; exit 1 ;;
     esac
     head -c "$4" <&3
-  ' sh "$_ar_id" "$_ar_real" "$CALLER_UID" "$((TP_APPENV_MAX + 1))" > "$TP_STAGE/envsrc" ||
+  ' sh "$_ar_id" "$_ar_real" "$CALLER_UID" "$((_ar_max + 1))" > "$TP_STAGE/envsrc" ||
     tp_die "refusing the staged variables file for $_ar_id"
-  [ "$(wc -c < "$TP_STAGE/envsrc")" -le "$TP_APPENV_MAX" ] ||
-    tp_die "refusing the variables file for $_ar_id: over $TP_APPENV_MAX bytes"
+  [ "$(wc -c < "$TP_STAGE/envsrc")" -le "$_ar_max" ] ||
+    tp_die "refusing the variables file for $_ar_id: over $_ar_max bytes"
 }
 
 # The file holds exactly what the daemon renders: blank lines, `#`/`;` comment
@@ -4805,6 +5208,52 @@ tp_verb_app_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# --- tunnel connector token (EnvironmentFile=) --------------------------------
+# A tunnel's run token reaches its connector the way a native app's variables
+# reach the app (see above): the daemon stages <state>/cloudflared/tunnels/<id>.env
+# (0600, its own), and tunnel-env-install checks it and copies it to
+# <config>/tunnel-env/<id>.env (root:root 0600, in a root:root 0700 folder) for
+# the unit to name. The connector runs as a throwaway account that cannot read
+# the copy: systemd reads it as root. The file holds exactly one line,
+# TUNNEL_TOKEN='<token>', with the token in base64 or its URL-safe form.
+
+tp_tunnel_env_content_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk -v max="$TP_TUNNEL_TOKEN_MAX" '
+    function fail(msg) {
+      print "tp-host: token file: " msg > "/dev/stderr"
+      bad = 1; exit 1
+    }
+    {
+      if (NR > 1) fail("more than one line")
+      if ($0 !~ /^TUNNEL_TOKEN=\047[A-Za-z0-9+\/=_-]+\047$/) fail("not TUNNEL_TOKEN=<token>")
+      if (length($0) > max + 15) fail("token too long")
+    }
+    END { if (!bad && NR != 1) { print "tp-host: token file: empty" > "/dev/stderr"; exit 1 } }
+  ' "$1"
+}
+
+tp_verb_tunnel_env_install() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-install: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-install: refusing tunnel id $1"
+  tp_stage_dir
+  tp_appenv_read_staged "$1" "$R_TUNNEL_STAGE" "$((TP_TUNNEL_TOKEN_MAX + 64))"
+  tp_tunnel_env_content_ok "$TP_STAGE/envsrc" ||
+    tp_die "refusing the token file for $1: content outside the allowed shape"
+  tp_appenv_enter "$R_TUNNELENV"
+  tp_put_file "$R_TUNNELENV/$1.env" 600 < "$TP_STAGE/envsrc"
+}
+
+tp_verb_tunnel_env_remove() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-remove: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-remove: refusing tunnel id $1"
+  # No folder yet: no tunnel has had a token, nothing to remove.
+  tp_pin_dir "$R_TUNNELENV" || return 0
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
+    tp_die "refusing $R_TUNNELENV: not a root-owned 0700 directory"
+  rm -f -- "./$1.env"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -4869,5 +5318,7 @@ case "$_verb" in
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   app-env-install) tp_verb_app_env_install "$@" ;;
   app-env-remove) tp_verb_app_env_remove "$@" ;;
+  tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
+  tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

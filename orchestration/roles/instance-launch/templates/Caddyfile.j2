@@ -50,9 +50,13 @@
         # Hosting Caddy (and cloudflared) dial this process from loopback and
         # set X-Forwarded-For. {client_ip} then keeps the original client on
         # X-Real-IP. A direct peer has that header stripped above, so
-        # {client_ip} is the peer itself.
+        # {client_ip} is the peer itself. Strict mode reads X-Forwarded-For from
+        # the right and takes the first untrusted address: a local proxy appends
+        # the real client to whatever list the client sent, so the leftmost entry
+        # can be forged.
         servers {
                 trusted_proxies static 127.0.0.0/8 ::1
+                trusted_proxies_strict
         }
 }
 

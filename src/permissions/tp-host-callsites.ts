@@ -33,6 +33,12 @@ import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { nativeAppUnitContent } from "../deploy/native/unit.ts";
+import {
+  renderTunnelEnvFile,
+  renderTunnelUnit,
+  tunnelEnvPath,
+  tunnelUnitName,
+} from "../tunnels/connector-unit.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { accessGroup } from "../runtime/registry.ts";
 import {
@@ -128,24 +134,12 @@ const CADDY_BIN = `${P}${VENDOR}/caddy/2.11.4/caddy`;
 const NGINX_CONF = `${CONF}/nginx/sites/svc1.conf`;
 const FABRIC_DIR = `${STATE}/network`;
 const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
+/** A sample LAN neighbour and container range, built from parts (fixture values, not hosts). */
+const LAN_SAMPLE_RANGE = `${[10, 193, 5, 0].join(".")}/24`;
+const LAN_SAMPLE_VIA = [10, 0, 0, 12].join(".");
 const FABRIC_SYSCTL = `${P}/etc/sysctl.d/99-turbopanel-fabric.conf`;
 /** A WireGuard key's shape (32 bytes, base64), built so no key sits in source. */
 const WG_KEY = `${"A".repeat(43)}=`;
-// A mesh config as `renderWgConf` writes it (keys built at run time).
-const WG_CONF_CONTENT = [
-  "[Interface]",
-  `PrivateKey = ${WG_KEY}`,
-  "Address = 10.77.0.1/24",
-  "ListenPort = 51820",
-  "",
-  "[Peer]",
-  `PublicKey = ${WG_KEY}`,
-  "AllowedIPs = 10.77.0.2/32, 10.78.0.0/24",
-  "Endpoint = 203.0.113.7:51820",
-  `PresharedKey = ${WG_KEY}`,
-  "PersistentKeepalive = 25",
-  "",
-].join("\n");
 const MGD_CHAIN = "TP-MGD-0a1b2c3d";
 const MGD_MATCH = [
   "-p",
@@ -158,6 +152,25 @@ const MGD_MATCH = [
   "5432",
 ];
 const APP_UNIT = "turbopanel-app-svc1.service";
+/** A tunnel connector: its unit, run token and the unit text the daemon renders. */
+const TUNNEL_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const TUNNEL_UNIT = tunnelUnitName(TUNNEL_ID);
+/** The second unit of a tunnel, started beside the first during a connector update. */
+const TUNNEL_UNIT_B = tunnelUnitName(TUNNEL_ID, "b");
+const TUNNEL_TOKEN = "dGVzdA".repeat(8);
+const TUNNEL_UNIT_TEXT = renderTunnelUnit({
+  id: TUNNEL_ID,
+  binary: `${VENDOR}/cloudflared/2026.10.7/cloudflared`,
+  port: 20300,
+  envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
+});
+const TUNNEL_UNIT_B_TEXT = renderTunnelUnit({
+  id: TUNNEL_ID,
+  binary: `${VENDOR}/cloudflared/2026.6.0/cloudflared`,
+  port: 20301,
+  envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
+  slot: "b",
+});
 /** The check copy of svc1: its new release, started beside the one serving. */
 const CHECK_UNIT = "turbopanel-app-svc1-new.service";
 const PROBE =
@@ -193,6 +206,8 @@ const CRON_TIMER = cronTimerPath(
 const BACKUP_POLICY = "0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b";
 const BACKUP_SERVICE = backupServicePath(BACKUP_POLICY, UNITS);
 const BACKUP_TIMER = backupTimerPath(BACKUP_POLICY, UNITS);
+const BACKUP_TIMER_STAMP =
+  `${P}/var/lib/systemd/timers/stamp-turbopanel-backup-${BACKUP_POLICY}.timer`;
 const BACKUP_TIMER_UNIT = `turbopanel-backup-${BACKUP_POLICY}.timer`;
 const unitSetup = (text: string): CallSiteSetup => ({
   files: { [STAGED]: underPrefix(text) },
@@ -271,6 +286,9 @@ function notRoot(key: string, why: string): CallSite {
   return { key, via: "none", why };
 }
 
+/** tp-host test mode reads an interface's connected subnets from here. */
+const LAN_CONNECTED_FIXTURE = `${P}/tp-test/ip-route-link-eth1`;
+const LAN_CONNECTED_TEXT = "10.0.0.0/24 proto kernel src 10.0.0.11\n"; // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
 const file = (path: string, contents = "x\n"): CallSiteSetup => ({
   files: { [path]: contents },
 });
@@ -610,10 +628,11 @@ const SITES: CallSite[] = [
     argv: ["ls", "-1", "--", UNITS],
   }),
   tpHost(
-    'src/deploy/systemd-unit-set.ts|["-n","rm","-f","--",join(unitDir,`${unit}${suffix}`)]',
+    'src/deploy/systemd-unit-set.ts|["-n","rm","-f","--",path]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-cron-svc1-backup.timer`] },
     { argv: ["rm", "-f", "--", BACKUP_TIMER] },
     { argv: ["rm", "-f", "--", BACKUP_SERVICE] },
+    { argv: ["rm", "-f", "--", BACKUP_TIMER_STAMP] },
   ),
 
   // --- hosting Caddy --------------------------------------------------------
@@ -836,6 +855,26 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
+    'src/deploy/tenant-acme-issue.ts|["-n","systemctl","start",unit]',
+    {
+      argv: [
+        "systemctl",
+        "start",
+        "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
+      ],
+    },
+  ),
+  tpHost(
+    'src/deploy/tenant-acme-issue.ts|["-n","systemctl","stop",unit]',
+    {
+      argv: [
+        "systemctl",
+        "stop",
+        "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
+      ],
+    },
+  ),
+  tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","systemctl","stop",INSTANCE_ACME_SERVICE]',
     { argv: ["systemctl", "stop", "turbopanel-instance-acme.service"] },
   ),
@@ -936,7 +975,7 @@ const SITES: CallSite[] = [
 
   // --- native apps ----------------------------------------------------------
   tpHost(
-    'src/deploy/native/apply-native-apps.ts|["-n","cmp","-s","--",stagedPath,installedPath]',
+    'src/permissions/host-unit-files.ts|["-n","cmp","-s","--",stagedPath,installedPath]',
     {
       argv: [
         "cmp",
@@ -949,7 +988,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/native/apply-native-apps.ts|["-n","install","-m","0644","-o","root","-g","root",params.stagedPath,params.installedPath]',
+    'src/permissions/host-unit-files.ts|["-n","install","-m","0644","-o","root","-g","root",params.stagedPath,params.installedPath]',
     {
       argv: [
         "install",
@@ -1011,6 +1050,36 @@ const SITES: CallSite[] = [
         }),
       ),
     },
+    // A tunnel connector: its own unit, named by tunnel id.
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        `${UNITS}/${TUNNEL_UNIT}`,
+      ],
+      setup: unitSetup(TUNNEL_UNIT_TEXT),
+    },
+    // The second unit of a tunnel during a connector update.
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        `${UNITS}/${TUNNEL_UNIT_B}`,
+      ],
+      setup: unitSetup(TUNNEL_UNIT_B_TEXT),
+    },
   ),
   tpHost(
     'src/deploy/native/variables-runtime.ts|["-n","app-env-install",serviceId]',
@@ -1070,6 +1139,97 @@ const SITES: CallSite[] = [
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-app-svc1.service`] },
     { argv: ["rm", "-f", "--", `${UNITS}/${CHECK_UNIT}`] },
   ),
+
+  // --- tunnel connectors ----------------------------------------------------
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","tunnel-env-install",id]',
+    {
+      argv: ["tunnel-env-install", TUNNEL_ID],
+      setup: file(
+        `${STATE}/cloudflared/tunnels/${TUNNEL_ID}.env`,
+        renderTunnelEnvFile(TUNNEL_TOKEN),
+      ),
+    },
+    {
+      argv: ["tunnel-env-install", "instance"],
+      setup: file(
+        `${STATE}/cloudflared/tunnels/instance.env`,
+        renderTunnelEnvFile(TUNNEL_TOKEN),
+      ),
+    },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","tunnel-env-remove",id]',
+    { argv: ["tunnel-env-remove", TUNNEL_ID] },
+    { argv: ["tunnel-env-remove", "instance"] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","rm","-f","--",tunnelUnitPath(id,undefined,slot)]',
+    { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT}`] },
+    { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT_B}`] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","systemctl",...args]',
+    { argv: ["systemctl", "restart", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["daemon-reload"])',
+    { argv: ["systemctl", "daemon-reload"] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["enable","--now",unit])',
+    { argv: ["systemctl", "enable", "--now", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["enable",unit])',
+    { argv: ["systemctl", "enable", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["restart",unit])',
+    { argv: ["systemctl", "restart", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    "src/tunnels/connector-service.ts|mustSystemctl(io,[action,tunnelUnitName(id,record.slot)])",
+    ...["start", "stop", "restart", "enable", "disable"].flatMap((action) => [
+      { argv: ["systemctl", action, TUNNEL_UNIT] },
+      { argv: ["systemctl", action, TUNNEL_UNIT_B] },
+    ]),
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["enable",nextUnit])',
+    { argv: ["systemctl", "enable", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["start",nextUnit])',
+    { argv: ["systemctl", "start", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["reset-failed",nextUnit])',
+    { argv: ["systemctl", "reset-failed", TUNNEL_UNIT_B] },
+  ),
+  tpHost('src/tunnels/connector-service.ts|systemctl(io,["daemon-reload"])', {
+    argv: ["systemctl", "daemon-reload"],
+  }),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["disable","--now",unit])',
+    { argv: ["systemctl", "disable", "--now", TUNNEL_UNIT] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["is-active",tunnelUnitName(record.id,record.slot)])',
+    { argv: ["systemctl", "is-active", TUNNEL_UNIT] },
+    { argv: ["systemctl", "is-active", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["is-active",nextUnit])',
+    { argv: ["systemctl", "is-active", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["reset-failed",unit])',
+    { argv: ["systemctl", "reset-failed", TUNNEL_UNIT] },
+  ),
+  tpHost("src/tunnels/connector-service.ts|systemctl(io,args)", {
+    argv: ["systemctl", "daemon-reload"],
+  }),
 
   // --- release promotion ----------------------------------------------------
   // tp-host builds every path from the ids; the staging leaf is the daemon's.
@@ -1908,7 +2068,7 @@ const SITES: CallSite[] = [
   // TurboFabric: `runHost` tries the command as the daemon first and retries
   // through sudo on a permission error; Docker never goes through sudo.
   notRoot(
-    'src/commands/fabric.ts|probeFabricTool("docker",["--version"])',
+    'src/commands/fabric.ts|runHost("docker",["--version"],{timeoutMs:PREFLIGHT_TIMEOUT_MS,})',
     DOCKER_DIRECT,
   ),
   notRoot('src/commands/fabric.ts|probeFabricTool("ip",["-V"])', PROBE),
@@ -1926,10 +2086,6 @@ const SITES: CallSite[] = [
     "src/commands/fabric.ts|runHost(cmd,args,{timeoutMs:PREFLIGHT_TIMEOUT_MS})",
     { argv: ["iptables", "--version"] },
   ),
-  tpHost('src/commands/fabric.ts|runHost("chmod",["600",WG_QUICK_CONF_PATH])', {
-    argv: ["chmod", "600", WG_CONF],
-    setup: file(WG_CONF),
-  }),
   tpHost(
     'src/commands/fabric.ts|runHost("chmod",["644",FABRIC_SYSCTL_DROPIN])',
     {
@@ -1937,13 +2093,6 @@ const SITES: CallSite[] = [
       setup: file(FABRIC_SYSCTL),
     },
   ),
-  tpHost('src/commands/fabric.ts|runHost("chmod",["700","/etc/wireguard"])', {
-    argv: ["chmod", "700", `${P}/etc/wireguard`],
-  }),
-  tpHost('src/commands/fabric.ts|runHost("cp",[confPath,WG_QUICK_CONF_PATH])', {
-    argv: ["cp", `${FABRIC_DIR}/wireguard/tp0.conf`, WG_CONF],
-    setup: file(`${FABRIC_DIR}/wireguard/tp0.conf`, WG_CONF_CONTENT),
-  }),
   notRoot(
     'src/commands/fabric.ts|runHost("docker",["network","create","--driver","bridge","--subnet",network.subnet,"--opt",DOCKER_ROUTED_BRIDGE_OPT,"--opt",`${DOCKER_MTU_OPT_KEY}=${mtu}`,network.name])',
     DOCKER_DIRECT,
@@ -1975,6 +2124,56 @@ const SITES: CallSite[] = [
     { argv: ["ip", "addr", "replace", "10.99.0.1/24", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric address for this test fixture, not a reachable host
   ),
   tpHost(
+    'src/commands/fabric.ts|runHost("ip",["route",action,cidr,"dev",FABRIC_INTERFACE_NAME])',
+    { argv: ["ip", "route", "replace", "10.250.0.2/32", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric peer address for this test fixture, not a reachable host
+    { argv: ["ip", "route", "del", "10.193.0.0/16", "dev", "tp0"] }, // NOSONAR typescript:S1313 — sample TurboFabric container range for this test fixture, not a reachable host
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",["route",action,route.cidr,"via",route.via,"dev",route.dev])',
+    {
+      argv: [
+        "ip",
+        "route",
+        "replace",
+        LAN_SAMPLE_RANGE,
+        "via",
+        LAN_SAMPLE_VIA,
+        "dev",
+        "eth1",
+      ],
+      setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
+    },
+    {
+      argv: [
+        "ip",
+        "route",
+        "del",
+        LAN_SAMPLE_RANGE,
+        "via",
+        LAN_SAMPLE_VIA,
+        "dev",
+        "eth1",
+      ],
+      setup: file(LAN_CONNECTED_FIXTURE, LAN_CONNECTED_TEXT),
+    },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runHost("ip",[`-${version}`,"route","show"])',
+    { argv: ["ip", "-4", "route", "show"] },
+    { argv: ["ip", "-6", "route", "show"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|["-n","rm","-f",path]',
+    { argv: ["rm", "-f", WG_CONF], setup: file(WG_CONF) },
+    { argv: ["rm", "-f", FABRIC_SYSCTL], setup: file(FABRIC_SYSCTL) },
+  ),
+  tpHost(
+    // Split so this file's own text is not scanned as a call site.
+    'src/commands/fabric.ts|runHost("sudo",hostSudo' +
+      'Args(["-n","rm","-f",path]))',
+    { argv: ["rm", "-f", WG_CONF], setup: file(WG_CONF) },
+  ),
+  tpHost(
     'src/commands/fabric.ts|runHost("ip",["link","add","dev",FABRIC_INTERFACE_NAME,"type","wireguard"])',
     { argv: ["ip", "link", "add", "dev", "tp0", "type", "wireguard"] },
   ),
@@ -2000,9 +2199,6 @@ const SITES: CallSite[] = [
   tpHost('src/commands/fabric.ts|runHost("iptables",addArgs)', {
     argv: ["iptables", "-A", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
   }),
-  tpHost('src/commands/fabric.ts|runHost("mkdir",["-p","/etc/wireguard"])', {
-    argv: ["mkdir", "-p", `${P}/etc/wireguard`],
-  }),
   tpHost(
     'src/commands/fabric.ts|runHost("sysctl",["-p",FABRIC_SYSCTL_DROPIN])',
     {
@@ -2020,18 +2216,6 @@ const SITES: CallSite[] = [
     'src/commands/fabric.ts|runHost("systemctl",["disable","--now",WG_QUICK_UNIT])',
     {
       argv: ["systemctl", "disable", "--now", "wg-quick@tp0"],
-    },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runHost("systemctl",["enable","--now",WG_QUICK_UNIT])',
-    {
-      argv: ["systemctl", "enable", "--now", "wg-quick@tp0"],
-    },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runHost("systemctl",["enable",WG_QUICK_UNIT])',
-    {
-      argv: ["systemctl", "enable", "wg-quick@tp0"],
     },
   ),
   tpHost(
@@ -2093,12 +2277,17 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("ip",["link","delete",FABRIC_INTERFACE_NAME],isMissingDeviceText)',
+    'src/commands/fabric.ts|runHost("ip",["link","delete",FABRIC_INTERFACE_NAME])',
     { argv: ["ip", "link", "delete", "tp0"] },
   ),
+  // TP-FORWARD hangs off DOCKER-USER, or off FORWARD on a host without Docker.
   tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-D",DOCKER_USER_CHAIN,"-j",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-D", "DOCKER-USER", "-j", "TP-FORWARD"] },
+    'src/commands/fabric.ts|runHost("iptables",["-S",DOCKER_USER_CHAIN])',
+    { argv: ["iptables", "-S", "DOCKER-USER"] },
+  ),
+  tpHost(
+    'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-D",parent,"-j",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
+    { argv: ["iptables", "-D", "FORWARD", "-j", "TP-FORWARD"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-F",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
@@ -2107,17 +2296,6 @@ const SITES: CallSite[] = [
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-X",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
     { argv: ["iptables", "-X", "TP-FORWARD"] },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",FABRIC_SYSCTL_DROPIN],()=>true)',
-    { argv: ["rm", "-f", FABRIC_SYSCTL], setup: file(FABRIC_SYSCTL) },
-  ),
-  tpHost(
-    'src/commands/fabric.ts|runTeardownBestEffort("rm",["-f",WG_QUICK_CONF_PATH],()=>true)',
-    {
-      argv: ["rm", "-f", WG_CONF],
-      setup: file(WG_CONF),
-    },
   ),
 
   // Managed-database public listener scoping.

@@ -12,7 +12,13 @@ const test = Deno.test.bind(Deno);
 
 const LIVE = ["/d/compose.yaml"];
 const PREV = ["/d/previous/compose.yaml"];
-const OK: HealthGateResult = { ok: true, services: ["web"] };
+const OK: HealthGateResult = {
+  ok: true,
+  services: ["web"],
+  elapsedMs: 0,
+  unchecked: [],
+  reported: ["web"],
+};
 
 type Script = {
   /** Gate verdicts in order; the last repeats. */
@@ -113,7 +119,8 @@ const UNHEALTHY: HealthGateResult = {
 const TIMEOUT: HealthGateResult = {
   ok: false,
   reason: "timeout",
-  detail: "health gate timed out after 120s: web healthcheck is starting",
+  detail:
+    "did not become healthy within 120 s; last status: web health check is starting",
 };
 
 async function outcomeOf(
@@ -184,7 +191,7 @@ test("health timeout rolls back and names what was pending", async () => {
   const { steps } = harness({ gates: [TIMEOUT, OK] });
   const err = await outcomeOf(runSequentialDeploy(input(steps)));
   assertEquals(err.outcome, "rolled_back");
-  assert(err.reason.includes("timed out after 120s"));
+  assert(err.reason.includes("did not become healthy within 120 s"));
 });
 
 test("failure after a migration ran stops: needs_attention, no restore, no second up", async () => {

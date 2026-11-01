@@ -36,6 +36,7 @@ import type {
   EnvironmentDeployResultSite,
 } from "../contracts/commands-contracts.ts";
 import "../testing/stub-hosting-caddy-host.ts";
+import { instantlyHealthy } from "../testing/instant-health-gate.ts";
 
 /**
  * Shared hosting-ingress Docker network — the `hosting-ingress` system
@@ -54,6 +55,7 @@ const test = Deno.test.bind(Deno);
 
 const hermeticDeployDeps = {
   ensureDocker: () => Promise.resolve(),
+  waitForHealth: instantlyHealthy,
   ensureExternalDockerNetworks: () => Promise.resolve(),
   ensureFabricDockerNetworks: () => Promise.resolve(),
 };
@@ -201,7 +203,7 @@ function appliedRelease(overrides: Partial<AppliedRelease>): AppliedRelease {
   };
 }
 
-async function seedRailpackReleaseManifest(
+async function seedImageBuildReleaseManifest(
   daemonStateDir: string,
   serviceId: string,
   releaseId: string,
@@ -266,8 +268,8 @@ test("shapeEnvironmentDeployResult includes releases and omits empty services", 
     releaseId: "rel-1",
     commitSha: "b".repeat(40),
     imageTag: "registry.example.test/web:rel-1",
-    railpackFrontendVersion: "0.2.0",
-    railpackPlanVersion: "0.1.0",
+    builderFrontendVersion: "0.2.0",
+    builderPlanVersion: "0.1.0",
   }];
   const result = shapeEnvironmentDeployResult({
     projectName: "demo",
@@ -949,7 +951,7 @@ test({
 
 test({
   name:
-    "handleEnvironmentDeploy applies railpack rollback image tags into compose.yaml",
+    "handleEnvironmentDeploy applies image-build rollback image tags into compose.yaml",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     await withDeployEnv(async ({ stateDir }) => {
@@ -960,7 +962,7 @@ test({
       const rollbackReleaseId = "rel-old";
       const imageTag = "registry.example.test/web:rel-old";
 
-      await seedRailpackReleaseManifest(
+      await seedImageBuildReleaseManifest(
         stateDir,
         serviceId,
         rollbackReleaseId,

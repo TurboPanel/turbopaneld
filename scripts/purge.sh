@@ -1474,6 +1474,28 @@ tp_inventory_firewall() {
       tp_file_add "$TP_TMP/inv.chains" "$_if_bin $_if_chain"
     done < "$TP_TMP/fw.chains"
   done
+  tp_inventory_nft_tables
+}
+
+# TurboPanel's own nftables tables (TP_NFT_TABLES, exact names in family inet),
+# listed beside the iptables chains. Nothing else in the nft ruleset is named.
+tp_inventory_nft_tables() {
+  if ! tp_has_tool nft; then
+    tp_inv_skip "nft not installed"
+    return 0
+  fi
+  if ! nft list tables > "$TP_TMP/fw.nft" 2>>"$TP_LOG_FILE"; then
+    tp_inv_warn "could not list nft tables"
+    if [ "${TP_INV_QUIET:-false}" = true ] && [ -f "$TP_TMP/before.chains" ]; then
+      grep "^nft " "$TP_TMP/before.chains" >> "$TP_TMP/inv.chains" || true
+    fi
+    return 0
+  fi
+  for _in_table in $TP_NFT_TABLES; do
+    if grep -qx "table inet $_in_table" "$TP_TMP/fw.nft"; then
+      tp_file_add "$TP_TMP/inv.chains" "nft inet $_in_table"
+    fi
+  done
 }
 
 tp_inventory_wireguard() {
@@ -1490,11 +1512,15 @@ tp_inventory_wireguard() {
 }
 
 tp_inventory_host_files() {
-  for _ih_pattern in /etc/sysctl.d/99-turbopanel-*.conf /etc/udev/rules.d/99-turbopanel-*.rules /etc/sudoers.d/turbopanel-*; do
+  for _ih_pattern in /etc/sysctl.d/99-turbopanel-*.conf /etc/udev/rules.d/99-turbopanel-*.rules /etc/sudoers.d/turbopanel-* /etc/modules-load.d/turbopanel-*.conf; do
     for _ih_file in $_ih_pattern; do
       [ -e "$_ih_file" ] || continue
       tp_file_add "$TP_TMP/inv.hostfiles" "$_ih_file"
     done
+  done
+  for _ih_pattern in "$TP_TIMER_STAMP_DIR"/stamp-turbopanel-*.timer; do
+    [ -e "$_ih_pattern" ] || continue
+    tp_file_add "$TP_TMP/inv.hostfiles" "$_ih_pattern"
   done
   for _ih_file in \
     /etc/tmpfiles.d/turbopanel.conf \
@@ -1502,6 +1528,7 @@ tp_inventory_host_files() {
     /etc/tmpfiles.d/turbopanel-hosting-caddy.conf \
     /etc/sudoers.d/tp \
     /etc/ssh/sshd_config.d/60-turbopanel.conf \
+    /etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev \
     /usr/local/bin/php
   do
     if [ -e "$_ih_file" ]; then
@@ -2393,10 +2420,148 @@ tp_firewall_try_delete() {
   return 1
 }
 
+# The nftables tables TurboPanel loads (hosting ingress guard, build and PHP
+# loopback filters). Each is deleted by exact name; the operator's own tables
+# and rules are never touched. Runs after the units are gone, so nothing
+# reloads a table behind the delete.
+tp_remove_nft_tables() {
+  if ! tp_has_tool nft; then
+    tp_record_skip "nft not installed"
+    return 0
+  fi
+  if ! nft list tables > "$TP_TMP/fw.nft" 2>>"$TP_LOG_FILE"; then
+    tp_record_fail "list nft tables"
+    return 0
+  fi
+  for _rn_table in $TP_NFT_TABLES; do
+    if ! grep -qx "table inet $_rn_table" "$TP_TMP/fw.nft"; then
+      continue
+    fi
+    tp_run "delete nft table inet $_rn_table" nft delete table inet "$_rn_table" || true
+  done
+}
+
 tp_remove_firewall() {
   tp_print_step "▸" "Firewall chains"
   tp_firewall_family iptables
   tp_firewall_family ip6tables
+  tp_remove_nft_tables
+}
+
+# LAN routes TurboFabric installed to other members' container subnets
+# (`installedLanRoutes` in <state>/network/state.json), one "cidr via dev" line
+# each. Only IPv4 private-looking shapes survive the character classes; the
+# daemon writes the keys in this order.
+tp_lan_routes_from_state() {
+  _lrs_state=$1
+  tr -d ' \t\r\n' < "$_lrs_state" 2>/dev/null |
+    sed -n 's/.*"installedLanRoutes":\[\([^]]*\)\].*/\1/p' |
+    tr '}' '\n' |
+    sed -n 's/.*"cidr":"\([0-9./]*\)","via":"\([0-9.]*\)","dev":"\([A-Za-z0-9._-]*\)".*/\1 \2 \3/p'
+}
+
+# The LAN route rules of the host wrapper, copied here because this script
+# stands alone (orchestration/scripts/tp-host: tp_ipv4_octet_ok,
+# tp_ipv4_literal_ok, tp_fabric_route_v4_private, the IPv4 half of
+# tp_fabric_route_cidr_ok and tp_lan_nic_ok). Keep them identical in behaviour
+# to the wrapper's: the purge must never delete a route the wrapper would not
+# have let the daemon add.
+
+# One IPv4 octet: 1-3 digits, no leading zero, at most 255.
+tp_ipv4_octet_ok() {
+  _ioo_oct=$1
+  case "$_ioo_oct" in
+    ''|*[!0-9]*|0?*) [ "$_ioo_oct" = "0" ] ;;
+    ????*) return 1 ;;
+    *) [ "$_ioo_oct" -le 255 ] ;;
+  esac
+}
+
+# A plain IPv4 literal: four octets, no leading zeros, nothing else.
+tp_ipv4_literal_ok() {
+  _ilo_rest=$1
+  case "$_ilo_rest" in *[!0-9.]*|.*|*.|*..*|'') return 1 ;; *) ;; esac
+  _ilo_n=0
+  while [ -n "$_ilo_rest" ]; do
+    tp_ipv4_octet_ok "${_ilo_rest%%.*}" || return 1
+    _ilo_n=$((_ilo_n + 1))
+    case "$_ilo_rest" in *.*) _ilo_rest="${_ilo_rest#*.}" ;; *) _ilo_rest="" ;; esac
+  done
+  [ "$_ilo_n" -eq 4 ]
+}
+
+# A private IPv4 block (first octet, second octet, prefix): 10/8, 172.16/12,
+# 192.168/16 and 100.64/10.
+tp_fabric_route_v4_private() {
+  _frp_o1=$1
+  _frp_o2=$2
+  _frp_bits=$3
+  case "$_frp_o1" in
+    10) return 0 ;;
+    172) [ "$_frp_o2" -ge 16 ] && [ "$_frp_o2" -le 31 ] && [ "$_frp_bits" -ge 12 ] ;;
+    192) [ "$_frp_o2" -eq 168 ] && [ "$_frp_bits" -ge 16 ] ;;
+    100) [ "$_frp_o2" -ge 64 ] && [ "$_frp_o2" -le 127 ] && [ "$_frp_bits" -ge 10 ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# A fabric IPv4 route: a.b.c.d/8-32 inside a private block, always with a
+# prefix (the wrapper's tp_fabric_route_cidr_ok for IPv4).
+tp_fabric_route_v4_cidr_ok() {
+  _frc_cidr=$1
+  case "$_frc_cidr" in */*/*) return 1 ;; */*) ;; *) return 1 ;; esac
+  _frc_addr="${_frc_cidr%/*}"
+  _frc_bits="${_frc_cidr#*/}"
+  case "$_frc_bits" in ''|*[!0-9]*|0?*|????*) return 1 ;; *) ;; esac
+  tp_ipv4_literal_ok "$_frc_addr" || return 1
+  [ "$_frc_bits" -ge 8 ] && [ "$_frc_bits" -le 32 ] || return 1
+  _frc_o2="${_frc_addr#*.}"
+  tp_fabric_route_v4_private "${_frc_addr%%.*}" "${_frc_o2%%.*}" "$_frc_bits"
+}
+
+# A LAN interface name: 1-15 of letters, digits, `.`, `-`, `_`, never the
+# fabric interface, loopback or a container-side link.
+tp_lan_nic_ok() {
+  _lno_nic=$1
+  case "$_lno_nic" in ''|*[!A-Za-z0-9._-]*|-*|.|..) return 1 ;; *) ;; esac
+  [ "${#_lno_nic}" -le 15 ] || return 1
+  case "$_lno_nic" in tp0|lo|docker*|br-*|veth*|tpn*) return 1 ;; *) ;; esac
+}
+
+# One recorded LAN route passes the wrapper's rules: an IPv4 private range
+# (/8-/32), a plain IPv4 next hop and a plain LAN interface.
+tp_lan_route_entry_ok() {
+  _lre_cidr=$1
+  _lre_via=$2
+  _lre_dev=$3
+  tp_fabric_route_v4_cidr_ok "$_lre_cidr" || return 1
+  tp_ipv4_literal_ok "$_lre_via" || return 1
+  tp_lan_nic_ok "$_lre_dev"
+}
+
+# The wrapper's other rule for a route (the next hop is a host on a subnet
+# the kernel says is connected to that interface) is not repeated here: the
+# exact-route match below only passes for a route the kernel accepted, and the
+# kernel only accepts a next hop it can reach on that interface.
+#
+# state.json is writable by the daemon account, so nothing in it is trusted:
+# a route is deleted only when its fields pass the wrapper's rules (so a
+# default route or a public range is never touched) and the kernel shows
+# exactly that route (same range, next hop and interface).
+tp_remove_lan_routes() {
+  for _rlr_dir in $TP_STATE_DIRS; do
+    _rlr_state="$_rlr_dir/network/state.json"
+    [ -f "$_rlr_state" ] && [ ! -L "$_rlr_state" ] || continue
+    tp_path_is_safe "$_rlr_state" || continue
+    tp_lan_routes_from_state "$_rlr_state" > "$TP_TMP/lan.routes" || continue
+    while read -r _rlr_cidr _rlr_via _rlr_dev; do
+      tp_lan_route_entry_ok "$_rlr_cidr" "$_rlr_via" "$_rlr_dev" || continue
+      ip -4 route show exact "$_rlr_cidr" dev "$_rlr_dev" 2>/dev/null |
+        sed 's/$/ /' | grep -qF "via $_rlr_via " || continue
+      tp_run "remove TurboFabric LAN route $_rlr_cidr via $_rlr_via" \
+        ip route del "$_rlr_cidr" via "$_rlr_via" dev "$_rlr_dev" || true
+    done < "$TP_TMP/lan.routes"
+  done
 }
 
 tp_remove_wireguard() {
@@ -2405,6 +2570,7 @@ tp_remove_wireguard() {
     if ip link show tp0 >/dev/null 2>&1; then
       tp_run "delete WireGuard interface tp0" ip link del tp0 || true
     fi
+    tp_remove_lan_routes
   else
     tp_record_skip "ip not installed"
   fi
@@ -2444,6 +2610,12 @@ tp_sshd_bin() {
 
 tp_remove_sshd_dropin() {
   _rsd=/etc/ssh/sshd_config.d/60-turbopanel.conf
+  # The copy the daemon keeps while it swaps the drop-in. sshd never reads it
+  # (its Include takes *.conf), so it goes without a config test.
+  _rsd_prev=/etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev
+  if [ -e "$_rsd_prev" ] || [ -L "$_rsd_prev" ]; then
+    tp_run "remove $_rsd_prev" rm -f "$_rsd_prev" || true
+  fi
   [ -f "$_rsd" ] || return 0
   _rsd_bin=$(tp_sshd_bin || true)
   _rsd_bak=$TP_TMP/sshd-dropin.bak
@@ -2543,6 +2715,13 @@ tp_remove_host_config() {
     fi
   done
   tp_remove_glob '/etc/sudoers.d/turbopanel-*' || true
+  # systemd keeps one stamp file per persistent timer; the unit files are gone
+  # but the stamps stay. Only files with TurboPanel's own prefix.
+  tp_remove_glob "$TP_TIMER_STAMP_DIR/stamp-turbopanel-*.timer" || true
+  # The drive temperature sensor's boot-time module load (metrics). The module
+  # already loaded stays until the next restart; unloading it could pull a
+  # module the operator also uses.
+  tp_remove_glob '/etc/modules-load.d/turbopanel-*.conf' || true
   tp_remove_sshd_dropin
   if [ -e /usr/local/bin/php ]; then
     tp_run "remove /usr/local/bin/php" rm -f /usr/local/bin/php || true
@@ -3595,8 +3774,12 @@ tp_principal_band_gid() {
 }
 
 # True when some account still has gid $1 as its primary group.
+# With $2 = a user name, that account is not counted (the dry run does not
+# run userdel, so it would otherwise block its own group and home).
 tp_gid_is_primary() {
-  getent passwd | awk -F: -v gid="$1" '$4 == gid { found = 1 } END { exit !found }'
+  _gip_gid=$1
+  _gip_skip=${2:-}
+  getent passwd | awk -F: -v gid="$_gip_gid" -v skip="$_gip_skip" '$4 == gid && $1 != skip { found = 1 } END { exit !found }'
 }
 
 # Remove a site owner's own group: `<name>`, and `<name>-grp` from hosts set
@@ -3608,6 +3791,8 @@ tp_purge_principal_groups() {
   _ppg_name=$1
   _ppg_home=$2
   _ppg_mode=$3
+  _ppg_skip=
+  [ "$DRY_RUN" = true ] && [ "$_ppg_mode" = account ] && _ppg_skip=$_ppg_name
   case "$_ppg_name" in
     ''|-*|*[!A-Za-z0-9_-]*|root|tp|tp[a-z]*) return 0 ;;
   esac
@@ -3617,7 +3802,7 @@ tp_purge_principal_groups() {
       tp_record_skip "kept group ${_ppg} (its id is outside ${TP_PRINCIPAL_ID_MIN}-${TP_PRINCIPAL_ID_MAX})"
       continue
     fi
-    if tp_gid_is_primary "$_ppg_gid"; then
+    if tp_gid_is_primary "$_ppg_gid" "$_ppg_skip"; then
       tp_principal_leave_home "$_ppg_home" "${_ppg} is still an account's primary group"
       return 1
     fi
@@ -3808,9 +3993,27 @@ tp_report_remaining() {
 tp_print_reinstall_commands() {
   tp_say ""
   tp_say "Install a daemon again:"
-  tp_say "  curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<license> sh"
+  tp_say "  curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=<license> sh"
   tp_say "Install a self-hosted control plane again:"
-  tp_say "  curl -fsSL turbopanel.sh | sh"
+  tp_say "  curl -fsSL https://turbopanel.sh | sh"
+}
+
+# The Raspberry Pi 4 KiB page-size line tp-kernel-features adds stays: taking
+# it out changes the kernel the board boots. Its marker stays too, so a later
+# `tp-kernel-features undo` still knows the line was TurboPanel's and not the
+# operator's.
+tp_note_kernel_boot_line() {
+  [ -f "$TP_KERNEL_MARKER_DIR/pi-4k-pagesize.applied" ] || return 0
+  [ -f "$TP_PI_BOOT_CONFIG" ] || return 0
+  grep -qx '[[:space:]]*kernel=kernel8.img[[:space:]]*' "$TP_PI_BOOT_CONFIG" 2>/dev/null || return 0
+  tp_say "The Raspberry Pi boot setting kernel=kernel8.img in $TP_PI_BOOT_CONFIG was left on purpose; to undo it, delete that line from $TP_PI_BOOT_CONFIG, then reboot."
+}
+
+# The fabric's and Docker's forwarding drop-ins are gone, but the running
+# kernel keeps the value they set until the next restart.
+tp_note_ip_forward() {
+  [ "$(cat "$TP_IP_FORWARD_FILE" 2>/dev/null)" = 1 ] || return 0
+  tp_say "IPv4 forwarding (net.ipv4.ip_forward) stays on until this host reboots (longer if another setting on this host turns it on)."
 }
 
 tp_print_purge_notes() {
@@ -3820,6 +4023,8 @@ tp_print_purge_notes() {
   if [ "$TP_NET_LEFT" = true ]; then
     tp_say "Some Docker bridges or firewall chains could not be removed; reboot this host to clear them."
   fi
+  tp_note_ip_forward
+  tp_note_kernel_boot_line
 }
 
 tp_print_summary() {
@@ -4043,12 +4248,22 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # default state it purges. tp_path_is_safe refuses anything else, including a
 # folder configured elsewhere in daemon.env; those are listed as kept.
 TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
+# Where systemd keeps the stamp files of persistent timers (outside the owned
+# trees; only stamp-turbopanel-*.timer is ever removed from it).
+TP_TIMER_STAMP_DIR=/var/lib/systemd/timers
 TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/system /usr/lib/systemd/system"
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge
+TP_KERNEL_MARKER_DIR=/var/lib/turbopanel-kernel
+TP_PI_BOOT_CONFIG=/boot/firmware/config.txt
+TP_IP_FORWARD_FILE=/proc/sys/net/ipv4/ip_forward
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
 TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker
+# TurboPanel's nftables tables, all in family inet. A role, host script or the
+# daemon that loads another table must add its exact name here (a coverage
+# test fails otherwise).
+TP_NFT_TABLES="turbopanel_ingress_guard turbopanel_build turbopanel_php"
 TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folders_remove folders_keep accounts groups principals volumes leftalone cpmarkers purge_targets"
 
 # Apt packages this script may purge: Docker's (the list below; a purge of
