@@ -78,3 +78,30 @@ test("instance-install.yml includes build-user between principal-access and daem
   assert(at("principal-access") < at("build-user"));
   assert(at("build-user") < at("daemon-launch"));
 });
+
+/**
+ * Playbooks that can be the first thing to install Docker on a host. The
+ * on-demand setup plays (rabbitmq, proxysql, ...) only run on hosts that an
+ * install play already gave a vendored Deno.
+ */
+const DOCKER_INSTALLERS = ["instance-install.yml", "docker-setup.yml"];
+
+test("every playbook that can install Docker vendors Deno before the docker role", async () => {
+  for (const name of DOCKER_INSTALLERS) {
+    const text = await Deno.readTextFile(join(PLAYBOOKS, name));
+    const docker = roleLine(text, "docker");
+    const deno = roleLine(text, "deno-runtime");
+    assert(docker >= 0, `${name} no longer runs the docker role`);
+    assert(
+      deno >= 0 && deno < docker,
+      `${name}: deno-runtime must come before docker (the Docker gate runs on it)`,
+    );
+  }
+});
+
+test("instance-install.yml vendors Deno unconditionally, not only for the JS-fallback daemon", async () => {
+  const text = await Deno.readTextFile(
+    join(PLAYBOOKS, "instance-install.yml"),
+  );
+  assert(!text.includes("turbopanel_daemon_exec_mode == 'js'"));
+});

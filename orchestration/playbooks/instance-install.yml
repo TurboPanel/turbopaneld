@@ -134,6 +134,10 @@
     # needs setfacl (the `acl` package) that minimal Debian images omit.
     - role: daemon-prereqs
     - role: turbopanel-user
+    # Before docker: the docker role installs the Docker gate at its end, and
+    # the gate runs on the vendored Deno. Unconditional (a native daemon needs
+    # it too); a no-op once the pinned version is in place.
+    - role: deno-runtime
     - role: runtime-sockets
     - role: daemon-logs
     - role: rapl-access
@@ -213,13 +217,6 @@
         - turbopanel-system-stack
         - turbopanel-instance
         - turbopanel-caddy
-
-    - name: Vendor the Deno runtime for the JS-fallback daemon
-      # Only the JS-fallback ExecStart needs it; the compiled instance and a
-      # native daemon do not (deno-runtime is a no-op once converged).
-      when: turbopanel_daemon_exec_mode == 'js'
-      ansible.builtin.include_role:
-        name: deno-runtime
 
     - name: Provision and start the co-located daemon
       # The roles daemon-install.yml runs on a managed node, minus its
