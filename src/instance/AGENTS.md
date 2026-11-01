@@ -370,7 +370,7 @@ panels only send these from enroll, older ones also from session), or
 (`401 Invalid license`, `400 License already consumed or invalid`,
 `400 License is inactive`, `400 Server key is inactive`,
 `403 Invalid signature`, `409 Fingerprint already exists`, and the local
-`missing license credentials for enrollment` → **park**). On `permanent` or
+`missing license credentials for enrollment` → **park**). `401 Invalid license` is what a used install key gets (the panel erases a key's token when its server binds, and a join ticket works once for an hour): the park log then names the way out, an owner issuing a re-enroll token on the server's page and the installer re-run with it (`permanentRejectionAdvice`). The restaged license files change the stamp, which unparks and force-enrolls with the persisted server id; the daemon keeps its staged license files (managed updates pass them to the installer). On `permanent` or
 `tls-trust`,
 `InstanceClient` enters `#enterParkedState` instead of `#increaseBackoff` —
 full-jitter backoff in `[PARKED_BACKOFF_MIN_MS, PARKED_BACKOFF_MAX_MS]`
