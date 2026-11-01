@@ -99,6 +99,7 @@ export const DAEMON_WIRE_FEATURES = [
   "fabric-peer-report-v1",
   "fabric-lan-routes-v1",
   "repo-key-report-v1",
+  "install-token-v2",
 ] as const;
 
 /**
@@ -186,6 +187,9 @@ export const FABRIC_LAN_ROUTES_FEATURE: DaemonWireFeature =
  * report until one does.
  */
 export const REPO_KEY_REPORT_FEATURE: DaemonWireFeature = "repo-key-report-v1";
+
+/** The installer reads one `TOKEN` value (signed, carries the panel key) as well as the older variables. */
+export const INSTALL_TOKEN_V2_FEATURE: DaemonWireFeature = "install-token-v2";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`

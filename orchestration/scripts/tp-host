@@ -5254,6 +5254,232 @@ tp_verb_tunnel_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# --- panel key pin (lib/panel-identity) ---------------------------------------
+# run.sh writes the pin file at install, root-owned, and no generic verb may
+# name it (it sits outside every managed tree). This verb is the one way the
+# daemon updates it afterwards, and only to follow the panel's own signed
+# identity document: stdin is the X-TurboPanel-Signature header value on the
+# first line and the exact response body after it. The document must name the
+# pinned current key, be signed by it, be unexpired and carry a key set no
+# lower than the pinned one. Only next=, keyset=, urls= and updated= change;
+# a change of the current key arrives only as a signed rotation or revoke
+# statement (`panel-identity-write statement`, below).
+
+tp_panel_identity_python() {
+  cat <<'PY'
+import base64, binascii, hashlib, json, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+PATH = "/api/daemon/v1/instance/identity"
+body_path, header_path, out, pinned, pinned_keyset = sys.argv[1:6]
+out = Path(out)
+
+def b64d(text):
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        raise SystemExit("not base64url")
+
+raw = Path(body_path).read_bytes()
+header = Path(header_path).read_text().strip()
+try:
+    doc = json.loads(raw)
+    current = [k for k in doc["keys"] if k.get("role") == "current"]
+    nxt = [k for k in doc["keys"] if k.get("role") == "next"]
+    keyset, expires, urls = doc["keyset"], doc["expires"], doc["urls"]
+except (ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("identity document is malformed")
+if len(current) != 1 or len(nxt) > 1:
+    raise SystemExit("identity document needs one current key and at most one next")
+pub = b64d(current[0].get("pub", ""))
+kid = base64.urlsafe_b64encode(hashlib.sha256(pub).digest()).rstrip(b"=").decode()
+if len(pub) != 32 or kid != current[0].get("kid"):
+    raise SystemExit("current key does not match its fingerprint")
+if kid != pinned:
+    raise SystemExit("the document names a different current key than the pin")
+if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset < int(pinned_keyset):
+    raise SystemExit("keyset is lower than the pinned one")
+try:
+    when = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+except (ValueError, AttributeError):
+    raise SystemExit("expires is not a timestamp")
+if when <= datetime.now(timezone.utc):
+    raise SystemExit("identity document has expired")
+head_kid, _, head_sig = header.partition(":")
+sig = b64d(head_sig)
+if head_kid != kid or len(sig) != 64:
+    raise SystemExit("signature header is wrong")
+for url in urls:
+    if not isinstance(url, str) or not url.startswith("https://") or len(url) < 9 or any(c in url[8:] for c in "/?#@\\ ,\n"):
+        raise SystemExit("url list holds a bad entry")
+next_kid = nxt[0].get("kid", "") if nxt else ""
+if next_kid and len(b64d(next_kid)) != 32:
+    raise SystemExit("next fingerprint is malformed")
+(out / "msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
+(out / "sig").write_bytes(sig)
+der = bytes.fromhex("302a300506032b6570032100") + pub
+pem = base64.b64encode(der).decode()
+(out / "pub.pem").write_text("-----BEGIN PUBLIC KEY-----\n" + "\n".join(pem[i:i + 64] for i in range(0, len(pem), 64)) + "\n-----END PUBLIC KEY-----\n")
+(out / "fields").write_text("%s\n%d\n%s\n" % (next_kid, keyset, ",".join(urls)))
+PY
+}
+
+# Python for a rotation or revoke statement (contract 10b.4). The statement is
+# the exact JSON the panel signed with the signature fields appended in place of
+# the final "}": `,"sigCurrent":"…","sigNext":"…"}` for a rotation, `,"sigNext":"…"}`
+# for a revoke. The signing input is "tp-rotation\n" plus the bytes before the
+# appended fields and a closing "}". Each signer's public key rides in `signers`
+# and must hash to the fingerprint this host pinned for that role (the old
+# current key and the offline next key); nothing in the statement is believed
+# before that. The statement's keyset must be strictly higher, and its new
+# current key must be the pinned next key.
+tp_panel_statement_python() {
+  cat <<'PY'
+import base64, binascii, hashlib, json, re, sys
+from pathlib import Path
+
+stmt_path, out, pin_cur, pin_next, pin_keyset = sys.argv[1:6]
+out = Path(out)
+
+def b64d(text):
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        raise SystemExit("not base64url")
+
+def pem(raw):
+    der = bytes.fromhex("302a300506032b6570032100") + raw
+    body = base64.b64encode(der).decode()
+    return "-----BEGIN PUBLIC KEY-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64)) + "\n-----END PUBLIC KEY-----\n"
+
+def signer(signers, fp):
+    pub = b64d(signers.get(fp, ""))
+    if len(pub) != 32 or base64.urlsafe_b64encode(hashlib.sha256(pub).digest()).rstrip(b"=").decode() != fp:
+        raise SystemExit("a signer key does not hash to the pinned fingerprint")
+    return pub
+
+raw = Path(stmt_path).read_text()
+if not pin_next:
+    raise SystemExit("no next key is pinned")
+tail = re.search(r',"sigCurrent":"([A-Za-z0-9_-]{86})","sigNext":"([A-Za-z0-9_-]{86})"\}$', raw)
+kind = "rotation"
+if tail is None:
+    tail = re.search(r',"sigNext":"([A-Za-z0-9_-]{86})"\}$', raw)
+    kind = "revoke"
+if tail is None:
+    raise SystemExit("statement signatures are missing or malformed")
+body = raw[:tail.start()] + "}"
+try:
+    doc = json.loads(body)
+    keyset, new_cur, new_next, signers = doc["keyset"], doc["current"], doc.get("next", ""), doc["signers"]
+    name = doc.get("type", doc.get("t"))
+except (ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("statement is malformed")
+if name != kind or not isinstance(signers, dict):
+    raise SystemExit("statement type does not match its signatures")
+if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset <= int(pin_keyset):
+    raise SystemExit("keyset does not increase")
+if new_cur != pin_next:
+    raise SystemExit("the new current key is not the pinned next key")
+if new_next != "" and (not isinstance(new_next, str) or len(b64d(new_next)) != 32):
+    raise SystemExit("next fingerprint is malformed")
+if kind == "revoke" and doc.get("revoked") != pin_cur:
+    raise SystemExit("the revoked key is not the pinned current key")
+(out / "msg").write_bytes(b"tp-rotation\n" + body.encode())
+(out / "pubn.pem").write_text(pem(signer(signers, pin_next)))
+(out / "sign").write_bytes(b64d(tail.group(tail.lastindex)))
+if kind == "rotation":
+    (out / "pubc.pem").write_text(pem(signer(signers, pin_cur)))
+    (out / "sigc").write_bytes(b64d(tail.group(1)))
+(out / "fields").write_text("%s\n%s\n%d\n%s\n" % (kind, new_cur, keyset, new_next))
+PY
+}
+
+tp_verb_panel_identity_statement() {
+  _ps_file="$INSTALL_ROOT/lib/panel-identity"
+  _ps_origin="$INSTALL_ROOT/lib/update-origin"
+  [ -f "$_ps_file" ] && [ ! -L "$_ps_file" ] || tp_die "panel-identity-write: no panel key is pinned on this host"
+  [ "$(stat -c %u "$_ps_file")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_ps_file is not root-owned"
+  _ps_cur="$(tp_pin_field_of "$_ps_file" current)"
+  _ps_next="$(tp_pin_field_of "$_ps_file" next)"
+  _ps_keyset="$(tp_pin_field_of "$_ps_file" keyset)"
+  [ -n "$_ps_cur" ] || tp_die "panel-identity-write: this host was installed without a panel key"
+  case "$_ps_keyset" in ''|*[!0-9]*) tp_die "panel-identity-write: the pin file has no valid keyset" ;; esac
+  tp_stage_dir
+  head -c 8193 > "$TP_STAGE/statement"
+  [ "$(wc -c < "$TP_STAGE/statement")" -le 8192 ] || tp_die "panel-identity-write: statement too large"
+  mkdir "$TP_STAGE/v"
+  python3 -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_next" "$_ps_keyset" ||
+    tp_die "panel-identity-write: refusing the statement"
+  openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pubn.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sign" >/dev/null 2>&1 ||
+    tp_die "panel-identity-write: the next key's signature is invalid"
+  if [ "$(sed -n '1p' "$TP_STAGE/v/fields")" = rotation ]; then
+    openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pubc.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sigc" >/dev/null 2>&1 ||
+      tp_die "panel-identity-write: the current key's signature is invalid"
+  fi
+  _ps_new_cur="$(sed -n '2p' "$TP_STAGE/v/fields")"
+  _ps_new_keyset="$(sed -n '3p' "$TP_STAGE/v/fields")"
+  _ps_new_next="$(sed -n '4p' "$TP_STAGE/v/fields")"
+  {
+    printf 'current=%s\n' "$_ps_new_cur"
+    printf 'next=%s\n' "$_ps_new_next"
+    printf 'keyset=%s\n' "$_ps_new_keyset"
+    printf 'urls=%s\n' "$(tp_pin_field_of "$_ps_file" urls)"
+    printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_ps_file" pinned_by)"
+    printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$TP_STAGE/new"
+  # The update origin names the pinned key too; both change together.
+  if [ -f "$_ps_origin" ] && [ ! -L "$_ps_origin" ]; then
+    sed "s|^panel_key=.*|panel_key=$_ps_new_cur|" "$_ps_origin" > "$TP_STAGE/origin"
+    tp_put_file "$_ps_origin" 600 root root < "$TP_STAGE/origin"
+  fi
+  tp_put_file "$_ps_file" 640 root tp < "$TP_STAGE/new"
+}
+
+tp_pin_field_of() {
+  sed -n "s/^$2=//p" "$1" | head -n 1
+}
+
+tp_verb_panel_identity_write() {
+  if [ $# -eq 1 ] && [ "$1" = statement ]; then
+    tp_verb_panel_identity_statement
+    return
+  fi
+  [ $# -eq 0 ] || tp_die "panel-identity-write: takes no arguments, or \"statement\""
+  _pi_file="$INSTALL_ROOT/lib/panel-identity"
+  [ -f "$_pi_file" ] && [ ! -L "$_pi_file" ] || tp_die "panel-identity-write: no panel key is pinned on this host"
+  [ "$(stat -c %u "$_pi_file")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_pi_file is not root-owned"
+  _pi_cur="$(tp_pin_field_of "$_pi_file" current)"
+  [ -n "$_pi_cur" ] || tp_die "panel-identity-write: this host was installed without a panel key"
+  _pi_keyset="$(tp_pin_field_of "$_pi_file" keyset)"
+  case "$_pi_keyset" in ''|*[!0-9]*) tp_die "panel-identity-write: the pin file has no valid keyset" ;; esac
+  tp_stage_dir
+  head -c 65537 > "$TP_STAGE/in"
+  [ "$(wc -c < "$TP_STAGE/in")" -le 65536 ] || tp_die "panel-identity-write: input too large"
+  sed -n '1p' "$TP_STAGE/in" > "$TP_STAGE/header"
+  sed '1d' "$TP_STAGE/in" > "$TP_STAGE/body"
+  # The body is signed byte for byte; sed adds nothing but a missing final newline.
+  [ "$(tail -c 1 "$TP_STAGE/in" | wc -l)" -eq 0 ] || tp_die "panel-identity-write: the body must not end in a newline"
+  mkdir "$TP_STAGE/v"
+  python3 -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" ||
+    tp_die "panel-identity-write: refusing the identity document"
+  openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pub.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sig" >/dev/null 2>&1 ||
+    tp_die "panel-identity-write: the identity document signature is invalid"
+  _pi_next="$(sed -n '1p' "$TP_STAGE/v/fields")"
+  _pi_new_keyset="$(sed -n '2p' "$TP_STAGE/v/fields")"
+  _pi_urls="$(sed -n '3p' "$TP_STAGE/v/fields")"
+  {
+    printf 'current=%s\n' "$_pi_cur"
+    printf 'next=%s\n' "$_pi_next"
+    printf 'keyset=%s\n' "$_pi_new_keyset"
+    printf 'urls=%s\n' "$_pi_urls"
+    printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_pi_file" pinned_by)"
+    printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$TP_STAGE/new"
+  tp_put_file "$_pi_file" 640 root tp < "$TP_STAGE/new"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -5320,5 +5546,6 @@ case "$_verb" in
   app-env-remove) tp_verb_app_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  panel-identity-write) tp_verb_panel_identity_write "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac
