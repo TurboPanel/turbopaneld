@@ -26,6 +26,7 @@ import {
   RECONNECT_FLOOR_MS,
   registerCommandPorts,
   STABLE_SESSION_MS,
+  TUNNEL_TOKEN_REMOTE_REFUSAL,
   writeKeyId,
 } from "./client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
@@ -6358,11 +6359,9 @@ it({
             (f as { id?: string }).id === "tun-fail"
           ) as { ok?: boolean; error?: string } | undefined,
       );
+      // A remote server refuses before the write hook (which would throw) runs.
       assertEquals(tun.ok, false);
-      assertEquals(
-        String(tun.error ?? "").includes("tunnel write failed"),
-        true,
-      );
+      assertEquals(tun.error, TUNNEL_TOKEN_REMOTE_REFUSAL);
 
       socket.receive({
         type: "public-urls-update",
@@ -7904,8 +7903,10 @@ it({
         return Promise.resolve();
       },
     });
+    // The control plane's own tunnel token is taken only on its host.
     const { socket, restore } = await startConnectedClient({
       decrypt: openSealedFixtures,
+      socketMode: true,
     });
     const resultFor = (id: string) =>
       waitFor(
