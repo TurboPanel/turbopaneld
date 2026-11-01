@@ -2811,14 +2811,14 @@ test("a dry run deletes no nft table", async () => {
 });
 
 test("without nft the table step is skipped, not failed", async () => {
-  const empty = await Deno.makeTempDir({ prefix: "tp-purge-nonft-" });
+  // The host under test may have a real nft, so the tool check is overridden.
   const result = await runPurgeSh(
     NFT_FUNCTIONS,
-    'tp_remove_nft_tables\necho "fail=$TP_FAIL_COUNT"',
-    { PATH: `${empty}:${BASE_PATH}` },
+    'tp_has_tool() { [ "$1" != nft ] && command -v "$1" >/dev/null 2>&1; }\ntp_remove_nft_tables\necho "fail=$TP_FAIL_COUNT"\ncat "$TP_TMP/skipped"',
   );
   assertEquals(result.code, 0, result.stderr);
   assertStringIncludes(result.stdout, "fail=0");
+  assertStringIncludes(result.stdout, "SKIPPED: nft not installed");
 });
 
 test("the inventory lists only TurboPanel's nft tables", async () => {
