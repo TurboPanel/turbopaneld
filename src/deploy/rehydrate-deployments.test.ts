@@ -1067,3 +1067,129 @@ test({
     }
   },
 });
+
+async function writePlainDeployment(
+  stateDir: string,
+  environmentId: string,
+): Promise<void> {
+  const dir = join(stateDir, "deployments", "proj-1", environmentId);
+  await Deno.mkdir(dir, { recursive: true });
+  await writeComposeFileSecure(
+    join(dir, RUNTIME_COMPOSE_FILENAME),
+    "services:\n  web:\n    image: nginx\n",
+  );
+  await writeDeploymentManifest(dir, {
+    version: 2,
+    projectId: "proj-1",
+    environmentId,
+    serverId: "srv-1",
+    generation: 1,
+    projectName: `demo-${environmentId}`,
+    composeSha256: "a".repeat(64),
+    services: { web: { replicas: 1 } },
+    secrets: [],
+  });
+}
+
+test({
+  name:
+    "rehydrateLocalDeployments does not start a stack the control plane reports gone, and still starts the rest",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-rehydrate-gone-" });
+    try {
+      const stateDir = join(root, "state");
+      const layout = { stateDir, runDir: join(root, "run") } as Parameters<
+        typeof rehydrateLocalDeployments
+      >[0]["layout"];
+      await writePlainDeployment(stateDir, "env-deleted");
+      await writePlainDeployment(stateDir, "env-kept");
+
+      const asked: string[] = [];
+      const ups: string[] = [];
+      await rehydrateLocalDeployments({
+        layout,
+        decryptSecrets: () => Promise.resolve([]),
+        rehydrate: (refs) => {
+          asked.push(...refs.map((ref) => ref.environmentId));
+          return Promise.resolve(
+            parseRehydrateDeploymentResults(Object.assign([], {
+              gone: [{ projectId: "proj-1", environmentId: "env-deleted" }],
+            })),
+          );
+        },
+        runDocker: (args) => {
+          ups.push(args[args.indexOf("-p") + 1] ?? "");
+          return Promise.resolve({
+            success: true,
+            stdout: "",
+            stderr: "",
+            code: 0,
+          });
+        },
+        composeUp: "always",
+      });
+      // A stack with no secrets is asked about too.
+      assertEquals(asked.sort(), ["env-deleted", "env-kept"]);
+      assertEquals(ups, ["demo-env-kept"]);
+      // Nothing is deleted on that signal.
+      await Deno.stat(join(stateDir, "deployments", "proj-1", "env-deleted"));
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "rehydrateLocalDeployments starts every stack when the lookup fails or names nothing gone",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-rehydrate-nogone-" });
+    try {
+      const stateDir = join(root, "state");
+      const layout = { stateDir, runDir: join(root, "run") } as Parameters<
+        typeof rehydrateLocalDeployments
+      >[0]["layout"];
+      await writePlainDeployment(stateDir, "env-a");
+      for (
+        const rehydrate of [
+          () => Promise.reject(new Error("offline")),
+          () => Promise.resolve([]),
+        ]
+      ) {
+        let ups = 0;
+        await rehydrateLocalDeployments({
+          layout,
+          decryptSecrets: () => Promise.resolve([]),
+          rehydrate,
+          runDocker: () => {
+            ups += 1;
+            return Promise.resolve({
+              success: true,
+              stdout: "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          composeUp: "always",
+        });
+        assertEquals(ups, 1);
+      }
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test("parseRehydrateDeploymentResults carries valid gone entries only", () => {
+  const parsed = parseRehydrateDeploymentResults(Object.assign([], {
+    gone: [
+      { projectId: "p", environmentId: "e" },
+      { projectId: 1 },
+      "junk",
+    ],
+  }));
+  assertEquals(parsed.gone, [{ projectId: "p", environmentId: "e" }]);
+  assertEquals(parseRehydrateDeploymentResults([]).gone, undefined);
+});

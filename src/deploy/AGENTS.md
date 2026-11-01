@@ -583,6 +583,15 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `deployment.desiredGeneration`; the daemon also refuses to materialize or
   `compose up` when the returned generation differs from the local manifest.
   Lifecycle `start`/`restart` rehydrate first when files are absent.
+  The request names every local deployment, secrets or not; the answer's
+  `gone[]` lists those whose environment the control plane no longer has (a
+  deleted project or environment), and boot does not `compose up` them. A
+  failed request or an older control plane (no `gone`) starts everything as
+  before. Nothing is deleted on that signal. `environment.stop` removes the
+  daemon's own files (manifest, compose files) right after the containers are
+  down, before the remaining cleanup, so a later failure cannot leave a stopped
+  stack that the next start brings back; relative-bind data stays unless the stop is a
+  delete (`removeDeploymentDir`).
   `environment.stop` deletes the `/run` tree. Build secrets belong on Compose
   `build.secrets`, not `build.args`.
 - **`-f` argv:** `composeFileArgs(projectName, paths)` builds
