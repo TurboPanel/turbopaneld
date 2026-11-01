@@ -478,6 +478,11 @@ async function stopEnvironmentLocked(
     await removeEarlierNamedContainers(parsedPayload, deploymentDir, run);
   }
 
+  // The containers are down, so the manifest must go now: a later step that
+  // throws would otherwise leave a stopped stack that the next daemon start
+  // brings back. Only the daemon's own files go; `./data` stays.
+  await removeDaemonDeploymentFiles(deploymentDir);
+
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
   if (fabricNetworks.length > 0 && dockerPresent) {
     try {

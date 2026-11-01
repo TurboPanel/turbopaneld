@@ -415,12 +415,13 @@ export class DaemonApiClient {
       generation: number;
       secretPlan: unknown;
       variableMaterial: unknown;
-    }>
+    }> & { gone?: unknown }
   > {
     if (deployments.length === 0) return [];
     const body = await this.#requestJson<{
       ok?: boolean;
       deployments?: unknown;
+      gone?: unknown;
     }>(
       "/api/daemon/v1/deployments/secrets/rehydrate",
       {
@@ -432,13 +433,16 @@ export class DaemonApiClient {
     if (!Array.isArray(body.deployments)) {
       throw new DaemonApiError(500, "Invalid secrets/rehydrate response");
     }
-    const out: Array<{
-      projectId: string;
-      environmentId: string;
-      generation: number;
-      secretPlan: unknown;
-      variableMaterial: unknown;
-    }> = [];
+    const out:
+      & Array<{
+        projectId: string;
+        environmentId: string;
+        generation: number;
+        secretPlan: unknown;
+        variableMaterial: unknown;
+      }>
+      & { gone?: unknown } = [];
+    if (Array.isArray(body.gone)) out.gone = body.gone;
     for (const entry of body.deployments) {
       if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
         continue;
