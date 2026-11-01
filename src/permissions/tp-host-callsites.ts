@@ -160,7 +160,7 @@ const TUNNEL_UNIT_B = tunnelUnitName(TUNNEL_ID, "b");
 const TUNNEL_TOKEN = "dGVzdA".repeat(8);
 const TUNNEL_UNIT_TEXT = renderTunnelUnit({
   id: TUNNEL_ID,
-  binary: `${VENDOR}/cloudflared/2026.5.2/cloudflared`,
+  binary: `${VENDOR}/cloudflared/2026.10.7/cloudflared`,
   port: 20300,
   envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
 });

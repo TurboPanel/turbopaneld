@@ -257,7 +257,7 @@ const OWNED_PATHS = [
   "/etc/turbopanel/tunnel-env",
   "/etc/turbopanel/tunnel-env/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.env",
   "/opt/turbopanel/vendor/cloudflared",
-  "/opt/turbopanel/vendor/cloudflared/2026.5.2/cloudflared",
+  "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
   "/var/lib/turbopanel/cloudflared/tunnels",
 ];
 
