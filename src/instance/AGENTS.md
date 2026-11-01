@@ -342,7 +342,14 @@ waits on that correlated round trip.
 in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on
 auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s)
 resets backoff to the initial floor so fleet-wide restarts do not align into a
-thundering herd.
+thundering herd. An edge restart drops every daemon at once; the full-jitter
+window (first window 8 s, then doubling to the cap) is what keeps the panel from
+a token-mint burst. Do not replace it with a fixed delay.
+
+**Advised heartbeat:** the unsigned `version` frame may carry `heartbeatSeconds`.
+The daemon accepts whole seconds in [15, 120] (`clampHeartbeatSeconds`), applies
+them to the ping cadence and the stale limit (3x), and keeps 60 s otherwise. A
+verified signed hello wins over this field (`#pinnedHelloApplied`).
 
 **Parked state:** `classifyConnectFailure` (`src/instance/connect-failure.ts`)
 maps enroll/session failures to `transient` (network, `>=500`, `429`,

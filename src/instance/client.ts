@@ -86,7 +86,7 @@ import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
-import { IdlePresence } from "./idle-presence.ts";
+import { advisedHeartbeatMs, IdlePresence } from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
 import { collectMetricsCapabilities } from "../metrics/collector/capabilities.ts";
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
@@ -523,6 +523,8 @@ export class InstanceClient {
   #caPinMismatch: string | null = null;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
+  /** Set by the signed-hello path once a verified hello carried the heartbeat; the unsigned advice is then ignored. */
+  #pinnedHelloApplied = false;
   /** Command ids already dispatched, so a repeated frame never runs twice. */
   readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
@@ -930,6 +932,17 @@ export class InstanceClient {
       wide
         ? Math.max(this.#backoffMs, RECONNECT_FIRST_WINDOW_MS)
         : this.#backoffMs,
+    );
+  }
+
+  #applyAdvisedHeartbeat(advised: unknown): void {
+    const ms = advisedHeartbeatMs(advised, this.#pinnedHelloApplied);
+    if (ms !== null) this.#idlePresence?.setIdleThresholdMs(ms);
+    logInfo(
+      "presence",
+      ms === null
+        ? "heartbeat 60s (default)"
+        : `heartbeat ${ms / 1000}s (advised)`,
     );
   }
 
@@ -1996,6 +2009,7 @@ export class InstanceClient {
         // resolves to unknown.
         this.#noteInstanceVersion(message.instanceVersion);
         this.#notePeerFeatures(message.features);
+        this.#applyAdvisedHeartbeat(message.heartbeatSeconds);
         logInfo(
           "instance",
           "attach frame received",

@@ -1108,6 +1108,37 @@ it({
 });
 
 it({
+  name:
+    "an edge restart that drops 20 daemons at once spreads their reconnects",
+  fn: () => {
+    // Seeded generator (mulberry32) so the draw is the same on every run.
+    let state = 0x2f6e2b1;
+    const seeded = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const originalRandom = Math.random;
+    Math.random = seeded;
+    try {
+      const delays = Array.from(
+        { length: 20 },
+        () => fullJitterMs(RECONNECT_FLOOR_MS, RECONNECT_FIRST_WINDOW_MS),
+      );
+      const window = RECONNECT_FIRST_WINDOW_MS - RECONNECT_FLOOR_MS;
+      assertEquals(new Set(delays).size, 20, "no two daemons share a delay");
+      assert(
+        Math.max(...delays) - Math.min(...delays) >= window * 0.6,
+        "spread must cover at least 60% of the first window",
+      );
+    } finally {
+      Math.random = originalRandom;
+    }
+  },
+});
+
+it({
   name: "InstanceClient reconnect delay is jittered within backoff bounds",
   permissions: {
     env: true,

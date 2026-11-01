@@ -54,6 +54,11 @@ export type CellAttachVersionMessage = {
    * the field; `instanceSupports` stays closed.
    */
   features?: string[];
+  /**
+   * Advised idle-ping cadence in seconds. The frame is unsigned, so the
+   * daemon clamps it to [15, 120]; pinned daemons use the signed hello.
+   */
+  heartbeatSeconds?: number;
 };
 
 /** One replica in a `managed-health-report`: `down`, or its reading. */

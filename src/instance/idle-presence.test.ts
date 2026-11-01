@@ -6,6 +6,8 @@ import type { ServerReportedIp } from "../host/server-addresses.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
 import type { HostResources } from "../host/host-inventory.ts";
 import {
+  advisedHeartbeatMs,
+  clampHeartbeatSeconds,
   hostCapacityMoved,
   IdlePresence,
   installIdlePresenceProviders,
@@ -1274,4 +1276,66 @@ test("IdlePresence heartbeat carries the command report only for a control plane
   assertEquals(supported.commands, REPORT);
   const older = await heartbeatAfterBuildChange(false);
   assertEquals("commands" in older, false);
+});
+
+test("clampHeartbeatSeconds accepts 15..120 and rejects the rest", () => {
+  assertEquals(clampHeartbeatSeconds(25), 25);
+  assertEquals(clampHeartbeatSeconds(15), 15);
+  assertEquals(clampHeartbeatSeconds(120), 120);
+  assertEquals(clampHeartbeatSeconds(24.6), 25);
+  assertEquals(clampHeartbeatSeconds(5), null);
+  assertEquals(clampHeartbeatSeconds(1), null);
+  assertEquals(clampHeartbeatSeconds(500), null);
+  assertEquals(clampHeartbeatSeconds("25"), null);
+  assertEquals(clampHeartbeatSeconds(Number.NaN), null);
+  assertEquals(clampHeartbeatSeconds(undefined), null);
+});
+
+test("advisedHeartbeatMs ignores the advice once a signed hello applied", () => {
+  assertEquals(advisedHeartbeatMs(25, false), 25_000);
+  assertEquals(advisedHeartbeatMs(1, false), null);
+  assertEquals(advisedHeartbeatMs(undefined, false), null);
+  assertEquals(advisedHeartbeatMs(25, true), null);
+});
+
+test({
+  name:
+    "IdlePresence setIdleThresholdMs re-arms the ping timer and stale limit",
+  fn: async () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const socket = openMockSocket();
+    let stale = 0;
+    // Default 60 s cadence: nothing would fire inside this test.
+    const presence = new IdlePresence({
+      serverId: "srv-advised",
+      onStaleConnection: () => stale++,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      assert(!socket.sentFrames.includes('{"type":"ping"}'));
+      presence.setIdleThresholdMs(20);
+      await sleep(70);
+      assert(
+        socket.sentFrames.includes('{"type":"ping"}'),
+        "ping should follow the advised cadence",
+      );
+      // Stale limit is 3x the cadence (60 ms) with no inbound traffic.
+      await sleep(120);
+      assert(stale >= 1, "stale limit should follow the advised cadence");
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
 });
