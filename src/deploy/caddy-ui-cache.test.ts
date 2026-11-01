@@ -1,5 +1,13 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, join } from "@std/path";
+import {
+  findOnPath,
+  freePort,
+  panelCaddyTestSite,
+  pinnedCaddy,
+  runCaddyfileTasks,
+  startPanelCaddy,
+} from "../testing/panel-caddy.ts";
 
 /**
  * After a control-plane update the exported UI has new bundle names. A browser
@@ -93,65 +101,8 @@ Deno.test("existing hosts get the UI cache headers in place, safely", async () =
 
 // ---- Optional checks: need ansible-playbook and/or the pinned Caddy. ----
 
-function findOnPath(name: string): string | undefined {
-  for (const dir of (Deno.env.get("PATH") ?? "").split(":")) {
-    if (!dir) continue;
-    try {
-      if (Deno.statSync(join(dir, name)).isFile) return join(dir, name);
-    } catch {
-      // not here
-    }
-  }
-  return undefined;
-}
-
-/** The pinned Caddy, when one is available (env or PATH); else skip. */
-function pinnedCaddy(): string | undefined {
-  const defaults = Deno.readTextFileSync(
-    new URL("caddy/defaults/main.yml", ROLES),
-  );
-  const wanted = /caddy_version:\s*"([^"]+)"/.exec(defaults)?.[1];
-  const candidate = Deno.env.get("TURBOPANEL_TEST_CADDY") ?? "caddy";
-  try {
-    const out = new Deno.Command(candidate, {
-      args: ["version"],
-      stdout: "piped",
-      stderr: "null",
-    }).outputSync();
-    const version = new TextDecoder().decode(out.stdout);
-    return wanted && version.startsWith(`v${wanted}`) ? candidate : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 const caddy = pinnedCaddy();
 const ansiblePlaybook = findOnPath("ansible-playbook");
-
-/** The template's variables, for a render without Jinja. */
-function substitute(text: string, root: string): string {
-  return text
-    .replaceAll("{{ turbopanel_caddy_admin_socket }}", join(root, "admin.sock"))
-    .replaceAll("{{ turbopanel_run_dir }}", join(root, "run"))
-    .replaceAll("{{ turbopanel_ui_dist_dir }}", join(root, "ui"))
-    .replaceAll("{{ turbopanel_caddyfile | dirname }}", root);
-}
-
-/** Global options and the shared snippet, served over plain HTTP on `port`. */
-function testSite(template: string, root: string, port: number): string {
-  const start = template.search(/^\{$/m);
-  const end = template.indexOf("# Always-on recovery listener");
-  assert(start >= 0 && end > start, "template layout");
-  return substitute(template.slice(start, end), root) +
-    `\nhttp://127.0.0.1:${port} {\n\timport turbopanel_app\n}\n`;
-}
-
-function freePort(): number {
-  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
-  const port = (listener.addr as Deno.NetAddr).port;
-  listener.close();
-  return port;
-}
 
 Deno.test({
   name: "the pinned Caddy serves the UI cache rules as intended",
@@ -168,26 +119,10 @@ Deno.test({
     const config = join(root, "Caddyfile");
     await Deno.writeTextFile(
       config,
-      testSite(await readRole(TEMPLATE), root, port),
+      panelCaddyTestSite(await readRole(TEMPLATE), root, port),
     );
-    const child = new Deno.Command(caddy!, {
-      args: ["run", "--config", config, "--adapter", "caddyfile"],
-      env: { XDG_DATA_HOME: root, XDG_CONFIG_HOME: root, HOME: root },
-      stdout: "null",
-      stderr: "piped",
-    }).spawn();
-    const base = `http://127.0.0.1:${port}`;
+    const { base, stop } = await startPanelCaddy(caddy!, config, root, port);
     try {
-      let up = false;
-      for (let i = 0; i < 100 && !up; i++) {
-        try {
-          await (await fetch(`${base}/`)).body?.cancel();
-          up = true;
-        } catch {
-          await new Promise((r) => setTimeout(r, 50));
-        }
-      }
-      assert(up, "caddy came up");
       const get = async (path: string) => {
         const res = await fetch(base + path);
         await res.body?.cancel();
@@ -221,9 +156,7 @@ Deno.test({
         );
       }
     } finally {
-      child.kill("SIGTERM");
-      await child.stderr.cancel();
-      await child.status;
+      await stop();
       await Deno.remove(root, { recursive: true });
     }
   },
@@ -236,59 +169,8 @@ const OLD_TAIL = [
   "",
 ].join("\n");
 
-async function runInPlaceEdit(root: string, caddyBin: string): Promise<string> {
-  const vendor = join(root, "vendor");
-  const link = join(vendor, "caddy", "current", "caddy");
-  await Deno.mkdir(dirname(link), { recursive: true });
-  try {
-    await Deno.lstat(link);
-  } catch {
-    const target = caddyBin.includes("/")
-      ? caddyBin
-      : findOnPath(caddyBin) ?? caddyBin;
-    await Deno.symlink(target, link);
-  }
-  const play = join(root, "play.yml");
-  await Deno.writeTextFile(
-    play,
-    [
-      "- hosts: localhost",
-      "  connection: local",
-      "  gather_facts: false",
-      "  vars:",
-      `    turbopanel_caddyfile: ${join(root, "Caddyfile")}`,
-      `    turbopanel_vendor_dir: ${vendor}`,
-      "    turbopanel_dev_user: ''",
-      "  tasks:",
-      `    - ansible.builtin.import_tasks: ${new URL(TASKS, ROLES).pathname}`,
-      "  handlers:",
-      "    - name: Reload turbopanel caddy",
-      "      ansible.builtin.debug:",
-      "        msg: reload",
-      "",
-    ].join("\n"),
-  );
-  const home = join(root, "home");
-  await Deno.mkdir(home, { recursive: true });
-  const out = await new Deno.Command(ansiblePlaybook!, {
-    args: [play, "-i", "localhost,", "-c", "local"],
-    env: {
-      HOME: home,
-      ANSIBLE_HOME: home,
-      ANSIBLE_LOCAL_TEMP: home,
-      ANSIBLE_REMOTE_TMP: home,
-      ANSIBLE_NOCOWS: "1",
-      XDG_DATA_HOME: root,
-      XDG_CONFIG_HOME: root,
-    },
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const output = new TextDecoder().decode(out.stdout) +
-    new TextDecoder().decode(out.stderr);
-  assert(out.success, output);
-  return output;
-}
+const runInPlaceEdit = (root: string, caddyBin: string) =>
+  runCaddyfileTasks(root, caddyBin, ansiblePlaybook!, TASKS);
 
 Deno.test({
   name: "the in-place edit turns an older Caddyfile into the current template",
@@ -298,7 +180,7 @@ Deno.test({
     const root = await Deno.makeTempDir({ prefix: "tp-ui-cache-edit-" });
     try {
       const template = await readRole(TEMPLATE);
-      const current = testSite(template, root, 18443);
+      const current = panelCaddyTestSite(template, root, 18443);
       const ui = uiHandle(current);
       // Everything after the `root` line, up to the handle's closing brace.
       const newTail = ui.slice(

@@ -1,0 +1,59 @@
+---
+# Edge port redirect for an INSTALLED Caddyfile (imported by main.yml).
+#
+# The template sends a known hostname on the wrong port (an edge answering
+# both 443 and 8443) to its public port. A host whose Caddyfile was kept
+# (Let's Encrypt or uploaded hostnames, see caddyfile.yml) is not re-rendered,
+# and the hostname list that would have named the ports was empty, so take the
+# names from the file's own `<name>:8443 {` site addresses: those are the
+# only names a kept file serves, on 8443. Platform CA names in a kept file
+# get the redirect when Hostnames is re-applied in the app. Only when the
+# marker is missing: nothing else in the file is touched, the result must
+# still adapt with the vendored Caddy or the file is left as it was, and a
+# backup is kept.
+- name: Read the installed Caddyfile for the edge port redirect check
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_caddyfile }}"
+  register: _edge_port_caddyfile
+  failed_when: false
+
+- name: Collect the hostnames the installed Caddyfile serves without the edge port redirect
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _edge_port_caddyfile.content is defined
+    - (_edge_port_caddyfile.content | b64decode) is not search('# Edge port redirect:')
+  ansible.builtin.set_fact:
+    _edge_port_names: >-
+      {{
+        (_edge_port_caddyfile.content | b64decode)
+        | regex_findall('(?m)^([a-z0-9][a-z0-9.-]*[a-z0-9]):8443 \{$')
+        | unique
+      }}
+
+- name: Add the edge port redirect to the installed Caddyfile when missing
+  when: _edge_port_names | default([]) | length > 0
+  ansible.builtin.replace:
+    path: "{{ turbopanel_caddyfile }}"
+    regexp: '^(\(turbopanel_app\) \{\n)'
+    # The same block the template renders (templates/Caddyfile-edge-port-redirect.j2).
+    replace: >-
+      \g<1>{{ lookup('ansible.builtin.template', 'Caddyfile-edge-port-redirect.j2',
+      template_vars={'_edge_redirects': _edge_port_names}) }}
+    backup: true
+    validate: "{{ turbopanel_vendor_dir }}/caddy/current/caddy adapt --config %s --adapter caddyfile"
+  register: _edge_port_inserted
+  failed_when: false
+  notify:
+    - Reload turbopanel caddy
+
+- name: Warn when the edge port redirect could not be added
+  when:
+    - _edge_port_inserted is not skipped
+    - _edge_port_inserted.msg is defined
+    - _edge_port_inserted.msg is search('validation')
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: could not add the edge port redirect to {{ turbopanel_caddyfile }};
+      the file is unchanged. A hostname answered on more than one port keeps
+      serving both until Hostnames is re-applied in the app.

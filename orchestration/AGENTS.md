@@ -475,6 +475,20 @@ config in the instance release package. The unit does not grant
 `CAP_NET_BIND_SERVICE`. Updating the proxy config is a template edit plus a
 converge, never a hand edit of the rendered file.
 
+**Edge port redirect.** An edge in front of the control plane (a tunnel, a
+proxy) can answer one hostname on 443 and 8443 and forward both to `:8443`;
+only the Host header still says which (443 sends the bare name). The shared
+`(turbopanel_app)` snippet includes `templates/Caddyfile-edge-port-redirect.j2`:
+a listed DNS name on the wrong port gets `308` to its public port with
+`Cache-Control: no-store`. The public port is the entry's `public_port` when
+the hostname list carries one, else the port in its URL, else 8443. Exempt:
+`/api/daemon/*`, `/ws/daemon/*`, `/api/health`, `/webhook/*` (providers do not
+follow redirects) and any WebSocket upgrade. LAN names and IPs carry their
+port in Host, so nothing loops. A kept Caddyfile (see `tasks/caddyfile.yml`)
+gets the block from `tasks/caddyfile-edge-port.yml` for its `<name>:8443`
+sites. Caddy's `host` matcher and site addresses ignore the Host port; match
+the port with `header Host`, which takes one value per line.
+
 **Managed install layout.** The instance package lies flat in the install
 root beside the daemon — `bin/turbopanel` and `lib/libduckdb.so` (the unit's
 `LD_LIBRARY_PATH` is `lib/`; email runs in-process, so there is no separate

@@ -1,0 +1,36 @@
+{#
+  Edge port redirect, shared by Caddyfile.j2 and tasks/caddyfile-edge-port.yml.
+
+  Input: _edge_redirects, a list of {name, port}: a lowercase DNS name the
+  control plane publishes and the port visitors should use for it. A bare
+  name string means port 8443.
+
+  An edge in front of the control plane (a tunnel, a proxy) can answer the
+  same name on more than one port and forward both here; the Host header is
+  the only thing that still says which port the visitor used (443 sends the
+  bare name, any other port sends name:port). A request for a listed name on
+  the wrong port gets a 308 to the public port. Exempt: the daemon's API and
+  WebSocket, the health check, Git webhooks (providers do not follow
+  redirects) and every WebSocket upgrade. A name on its public port, and any
+  name not listed (LAN names, IPs), never matches, so the redirect cannot
+  loop. Keep the marker comment: the patch task looks for it.
+#}
+{% if _edge_redirects | default([]) | length > 0 %}
+        # Edge port redirect: send a known hostname to its public port.
+{% for e in _edge_redirects %}
+{% set _n = e.name if e is mapping else e %}
+{% set _p = (e.port if e is mapping else '8443') | string %}
+        @tp_edge_port_{{ loop.index0 }} {
+                host {{ _n }}
+{% if _p == '443' %}
+                not header Host {{ _n }}
+{% endif %}
+                not header Host {{ _n }}:{{ _p }}
+                not path /api/daemon/* /ws/daemon/* /api/health /webhook/*
+                not header Upgrade *
+        }
+        header @tp_edge_port_{{ loop.index0 }} Cache-Control "no-store"
+        redir @tp_edge_port_{{ loop.index0 }} https://{{ _n }}{{ '' if _p == '443' else ':' ~ _p }}{uri} 308
+{% endfor %}
+
+{% endif %}
