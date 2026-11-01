@@ -86,7 +86,11 @@ import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
 import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
-import { advisedHeartbeatMs, IdlePresence } from "./idle-presence.ts";
+import {
+  advisedHeartbeatMs,
+  IDLE_PRESENCE_MS,
+  IdlePresence,
+} from "./idle-presence.ts";
 import type { MetricsCollector } from "../metrics/collector/index.ts";
 import { collectMetricsCapabilities } from "../metrics/collector/capabilities.ts";
 import type { MetricsScheduler } from "../metrics/scheduler.ts";
@@ -937,7 +941,12 @@ export class InstanceClient {
 
   #applyAdvisedHeartbeat(advised: unknown): void {
     const ms = advisedHeartbeatMs(advised, this.#pinnedHelloApplied);
+    // IdlePresence is reused across reconnects: a frame without advice must
+    // put the default back, not keep the last advised cadence.
     if (ms !== null) this.#idlePresence?.setIdleThresholdMs(ms);
+    else if (!this.#pinnedHelloApplied) {
+      this.#idlePresence?.setIdleThresholdMs(IDLE_PRESENCE_MS);
+    }
     logInfo(
       "presence",
       ms === null

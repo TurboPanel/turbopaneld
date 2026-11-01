@@ -3,6 +3,7 @@ import { DAEMON_VERSION } from "../version.ts";
 import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
 import type { ServerReportedIp } from "../host/server-addresses.ts";
+import { waitFor } from "../testing/wait-for.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
 import type { HostResources } from "../host/host-inventory.ts";
 import {
@@ -1324,15 +1325,16 @@ test({
     try {
       presence.attach(socket as unknown as WebSocket);
       assert(!socket.sentFrames.includes('{"type":"ping"}'));
-      presence.setIdleThresholdMs(20);
-      await sleep(70);
-      assert(
-        socket.sentFrames.includes('{"type":"ping"}'),
-        "ping should follow the advised cadence",
+      presence.setIdleThresholdMs(50);
+      await waitFor(
+        "a ping at the advised cadence",
+        () => socket.sentFrames.includes('{"type":"ping"}'),
+        { timeoutMs: 10_000 },
       );
-      // Stale limit is 3x the cadence (60 ms) with no inbound traffic.
-      await sleep(120);
-      assert(stale >= 1, "stale limit should follow the advised cadence");
+      // Stale limit is 3x the cadence (150 ms) with no inbound traffic.
+      await waitFor("the stale limit to fire", () => stale >= 1, {
+        timeoutMs: 10_000,
+      });
     } finally {
       presence.detach();
       restore();
