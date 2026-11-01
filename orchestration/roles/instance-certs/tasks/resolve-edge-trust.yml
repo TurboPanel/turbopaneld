@@ -9,7 +9,7 @@
 - name: Read the persisted edge trust set
   when: (turbopanel_edge_trust_json | default('')) | length == 0
   ansible.builtin.slurp:
-    src: "{{ turbopanel_config_dir }}/caddy/instance-edge-trust.json"
+    src: "{{ turbopanel_config_dir | default('/etc/turbopanel') }}/caddy/instance-edge-trust.json"
   register: _persisted_edge_trust
   failed_when: false
 
@@ -29,7 +29,7 @@
       ansible.builtin.debug:
         msg: >-
           WARNING: the edge trust set is not valid JSON; trusting no edge
-          ranges ({{ turbopanel_config_dir }}/caddy/instance-edge-trust.json).
+          ranges ({{ turbopanel_config_dir | default('/etc/turbopanel') }}/caddy/instance-edge-trust.json).
 
     - name: Trust no edge ranges
       ansible.builtin.set_fact:
