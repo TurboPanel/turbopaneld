@@ -349,7 +349,9 @@ maps enroll/session failures to `transient` (network, `>=500`, `429`,
 `400 Invalid or expired challenge` → normal full-jitter reconnect),
 `temporary-auth` (reserved — close-code / stale-JWT refresh path, e.g. `4401` →
 refresh, no identity clear), `stale-identity` (`404 Server key not found`,
-`400 Server key mismatch` → recover + re-enroll), `tls-trust`
+`400 Server key mismatch`, `409 Server key already registered` → **park** as
+`awaiting-administrator`: key files are kept, nothing re-enrolls, the check
+repeats on the parked backoff; a real re-key is an owner action), `tls-trust`
 (Deno/rustls chain/SAN/expiry: `invalid peer certificate`, `UnknownIssuer`,
 `NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop),
 `awaiting-seat` (`400 License tier below required`,
@@ -368,11 +370,14 @@ full-jitter backoff in `[PARKED_BACKOFF_MIN_MS, PARKED_BACKOFF_MAX_MS]`
 (**5 min → 1 h**, vs the transient `DEFAULT_MAX_BACKOFF_MS` 30 s ceiling) with
 **no** enroll/challenge/session network traffic while parked. This parked
 state — not the instance rate limiter — is the primary storm protection.
-`#recoverFromStaleIdentity` calls `clearDaemonKeyState` (removes only
-`server-key.json` + `server-key-id`, **keeps** `server.id`) so `enrollDaemon`
-can re-present the persisted `serverId` for an already-latched license; a
-permanent enroll failure on that path then parks rather than re-clearing every
-cycle. Unpark triggers while the process stays up: license-file change
+The daemon never deletes its key files on an unauthenticated
+error: the panel saying a key is unknown is not proof, and re-enrolling would resend
+the license token. Greppable park log: `panel says this server's key is unknown;
+waiting for an administrator`. A daemon that enrolls with a fresh key (key files
+missing, or `TURBOPANEL_FORCE_ENROLL`) is refused with `409` by a panel that already
+holds a key for the server. `awaiting-administrator` retries on the parked backoff with the
+same key; a license-file change or `TURBOPANEL_FORCE_ENROLL` (an action on the host) makes
+the next attempt enroll afresh. Unpark triggers for permanent parks while the process stays up: license-file change
 (SHA-256 stamp of `license.id` + `license.token` differs) or
 `TURBOPANEL_FORCE_ENROLL` truthy — both reset backoff and force re-enroll on
 the next cycle. Daemon restart clears the in-memory parked backoff and retries

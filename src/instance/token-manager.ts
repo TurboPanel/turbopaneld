@@ -77,7 +77,7 @@ export class DaemonTokenManager {
       const kind = classifyConnectFailure(firstError).kind;
       if (
         kind === "permanent" || kind === "awaiting-seat" ||
-        isJwksTrustFailure(firstError)
+        kind === "stale-identity" || isJwksTrustFailure(firstError)
       ) {
         throw firstError;
       }

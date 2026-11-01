@@ -52,6 +52,16 @@ const SERVER_KEY_MISMATCH: StatusMessage = {
   message: "Server key mismatch",
 };
 
+/**
+ * The panel already holds a different key for this server and refuses to
+ * replace it (first registered key wins). Same handling as an unknown key:
+ * keep the key files and wait for an administrator.
+ */
+const SERVER_KEY_ALREADY_REGISTERED: StatusMessage = {
+  status: 409,
+  message: "Server key already registered",
+};
+
 const INVALID_OR_EXPIRED_CHALLENGE: StatusMessage = {
   status: 400,
   message: "Invalid or expired challenge",
@@ -118,7 +128,8 @@ export function isTransientConnectError(err: unknown): boolean {
 function isClassifierStaleIdentity(err: unknown): boolean {
   if (isStaleDaemonIdentityError(err)) return true;
   return err instanceof DaemonApiError &&
-    matchesExact(err, SERVER_KEY_MISMATCH);
+    (matchesExact(err, SERVER_KEY_MISMATCH) ||
+      matchesExact(err, SERVER_KEY_ALREADY_REGISTERED));
 }
 
 function failureReason(err: unknown): string {
