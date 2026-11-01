@@ -113,6 +113,15 @@ function setOptionalEnv(key: string, value: string | undefined): void {
   else Deno.env.set(key, value);
 }
 
+async function replaceFileAtomically(
+  path: string,
+  text: string,
+): Promise<void> {
+  const staged = `${path}.next`;
+  await Deno.writeTextFile(staged, text);
+  await Deno.rename(staged, path);
+}
+
 async function waitFor<T>(
   label: string,
   predicate: () => T | undefined | Promise<T | undefined>,
@@ -2717,8 +2726,11 @@ it({
       );
       await new Promise((resolve) => originalSetTimeout(resolve, 50));
       enrollsAtPark = enrollCount;
-      await Deno.writeTextFile(`${tempDir}/license.id`, "license-456\n");
-      await Deno.writeTextFile(`${tempDir}/license.token`, "token-xyz\n");
+      // The parked client re-reads these files every few ms, so replace each
+      // one atomically: a plain write truncates first and a re-check landing in
+      // that window sees an empty file instead of the new license.
+      await replaceFileAtomically(`${tempDir}/license.id`, "license-456\n");
+      await replaceFileAtomically(`${tempDir}/license.token`, "token-xyz\n");
       const socket = await waitFor(
         "unpark websocket",
         () => sockets.at(0),
