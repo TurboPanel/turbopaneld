@@ -3089,7 +3089,7 @@ if [ "$DAEMON_EXEC_MODE" = "js" ]; then
   DENO_BIN="$RUNTIMES_DIR/deno/bin/deno"
   tp_print_ok "Deno ${TP_DENO_VERSION} ready"
 else
-  tp_print_step "–" "Skipping Deno runtime (native binary)"
+  tp_print_step "–" "Deno runtime not needed by the native daemon (Ansible vendors the pinned Deno for the Docker gate)"
 fi
 
 if [ "$DAEMON_EXEC_MODE" = "$TP_EXEC_MODE_NATIVE" ]; then

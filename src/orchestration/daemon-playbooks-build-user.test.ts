@@ -80,11 +80,16 @@ test("instance-install.yml includes build-user between principal-access and daem
 });
 
 /**
- * Playbooks that can be the first thing to install Docker on a host. The
- * on-demand setup plays (rabbitmq, proxysql, ...) only run on hosts that an
- * install play already gave a vendored Deno.
+ * Playbooks that run the docker role (which installs the Docker gate, which
+ * runs on the vendored Deno), so any of them can be the first to install it.
  */
-const DOCKER_INSTALLERS = ["instance-install.yml", "docker-setup.yml"];
+const DOCKER_INSTALLERS = [
+  "instance-install.yml",
+  "docker-setup.yml",
+  "orchestrator-setup.yml",
+  "proxysql-setup.yml",
+  "rabbitmq-setup.yml",
+];
 
 test("every playbook that can install Docker vendors Deno before the docker role", async () => {
   for (const name of DOCKER_INSTALLERS) {
