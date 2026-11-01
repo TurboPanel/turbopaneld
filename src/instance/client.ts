@@ -523,8 +523,8 @@ export class InstanceClient {
   #caPinMismatch: string | null = null;
   #licenseStamp: string | undefined;
   #idlePresence: IdlePresence | undefined;
-  /** Set by the signed-hello path once a verified hello carried the heartbeat; the unsigned advice is then ignored. */
-  #pinnedHelloApplied = false;
+  /** Always false until the signed-hello change lands; that change drops `readonly` and sets it, after which the unsigned advice is ignored. */
+  readonly #pinnedHelloApplied = false;
   /** Command ids already dispatched, so a repeated frame never runs twice. */
   readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
