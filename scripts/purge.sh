@@ -1474,6 +1474,28 @@ tp_inventory_firewall() {
       tp_file_add "$TP_TMP/inv.chains" "$_if_bin $_if_chain"
     done < "$TP_TMP/fw.chains"
   done
+  tp_inventory_nft_tables
+}
+
+# TurboPanel's own nftables tables (TP_NFT_TABLES, exact names in family inet),
+# listed beside the iptables chains. Nothing else in the nft ruleset is named.
+tp_inventory_nft_tables() {
+  if ! tp_has_tool nft; then
+    tp_inv_skip "nft not installed"
+    return 0
+  fi
+  if ! nft list tables > "$TP_TMP/fw.nft" 2>>"$TP_LOG_FILE"; then
+    tp_inv_warn "could not list nft tables"
+    if [ "${TP_INV_QUIET:-false}" = true ] && [ -f "$TP_TMP/before.chains" ]; then
+      grep "^nft " "$TP_TMP/before.chains" >> "$TP_TMP/inv.chains" || true
+    fi
+    return 0
+  fi
+  for _in_table in $TP_NFT_TABLES; do
+    if grep -qx "table inet $_in_table" "$TP_TMP/fw.nft"; then
+      tp_file_add "$TP_TMP/inv.chains" "nft inet $_in_table"
+    fi
+  done
 }
 
 tp_inventory_wireguard() {
@@ -2398,10 +2420,32 @@ tp_firewall_try_delete() {
   return 1
 }
 
+# The nftables tables TurboPanel loads (hosting ingress guard, build and PHP
+# loopback filters). Each is deleted by exact name; the operator's own tables
+# and rules are never touched. Runs after the units are gone, so nothing
+# reloads a table behind the delete.
+tp_remove_nft_tables() {
+  if ! tp_has_tool nft; then
+    tp_record_skip "nft not installed"
+    return 0
+  fi
+  if ! nft list tables > "$TP_TMP/fw.nft" 2>>"$TP_LOG_FILE"; then
+    tp_record_fail "list nft tables"
+    return 0
+  fi
+  for _rn_table in $TP_NFT_TABLES; do
+    if ! grep -qx "table inet $_rn_table" "$TP_TMP/fw.nft"; then
+      continue
+    fi
+    tp_run "delete nft table inet $_rn_table" nft delete table inet "$_rn_table" || true
+  done
+}
+
 tp_remove_firewall() {
   tp_print_step "▸" "Firewall chains"
   tp_firewall_family iptables
   tp_firewall_family ip6tables
+  tp_remove_nft_tables
 }
 
 # LAN routes TurboFabric installed to other members' container subnets
@@ -4216,6 +4260,10 @@ TP_IP_FORWARD_FILE=/proc/sys/net/ipv4/ip_forward
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
 TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker
+# TurboPanel's nftables tables, all in family inet. A role, host script or the
+# daemon that loads another table must add its exact name here (a coverage
+# test fails otherwise).
+TP_NFT_TABLES="turbopanel_ingress_guard turbopanel_build turbopanel_php"
 TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folders_remove folders_keep accounts groups principals volumes leftalone cpmarkers purge_targets"
 
 # Apt packages this script may purge: Docker's (the list below; a purge of
