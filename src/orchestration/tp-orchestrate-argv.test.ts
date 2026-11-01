@@ -138,6 +138,12 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
         directoryUrl: "https://acme-v02.api.letsencrypt.org/directory",
         useStaging: false,
       },
+      edgeTrust: {
+        cidrs: ["198.51.100.0/24", "2001:db8::/32", "203.0.113.7/32"],
+        hash: "a".repeat(64),
+        cloudflare: ["198.51.100.0/24", "2001:db8::/32"],
+        bunny: ["203.0.113.7/32"],
+      },
       env: {},
     },
   );
@@ -259,6 +265,10 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       "turbopanel_public_urls=https://[2001:db8::1:8443",
       'turbopanel_hostnames_json=[{"host":"{{x}}"}]',
       'turbopanel_hostnames_json=[{"host":"a b"}]',
+      'turbopanel_edge_trust_json={"cloudflare":["1.2.3.0/24 }\\n"]}',
+      'turbopanel_edge_trust_json={"cloudflare":["{{x}}"]}',
+      'turbopanel_edge_trust_json={"cloudflare":["a b"]}',
+      'turbopanel_edge_trust_json=["198.51.100.0/24"]',
       "turbopanel_acme_email=no-at-sign",
       "turbopanel_acme_email=a@localhost",
       "turbopanel_acme_directory=http://acme.example.com/directory",

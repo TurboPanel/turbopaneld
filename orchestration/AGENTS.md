@@ -455,6 +455,7 @@ Vars (both roles; extra-vars win):
 | --- | --- |
 | `turbopanel_hostnames` | Per-hostname `{host, source, cert_id}` list |
 | `turbopanel_hostnames_json` | Compact JSON of that list. `tp-orchestrate` accepts only `key=value` extra-vars, which stay strings, so public-urls apply passes this and `resolve-hostnames.yml` loads it with `from_json` into `turbopanel_hostnames` before `selectattr` and the Caddy template |
+| `turbopanel_edge_trust_json` | Compact JSON object `{hash, cloudflare, bunny}` of edge CIDRs from `public-urls-update` `edgeTrust`. `resolve-edge-trust.yml` turns it into `turbopanel_edge_cidrs` (union), `turbopanel_edge_cf_cidrs` and `turbopanel_edge_bunny_cidrs`, which `Caddyfile.j2` puts in `trusted_proxies` and in the `@not_edge_peer` / `@not_cloudflare_peer` strip matchers. The apply persists it as `caddy/instance-edge-trust.json`; a converge that passes none reads that file, so ranges survive an update. Empty lists clear it |
 | `turbopanel_tls_mode` | Deprecated alias. Display-only once hostnames are set |
 | `turbopanel_tls_cert_path` / `turbopanel_tls_key_path` | Legacy uploaded pair when `cert_id` is empty; copied to `uploaded.{crt,key}` |
 | `turbopanel_public_hostname` / `turbopanel_acme_email` | Deprecated single ACME name, and the account email (no longer rendered into the Caddyfile) |

@@ -891,13 +891,28 @@ test(
     );
     assertMatch(
       caddyfile,
-      /trusted_proxies static 127\.0\.0\.0\/8 ::1\n\s+trusted_proxies_strict\n/,
+      /trusted_proxies static 127\.0\.0\.0\/8 ::1(?:\{% for c in turbopanel_edge_cidrs[^%]*%\} \{\{ c \}\}\{% endfor %\})?\s+trusted_proxies_strict\n/,
       "X-Forwarded-For is read from the right, so a client cannot forge the leftmost entry",
     );
     assertEquals(
       (caddyfile.match(/header_up X-Real-IP \{client_ip\}/g) ?? []).length,
       3,
       "the three unix proxies forward {client_ip}",
+    );
+    assertMatch(
+      caddyfile,
+      /@not_cloudflare_peer not remote_ip 127\.0\.0\.0\/8 ::1\{% for c in turbopanel_edge_cf_cidrs/,
+      "Cloudflare headers survive only from loopback and Cloudflare ranges",
+    );
+    assertMatch(
+      caddyfile,
+      /@not_edge_peer not remote_ip 127\.0\.0\.0\/8 ::1\{% for c in turbopanel_edge_cidrs/,
+      "X-Forwarded-For survives only from loopback and edge ranges",
+    );
+    assertMatch(
+      caddyfile,
+      /request_header @not_edge_peer -X-Forwarded-For/,
+      "every other peer still has X-Forwarded-For stripped",
     );
     assertEquals(caddyfile.includes("{remote_host}"), false);
     assertEquals(
