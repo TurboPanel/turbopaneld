@@ -40,6 +40,32 @@ export async function sealingKid(rawPublicKey: Uint8Array): Promise<string> {
   return encodeBase64Url(new Uint8Array(digest));
 }
 
+/** Seal `plaintext` to a raw 32-byte X25519 public key (the control plane's sealing key). */
+export async function sealToRecipient(
+  recipientPublicRaw: Uint8Array,
+  kid: string,
+  aad: string,
+  plaintext: Uint8Array,
+): Promise<HpkeEnvelope> {
+  if (recipientPublicRaw.length !== X25519_KEY_BYTES) {
+    throw new TypeError("recipient public key must be 32 bytes");
+  }
+  const recipientPublicKey = await suite().kem.deserializePublicKey(
+    recipientPublicRaw as BufferSource,
+  );
+  const sealed = await suite().seal(
+    { recipientPublicKey },
+    plaintext as BufferSource,
+    textEncoder.encode(aad) as BufferSource,
+  );
+  return {
+    v: 1,
+    kid,
+    enc: encodeBase64Url(new Uint8Array(sealed.enc)),
+    ct: encodeBase64Url(new Uint8Array(sealed.ct)),
+  };
+}
+
 /** Open an envelope with the raw 32-byte X25519 private key. Throws on any mismatch. */
 export async function openFromSender(
   recipientPrivateRaw: Uint8Array,

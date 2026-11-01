@@ -1,8 +1,17 @@
 import { encodeBase64 } from "@std/encoding/base64";
-import { type HpkeEnvelope, isHpkeEnvelope } from "../crypto/hpke.ts";
+import {
+  type HpkeEnvelope,
+  isHpkeEnvelope,
+  sealToRecipient,
+} from "../crypto/hpke.ts";
 import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { logWarn } from "../util/logger.ts";
 import { retryTransient, type RetryView } from "../util/retry-fetch.ts";
+import {
+  IDENTITY_DOCUMENT_PATH,
+  type PanelIdentityFetch,
+  type PanelSealKey,
+} from "./panel-identity-cache.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
 
@@ -32,6 +41,8 @@ export interface DaemonApiClientOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Present on the authenticated client; without it only plaintext answers are understood. */
   sealing?: DaemonSealingContext;
+  /** The control plane's sealing key, for secrets this daemon sends up; null when unknown. */
+  panelSealKey?: () => Promise<PanelSealKey | null>;
 }
 
 /**
@@ -463,6 +474,7 @@ export class DaemonApiClient {
       requestId?: string;
     },
   ): Promise<{ stored: boolean }> {
+    const privateKey = await this.#issuedPrivateKeyField(input.privateKeyPem);
     const body = await this.#requestJson<{ ok?: boolean; stored?: unknown }>(
       "/api/daemon/v1/tls/issued",
       {
@@ -470,7 +482,7 @@ export class DaemonApiClient {
         body: JSON.stringify({
           hostname: input.hostname,
           certificatePem: input.certificatePem,
-          privateKeyPem: input.privateKeyPem,
+          ...privateKey,
           ...(input.requestId === undefined
             ? {}
             : { requestId: input.requestId }),
@@ -479,6 +491,43 @@ export class DaemonApiClient {
       { auth: true },
     );
     return { stored: body.stored === true };
+  }
+
+  /**
+   * The private key field of a `/tls/issued` body: an envelope sealed to the
+   * control plane's sealing key when it is known, plain PEM only while this
+   * server has never received a sealed secret. Once it has, a missing sealing
+   * key fails the report rather than sending the key in the clear.
+   */
+  async #issuedPrivateKeyField(
+    privateKeyPem: string,
+  ): Promise<{ privateKeyEnvelope: HpkeEnvelope } | { privateKeyPem: string }> {
+    const seal = await this.#options.panelSealKey?.();
+    if (seal) {
+      return {
+        privateKeyEnvelope: await sealToRecipient(
+          seal.pub,
+          seal.kid,
+          seal.panelFingerprint,
+          new TextEncoder().encode(privateKeyPem),
+        ),
+      };
+    }
+    if (await this.#options.sealing?.isTrustSealed()) {
+      throw new DaemonApiError(503, "panel seal key unavailable");
+    }
+    return { privateKeyPem };
+  }
+
+  /** The signed identity document, as the raw body plus its signature header. */
+  async getPanelIdentityDocument(): Promise<PanelIdentityFetch> {
+    const response = await this.#request(IDENTITY_DOCUMENT_PATH, {
+      method: "GET",
+    });
+    return {
+      body: await response.text(),
+      signature: response.headers.get("x-turbopanel-signature"),
+    };
   }
 
   /**

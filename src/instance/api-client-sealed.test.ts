@@ -1,5 +1,11 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { openFromSender } from "../crypto/hpke.ts";
+import { decodeBase64Url } from "@std/encoding/base64url";
+import {
+  type HpkeEnvelope,
+  isHpkeEnvelope,
+  openFromSender,
+  sealingKid,
+} from "../crypto/hpke.ts";
 import { sharedSecretRedactor } from "../logs/redactor.ts";
 import { createFakeInstanceApi } from "../testing/fake-instance-api.ts";
 import {
@@ -13,6 +19,7 @@ import {
   DaemonApiError,
   type DaemonSealingContext,
 } from "./api-client.ts";
+import type { PanelSealKey } from "./panel-identity-cache.ts";
 import { registerSealingKey } from "./sealing.ts";
 
 const test = Deno.test.bind(Deno);
@@ -246,4 +253,96 @@ test("opening and registering log no plaintext or private key material", async (
   } finally {
     restore();
   }
+});
+
+const ISSUED_PATH = "/api/daemon/v1/tls/issued";
+const KEY_PEM =
+  "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+
+async function panelKey(): Promise<
+  { seal: PanelSealKey; privateRaw: Uint8Array }
+> {
+  const pair = await crypto.subtle.generateKey({ name: "X25519" }, true, [
+    "deriveBits",
+  ]) as CryptoKeyPair;
+  const pub = decodeBase64Url(
+    (await crypto.subtle.exportKey("jwk", pair.publicKey)).x as string,
+  );
+  const privateRaw = decodeBase64Url(
+    (await crypto.subtle.exportKey("jwk", pair.privateKey)).d as string,
+  );
+  return {
+    seal: { kid: await sealingKid(pub), pub, panelFingerprint: "P".repeat(43) },
+    privateRaw,
+  };
+}
+
+function reportClient(
+  options: { seal: PanelSealKey | null; trustSealed?: boolean },
+): DaemonApiClient {
+  return new DaemonApiClient({
+    config: {
+      kind: "url",
+      baseUrl: "https://instance.test",
+      wsBaseUrl: "wss://instance.test",
+    },
+    getToken: () => Promise.resolve("tok"),
+    sleep: () => Promise.resolve(),
+    panelSealKey: () => Promise.resolve(options.seal),
+    sealing: sealingContext({ sealed: options.trustSealed === true, marks: 0 }),
+  });
+}
+
+async function reportAndCapture(client: DaemonApiClient): Promise<unknown> {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    let sent: unknown;
+    api.script(ISSUED_PATH, (init) => {
+      sent = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ok: true, stored: true }), {
+        status: 200,
+      });
+    });
+    await client.reportIssuedCertificate({
+      hostname: "shop.example.com",
+      certificatePem: "CERT",
+      privateKeyPem: KEY_PEM,
+    });
+    return sent;
+  } finally {
+    restore();
+  }
+}
+
+test("an issued key is sent as an envelope the panel can open, never as PEM", async () => {
+  const { seal, privateRaw } = await panelKey();
+  const sent = await reportAndCapture(reportClient({ seal })) as Record<
+    string,
+    unknown
+  >;
+  assertEquals("privateKeyPem" in sent, false);
+  assert(isHpkeEnvelope(sent.privateKeyEnvelope));
+  const opened = await openFromSender(
+    privateRaw,
+    seal.panelFingerprint,
+    sent.privateKeyEnvelope as HpkeEnvelope,
+  );
+  assertEquals(new TextDecoder().decode(opened), KEY_PEM);
+  assert(!JSON.stringify(sent).includes("PRIVATE KEY"));
+});
+
+test("without a panel sealing key the key goes as PEM, unless a sealed answer was ever received", async () => {
+  const sent = await reportAndCapture(reportClient({ seal: null })) as Record<
+    string,
+    unknown
+  >;
+  assertEquals(sent.privateKeyPem, KEY_PEM);
+  assertEquals("privateKeyEnvelope" in sent, false);
+
+  const err = await assertRejects(
+    () => reportAndCapture(reportClient({ seal: null, trustSealed: true })),
+    DaemonApiError,
+  );
+  assertEquals(err.status, 503);
 });

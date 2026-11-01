@@ -64,6 +64,7 @@ import {
   sizesFeaturesNegotiated,
 } from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
+import { createPanelSealKeySource } from "./panel-identity-cache.ts";
 import { createSealingContext, registerSealingKey } from "./sealing.ts";
 import {
   INSTANCE_VERSION_HEADER,
@@ -1405,6 +1406,9 @@ export class InstanceClient {
       serverKeyId: keyFile.keyId,
     });
     this.#sealingRegistered = false;
+    const panelSealKeys = createPanelSealKeySource({
+      fetchDocument: () => this.#apiClient!.getPanelIdentityDocument(),
+    });
     const apiClient = new DaemonApiClient({
       config: this.#config,
       httpClient: this.#httpClient,
@@ -1415,6 +1419,7 @@ export class InstanceClient {
         return await tokenManagerRef.current.getToken(options);
       },
       sealing: this.#sealing,
+      panelSealKey: () => panelSealKeys.get(),
       ...this.#apiClientVersionHook(),
     });
     const tokenManager = new DaemonTokenManager({
