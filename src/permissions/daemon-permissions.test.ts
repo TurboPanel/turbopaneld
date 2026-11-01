@@ -1,3 +1,4 @@
+import { PROD_LIB_DIR_DEFAULT } from "../paths/layout.ts";
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
@@ -226,6 +227,8 @@ test("every compile task bakes --quiet so absent optional tools are not logged a
 });
 
 /** True when `path` is `grant` itself or sits beneath it. */
+const PANEL_IDENTITY_PIN_PATH = `${PROD_LIB_DIR_DEFAULT}/panel-identity`;
+
 function covers(grants: readonly string[], path: string): boolean {
   return grants.some((grant) => path === grant || path.startsWith(`${grant}/`));
 }
@@ -240,6 +243,10 @@ test("the scheduled-backup wrapper renders the backup runner contract, not the d
   // The line ends by running the bundle's backup-run verb on its one argument.
   assertEquals(found.flags.at(-1), '"$policy_id"');
   assertEquals(found.flags.at(-2), "backup-run");
+});
+
+test("the daemon can read the panel key pin file", () => {
+  assertEquals(covers(DAEMON_READ_PATHS, PANEL_IDENTITY_PIN_PATH), true);
 });
 
 test("the backup runner's grants are a strict subset of the daemon's", () => {

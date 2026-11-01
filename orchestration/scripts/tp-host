@@ -5254,6 +5254,115 @@ tp_verb_tunnel_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# --- panel key pin (lib/panel-identity) ---------------------------------------
+# run.sh writes the pin file at install, root-owned, and no generic verb may
+# name it (it sits outside every managed tree). This verb is the one way the
+# daemon updates it afterwards, and only to follow the panel's own signed
+# identity document: stdin is the X-TurboPanel-Signature header value on the
+# first line and the exact response body after it. The document must name the
+# pinned current key, be signed by it, be unexpired and carry a key set no
+# lower than the pinned one. Only next=, keyset=, urls= and updated= change;
+# a change of the current key (a rotation) is refused here.
+
+tp_panel_identity_python() {
+  cat <<'PY'
+import base64, binascii, hashlib, json, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+PATH = "/api/daemon/v1/instance/identity"
+body_path, header_path, out, pinned, pinned_keyset = sys.argv[1:6]
+out = Path(out)
+
+def b64d(text):
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        raise SystemExit("not base64url")
+
+raw = Path(body_path).read_bytes()
+header = Path(header_path).read_text().strip()
+try:
+    doc = json.loads(raw)
+    current = [k for k in doc["keys"] if k.get("role") == "current"]
+    nxt = [k for k in doc["keys"] if k.get("role") == "next"]
+    keyset, expires, urls = doc["keyset"], doc["expires"], doc["urls"]
+except (ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("identity document is malformed")
+if len(current) != 1 or len(nxt) > 1:
+    raise SystemExit("identity document needs one current key and at most one next")
+pub = b64d(current[0].get("pub", ""))
+kid = base64.urlsafe_b64encode(hashlib.sha256(pub).digest()).rstrip(b"=").decode()
+if len(pub) != 32 or kid != current[0].get("kid"):
+    raise SystemExit("current key does not match its fingerprint")
+if kid != pinned:
+    raise SystemExit("the document names a different current key than the pin")
+if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset < int(pinned_keyset):
+    raise SystemExit("keyset is lower than the pinned one")
+try:
+    when = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+except (ValueError, AttributeError):
+    raise SystemExit("expires is not a timestamp")
+if when <= datetime.now(timezone.utc):
+    raise SystemExit("identity document has expired")
+head_kid, _, head_sig = header.partition(":")
+sig = b64d(head_sig)
+if head_kid != kid or len(sig) != 64:
+    raise SystemExit("signature header is wrong")
+for url in urls:
+    if not isinstance(url, str) or not url.startswith("https://") or len(url) < 9 or any(c in url[8:] for c in "/?#@\\ ,\n"):
+        raise SystemExit("url list holds a bad entry")
+next_kid = nxt[0].get("kid", "") if nxt else ""
+if next_kid and len(b64d(next_kid)) != 32:
+    raise SystemExit("next fingerprint is malformed")
+(out / "msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
+(out / "sig").write_bytes(sig)
+der = bytes.fromhex("302a300506032b6570032100") + pub
+pem = base64.b64encode(der).decode()
+(out / "pub.pem").write_text("-----BEGIN PUBLIC KEY-----\n" + "\n".join(pem[i:i + 64] for i in range(0, len(pem), 64)) + "\n-----END PUBLIC KEY-----\n")
+(out / "fields").write_text("%s\n%d\n%s\n" % (next_kid, keyset, ",".join(urls)))
+PY
+}
+
+tp_pin_field_of() {
+  sed -n "s/^$2=//p" "$1" | head -n 1
+}
+
+tp_verb_panel_identity_write() {
+  [ $# -eq 0 ] || tp_die "panel-identity-write: takes no arguments"
+  _pi_file="$INSTALL_ROOT/lib/panel-identity"
+  [ -f "$_pi_file" ] && [ ! -L "$_pi_file" ] || tp_die "panel-identity-write: no panel key is pinned on this host"
+  [ "$(stat -c %u "$_pi_file")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_pi_file is not root-owned"
+  _pi_cur="$(tp_pin_field_of "$_pi_file" current)"
+  [ -n "$_pi_cur" ] || tp_die "panel-identity-write: this host was installed without a panel key"
+  _pi_keyset="$(tp_pin_field_of "$_pi_file" keyset)"
+  case "$_pi_keyset" in ''|*[!0-9]*) tp_die "panel-identity-write: the pin file has no valid keyset" ;; esac
+  tp_stage_dir
+  head -c 65537 > "$TP_STAGE/in"
+  [ "$(wc -c < "$TP_STAGE/in")" -le 65536 ] || tp_die "panel-identity-write: input too large"
+  sed -n '1p' "$TP_STAGE/in" > "$TP_STAGE/header"
+  sed '1d' "$TP_STAGE/in" > "$TP_STAGE/body"
+  # The body is signed byte for byte; sed adds nothing but a missing final newline.
+  [ "$(tail -c 1 "$TP_STAGE/in" | wc -l)" -eq 0 ] || tp_die "panel-identity-write: the body must not end in a newline"
+  mkdir "$TP_STAGE/v"
+  python3 -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" ||
+    tp_die "panel-identity-write: refusing the identity document"
+  openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pub.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sig" >/dev/null 2>&1 ||
+    tp_die "panel-identity-write: the identity document signature is invalid"
+  _pi_next="$(sed -n '1p' "$TP_STAGE/v/fields")"
+  _pi_new_keyset="$(sed -n '2p' "$TP_STAGE/v/fields")"
+  _pi_urls="$(sed -n '3p' "$TP_STAGE/v/fields")"
+  {
+    printf 'current=%s\n' "$_pi_cur"
+    printf 'next=%s\n' "$_pi_next"
+    printf 'keyset=%s\n' "$_pi_new_keyset"
+    printf 'urls=%s\n' "$_pi_urls"
+    printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_pi_file" pinned_by)"
+    printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$TP_STAGE/new"
+  tp_put_file "$_pi_file" 640 root tp < "$TP_STAGE/new"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -5320,5 +5429,6 @@ case "$_verb" in
   app-env-remove) tp_verb_app_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  panel-identity-write) tp_verb_panel_identity_write "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

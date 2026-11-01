@@ -154,6 +154,198 @@ tp_normalize_ca_pin() {
   printf '%s' "$_pin_out"
 }
 
+# --- Install TOKEN -----------------------------------------------------------
+# The install command carries one value, TOKEN=<payload>.<sig>. payload is the
+# base64url text of "v2:" + six base64url fields joined by ":" (licenseId,
+# licenseToken, panelUrls, panelFingerprint, nextFingerprint, caFingerprint;
+# any may be empty). sig is the panel identity key's Ed25519 signature over
+# the payload text. The key is found in the panel's identity document, so the
+# token is only believed after tp_verify_install_token has fetched it.
+
+# Decode base64url (no padding) on stdout; fails on anything outside the alphabet.
+tp_b64url_decode() {
+  _bd_in="$1"
+  case "$_bd_in" in
+    *[!A-Za-z0-9_-]*) return 1 ;;
+    *) ;;
+  esac
+  while [ $(( ${#_bd_in} % 4 )) -ne 0 ]; do
+    _bd_in="${_bd_in}="
+  done
+  printf '%s' "$_bd_in" | tr -- '-_' '+/' | base64 -d 2>/dev/null
+}
+
+# A panel key fingerprint: base64url of a SHA-256 digest, 43 characters.
+tp_panel_fingerprint_ok() {
+  case "$1" in
+    *[!A-Za-z0-9_-]*) return 1 ;;
+    *) ;;
+  esac
+  [ "${#1}" -eq 43 ]
+}
+
+# Split a TOKEN into TOKEN_PAYLOAD, TOKEN_SIG and the six fields. Returns 1
+# when it is malformed and 2 when it decodes to something that is not a v2
+# payload (the older TURBOPANEL_LICENSE value). Fields are returned decoded.
+tp_install_token_decode() {
+  _itd_tok="$1"
+  TOKEN_PAYLOAD="${_itd_tok%.*}"
+  TOKEN_SIG=""
+  case "$_itd_tok" in
+    *.*) TOKEN_SIG="${_itd_tok##*.}" ;;
+    *) ;;
+  esac
+  _itd_text="$(tp_b64url_decode "$TOKEN_PAYLOAD")" || return 1
+  case "$_itd_text" in
+    v2:*) ;;
+    *) return 2 ;;
+  esac
+  _itd_rest="${_itd_text#v2:}"
+  # Fields hold no ":" (base64url), so five separators mean six fields. IFS
+  # splitting would drop trailing empty fields, hence cut.
+  [ "$(printf '%s' "$_itd_rest" | tr -cd ':' | wc -c)" -eq 5 ] || return 1
+  _itd_n=1
+  for _itd_name in TOKEN_LICENSE_ID TOKEN_LICENSE_TOKEN TOKEN_PANEL_URLS \
+    TOKEN_PANEL_FINGERPRINT TOKEN_NEXT_FINGERPRINT TOKEN_CA_FINGERPRINT; do
+    _itd_field="$(printf '%s' "$_itd_rest" | cut -d: -f"$_itd_n")"
+    _itd_value="$(tp_b64url_decode "$_itd_field")" || return 1
+    eval "$_itd_name=\$_itd_value"
+    _itd_n=$((_itd_n + 1))
+  done
+  [ -n "$TOKEN_LICENSE_ID" ] && [ -n "$TOKEN_LICENSE_TOKEN" ] || return 1
+  # Without a fingerprint nothing can vouch for the token; it is only usable
+  # under --unsafe-no-panel-key.
+  if [ -n "$TOKEN_PANEL_FINGERPRINT" ]; then
+    tp_panel_fingerprint_ok "$TOKEN_PANEL_FINGERPRINT" || return 1
+    [ -n "$TOKEN_SIG" ] && [ "$TOKEN_SIG" != "$_itd_tok" ] || return 1
+  fi
+  if [ -n "$TOKEN_NEXT_FINGERPRINT" ]; then
+    tp_panel_fingerprint_ok "$TOKEN_NEXT_FINGERPRINT" || return 1
+  fi
+  [ -n "$TOKEN_PANEL_URLS" ] || return 1
+  _itd_ifs="$IFS"
+  IFS=','
+  for _itd_url in $TOKEN_PANEL_URLS; do
+    case "$_itd_url" in
+      https://?*) ;;
+      *) IFS="$_itd_ifs"; return 1 ;;
+    esac
+    case "${_itd_url#https://}" in
+      *[/?#@\\\ ]*) IFS="$_itd_ifs"; return 1 ;;
+      *) ;;
+    esac
+  done
+  IFS="$_itd_ifs"
+  return 0
+}
+
+# Python for the identity document: checks it is well formed and names
+# $4 as its only current key, then writes what openssl needs to $3: pub.pem,
+# doc.msg and doc.sig (the document's header signature over
+# "tp-http\n<path>\n<body>"), tok.msg and tok.sig (the TOKEN's), keyset and urls.
+tp_identity_material_python() {
+  cat <<'PY'
+import base64, binascii, hashlib, json, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+PATH = "/api/daemon/v1/instance/identity"
+body_path, header, out, expected, tok_payload, tok_sig = sys.argv[1:7]
+out = Path(out)
+
+def b64d(text):
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        raise SystemExit("not base64url")
+
+def b64e(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+raw = Path(body_path).read_bytes()
+try:
+    doc = json.loads(raw)
+    keys = [k for k in doc["keys"] if k.get("role") == "current"]
+    keyset, expires = doc["keyset"], doc["expires"]
+except (ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("identity document is malformed")
+if len(keys) != 1:
+    raise SystemExit("identity document needs exactly one current key")
+pub = b64d(keys[0].get("pub", ""))
+if len(pub) != 32:
+    raise SystemExit("current key is not a 32-byte Ed25519 key")
+kid = b64e(hashlib.sha256(pub).digest())
+if kid != keys[0].get("kid"):
+    raise SystemExit("current kid is not the fingerprint of its key")
+if kid != expected:
+    raise SystemExit("the panel's key is not the one this command names")
+if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset < 1:
+    raise SystemExit("keyset is not a positive integer")
+try:
+    when = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+except (ValueError, AttributeError):
+    raise SystemExit("expires is not a timestamp")
+if when <= datetime.now(timezone.utc):
+    raise SystemExit("identity document has expired")
+head_kid, _, head_sig = header.strip().partition(":")
+if head_kid != kid:
+    raise SystemExit("signature header names another key")
+sig = b64d(head_sig)
+tsig = b64d(tok_sig)
+if len(sig) != 64 or len(tsig) != 64:
+    raise SystemExit("signature is not 64 bytes")
+(out / "doc.msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
+(out / "doc.sig").write_bytes(sig)
+(out / "tok.msg").write_bytes(tok_payload.encode())
+(out / "tok.sig").write_bytes(tsig)
+der = bytes.fromhex("302a300506032b6570032100") + pub
+pem = base64.b64encode(der).decode()
+lines = [pem[i:i + 64] for i in range(0, len(pem), 64)]
+(out / "pub.pem").write_text("-----BEGIN PUBLIC KEY-----\n" + "\n".join(lines) + "\n-----END PUBLIC KEY-----\n")
+(out / "keyset").write_text(str(keyset))
+(out / "urls").write_text(",".join(u for u in doc.get("urls", []) if isinstance(u, str)))
+PY
+}
+
+# openssl check of one raw Ed25519 signature: $1 pub.pem, $2 message, $3 signature.
+tp_verify_ed25519() {
+  openssl pkeyutl -verify -pubin -inkey "$1" -rawin -in "$2" -sigfile "$3" >/dev/null 2>&1
+}
+
+# Fetch the identity document from the first panel URL and check the TOKEN
+# against it, before this host sends the panel anything. Sets PANEL_KEYSET.
+# Needs python3 and openssl (installed by the prerequisites step).
+tp_verify_install_token() {
+  _vt_dir="$(mktemp -d)"
+  _vt_curl="$(tp_instance_bootstrap_curl)"
+  _vt_url="${PANEL_URLS%%,*}"
+  # shellcheck disable=SC2086
+  if ! $_vt_curl -f -D "$_vt_dir/headers" -o "$_vt_dir/body" "${_vt_url%/}/api/daemon/v1/instance/identity" 2>/dev/null; then
+    tp_print_error "Could not fetch the panel's identity document from ${_vt_url}. Nothing was sent. Check that the panel is reachable and copy a fresh command from Add Server."
+    rm -rf "$_vt_dir"
+    return 1
+  fi
+  _vt_header="$(tr -d '\r' < "$_vt_dir/headers" | grep -i '^x-turbopanel-signature:' | tail -n 1 | sed 's/^[^:]*:[[:space:]]*//')"
+  if ! python3 -c "$(tp_identity_material_python)" "$_vt_dir/body" "$_vt_header" "$_vt_dir" \
+      "$PANEL_FINGERPRINT" "$TOKEN_PAYLOAD" "$TOKEN_SIG" 2>"$_vt_dir/err"; then
+    tp_print_error "The panel's identity document was refused: $(cat "$_vt_dir/err" 2>/dev/null). Nothing was sent. Copy a fresh command from Add Server."
+    rm -rf "$_vt_dir"
+    return 1
+  fi
+  if ! tp_verify_ed25519 "$_vt_dir/pub.pem" "$_vt_dir/doc.msg" "$_vt_dir/doc.sig"; then
+    tp_print_error "The panel's identity document signature is invalid. Nothing was sent. Someone may be intercepting this connection."
+    rm -rf "$_vt_dir"
+    return 1
+  fi
+  if ! tp_verify_ed25519 "$_vt_dir/pub.pem" "$_vt_dir/tok.msg" "$_vt_dir/tok.sig"; then
+    tp_print_error "The install command's signature is invalid. Nothing was sent. Copy the command again from Add Server."
+    rm -rf "$_vt_dir"
+    return 1
+  fi
+  PANEL_KEYSET="$(cat "$_vt_dir/keyset")"
+  rm -rf "$_vt_dir"
+}
+
 # Fingerprints of every certificate in the given PEM files, comma-separated
 # and de-duplicated. Missing files are skipped.
 tp_pem_files_pin() {
@@ -2490,6 +2682,11 @@ SKIP_DAEMON_PACKAGE=false
 MANIFEST_URL=""
 INSTANCE_MANIFEST_URL=""
 UI_MANIFEST_URL=""
+PANEL_URLS=""
+PANEL_FINGERPRINT=""
+PANEL_NEXT_FINGERPRINT=""
+PANEL_KEYSET=""
+UNSAFE_NO_PANEL_KEY=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -2515,6 +2712,13 @@ while [ $# -gt 0 ]; do
       export TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1; shift ;;
     --insecure-tls)
       INSECURE_TLS=true; shift ;;
+    --unsafe-no-panel-key)
+      UNSAFE_NO_PANEL_KEY=true; shift ;;
+    --panel-key)
+      # Used by the sudo re-exec and tp-orchestrate so the pin survives; not
+      # something a person types.
+      [ $# -ge 2 ] || { tp_print_error "--panel-key requires an argument"; exit 1; }
+      PANEL_FINGERPRINT="$2"; shift 2 ;;
     --no-start)
       NO_START=true; shift ;;
     --progress-markers)
@@ -2547,6 +2751,47 @@ done
 # Explicit flags win when both are set. The sudo re-exec hands the license and
 # tunnel token over in these variables, never as flags: argv is world-readable
 # (ps, /proc) and sudo logs it.
+# The new install value: one TOKEN (see tp_install_token_decode). Read once and
+# unset, so nothing started later inherits it. The sudo re-exec hands it over
+# as TURBOPANEL_INSTALL_TOKEN (an internal name, not part of the command).
+INSTALL_TOKEN="${TOKEN:-${TURBOPANEL_INSTALL_TOKEN:-}}"
+unset TOKEN TURBOPANEL_INSTALL_TOKEN
+TOKEN_PAYLOAD=""
+TOKEN_SIG=""
+if [ -n "$INSTALL_TOKEN" ]; then
+  _tok_rc=0
+  tp_install_token_decode "$INSTALL_TOKEN" || _tok_rc=$?
+  case "$_tok_rc" in
+    0) ;;
+    2)
+      tp_print_error "TOKEN holds an older install value. Pass it as TURBOPANEL_LICENSE, or copy a fresh command from Add Server."
+      exit 1
+      ;;
+    *)
+      tp_print_error "TOKEN is not a TurboPanel install value. Copy the command again from Add Server."
+      exit 1
+      ;;
+  esac
+  if [ -z "$TOKEN_PANEL_FINGERPRINT" ] && [ "$UNSAFE_NO_PANEL_KEY" != true ]; then
+    tp_print_error "This install command carries no panel key. Copy a fresh command from Add Server, or re-run with --unsafe-no-panel-key to pin nothing (not recommended)."
+    exit 1
+  fi
+  # The legacy base64url "id:token" form keeps the license decode below as is.
+  LICENSE="$(printf '%s:%s' "$TOKEN_LICENSE_ID" "$TOKEN_LICENSE_TOKEN" | base64 | tr -d '\n=' | tr '+/' '-_')"
+  HOST_URL="${TOKEN_PANEL_URLS%%,*}"
+  PANEL_URLS="$TOKEN_PANEL_URLS"
+  PANEL_FINGERPRINT="$TOKEN_PANEL_FINGERPRINT"
+  PANEL_NEXT_FINGERPRINT="$TOKEN_NEXT_FINGERPRINT"
+  if [ -n "$TOKEN_CA_FINGERPRINT" ]; then
+    CA_PIN="$TOKEN_CA_FINGERPRINT"
+    # A pinned CA in the command means the panel's certificate is private.
+    INSECURE_TLS=true
+  fi
+fi
+if [ -n "$PANEL_FINGERPRINT" ] && ! tp_panel_fingerprint_ok "$PANEL_FINGERPRINT"; then
+  tp_print_error "The panel key fingerprint is malformed. Copy the command again from Add Server."
+  exit 1
+fi
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
 [ -n "$TUNNEL_TOKEN" ] || TUNNEL_TOKEN="${TURBOPANEL_TUNNEL_TOKEN:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
@@ -2744,6 +2989,10 @@ if ! tp_is_root; then
     export TURBOPANEL_LICENSE="$LICENSE"
     _sudo_keep="TURBOPANEL_LICENSE"
   fi
+  if [ -n "$INSTALL_TOKEN" ]; then
+    export TURBOPANEL_INSTALL_TOKEN="$INSTALL_TOKEN"
+    _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_INSTALL_TOKEN"
+  fi
   if [ -n "$TUNNEL_TOKEN" ]; then
     export TURBOPANEL_TUNNEL_TOKEN="$TUNNEL_TOKEN"
     _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_TUNNEL_TOKEN"
@@ -2761,6 +3010,9 @@ if ! tp_is_root; then
   # the root run would trust whatever CA answers.
   [ -n "$CA_PIN" ] && set -- "$@" --instance-ca-fingerprint "$CA_PIN"
   [ "$INSECURE_TLS" = true ] && set -- "$@" --insecure-tls
+  # Not secrets; they must survive sudo's environment reset.
+  [ -n "$PANEL_FINGERPRINT" ] && set -- "$@" --panel-key "$PANEL_FINGERPRINT"
+  [ "$UNSAFE_NO_PANEL_KEY" = true ] && set -- "$@" --unsafe-no-panel-key
   [ "$NO_START" = true ] && set -- "$@" --no-start
   [ "$SKIP_DAEMON_PACKAGE" = true ] && set -- "$@" --skip-daemon-package
   [ "$PROGRESS_MARKERS" = true ] && set -- "$@" --progress-markers
@@ -2898,6 +3150,19 @@ fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
 
+# The install command's panel key, checked against the panel's own identity
+# document before this host sends the panel anything (the first contact is the
+# Platform CA fetch below; the enrolment comes later still). A failure stops
+# the install here.
+if [ -n "$TOKEN_PAYLOAD" ] && [ -n "$PANEL_FINGERPRINT" ]; then
+  tp_print_step "▸" "Checking the install command against the panel's key…"
+  tp_verify_install_token || exit 1
+  tp_print_ok "Install command matches the panel's key"
+fi
+if [ "$INSTANCE_INSTALL" != true ]; then
+  tp_resolve_panel_pin || exit 1
+fi
+
 # Control-plane update: swap the instance and UI packages only. The running
 # daemon binary, its JS fallback, and the orchestration tree stay put.
 if [ "$SKIP_DAEMON_PACKAGE" = true ]; then
@@ -2989,6 +3254,117 @@ if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
   fi
 fi
 
+# One `key=value` line from a pin file ("" when the file or the key is absent).
+tp_pin_file_field() {
+  [ -f "$1" ] || return 0
+  sed -n "s/^$2=//p" "$1" | head -n 1
+}
+
+# Decide what this run does with the panel key pin, before anything is
+# written. The pin file (lib/panel-identity) and the panel_key line in
+# lib/update-origin must agree. Outcomes in PIN_ACTION:
+#   none    a legacy install: nothing to pin (no key given, none stored)
+#   write   first pin (fresh install with a TOKEN, or --unsafe-no-panel-key)
+#   refresh the same key again: only urls= and updated= change
+#   keep    a re-run without a TOKEN (managed update): file untouched, and the
+#           stored key stays in update-origin
+# A different key is refused: a key change arrives only as a signed rotation
+# from the panel. A TOKEN-less run never loosens a stored pin.
+tp_resolve_panel_pin() {
+  _pp_file="$INSTALL_ROOT/lib/panel-identity"
+  _pp_origin="$INSTALL_ROOT/lib/update-origin"
+  PIN_ACTION=none
+  PIN_HOSTS=""
+  _pp_have_file=false
+  [ -f "$_pp_file" ] && _pp_have_file=true
+  _pp_cur="$(tp_pin_file_field "$_pp_file" current)"
+  _pp_okey="$(tp_pin_file_field "$_pp_origin" panel_key)"
+  _pp_ohosts="$(tp_pin_file_field "$_pp_origin" hosts)"
+  if [ "$_pp_cur" != "$_pp_okey" ] && { [ "$_pp_have_file" = true ] || [ -n "$_pp_okey" ]; }; then
+    tp_print_error "The panel key pin and the update origin disagree; refusing to continue."
+    return 1
+  fi
+  if [ "$_pp_have_file" = true ]; then
+    if [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -n "$_pp_cur" ]; then
+      tp_print_error "This server is pinned to a panel key; --unsafe-no-panel-key cannot remove it."
+      return 1
+    fi
+    if [ -n "$PANEL_FINGERPRINT" ] && [ "$PANEL_FINGERPRINT" != "$_pp_cur" ]; then
+      tp_print_error "This server is pinned to a different panel key; a key change arrives only as a signed rotation from the panel."
+      return 1
+    fi
+    if [ -n "$TOKEN_PAYLOAD" ]; then
+      _pp_keyset="$(tp_pin_file_field "$_pp_file" keyset)"
+      if [ -n "$PANEL_KEYSET" ] && [ "$PANEL_KEYSET" -lt "${_pp_keyset:-0}" ]; then
+        tp_print_error "The panel offered an older key set than this server has pinned; refusing."
+        return 1
+      fi
+      PIN_ACTION=refresh
+      PIN_HOSTS="$PANEL_URLS"
+    else
+      PIN_ACTION=keep
+      PANEL_FINGERPRINT="$_pp_cur"
+      PIN_HOSTS="$_pp_ohosts"
+    fi
+    return 0
+  fi
+  if [ -n "$PANEL_FINGERPRINT" ] || [ "$UNSAFE_NO_PANEL_KEY" = true ]; then
+    PIN_ACTION=write
+    PIN_HOSTS="$PANEL_URLS"
+  else
+    PIN_HOSTS="$_pp_ohosts"
+  fi
+  return 0
+}
+
+# Write lib/panel-identity (see tp_resolve_panel_pin for PIN_ACTION). Contents,
+# one key=value per line: current, next, keyset, urls, pinned_by, updated.
+# It is created 0644 here (this script runs as root) because the tp group does not exist until
+# the installer role has run; tp_finish_panel_identity_pin narrows it to
+# root:tp 0640. The values are public key fingerprints.
+tp_write_panel_identity_pin() {
+  _wp_file="$INSTALL_ROOT/lib/panel-identity"
+  _wp_by=install
+  [ "$UNSAFE_NO_PANEL_KEY" = true ] && _wp_by=unsafe
+  _wp_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  case "$PIN_ACTION" in
+    write)
+      _wp_cur="$PANEL_FINGERPRINT"
+      _wp_next="$PANEL_NEXT_FINGERPRINT"
+      _wp_keyset="${PANEL_KEYSET:-0}"
+      ;;
+    refresh)
+      _wp_cur="$(tp_pin_file_field "$_wp_file" current)"
+      _wp_next="$(tp_pin_file_field "$_wp_file" next)"
+      _wp_keyset="$(tp_pin_file_field "$_wp_file" keyset)"
+      _wp_by="$(tp_pin_file_field "$_wp_file" pinned_by)"
+      ;;
+    *) return 0 ;;
+  esac
+  _wp_tmp="$(mktemp)"
+  {
+    printf 'current=%s\n' "$_wp_cur"
+    printf 'next=%s\n' "$_wp_next"
+    printf 'keyset=%s\n' "$_wp_keyset"
+    printf 'urls=%s\n' "$PIN_HOSTS"
+    printf 'pinned_by=%s\n' "$_wp_by"
+    printf 'updated=%s\n' "$_wp_now"
+  } > "$_wp_tmp"
+  install -m 0644 "$_wp_tmp" "$_wp_file"
+  rm -f "$_wp_tmp"
+}
+
+# Once the tp group exists (after the installer role), hand the pin file to it.
+tp_finish_panel_identity_pin() {
+  _fp_file="$INSTALL_ROOT/lib/panel-identity"
+  [ -f "$_fp_file" ] || return 0
+  if ! getent group tp >/dev/null 2>&1; then
+    tp_print_error "The tp group is missing; cannot finish the panel key pin."
+    return 1
+  fi
+  chown root:tp "$_fp_file" && chmod 0640 "$_fp_file"
+}
+
 # Root-pinned update origin for tp-orchestrate (orchestration/scripts): the
 # control plane this host enrols with, the overlay catalog when one is used,
 # and the Platform CA file it trusts. Lives under the root-owned lib/ tree —
@@ -3000,6 +3376,8 @@ tp_write_update_origin_pin() {
   _pin_tmp="$(mktemp)"
   {
     printf 'host=%s\n' "$HOST_URL"
+    printf 'hosts=%s\n' "${PIN_HOSTS:-$HOST_URL}"
+    printf 'panel_key=%s\n' "$PANEL_FINGERPRINT"
     printf 'dl_base=%s\n' "$DL_BASE"
     if [ -f "$CA_PATH" ]; then
       printf 'instance_ca=%s\n' "$CA_PATH"
@@ -3029,6 +3407,7 @@ tp_write_colocated_update_origin_pin() {
 }
 if [ "$INSTANCE_INSTALL" != true ] && [ "$_colocated_daemon_refresh" != true ]; then
   tp_write_update_origin_pin
+  tp_write_panel_identity_pin
 else
   tp_write_colocated_update_origin_pin
 fi
@@ -3199,6 +3578,10 @@ else
 fi
 # Disposable ansible scratch (ANSIBLE_HOME); roles/collections already live under FHS.
 rm -rf /tmp/turbopanel-ansible /root/.ansible
+
+if [ "$INSTANCE_INSTALL" != true ] && [ "$_colocated_daemon_refresh" != true ]; then
+  tp_finish_panel_identity_pin || exit 1
+fi
 
 # `--no-start` returns here so InstanceClient can restart the unit. Arm the
 # rollback timer before that handoff; a silent start failure would leave

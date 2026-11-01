@@ -892,3 +892,31 @@ the rest of this file.
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
+
+## Install TOKEN and the panel key pin
+
+The install command carries one value, `TOKEN=<payload>.<sig>` (grammar: the
+panel's `daemon-install-command.ts`). `scripts/run.sh` reads it once and
+unsets it, fetches the panel's identity document from the first URL in the
+token, and refuses to continue unless the current key's fingerprint equals the
+token's `panelFingerprint`, the document's `X-TurboPanel-Signature` header
+verifies, and the token's own signature verifies with that key. All of that
+happens before the first request to the panel. The older
+`TURBOPANEL_LICENSE` + `TURBOPANEL_HOST` + `TURBOPANEL_INSTANCE_CA_FINGERPRINT`
+form still works, pins nothing and writes no pin file.
+
+- `/opt/turbopanel/lib/panel-identity` (`current`, `next`, `keyset`, `urls`,
+  `pinned_by`, `updated`; root:tp 0640) is written by `run.sh` after the tp
+  group exists. `lib/update-origin` gains `hosts=` (host= stays for older
+  readers) and `panel_key=`. `tp-orchestrate update` passes `--panel-key` and
+  refuses another value; `run.sh` refuses a different key, an unsafe re-run on
+  a pinned host, and a pin file that disagrees with `panel_key=`.
+- `--unsafe-no-panel-key` is the only way to install from a token with an empty
+  fingerprint. It writes `pinned_by=unsafe` and an empty `current=`; enforcement
+  must treat that as "nothing pinned". The hello reports `panelPin` so the
+  panel can show it on the server row.
+- Only `tp-host panel-identity-write` changes the file afterwards: stdin is the
+  signature header line then the exact identity body; it follows the pinned
+  current key only (urls, next, keyset), never a rotation.
+- `src/instance/panel-identity-pin.ts` reads and parses the file. The daemon
+  logs it at connect and enforces nothing yet.

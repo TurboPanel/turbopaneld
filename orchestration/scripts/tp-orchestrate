@@ -561,6 +561,24 @@ tp_load_update_origin_pin() {
   _pin_ca="$(tp_pin_field instance_ca)"
   _pin_uploaded="$(tp_pin_field uploaded_trust)"
   _pin_colocated="$(tp_pin_field colocated)"
+  _pin_panel_key="$(tp_pin_field panel_key)"
+}
+
+# The panel key pin file (written by run.sh, root-owned) must agree with the
+# panel_key line of the update origin. A host installed before panel keys has
+# neither and passes.
+tp_panel_identity_consistent() {
+  _pi_file="$INSTALL_ROOT/lib/panel-identity"
+  if [ -z "$_pin_panel_key" ] && [ ! -e "$_pi_file" ]; then
+    return 0
+  fi
+  if [ -L "$_pi_file" ] || [ ! -f "$_pi_file" ]; then
+    tp_die "$_pi_file is missing or not a regular file; refusing"
+  fi
+  [ "$(stat -c %u "$_pi_file" 2>/dev/null || echo -1)" = "0" ] ||
+    tp_die "$_pi_file is not root-owned; refusing"
+  [ "$(sed -n 's/^current=//p' "$_pi_file" | head -1)" = "$_pin_panel_key" ] ||
+    tp_die "panel key pin and update origin disagree; refusing"
 }
 
 # The remote-daemon pin: `update` re-enrols against the pinned control
@@ -721,6 +739,7 @@ tp_fetch_pinned_run_script() {
 tp_verb_update() {
   tp_require_root_scratch
   tp_read_update_origin_pin
+  tp_panel_identity_consistent
   _license=""
   _license_stdin=false
   _host=""
@@ -758,6 +777,12 @@ tp_verb_update() {
         [ "$2" = "$CANONICAL_INSTANCE_CA" ] || tp_die "--instance-ca must be $CANONICAL_INSTANCE_CA"
         [ "$_pin_ca" = "$2" ] || tp_die "refusing --instance-ca: no Platform CA is pinned for this host"
         _ca="$2"
+        shift 2
+        ;;
+      --panel-key)
+        [ $# -ge 2 ] || tp_die "--panel-key requires a value"
+        [ -n "$_pin_panel_key" ] && [ "$2" = "$_pin_panel_key" ] ||
+          tp_die "refusing --panel-key: this host is pinned to another panel key"
         shift 2
         ;;
       --channel)
@@ -818,6 +843,7 @@ tp_verb_update() {
 
   set --
   [ -n "$_host" ] && set -- "$@" --host "$_host"
+  [ -n "$_pin_panel_key" ] && set -- "$@" --panel-key "$_pin_panel_key"
   # An overlay host was installed with --dev-allow-unsigned (the root-owned
   # pin exists only for such an install), so the refresh carries it too.
   [ -n "$_dl_base" ] && set -- "$@" --dl-base "$_dl_base" --dev-allow-unsigned
