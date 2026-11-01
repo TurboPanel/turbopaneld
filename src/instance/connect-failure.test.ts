@@ -96,6 +96,15 @@ it("classifies stale-identity errors", async () => {
   );
 });
 
+it("classifies a refused key replacement as stale-identity", () => {
+  assertEquals(
+    classifyConnectFailure(
+      new DaemonApiError(409, "Server key already registered"),
+    ).kind,
+    "stale-identity",
+  );
+});
+
 it("classifies tls-trust errors before transient fallthrough", () => {
   const tlsCases: unknown[] = [
     new Error("invalid peer certificate: UnknownIssuer"),

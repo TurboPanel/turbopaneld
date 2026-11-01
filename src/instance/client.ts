@@ -8,7 +8,7 @@ import {
 } from "./restart-daemon-service.ts";
 import { describeUnknown } from "../util/describe-unknown.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
-import { forEachSequential, repeatSequential } from "../util/sequential.ts";
+import { repeatSequential } from "../util/sequential.ts";
 import {
   createInstanceHttpClient,
   describeInstance,
@@ -79,7 +79,6 @@ import { runDocker as defaultRunDocker } from "../deploy/docker-cli.ts";
 import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
 import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
-import { removeDaemonFile } from "../permissions/daemon-files.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
@@ -459,29 +458,21 @@ function parseMessage(raw: string): DaemonMessage | null {
   }
 }
 
-/** Removes only `server-key.json` + `server-key-id`; keeps persisted `server.id`. */
-export async function clearDaemonKeyState(stateDir: string): Promise<void> {
-  await forEachSequential([SERVER_KEY_FILE, KEY_ID_FILE], async (file) => {
-    try {
-      await removeDaemonFile(`${stateDir}/${file}`);
-    } catch {
-      // Missing files are fine.
-    }
-  });
-}
-
 /**
  * Why the connect loop is parked (no reconnect backoff, periodic re-check):
  * `permanent` — the control plane rejected enrollment/auth; `tls-trust` — the
  * platform CA does not validate the control plane; `awaiting-license` — no
  * license credentials on disk yet (install wizard / installer still to run);
- * `awaiting-seat` — no purchased size is free for this server yet.
+ * `awaiting-seat` — no purchased size is free for this server yet;
+ * `awaiting-administrator` — the control plane does not know this server's
+ * key (key files are kept, nothing is re-enrolled).
  */
 type ParkedKind =
   | "permanent"
   | "tls-trust"
   | "awaiting-license"
-  | "awaiting-seat";
+  | "awaiting-seat"
+  | "awaiting-administrator";
 
 export class InstanceClient {
   readonly #config: InstanceConfig;
@@ -506,6 +497,7 @@ export class InstanceClient {
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
   #forceEnrollPending = false;
+  #unparkForcesEnroll = false;
   /** Orphan transcript sweep runs once per process, never on reconnect. */
   #orphanSweepStarted = false;
   #didCompleteSecretsRehydrate = false;
@@ -1102,6 +1094,8 @@ export class InstanceClient {
       await this.#enterParkedState(classified.reason, "awaiting-license");
     } else if (classified.kind === "awaiting-seat") {
       await this.#enterParkedState(classified.reason, "awaiting-seat");
+    } else if (classified.kind === "stale-identity") {
+      await this.#enterParkedState(classified.reason, "awaiting-administrator");
     } else {
       this.#increaseBackoff();
     }
@@ -1151,6 +1145,13 @@ export class InstanceClient {
       );
       return;
     }
+    if (kind === "awaiting-administrator") {
+      logWarn(
+        "instance",
+        `panel says this server's key is unknown; waiting for an administrator (${reason}); key files are kept and the check repeats with backoff`,
+      );
+      return;
+    }
     if (kind === "tls-trust") {
       const caPath = resolveInstanceCaPath() ?? "(none)";
       const uploadedTrust = resolveInstanceUploadedTrustPath() ?? "(none)";
@@ -1197,10 +1198,20 @@ export class InstanceClient {
   }
 
   async #shouldUnpark(): Promise<boolean> {
+    if (this.#parkedKind === "awaiting-administrator") {
+      // Retried on the timer with the same key. Only an action on this host
+      // (a new license written by the installer, or the force flag) asks for
+      // a fresh enrollment; nothing the panel answers can.
+      this.#unparkForcesEnroll =
+        isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL")) ||
+        (await this.#readLicenseStamp()) !== this.#licenseStamp;
+      return true;
+    }
     // Retried on the timer: a purchase changes the answer without any
     // change on this server.
     if (
-      this.#parkedKind === "tls-trust" || this.#parkedKind === "awaiting-seat"
+      this.#parkedKind === "tls-trust" ||
+      this.#parkedKind === "awaiting-seat"
     ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
     const stamp = await this.#readLicenseStamp();
@@ -1217,7 +1228,10 @@ export class InstanceClient {
     this.#resetBackoff();
     // A seat wait retries the same enroll or session; re-enrolling with a
     // new key would not change the answer.
-    if (kind !== "tls-trust" && kind !== "awaiting-seat") {
+    if (kind === "awaiting-administrator") {
+      this.#forceEnrollPending = this.#unparkForcesEnroll;
+      this.#unparkForcesEnroll = false;
+    } else if (kind !== "tls-trust" && kind !== "awaiting-seat") {
       this.#forceEnrollPending = true;
     }
     if (kind === "awaiting-license") {
@@ -1231,6 +1245,9 @@ export class InstanceClient {
         `unparking after tls-trust failure (${reason}); retrying with a fresh CA read`;
     } else if (kind === "awaiting-seat") {
       message = `re-checking for a purchased size (${reason})`;
+    } else if (kind === "awaiting-administrator") {
+      message =
+        `re-checking whether the panel knows this server's key (${reason})`;
     }
     logDebug("instance", message);
   }
@@ -1389,19 +1406,6 @@ export class InstanceClient {
     }
   }
 
-  async #recoverFromStaleIdentity(stateDir: string): Promise<void> {
-    logWarn(
-      "instance",
-      "daemon identity is stale for this instance; clearing local key files and re-enrolling",
-    );
-    await clearDaemonKeyState(stateDir);
-    this.#tokenManager = undefined;
-    this.#apiClient = undefined;
-    this.#tokenServerId = undefined;
-    this.#tokenKeyId = undefined;
-    this.#forceEnrollPending = true;
-  }
-
   async #connectOnce(): Promise<void> {
     await this.refreshPlatformCaClient();
     if (this.#caPinMismatch) {
@@ -1421,19 +1425,19 @@ export class InstanceClient {
     const machineKey = await readMachineKey();
     const hostname = Deno.hostname();
 
-    await this.#connectWithIdentity(stateDir, machineKey, hostname, 0);
+    await this.#connectWithIdentity(stateDir, machineKey, hostname);
   }
 
   /**
-   * Load (or enrol) the identity and open the websocket. A stale identity is
-   * cleared and re-enrolled once: attempt 0 may recover into attempt 1, whose
-   * failures always surface.
+   * Load (or enrol) the identity and open the websocket. Failures always
+   * surface. An unknown-key answer never deletes the key files: the panel
+   * saying it does not know this key is not proof, so the daemon parks and
+   * waits for an administrator instead of re-enrolling.
    */
   async #connectWithIdentity(
     stateDir: string,
     machineKey: string | undefined,
     hostname: string,
-    attempt: number,
   ): Promise<void> {
     const identity = await this.#loadOrEnrollIdentity(
       stateDir,
@@ -1456,20 +1460,8 @@ export class InstanceClient {
       hostname,
     );
 
-    try {
-      const jwt = await this.#tokenManager!.getToken();
-      await this.#openDaemonWebSocket(jwt, identity.serverId);
-    } catch (err) {
-      if (
-        attempt === 0 &&
-        classifyConnectFailure(err).kind === "stale-identity"
-      ) {
-        await this.#recoverFromStaleIdentity(stateDir);
-        await this.#connectWithIdentity(stateDir, machineKey, hostname, 1);
-        return;
-      }
-      throw err;
-    }
+    const jwt = await this.#tokenManager!.getToken();
+    await this.#openDaemonWebSocket(jwt, identity.serverId);
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {

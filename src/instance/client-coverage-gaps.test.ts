@@ -1,7 +1,6 @@
 import { it } from "@std/testing/bdd";
 import { assertEquals } from "@std/assert";
 import {
-  clearDaemonKeyState,
   DEFAULT_INITIAL_BACKOFF_MS,
   installClientTestHooks,
   installClientTimeSource,
@@ -127,16 +126,6 @@ const VALID_CAPABILITY_PLAN = {
   managedDockerEnabled: true,
   hardwareHealthEventsEnabled: true,
 };
-
-it({
-  name: "clearDaemonKeyState ignores missing key files",
-  permissions: { env: true, read: true, write: true },
-  fn: async () => {
-    await withTempLayout(async (fixture) => {
-      await clearDaemonKeyState(fixture.dirs.stateDir);
-    });
-  },
-});
 
 it({
   name:
