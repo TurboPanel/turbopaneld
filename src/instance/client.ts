@@ -80,7 +80,10 @@ import { syncHostDockerNetworking } from "../deploy/docker-networking-sync.ts";
 import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
-import { classifyConnectFailure } from "./connect-failure.ts";
+import {
+  classifyConnectFailure,
+  permanentRejectionAdvice,
+} from "./connect-failure.ts";
 import { DaemonJwksClient } from "./jwks-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
@@ -1175,7 +1178,9 @@ export class InstanceClient {
     }
     logError(
       "instance",
-      `daemon control-plane permanently rejected enrollment (${reason}); parked — install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL at the correct control plane, then the daemon auto-recovers`,
+      `daemon control-plane permanently rejected enrollment (${reason}); parked — ${
+        permanentRejectionAdvice(reason)
+      }, then the daemon auto-recovers`,
     );
   }
 

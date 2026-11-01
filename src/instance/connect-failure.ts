@@ -187,3 +187,18 @@ export function temporaryAuthFailure(
 ): ClassifiedConnectFailure {
   return { kind: "temporary-auth", reason };
 }
+
+/**
+ * What an operator should do about a permanent rejection. A used or expired
+ * install key (`401 Invalid license`) is the common one: the panel erases a
+ * key's token when its server binds and a join ticket works once for an hour,
+ * so a server that lost its key files needs an owner to issue a re-enroll
+ * token on the server's page and the installer re-run with it. The daemon
+ * keeps its license files and picks the new ones up by itself.
+ */
+export function permanentRejectionAdvice(reason: string): string {
+  if (reason.startsWith("401 Invalid license")) {
+    return "this install key was already used or has expired; for a server that lost its key, ask an owner to issue a re-enroll token on the server's page in the control plane and re-run the installer with it, or install a new server with a fresh key (Add Server)";
+  }
+  return "install a fresh registration key (Add Server) or point TURBOPANEL_INSTANCE_URL at the correct control plane";
+}
