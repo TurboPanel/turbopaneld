@@ -1,9 +1,23 @@
 import { encodeBase64 } from "@std/encoding/base64";
+import { type HpkeEnvelope, isHpkeEnvelope } from "../crypto/hpke.ts";
 import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { logWarn } from "../util/logger.ts";
 import { retryTransient, type RetryView } from "../util/retry-fetch.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
+
+/**
+ * What an authenticated client needs to take sealed `/secrets/decrypt`
+ * answers: open one envelope with the daemon's sealing key (the server id is
+ * the aad) and keep the high-water mark that stops a later downgrade to
+ * plaintext.
+ */
+export interface DaemonSealingContext {
+  /** Open one envelope; resolves to the plaintext, rejects on any mismatch. */
+  open(envelope: HpkeEnvelope): Promise<string>;
+  isTrustSealed(): Promise<boolean>;
+  markTrustSealed(): Promise<void>;
+}
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
@@ -16,6 +30,8 @@ export interface DaemonApiClientOptions {
   onInstanceVersion?: (version: string | null) => void;
   /** Wait between rate-limit retries; tests inject a no-op. Defaults to a timer. */
   sleep?: (ms: number) => Promise<void>;
+  /** Present on the authenticated client; without it only plaintext answers are understood. */
+  sealing?: DaemonSealingContext;
 }
 
 /**
@@ -345,6 +361,7 @@ export class DaemonApiClient {
     const body = await this.#requestJson<{
       ok?: boolean;
       plaintexts?: unknown;
+      sealed?: unknown;
     }>(
       "/api/daemon/v1/secrets/decrypt",
       {
@@ -353,14 +370,80 @@ export class DaemonApiClient {
       },
       { auth: true },
     );
-    if (!Array.isArray(body.plaintexts)) {
-      throw new DaemonApiError(500, "Invalid secrets/decrypt response");
-    }
-    const plaintexts = body.plaintexts.map((entry) =>
-      typeof entry === "string" ? entry : null
+    const plaintexts = await this.#plaintextsFromDecryptAnswer(
+      body,
+      ciphertexts.length,
     );
     rememberSecretPlaintexts(plaintexts);
     return plaintexts;
+  }
+
+  /**
+   * The answer is either `sealed` (HPKE envelopes opened here with the
+   * sealing key, so the redaction deny-set only ever sees values opened on
+   * this host) or `plaintexts`. Never both. Once a sealed answer has been
+   * opened, a plaintext one is refused for good.
+   */
+  async #plaintextsFromDecryptAnswer(
+    body: { plaintexts?: unknown; sealed?: unknown },
+    count: number,
+  ): Promise<(string | null)[]> {
+    const sealing = this.#options.sealing;
+    if (body.sealed !== undefined) {
+      if (
+        body.plaintexts !== undefined || !sealing ||
+        !Array.isArray(body.sealed) || body.sealed.length !== count
+      ) {
+        throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+      }
+      const opened: (string | null)[] = [];
+      for (const entry of body.sealed) {
+        if (entry === null) {
+          opened.push(null);
+          continue;
+        }
+        if (!isHpkeEnvelope(entry)) {
+          throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+        }
+        try {
+          opened.push(await sealing.open(entry));
+        } catch {
+          throw new DaemonApiError(
+            500,
+            "sealed secrets/decrypt answer could not be opened",
+          );
+        }
+      }
+      await sealing.markTrustSealed();
+      return opened;
+    }
+    if (!Array.isArray(body.plaintexts)) {
+      throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+    }
+    if (sealing && await sealing.isTrustSealed()) {
+      logWarn(
+        "instance",
+        "refusing a plaintext secrets answer: this server already receives them sealed",
+      );
+      throw new DaemonApiError(400, "plaintext secrets refused");
+    }
+    return body.plaintexts.map((entry) =>
+      typeof entry === "string" ? entry : null
+    );
+  }
+
+  /**
+   * Register the X25519 sealing key (`POST /api/daemon/v1/servers/self/sealing-key`).
+   * `sig` is the Ed25519 signature over the registration payload.
+   */
+  async registerSealingKey(
+    params: { kid: string; pub: string; sig: string },
+  ): Promise<void> {
+    await this.#requestJson(
+      "/api/daemon/v1/servers/self/sealing-key",
+      { method: "POST", body: JSON.stringify(params) },
+      { auth: true },
+    );
   }
 
   /**

@@ -5,7 +5,7 @@
  * (P1-1): the daemon account can write inside its own folders (the leaves in
  * `src/paths/layout.ts`) but cannot create, rename or remove an entry in the
  * root itself. The few files that live at that level (`instance-ca.pem`,
- * `firewall*.v4|v6`, `server.id`, the server key, `update-guard-disarm.json`)
+ * `firewall*.v4|v6`, `server.id`, the server key, `sealing-key.json`, `trust-level`, `update-guard-disarm.json`)
  * are written here: first the way the daemon always did (stage next to the
  * file and rename it in, which works while the root is writable and in
  * development), and when the OS says no, through `tp-host install` / `rm`,

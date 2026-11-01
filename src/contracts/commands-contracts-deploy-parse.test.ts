@@ -386,6 +386,34 @@ test("parsePrincipalsReconcilePayload round-trips a password hash", () => {
   assertEquals(payload.principals[0].passwordHash, passwordHash);
 });
 
+test("parsePrincipalsReconcilePayload accepts a sealed password hash envelope, never beside the plain hash", () => {
+  const passwordHashEnvelope = "tpdaemon.v1.srv.key.payload";
+  const parse = (extra: Record<string, unknown>) =>
+    parsePrincipalsReconcilePayload({
+      principals: [{
+        principalId: PRINCIPAL_ID,
+        username: "deploy_user",
+        ...extra,
+      }],
+    });
+  assertEquals(
+    parse({ passwordHashEnvelope }).principals[0].passwordHashEnvelope,
+    passwordHashEnvelope,
+  );
+  for (
+    const bad of [
+      { passwordHashEnvelope: "plain-text" },
+      { passwordHashEnvelope: 7 },
+      {
+        passwordHashEnvelope,
+        passwordHash: `$6$saltstring$${"a".repeat(86)}`,
+      },
+    ]
+  ) {
+    assertThrows(() => parse(bad));
+  }
+});
+
 test("parseEnvironmentDeployPayload trims a site document root", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,

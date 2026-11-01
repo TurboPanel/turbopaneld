@@ -989,6 +989,13 @@ export type EnvironmentDeployPrincipalMaterial = {
    * reconciles to the state the account already had.
    */
   passwordHash?: string;
+  /**
+   * The same hash as a `tpdaemon.…` envelope, sent instead of `passwordHash` by
+   * a control plane that sees `daemon-sealed-secrets-v1`. The daemon opens it
+   * through `/secrets/decrypt` (which answers sealed to its own key) before the
+   * account is touched. Never both fields.
+   */
+  passwordHashEnvelope?: string;
 };
 
 /**
@@ -5027,6 +5034,14 @@ function parsePrincipalMaterial(
     (raw) => PASSWORD_HASH_RE.test(raw),
   );
   if (passwordHash !== undefined) material.passwordHash = passwordHash;
+  const passwordHashEnvelope = parsePrincipalOptionalString(
+    value.passwordHashEnvelope,
+    "passwordHashEnvelope",
+    (raw) => raw.startsWith("tpdaemon.") && passwordHash === undefined,
+  );
+  if (passwordHashEnvelope !== undefined) {
+    material.passwordHashEnvelope = passwordHashEnvelope;
+  }
   return material;
 }
 

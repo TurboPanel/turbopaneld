@@ -2,6 +2,7 @@ import {
   buildStorageVolumesFragment,
   declaredVolumeUsers,
 } from "../deploy/apply-storage-volumes.ts";
+import { openPrincipalPasswordEnvelopes } from "../deploy/principal-password-envelope.ts";
 import { applyVolumeAccess } from "../deploy/volume-access.ts";
 import {
   deploymentBindWarnings,
@@ -3124,7 +3125,10 @@ async function deployEnvironmentHolding(
       }),
   );
 
-  const principalMaterial = parsedPayload.principalMaterial ?? [];
+  const principalMaterial = await openPrincipalPasswordEnvelopes(
+    parsedPayload.principalMaterial ?? [],
+    runtime.decryptSecrets,
+  );
   const principalIdReports = await ensureDeployPrincipals(
     layout,
     deployPrincipalSpecs(parsedPayload, principalMaterial),
