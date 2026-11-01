@@ -915,8 +915,15 @@ form still works, pins nothing and writes no pin file.
   fingerprint. It writes `pinned_by=unsafe` and an empty `current=`; enforcement
   must treat that as "nothing pinned". The hello reports `panelPin` so the
   panel can show it on the server row.
-- Only `tp-host panel-identity-write` changes the file afterwards: stdin is the
-  signature header line then the exact identity body; it follows the pinned
-  current key only (urls, next, keyset), never a rotation.
+- Only `tp-host panel-identity-write` changes the file afterwards. With no
+  argument, stdin is the signature header line then the exact identity body; it
+  follows the pinned current key only (urls, next, keyset). With `statement`,
+  stdin is a rotation or revoke statement carrying `signers` (public keys); each
+  must hash to the fingerprint pinned for its role (old current, offline next),
+  `keyset` must rise and the new current key must be the pinned next key. A
+  rotation also rewrites `panel_key=` in `lib/update-origin`.
+- `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
+  contains that flag; after an older installer ran it restores the `panel_key=`
+  line it dropped, so a move back to an older release does not break the pin.
 - `src/instance/panel-identity-pin.ts` reads and parses the file. The daemon
   logs it at connect and enforces nothing yet.

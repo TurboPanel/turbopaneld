@@ -564,6 +564,16 @@ tp_load_update_origin_pin() {
   _pin_panel_key="$(tp_pin_field panel_key)"
 }
 
+# After a run by an installer that predates the pin: its update origin has no
+# panel_key line, which would make the next update refuse. Put the pinned key
+# back (the pin file itself is untouched by such an installer).
+tp_restore_panel_key_line() {
+  [ -n "$_pin_panel_key" ] || return 0
+  [ -f "$UPDATE_ORIGIN_PIN" ] && [ ! -L "$UPDATE_ORIGIN_PIN" ] || return 0
+  grep -q '^panel_key=' "$UPDATE_ORIGIN_PIN" ||
+    printf 'panel_key=%s\n' "$_pin_panel_key" >> "$UPDATE_ORIGIN_PIN"
+}
+
 # The panel key pin file (written by run.sh, root-owned) must agree with the
 # panel_key line of the update origin. A host installed before panel keys has
 # neither and passes.
@@ -843,7 +853,14 @@ tp_verb_update() {
 
   set --
   [ -n "$_host" ] && set -- "$@" --host "$_host"
-  [ -n "$_pin_panel_key" ] && set -- "$@" --panel-key "$_pin_panel_key"
+  # An installer from before the panel key pin does not know --panel-key (a
+  # channel switch back to an older release can serve one), and an unknown flag
+  # would stop the update. Pass the flag only when this run.sh has it; an older
+  # one rewrites the update origin without panel_key, which
+  # tp_restore_panel_key_line puts back afterwards.
+  if [ -n "$_pin_panel_key" ] && grep -q -e '--panel-key' "$_script"; then
+    set -- "$@" --panel-key "$_pin_panel_key"
+  fi
   # An overlay host was installed with --dev-allow-unsigned (the root-owned
   # pin exists only for such an install), so the refresh carries it too.
   [ -n "$_dl_base" ] && set -- "$@" --dl-base "$_dl_base" --dev-allow-unsigned
@@ -858,6 +875,7 @@ tp_verb_update() {
   # process's environment is readable only by root.
   TURBOPANEL_LICENSE="$_license" sh "$_script" "$@" </dev/null || _rc=$?
   rm -f "$_script"
+  tp_restore_panel_key_line
   exit "$_rc"
 }
 
