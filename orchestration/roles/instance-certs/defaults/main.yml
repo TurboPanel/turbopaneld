@@ -60,6 +60,10 @@ turbopanel_hostnames: []
 # so public-urls apply passes this and resolve-hostnames.yml decodes it
 # into turbopanel_hostnames.
 turbopanel_hostnames_json: ""
+# Edge address ranges for Cloudflare proxy / Bunny pull zone hostnames, as a
+# compact JSON object {hash, cloudflare, bunny}. Empty reads the persisted
+# instance-edge-trust.json (resolve-edge-trust.yml).
+turbopanel_edge_trust_json: ""
 turbopanel_config_dir: /etc/turbopanel
 turbopanel_run_dir: /run/turbopanel
 turbopanel_ui_dist_dir: /opt/turbopanel/share/ui

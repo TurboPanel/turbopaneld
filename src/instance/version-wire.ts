@@ -99,6 +99,7 @@ export const DAEMON_WIRE_FEATURES = [
   "fabric-peer-report-v1",
   "fabric-lan-routes-v1",
   "repo-key-report-v1",
+  "instance-edge-trust-v1",
 ] as const;
 
 /**

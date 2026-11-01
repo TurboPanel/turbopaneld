@@ -2462,7 +2462,10 @@ export class InstanceClient {
           host,
           source: "platform-ca" as const,
         })),
-        hostnames ? { instanceAcme: message.instanceAcme } : {},
+        {
+          ...(hostnames ? { instanceAcme: message.instanceAcme } : {}),
+          ...(message.edgeTrust ? { edgeTrust: message.edgeTrust } : {}),
+        },
       );
       ok = true;
       await this.#instanceAcmeRenewal?.check();
