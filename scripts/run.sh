@@ -309,7 +309,10 @@ PY
 
 # openssl check of one raw Ed25519 signature: $1 pub.pem, $2 message, $3 signature.
 tp_verify_ed25519() {
-  openssl pkeyutl -verify -pubin -inkey "$1" -rawin -in "$2" -sigfile "$3" >/dev/null 2>&1
+  _ve_pub="$1"
+  _ve_msg="$2"
+  _ve_sig="$3"
+  openssl pkeyutl -verify -pubin -inkey "$_ve_pub" -rawin -in "$_ve_msg" -sigfile "$_ve_sig" >/dev/null 2>&1
 }
 
 # Fetch the identity document from the first panel URL and check the TOKEN
@@ -3256,8 +3259,10 @@ fi
 
 # One `key=value` line from a pin file ("" when the file or the key is absent).
 tp_pin_file_field() {
-  [ -f "$1" ] || return 0
-  sed -n "s/^$2=//p" "$1" | head -n 1
+  _pf_path="$1"
+  _pf_key="$2"
+  [ -f "$_pf_path" ] || return 0
+  sed -n "s/^${_pf_key}=//p" "$_pf_path" | head -n 1
 }
 
 # Decide what this run does with the panel key pin, before anything is

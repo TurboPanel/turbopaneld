@@ -28,7 +28,11 @@ export type PanelIdentityPin = {
 };
 
 const FINGERPRINT = /^[A-Za-z0-9_-]{43}$/;
-const PINNED_BY: readonly string[] = ["install", "upgrade", "unsafe"];
+const PINNED_BY: ReadonlySet<string> = new Set([
+  "install",
+  "upgrade",
+  "unsafe",
+]);
 const KEYS = [
   "current",
   "next",
@@ -67,7 +71,7 @@ function fields(text: string): PinFields {
 export function parsePanelIdentityPin(text: string): PanelIdentityPin {
   const values = fields(text);
   const pinnedBy = values.pinned_by;
-  if (!PINNED_BY.includes(pinnedBy)) {
+  if (!PINNED_BY.has(pinnedBy)) {
     throw new TypeError(
       "panel-identity: pinned_by is not install, upgrade or unsafe",
     );
