@@ -899,3 +899,11 @@ the rest of this file.
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
+
+## Sealed secrets (`daemon-sealed-secrets-v1`)
+
+- The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged once and retried on the next connect. Only the key id is logged.
+- `decryptSecrets` takes `{ sealed }` (HPKE envelopes, `aad` = server id, opened locally, then added to the redaction deny-set) or `{ plaintexts }`, never both. After the first sealed answer is opened the daemon writes `<state>/trust-level` = `sealed` and refuses any later plaintext answer (`plaintext secrets refused`). The daemon never lowers the mark; after a deliberate control plane rollback an operator removes the file by hand.
+- The Hosting Account password hash may arrive as `passwordHashEnvelope`; `openPrincipalPasswordEnvelopes` opens it through `decryptSecrets` before the account is touched. `server.principals.reconcile` refuses an envelope rather than lock the account.
+- `scripts/scan-secrets.patterns` (`daemon-identity-file`) does not name `sealing-key.json`; it is byte-identical across five repos, so it is a follow-up for all five together.
+- **Keys sent up.** `reportIssuedCertificate` seals the private key to the control plane's sealing key (`privateKeyEnvelope`, aad = the control plane's signing key fingerprint) when `panel-identity-cache.ts` has one, and sends plain PEM otherwise, except that a server that has ever received a sealed secret (`trust-level`) fails the report with 503 instead. The sealing key comes from the signed identity document (signature checked against its own `current` key, cached a day, a lower `keyset` ignored). Until the pin file exists the document is trusted as far as TLS; `isTrustedSigningKey` is where the pin check plugs in.

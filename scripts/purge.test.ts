@@ -259,6 +259,10 @@ const OWNED_PATHS = [
   "/opt/turbopanel/vendor/cloudflared",
   "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
   "/var/lib/turbopanel/cloudflared/tunnels",
+  // The daemon's sealing key and secrets trust mark live loose in the state
+  // root; the purge removes them with the tree.
+  "/var/lib/turbopanel/sealing-key.json",
+  "/var/lib/turbopanel/trust-level",
 ];
 
 test("tp_path_is_safe refuses every path outside TurboPanel's own trees", async () => {

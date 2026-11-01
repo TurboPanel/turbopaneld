@@ -10,6 +10,8 @@
     "jsr:@std/internal@^1.0.14": "1.0.14",
     "jsr:@std/path@1": "1.1.5",
     "jsr:@std/testing@1": "1.0.19",
+    "npm:@hpke/chacha20poly1305@^1.8.0": "1.8.0",
+    "npm:@hpke/core@^1.9.0": "1.9.0",
     "npm:postgres@3.4.5": "3.4.5",
     "npm:yaml@^2.8.0": "2.9.0"
   },
@@ -44,6 +46,21 @@
     }
   },
   "npm": {
+    "@hpke/chacha20poly1305@1.8.0": {
+      "integrity": "sha512-FcBfAQ+Y99vMNJP2yrZ9wpL8V0GOwp1+zMyzvc6alasrBygfFjFm1yeUtyADJCu/27C3Lm5mJzx6u7pwg+cX5w==",
+      "dependencies": [
+        "@hpke/common"
+      ]
+    },
+    "@hpke/common@1.10.1": {
+      "integrity": "sha512-moJwhmtLtuxiUzzNp1jpfBfx8yefKoO9D/RCR9dmwrnc7qjJqId1rEtQz+lSlU5cabX8daToMSx/7HayXOiaFw=="
+    },
+    "@hpke/core@1.9.0": {
+      "integrity": "sha512-pFxWl1nNJeQCSUFs7+GAblHvXBCjn9EPN65vdKlYQil2aURaRxfGMO6vBKGqm1YHTKwiAxJQNEI70PbSowMP9Q==",
+      "dependencies": [
+        "@hpke/common"
+      ]
+    },
     "postgres@3.4.5": {
       "integrity": "sha512-cDWgoah1Gez9rN3H4165peY9qfpEo+SA61oQv65O3cRUE1pOEoJWwddwcqKE8XZYjbblOJlYDlLV4h67HrEVDg=="
     },
@@ -59,6 +76,8 @@
       "jsr:@std/encoding@1",
       "jsr:@std/path@1",
       "jsr:@std/testing@1",
+      "npm:@hpke/chacha20poly1305@^1.8.0",
+      "npm:@hpke/core@^1.9.0",
       "npm:yaml@^2.8.0"
     ]
   }

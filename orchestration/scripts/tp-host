@@ -325,6 +325,7 @@ tp_daemon_loose_file_name() {
   case "$1" in
     "$R_CONFIG"/instance-ca.pem|"$R_CONFIG"/firewall.v4|"$R_CONFIG"/firewall.v6|"$R_CONFIG"/firewall.pending.v4|"$R_CONFIG"/firewall.pending.v6) return 0 ;;
     "$R_STATE"/server.id|"$R_STATE"/server-key.json|"$R_STATE"/server-key-id|"$R_STATE"/update-guard-disarm.json|"$R_STATE"/release-link-scan.json) return 0 ;;
+    "$R_STATE"/sealing-key.json|"$R_STATE"/trust-level) return 0 ;;
   esac
   return 1
 }
