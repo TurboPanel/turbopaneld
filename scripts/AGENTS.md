@@ -30,7 +30,7 @@ A development environment is refused before anything is changed:
 `TURBOPANEL_MODE=development`, `TURBOPANEL_DEV_ROOT`, or `TURBOPANEL_DEV_USER`
 in `daemon.env`, `/etc/sudoers.d/turbopanel-dev-nopasswd`,
 `/etc/turbopanel/dev-forward-hosts`, or a `turbopaneld.service` `ExecStart`
-that runs `main.ts`. The message points at `~/dev/console` → Developer →
+that runs `main.ts`. The message points at `~/turbopanel/dev/console` → Developer →
 **Reset development environment** / **Purge completely**.
 
 Four maintenance rules:

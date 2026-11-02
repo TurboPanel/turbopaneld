@@ -18,8 +18,8 @@ env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`,
 `src/orchestration/assets.ts` and `src/instance/sockets.ts` derive their constants
 from `resolveLayout` — do **not** hardcode absolute paths in runtime code;
 add/extend a layout field instead. The development default checkout root is
-`<devRoot>/turbopaneld` (from `TURBOPANEL_DEV_ROOT`, else `$HOME/turbopanel`, or `$HOME`
-inside the Vagrant guest per `isVagrantGuest`; the root is the folder that holds the repos, and `TURBOPANEL_DEV_HOME` carries the real home for
+`<devRoot>/turbopaneld` (from `TURBOPANEL_DEV_ROOT`, else `$HOME/turbopanel`, on every dev
+machine including the Vagrant guest; the root is the folder that holds the repos, and `TURBOPANEL_DEV_HOME` carries the real home for
 git, ssh and pnpm, see `orchestration/AGENTS.md`); production runtime
 code must never name the retired `/opt/turbopanel/platform` token — the layout
 module and CI guard are the only places allowed to reference it.
@@ -131,7 +131,7 @@ vs **Organization CA** (two-CA distinction):
 
 | Purpose                          | Path                                                                               |
 | -------------------------------- | ---------------------------------------------------------------------------------- |
-| Daemon checkout / install root   | `<TURBOPANEL_DEV_ROOT or $HOME/turbopanel>/turbopaneld` (`$HOME` in the Vagrant guest)  |
+| Daemon checkout / install root   | `<TURBOPANEL_DEV_ROOT or $HOME/turbopanel>/turbopaneld`                                 |
 | Orchestration assets             | `<checkout>/orchestration` (prod roles); overlay in `<dev checkout>/orchestration` |
 | Vendored runtimes                | `/opt/turbopanel/vendor`                                                           |
 | Daemon env file                  | `/etc/turbopanel/daemon.env`                                                       |

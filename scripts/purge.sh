@@ -923,7 +923,7 @@ tp_refuse_dev_environment() {
   fi
   [ -n "$_rde" ] || return 0
   tp_print_error "This host is a TurboPanel development environment (${_rde}). Nothing was changed."
-  tp_print_error "Use ~/dev/console → Developer → Reset development environment / Purge completely."
+  tp_print_error "Use ~/turbopanel/dev/console → Developer → Reset development environment / Purge completely."
   exit 1
 }
 

@@ -68,10 +68,10 @@ off-checkout; CI always has a real checkout.
 suites **inside the Vagrant guest** from the host `dev` checkout:
 
 ```bash
-vagrant ssh -c 'export PATH="/opt/turbopanel/vendor/deno/current:$PATH"; cd ~/turbopaneld && deno task test'
+vagrant ssh -c 'export PATH="/opt/turbopanel/vendor/deno/current:$PATH"; cd ~/turbopanel/turbopaneld && deno task test'
 ```
 
-Interactive `vagrant ssh` then `cd ~/turbopaneld` also works. Canonical
+Interactive `vagrant ssh` then `cd ~/turbopanel/turbopaneld` also works. Canonical
 detail: `../dev/AGENTS.md` → Testing. Do not run `deno task test` on the
 host.
 

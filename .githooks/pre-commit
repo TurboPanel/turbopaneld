@@ -25,15 +25,9 @@ tp_precommit_dev_checkout() {
     CDPATH= cd -- "$ROOT/../dev" && pwd
     return 0
   fi
-  # Same default as the dev console: the turbopanel folder in the home, or the
-  # home itself inside the Vagrant guest (marked by the provisioner's profile file).
-  if [ -n "${TURBOPANEL_DEV_ROOT:-}" ]; then
-    _home_dev="$TURBOPANEL_DEV_ROOT/dev"
-  elif [ -f /etc/profile.d/turbopanel-vagrant.sh ]; then
-    _home_dev="$HOME/dev"
-  else
-    _home_dev="$HOME/turbopanel/dev"
-  fi
+  # Same default as the dev console: the turbopanel folder in the home, on
+  # every machine including the Vagrant guest.
+  _home_dev="${TURBOPANEL_DEV_ROOT:-$HOME/turbopanel}/dev"
   if [ -f "$_home_dev/Vagrantfile" ]; then
     printf '%s\n' "$_home_dev"
     return 0
@@ -76,7 +70,7 @@ tp_precommit_vagrant_deno() {
   echo "pre-commit: no pinned host Deno - running 'deno $*' via vagrant ssh ($_dev)" >&2
   (
     CDPATH= cd -- "$_dev" || exit 1
-    vagrant ssh -c "export PATH=\"/opt/turbopanel/vendor/deno/current:\$PATH\"; cd ~/turbopaneld && deno $*"
+    vagrant ssh -c "export PATH=\"/opt/turbopanel/vendor/deno/current:\$PATH\"; cd ~/turbopanel/turbopaneld && deno $*"
   )
 }
 

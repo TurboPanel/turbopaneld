@@ -31,8 +31,8 @@ and otherwise runs the versioned binary directly); an absent pin is fetched from
 resort, never the default — `deno fmt` / `lint` output differs between releases,
 so a stale host Deno reformats the tree the pinned CI runner then rejects. When
 none of that yields a pinned Deno the hook falls back to
-`vagrant ssh -c '… cd ~/turbopaneld && deno <args>'` from the sibling `dev`
-checkout (same guest command as "Where to run tests" in
+`vagrant ssh -c '… cd ~/turbopanel/turbopaneld && deno <args>'` from the sibling
+`dev` checkout (same guest command as "Where to run tests" in
 `src/testing/AGENTS.md`). Resolution is memoized across the four guards, and
 `tp_precommit_deno_exec` propagates the exit status, so a failing guard aborts
 the commit. Typecheck and the suites stay deferred to `deno task verify` / CI.
