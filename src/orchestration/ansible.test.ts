@@ -604,7 +604,7 @@ test("instance-migrate uses the dev-user HOME for pnpm", async () => {
   );
   assertMatch(
     tasks,
-    /HOME: "{{ turbopanel_dev_root if \(turbopanel_dev_user/,
+    /HOME: "{{ turbopanel_dev_home if \(turbopanel_dev_user/,
     "instance-migrate HOME follows the co-located dev user",
   );
 });
