@@ -200,7 +200,9 @@ policy sits in `util/retry-fetch.ts` options.
 leaves. It starts from `InstanceClient.start()` and keeps running across
 socket reconnects; events queued while the socket is down flush on the next
 attach. It does not probe public `:443` — that port is tenant hosting. The
-hostname list is `instance-hostnames.json` (`readInstanceLetsEncryptHostnames`).
+hostname list is `instance-hostnames.json` (`readInstanceLetsEncryptHostnames`). Beside it, `instance-edge-trust.json` holds the Cloudflare and Bunny edge
+ranges from `public-urls-update` `edgeTrust` (`instance-edge-trust-v1`); a message
+without the field leaves it as it is.
 Each leaf is `letsencrypt-<host>.crt` in the instance certs directory. A name
 is due when that file is missing, not a certificate, or inside the issuer
 window (`INSTANCE_ACME_RENEWAL_WINDOW_RATIO`, the same `renewal_window_ratio`

@@ -46,6 +46,8 @@ const LETS_ENCRYPT = JSON.stringify([
 interface Scenario {
   /** Contents of instance-hostnames.json; undefined = no sidecar. */
   sidecar?: string;
+  /** Contents of instance-edge-trust.json; undefined = no sidecar. */
+  edgeSidecar?: string;
   /** Contents of the already-installed Caddyfile; undefined = none. */
   installed?: string;
   /** Extra-vars the caller passes, as key=value. */
@@ -100,6 +102,12 @@ async function render(scenario: Scenario): Promise<Rendered> {
     await Deno.writeTextFile(
       join(caddyDir, "instance-hostnames.json"),
       scenario.sidecar,
+    );
+  }
+  if (scenario.edgeSidecar !== undefined) {
+    await Deno.writeTextFile(
+      join(caddyDir, "instance-edge-trust.json"),
+      scenario.edgeSidecar,
     );
   }
   if (scenario.installed !== undefined) {
@@ -222,6 +230,79 @@ test({
     if (caddyfile === undefined) throw new TypeError("no Caddyfile rendered");
     assertStringIncludes(caddyfile, "tls mode: self_signed");
     assertStringIncludes(output, "not valid JSON");
+  },
+});
+
+const EDGE_TRUST = JSON.stringify({
+  hash: "0".repeat(64),
+  cloudflare: ["198.51.100.0/24"],
+  bunny: ["203.0.113.7/32"],
+});
+
+function assertEdgeRanges(caddyfile: string | undefined): void {
+  if (caddyfile === undefined) throw new TypeError("no Caddyfile rendered");
+  assertStringIncludes(
+    caddyfile,
+    "trusted_proxies static 127.0.0.0/8 ::1 198.51.100.0/24 203.0.113.7/32",
+  );
+  // Cloudflare headers survive only from loopback and Cloudflare ranges;
+  // X-Forwarded-For from loopback and every edge range.
+  assertStringIncludes(
+    caddyfile,
+    "@not_cloudflare_peer not remote_ip 127.0.0.0/8 ::1 198.51.100.0/24\n",
+  );
+  assertStringIncludes(
+    caddyfile,
+    "@not_edge_peer not remote_ip 127.0.0.0/8 ::1 198.51.100.0/24 203.0.113.7/32\n",
+  );
+}
+
+test({
+  name: "the edge trust extra-var renders the ranges into the Caddyfile",
+  ignore,
+  permissions,
+  fn: async () => {
+    const { caddyfile } = await render({
+      extra: [`turbopanel_edge_trust_json=${EDGE_TRUST}`],
+    });
+    assertEdgeRanges(caddyfile);
+  },
+});
+
+test({
+  name: "a bare converge renders the persisted edge ranges",
+  ignore,
+  permissions,
+  fn: async () => {
+    const { caddyfile } = await render({ edgeSidecar: EDGE_TRUST });
+    assertEdgeRanges(caddyfile);
+  },
+});
+
+test({
+  name: "no edge ranges keeps loopback as the only trusted proxy",
+  ignore,
+  permissions,
+  fn: async () => {
+    const { caddyfile } = await render({});
+    if (caddyfile === undefined) throw new TypeError("no Caddyfile rendered");
+    assertStringIncludes(caddyfile, "trusted_proxies static 127.0.0.0/8 ::1\n");
+    assertStringIncludes(
+      caddyfile,
+      "@not_edge_peer not remote_ip 127.0.0.0/8 ::1\n",
+    );
+  },
+});
+
+test({
+  name: "a corrupt edge sidecar trusts nothing and is not fatal",
+  ignore,
+  permissions,
+  fn: async () => {
+    const { caddyfile, output } = await render({ edgeSidecar: "{not json" });
+    if (caddyfile === undefined) throw new TypeError("no Caddyfile rendered");
+    assertStringIncludes(caddyfile, "trusted_proxies static 127.0.0.0/8 ::1\n");
+    assertStringIncludes(output, "edge trust set is not valid JSON");
   },
 });
 

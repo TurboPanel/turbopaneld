@@ -55,7 +55,8 @@
         # the real client to whatever list the client sent, so the leftmost entry
         # can be forged.
         servers {
-                trusted_proxies static 127.0.0.0/8 ::1
+                trusted_proxies static 127.0.0.0/8 ::1{% for c in turbopanel_edge_cidrs | default([]) %} {{ c }}{% endfor %}
+
                 trusted_proxies_strict
         }
 }
@@ -67,10 +68,17 @@
         # cannot declare its own address; the instance reads CF-Connecting-IP /
         # X-Forwarded-For only when its immediate peer is loopback
         # (TURBOPANEL_TRUSTED_PROXY_CIDRS widens that set).
-        @remote_peer not remote_ip 127.0.0.0/8 ::1
-        request_header @remote_peer -CF-Connecting-IP
-        request_header @remote_peer -True-Client-IP
-        request_header @remote_peer -X-Forwarded-For
+        # Peers inside a published edge range (Cloudflare proxy, Bunny pull
+        # zone) are the one exception: Caddy trusts them in `servers` above and
+        # reads the visitor from X-Forwarded-For, so their headers survive;
+        # the Cloudflare headers survive for Cloudflare ranges only.
+        @not_cloudflare_peer not remote_ip 127.0.0.0/8 ::1{% for c in turbopanel_edge_cf_cidrs | default([]) %} {{ c }}{% endfor %}
+
+        @not_edge_peer not remote_ip 127.0.0.0/8 ::1{% for c in turbopanel_edge_cidrs | default([]) %} {{ c }}{% endfor %}
+
+        request_header @not_cloudflare_peer -CF-Connecting-IP
+        request_header @not_cloudflare_peer -True-Client-IP
+        request_header @not_edge_peer -X-Forwarded-For
 
         # Baseline response headers. HSTS is safe even on the self-signed
         # default: a browser that already trusts the leaf (Organization CA, or a

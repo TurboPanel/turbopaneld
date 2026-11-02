@@ -431,9 +431,17 @@ test("repo-key-report-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("daemon-sealed-secrets-v1 is advertised last and raised no floor", () => {
+test("daemon-sealed-secrets-v1 is advertised and raised no floor", () => {
   assertEquals(DAEMON_SEALED_SECRETS_FEATURE, "daemon-sealed-secrets-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), DAEMON_SEALED_SECRETS_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(DAEMON_SEALED_SECRETS_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("instance-edge-trust-v1 is advertised last and raised no floor", () => {
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), "instance-edge-trust-v1");
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
