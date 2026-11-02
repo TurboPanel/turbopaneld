@@ -785,7 +785,7 @@ can enable them later.
 **Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
 Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via
 orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set is
-**sudo, curl, ca-certificates, tar, python3-minimal** (`run.sh` may apt-install
+**sudo, curl, ca-certificates, tar, python3-minimal, zstd, openssl** (`run.sh` may apt-install
 these only when absent). `python3-minimal` extracts Deno release zips without
 apt `unzip`. The `daemon-prereqs` role covers the broader managed-host set (git,
 gnupg, pamtester, xz-utils, iptables, …) once Ansible can converge, and
