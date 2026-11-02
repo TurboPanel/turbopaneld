@@ -50,6 +50,10 @@ export const SIGNED_RESPONSE_ROUTES: ReadonlySet<string> = new Set([
   "/api/daemon/v1/enroll",
 ]);
 
+/** A pinned server holds no verified control plane key right now; retried like a network error. */
+export const CONTROL_PLANE_KEY_NOT_VERIFIED =
+  "control plane key not verified yet";
+
 /** The message an unsigned error answer is reported as (classified transient). */
 export const UNSIGNED_CONTROL_PLANE_ERROR = "unsigned control-plane error";
 
@@ -126,18 +130,20 @@ export interface PanelResponseVerifier {
 }
 
 /**
- * `signing` returns the verified key while the server is pinned and
- * undefined otherwise (nothing is checked then).
+ * `state` says whether this server is pinned and which verified key it holds;
+ * pinned without a key refuses every covered answer.
  */
 export function createPanelResponseVerifier(
-  signing: () => PanelSigningKey | undefined,
+  state: () => { pinned: boolean; key: PanelSigningKey | undefined },
 ): PanelResponseVerifier {
   return {
-    covers: (path) =>
-      signing() !== undefined && SIGNED_RESPONSE_ROUTES.has(path),
+    covers: (path) => state().pinned && SIGNED_RESPONSE_ROUTES.has(path),
     async verify(path, status, header, body) {
-      const key = signing();
-      if (!key) return;
+      const { pinned, key } = state();
+      if (!pinned) return;
+      // Pinned but no verified key held (being refreshed, or cleared by a
+      // park): nothing unsigned is accepted. Plain error, so it is retried.
+      if (!key) throw new Error(CONTROL_PLANE_KEY_NOT_VERIFIED);
       if (await httpSignatureVerifies(key, path, header, body)) return;
       if (header === null && (status < 200 || status >= 300)) {
         throw new DaemonApiError(status, UNSIGNED_CONTROL_PLANE_ERROR);

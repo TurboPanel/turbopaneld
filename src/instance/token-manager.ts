@@ -9,7 +9,10 @@ import { logWarn } from "../util/logger.ts";
 import type { DaemonApiClient } from "./api-client.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import type { VerifyInstanceJwtResult } from "./jwks-client.ts";
-import { PanelIdentityError } from "./panel-identity-trust.ts";
+import {
+  CONTROL_PLANE_KEY_NOT_VERIFIED,
+  PanelIdentityError,
+} from "./panel-identity-trust.ts";
 
 export type VerifyResult = VerifyInstanceJwtResult;
 
@@ -29,6 +32,8 @@ export interface TokenManagerOptions {
    * without a verified JWKS.
    */
   panelFingerprint?: () => string | undefined;
+  /** True while this server is pinned, even when no verified key is held right now. */
+  isPinned?: () => boolean;
 }
 
 const DEFAULT_REFRESH_EARLY_MS = 60_000;
@@ -138,6 +143,12 @@ export class DaemonTokenManager {
   }
 
   async #doRefresh(): Promise<void> {
+    const panelFingerprint = this.#options.panelFingerprint?.();
+    const pinned = this.#options.isPinned?.() ?? panelFingerprint !== undefined;
+    // Pinned without a verified key: no v1 proof and no unverified token.
+    if (pinned && panelFingerprint === undefined) {
+      throw new Error(CONTROL_PLANE_KEY_NOT_VERIFIED);
+    }
     const challenge = await this.#options.apiClient.getAuthChallenge({
       serverId: this.#options.serverId,
       keyId: this.#options.keyId,
@@ -151,7 +162,6 @@ export class DaemonTokenManager {
       machineKey: this.#options.machineKey ?? "",
       hostname: this.#options.hostname,
     };
-    const panelFingerprint = this.#options.panelFingerprint?.();
     const v2 = panelFingerprint
       ? { panelFingerprint, iat: Math.floor(now() / 1000) }
       : undefined;
@@ -176,7 +186,7 @@ export class DaemonTokenManager {
 
     this.#expiresAtMs = await this.#acceptedExpiryMs(
       session.token,
-      panelFingerprint !== undefined,
+      pinned,
     );
 
     this.#token = session.token;

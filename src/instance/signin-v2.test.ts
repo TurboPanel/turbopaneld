@@ -224,3 +224,37 @@ test("a pinned enrollment sends a v2 proof naming the pinned key", async () => {
     await Deno.remove(stateDir, { recursive: true });
   }
 });
+
+test("pinned with no verified key: no challenge, no v1 proof, no token", async () => {
+  const file = await keyFile();
+  let calls = 0;
+  const token = new DaemonTokenManager({
+    keyFile: file,
+    serverId: "srv-1",
+    keyId: "kid-1",
+    machineKey: undefined,
+    hostname: "host-1",
+    apiClient: {
+      getAuthChallenge: () => {
+        calls += 1;
+        return Promise.reject(new Error("must not be called"));
+      },
+      createSession: () => {
+        calls += 1;
+        return Promise.reject(new Error("must not be called"));
+      },
+    },
+    panelFingerprint: () => undefined,
+    isPinned: () => true,
+  });
+  const restore = installTokenManagerTimeSource({
+    delay: () => Promise.resolve(),
+  });
+  try {
+    const err = await token.getToken().catch((e) => e);
+    assertEquals(err.message, "control plane key not verified yet");
+    assertEquals(calls, 0);
+  } finally {
+    restore();
+  }
+});

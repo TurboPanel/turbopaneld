@@ -351,6 +351,13 @@ export const PARKED_BACKOFF_MIN_MS = 5 * 60_000;
 export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
 /** How long a verified control plane key is used before its identity document is fetched again. */
 const PANEL_KEY_REFRESH_MS = 24 * 60 * 60_000;
+/** Identity document answers that mean "this control plane has no such key" (others are retried). */
+const IDENTITY_REFUSAL_STATUSES: ReadonlySet<number> = new Set([
+  401,
+  403,
+  404,
+  410,
+]);
 /**
  * Re-check cadence while no license credentials exist on disk yet. Cheap (two
  * file reads) and short on purpose: on a self-hosted control-plane host the
@@ -590,9 +597,10 @@ export class InstanceClient {
   #panelPin: PanelIdentityPin | null = null;
   /** The pinned control plane key, from its verified identity document (refreshed at most daily). */
   #panelKey: (PanelSigningKey & { fetchedAtMs: number }) | undefined;
-  readonly #panelResponseVerifier = createPanelResponseVerifier(() =>
-    this.#panelPin ? this.#panelKey : undefined
-  );
+  readonly #panelResponseVerifier = createPanelResponseVerifier(() => ({
+    pinned: this.#panelPin !== null,
+    key: this.#panelKey,
+  }));
   /** Command ids already dispatched, so a repeated frame never runs twice. */
   readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
@@ -946,7 +954,8 @@ export class InstanceClient {
     ) {
       return;
     }
-    this.#panelKey = undefined;
+    // The old key stays until a verified replacement: while pinned, a missing
+    // key refuses everything rather than accepting unsigned answers.
     const fetcher = new DaemonApiClient({
       config: this.#config,
       httpClient: this.#httpClient,
@@ -960,7 +969,8 @@ export class InstanceClient {
       // Unreachable or a server error: retried like any network failure. A
       // control plane that answers but has no key cannot prove itself.
       if (
-        err instanceof DaemonApiError && err.status >= 400 && err.status < 500
+        err instanceof DaemonApiError &&
+        IDENTITY_REFUSAL_STATUSES.has(err.status)
       ) {
         throw new PanelIdentityError(
           "/api/daemon/v1/instance/identity",
@@ -1609,6 +1619,7 @@ export class InstanceClient {
       apiClient,
       verifyToken: (token) => this.#jwksClient!.verifyInstanceJwt(token),
       panelFingerprint: () => this.#pinnedPanelFingerprint(),
+      isPinned: () => this.#panelPin !== null,
     });
     tokenManagerRef.current = tokenManager;
     this.#tokenManager = tokenManager;
@@ -1850,7 +1861,13 @@ export class InstanceClient {
         ? event.data
         : String(event.data);
       if (signed) {
-        void signed.handle(raw);
+        signed.handle(raw).catch((err) =>
+          logError(
+            "instance",
+            "panel-identity: a verified frame could not be handled:",
+            sanitizeForLog(err),
+          )
+        );
         return;
       }
       this.#dispatchRawMessage(raw, ws);

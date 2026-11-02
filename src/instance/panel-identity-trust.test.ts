@@ -97,7 +97,10 @@ test("the identity document must be signed by a pinned key with a keyset not bel
 test("signed answers pass; unsigned errors change nothing; forged or unsigned successes park", async () => {
   const panel = await createTestPanel();
   const signing = await panel.signing();
-  const verifier = createPanelResponseVerifier(() => signing);
+  const verifier = createPanelResponseVerifier(() => ({
+    pinned: true,
+    key: signing,
+  }));
   const path = "/api/daemon/v1/auth/session";
   const body = '{"ok":false,"error":"Server key not found"}';
   assertEquals(verifier.covers(path), true);
@@ -128,6 +131,21 @@ test("signed answers pass; unsigned errors change nothing; forged or unsigned su
 });
 
 test("an unpinned server checks nothing", () => {
-  const verifier = createPanelResponseVerifier(() => undefined);
+  const verifier = createPanelResponseVerifier(() => ({
+    pinned: false,
+    key: undefined,
+  }));
   assertEquals(verifier.covers("/api/daemon/v1/auth/session"), false);
+});
+
+test("pinned with no verified key held refuses every covered answer, as a retryable error", async () => {
+  const verifier = createPanelResponseVerifier(() => ({
+    pinned: true,
+    key: undefined,
+  }));
+  const path = "/api/daemon/v1/jwks.json";
+  assertEquals(verifier.covers(path), true);
+  const err = await verifier.verify(path, 200, null, "{}").catch((e) => e);
+  assertEquals(err instanceof PanelIdentityError, false);
+  assertEquals(classifyConnectFailure(err).kind, "transient");
 });

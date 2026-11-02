@@ -974,6 +974,14 @@ On a pinned server, every connect attempt:
    last+1, the same `sessionId`, a pinned `kid` and a fresh `iat`
    (`panel-identity-frames.ts`); the transport pong is the only unsigned frame.
 
+While a server is pinned but holds no verified key (an identity refresh, or after a park), every
+answer on a signed route is refused and the token manager makes no call, as retryable errors: pinned
+never depends on the key being present. A control plane that does not know `hello-nonce` answers with
+its unsigned `version` frame, which a pinned daemon refuses and parks on; one that stays silent hits the
+30 s hello timeout instead (transient). The `4401 server row missing` close is honoured before the hello
+too (it only parks `awaiting-administrator`; nothing is cleared). Only 401, 403, 404 and 410 on the
+identity document park `panel-identity`; other statuses are retried.
+
 Any failure closes 4403 and parks with reason `panel-identity` (timer backoff,
 key files kept, never re-enrolls). No hello within 30 s is a plain timeout.
 The hello's `heartbeatSeconds` wins over the unsigned `version` advice.
