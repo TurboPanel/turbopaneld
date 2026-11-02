@@ -64,6 +64,8 @@ import {
   sizesFeaturesNegotiated,
 } from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
+import { createPanelSealKeySource } from "./panel-identity-cache.ts";
+import { createSealingContext, registerSealingKey } from "./sealing.ts";
 import {
   INSTANCE_VERSION_HEADER,
   type InstanceSupportStatus,
@@ -457,6 +459,21 @@ async function readLicenseCredentials(
   return { licenseId, licenseToken };
 }
 
+/** SHA-256 of a license pair, or undefined when either half is missing. */
+async function licenseStampOf(
+  { licenseId, licenseToken }: { licenseId?: string; licenseToken?: string },
+): Promise<string | undefined> {
+  if (!licenseId || !licenseToken) return undefined;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${licenseId}\n${licenseToken}`),
+  );
+  return Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
 function parseMessage(raw: string): DaemonMessage | null {
   try {
     return JSON.parse(raw) as DaemonMessage;
@@ -503,6 +520,8 @@ export class InstanceClient {
   #apiClient: DaemonApiClient | undefined;
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
+  #sealing: ReturnType<typeof createSealingContext> | null = null;
+  #sealingRegistered = false;
   #forceEnrollPending = false;
   #unparkForcesEnroll = false;
   /** Orphan transcript sweep runs once per process, never on reconnect. */
@@ -528,7 +547,16 @@ export class InstanceClient {
   #loggedUnsupportedInstanceVersion: string | undefined;
   /** Why the trust files do not match the pinned CA list; null when they do. */
   #caPinMismatch: string | null = null;
+  /**
+   * Digest of the license the last connect attempt tried: read just before an
+   * attempt that does not come out of a park, or taken from the credentials an
+   * enrollment used. A park compares the files against it and never re-reads
+   * it, so a license written while an attempt is in flight is not mistaken
+   * for one already tried.
+   */
   #licenseStamp: string | undefined;
+  /** Set once the unreadable-license warning is logged; cleared on a good read. */
+  #loggedUnreadableLicense = false;
   #idlePresence: IdlePresence | undefined;
   /** Always false until the signed-hello change lands; that change drops `readonly` and sets it, after which the unsigned advice is ignored. */
   readonly #pinnedHelloApplied = false;
@@ -1050,7 +1078,11 @@ export class InstanceClient {
   /** One pass of the connect loop. Resolves `false` once the client is stopped. */
   async #connectLoopTurn(): Promise<boolean> {
     if (this.#stopped) return false;
+    const wasParked = this.#parked;
     if (!(await this.#waitForParkedWake())) return !this.#stopped;
+    // A retry out of a park keeps the stamp it parked with; any other attempt
+    // notes which license it starts from.
+    if (!wasParked) this.#licenseStamp = await this.#readLicenseStamp();
 
     try {
       await this.#connectOnce();
@@ -1131,18 +1163,9 @@ export class InstanceClient {
   }
 
   async #readLicenseStamp(): Promise<string | undefined> {
-    const { licenseId, licenseToken } = await readLicenseCredentials(
-      this.#serverIdentityDir(),
+    return await licenseStampOf(
+      await readLicenseCredentials(this.#serverIdentityDir()),
     );
-    if (!licenseId || !licenseToken) return undefined;
-    const digest = await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(`${licenseId}\n${licenseToken}`),
-    );
-    return Array.from(
-      new Uint8Array(digest),
-      (byte) => byte.toString(16).padStart(2, "0"),
-    ).join("");
   }
 
   async #enterParkedState(
@@ -1153,7 +1176,6 @@ export class InstanceClient {
     this.#parkedReason = reason;
     this.#parkedKind = kind;
     this.#forceEnrollPending = false;
-    this.#licenseStamp = await this.#readLicenseStamp();
     if (kind === "awaiting-license") {
       // Expected on every fresh self-hosted install: not an error, and never
       // the hour-long permanent-park backoff.
@@ -1231,7 +1253,7 @@ export class InstanceClient {
       // a fresh enrollment; nothing the panel answers can.
       this.#unparkForcesEnroll =
         isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL")) ||
-        (await this.#readLicenseStamp()) !== this.#licenseStamp;
+        (await this.#licenseChanged());
       return true;
     }
     // Retried on the timer: a purchase changes the answer without any
@@ -1241,7 +1263,28 @@ export class InstanceClient {
       this.#parkedKind === "awaiting-seat"
     ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
+    return await this.#licenseChanged();
+  }
+
+  /**
+   * True when the license files hold a different, complete pair than the one
+   * last tried. An empty or half-written read (the installer replacing the
+   * files) while a license was already tried is "no change": it is logged once
+   * and the next re-check reads the finished files.
+   */
+  async #licenseChanged(): Promise<boolean> {
     const stamp = await this.#readLicenseStamp();
+    if (stamp === undefined && this.#licenseStamp !== undefined) {
+      if (!this.#loggedUnreadableLicense) {
+        this.#loggedUnreadableLicense = true;
+        logWarn(
+          "instance",
+          "license files are empty or incomplete; keeping the previous license until they are readable",
+        );
+      }
+      return false;
+    }
+    this.#loggedUnreadableLicense = false;
     return stamp !== this.#licenseStamp;
   }
 
@@ -1340,6 +1383,7 @@ export class InstanceClient {
     if (!licenseCredentials.licenseId || !licenseCredentials.licenseToken) {
       throw new Error("missing license credentials for enrollment");
     }
+    this.#licenseStamp = await licenseStampOf(licenseCredentials);
 
     const enrollClient = this.#apiClient ?? new DaemonApiClient({
       config: this.#config,
@@ -1372,6 +1416,7 @@ export class InstanceClient {
     identity: { keyFile: DaemonKeyFile; serverId: string; keyId: string },
     machineKey: string | undefined,
     hostname: string,
+    stateDir: string,
   ): void {
     const { keyFile, serverId, keyId } = identity;
     if (
@@ -1395,6 +1440,15 @@ export class InstanceClient {
     }
 
     const tokenManagerRef: { current?: DaemonTokenManager } = {};
+    this.#sealing = createSealingContext({
+      stateDir,
+      serverId,
+      serverKeyId: keyFile.keyId,
+    });
+    this.#sealingRegistered = false;
+    const panelSealKeys = createPanelSealKeySource({
+      fetchDocument: () => this.#apiClient!.getPanelIdentityDocument(),
+    });
     const apiClient = new DaemonApiClient({
       config: this.#config,
       httpClient: this.#httpClient,
@@ -1404,6 +1458,8 @@ export class InstanceClient {
         }
         return await tokenManagerRef.current.getToken(options);
       },
+      sealing: this.#sealing,
+      panelSealKey: () => panelSealKeys.get(),
       ...this.#apiClientVersionHook(),
     });
     const tokenManager = new DaemonTokenManager({
@@ -1485,10 +1541,28 @@ export class InstanceClient {
       },
       machineKey,
       hostname,
+      stateDir,
     );
 
     const jwt = await this.#tokenManager!.getToken();
+    await this.#registerSealingKeyOnce(identity.keyFile);
     await this.#openDaemonWebSocket(jwt, identity.serverId);
+  }
+
+  /**
+   * Register the sealing key once per identity, after the token exists and
+   * before the socket opens. Never blocks the connect: a failure is logged
+   * and the next connect tries again.
+   */
+  async #registerSealingKeyOnce(keyFile: DaemonKeyFile): Promise<void> {
+    const sealing = this.#sealing;
+    const apiClient = this.#apiClient;
+    if (!sealing || !apiClient || this.#sealingRegistered) return;
+    this.#sealingRegistered = await registerSealingKey({
+      sealing,
+      privateJwk: keyFile.privateJwk,
+      register: (body) => apiClient.registerSealingKey(body),
+    });
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
