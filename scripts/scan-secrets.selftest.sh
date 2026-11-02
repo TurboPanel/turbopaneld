@@ -193,6 +193,7 @@ expect_path_flag pkcs-keystore store.jks
 expect_path_flag credentials-json gcp/credentials-prod.json
 expect_path_flag daemon-identity-file "state/$(printf '%s%s' license. token)"
 expect_path_flag daemon-identity-file "$(printf '%s%s' server-key. json)"
+expect_path_flag daemon-identity-file "state/$(printf '%s%s' sealing-key. json)"
 expect_path_flag password-file "db/.$(printf '%s%s' pg pass)"
 expect_path_flag password-file ".$(printf '%s%s' rabbitmq_ pass)"
 expect_path_clean .env.example
