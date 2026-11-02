@@ -44,7 +44,8 @@ Four maintenance rules:
 3. **Never add a generic package to the purge.** Hosts run this on desktops and
    shared machines, and the installer's dependencies (curl, git, acl, gnupg,
    iptables, openssl, wireguard-tools, build-essential, sudo,
-   systemd-timesyncd, ...) are not TurboPanel's to remove. Only Docker's
+   systemd-timesyncd, unattended-upgrades, ...) are not TurboPanel's to remove
+   (the purge removes only our `52turbopanel-security-updates` apt setting). Only Docker's
    packages (`TP_DOCKER_PACKAGES`) and the `phpN.N-*` packages plus
    `debsuryorg-archive-keyring` that the php-fpm role's sury repo supplied are
    purged. A role that adds a new apt repository for its own packages must add
