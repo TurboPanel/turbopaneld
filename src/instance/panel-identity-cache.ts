@@ -25,14 +25,15 @@ export interface PanelSealKeySourceOptions {
   fetchDocument: () => Promise<PanelIdentityFetch | null>;
   now?: () => number;
   /**
-   * Whether this signing key id is one the server trusts. Until the pin file
-   * exists this is absent, and the document is trusted as far as the TLS
-   * connection it came over; the pin row supplies it.
+   * Whether this signing key id is one the server trusts: on a pinned server
+   * the pin file (`panel-identity-pin.ts`). Absent only on a server with no
+   * pin, where the document is trusted as far as the TLS connection it came
+   * over.
    */
   isTrustedSigningKey?: (kid: string) => boolean | Promise<boolean>;
 }
 
-type Cached = { key: PanelSealKey; keyset: number; fetchedAt: number };
+type Cached = ParsedPanelIdentity & { fetchedAt: number };
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -78,12 +79,20 @@ async function signatureVerifies(
   }
 }
 
+/** A verified document: its sealing key, key set and current signing key. */
+export interface ParsedPanelIdentity {
+  key: PanelSealKey;
+  keyset: number;
+  /** The `current` Ed25519 key the document is signed with (raw 32 bytes). */
+  signing: { kid: string; pub: Uint8Array };
+}
+
 /** Parse and verify a document; null when anything about it is wrong. */
 export async function parsePanelIdentity(
   fetched: PanelIdentityFetch,
   now: number,
   isTrustedSigningKey?: (kid: string) => boolean | Promise<boolean>,
-): Promise<{ key: PanelSealKey; keyset: number } | null> {
+): Promise<ParsedPanelIdentity | null> {
   let doc: Record<string, unknown> | null;
   try {
     doc = record(JSON.parse(fetched.body));
@@ -115,6 +124,7 @@ export async function parsePanelIdentity(
       pub: sealPub,
       panelFingerprint: currentKid,
     },
+    signing: { kid: currentKid, pub: currentPub },
   };
 }
 

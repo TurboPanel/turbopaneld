@@ -5,6 +5,7 @@ import {
 } from "../permissions/daemon-files.ts";
 import {
   buildEnrollmentPayload,
+  buildEnrollmentPayloadV2,
   computePublicKeyFingerprint,
   type DaemonKeyFile,
   generateDaemonKeypair,
@@ -56,20 +57,33 @@ export async function enrollDaemon(params: {
   licenseId: string;
   licenseToken: string;
   stateDir: string;
+  /** The pinned control plane key, once its identity document verified: the proof is then v2. */
+  panelFingerprint?: string;
+  /** Wall clock for the v2 `iat`; tests pass a fixed one. */
+  nowMs?: () => number;
 }): Promise<{ keyFile: DaemonKeyFile; serverId: string; keyId: string }> {
   const challenge = await params.apiClient.getEnrollmentChallenge();
   const enrollmentKeyFile = await generateDaemonKeypair();
   const fingerprint = await computePublicKeyFingerprint(
     enrollmentKeyFile.publicJwk,
   );
-  const payload = buildEnrollmentPayload({
+  const fields = {
     challengeId: challenge.challengeId,
     nonce: challenge.nonce,
     licenseId: params.licenseId,
     machineKey: params.machineKey ?? "",
     hostname: params.hostname,
     publicKeyFingerprint: fingerprint,
-  });
+  };
+  const v2 = params.panelFingerprint
+    ? {
+      panelFingerprint: params.panelFingerprint,
+      iat: Math.floor((params.nowMs ?? Date.now)() / 1000),
+    }
+    : undefined;
+  const payload = v2
+    ? buildEnrollmentPayloadV2({ ...fields, ...v2 })
+    : buildEnrollmentPayload(fields);
   const signature = await signChallenge(enrollmentKeyFile.privateJwk, payload);
   const persistedServerId = await readPersistedServerId(params.stateDir);
   const enrollment = await params.apiClient.enroll({
@@ -81,6 +95,7 @@ export async function enrollDaemon(params: {
     publicJwk: enrollmentKeyFile.publicJwk,
     challengeId: challenge.challengeId,
     signature,
+    ...(v2 ? { payloadVersion: 2 as const, ...v2 } : {}),
   });
 
   await ensureDaemonDir(params.stateDir);

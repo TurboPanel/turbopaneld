@@ -90,6 +90,71 @@ export function buildAuthPayload(params: {
   return `turbopanel-daemon-auth-v1\n${params.challengeId}\n${params.nonce}\n${params.serverId}\n${params.keyId}\n${params.machineKey}\n${params.hostname}`;
 }
 
+/** First line of a v2 enroll proof; pinned to the control plane's copy by contract-drift. */
+export const ENROLL_PROOF_V2_TAG = "turbopanel-daemon-enroll-v2";
+/** First line of a v2 session proof; pinned like {@link ENROLL_PROOF_V2_TAG}. */
+export const AUTH_PROOF_V2_TAG = "turbopanel-daemon-auth-v2";
+
+/**
+ * A v2 proof also names the control plane by the fingerprint of the key this
+ * server pinned, plus the method, the path and `iat` (Unix seconds), so a
+ * proof made for one control plane is no use at another.
+ */
+export interface ProofV2Fields {
+  panelFingerprint: string;
+  iat: number;
+}
+
+export function buildEnrollmentPayloadV2(
+  params: {
+    challengeId: string;
+    nonce: string;
+    licenseId: string;
+    machineKey: string;
+    hostname: string;
+    publicKeyFingerprint: string;
+  } & ProofV2Fields,
+): string {
+  return [
+    ENROLL_PROOF_V2_TAG,
+    params.challengeId,
+    params.nonce,
+    params.licenseId,
+    params.machineKey,
+    params.hostname,
+    params.publicKeyFingerprint,
+    params.panelFingerprint,
+    "POST",
+    "/api/daemon/v1/enroll",
+    String(params.iat),
+  ].join("\n");
+}
+
+export function buildAuthPayloadV2(
+  params: {
+    challengeId: string;
+    nonce: string;
+    serverId: string;
+    keyId: string;
+    machineKey: string;
+    hostname: string;
+  } & ProofV2Fields,
+): string {
+  return [
+    AUTH_PROOF_V2_TAG,
+    params.challengeId,
+    params.nonce,
+    params.serverId,
+    params.keyId,
+    params.machineKey,
+    params.hostname,
+    params.panelFingerprint,
+    "POST",
+    "/api/daemon/v1/auth/session",
+    String(params.iat),
+  ].join("\n");
+}
+
 export async function signChallenge(
   privateJwk: JsonWebKey,
   payload: string,

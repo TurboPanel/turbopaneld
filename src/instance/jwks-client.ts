@@ -19,7 +19,12 @@ export type InstanceJwtClaims = {
 export type VerifyInstanceJwtResult =
   | { ok: true; claims: InstanceJwtClaims }
   | { ok: false; reason: "invalid" }
-  | { ok: false; reason: "unavailable" };
+  | {
+    ok: false;
+    reason: "unavailable";
+    /** Why the last key refresh failed, when it did (a `PanelIdentityError` for a forged key set). */
+    cause?: unknown;
+  };
 
 export interface DaemonJwksClientOptions {
   apiClient: Pick<DaemonApiClient, "getJwks">;
@@ -76,6 +81,7 @@ export class DaemonJwksClient {
   #fetchedAtMs = 0;
   #lastRefreshAttemptMs = 0;
   #lastRefreshFailed = false;
+  #lastRefreshError: unknown = undefined;
   #refreshPromise: Promise<void> | undefined;
 
   constructor(options: DaemonJwksClientOptions) {
@@ -131,7 +137,9 @@ export class DaemonJwksClient {
 
     if (!key) {
       if (this.#keys.size === 0 || this.#lastRefreshFailed) {
-        return { ok: false, reason: "unavailable" };
+        return this.#lastRefreshFailed
+          ? { ok: false, reason: "unavailable", cause: this.#lastRefreshError }
+          : { ok: false, reason: "unavailable" };
       }
       return { ok: false, reason: "invalid" };
     }
@@ -227,8 +235,10 @@ export class DaemonJwksClient {
       this.#keys = nextKeys;
       this.#fetchedAtMs = Date.now();
       this.#lastRefreshFailed = false;
-    } catch {
+      this.#lastRefreshError = undefined;
+    } catch (err) {
       this.#lastRefreshFailed = true;
+      this.#lastRefreshError = err;
       throw new Error("JWKS refresh failed");
     }
   }

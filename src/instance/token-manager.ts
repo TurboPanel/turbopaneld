@@ -1,6 +1,7 @@
 import { decodeBase64Url } from "@std/encoding/base64url";
 import {
   buildAuthPayload,
+  buildAuthPayloadV2,
   type DaemonKeyFile,
   signChallenge,
 } from "../crypto/keys.ts";
@@ -8,6 +9,7 @@ import { logWarn } from "../util/logger.ts";
 import type { DaemonApiClient } from "./api-client.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import type { VerifyInstanceJwtResult } from "./jwks-client.ts";
+import { PanelIdentityError } from "./panel-identity-trust.ts";
 
 export type VerifyResult = VerifyInstanceJwtResult;
 
@@ -20,6 +22,13 @@ export interface TokenManagerOptions {
   apiClient: Pick<DaemonApiClient, "getAuthChallenge" | "createSession">;
   refreshEarlyMs?: number;
   verifyToken?: (token: string) => Promise<VerifyResult>;
+  /**
+   * The fingerprint of the control plane key this server pinned, once the
+   * identity document verified; undefined on a server with no pin. When set
+   * the session proof is v2 (it names the key) and a token is never used
+   * without a verified JWKS.
+   */
+  panelFingerprint?: () => string | undefined;
 }
 
 const DEFAULT_REFRESH_EARLY_MS = 60_000;
@@ -77,7 +86,8 @@ export class DaemonTokenManager {
       const kind = classifyConnectFailure(firstError).kind;
       if (
         kind === "permanent" || kind === "awaiting-seat" ||
-        kind === "stale-identity" || isJwksTrustFailure(firstError)
+        kind === "stale-identity" || kind === "panel-identity" ||
+        isJwksTrustFailure(firstError)
       ) {
         throw firstError;
       }
@@ -98,14 +108,21 @@ export class DaemonTokenManager {
       keyId: this.#options.keyId,
     });
 
-    const payload = buildAuthPayload({
+    const fields = {
       challengeId: challenge.challengeId,
       nonce: challenge.nonce,
       serverId: this.#options.serverId,
       keyId: this.#options.keyId,
       machineKey: this.#options.machineKey ?? "",
       hostname: this.#options.hostname,
-    });
+    };
+    const panelFingerprint = this.#options.panelFingerprint?.();
+    const v2 = panelFingerprint
+      ? { panelFingerprint, iat: Math.floor(now() / 1000) }
+      : undefined;
+    const payload = v2
+      ? buildAuthPayloadV2({ ...fields, ...v2 })
+      : buildAuthPayload(fields);
 
     const signature = await signChallenge(
       this.#options.keyFile.privateJwk,
@@ -119,6 +136,7 @@ export class DaemonTokenManager {
       machineKey: this.#options.machineKey,
       hostname: this.#options.hostname,
       at: new Date().toISOString(),
+      ...(v2 ? { payloadVersion: 2 as const, ...v2 } : {}),
     });
 
     if (this.#options.verifyToken) {
@@ -126,6 +144,14 @@ export class DaemonTokenManager {
       if (!verification.ok) {
         if (verification.reason === "invalid") {
           throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
+        }
+        if (panelFingerprint) {
+          // Pinned: no fallback to an unverified token. A forged key set
+          // parks (`panel-identity`); an unreachable one is retried.
+          if (verification.cause instanceof PanelIdentityError) {
+            throw verification.cause;
+          }
+          throw new Error("JWKS unavailable; the token is not used");
         }
         logWarn(
           "instance",

@@ -49,6 +49,20 @@ export interface DaemonApiClientOptions {
    * sealing key can be registered again without waiting for a reconnect.
    */
   onPlaintextSecretsAnswer?: () => void;
+  /**
+   * On a pinned server, checks the signature on answers from signed routes
+   * (`panel-identity-trust.ts` `createPanelResponseVerifier`); throws to
+   * refuse an answer.
+   */
+  verifyResponse?: {
+    covers(path: string): boolean;
+    verify(
+      path: string,
+      status: number,
+      header: string | null,
+      body: string,
+    ): Promise<void>;
+  };
 }
 
 /**
@@ -141,6 +155,10 @@ export interface DaemonEnrollRequest {
   publicJwk: JsonWebKey;
   challengeId: string;
   signature: string;
+  /** v2 proof members, sent only by a pinned server. */
+  payloadVersion?: 2;
+  panelFingerprint?: string;
+  iat?: number;
 }
 
 export interface DaemonEnrollResponse {
@@ -156,6 +174,10 @@ export interface DaemonSessionRequest {
   machineKey?: string;
   hostname: string;
   at: string;
+  /** v2 proof members, sent only by a pinned server. */
+  payloadVersion?: 2;
+  panelFingerprint?: string;
+  iat?: number;
 }
 
 export interface DaemonSessionResponse {
@@ -714,7 +736,30 @@ export class DaemonApiClient {
       response = await this.#fetch(path, { ...init, headers: retryHeaders });
       this.#captureInstanceVersion(response);
     }
-    return response;
+    return await this.#verifiedResponse(path, response);
+  }
+
+  /**
+   * On a pinned server, an answer on a signed route is read whole and checked
+   * before anything looks at it (`panel-identity-trust.ts`); the checked
+   * bytes are handed on as a fresh response.
+   */
+  async #verifiedResponse(path: string, response: Response): Promise<Response> {
+    const verifier = this.#options.verifyResponse;
+    const pathname = path.split("?")[0];
+    if (!verifier?.covers(pathname)) return response;
+    const body = await response.text();
+    await verifier.verify(
+      pathname,
+      response.status,
+      response.headers.get("x-turbopanel-signature"),
+      body,
+    );
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   }
 
   #captureInstanceVersion(response: Response): void {

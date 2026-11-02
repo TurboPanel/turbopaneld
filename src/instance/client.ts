@@ -22,7 +22,23 @@ import {
   resolveServerIdentityDir,
 } from "./sockets.ts";
 import { caPinMismatch, CaPinMismatchError } from "./ca-pin.ts";
-import { readPanelIdentityPin } from "./panel-identity-pin.ts";
+import {
+  type PanelIdentityPin,
+  readPanelIdentityPin,
+} from "./panel-identity-pin.ts";
+import {
+  type PanelSigningKey,
+  pinAccepts,
+  type VerifiedHello,
+} from "./panel-identity-frames.ts";
+import {
+  createPanelResponseVerifier,
+  PanelIdentityError,
+  type PanelResponseVerifier,
+  readEnforcedPin,
+  verifyPanelIdentityDocument,
+} from "./panel-identity-trust.ts";
+import { SignedPanelSession, UNSIGNED_PONG } from "./signed-session.ts";
 import { runServerNetworkCheck } from "../host/network-check.ts";
 import {
   collectServerIps,
@@ -98,6 +114,7 @@ import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
 import {
   advisedHeartbeatMs,
+  clampHeartbeatSeconds,
   IDLE_PRESENCE_MS,
   IdlePresence,
 } from "./idle-presence.ts";
@@ -332,6 +349,8 @@ export const RECONNECT_FLOOR_MS = 250;
 export const RECONNECT_FIRST_WINDOW_MS = 8_000;
 export const PARKED_BACKOFF_MIN_MS = 5 * 60_000;
 export const PARKED_BACKOFF_MAX_MS = 60 * 60_000;
+/** How long a verified control plane key is used before its identity document is fetched again. */
+const PANEL_KEY_REFRESH_MS = 24 * 60 * 60_000;
 /**
  * Re-check cadence while no license credentials exist on disk yet. Cheap (two
  * file reads) and short on purpose: on a self-hosted control-plane host the
@@ -501,7 +520,8 @@ type ParkedKind =
   | "tls-trust"
   | "awaiting-license"
   | "awaiting-seat"
-  | "awaiting-administrator";
+  | "awaiting-administrator"
+  | "panel-identity";
 
 export class InstanceClient {
   readonly #config: InstanceConfig;
@@ -564,8 +584,15 @@ export class InstanceClient {
   /** Set once the unreadable-license warning is logged; cleared on a good read. */
   #loggedUnreadableLicense = false;
   #idlePresence: IdlePresence | undefined;
-  /** Always false until the signed-hello change lands; that change drops `readonly` and sets it, after which the unsigned advice is ignored. */
-  readonly #pinnedHelloApplied = false;
+  /** True once a verified signed hello set the heartbeat; the unsigned advice is then ignored. */
+  #pinnedHelloApplied = false;
+  /** The enforced pin read at the start of this connect attempt (null = unsigned session). */
+  #panelPin: PanelIdentityPin | null = null;
+  /** The pinned control plane key, from its verified identity document (refreshed at most daily). */
+  #panelKey: (PanelSigningKey & { fetchedAtMs: number }) | undefined;
+  readonly #panelResponseVerifier = createPanelResponseVerifier(() =>
+    this.#panelPin ? this.#panelKey : undefined
+  );
   /** Command ids already dispatched, so a repeated frame never runs twice. */
   readonly #seenDispatchIds = new SeenCommandIds();
   #haObserver: ManagedHaObserver | undefined;
@@ -889,12 +916,61 @@ export class InstanceClient {
     void this.#repoKeyReporter?.flush();
   }
 
-  #apiClientVersionHook(): {
+  /** Hooks every `DaemonApiClient` this client builds gets: version notes and, when pinned, signed answers. */
+  #apiClientHooks(): {
     onInstanceVersion: (version: string | null) => void;
+    verifyResponse: PanelResponseVerifier;
   } {
     return {
       onInstanceVersion: (version) => this.#noteInstanceVersion(version),
+      verifyResponse: this.#panelResponseVerifier,
     };
+  }
+
+  /** The pinned key's fingerprint while this server is pinned and the key is verified. */
+  #pinnedPanelFingerprint(): string | undefined {
+    return this.#panelPin ? this.#panelKey?.kid : undefined;
+  }
+
+  /**
+   * On a pinned server: before anything is sent to the control plane, its
+   * identity document must verify against the pin. Re-checked at most daily
+   * per HTTP client; a document that fails is a `PanelIdentityError`.
+   */
+  async #verifyPanelIdentity(pin: PanelIdentityPin): Promise<void> {
+    const nowMs = now();
+    const cached = this.#panelKey;
+    if (
+      cached && nowMs - cached.fetchedAtMs < PANEL_KEY_REFRESH_MS &&
+      pinAccepts(pin, cached.kid) && cached.keyset >= pin.keyset
+    ) {
+      return;
+    }
+    this.#panelKey = undefined;
+    const fetcher = new DaemonApiClient({
+      config: this.#config,
+      httpClient: this.#httpClient,
+      getToken: () =>
+        Promise.reject(new Error("token unavailable for identity fetch")),
+    });
+    let fetched;
+    try {
+      fetched = await fetcher.getPanelIdentityDocument();
+    } catch (err) {
+      // Unreachable or a server error: retried like any network failure. A
+      // control plane that answers but has no key cannot prove itself.
+      if (
+        err instanceof DaemonApiError && err.status >= 400 && err.status < 500
+      ) {
+        throw new PanelIdentityError(
+          "/api/daemon/v1/instance/identity",
+          `identity document answered ${err.status}`,
+        );
+      }
+      throw err;
+    }
+    const signing = await verifyPanelIdentityDocument(fetched, pin, nowMs);
+    this.#panelKey = { ...signing, fetchedAtMs: nowMs };
   }
 
   async fetchHealth(): Promise<{ ok: boolean }> {
@@ -1002,6 +1078,8 @@ export class InstanceClient {
   }
 
   #applyAdvisedHeartbeat(advised: unknown): void {
+    // A verified signed hello set the cadence; unsigned advice cannot move it.
+    if (this.#pinnedHelloApplied) return;
     const ms = advisedHeartbeatMs(advised, this.#pinnedHelloApplied);
     // IdlePresence is reused across reconnects: a frame without advice must
     // put the default back, not keep the last advised cadence.
@@ -1184,6 +1262,8 @@ export class InstanceClient {
       await this.#enterParkedState(classified.reason, "awaiting-seat");
     } else if (classified.kind === "stale-identity") {
       await this.#enterParkedState(classified.reason, "awaiting-administrator");
+    } else if (classified.kind === "panel-identity") {
+      await this.#enterParkedState(classified.reason, "panel-identity");
     } else {
       this.#increaseBackoff();
     }
@@ -1227,6 +1307,18 @@ export class InstanceClient {
       logWarn(
         "instance",
         `panel says this server's key is unknown; waiting for an administrator (${reason}); key files are kept and the check repeats with backoff`,
+      );
+      return;
+    }
+    if (kind === "panel-identity") {
+      // Never clears key files and never re-enrolls: an unproven control
+      // plane is no reason to change anything on this server.
+      this.#panelKey = undefined;
+      logError(
+        "instance",
+        `daemon control-plane failed panel identity check (${reason}) at ${
+          sanitizeForLog(this.target)
+        }; parked — this control plane did not prove it holds the pinned panel key; retrying with backoff, or re-install with a fresh install command if it keeps failing`,
       );
       return;
     }
@@ -1291,7 +1383,8 @@ export class InstanceClient {
     // change on this server.
     if (
       this.#parkedKind === "tls-trust" ||
-      this.#parkedKind === "awaiting-seat"
+      this.#parkedKind === "awaiting-seat" ||
+      this.#parkedKind === "panel-identity"
     ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
     return await this.#licenseChanged();
@@ -1421,7 +1514,7 @@ export class InstanceClient {
       httpClient: this.#httpClient,
       getToken: () =>
         Promise.reject(new Error("token unavailable before enrollment")),
-      ...this.#apiClientVersionHook(),
+      ...this.#apiClientHooks(),
     });
     const enrollment = await enrollDaemon({
       apiClient: enrollClient,
@@ -1430,6 +1523,7 @@ export class InstanceClient {
       licenseId: licenseCredentials.licenseId,
       licenseToken: licenseCredentials.licenseToken,
       stateDir,
+      panelFingerprint: this.#pinnedPanelFingerprint(),
     });
     keyFile = enrollment.keyFile;
     serverId = enrollment.serverId;
@@ -1465,7 +1559,7 @@ export class InstanceClient {
         httpClient: this.#httpClient,
         getToken: () =>
           Promise.reject(new Error("token unavailable for JWKS fetch")),
-        ...this.#apiClientVersionHook(),
+        ...this.#apiClientHooks(),
       });
       this.#jwksClient = new DaemonJwksClient({ apiClient: jwksApiClient });
     }
@@ -1486,6 +1580,9 @@ export class InstanceClient {
     });
     const panelSealKeys = createPanelSealKeySource({
       fetchDocument: () => this.#apiClient!.getPanelIdentityDocument(),
+      // A pinned server trusts only a document signed by a pinned key.
+      isTrustedSigningKey: (kid) =>
+        this.#panelPin ? pinAccepts(this.#panelPin, kid) : true,
     });
     const apiClient = new DaemonApiClient({
       config: this.#config,
@@ -1501,7 +1598,7 @@ export class InstanceClient {
       onPlaintextSecretsAnswer: () => {
         void this.#sealingRegistration?.afterPlaintextAnswer();
       },
-      ...this.#apiClientVersionHook(),
+      ...this.#apiClientHooks(),
     });
     const tokenManager = new DaemonTokenManager({
       keyFile,
@@ -1511,6 +1608,7 @@ export class InstanceClient {
       hostname,
       apiClient,
       verifyToken: (token) => this.#jwksClient!.verifyInstanceJwt(token),
+      panelFingerprint: () => this.#pinnedPanelFingerprint(),
     });
     tokenManagerRef.current = tokenManager;
     this.#tokenManager = tokenManager;
@@ -1538,6 +1636,10 @@ export class InstanceClient {
       throw new CaPinMismatchError(this.#caPinMismatch);
     }
     await this.#waitForConnectPreconditions();
+    // The pin file, never the feature list, turns the signed session on.
+    // Pinned: the control plane proves its key before anything is sent to it.
+    this.#panelPin = await readEnforcedPin();
+    if (this.#panelPin) await this.#verifyPanelIdentity(this.#panelPin);
 
     // Do not close the active socket here: by the time #connectOnce() is called
     // from #runConnectLoop(), the previous socket has already closed naturally
@@ -1588,6 +1690,73 @@ export class InstanceClient {
     const jwt = await this.#tokenManager!.getToken();
     await this.#sealingRegistration?.atConnect();
     await this.#openDaemonWebSocket(jwt, identity.serverId);
+  }
+
+  /** Presence, observers, reporters and the after-connect pulls, for one session. */
+  #startSessionWork(ws: WebSocket): void {
+    this.#idlePresence?.attach(ws);
+    this.#ensureHaObserver();
+    this.#haObserver?.attach();
+    this.#ensurePgProbeObserver();
+    this.#pgProbeObserver?.attach();
+    this.#ensureBootHoldReporter();
+    this.#bootHoldReporter?.attach();
+    this.#pgStandbySampler ??= new PgStandbySampler();
+    this.#pgStandbySampler.attach();
+    this.#mysqlFamilySampler ??= new PgStandbySampler({
+      engines: MYSQL_FAMILY_SAMPLED_ENGINES,
+      globallyEnabled: () => true,
+    });
+    this.#mysqlFamilySampler.attach();
+    this.#ensureManagedHealthReporter().attach();
+    this.#ensureFabricPeerReporter().attach();
+    this.#ensureRepoKeyReporter().attach();
+    this.#ensureBackupReporter().attach();
+    this.#ensureBackupCopier().start();
+    this.#ensureBackupCopyReporter().attach();
+    this.#ensureAcmeObserver();
+    this.#ensureProofForward();
+    this.#ensureAcmeIssue();
+    this.#acmeObserver?.attach();
+    this.#instanceAcmeRenewal?.flush();
+    this.#metricsScheduler?.attach((sample) =>
+      this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
+    );
+    this.#topologyReporter?.attach((report) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(JSON.stringify(
+        { type: "topology-report", ...report } satisfies DaemonMessage,
+      ));
+    });
+    this.#rehydrateDeploymentSecretsAfterConnect();
+    this.#syncDockerNetworkingAfterConnect();
+  }
+
+  /** Parse one inbound frame and hand it to the handlers (the current socket only). */
+  #dispatchRawMessage(raw: string, ws: WebSocket): void {
+    if (this.#ws !== ws) return;
+    const message = parseMessage(raw);
+    if (!message) {
+      logWarn("instance", "ignored non-JSON websocket message");
+      return;
+    }
+    this.#onMessage?.(message);
+    this.#handleMessage(message, ws);
+  }
+
+  /** A verified hello sets the heartbeat; the unsigned `version` advice is ignored after it. */
+  #applySignedHello(hello: VerifiedHello): void {
+    this.#pinnedHelloApplied = true;
+    const seconds = clampHeartbeatSeconds(hello.heartbeatSeconds);
+    this.#idlePresence?.setIdleThresholdMs(
+      seconds === null ? IDLE_PRESENCE_MS : seconds * 1000,
+    );
+    logInfo(
+      "presence",
+      seconds === null
+        ? "heartbeat 60s (default)"
+        : `heartbeat ${seconds}s (signed hello)`,
+    );
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
@@ -1650,42 +1819,27 @@ export class InstanceClient {
     // observers below attach: until then nothing may read it as "unsupported".
     this.#peerFeaturesKnown = false;
     const connectedAt = now();
-    this.#idlePresence?.attach(ws);
-    this.#ensureHaObserver();
-    this.#haObserver?.attach();
-    this.#ensurePgProbeObserver();
-    this.#pgProbeObserver?.attach();
-    this.#ensureBootHoldReporter();
-    this.#bootHoldReporter?.attach();
-    this.#pgStandbySampler ??= new PgStandbySampler();
-    this.#pgStandbySampler.attach();
-    this.#mysqlFamilySampler ??= new PgStandbySampler({
-      engines: MYSQL_FAMILY_SAMPLED_ENGINES,
-      globallyEnabled: () => true,
-    });
-    this.#mysqlFamilySampler.attach();
-    this.#ensureManagedHealthReporter().attach();
-    this.#ensureFabricPeerReporter().attach();
-    this.#ensureRepoKeyReporter().attach();
-    this.#ensureBackupReporter().attach();
-    this.#ensureBackupCopier().start();
-    this.#ensureBackupCopyReporter().attach();
-    this.#ensureAcmeObserver();
-    this.#ensureProofForward();
-    this.#ensureAcmeIssue();
-    this.#acmeObserver?.attach();
-    this.#instanceAcmeRenewal?.flush();
-    this.#metricsScheduler?.attach((sample) =>
-      this.#apiClient?.sendHostMetrics(sample) ?? Promise.resolve()
-    );
-    this.#topologyReporter?.attach((report) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      ws.send(JSON.stringify(
-        { type: "topology-report", ...report } satisfies DaemonMessage,
-      ));
-    });
-    this.#rehydrateDeploymentSecretsAfterConnect();
-    this.#syncDockerNetworkingAfterConnect();
+    this.#pinnedHelloApplied = false;
+    // Pinned: only the hello-nonce goes out until the control plane's signed
+    // hello verifies; presence, reporters and held results start after it.
+    const signed = this.#panelPin && this.#panelKey
+      ? new SignedPanelSession({
+        ws,
+        pin: this.#panelPin,
+        signing: this.#panelKey,
+        onVerified: (hello) => {
+          logInfo("instance", "panel-identity: signed hello verified");
+          this.#startSessionWork(ws);
+          this.#applySignedHello(hello);
+          commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+        },
+        onFrame: (json) => this.#dispatchRawMessage(json, ws),
+        onPong: () => this.#dispatchRawMessage(UNSIGNED_PONG, ws),
+        now,
+      })
+      : undefined;
+    if (signed) signed.start();
+    else this.#startSessionWork(ws);
 
     ws.onmessage = (event) => {
       // An abandoned or replaced socket may still wake up with buffered
@@ -1695,15 +1849,11 @@ export class InstanceClient {
       const raw = typeof event.data === "string"
         ? event.data
         : String(event.data);
-
-      const message = parseMessage(raw);
-      if (!message) {
-        logWarn("instance", "ignored non-JSON websocket message");
+      if (signed) {
+        void signed.handle(raw);
         return;
       }
-
-      this.#onMessage?.(message);
-      this.#handleMessage(message, ws);
+      this.#dispatchRawMessage(raw, ws);
     };
 
     let closeHandled = false;
@@ -1761,7 +1911,7 @@ export class InstanceClient {
     // never wait on one frame that may be lost with the upgrade. Nothing is
     // cleared until the attach frame says the control plane confirms results
     // (or it confirms one); a repeat send is harmless.
-    commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+    if (!signed) commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
       ws.addEventListener("close", (event) => resolve(event as CloseEvent), {
@@ -1774,6 +1924,8 @@ export class InstanceClient {
     ) {
       throw new DaemonApiError(404, "Server key not found");
     }
+    signed?.noteClosed(closeEvent.code, closeEvent.reason);
+    if (signed?.failure) throw signed.failure;
     const wasAuthFailure = closeEvent.code === 4401;
     if (wasAuthFailure) {
       await this.#tokenManager?.refresh();

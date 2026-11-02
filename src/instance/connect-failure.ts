@@ -1,5 +1,6 @@
 import { DaemonApiError } from "./api-client.ts";
 import { CaPinMismatchError } from "./ca-pin.ts";
+import { PanelIdentityError } from "./panel-identity-trust.ts";
 import { errorText } from "../util/logger.ts";
 
 export type ConnectFailureClass =
@@ -9,7 +10,8 @@ export type ConnectFailureClass =
   | "permanent"
   | "tls-trust"
   | "awaiting-license"
-  | "awaiting-seat";
+  | "awaiting-seat"
+  | "panel-identity";
 
 export type ClassifiedConnectFailure = {
   kind: ConnectFailureClass;
@@ -31,6 +33,9 @@ const PERMANENT_ENROLLMENT_ERRORS: readonly StatusMessage[] = [
 const PERMANENT_AUTH_ERRORS: readonly StatusMessage[] = [
   { status: 400, message: "License is inactive" },
   { status: 400, message: "Server key is inactive" },
+  // This server once ran a signed session and now sends a v1 proof: its pin
+  // file is gone. Retrying cannot fix that; re-running the installer can.
+  { status: 403, message: "Signed proof required" },
 ];
 
 /**
@@ -165,6 +170,13 @@ export function classifyConnectFailure(
 ): ClassifiedConnectFailure {
   if (isMissingLicenseCredentialsError(err)) {
     return { kind: "awaiting-license", reason: failureReason(err) };
+  }
+  if (
+    err instanceof PanelIdentityError ||
+    (err instanceof DaemonApiError && err.status === 403 &&
+      err.message === "Panel fingerprint mismatch")
+  ) {
+    return { kind: "panel-identity", reason: failureReason(err) };
   }
   if (isAwaitingSeatError(err)) {
     return { kind: "awaiting-seat", reason: failureReason(err) };

@@ -34,6 +34,8 @@ import {
   MANAGED_REPLICA_FRESHNESS_FEATURE,
   MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
+  PANEL_IDENTITY_FEATURE,
+  PANEL_SIGNED_FRAMES_FEATURE,
   parseSemver,
   PHP_SITE_MODES_FEATURE,
   REPO_KEY_REPORT_FEATURE,
@@ -41,6 +43,7 @@ import {
   resolveInstanceCapabilities,
   resolveInstanceSupport,
   SERVER_NETWORK_CHECK_FEATURE,
+  SIGNIN_V2_FEATURE,
   SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   TLS_CAPTURE_FEATURE,
@@ -472,9 +475,22 @@ test("daemon-sealed-principal-reconcile-v1 is advertised and raised no floor", (
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("install-token-v2 is advertised last and raised no floor", () => {
+test("install-token-v2 is advertised and raised no floor", () => {
   assertEquals(INSTALL_TOKEN_V2_FEATURE, "install-token-v2");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), INSTALL_TOKEN_V2_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(INSTALL_TOKEN_V2_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("the signed session features are advertised and raised no floor", () => {
+  for (
+    const feature of [
+      PANEL_IDENTITY_FEATURE,
+      PANEL_SIGNED_FRAMES_FEATURE,
+      SIGNIN_V2_FEATURE,
+    ]
+  ) {
+    assertEquals(DAEMON_WIRE_FEATURES.includes(feature), true);
+  }
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

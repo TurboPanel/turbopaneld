@@ -104,6 +104,9 @@ export const DAEMON_WIRE_FEATURES = [
   "instance-hostname-public-port-v1",
   "daemon-sealed-principal-reconcile-v1",
   "install-token-v2",
+  "panel-identity-v1",
+  "panel-signed-frames-v1",
+  "signin-v2",
 ] as const;
 
 /**
@@ -194,6 +197,20 @@ export const REPO_KEY_REPORT_FEATURE: DaemonWireFeature = "repo-key-report-v1";
 
 /** The installer reads one `TOKEN` value (signed, carries the panel key) as well as the older variables. */
 export const INSTALL_TOKEN_V2_FEATURE: DaemonWireFeature = "install-token-v2";
+
+/**
+ * Informational only: this daemon runs a signed session when its pin file
+ * exists (`hello-nonce`, then a signed hello and signed frames). Enforcement
+ * follows the pin file, never this list, because the list arrives unsigned.
+ */
+export const PANEL_IDENTITY_FEATURE: DaemonWireFeature = "panel-identity-v1";
+
+/** Informational only: every frame after a signed hello carries a signed envelope. */
+export const PANEL_SIGNED_FRAMES_FEATURE: DaemonWireFeature =
+  "panel-signed-frames-v1";
+
+/** Informational only: a pinned daemon signs in with v2 proofs naming the pinned key. */
+export const SIGNIN_V2_FEATURE: DaemonWireFeature = "signin-v2";
 
 /**
  * This daemon holds an X25519 sealing key (registered with the control plane,
