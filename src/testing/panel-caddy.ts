@@ -47,6 +47,12 @@ export function pinnedCaddy(): string | undefined {
   }
 }
 
+/** `value`, or a TypeError naming the missing tool. */
+export function required(value: string | undefined, name: string): string {
+  if (value === undefined) throw new TypeError(`${name} missing`);
+  return value;
+}
+
 /** A free loopback TCP port. */
 export function freePort(): number {
   const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
@@ -166,10 +172,23 @@ export async function runCaddyfileTasks(
       "",
     ].join("\n"),
   );
+  return await runLocalPlaybook(ansiblePlaybook, root, play);
+}
+
+/**
+ * Run a localhost playbook with Ansible state kept under `root`; fails the
+ * test when the play fails. Returns the play output.
+ */
+export async function runLocalPlaybook(
+  ansiblePlaybook: string,
+  root: string,
+  play: string,
+  extraArgs: string[] = [],
+): Promise<string> {
   const home = join(root, "home");
   await Deno.mkdir(home, { recursive: true });
   const out = await new Deno.Command(ansiblePlaybook, {
-    args: [play, "-i", "localhost,", "-c", "local"],
+    args: [play, "-i", "localhost,", "-c", "local", ...extraArgs],
     env: {
       HOME: home,
       ANSIBLE_HOME: home,

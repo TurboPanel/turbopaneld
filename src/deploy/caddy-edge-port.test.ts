@@ -6,7 +6,9 @@ import {
   INSTANCE_LAUNCH_ROLES,
   panelCaddyTestSite,
   pinnedCaddy,
+  required,
   runCaddyfileTasks,
+  runLocalPlaybook,
   startPanelCaddy,
 } from "../testing/panel-caddy.ts";
 
@@ -118,37 +120,22 @@ async function renderTemplate(
       "  gather_facts: false",
       "  tasks:",
       "    - ansible.builtin.copy:",
-      "        content: \"{{ lookup('ansible.builtin.template', '" +
-      new URL(TEMPLATE, INSTANCE_LAUNCH_ROLES).pathname + "') }}\"",
+      `        content: "{{ lookup('ansible.builtin.template', '${
+        new URL(TEMPLATE, INSTANCE_LAUNCH_ROLES).pathname
+      }') }}"`,
       `        dest: ${out}`,
       "",
     ].join("\n"),
   );
-  const home = join(root, "home");
-  await Deno.mkdir(home, { recursive: true });
-  const result = await new Deno.Command(ansiblePlaybook!, {
-    args: [
-      play,
-      "-i",
-      "localhost,",
-      "-c",
-      "local",
+  await runLocalPlaybook(
+    required(ansiblePlaybook, "ansible-playbook"),
+    root,
+    play,
+    [
       "-e",
       JSON.stringify(vars),
     ],
-    env: {
-      HOME: home,
-      ANSIBLE_HOME: home,
-      ANSIBLE_LOCAL_TEMP: home,
-      ANSIBLE_REMOTE_TMP: home,
-      ANSIBLE_NOCOWS: "1",
-    },
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const output = new TextDecoder().decode(result.stdout) +
-    new TextDecoder().decode(result.stderr);
-  assert(result.success, output);
+  );
   return await Deno.readTextFile(out);
 }
 
@@ -254,7 +241,12 @@ test({
         config,
         panelCaddyTestSite(await renderTemplate(root, HOSTNAMES), root, port),
       );
-      const { stop } = await startPanelCaddy(caddy!, config, root, port);
+      const { stop } = await startPanelCaddy(
+        required(caddy, "caddy"),
+        config,
+        root,
+        port,
+      );
       try {
         const redirects: [string, string, string][] = [
           [
@@ -333,8 +325,8 @@ test({
       await Deno.writeTextFile(file, base);
       const plain = await runCaddyfileTasks(
         root,
-        caddy!,
-        ansiblePlaybook!,
+        required(caddy, "caddy"),
+        required(ansiblePlaybook, "ansible-playbook"),
         TASKS,
       );
       assertStringIncludes(plain, "changed=0");
@@ -346,8 +338,8 @@ test({
       await Deno.writeTextFile(file, kept);
       const first = await runCaddyfileTasks(
         root,
-        caddy!,
-        ansiblePlaybook!,
+        required(caddy, "caddy"),
+        required(ansiblePlaybook, "ansible-playbook"),
         TASKS,
       );
       assertStringIncludes(first, "changed=1");
@@ -362,8 +354,8 @@ test({
 
       const again = await runCaddyfileTasks(
         root,
-        caddy!,
-        ansiblePlaybook!,
+        required(caddy, "caddy"),
+        required(ansiblePlaybook, "ansible-playbook"),
         TASKS,
       );
       assertStringIncludes(again, "changed=0");

@@ -5,6 +5,7 @@ import {
   freePort,
   panelCaddyTestSite,
   pinnedCaddy,
+  required,
   runCaddyfileTasks,
   startPanelCaddy,
 } from "../testing/panel-caddy.ts";
@@ -121,7 +122,12 @@ Deno.test({
       config,
       panelCaddyTestSite(await readRole(TEMPLATE), root, port),
     );
-    const { base, stop } = await startPanelCaddy(caddy!, config, root, port);
+    const { base, stop } = await startPanelCaddy(
+      required(caddy, "caddy"),
+      config,
+      root,
+      port,
+    );
     try {
       const get = async (path: string) => {
         const res = await fetch(base + path);
@@ -170,7 +176,12 @@ const OLD_TAIL = [
 ].join("\n");
 
 const runInPlaceEdit = (root: string, caddyBin: string) =>
-  runCaddyfileTasks(root, caddyBin, ansiblePlaybook!, TASKS);
+  runCaddyfileTasks(
+    root,
+    caddyBin,
+    required(ansiblePlaybook, "ansible-playbook"),
+    TASKS,
+  );
 
 Deno.test({
   name: "the in-place edit turns an older Caddyfile into the current template",
