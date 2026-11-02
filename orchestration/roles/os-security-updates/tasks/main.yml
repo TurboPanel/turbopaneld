@@ -25,7 +25,7 @@
     dest: /etc/apt/apt.conf.d/52turbopanel-security-updates
     owner: root
     group: root
-    mode: "0644"
+    mode: "0644"  # NOSONAR ansible:S2612 — apt and apt-config read apt.conf.d as any user
   when: ansible_distribution == 'Debian'
 
 - name: Enable the apt timers that run the automatic updates
