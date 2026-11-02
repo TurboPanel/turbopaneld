@@ -73,7 +73,7 @@ async function withHarness(
   const io: ConnectorIo = {
     layout: { configDir: join(root, "etc") },
     workDir,
-    version: "2026.5.2",
+    version: "2026.10.7",
     ensureBinary: () => {
       binaryCalls.count++;
       return Promise.resolve(
@@ -350,7 +350,7 @@ test("a failed unit install keeps the token copy of a tunnel that already runs",
 
 const unitOf = (id: string, slot: "a" | "b" = "a") =>
   `turbopanel-tunnel-${id}${slot === "b" ? "-b" : ""}.service`;
-const NEW = "2026.6.0";
+const NEW = "2026.11.0";
 
 async function readRecordFile(h: Harness, id: string) {
   return JSON.parse(await Deno.readTextFile(join(h.io.workDir, `${id}.json`)));
@@ -364,7 +364,7 @@ test("an update starts the new version in the other slot and moves only after it
     h.installedUnits.length = 0;
 
     const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome, { kind: "updated", from: "2026.5.2", to: NEW });
+    assertEquals(outcome, { kind: "updated", from: "2026.10.7", to: NEW });
 
     assertEquals(h.installedUnits.length, 1);
     assertStringIncludes(
@@ -408,7 +408,7 @@ test("a new connector that never connects is removed and the old one is not touc
     const outcome = await updateConnector(h.io, ID_A);
     assertEquals(outcome.kind, "rolled-back");
     if (outcome.kind === "rolled-back") {
-      assertEquals(outcome.version, "2026.5.2");
+      assertEquals(outcome.version, "2026.10.7");
       assertStringIncludes(outcome.reason, "did not report connected");
     }
     const second = unitOf(ID_A, "b");
@@ -418,7 +418,7 @@ test("a new connector that never connects is removed and the old one is not touc
     assert(h.calls.every((c) => !c.includes(unitOf(ID_A))));
     const record = await readRecordFile(h, ID_A);
     assertEquals(record.slot, "a");
-    assertEquals(record.version, "2026.5.2");
+    assertEquals(record.version, "2026.10.7");
     assertEquals(record.port, 20300);
   });
 });
@@ -441,7 +441,7 @@ test("an update that cannot be installed rolls back", async () => {
     h.state.fail.add("install ");
     const outcome = await updateConnector(h.io, ID_A);
     assertEquals(outcome.kind, "rolled-back");
-    assertEquals((await readRecordFile(h, ID_A)).version, "2026.5.2");
+    assertEquals((await readRecordFile(h, ID_A)).version, "2026.10.7");
   });
 });
 
@@ -454,7 +454,7 @@ test("a connector already on the pinned version is left alone, and an unknown tu
     h.state.unchanged = true;
     assertEquals(await updateConnector(h.io, ID_A), {
       kind: "current",
-      version: "2026.5.2",
+      version: "2026.10.7",
     });
     assertEquals(
       h.calls.filter((c) => !c.startsWith("cmp ")),
@@ -537,7 +537,7 @@ test("the report lists each connector with status, version and slot, and the pin
     assertEquals(
       report.connectors.map((c) => [c.tunnelId, c.status, c.version, c.slot]),
       [
-        [ID_A, "connected", "2026.5.2", "a"],
+        [ID_A, "connected", "2026.10.7", "a"],
         [ID_B, "connected", NEW, "b"],
       ],
     );
@@ -576,7 +576,7 @@ test("a readiness answer alone is not enough: the unit must be running and hold 
     }
     const record = await readRecordFile(h, ID_A);
     assertEquals(record.slot, "a");
-    assertEquals(record.version, "2026.5.2");
+    assertEquals(record.version, "2026.10.7");
   });
 });
 
@@ -632,7 +632,7 @@ test("a unit installed with the old command line is replaced and restarted at th
     h.state.unchanged = false;
 
     const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome, { kind: "current", version: "2026.5.2" });
+    assertEquals(outcome, { kind: "current", version: "2026.10.7" });
 
     assertEquals(h.installedUnits.length, 1);
     assertStringIncludes(
@@ -658,7 +658,7 @@ test("a unit that already matches is left running at the same version", async ()
     h.state.unchanged = true;
 
     const outcome = await updateConnector(h.io, ID_A);
-    assertEquals(outcome, { kind: "current", version: "2026.5.2" });
+    assertEquals(outcome, { kind: "current", version: "2026.10.7" });
 
     assertEquals(h.installedUnits.length, 0);
     assert(

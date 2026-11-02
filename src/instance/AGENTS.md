@@ -342,7 +342,14 @@ waits on that correlated round trip.
 in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on
 auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s)
 resets backoff to the initial floor so fleet-wide restarts do not align into a
-thundering herd.
+thundering herd. An edge restart drops every daemon at once; the full-jitter
+window (first window 8 s, then doubling to the cap) is what keeps the panel from
+a token-mint burst. Do not replace it with a fixed delay.
+
+**Advised heartbeat:** the unsigned `version` frame may carry `heartbeatSeconds`.
+The daemon accepts whole seconds in [15, 120] (`clampHeartbeatSeconds`), applies
+them to the ping cadence and the stale limit (3x), and keeps 60 s otherwise. A
+verified signed hello wins over this field (`#pinnedHelloApplied`).
 
 **Parked state:** `classifyConnectFailure` (`src/instance/connect-failure.ts`)
 maps enroll/session failures to `transient` (network, `>=500`, `429`,
@@ -363,7 +370,7 @@ panels only send these from enroll, older ones also from session), or
 (`401 Invalid license`, `400 License already consumed or invalid`,
 `400 License is inactive`, `400 Server key is inactive`,
 `403 Invalid signature`, `409 Fingerprint already exists`, and the local
-`missing license credentials for enrollment` → **park**). On `permanent` or
+`missing license credentials for enrollment` → **park**). `401 Invalid license` is what a used install key gets (the panel erases a key's token when its server binds, and a join ticket works once for an hour): the park log then names the way out, an owner issuing a re-enroll token on the server's page and the installer re-run with it (`permanentRejectionAdvice`). The restaged license files change the stamp, which unparks and force-enrolls with the persisted server id; the daemon keeps its staged license files (managed updates pass them to the installer). On `permanent` or
 `tls-trust`,
 `InstanceClient` enters `#enterParkedState` instead of `#increaseBackoff` —
 full-jitter backoff in `[PARKED_BACKOFF_MIN_MS, PARKED_BACKOFF_MAX_MS]`
@@ -380,7 +387,13 @@ same key; a license-file change or `TURBOPANEL_FORCE_ENROLL` (an action on the h
 the next attempt enroll afresh. Unpark triggers for permanent parks while the process stays up: license-file change
 (SHA-256 stamp of `license.id` + `license.token` differs) or
 `TURBOPANEL_FORCE_ENROLL` truthy — both reset backoff and force re-enroll on
-the next cycle. Daemon restart clears the in-memory parked backoff and retries
+the next cycle. The stamp is the license the last attempt tried: it is read
+before an attempt that does not come out of a park, or taken from the
+credentials an enrollment used, and parking never re-reads it, so a license
+written while a retry is in flight is not mistaken for one already tried.
+An empty or incomplete read of the pair (the installer mid-replace) is "no
+change": it is logged once and the next re-check reads the finished files.
+Daemon restart clears the in-memory parked backoff and retries
 the normal identity path; forced re-enroll after restart still requires
 `TURBOPANEL_FORCE_ENROLL` or missing/cleared key files. Greppable park
 log: `daemon control-plane permanently rejected enrollment (<reason>); parked —
@@ -927,3 +940,11 @@ form still works, pins nothing and writes no pin file.
   line it dropped, so a move back to an older release does not break the pin.
 - `src/instance/panel-identity-pin.ts` reads and parses the file. The daemon
   logs it at connect and enforces nothing yet.
+
+## Sealed secrets (`daemon-sealed-secrets-v1`)
+
+- The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged once and retried on the next connect. Only the key id is logged.
+- `decryptSecrets` takes `{ sealed }` (HPKE envelopes, `aad` = server id, opened locally, then added to the redaction deny-set) or `{ plaintexts }`, never both. After the first sealed answer is opened the daemon writes `<state>/trust-level` = `sealed` and refuses any later plaintext answer (`plaintext secrets refused`). The daemon never lowers the mark; after a deliberate control plane rollback an operator removes the file by hand.
+- The Hosting Account password hash may arrive as `passwordHashEnvelope`; `openPrincipalPasswordEnvelopes` opens it through `decryptSecrets` before the account is touched. `server.principals.reconcile` refuses an envelope rather than lock the account.
+- `scripts/scan-secrets.patterns` (`daemon-identity-file`) does not name `sealing-key.json`; it is byte-identical across five repos, so it is a follow-up for all five together.
+- **Keys sent up.** `reportIssuedCertificate` seals the private key to the control plane's sealing key (`privateKeyEnvelope`, aad = the control plane's signing key fingerprint) when `panel-identity-cache.ts` has one, and sends plain PEM otherwise, except that a server that has ever received a sealed secret (`trust-level`) fails the report with 503 instead. The sealing key comes from the signed identity document (signature checked against its own `current` key, cached a day, a lower `keyset` ignored). Until the pin file exists the document is trusted as far as TLS; `isTrustedSigningKey` is where the pin check plugs in.

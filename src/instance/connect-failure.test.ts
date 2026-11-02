@@ -9,6 +9,7 @@ import {
   isPermanentEnrollmentError,
   isStaleDaemonIdentityError,
   isTransientConnectError,
+  permanentRejectionAdvice,
   temporaryAuthFailure,
 } from "./connect-failure.ts";
 import {
@@ -232,4 +233,17 @@ it("classifies non-Error throwables as transient network failures", () => {
   const classified = classifyConnectFailure("socket reset");
   assertEquals(classified.kind, "transient");
   assertEquals(classified.reason, "network or transport failure");
+});
+
+it("names the re-enroll token when an install key was already used", () => {
+  assert(
+    permanentRejectionAdvice("401 Invalid license").includes(
+      "re-enroll token",
+    ),
+  );
+  assert(
+    permanentRejectionAdvice("403 Invalid signature").includes(
+      "fresh registration key",
+    ),
+  );
 });

@@ -260,8 +260,12 @@ const OWNED_PATHS = [
   "/etc/turbopanel/tunnel-env",
   "/etc/turbopanel/tunnel-env/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.env",
   "/opt/turbopanel/vendor/cloudflared",
-  "/opt/turbopanel/vendor/cloudflared/2026.5.2/cloudflared",
+  "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
   "/var/lib/turbopanel/cloudflared/tunnels",
+  // The daemon's sealing key and secrets trust mark live loose in the state
+  // root; the purge removes them with the tree.
+  "/var/lib/turbopanel/sealing-key.json",
+  "/var/lib/turbopanel/trust-level",
 ];
 
 test("tp_path_is_safe refuses every path outside TurboPanel's own trees", async () => {
@@ -2036,6 +2040,23 @@ test("the inventory lists TurboPanel's timer stamps and nothing else from that f
   assertEquals(result.stdout.includes("stamp-fstrim"), false);
   assertEquals(result.stdout.includes("stamp-apt-daily"), false);
   assertEquals(result.stdout.includes(".service"), false);
+});
+
+test("purge lists and removes the security update settings file and keeps the package", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const file = "/etc/apt/apt.conf.d/52turbopanel-security-updates";
+  assertStringIncludes(
+    extractFunction(source, "tp_inventory_host_files") ?? "",
+    file,
+  );
+  assertStringIncludes(
+    extractFunction(source, "tp_remove_host_config") ?? "",
+    file,
+  );
+  // The host may have had unattended-upgrades before TurboPanel: never purged.
+  const code = source.split("\n").filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  assertEquals(code.includes("unattended-upgrades"), false);
 });
 
 test("purge never touches a group named root or tp*", async () => {

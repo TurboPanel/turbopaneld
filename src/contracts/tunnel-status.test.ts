@@ -14,9 +14,9 @@ const test = Deno.test.bind(Deno);
 
 const ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const GOOD = {
-  pinnedVersion: "2026.5.2",
+  pinnedVersion: "2026.10.7",
   connectors: [
-    { tunnelId: ID, status: "connected", version: "2026.5.2", slot: "a" },
+    { tunnelId: ID, status: "connected", version: "2026.10.7", slot: "a" },
     { tunnelId: "instance", status: "stopped", version: "2026.5.0", slot: "b" },
   ],
 };
@@ -31,8 +31,8 @@ test("server.tunnel.status takes no input", () => {
 test("server.tunnel.status parses a result and an empty one", () => {
   assertEquals(parseTunnelStatusResult(GOOD), GOOD);
   assertEquals(
-    parseTunnelStatusResult({ pinnedVersion: "2026.5.2", connectors: [] }),
-    { pinnedVersion: "2026.5.2", connectors: [] },
+    parseTunnelStatusResult({ pinnedVersion: "2026.10.7", connectors: [] }),
+    { pinnedVersion: "2026.10.7", connectors: [] },
   );
 });
 

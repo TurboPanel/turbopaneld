@@ -35,7 +35,7 @@ async function withIo(
   const io: ConnectorIo = {
     layout: { configDir: join(dir, "etc") },
     workDir: dir,
-    version: "2026.5.2",
+    version: "2026.10.7",
     ensureBinary: () =>
       Promise.resolve("/opt/turbopanel/vendor/cloudflared/x/cloudflared"),
     probe: () => Promise.resolve({ kind: "unreachable" }),

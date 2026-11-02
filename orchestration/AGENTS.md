@@ -34,6 +34,29 @@ stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
   is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
   not restart/start timesyncd after `timedatectl set-ntp false`.
 
+### OS security updates (`os-security-updates`)
+
+Every managed server installs Debian security updates on its own and never
+restarts by itself (owner decision 2026-11-01). The role installs
+`unattended-upgrades` with `install_recommends: false` (no `apt-listchanges`,
+no mail) and copies one file, `/etc/apt/apt.conf.d/52turbopanel-security-updates`
+(`root:root` `0644`). It sorts after the package's `50unattended-upgrades`, so
+its `#clear Unattended-Upgrade::Origins-Pattern` drops the package default
+(which also takes stable point releases) and leaves only the
+`${distro_codename}-security` origin; it also turns on the two
+`APT::Periodic` switches and sets `Automatic-Reboot "false"`. The package's own
+conffiles are never edited. The apt timers (`apt-daily`, `apt-daily-upgrade`)
+are enabled. A kernel update leaves `/var/run/reboot-required` (the package's
+`/etc/kernel/postinst.d` hook); the metrics collector reports it as host text
+`rebootRequired`, and the web interface shows Restart Needed on the server
+page. Debian only (`ansible_distribution == 'Debian'`): Ubuntu keeps its own
+defaults. Docker's packages come from Docker's repository and are held, so they
+are never touched. Wired into `daemon-converge.yml` (every boot of a managed
+server), `daemon-install.yml`, `instance-install.yml` and
+`daemon-colocated-refresh.yml`. The development overlay does not run it: a
+contributor VM is not a managed server. The purge removes the file and keeps
+the package (`scripts/AGENTS.md` rule 3).
+
 ### Docker (`docker`)
 
 Installs Docker Engine itself (`tasks/install.yml`, no Galaxy role, nothing
@@ -785,7 +808,7 @@ can enable them later.
 **Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
 Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via
 orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set is
-**sudo, curl, ca-certificates, tar, python3-minimal** (`run.sh` may apt-install
+**sudo, curl, ca-certificates, tar, python3-minimal, zstd, openssl** (`run.sh` may apt-install
 these only when absent). `python3-minimal` extracts Deno release zips without
 apt `unzip`. The `daemon-prereqs` role covers the broader managed-host set (git,
 gnupg, pamtester, xz-utils, iptables, …) once Ansible can converge, and

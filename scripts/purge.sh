@@ -1526,6 +1526,7 @@ tp_inventory_host_files() {
     /etc/tmpfiles.d/turbopanel.conf \
     /etc/tmpfiles.d/turbopanel-docker-gate.conf \
     /etc/tmpfiles.d/turbopanel-hosting-caddy.conf \
+    /etc/apt/apt.conf.d/52turbopanel-security-updates \
     /etc/sudoers.d/tp \
     /etc/ssh/sshd_config.d/60-turbopanel.conf \
     /etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev \
@@ -2709,7 +2710,9 @@ tp_remove_host_config() {
       tp_record_skip "udevadm not installed"
     fi
   fi
-  for _rhc in /etc/tmpfiles.d/turbopanel.conf /etc/tmpfiles.d/turbopanel-docker-gate.conf /etc/tmpfiles.d/turbopanel-hosting-caddy.conf /etc/sudoers.d/tp; do
+  # The automatic security update settings (os-security-updates role). The
+  # unattended-upgrades package itself stays: the host may have had it before.
+  for _rhc in /etc/tmpfiles.d/turbopanel.conf /etc/tmpfiles.d/turbopanel-docker-gate.conf /etc/tmpfiles.d/turbopanel-hosting-caddy.conf /etc/apt/apt.conf.d/52turbopanel-security-updates /etc/sudoers.d/tp; do
     if [ -e "$_rhc" ]; then
       tp_run "remove $_rhc" rm -f "$_rhc" || true
     fi
