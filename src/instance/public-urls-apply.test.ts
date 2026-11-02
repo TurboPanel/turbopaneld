@@ -3,6 +3,7 @@ import { dirname, fromFileUrl, join } from "@std/path";
 import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { PROD_INSTANCE_DIR_DEFAULT } from "../paths/layout.ts";
 import {
+  ansibleHostname,
   applyPublicUrls,
   resolveInstanceDir,
   runInstanceCertsApply,
@@ -779,5 +780,28 @@ test("upsertPublicUrlsInEnv creates no folder beside runtime.env (sealed config 
     assertEquals(source.includes(".write-tmp"), false);
   } finally {
     await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a hostname row carries public_port only for a valid port", () => {
+  const base = {
+    host: "https://panel.example.com:8443",
+    source: "platform-ca",
+  } as const;
+  assertEquals(ansibleHostname({ ...base, publicPort: 443 }), {
+    host: base.host,
+    source: "platform-ca",
+    cert_id: "",
+    public_port: 443,
+  });
+  assertEquals(
+    ansibleHostname({ ...base, publicPort: 8443 }).public_port,
+    8443,
+  );
+  for (const publicPort of [undefined, 0, 65536, 44.3, Number.NaN]) {
+    assertEquals(
+      "public_port" in ansibleHostname({ ...base, publicPort }),
+      false,
+    );
   }
 });

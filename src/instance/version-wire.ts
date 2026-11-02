@@ -99,6 +99,7 @@ export const DAEMON_WIRE_FEATURES = [
   "fabric-peer-report-v1",
   "fabric-lan-routes-v1",
   "repo-key-report-v1",
+  "instance-hostname-public-port-v1",
 ] as const;
 
 /**
@@ -194,6 +195,15 @@ export const REPO_KEY_REPORT_FEATURE: DaemonWireFeature = "repo-key-report-v1";
  */
 export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
   "sealed-instance-secrets-v1";
+
+/**
+ * This daemon reads `publicPort` on each `public-urls-update` hostname, keeps
+ * it as `public_port` in the hostname sidecar, and has the panel's Caddy send
+ * a request for that hostname on any other port to it. The control plane
+ * sends `publicPort` only to a daemon that lists this.
+ */
+export const INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE: DaemonWireFeature =
+  "instance-hostname-public-port-v1";
 
 /**
  * This daemon reads the certificate and key Caddy issued for a hostname and

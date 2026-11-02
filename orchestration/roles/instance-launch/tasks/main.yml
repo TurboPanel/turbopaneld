@@ -125,9 +125,6 @@
 - name: Cache hashed UI bundles and revalidate the page in the installed Caddyfile
   ansible.builtin.import_tasks: caddyfile-ui-cache.yml
 
-- name: Send a known hostname on the wrong port to its public port in the installed Caddyfile
-  ansible.builtin.import_tasks: caddyfile-edge-port.yml
-
 - name: Install the control-plane updating page
   when: turbopanel_dev_user | default('') | length == 0
   ansible.builtin.template:

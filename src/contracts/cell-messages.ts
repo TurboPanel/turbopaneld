@@ -280,6 +280,11 @@ export type InstanceHostnameWireEntry = {
   keyPem?: string;
   keyEnvelope?: string;
   uploadedCertId?: string;
+  /**
+   * Port visitors use for this hostname (1-65535). Sent only to a daemon that
+   * advertises `instance-hostname-public-port-v1`.
+   */
+  publicPort?: number;
 };
 
 /**

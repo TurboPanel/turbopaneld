@@ -7,7 +7,6 @@ import {
   panelCaddyTestSite,
   pinnedCaddy,
   required,
-  runCaddyfileTasks,
   runLocalPlaybook,
   startPanelCaddy,
 } from "../testing/panel-caddy.ts";
@@ -31,8 +30,6 @@ const test = Deno.test.bind(Deno);
 
 const TEMPLATE = "instance-launch/templates/Caddyfile.j2";
 const PARTIAL = "instance-launch/templates/Caddyfile-edge-port-redirect.j2";
-const TASKS = "instance-launch/tasks/caddyfile-edge-port.yml";
-const MAIN = "instance-launch/tasks/main.yml";
 const MARKER = "# Edge port redirect:";
 const EXEMPT = "not path /api/daemon/* /ws/daemon/* /api/health /webhook/*";
 
@@ -59,18 +56,13 @@ test("the redirect sits in the shared site snippet, before any handler", async (
   assertStringIncludes(partial, "{uri} 308");
 });
 
-test("existing hosts get the redirect in place, safely", async () => {
-  const tasks = await readRole(TASKS);
-  assertStringIncludes(tasks, "ansible.builtin.replace:");
-  assertStringIncludes(tasks, "backup: true");
-  assertStringIncludes(tasks, "caddy adapt --config %s");
-  assertStringIncludes(tasks, "Reload turbopanel caddy");
-  assertStringIncludes(tasks, MARKER);
-  assertStringIncludes(tasks, "Caddyfile-edge-port-redirect.j2");
-  const main = await readRole(MAIN);
-  const uiCache = main.indexOf("import_tasks: caddyfile-ui-cache.yml");
-  const edge = main.indexOf("import_tasks: caddyfile-edge-port.yml");
-  assert(uiCache >= 0 && edge > uiCache);
+test("a kept Caddyfile is not patched: its names carry no public port", async () => {
+  const main = await readRole("instance-launch/tasks/main.yml");
+  assertEquals(main.includes("caddyfile-edge-port"), false);
+  const template = await readRole(TEMPLATE);
+  // The port comes only from public_port, never from the URL or a default.
+  assertStringIncludes(template, "h.public_port | default('', true)");
+  assertEquals(/default\('8443'\)|or '8443'/.test(template), false);
 });
 
 // ---- Optional checks: need ansible-playbook and/or the pinned Caddy. ----
@@ -83,16 +75,25 @@ type Hostname = {
 };
 
 const HOSTNAMES: Hostname[] = [
-  { host: "https://edge.example.com:8443", source: "platform-ca" },
-  { host: "https://panel.lan:8443", source: "platform-ca" },
+  {
+    host: "https://edge.example.com:8443",
+    source: "platform-ca",
+    public_port: 8443,
+  },
+  { host: "https://panel.lan:8443", source: "platform-ca", public_port: 8443 },
   {
     host: "https://Front.Example.com:8443",
     source: "platform-ca",
     public_port: 443,
   },
-  { host: "bare.example.com", source: "platform-ca" },
-  { host: "https://edge.example.com:8443/", source: "platform-ca" },
-  { host: "https://[::1]:8443", source: "platform-ca" },
+  // No public_port: the control plane did not send one, so no redirect.
+  { host: "https://noport.example.com:8443", source: "platform-ca" },
+  {
+    host: "https://edge.example.com:8443/",
+    source: "platform-ca",
+    public_port: 9443,
+  },
+  { host: "https://[::1]:8443", source: "platform-ca", public_port: 8443 },
 ];
 
 /** Render Caddyfile.j2 with Ansible for `hostnames`, under `root`. */
@@ -169,13 +170,11 @@ test({
       );
       assertStringIncludes(rendered, "not header Host front.example.com\n");
       assertStringIncludes(rendered, "not header Host front.example.com:443");
-      // An entry with no port means 8443.
-      assertStringIncludes(
-        rendered,
-        "redir @tp_edge_port_3 https://bare.example.com:8443{uri} 308",
-      );
-      // The duplicate and the IPv6 literal are left out.
-      assertEquals(rendered.includes("@tp_edge_port_4 {"), false);
+      // No public_port, no redirect: the URL port is the origin's.
+      assertEquals(rendered.includes("noport.example.com"), false);
+      // The duplicate (first entry wins) and the IPv6 literal are left out.
+      assertEquals(rendered.includes("@tp_edge_port_3 {"), false);
+      assertEquals(rendered.includes(":9443"), false);
       assertEquals(rendered.includes("::1]"), false);
 
       const none = await renderTemplate(root, []);
@@ -288,6 +287,7 @@ test({
           ["panel.lan:8443", "/"],
           ["10.0.0.5:8443", "/"],
           ["other.example.com", "/"],
+          ["noport.example.com", "/"],
           // Exempt paths on the wrong port.
           ["edge.example.com", "/api/health"],
           ["edge.example.com", "/api/daemon/v1/instance/identity"],
@@ -308,57 +308,5 @@ test({
       } finally {
         await stop();
       }
-    }),
-});
-
-test({
-  name: "the in-place edit adds the redirect to a kept Caddyfile once",
-  ignore: ansiblePlaybook === undefined || caddy === undefined,
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: () =>
-    withRoot("tp-edge-port-edit-", async (root) => {
-      const base = panelCaddyTestSite(await readRole(TEMPLATE), root, 18443);
-      assertEquals(base.includes(MARKER), false);
-      const file = join(root, "Caddyfile");
-
-      // No named site: nothing to add.
-      await Deno.writeTextFile(file, base);
-      const plain = await runCaddyfileTasks(
-        root,
-        required(caddy, "caddy"),
-        required(ansiblePlaybook, "ansible-playbook"),
-        TASKS,
-      );
-      assertStringIncludes(plain, "changed=0");
-      assertEquals(await Deno.readTextFile(file), base);
-
-      // A kept Let's Encrypt site gets the redirect for its name on 8443.
-      const kept = base +
-        "\nkept.example.com:8443 {\n\ttls internal\n\timport turbopanel_app\n}\n";
-      await Deno.writeTextFile(file, kept);
-      const first = await runCaddyfileTasks(
-        root,
-        required(caddy, "caddy"),
-        required(ansiblePlaybook, "ansible-playbook"),
-        TASKS,
-      );
-      assertStringIncludes(first, "changed=1");
-      const edited = await Deno.readTextFile(file);
-      assertStringIncludes(edited, MARKER);
-      assertStringIncludes(edited, "host kept.example.com");
-      assertStringIncludes(
-        edited,
-        "redir @tp_edge_port_0 https://kept.example.com:8443{uri} 308",
-      );
-      assertStringIncludes(edited, EXEMPT);
-
-      const again = await runCaddyfileTasks(
-        root,
-        required(caddy, "caddy"),
-        required(ansiblePlaybook, "ansible-playbook"),
-        TASKS,
-      );
-      assertStringIncludes(again, "changed=0");
-      assertEquals(await Deno.readTextFile(file), edited);
     }),
 });

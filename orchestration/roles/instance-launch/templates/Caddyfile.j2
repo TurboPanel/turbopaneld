@@ -26,17 +26,16 @@
 {% endif %}
 {% set _certs_dir = turbopanel_instance_certs_dir %}
 {#
-  Edge port redirect targets: every listed DNS name with the port visitors
-  use. An entry's public_port wins; without one it is the port in the entry's
-  URL, and an entry with no port means 8443 (the control plane writes an
-  omitted https port as :8443). Names that are not plain DNS names (IPv6
-  literals, anything a Caddyfile could misread) are left out.
+  Edge port redirect targets: every listed DNS name whose entry carries the
+  public_port the control plane sent (the port visitors use). A name without
+  one gets no redirect: the port in its URL is the origin's, not the
+  visitors'. Names that are not plain DNS names (IPv6 literals, anything a
+  Caddyfile could misread) and ports that are not 1-5 digits are left out.
 #}
 {% set edge = namespace(items=[], names=[]) %}
 {% for h in turbopanel_hostnames | default([]) %}
-{% set _authority = (h.host | default('') | string | lower) | regex_replace('^https?://', '') | regex_replace('/.*$', '') %}
-{% set _edge_name = _authority | regex_replace(':[0-9]*$', '') | regex_replace('\.$', '') %}
-{% set _edge_port = (h.public_port | default('', true) | string) or (_authority | regex_replace('^[^:]*:?', '')) or '8443' %}
+{% set _edge_name = (h.host | default('') | string | lower) | regex_replace('^https?://', '') | regex_replace('/.*$', '') | regex_replace(':[0-9]*$', '') | regex_replace('\.$', '') %}
+{% set _edge_port = h.public_port | default('', true) | string %}
 {% if _edge_name is match('^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$') and _edge_port is match('^[0-9]{1,5}$') and _edge_name not in edge.names %}
 {% set edge.names = edge.names + [_edge_name] %}
 {% set edge.items = edge.items + [{'name': _edge_name, 'port': _edge_port}] %}

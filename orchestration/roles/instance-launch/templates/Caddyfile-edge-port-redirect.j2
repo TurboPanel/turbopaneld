@@ -1,9 +1,8 @@
 {#
-  Edge port redirect, shared by Caddyfile.j2 and tasks/caddyfile-edge-port.yml.
+  Edge port redirect, included by Caddyfile.j2.
 
   Input: _edge_redirects, a list of {name, port}: a lowercase DNS name the
-  control plane publishes and the port visitors should use for it. A bare
-  name string means port 8443.
+  control plane publishes and the port visitors should use for it.
 
   An edge in front of the control plane (a tunnel, a proxy) can answer the
   same name on more than one port and forward both here; the Host header is
@@ -13,13 +12,13 @@
   WebSocket, the health check, Git webhooks (providers do not follow
   redirects) and every WebSocket upgrade. A name on its public port, and any
   name not listed (LAN names, IPs), never matches, so the redirect cannot
-  loop. Keep the marker comment: the patch task looks for it.
+  loop.
 #}
 {% if _edge_redirects | default([]) | length > 0 %}
         # Edge port redirect: send a known hostname to its public port.
 {% for e in _edge_redirects %}
-{% set _n = e.name if e is mapping else e %}
-{% set _p = (e.port if e is mapping else '8443') | string %}
+{% set _n = e.name %}
+{% set _p = e.port | string %}
         @tp_edge_port_{{ loop.index0 }} {
                 host {{ _n }}
 {% if _p == '443' %}
