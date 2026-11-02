@@ -715,10 +715,12 @@ ordering too.
 
 In co-located dev (`turbopanel_dev_user` set) every repo path is
 `<turbopanel_dev_root>/<repo>`. The root is the folder that holds the repos: the
-daemon forwards `TURBOPANEL_DEV_ROOT` as an extra-var (default the dev user's
-home, the Vagrant layout; a host-native checkout may use e.g.
-`~/work/turbopanel`). Extra-vars outrank `set_fact`, so a playbook's getent
-pre_task only fills the root on a direct run. Tasks that run git, ssh or pnpm
+daemon forwards `TURBOPANEL_DEV_ROOT` as an extra-var. It is always a folder
+named `turbopanel` (default `~/turbopanel`, or e.g. `~/work/turbopanel`), on
+every dev machine including the Vagrant guest, which mounts the host repos at
+`~/turbopanel/<repo>`; the dev console refuses any other name.
+Extra-vars outrank `set_fact`, so a playbook's getent pre_task only fills the
+root on a direct run, with the same rule (`instance-launch-only.yml`). Tasks that run git, ssh or pnpm
 set `HOME` to `turbopanel_dev_home` (the dev user's real home, from
 `TURBOPANEL_DEV_HOME` or getent), never to the root, so keys, `known_hosts`,
 git config and the pnpm store stay in the home. Each role that sets `HOME`
