@@ -84,3 +84,30 @@ test("server.tunnel.status refuses a malformed result", () => {
   one({ slot: "c" });
   one({ slot: undefined });
 });
+
+test("server.tunnel.status keeps the connector facts and refuses bad ones", () => {
+  const facts = {
+    ...GOOD.connectors[0],
+    edgeConnections: 4,
+    hostnames: ["panel.example.com"],
+  };
+  const parsed = parseTunnelStatusResult({ ...GOOD, connectors: [facts] });
+  assertEquals(parsed.connectors[0].edgeConnections, 4);
+  assertEquals(parsed.connectors[0].hostnames, ["panel.example.com"]);
+  const bad = (patch: Record<string, unknown>) =>
+    assertThrows(() =>
+      parseTunnelStatusResult({
+        ...GOOD,
+        connectors: [{ ...GOOD.connectors[0], ...patch }],
+      })
+    );
+  bad({ edgeConnections: -1 });
+  bad({ edgeConnections: 1.5 });
+  bad({ edgeConnections: "4" });
+  bad({ hostnames: "panel.example.com" });
+  bad({ hostnames: [""] });
+  bad({ hostnames: ["x".repeat(254)] });
+  bad({
+    hostnames: Array.from({ length: 101 }, (_, i) => `n${i}.example.com`),
+  });
+});

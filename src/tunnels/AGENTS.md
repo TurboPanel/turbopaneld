@@ -133,6 +133,16 @@ transcript redactor here keeps its no-heuristics rule.
   `{ pinnedVersion, connectors: [{ tunnelId, status, version, slot, lastUpdate? }] }`. The
   control plane polls it to show the version per server and an update-pending
   notice (running version differs from the pinned one).
+  With `tunnel-status-facts-v1` a connector whose `/ready` answered also
+  carries `edgeConnections` (its `readyConnections`) and, when its `/config`
+  answers, `hostnames`: the hostnames of its ingress rules (catch-all and
+  anything that is not a DNS name dropped, lower case, at most 100). cloudflared
+  serves `/config` on the same loopback metrics address
+  (`{"version":N,"config":{"ingress":[{"hostname",...}]}}`, `metrics/metrics.go`
+  and `GetVersionedConfigJSON` upstream, checked at 2026.10.7); for a tunnel run
+  from a pasted token that is the ingress the provider dashboard pushed, so the
+  control plane can show routed names without a provider account. A connector
+  that does not answer leaves both fields out; the status never fails for it.
 - Not proven on a real host yet: the overlap on one tunnel across two metrics
   ports, the 90 s window against a real edge connection time, and the traversal
   of the new version folder by the throwaway account.

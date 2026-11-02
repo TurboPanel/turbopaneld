@@ -49,6 +49,7 @@ import {
   TLS_CAPTURE_FEATURE,
   TUNNEL_CONNECTOR_FEATURE,
   TUNNEL_FORWARDING_FEATURE,
+  TUNNEL_STATUS_FACTS_FEATURE,
   TUNNEL_STATUS_FEATURE,
 } from "./version-wire.ts";
 
@@ -491,6 +492,15 @@ test("the signed session features are advertised and raised no floor", () => {
   ) {
     assertEquals(DAEMON_WIRE_FEATURES.includes(feature), true);
   }
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("tunnel-status-facts-v1 is advertised and raised no floor", () => {
+  assertEquals(TUNNEL_STATUS_FACTS_FEATURE, "tunnel-status-facts-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(TUNNEL_STATUS_FACTS_FEATURE),
+    true,
+  );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
