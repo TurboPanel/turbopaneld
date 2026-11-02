@@ -260,6 +260,27 @@ test("devInstanceExtraArgs includes SSH repo urls and workers postgres expose", 
   assertEquals(args.includes("turbopanel_instance_runtime=workers"), true);
   assertEquals(args.includes("postgres_expose_port=true"), true);
   assertEquals(args.includes("turbopanel_dev_root=/home/vagrant"), true);
+  assertEquals(
+    args.some((arg) => arg.startsWith("turbopanel_dev_home=")),
+    false,
+  );
+});
+
+test("devInstanceExtraArgs forwards a repo folder outside the home and the real home", () => {
+  const args = devInstanceExtraArgs(
+    fakeEnv({
+      TURBOPANEL_DEV_USER: "pat",
+      TURBOPANEL_DEV_UID: "1000",
+      TURBOPANEL_DEV_GID: "1000",
+      TURBOPANEL_DEV_ROOT: "/home/pat/work/turbopanel",
+      TURBOPANEL_DEV_HOME: "/home/pat",
+    }),
+  );
+  assertEquals(
+    args.includes("turbopanel_dev_root=/home/pat/work/turbopanel"),
+    true,
+  );
+  assertEquals(args.includes("turbopanel_dev_home=/home/pat"), true);
 });
 
 test("applyDaemonEnvToProcess hoists unset keys and ignores existing ones", async () => {

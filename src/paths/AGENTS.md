@@ -18,7 +18,9 @@ env-overridable (`TURBOPANEL_HOME`, `TURBOPANEL_BIN_DIR`, `TURBOPANEL_LIB_DIR`,
 `src/orchestration/assets.ts` and `src/instance/sockets.ts` derive their constants
 from `resolveLayout` — do **not** hardcode absolute paths in runtime code;
 add/extend a layout field instead. The development default checkout root is
-`<devRoot>/turbopaneld` (from `TURBOPANEL_DEV_ROOT` / `$HOME`); production runtime
+`<devRoot>/turbopaneld` (from `TURBOPANEL_DEV_ROOT` / `$HOME`; the root may be any
+folder that holds the repos, and `TURBOPANEL_DEV_HOME` carries the real home for
+git, ssh and pnpm, see `orchestration/AGENTS.md`); production runtime
 code must never name the retired `/opt/turbopanel/platform` token — the layout
 module and CI guard are the only places allowed to reference it.
 

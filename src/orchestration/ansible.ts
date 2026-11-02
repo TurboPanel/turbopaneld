@@ -161,6 +161,10 @@ export function devOwnershipPlaybookExtraArgs(
   // Ansible instance-certs defaults compute `<dev_root>/turbopanel` when
   // turbopanel_dev_user is set; pass the root so HOME/certs stay aligned.
   if (devRoot) args.push("-e", `turbopanel_dev_root=${devRoot}`);
+  // The dev user's real home (HOME for git, ssh and pnpm in the repo roles);
+  // it differs from the root when the repos sit in a sub-folder of the home.
+  const devHome = env.TURBOPANEL_DEV_HOME?.trim();
+  if (devHome) args.push("-e", `turbopanel_dev_home=${devHome}`);
   return args;
 }
 

@@ -1823,6 +1823,21 @@ test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
   assertEquals(devOwnershipPlaybookExtraArgs({}), []);
   assertEquals(
     devOwnershipPlaybookExtraArgs({
+      TURBOPANEL_DEV_USER: "pat",
+      TURBOPANEL_DEV_ROOT: "/home/pat/work/turbopanel",
+      TURBOPANEL_DEV_HOME: "/home/pat",
+    }),
+    [
+      "-e",
+      "turbopanel_dev_user=pat",
+      "-e",
+      "turbopanel_dev_root=/home/pat/work/turbopanel",
+      "-e",
+      "turbopanel_dev_home=/home/pat",
+    ],
+  );
+  assertEquals(
+    devOwnershipPlaybookExtraArgs({
       TURBOPANEL_DEV_USER: "vagrant",
       TURBOPANEL_DEV_ROOT: "  ",
     }),

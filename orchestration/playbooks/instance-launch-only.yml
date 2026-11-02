@@ -16,8 +16,13 @@
         key: "{{ turbopanel_dev_user }}"
       when: turbopanel_dev_user | default('') | length > 0
 
-    - name: Set dev source-repo root from the dev user's home directory
+    # turbopanel_dev_home is the HOME for git, ssh and pnpm. The source-repo
+    # root falls back to the same home here, but an extra-var
+    # turbopanel_dev_root (TURBOPANEL_DEV_ROOT, forwarded by the daemon) always
+    # wins over set_fact, so a repo folder outside the home is kept.
+    - name: Set dev home and default source-repo root from the dev user's home directory
       ansible.builtin.set_fact:
+        turbopanel_dev_home: "{{ getent_passwd[turbopanel_dev_user][4] }}"
         turbopanel_dev_root: "{{ getent_passwd[turbopanel_dev_user][4] }}"
       when:
         - turbopanel_dev_user | default('') | length > 0
