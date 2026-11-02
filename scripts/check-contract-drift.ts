@@ -212,6 +212,47 @@ async function checkHostname(tp: string, td: string): Promise<void> {
   );
 }
 
+/** The signed-session byte rules and the v2 sign-in proof tags must be identical on both sides. */
+async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
+  const envelopeLeft = requireText(
+    await readRel(tp, "src/lib/panel-identity/frame-envelope.ts"),
+    "frame-envelope.ts missing on the instance",
+  );
+  const envelopeRight = requireText(
+    await readRel(td, "src/instance/panel-identity-frames.ts"),
+    "panel-identity-frames.ts missing on the daemon",
+  );
+  for (
+    const name of [
+      "HELLO_PREFIX",
+      "FRAME_PREFIX",
+      "HTTP_PREFIX",
+      "SIG_SUFFIX_MARKER",
+    ]
+  ) {
+    requireEqual(
+      extractConst(envelopeLeft, name),
+      extractConst(envelopeRight, name),
+      `${name} drifted`,
+    );
+  }
+  const proofLeft = requireText(
+    await readRel(tp, "src/daemon/authn/proof-version.ts"),
+    "proof-version.ts missing on the instance",
+  );
+  const proofRight = requireText(
+    await readRel(td, "src/crypto/keys.ts"),
+    "keys.ts missing on the daemon",
+  );
+  for (const name of ["ENROLL_PROOF_V2_TAG", "AUTH_PROOF_V2_TAG"]) {
+    requireEqual(
+      extractConst(proofLeft, name),
+      extractConst(proofRight, name),
+      `${name} drifted`,
+    );
+  }
+}
+
 async function checkMachineKey(tp: string, td: string): Promise<void> {
   const mkLeft = requireText(
     await readRel(tp, "src/lib/machine-key.ts"),
@@ -1158,10 +1199,11 @@ export async function runContractDriftCheck(
   await checkReportedIp(tp, td);
   await checkSlotMapping(tp, td);
   await checkLayoutVectors(tp, td);
+  await checkPanelIdentityBytes(tp, td);
   await checkExpandOnly(tp, td);
 
   console.log(
-    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, folder name vectors, expand-only fields agree.",
+    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, folder name vectors, signed-session bytes, expand-only fields agree.",
   );
   return "ok";
 }

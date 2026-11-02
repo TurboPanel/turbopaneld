@@ -363,6 +363,9 @@ refresh, no identity clear), `stale-identity` (`404 Server key not found`,
 repeats on the parked backoff; a real re-key is an owner action), `tls-trust`
 (Deno/rustls chain/SAN/expiry: `invalid peer certificate`, `UnknownIssuer`,
 `NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop),
+`panel-identity` (a pinned server's control plane did not prove its key: a
+`PanelIdentityError` or `403 Panel fingerprint mismatch` → **park**, timer
+backoff, keys kept; see "Signed session" below),
 `awaiting-seat` (`400 License tier below required`,
 `400 License tier not assigned` — no purchased size is free for this server;
 **park** on a fixed `AWAITING_SEAT_POLL_MS` 15 min re-check that retries the
@@ -371,7 +374,7 @@ panels only send these from enroll, older ones also from session), or
 `permanent`
 (`401 Invalid license`, `400 License already consumed or invalid`,
 `400 License is inactive`, `400 Server key is inactive`,
-`403 Invalid signature`, `409 Fingerprint already exists`, and the local
+`403 Invalid signature`, `403 Signed proof required`, `409 Fingerprint already exists`, and the local
 `missing license credentials for enrollment` → **park**). `401 Invalid license` is what a used install key gets (the panel erases a key's token when its server binds, and a join ticket works once for an hour): the park log then names the way out, an owner issuing a re-enroll token on the server's page and the installer re-run with it (`permanentRejectionAdvice`). The restaged license files change the stamp, which unparks and force-enrolls with the persisted server id; the daemon keeps its staged license files (managed updates pass them to the installer). On `permanent` or
 `tls-trust`,
 `InstanceClient` enters `#enterParkedState` instead of `#increaseBackoff` —
@@ -940,8 +943,49 @@ form still works, pins nothing and writes no pin file.
 - `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
   contains that flag; after an older installer ran it restores the `panel_key=`
   line it dropped, so a move back to an older release does not break the pin.
-- `src/instance/panel-identity-pin.ts` reads and parses the file. The daemon
-  logs it at connect and enforces nothing yet.
+- `src/instance/panel-identity-pin.ts` reads and parses the file. Its
+  presence (with a non-empty `current`) turns the signed session on; the
+  unsigned feature list never does (`readEnforcedPin`, a pin file that exists
+  but cannot be read parks `panel-identity`, never falls back).
+
+## Signed session (`panel-identity-v1`, `panel-signed-frames-v1`, `signin-v2`)
+
+On a pinned server, every connect attempt:
+
+1. fetches `GET /api/daemon/v1/instance/identity` and requires its `current`
+   key to be pinned, its header signature to verify and its `keyset` not to be
+   lower than the pin (`verifyPanelIdentityDocument`, cached a day) before any
+   authenticated call;
+2. checks `X-TurboPanel-Signature` on every answer from
+   `SIGNED_RESPONSE_ROUTES` (`panel-identity-trust.ts`, the control plane keeps
+   the same list). A bad signature, or an unsigned success, is a
+   `PanelIdentityError`; an unsigned error answer is
+   `unsigned control-plane error`, classified transient, so an unsigned
+   `404 Server key not found` never parks `awaiting-administrator`;
+3. signs in with v2 proofs (`buildEnrollmentPayloadV2`, `buildAuthPayloadV2`:
+   pinned fingerprint, method, path, `iat`) and never uses a token without a
+   verified JWKS (a forged key set parks, an unreachable one is retried);
+4. opens the socket and sends only `{"type":"hello-nonce","nonce":...}`
+   (`signed-session.ts`). Every other send on that socket is dropped until the
+   control plane's hello, signed over `"tp-hello\n" + exact JSON`, echoes the
+   nonce with a pinned `kid`, `|iat - now| <= 300 s` and `keyset >= pin`. Only
+   then do presence, reporters, metrics, rehydrate, docker sync and held
+   results start. After it each frame must be an envelope with `seq` exactly
+   last+1, the same `sessionId`, a pinned `kid` and a fresh `iat`
+   (`panel-identity-frames.ts`); the transport pong is the only unsigned frame.
+
+While a server is pinned but holds no verified key (an identity refresh, or after a park), every
+answer on a signed route is refused and the token manager makes no call, as retryable errors: pinned
+never depends on the key being present. A control plane that does not know `hello-nonce` answers with
+its unsigned `version` frame, which a pinned daemon refuses and parks on; one that stays silent hits the
+30 s hello timeout instead (transient). The `4401 server row missing` close is honoured before the hello
+too (it only parks `awaiting-administrator`; nothing is cleared). Only 401, 403, 404 and 410 on the
+identity document park `panel-identity`; other statuses are retried.
+
+Any failure closes 4403 and parks with reason `panel-identity` (timer backoff,
+key files kept, never re-enrolls). No hello within 30 s is a plain timeout.
+The hello's `heartbeatSeconds` wins over the unsigned `version` advice.
+An unpinned server keeps the unsigned session exactly as before.
 
 ## Sealed secrets (`daemon-sealed-secrets-v1`)
 
@@ -949,4 +993,4 @@ form still works, pins nothing and writes no pin file.
 - `decryptSecrets` takes `{ sealed }` (HPKE envelopes, `aad` = server id, opened locally, then added to the redaction deny-set) or `{ plaintexts }`, never both. After the first sealed answer is opened the daemon writes `<state>/trust-level` = `sealed` and refuses any later plaintext answer (`plaintext secrets refused`). The daemon never lowers the mark; after a deliberate control plane rollback an operator removes the file by hand.
 - The Hosting Account password hash may arrive as `passwordHashEnvelope`; `openPrincipalPasswordEnvelopes` opens it through `decryptSecrets` before the account is touched. `server.principals.reconcile` opens it the same way (`daemon-sealed-principal-reconcile-v1`; the control plane sends the envelope there only to a daemon that lists it), and an envelope that cannot be opened fails the whole command rather than lock the account.
 - `scripts/scan-secrets.patterns` (`daemon-identity-file`) does not name `sealing-key.json`; it is byte-identical across five repos, so it is a follow-up for all five together.
-- **Keys sent up.** `reportIssuedCertificate` seals the private key to the control plane's sealing key (`privateKeyEnvelope`, aad = the control plane's signing key fingerprint) when `panel-identity-cache.ts` has one, and sends plain PEM otherwise, except that a server that has ever received a sealed secret (`trust-level`) fails the report with 503 instead. The sealing key comes from the signed identity document (signature checked against its own `current` key, cached a day, a lower `keyset` ignored). Until the pin file exists the document is trusted as far as TLS; `isTrustedSigningKey` is where the pin check plugs in.
+- **Keys sent up.** `reportIssuedCertificate` seals the private key to the control plane's sealing key (`privateKeyEnvelope`, aad = the control plane's signing key fingerprint) when `panel-identity-cache.ts` has one, and sends plain PEM otherwise, except that a server that has ever received a sealed secret (`trust-level`) fails the report with 503 instead. The sealing key comes from the signed identity document (signature checked against its own `current` key, cached a day, a lower `keyset` ignored). On a pinned server `isTrustedSigningKey` accepts only a pinned key; without a pin the document is trusted as far as TLS.
