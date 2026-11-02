@@ -41,7 +41,16 @@ to the repo root.
   new code is below 80%** (`new_coverage` LT 80); the scan waits on the gate
   (`sonar.qualitygate.wait=true`). Same-repo PRs and trunk **require**
   `SONAR_TOKEN` (hard fail); fork PRs skip the scan so fmt/lint/tests still
-  gate. CI runs on `pull_request` only (never `pull_request_target`), so a run from a fork gets a read-only token and no secrets, and waits for a maintainer to approve it (a repository Actions setting, not workflow code). The code scan and the no-new-issues step skip there; the `Note a skipped code scan` step then writes a notice and a job summary that say why and that a maintainer will push the branch to the TurboPanel repository if a scan is needed. Formatting, the vocabulary check, the secret scan and the tests run as usual, and `ci-ok` still requires every needed job to succeed: a step skipped inside a job leaves the job green, while a skipped or cancelled job turns `ci-ok` red. Quality gate failure fails verify (and therefore trunk `publish`, which
+  gate. CI runs on `pull_request` only (never `pull_request_target`), so a run
+  from a fork gets a read-only token and no secrets, and waits for a maintainer
+  to approve it (a repository Actions setting, not workflow code). The code scan
+  and the no-new-issues step skip there; the `Note a skipped code scan` step
+  then writes a notice and a job summary that say why and that a maintainer will
+  push the branch to the TurboPanel repository if a scan is needed. Formatting,
+  the vocabulary check, the secret scan and the tests run as usual, and `ci-ok`
+  still requires every needed job to succeed: a step skipped inside a job leaves
+  the job green, while a skipped or cancelled job turns `ci-ok` red. Quality
+  gate failure fails verify (and therefore trunk `publish`, which
   `needs: verify`). After switching from Automatic Analysis, reset **New Code**
   (Administration → New Code) so the baseline is not months of uncovered
   history. Sibling `turbopanel` / `ui` also use CI-based analysis; `website`
@@ -71,21 +80,35 @@ to the repo root.
   `contract-drift` job checks out `TurboPanel/turbopanel` (same-named branch,
   else trunk) beside this repo and runs `check:contract-drift` with
   `TURBOPANEL_REQUIRE_SIBLING=1`, so a missing sibling fails instead of
-  skipping. **Contract sibling override.** The `contract-drift` job in `.github/workflows/verify.yml` picks the `turbopanel` branch to check out with `scripts/resolve-sibling-ref.ts`: the same-named branch in the TurboPanel org, else trunk, and always trunk for promotion pull requests (unchanged default). A pull request (from a fork, or a twin with another name) may name a different org branch with one line `Sibling-Branch: <branch>` (at the start of a line) in its description. The description is untrusted: it is re-read from the API (so an edit counts on a re-run) and reaches the resolver only through the environment, the value must match `^[A-Za-z0-9._/-]{1,100}$` with no `..`, leading `-` or `.lock` ending, and a named branch that does not exist fails the job. The job summary names the ref used and, for a twin, says to merge the turbopanel pull request before the turbopaneld one. The control plane repository keeps a twin of the resolver; change both together. Tests: `scripts/resolve-sibling-ref.test.ts`. `scripts/scan-secrets.sh`, `scripts/scan-secrets.patterns` and
-  `scripts/scan-secrets.selftest.sh` are byte-identical in turbopanel,
-  turbopaneld, ui, website and dev: change all five together (each repo keeps a
-  copy because the pre-commit hook runs it locally). The rules in the patterns
-  file cover private key blocks, vendor tokens, JWTs, connection URLs with
-  credentials, secret-looking assignments and forbidden file names (dotenv
-  files, `*.pem`, `*.key`, daemon identity files, …); the scanner reports the
-  rule id and location, never the matching text. `--all` scans the tree;
-  `--range BASE..HEAD` scans every line the PR's commits added, so a secret
-  added and removed inside a PR is still caught (CI runs it on PRs into trunk).
-  Allowlist entries in `.secretscan-allowlist` are `path:full line text` (or
-  `@path exact/file` for a forbidden file name), each needs a `# reason:`
-  comment above it, and wildcards are rejected. The self-test builds its
-  fixtures at run time from fragments; dev's `src/lib/scan-secrets.test.ts` runs
-  it and, with the siblings checked out in dev CI, fails if any copy drifts.
+  skipping. **Contract sibling override.** The `contract-drift` job in
+  `.github/workflows/verify.yml` picks the `turbopanel` branch to check out with
+  `scripts/resolve-sibling-ref.ts`: the same-named branch in the TurboPanel org,
+  else trunk, and always trunk for promotion pull requests (unchanged default).
+  A pull request (from a fork, or a twin with another name) may name a different
+  org branch with one line `Sibling-Branch: <branch>` (at the start of a line)
+  in its description. The description is untrusted: it is re-read from the API
+  (so an edit counts on a re-run) and reaches the resolver only through the
+  environment, the value must match `^[A-Za-z0-9._/-]{1,100}$` with no `..`,
+  leading `-` or `.lock` ending, and a named branch that does not exist fails
+  the job. The job summary names the ref used and, for a twin, says to merge the
+  turbopanel pull request before the turbopaneld one. The control plane
+  repository keeps a twin of the resolver; change both together. Tests:
+  `scripts/resolve-sibling-ref.test.ts`. `scripts/scan-secrets.sh`,
+  `scripts/scan-secrets.patterns` and `scripts/scan-secrets.selftest.sh` are
+  byte-identical in turbopanel, turbopaneld, ui, website and dev: change all
+  five together (each repo keeps a copy because the pre-commit hook runs it
+  locally). The rules in the patterns file cover private key blocks, vendor
+  tokens, JWTs, connection URLs with credentials, secret-looking assignments and
+  forbidden file names (dotenv files, `*.pem`, `*.key`, daemon identity files,
+  …); the scanner reports the rule id and location, never the matching text.
+  `--all` scans the tree; `--range BASE..HEAD` scans every line the PR's commits
+  added, so a secret added and removed inside a PR is still caught (CI runs it
+  on PRs into trunk). Allowlist entries in `.secretscan-allowlist` are
+  `path:full line text` (or `@path exact/file` for a forbidden file name), each
+  needs a `# reason:` comment above it, and wildcards are rejected. The
+  self-test builds its fixtures at run time from fragments; dev's
+  `src/lib/scan-secrets.test.ts` runs it and, with the siblings checked out in
+  dev CI, fails if any copy drifts.
 - **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
   reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
   promotion re-verifies artifact hashes only (no new compile from source).
