@@ -44,6 +44,11 @@ export interface DaemonApiClientOptions {
   sealing?: DaemonSealingContext;
   /** The control plane's sealing key, for secrets this daemon sends up; null when unknown. */
   panelSealKey?: () => Promise<PanelSealKey | null>;
+  /**
+   * Called (not awaited) after a plaintext decrypt answer is accepted, so the
+   * sealing key can be registered again without waiting for a reconnect.
+   */
+  onPlaintextSecretsAnswer?: () => void;
 }
 
 /**
@@ -423,6 +428,7 @@ export class DaemonApiClient {
       );
       throw new DaemonApiError(400, "plaintext secrets refused");
     }
+    this.#options.onPlaintextSecretsAnswer?.();
     return body.plaintexts.map((entry) =>
       typeof entry === "string" ? entry : null
     );

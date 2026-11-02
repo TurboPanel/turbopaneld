@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
 import type { PrincipalEnsureSpec } from "../deploy/ensure-principal.ts";
 import type {
@@ -317,4 +317,72 @@ test("handlePrincipalsReconcile asks for each account's home under the daemon's 
     },
   );
   assertEquals(roots, ["/srv/users"]);
+});
+
+const SEALED_HASH = `$6$saltstring$${"a".repeat(86)}`;
+
+function sealedHashDeps(
+  decrypt: (ciphertexts: string[]) => Promise<(string | null)[]>,
+  ensured: PrincipalEnsureSpec[][],
+) {
+  return {
+    resolveLayout: () => LAYOUT,
+    listAssetFolders: () => Promise.resolve([]),
+    reportPrincipalIds: () => Promise.resolve([]),
+    ensureSystemPrincipals: (
+      _layout: LayoutPaths,
+      principals: PrincipalEnsureSpec[],
+    ) => {
+      ensured.push(principals);
+      return Promise.resolve([]);
+    },
+    applySshAccess: () => Promise.resolve(NO_CHANGE),
+    decryptSecrets: decrypt,
+  };
+}
+
+test("handlePrincipalsReconcile opens a sealed password hash before the account is touched", async () => {
+  const ensured: PrincipalEnsureSpec[][] = [];
+  const asked: string[][] = [];
+  await handlePrincipalsReconcile(
+    {
+      principals: [
+        {
+          principalId: "p1",
+          username: "alice",
+          passwordHashEnvelope: "tpdaemon.x",
+        },
+        { principalId: "p2", username: "bob" },
+      ],
+    },
+    "2026-01-01T00:00:00.000Z",
+    sealedHashDeps((ciphertexts) => {
+      asked.push(ciphertexts);
+      return Promise.resolve([SEALED_HASH]);
+    }, ensured),
+  );
+  assertEquals(asked, [["tpdaemon.x"]]);
+  assertEquals(ensured.length, 1);
+  assertEquals(ensured[0]?.[0]?.passwordHash, SEALED_HASH);
+  assertEquals(ensured[0]?.[1]?.passwordHash, undefined);
+});
+
+test("handlePrincipalsReconcile fails without touching accounts when a sealed hash cannot be opened", async () => {
+  const ensured: PrincipalEnsureSpec[][] = [];
+  await assertRejects(() =>
+    handlePrincipalsReconcile(
+      {
+        principals: [
+          {
+            principalId: "p1",
+            username: "alice",
+            passwordHashEnvelope: "tpdaemon.x",
+          },
+        ],
+      },
+      "2026-01-01T00:00:00.000Z",
+      sealedHashDeps(() => Promise.resolve([null]), ensured),
+    )
+  );
+  assertEquals(ensured.length, 0);
 });

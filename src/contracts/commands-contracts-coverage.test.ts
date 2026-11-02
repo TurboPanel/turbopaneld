@@ -1579,3 +1579,16 @@ test("parseEnvironmentDeployPayload keeps a www mode, drops off, and rejects unk
     "hostings[].wwwRedirect must be a boolean",
   );
 });
+
+test("parsePrincipalsReconcilePayload carries a sealed password hash", () => {
+  assertEquals(
+    parsePrincipalsReconcilePayload({
+      principals: [{
+        principalId: PRINCIPAL_ID,
+        username: "sealed_user",
+        passwordHashEnvelope: "tpdaemon.v1.k.iv.ct",
+      }],
+    }).principals[0]?.passwordHashEnvelope,
+    "tpdaemon.v1.k.iv.ct",
+  );
+});
