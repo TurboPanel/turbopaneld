@@ -34,6 +34,7 @@ test("the status answer lists each connector with its version and the pinned ver
       version: "2026.10.7",
       ensureBinary: () => Promise.resolve("/unused"),
       probe: () => Promise.resolve({ kind: "ready", connections: 4 }),
+      readHostnames: () => Promise.resolve(["panel.example.com"]),
       run: (): Promise<RunResult> =>
         Promise.resolve({ success: true, stdout: "active", stderr: "" }),
     };
@@ -41,7 +42,14 @@ test("the status answer lists each connector with its version and the pinned ver
     assertEquals(result, {
       pinnedVersion: "2026.10.7",
       connectors: [
-        { tunnelId: ID, status: "connected", version: "2026.5.0", slot: "b" },
+        {
+          tunnelId: ID,
+          status: "connected",
+          version: "2026.5.0",
+          slot: "b",
+          edgeConnections: 4,
+          hostnames: ["panel.example.com"],
+        },
       ],
     });
     // What the handler writes is what the control plane's parser accepts.

@@ -104,6 +104,7 @@ export const DAEMON_WIRE_FEATURES = [
   "instance-hostname-public-port-v1",
   "daemon-sealed-principal-reconcile-v1",
   "install-token-v2",
+  "tunnel-status-facts-v1",
 ] as const;
 
 /**
@@ -145,6 +146,13 @@ export const TUNNEL_CONNECTOR_FEATURE: DaemonWireFeature =
   "tunnel-connector-v1";
 /** The daemon answers `server.tunnel.status` with each connector's state and version. */
 export const TUNNEL_STATUS_FEATURE: DaemonWireFeature = "tunnel-status-v1";
+/**
+ * Each `server.tunnel.status` connector may carry `edgeConnections` (from the
+ * connector's `/ready`) and `hostnames` (from its `/config`). Both stay
+ * optional: a connector that does not answer leaves them out.
+ */
+export const TUNNEL_STATUS_FACTS_FEATURE: DaemonWireFeature =
+  "tunnel-status-facts-v1";
 
 /**
  * This daemon honours `credentials[].kind: "backup"` on `managed.apply`: it

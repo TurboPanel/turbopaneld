@@ -46,6 +46,7 @@ import {
   TLS_CAPTURE_FEATURE,
   TUNNEL_CONNECTOR_FEATURE,
   TUNNEL_FORWARDING_FEATURE,
+  TUNNEL_STATUS_FACTS_FEATURE,
   TUNNEL_STATUS_FEATURE,
 } from "./version-wire.ts";
 
@@ -472,9 +473,15 @@ test("daemon-sealed-principal-reconcile-v1 is advertised and raised no floor", (
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("install-token-v2 is advertised last and raised no floor", () => {
+test("install-token-v2 is advertised and raised no floor", () => {
   assertEquals(INSTALL_TOKEN_V2_FEATURE, "install-token-v2");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), INSTALL_TOKEN_V2_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(INSTALL_TOKEN_V2_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("tunnel-status-facts-v1 is advertised last and raised no floor", () => {
+  assertEquals(TUNNEL_STATUS_FACTS_FEATURE, "tunnel-status-facts-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_STATUS_FACTS_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

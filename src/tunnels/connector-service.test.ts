@@ -10,8 +10,10 @@ import {
   type ConnectorIo,
   connectorStatus,
   controlConnector,
+  hostnamesFromConfig,
   installConnector,
   listConnectorIds,
+  MAX_REPORTED_HOSTNAMES,
   removeConnector,
   reportConnectors,
   updateAllConnectors,
@@ -669,4 +671,68 @@ test("a unit that already matches is left running at the same version", async ()
       h.calls.join("\n"),
     );
   });
+});
+
+test("the report carries the connector's edge connections and routed names when it answers", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    await installConnector(h.io, ID_B, TOKEN);
+    const ports: number[] = [];
+    h.io.readHostnames = (port) => {
+      ports.push(port);
+      return Promise.resolve(["panel.example.com"]);
+    };
+    h.probe.byPort.set(20301, { kind: "unreachable" });
+    const report = await reportConnectors(h.io);
+    const [a, b] = report.connectors;
+    assertEquals(a.edgeConnections, 4);
+    assertEquals(a.hostnames, ["panel.example.com"]);
+    // A connector whose /ready does not answer reports neither fact.
+    assertEquals(b.edgeConnections, undefined);
+    assertEquals(b.hostnames, undefined);
+    assertEquals(ports, [20300]);
+  });
+});
+
+test("a connector without /config still reports its edge connections", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.probe.value = { kind: "not-ready", connections: 0 };
+    h.io.readHostnames = () => Promise.resolve(null);
+    const [a] = (await reportConnectors(h.io)).connectors;
+    assertEquals(a.status, "connecting");
+    assertEquals(a.edgeConnections, 0);
+    assertEquals("hostnames" in a, false);
+  });
+});
+
+test("routed names come from the /config ingress rules, catch-all and junk dropped", () => {
+  const body = {
+    version: 7,
+    config: {
+      ingress: [
+        { hostname: "Panel.Example.com.", service: "https://127.0.0.1:8443" },
+        { hostname: "*.apps.example.com", service: "http://localhost:80" },
+        { hostname: "panel.example.com", path: "^/api", service: "x" },
+        { hostname: "bad name", service: "x" },
+        { hostname: 7 },
+        { service: "http_status:404" },
+      ],
+      "warp-routing": { enabled: false },
+    },
+  };
+  assertEquals(hostnamesFromConfig(body), [
+    "*.apps.example.com",
+    "panel.example.com",
+  ]);
+  assertEquals(hostnamesFromConfig({ config: { ingress: [] } }), []);
+  assertEquals(hostnamesFromConfig({ version: 1 }), null);
+  assertEquals(hostnamesFromConfig("ERR: no config"), null);
+  const many = Array.from({ length: 150 }, (_, i) => ({
+    hostname: `n${String(i).padStart(3, "0")}.example.com`,
+  }));
+  assertEquals(
+    hostnamesFromConfig({ config: { ingress: many } })?.length,
+    MAX_REPORTED_HOSTNAMES,
+  );
 });
