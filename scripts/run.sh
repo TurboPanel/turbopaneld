@@ -242,7 +242,9 @@ tp_install_token_decode() {
 # Python for the identity document: checks it is well formed and names
 # $4 as its only current key, then writes what openssl needs to $3: pub.pem,
 # doc.msg and doc.sig (the document's header signature over
-# "tp-http\n<path>\n<body>"), tok.msg and tok.sig (the TOKEN's), keyset and urls.
+# "tp-http\n<path>\n<body>"), tok.sig (the TOKEN's, read from $3/tok.sig.txt),
+# keyset and urls. The TOKEN payload carries the join secret, so the caller
+# writes it to $3/tok.msg itself and it never appears in an argument list.
 tp_identity_material_python() {
   cat <<'PY'
 import base64, binascii, hashlib, json, sys
@@ -250,8 +252,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PATH = "/api/daemon/v1/instance/identity"
-body_path, header, out, expected, tok_payload, tok_sig = sys.argv[1:7]
+body_path, header, out, expected = sys.argv[1:5]
 out = Path(out)
+tok_sig = (out / "tok.sig.txt").read_text().strip()
 
 def b64d(text):
     try:
@@ -296,7 +299,6 @@ if len(sig) != 64 or len(tsig) != 64:
     raise SystemExit("signature is not 64 bytes")
 (out / "doc.msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
 (out / "doc.sig").write_bytes(sig)
-(out / "tok.msg").write_bytes(tok_payload.encode())
 (out / "tok.sig").write_bytes(tsig)
 der = bytes.fromhex("302a300506032b6570032100") + pub
 pem = base64.b64encode(der).decode()
@@ -329,8 +331,13 @@ tp_verify_install_token() {
     return 1
   fi
   _vt_header="$(tr -d '\r' < "$_vt_dir/headers" | grep -i '^x-turbopanel-signature:' | tail -n 1 | sed 's/^[^:]*:[[:space:]]*//')"
+  # printf is a shell builtin: the payload (it holds the join secret) goes
+  # into the private mktemp directory without ever being a process argument,
+  # which any local user could read from ps or /proc/<pid>/cmdline.
+  printf '%s' "$TOKEN_PAYLOAD" > "$_vt_dir/tok.msg"
+  printf '%s' "$TOKEN_SIG" > "$_vt_dir/tok.sig.txt"
   if ! python3 -c "$(tp_identity_material_python)" "$_vt_dir/body" "$_vt_header" "$_vt_dir" \
-      "$PANEL_FINGERPRINT" "$TOKEN_PAYLOAD" "$TOKEN_SIG" 2>"$_vt_dir/err"; then
+      "$PANEL_FINGERPRINT" 2>"$_vt_dir/err"; then
     tp_print_error "The panel's identity document was refused: $(cat "$_vt_dir/err" 2>/dev/null). Nothing was sent. Copy a fresh command from Add Server."
     rm -rf "$_vt_dir"
     return 1
@@ -3337,7 +3344,8 @@ tp_resolve_panel_pin() {
 tp_write_panel_identity_pin() {
   _wp_file="$INSTALL_ROOT/lib/panel-identity"
   _wp_by=install
-  [ "$UNSAFE_NO_PANEL_KEY" = true ] && _wp_by=unsafe
+  # The flag only matters for a token with no key; a checked key is a real pin.
+  [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -z "$PANEL_FINGERPRINT" ] && _wp_by=unsafe
   _wp_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   case "$PIN_ACTION" in
     write)

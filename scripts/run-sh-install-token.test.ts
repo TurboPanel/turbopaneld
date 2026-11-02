@@ -229,6 +229,25 @@ test("a TOKEN signed by the panel's key verifies against its document", async ()
   assertStringIncludes(result.stdout, "keyset=4");
 });
 
+test("the TOKEN payload is never a process argument", async () => {
+  const panel = await makePanel();
+  const token = await makeToken(panel);
+  const args = await Deno.makeTempFile();
+  // Record every argument python3 is given, then run the real one.
+  const spy = `python3() { printf '%s\\n' "$@" >> ${
+    quote(args)
+  }; command python3 "$@"; }`;
+  const result = await run(
+    `${spy}\n${verifyScript(token, panel.fingerprint)}`,
+    panel,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  const seen = await Deno.readTextFile(args);
+  await Deno.remove(args);
+  assert(seen.length > 0, "python3 was not called");
+  assert(!seen.includes(token.split(".")[0]), "payload passed as an argument");
+});
+
 test("a tampered payload fails the signature", async () => {
   const panel = await makePanel();
   const token = await makeToken(panel);
@@ -300,6 +319,16 @@ test("a first install writes the pin file with its six lines", async () => {
   ]);
   assertEquals(lines[0], `current=${FP_A}`);
   assertEquals(lines[4], "pinned_by=install");
+});
+
+test("the unsafe flag does not mark a checked key as unsafe", async () => {
+  const state = await pinState(
+    "",
+    `PANEL_FINGERPRINT=${FP_A}; PANEL_NEXT_FINGERPRINT=''; PANEL_KEYSET=1; PANEL_URLS=https://p.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=true`,
+  );
+  assertEquals(state.code, 0, state.stderr);
+  const text = await Deno.readTextFile(join(state.root, "lib/panel-identity"));
+  assertStringIncludes(text, "pinned_by=install");
 });
 
 test("the unsafe flag records pinned_by=unsafe with no key", async () => {
