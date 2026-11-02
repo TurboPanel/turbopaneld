@@ -257,15 +257,31 @@ export function platformCaHosts(
     .map((entry) => entry.host);
 }
 
-function ansibleHostname(entry: InstanceHostnameApplyEntry): {
+/** A TCP port the panel's Caddy may redirect to, else undefined. */
+function validPublicPort(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) &&
+      value >= 1 && value <= 65535
+    ? value
+    : undefined;
+}
+
+/**
+ * One `turbopanel_hostnames_json` row. `public_port` is present only when the
+ * control plane sent a valid `publicPort`; without it the Caddyfile adds no
+ * edge port redirect for the name.
+ */
+export function ansibleHostname(entry: InstanceHostnameApplyEntry): {
   host: string;
   source: InstanceHostnameApplyEntry["source"];
   cert_id: string;
+  public_port?: number;
 } {
+  const publicPort = validPublicPort(entry.publicPort);
   return {
     host: entry.host,
     source: entry.source,
     cert_id: entry.uploadedCertId ?? "",
+    ...(publicPort === undefined ? {} : { public_port: publicPort }),
   };
 }
 
