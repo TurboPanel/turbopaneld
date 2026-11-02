@@ -112,6 +112,10 @@ turbopanel_hostnames: []
 # it into turbopanel_hostnames. Empty leaves that list alone. tp-orchestrate
 # accepts only key=value extra-vars, which stay strings.
 turbopanel_hostnames_json: ""
+# Edge address ranges for Cloudflare proxy / Bunny pull zone hostnames, as a
+# compact JSON object {hash, cloudflare, bunny}. Empty reads the persisted
+# instance-edge-trust.json (resolve-edge-trust.yml).
+turbopanel_edge_trust_json: ""
 # Absolute paths on the target host (upload). Copied into the role-owned
 # certs/ tree so tpcaddy can read the key without mutating the operator's files.
 turbopanel_tls_cert_path: ""
