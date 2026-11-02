@@ -805,3 +805,91 @@ test("a hostname row carries public_port only for a valid port", () => {
     );
   }
 });
+
+const EDGE_TRUST = {
+  cidrs: ["198.51.100.0/24", "203.0.113.7/32"],
+  hash: "b".repeat(64),
+  cloudflare: ["198.51.100.0/24"],
+  bunny: ["203.0.113.7/32"],
+};
+
+async function certsApplyArgs(
+  edgeTrust: typeof EDGE_TRUST | undefined,
+): Promise<string[]> {
+  let captured: string[] = [];
+  await runInstanceCertsApply("/opt/turbopanel", [], {
+    readForwardHosts: () => "",
+    env: {},
+    edgeTrust,
+    runPlaybook: (_playbook, extraArgs = []) => {
+      captured = [...extraArgs];
+      return Promise.resolve();
+    },
+  });
+  return captured;
+}
+
+test("an apply without edgeTrust passes no edge extra-var, so the persisted set stays", async () => {
+  const args = await certsApplyArgs(undefined);
+  assertEquals(
+    args.some((a) => a.startsWith("turbopanel_edge_trust_json=")),
+    false,
+  );
+});
+
+test("an apply with edgeTrust passes the per-provider lists and the hash only", async () => {
+  const args = await certsApplyArgs(EDGE_TRUST);
+  const value = args.find((a) => a.startsWith("turbopanel_edge_trust_json="));
+  assertEquals(
+    JSON.parse(value!.slice("turbopanel_edge_trust_json=".length)),
+    {
+      hash: EDGE_TRUST.hash,
+      cloudflare: EDGE_TRUST.cloudflare,
+      bunny: EDGE_TRUST.bunny,
+    },
+  );
+});
+
+test("an edge range that is not a CIDR literal is refused before the playbook runs", async () => {
+  await assertRejects(
+    () =>
+      certsApplyArgs({
+        ...EDGE_TRUST,
+        cloudflare: ["1.2.3.0/24; id"],
+        cidrs: ["1.2.3.0/24; id"],
+      }),
+    Error,
+    "refusing edge range",
+  );
+  await assertRejects(
+    () => certsApplyArgs({ ...EDGE_TRUST, cloudflare: ["192.0.2.0/24"] }),
+    Error,
+    "not in the union",
+  );
+});
+
+test("edge ranges that are catch-all, loopback or private are refused on the daemon", async () => {
+  const bad = [
+    "0.0.0.0/0",
+    "::/0",
+    "10.0.0.0/8",
+    "127.0.0.0/8",
+    "192.168.1.0/24",
+    "fc00::/7",
+    "::1/128",
+    "1.0.0.0/7",
+  ];
+  await Promise.all(bad.map((range) =>
+    assertRejects(
+      () =>
+        certsApplyArgs({
+          ...EDGE_TRUST,
+          cidrs: [range],
+          cloudflare: [range],
+          bunny: [],
+        }),
+      Error,
+      "refusing edge range",
+    )
+  ));
+});

@@ -100,6 +100,7 @@ export const DAEMON_WIRE_FEATURES = [
   "fabric-lan-routes-v1",
   "repo-key-report-v1",
   "daemon-sealed-secrets-v1",
+  "instance-edge-trust-v1",
   "instance-hostname-public-port-v1",
 ] as const;
 

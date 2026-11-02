@@ -441,6 +441,11 @@ test("daemon-sealed-secrets-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
+test("instance-edge-trust-v1 is advertised and raised no floor", () => {
+  assertEquals(DAEMON_WIRE_FEATURES.includes("instance-edge-trust-v1"), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
 test("instance-hostname-public-port-v1 is advertised last and raised no floor", () => {
   assertEquals(
     INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE,

@@ -190,6 +190,15 @@
         group: "{{ turbopanel_group }}"
         mode: "0750"
 
+    - name: Persist the edge address ranges for later converges
+      when: (turbopanel_edge_trust_json | default('')) | length > 0
+      ansible.builtin.copy:
+        dest: "{{ turbopanel_config_dir }}/caddy/instance-edge-trust.json"
+        content: "{{ turbopanel_edge_trust_effective_json }}"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0640"
+
     - name: Record instance hostnames for the ACME observer
       ansible.builtin.copy:
         dest: "{{ turbopanel_config_dir }}/caddy/instance-hostnames.json"

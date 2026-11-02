@@ -63,11 +63,13 @@ export function freePort(): number {
 
 /**
  * The template's variables, for a render without Jinja. Jinja statement and
- * comment lines (the edge port redirect include) drop out: a raw template
- * then renders as if no hostname were listed.
+ * comment lines (the edge port redirect include) and inline `for` loops (the
+ * edge ranges) drop out: a raw template then renders as if no hostname or
+ * edge range were listed.
  */
 export function substitutePanelCaddyfile(text: string, root: string): string {
   return text
+    .replaceAll(/\{% for [^%]*%\}.*?\{% endfor %\}/g, "")
     .replaceAll(/^\{[%#][^\n]*\n/gm, "")
     .replaceAll("{{ turbopanel_caddy_admin_socket }}", join(root, "admin.sock"))
     .replaceAll("{{ turbopanel_run_dir }}", join(root, "run"))
