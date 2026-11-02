@@ -99,6 +99,7 @@ export const DAEMON_WIRE_FEATURES = [
   "fabric-peer-report-v1",
   "fabric-lan-routes-v1",
   "repo-key-report-v1",
+  "daemon-sealed-secrets-v1",
 ] as const;
 
 /**
@@ -186,6 +187,16 @@ export const FABRIC_LAN_ROUTES_FEATURE: DaemonWireFeature =
  * report until one does.
  */
 export const REPO_KEY_REPORT_FEATURE: DaemonWireFeature = "repo-key-report-v1";
+
+/**
+ * This daemon holds an X25519 sealing key (registered with the control plane,
+ * signed by its server key) and opens the `sealed` answer of
+ * `POST /api/daemon/v1/secrets/decrypt`. A control plane that sees the feature
+ * seals every decrypt answer, and the Hosting Account password hash, to that
+ * key; once the daemon has opened one it refuses a plaintext answer.
+ */
+export const DAEMON_SEALED_SECRETS_FEATURE: DaemonWireFeature =
+  "daemon-sealed-secrets-v1";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`

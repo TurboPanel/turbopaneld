@@ -64,6 +64,8 @@ import {
   sizesFeaturesNegotiated,
 } from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
+import { createPanelSealKeySource } from "./panel-identity-cache.ts";
+import { createSealingContext, registerSealingKey } from "./sealing.ts";
 import {
   INSTANCE_VERSION_HEADER,
   type InstanceSupportStatus,
@@ -518,6 +520,8 @@ export class InstanceClient {
   #apiClient: DaemonApiClient | undefined;
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
+  #sealing: ReturnType<typeof createSealingContext> | null = null;
+  #sealingRegistered = false;
   #forceEnrollPending = false;
   #unparkForcesEnroll = false;
   /** Orphan transcript sweep runs once per process, never on reconnect. */
@@ -551,6 +555,8 @@ export class InstanceClient {
    * for one already tried.
    */
   #licenseStamp: string | undefined;
+  /** Set once the unreadable-license warning is logged; cleared on a good read. */
+  #loggedUnreadableLicense = false;
   #idlePresence: IdlePresence | undefined;
   /** Always false until the signed-hello change lands; that change drops `readonly` and sets it, after which the unsigned advice is ignored. */
   readonly #pinnedHelloApplied = false;
@@ -1247,7 +1253,7 @@ export class InstanceClient {
       // a fresh enrollment; nothing the panel answers can.
       this.#unparkForcesEnroll =
         isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL")) ||
-        (await this.#readLicenseStamp()) !== this.#licenseStamp;
+        (await this.#licenseChanged());
       return true;
     }
     // Retried on the timer: a purchase changes the answer without any
@@ -1257,7 +1263,28 @@ export class InstanceClient {
       this.#parkedKind === "awaiting-seat"
     ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
+    return await this.#licenseChanged();
+  }
+
+  /**
+   * True when the license files hold a different, complete pair than the one
+   * last tried. An empty or half-written read (the installer replacing the
+   * files) while a license was already tried is "no change": it is logged once
+   * and the next re-check reads the finished files.
+   */
+  async #licenseChanged(): Promise<boolean> {
     const stamp = await this.#readLicenseStamp();
+    if (stamp === undefined && this.#licenseStamp !== undefined) {
+      if (!this.#loggedUnreadableLicense) {
+        this.#loggedUnreadableLicense = true;
+        logWarn(
+          "instance",
+          "license files are empty or incomplete; keeping the previous license until they are readable",
+        );
+      }
+      return false;
+    }
+    this.#loggedUnreadableLicense = false;
     return stamp !== this.#licenseStamp;
   }
 
@@ -1389,6 +1416,7 @@ export class InstanceClient {
     identity: { keyFile: DaemonKeyFile; serverId: string; keyId: string },
     machineKey: string | undefined,
     hostname: string,
+    stateDir: string,
   ): void {
     const { keyFile, serverId, keyId } = identity;
     if (
@@ -1412,6 +1440,15 @@ export class InstanceClient {
     }
 
     const tokenManagerRef: { current?: DaemonTokenManager } = {};
+    this.#sealing = createSealingContext({
+      stateDir,
+      serverId,
+      serverKeyId: keyFile.keyId,
+    });
+    this.#sealingRegistered = false;
+    const panelSealKeys = createPanelSealKeySource({
+      fetchDocument: () => this.#apiClient!.getPanelIdentityDocument(),
+    });
     const apiClient = new DaemonApiClient({
       config: this.#config,
       httpClient: this.#httpClient,
@@ -1421,6 +1458,8 @@ export class InstanceClient {
         }
         return await tokenManagerRef.current.getToken(options);
       },
+      sealing: this.#sealing,
+      panelSealKey: () => panelSealKeys.get(),
       ...this.#apiClientVersionHook(),
     });
     const tokenManager = new DaemonTokenManager({
@@ -1502,10 +1541,28 @@ export class InstanceClient {
       },
       machineKey,
       hostname,
+      stateDir,
     );
 
     const jwt = await this.#tokenManager!.getToken();
+    await this.#registerSealingKeyOnce(identity.keyFile);
     await this.#openDaemonWebSocket(jwt, identity.serverId);
+  }
+
+  /**
+   * Register the sealing key once per identity, after the token exists and
+   * before the socket opens. Never blocks the connect: a failure is logged
+   * and the next connect tries again.
+   */
+  async #registerSealingKeyOnce(keyFile: DaemonKeyFile): Promise<void> {
+    const sealing = this.#sealing;
+    const apiClient = this.#apiClient;
+    if (!sealing || !apiClient || this.#sealingRegistered) return;
+    this.#sealingRegistered = await registerSealingKey({
+      sealing,
+      privateJwk: keyFile.privateJwk,
+      register: (body) => apiClient.registerSealingKey(body),
+    });
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {

@@ -123,7 +123,7 @@ const MAX_PRINCIPAL_USERNAME_LENGTH = 28;
  * gate in `../contracts/commands-contracts.ts` and the instance's
  * `src/lib/sha512-crypt.ts`.
  */
-const PASSWORD_HASH_RE =
+export const PASSWORD_HASH_RE =
   /^\$6\$(?:rounds=\d{4,9}\$)?[./0-9A-Za-z]{8,16}\$[./0-9A-Za-z]{86}$/;
 
 /**

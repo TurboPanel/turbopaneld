@@ -1,9 +1,33 @@
 import { encodeBase64 } from "@std/encoding/base64";
+import {
+  type HpkeEnvelope,
+  isHpkeEnvelope,
+  sealToRecipient,
+} from "../crypto/hpke.ts";
 import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { logWarn } from "../util/logger.ts";
+import { mapSequential } from "../util/sequential.ts";
 import { retryTransient, type RetryView } from "../util/retry-fetch.ts";
+import {
+  IDENTITY_DOCUMENT_PATH,
+  type PanelIdentityFetch,
+  type PanelSealKey,
+} from "./panel-identity-cache.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
+
+/**
+ * What an authenticated client needs to take sealed `/secrets/decrypt`
+ * answers: open one envelope with the daemon's sealing key (the server id is
+ * the aad) and keep the high-water mark that stops a later downgrade to
+ * plaintext.
+ */
+export interface DaemonSealingContext {
+  /** Open one envelope; resolves to the plaintext, rejects on any mismatch. */
+  open(envelope: HpkeEnvelope): Promise<string>;
+  isTrustSealed(): Promise<boolean>;
+  markTrustSealed(): Promise<void>;
+}
 
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
@@ -16,6 +40,10 @@ export interface DaemonApiClientOptions {
   onInstanceVersion?: (version: string | null) => void;
   /** Wait between rate-limit retries; tests inject a no-op. Defaults to a timer. */
   sleep?: (ms: number) => Promise<void>;
+  /** Present on the authenticated client; without it only plaintext answers are understood. */
+  sealing?: DaemonSealingContext;
+  /** The control plane's sealing key, for secrets this daemon sends up; null when unknown. */
+  panelSealKey?: () => Promise<PanelSealKey | null>;
 }
 
 /**
@@ -345,6 +373,7 @@ export class DaemonApiClient {
     const body = await this.#requestJson<{
       ok?: boolean;
       plaintexts?: unknown;
+      sealed?: unknown;
     }>(
       "/api/daemon/v1/secrets/decrypt",
       {
@@ -353,14 +382,88 @@ export class DaemonApiClient {
       },
       { auth: true },
     );
-    if (!Array.isArray(body.plaintexts)) {
-      throw new DaemonApiError(500, "Invalid secrets/decrypt response");
-    }
-    const plaintexts = body.plaintexts.map((entry) =>
-      typeof entry === "string" ? entry : null
+    const plaintexts = await this.#plaintextsFromDecryptAnswer(
+      body,
+      ciphertexts.length,
     );
     rememberSecretPlaintexts(plaintexts);
     return plaintexts;
+  }
+
+  /**
+   * The answer is either `sealed` (HPKE envelopes opened here with the
+   * sealing key, so the redaction deny-set only ever sees values opened on
+   * this host) or `plaintexts`. Never both. Once a sealed answer has been
+   * opened, a plaintext one is refused for good.
+   */
+  async #plaintextsFromDecryptAnswer(
+    body: { plaintexts?: unknown; sealed?: unknown },
+    count: number,
+  ): Promise<(string | null)[]> {
+    const sealing = this.#options.sealing;
+    if (body.sealed !== undefined) {
+      if (body.plaintexts !== undefined || !sealing) {
+        throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+      }
+      const opened = await this.#openSealedAnswers(
+        sealing,
+        body.sealed,
+        count,
+      );
+      await sealing.markTrustSealed();
+      return opened;
+    }
+    if (!Array.isArray(body.plaintexts)) {
+      throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+    }
+    if (sealing && await sealing.isTrustSealed()) {
+      logWarn(
+        "instance",
+        "refusing a plaintext secrets answer: this server already receives them sealed",
+      );
+      throw new DaemonApiError(400, "plaintext secrets refused");
+    }
+    return body.plaintexts.map((entry) =>
+      typeof entry === "string" ? entry : null
+    );
+  }
+
+  async #openSealedAnswers(
+    sealing: DaemonSealingContext,
+    sealed: unknown,
+    count: number,
+  ): Promise<(string | null)[]> {
+    if (!Array.isArray(sealed) || sealed.length !== count) {
+      throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+    }
+    return await mapSequential(sealed, async (entry) => {
+      if (entry === null) return null;
+      if (!isHpkeEnvelope(entry)) {
+        throw new DaemonApiError(500, "Invalid secrets/decrypt response");
+      }
+      try {
+        return await sealing.open(entry);
+      } catch {
+        throw new DaemonApiError(
+          500,
+          "sealed secrets/decrypt answer could not be opened",
+        );
+      }
+    });
+  }
+
+  /**
+   * Register the X25519 sealing key (`POST /api/daemon/v1/servers/self/sealing-key`).
+   * `sig` is the Ed25519 signature over the registration payload.
+   */
+  async registerSealingKey(
+    params: { kid: string; pub: string; sig: string },
+  ): Promise<void> {
+    await this.#requestJson(
+      "/api/daemon/v1/servers/self/sealing-key",
+      { method: "POST", body: JSON.stringify(params) },
+      { auth: true },
+    );
   }
 
   /**
@@ -380,6 +483,7 @@ export class DaemonApiClient {
       requestId?: string;
     },
   ): Promise<{ stored: boolean }> {
+    const privateKey = await this.#issuedPrivateKeyField(input.privateKeyPem);
     const body = await this.#requestJson<{ ok?: boolean; stored?: unknown }>(
       "/api/daemon/v1/tls/issued",
       {
@@ -387,7 +491,7 @@ export class DaemonApiClient {
         body: JSON.stringify({
           hostname: input.hostname,
           certificatePem: input.certificatePem,
-          privateKeyPem: input.privateKeyPem,
+          ...privateKey,
           ...(input.requestId === undefined
             ? {}
             : { requestId: input.requestId }),
@@ -396,6 +500,43 @@ export class DaemonApiClient {
       { auth: true },
     );
     return { stored: body.stored === true };
+  }
+
+  /**
+   * The private key field of a `/tls/issued` body: an envelope sealed to the
+   * control plane's sealing key when it is known, plain PEM only while this
+   * server has never received a sealed secret. Once it has, a missing sealing
+   * key fails the report rather than sending the key in the clear.
+   */
+  async #issuedPrivateKeyField(
+    privateKeyPem: string,
+  ): Promise<{ privateKeyEnvelope: HpkeEnvelope } | { privateKeyPem: string }> {
+    const seal = await this.#options.panelSealKey?.();
+    if (seal) {
+      return {
+        privateKeyEnvelope: await sealToRecipient(
+          seal.pub,
+          seal.kid,
+          seal.panelFingerprint,
+          new TextEncoder().encode(privateKeyPem),
+        ),
+      };
+    }
+    if (await this.#options.sealing?.isTrustSealed()) {
+      throw new DaemonApiError(503, "panel seal key unavailable");
+    }
+    return { privateKeyPem };
+  }
+
+  /** The signed identity document, as the raw body plus its signature header. */
+  async getPanelIdentityDocument(): Promise<PanelIdentityFetch> {
+    const response = await this.#request(IDENTITY_DOCUMENT_PATH, {
+      method: "GET",
+    });
+    return {
+      body: await response.text(),
+      signature: response.headers.get("x-turbopanel-signature"),
+    };
   }
 
   /**
