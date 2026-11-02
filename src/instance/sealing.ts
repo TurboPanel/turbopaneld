@@ -84,3 +84,51 @@ export async function registerSealingKey(params: {
     return false;
   }
 }
+
+/** Wait at least this long between registration retries on an open socket. */
+export const SEALING_RETRY_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * When to register the sealing key: at every connect until it is on file, and
+ * again (at most every {@link SEALING_RETRY_INTERVAL_MS}) when a decrypt answer
+ * arrives in plaintext while it is still not on file. The second case is a
+ * control plane upgraded while this socket stayed open: the older one answered
+ * the connect-time registration with 404, and without a retry this server
+ * would keep getting plaintext until it reconnected. One attempt at a time.
+ */
+export function createSealingRegistration(params: {
+  register: () => Promise<boolean>;
+  now?: () => number;
+  retryIntervalMs?: number;
+}): {
+  isRegistered(): boolean;
+  atConnect(): Promise<void>;
+  afterPlaintextAnswer(): Promise<void>;
+} {
+  const now = params.now ?? Date.now;
+  const retryIntervalMs = params.retryIntervalMs ?? SEALING_RETRY_INTERVAL_MS;
+  let registered = false;
+  let lastAttemptAt: number | null = null;
+  let running: Promise<void> | null = null;
+  const attempt = (): Promise<void> => {
+    if (running) return running;
+    lastAttemptAt = now();
+    running = params.register().then((ok) => {
+      registered = ok;
+    }).finally(() => {
+      running = null;
+    });
+    return running;
+  };
+  return {
+    isRegistered: () => registered,
+    atConnect: () => registered ? Promise.resolve() : attempt(),
+    afterPlaintextAnswer: () => {
+      if (registered || running) return Promise.resolve();
+      if (lastAttemptAt !== null && now() - lastAttemptAt < retryIntervalMs) {
+        return Promise.resolve();
+      }
+      return attempt();
+    },
+  };
+}

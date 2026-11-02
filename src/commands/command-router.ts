@@ -365,7 +365,7 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handlePrincipalsReconcile",
           handlePrincipalsReconcile,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;

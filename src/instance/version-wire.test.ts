@@ -7,6 +7,7 @@ import {
   compareSemver,
   CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_FEATURE_MIN_VERSIONS,
+  DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
   DAEMON_SEALED_SECRETS_FEATURE,
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
@@ -431,9 +432,24 @@ test("repo-key-report-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("daemon-sealed-secrets-v1 is advertised last and raised no floor", () => {
+test("daemon-sealed-secrets-v1 is advertised and raised no floor", () => {
   assertEquals(DAEMON_SEALED_SECRETS_FEATURE, "daemon-sealed-secrets-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), DAEMON_SEALED_SECRETS_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(DAEMON_SEALED_SECRETS_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("daemon-sealed-principal-reconcile-v1 is advertised last and raised no floor", () => {
+  assertEquals(
+    DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
+    "daemon-sealed-principal-reconcile-v1",
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.at(-1),
+    DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
+  );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

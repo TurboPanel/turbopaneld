@@ -100,6 +100,7 @@ export const DAEMON_WIRE_FEATURES = [
   "fabric-lan-routes-v1",
   "repo-key-report-v1",
   "daemon-sealed-secrets-v1",
+  "daemon-sealed-principal-reconcile-v1",
 ] as const;
 
 /**
@@ -197,6 +198,14 @@ export const REPO_KEY_REPORT_FEATURE: DaemonWireFeature = "repo-key-report-v1";
  */
 export const DAEMON_SEALED_SECRETS_FEATURE: DaemonWireFeature =
   "daemon-sealed-secrets-v1";
+
+/**
+ * `server.principals.reconcile` opens `passwordHashEnvelope` too (through
+ * `/secrets/decrypt`). A control plane sends the envelope there only to a
+ * daemon that lists this; older ones keep the plain hash.
+ */
+export const DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE: DaemonWireFeature =
+  "daemon-sealed-principal-reconcile-v1";
 
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`

@@ -20,7 +20,11 @@ import {
   type DaemonSealingContext,
 } from "./api-client.ts";
 import type { PanelSealKey } from "./panel-identity-cache.ts";
-import { registerSealingKey } from "./sealing.ts";
+import {
+  createSealingRegistration,
+  registerSealingKey,
+  SEALING_RETRY_INTERVAL_MS,
+} from "./sealing.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -345,4 +349,92 @@ test("without a panel sealing key the key goes as PEM, unless a sealed answer wa
     DaemonApiError,
   );
   assertEquals(err.status, 503);
+});
+
+test("an accepted plaintext answer tells the client, a sealed or refused one does not", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    const state = { sealed: false, marks: 0 };
+    let told = 0;
+    const client = new DaemonApiClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+      getToken: () => Promise.resolve("tok"),
+      sleep: () => Promise.resolve(),
+      sealing: sealingContext(state),
+      onPlaintextSecretsAnswer: () => {
+        told += 1;
+      },
+    });
+    const bodies: unknown[] = [
+      { plaintexts: ["plain"] },
+      { sealed: [HPKE_VECTOR] },
+      { plaintexts: ["plain"] },
+    ];
+    api.script(DECRYPT_PATH, () => answer(bodies.shift())());
+    await client.decryptSecrets(["tpdaemon.v1.a"]);
+    assertEquals(told, 1);
+
+    await client.decryptSecrets(["tpdaemon.v1.a"]);
+    assertEquals(told, 1);
+
+    await assertRejects(() => client.decryptSecrets(["tpdaemon.v1.a"]));
+    assertEquals(told, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("the sealing key is registered again after a plaintext answer, at most once per interval", async () => {
+  let clock = 1_000_000;
+  const outcomes = [false, false, true];
+  let attempts = 0;
+  const registration = createSealingRegistration({
+    register: () => Promise.resolve(outcomes[attempts++] ?? true),
+    now: () => clock,
+  });
+  // Connect: the older control plane answered 404.
+  await registration.atConnect();
+  assertEquals(attempts, 1);
+  // Plaintext answer right away: still inside the interval.
+  await registration.afterPlaintextAnswer();
+  assertEquals(attempts, 1);
+  clock += SEALING_RETRY_INTERVAL_MS;
+  await registration.afterPlaintextAnswer();
+  assertEquals(attempts, 2);
+  assertEquals(registration.isRegistered(), false);
+  clock += SEALING_RETRY_INTERVAL_MS;
+  await registration.afterPlaintextAnswer();
+  assertEquals(attempts, 3);
+  assertEquals(registration.isRegistered(), true);
+  // Registered: neither a later answer nor a reconnect posts it again.
+  clock += SEALING_RETRY_INTERVAL_MS;
+  await registration.afterPlaintextAnswer();
+  await registration.atConnect();
+  assertEquals(attempts, 3);
+});
+
+test("a registration in flight is not started twice", async () => {
+  let attempts = 0;
+  let finish: (ok: boolean) => void = () => {};
+  const registration = createSealingRegistration({
+    register: () => {
+      attempts += 1;
+      return new Promise<boolean>((resolve) => {
+        finish = resolve;
+      });
+    },
+    now: () => 0,
+  });
+  const first = registration.atConnect();
+  const second = registration.afterPlaintextAnswer();
+  const third = registration.atConnect();
+  finish(true);
+  await Promise.all([first, second, third]);
+  assertEquals(attempts, 1);
+  assertEquals(registration.isRegistered(), true);
 });
