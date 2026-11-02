@@ -551,6 +551,8 @@ export class InstanceClient {
    * for one already tried.
    */
   #licenseStamp: string | undefined;
+  /** Set once the unreadable-license warning is logged; cleared on a good read. */
+  #loggedUnreadableLicense = false;
   #idlePresence: IdlePresence | undefined;
   /** Always false until the signed-hello change lands; that change drops `readonly` and sets it, after which the unsigned advice is ignored. */
   readonly #pinnedHelloApplied = false;
@@ -1247,7 +1249,7 @@ export class InstanceClient {
       // a fresh enrollment; nothing the panel answers can.
       this.#unparkForcesEnroll =
         isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL")) ||
-        (await this.#readLicenseStamp()) !== this.#licenseStamp;
+        (await this.#licenseChanged());
       return true;
     }
     // Retried on the timer: a purchase changes the answer without any
@@ -1257,7 +1259,28 @@ export class InstanceClient {
       this.#parkedKind === "awaiting-seat"
     ) return true;
     if (isTruthyFlag(Deno.env.get("TURBOPANEL_FORCE_ENROLL"))) return true;
+    return await this.#licenseChanged();
+  }
+
+  /**
+   * True when the license files hold a different, complete pair than the one
+   * last tried. An empty or half-written read (the installer replacing the
+   * files) while a license was already tried is "no change": it is logged once
+   * and the next re-check reads the finished files.
+   */
+  async #licenseChanged(): Promise<boolean> {
     const stamp = await this.#readLicenseStamp();
+    if (stamp === undefined && this.#licenseStamp !== undefined) {
+      if (!this.#loggedUnreadableLicense) {
+        this.#loggedUnreadableLicense = true;
+        logWarn(
+          "instance",
+          "license files are empty or incomplete; keeping the previous license until they are readable",
+        );
+      }
+      return false;
+    }
+    this.#loggedUnreadableLicense = false;
     return stamp !== this.#licenseStamp;
   }
 
