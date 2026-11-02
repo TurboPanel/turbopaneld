@@ -280,6 +280,23 @@ export type InstanceHostnameWireEntry = {
   keyPem?: string;
   keyEnvelope?: string;
   uploadedCertId?: string;
+  /**
+   * Port visitors use for this hostname (1-65535). Sent only to a daemon that
+   * advertises `instance-hostname-public-port-v1`.
+   */
+  publicPort?: number;
+};
+
+/**
+ * Edge address ranges for the control plane's Caddy on `public-urls-update`.
+ * `cidrs` is the union of `cloudflare` and `bunny`; `hash` identifies the set.
+ * Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type InstanceEdgeTrustWire = {
+  cidrs: string[];
+  hash: string;
+  cloudflare: string[];
+  bunny: string[];
 };
 
 /**
@@ -934,6 +951,8 @@ export type DaemonMessage =
     hostnames?: InstanceHostnameWireEntry[];
     /** Present when any hostname uses `lets-encrypt`. */
     instanceAcme?: InstanceAcmeWireSettings;
+    /** Present only when this daemon advertises `instance-edge-trust-v1`. */
+    edgeTrust?: InstanceEdgeTrustWire;
     at: string;
   }
   | {

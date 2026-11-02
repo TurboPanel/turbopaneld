@@ -180,6 +180,7 @@
       { "name": "host", "required": true, "type": "string" },
       { "name": "keyEnvelope", "required": false, "type": "string" },
       { "name": "keyPem", "required": false, "type": "string" },
+      { "name": "publicPort", "required": false, "type": "number" },
       {
         "name": "source",
         "required": true,

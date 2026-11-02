@@ -478,6 +478,7 @@ Vars (both roles; extra-vars win):
 | --- | --- |
 | `turbopanel_hostnames` | Per-hostname `{host, source, cert_id}` list |
 | `turbopanel_hostnames_json` | Compact JSON of that list. `tp-orchestrate` accepts only `key=value` extra-vars, which stay strings, so public-urls apply passes this and `resolve-hostnames.yml` loads it with `from_json` into `turbopanel_hostnames` before `selectattr` and the Caddy template |
+| `turbopanel_edge_trust_json` | Compact JSON object `{hash, cloudflare, bunny}` of edge CIDRs from `public-urls-update` `edgeTrust`. `resolve-edge-trust.yml` turns it into `turbopanel_edge_cidrs` (union), `turbopanel_edge_cf_cidrs` and `turbopanel_edge_bunny_cidrs`, which `Caddyfile.j2` puts in `trusted_proxies` and in the `@not_edge_peer` / `@not_cloudflare_peer` strip matchers. The apply persists it as `caddy/instance-edge-trust.json`; a converge that passes none reads that file, so ranges survive an update. Empty lists clear it |
 | `turbopanel_tls_mode` | Deprecated alias. Display-only once hostnames are set |
 | `turbopanel_tls_cert_path` / `turbopanel_tls_key_path` | Legacy uploaded pair when `cert_id` is empty; copied to `uploaded.{crt,key}` |
 | `turbopanel_public_hostname` / `turbopanel_acme_email` | Deprecated single ACME name, and the account email (no longer rendered into the Caddyfile) |
@@ -497,6 +498,21 @@ paths are baked in at render time — no Caddy env placeholders, no static site
 config in the instance release package. The unit does not grant
 `CAP_NET_BIND_SERVICE`. Updating the proxy config is a template edit plus a
 converge, never a hand edit of the rendered file.
+
+**Edge port redirect.** An edge in front of the control plane (a tunnel, a
+proxy) can answer one hostname on 443 and 8443 and forward both to `:8443`;
+only the Host header still says which (443 sends the bare name). The shared
+`(turbopanel_app)` snippet includes `templates/Caddyfile-edge-port-redirect.j2`:
+a listed DNS name on the wrong port gets `308` to its public port with
+`Cache-Control: no-store`. The public port is only the entry's `public_port`,
+which the control plane sends as `publicPort` on `public-urls-update` to a
+daemon advertising `instance-hostname-public-port-v1` and the sidecar keeps; a
+name without one gets no redirect (its URL port is the origin's, not the
+visitors'), so a kept Caddyfile is never patched. Exempt: `/api/daemon/*`,
+`/ws/daemon/*`, `/api/health`, `/webhook/*` (providers do not follow
+redirects) and any WebSocket upgrade. LAN names and IPs carry their port in
+Host, so nothing loops. Caddy's `host` matcher and site addresses ignore the
+Host port; match the port with `header Host`, which takes one value per line.
 
 **Managed install layout.** The instance package lies flat in the install
 root beside the daemon — `bin/turbopanel` and `lib/libduckdb.so` (the unit's
