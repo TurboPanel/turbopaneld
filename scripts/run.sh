@@ -3160,6 +3160,78 @@ fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
 
+# One `key=value` line from a pin file ("" when the file or the key is absent).
+tp_pin_file_field() {
+  _pf_path="$1"
+  _pf_key="$2"
+  [ -f "$_pf_path" ] || return 0
+  sed -n "s/^${_pf_key}=//p" "$_pf_path" | head -n 1
+}
+
+# Decide what this run does with the panel key pin, before anything is
+# written. The pin file (lib/panel-identity) and the panel_key line in
+# lib/update-origin must agree. Outcomes in PIN_ACTION:
+#   none    a legacy install: nothing to pin (no key given, none stored)
+#   write   first pin (fresh install with a TOKEN, or --unsafe-no-panel-key)
+#   refresh the same key again: only urls= and updated= change
+#   keep    a re-run without a TOKEN (managed update): file untouched, and the
+#           stored key stays in update-origin
+# A different key is refused: a key change arrives only as a signed rotation
+# from the panel. A TOKEN-less run never loosens a stored pin.
+tp_resolve_panel_pin() {
+  _pp_file="$INSTALL_ROOT/lib/panel-identity"
+  _pp_origin="$INSTALL_ROOT/lib/update-origin"
+  PIN_ACTION=none
+  PIN_HOSTS=""
+  _pp_have_file=false
+  [ -f "$_pp_file" ] && _pp_have_file=true
+  _pp_cur="$(tp_pin_file_field "$_pp_file" current)"
+  _pp_okey="$(tp_pin_file_field "$_pp_origin" panel_key)"
+  _pp_ohosts="$(tp_pin_file_field "$_pp_origin" hosts)"
+  if [ "$_pp_cur" != "$_pp_okey" ] && { [ "$_pp_have_file" = true ] || [ -n "$_pp_okey" ]; }; then
+    tp_print_error "The panel key pin and the update origin disagree; refusing to continue."
+    return 1
+  fi
+  if [ "$_pp_have_file" = true ] && [ -z "$_pp_cur" ] && [ -n "$PANEL_FINGERPRINT" ]; then
+    # Installed with --unsafe-no-panel-key, nothing pinned: a verified token
+    # with a key pins it now.
+    PIN_ACTION=write
+    PIN_HOSTS="$PANEL_URLS"
+    return 0
+  fi
+  if [ "$_pp_have_file" = true ]; then
+    if [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -n "$_pp_cur" ]; then
+      tp_print_error "This server is pinned to a panel key; --unsafe-no-panel-key cannot remove it."
+      return 1
+    fi
+    if [ -n "$PANEL_FINGERPRINT" ] && [ "$PANEL_FINGERPRINT" != "$_pp_cur" ]; then
+      tp_print_error "This server is pinned to a different panel key; a key change arrives only as a signed rotation from the panel."
+      return 1
+    fi
+    if [ -n "$TOKEN_PAYLOAD" ]; then
+      _pp_keyset="$(tp_pin_file_field "$_pp_file" keyset)"
+      if [ -n "$PANEL_KEYSET" ] && [ "$PANEL_KEYSET" -lt "${_pp_keyset:-0}" ]; then
+        tp_print_error "The panel offered an older key set than this server has pinned; refusing."
+        return 1
+      fi
+      PIN_ACTION=refresh
+      PIN_HOSTS="$PANEL_URLS"
+    else
+      PIN_ACTION=keep
+      PANEL_FINGERPRINT="$_pp_cur"
+      PIN_HOSTS="$_pp_ohosts"
+    fi
+    return 0
+  fi
+  if [ -n "$PANEL_FINGERPRINT" ] || [ "$UNSAFE_NO_PANEL_KEY" = true ]; then
+    PIN_ACTION=write
+    PIN_HOSTS="$PANEL_URLS"
+  else
+    PIN_HOSTS="$_pp_ohosts"
+  fi
+  return 0
+}
+
 # The install command's panel key, checked against the panel's own identity
 # document before this host sends the panel anything (the first contact is the
 # Platform CA fetch below; the enrolment comes later still). A failure stops
@@ -3263,78 +3335,6 @@ if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
     exit 1
   fi
 fi
-
-# One `key=value` line from a pin file ("" when the file or the key is absent).
-tp_pin_file_field() {
-  _pf_path="$1"
-  _pf_key="$2"
-  [ -f "$_pf_path" ] || return 0
-  sed -n "s/^${_pf_key}=//p" "$_pf_path" | head -n 1
-}
-
-# Decide what this run does with the panel key pin, before anything is
-# written. The pin file (lib/panel-identity) and the panel_key line in
-# lib/update-origin must agree. Outcomes in PIN_ACTION:
-#   none    a legacy install: nothing to pin (no key given, none stored)
-#   write   first pin (fresh install with a TOKEN, or --unsafe-no-panel-key)
-#   refresh the same key again: only urls= and updated= change
-#   keep    a re-run without a TOKEN (managed update): file untouched, and the
-#           stored key stays in update-origin
-# A different key is refused: a key change arrives only as a signed rotation
-# from the panel. A TOKEN-less run never loosens a stored pin.
-tp_resolve_panel_pin() {
-  _pp_file="$INSTALL_ROOT/lib/panel-identity"
-  _pp_origin="$INSTALL_ROOT/lib/update-origin"
-  PIN_ACTION=none
-  PIN_HOSTS=""
-  _pp_have_file=false
-  [ -f "$_pp_file" ] && _pp_have_file=true
-  _pp_cur="$(tp_pin_file_field "$_pp_file" current)"
-  _pp_okey="$(tp_pin_file_field "$_pp_origin" panel_key)"
-  _pp_ohosts="$(tp_pin_file_field "$_pp_origin" hosts)"
-  if [ "$_pp_cur" != "$_pp_okey" ] && { [ "$_pp_have_file" = true ] || [ -n "$_pp_okey" ]; }; then
-    tp_print_error "The panel key pin and the update origin disagree; refusing to continue."
-    return 1
-  fi
-  if [ "$_pp_have_file" = true ] && [ -z "$_pp_cur" ] && [ -n "$PANEL_FINGERPRINT" ]; then
-    # Installed with --unsafe-no-panel-key, nothing pinned: a verified token
-    # with a key pins it now.
-    PIN_ACTION=write
-    PIN_HOSTS="$PANEL_URLS"
-    return 0
-  fi
-  if [ "$_pp_have_file" = true ]; then
-    if [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -n "$_pp_cur" ]; then
-      tp_print_error "This server is pinned to a panel key; --unsafe-no-panel-key cannot remove it."
-      return 1
-    fi
-    if [ -n "$PANEL_FINGERPRINT" ] && [ "$PANEL_FINGERPRINT" != "$_pp_cur" ]; then
-      tp_print_error "This server is pinned to a different panel key; a key change arrives only as a signed rotation from the panel."
-      return 1
-    fi
-    if [ -n "$TOKEN_PAYLOAD" ]; then
-      _pp_keyset="$(tp_pin_file_field "$_pp_file" keyset)"
-      if [ -n "$PANEL_KEYSET" ] && [ "$PANEL_KEYSET" -lt "${_pp_keyset:-0}" ]; then
-        tp_print_error "The panel offered an older key set than this server has pinned; refusing."
-        return 1
-      fi
-      PIN_ACTION=refresh
-      PIN_HOSTS="$PANEL_URLS"
-    else
-      PIN_ACTION=keep
-      PANEL_FINGERPRINT="$_pp_cur"
-      PIN_HOSTS="$_pp_ohosts"
-    fi
-    return 0
-  fi
-  if [ -n "$PANEL_FINGERPRINT" ] || [ "$UNSAFE_NO_PANEL_KEY" = true ]; then
-    PIN_ACTION=write
-    PIN_HOSTS="$PANEL_URLS"
-  else
-    PIN_HOSTS="$_pp_ohosts"
-  fi
-  return 0
-}
 
 # Write lib/panel-identity (see tp_resolve_panel_pin for PIN_ACTION). Contents,
 # one key=value per line: current, next, keyset, urls, pinned_by, updated.
