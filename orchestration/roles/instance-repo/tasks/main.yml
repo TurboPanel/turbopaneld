@@ -30,7 +30,7 @@
     version: "{{ instance_branch }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_home if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
   register: _instance_clone
 
 - name: Report instance checkout state
@@ -63,6 +63,6 @@
     chdir: "{{ turbopanel_instance_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_home if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
     PATH: "{{ turbopanel_runtime_path }}"
   register: _instance_pnpm_install

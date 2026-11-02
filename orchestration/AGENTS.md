@@ -711,6 +711,21 @@ mailer units ExecStart through the vendored Deno path — it is not only the
 daemon's JS-fallback concern. `src/orchestration/assets.test.ts` pins that
 ordering too.
 
+## Dev Source-Repo Root and Home
+
+In co-located dev (`turbopanel_dev_user` set) every repo path is
+`<turbopanel_dev_root>/<repo>`. The root is the folder that holds the repos: the
+daemon forwards `TURBOPANEL_DEV_ROOT` as an extra-var (default the dev user's
+home, the Vagrant layout; a host-native checkout may use e.g.
+`~/work/turbopanel`). Extra-vars outrank `set_fact`, so a playbook's getent
+pre_task only fills the root on a direct run. Tasks that run git, ssh or pnpm
+set `HOME` to `turbopanel_dev_home` (the dev user's real home, from
+`TURBOPANEL_DEV_HOME` or getent), never to the root, so keys, `known_hosts`,
+git config and the pnpm store stay in the home. Each role that sets `HOME`
+defaults `turbopanel_dev_home` to `turbopanel_dev_root`, which keeps older dev
+consoles working. Validation and the reasons for it live in
+the dev repo's dev-environment runbook (Repos Outside the Home Folder).
+
 ## Vendored Runtimes and Ansible Environment
 
 **Vendored Node/Deno layout:** Ansible roles install pinned runtimes under

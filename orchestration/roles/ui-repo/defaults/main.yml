@@ -3,9 +3,16 @@ turbopanel_install_root: /opt/turbopanel
 turbopanel_dev_user: ""
 turbopanel_dev_uid: ""
 turbopanel_dev_gid: ""
-# Co-located dev source checkout root (dev user's home); overridden by an
+# Co-located dev source checkout root (the folder that holds the repos, from
+# TURBOPANEL_DEV_ROOT; defaults to the dev user's home); overridden by an
 # extra-var (turbopanel_dev_root) from the dev converge.
 turbopanel_dev_root: "{{ ansible_env.HOME }}"
+# The dev user's real home, used as HOME for git, ssh and pnpm (keys, known_hosts,
+# gitconfig and the pnpm store live there). It differs from turbopanel_dev_root
+# when the repos sit in a sub-folder such as ~/work/turbopanel. Set by the
+# daemon (extra-var from TURBOPANEL_DEV_HOME) or a playbook getent pre_task;
+# the fallback keeps the old behaviour when neither is present.
+turbopanel_dev_home: "{{ turbopanel_dev_root }}"
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
 turbopanel_user: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 turbopanel_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"

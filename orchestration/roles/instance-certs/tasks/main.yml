@@ -56,7 +56,7 @@
   # Road to 0.1.x); the hardening tasks then set the leaf's owner.
   become_user: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
   environment:
-    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
+    HOME: "{{ turbopanel_dev_home if (turbopanel_dev_user | default('') | length > 0) else turbopanel_instance_dir }}"
     PATH: "{{ turbopanel_runtime_path }}"
     TURBOPANEL_STATE_DIR: "{{ turbopanel_state_dir }}"
     TURBOPANEL_TLS_CERTS_DIR: "{{ turbopanel_instance_certs_dir }}"
