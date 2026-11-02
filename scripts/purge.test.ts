@@ -2035,6 +2035,23 @@ test("the inventory lists TurboPanel's timer stamps and nothing else from that f
   assertEquals(result.stdout.includes(".service"), false);
 });
 
+test("purge lists and removes the security update settings file and keeps the package", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const file = "/etc/apt/apt.conf.d/52turbopanel-security-updates";
+  assertStringIncludes(
+    extractFunction(source, "tp_inventory_host_files") ?? "",
+    file,
+  );
+  assertStringIncludes(
+    extractFunction(source, "tp_remove_host_config") ?? "",
+    file,
+  );
+  // The host may have had unattended-upgrades before TurboPanel: never purged.
+  const code = source.split("\n").filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  assertEquals(code.includes("unattended-upgrades"), false);
+});
+
 test("purge never touches a group named root or tp*", async () => {
   for (const name of ["root", "tp", "tpnginx"]) {
     const result = await purgeGroups(

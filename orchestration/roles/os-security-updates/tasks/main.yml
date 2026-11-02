@@ -1,0 +1,39 @@
+---
+# Automatic Debian security updates: unattended-upgrades limited to the Debian
+# security repository, never restarting the server. Debian only: Ubuntu keeps
+# its own defaults (which already take security updates), and our origin list
+# would replace them with one that matches nothing there.
+#
+# Fast path: the package already present and the file unchanged means apt and
+# copy report ok and nothing else runs.
+
+- name: Install unattended-upgrades (no recommends, so no apt-listchanges)
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+    install_recommends: false
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_distribution == 'Debian'
+
+# Sorts after the package's own 50unattended-upgrades, so the #clear lines
+# drop its origin list. The package's conffiles (50unattended-upgrades,
+# 20auto-upgrades) are left as shipped.
+- name: Limit automatic updates to the Debian security repository
+  ansible.builtin.copy:
+    src: 52turbopanel-security-updates
+    dest: /etc/apt/apt.conf.d/52turbopanel-security-updates
+    owner: root
+    group: root
+    mode: "0644"
+  when: ansible_distribution == 'Debian'
+
+- name: Enable the apt timers that run the automatic updates
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+  when: ansible_distribution == 'Debian'
