@@ -60,6 +60,8 @@ export type ConnectorIo = {
   version: string;
   /** Ask the connector's own `/ready` endpoint. */
   probe: (port: number) => Promise<ReadyProbe>;
+  /** The hostnames the connector routes, from its own `/config`; null when it cannot say. */
+  readHostnames?: (port: number) => Promise<string[] | null>;
   /** Whether nothing listens on this loopback port (default: try to bind it). */
   portFree?: (port: number) => Promise<boolean>;
   /** Whether a unit file exists (default: the real file system). */
@@ -119,6 +121,58 @@ export async function probeReadyDefault(port: number): Promise<ReadyProbe> {
   }
 }
 
+/** At most this many routed names are reported per connector. */
+export const MAX_REPORTED_HOSTNAMES = 100;
+const HOSTNAME_RE =
+  /^(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+/**
+ * The hostnames of a `/config` answer. cloudflared serves
+ * `{"version":N,"config":{"ingress":[{"hostname":"...","service":"..."},...]}}`
+ * on its metrics address (`metrics/metrics.go`, `GetVersionedConfigJSON` in
+ * `orchestration/orchestrator.go`); for a tunnel run from a token that is the
+ * ingress the dashboard pushed. The catch-all rule has no hostname and is
+ * skipped; anything that is not a plain DNS name is dropped. Null when the
+ * body is not that shape.
+ */
+export function hostnamesFromConfig(body: unknown): string[] | null {
+  if (typeof body !== "object" || body === null) return null;
+  const config = (body as { config?: unknown }).config;
+  if (typeof config !== "object" || config === null) return null;
+  const ingress = (config as { ingress?: unknown }).ingress;
+  if (!Array.isArray(ingress)) return null;
+  const names = new Set<string>();
+  for (const rule of ingress) {
+    const raw = typeof rule === "object" && rule !== null
+      ? (rule as { hostname?: unknown }).hostname
+      : undefined;
+    if (typeof raw !== "string") continue;
+    const name = raw.trim().toLowerCase().replace(/\.$/, "");
+    if (name.length > 0 && name.length <= 253 && HOSTNAME_RE.test(name)) {
+      names.add(name);
+    }
+  }
+  return [...names].sort().slice(0, MAX_REPORTED_HOSTNAMES);
+}
+
+/** Read `/config` on the connector's loopback metrics address. */
+export async function readHostnamesDefault(
+  port: number,
+): Promise<string[] | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/config`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (res.status !== 200) {
+      await res.body?.cancel();
+      return null;
+    }
+    return hostnamesFromConfig(JSON.parse(await res.text()));
+  } catch {
+    return null;
+  }
+}
+
 export function defaultConnectorIo(): ConnectorIo {
   return {
     run: runDefault,
@@ -127,6 +181,7 @@ export function defaultConnectorIo(): ConnectorIo {
     ensureBinary: () => ensureCloudflared(),
     version: CLOUDFLARED_VERSION,
     probe: probeReadyDefault,
+    readHostnames: readHostnamesDefault,
   };
 }
 
@@ -408,6 +463,14 @@ async function statusOfRecord(
   io: ConnectorIo,
   record: ConnectorRecord,
 ): Promise<ConnectorStatus> {
+  return (await probeRecord(io, record)).status;
+}
+
+/** The unit's status and, when it is active, what its own `/ready` said. */
+async function probeRecord(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+): Promise<{ status: ConnectorStatus; probe: ReadyProbe | null }> {
   const state = await systemctl(io, [
     "is-active",
     tunnelUnitName(record.id, record.slot),
@@ -417,7 +480,7 @@ async function statusOfRecord(
   const probe = unitState.trim() === "active"
     ? await io.probe(record.port)
     : null;
-  return mapConnectorStatus(unitState, probe);
+  return { status: mapConnectorStatus(unitState, probe), probe };
 }
 
 /** What an update attempt for one tunnel did. */
@@ -674,7 +737,25 @@ export type ConnectorReport = {
   slot: ConnectorSlot;
   /** How the last update attempt ended, so "update pending" can say why. */
   lastUpdate?: ConnectorLastUpdate;
+  /** Live edge connections from the connector's `/ready`; absent when it did not answer. */
+  edgeConnections?: number;
+  /** Names the connector routes, from its `/config`; absent when it did not answer. */
+  hostnames?: string[];
 };
+
+/** The connector's own facts: edge connections and routed names, when it answers. */
+async function connectorFacts(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+  probe: ReadyProbe | null,
+): Promise<Pick<ConnectorReport, "edgeConnections" | "hostnames">> {
+  if (!probe || probe.kind === "unreachable") return {};
+  const edgeConnections = Math.max(0, Math.trunc(probe.connections));
+  const hostnames = io.readHostnames
+    ? await io.readHostnames(record.port)
+    : null;
+  return { edgeConnections, ...(hostnames ? { hostnames } : {}) };
+}
 
 /**
  * Every connector on this host with its status and version. Read-only and
@@ -687,13 +768,17 @@ export async function reportConnectors(
   const records = await listRecords(io);
   const connectors = await mapSequential(
     records,
-    async (record): Promise<ConnectorReport> => ({
-      tunnelId: record.id,
-      status: await statusOfRecord(io, record),
-      version: record.version,
-      slot: record.slot,
-      ...(record.lastUpdate ? { lastUpdate: record.lastUpdate } : {}),
-    }),
+    async (record): Promise<ConnectorReport> => {
+      const { status, probe } = await probeRecord(io, record);
+      return {
+        tunnelId: record.id,
+        status,
+        version: record.version,
+        slot: record.slot,
+        ...(record.lastUpdate ? { lastUpdate: record.lastUpdate } : {}),
+        ...(await connectorFacts(io, record, probe)),
+      };
+    },
   );
   return { pinnedVersion: io.version, connectors };
 }

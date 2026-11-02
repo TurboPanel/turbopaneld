@@ -7304,6 +7304,10 @@ export type TunnelStatusConnector = {
     /** Why a rolled-back attempt stopped (at most 300 characters). */
     reason?: string;
   };
+  /** Live edge connections from the connector's `/ready` (feature `tunnel-status-facts-v1`). */
+  edgeConnections?: number;
+  /** Names the connector routes, from its `/config`, at most 100 (feature `tunnel-status-facts-v1`). */
+  hostnames?: string[];
 };
 
 /** Must stay in sync with the instance `server.tunnel.status` shape. */
@@ -7373,6 +7377,39 @@ function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
       at: last.at,
       ...(last.reason === undefined ? {} : { reason: last.reason }),
     };
+  }
+  return withTunnelStatusFacts(connector, value);
+}
+
+const MAX_TUNNEL_STATUS_EDGE_CONNECTIONS = 1000;
+const MAX_TUNNEL_STATUS_HOSTNAMES = 100;
+
+/** The optional connector facts (`edgeConnections`, `hostnames`), checked. */
+function withTunnelStatusFacts(
+  connector: TunnelStatusConnector,
+  value: Record<string, unknown>,
+): TunnelStatusConnector {
+  const edge = value.edgeConnections;
+  if (edge !== undefined) {
+    if (
+      typeof edge !== "number" || !Number.isInteger(edge) || edge < 0 ||
+      edge > MAX_TUNNEL_STATUS_EDGE_CONNECTIONS
+    ) {
+      throw new TypeError("Invalid server.tunnel.status edgeConnections");
+    }
+    connector.edgeConnections = edge;
+  }
+  const names = value.hostnames;
+  if (names !== undefined) {
+    if (
+      !Array.isArray(names) || names.length > MAX_TUNNEL_STATUS_HOSTNAMES ||
+      !names.every((name) =>
+        typeof name === "string" && name.length > 0 && name.length <= 253
+      )
+    ) {
+      throw new TypeError("Invalid server.tunnel.status hostnames");
+    }
+    connector.hostnames = [...names] as string[];
   }
   return connector;
 }
