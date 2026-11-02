@@ -142,16 +142,16 @@ export async function runCaddyfileTasks(
   tasks: string,
 ): Promise<string> {
   const vendor = join(root, "vendor");
-  const link = join(vendor, "caddy", "current", "caddy");
-  await Deno.mkdir(dirname(link), { recursive: true });
-  try {
-    await Deno.lstat(link);
-  } catch {
-    const target = caddyBin.includes("/")
-      ? caddyBin
-      : findOnPath(caddyBin) ?? caddyBin;
-    await Deno.symlink(target, link);
-  }
+  // A wrapper script stands in for the vendored binary (no symlink: the
+  // scoped-writes guard refuses Deno.symlink anywhere outside tests).
+  const wrapper = join(vendor, "caddy", "current", "caddy");
+  await Deno.mkdir(dirname(wrapper), { recursive: true });
+  const target = caddyBin.includes("/")
+    ? caddyBin
+    : findOnPath(caddyBin) ?? caddyBin;
+  await Deno.writeTextFile(wrapper, `#!/bin/sh\nexec '${target}' "$@"\n`, {
+    mode: 0o755,
+  });
   const play = join(root, "play.yml");
   await Deno.writeTextFile(
     play,
