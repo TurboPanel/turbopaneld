@@ -7,6 +7,7 @@ import {
   compareSemver,
   CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_FEATURE_MIN_VERSIONS,
+  DAEMON_SEALED_SECRETS_FEATURE,
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
@@ -424,9 +425,15 @@ test("fabric-lan-routes-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("repo-key-report-v1 is advertised last and raised no floor", () => {
+test("repo-key-report-v1 is advertised and raised no floor", () => {
   assertEquals(REPO_KEY_REPORT_FEATURE, "repo-key-report-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), REPO_KEY_REPORT_FEATURE);
+  assertEquals(DAEMON_WIRE_FEATURES.includes(REPO_KEY_REPORT_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("daemon-sealed-secrets-v1 is advertised last and raised no floor", () => {
+  assertEquals(DAEMON_SEALED_SECRETS_FEATURE, "daemon-sealed-secrets-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), DAEMON_SEALED_SECRETS_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

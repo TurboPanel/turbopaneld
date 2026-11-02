@@ -77,6 +77,11 @@ export async function handlePrincipalsReconcile(
   deps: PrincipalsReconcileDeps = {},
 ): Promise<PrincipalsReconcileResult> {
   const layout = (deps.resolveLayout ?? resolveLayout)();
+  if (payload.principals.some((p) => p.passwordHashEnvelope !== undefined)) {
+    // The control plane never seals a hash here; an entry with only an
+    // envelope would read as "no password" and lock the account.
+    throw new Error("principals reconcile cannot carry a sealed password hash");
+  }
 
   // Accounts, shells, and group membership first. `applySshAccess` writes files
   // keyed by username, so the account has to exist before its key file does —

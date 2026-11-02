@@ -77,6 +77,10 @@ function scriptApi(
     () => stamp(sessionResponse({ token: authToken })),
   );
   api.script(
+    "/api/daemon/v1/servers/self/sealing-key",
+    () => stamp(new Response(JSON.stringify({ ok: true }), { status: 200 })),
+  );
+  api.script(
     "/api/daemon/v1/metrics",
     () => stamp(new Response("{}", { status: 202 })),
   );
