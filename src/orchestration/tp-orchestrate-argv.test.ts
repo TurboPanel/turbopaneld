@@ -365,6 +365,21 @@ test("tp-orchestrate accepts the PHP series to remove as plain major.minor strin
   }
 });
 
+test("tp-orchestrate accepts a hostname row that carries its public port", async () => {
+  const vendorDir = await makeFakeVendorDir();
+  try {
+    const verdicts = await checkExtraVars(
+      [
+        'turbopanel_hostnames_json=[{"host":"https://panel.example.com:8443","source":"platform-ca","cert_id":"","public_port":443}]',
+      ],
+      { vendorDir },
+    );
+    assertEquals(verdicts.map((v) => v.accepted), [true]);
+  } finally {
+    await Deno.remove(vendorDir, { recursive: true });
+  }
+});
+
 test("tp-orchestrate accepts the web engines to remove by name", async () => {
   const vendorDir = await makeFakeVendorDir();
   try {
