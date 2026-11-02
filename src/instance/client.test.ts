@@ -2670,8 +2670,9 @@ async function runUnknownKeyParkNewLicenseCase(
             if (keyedChallenges === 2) {
               // Interleaved write: the installer has truncated both files and
               // not yet filled them when the next re-check reads them.
-              await Deno.writeTextFile(`${tempDir}/license.id`, "");
-              await Deno.writeTextFile(`${tempDir}/license.token`, "");
+              for (const name of ["license.id", "license.token"]) {
+                await Deno.writeTextFile(`${tempDir}/${name}`, "");
+              }
             } else if (keyedChallenges === 3) {
               // This retry ran after a re-check that read the empty files.
               enrollsAtEmptyRead = enrollCount;
