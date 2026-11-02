@@ -391,6 +391,8 @@ the next cycle. The stamp is the license the last attempt tried: it is read
 before an attempt that does not come out of a park, or taken from the
 credentials an enrollment used, and parking never re-reads it, so a license
 written while a retry is in flight is not mistaken for one already tried.
+An empty or incomplete read of the pair (the installer mid-replace) is "no
+change": it is logged once and the next re-check reads the finished files.
 Daemon restart clears the in-memory parked backoff and retries
 the normal identity path; forced re-enroll after restart still requires
 `TURBOPANEL_FORCE_ENROLL` or missing/cleared key files. Greppable park

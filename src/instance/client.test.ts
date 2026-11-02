@@ -2590,7 +2590,7 @@ it({
  * in the middle of a parked retry (the attempt that answers 404 again).
  */
 async function runUnknownKeyParkNewLicenseCase(
-  licenseChange: "while-parked" | "during-retry",
+  licenseChange: "while-parked" | "during-retry" | "empty-then-full",
 ): Promise<void> {
   const tempDir = await Deno.makeTempDir();
   const originalFetch = globalThis.fetch;
@@ -2604,6 +2604,7 @@ async function runUnknownKeyParkNewLicenseCase(
   let enrollCount = 0;
   let enrollsAtPark = -1;
   let keyedChallenges = 0;
+  let enrollsAtEmptyRead = -1;
   const replaceLicense = async () => {
     // The parked client re-reads these files on every re-check, so replace
     // each one atomically: a plain write truncates first and a re-check
@@ -2664,6 +2665,19 @@ async function runUnknownKeyParkNewLicenseCase(
             // The first parked retry with the same key: the installer writes
             // the new license while that attempt is in flight.
             await replaceLicense();
+          }
+          if (licenseChange === "empty-then-full") {
+            if (keyedChallenges === 2) {
+              // Interleaved write: the installer has truncated both files and
+              // not yet filled them when the next re-check reads them.
+              for (const half of ["id", "token"]) {
+                await Deno.writeTextFile(`${tempDir}/license.${half}`, "");
+              }
+            } else if (keyedChallenges === 3) {
+              // This retry ran after a re-check that read the empty files.
+              enrollsAtEmptyRead = enrollCount;
+              await replaceLicense();
+            }
           }
           if (enrolled) {
             return new Response(
@@ -2750,6 +2764,10 @@ async function runUnknownKeyParkNewLicenseCase(
     // Parked on the unknown key, the client never re-enrolls on its own.
     if (licenseChange === "while-parked") assertEquals(enrollsAtPark, 0);
     assertEquals(enrollCount, 1);
+    // An empty read is not a new license: no enroll until the full one lands.
+    if (licenseChange === "empty-then-full") {
+      assertEquals(enrollsAtEmptyRead, 0);
+    }
     assertEquals(socket.readyState, MockWebSocket.OPEN);
     socket.close(1000, "done");
   } finally {
@@ -2798,6 +2816,13 @@ it({
     "a new license written while a parked same-key retry is in flight still enrolls afresh",
   ...unknownKeyParkTestOptions,
   fn: () => runUnknownKeyParkNewLicenseCase("during-retry"),
+});
+
+it({
+  name:
+    "an empty license read while parked is no change, and the full license then enrolls once",
+  ...unknownKeyParkTestOptions,
+  fn: () => runUnknownKeyParkNewLicenseCase("empty-then-full"),
 });
 
 it({
