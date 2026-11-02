@@ -111,6 +111,44 @@ export function assertInstanceCertsApplyInputs(
   }
 }
 
+/** Shortest prefix an edge range may have; anything wider is refused. */
+const MIN_EDGE_PREFIX = { 4: 8, 6: 16 } as const;
+
+/** Loopback, private, link-local, CGNAT, ULA, multicast and reserved space. */
+const NEVER_EDGE_RANGES = [
+  "0.0.0.0/8",
+  "10.0.0.0/8",
+  "100.64.0.0/10",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "224.0.0.0/3",
+  "::/8",
+  "fc00::/7",
+  "fe80::/10",
+  "ff00::/8",
+].flatMap((cidr) => {
+  const parsed = parseCidrLiteral(cidr);
+  return parsed ? [parsed] : [];
+});
+
+/**
+ * A range Caddy may trust as an edge, checked again on the daemon so the
+ * root-side boundary stands alone: a CIDR literal, not wider than the prefix
+ * floor, and clear of every local, private or reserved block.
+ */
+export function isSafeEdgeRange(value: string): boolean {
+  const parsed = parseCidrLiteral(value);
+  if (parsed === null || parsed.prefix < MIN_EDGE_PREFIX[parsed.version]) {
+    return false;
+  }
+  return !NEVER_EDGE_RANGES.some((blocked) =>
+    blocked.version === parsed.version && blocked.base <= parsed.last &&
+    parsed.base <= blocked.last
+  );
+}
+
 /**
  * The ranges reach a root-run template, so every entry must be a CIDR literal
  * and the per-provider lists must sit inside the union. Returns the compact
@@ -119,7 +157,7 @@ export function assertInstanceCertsApplyInputs(
 export function edgeTrustExtraVar(edgeTrust: InstanceEdgeTrustWire): string {
   const lists = [edgeTrust.cidrs, edgeTrust.cloudflare, edgeTrust.bunny];
   for (const entry of lists.flat()) {
-    if (parseCidrLiteral(entry) === null) {
+    if (!isSafeEdgeRange(entry)) {
       throw new Error(`refusing edge range ${JSON.stringify(entry)}`);
     }
   }

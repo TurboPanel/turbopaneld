@@ -843,3 +843,29 @@ test("an edge range that is not a CIDR literal is refused before the playbook ru
     "not in the union",
   );
 });
+
+test("edge ranges that are catch-all, loopback or private are refused on the daemon", async () => {
+  const bad = [
+    "0.0.0.0/0",
+    "::/0",
+    "10.0.0.0/8",
+    "127.0.0.0/8",
+    "192.168.1.0/24",
+    "fc00::/7",
+    "::1/128",
+    "1.0.0.0/7",
+  ];
+  await Promise.all(bad.map((range) =>
+    assertRejects(
+      () =>
+        certsApplyArgs({
+          ...EDGE_TRUST,
+          cidrs: [range],
+          cloudflare: [range],
+          bunny: [],
+        }),
+      Error,
+      "refusing edge range",
+    )
+  ));
+});
