@@ -66,7 +66,11 @@ import {
 } from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { createPanelSealKeySource } from "./panel-identity-cache.ts";
-import { createSealingContext, registerSealingKey } from "./sealing.ts";
+import {
+  createSealingContext,
+  createSealingRegistration,
+  registerSealingKey,
+} from "./sealing.ts";
 import {
   INSTANCE_VERSION_HEADER,
   type InstanceSupportStatus,
@@ -521,8 +525,8 @@ export class InstanceClient {
   #apiClient: DaemonApiClient | undefined;
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
-  #sealing: ReturnType<typeof createSealingContext> | null = null;
-  #sealingRegistered = false;
+  #sealingRegistration: ReturnType<typeof createSealingRegistration> | null =
+    null;
   #forceEnrollPending = false;
   #unparkForcesEnroll = false;
   /** Orphan transcript sweep runs once per process, never on reconnect. */
@@ -1467,12 +1471,19 @@ export class InstanceClient {
     }
 
     const tokenManagerRef: { current?: DaemonTokenManager } = {};
-    this.#sealing = createSealingContext({
+    const sealing = createSealingContext({
       stateDir,
       serverId,
       serverKeyId: keyFile.keyId,
     });
-    this.#sealingRegistered = false;
+    this.#sealingRegistration = createSealingRegistration({
+      register: () =>
+        registerSealingKey({
+          sealing,
+          privateJwk: keyFile.privateJwk,
+          register: (body) => apiClient.registerSealingKey(body),
+        }),
+    });
     const panelSealKeys = createPanelSealKeySource({
       fetchDocument: () => this.#apiClient!.getPanelIdentityDocument(),
     });
@@ -1485,8 +1496,11 @@ export class InstanceClient {
         }
         return await tokenManagerRef.current.getToken(options);
       },
-      sealing: this.#sealing,
+      sealing,
       panelSealKey: () => panelSealKeys.get(),
+      onPlaintextSecretsAnswer: () => {
+        void this.#sealingRegistration?.afterPlaintextAnswer();
+      },
       ...this.#apiClientVersionHook(),
     });
     const tokenManager = new DaemonTokenManager({
@@ -1572,24 +1586,8 @@ export class InstanceClient {
     );
 
     const jwt = await this.#tokenManager!.getToken();
-    await this.#registerSealingKeyOnce(identity.keyFile);
+    await this.#sealingRegistration?.atConnect();
     await this.#openDaemonWebSocket(jwt, identity.serverId);
-  }
-
-  /**
-   * Register the sealing key once per identity, after the token exists and
-   * before the socket opens. Never blocks the connect: a failure is logged
-   * and the next connect tries again.
-   */
-  async #registerSealingKeyOnce(keyFile: DaemonKeyFile): Promise<void> {
-    const sealing = this.#sealing;
-    const apiClient = this.#apiClient;
-    if (!sealing || !apiClient || this.#sealingRegistered) return;
-    this.#sealingRegistered = await registerSealingKey({
-      sealing,
-      privateJwk: keyFile.privateJwk,
-      register: (body) => apiClient.registerSealingKey(body),
-    });
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {

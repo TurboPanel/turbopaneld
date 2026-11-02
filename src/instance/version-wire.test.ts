@@ -7,6 +7,7 @@ import {
   compareSemver,
   CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_FEATURE_MIN_VERSIONS,
+  DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
   DAEMON_SEALED_SECRETS_FEATURE,
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
@@ -449,9 +450,26 @@ test("instance-edge-trust-v1 is advertised and raised no floor", () => {
 
 test("instance-hostname-public-port-v1 is advertised and raised no floor", () => {
   assertEquals(
+    INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE,
+    "instance-hostname-public-port-v1",
+  );
+  assertEquals(
     DAEMON_WIRE_FEATURES.includes(INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE),
     true,
   );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("daemon-sealed-principal-reconcile-v1 is advertised and raised no floor", () => {
+  assertEquals(
+    DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
+    "daemon-sealed-principal-reconcile-v1",
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
 test("install-token-v2 is advertised last and raised no floor", () => {

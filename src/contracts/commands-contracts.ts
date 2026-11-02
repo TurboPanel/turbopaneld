@@ -991,7 +991,9 @@ export type EnvironmentDeployPrincipalMaterial = {
   passwordHash?: string;
   /**
    * The same hash as a `tpdaemon.…` envelope, sent instead of `passwordHash` by
-   * a control plane that sees `daemon-sealed-secrets-v1`. The daemon opens it
+   * a control plane that sees `daemon-sealed-secrets-v1` (environment deploys)
+   * or `daemon-sealed-principal-reconcile-v1` (principals reconcile). The daemon
+   * opens it
    * through `/secrets/decrypt` (which answers sealed to its own key) before the
    * account is touched. Never both fields.
    */
