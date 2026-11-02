@@ -141,6 +141,8 @@
     - role: runtime-sockets
     - role: daemon-logs
     - role: rapl-access
+    # Debian security updates on their own; never restarts the server.
+    - role: os-security-updates
     - role: docker
     - role: postgres
     - role: redis
