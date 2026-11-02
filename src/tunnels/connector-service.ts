@@ -152,7 +152,10 @@ export function hostnamesFromConfig(body: unknown): string[] | null {
       names.add(name);
     }
   }
-  return [...names].sort().slice(0, MAX_REPORTED_HOSTNAMES);
+  return [...names].sort((a, b) => a.localeCompare(b)).slice(
+    0,
+    MAX_REPORTED_HOSTNAMES,
+  );
 }
 
 /** Read `/config` on the connector's loopback metrics address. */
