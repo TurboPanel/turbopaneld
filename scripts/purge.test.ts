@@ -234,6 +234,9 @@ const REFUSED_PATHS = [
 
 const OWNED_PATHS = [
   "/opt/turbopanel",
+  // The root-owned pins under lib/: the panel key pin and the update origin.
+  "/opt/turbopanel/lib/panel-identity",
+  "/opt/turbopanel/lib/update-origin",
   "/opt/turbopanel/vendor/deno",
   "/etc/turbopanel",
   "/etc/ssh/turbopanel",

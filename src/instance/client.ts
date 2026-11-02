@@ -22,6 +22,7 @@ import {
   resolveServerIdentityDir,
 } from "./sockets.ts";
 import { caPinMismatch, CaPinMismatchError } from "./ca-pin.ts";
+import { readPanelIdentityPin } from "./panel-identity-pin.ts";
 import { runServerNetworkCheck } from "../host/network-check.ts";
 import {
   collectServerIps,
@@ -551,6 +552,7 @@ export class InstanceClient {
   #loggedUnsupportedInstanceVersion: string | undefined;
   /** Why the trust files do not match the pinned CA list; null when they do. */
   #caPinMismatch: string | null = null;
+  #loggedPanelPin = false;
   /**
    * Digest of the license the last connect attempt tried: read just before an
    * attempt that does not come out of a park, or taken from the credentials an
@@ -797,6 +799,31 @@ export class InstanceClient {
       this.#apiClient = undefined;
     }
     await this.#checkCaPin(env);
+    await this.#noteStoredPanelPin(env);
+  }
+
+  /** Log the stored panel key pin once. Nothing is enforced yet. */
+  async #noteStoredPanelPin(
+    env: Record<string, string | undefined>,
+  ): Promise<void> {
+    if (this.#loggedPanelPin) return;
+    this.#loggedPanelPin = true;
+    try {
+      const pin = await readPanelIdentityPin(env);
+      if (pin) {
+        logInfo(
+          "instance",
+          `panel-identity: pinned ${
+            pin.current || "(none)"
+          } (keyset ${pin.keyset}, by ${pin.pinnedBy})`,
+        );
+      }
+    } catch (err) {
+      logError(
+        "instance",
+        `panel-identity: the pin file is unreadable: ${sanitizeForLog(err)}`,
+      );
+    }
   }
 
   /**

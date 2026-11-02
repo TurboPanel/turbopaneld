@@ -17,6 +17,7 @@ import {
   FABRIC_PEER_REPORT_FEATURE,
   FABRIC_RETAIN_KEYS_FEATURE,
   HOST_CAPACITY_FEATURE,
+  INSTALL_TOKEN_V2_FEATURE,
   INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE,
   instanceUnsupportedReason,
   MANAGED_BACKUP_LOGIN_FEATURE,
@@ -459,15 +460,21 @@ test("instance-hostname-public-port-v1 is advertised and raised no floor", () =>
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 
-test("daemon-sealed-principal-reconcile-v1 is advertised last and raised no floor", () => {
+test("daemon-sealed-principal-reconcile-v1 is advertised and raised no floor", () => {
   assertEquals(
     DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
     "daemon-sealed-principal-reconcile-v1",
   );
   assertEquals(
-    DAEMON_WIRE_FEATURES.at(-1),
-    DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
+    DAEMON_WIRE_FEATURES.includes(DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE),
+    true,
   );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("install-token-v2 is advertised last and raised no floor", () => {
+  assertEquals(INSTALL_TOKEN_V2_FEATURE, "install-token-v2");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), INSTALL_TOKEN_V2_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });
 

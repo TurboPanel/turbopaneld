@@ -26,6 +26,10 @@ import {
 } from "./version-wire.ts";
 import type { CommandRecoveryReport } from "../contracts/cell-messages.ts";
 import {
+  panelPinReport,
+  readPanelIdentityPinSync,
+} from "./panel-identity-pin.ts";
+import {
   collectServerIps,
   readDefaultRouteInterfaces,
   readHostInterfaceLinkStates,
@@ -256,6 +260,12 @@ function readLinkScanForPresence(): ReleaseLinkScanReport | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** The hello's `panelPin` (how this server pinned the panel key), when it has a pin. */
+function panelPinField(): { panelPin?: ReturnType<typeof panelPinReport> } {
+  const panelPin = panelPinReport(readPanelIdentityPinSync());
+  return panelPin ? { panelPin } : {};
 }
 
 function defaultPresenceSnapshot(): PresenceSnapshot {
@@ -558,6 +568,7 @@ export class IdlePresence {
           ? { releaseLinkScan: presence.releaseLinkScan }
           : {}),
         features: [...DAEMON_WIRE_FEATURES],
+        ...panelPinField(),
         ...this.#commandsField(false),
       }));
       this.#lastActivityAt = Date.now();

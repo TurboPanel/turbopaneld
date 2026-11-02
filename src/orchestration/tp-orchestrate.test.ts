@@ -325,7 +325,13 @@ async function runUpdateVerb(
     | "tp_verb_update"
     | "tp_verb_update_instance"
     | "tp_verb_update_colocated" = "tp_verb_update",
-  options: { controlPlaneHost?: boolean; stdin?: string } = {},
+  options: {
+    controlPlaneHost?: boolean;
+    stdin?: string;
+    panelIdentity?: string;
+    /** A run.sh from before the panel key pin: it has no --panel-key flag. */
+    olderRunSh?: boolean;
+  } = {},
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   const source = await Deno.readTextFile(helperPath);
   const root = await Deno.makeTempDir({ prefix: "tp-orchestrate-update-" });
@@ -339,12 +345,23 @@ async function runUpdateVerb(
     if (pin !== null) {
       await Deno.writeTextFile(join(root, "lib", "update-origin"), pin);
     }
+    if (options.panelIdentity !== undefined) {
+      await Deno.writeTextFile(
+        join(root, "lib", "panel-identity"),
+        options.panelIdentity,
+      );
+    }
     const fakeCurl = [
       "curl() {",
       "  printf 'CURL'; for a in \"$@\"; do printf ' [%s]' \"$a\"; done; printf '\\n'",
       '  _out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && _out="$2"; shift; done',
       "  cat > \"$_out\" <<'FAKE'",
       "#!/bin/sh",
+      options.olderRunSh ? "# no pin support" : "# supports --panel-key",
+      // An older installer rewrites the update origin without panel_key.
+      options.olderRunSh
+        ? `printf 'host=h\\n' > "${root}/lib/update-origin"`
+        : ":",
       "printf 'RUNSH'; for a in \"$@\"; do printf ' [%s]' \"$a\"; done; printf '\\n'",
       "printf 'RUNSH-LICENSE [%s]\\n' \"${TURBOPANEL_LICENSE:-}\"",
       "FAKE",
@@ -366,6 +383,8 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_pin_field"),
       extractShellFunction(source, "tp_load_update_origin_pin"),
       extractShellFunction(source, "tp_read_update_origin_pin"),
+      extractShellFunction(source, "tp_panel_identity_consistent"),
+      extractShellFunction(source, "tp_restore_panel_key_line"),
       extractShellFunction(source, "tp_colocated_host"),
       extractShellFunction(source, "tp_read_control_plane_pin"),
       extractShellFunction(source, "tp_release_manifest_url_ok"),
@@ -374,6 +393,9 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_verb_update"),
       extractShellFunction(source, "tp_verb_update_instance"),
       extractShellFunction(source, "tp_verb_update_colocated"),
+      options.olderRunSh
+        ? `trap 'printf "ORIGIN:"; cat "${root}/lib/update-origin"' EXIT`
+        : ":",
       `${verb} "$@"`,
     ].join("\n");
     // The daemon writes the license line to the helper's stdin.
@@ -416,6 +438,70 @@ for (
     assertStringIncludes(result.stdout, `[https://${host}]`);
   });
 }
+
+const PANEL_KEY = "k".repeat(43);
+const PINNED_PIN = `${PUBLIC_PIN}panel_key=${PANEL_KEY}\n`;
+const PIN_FILE =
+  `current=${PANEL_KEY}\nnext=\nkeyset=1\nurls=\npinned_by=install\nupdated=x\n`;
+
+test("tp-orchestrate update passes the pinned panel key on to run.sh", async () => {
+  const result = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE },
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(result.stdout, `[--panel-key] [${PANEL_KEY}]`);
+});
+
+test("tp-orchestrate update leaves --panel-key out for an older run.sh and restores the pin line", async () => {
+  const result = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE, olderRunSh: true },
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertEquals(result.stdout.includes("RUNSH [--host]"), true);
+  assertEquals(result.stdout.includes("[--panel-key]"), false);
+  assertStringIncludes(result.stdout, `panel_key=${PANEL_KEY}`);
+});
+
+test("tp-orchestrate update refuses another panel key, the unsafe flag and a disagreeing pin file", async () => {
+  const other = await runUpdateVerb(
+    ["--license-stdin", "--panel-key", "x".repeat(43), "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE },
+  );
+  assertEquals(other.status, 1);
+  assertStringIncludes(other.stderr, "pinned to another panel key");
+
+  const unsafe = await runUpdateVerb(
+    ["--license-stdin", "--unsafe-no-panel-key", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE },
+  );
+  assertEquals(unsafe.status, 1);
+  assertStringIncludes(unsafe.stderr, "refusing update flag");
+
+  const disagree = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE.replace("kkkk", "zzzz") },
+  );
+  assertEquals(disagree.status, 1);
+  assertStringIncludes(disagree.stderr, "disagree");
+
+  const missing = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+  );
+  assertEquals(missing.status, 1);
+});
 
 test("tp-orchestrate update with no channel keeps the release installer host", async () => {
   const result = await runUpdateVerb(

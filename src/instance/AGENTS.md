@@ -908,6 +908,41 @@ the rest of this file.
 |---|---|---|
 | **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
 
+## Install TOKEN and the panel key pin
+
+The install command carries one value, `TOKEN=<payload>.<sig>` (grammar: the
+panel's `daemon-install-command.ts`). `scripts/run.sh` reads it once and
+unsets it, fetches the panel's identity document from the first URL in the
+token, and refuses to continue unless the current key's fingerprint equals the
+token's `panelFingerprint`, the document's `X-TurboPanel-Signature` header
+verifies, and the token's own signature verifies with that key. All of that
+happens before the first request to the panel. The older
+`TURBOPANEL_LICENSE` + `TURBOPANEL_HOST` + `TURBOPANEL_INSTANCE_CA_FINGERPRINT`
+form still works, pins nothing and writes no pin file.
+
+- `/opt/turbopanel/lib/panel-identity` (`current`, `next`, `keyset`, `urls`,
+  `pinned_by`, `updated`; root:tp 0640) is written by `run.sh` after the tp
+  group exists. `lib/update-origin` gains `hosts=` (host= stays for older
+  readers) and `panel_key=`. `tp-orchestrate update` passes `--panel-key` and
+  refuses another value; `run.sh` refuses a different key, an unsafe re-run on
+  a pinned host, and a pin file that disagrees with `panel_key=`.
+- `--unsafe-no-panel-key` is the only way to install from a token with an empty
+  fingerprint. It writes `pinned_by=unsafe` and an empty `current=`; enforcement
+  must treat that as "nothing pinned". The hello reports `panelPin` so the
+  panel can show it on the server row.
+- Only `tp-host panel-identity-write` changes the file afterwards. With no
+  argument, stdin is the signature header line then the exact identity body; it
+  follows the pinned current key only (urls, next, keyset). With `statement`,
+  stdin is a rotation or revoke statement carrying `signers` (public keys); each
+  must hash to the fingerprint pinned for its role (old current, offline next),
+  `keyset` must rise and the new current key must be the pinned next key. A
+  rotation also rewrites `panel_key=` in `lib/update-origin`.
+- `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
+  contains that flag; after an older installer ran it restores the `panel_key=`
+  line it dropped, so a move back to an older release does not break the pin.
+- `src/instance/panel-identity-pin.ts` reads and parses the file. The daemon
+  logs it at connect and enforces nothing yet.
+
 ## Sealed secrets (`daemon-sealed-secrets-v1`)
 
 - The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged and retried on the next connect, and also on an open socket after a plaintext decrypt answer (at most every ten minutes, one attempt at a time; `createSealingRegistration`), so a control plane upgraded under an open socket starts sealing without a reconnect. That control plane adds `daemon-sealed-secrets-v1` to the stored features on a verified registration, because the older one dropped the then-unknown feature from the hello. Only the key id is logged.
