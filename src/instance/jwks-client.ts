@@ -137,9 +137,7 @@ export class DaemonJwksClient {
 
     if (!key) {
       if (this.#keys.size === 0 || this.#lastRefreshFailed) {
-        return this.#lastRefreshFailed
-          ? { ok: false, reason: "unavailable", cause: this.#lastRefreshError }
-          : { ok: false, reason: "unavailable" };
+        return this.#unavailable();
       }
       return { ok: false, reason: "invalid" };
     }
@@ -171,6 +169,13 @@ export class DaemonJwksClient {
     }
 
     return { ok: true, claims };
+  }
+
+  /** No key to check with; says why when the last refresh failed. */
+  #unavailable(): VerifyInstanceJwtResult {
+    return this.#lastRefreshFailed
+      ? { ok: false, reason: "unavailable", cause: this.#lastRefreshError }
+      : { ok: false, reason: "unavailable" };
   }
 
   async #tryRefresh(): Promise<void> {

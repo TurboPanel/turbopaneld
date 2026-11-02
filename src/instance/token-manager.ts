@@ -102,6 +102,41 @@ export class DaemonTokenManager {
     }
   }
 
+  /**
+   * The expiry to use for a fresh token, after checking it against the JWKS
+   * when a verifier is set. A pinned server never falls back to an unverified
+   * token: a forged key set parks (`panel-identity`), an unreachable one is
+   * retried.
+   */
+  async #acceptedExpiryMs(token: string, pinned: boolean): Promise<number> {
+    if (!this.#options.verifyToken) return parseJwtExpiryMs(token);
+    const verification = await this.#options.verifyToken(token);
+    if (verification.ok) {
+      const { claims } = verification;
+      if (
+        claims.sub !== this.#options.serverId ||
+        claims.kid !== this.#options.keyId
+      ) {
+        throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
+      }
+      return claims.exp * 1000;
+    }
+    if (verification.reason === "invalid") {
+      throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
+    }
+    if (pinned) {
+      if (verification.cause instanceof PanelIdentityError) {
+        throw verification.cause;
+      }
+      throw new Error("JWKS unavailable; the token is not used");
+    }
+    logWarn(
+      "instance",
+      "JWKS verification unavailable; using instance-issued token",
+    );
+    return parseJwtExpiryMs(token);
+  }
+
   async #doRefresh(): Promise<void> {
     const challenge = await this.#options.apiClient.getAuthChallenge({
       serverId: this.#options.serverId,
@@ -139,36 +174,10 @@ export class DaemonTokenManager {
       ...(v2 ? { payloadVersion: 2 as const, ...v2 } : {}),
     });
 
-    if (this.#options.verifyToken) {
-      const verification = await this.#options.verifyToken(session.token);
-      if (!verification.ok) {
-        if (verification.reason === "invalid") {
-          throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
-        }
-        if (panelFingerprint) {
-          // Pinned: no fallback to an unverified token. A forged key set
-          // parks (`panel-identity`); an unreachable one is retried.
-          if (verification.cause instanceof PanelIdentityError) {
-            throw verification.cause;
-          }
-          throw new Error("JWKS unavailable; the token is not used");
-        }
-        logWarn(
-          "instance",
-          "JWKS verification unavailable; using instance-issued token",
-        );
-        this.#expiresAtMs = parseJwtExpiryMs(session.token);
-      } else if (
-        verification.claims.sub !== this.#options.serverId ||
-        verification.claims.kid !== this.#options.keyId
-      ) {
-        throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
-      } else {
-        this.#expiresAtMs = verification.claims.exp * 1000;
-      }
-    } else {
-      this.#expiresAtMs = parseJwtExpiryMs(session.token);
-    }
+    this.#expiresAtMs = await this.#acceptedExpiryMs(
+      session.token,
+      panelFingerprint !== undefined,
+    );
 
     this.#token = session.token;
   }

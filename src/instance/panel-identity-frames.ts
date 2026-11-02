@@ -223,7 +223,7 @@ export async function verifyEnvelopedFrame(
     return fail("frame is for another session");
   }
   if (frame.seq !== ctx.session.lastSeq + 1) {
-    return fail(`seq ${String(frame.seq)} after ${ctx.session.lastSeq}`);
+    return fail(`seq is not ${ctx.session.lastSeq + 1}`);
   }
   if (frame.kid !== ctx.signing.kid || !pinAccepts(ctx.pin, ctx.signing.kid)) {
     return fail("key is not pinned");
