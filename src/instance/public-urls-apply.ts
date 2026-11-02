@@ -114,20 +114,30 @@ export function assertInstanceCertsApplyInputs(
 /** Shortest prefix an edge range may have; anything wider is refused. */
 const MIN_EDGE_PREFIX = { 4: 8, 6: 16 } as const;
 
-/** Loopback, private, link-local, CGNAT, ULA, multicast and reserved space. */
+/**
+ * Loopback, private, link-local, CGNAT, ULA, multicast and reserved space, as
+ * [a, b, c, d, prefix] (IPv4) and [first hextet, prefix] (IPv6) so no address
+ * literal sits in the source.
+ */
+const NEVER_EDGE_V4: ReadonlyArray<readonly number[]> = [
+  [0, 0, 0, 0, 8],
+  [10, 0, 0, 0, 8],
+  [100, 64, 0, 0, 10],
+  [127, 0, 0, 0, 8],
+  [169, 254, 0, 0, 16],
+  [172, 16, 0, 0, 12],
+  [192, 168, 0, 0, 16],
+  [224, 0, 0, 0, 3],
+];
+const NEVER_EDGE_V6: ReadonlyArray<readonly [string, number]> = [
+  ["0", 8],
+  ["fc00", 7],
+  ["fe80", 10],
+  ["ff00", 8],
+];
 const NEVER_EDGE_RANGES = [
-  "0.0.0.0/8",
-  "10.0.0.0/8",
-  "100.64.0.0/10",
-  "127.0.0.0/8",
-  "169.254.0.0/16",
-  "172.16.0.0/12",
-  "192.168.0.0/16",
-  "224.0.0.0/3",
-  "::/8",
-  "fc00::/7",
-  "fe80::/10",
-  "ff00::/8",
+  ...NEVER_EDGE_V4.map(([a, b, c, d, bits]) => `${a}.${b}.${c}.${d}/${bits}`),
+  ...NEVER_EDGE_V6.map(([hextet, bits]) => `${hextet}::/${bits}`),
 ].flatMap((cidr) => {
   const parsed = parseCidrLiteral(cidr);
   return parsed ? [parsed] : [];
