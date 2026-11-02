@@ -111,7 +111,7 @@ export function createSealingRegistration(params: {
   let lastAttemptAt: number | null = null;
   let running: Promise<void> | null = null;
   const attempt = (): Promise<void> => {
-    if (running) return running;
+    if (running !== null) return running;
     lastAttemptAt = now();
     running = params.register().then((ok) => {
       registered = ok;
@@ -124,7 +124,7 @@ export function createSealingRegistration(params: {
     isRegistered: () => registered,
     atConnect: () => registered ? Promise.resolve() : attempt(),
     afterPlaintextAnswer: () => {
-      if (registered || running) return Promise.resolve();
+      if (registered || running !== null) return Promise.resolve();
       if (lastAttemptAt !== null && now() - lastAttemptAt < retryIntervalMs) {
         return Promise.resolve();
       }

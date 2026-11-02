@@ -524,7 +524,6 @@ export class InstanceClient {
   #apiClient: DaemonApiClient | undefined;
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
-  #sealing: ReturnType<typeof createSealingContext> | null = null;
   #sealingRegistration: ReturnType<typeof createSealingRegistration> | null =
     null;
   #forceEnrollPending = false;
@@ -1450,7 +1449,6 @@ export class InstanceClient {
       serverId,
       serverKeyId: keyFile.keyId,
     });
-    this.#sealing = sealing;
     this.#sealingRegistration = createSealingRegistration({
       register: () =>
         registerSealingKey({
