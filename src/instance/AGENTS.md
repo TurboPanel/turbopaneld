@@ -387,7 +387,11 @@ same key; a license-file change or `TURBOPANEL_FORCE_ENROLL` (an action on the h
 the next attempt enroll afresh. Unpark triggers for permanent parks while the process stays up: license-file change
 (SHA-256 stamp of `license.id` + `license.token` differs) or
 `TURBOPANEL_FORCE_ENROLL` truthy — both reset backoff and force re-enroll on
-the next cycle. Daemon restart clears the in-memory parked backoff and retries
+the next cycle. The stamp is the license the last attempt tried: it is read
+before an attempt that does not come out of a park, or taken from the
+credentials an enrollment used, and parking never re-reads it, so a license
+written while a retry is in flight is not mistaken for one already tried.
+Daemon restart clears the in-memory parked backoff and retries
 the normal identity path; forced re-enroll after restart still requires
 `TURBOPANEL_FORCE_ENROLL` or missing/cleared key files. Greppable park
 log: `daemon control-plane permanently rejected enrollment (<reason>); parked —

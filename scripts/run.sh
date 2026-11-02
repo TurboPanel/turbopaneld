@@ -2890,10 +2890,10 @@ if [ -n "$_tp_host_missing" ] \
     || ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal zstd openssl >>"$_apt_log" 2>&1; }; then
   _tp_host_prereq_fail "host prerequisites failed (need:${_tp_host_missing})"
 fi
-if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1 \
-  || ! command -v python3 >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1 \
+if ! command -v sudo >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
+  || ! command -v tar >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1 || ! command -v zstd >/dev/null 2>&1 \
   || ! command -v openssl >/dev/null 2>&1; then
-  _tp_host_prereq_fail "host prerequisites missing after install (need curl tar python3 zstd openssl)"
+  _tp_host_prereq_fail "host prerequisites missing after install (need sudo curl tar python3 zstd openssl)"
 fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
