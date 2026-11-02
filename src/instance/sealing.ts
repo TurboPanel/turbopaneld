@@ -78,7 +78,7 @@ export async function registerSealingKey(params: {
     }
     logWarn(
       "instance",
-      "could not register the sealing key; will retry on the next connect",
+      "could not register the sealing key; will retry on the next connect or plaintext answer",
       sanitizeForLog(err instanceof DaemonApiError ? err.status : "error"),
     );
     return false;
@@ -113,9 +113,16 @@ export function createSealingRegistration(params: {
   const attempt = (): Promise<void> => {
     if (running !== null) return running;
     lastAttemptAt = now();
-    running = params.register().then((ok) => {
-      registered = ok;
-    }).finally(() => {
+    running = params.register().then(
+      (ok) => {
+        registered = ok;
+      },
+      // `registerSealingKey` never rejects; this keeps a future caller that
+      // does from leaving an unhandled rejection behind the `void` call site.
+      () => {
+        registered = false;
+      },
+    ).finally(() => {
       running = null;
     });
     return running;
