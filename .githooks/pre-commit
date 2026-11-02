@@ -25,7 +25,15 @@ tp_precommit_dev_checkout() {
     CDPATH= cd -- "$ROOT/../dev" && pwd
     return 0
   fi
-  _home_dev="${TURBOPANEL_DEV_ROOT:-$HOME}/dev"
+  # Same default as the dev console: the turbopanel folder in the home, or the
+  # home itself inside the Vagrant guest (marked by the provisioner's profile file).
+  if [ -n "${TURBOPANEL_DEV_ROOT:-}" ]; then
+    _home_dev="$TURBOPANEL_DEV_ROOT/dev"
+  elif [ -f /etc/profile.d/turbopanel-vagrant.sh ]; then
+    _home_dev="$HOME/dev"
+  else
+    _home_dev="$HOME/turbopanel/dev"
+  fi
   if [ -f "$_home_dev/Vagrantfile" ]; then
     printf '%s\n' "$_home_dev"
     return 0

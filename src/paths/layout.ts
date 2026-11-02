@@ -88,18 +88,62 @@ export const PROD_ORCHESTRATION_DIR_DEFAULT = join(
 export const PROD_INSTANCE_DIR_DEFAULT = PROD_HOME_DEFAULT;
 
 /**
+ * Profile file the dev repo's Vagrantfile provisioner writes inside the Vagrant
+ * guest (the dev repo's `scripts/lib/paths.sh` and `src/lib/vagrant-guest.ts`
+ * read the same file). `TURBOPANEL_VAGRANT_GUEST_MARKER` exists only as a test
+ * seam, with the same name on both sides.
+ */
+export const VAGRANT_GUEST_MARKER = "/etc/profile.d/turbopanel-vagrant.sh";
+
+/**
+ * True inside the Vagrant guest, where the host repos are mounted at
+ * `$HOME/<repo>`. A stat that fails for any reason (including a scoped read
+ * grant in a production build) counts as "not the guest".
+ */
+export function isVagrantGuest(
+  env: Record<string, string | undefined> = {},
+): boolean {
+  const marker = env.TURBOPANEL_VAGRANT_GUEST_MARKER?.trim() ||
+    readEnv("TURBOPANEL_VAGRANT_GUEST_MARKER")?.trim() ||
+    VAGRANT_GUEST_MARKER;
+  try {
+    return Deno.statSync(marker).isFile;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Default source-repo root under a home folder: `<home>/turbopanel`, the folder
+ * every non-Vagrant checkout keeps the repos in (owner rule, enforced by the dev
+ * console), or the home itself inside the Vagrant guest.
+ */
+function devRootUnderHome(
+  home: string,
+  env: Record<string, string | undefined> = {},
+): string {
+  return isVagrantGuest(env) ? home : join(home, "turbopanel");
+}
+
+/**
  * Development source-repo root.
  *
  * In development the *source* repos (the daemon checkout, and its siblings) live
- * under this root — the daemon checkout resolves to `<devRoot>/turbopaneld`. Defaults
- * to the dev user's home (`$HOME`); override with `TURBOPANEL_DEV_ROOT`. Every
+ * under this root — the daemon checkout resolves to `<devRoot>/turbopaneld`. The
+ * dev console always writes `TURBOPANEL_DEV_ROOT` into daemon.env; without it the
+ * default is `$HOME/turbopanel` (`$HOME` inside the Vagrant guest). Every
  * *mutable* dir (config/state/log/runtimes/run, instance install root) does NOT
  * use this root — it resolves to the same production FHS paths, owned by the dev
  * user at runtime.
  */
-const DEV_ROOT_DEFAULT = readEnv("TURBOPANEL_DEV_ROOT")?.trim() ||
-  readEnv("HOME")?.trim() ||
-  PROD_HOME_DEFAULT;
+const DEV_ROOT_DEFAULT = defaultDevRoot();
+
+function defaultDevRoot(): string {
+  const explicit = readEnv("TURBOPANEL_DEV_ROOT")?.trim();
+  if (explicit) return explicit;
+  const home = readEnv("HOME")?.trim();
+  return home ? devRootUnderHome(home) : PROD_HOME_DEFAULT;
+}
 
 /** Tenant principal home root — homes keyed as `/srv/users/<username>`. */
 const PRINCIPAL_HOME_ROOT_DEFAULT = "/srv/users";
@@ -107,18 +151,19 @@ const PRINCIPAL_HOME_ROOT_DEFAULT = "/srv/users";
 /**
  * Resolve the development source-repo root from an env bag.
  *
- * Prefers `env.TURBOPANEL_DEV_ROOT`, then `env.HOME`, then the module-level
- * default ({@link DEV_ROOT_DEFAULT}) so `resolveLayout(env)` and tests stay
+ * Prefers `env.TURBOPANEL_DEV_ROOT`, then `<env.HOME>/turbopanel` (`env.HOME`
+ * inside the Vagrant guest), then the module-level default
+ * ({@link DEV_ROOT_DEFAULT}) so `resolveLayout(env)` and tests stay
  * deterministic when the bag omits those keys.
  */
 export function resolveDevRoot(
   env: Record<string, string | undefined> = {},
 ): string {
-  return stripTrailingSlash(
-    env.TURBOPANEL_DEV_ROOT?.trim() ||
-      env.HOME?.trim() ||
-      DEV_ROOT_DEFAULT,
-  );
+  const explicit = env.TURBOPANEL_DEV_ROOT?.trim();
+  if (explicit) return stripTrailingSlash(explicit);
+  const home = env.HOME?.trim();
+  if (home) return stripTrailingSlash(devRootUnderHome(home, env));
+  return stripTrailingSlash(DEV_ROOT_DEFAULT);
 }
 
 /**

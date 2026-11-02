@@ -15,6 +15,7 @@ import {
   fabricStatePath,
   hasDaemonCheckout,
   isCompiledStubRoot,
+  isVagrantGuest,
   pathExists,
   principalHomePath,
   principalTmpDir,
@@ -121,20 +122,49 @@ test("isCompiledStubRoot detects deno-compile and non-checkout /tmp roots", asyn
   });
 });
 
-test("resolveDevRoot prefers TURBOPANEL_DEV_ROOT then HOME", () => {
+test("resolveDevRoot prefers TURBOPANEL_DEV_ROOT then HOME/turbopanel", () => {
+  const noGuest = "/nonexistent/turbopanel-vagrant.sh";
   assertEquals(
     resolveDevRoot({ TURBOPANEL_DEV_ROOT: "/custom/dev/" }),
     "/custom/dev",
   );
   assertEquals(
-    resolveDevRoot({ HOME: "/home/operator/" }),
-    "/home/operator",
+    resolveDevRoot({
+      HOME: "/home/operator/",
+      TURBOPANEL_VAGRANT_GUEST_MARKER: noGuest,
+    }),
+    "/home/operator/turbopanel",
+  );
+  assertEquals(
+    isVagrantGuest({ TURBOPANEL_VAGRANT_GUEST_MARKER: noGuest }),
+    false,
   );
   assertEquals(
     resolveDevRoot({ TURBOPANEL_DEV_ROOT: "  ", HOME: "  " }),
     resolveDevRoot({}),
   );
   assertEquals(resolveDevRoot({ TURBOPANEL_DEV_ROOT: "/" }), "");
+});
+
+test("resolveDevRoot keeps the home folder inside the Vagrant guest", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const marker = join(dir, "turbopanel-vagrant.sh");
+    await Deno.writeTextFile(marker, "# guest\n");
+    const env = {
+      HOME: "/home/vagrant",
+      TURBOPANEL_VAGRANT_GUEST_MARKER: marker,
+    };
+    assertEquals(isVagrantGuest(env), true);
+    assertEquals(resolveDevRoot(env), "/home/vagrant");
+    // An explicit root still wins in the guest.
+    assertEquals(
+      resolveDevRoot({ ...env, TURBOPANEL_DEV_ROOT: "/srv/turbopanel" }),
+      "/srv/turbopanel",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 test("resolveLayout ignores whitespace-only pickPath env overrides", () => {
