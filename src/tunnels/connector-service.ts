@@ -123,6 +123,8 @@ export async function probeReadyDefault(port: number): Promise<ReadyProbe> {
 
 /** At most this many routed names are reported per connector. */
 export const MAX_REPORTED_HOSTNAMES = 100;
+/** The contract's bound on a reported edge connection count. */
+const MAX_REPORTED_EDGE_CONNECTIONS = 1000;
 const HOSTNAME_RE =
   /^(?:\*\.)?[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
 
@@ -753,7 +755,11 @@ async function connectorFacts(
   probe: ReadyProbe | null,
 ): Promise<Pick<ConnectorReport, "edgeConnections" | "hostnames">> {
   if (!probe || probe.kind === "unreachable") return {};
-  const edgeConnections = Math.max(0, Math.trunc(probe.connections));
+  // The control plane refuses a count above 1000 (the contract bound).
+  const edgeConnections = Math.min(
+    MAX_REPORTED_EDGE_CONNECTIONS,
+    Math.max(0, Math.trunc(probe.connections)),
+  );
   const hostnames = io.readHostnames
     ? await io.readHostnames(record.port)
     : null;
