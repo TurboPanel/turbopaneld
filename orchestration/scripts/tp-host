@@ -63,14 +63,11 @@ fi
 
 _self_dir="$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_ROOT="$(CDPATH='' cd -P -- "$_self_dir/.." && pwd -P)"
-# The account that owns this script. On a managed install that is root (the
-# root:root 0755 file sudoers names), so it adds nothing. Run from a
-# development checkout it is the developer, who already decides what root runs
-# here and whose co-located layout keeps /etc/turbopanel and /var/lib/turbopanel
-# (daemon-seal: turbopanel_seal_*_root false); a folder that account owns is as
-# sealed as one root owns, and only tp_dir_sealed_at reads this.
-SELF_UID="$(stat -L -c '%u' -- "$_self_dir/${0##*/}")" ||
-  tp_die "cannot read the owner of $0"
+# The account that owns this script and the script's mode, for one check only
+# (tp_config_root_self_sealed). Empty when unreadable, which fails that check.
+_self_meta="$(stat -L -c '%u %a' -- "$_self_dir/${0##*/}" 2>/dev/null)" || _self_meta=""
+SELF_UID="${_self_meta%% *}"
+SELF_MODE="${_self_meta#* }"
 
 R_CONFIG="$P/etc/turbopanel"
 R_STATE="$P/var/lib/turbopanel"
@@ -813,11 +810,10 @@ tp_home_parent_sealed() {
   tp_dir_sealed_at ..
 }
 
-# DIR is root-owned (or owned by SELF_UID, see below) and neither group- nor
-# world-writable.
+# DIR is root-owned and neither group- nor world-writable.
 tp_dir_sealed_at() {
   _hp="$(stat -c '%u %a' "$1")" || return 1
-  [ "${_hp%% *}" = "$ROOT_UID" ] || [ "${_hp%% *}" = "$SELF_UID" ] || return 1
+  [ "${_hp%% *}" = "$ROOT_UID" ] || return 1
   case "${_hp#* }" in
     *[2367]?|*[2367]) return 1 ;;
   esac
@@ -5106,8 +5102,39 @@ tp_appenv_enter() {
   tp_mkdir_pinned "$_ae_dir" 0700
   [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
     tp_die "refusing $_ae_dir: not a root-owned 0700 directory"
-  tp_dir_sealed_at .. ||
+  tp_dir_sealed_at .. || tp_config_root_self_sealed .. ||
     tp_die "refusing $_ae_dir: its parent is not sealed (root-owned, not group- or world-writable)"
+}
+
+# A development checkout: the co-located layout keeps the config root owned by
+# the developer (daemon-seal, turbopanel_seal_config_root false), and that
+# account also owns the tp-host sudo is running, so it already decides what
+# root runs here. Only the variables and token folders' parent may pass this
+# way (tp_appenv_enter); every other sealed check stays root-only.
+tp_config_root_self_sealed() {
+  _cs_real="$(CDPATH='' cd -P -- "$1" && pwd -P)" || return 1
+  _cs_meta="$(stat -c '%u %a' -- "$1")" || return 1
+  tp_self_sealed_ok "$_cs_real" "${_cs_meta%% *}" "${_cs_meta#* }"
+}
+
+# REAL OWNER MODE of a directory: it is the config root itself (physical path),
+# owned by the script's owner, that owner is not root, the directory is neither
+# group- nor world-writable, and the script file is owner-writable (an owner
+# that cannot change the script, such as a read-only image's build account, is
+# refused). Fails closed when SELF_UID or SELF_MODE could not be read.
+tp_self_sealed_ok() {
+  [ "$1" = "$R_CONFIG" ] || return 1
+  case "$SELF_UID" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$SELF_UID" != "$ROOT_UID" ] || return 1
+  [ "$2" = "$SELF_UID" ] || return 1
+  case "$3" in
+    ''|*[!0-7]*|*[2367]?|*[2367]) return 1 ;;
+  esac
+  case "$SELF_MODE" in
+    *[!0-7]*) return 1 ;;
+    *[2367]??) return 0 ;;
+  esac
+  return 1
 }
 
 # Copy the daemon's staged variables file for service ID to $TP_STAGE/envsrc.
