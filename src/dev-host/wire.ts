@@ -120,12 +120,13 @@ export async function answerDevHostAction(
       at: new Date(nowMs()).toISOString(),
     };
   }
-  let result: StartResult;
+  let result: StartResult | { ok: false; error: "start_failed" };
   try {
     result = await port.start(message.action);
   } catch (err) {
+    // Not `job_running`: nothing is running, the job could not be started.
     logWarn("dev-host", "could not start the job:", String(err));
-    result = { ok: false, error: "job_running" };
+    result = { ok: false, error: "start_failed" };
   }
   const at = new Date(nowMs()).toISOString();
   return result.ok

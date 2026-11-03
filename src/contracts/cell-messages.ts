@@ -596,7 +596,7 @@ export type DevHostActionResultMessage = {
   ok: boolean;
   /** The started job's id when `ok`. */
   jobId?: string;
-  /** `job_running` or `not_development` when not `ok`. */
+  /** `job_running`, `not_development` or `start_failed` when not `ok`. */
   error?: string;
   at: string;
 };
@@ -607,6 +607,8 @@ export const MAX_DEV_HOST_DIRTY_ENTRIES = 50;
 export const MAX_DEV_HOST_LOG_TAIL_LINES = 15;
 /** Most characters in one `logTail` line, a step `detail` or a `blockedReason`. */
 export const MAX_DEV_HOST_TEXT_CHARS = 512;
+/** Most characters in a part's `unit` or `branch`. */
+export const MAX_DEV_HOST_NAME_CHARS = 256;
 /** Most characters in a dirty entry's `path`. */
 export const MAX_DEV_HOST_PATH_CHARS = 1024;
 /** Most UTF-8 bytes of the `status` JSON the control plane accepts. */

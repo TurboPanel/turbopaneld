@@ -15,6 +15,7 @@ import {
   type DevHostJob,
   type DevHostPart,
   type DevHostStatus,
+  MAX_DEV_HOST_NAME_CHARS,
   MAX_DEV_HOST_TEXT_CHARS,
 } from "../contracts/cell-messages.ts";
 import { clipText, type RunCommand } from "./commands.ts";
@@ -168,7 +169,7 @@ export class DevHostStatusCollector {
     const head = await readHead(repo);
     const base = {
       name: spec.name,
-      unit: spec.unit,
+      unit: clipText(spec.unit, MAX_DEV_HOST_NAME_CHARS),
       active: unit?.active ?? false,
     };
     if (!head) {
@@ -198,7 +199,7 @@ export class DevHostStatusCollector {
     const onTrunk = head.branch === TRUNK;
     const part: DevHostPart = {
       ...base,
-      branch: head.branch ?? "",
+      branch: clipText(head.branch ?? "", MAX_DEV_HOST_NAME_CHARS),
       onTrunk,
       headCommit: head.commit ?? "",
       runningCommit,

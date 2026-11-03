@@ -15,9 +15,11 @@ import {
   DevHostJobRunner,
   type JobDeps,
   parseJob,
+  parsePostgresUrl,
   pruneBackups,
   RESTART_STEPS,
   UPDATE_STEPS,
+  urlSecrets,
   waitForControlPlane,
   waitForUnit,
 } from "./job.ts";
@@ -478,17 +480,98 @@ test("the backup command takes plain names only", () => {
     const [url, dir] of [
       ["not a url", "/b"],
       ["mysql://u@h/db", "/b"],
-      ["postgres://h/db", "/b"],
-      ["postgres://u@h/", "/b"],
-      ["postgres://u%27x@h/db", "/b"],
-      ["postgres://u@h/db", "relative"],
-      ["postgres://u@h/db", "/a/../b"],
-      ["postgres://u@h/db", "/a b"],
+      ["postgres://localhost/db", "/b"],
+      ["postgres://u@localhost/", "/b"],
+      ["postgres://u%27x@localhost/db", "/b"],
+      ["postgres://u@localhost/db", "relative"],
+      ["postgres://u@localhost/db", "/a/../b"],
+      ["postgres://u@localhost/db", "/a b"],
     ]
   ) {
     assert("error" in buildBackupCommand(url, dir, "c"), `${url} ${dir}`);
   }
-  assert("error" in buildBackupCommand("postgres://u@h/db", "/b", "a;b"));
+  assert(
+    "error" in buildBackupCommand("postgres://u@localhost/db", "/b", "a;b"),
+  );
+});
+
+test("the instance unit's socket URL is read; its password is blanked", () => {
+  // The exact shape turbopanel-instance.service.j2 writes.
+  const url = dbUrl(
+    "postgresql",
+    "turbopanel",
+    "fake%2Fpw-for-tests",
+    "/turbopanel?host=/var/run/turbopanel/postgres",
+  );
+  assertEquals(parsePostgresUrl(url), {
+    user: "turbopanel",
+    database: "turbopanel",
+    password: "fake/pw-for-tests",
+    passwordRaw: "fake%2Fpw-for-tests",
+    socketDir: "/var/run/turbopanel/postgres",
+    host: "",
+  });
+  const plan = buildBackupCommand(
+    url,
+    "/var/lib/x/backups",
+    "turbopanel-database",
+  );
+  assert("command" in plan);
+  assertStringIncludes(
+    plan.command,
+    "docker exec turbopanel-database pg_dump -Fc -U 'turbopanel' -d 'turbopanel'",
+  );
+  assertEquals(plan.command.includes("fake"), false);
+  assertEquals(urlSecrets(url), [
+    url,
+    "fake%2Fpw-for-tests",
+    "fake/pw-for-tests",
+  ]);
+  // A socket-form URL without `?host=` names no database location.
+  assertEquals(parsePostgresUrl(dbUrl("postgresql", "u", "x", "/db")), null);
+});
+
+test("the backup refuses a database that is not on this machine", () => {
+  for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
+    const plan = buildBackupCommand(
+      dbUrl("postgres", "tp", "x", `${host}:5432/tpdb`),
+      "/b",
+      "c",
+    );
+    assert("command" in plan, host);
+  }
+  const remote = buildBackupCommand(
+    dbUrl("postgres", "tp", "x", "db.example.com:5432/tpdb"),
+    "/b",
+    "c",
+  );
+  assertEquals(remote, {
+    error: "the database is not on this machine (host db.example.com)",
+  });
+});
+
+test("migrate is skipped, and the job goes on, when the control plane is off trunk or changed", async () => {
+  for (const setup of ["branch", "dirty"] as const) {
+    await withHarness(FOUR, async (h) => {
+      if (setup === "branch") {
+        await h.fx.git("turbopanel", "checkout", "-q", "-b", "feat/migration");
+      } else {
+        await Deno.writeTextFile(join(h.fx.root, "turbopanel", "a.txt"), "x\n");
+      }
+      await h.runner.start("update");
+      await h.runner.settled();
+      const job = h.runner.current()!;
+      const migrate = job.steps.find((s) => s.name === "migrate")!;
+      assertEquals(migrate.state, "skipped", setup);
+      assertStringIncludes(migrate.detail ?? "", "not migrating");
+      assertEquals(job.state, "done");
+      assertEquals(
+        h.calls.some((c) => c.program === "pnpm" && c.args[0] === "migrate"),
+        false,
+      );
+      assertEquals(sudoUnits(h.calls).includes("turbopanel-instance"), true);
+    });
+  }
 });
 
 test("only the newest five dumps are kept", async () => {

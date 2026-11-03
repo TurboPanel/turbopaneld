@@ -37,8 +37,11 @@ and an action is answered `not_development`.
   `turbopanel-database` container written to `dev-updates/backups/` (newest 5
   kept). The control plane's migrate script runs that command only when
   something is pending and refuses to migrate when it fails. No URL, or a URL
-  whose user or database is not a plain name, fails the step before
-  `pnpm migrate` runs. A failed install, backup or migrate stops the job
+  whose user or database is not a plain name, or whose database is not on
+  this machine (a `?host=` socket URL, the form the instance unit uses, or a
+  loopback host), fails the step before `pnpm migrate` runs. Migrate is
+  skipped when the control plane checkout is off trunk or has a content
+  change, so a half-written migration is never applied. A failed install, backup or migrate stops the job
   before any restart.
 - Restart order: control plane (then wait until it restarted, is active and
   answers `/api/health`; a development control plane reports commit

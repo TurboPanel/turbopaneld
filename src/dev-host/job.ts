@@ -397,8 +397,31 @@ export class DevHostJobRunner {
   async #stepMigrate(job: DevHostJob, ctx: JobContext): Promise<StepOutcome> {
     const spec = this.#spec("control-plane");
     const repo = this.#repo(spec);
-    if (!(await readHead(repo))) {
+    const head = await readHead(repo);
+    if (!head) {
       return { state: "skipped", detail: "control plane checkout missing" };
+    }
+    // Only migrations from a clean trunk checkout are applied: a half-written
+    // migration on a branch or in a local change must never reach the database.
+    if (head.branch !== TRUNK) {
+      return {
+        state: "skipped",
+        detail: `control plane is on branch ${
+          head.branch ?? "(detached)"
+        }, not trunk; not migrating`,
+      };
+    }
+    const { dirty, error } = await readDirty(
+      this.#deps.run,
+      repo,
+      spec.repo,
+      this.#deps.gitEnv,
+    );
+    if (error || dirty.blocking) {
+      return {
+        state: "skipped",
+        detail: "control plane has local changes; not migrating",
+      };
     }
     const url =
       await (this.#deps.databaseUrl ?? (() => Promise.resolve(null)))();
@@ -614,16 +637,85 @@ export class DevHostJobRunner {
 /** Every value in a database URL that must never reach a log line. */
 export function urlSecrets(url: string): string[] {
   const out = [url];
-  try {
-    const parsed = new URL(url);
-    if (parsed.password) {
-      out.push(parsed.password, decodeURIComponent(parsed.password));
-    }
-  } catch {
-    // Unparseable: only the whole URL is known.
-  }
+  const parts = parsePostgresUrl(url);
+  if (parts?.passwordRaw) out.push(parts.passwordRaw, parts.password);
   return out.filter((s) => s.length > 0);
 }
+
+/** The parts of a Postgres URL the backup needs. */
+export type PostgresUrlParts = {
+  user: string;
+  database: string;
+  /** Decoded password and the text as it appears in the URL. */
+  password: string;
+  passwordRaw: string;
+  /** Unix socket folder from `?host=`, or null for a TCP URL. */
+  socketDir: string | null;
+  /** TCP host name (brackets kept off an IPv6 literal); empty for a socket URL. */
+  host: string;
+};
+
+const SOCKET_URL_RE =
+  /^postgres(?:ql)?:\/\/([^:@/]+)(?::([^@]*))?@\/([^?]+)(?:\?(.*))?$/;
+
+function safeDecode(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse a Postgres URL the way the control plane's
+ * `scripts/resolve-postgres-url.mjs` does, including the Unix-socket form
+ * (user and password, then `@/db?host=/run/...`) that `new URL()` rejects:
+ * an empty host with credentials. Null when it is neither form.
+ */
+export function parsePostgresUrl(url: string): PostgresUrlParts | null {
+  const socket = SOCKET_URL_RE.exec(url);
+  if (socket) {
+    const [, userEnc, passwordEnc = "", dbEnc, query = ""] = socket;
+    const socketDir = new URLSearchParams(query).get("host")?.trim() || null;
+    const user = safeDecode(userEnc);
+    const database = safeDecode(dbEnc);
+    const password = safeDecode(passwordEnc);
+    if (!socketDir || !user || !database || password === null) return null;
+    return {
+      user,
+      database,
+      password,
+      passwordRaw: passwordEnc,
+      socketDir,
+      host: "",
+    };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    return null;
+  }
+  const user = safeDecode(parsed.username);
+  const database = safeDecode(parsed.pathname.replace(/^\//, ""));
+  const password = safeDecode(parsed.password);
+  if (!user || !database || password === null) return null;
+  const socketDir = parsed.searchParams.get("host")?.trim() || null;
+  return {
+    user,
+    database,
+    password,
+    passwordRaw: parsed.password,
+    socketDir,
+    host: socketDir ? "" : parsed.hostname.replace(/^\[|\]$/g, ""),
+  };
+}
+
+/** TCP hosts that are this machine, so the local container is the database. */
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const SAFE_NAME = /^\w[\w.-]{0,62}$/;
 const SAFE_DIR = /^\/[A-Za-z0-9_./-]+$/;
@@ -642,17 +734,18 @@ export function buildBackupCommand(
   backupsDir: string,
   container: string,
 ): { command: string } | { error: string } {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return { error: "the database URL cannot be read" };
+  const parts = parsePostgresUrl(url);
+  if (!parts) return { error: "the database URL is not a Postgres URL" };
+  // The dump runs in the local database container, so the URL must name
+  // this machine: a socket folder, or a loopback host.
+  if (!parts.socketDir && !LOCAL_HOSTS.has(parts.host.toLowerCase())) {
+    return {
+      error: `the database is not on this machine (host ${
+        parts.host || "missing"
+      })`,
+    };
   }
-  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-    return { error: "the database URL is not a Postgres URL" };
-  }
-  const user = decodeURIComponent(parsed.username);
-  const database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  const { user, database } = parts;
   if (!SAFE_NAME.test(user)) return { error: "no plain user name in the URL" };
   if (!SAFE_NAME.test(database)) {
     return { error: "no plain database name in the URL" };

@@ -120,7 +120,8 @@ test("an action is answered with the job id, or job_running", async () => {
     { id: "a4", action: "update" },
     () => NOW,
   );
-  assertEquals(thrown?.error, "job_running");
+  assertEquals(thrown?.ok, false);
+  assertEquals(thrown?.error, "start_failed");
 });
 
 async function withService(
