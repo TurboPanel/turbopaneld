@@ -5,6 +5,8 @@ import {
   DockerMonitor,
 } from "../docker/index.ts";
 import { connectInstance, hasEnrolledServerId } from "../instance/client.ts";
+import { startDevHostIfEnabled } from "../dev-host/wire.ts";
+import type { DevHostPort } from "../dev-host/wire.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
   armFabricPeerRefresh,
@@ -146,7 +148,14 @@ export type DaemonRunIo = {
   connectInstance?: (opts: {
     metricsCollectorFactory: () => unknown;
     collectTopologyFn: () => unknown;
+    devHost?: DevHostPort;
   }) => Promise<{ stop(): void }>;
+  /**
+   * Start the co-located development host (`dev-host-v1`); null when this is
+   * not a development install with `TURBOPANEL_DEV_INSTANCE=1`. Defaults to
+   * {@link startDevHostIfEnabled}.
+   */
+  startDevHost?: () => (DevHostPort & { stop(): void }) | null;
   /**
    * Register the command result keeping (resend on attach, the result ack,
    * repeated dispatches, the hello report) with the client; returns the undo.
@@ -184,6 +193,7 @@ function closeDockerClient(client: DockerClientLike | undefined): void {
  */
 async function connectControlPlane(
   io: DaemonRunIo,
+  devHost?: DevHostPort,
 ): Promise<{ stop(): void }> {
   // Also armed here: a host whose boot converge failed skips the boot
   // restore but can still bring tp0 up through a reconcile.
@@ -191,7 +201,7 @@ async function connectControlPlane(
   const unwire = (io.wireCommandPorts ?? wireCommandPorts)();
   let instance: { stop(): void };
   try {
-    instance = await openControlPlane(io);
+    instance = await openControlPlane(io, devHost);
   } catch (err) {
     unwire();
     throw err;
@@ -206,6 +216,7 @@ async function connectControlPlane(
 
 async function openControlPlane(
   io: DaemonRunIo,
+  devHost?: DevHostPort,
 ): Promise<{ stop(): void }> {
   const connect = io.connectInstance;
   if (connect) {
@@ -213,11 +224,13 @@ async function openControlPlane(
       metricsCollectorFactory: () =>
         io.createMetricsCollector?.() ?? createMetricsCollector(),
       collectTopologyFn: () => io.collectTopology?.() ?? collectTopology(),
+      ...(devHost ? { devHost } : {}),
     });
   }
   return await connectInstance({
     metricsCollectorFactory: () => createMetricsCollector(),
     collectTopologyFn: () => collectTopology(),
+    ...(devHost ? { devHost } : {}),
   });
 }
 
@@ -629,9 +642,12 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
 
   const instanceHandle = { stop() {} };
   let instance: { stop(): void } = instanceHandle;
+  // Started before the connection so status.json is written even while the
+  // control plane is down (the Developer Console reads it).
+  const devHost = (io.startDevHost ?? startDevHostIfEnabled)();
 
   if ((io.shouldConnectToInstance ?? shouldConnectToInstance)()) {
-    instance = await connectControlPlane(io);
+    instance = await connectControlPlane(io, devHost ?? undefined);
   } else {
     info(
       "instance",
@@ -645,6 +661,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       shuttingDown = true;
       info("daemon", "shutting down");
       instance.stop();
+      devHost?.stop();
       sentinel.stop();
       setServiceRunStateSource(undefined);
       (io.stopHostStorageSamplers ?? stopHostStorageSamplers)();

@@ -61,6 +61,7 @@ Read the matching file before editing that area. Paths are relative to the repo 
 | `src/backups/` | `src/backups/AGENTS.md` | Scheduled backups |
 | `src/tunnels/` | `src/tunnels/AGENTS.md` | Tunnel connectors as their own services, token copies, readiness |
 | `src/firewall/` | `src/firewall/AGENTS.md` | Managed host firewall (daemon side) |
+| `src/dev-host/` | `src/dev-host/AGENTS.md` | Development host status, Update and Restart, Restart Only (`dev-host-v1`) |
 | `src/orchestration/` | `src/orchestration/AGENTS.md` | Installer presenter and sanitizer, runtime integrity digests |
 | `orchestration/` | `orchestration/AGENTS.md` | Ansible style, vendored runtimes, Galaxy content, host-base prerequisites; role guides under `orchestration/roles/*/` |
 | `orchestration/scripts/` | `orchestration/scripts/AGENTS.md` | `sudo`, `tp-host` and `tp-orchestrate` rules |

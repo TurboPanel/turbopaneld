@@ -480,6 +480,138 @@ export type ServerNetworkCheckResultMessage = {
 /** Most targets in one `server-network-check-request`. */
 export const SERVER_NETWORK_CHECK_MAX_TARGETS = 32;
 
+/** One local change in a development checkout and how it was classified. */
+export type DevHostDirtyEntry = {
+  path: string;
+  /**
+   * `content` blocks a pull; `mode` (permission bit only), `generated`
+   * (a known generated file), `untracked` and `runtime` (tool state folders)
+   * are shown but do not.
+   */
+  kind: "content" | "mode" | "generated" | "untracked" | "runtime";
+};
+
+/** Local changes in one checkout (feature `dev-host-v1`). */
+export type DevHostDirty = {
+  /** Number of changed paths (all kinds). */
+  files: number;
+  /** True when any path is a `content` change: the checkout is not pulled. */
+  blocking: boolean;
+  /** At most {@link MAX_DEV_HOST_DIRTY_ENTRIES} entries. */
+  kinds: DevHostDirtyEntry[];
+};
+
+/** What one part needs before it runs the newest code (`install`, `migrate`). */
+export type DevHostSetupNeeded = {
+  /** The lockfile is newer than the installed packages. */
+  install?: boolean;
+  /** Filled by the control plane only: database migrations not yet applied. */
+  migrate?: { pending: number };
+};
+
+/** One part of the co-located development host (feature `dev-host-v1`). */
+export type DevHostPart = {
+  name: "daemon" | "control-plane" | "web-interface" | "website";
+  /** The systemd unit, without `.service`. */
+  unit: string;
+  /** Current branch; empty on a detached head or a missing checkout. */
+  branch: string;
+  onTrunk: boolean;
+  /** Full sha of HEAD; empty when the checkout is missing. */
+  headCommit: string;
+  /** The commit the running process was started from, when known. */
+  runningCommit: string | null;
+  /** Commits on `origin/trunk` that the checkout does not have yet. */
+  behindBy: number;
+  dirty: DevHostDirty;
+  restartNeeded: boolean;
+  setupNeeded: DevHostSetupNeeded;
+  /** The unit's ActiveState is `active`. */
+  active: boolean;
+  /** Why the part is not pulled (other branch, local changes, a refused fast-forward). */
+  blockedReason?: string;
+};
+
+/** One step of a development host job. */
+export type DevHostJobStep = {
+  name: string;
+  state: "pending" | "running" | "done" | "skipped" | "failed";
+  detail?: string;
+};
+
+/** The current or last development host job (persisted across a daemon restart). */
+export type DevHostJob = {
+  id: string;
+  action: "update" | "restart";
+  state: "running" | "done" | "failed";
+  /** Name of the step running now (or the last one). */
+  step: string;
+  steps: DevHostJobStep[];
+  startedAt: string;
+  endedAt: string | null;
+  /** Last lines of the newest command output, at most 15. */
+  logTail: string[];
+};
+
+/** Everything the development host bar shows (feature `dev-host-v1`). */
+export type DevHostStatus = {
+  parts: DevHostPart[];
+  /** Last successful `git fetch` of any checkout (ISO 8601), or null. */
+  lastFetchAt: string | null;
+  job: DevHostJob | null;
+};
+
+/**
+ * Daemon → control plane, fire-and-forget: the co-located development host's
+ * checkouts, units and job (feature `dev-host-v1`). Sent on attach, on change
+ * and at least every 60 s, only to a control plane that lists the feature, and
+ * only from a development install with `TURBOPANEL_DEV_INSTANCE=1`. Twin of
+ * `turbopanel/src/contracts/cell-protocol.ts`.
+ */
+export type DevHostStatusMessage = {
+  type: "dev-host-status";
+  status: DevHostStatus;
+  at: string;
+};
+
+/**
+ * Control plane → daemon: start a development host job (feature
+ * `dev-host-v1`). The action is the only input; no path, branch or command
+ * comes from the wire.
+ */
+export type DevHostActionMessage = {
+  type: "dev-host-action";
+  id: string;
+  action: "update" | "restart";
+  at: string;
+};
+
+/**
+ * Daemon → control plane, on the action's `id`. Sent for every well-formed
+ * action; a frame whose `action` is not one of the two is logged and dropped.
+ */
+export type DevHostActionResultMessage = {
+  type: "dev-host-action-result";
+  id: string;
+  ok: boolean;
+  /** The started job's id when `ok`. */
+  jobId?: string;
+  /** `job_running` or `not_development` when not `ok`. */
+  error?: string;
+  at: string;
+};
+
+/** Most dirty entries carried per part in {@link DevHostDirty}. */
+export const MAX_DEV_HOST_DIRTY_ENTRIES = 50;
+/** Most lines in a job's `logTail`. */
+export const MAX_DEV_HOST_LOG_TAIL_LINES = 15;
+/** Most characters in one `logTail` line, a step `detail` or a `blockedReason`. */
+export const MAX_DEV_HOST_TEXT_CHARS = 512;
+/** Most characters in a dirty entry's `path`. */
+export const MAX_DEV_HOST_PATH_CHARS = 1024;
+/** Most UTF-8 bytes of the `status` JSON the control plane accepts. */
+export const MAX_DEV_HOST_STATUS_BYTES = 64 * 1024;
+
 /** Instance-wide ACME knobs for hostnames whose source is `lets-encrypt`. */
 export type InstanceAcmeWireSettings = {
   contactEmail: string;
@@ -590,6 +722,9 @@ export type DaemonMessage =
   | ManagedPermissionsResultMessage
   | ServerNetworkCheckRequestMessage
   | ServerNetworkCheckResultMessage
+  | DevHostStatusMessage
+  | DevHostActionMessage
+  | DevHostActionResultMessage
   | {
     /**
      * Daemon-initiated, fire-and-forget: every managed replica this host runs,

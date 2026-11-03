@@ -109,6 +109,7 @@ export const DAEMON_WIRE_FEATURES = [
   "panel-signed-frames-v1",
   "signin-v2",
   "hosting-via-header-v1",
+  "dev-host-v1",
 ] as const;
 
 /**
@@ -324,6 +325,16 @@ export const MANAGED_PERMISSIONS_READ_FEATURE: DaemonWireFeature =
  */
 export const SERVER_NETWORK_CHECK_FEATURE: DaemonWireFeature =
   "server-network-check-v1";
+
+/**
+ * A development install with `TURBOPANEL_DEV_INSTANCE=1` pushes
+ * `dev-host-status` (its checkouts, units and job) and answers
+ * `dev-host-action` with `dev-host-action-result`. The daemon sends the status
+ * only to a control plane that lists this feature; the control plane sends an
+ * action only to a daemon that lists it. Any other install answers
+ * `not_development`.
+ */
+export const DEV_HOST_FEATURE: DaemonWireFeature = "dev-host-v1";
 
 /**
  * This daemon pushes `managed-health-report` (every local replica's fresh

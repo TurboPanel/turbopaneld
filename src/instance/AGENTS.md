@@ -132,6 +132,22 @@ and closes a connection (`src/host/network-check.ts`), at most 3 s per target,
 and refuses loopback, link-local and public addresses. Nothing is sent on the
 connection, nothing is stored, no command row.
 
+**Development host (`dev-host-v1`).** Only a development install with
+`TURBOPANEL_DEV_INSTANCE=1` has one (`src/dev-host/`, started by
+`entry/run.ts` before the connection and passed in as
+`InstanceClientOptions.devHost`). It sends fire-and-forget
+`dev-host-status` (`status`: `parts[]`, `lastFetchAt`, `job`) on attach, when
+the attach frame's features arrive, whenever the job changes and after each
+60 s tick, only to a control plane that lists the feature. A control plane
+that lists it may send `dev-host-action` (`id`, `action`: `update` or
+`restart`) and gets `dev-host-action-result` (`ok`, `jobId` or `error`:
+`job_running`, `not_development`) on the same id; a frame whose action is
+neither is logged and dropped. The action enum is the only wire input: no
+path, branch or command comes from the control plane. The attach frame's
+`commit` is kept as the control plane's running commit when it is a full
+sha. The status is capped under the control plane's 64 KB limit (dirty lists
+shrink first). Additive; no floor moved. Rules: `../dev-host/AGENTS.md`.
+
 **Changed package signing keys (`repo-key-report-v1`).** The playbook runner
 (`orchestration/repo-key-changes.ts`) keeps each structured key change in
 `<daemonStateDir>/spool/repo-key-reports.json` as pending, once per key name and
