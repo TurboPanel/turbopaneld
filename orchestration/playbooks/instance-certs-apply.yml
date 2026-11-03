@@ -64,6 +64,12 @@
           - --adapter
           - caddyfile
 
+    # Co-located development: the dev overlay Caddyfile stays the loaded
+    # config; only the named hostname sites file it imports is rendered,
+    # validated and installed here, and the dev unit reload below picks it up.
+    - name: Render the development hostname sites
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../roles/instance-launch/tasks/caddyfile-dev-sites.yml"
+
     - name: Read whether control-plane Caddy is active
       ansible.builtin.command:
         argv: ["systemctl", "is-active", "turbopanel-caddy"]

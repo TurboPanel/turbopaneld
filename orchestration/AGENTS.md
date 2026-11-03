@@ -499,6 +499,28 @@ config in the instance release package. The unit does not grant
 `CAP_NET_BIND_SERVICE`. Updating the proxy config is a template edit plus a
 converge, never a hand edit of the rendered file.
 
+**Named hostname sites in co-located development.** The dev overlay
+Caddyfile is a static file and stays the loaded config, so the per-hostname
+loop lives in its own template, `templates/Caddyfile-hostname-sites.j2`,
+included by `Caddyfile.j2` and by `templates/Caddyfile-dev-sites.j2`.
+`tasks/caddyfile-dev-sites.yml` (imported by `caddyfile.yml` on a converge
+and included by `instance-certs-apply.yml` on a hostname apply; every task
+gated on `turbopanel_dev_user`) renders the dev template to
+`{{ turbopanel_dev_sites_dir }}/hostnames.caddy`
+(`/etc/turbopanel/caddy/dev-sites`, root:`<dev user>` `0750`, file `0640`),
+which the dev Caddyfile picks up with
+`import {$TURBOPANEL_DEV_SITES_DIR}/*.caddy` (the Caddy unit exports that
+variable in dev). The candidate is validated against the dev Caddyfile with
+a staging directory standing in for the sites directory, and only then
+installed, so a bad render never reaches a file Caddy reads on its next
+start; the dev unit is reloaded on a change. One file, rewritten on every
+apply, so a removed hostname disappears with it. A DNS-01 pair the control
+plane issued reaches the daemon as `uploaded` and is served by name (SNI) on
+`:8443` while the bare `:8443` site keeps the Platform CA leaf, which is
+what lets the development panel test a real certificate for its own
+hostname both on the LAN and through a tunnel. `lets-encrypt` (HTTP-01)
+stays managed-install only.
+
 **Edge port redirect.** An edge in front of the control plane (a tunnel, a
 proxy) can answer one hostname on 443 and 8443 and forward both to `:8443`;
 only the Host header still says which (443 sends the bare name). The shared

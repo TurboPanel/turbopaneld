@@ -239,23 +239,4 @@
         import turbopanel_app
 }
 
-{% for h in turbopanel_hostnames | default([]) %}
-{% if h.source == 'lets-encrypt' or h.source == 'uploaded' %}
-{% set _site = h.host | regex_replace('^https?://', '') | regex_replace('/.*$', '') | regex_replace(':.*$', '') %}
-{% if _site | length > 0 %}
-{% if h.source == 'uploaded' %}
-{% set _id = h.cert_id | default('') %}
-{% set _leaf = ('uploaded-' ~ _id) if (_id | length > 0) else 'uploaded' %}
-{{ _site }}:8443 {
-        tls {{ _certs_dir }}/{{ _leaf }}.crt {{ _certs_dir }}/{{ _leaf }}.key
-        import turbopanel_app
-}
-{% elif _site in (turbopanel_letsencrypt_ready | default([])) %}
-{{ _site }}:8443 {
-        tls {{ _certs_dir }}/letsencrypt-{{ _site }}.crt {{ _certs_dir }}/letsencrypt-{{ _site }}.key
-        import turbopanel_app
-}
-{% endif %}
-{% endif %}
-{% endif %}
-{% endfor %}
+{% include 'Caddyfile-hostname-sites.j2' %}
