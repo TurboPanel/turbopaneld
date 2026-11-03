@@ -14,9 +14,13 @@ built-in TypeScript/JavaScript validators so Cursor/VS Code does not report
 (Node console). Typecheck with `deno task check` / `deno task test`, not `tsc`.
 
 **Pre-commit** (`.githooks/pre-commit`): `scripts/scan-secrets.sh` is never
-skippable. The hook then runs `deno fmt` and restages files already in the
-commit so the index cannot stay unformatted, followed by the **offline static
-gates from `verify.yml`, in CI order**: `deno lint`, `deno task check:layout`,
+skippable. The hook takes its root from `git rev-parse --show-toplevel`, never
+from its own path: with an absolute `core.hooksPath`, a commit from a worktree
+runs the main checkout's copy, and a root taken from that path would scan,
+format and restage the main checkout's files instead of the worktree's. The hook
+then runs `deno fmt` and restages files already in the commit so the index
+cannot stay unformatted, followed by the **offline static gates from
+`verify.yml`, in CI order**: `deno lint`, `deno task check:layout`,
 `deno task check:vocabulary`. Those three are whole-tree scans (not staged-diff
 scans) and finish in ~1s together — they exist here because a new file that
 hardcodes a layout path or uses retired phrasing is otherwise only caught
