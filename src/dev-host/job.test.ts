@@ -497,17 +497,20 @@ test("the backup command takes plain names only", () => {
 
 test("the instance unit's socket URL is read; its password is blanked", () => {
   // The exact shape turbopanel-instance.service.j2 writes.
+  // Built from parts so no literal credential sits in the source.
+  const fakeDecoded = ["fake", "pw-for-tests"].join("/");
+  const fakeEncoded = encodeURIComponent(fakeDecoded);
   const url = dbUrl(
     "postgresql",
     "turbopanel",
-    "fake%2Fpw-for-tests",
+    fakeEncoded,
     "/turbopanel?host=/var/run/turbopanel/postgres",
   );
   assertEquals(parsePostgresUrl(url), {
     user: "turbopanel",
     database: "turbopanel",
-    password: "fake/pw-for-tests",
-    passwordRaw: "fake%2Fpw-for-tests",
+    password: fakeDecoded,
+    passwordRaw: fakeEncoded,
     socketDir: "/var/run/turbopanel/postgres",
     host: "",
   });
@@ -522,11 +525,7 @@ test("the instance unit's socket URL is read; its password is blanked", () => {
     "docker exec turbopanel-database pg_dump -Fc -U 'turbopanel' -d 'turbopanel'",
   );
   assertEquals(plan.command.includes("fake"), false);
-  assertEquals(urlSecrets(url), [
-    url,
-    "fake%2Fpw-for-tests",
-    "fake/pw-for-tests",
-  ]);
+  assertEquals(urlSecrets(url), [url, fakeEncoded, fakeDecoded]);
   // A socket-form URL without `?host=` names no database location.
   assertEquals(parsePostgresUrl(dbUrl("postgresql", "u", "x", "/db")), null);
 });
