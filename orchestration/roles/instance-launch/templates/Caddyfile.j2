@@ -107,8 +107,8 @@
         # The proxy does not name itself: Caddy sets `Server: Caddy` on every
         # response and `Via: 1.1 Caddy` on proxied ones. A deletion here is
         # applied when the response is written, so it also covers what
-        # reverse_proxy adds. Error responses (handle_errors below) bypass
-        # this block and delete Server themselves.
+        # reverse_proxy adds. Error responses (the error routes at the end of
+        # this snippet) bypass this block and delete Server themselves.
         # Existing hosts get the two deletions from
         # tasks/caddyfile-server-headers.yml; keep the two identical.
         header {
