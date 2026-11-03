@@ -1266,13 +1266,15 @@ async function defaultReadCaddyfile(): Promise<string | null> {
 }
 
 /**
- * A Caddyfile from an older build: no updating page, or no UI cache rules
- * (browsers then keep running an old panel page after an update).
+ * A Caddyfile from an older build: no updating page, no UI cache rules
+ * (browsers then keep running an old panel page after an update), or still
+ * naming the proxy in the Server and Via response headers.
  */
 function caddyNeedsRefresh(text: string | null): boolean {
   if (!text) return true;
   return !text.includes("handle_errors") || !text.includes("updating.html") ||
-    !text.includes("@ui_hashed");
+    !text.includes("@ui_hashed") || !/^\s*-Via\s*$/m.test(text) ||
+    !/^\s*header -Server\s*$/m.test(text);
 }
 
 /** The plain fact first: what did not happen, and for how long we waited. */

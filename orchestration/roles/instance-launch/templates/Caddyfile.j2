@@ -104,10 +104,19 @@
         # visit, and a real browser will remember and enforce it.
         # This never applies to tenant hosting sites — those are a separate,
         # per-server Caddy config the daemon generates, not this file.
+        # The proxy does not name itself: Caddy sets `Server: Caddy` on every
+        # response and `Via: 1.1 Caddy` on proxied ones. A deletion here is
+        # applied when the response is written, so it also covers what
+        # reverse_proxy adds. Error responses (handle_errors below) bypass
+        # this block and delete Server themselves.
+        # Existing hosts get the two deletions from
+        # tasks/caddyfile-server-headers.yml; keep the two identical.
         header {
                 Strict-Transport-Security "max-age=31536000; includeSubDomains"
                 X-Content-Type-Options "nosniff"
                 X-Frame-Options "DENY"
+                -Server
+                -Via
         }
 
         @api path /api/*
@@ -199,6 +208,8 @@
         # Reusing @api/@ws/@webhook here makes Caddy refuse to start
         # ("matcher is defined more than once").
         handle_errors {
+                # The header block above does not reach error responses.
+                header -Server
                 @updating `{http.error.status_code} in [502, 503, 504]`
                 handle @updating {
                         @updating_api path /api/*
