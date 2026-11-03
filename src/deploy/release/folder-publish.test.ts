@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import type { RunFn } from "../ensure-principal.ts";
 import { publishInFolder, publishOpenInFolder } from "./folder-publish.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -15,7 +16,7 @@ const ids = {
 function recorder(success = true): { runFn: RunFn; calls: string[][] } {
   const calls: string[][] = [];
   const runFn: RunFn = (_command, args) => {
-    calls.push(args);
+    calls.push(bareSudoArgs(args));
     return Promise.resolve({
       success,
       stdout: "",
