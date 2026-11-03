@@ -2049,9 +2049,13 @@ function headerDeletionBlock(names: readonly string[], indent: string): string {
  * repeats it; it writes nothing itself, so the status and the empty body stay
  * as Caddy sends them.
  */
-function headerDeletions(choices: HostingHeaderChoices): string {
+function headerDeletions(
+  choices: HostingHeaderChoices,
+  errors = true,
+): string {
   const names = deletedHeaders(choices);
   if (names.length === 0) return "";
+  if (!errors) return headerDeletionBlock(names, "  ");
   return `${headerDeletionBlock(names, "  ")}  handle_errors {
 ${headerDeletionBlock(names, "    ")}  }
 `;
@@ -2080,7 +2084,11 @@ export function hostingFallbackSnippet(
   hideWebServerNames: boolean | undefined,
   sendViaHeader?: boolean,
 ): string {
-  const hide = headerDeletions({ hideWebServerNames, sendViaHeader });
+  // No handle_errors here: the http:// and https:// blocks match every host,
+  // so their error routes would become the fallback for every other site's
+  // errors and impose this deploy's choices on sites that delete nothing.
+  // `respond` never raises an error, so nothing is lost.
+  const hide = headerDeletions({ hideWebServerNames, sendViaHeader }, false);
   return `# Names nobody hosts. Rewritten on every deploy.
 http:// {
 ${hide}  respond "" 200

@@ -682,11 +682,14 @@ test("siteSnippet strips Via on its own switch, apart from server names", () => 
       choices.hideWebServerNames,
       choices.sendViaHeader,
     );
+    // The catch-all matches every host, so it never carries handle_errors:
+    // its error routes would apply to every other site's errors.
     assertEquals(
-      fallback.split(deletionsWithErrors(names)).length - 1,
+      fallback.split(deletionBlock(names)).length - 1,
       names.length === 0 ? 0 : 3,
       where,
     );
+    assertEquals(fallback.includes("handle_errors"), false, where);
   }
 });
 
@@ -746,8 +749,9 @@ for (const sendViaHeader of [true, false, undefined]) {
       for (const text of [site, fallback]) {
         assertEquals(/^\s*-Via$/m.test(text), sendViaHeader !== true);
         assertEquals(/^\s*-Server$/m.test(text), true);
-        assertStringIncludes(text, "handle_errors {");
       }
+      assertStringIncludes(site, "handle_errors {");
+      assertEquals(fallback.includes("handle_errors"), false);
     } finally {
       restore();
       await cleanup();

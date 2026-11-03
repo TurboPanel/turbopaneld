@@ -1033,15 +1033,19 @@ default, resolved per server by the control plane) alone decides Caddy's
 `Via: 1.1 Caddy`: true keeps it, false adds `-Via` to the same block. Absent
 follows `hideWebServerNames` (Via goes with the names), which is what an older
 control plane always got, so Via does not change until a control plane sends
-the field. The control plane's own Caddy is separate and always
-strips both.
+the field (the site files still gain the `handle_errors` below when names are
+hidden). The control plane's own Caddy is separate and always strips both.
 
-Whenever the block deletes anything, the site also gets `handle_errors` with
-the same deferred block: Caddy's own error responses (a 502 when the upstream
-is down) skip the site-level block and would otherwise still send
+Whenever the block deletes anything, a site block also gets `handle_errors`
+with the same deferred block: Caddy's own error responses (a 502 when the
+upstream is down) skip the site-level block and would otherwise still send
 `Server: Caddy`. It writes no response itself, so the status and empty body
 stay as Caddy sends them (`caddy-hosting-headers.test.ts` checks this against
-the pinned Caddy).
+the pinned Caddy). The catch-all never gets `handle_errors`: its `http://` and
+`https://` blocks match every host, so their error routes would become the
+fallback for every other site's errors and impose the last deploy's choices on
+sites that delete nothing. Its `respond` never raises an error, so nothing is
+lost.
 
 Both apply on the environment's next deploy; there is no fan-out command. The
 catch-all (`00-fallback.caddy`) is shared by every environment on the server,

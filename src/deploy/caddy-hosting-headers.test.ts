@@ -33,6 +33,7 @@ const CHOICES: readonly Choices[] = [
 function hostingConfig(
   choices: Choices,
   ports: { http: number; https: number; up: number; down: number },
+  fallback: Choices = choices,
 ): string {
   const upstream = (port: number) =>
     ({ kind: "http", host: "127.0.0.1", port }) as const;
@@ -64,7 +65,7 @@ function hostingConfig(
       forceHttps: false,
       ...choices,
     }),
-    hostingFallbackSnippet(choices.hideWebServerNames, choices.sendViaHeader),
+    hostingFallbackSnippet(fallback.hideWebServerNames, fallback.sendViaHeader),
   ];
   return `{
   admin off
@@ -169,6 +170,51 @@ async function probe(choices: Choices, upPort: number): Promise<void> {
     await Deno.remove(root, { recursive: true });
   }
 }
+
+test({
+  name:
+    "a catch-all from another deploy does not change a site's own error responses",
+  ignore: caddy === undefined,
+  permissions: { read: true, write: true, run: true, env: true, net: true },
+  fn: async () => {
+    // The catch-all is shared by every environment on the server and follows
+    // whichever deployed last; a site that deletes nothing must keep Caddy's
+    // own Server header on its errors even when that catch-all hides names.
+    const root = await Deno.makeTempDir({ prefix: "tp-hosting-mixed-" });
+    const ports = {
+      http: freePort(),
+      https: freePort(),
+      up: freePort(),
+      down: freePort(),
+    };
+    const config = join(root, "Caddyfile");
+    await Deno.writeTextFile(
+      config,
+      hostingConfig(
+        { hideWebServerNames: false, sendViaHeader: true },
+        ports,
+        { hideWebServerNames: true, sendViaHeader: false },
+      ),
+    );
+    const { stop } = await startPanelCaddy(
+      required(caddy, "caddy"),
+      config,
+      root,
+      ports.http,
+    );
+    try {
+      const down = await rawGet(ports.http, "down.test", "/");
+      assertEquals(down.res.status, 502);
+      assertEquals(down.res.headers.get("server"), "Caddy");
+      const nobody = await rawGet(ports.http, "nobody.test", "/");
+      assertEquals(nobody.res.status, 200);
+      assertEquals(nobody.res.headers.get("server"), null);
+    } finally {
+      await stop();
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
 
 /** One plain HTTP/1.1 GET with a chosen Host (fetch would not send it). */
 async function rawGet(
