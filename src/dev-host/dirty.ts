@@ -49,7 +49,7 @@ export function parsePorcelainZ(stdout: string): PorcelainEntry[] {
     if (record.length < 4) continue;
     const xy = record.slice(0, 2);
     out.push({ xy, path: record.slice(3) });
-    if (xy[0] === "R" || xy[0] === "C") i += 1;
+    if (xy.startsWith("R") || xy.startsWith("C")) i += 1;
   }
   return out;
 }

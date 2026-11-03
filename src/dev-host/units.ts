@@ -128,27 +128,39 @@ export async function readInstanceDatabaseUrl(
     `${unit}.service`,
   ], { timeoutMs: 15_000 });
   if (result.code !== 0) return null;
+  const parsed = parseUnitEnvironment(result.stdout);
+  let url = parsed.url;
+  const texts = await Promise.all(parsed.files.map((path) => readFile(path)));
+  for (const text of texts) {
+    const value = text === null ? null : readEnvFileValue(text, DATABASE_URL);
+    if (value) url = value;
+  }
+  return url?.trim() || null;
+}
+
+/** The URL from `Environment=` lines and the `EnvironmentFiles=` paths, in order. */
+function parseUnitEnvironment(
+  stdout: string,
+): { url: string | null; files: string[] } {
   let url: string | null = null;
   const files: string[] = [];
-  for (const line of result.stdout.split("\n")) {
+  for (const line of stdout.split("\n")) {
     if (line.startsWith("Environment=")) {
-      for (const pair of splitEnvironment(line.slice("Environment=".length))) {
-        if (pair.startsWith(`${DATABASE_URL}=`)) {
-          url = pair.slice(DATABASE_URL.length + 1);
-        }
-      }
+      url = urlFromEnvironment(line.slice("Environment=".length)) ?? url;
     } else if (line.startsWith("EnvironmentFiles=")) {
       // `EnvironmentFiles=/path (ignore_errors=yes)`
       const path = line.slice("EnvironmentFiles=".length).split(" (")[0].trim();
       if (path.startsWith("/")) files.push(path);
     }
   }
-  const texts = await Promise.all(files.map((path) => readFile(path)));
-  for (const text of texts) {
-    const value = text === null ? null : readEnvFileValue(text, DATABASE_URL);
-    if (value) url = value;
-  }
-  return url?.trim() || null;
+  return { url, files };
+}
+
+/** The last `TURBOPANEL_DATABASE_URL=` assignment in an `Environment=` value. */
+function urlFromEnvironment(value: string): string | null {
+  const prefix = `${DATABASE_URL}=`;
+  const pair = splitEnvironment(value).findLast((p) => p.startsWith(prefix));
+  return pair === undefined ? null : pair.slice(prefix.length);
 }
 
 async function readTextOrNull(path: string): Promise<string | null> {

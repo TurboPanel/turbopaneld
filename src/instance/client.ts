@@ -2304,6 +2304,10 @@ export class InstanceClient {
     // The control plane answers the daemon's wire ping with `{type:"pong"}`
     // (a Workers auto-response); it carries nothing to act on.
     if ((message as { type?: unknown }).type === "pong") return;
+    if (message.type === "dev-host-action") {
+      void this.#answerDevHostActionAsync(message, ws);
+      return;
+    }
     switch (message.type) {
       case "version":
         // `commit` / `branch` stay informational — the daemon never
@@ -2375,9 +2379,6 @@ export class InstanceClient {
         break;
       case "server-network-check-request":
         void this.#runServerNetworkCheckAsync(message, ws);
-        break;
-      case "dev-host-action":
-        void this.#answerDevHostActionAsync(message, ws);
         break;
       case "metrics-live-start":
         this.#applyLiveLeaseStart(message, ws);

@@ -777,7 +777,7 @@ export function parseJob(value: unknown): DevHostJob | null {
   if (endedAt !== null && typeof endedAt !== "string") return null;
   if (!Array.isArray(steps) || !Array.isArray(logTail)) return null;
   const parsedSteps = steps.map(parseStep);
-  if (parsedSteps.some((s) => s === null)) return null;
+  if (parsedSteps.includes(null)) return null;
   return {
     id,
     action,
