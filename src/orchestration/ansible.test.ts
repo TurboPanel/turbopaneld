@@ -871,16 +871,27 @@ test(
     );
     assertMatch(
       caddyfile,
+      /:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/platform-ca\.crt[\s\S]*?\{% include 'Caddyfile-hostname-sites\.j2' %\}/,
+      "the named hostname sites follow the :8443 catch-all as a shared include",
+    );
+    const hostnameSites = await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/instance-launch/templates/Caddyfile-hostname-sites.j2",
+      ),
+    );
+    assertMatch(
+      hostnameSites,
       /\{\{ _site \}\}:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.crt \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.key/,
       "an uploaded hostname is a named :8443 site with uploaded-<cert_id> files",
     );
     assertMatch(
-      caddyfile,
+      hostnameSites,
       /_site in \(turbopanel_letsencrypt_ready \| default\(\[\]\)\)[\s\S]*?\{\{ _site \}\}:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/letsencrypt-\{\{ _site \}\}\.crt \{\{ _certs_dir \}\}\/letsencrypt-\{\{ _site \}\}\.key/,
       "a Let's Encrypt hostname is a named :8443 site only when its files exist",
     );
     assertEquals(
-      caddyfile.includes("{{ _site }} {"),
+      hostnameSites.includes("{{ _site }} {"),
       false,
       "a bare hostname would bind :443 implicitly",
     );
@@ -2818,4 +2829,109 @@ test("the pre-update snapshot holds a restorable full dump of the control-plane 
       rollback.includes("turbopanel.dump"),
     "the rollback replays the same file with pg_restore",
   );
+});
+
+test("co-located development renders named hostname sites into the dev sites directory", async () => {
+  const tasks = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/caddyfile-dev-sites.yml",
+    ),
+  );
+  const taskCount = (tasks.match(/^- name: /gm) ?? []).length;
+  const gated = (tasks.match(
+    /^ {2}when: turbopanel_dev_user \| default\(''\) \| length > 0$/gm,
+  ) ??
+    []).length;
+  assertEquals(taskCount > 0, true);
+  assertEquals(
+    gated,
+    taskCount,
+    "every dev sites task is gated on turbopanel_dev_user",
+  );
+  assertMatch(
+    tasks,
+    /src: "\{\{ role_path \| default\(playbook_dir ~ '\/\.\.\/roles\/instance-launch'\) \}\}\/templates\/Caddyfile-dev-sites\.j2"\n\s+dest: "\{\{ turbopanel_dev_sites_dir \}\}\/hostnames\.caddy\.candidate"/,
+    "the candidate is rendered from Caddyfile-dev-sites.j2 by an explicit path that also resolves outside the role",
+  );
+  assertMatch(
+    tasks,
+    /TURBOPANEL_DEV_SITES_DIR="\$staging" "\$CADDY_BIN" validate --config "\$CADDYFILE" --adapter caddyfile/,
+    "the candidate is validated against the dev Caddyfile through a staging directory",
+  );
+  assertEquals(
+    tasks.indexOf("validate --config") <
+      tasks.indexOf('dest: "{{ turbopanel_dev_sites_dir }}/hostnames.caddy"\n'),
+    true,
+    "validation precedes the install",
+  );
+  assertMatch(
+    tasks,
+    /dest: "\{\{ turbopanel_dev_sites_dir \}\}\/hostnames\.caddy"\n[\s\S]*?register: turbopanel_dev_sites_install/,
+    "the install registers turbopanel_dev_sites_install for the reload",
+  );
+
+  const caddyfileTasks = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/caddyfile.yml",
+    ),
+  );
+  assertMatch(
+    caddyfileTasks,
+    /ansible\.builtin\.import_tasks: caddyfile-dev-sites\.yml/,
+    "a converge renders the dev sites",
+  );
+  assertMatch(
+    caddyfileTasks,
+    /turbopanel_dev_sites_install is changed[\s\S]*?notify:\n\s+- Reload turbopanel caddy/,
+    "a changed dev sites file reloads Caddy on a converge",
+  );
+
+  const playbook = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/instance-certs-apply.yml"),
+  );
+  const devSites = playbook.indexOf("tasks/caddyfile-dev-sites.yml");
+  const active = playbook.indexOf("Read whether control-plane Caddy is active");
+  const devReload = playbook.indexOf("Reload the development Caddy unit");
+  assertEquals(devSites >= 0 && devSites < active, true);
+  assertEquals(
+    active < devReload,
+    true,
+    "the dev unit reload follows the render",
+  );
+
+  const devTemplate = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/Caddyfile-dev-sites.j2",
+    ),
+  );
+  assertMatch(
+    devTemplate,
+    /\{% set _certs_dir = turbopanel_instance_certs_dir %\}[\s\S]*?\{% include 'Caddyfile-hostname-sites\.j2' %\}/,
+    "the dev template shares the hostname sites include with Caddyfile.j2",
+  );
+
+  const unit = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/turbopanel-caddy.service.j2",
+    ),
+  );
+  assertMatch(
+    unit,
+    /\{% if turbopanel_dev_user \| default\(''\) \| length > 0 %\}[\s\S]*?Environment=TURBOPANEL_DEV_SITES_DIR=\{\{ turbopanel_dev_sites_dir \}\}/,
+    "the dev Caddy unit exports the sites directory",
+  );
+  for (const role of ["instance-certs", "instance-launch"]) {
+    const defaults = await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, `roles/${role}/defaults/main.yml`),
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_dev_sites_dir: "\{\{ turbopanel_config_dir \}\}\/caddy\/dev-sites"/,
+      `${role} defaults the dev sites directory`,
+    );
+  }
 });

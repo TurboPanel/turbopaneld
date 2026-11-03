@@ -1,0 +1,74 @@
+---
+# Named :8443 sites for co-located development (imported by caddyfile.yml and
+# included by playbooks/instance-certs-apply.yml). Every task is gated on
+# turbopanel_dev_user; a managed host renders its sites into its own Caddyfile.
+#
+# The dev overlay Caddyfile is a static file in the dev checkout and stays the
+# loaded config. It ends with `import {$TURBOPANEL_DEV_SITES_DIR}/*.caddy`, so
+# the hostname sites go into their own file under that directory: one file,
+# rewritten on every apply, so a removed hostname disappears with it. The
+# candidate is validated against the dev Caddyfile first (a staging directory
+# stands in for the sites directory) and only then installed, so a bad render
+# never reaches a file Caddy would read on its next start.
+- name: Ensure the development hostname sites directory exists
+  when: turbopanel_dev_user | default('') | length > 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_dev_sites_dir }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+# The template path is explicit because this file is also included from
+# playbooks/instance-certs-apply.yml, outside the role, where Ansible does not
+# search the role's templates directory (role_path is unset there).
+- name: Render a candidate development hostname sites file
+  when: turbopanel_dev_user | default('') | length > 0
+  ansible.builtin.template:
+    src: "{{ role_path | default(playbook_dir ~ '/../roles/instance-launch') }}/templates/Caddyfile-dev-sites.j2"
+    dest: "{{ turbopanel_dev_sites_dir }}/hostnames.caddy.candidate"
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  changed_when: false
+
+- name: Validate the development Caddyfile with the candidate hostname sites
+  when: turbopanel_dev_user | default('') | length > 0
+  ansible.builtin.command:
+    argv:
+      - /bin/bash
+      - -eu
+      - -c
+      - |
+        staging=$(mktemp -d)
+        trap 'rm -rf "$staging"' EXIT
+        cp "$CANDIDATE" "$staging/hostnames.caddy"
+        cd "$INSTANCE_DIR"
+        TURBOPANEL_DEV_SITES_DIR="$staging" "$CADDY_BIN" validate --config "$CADDYFILE" --adapter caddyfile
+  environment:
+    CANDIDATE: "{{ turbopanel_dev_sites_dir }}/hostnames.caddy.candidate"
+    INSTANCE_DIR: "{{ turbopanel_instance_dir }}"
+    CADDY_BIN: "{{ turbopanel_caddy_bin }}"
+    CADDYFILE: "{{ turbopanel_caddyfile }}"
+    CADDY_TLS_CERT: "{{ turbopanel_instance_certs_dir }}/self-signed.crt"
+    CADDY_TLS_KEY: "{{ turbopanel_instance_certs_dir }}/self-signed.key"
+    TURBOPANEL_RUN_DIR: "{{ turbopanel_run_dir }}"
+  changed_when: false
+
+- name: Install the validated development hostname sites file
+  when: turbopanel_dev_user | default('') | length > 0
+  ansible.builtin.copy:
+    src: "{{ turbopanel_dev_sites_dir }}/hostnames.caddy.candidate"
+    dest: "{{ turbopanel_dev_sites_dir }}/hostnames.caddy"
+    remote_src: true
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+  register: turbopanel_dev_sites_install
+
+- name: Remove the development hostname sites candidate
+  when: turbopanel_dev_user | default('') | length > 0
+  ansible.builtin.file:
+    path: "{{ turbopanel_dev_sites_dir }}/hostnames.caddy.candidate"
+    state: absent
+  changed_when: false

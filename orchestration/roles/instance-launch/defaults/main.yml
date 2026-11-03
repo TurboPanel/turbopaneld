@@ -146,6 +146,12 @@ turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else
   (turbopanel_config_dir ~ '/caddy/Caddyfile') }}
+# Co-located development only: the directory the dev overlay Caddyfile
+# imports (`*.caddy`) for named hostname sites, rendered by
+# tasks/caddyfile-dev-sites.yml and exported to the Caddy unit as
+# TURBOPANEL_DEV_SITES_DIR. A managed host renders those sites into its own
+# Caddyfile and never uses this.
+turbopanel_dev_sites_dir: "{{ turbopanel_config_dir }}/caddy/dev-sites"
 # "source" runs deno run src/deno-dev.ts when the developer surface is on,
 # otherwise src/deno.ts; "compiled" exec's the single binary. Co-located dev
 # defaults to source (its build toggle passes -e turbopanel_instance_run_mode

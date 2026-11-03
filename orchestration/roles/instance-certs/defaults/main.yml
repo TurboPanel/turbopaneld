@@ -86,6 +86,11 @@ turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else
   (turbopanel_config_dir ~ '/caddy/Caddyfile') }}
+# Co-located development only: the directory the dev overlay Caddyfile
+# imports (`*.caddy`) for named hostname sites, rendered by instance-launch
+# tasks/caddyfile-dev-sites.yml. A managed host renders those sites into
+# its own Caddyfile and never uses this.
+turbopanel_dev_sites_dir: "{{ turbopanel_config_dir }}/caddy/dev-sites"
 # Absolute paths on the target host (upload). Copied into the role-owned
 # certs/ tree so tpcaddy can read the key without mutating the operator's files.
 turbopanel_tls_cert_path: ""
