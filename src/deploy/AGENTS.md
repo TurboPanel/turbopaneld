@@ -1013,19 +1013,46 @@ Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next service
 Moved to [`site/AGENTS.md`](./site/AGENTS.md) — engine drivers, vhost
 materialization, PHP-FPM wiring, managed-directory sites.
 
-## Hiding web server names (`hideWebServerNames`)
+## Hiding web server names (`hideWebServerNames`) and Via (`sendViaHeader`)
 
 `environment.deploy` carries an optional `hideWebServerNames` (absent = off, so
 an older control plane changes nothing; the control plane sends the effective
 per-server value, on by default). When true: every hosting Caddy site block
-(HTTP, HTTPS, `www` redirects) gets `header { -Server -Via -X-Powered-By defer }`
-(`siteSnippet`; `defer` so the removal runs after the proxy copied the
-upstream's headers, which also covers Traefik-routed containers); each nginx
-vhost gets `server_tokens off`; each Apache vhost gets `ServerSignature Off`
-and `ServerTokens Prod` (server-wide, so written beside the `Listen` lines,
-outside the block). OpenLiteSpeed already runs with `showVersionNumber 0`.
-It applies on the environment's next deploy; there is no fan-out command.
-PHP's `expose_php` stays off in the runtime config; nothing here edits it.
+(HTTP, HTTPS, `www` redirects) and the catch-all delete `Server` and
+`X-Powered-By` in a deferred `header` block (`siteSnippet`,
+`hostingFallbackSnippet`; `defer` so the removal runs after the proxy copied
+the upstream's headers, which also covers Traefik-routed containers); each
+nginx vhost gets `server_tokens off`; each Apache vhost gets
+`ServerSignature Off` and `ServerTokens Prod` (server-wide, so written beside
+the `Listen` lines, outside the block). OpenLiteSpeed already runs with
+`showVersionNumber 0`. PHP's `expose_php` stays off in the runtime config;
+nothing here edits it.
+
+`sendViaHeader` (feature `hosting-via-header-v1`, Send Via Header, off by
+default, resolved per server by the control plane) alone decides Caddy's
+`Via: 1.1 Caddy`: true keeps it, false adds `-Via` to the same block. Absent
+follows `hideWebServerNames` (Via goes with the names), which is what an older
+control plane always got, so Via does not change until a control plane sends
+the field (the site files still gain the `handle_errors` below when names are
+hidden). The control plane's own Caddy is separate and always strips both.
+
+Whenever the block deletes anything, a site block also gets `handle_errors`
+with the same deferred block: Caddy's own error responses (a 502 when the
+upstream is down) skip the site-level block and would otherwise still send
+`Server: Caddy`. It writes no response itself, so the status and empty body
+stay as Caddy sends them (`caddy-hosting-headers.test.ts` checks this against
+the pinned Caddy). The catch-all never gets `handle_errors`: its `http://` and
+`https://` blocks match every host, so their error routes would become the
+fallback for every other site's errors and impose the last deploy's choices on
+sites that delete nothing. Its `respond` never raises an error, so nothing is
+lost.
+
+Both apply on the environment's next deploy; there is no fan-out command. The
+catch-all (`00-fallback.caddy`) is shared by every environment on the server,
+so it carries the choices of the last deploy; at daemon start a missing one is
+re-derived from the written sites (`lastKnownHeaderChoices`: any site deletes
+`Server`, names hidden; Via kept only when no site deletes it; no readable
+site, names hidden and Via stripped).
 
 ## The PHP shell dispatcher
 

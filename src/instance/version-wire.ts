@@ -108,6 +108,7 @@ export const DAEMON_WIRE_FEATURES = [
   "panel-identity-v1",
   "panel-signed-frames-v1",
   "signin-v2",
+  "hosting-via-header-v1",
 ] as const;
 
 /**
@@ -129,6 +130,14 @@ export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
  */
 export const DEPLOY_HOSTINGS_ONLY_FEATURE: DaemonWireFeature =
   "deploy-hostings-only-v1";
+
+/**
+ * This daemon honours `sendViaHeader` on `environment.deploy`: the hosting web
+ * server keeps or strips `Via` on its own, apart from `hideWebServerNames`. An
+ * older daemon ignores the field and strips `Via` only with the names.
+ */
+export const HOSTING_VIA_HEADER_FEATURE: DaemonWireFeature =
+  "hosting-via-header-v1";
 
 /**
  * This daemon takes any application mode in `nativeAppServices[].appMode`
