@@ -17,6 +17,7 @@ import {
   FABRIC_PEER_REPORT_FEATURE,
   FABRIC_RETAIN_KEYS_FEATURE,
   HOST_CAPACITY_FEATURE,
+  HOSTING_VIA_HEADER_FEATURE,
   INSTALL_TOKEN_V2_FEATURE,
   INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE,
   instanceUnsupportedReason,
@@ -507,5 +508,11 @@ test("tunnel-status-facts-v1 is advertised and raised no floor", () => {
 test("tunnel-status-v1 is advertised and raised no floor", () => {
   assertEquals(TUNNEL_STATUS_FEATURE, "tunnel-status-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(TUNNEL_STATUS_FEATURE), true);
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+});
+
+test("hosting-via-header-v1 is advertised and raised no floor", () => {
+  assertEquals(HOSTING_VIA_HEADER_FEATURE, "hosting-via-header-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(HOSTING_VIA_HEADER_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
 });

@@ -1637,6 +1637,12 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   hideWebServerNames?: boolean;
   /**
+   * Send the hosting web server's `Via` response header. False strips it.
+   * Absent follows `hideWebServerNames` (stripped when names are hidden), so
+   * an older control plane changes nothing.
+   */
+  sendViaHeader?: boolean;
+  /**
    * `sequential` stops the previous version, runs migrations, starts the new
    * version, gates on health and rolls back (see `deploy/sequential-deploy.ts`).
    * Absent or `inplace` is the original `compose up -d` deploy. An older
@@ -6706,6 +6712,10 @@ export function parseEnvironmentDeployPayload(
       hideWebServerNames: parseOptionalBoolean(
         value.hideWebServerNames,
         "hideWebServerNames",
+      ),
+      sendViaHeader: parseOptionalBoolean(
+        value.sendViaHeader,
+        "sendViaHeader",
       ),
       deployStrategy: parseDeployStrategy(value.deployStrategy),
       migrations: parseDeployMigrations(value.migrations),

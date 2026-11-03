@@ -935,6 +935,7 @@ test("parseEnvironmentDeployPayload rejects optional array/boolean/network field
     { hideWebServerNames: "yes" },
     "hideWebServerNames must be a boolean",
   );
+  rejectDeploy({ sendViaHeader: "yes" }, "sendViaHeader must be a boolean");
   rejectDeploy(
     { dockerExternalNetworks: "org-net" },
     "dockerExternalNetworks must be an array",
@@ -1102,6 +1103,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
     noCache: true,
     hostingsOnly: true,
     hideWebServerNames: true,
+    sendViaHeader: false,
     dockerExternalNetworks: ["org_net_b", "org_net_a"],
     fabricNetworks: [{
       name: "tpn_mesh01",
@@ -1120,6 +1122,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
   assertEquals(payload.noCache, true);
   assertEquals(payload.hostingsOnly, true);
   assertEquals(payload.hideWebServerNames, true);
+  assertEquals(payload.sendViaHeader, false);
   assertEquals(payload.dockerExternalNetworks, ["org_net_a", "org_net_b"]);
   assertEquals(payload.fabricNetworks?.[0]?.gateway, "203.0.113.1");
   assertEquals(payload.hostingIngress?.composeServiceName, "traefik");

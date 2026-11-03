@@ -620,6 +620,88 @@ test("siteSnippet strips server names from every block only when asked", () => {
   assertEquals(redirect.split(HIDE_HEADER_BLOCK).length - 1, 2);
 });
 
+/** The deferred header block of a site block, deleting `names`. */
+function deletionBlock(names: readonly string[], indent = "  "): string {
+  const lines = names.map((name) => `${indent}  -${name}\n`).join("");
+  return `${indent}header {\n${lines}${indent}  defer\n${indent}}\n`;
+}
+
+/** The site-level block plus the same deletions under `handle_errors`. */
+function deletionsWithErrors(names: readonly string[]): string {
+  return `${deletionBlock(names)}  handle_errors {\n${
+    deletionBlock(names, "    ")
+  }  }\n`;
+}
+
+test("siteSnippet strips Via on its own switch, apart from server names", () => {
+  const base = { hostname: "app.example.com", tlsDir: TLS_DIR };
+  const cases: [
+    { hideWebServerNames?: boolean; sendViaHeader?: boolean },
+    readonly string[],
+  ][] = [
+    // Absent follows the names, as an older control plane always got.
+    [{}, []],
+    [{ hideWebServerNames: true }, ["Server", "Via", "X-Powered-By"]],
+    [{ sendViaHeader: false }, ["Via"]],
+    [{ hideWebServerNames: false, sendViaHeader: false }, ["Via"]],
+    [{ hideWebServerNames: true, sendViaHeader: false }, [
+      "Server",
+      "Via",
+      "X-Powered-By",
+    ]],
+    [{ hideWebServerNames: true, sendViaHeader: true }, [
+      "Server",
+      "X-Powered-By",
+    ]],
+    [{ sendViaHeader: true }, []],
+  ];
+  for (const [choices, names] of cases) {
+    const where = JSON.stringify(choices);
+    for (
+      const snippet of [
+        siteSnippet({ ...base, ...choices }),
+        siteSnippet({ ...base, ...choices, redirectTo: "example.com" }),
+        siteSnippet({ ...base, ...choices, forceHttps: false }),
+      ]
+    ) {
+      assertEquals(/^\s*-Via$/m.test(snippet), names.includes("Via"), where);
+      if (names.length === 0) {
+        assertEquals(snippet.includes("header {"), false, where);
+        assertEquals(snippet.includes("handle_errors"), false, where);
+        continue;
+      }
+      const blocks = snippet.includes("\n\napp.example.com {") ? 2 : 1;
+      assertEquals(
+        snippet.split(deletionsWithErrors(names)).length - 1,
+        blocks,
+        where,
+      );
+      assertEquals(snippet.split("handle_errors").length - 1, blocks, where);
+    }
+    const fallback = hostingFallbackSnippet(
+      choices.hideWebServerNames,
+      choices.sendViaHeader,
+    );
+    assertEquals(
+      fallback.split(deletionsWithErrors(names)).length - 1,
+      names.length === 0 ? 0 : 3,
+      where,
+    );
+  }
+});
+
+test("siteSnippet with names shown and Via kept is byte-identical to before", () => {
+  const base = { hostname: "app.example.com", tlsDir: TLS_DIR };
+  assertEquals(
+    siteSnippet({ ...base, hideWebServerNames: false, sendViaHeader: true }),
+    siteSnippet(base),
+  );
+  assertEquals(
+    hostingFallbackSnippet(false, true),
+    hostingFallbackSnippet(false),
+  );
+});
+
 test("hostingFallbackSnippet answers unhosted names on 80 and 443 and hides names only when asked", () => {
   const plain = hostingFallbackSnippet(false);
   assertEquals(plain.includes("-Server"), false);
@@ -639,6 +721,39 @@ test("the Caddyfile hands every unmatched name the one fixed fallback certificat
   assertStringIncludes(config, "fallback_sni unconfigured.invalid");
   assertEquals(config.includes("on_demand"), false);
 });
+
+for (const sendViaHeader of [true, false, undefined]) {
+  test(`rewriteHostingCaddySites writes sites and the catch-all with sendViaHeader ${sendViaHeader}`, async () => {
+    const { layout, cleanup } = await makeTestLayout();
+    const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+    try {
+      await rewriteHostingCaddySites(
+        layout,
+        {
+          ...hostingPayload("env-v", "app.example.com"),
+          hideWebServerNames: true,
+          sendViaHeader,
+        },
+        undefined,
+        noGrant,
+      );
+      const sitesDir = join(layout.configDir, "hosting", "sites");
+      const site = await Deno.readTextFile(join(sitesDir, "env-v.caddy"));
+      const fallback = await Deno.readTextFile(
+        join(sitesDir, "00-fallback.caddy"),
+      );
+      assertEquals(fallback, hostingFallbackSnippet(true, sendViaHeader));
+      for (const text of [site, fallback]) {
+        assertEquals(/^\s*-Via$/m.test(text), sendViaHeader !== true);
+        assertEquals(/^\s*-Server$/m.test(text), true);
+        assertStringIncludes(text, "handle_errors {");
+      }
+    } finally {
+      restore();
+      await cleanup();
+    }
+  });
+}
 
 for (const hide of [true, false]) {
   test(`rewriteHostingCaddySites writes the catch-all with hide names ${hide}`, async () => {
@@ -5234,6 +5349,59 @@ test("ensureHostingFallback keeps a fallback a deploy wrote and takes the choice
       await Deno.readTextFile(join(sitesDir, "00-fallback.caddy")),
       hostingFallbackSnippet(false),
     );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("ensureHostingFallback takes the Via choice from written sites", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  const site = (choices: object) =>
+    siteSnippet({
+      hostname: "a.example.com",
+      tlsDir: layout.tlsDir,
+      tlsMode: "acme",
+      upstream: { kind: "traefik" },
+      ...choices,
+    });
+  // What a build before the Via switch wrote for hidden names.
+  const olderHidden = `b.example.com {
+  header {
+    -Server
+    -Via
+    -X-Powered-By
+    defer
+  }
+  reverse_proxy 127.0.0.1:80
+}
+`;
+  const cases: [string[], boolean, boolean][] = [
+    [[site({ hideWebServerNames: true, sendViaHeader: true })], true, true],
+    [[site({ hideWebServerNames: false, sendViaHeader: false })], false, false],
+    [[site({ sendViaHeader: true })], false, true],
+    [[olderHidden], true, false],
+    [[site({}), olderHidden], true, false],
+  ];
+  try {
+    const hostingDir = await startedHostingHost(layout);
+    const sitesDir = join(hostingDir, "sites");
+    for (const [texts, hide, via] of cases) {
+      for (const entry of Deno.readDirSync(sitesDir)) {
+        await Deno.remove(join(sitesDir, entry.name));
+      }
+      await Deno.writeTextFile(join(hostingDir, "Caddyfile"), "# old\n");
+      for (const [i, text] of texts.entries()) {
+        await Deno.writeTextFile(join(sitesDir, `env-${i}.caddy`), text);
+      }
+      assertEquals(await ensureHostingFallback(layout, noGrant), true);
+      assertEquals(
+        await Deno.readTextFile(join(sitesDir, "00-fallback.caddy")),
+        hostingFallbackSnippet(hide, via),
+        JSON.stringify({ hide, via }),
+      );
+    }
   } finally {
     restore();
     await cleanup();

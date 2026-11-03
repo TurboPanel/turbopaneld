@@ -1986,10 +1986,16 @@ export type SiteSnippetOptions = Readonly<{
    */
   redirectTo?: string;
   /**
-   * Strip `Server`, `Via` and `X-Powered-By` from every response (Caddy's own
-   * and whatever the upstream sent), so nothing names the web server.
+   * Strip `Server` and `X-Powered-By` from every response (Caddy's own and
+   * whatever the upstream sent), so nothing names the web server.
    */
   hideWebServerNames?: boolean;
+  /**
+   * Keep Caddy's `Via: 1.1 Caddy` on proxied responses. False strips it.
+   * Absent follows `hideWebServerNames` (Via goes when names are hidden), which
+   * is what an older control plane always got.
+   */
+  sendViaHeader?: boolean;
   /**
    * The folder of per-host proof handlers (`proofDir()`). When set, the plain
    * HTTP block imports that host's handler (a glob, so a missing file is a
@@ -2000,18 +2006,61 @@ export type SiteSnippetOptions = Readonly<{
   proofDir?: string;
 }>;
 
+/** The two response-header choices of the hosting web server. */
+type HostingHeaderChoices = Readonly<{
+  hideWebServerNames?: boolean;
+  sendViaHeader?: boolean;
+}>;
+
 /**
+ * Whether `Via` is stripped: an explicit choice wins; absent follows the
+ * hide-names choice, so an older control plane changes nothing.
+ */
+function stripsVia(choices: HostingHeaderChoices): boolean {
+  if (choices.sendViaHeader === undefined) {
+    return choices.hideWebServerNames === true;
+  }
+  return choices.sendViaHeader !== true;
+}
+
+/** The response headers to delete, in the order the block lists them. */
+function deletedHeaders(choices: HostingHeaderChoices): string[] {
+  const hide = choices.hideWebServerNames === true;
+  return [
+    ...(hide ? ["Server"] : []),
+    ...(stripsVia(choices) ? ["Via"] : []),
+    ...(hide ? ["X-Powered-By"] : []),
+  ];
+}
+
+/** A deferred `header` block deleting `names`, at `indent`. */
+function headerDeletionBlock(names: readonly string[], indent: string): string {
+  const lines = names.map((name) => `${indent}  -${name}\n`).join("");
+  return `${indent}header {\n${lines}${indent}  defer\n${indent}}\n`;
+}
+
+/**
+ * The header removal a hosting site block carries, or "" when nothing goes.
+ *
  * `defer` runs the removal when the response headers are written, after the
  * reverse proxy has copied the upstream's headers in; without it the upstream's
- * `Server` and Caddy's own `Via` would survive.
+ * `Server` and Caddy's own `Via` would survive. Caddy's own error responses (a
+ * 502 when the upstream is down, for one) skip that block, so `handle_errors`
+ * repeats it; it writes nothing itself, so the status and the empty body stay
+ * as Caddy sends them.
  */
-const HIDE_WEB_SERVER_NAMES_BLOCK = `  header {
-    -Server
-    -Via
-    -X-Powered-By
-    defer
-  }
+function headerDeletions(choices: HostingHeaderChoices): string {
+  const names = deletedHeaders(choices);
+  if (names.length === 0) return "";
+  return `${headerDeletionBlock(names, "  ")}  handle_errors {
+${headerDeletionBlock(names, "    ")}  }
 `;
+}
+
+/** A deletion line for `name` anywhere in a written site file. */
+function deletesHeader(text: string, name: string): boolean {
+  return new RegExp(`^\\s*-${name}$`, "m").test(text);
+}
 
 /**
  * The hosting web server's answer for a name nobody hosts, on :80 and :443.
@@ -2024,13 +2073,14 @@ const HIDE_WEB_SERVER_NAMES_BLOCK = `  header {
  * different listener and is not affected.
  *
  * This one file is shared by every environment on the server: each hosting
- * deploy rewrites it, so the hide-names choice in force is that of whichever
- * environment deployed last.
+ * deploy rewrites it, so the hide-names and Via choices in force are those of
+ * whichever environment deployed last.
  */
 export function hostingFallbackSnippet(
   hideWebServerNames: boolean | undefined,
+  sendViaHeader?: boolean,
 ): string {
-  const hide = hideWebServerNames ? HIDE_WEB_SERVER_NAMES_BLOCK : "";
+  const hide = headerDeletions({ hideWebServerNames, sendViaHeader });
   return `# Names nobody hosts. Rewritten on every deploy.
 http:// {
 ${hide}  respond "" 200
@@ -2050,10 +2100,10 @@ ${hide}  respond "" 200
 /** The bind line plus, when asked, the header removal that follows it. */
 function siteBlockPreamble(
   bindAddress: string | readonly string[] | undefined,
-  hideWebServerNames: boolean | undefined,
+  choices: HostingHeaderChoices,
 ): string {
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
-  return hideWebServerNames ? bindLine + HIDE_WEB_SERVER_NAMES_BLOCK : bindLine;
+  return bindLine + headerDeletions(choices);
 }
 
 /** The import line for a host's proof handler, or "" when the block takes none. */
@@ -2081,7 +2131,7 @@ function redirectSiteSnippet(options: SiteSnippetOptions): string {
   const target = safeConfigToken("hostings[].www", options.redirectTo!);
   const tlsDirective = hostingTlsDirective(tlsMode, tlsId, tlsDir);
   const tlsLine = tlsDirective ? `${tlsDirective}\n` : "";
-  const bindLine = siteBlockPreamble(bindAddress, options.hideWebServerNames);
+  const bindLine = siteBlockPreamble(bindAddress, options);
   // Both schemes land on the scheme the target actually serves: HTTPS in one
   // hop normally, plain HTTP when the target has forced HTTPS off (it then has
   // no HTTPS site to land on).
@@ -2135,7 +2185,6 @@ export function siteSnippet(options: SiteSnippetOptions): string {
     upstream = DEFAULT_TRAEFIK_UPSTREAM,
     routes,
     tlsMode,
-    hideWebServerNames,
     tunnel,
   } = options;
   const effectiveRoutes: CaddySiteRoute[] = routes?.length
@@ -2152,7 +2201,7 @@ export function siteSnippet(options: SiteSnippetOptions): string {
   );
   const bindLine = siteBlockPreamble(
     tunnelBindAddresses(bindAddress, tunnel),
-    hideWebServerNames,
+    options,
   );
   // The connector speaks HTTPS to localhost, so a tunnel name always has an
   // HTTPS site; a locked one has no HTTP site at all (the catch-all answers
@@ -3089,25 +3138,30 @@ async function guardHostingCaddySitesLocked(
 }
 
 /**
- * The hide-names choice to give the catch-all when no deploy has sent one: the
- * answer already on disk wins, then what the written sites say (any of them
- * hides names: yes; sites without it: no), and an unknown answer hides names,
- * which is the organization default.
+ * The header choices to give the catch-all when no deploy has sent them: the
+ * answer already on disk wins, then what the written sites say. Names: any
+ * site hides them, yes; sites without it, no. Via: kept only when no site
+ * strips it. An unknown answer hides names and strips Via, the organization
+ * defaults.
  */
-async function lastKnownHideWebServerNames(
+async function lastKnownHeaderChoices(
   sitesDir: string,
   names: readonly string[],
-): Promise<boolean> {
+): Promise<HostingHeaderChoices> {
+  const unknown = { hideWebServerNames: true, sendViaHeader: false };
   const sites = names.filter((name) => !isDaemonReservedHostingSite(name));
-  if (sites.length === 0) return true;
+  if (sites.length === 0) return unknown;
   const texts = await Promise.all(
     sites.map((name) =>
       readTextIfPresent(join(sitesDir, name)).catch(() => undefined)
     ),
   );
   const readable = texts.filter((text) => text !== undefined);
-  if (readable.length === 0) return true;
-  return readable.some((text) => text.includes(HIDE_WEB_SERVER_NAMES_BLOCK));
+  if (readable.length === 0) return unknown;
+  return {
+    hideWebServerNames: readable.some((text) => deletesHeader(text, "Server")),
+    sendViaHeader: readable.every((text) => !deletesHeader(text, "Via")),
+  };
 }
 
 /**
@@ -3159,8 +3213,14 @@ async function ensureHostingFallbackLocked(
   if (liveFallback !== undefined && liveCaddyfile === wantCaddyfile) {
     return false;
   }
-  const fallback = liveFallback ??
-    hostingFallbackSnippet(await lastKnownHideWebServerNames(sitesDir, names));
+  let fallback = liveFallback;
+  if (fallback === undefined) {
+    const known = await lastKnownHeaderChoices(sitesDir, names);
+    fallback = hostingFallbackSnippet(
+      known.hideWebServerNames,
+      known.sendViaHeader,
+    );
+  }
 
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
@@ -3402,6 +3462,7 @@ async function rewriteHostingCaddySitesLocked(
         tlsMode: site.tlsMode,
         redirectTo: site.redirectTo,
         hideWebServerNames: payload.hideWebServerNames === true,
+        sendViaHeader: payload.sendViaHeader,
         tunnel: site.tunnel,
         proofDir: proofDir(layout),
       });
@@ -3410,6 +3471,7 @@ async function rewriteHostingCaddySitesLocked(
   const siteFile = `${payload.environmentId}.caddy`;
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
+    payload.sendViaHeader,
   );
   // Tunnel names that run on other servers have forward blocks in a reserved
   // file. Which names run here just changed, so that file is re-rendered with
