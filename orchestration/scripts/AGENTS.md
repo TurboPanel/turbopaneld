@@ -18,8 +18,26 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
 - **tp-host** — every root host command the daemon issues goes
   `sudo -n -- <install>/lib/tp-host <verb> …`: every `sudo -n <cmd>` call site
   passes its argv through `hostSudoArgs` (`src/permissions/host-sudo.ts`),
-  which rewrites a tp-host verb on a managed install and leaves development,
-  root, `-u` re-execs, tp-orchestrate and engine tests alone;
+  which rewrites a tp-host verb on a managed install and leaves root on a
+  managed install, `-u` re-execs, tp-orchestrate and engine tests alone. The
+  verbs are split in two: `HOST_PROGRAM_VERBS` (real programs: `install`,
+  `systemctl`, `iptables`, `useradd`, …) run directly in development, and
+  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `publish`,
+  `cert-dates`, …, which no host program provides) run in development through
+  the checkout's own `<checkout>/orchestration/scripts/tp-host` with sudo and
+  every check it applies on a managed host. `tp_dir_sealed_at` stays
+  root-only everywhere (publish chain, staging, home parents). One exception,
+  for the co-located layout that keeps `/etc/turbopanel` dev-owned
+  (`daemon-seal`): `tp_appenv_enter` (the `node-app-env` / `tunnel-env`
+  folders) also accepts a parent that is exactly the config root (physical
+  path), owned by the running tp-host's owner, that owner not root, the parent
+  not group- or world-writable, and the script owner-writable
+  (`tp_config_root_self_sealed` / `tp_self_sealed_ok`; anything else fails
+  closed). Unprivileged tests can only exercise that rule lifted from the
+  script, since it needs a directory owned by a uid other than the stand-in
+  root. Verbs
+  that use `INSTALL_ROOT` (`$_self_dir/..`: `lib/`, `vendor/lsphp`) still
+  assume the installed layout.
   `host-sudo.test.ts` fails on any unwrapped `sudo -n <verb>` literal in `src/`.
   tp-host accepts only the argument shapes the daemon produces and:
   - confines paths to the trees TurboPanel owns (`/etc/turbopanel`,

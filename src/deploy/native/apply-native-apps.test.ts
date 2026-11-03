@@ -41,6 +41,7 @@ import {
   principalSliceContent,
   principalSlicePath,
 } from "./unit.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test} — Sonar typescript:S2187 only
@@ -116,7 +117,8 @@ function createRunMock(layout?: LayoutPaths): RunMock {
   const calls: Array<{ command: string; args: string[] }> = [];
   const activeUnits = new Set<string>();
   const envCopies = new Map<string, string>();
-  const run: RunFn = async (command, args) => {
+  const run: RunFn = async (command, given) => {
+    const args = bareSudoArgs(given);
     calls.push({ command, args: [...args] });
     if (command !== "sudo") return ok();
 

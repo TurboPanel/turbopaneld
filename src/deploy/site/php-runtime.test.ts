@@ -35,6 +35,7 @@ import {
   type SitePhpRuntimeFiles,
   type SitePhpRuntimeIo,
 } from "./php-runtime-apply.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -338,7 +339,7 @@ test("boot reconcile starts only what is down: the socket for FastCGI, the maste
   const io: SitePhpRuntimeIo = {
     unitDir: "/units",
     run: (_command, args) => {
-      const argv = args.slice(1);
+      const argv = bareSudoArgs(args).slice(1);
       calls.push(argv.join(" "));
       if (argv[0] === "ls" && argv.at(-1) !== "/units") {
         return Promise.resolve({
@@ -484,7 +485,7 @@ function orphanIo(opts: {
     calls,
     unitDir: "/units",
     run: (_command, args) => {
-      const argv = args.slice(1);
+      const argv = bareSudoArgs(args).slice(1);
       calls.push(argv.join(" "));
       const path = argv.at(-1) ?? "";
       const answer = (success: boolean, stdout = "", stderr = "") =>
@@ -593,7 +594,7 @@ function installIo(fails: (argv: string[]) => boolean) {
     unitDir: "/units",
     sleep: () => Promise.resolve(),
     run: (_command, args) => {
-      const argv = args.slice(1);
+      const argv = bareSudoArgs(args).slice(1);
       calls.push(argv.join(" "));
       // `cmp` failing means "the file differs", so everything gets written.
       const success = argv[0] !== "cmp" && !fails(argv);

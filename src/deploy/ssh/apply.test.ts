@@ -18,6 +18,7 @@ import {
   sshdConfigIncludesDropIns,
   sshdDropInContent,
 } from "./sshd-config.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -144,7 +145,8 @@ async function makeHost(
     cleanup: () => Deno.remove(root, { recursive: true }),
   };
 
-  host.run = async (command, args) => {
+  host.run = async (command, given) => {
+    const args = bareSudoArgs(given);
     host.calls.push({ command, args: [...args] });
     if (command === "getent" && args[0] === "group") {
       const line = host.groups.get(args[1]);

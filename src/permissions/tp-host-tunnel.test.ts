@@ -481,3 +481,82 @@ test("tp-host and the daemon agree on the token and port limits", async () => {
   assert(TUNNEL_TOKEN_RE.test("a".repeat(2048)));
   assert(!TUNNEL_TOKEN_RE.test("a".repeat(2049)));
 });
+
+/**
+ * Runs tp-host's own `tp_self_sealed_ok`, lifted from the script, with the
+ * owner and mode facts set by hand. The case it admits (a config root owned by
+ * a non-root script owner) needs a directory owned by another uid than the
+ * stand-in root, which an unprivileged test cannot create, so the rule is
+ * exercised here directly and the verb only as root.
+ */
+async function selfSealed(
+  facts: {
+    real?: string;
+    owner?: string;
+    mode?: string;
+    selfUid?: string;
+    selfMode?: string;
+    rootUid?: string;
+  },
+): Promise<boolean> {
+  const script = await Deno.readTextFile(TP_HOST_SCRIPT);
+  const start = script.indexOf("tp_self_sealed_ok() {");
+  const body = script.slice(start, script.indexOf("\n}\n", start) + 3);
+  const out = await new Deno.Command("sh", {
+    args: [
+      "-c",
+      `${body}\nR_CONFIG=/etc/turbopanel\nSELF_UID="$1"\nSELF_MODE="$2"\nROOT_UID="$3"\ntp_self_sealed_ok "$4" "$5" "$6"`,
+      "sh",
+      facts.selfUid ?? "1000",
+      facts.selfMode ?? "775",
+      facts.rootUid ?? "0",
+      facts.real ?? "/etc/turbopanel",
+      facts.owner ?? "1000",
+      facts.mode ?? "750",
+    ],
+  }).output();
+  return out.success;
+}
+
+test("a config root owned by the checkout's tp-host owner counts as sealed for the token folder", async () => {
+  assertEquals(await selfSealed({}), true);
+  assertEquals(await selfSealed({ selfMode: "4755" }), true);
+  assertEquals(await selfSealed({ mode: "700" }), true);
+});
+
+test("the checkout-owner rule fails closed on every other shape", async () => {
+  for (
+    const facts of [
+      { real: "/etc/turbopanel/x" },
+      { real: "/var/lib/turbopanel" },
+      { real: "/srv/users" },
+      { owner: "1001" },
+      { selfUid: "0", owner: "0" },
+      { selfUid: "", owner: "" },
+      { selfUid: "x" },
+      { mode: "770" },
+      { mode: "752" },
+      { mode: "1777" },
+      { mode: "" },
+      { selfMode: "555" },
+      { selfMode: "4555" },
+      { selfMode: "" },
+      { selfMode: "75" },
+    ]
+  ) {
+    assertEquals(await selfSealed(facts), false, JSON.stringify(facts));
+  }
+});
+
+test("only the token and variables folders' parent may use the checkout-owner rule", async () => {
+  const script = await Deno.readTextFile(TP_HOST_SCRIPT);
+  const uses = [...script.matchAll(/tp_config_root_self_sealed \.\./g)];
+  assertEquals(uses.length, 1);
+  const enter = script.slice(script.indexOf("tp_appenv_enter() {"));
+  assertStringIncludes(
+    enter.slice(0, enter.indexOf("\n}\n")),
+    "tp_dir_sealed_at .. || tp_config_root_self_sealed ..",
+  );
+  const sealed = script.slice(script.indexOf("tp_dir_sealed_at() {"));
+  assert(!sealed.slice(0, sealed.indexOf("\n}\n")).includes("SELF_UID"));
+});
