@@ -1161,6 +1161,17 @@ function instanceManifestBody(): string {
   return SIGNED_INSTANCE_MANIFEST_BODY;
 }
 
+/** The markers caddyNeedsRefresh looks for in a current Caddyfile. */
+const CURRENT_CADDYFILE = [
+  "handle_errors {",
+  "        header -Server",
+  "updating.html",
+  "@ui_hashed path",
+  "        -Server",
+  "        -Via",
+  "",
+].join("\n");
+
 function managedUpdateHooks(
   calls: Array<{ bin: string; args: string[] }>,
   overrides: Partial<InstanceUpdateHooks> = {},
@@ -1172,8 +1183,7 @@ function managedUpdateHooks(
     statfsProbe: PLENTY_STATFS,
     fetchText: () =>
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
-    readCaddyfile: () =>
-      Promise.resolve("handle_errors\nupdating.html\n@ui_hashed path\n"),
+    readCaddyfile: () => Promise.resolve(CURRENT_CADDYFILE),
     restartUnits: () => Promise.resolve(true),
     ensureWebServer: () => Promise.resolve(true),
     migrate: () =>
@@ -1586,6 +1596,35 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the UI cache rules are
   });
   const names = calls.map((call) => call.args.at(-1));
   assertEquals(names.includes("instance-launch-only.yml"), true);
+});
+
+test("executeInstanceUpdateReconcile refreshes Caddy when the Server and Via deletions are absent", async () => {
+  for (
+    const stale of [
+      CURRENT_CADDYFILE.replace("        -Via\n", ""),
+      CURRENT_CADDYFILE.replace("        header -Server\n", ""),
+    ]
+  ) {
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    await executeInstanceUpdateReconcile({
+      channel: "release",
+      hooks: managedUpdateHooks(calls, {
+        readCaddyfile: () => Promise.resolve(stale),
+      }),
+    });
+    const names = calls.map((call) => call.args.at(-1));
+    assertEquals(names.includes("instance-launch-only.yml"), true);
+  }
+});
+
+test("executeInstanceUpdateReconcile leaves a current Caddyfile alone", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  assertEquals(names.includes("instance-launch-only.yml"), false);
 });
 
 test("executeInstanceUpdateReconcile refreshes the broker config once, after the new build is healthy", async () => {

@@ -125,6 +125,9 @@
 - name: Cache hashed UI bundles and revalidate the page in the installed Caddyfile
   ansible.builtin.import_tasks: caddyfile-ui-cache.yml
 
+- name: Stop the installed Caddyfile naming the proxy in response headers
+  ansible.builtin.import_tasks: caddyfile-server-headers.yml
+
 - name: Install the control-plane updating page
   when: turbopanel_dev_user | default('') | length == 0
   ansible.builtin.template:
