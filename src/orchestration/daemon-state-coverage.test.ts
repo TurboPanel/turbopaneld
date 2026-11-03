@@ -58,6 +58,10 @@ const EXEMPT: Record<string, string> = {
   // user (2770) and daemon-layout leaves it alone.
   "state/metrics":
     "conditional leaf (daemon-only) / instance-launch (co-located)",
+  // Development installs only (src/dev-host/): there the state root belongs to
+  // the dev user and is never sealed; a managed host never creates it.
+  "state/dev-updates":
+    "development only (dev-host): dev-user owned state root, never sealed",
   // Written by the root guard script, only read or removed by the daemon.
   "state/firewall-rollback.json": "written by the root guard",
 };

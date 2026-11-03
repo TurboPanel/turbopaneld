@@ -2042,6 +2042,15 @@ const SITES: CallSite[] = [
     // finish (see restart-daemon-service.ts for why).
     { argv: ["systemctl", "restart", "--no-block", "turbopaneld.service"] },
   ),
+  // Development host restarts (src/dev-host/): the four development units.
+  // In development `systemctl` is a host program verb, so this runs as given.
+  tpHost(
+    'src/dev-host/job.ts|["-n","systemctl","restart","--no-block",unit]',
+    { argv: ["systemctl", "restart", "--no-block", "turbopanel-instance"] },
+    { argv: ["systemctl", "restart", "--no-block", "turbopanel-ui"] },
+    { argv: ["systemctl", "restart", "--no-block", "turbopanel-website"] },
+    { argv: ["systemctl", "restart", "--no-block", "turbopaneld"] },
+  ),
   tpHost(
     "src/instance/run-reconcile.ts|args",
     { argv: ["systemctl", "restart", "turbopanel-instance.service"] },

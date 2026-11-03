@@ -201,6 +201,7 @@ import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   BACKUP_S3_COPY_FEATURE,
+  DEV_HOST_FEATURE,
   FABRIC_PEER_REPORT_FEATURE,
   HOST_CAPACITY_FEATURE,
   MANAGED_HA_BOOT_HOLD_FEATURE,
@@ -211,11 +212,13 @@ import {
   TLS_CAPTURE_FEATURE,
 } from "./version-wire.ts";
 import { TopologyReporter } from "./topology-reporter.ts";
+import { answerDevHostAction, type DevHostPort } from "../dev-host/wire.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import type {
   CommandRecoveryReport,
   DaemonMessage,
+  DevHostActionMessage,
   InstanceHostnameWireEntry,
   UpdateProgressStage,
 } from "../contracts/cell-messages.ts";
@@ -336,6 +339,12 @@ export interface InstanceClientOptions {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /**
+   * The co-located development host (`dev-host-v1`). Only a development
+   * install with `TURBOPANEL_DEV_INSTANCE=1` supplies one; without it a
+   * `dev-host-action` is answered `not_development`.
+   */
+  devHost?: DevHostPort;
 }
 
 export const DEFAULT_INITIAL_BACKOFF_MS = 2_000;
@@ -636,6 +645,7 @@ export class InstanceClient {
   readonly #handleCommandDispatch?: CommandDispatchHandler;
   readonly #handleFabricPathProbe?: FabricPathProbeHandler;
   readonly #handleDrivetempEnable?: DrivetempEnableHandler;
+  readonly #devHost?: DevHostPort;
   #updateInstallInProgress = false;
   #instanceUpdateInProgress = false;
   #pendingInstanceUpdateResult: DaemonMessage | null = null;
@@ -672,6 +682,7 @@ export class InstanceClient {
     this.#handleCommandDispatch = options.handleCommandDispatch;
     this.#handleFabricPathProbe = options.handleFabricPathProbe;
     this.#handleDrivetempEnable = options.handleDrivetempEnable;
+    this.#devHost = options.devHost;
   }
 
   get config(): InstanceConfig {
@@ -922,6 +933,7 @@ export class InstanceClient {
     setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
     // A change kept for an older control plane goes out once this one lists the feature.
     void this.#repoKeyReporter?.flush();
+    this.#devHost?.peerFeaturesChanged();
   }
 
   /** Hooks every `DaemonApiClient` this client builds gets: version notes and, when pinned, signed answers. */
@@ -1162,6 +1174,7 @@ export class InstanceClient {
     this.#managedHealthReporter?.detach();
     this.#fabricPeerReporter?.detach();
     this.#repoKeyReporter?.detach();
+    this.#devHost?.detach();
     this.#haObserver = undefined;
     this.#backupReporter?.detach();
     this.#backupReporter = undefined;
@@ -1722,6 +1735,14 @@ export class InstanceClient {
     this.#ensureManagedHealthReporter().attach();
     this.#ensureFabricPeerReporter().attach();
     this.#ensureRepoKeyReporter().attach();
+    this.#devHost?.attach({
+      send: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
+      peerSupports: () => this.instanceSupports(DEV_HOST_FEATURE),
+    });
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
@@ -1907,6 +1928,7 @@ export class InstanceClient {
       this.#mysqlFamilySampler?.detach();
       this.#managedHealthReporter?.detach();
       this.#fabricPeerReporter?.detach();
+      this.#devHost?.detach();
       this.#backupReporter?.detach();
       this.#backupCopier?.stop();
       this.#backupCopyReporter?.detach();
@@ -2282,6 +2304,10 @@ export class InstanceClient {
     // The control plane answers the daemon's wire ping with `{type:"pong"}`
     // (a Workers auto-response); it carries nothing to act on.
     if ((message as { type?: unknown }).type === "pong") return;
+    if (message.type === "dev-host-action") {
+      void this.#answerDevHostActionAsync(message, ws);
+      return;
+    }
     switch (message.type) {
       case "version":
         // `commit` / `branch` stay informational — the daemon never
@@ -2290,6 +2316,7 @@ export class InstanceClient {
         // the last observation so a downgrade or pre-field control plane
         // resolves to unknown.
         this.#noteInstanceVersion(message.instanceVersion);
+        this.#devHost?.setControlPlaneCommit(message.commit);
         this.#notePeerFeatures(message.features);
         this.#applyAdvisedHeartbeat(message.heartbeatSeconds);
         logInfo(
@@ -3453,6 +3480,17 @@ export class InstanceClient {
     };
 
     if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(result));
+    }
+  }
+
+  async #answerDevHostActionAsync(
+    message: DevHostActionMessage,
+    ws: WebSocket,
+  ): Promise<void> {
+    // Never throws; a malformed frame gets no answer.
+    const result = await answerDevHostAction(this.#devHost, message);
+    if (result && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(result));
     }
   }
