@@ -2063,7 +2063,7 @@ ${headerDeletionBlock(names, "    ")}  }
 
 /** A deletion line for `name` anywhere in a written site file. */
 function deletesHeader(text: string, name: string): boolean {
-  return new RegExp(`^\\s*-${name}$`, "m").test(text);
+  return text.split("\n").some((line) => line.trim() === `-${name}`);
 }
 
 /**
