@@ -1272,9 +1272,10 @@ async function defaultReadCaddyfile(): Promise<string | null> {
  */
 function caddyNeedsRefresh(text: string | null): boolean {
   if (!text) return true;
+  const lines = new Set(text.split("\n").map((line) => line.trim()));
   return !text.includes("handle_errors") || !text.includes("updating.html") ||
-    !text.includes("@ui_hashed") || !/^\s*-Via\s*$/m.test(text) ||
-    !/^\s*header -Server\s*$/m.test(text);
+    !text.includes("@ui_hashed") || !lines.has("-Via") ||
+    !lines.has("header -Server");
 }
 
 /** The plain fact first: what did not happen, and for how long we waited. */

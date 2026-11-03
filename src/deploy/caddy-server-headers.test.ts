@@ -39,7 +39,7 @@ function withoutDeletions(text: string): string {
   const older = text
     .replace(HEADER_DELETIONS, "")
     .replace(ERRORS_DELETION, "");
-  assert(!/^\s*-Via\s*$/m.test(older) && !older.includes("-Server"), older);
+  assert(!older.includes("-Via") && !older.includes("-Server"), older);
   return older;
 }
 
