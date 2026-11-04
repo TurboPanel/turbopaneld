@@ -562,10 +562,15 @@ export async function staleUploadedCertFiles(
       }
     }
   } catch (err) {
-    if (
-      err instanceof Deno.errors.NotFound ||
-      err instanceof Deno.errors.PermissionDenied
-    ) return [];
+    if (err instanceof Deno.errors.NotFound) return [];
+    if (err instanceof Deno.errors.PermissionDenied) {
+      logWarn(
+        "public-urls",
+        `cannot list ${certsDir} to find unused uploaded certificates:`,
+        err.message,
+      );
+      return [];
+    }
     throw err;
   }
   return stale.sort((a, b) => a.localeCompare(b));
@@ -696,22 +701,47 @@ export async function runInstanceCertsApply(
   await runPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
 }
 
+/** Seams for {@link applyPublicUrls}; each defaults to the real step. */
+export type ApplyPublicUrlsDeps = {
+  runCertsApply?: typeof runInstanceCertsApply;
+  runPlaybook?: typeof runLocalPlaybook;
+  readForwardHosts?: () => string;
+  instanceAcme?: InstanceAcmeWireSettings;
+  edgeTrust?: InstanceEdgeTrustWire;
+  writeUploadedCerts?: typeof writeUploadedInstanceCerts;
+  pruneUploadedCerts?: typeof pruneUploadedInstanceCerts;
+  openWindow?: typeof openInstanceAcmeWindow;
+  preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
+  issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
+  closeWindow?: typeof closeInstanceAcmeWindow;
+  withLock?: typeof withInstanceAcmeWindowLock;
+};
+
 export async function applyPublicUrls(
   hostnames: readonly InstanceHostnameApplyEntry[],
-  deps: {
-    runCertsApply?: typeof runInstanceCertsApply;
-    runPlaybook?: typeof runLocalPlaybook;
-    readForwardHosts?: () => string;
-    instanceAcme?: InstanceAcmeWireSettings;
-    edgeTrust?: InstanceEdgeTrustWire;
-    writeUploadedCerts?: typeof writeUploadedInstanceCerts;
-    pruneUploadedCerts?: typeof pruneUploadedInstanceCerts;
-    openWindow?: typeof openInstanceAcmeWindow;
-    preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
-    issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
-    closeWindow?: typeof closeInstanceAcmeWindow;
-    withLock?: typeof withInstanceAcmeWindowLock;
-  } = {},
+  deps: ApplyPublicUrlsDeps = {},
+): Promise<void> {
+  return await serialPublicUrlsApply(() => applyPublicUrlsNow(hostnames, deps));
+}
+
+/**
+ * The tail of the apply queue. Every `public-urls-update` starts its own
+ * handler, so two applies could otherwise overlap: one rendering a config that
+ * names a certificate while the other's prune removes it. Each apply (install,
+ * playbook, prune) runs only after the one before it has finished, so the
+ * prune that runs last is the one of the apply that finished last.
+ */
+let publicUrlsApplyTail: Promise<unknown> = Promise.resolve();
+
+function serialPublicUrlsApply<T>(fn: () => Promise<T>): Promise<T> {
+  const run = publicUrlsApplyTail.then(fn, fn);
+  publicUrlsApplyTail = run.catch(() => undefined);
+  return run;
+}
+
+async function applyPublicUrlsNow(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  deps: ApplyPublicUrlsDeps,
 ): Promise<void> {
   const instanceDir = resolveInstanceDir();
   const layout = resolveLayout(Deno.env.toObject());

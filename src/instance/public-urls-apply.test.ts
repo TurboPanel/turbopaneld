@@ -1330,3 +1330,93 @@ test("applyPublicUrls prunes after the certs apply, with the hostnames and certs
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("overlapping applies run one after the other, so the last prune is the last apply's", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-apply-urls-" });
+  const saved = {
+    config: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    instance: Deno.env.get("TURBOPANEL_INSTANCE_DIR"),
+  };
+  Deno.env.set("TURBOPANEL_INSTANCE_DIR", join(root, "instance-src"));
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", root);
+  try {
+    await Deno.mkdir(join(root, "instance"), { recursive: true });
+    const order: string[] = [];
+    const pruned: string[][] = [];
+    const firstPlaybook = Promise.withResolvers<void>();
+    const firstStarted = Promise.withResolvers<void>();
+    const deps = (name: string, playbook: () => Promise<void>) => ({
+      writeUploadedCerts: () => {
+        order.push(`${name} write`);
+        return Promise.resolve();
+      },
+      runCertsApply: async () => {
+        order.push(`${name} apply`);
+        await playbook();
+      },
+      pruneUploadedCerts: (seen: readonly { uploadedCertId?: string }[]) => {
+        order.push(`${name} prune`);
+        pruned.push(seen.map((entry) => entry.uploadedCertId ?? ""));
+        return Promise.resolve();
+      },
+    });
+    // A carries the old certificate, B the renewed one; A's playbook is
+    // still running when B arrives.
+    const first = applyPublicUrls(
+      [uploadedRow("https://a.example", RETIRED_ID)],
+      deps("A", () => {
+        firstStarted.resolve();
+        return firstPlaybook.promise;
+      }),
+    );
+    await firstStarted.promise;
+    const second = applyPublicUrls(
+      [uploadedRow("https://a.example", CERT_ID)],
+      deps("B", () => Promise.resolve()),
+    );
+    // B waits: nothing of it has started while A's playbook runs.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assertEquals(order, ["A write", "A apply"]);
+    firstPlaybook.resolve();
+    await Promise.all([first, second]);
+    assertEquals(order, [
+      "A write",
+      "A apply",
+      "A prune",
+      "B write",
+      "B apply",
+      "B prune",
+    ]);
+    assertEquals(pruned.at(-1), [CERT_ID]);
+    // A failed apply does not block the next one.
+    order.length = 0;
+    await assertRejects(() =>
+      applyPublicUrls(
+        [uploadedRow("https://a.example", CERT_ID)],
+        deps("C", () => Promise.reject(new Error("caddy refused"))),
+      )
+    );
+    await applyPublicUrls(
+      [uploadedRow("https://a.example", CERT_ID)],
+      deps("D", () => Promise.resolve()),
+    );
+    assertEquals(order, [
+      "C write",
+      "C apply",
+      "D write",
+      "D apply",
+      "D prune",
+    ]);
+  } finally {
+    for (
+      const [name, value] of [
+        ["TURBOPANEL_CONFIG_DIR", saved.config],
+        ["TURBOPANEL_INSTANCE_DIR", saved.instance],
+      ] as const
+    ) {
+      if (value === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, value);
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+});

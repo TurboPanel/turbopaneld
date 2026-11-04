@@ -389,7 +389,9 @@ after a successful apply the daemon removes the pairs of ids no hostname uses
 is there runs `tp-host instance-cert-prune <ids in use>`; development removes
 them itself). A failed apply never prunes. `<state>/tls` (the CA folder) is
 `root:tp 0750` from both this role and `daemon-layout`; it is not a daemon
-leaf. `lets-encrypt` names are extra `:8443` sites with
+leaf, and tp-host's generic verbs name nothing in it but `instance-ca-pin` and
+`certs/letsencrypt-<host>.{crt,key}`. Applies are serialised in the daemon, so
+one apply's prune never removes a pair another apply is rendering. `lets-encrypt` names are extra `:8443` sites with
 `tls letsencrypt-<host>.{crt,key}` under `turbopanel_instance_certs_dir`,
 rendered **only when both files exist** (`letsencrypt-files.yml` stats them
 before the template). The daemon installs each certificate as `root:tp`

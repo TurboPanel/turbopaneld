@@ -116,18 +116,19 @@ export function isUnderSystemTemp(dir: string): boolean {
 export function seedSentinel(dir: string, onActions: boolean): void {
   // GitHub Actions first: there the seed step may only write the state dir,
   // so probing the temp folder would be refused.
-  if (!onActions && !isUnderSystemTemp(dir)) {
-    throw new Error(
-      `refusing to seed ${dir} outside the system temp folder when not running under GitHub Actions`,
-    );
+  if (!onActions) {
+    // `resolve` folds `..` before links are followed, so a `..` after a link
+    // could point somewhere the check never looked: no `..` at all.
+    if (dir.split("/").includes("..")) {
+      throw new Error(`refusing to seed ${dir}: a ".." in the path`);
+    }
+    if (!isUnderSystemTemp(dir)) {
+      throw new Error(
+        `refusing to seed ${dir} outside the system temp folder when not running under GitHub Actions`,
+      );
+    }
   }
   Deno.mkdirSync(dir, { recursive: true });
-  // Again now that it exists: a `..` after a link resolves only on disk.
-  if (!onActions && !isUnderSystemTemp(dir)) {
-    throw new Error(
-      `refusing to seed ${dir}: it resolves outside the system temp folder`,
-    );
-  }
   const existing = listEntries(dir);
   if (existing.length > 0 && sentinelProblems(dir).length > 0) {
     throw new Error(

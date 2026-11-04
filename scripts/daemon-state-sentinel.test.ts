@@ -139,6 +139,16 @@ test("seed refuses a temp path that is a link to a folder outside the temp folde
       await Deno.lstat(join(REPO, "never-made")).then(() => true, () => false),
       false,
     );
+    // A ".." is refused before anything is created.
+    assertThrows(
+      () => seedSentinel(`${root}/state/../x`, false),
+      Error,
+      '".." in the path',
+    );
+    assertEquals(
+      await Deno.lstat(join(root, "x")).then(() => true, () => false),
+      false,
+    );
     // A plain temp path, existing or not, is inside.
     assert(isUnderSystemTemp(root));
     assert(isUnderSystemTemp(join(root, "a", "b")));

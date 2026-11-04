@@ -509,3 +509,108 @@ test("tp-host and the daemon agree on how many ids instance-cert-prune takes", a
     `TP_INSTANCE_CERT_KEEP_MAX=${INSTANCE_CERT_KEEP_MAX}\n`,
   );
 });
+
+test("instance-cert-install renames the key into place before the chain", async () => {
+  const script = await Deno.readTextFile(TP_HOST_SCRIPT);
+  const start = script.indexOf("tp_verb_instance_cert_install() {");
+  const body = script.slice(start, script.indexOf("\n}\n", start));
+  const key = body.indexOf('mv -T -f -- ./key "../uploaded-$1.key"');
+  const crt = body.indexOf('mv -T -f -- ./crt "../uploaded-$1.crt"');
+  assert(key > 0 && crt > key, "the key is renamed in first");
+  // Both are written before either rename.
+  const writes = Math.max(
+    body.indexOf("cat > ./key"),
+    body.indexOf("cat > ./crt"),
+  );
+  assert(writes > 0 && writes < key, "both files are written before a rename");
+});
+
+const TLS_DIR = "var/lib/turbopanel/tls";
+
+test("no generic verb reaches the TLS folder but the CA pin and the Let's Encrypt pairs", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path(CERTS_DIR), { recursive: true, mode: 0o750 });
+    await Deno.chmod(host.path(CERTS_DIR), 0o750);
+    await Deno.writeTextFile(host.path("tmp/staged"), "x\n");
+    for (
+      const name of ["ca.key", "ca.crt", "certs/platform-ca.key", "certs/x"]
+    ) {
+      await Deno.writeTextFile(host.path(`${TLS_DIR}/${name}`), "x\n");
+    }
+    await Deno.writeTextFile(
+      host.path(`${CERTS_DIR}/uploaded-${ID}.key`),
+      KEY,
+    );
+    const refusedPaths = [
+      `${TLS_DIR}/ca.key`,
+      `${TLS_DIR}/ca.crt`,
+      `${TLS_DIR}/ca-bundle.pem`,
+      `${CERTS_DIR}/uploaded-${ID}.key`,
+      `${CERTS_DIR}/uploaded-${ID}.crt`,
+      `${CERTS_DIR}/platform-ca.key`,
+      `${CERTS_DIR}/letsencrypt-.key`,
+      `${CERTS_DIR}/letsencrypt-a_b.key`,
+      `${CERTS_DIR}/letsencrypt-a.pem`,
+      `${CERTS_DIR}/x`,
+    ].map((rel) => host.path(rel));
+    for (const path of refusedPaths) {
+      const staged = host.path("tmp/staged");
+      for (
+        const argv of [
+          ["install", "-m", "0640", "-o", "tp", "-g", "tp", staged, path],
+          ["rm", "-f", "--", path],
+          ["chmod", "0644", path],
+          ["chown", "tp:tp", path],
+          ["cat", "--", path],
+          ["tee", path],
+          ["cp", staged, path],
+        ]
+      ) {
+        await refused(host, argv, "x\n");
+      }
+    }
+    for (const dir of [TLS_DIR, CERTS_DIR]) {
+      await refused(host, ["rm", "-rf", "--", host.path(dir)]);
+      await refused(host, ["chown", "tp:tp", host.path(dir)]);
+      await refused(host, ["install", "-d", "-m", "0750", host.path(dir)]);
+    }
+    // Nothing was written, removed or replaced.
+    assertEquals(
+      await Deno.readTextFile(host.path(`${TLS_DIR}/ca.key`)),
+      "x\n",
+    );
+    assertEquals(
+      await Deno.readTextFile(host.path(`${CERTS_DIR}/uploaded-${ID}.key`)),
+      KEY,
+    );
+    // The daemon's own CA pin file, through writeDaemonFile's fallback.
+    const pin = host.path(`${TLS_DIR}/instance-ca-pin`);
+    const staged = host.path("tmp/staged");
+    const pinned = await host.run([
+      "install",
+      "-m",
+      "0600",
+      "-o",
+      "tp",
+      "-g",
+      "tp",
+      staged,
+      pin,
+    ]);
+    assertEquals(pinned.code, 0, pinned.stderr);
+    assertEquals(await Deno.readTextFile(pin), "x\n");
+    // A Let's Encrypt pair the daemon installs and reads back.
+    const le = host.path(`${CERTS_DIR}/letsencrypt-panel.example.com.key`);
+    for (
+      const argv of [
+        ["install", "-m", "0600", "-o", "tp", "-g", "tp", "--", staged, le],
+        ["chown", ":tp", le],
+        ["chmod", "0600", le],
+        ["cat", "--", le],
+      ]
+    ) {
+      const result = await host.run(argv);
+      assertEquals(result.code, 0, `${argv[0]}: ${result.stderr}`);
+    }
+  });
+});

@@ -1187,7 +1187,16 @@ const SITES: CallSite[] = [
       },
     },
     // No id in use: every uploaded pair goes.
-    { argv: ["instance-cert-prune"] },
+    {
+      argv: ["instance-cert-prune"],
+      setup: {
+        files: {
+          [`${INSTANCE_CERTS}/uploaded-${INSTANCE_CERT_RETIRED_ID}.crt`]:
+            INSTANCE_CERT_PEM,
+        },
+        modes: { [INSTANCE_CERTS]: 0o750 },
+      },
+    },
   ),
 
   // --- tunnel connectors ----------------------------------------------------

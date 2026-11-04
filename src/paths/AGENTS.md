@@ -50,7 +50,12 @@ folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
 is not one of them: it holds the control plane's Platform CA and the certs
 folder its Caddy reads, so `daemon-layout` and `instance-certs` both make it
 `root:tp 0750` (the developer's own in co-located development), and the
-daemon's one file there (`instance-ca-pin`) goes through `writeDaemonFile`. The few files that
+daemon's one file there (`instance-ca-pin`) goes through `writeDaemonFile`.
+tp-host's generic verbs refuse every path in it except that pin file and the
+`certs/letsencrypt-<host>.{crt,key}` pairs; uploaded pairs go only through
+`instance-cert-install` / `instance-cert-prune`. On a co-located host the
+state root is still `tp`-writable (`2770`), so there the folder's owner alone
+does not stop it being renamed. The few files that
 live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,
 the server key and key-id files, the sealing key (`sealing-key.json`) and the secrets trust mark (`trust-level`), `update-guard-disarm.json`,
 `release-link-scan.json`) go through

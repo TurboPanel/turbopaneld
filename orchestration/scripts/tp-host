@@ -208,6 +208,24 @@ tp_under() {
   return 1
 }
 
+# False for a path in <state>/tls that no generic verb may name (see
+# tp_path_class); true for every other path.
+tp_instance_tls_path_ok() {
+  case "$1" in
+    "$R_STATE"/tls/instance-ca-pin) return 0 ;;
+    "$R_INSTANCE_CERTS"/letsencrypt-*.crt|"$R_INSTANCE_CERTS"/letsencrypt-*.key)
+      _it_host="${1#"$R_INSTANCE_CERTS"/letsencrypt-}"
+      _it_host="${_it_host%.*}"
+      case "$_it_host" in
+        ''|*[!A-Za-z0-9.-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    "$R_STATE"/tls|"$R_STATE"/tls/*) return 1 ;;
+  esac
+  return 0
+}
+
 # Which managed place a path is. Prints the class, or fails.
 tp_path_class() {
   _pc="$1"
@@ -237,6 +255,12 @@ tp_path_class() {
     "$R_STATE"/hosting-caddy|"$R_STATE"/hosting-caddy/*) return 1 ;;
     "$R_STATE"/docker-gate|"$R_STATE"/docker-gate/*) return 1 ;;
   esac
+  # The control plane's TLS folder: its Platform CA (ca.key) and the certs
+  # folder its Caddy reads. Uploaded pairs reach it only through
+  # instance-cert-install and instance-cert-prune. A generic verb may name only
+  # the daemon's CA pin file and the Let's Encrypt pairs the daemon installs
+  # there (letsencrypt-<host>.crt|.key, the host as the daemon checks it).
+  tp_instance_tls_path_ok "$_pc" || return 1
   # The SFTP jail switch sits in the SSH folder beside the key files but is
   # written only by `sftp-chroot on` (after its check) and `off`.
   case "$_pc" in
@@ -693,11 +717,18 @@ tp_uuid_ok() {
   [ "${#1}" -eq 36 ] || return 1
   _uu_h='[0-9a-f]'
   _uu_4="$_uu_h$_uu_h$_uu_h$_uu_h"
+  # A bracket range follows the locale's collation; the C locale keeps
+  # [0-9a-f] to exactly those sixteen characters.
+  _uu_lc="${LC_ALL-}"
+  LC_ALL=C
+  _uu_ok=1
   # shellcheck disable=SC2254 # the expansions are the pattern
   case "$1" in
-    $_uu_4$_uu_4-$_uu_4-$_uu_4-$_uu_4-$_uu_4$_uu_4$_uu_4) return 0 ;;
+    $_uu_4$_uu_4-$_uu_4-$_uu_4-$_uu_4-$_uu_4$_uu_4$_uu_4) _uu_ok=0 ;;
   esac
-  return 1
+  LC_ALL="$_uu_lc"
+  [ -n "$_uu_lc" ] || unset LC_ALL
+  return "$_uu_ok"
 }
 
 # The folder a path below a scope names, split. REL is the path relative to the
