@@ -171,6 +171,20 @@ const TUNNEL_UNIT_B_TEXT = renderTunnelUnit({
   envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
   slot: "b",
 });
+/** A control-plane hostname's certificate pair, staged for instance-cert-install. */
+const INSTANCE_CERT_ID = "01a1a47c-5b2d-7e3f-9a4b-6c7d8e9f0a1b";
+const INSTANCE_CERT_STAGE = `${STATE}/system/instance-certs`;
+/** PEM labels built from parts, so no key header sits in the source. */
+const pemBlock = (label: string, body: string) =>
+  `-----BEGIN ${label}-----\n${body}\n-----END ${label}-----\n`;
+const INSTANCE_CERT_PEM = pemBlock(
+  "CERTIFICATE",
+  "MIIBszCCAVmgAwIBAgIUZm9yIHRlc3Rz",
+);
+const INSTANCE_KEY_PEM = pemBlock(
+  ["PRIVATE", "KEY"].join(" "),
+  "MC4CAQAwBQYDK2VwBCIEIGZvciB0ZXN0cw==",
+);
 /** The check copy of svc1: its new release, started beside the one serving. */
 const CHECK_UNIT = "turbopanel-app-svc1-new.service";
 const PROBE =
@@ -1138,6 +1152,20 @@ const SITES: CallSite[] = [
     'src/deploy/native/apply-native-apps.ts|["-n","rm","-f","--",path]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-app-svc1.service`] },
     { argv: ["rm", "-f", "--", `${UNITS}/${CHECK_UNIT}`] },
+  ),
+
+  // --- control-plane hostname certificates ---------------------------------
+  tpHost(
+    'src/instance/public-urls-apply.ts|["-n","instance-cert-install",id]',
+    {
+      argv: ["instance-cert-install", INSTANCE_CERT_ID],
+      setup: {
+        files: {
+          [`${INSTANCE_CERT_STAGE}/${INSTANCE_CERT_ID}.crt`]: INSTANCE_CERT_PEM,
+          [`${INSTANCE_CERT_STAGE}/${INSTANCE_CERT_ID}.key`]: INSTANCE_KEY_PEM,
+        },
+      },
+    },
   ),
 
   // --- tunnel connectors ----------------------------------------------------

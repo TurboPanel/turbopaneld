@@ -96,6 +96,15 @@ TP_TUNNEL_TOKEN_MAX=2048
 # a test).
 TP_TUNNEL_PORT_MIN=20300
 TP_TUNNEL_PORT_MAX=20899
+# A control-plane hostname's uploaded certificate pair: the daemon's staging
+# folder, the certs folder Caddy reads, and the size and chain-length caps
+# (INSTANCE_CERT_* in src/instance/public-urls-apply.ts; a test keeps them
+# equal). See tp_verb_instance_cert_install.
+R_INSTANCE_CERT_STAGE="$R_STATE/system/instance-certs"
+R_INSTANCE_CERTS="$R_STATE/tls/certs"
+TP_INSTANCE_CERT_MAX=65536
+TP_INSTANCE_KEY_MAX=16384
+TP_INSTANCE_CERT_BLOCKS_MAX=10
 R_UNITS="$P/etc/systemd/system"
 R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
 R_WG="$P/etc/wireguard"
@@ -1259,6 +1268,9 @@ tp_tunnel_id_ok() {
   case "$1" in
     instance|default) return 0 ;;
   esac
+  # grep matches any line, so a value with a newline is refused first.
+  [ "${#1}" -eq 36 ] || return 1
+  case "$1" in *[!0-9a-f-]*) return 1 ;; esac
   printf '%s\n' "$1" |
     LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 }
@@ -5138,22 +5150,33 @@ tp_self_sealed_ok() {
 }
 
 # Copy the daemon's staged variables file for service ID to $TP_STAGE/envsrc.
-# The inner script runs as the daemon account (the same trust the other
-# daemon-staged sources get) under a timeout, so a FIFO swapped in at the path
-# can stall neither root nor the verb.
 tp_appenv_read_staged() {
+  tp_read_staged "$1" "$1.env" "${2:-$R_CONFIG/node-apps/envs}" \
+    "${3:-$TP_APPENV_MAX}" "$TP_STAGE/envsrc" "variables file"
+}
+
+# Copy the daemon's staged file NAME in STAGE (a folder the calling account
+# owns) to OUT, refusing more than MAX bytes; ID and LABEL only name it in
+# errors. The inner script runs as the daemon account (the same trust the other
+# daemon-staged sources get) under a timeout, so a FIFO swapped in at the path
+# can stall neither root nor the verb. The file actually opened must be NAME in
+# STAGE (no link), a regular file the caller owns with exactly one link.
+tp_read_staged() {
   _ar_id="$1"
-  _ar_stage="${2:-$R_CONFIG/node-apps/envs}"
-  _ar_max="${3:-$TP_APPENV_MAX}"
+  _ar_name="$2"
+  _ar_stage="$3"
+  _ar_max="$4"
+  _ar_out="$5"
+  _ar_label="$6"
   tp_pin_dir "$_ar_stage" ||
     tp_die "no staging directory $_ar_stage"
   [ "$(stat -c '%u' .)" = "$CALLER_UID" ] ||
     tp_die "refusing $_ar_stage: not owned by the calling account"
   _ar_real="$(pwd -P)"
   tp_as "$CALLER_UID" "$CALLER_GID" timeout 10 sh -c '
-    exec 3< "./$1.env" || { echo "tp-host: cannot open the staged file" >&2; exit 1; }
+    exec 3< "./$1" || { echo "tp-host: cannot open the staged file" >&2; exit 1; }
     real="$(readlink /proc/self/fd/3)"
-    if [ "$real" != "$2/$1.env" ]; then
+    if [ "$real" != "$2/$1" ]; then
       echo "tp-host: refusing the staged file: it resolves to $real" >&2
       exit 1
     fi
@@ -5163,10 +5186,10 @@ tp_appenv_read_staged() {
       *) echo "tp-host: refusing the staged file: owner, links or type ($meta)" >&2; exit 1 ;;
     esac
     head -c "$4" <&3
-  ' sh "$_ar_id" "$_ar_real" "$CALLER_UID" "$((_ar_max + 1))" > "$TP_STAGE/envsrc" ||
-    tp_die "refusing the staged variables file for $_ar_id"
-  [ "$(wc -c < "$TP_STAGE/envsrc")" -le "$_ar_max" ] ||
-    tp_die "refusing the variables file for $_ar_id: over $_ar_max bytes"
+  ' sh "$_ar_name" "$_ar_real" "$CALLER_UID" "$((_ar_max + 1))" > "$_ar_out" ||
+    tp_die "refusing the staged $_ar_label for $_ar_id"
+  [ "$(wc -c < "$_ar_out")" -le "$_ar_max" ] ||
+    tp_die "refusing the $_ar_label for $_ar_id: over $_ar_max bytes"
 }
 
 # The file holds exactly what the daemon renders: blank lines, `#`/`;` comment
@@ -5289,6 +5312,90 @@ tp_verb_tunnel_env_remove() {
   [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
     tp_die "refusing $R_TUNNELENV: not a root-owned 0700 directory"
   rm -f -- "./$1.env"
+}
+
+# --- control-plane uploaded certificates ------------------------------------
+# A certificate pair for one of the control plane's own hostnames (uploaded by
+# an administrator, or issued by the control plane over DNS-01) reaches the
+# control-plane Caddy as <state>/tls/certs/uploaded-<id>.{crt,key}. That folder
+# is the instance-certs role's (root or the instance account, group tp, 0750),
+# so the daemon cannot write it: it stages the pair as
+# <state>/system/instance-certs/<id>.{crt,key} (0600, its own, in a 0700
+# folder it owns) and instance-cert-install checks both and places them
+# root:tp 0640 (Caddy reads them through group tp). <id> is the control
+# plane's certificate id, a UUID.
+
+tp_instance_cert_id_ok() {
+  # grep matches any line, so a value with a newline is refused first.
+  [ "${#1}" -eq 36 ] || return 1
+  case "$1" in *[!0-9A-Fa-f-]*) return 1 ;; esac
+  printf '%s\n' "$1" |
+    LC_ALL=C grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+}
+
+# FILE is PEM blocks and nothing else: each block a BEGIN line, base64 lines
+# and the matching END line, blank lines only between blocks. MODE "chain"
+# takes 1 to TP_INSTANCE_CERT_BLOCKS_MAX CERTIFICATE blocks; "key" exactly one
+# unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block.
+tp_instance_pem_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk -v mode="$2" -v maxblocks="$TP_INSTANCE_CERT_BLOCKS_MAX" '
+    function fail(msg) {
+      print "tp-host: " (mode == "key" ? "private key" : "certificate chain") ": line " NR ": " msg > "/dev/stderr"
+      bad = 1; exit 1
+    }
+    function label_ok(l) {
+      if (mode == "key") return l == "PRIVATE KEY" || l == "RSA PRIVATE KEY" || l == "EC PRIVATE KEY"
+      return l == "CERTIFICATE"
+    }
+    BEGIN { label = ""; blocks = 0 }
+    {
+      if (label == "") {
+        if ($0 == "") next
+        if ($0 !~ /^-----BEGIN [A-Z ]+-----$/) fail("not a PEM BEGIN line")
+        label = substr($0, 12, length($0) - 16)
+        if (!label_ok(label)) fail("a " label " block is not allowed here")
+        blocks++
+        lines = 0
+        next
+      }
+      if ($0 == "-----END " label "-----") {
+        if (lines == 0) fail("an empty block")
+        label = ""
+        next
+      }
+      if ($0 !~ /^[A-Za-z0-9+\/=]+$/ || length($0) > 128) fail("not a base64 line")
+      lines++
+    }
+    END {
+      if (bad) exit 1
+      if (label != "") { print "tp-host: PEM block without an END line" > "/dev/stderr"; exit 1 }
+      if (mode == "key" && blocks != 1) { print "tp-host: private key: exactly one key block is required" > "/dev/stderr"; exit 1 }
+      if (mode != "key" && (blocks < 1 || blocks > maxblocks)) { print "tp-host: certificate chain: 1 to " maxblocks " certificates are required" > "/dev/stderr"; exit 1 }
+    }
+  ' "$1"
+}
+
+tp_verb_instance_cert_install() {
+  [ $# -eq 1 ] || tp_die "instance-cert-install: takes one certificate id"
+  tp_instance_cert_id_ok "$1" || tp_die "instance-cert-install: refusing certificate id $1"
+  tp_stage_dir
+  tp_read_staged "$1" "$1.crt" "$R_INSTANCE_CERT_STAGE" "$TP_INSTANCE_CERT_MAX" \
+    "$TP_STAGE/crt" "certificate chain"
+  tp_read_staged "$1" "$1.key" "$R_INSTANCE_CERT_STAGE" "$TP_INSTANCE_KEY_MAX" \
+    "$TP_STAGE/key" "private key"
+  tp_instance_pem_ok "$TP_STAGE/crt" chain ||
+    tp_die "refusing the certificate chain for $1: not PEM certificates only"
+  tp_instance_pem_ok "$TP_STAGE/key" key ||
+    tp_die "refusing the private key for $1: not one PEM private key"
+  tp_mkdir_pinned "$R_INSTANCE_CERTS" 0750
+  case "$(stat -c '%a' .)" in
+    *[2367]?|*[2367]) tp_die "refusing $R_INSTANCE_CERTS: group- or world-writable" ;;
+  esac
+  # Both are checked before either is written. The certificate goes first: a
+  # key with no new certificate beside it is never named by the Caddyfile.
+  tp_put_file "$R_INSTANCE_CERTS/uploaded-$1.crt" 640 root "$DAEMON_ACCOUNT" < "$TP_STAGE/crt"
+  tp_put_file "$R_INSTANCE_CERTS/uploaded-$1.key" 640 root "$DAEMON_ACCOUNT" < "$TP_STAGE/key"
 }
 
 # --- panel key pin (lib/panel-identity) ---------------------------------------
@@ -5583,6 +5690,7 @@ case "$_verb" in
   app-env-remove) tp_verb_app_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  instance-cert-install) tp_verb_instance_cert_install "$@" ;;
   panel-identity-write) tp_verb_panel_identity_write "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

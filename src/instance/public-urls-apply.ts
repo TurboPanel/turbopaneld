@@ -36,11 +36,17 @@ import {
 } from "../deploy/instance-acme-failure.ts";
 import { instanceAcmeIssuerKey } from "../deploy/instance-acme-issuer.ts";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
+import type { RunFn } from "../deploy/ensure-principal.ts";
+import { runHostCommand } from "../deploy/systemd-unit-set.ts";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
+import { writePrivateFileAtomic } from "../permissions/host-unit-files.ts";
 
 /** Wire hostname, including the one-hop decrypted upload pair. */
 export type InstanceHostnameApplyEntry = InstanceHostnameWireEntry;
 
-const UPLOADED_CERT_ID = /^[0-9a-f-]{36}$/i;
+/** The control plane's certificate id: a UUID (tp-host's `tp_instance_cert_id_ok`). */
+const UPLOADED_CERT_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** `https://<host>[:port][/]`, the install origin the control plane stores. */
 const INSTALL_ORIGIN =
   /^https:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^/:[\]]+))(?::(\d{1,5}))?\/?$/;
@@ -285,12 +291,200 @@ export function ansibleHostname(entry: InstanceHostnameApplyEntry): {
   };
 }
 
+/** Largest certificate chain tp-host installs (`TP_INSTANCE_CERT_MAX`). */
+export const INSTANCE_CERT_CHAIN_MAX_BYTES = 65_536;
+/** Largest private key tp-host installs (`TP_INSTANCE_KEY_MAX`). */
+export const INSTANCE_CERT_KEY_MAX_BYTES = 16_384;
+/** Most certificates in one chain (`TP_INSTANCE_CERT_BLOCKS_MAX`). */
+export const INSTANCE_CERT_CHAIN_MAX_BLOCKS = 10;
+
+const KEY_LABELS = new Set([
+  "PRIVATE KEY",
+  "RSA PRIVATE KEY",
+  "EC PRIVATE KEY",
+]);
+const PEM_BEGIN = /^-----BEGIN ([A-Z ]+)-----$/;
+const PEM_BASE64_LINE = /^[A-Za-z0-9+/=]{1,128}$/;
+
+/**
+ * Labels of the PEM blocks in `text`, or null unless it is PEM blocks and
+ * nothing else (blank lines between blocks only). Mirrors tp-host's
+ * `tp_instance_pem_ok`, so a pair the daemon accepts is not refused root-side.
+ */
+function pemBlockLabels(text: string): string[] | null {
+  const scan: PemScan = { labels: [], open: null, lines: 0 };
+  for (const line of text.split("\n")) {
+    if (!scanPemLine(scan, line)) return null;
+  }
+  return scan.open === null ? scan.labels : null;
+}
+
+type PemScan = { labels: string[]; open: string | null; lines: number };
+
+/** Feeds one line to the scan; false when the text is not PEM blocks only. */
+function scanPemLine(scan: PemScan, line: string): boolean {
+  if (scan.open === null) return openPemBlock(scan, line);
+  if (line === `-----END ${scan.open}-----`) {
+    if (scan.lines === 0) return false;
+    scan.open = null;
+    return true;
+  }
+  if (!PEM_BASE64_LINE.test(line)) return false;
+  scan.lines += 1;
+  return true;
+}
+
+/** Outside a block only blank lines and a BEGIN line may appear. */
+function openPemBlock(scan: PemScan, line: string): boolean {
+  if (line === "") return true;
+  const begin = PEM_BEGIN.exec(line);
+  if (!begin) return false;
+  scan.open = begin[1]!;
+  scan.labels.push(scan.open);
+  scan.lines = 0;
+  return true;
+}
+
+/** LF line endings and one final newline, the bytes tp-host checks. */
+function normalizePem(text: string): string {
+  return `${text.replaceAll("\r\n", "\n").trimEnd()}\n`;
+}
+
+/**
+ * The pair as staged, or an error naming what is wrong with it. The same
+ * shapes and caps tp-host enforces: 1 to 10 CERTIFICATE blocks, exactly one
+ * unencrypted private key block.
+ */
+export function uploadedCertPair(
+  id: string,
+  certPem: string,
+  keyPem: string,
+): { cert: string; key: string } {
+  const cert = normalizePem(certPem);
+  const key = normalizePem(keyPem);
+  const encoder = new TextEncoder();
+  if (encoder.encode(cert).byteLength > INSTANCE_CERT_CHAIN_MAX_BYTES) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the chain is over ${INSTANCE_CERT_CHAIN_MAX_BYTES} bytes`,
+    );
+  }
+  if (encoder.encode(key).byteLength > INSTANCE_CERT_KEY_MAX_BYTES) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the private key is over ${INSTANCE_CERT_KEY_MAX_BYTES} bytes`,
+    );
+  }
+  const chain = pemBlockLabels(cert);
+  if (
+    !chain || chain.length === 0 ||
+    chain.length > INSTANCE_CERT_CHAIN_MAX_BLOCKS ||
+    chain.some((label) => label !== "CERTIFICATE")
+  ) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the certificate is not a PEM chain of 1 to ${INSTANCE_CERT_CHAIN_MAX_BLOCKS} certificates`,
+    );
+  }
+  const keys = pemBlockLabels(key);
+  if (keys?.length !== 1 || !KEY_LABELS.has(keys[0]!)) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the private key is not one unencrypted PEM private key`,
+    );
+  }
+  return { cert, key };
+}
+
+/** Installs one checked pair as `uploaded-<id>.{crt,key}` in the certs dir. */
+export type UploadedCertInstaller = (
+  id: string,
+  pair: { cert: string; key: string },
+) => Promise<void>;
+
+/**
+ * Where the daemon stages a pair for `tp-host instance-cert-install`
+ * (`<state>/system/instance-certs`, tp-host's `R_INSTANCE_CERT_STAGE`).
+ */
+export function instanceCertStageDir(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  return join(resolveLayout(env).stateDir, "system", "instance-certs");
+}
+
+/**
+ * Co-located development: the certs dir is the developer's own (beside the
+ * checkout), so the daemon writes the pair itself.
+ */
+export function writeUploadedCertDirect(
+  certsDir: string,
+): UploadedCertInstaller {
+  let made = false;
+  return async (id, pair) => {
+    if (!made) {
+      await Deno.mkdir(certsDir, { recursive: true, mode: 0o750 });
+      made = true;
+    }
+    await Deno.writeTextFile(join(certsDir, `uploaded-${id}.crt`), pair.cert, {
+      mode: 0o640,
+    });
+    await Deno.writeTextFile(join(certsDir, `uploaded-${id}.key`), pair.key, {
+      mode: 0o640,
+    });
+  };
+}
+
+/**
+ * A managed host: the certs dir belongs to the instance-certs role and the
+ * daemon account cannot write it. Stage the pair in a 0700 folder the daemon
+ * owns and let `tp-host instance-cert-install <id>` check it and place it
+ * (root:tp 0640). The staged copies are removed whatever the outcome.
+ */
+export function installUploadedCertViaHost(
+  deps: { stageDir: string; run?: RunFn },
+): UploadedCertInstaller {
+  const run = deps.run ?? runHostCommand;
+  return async (id, pair) => {
+    await Deno.mkdir(deps.stageDir, { recursive: true, mode: 0o700 });
+    await Deno.chmod(deps.stageDir, 0o700);
+    const staged = [
+      join(deps.stageDir, `${id}.crt`),
+      join(deps.stageDir, `${id}.key`),
+    ];
+    try {
+      await writePrivateFileAtomic(deps.stageDir, `${id}.crt`, pair.cert);
+      await writePrivateFileAtomic(deps.stageDir, `${id}.key`, pair.key);
+      const result = await run(
+        "sudo",
+        hostSudoArgs(["-n", "instance-cert-install", id]),
+      );
+      if (!result.success) {
+        throw new Error(
+          `installing uploaded certificate ${id} failed: ${
+            result.stderr.trim() || "tp-host refused it"
+          }`,
+        );
+      }
+    } finally {
+      await Promise.all(
+        staged.map((path) => Deno.remove(path).catch(() => undefined)),
+      );
+    }
+  };
+}
+
+/** The installer for this host's layout. */
+export function uploadedCertInstaller(
+  certsDir: string,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): UploadedCertInstaller {
+  return isCoLocatedDev(env)
+    ? writeUploadedCertDirect(certsDir)
+    : installUploadedCertViaHost({ stageDir: instanceCertStageDir(env) });
+}
+
 export async function writeUploadedInstanceCerts(
   hostnames: readonly InstanceHostnameApplyEntry[],
   certsDir: string,
+  install: UploadedCertInstaller = uploadedCertInstaller(certsDir),
 ): Promise<void> {
   const seen = new Set<string>();
-  let wrote = false;
   await forEachSequential(hostnames, async (entry) => {
     if (entry.source !== "uploaded") return;
     const id = entry.uploadedCertId;
@@ -300,24 +494,7 @@ export async function writeUploadedInstanceCerts(
     }
     if (seen.has(id)) return;
     seen.add(id);
-    if (!wrote) {
-      await Deno.mkdir(certsDir, { recursive: true, mode: 0o750 });
-      wrote = true;
-    }
-    await Deno.writeTextFile(
-      join(certsDir, `uploaded-${id}.crt`),
-      entry.certPem,
-      {
-        mode: 0o640,
-      },
-    );
-    await Deno.writeTextFile(
-      join(certsDir, `uploaded-${id}.key`),
-      entry.keyPem,
-      {
-        mode: 0o640,
-      },
-    );
+    await install(id, uploadedCertPair(id, entry.certPem, entry.keyPem));
   });
 }
 
