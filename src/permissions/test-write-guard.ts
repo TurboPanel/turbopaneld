@@ -4,12 +4,13 @@
  * A control plane test run once replaced a dev box's real license files and
  * `server.id` and took the co-located daemon offline. The daemon writes the
  * same kind of files (`server.id`, the server key and its id, the sealing
- * key, the CA pin, `trust-level`) through
- * `writeDaemonFile` / `removeDaemonFile`, so those call
+ * key, the CA pin, `trust-level`) through `writeDaemonFile` /
+ * `removeDaemonFile`, and keeps its in-flight command journal and update
+ * progress queue in the same state dir. Those writers call
  * {@link assertTestRunMayWrite} first: in a `deno test` run a path that is not
- * inside a temp root (`/tmp`, `/var/tmp` or `TMPDIR`), as written and again with
- * symlinks resolved, throws before any I/O. A production daemon is never a
- * test run and passes straight through.
+ * inside `/tmp` or `/var/tmp`, as written and again with symlinks resolved,
+ * throws before any I/O. A production daemon is never a test run and passes
+ * straight through.
  */
 
 const TEST_MODULE_PATTERN = /[._]test\.(?:ts|tsx|mts|js|mjs)$/;
@@ -49,17 +50,12 @@ export function isStrictlyInside(path: string, root: string): boolean {
     .every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
-/** `/tmp`, `/var/tmp`, and `TMPDIR` when it is set and readable. */
-function tempRoots(): string[] {
-  const roots = ["/tmp", "/var/tmp"];
-  try {
-    const tmpdir = Deno.env.get("TMPDIR")?.trim();
-    if (tmpdir?.startsWith("/") && tmpdir !== "/") roots.push(tmpdir);
-  } catch {
-    // No env grant for this test: the fixed roots still apply.
-  }
-  return roots;
-}
+/**
+ * Fixed temp roots, not `TMPDIR`: the daemon reads no env var its compiled
+ * `--allow-env` list lacks. `Deno.makeTempDir` lands under `/tmp` unless
+ * `TMPDIR` says otherwise; a test run with another `TMPDIR` is refused.
+ */
+const TEMP_ROOTS = ["/tmp", "/var/tmp"];
 
 /** The deepest existing path at or above `path` (by `lstat`, so a dangling link counts). */
 function deepestExisting(path: string): string {
@@ -100,7 +96,7 @@ export function assertTestRunMayWrite(
   opts: { testRun?: boolean; roots?: string[] } = {},
 ): void {
   if (!(opts.testRun ?? isDenoTestRun())) return;
-  const roots = opts.roots ?? tempRoots();
+  const roots = opts.roots ?? TEMP_ROOTS;
   if (
     roots.some((root) =>
       isStrictlyInside(path, root) && resolvesInside(path, root)

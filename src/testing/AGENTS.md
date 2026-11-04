@@ -68,12 +68,17 @@ off-checkout; CI always has a real checkout.
 key, `server-key-id`, the sealing key, the license files, the CA pin or
 `trust-level` gives the code a temp state dir (`createTempLayout` /
 `withTempLayout`, or a `Deno.makeTempDir` passed as `stateDir`). In a
-`deno test` run `writeDaemonFile`, `removeDaemonFile` and the key-id writer
-refuse any path outside `/tmp`, `/var/tmp` or `TMPDIR`, with symlinks resolved
+`deno test` run `writeDaemonFile`, `removeDaemonFile`, the key-id writer, the
+in-flight command journal and the update progress queue refuse any path
+outside `/tmp` or `/var/tmp`, with symlinks resolved
 (`src/permissions/test-write-guard.ts`); `test-write-guard.test.ts` fails when
 a module that names these files writes them some other way. CI seeds
 `/var/lib/turbopanel` with stand-in files before the tests and fails when any
 of them changed or a new entry appeared (`scripts/daemon-state-sentinel.ts`).
+Its first run caught suites writing `commands/inflight/` and
+`update/progress-queue.jsonl` there, which is why those two writers are
+guarded too. A `TMPDIR` outside `/tmp` makes `Deno.makeTempDir` dirs fail the
+guard, so unset it for test runs.
 On a box with a real daemon (the dev box), leave the full suite to CI or the
 guest; locally run only the files you touched, and never with
 `TURBOPANEL_DAEMON_STATE_DIR` or `TURBOPANEL_STATE_DIR` pointing at a real
