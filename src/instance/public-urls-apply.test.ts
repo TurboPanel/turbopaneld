@@ -5,9 +5,15 @@ import { PROD_INSTANCE_DIR_DEFAULT } from "../paths/layout.ts";
 import {
   ansibleHostname,
   applyPublicUrls,
+  installUploadedCertViaHost,
+  instanceCertStageDir,
+  resolveInstanceCertsDir,
   resolveInstanceDir,
   runInstanceCertsApply,
+  uploadedCertPair,
   upsertPublicUrlsInEnv,
+  writeUploadedCertDirect,
+  writeUploadedInstanceCerts,
 } from "./public-urls-apply.ts";
 
 /**
@@ -892,4 +898,188 @@ test("edge ranges that are catch-all, loopback or private are refused on the dae
       "refusing edge range",
     )
   ));
+});
+
+// --- uploaded certificate pairs -----------------------------------------------
+
+const CERT_ID = "01a1a47c-5b2d-7e3f-9a4b-6c7d8e9f0a1b";
+/** PEM labels built from parts, so no key header sits in the source. */
+const KEY_LABEL = ["PRIVATE", "KEY"].join(" ");
+const pem = (label: string, body: string) =>
+  `-----BEGIN ${label}-----\n${body}\n-----END ${label}-----\n`;
+const CERT_PEM = pem("CERTIFICATE", "MIIBszCCAVmgAwIBAgIUZm9yIHRlc3Rz");
+const KEY_PEM = pem(KEY_LABEL, "MC4CAQAwBQYDK2VwBCIEIGZvciB0ZXN0cw==");
+const uploadedRow = (host: string, id = CERT_ID) => ({
+  host,
+  source: "uploaded" as const,
+  uploadedCertId: id,
+  certPem: CERT_PEM,
+  keyPem: KEY_PEM,
+});
+
+const pathExists = (path: string) =>
+  Deno.lstat(path).then(() => true, () => false);
+
+test("a managed host stages the pair 0600 and asks tp-host to install it, never writing the certs dir", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const stageDir = join(root, "system", "instance-certs");
+    const certsDir = join(root, "tls", "certs");
+    const calls: string[][] = [];
+    const seen: Record<string, { text: string; mode: number }> = {};
+    const install = installUploadedCertViaHost({
+      stageDir,
+      run: async (command, args) => {
+        assertEquals(command, "sudo");
+        calls.push(args);
+        for (const ext of ["crt", "key"]) {
+          const path = join(stageDir, `${CERT_ID}.${ext}`);
+          seen[ext] = {
+            text: await Deno.readTextFile(path),
+            mode: (await Deno.stat(path)).mode! & 0o777,
+          };
+        }
+        return { success: true, stdout: "", stderr: "" };
+      },
+    });
+    await writeUploadedInstanceCerts(
+      [
+        uploadedRow("https://a.example"),
+        // The same certificate on a second name is installed once.
+        uploadedRow("https://b.example"),
+        { host: "https://c.example", source: "platform-ca" },
+      ],
+      certsDir,
+      install,
+    );
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0]!.slice(-2), ["instance-cert-install", CERT_ID]);
+    assertEquals(calls[0]![0], "-n");
+    assertEquals(seen.crt, { text: CERT_PEM, mode: 0o600 });
+    assertEquals(seen.key, { text: KEY_PEM, mode: 0o600 });
+    assertEquals((await Deno.stat(stageDir)).mode! & 0o777, 0o700);
+    // The staged copies are gone and the daemon never touched the certs dir.
+    assertEquals([...Deno.readDirSync(stageDir)], []);
+    assertEquals(await pathExists(certsDir), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a tp-host refusal surfaces as the apply's error and leaves nothing staged", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const stageDir = join(root, "instance-certs");
+    const install = installUploadedCertViaHost({
+      stageDir,
+      run: () =>
+        Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr:
+            "tp-host: refusing the private key for x: not one PEM private key\n",
+        }),
+    });
+    const err = await assertRejects(
+      () =>
+        writeUploadedInstanceCerts(
+          [uploadedRow("https://a.example")],
+          join(root, "certs"),
+          install,
+        ),
+      Error,
+    );
+    assertEquals(
+      err.message,
+      `installing uploaded certificate ${CERT_ID} failed: tp-host: refusing the private key for x: not one PEM private key`,
+    );
+    assertEquals([...Deno.readDirSync(stageDir)], []);
+    const silent = installUploadedCertViaHost({
+      stageDir,
+      run: () => Promise.resolve({ success: false, stdout: "", stderr: "" }),
+    });
+    await assertRejects(
+      () => silent(CERT_ID, { cert: CERT_PEM, key: KEY_PEM }),
+      Error,
+      "tp-host refused it",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a pair that is not PEM certificates and one key is refused before anything is staged", async () => {
+  const calls: string[] = [];
+  const install = (id: string) => {
+    calls.push(id);
+    return Promise.resolve();
+  };
+  const bad = [
+    { certPem: KEY_PEM, keyPem: KEY_PEM },
+    { certPem: CERT_PEM, keyPem: CERT_PEM },
+    { certPem: CERT_PEM, keyPem: `${KEY_PEM}${KEY_PEM}` },
+    { certPem: `junk\n${CERT_PEM}`, keyPem: KEY_PEM },
+    { certPem: CERT_PEM, keyPem: pem(`ENCRYPTED ${KEY_LABEL}`, "MC4C") },
+    { certPem: CERT_PEM.repeat(11), keyPem: KEY_PEM },
+    {
+      certPem: pem("CERTIFICATE", "A".repeat(64)).repeat(1100),
+      keyPem: KEY_PEM,
+    },
+  ];
+  for (const pair of bad) {
+    await assertRejects(
+      () =>
+        writeUploadedInstanceCerts(
+          [{ ...uploadedRow("https://a.example"), ...pair }],
+          "/nonexistent",
+          install,
+        ),
+      Error,
+      `refusing uploaded certificate ${CERT_ID}`,
+    );
+  }
+  assertEquals(calls, []);
+  // CRLF line endings and a missing final newline are normalized, not refused.
+  assertEquals(
+    uploadedCertPair(
+      CERT_ID,
+      CERT_PEM.replaceAll("\n", "\r\n").trimEnd(),
+      KEY_PEM,
+    ),
+    { cert: CERT_PEM, key: KEY_PEM },
+  );
+});
+
+test("co-located development writes the pair into its own certs dir", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const certsDir = join(root, "certs");
+    await writeUploadedInstanceCerts(
+      [uploadedRow("https://a.example")],
+      certsDir,
+      writeUploadedCertDirect(certsDir),
+    );
+    assertEquals(
+      await Deno.readTextFile(join(certsDir, `uploaded-${CERT_ID}.crt`)),
+      CERT_PEM,
+    );
+    assertEquals(
+      await Deno.readTextFile(join(certsDir, `uploaded-${CERT_ID}.key`)),
+      KEY_PEM,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("the staging folder is in the daemon's state tree, apart from the certs dir", () => {
+  const managed = { TURBOPANEL_MODE: "production" };
+  assertEquals(
+    instanceCertStageDir(managed),
+    "/var/lib/turbopanel/system/instance-certs",
+  );
+  assertEquals(
+    resolveInstanceCertsDir(managed),
+    "/var/lib/turbopanel/tls/certs",
+  );
 });

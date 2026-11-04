@@ -375,7 +375,15 @@ owns public `:80`/`:443` for tenant sites and does **not** publish panel names.
 `turbopanel_hostnames` is the list of `{host, source, cert_id}` the
 `public-urls-update` wire renders. `uploaded` names are extra `:8443` sites
 with `tls uploaded-<cert_id>.{crt,key}` (legacy empty `cert_id` uses
-`uploaded.{crt,key}`). `lets-encrypt` names are extra `:8443` sites with
+`uploaded.{crt,key}`). On a managed host the daemon cannot write the cert
+directory, so it stages each uploaded pair (an administrator's upload or the
+control plane's DNS-01 certificate) as
+`<state>/system/instance-certs/<id>.{crt,key}` (`0600`, its own `0700`
+folder) and `tp-host instance-cert-install <id>` checks the id (a UUID), the
+shapes (1 to 10 PEM `CERTIFICATE` blocks, at most 64 KiB; exactly one
+unencrypted PEM private key, at most 16 KiB), reads both as the daemon account
+refusing links, and places them `root:tp` `0640`; co-located development
+writes them directly. `lets-encrypt` names are extra `:8443` sites with
 `tls letsencrypt-<host>.{crt,key}` under `turbopanel_instance_certs_dir`,
 rendered **only when both files exist** (`letsencrypt-files.yml` stats them
 before the template). The daemon installs each certificate as `root:tp`

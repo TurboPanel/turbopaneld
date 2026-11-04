@@ -22,7 +22,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   managed install, `-u` re-execs, tp-orchestrate and engine tests alone. The
   verbs are split in two: `HOST_PROGRAM_VERBS` (real programs: `install`,
   `systemctl`, `iptables`, `useradd`, …) run directly in development, and
-  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `publish`,
+  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `instance-cert-install`, `publish`,
   `cert-dates`, …, which no host program provides) run in development through
   the checkout's own `<checkout>/orchestration/scripts/tp-host` with sudo and
   every check it applies on a managed host. `tp_dir_sealed_at` stays
@@ -77,7 +77,12 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     way in `<config>/tunnel-env/` (`tunnel-env-install <id>` reads the daemon's
     staged `<state>/cloudflared/tunnels/<id>.env`, which must be exactly one
     `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
-    <id>`), and a `turbopanel-tunnel-<id>.service` (or `...-<id>-b.service`, the
+    <id>`); a control-plane hostname's uploaded certificate pair goes the
+    same way into the instance-certs role's `<state>/tls/certs`
+    (`instance-cert-install <id>` reads the daemon's staged
+    `<state>/system/instance-certs/<id>.{crt,key}`, checks one PEM chain and
+    one unencrypted PEM key within their caps, and places them
+    `uploaded-<id>.{crt,key}` `root:tp 0640`), and a `turbopanel-tunnel-<id>.service` (or `...-<id>-b.service`, the
     second unit while a connector update runs) unit is installed only if it
     equals `tp_tunnel_unit_text` (a throwaway `DynamicUser=` account, no
     capability); `tp_path_class` refuses the folder to
