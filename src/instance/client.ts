@@ -53,6 +53,7 @@ import {
 import { collectManagedLogs } from "../managed/logs.ts";
 import { probeManagedMemberHealth } from "../managed/health.ts";
 import { readManagedPermissions } from "../managed/permissions-read.ts";
+import { assertTestRunMayWrite } from "../permissions/test-write-guard.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
 import {
@@ -469,6 +470,7 @@ async function writeKeyId(
 ): Promise<void> {
   const trimmed = keyId.trim();
   if (!trimmed) return;
+  assertTestRunMayWrite(`${dir}/${KEY_ID_FILE}`);
   try {
     await Deno.mkdir(dir, { recursive: true });
     await Deno.writeTextFile(`${dir}/${KEY_ID_FILE}`, `${trimmed}\n`);

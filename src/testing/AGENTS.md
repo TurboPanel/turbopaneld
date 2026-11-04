@@ -64,6 +64,21 @@ helper's `cwd = ROOT` *default argument*, guard it with
 `ignore: !await ambientCheckoutIsGitRepo(...)` so it skips rather than fails
 off-checkout; CI always has a real checkout.
 
+**Daemon identity files in tests:** a test that writes `server.id`, the server
+key, `server-key-id`, the sealing key, the license files, the CA pin or
+`trust-level` gives the code a temp state dir (`createTempLayout` /
+`withTempLayout`, or a `Deno.makeTempDir` passed as `stateDir`). In a
+`deno test` run `writeDaemonFile`, `removeDaemonFile` and the key-id writer
+refuse any path outside `/tmp`, `/var/tmp` or `TMPDIR`, with symlinks resolved
+(`src/permissions/test-write-guard.ts`); `test-write-guard.test.ts` fails when
+a module that names these files writes them some other way. CI seeds
+`/var/lib/turbopanel` with stand-in files before the tests and fails when any
+of them changed or a new entry appeared (`scripts/daemon-state-sentinel.ts`).
+On a box with a real daemon (the dev box), leave the full suite to CI or the
+guest; locally run only the files you touched, and never with
+`TURBOPANEL_DAEMON_STATE_DIR` or `TURBOPANEL_STATE_DIR` pointing at a real
+state dir.
+
 **Where to run tests:** host VirtFS checkouts lack a usable Deno tree. Run
 suites **inside the Vagrant guest** from the host `dev` checkout:
 
