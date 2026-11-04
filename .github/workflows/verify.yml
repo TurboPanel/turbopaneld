@@ -204,11 +204,23 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: scripts/download-caddy.mjs
 
+      - name: Seed the daemon state sentinel
+        # The default daemon state dir, writable by the runner and filled with
+        # fixed stand-in files, so a test that wrote it would land and the
+        # check after the tests would fail.
+        run: |
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/turbopanel
+          deno run --allow-read --allow-write=/var/lib/turbopanel --allow-env=GITHUB_ACTIONS scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel
+
       - name: Test with coverage
         env:
           # The real-Postgres suites must run here, never skip on a Docker hiccup.
           TURBOPANEL_REQUIRE_REAL_POSTGRES: "1"
         run: deno task test:coverage
+
+      - name: Check no test wrote the daemon state dir
+        if: ${{ !cancelled() }}
+        run: deno run --allow-read scripts/daemon-state-sentinel.ts verify /var/lib/turbopanel
 
       # `deno task test:coverage` already normalizes; re-running here is
       # idempotent and keeps the assertions (nothing absolute, at least one
