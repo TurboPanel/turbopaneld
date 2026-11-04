@@ -17,7 +17,7 @@
  * files, and outside `/tmp` it runs only under GitHub Actions, so it can never
  * replace a real daemon's files on a dev box.
  */
-import { join, resolve } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 
 /** File names the daemon keeps in its state dir, with fixed stand-in bytes. */
 export const SENTINEL_FILES: Readonly<Record<string, string>> = Object.freeze({
@@ -40,7 +40,7 @@ function listEntries(dir: string): string[] {
     }
   };
   walk("");
-  return out.sort();
+  return out.sort((a, b) => a.localeCompare(b));
 }
 
 /** Differences between `dir` and the sentinel, one line each; empty when it matches. */
@@ -53,7 +53,9 @@ export function sentinelProblems(dir: string): string[] {
   }
   if (!stat.isDirectory) return [`${dir} is not a plain directory`];
   const problems: string[] = [];
-  const expected = Object.keys(SENTINEL_FILES).sort();
+  const expected = Object.keys(SENTINEL_FILES).sort((a, b) =>
+    a.localeCompare(b)
+  );
   const actual = listEntries(dir);
   for (const name of actual) {
     if (!expected.includes(name)) problems.push(`new entry: ${name}`);
@@ -71,16 +73,28 @@ export function sentinelProblems(dir: string): string[] {
   return problems;
 }
 
-function isUnderTmp(dir: string): boolean {
-  const resolved = resolve(dir);
-  return resolved.startsWith("/tmp/") || resolved.startsWith("/var/tmp/");
+/** The system temp folder, as Deno.makeTempDirSync picks it (probe made and removed). */
+function systemTempRoot(): string {
+  const probe = Deno.makeTempDirSync({ prefix: "tp-sentinel-probe-" });
+  try {
+    return dirname(probe);
+  } finally {
+    Deno.removeSync(probe);
+  }
+}
+
+function isUnderSystemTemp(dir: string): boolean {
+  const root = systemTempRoot();
+  return resolve(dir).startsWith(root.endsWith("/") ? root : `${root}/`);
 }
 
 /** Write the sentinel files into `dir`. Throws instead of replacing real files. */
 export function seedSentinel(dir: string, onActions: boolean): void {
-  if (!isUnderTmp(dir) && !onActions) {
+  // GitHub Actions first: there the seed step may only write the state dir,
+  // so probing the temp folder would be refused.
+  if (!onActions && !isUnderSystemTemp(dir)) {
     throw new Error(
-      `refusing to seed ${dir} outside /tmp when not running under GitHub Actions`,
+      `refusing to seed ${dir} outside the system temp folder when not running under GitHub Actions`,
     );
   }
   Deno.mkdirSync(dir, { recursive: true });

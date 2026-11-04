@@ -32,7 +32,6 @@ async function withSeeded(
   fn: (dir: string) => Promise<void> | void,
 ): Promise<void> {
   const dir = await Deno.makeTempDir({
-    dir: "/tmp",
     prefix: "tp-state-sentinel-",
   });
   try {
@@ -98,7 +97,6 @@ test("a missing dir is reported", () => {
 
 test("seed never writes over files that are not the sentinel", async () => {
   const dir = await Deno.makeTempDir({
-    dir: "/tmp",
     prefix: "tp-state-sentinel-",
   });
   try {
@@ -113,11 +111,11 @@ test("seed never writes over files that are not the sentinel", async () => {
   }
 });
 
-test("seed refuses a dir outside /tmp unless it runs under GitHub Actions", () => {
+test("seed refuses a dir outside the system temp folder unless it runs under GitHub Actions", () => {
   assertThrows(
     () => seedSentinel("/var/lib/turbopanel-sentinel-never-made", false),
     Error,
-    "outside /tmp",
+    "outside the system temp folder",
   );
 });
 
