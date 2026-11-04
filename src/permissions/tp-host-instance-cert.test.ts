@@ -15,6 +15,7 @@ import {
 import {
   INSTANCE_CERT_CHAIN_MAX_BLOCKS,
   INSTANCE_CERT_CHAIN_MAX_BYTES,
+  INSTANCE_CERT_KEEP_MAX,
   INSTANCE_CERT_KEY_MAX_BYTES,
   instanceCertStageDir,
   resolveInstanceCertsDir,
@@ -64,11 +65,18 @@ test("instance-cert-install places a checked pair root:tp 0640 in the certs fold
     assertEquals((await Deno.stat(crt)).mode! & 0o777, 0o640);
     assertEquals((await Deno.stat(key)).mode! & 0o777, 0o640);
     assertEquals((await Deno.stat(host.path(CERTS_DIR))).mode! & 0o777, 0o750);
-    // Root would hand both to root:tp (printed in test mode).
+    // Root would hand both to root:tp in one call, before either is renamed
+    // into place (printed in test mode).
     assertEquals(
-      result.stdout.match(/EXEC \[chown\] \[-h\] \[--\] \[root:tp\] \[\.\/f\]/g)
-        ?.length,
-      2,
+      result.stdout.match(
+        /EXEC \[chown\] \[-h\] \[--\] \[root:tp\] \[\.\/key\] \[\.\/crt\]/g,
+      )?.length,
+      1,
+    );
+    // The scratch folder is gone: only the pair is left in the certs folder.
+    assertEquals(
+      [...Deno.readDirSync(host.path(CERTS_DIR))].map((e) => e.name).sort(),
+      [`uploaded-${ID}.crt`, `uploaded-${ID}.key`],
     );
     // Neither file's text appears in what tp-host prints.
     assert(
@@ -116,6 +124,8 @@ test("instance-cert-install takes one certificate id and nothing that is a path"
         "-".repeat(36),
         `${ID}0`,
         ID.slice(1),
+        ID.toUpperCase(),
+        `${ID.slice(0, 8)}x${ID.slice(9)}`,
         "instance",
       ]
     ) {
@@ -290,8 +300,11 @@ test("tp-host and the daemon agree on the staging folder, the certs folder and t
  */
 async function idCheck(fn: string, value: string): Promise<boolean> {
   const script = await Deno.readTextFile(TP_HOST_SCRIPT);
-  const start = script.indexOf(`${fn}() {`);
-  const body = script.slice(start, script.indexOf("\n}\n", start) + 3);
+  const lift = (name: string) => {
+    const start = script.indexOf(`${name}() {`);
+    return script.slice(start, script.indexOf("\n}\n", start) + 3);
+  };
+  const body = `${lift("tp_uuid_ok")}\n${lift(fn)}`;
   const out = await new Deno.Command("sh", {
     args: ["-c", `${body}\n${fn} "$1"`, "sh", value],
   }).output();
@@ -303,10 +316,301 @@ test("the certificate and tunnel id checks refuse a value with a second line", a
   assert(await idCheck("tp_instance_cert_id_ok", ID));
   assert(await idCheck("tp_tunnel_id_ok", tunnelId));
   assert(await idCheck("tp_tunnel_id_ok", "instance"));
-  for (const value of [`${ID}\nx`, `x\n${ID}`, `${ID}\n`]) {
-    assertEquals(await idCheck("tp_instance_cert_id_ok", value), false);
+  const variants = (id: string) => [
+    `${id}\nx`,
+    `x\n${id}`,
+    `${id}\n`,
+    `\n${id}`,
+    `${id}\n${id}`,
+    `${id.slice(0, 18)}\n${id.slice(19)}`,
+    id.toUpperCase(),
+    `${id.slice(1)}-`,
+    `${id.slice(0, 8)}${id.slice(9)}-`,
+    "-".repeat(36),
+    "a".repeat(36),
+    "",
+  ];
+  for (const value of variants(ID)) {
+    assertEquals(
+      await idCheck("tp_instance_cert_id_ok", value),
+      false,
+      JSON.stringify(value),
+    );
   }
-  for (const value of [`${tunnelId}\nx`, `x\n${tunnelId}`, `${tunnelId}\n`]) {
-    assertEquals(await idCheck("tp_tunnel_id_ok", value), false);
+  for (const value of variants(tunnelId)) {
+    assertEquals(
+      await idCheck("tp_tunnel_id_ok", value),
+      false,
+      JSON.stringify(value),
+    );
   }
+  for (const value of ["instance\n", "default\nx", "x\ninstance"]) {
+    assertEquals(await idCheck("tp_tunnel_id_ok", value), false, value);
+  }
+});
+
+test("the id checks match whole values with shell patterns, not grep", async () => {
+  const script = await Deno.readTextFile(TP_HOST_SCRIPT);
+  for (
+    const fn of ["tp_uuid_ok", "tp_instance_cert_id_ok", "tp_tunnel_id_ok"]
+  ) {
+    const start = script.indexOf(`${fn}() {`);
+    assert(start >= 0, fn);
+    const body = script.slice(start, script.indexOf("\n}\n", start));
+    assert(!/\bgrep\s/.test(body), `${fn} must not run grep`);
+  }
+});
+
+const RETIRED = "9f8e7d6c-5b4a-4321-8fed-cba987654321";
+const OTHER = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+
+async function certsFolder(host: Host, names: string[]) {
+  await Deno.mkdir(host.path(CERTS_DIR), { recursive: true, mode: 0o750 });
+  await Deno.chmod(host.path(CERTS_DIR), 0o750);
+  for (const name of names) {
+    await Deno.writeTextFile(host.path(`${CERTS_DIR}/${name}`), CERT);
+  }
+}
+
+const listCerts = (host: Host) =>
+  [...Deno.readDirSync(host.path(CERTS_DIR))].map((e) => e.name).sort();
+
+test("instance-cert-prune removes only the uploaded pairs of ids it is not given", async () => {
+  await withHost(async (host) => {
+    const kept = [
+      `uploaded-${ID}.crt`,
+      `uploaded-${ID}.key`,
+      `uploaded-${OTHER}.crt`,
+      `uploaded-${OTHER}.key`,
+    ];
+    const untouched = [
+      "uploaded.crt",
+      "uploaded.key",
+      "platform-ca.crt",
+      "platform-ca.key",
+      "letsencrypt-panel.example.crt",
+      `uploaded-${RETIRED.toUpperCase()}.crt`,
+      `uploaded-${RETIRED}.pem`,
+      `uploaded-${RETIRED}.crt.bak`,
+      `xuploaded-${RETIRED}.crt`,
+    ];
+    await certsFolder(host, [
+      ...kept,
+      ...untouched,
+      `uploaded-${RETIRED}.crt`,
+      `uploaded-${RETIRED}.key`,
+    ]);
+    const result = await host.run(["instance-cert-prune", ID, OTHER]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(listCerts(host), [...kept, ...untouched].sort());
+    // A second run has nothing to do.
+    assertEquals((await host.run(["instance-cert-prune", ID, OTHER])).code, 0);
+    assertEquals(listCerts(host), [...kept, ...untouched].sort());
+    // No id in use: every uploaded pair goes, nothing else does.
+    assertEquals((await host.run(["instance-cert-prune"])).code, 0);
+    assertEquals(listCerts(host), untouched.sort());
+  });
+});
+
+test("instance-cert-prune removes a link itself, never its target, and never a folder", async () => {
+  await withHost(async (host) => {
+    await certsFolder(host, []);
+    await Deno.writeTextFile(host.path("outside/secret"), "keep me\n");
+    await Deno.symlink(
+      host.path("outside/secret"),
+      host.path(`${CERTS_DIR}/uploaded-${RETIRED}.key`),
+    );
+    await Deno.mkdir(host.path("outside/dir"));
+    await Deno.writeTextFile(host.path("outside/dir/x"), "x\n");
+    await Deno.symlink(
+      host.path("outside/dir"),
+      host.path(`${CERTS_DIR}/uploaded-${OTHER}.key`),
+    );
+    await Deno.mkdir(host.path(`${CERTS_DIR}/uploaded-${RETIRED}.crt`));
+    await Deno.writeTextFile(
+      host.path(`${CERTS_DIR}/uploaded-${RETIRED}.crt/x`),
+      "x\n",
+    );
+    const result = await host.run(["instance-cert-prune", ID]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(listCerts(host), [`uploaded-${RETIRED}.crt`]);
+    assertEquals(
+      await Deno.readTextFile(host.path("outside/secret")),
+      "keep me\n",
+    );
+    assertEquals(await Deno.readTextFile(host.path("outside/dir/x")), "x\n");
+    assertEquals(
+      await Deno.readTextFile(
+        host.path(`${CERTS_DIR}/uploaded-${RETIRED}.crt/x`),
+      ),
+      "x\n",
+    );
+  });
+});
+
+test("instance-cert-prune refuses a bad id, a linked or writable folder, and too many ids", async () => {
+  await withHost(async (host) => {
+    // No certs folder yet: nothing to do.
+    assertEquals((await host.run(["instance-cert-prune", ID])).code, 0);
+    await certsFolder(host, [`uploaded-${RETIRED}.crt`]);
+    for (
+      const id of [
+        "",
+        "../x",
+        `${ID}/x`,
+        "*",
+        "uploaded-*",
+        ID.toUpperCase(),
+        `${ID}.crt`,
+        "instance",
+      ]
+    ) {
+      await refused(host, ["instance-cert-prune", id]);
+      await refused(host, ["instance-cert-prune", ID, id]);
+    }
+    await refused(
+      host,
+      ["instance-cert-prune", ...Array.from({ length: 65 }, () => ID)],
+    );
+    assertEquals(
+      (await host.run([
+        "instance-cert-prune",
+        ...Array.from({ length: 64 }, () => RETIRED),
+      ])).code,
+      0,
+    );
+    await Deno.chmod(host.path(CERTS_DIR), 0o770);
+    assertStringIncludes(
+      await refused(host, ["instance-cert-prune", ID]),
+      "group- or world-writable",
+    );
+    await Deno.chmod(host.path(CERTS_DIR), 0o750);
+    assertEquals(listCerts(host), [`uploaded-${RETIRED}.crt`]);
+    // A certs folder that is a link to somewhere else.
+    await Deno.remove(host.path(CERTS_DIR), { recursive: true });
+    await Deno.mkdir(host.path("outside/certs"));
+    await Deno.writeTextFile(
+      host.path(`outside/certs/uploaded-${RETIRED}.crt`),
+      CERT,
+    );
+    await Deno.symlink(host.path("outside/certs"), host.path(CERTS_DIR));
+    await refused(host, ["instance-cert-prune", ID]);
+    assertEquals(
+      [...Deno.readDirSync(host.path("outside/certs"))].map((e) => e.name),
+      [`uploaded-${RETIRED}.crt`],
+    );
+  });
+});
+
+test("tp-host and the daemon agree on how many ids instance-cert-prune takes", async () => {
+  const script = await Deno.readTextFile(TP_HOST_SCRIPT);
+  assertStringIncludes(
+    script,
+    `TP_INSTANCE_CERT_KEEP_MAX=${INSTANCE_CERT_KEEP_MAX}\n`,
+  );
+});
+
+test("instance-cert-install renames the key into place before the chain", async () => {
+  const script = await Deno.readTextFile(TP_HOST_SCRIPT);
+  const start = script.indexOf("tp_verb_instance_cert_install() {");
+  const body = script.slice(start, script.indexOf("\n}\n", start));
+  const key = body.indexOf('mv -T -f -- ./key "../uploaded-$1.key"');
+  const crt = body.indexOf('mv -T -f -- ./crt "../uploaded-$1.crt"');
+  assert(key > 0 && crt > key, "the key is renamed in first");
+  // Both are written before either rename.
+  const writes = Math.max(
+    body.indexOf("cat > ./key"),
+    body.indexOf("cat > ./crt"),
+  );
+  assert(writes > 0 && writes < key, "both files are written before a rename");
+});
+
+const TLS_DIR = "var/lib/turbopanel/tls";
+
+test("no generic verb reaches the TLS folder but the CA pin and the Let's Encrypt pairs", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path(CERTS_DIR), { recursive: true, mode: 0o750 });
+    await Deno.chmod(host.path(CERTS_DIR), 0o750);
+    await Deno.writeTextFile(host.path("tmp/staged"), "x\n");
+    for (
+      const name of ["ca.key", "ca.crt", "certs/platform-ca.key", "certs/x"]
+    ) {
+      await Deno.writeTextFile(host.path(`${TLS_DIR}/${name}`), "x\n");
+    }
+    await Deno.writeTextFile(
+      host.path(`${CERTS_DIR}/uploaded-${ID}.key`),
+      KEY,
+    );
+    const refusedPaths = [
+      `${TLS_DIR}/ca.key`,
+      `${TLS_DIR}/ca.crt`,
+      `${TLS_DIR}/ca-bundle.pem`,
+      `${CERTS_DIR}/uploaded-${ID}.key`,
+      `${CERTS_DIR}/uploaded-${ID}.crt`,
+      `${CERTS_DIR}/platform-ca.key`,
+      `${CERTS_DIR}/letsencrypt-.key`,
+      `${CERTS_DIR}/letsencrypt-a_b.key`,
+      `${CERTS_DIR}/letsencrypt-a.pem`,
+      `${CERTS_DIR}/x`,
+    ].map((rel) => host.path(rel));
+    for (const path of refusedPaths) {
+      const staged = host.path("tmp/staged");
+      for (
+        const argv of [
+          ["install", "-m", "0640", "-o", "tp", "-g", "tp", staged, path],
+          ["rm", "-f", "--", path],
+          ["chmod", "0644", path],
+          ["chown", "tp:tp", path],
+          ["cat", "--", path],
+          ["tee", path],
+          ["cp", staged, path],
+        ]
+      ) {
+        await refused(host, argv, "x\n");
+      }
+    }
+    for (const dir of [TLS_DIR, CERTS_DIR]) {
+      await refused(host, ["rm", "-rf", "--", host.path(dir)]);
+      await refused(host, ["chown", "tp:tp", host.path(dir)]);
+      await refused(host, ["install", "-d", "-m", "0750", host.path(dir)]);
+    }
+    // Nothing was written, removed or replaced.
+    assertEquals(
+      await Deno.readTextFile(host.path(`${TLS_DIR}/ca.key`)),
+      "x\n",
+    );
+    assertEquals(
+      await Deno.readTextFile(host.path(`${CERTS_DIR}/uploaded-${ID}.key`)),
+      KEY,
+    );
+    // The daemon's own CA pin file, through writeDaemonFile's fallback.
+    const pin = host.path(`${TLS_DIR}/instance-ca-pin`);
+    const staged = host.path("tmp/staged");
+    const pinned = await host.run([
+      "install",
+      "-m",
+      "0600",
+      "-o",
+      "tp",
+      "-g",
+      "tp",
+      staged,
+      pin,
+    ]);
+    assertEquals(pinned.code, 0, pinned.stderr);
+    assertEquals(await Deno.readTextFile(pin), "x\n");
+    // A Let's Encrypt pair the daemon installs and reads back.
+    const le = host.path(`${CERTS_DIR}/letsencrypt-panel.example.com.key`);
+    for (
+      const argv of [
+        ["install", "-m", "0600", "-o", "tp", "-g", "tp", "--", staged, le],
+        ["chown", ":tp", le],
+        ["chmod", "0600", le],
+        ["cat", "--", le],
+      ]
+    ) {
+      const result = await host.run(argv);
+      assertEquals(result.code, 0, `${argv[0]}: ${result.stderr}`);
+    }
+  });
 });

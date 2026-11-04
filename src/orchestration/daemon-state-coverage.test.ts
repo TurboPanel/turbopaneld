@@ -62,6 +62,12 @@ const EXEMPT: Record<string, string> = {
   // the dev user and is never sealed; a managed host never creates it.
   "state/dev-updates":
     "development only (dev-host): dev-user owned state root, never sealed",
+  // The control plane's TLS folder: root:tp from daemon-layout and
+  // instance-certs. The daemon reads it, writes its CA pin there through
+  // writeDaemonFile (tp-host install), and installs certificates only through
+  // tp-host.
+  "state/tls":
+    "root-owned (daemon-layout, instance-certs): the daemon writes it only through tp-host",
   // Written by the root guard script, only read or removed by the daemon.
   "state/firewall-rollback.json": "written by the root guard",
 };

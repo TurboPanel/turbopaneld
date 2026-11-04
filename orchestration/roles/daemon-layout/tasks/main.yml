@@ -52,6 +52,18 @@
         owner: "root",
         group: "{{ turbopanel_group }}",
       }
+    # The control plane's TLS folder (its Platform CA, and the certs folder
+    # Caddy reads). The instance-certs role owns it with this same owner and
+    # mode; the daemon never writes it directly (it installs uploaded pairs
+    # through tp-host). A tp-owned folder would let it replace the CA key in
+    # place. On a co-located host the state root itself is still tp-writable
+    # (2770), so there this does not stop the folder being renamed away.
+    - {
+        path: "{{ turbopanel_daemon_state_dir }}/tls",
+        mode: "0750",
+        owner: "root",
+        group: "{{ turbopanel_group }}",
+      }
     - {
         path: "{{ turbopanel_run_dir | default('/run/turbopanel') }}",
         # setgid + sticky: group tp shares the folder, but only a file's owner

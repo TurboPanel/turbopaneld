@@ -174,6 +174,9 @@ const TUNNEL_UNIT_B_TEXT = renderTunnelUnit({
 /** A control-plane hostname's certificate pair, staged for instance-cert-install. */
 const INSTANCE_CERT_ID = "01a1a47c-5b2d-7e3f-9a4b-6c7d8e9f0a1b";
 const INSTANCE_CERT_STAGE = `${STATE}/system/instance-certs`;
+/** The certs folder instance-cert-prune clears, and an id no hostname uses. */
+const INSTANCE_CERTS = `${STATE}/tls/certs`;
+const INSTANCE_CERT_RETIRED_ID = "9f8e7d6c-5b4a-4321-8fed-cba987654321";
 /** PEM labels built from parts, so no key header sits in the source. */
 const pemBlock = (label: string, body: string) =>
   `-----BEGIN ${label}-----\n${body}\n-----END ${label}-----\n`;
@@ -1164,6 +1167,34 @@ const SITES: CallSite[] = [
           [`${INSTANCE_CERT_STAGE}/${INSTANCE_CERT_ID}.crt`]: INSTANCE_CERT_PEM,
           [`${INSTANCE_CERT_STAGE}/${INSTANCE_CERT_ID}.key`]: INSTANCE_KEY_PEM,
         },
+      },
+    },
+  ),
+  tpHost(
+    'src/instance/public-urls-apply.ts|["-n","instance-cert-prune",...keep]',
+    {
+      argv: ["instance-cert-prune", INSTANCE_CERT_ID],
+      setup: {
+        files: {
+          [`${INSTANCE_CERTS}/uploaded-${INSTANCE_CERT_ID}.crt`]:
+            INSTANCE_CERT_PEM,
+          [`${INSTANCE_CERTS}/uploaded-${INSTANCE_CERT_RETIRED_ID}.crt`]:
+            INSTANCE_CERT_PEM,
+          [`${INSTANCE_CERTS}/uploaded-${INSTANCE_CERT_RETIRED_ID}.key`]:
+            INSTANCE_KEY_PEM,
+        },
+        modes: { [INSTANCE_CERTS]: 0o750 },
+      },
+    },
+    // No id in use: every uploaded pair goes.
+    {
+      argv: ["instance-cert-prune"],
+      setup: {
+        files: {
+          [`${INSTANCE_CERTS}/uploaded-${INSTANCE_CERT_RETIRED_ID}.crt`]:
+            INSTANCE_CERT_PEM,
+        },
+        modes: { [INSTANCE_CERTS]: 0o750 },
       },
     },
   ),

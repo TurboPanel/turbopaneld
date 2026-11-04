@@ -85,6 +85,7 @@ export const TP_HOST_ONLY_VERBS: ReadonlySet<string> = new Set([
   "tunnel-env-install",
   "tunnel-env-remove",
   "instance-cert-install",
+  "instance-cert-prune",
 ]);
 
 /** The commands tp-host implements. Keep in step with its dispatch. */
