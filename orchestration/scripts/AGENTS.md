@@ -81,8 +81,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     same way into the instance-certs role's `<state>/tls/certs`
     (`instance-cert-install <id>` reads the daemon's staged
     `<state>/system/instance-certs/<id>.{crt,key}`, checks one PEM chain and
-    one unencrypted PEM key within their caps, and places them
-    `uploaded-<id>.{crt,key}` `root:tp 0640`), and a `turbopanel-tunnel-<id>.service` (or `...-<id>-b.service`, the
+    one unencrypted PEM key within their caps, writes both in one scratch
+    folder and renames the key in before the chain, as
+    `uploaded-<id>.{crt,key}` `root:tp 0640`; `<id>` is a lower-case UUID,
+    matched with shell patterns as one whole value, never a line-based
+    match; `instance-cert-prune [<id>...]` removes `uploaded-<uuid>.{crt,key}`
+    there for every id it is not given, only plain files or links of exactly
+    that name, never a folder or a link's target, at most 64 ids), and a `turbopanel-tunnel-<id>.service` (or `...-<id>-b.service`, the
     second unit while a connector update runs) unit is installed only if it
     equals `tp_tunnel_unit_text` (a throwaway `DynamicUser=` account, no
     capability); `tp_path_class` refuses the folder to

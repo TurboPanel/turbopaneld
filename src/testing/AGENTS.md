@@ -74,8 +74,10 @@ outside `/tmp` or `/var/tmp`, with symlinks resolved
 (`src/permissions/test-write-guard.ts`); `test-write-guard.test.ts` fails when
 a module that names these files writes them some other way. CI seeds
 `/var/lib/turbopanel` with stand-in files before the tests and fails when any
-of them changed or a new entry appeared (`scripts/daemon-state-sentinel.ts`).
-Its first run caught suites writing `commands/inflight/` and
+of them changed or a new entry appeared (`scripts/daemon-state-sentinel.ts`),
+around the coverage run and the privileged single-file runs alike; its `seed`
+refuses a dir outside the system temp folder (links resolved) unless it runs
+under GitHub Actions. Its first run caught suites writing `commands/inflight/` and
 `update/progress-queue.jsonl` there, which is why those two writers are
 guarded too. A `TMPDIR` outside `/tmp` makes `Deno.makeTempDir` dirs fail the
 guard, so unset it for test runs.

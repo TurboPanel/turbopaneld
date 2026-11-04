@@ -14,10 +14,11 @@
  *   deno run --allow-read scripts/daemon-state-sentinel.ts verify <dir>
  *
  * `seed` refuses a dir that already holds anything other than the sentinel
- * files, and outside `/tmp` it runs only under GitHub Actions, so it can never
- * replace a real daemon's files on a dev box.
+ * files, and outside the system temp folder (the one `Deno.makeTempDir`
+ * picks, compared after resolving links) it runs only under GitHub Actions,
+ * so it can never replace a real daemon's files on a dev box.
  */
-import { dirname, join, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 
 /** File names the daemon keeps in its state dir, with fixed stand-in bytes. */
 export const SENTINEL_FILES: Readonly<Record<string, string>> = Object.freeze({
@@ -73,19 +74,42 @@ export function sentinelProblems(dir: string): string[] {
   return problems;
 }
 
-/** The system temp folder, as Deno.makeTempDirSync picks it (probe made and removed). */
+/** The system temp folder, as Deno.makeTempDirSync picks it (probe made and removed), links resolved. */
 function systemTempRoot(): string {
   const probe = Deno.makeTempDirSync({ prefix: "tp-sentinel-probe-" });
   try {
-    return dirname(probe);
+    return Deno.realPathSync(dirname(probe));
   } finally {
     Deno.removeSync(probe);
   }
 }
 
-function isUnderSystemTemp(dir: string): boolean {
+/**
+ * `path` with every link in its existing part resolved; the part that does
+ * not exist yet is appended as written.
+ */
+export function realPathOfNearest(path: string): string {
+  let current = resolve(path);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      return join(Deno.realPathSync(current), ...missing);
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+    const parent = dirname(current);
+    if (parent === current) return resolve(path);
+    missing.unshift(basename(current));
+    current = parent;
+  }
+}
+
+/** True when `dir`, links resolved, is inside the system temp folder. */
+export function isUnderSystemTemp(dir: string): boolean {
   const root = systemTempRoot();
-  return resolve(dir).startsWith(root.endsWith("/") ? root : `${root}/`);
+  return realPathOfNearest(dir).startsWith(
+    root.endsWith("/") ? root : `${root}/`,
+  );
 }
 
 /** Write the sentinel files into `dir`. Throws instead of replacing real files. */
@@ -98,6 +122,12 @@ export function seedSentinel(dir: string, onActions: boolean): void {
     );
   }
   Deno.mkdirSync(dir, { recursive: true });
+  // Again now that it exists: a `..` after a link resolves only on disk.
+  if (!onActions && !isUnderSystemTemp(dir)) {
+    throw new Error(
+      `refusing to seed ${dir}: it resolves outside the system temp folder`,
+    );
+  }
   const existing = listEntries(dir);
   if (existing.length > 0 && sentinelProblems(dir).length > 0) {
     throw new Error(

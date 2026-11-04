@@ -577,7 +577,6 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "network", mode: "0700" },
   { name: "tenant-acme", mode: "0750" },
   { name: "cloudflared/tunnels", mode: "0750" },
-  { name: "tls", mode: "0750" },
   { name: "orchestrator", mode: "0750" },
   // In-flight and outcome command journal (command-outbox.ts).
   { name: "commands", mode: "0750" },

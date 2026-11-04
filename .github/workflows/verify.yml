@@ -428,6 +428,13 @@ jobs:
           deno-version: "2.9.8"
           cache: true
 
+      # The same stand-in state dir as in `verify`: these runs (one as root)
+      # are checked for writes to it too.
+      - name: Seed the daemon state sentinel
+        run: |
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/turbopanel
+          deno run --allow-read --allow-write=/var/lib/turbopanel --allow-env=GITHUB_ACTIONS scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel
+
       - name: Sealed-release copy as root (hard link to a root-owned file)
         run: >-
           sudo env "PATH=$PATH" DENO_DIR=/tmp/deno-root-cache
@@ -438,6 +445,10 @@ jobs:
         env:
           DOCKER_GATE_GO_DIFF: "1"
         run: deno test -A --no-check src/docker-gate/parser-differential.test.ts
+
+      - name: Check no test wrote the daemon state dir
+        if: ${{ !cancelled() }}
+        run: deno run --allow-read scripts/daemon-state-sentinel.ts verify /var/lib/turbopanel
 
   ci-ok:
     name: ci-ok

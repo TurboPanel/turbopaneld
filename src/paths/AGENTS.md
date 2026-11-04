@@ -46,7 +46,11 @@ and `/var/lib/turbopanel` end up root-owned (the `daemon-seal` role, last before
 the daemon restarts, with a sweep of links the daemon planted; an administrator's
 root-owned links stay): the daemon (`tp`) writes only its own
 folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
-`src/paths/layout.ts`, created by the `daemon-layout` role). The few files that
+`src/paths/layout.ts`, created by the `daemon-layout` role). `<state>/tls`
+is not one of them: it holds the control plane's Platform CA and the certs
+folder its Caddy reads, so `daemon-layout` and `instance-certs` both make it
+`root:tp 0750` (the developer's own in co-located development), and the
+daemon's one file there (`instance-ca-pin`) goes through `writeDaemonFile`. The few files that
 live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,
 the server key and key-id files, the sealing key (`sealing-key.json`) and the secrets trust mark (`trust-level`), `update-guard-disarm.json`,
 `release-link-scan.json`) go through

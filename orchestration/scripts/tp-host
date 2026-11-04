@@ -330,7 +330,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
   esac
   return 1
 }
@@ -448,25 +448,37 @@ tp_put_file() {
     esac
   fi
   tp_pin_parent "$_pf_path" || tp_die "no such directory for $_pf_path"
-  _pf_real="$(pwd -P)"
-  _pf_priv="$(mktemp -d "./.tp-host.XXXXXX")"
-  _pf_priv="${_pf_priv#./}"
-  CDPATH='' cd -P -- "$_pf_priv"
-  if [ "$(pwd -P)" != "$_pf_real/$_pf_priv" ] || {
-      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
-      [ ! -O . ]
-    } ||
-    [ "$(stat -c '%a' .)" != "700" ]; then
-    tp_die "scratch directory for $_pf_path moved; not writing"
-  fi
+  tp_scratch_enter "$_pf_path"
   cat > ./f
   chmod "$_pf_mode" ./f
   if [ -n "$_pf_owner$_pf_group" ]; then
     tp_run chown -h -- "${_pf_owner}${_pf_group:+:$_pf_group}" ./f
   fi
   mv -T -f -- ./f "../$PIN_NAME"
+  tp_scratch_leave
+}
+
+# From inside a pinned directory, make a root-only 0700 scratch folder in it
+# and cd there (SCRATCH_NAME is its name); LABEL names what is being written.
+# A file finished there reaches the pinned directory with one `mv -T`.
+tp_scratch_enter() {
+  _se_real="$(pwd -P)"
+  SCRATCH_NAME="$(mktemp -d "./.tp-host.XXXXXX")"
+  SCRATCH_NAME="${SCRATCH_NAME#./}"
+  CDPATH='' cd -P -- "$SCRATCH_NAME"
+  if [ "$(pwd -P)" != "$_se_real/$SCRATCH_NAME" ] || {
+      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
+      [ ! -O . ]
+    } ||
+    [ "$(stat -c '%a' .)" != "700" ]; then
+    tp_die "scratch directory for $1 moved; not writing"
+  fi
+}
+
+# Back to the pinned directory, removing the (empty) scratch folder.
+tp_scratch_leave() {
   cd ..
-  rmdir -- "$_pf_priv" 2>/dev/null || true
+  rmdir -- "$SCRATCH_NAME" 2>/dev/null || true
 }
 
 # A root-only scratch directory for this run (never a guessable name in /tmp).
@@ -673,14 +685,19 @@ tp_folder_name_ok() {
   [ "${#1}" -le 63 ]
 }
 
-# A lowercase canonical UUID: every id that forms a path, a lock or a staging name.
+# A lowercase canonical UUID: every id that forms a path, a lock or a staging
+# name. Exactly one value and nothing else: shell patterns only (a line-based
+# matcher accepts a value of which any one line matches), and the length check
+# rules out a second line or a trailing newline before the pattern is tried.
 tp_uuid_ok() {
+  [ "${#1}" -eq 36 ] || return 1
+  _uu_h='[0-9a-f]'
+  _uu_4="$_uu_h$_uu_h$_uu_h$_uu_h"
+  # shellcheck disable=SC2254 # the expansions are the pattern
   case "$1" in
-    ????????-????-????-????-????????????) ;;
-    *) return 1 ;;
+    $_uu_4$_uu_4-$_uu_4-$_uu_4-$_uu_4-$_uu_4$_uu_4$_uu_4) return 0 ;;
   esac
-  printf '%s\n' "$1" |
-    LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  return 1
 }
 
 # The folder a path below a scope names, split. REL is the path relative to the
@@ -1268,11 +1285,7 @@ tp_tunnel_id_ok() {
   case "$1" in
     instance|default) return 0 ;;
   esac
-  # grep matches any line, so a value with a newline is refused first.
-  [ "${#1}" -eq 36 ] || return 1
-  case "$1" in *[!0-9a-f-]*) return 1 ;; esac
-  printf '%s\n' "$1" |
-    LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  tp_uuid_ok "$1"
 }
 
 # The expected text of the connector unit for ID, VERSION, PORT and SLOT suffix
@@ -5323,14 +5336,10 @@ tp_verb_tunnel_env_remove() {
 # <state>/system/instance-certs/<id>.{crt,key} (0600, its own, in a 0700
 # folder it owns) and instance-cert-install checks both and places them
 # root:tp 0640 (Caddy reads them through group tp). <id> is the control
-# plane's certificate id, a UUID.
+# plane's certificate id, a lower-case UUID.
 
 tp_instance_cert_id_ok() {
-  # grep matches any line, so a value with a newline is refused first.
-  [ "${#1}" -eq 36 ] || return 1
-  case "$1" in *[!0-9A-Fa-f-]*) return 1 ;; esac
-  printf '%s\n' "$1" |
-    LC_ALL=C grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
+  tp_uuid_ok "$1"
 }
 
 # FILE is PEM blocks and nothing else: each block a BEGIN line, base64 lines
@@ -5392,10 +5401,62 @@ tp_verb_instance_cert_install() {
   case "$(stat -c '%a' .)" in
     *[2367]?|*[2367]) tp_die "refusing $R_INSTANCE_CERTS: group- or world-writable" ;;
   esac
-  # Both are checked before either is written. The certificate goes first: a
-  # key with no new certificate beside it is never named by the Caddyfile.
-  tp_put_file "$R_INSTANCE_CERTS/uploaded-$1.crt" 640 root "$DAEMON_ACCOUNT" < "$TP_STAGE/crt"
-  tp_put_file "$R_INSTANCE_CERTS/uploaded-$1.key" 640 root "$DAEMON_ACCOUNT" < "$TP_STAGE/key"
+  # Both are checked, then both are written, moded and owned in one scratch
+  # folder before either is renamed into place, the key first. A failed write
+  # leaves the old pair as it was, so Caddy never reads a new chain beside an
+  # old key; only a crash between the two renames (same folder, no data left
+  # to write) could leave the new key beside the old chain.
+  tp_scratch_enter "$R_INSTANCE_CERTS/uploaded-$1"
+  cat > ./key < "$TP_STAGE/key"
+  cat > ./crt < "$TP_STAGE/crt"
+  chmod 640 ./key ./crt
+  tp_run chown -h -- "root:$DAEMON_ACCOUNT" ./key ./crt
+  mv -T -f -- ./key "../uploaded-$1.key"
+  mv -T -f -- ./crt "../uploaded-$1.crt"
+  tp_scratch_leave
+}
+
+# Every DNS-01 renewal brings a new certificate id, so the pairs of ids no
+# hostname uses any more would pile up (keys included). instance-cert-prune
+# [<id>...] removes uploaded-<id>.{crt,key} from the certs folder for every id
+# it is not given: the daemon names every id its hostnames still use, after
+# the control-plane Caddy has taken the config that names only those. Only an
+# entry directly in the pinned folder whose name is exactly
+# uploaded-<lower-case uuid>.crt or .key is touched, never a folder, and rm
+# removes a link itself, never what it points to. The legacy uploaded.{crt,key}
+# and every other file stay.
+TP_INSTANCE_CERT_KEEP_MAX=64
+
+tp_verb_instance_cert_prune() {
+  [ $# -le "$TP_INSTANCE_CERT_KEEP_MAX" ] ||
+    tp_die "instance-cert-prune: at most $TP_INSTANCE_CERT_KEEP_MAX certificate ids"
+  for _ip_keep in "$@"; do
+    tp_instance_cert_id_ok "$_ip_keep" ||
+      tp_die "instance-cert-prune: refusing certificate id $_ip_keep"
+  done
+  # No folder yet: nothing was ever installed, nothing to remove.
+  tp_pin_dir "$R_INSTANCE_CERTS" || return 0
+  case "$(stat -c '%a' .)" in
+    *[2367]?|*[2367]) tp_die "refusing $R_INSTANCE_CERTS: group- or world-writable" ;;
+  esac
+  for _ip_file in uploaded-*.crt uploaded-*.key; do
+    [ -L "$_ip_file" ] || [ -f "$_ip_file" ] || continue
+    _ip_id="${_ip_file#uploaded-}"
+    _ip_id="${_ip_id%.*}"
+    tp_instance_cert_id_ok "$_ip_id" || continue
+    tp_instance_cert_kept "$_ip_id" "$@" && continue
+    rm -f -- "./$_ip_file"
+  done
+}
+
+# True when ID (the first argument) is one of the ids after it.
+tp_instance_cert_kept() {
+  _ik_id="$1"
+  shift
+  for _ik_keep in "$@"; do
+    [ "$_ik_keep" = "$_ik_id" ] && return 0
+  done
+  return 1
 }
 
 # --- panel key pin (lib/panel-identity) ---------------------------------------
@@ -5691,6 +5752,7 @@ case "$_verb" in
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
   instance-cert-install) tp_verb_instance_cert_install "$@" ;;
+  instance-cert-prune) tp_verb_instance_cert_prune "$@" ;;
   panel-identity-write) tp_verb_panel_identity_write "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

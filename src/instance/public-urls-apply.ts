@@ -36,6 +36,7 @@ import {
 } from "../deploy/instance-acme-failure.ts";
 import { instanceAcmeIssuerKey } from "../deploy/instance-acme-issuer.ts";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
+import { logWarn } from "../util/logger.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { runHostCommand } from "../deploy/systemd-unit-set.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
@@ -44,9 +45,16 @@ import { writePrivateFileAtomic } from "../permissions/host-unit-files.ts";
 /** Wire hostname, including the one-hop decrypted upload pair. */
 export type InstanceHostnameApplyEntry = InstanceHostnameWireEntry;
 
-/** The control plane's certificate id: a UUID (tp-host's `tp_instance_cert_id_ok`). */
+/**
+ * The control plane's certificate id: a lower-case UUID, the form Postgres
+ * prints and tp-host's `tp_instance_cert_id_ok` takes.
+ */
 const UPLOADED_CERT_ID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** `uploaded-<id>.crt` or `.key`, the names an uploaded pair is installed as. */
+const UPLOADED_CERT_FILE = /^uploaded-(.{36})\.(?:crt|key)$/;
+/** Most ids `tp-host instance-cert-prune` takes (its TP_INSTANCE_CERT_KEEP_MAX). */
+export const INSTANCE_CERT_KEEP_MAX = 64;
 /** `https://<host>[:port][/]`, the install origin the control plane stores. */
 const INSTALL_ORIGIN =
   /^https:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^/:[\]]+))(?::(\d{1,5}))?\/?$/;
@@ -479,6 +487,128 @@ export function uploadedCertInstaller(
     : installUploadedCertViaHost({ stageDir: instanceCertStageDir(env) });
 }
 
+/**
+ * Removes the installed `uploaded-<id>.{crt,key}` files whose id is not in
+ * `keep` (the ids the hostnames still use).
+ */
+export type UploadedCertPruner = (keep: readonly string[]) => Promise<void>;
+
+/** Co-located development: the certs dir is the developer's own. */
+export function pruneUploadedCertsDirect(
+  certsDir: string,
+): UploadedCertPruner {
+  return async (keep) => {
+    const stale = await staleUploadedCertFiles(certsDir, keep);
+    await forEachSequential(stale, async (name) => {
+      await Deno.remove(join(certsDir, name)).catch((err) => {
+        if (!(err instanceof Deno.errors.NotFound)) throw err;
+      });
+    });
+  };
+}
+
+/** A managed host: `tp-host instance-cert-prune <keep-id>...` removes them. */
+export function pruneUploadedCertsViaHost(
+  deps: { run?: RunFn } = {},
+): UploadedCertPruner {
+  const run = deps.run ?? runHostCommand;
+  return async (keep) => {
+    if (keep.length > INSTANCE_CERT_KEEP_MAX) {
+      throw new Error(
+        `more than ${INSTANCE_CERT_KEEP_MAX} uploaded certificates in use`,
+      );
+    }
+    const result = await run(
+      "sudo",
+      hostSudoArgs(["-n", "instance-cert-prune", ...keep]),
+    );
+    if (!result.success) {
+      throw new Error(
+        `removing unused uploaded certificates failed: ${
+          result.stderr.trim() || "tp-host refused it"
+        }`,
+      );
+    }
+  };
+}
+
+/** The pruner for this host's layout. */
+export function uploadedCertPruner(
+  certsDir: string,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): UploadedCertPruner {
+  return isCoLocatedDev(env)
+    ? pruneUploadedCertsDirect(certsDir)
+    : pruneUploadedCertsViaHost();
+}
+
+/**
+ * Names in `certsDir` of installed uploaded pairs whose id is not in `keep`:
+ * plain files or links named exactly `uploaded-<uuid>.{crt,key}`. A missing
+ * or unreadable folder has none.
+ */
+export async function staleUploadedCertFiles(
+  certsDir: string,
+  keep: readonly string[],
+): Promise<string[]> {
+  const kept = new Set(keep);
+  const stale: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(certsDir)) {
+      if (entry.isDirectory) continue;
+      const id = UPLOADED_CERT_FILE.exec(entry.name)?.[1];
+      if (id && UPLOADED_CERT_ID.test(id) && !kept.has(id)) {
+        stale.push(entry.name);
+      }
+    }
+  } catch (err) {
+    if (
+      err instanceof Deno.errors.NotFound ||
+      err instanceof Deno.errors.PermissionDenied
+    ) return [];
+    throw err;
+  }
+  return stale.sort((a, b) => a.localeCompare(b));
+}
+
+/** The certificate ids the uploaded hostnames use, each once. */
+export function uploadedCertIdsInUse(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+): string[] {
+  const ids = new Set<string>();
+  for (const entry of hostnames) {
+    const id = entry.uploadedCertId;
+    if (entry.source === "uploaded" && id && UPLOADED_CERT_ID.test(id)) {
+      ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Every DNS-01 renewal brings a new certificate id, so after the control-plane
+ * Caddy has taken a config that names only the current ids, the pairs of the
+ * ids no hostname uses are removed. A failure is logged, not thrown: the
+ * apply itself has already succeeded, and the next one tries again.
+ */
+export async function pruneUploadedInstanceCerts(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  certsDir: string,
+  prune: UploadedCertPruner = uploadedCertPruner(certsDir),
+): Promise<void> {
+  const keep = uploadedCertIdsInUse(hostnames);
+  try {
+    if ((await staleUploadedCertFiles(certsDir, keep)).length === 0) return;
+    await prune(keep);
+  } catch (err) {
+    logWarn(
+      "public-urls",
+      "removing unused uploaded certificates failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 export async function writeUploadedInstanceCerts(
   hostnames: readonly InstanceHostnameApplyEntry[],
   certsDir: string,
@@ -575,6 +705,7 @@ export async function applyPublicUrls(
     instanceAcme?: InstanceAcmeWireSettings;
     edgeTrust?: InstanceEdgeTrustWire;
     writeUploadedCerts?: typeof writeUploadedInstanceCerts;
+    pruneUploadedCerts?: typeof pruneUploadedInstanceCerts;
     openWindow?: typeof openInstanceAcmeWindow;
     preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
     issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
@@ -596,6 +727,8 @@ export async function applyPublicUrls(
     readForwardHosts: deps.readForwardHosts,
     runPlaybook: deps.runPlaybook,
   });
+  const prune = deps.pruneUploadedCerts ?? pruneUploadedInstanceCerts;
+  await prune(hostnames, certsDir);
 }
 
 async function issueLetsEncryptHosts(

@@ -123,3 +123,44 @@ test("the ansible probe scratch folder is a state leaf", () => {
   const modes = new Map(DAEMON_STATE_LEAVES.map((l) => [l.name, l.mode]));
   assertEquals(modes.get("ansible"), "0750");
 });
+
+test("the TLS state folder is root:tp 0750 from both daemon-layout and instance-certs, never a daemon leaf", async () => {
+  assert(!DAEMON_STATE_LEAVES.some((leaf) => leaf.name === "tls"));
+  const tasks = await readYaml<Task[]>(join(ROLE, "tasks/main.yml"));
+  const fhs = tasks.find((t) =>
+    t.name === "Ensure production FHS directories exist"
+  );
+  assert(fhs, "expected the FHS directories task");
+  const items = fhs.loop as Array<Record<string, string>>;
+  const tls = items.find((item) =>
+    item.path === "{{ turbopanel_daemon_state_dir }}/tls"
+  );
+  assertEquals(tls, {
+    path: "{{ turbopanel_daemon_state_dir }}/tls",
+    mode: "0750",
+    owner: "root",
+    group: "{{ turbopanel_group }}",
+  });
+  const certsRole = join(DAEMON_ROOT, "orchestration/roles/instance-certs");
+  const defaults = await readYaml<Record<string, string>>(
+    join(certsRole, "defaults/main.yml"),
+  );
+  assertEquals(
+    defaults.turbopanel_instance_ca_dir,
+    "{{ turbopanel_state_dir }}/tls",
+  );
+  const certTasks = await readYaml<Task[]>(join(certsRole, "tasks/main.yml"));
+  const caDir = certTasks.find((t) =>
+    (t["ansible.builtin.file"] as Record<string, unknown> | undefined)
+      ?.path === "{{ turbopanel_instance_ca_dir }}"
+  );
+  assert(caDir, "expected the instance-certs CA folder task");
+  const args = caDir["ansible.builtin.file"] as Record<string, unknown>;
+  // Root on a managed host; the developer's own only in co-located development.
+  assertEquals(
+    args.owner,
+    "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}",
+  );
+  assertEquals(args.group, "{{ turbopanel_group }}");
+  assertEquals(args.mode, "0750");
+});

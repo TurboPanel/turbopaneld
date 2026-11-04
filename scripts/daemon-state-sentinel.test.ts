@@ -11,6 +11,8 @@ import {
 } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
+  isUnderSystemTemp,
+  realPathOfNearest,
   seedSentinel,
   SENTINEL_FILES,
   sentinelProblems,
@@ -119,6 +121,36 @@ test("seed refuses a dir outside the system temp folder unless it runs under Git
   );
 });
 
+test("seed refuses a temp path that is a link to a folder outside the temp folder", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-state-sentinel-" });
+  try {
+    // A link that leaves the temp folder (the repo checkout stands in for a
+    // real state dir; nothing is written through it).
+    const link = join(root, "state");
+    await Deno.symlink(REPO, link);
+    assertEquals(isUnderSystemTemp(link), false);
+    assertEquals(isUnderSystemTemp(join(link, "never-made")), false);
+    assertThrows(
+      () => seedSentinel(join(link, "never-made"), false),
+      Error,
+      "outside the system temp folder",
+    );
+    assertEquals(
+      await Deno.lstat(join(REPO, "never-made")).then(() => true, () => false),
+      false,
+    );
+    // A plain temp path, existing or not, is inside.
+    assert(isUnderSystemTemp(root));
+    assert(isUnderSystemTemp(join(root, "a", "b")));
+    assertEquals(
+      realPathOfNearest(join(root, "a", "b")),
+      join(Deno.realPathSync(root), "a", "b"),
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 test("verify exits non-zero and names the change", async () => {
   await withSeeded(async (dir) => {
     await Deno.writeTextFile(join(dir, "server.id"), "throwaway");
@@ -149,5 +181,27 @@ test("verify.yml seeds the sentinel before the tests and verifies it after", () 
   assert(seed >= 0 && tests > seed, "seed the sentinel before the tests");
   assert(check > tests, "verify the sentinel after the tests");
   const step = verify.slice(verify.lastIndexOf("- name:", check), check);
+  assertStringIncludes(step, "!cancelled()", "verify even when tests fail");
+});
+
+test("the privileged single-file test runs are inside the sentinel too", () => {
+  const verify = Deno.readTextFileSync(
+    join(REPO, ".github", "workflows", "verify.yml"),
+  );
+  const job = verify.slice(
+    verify.indexOf("\n  privileged-suites:"),
+    verify.indexOf("\n  ci-ok:"),
+  );
+  const seed = job.indexOf(
+    "scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel",
+  );
+  const check = job.indexOf(
+    "scripts/daemon-state-sentinel.ts verify /var/lib/turbopanel",
+  );
+  const runs = [...job.matchAll(/deno test /g)].map((m) => m.index);
+  assert(runs.length > 0, "the job runs tests");
+  assert(seed >= 0 && runs.every((at) => at > seed), "seed before every run");
+  assert(runs.every((at) => check > at), "verify after every run");
+  const step = job.slice(job.lastIndexOf("- name:", check), check);
   assertStringIncludes(step, "!cancelled()", "verify even when tests fail");
 });
