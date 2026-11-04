@@ -1038,6 +1038,19 @@ test("a pair that is not PEM certificates and one key is refused before anything
       `refusing uploaded certificate ${CERT_ID}`,
     );
   }
+  // A certificate id that is not a UUID is refused too.
+  for (const id of ["-".repeat(36), "a".repeat(36), `${CERT_ID}\nx`]) {
+    await assertRejects(
+      () =>
+        writeUploadedInstanceCerts(
+          [uploadedRow("https://a.example", id)],
+          "/nonexistent",
+          install,
+        ),
+      Error,
+      "refusing uploaded certificate id",
+    );
+  }
   assertEquals(calls, []);
   // CRLF line endings and a missing final newline are normalized, not refused.
   assertEquals(

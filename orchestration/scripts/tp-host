@@ -1268,6 +1268,9 @@ tp_tunnel_id_ok() {
   case "$1" in
     instance|default) return 0 ;;
   esac
+  # grep matches any line, so a value with a newline is refused first.
+  [ "${#1}" -eq 36 ] || return 1
+  case "$1" in *[!0-9a-f-]*) return 1 ;; esac
   printf '%s\n' "$1" |
     LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 }
@@ -5323,6 +5326,9 @@ tp_verb_tunnel_env_remove() {
 # plane's certificate id, a UUID.
 
 tp_instance_cert_id_ok() {
+  # grep matches any line, so a value with a newline is refused first.
+  [ "${#1}" -eq 36 ] || return 1
+  case "$1" in *[!0-9A-Fa-f-]*) return 1 ;; esac
   printf '%s\n' "$1" |
     LC_ALL=C grep -Eq '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
 }

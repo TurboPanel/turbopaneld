@@ -282,3 +282,31 @@ test("tp-host and the daemon agree on the staging folder, the certs folder and t
   assertEquals(instanceCertStageDir(managed), `/${STAGE_DIR}`);
   assertEquals(resolveInstanceCertsDir(managed), `/${CERTS_DIR}`);
 });
+
+/**
+ * Runs one of tp-host's id checks, lifted from the script, on VALUE. The
+ * dispatch already refuses an argument with a newline, so this proves the
+ * check holds on its own: grep matches any line of a multi-line value.
+ */
+async function idCheck(fn: string, value: string): Promise<boolean> {
+  const script = await Deno.readTextFile(TP_HOST_SCRIPT);
+  const start = script.indexOf(`${fn}() {`);
+  const body = script.slice(start, script.indexOf("\n}\n", start) + 3);
+  const out = await new Deno.Command("sh", {
+    args: ["-c", `${body}\n${fn} "$1"`, "sh", value],
+  }).output();
+  return out.success;
+}
+
+test("the certificate and tunnel id checks refuse a value with a second line", async () => {
+  const tunnelId = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+  assert(await idCheck("tp_instance_cert_id_ok", ID));
+  assert(await idCheck("tp_tunnel_id_ok", tunnelId));
+  assert(await idCheck("tp_tunnel_id_ok", "instance"));
+  for (const value of [`${ID}\nx`, `x\n${ID}`, `${ID}\n`]) {
+    assertEquals(await idCheck("tp_instance_cert_id_ok", value), false);
+  }
+  for (const value of [`${tunnelId}\nx`, `x\n${tunnelId}`, `${tunnelId}\n`]) {
+    assertEquals(await idCheck("tp_tunnel_id_ok", value), false);
+  }
+});

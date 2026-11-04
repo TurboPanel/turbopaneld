@@ -44,7 +44,9 @@ import { writePrivateFileAtomic } from "../permissions/host-unit-files.ts";
 /** Wire hostname, including the one-hop decrypted upload pair. */
 export type InstanceHostnameApplyEntry = InstanceHostnameWireEntry;
 
-const UPLOADED_CERT_ID = /^[0-9a-f-]{36}$/i;
+/** The control plane's certificate id: a UUID (tp-host's `tp_instance_cert_id_ok`). */
+const UPLOADED_CERT_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** `https://<host>[:port][/]`, the install origin the control plane stores. */
 const INSTALL_ORIGIN =
   /^https:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^/:[\]]+))(?::(\d{1,5}))?\/?$/;
@@ -310,27 +312,37 @@ const PEM_BASE64_LINE = /^[A-Za-z0-9+/=]{1,128}$/;
  * `tp_instance_pem_ok`, so a pair the daemon accepts is not refused root-side.
  */
 function pemBlockLabels(text: string): string[] | null {
-  const labels: string[] = [];
-  let open: string | null = null;
-  let lines = 0;
+  const scan: PemScan = { labels: [], open: null, lines: 0 };
   for (const line of text.split("\n")) {
-    if (open === null) {
-      if (line === "") continue;
-      const begin = PEM_BEGIN.exec(line);
-      if (!begin) return null;
-      open = begin[1]!;
-      labels.push(open);
-      lines = 0;
-    } else if (line === `-----END ${open}-----`) {
-      if (lines === 0) return null;
-      open = null;
-    } else if (PEM_BASE64_LINE.test(line)) {
-      lines += 1;
-    } else {
-      return null;
-    }
+    if (!scanPemLine(scan, line)) return null;
   }
-  return open === null ? labels : null;
+  return scan.open === null ? scan.labels : null;
+}
+
+type PemScan = { labels: string[]; open: string | null; lines: number };
+
+/** Feeds one line to the scan; false when the text is not PEM blocks only. */
+function scanPemLine(scan: PemScan, line: string): boolean {
+  if (scan.open === null) return openPemBlock(scan, line);
+  if (line === `-----END ${scan.open}-----`) {
+    if (scan.lines === 0) return false;
+    scan.open = null;
+    return true;
+  }
+  if (!PEM_BASE64_LINE.test(line)) return false;
+  scan.lines += 1;
+  return true;
+}
+
+/** Outside a block only blank lines and a BEGIN line may appear. */
+function openPemBlock(scan: PemScan, line: string): boolean {
+  if (line === "") return true;
+  const begin = PEM_BEGIN.exec(line);
+  if (!begin) return false;
+  scan.open = begin[1]!;
+  scan.labels.push(scan.open);
+  scan.lines = 0;
+  return true;
 }
 
 /** LF line endings and one final newline, the bytes tp-host checks. */
@@ -372,7 +384,7 @@ export function uploadedCertPair(
     );
   }
   const keys = pemBlockLabels(key);
-  if (!keys || keys.length !== 1 || !KEY_LABELS.has(keys[0]!)) {
+  if (keys?.length !== 1 || !KEY_LABELS.has(keys[0]!)) {
     throw new Error(
       `refusing uploaded certificate ${id}: the private key is not one unencrypted PEM private key`,
     );
