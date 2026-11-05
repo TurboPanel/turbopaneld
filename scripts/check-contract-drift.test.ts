@@ -5,9 +5,11 @@ import {
   type ContractFieldPin,
   extractFieldSpecs,
   fieldPinDrift,
+  floorWithinVersionDrift,
   main,
   runContractDriftCheck,
   snapshotDataDrift,
+  versionFloorsDrift,
 } from "./check-contract-drift.ts";
 
 /**
@@ -223,5 +225,69 @@ test("snapshotDataDrift reports a shorter array and a malformed file", () => {
     () => snapshotDataDrift(`{}`, `nope`),
     Error,
     "on the daemon is not valid JSON",
+  );
+});
+
+test("a version floor passes at or below the peer version and names why otherwise", () => {
+  const name = "MIN_SUPPORTED_INSTANCE_VERSION";
+  assertEquals(floorWithinVersionDrift("0.1.22", "0.1.22", name), null);
+  assertEquals(floorWithinVersionDrift("0.1.18", "0.1.22", name), null);
+  assertEquals(floorWithinVersionDrift("0.9.9", "1.0.0", name), null);
+  assertEquals(
+    floorWithinVersionDrift("0.1.23", "0.1.22", name),
+    "MIN_SUPPORTED_INSTANCE_VERSION 0.1.23 is newer than the peer's version 0.1.22",
+  );
+  assertEquals(
+    floorWithinVersionDrift("0.2.0", "0.1.22", name),
+    "MIN_SUPPORTED_INSTANCE_VERSION 0.2.0 is newer than the peer's version 0.1.22",
+  );
+  assertEquals(
+    floorWithinVersionDrift("0.1.22-rc.1", "0.1.22", name),
+    "MIN_SUPPORTED_INSTANCE_VERSION must be a plain X.Y.Z (got 0.1.22-rc.1)",
+  );
+  assertEquals(
+    floorWithinVersionDrift(null, "0.1.22", name),
+    "MIN_SUPPORTED_INSTANCE_VERSION must be a plain X.Y.Z (got null)",
+  );
+  assertEquals(
+    floorWithinVersionDrift("0.1.22", "v0.1.22", name),
+    "MIN_SUPPORTED_INSTANCE_VERSION: the peer deno.json version is not X.Y.Z (got v0.1.22)",
+  );
+});
+
+test("versionFloorsDrift holds each floor against the peer repo's deno.json", () => {
+  const instanceWire = `export const MIN_SUPPORTED_DAEMON_VERSION = '0.1.18'`;
+  const daemonWire = `export const MIN_SUPPORTED_INSTANCE_VERSION = "0.1.22";`;
+  const json = (version: string) => JSON.stringify({ version });
+  assertEquals(
+    versionFloorsDrift(
+      instanceWire,
+      daemonWire,
+      json("0.1.22"),
+      json("0.1.18"),
+    ),
+    null,
+  );
+  assertEquals(
+    versionFloorsDrift(
+      instanceWire,
+      daemonWire,
+      json("0.1.21"),
+      json("0.1.18"),
+    ),
+    "MIN_SUPPORTED_INSTANCE_VERSION 0.1.22 is newer than the peer's version 0.1.21",
+  );
+  assertEquals(
+    versionFloorsDrift(
+      instanceWire,
+      daemonWire,
+      json("0.1.22"),
+      json("0.1.17"),
+    ),
+    "MIN_SUPPORTED_DAEMON_VERSION 0.1.18 is newer than the peer's version 0.1.17",
+  );
+  assertEquals(
+    versionFloorsDrift(instanceWire, daemonWire, "{}", json("0.1.18")),
+    "MIN_SUPPORTED_INSTANCE_VERSION: the peer deno.json version is not X.Y.Z (got null)",
   );
 });
