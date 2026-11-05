@@ -26,7 +26,9 @@ import { getBuildInfo } from "../build-info.ts";
 import { runCommand } from "./commands.ts";
 import {
   devHostEnabled,
+  type DevHostPartName,
   devHostParts,
+  type DevHostPartSpec,
   type DevHostPaths,
   partCheckout,
   resolveDevHostPaths,
@@ -40,7 +42,9 @@ import {
 } from "./job.ts";
 import { DevHostStatusCollector } from "./status.ts";
 import { readInstanceDatabaseUrl } from "./units.ts";
+import { join } from "@std/path";
 import {
+  aheadOfTrunk,
   AutoMigrate,
   readAppliedHashes,
   readTrunkHashes,
@@ -205,7 +209,12 @@ export class DevHostService implements DevHostPort {
           this.#deps.jobs.current(),
         );
         if (this.#deps.autoMigrate) {
-          status = await this.#deps.autoMigrate.review(status);
+          try {
+            status = await this.#deps.autoMigrate.review(status);
+          } catch (err) {
+            // The collected status still goes out.
+            logWarn("dev-host", "migration review failed:", String(err));
+          }
           // A job started by the review has already been published; keep it.
           status = { ...status, job: this.#deps.jobs.current() };
         }
@@ -284,20 +293,52 @@ export class DevHostService implements DevHostPort {
 
 /** The migration watch on the real control plane checkout and database. */
 function autoMigrateFor(
-  repo: string,
+  paths: Pick<DevHostPaths, "devRoot" | "dir">,
+  parts: readonly DevHostPartSpec[],
+  controlPlaneRepo: string,
   databaseUrl: () => Promise<string | null>,
   ref: { service?: DevHostService },
 ): AutoMigrate {
+  const repos = parts.map((spec) => ({
+    name: spec.name,
+    repo: partCheckout(paths, spec),
+  }));
+  const triedFile = join(paths.dir, "auto-migrate.json");
   return new AutoMigrate({
+    // Every checkout's refs, so the ahead-of-trunk check reruns when any moves.
     refsKey: async () => {
-      const remote = await readRef(repo, REMOTE_TRUNK_REF);
-      const head = await readHead(repo);
-      return remote && head?.commit ? `${remote}..${head.commit}` : null;
+      const keys = await Promise.all(repos.map(async ({ repo }) => {
+        const remote = await readRef(repo, REMOTE_TRUNK_REF);
+        const head = await readHead(repo);
+        return `${remote ?? "-"}..${head?.commit ?? "-"}`;
+      }));
+      const controlPlane = await readRef(controlPlaneRepo, REMOTE_TRUNK_REF);
+      return controlPlane ? keys.join(" ") : null;
     },
-    trunkHashes: () => readTrunkHashes(runCommand, repo),
+    trunkHashes: () => readTrunkHashes(runCommand, controlPlaneRepo),
     appliedHashes: async () =>
       readAppliedHashes(runCommand, await databaseUrl(), POSTGRES_CONTAINER),
+    partsAheadOfTrunk: async () => {
+      const ahead = await Promise.all(
+        repos.map(async ({ name, repo }) =>
+          (await aheadOfTrunk(runCommand, repo)) ? name : null
+        ),
+      );
+      return ahead.filter((name): name is DevHostPartName => name !== null);
+    },
     startUpdate: async () => (await ref.service?.start("update"))?.ok === true,
+    loadTried: async () => {
+      try {
+        const saved = JSON.parse(await Deno.readTextFile(triedFile));
+        return typeof saved?.trunk === "string" ? saved.trunk : null;
+      } catch {
+        return null;
+      }
+    },
+    saveTried: async (trunk) => {
+      await Deno.mkdir(paths.dir, { recursive: true, mode: 0o750 });
+      await writeJsonAtomic(triedFile, { trunk });
+    },
   });
 }
 
@@ -336,7 +377,13 @@ export function startDevHostIfEnabled(
     onChange: (job) => ref.service?.jobChanged(job),
   });
   const autoMigrate = controlPlane
-    ? autoMigrateFor(partCheckout(paths, controlPlane), databaseUrl, ref)
+    ? autoMigrateFor(
+      paths,
+      parts,
+      partCheckout(paths, controlPlane),
+      databaseUrl,
+      ref,
+    )
     : undefined;
   const service = new DevHostService({ collector, jobs, paths, autoMigrate });
   ref.service = service;

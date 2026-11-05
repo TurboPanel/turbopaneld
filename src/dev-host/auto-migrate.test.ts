@@ -1,7 +1,12 @@
 import { assert, assertEquals } from "@std/assert";
-import type { DevHostPart, DevHostStatus } from "../contracts/cell-messages.ts";
+import type {
+  DevHostJob,
+  DevHostPart,
+  DevHostStatus,
+} from "../contracts/cell-messages.ts";
 import type { CommandResult, RunCommand } from "./commands.ts";
 import {
+  aheadOfTrunk,
   AUTO_MIGRATE_CHECK_MS,
   AutoMigrate,
   type AutoMigrateDeps,
@@ -42,7 +47,10 @@ function part(
   };
 }
 
-function status(parts: DevHostPart[] = []): DevHostStatus {
+function status(
+  parts: DevHostPart[] = [],
+  job: DevHostJob | null = null,
+): DevHostStatus {
   const names: DevHostPart["name"][] = [
     "daemon",
     "control-plane",
@@ -53,7 +61,20 @@ function status(parts: DevHostPart[] = []): DevHostStatus {
   return {
     parts: names.map((n) => byName.get(n) ?? part(n)),
     lastFetchAt: null,
-    job: null,
+    job,
+  };
+}
+
+function job(id: string, state: DevHostJob["state"]): DevHostJob {
+  return {
+    id,
+    action: "update",
+    state,
+    step: "migrate",
+    steps: [],
+    startedAt: new Date(NOW).toISOString(),
+    endedAt: state === "running" ? null : new Date(NOW + 1000).toISOString(),
+    logTail: [],
   };
 }
 
@@ -61,35 +82,55 @@ function controlPlaneReason(s: DevHostStatus): string | undefined {
   return s.parts.find((p) => p.name === "control-plane")?.blockedReason;
 }
 
+type State = {
+  key: string;
+  trunk: string[];
+  applied: string[];
+  ahead: string[];
+  started: boolean;
+  saved: string | null;
+};
+
 type Harness = {
   auto: AutoMigrate;
   starts: () => number;
   reads: () => number;
-  set: (
-    next: Partial<{ key: string; trunk: string[]; applied: string[] }>,
-  ) => void;
+  state: State;
   advance: (ms: number) => void;
 };
 
 function harness(
   overrides: Partial<AutoMigrateDeps> = {},
+  initial: Partial<State> = {},
 ): Harness {
-  let key = "t1..h1";
-  let trunk = ["h0", "h1", "h2"];
-  let applied = ["h0"];
+  const state: State = {
+    key: "t1..h1",
+    trunk: ["h0", "h1", "h2"],
+    applied: ["h0"],
+    ahead: [],
+    started: true,
+    saved: null,
+    ...initial,
+  };
   let now = NOW;
   let starts = 0;
   let reads = 0;
   const auto = new AutoMigrate({
-    refsKey: () => Promise.resolve(key),
+    refsKey: () => Promise.resolve(state.key),
     trunkHashes: () => {
       reads++;
-      return Promise.resolve(trunk);
+      return Promise.resolve(state.trunk);
     },
-    appliedHashes: () => Promise.resolve(applied),
+    appliedHashes: () => Promise.resolve(state.applied),
+    partsAheadOfTrunk: () => Promise.resolve(state.ahead),
     startUpdate: () => {
-      starts++;
-      return Promise.resolve(true);
+      if (state.started) starts++;
+      return Promise.resolve(state.started);
+    },
+    loadTried: () => Promise.resolve(state.saved),
+    saveTried: (key) => {
+      state.saved = key;
+      return Promise.resolve();
     },
     nowMs: () => now,
     ...overrides,
@@ -98,18 +139,14 @@ function harness(
     auto,
     starts: () => starts,
     reads: () => reads,
-    set: (next) => {
-      key = next.key ?? key;
-      trunk = next.trunk ?? trunk;
-      applied = next.applied ?? applied;
-    },
+    state,
     advance: (ms) => {
       now += ms;
     },
   };
 }
 
-test("the gap counts trunk migrations the database lacks", () => {
+test("the gap follows the control plane's rule: applied must be trunk's start", () => {
   assertEquals(migrationGap(["a", "b"], ["a", "b"]), { kind: "none" });
   assertEquals(migrationGap(["a", "b", "c"], ["a"]), {
     kind: "pending",
@@ -117,13 +154,16 @@ test("the gap counts trunk migrations the database lacks", () => {
   });
   assertEquals(migrationGap(["a", "b"], []), { kind: "pending", count: 2 });
   assertEquals(migrationGap(["a"], ["a", "x"]), { kind: "foreign" });
+  // A gap or a different order is what pnpm migrate calls diverged.
+  assertEquals(migrationGap(["a", "b", "c"], ["a", "c"]), { kind: "foreign" });
+  assertEquals(migrationGap(["a", "b"], ["b"]), { kind: "foreign" });
 });
 
 test("any part off trunk, dirty or blocked holds the job", () => {
   assertEquals(holdReason(status()), null);
   assertEquals(
     holdReason(status([part("website", { onTrunk: false, branch: "x" })])),
-    "website is not on trunk",
+    { part: "website", reason: "is not on trunk" },
   );
   assertEquals(
     holdReason(
@@ -133,7 +173,7 @@ test("any part off trunk, dirty or blocked holds the job", () => {
         }),
       ]),
     ),
-    "web-interface has local changes",
+    { part: "web-interface", reason: "has local changes" },
   );
   assertEquals(
     holdReason(
@@ -144,7 +184,7 @@ test("any part off trunk, dirty or blocked holds the job", () => {
         }),
       ]),
     ),
-    "control-plane detached HEAD, not trunk; not pulled",
+    { part: "control-plane", reason: "detached HEAD, not trunk; not pulled" },
   );
 });
 
@@ -160,22 +200,52 @@ test("a manifest gives its hashes in order; anything else is null", () => {
   assertEquals(manifestHashes(JSON.stringify({ entries: [{}] })), null);
 });
 
-test("pending trunk migrations with clean checkouts start Update and Restart once", async () => {
+test("pending trunk migrations with clean checkouts start Update and Restart once per trunk list", async () => {
   const h = harness();
   const out = await h.auto.review(status());
   assertEquals(h.starts(), 1);
   assertEquals(controlPlaneReason(out), undefined);
-  // Same trunk and HEAD (the job failed or left migrations): not again.
-  const again = await h.auto.review(status());
+  assertEquals(h.state.saved, "h0,h1,h2");
+  // The job pulled (refs moved) but failed before migrating: not again.
+  h.state.key = "t1..t1";
+  const again = await h.auto.review(status([], job("j1", "failed")));
   assertEquals(h.starts(), 1);
   assertEquals(
     controlPlaneReason(again),
-    "trunk has 2 new migrations; the automatic update did not apply them (see the last job)",
+    "trunk has 2 new migrations; the automatic update did not apply them (see the last job, or run Update and Restart)",
   );
-  // A new trunk commit is tried again.
-  h.set({ key: "t2..h1", trunk: ["h0", "h1", "h2", "h3"] });
-  await h.auto.review(status());
+  // Trunk ships another migration: tried again.
+  h.state.key = "t2..t1";
+  h.state.trunk = ["h0", "h1", "h2", "h3"];
+  await h.auto.review(status([], job("j1", "failed")));
   assertEquals(h.starts(), 2);
+});
+
+test("the tried list survives a daemon restart", async () => {
+  const h = harness({}, { saved: "h0,h1,h2" });
+  const out = await h.auto.review(status());
+  assertEquals(h.starts(), 0);
+  assert(controlPlaneReason(out)?.includes("did not apply them"));
+});
+
+test("a job that ends is followed by a fresh comparison (no stale failure note)", async () => {
+  const h = harness();
+  await h.auto.review(status());
+  assertEquals(h.starts(), 1);
+  // The job migrated without moving any ref (checkouts were already current).
+  h.state.applied = ["h0", "h1", "h2"];
+  const out = await h.auto.review(status([], job("j1", "done")));
+  assertEquals(h.reads(), 2);
+  assertEquals(controlPlaneReason(out), undefined);
+});
+
+test("a start refused because a job is running is not counted as tried", async () => {
+  const h = harness({}, { started: false });
+  await h.auto.review(status());
+  assertEquals(h.state.saved, null);
+  h.state.started = true;
+  await h.auto.review(status());
+  assertEquals(h.starts(), 1);
 });
 
 test("a checkout with local changes holds the job and says why", async () => {
@@ -192,7 +262,7 @@ test("a checkout with local changes holds the job and says why", async () => {
   );
 });
 
-test("a detached control plane keeps its own reason and adds the hold", async () => {
+test("a detached control plane keeps its own reason and adds the hold once", async () => {
   const h = harness();
   const out = await h.auto.review(
     status([
@@ -206,13 +276,22 @@ test("a detached control plane keeps its own reason and adds the hold", async ()
   assertEquals(h.starts(), 0);
   assertEquals(
     controlPlaneReason(out),
-    "detached HEAD, not trunk; not pulled; trunk has 2 new migrations, not applied automatically: control-plane detached HEAD, not trunk; not pulled",
+    "detached HEAD, not trunk; not pulled; trunk has 2 new migrations, not applied automatically until this is fixed",
+  );
+});
+
+test("a checkout with commits not on origin/trunk holds the job", async () => {
+  const h = harness({}, { ahead: ["control-plane"] });
+  const out = await h.auto.review(status());
+  assertEquals(h.starts(), 0);
+  assertEquals(
+    controlPlaneReason(out),
+    "trunk has 2 new migrations, not applied automatically: control-plane has commits not on origin/trunk",
   );
 });
 
 test("nothing pending, a running job or unreadable state starts nothing", async () => {
-  const current = harness();
-  current.set({ applied: ["h0", "h1", "h2"] });
+  const current = harness({}, { applied: ["h0", "h1", "h2"] });
   assertEquals(
     controlPlaneReason(await current.auto.review(status())),
     undefined,
@@ -220,18 +299,7 @@ test("nothing pending, a running job or unreadable state starts nothing", async 
   assertEquals(current.starts(), 0);
 
   const running = harness();
-  const busy = status();
-  busy.job = {
-    id: "j",
-    action: "update",
-    state: "running",
-    step: "pull",
-    steps: [],
-    startedAt: new Date(NOW).toISOString(),
-    endedAt: null,
-    logTail: [],
-  };
-  await running.auto.review(busy);
+  await running.auto.review(status([], job("j", "running")));
   assertEquals(running.starts(), 0);
   assertEquals(running.reads(), 0, "no git or database read while a job runs");
 
@@ -243,29 +311,31 @@ test("nothing pending, a running job or unreadable state starts nothing", async 
   assertEquals(unreadable.starts(), 0);
 });
 
-test("a database with migrations trunk does not ship is never migrated automatically", async () => {
-  const h = harness();
-  h.set({ applied: ["h0", "branch-only"] });
+test("a database whose migrations are not trunk's start is never migrated automatically", async () => {
+  const h = harness({}, { applied: ["h0", "branch-only"] });
   const out = await h.auto.review(status());
   assertEquals(h.starts(), 0);
   assertEquals(
     controlPlaneReason(out),
-    "the database has migrations that are not on trunk; not migrating automatically",
+    "the database's migrations are not the start of trunk's; not migrating automatically",
   );
 });
 
-test("the comparison repeats only when refs move or after ten minutes", async () => {
-  const h = harness();
-  h.set({ applied: ["h0", "h1", "h2"] });
+test("the comparison repeats only when refs move, a job ends, or after ten minutes", async () => {
+  const h = harness({}, { applied: ["h0", "h1", "h2"] });
   await h.auto.review(status());
   await h.auto.review(status());
   assertEquals(h.reads(), 1);
   h.advance(AUTO_MIGRATE_CHECK_MS);
   await h.auto.review(status());
   assertEquals(h.reads(), 2);
-  h.set({ key: "t2..h1" });
+  h.state.key = "t2..h1";
   await h.auto.review(status());
   assertEquals(h.reads(), 3);
+  await h.auto.review(status([], job("j9", "done")));
+  assertEquals(h.reads(), 4);
+  await h.auto.review(status([], job("j9", "done")));
+  assertEquals(h.reads(), 4);
 });
 
 function recordingRun(
@@ -342,4 +412,19 @@ test("trunk hashes come from git show in the control plane checkout", async () =
   ]);
   const missing = recordingRun({ code: 128, stdout: "", stderr: "bad ref" });
   assertEquals(await readTrunkHashes(missing.run, "/repo"), null);
+});
+
+test("a HEAD that is not an ancestor of origin/trunk counts as ahead", async () => {
+  const onTrunk = recordingRun({ code: 0, stdout: "", stderr: "" });
+  assertEquals(await aheadOfTrunk(onTrunk.run, "/repo"), false);
+  assertEquals(onTrunk.calls[0].args, [
+    "-C",
+    "/repo",
+    "merge-base",
+    "--is-ancestor",
+    "HEAD",
+    "refs/remotes/origin/trunk",
+  ]);
+  const ahead = recordingRun({ code: 1, stdout: "", stderr: "" });
+  assertEquals(await aheadOfTrunk(ahead.run, "/repo"), true);
 });

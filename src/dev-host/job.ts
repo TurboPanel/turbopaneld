@@ -715,9 +715,10 @@ export function parsePostgresUrl(url: string): PostgresUrlParts | null {
 }
 
 /** TCP hosts that are this machine, so the local container is the database. */
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+export const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
-const SAFE_NAME = /^\w[\w.-]{0,62}$/;
+/** A plain Postgres user, database or container name. */
+export const SAFE_NAME = /^\w[\w.-]{0,62}$/;
 const SAFE_DIR = /^\/[A-Za-z0-9_./-]+$/;
 
 /**

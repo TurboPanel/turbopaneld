@@ -225,6 +225,18 @@ test("every tick passes through the migration review before it is published", as
   });
 });
 
+test("a failing migration review still publishes the collected status", async () => {
+  await withService(async ({ service, written }) => {
+    await service.run();
+    assertEquals(written.length, 1);
+    assertEquals(written[0].parts, []);
+  }, {
+    autoMigrate: {
+      review: () => Promise.reject(new Error("lock folder missing")),
+    },
+  });
+});
+
 test("the minute timer ticks and stop cancels it; a job change goes out at once", async () => {
   await withService(async ({ service, written, tickers }) => {
     await service.run();
