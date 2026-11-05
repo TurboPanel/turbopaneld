@@ -73,3 +73,17 @@ field: a host offline for weeks must still update and old manifests lack it.
 Break-glass is host-side only: `TURBOPANEL_ALLOW_DOWNGRADE=1` in the daemon
 environment, or running `run.sh --manifest-url <older tag>` by hand (run.sh
 itself does not compare versions). Nothing in a WebSocket message can lift it.
+
+## Update channel pin
+
+The host channel (`TURBOPANEL_UPDATE_CHANNEL` in daemon.env, written by the
+installer) holds against the control plane's messages. An `update` or
+`instance-update` naming another channel is honoured only when it arrived on a
+verified signed session (pinned server, signed hello applied); on an unsigned
+session it is refused before anything runs with `errorCode` `channel_pinned`
+(`decideUpdateChannel`, `src/instance/update-channel-pin.ts`). An absent,
+equal or unknown message channel keeps the host channel. The host-side way to
+change it is re-running the installer with `TURBOPANEL_UPDATE_CHANNEL`. Root
+does not compare a requested channel against a stored one (`tp-orchestrate`
+only allowlists the name): root cannot verify a control-plane signature, so
+such a pin would also block the signed path.
