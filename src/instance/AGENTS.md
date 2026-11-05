@@ -1004,6 +1004,30 @@ key files kept, never re-enrolls). No hello within 30 s is a plain timeout.
 The hello's `heartbeatSeconds` wins over the unsigned `version` advice.
 An unpinned server keeps the unsigned session exactly as before.
 
+## Daemon-signed requests and the attach proof
+
+On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):
+
+- **Requests.** Every authenticated call and `/auth/session` carry
+  `X-TurboPanel-Daemon-Signature: <keyId>:<nonce>:<iat>:<sig>` over
+  `"tp-request\n" + METHOD + "\n" + pathname + "\n" + panelFingerprint + "\n" +
+  nonce + "\n" + base64url(SHA-256(body)) + "\n" + iat` (`signDaemonRequest`,
+  wired as `signRequest` on the authenticated `DaemonApiClient`; a 401 retry
+  signs again with a fresh nonce). `keyId` is the enrolled key id (the token's
+  `kid`); `panelFingerprint` is the pinned key that signed the identity
+  document. The `/ws/daemon/v1` upgrade carries the same header (GET, empty
+  body). Without a pin nothing is signed. A signed `/auth/session` gets a token
+  bound to the daemon key (`cnf`) and raises the server to `trust_level` 2;
+  after that the control plane refuses any unsigned request, and `403 Signed
+  request required` on a session is permanent (the pin is gone). `400 Request
+  clock skew` is transient.
+- **Attach proof.** After the signed hello verifies, the first presence `hello`
+  carries `attach: {keyId, iat, sig}` over `"tp-attach\n" + sessionId + "\n" +
+  panelFingerprint + "\n" + serverId + "\n" + keyId + "\n" + iat`
+  (`signAttachProof`; the session id and key are the control plane hello's).
+  The control plane holds its outbox until that hello arrives. The prefixes
+  are pinned by `deno task check:contract-drift`.
+
 ## Sealed secrets (`daemon-sealed-secrets-v1`)
 
 - The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged and retried on the next connect, and also on an open socket after a plaintext decrypt answer (at most every ten minutes, one attempt at a time; `createSealingRegistration`), so a control plane upgraded under an open socket starts sealing without a reconnect. That control plane adds `daemon-sealed-secrets-v1` to the stored features on a verified registration, because the older one dropped the then-unknown feature from the hello. Only the key id is logged.

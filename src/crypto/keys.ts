@@ -174,6 +174,120 @@ export async function signChallenge(
   return encodeBase64Url(new Uint8Array(signature));
 }
 
+/**
+ * Prefix of a daemon-signed request; pinned to the control plane's copy
+ * (`turbopanel/src/daemon/authn/request-signature.ts`) by contract-drift.
+ */
+export const REQUEST_PREFIX = "tp-request\n";
+/** Prefix of the attach proof on a signed session's hello; pinned like {@link REQUEST_PREFIX}. */
+export const ATTACH_PREFIX = "tp-attach\n";
+/** Header that carries a request signature. */
+export const DAEMON_SIGNATURE_HEADER = "x-turbopanel-daemon-signature";
+
+/**
+ * The bytes a daemon-signed request covers:
+ * `"tp-request\n" + METHOD + "\n" + pathname + "\n" + panelFingerprint +
+ * "\n" + nonce + "\n" + base64url(SHA-256(body)) + "\n" + iat`.
+ */
+export function buildRequestSigningInput(params: {
+  method: string;
+  pathname: string;
+  panelFingerprint: string;
+  nonce: string;
+  bodySha256: string;
+  iat: number;
+}): string {
+  return [
+    `${REQUEST_PREFIX}${params.method.toUpperCase()}`,
+    params.pathname,
+    params.panelFingerprint,
+    params.nonce,
+    params.bodySha256,
+    String(params.iat),
+  ].join("\n");
+}
+
+/** base64url SHA-256 of the exact body bytes (empty for a GET). */
+export async function bodySha256B64u(body: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    textEncoder.encode(body),
+  );
+  return encodeBase64Url(new Uint8Array(digest));
+}
+
+/**
+ * The `X-TurboPanel-Daemon-Signature` value for one request:
+ * `<keyId>:<nonce>:<iat>:<sig>`, with a fresh 16-byte nonce. `pathname` has
+ * no query string.
+ */
+export async function signDaemonRequest(
+  key: { keyId: string; privateJwk: JsonWebKey },
+  request: {
+    method: string;
+    pathname: string;
+    body: string;
+    panelFingerprint: string;
+    nowMs?: number;
+  },
+): Promise<string> {
+  const nonce = encodeBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+  const iat = Math.floor((request.nowMs ?? Date.now()) / 1000);
+  const input = buildRequestSigningInput({
+    method: request.method,
+    pathname: request.pathname,
+    panelFingerprint: request.panelFingerprint,
+    nonce,
+    bodySha256: await bodySha256B64u(request.body),
+    iat,
+  });
+  return `${key.keyId}:${nonce}:${iat}:${await signChallenge(
+    key.privateJwk,
+    input,
+  )}`;
+}
+
+/**
+ * The attach proof on the first hello of a signed session, bound to the
+ * control plane's session id and key: `"tp-attach\n" + sessionId + "\n" +
+ * panelFingerprint + "\n" + serverId + "\n" + keyId + "\n" + iat`.
+ */
+export function buildAttachSigningInput(params: {
+  sessionId: string;
+  panelFingerprint: string;
+  serverId: string;
+  keyId: string;
+  iat: number;
+}): string {
+  return [
+    `${ATTACH_PREFIX}${params.sessionId}`,
+    params.panelFingerprint,
+    params.serverId,
+    params.keyId,
+    String(params.iat),
+  ].join("\n");
+}
+
+export interface AttachProof {
+  keyId: string;
+  iat: number;
+  sig: string;
+}
+
+export async function signAttachProof(
+  key: { keyId: string; privateJwk: JsonWebKey },
+  session: { sessionId: string; panelFingerprint: string; serverId: string },
+  nowMs: number = Date.now(),
+): Promise<AttachProof> {
+  const iat = Math.floor(nowMs / 1000);
+  const input = buildAttachSigningInput({ ...session, keyId: key.keyId, iat });
+  return {
+    keyId: key.keyId,
+    iat,
+    sig: await signChallenge(key.privateJwk, input),
+  };
+}
+
 export async function verifyChallenge(
   publicJwk: JsonWebKey,
   payload: string,

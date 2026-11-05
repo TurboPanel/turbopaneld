@@ -251,6 +251,23 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
       `${name} drifted`,
     );
   }
+  // Daemon-signed requests and the attach proof (pinned here only: the
+  // control plane ships first, so its drift check cannot require them yet).
+  const pairs: ReadonlyArray<[string, string]> = [
+    ["src/daemon/authn/request-signature.ts", "REQUEST_PREFIX"],
+    ["src/daemon/authn/attach-proof.ts", "ATTACH_PREFIX"],
+  ];
+  for (const [file, name] of pairs) {
+    const left = requireText(
+      await readRel(tp, file),
+      `${file} missing on the instance`,
+    );
+    requireEqual(
+      extractConst(left, name),
+      extractConst(proofRight, name),
+      `${name} drifted`,
+    );
+  }
 }
 
 async function checkMachineKey(tp: string, td: string): Promise<void> {
