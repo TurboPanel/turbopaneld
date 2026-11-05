@@ -15,6 +15,7 @@
     _tls_folder_checks:
       - path: "{{ turbopanel_instance_ca_dir }}"
         owner: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+        adopt_daemon_owned: true
       - path: "{{ turbopanel_instance_certs_dir }}"
         owner: "{{ instance_certs_owner }}"
 
@@ -84,8 +85,9 @@
       platform-ca.{{ item.item }} beside it
       ({{ 'a link to ' ~ (item.stat.lnk_target | default('?')) if (item.stat.islnk | default(false)) else 'not a regular file' }}).
       It may have been swapped. Nothing was changed. Look at it
-      (ls -la {{ turbopanel_instance_certs_dir }}), remove the stand-in, then
-      run the update again.
+      (ls -la {{ turbopanel_instance_certs_dir }}), then restore the original
+      file or ask for help, and run the update again. Do not delete the tls
+      folder: it holds the Platform CA key.
     quiet: true
   loop: "{{ _self_signed_stat.results }}"
   loop_control:

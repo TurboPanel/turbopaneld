@@ -106,6 +106,7 @@
     _tls_folder_checks:
       - path: "{{ turbopanel_state_dir }}/tls"
         owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+        adopt_daemon_owned: true
       - path: "{{ turbopanel_instance_certs_dir }}"
         owner: "{{ instance_user }}"
       - path: "{{ turbopanel_state_dir }}/instance-acme"

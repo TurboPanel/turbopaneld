@@ -7,9 +7,16 @@
 # message if it is not what the layout expects. Nothing is moved, renamed or
 # rotated: the operator looks and decides.
 #
-# _tls_folder_checks: a list of {path, owner}. A folder passes when it does not
-# exist yet (the tasks that follow create it), or when it is a real folder (not
-# a link) owned by `owner` or by root.
+# _tls_folder_checks: a list of {path, owner, adopt_daemon_owned}. A folder
+# passes when it does not exist yet (the tasks that follow create it), or when
+# it is a real folder (not a link) owned by `owner` or by root.
+#
+# adopt_daemon_owned (only <state>/tls): hosts installed before the TLS folder
+# became root's still have it owned by the daemon account (tp), because the
+# daemon-layout role that re-owns it runs after these tasks. On a managed host
+# such a folder, when it is a real folder and not a link, is given to `owner`
+# (group tp, 0750, the layout's own value) and the play goes on. A link or any
+# other owner still stops.
 - name: Look at the control-plane TLS folders without following links
   ansible.builtin.stat:
     path: "{{ item.path }}"
@@ -20,6 +27,25 @@
     label: "{{ item.path }}"
   register: _tls_folder_stat
 
+- name: Take over a TLS folder the daemon account still owns from an older install
+  ansible.builtin.file:
+    path: "{{ item.item.path }}"
+    state: directory
+    follow: false
+    owner: "{{ item.item.owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - item.item.adopt_daemon_owned | default(false) | bool
+    - item.stat.exists | default(false)
+    - item.stat.isdir | default(false)
+    - not (item.stat.islnk | default(false))
+    - (item.stat.pw_name | default('')) == turbopanel_user
+  loop: "{{ _tls_folder_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
 - name: Stop when a control-plane TLS folder is not the one the layout made
   ansible.builtin.assert:
     that:
@@ -28,18 +54,27 @@
         or (
           (item.stat.isdir | default(false))
           and not (item.stat.islnk | default(false))
-          and (item.stat.pw_name | default('')) in ['root', item.item.owner]
+          and (
+            (item.stat.pw_name | default('')) in ['root', item.item.owner]
+            or (
+              (turbopanel_dev_user | default('') | length == 0)
+              and (item.item.adopt_daemon_owned | default(false) | bool)
+              and (item.stat.pw_name | default('')) == turbopanel_user
+            )
+          )
         )
     fail_msg: >-
       {{ item.item.path }} is
       {% if item.stat.islnk | default(false) %}a symbolic link to
       {{ item.stat.lnk_source | default('an unknown target') }}{% elif not (item.stat.isdir | default(false)) %}not a folder{% else %}a folder owned by
-      {{ item.stat.pw_name | default('an unknown account') }}{% endif %}.
-      TurboPanel expects a real folder owned by {{ item.item.owner }} (or
-      root) there, so it may have been swapped. Nothing was changed. Look at
-      what is there and who made it (ls -la {{ item.item.path | dirname }}),
-      put the original folder back or remove the stand-in, then run the update
-      again.
+      {{ item.stat.pw_name | default('an unknown account') }}{% endif %},
+      but TurboPanel expects a real folder owned by {{ item.item.owner }}{{ '' if item.item.owner == 'root' else ' (or root)' }}
+      there, so it may have been swapped. Nothing was changed. Look at
+      what is there (ls -la {{ item.item.path | dirname }}), then restore the
+      original folder and its owner, or ask for help. Do not delete the tls
+      folder or anything in it: it holds the Platform CA key, and a new CA
+      would break the trust every connected server has in this control plane.
+      Then run the update again.
     quiet: true
   loop: "{{ _tls_folder_stat.results }}"
   loop_control:

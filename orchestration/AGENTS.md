@@ -403,7 +403,12 @@ Encrypt keys: control-plane Caddy (`User=tpcaddy`) is its only reader, and
 The generator chmods both keys to `0640` on every run; the role sets them
 back each converge (so those two tasks report a change each time), and since
 neither key's group is `tp` that window never lets the daemon account read
-one. Existing hosts move to these modes on their next converge.
+one. Existing hosts move to these modes on their next converge that runs
+`instance-certs` (an install, a colocated refresh, a hostname apply); until
+then they keep the old ones, and the first such run after the upgrade still
+has `ca.key` group `tp` until its task runs. Because the CA key is now root's
+alone, a Platform CA rotation (`TURBOPANEL_TLS_CA_ROTATE=1`) must run the
+generator as root, as `instance-certs` does on a managed host.
 
 **Folder checks before root writes.** Before root tasks touch `<state>/tls`,
 the certs folder or `<state>/instance-acme`, `instance-certs` and
@@ -411,8 +416,13 @@ the certs folder or `<state>/instance-acme`, `instance-certs` and
 folder must be missing (created next) or a real folder, not a link, owned by
 the expected account (`root` or the developer for `<state>/tls`, the instance
 account for the certs folder, `caddy_user` for `instance-acme`) or by root.
-Anything else stops the play with a message saying what was found and what
-to check; nothing is renamed, set aside or rotated. `instance-certs` also
+One exception: hosts installed before `<state>/tls` became root's still have
+it owned by `tp` (daemon-layout re-owns it, but runs after these roles), so
+on a managed host a real `tp`-owned `<state>/tls` is re-owned to `root:tp
+0750` (`follow: false`) and the play goes on. Anything else stops the play with a message saying what was found, that
+nothing was changed, and to restore the original folder or ask for help; it
+warns never to delete `tls/`, which holds the Platform CA key (a new CA would
+break every daemon's pin). Nothing is renamed, set aside or rotated. `instance-certs` also
 refuses `self-signed.{crt,key}` unless each is a regular file or the link it
 makes to `platform-ca.*`, every file and copy task there sets
 `follow: false`, the Let's Encrypt migration script refuses a link, and the

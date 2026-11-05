@@ -38,7 +38,7 @@
         # folder (it belongs to the instance account).
         for path in "$LE_DEST" "$dest_crt" "$dest_key"; do
           if [ -L "$path" ]; then
-            echo "$path is a symbolic link; nothing was changed. Look at it, remove the stand-in, then run the update again." >&2
+            echo "$path is a symbolic link; nothing was changed. Look at it, restore the original file or ask for help, then run the update again. Do not delete the tls folder: it holds the Platform CA key." >&2
             exit 1
           fi
         done
