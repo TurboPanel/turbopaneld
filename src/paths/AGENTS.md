@@ -50,7 +50,11 @@ folders below them (`DAEMON_CONFIG_LEAVES` / `DAEMON_STATE_LEAVES` in
 is not one of them: it holds the control plane's Platform CA and the certs
 folder its Caddy reads, so `daemon-layout` and `instance-certs` both make it
 `root:tp 0750` (the developer's own in co-located development), and the
-daemon's one file there (`instance-ca-pin`) goes through `writeDaemonFile`.
+daemon's one file there (`instance-ca-pin`) goes through `writeDaemonFile`. Its
+Platform CA key (`ca.key`) is `root:root 0600` on a managed host and the
+leaf key Caddy serves (`certs/platform-ca.key`) is `tpcaddy` `0600`, so the
+daemon account reads neither; root tasks check the folder is real before
+writing there (`orchestration/AGENTS.md`, control-plane TLS key modes).
 tp-host's generic verbs refuse every path in it except that pin file and the
 `certs/letsencrypt-<host>.{crt,key}` pairs; uploaded pairs go only through
 `instance-cert-install` / `instance-cert-prune`. On a co-located host the

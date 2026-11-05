@@ -9,10 +9,21 @@
 - name: Resolve instance hostnames
   ansible.builtin.include_tasks: resolve-hostnames.yml
 
+- name: Check the control-plane TLS folders before root touches them
+  ansible.builtin.include_tasks: tls-folders-check.yml
+  vars:
+    _tls_folder_checks:
+      - path: "{{ turbopanel_instance_ca_dir }}"
+        owner: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+        adopt_daemon_owned: true
+      - path: "{{ turbopanel_instance_certs_dir }}"
+        owner: "{{ instance_certs_owner }}"
+
 - name: Ensure durable platform CA directory exists
   ansible.builtin.file:
     path: "{{ turbopanel_instance_ca_dir }}"
     state: directory
+    follow: false
     owner: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
@@ -21,6 +32,7 @@
   ansible.builtin.file:
     path: "{{ turbopanel_instance_certs_dir }}"
     state: directory
+    follow: false
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0750"
@@ -43,6 +55,43 @@
         | unique
         | join(',')
       }}
+
+# The certs folder belongs to the instance account, and the generator (root on
+# a managed install) writes self-signed.{crt,key} and the copies below read
+# them. Each is either a real file the generator just wrote or the link this
+# role makes to platform-ca.*; anything else (a link somewhere else) stops
+# here before root reads or writes through it.
+- name: Look at the deprecated leaf names without following links
+  ansible.builtin.stat:
+    path: "{{ turbopanel_instance_certs_dir }}/self-signed.{{ item }}"
+    follow: false
+    get_checksum: false
+  loop: [crt, key]
+  register: _self_signed_stat
+
+- name: Stop when a deprecated leaf name points somewhere else
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (item.stat.exists | default(false))
+        or (item.stat.isreg | default(false))
+        or (
+          (item.stat.islnk | default(false))
+          and (item.stat.lnk_target | default('')) == (turbopanel_instance_certs_dir ~ '/platform-ca.' ~ item.item)
+        )
+    fail_msg: >-
+      {{ turbopanel_instance_certs_dir }}/self-signed.{{ item.item }} is not
+      the file the certificate generator writes nor a link to
+      platform-ca.{{ item.item }} beside it
+      ({{ 'a link to ' ~ (item.stat.lnk_target | default('?')) if (item.stat.islnk | default(false)) else 'not a regular file' }}).
+      It may have been swapped. Nothing was changed. Look at it
+      (ls -la {{ turbopanel_instance_certs_dir }}), then restore the original
+      file or ask for help, and run the update again. Do not delete the tls
+      folder: it holds the Platform CA key.
+    quiet: true
+  loop: "{{ _self_signed_stat.results }}"
+  loop_control:
+    label: "self-signed.{{ item.item }}"
 
 - name: Generate platform CA and server certificate
   ansible.builtin.command:
@@ -67,13 +116,18 @@
     TURBOPANEL_PUBLIC_URLS: "{{ turbopanel_public_urls | default('', true) }}"
   changed_when: false
 
-# Caddy runs as `tpcaddy` (supplementary group `tp`) and must read the server leaf key.
-# generate-self-signed-cert.mjs chmods keys to 0640 but does not set group ownership.
+# Caddy runs as `tpcaddy` and is the only reader of the server leaf key, so
+# the key is tpcaddy's own (group tpcaddy, mode 0600), like the Let's Encrypt
+# keys. The certificate stays group tp (0640). generate-self-signed-cert.mjs
+# chmods both keys to 0640 on every run without changing the group; the
+# tasks below set them back, and because neither key's group is tp the
+# 0640 between the two never lets the daemon account read one.
 - name: Publish the platform-ca leaf certificate
   ansible.builtin.copy:
     src: "{{ turbopanel_instance_certs_dir }}/self-signed.crt"
     dest: "{{ turbopanel_instance_certs_dir }}/platform-ca.crt"
     remote_src: true
+    follow: false
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -83,9 +137,10 @@
     src: "{{ turbopanel_instance_certs_dir }}/self-signed.key"
     dest: "{{ turbopanel_instance_certs_dir }}/platform-ca.key"
     remote_src: true
-    owner: "{{ instance_certs_owner }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0640"
+    follow: false
+    owner: "{{ caddy_user }}"
+    group: "{{ caddy_primary_group }}"
+    mode: "0600"
 
 - name: Keep the deprecated self-signed certificate name
   ansible.builtin.file:
@@ -101,19 +156,26 @@
     state: link
     force: true
 
-- name: Harden server leaf key ownership for Caddy
+- name: Keep the server leaf key readable by control-plane Caddy only
   ansible.builtin.file:
     path: "{{ turbopanel_instance_certs_dir }}/platform-ca.key"
-    owner: "{{ instance_certs_owner }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0640"
+    state: file
+    follow: false
+    owner: "{{ caddy_user }}"
+    group: "{{ caddy_primary_group }}"
+    mode: "0600"
 
-- name: Harden platform CA key ownership
+# Only the generator reads the Platform CA key, and on a managed install it
+# runs as root, so the key is root:root 0600 there. Co-located development
+# keeps it the developer's own (0640, the generator runs as that user).
+- name: Keep the platform CA key readable by root only
   ansible.builtin.file:
     path: "{{ turbopanel_instance_ca_dir }}/ca.key"
+    state: file
+    follow: false
     owner: "{{ instance_certs_owner if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0640"
+    group: "{{ turbopanel_group if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+    mode: "{{ '0640' if (turbopanel_dev_user | default('') | length > 0) else '0600' }}"
 
 - name: Stat operator TLS certificate for upload mode
   when: turbopanel_tls_mode | default('self_signed') == 'upload'
@@ -149,6 +211,7 @@
     src: "{{ turbopanel_tls_cert_path }}"
     dest: "{{ turbopanel_instance_certs_dir }}/uploaded.crt"
     remote_src: true
+    follow: false
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -159,6 +222,7 @@
     src: "{{ turbopanel_tls_key_path }}"
     dest: "{{ turbopanel_instance_certs_dir }}/uploaded.key"
     remote_src: true
+    follow: false
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -167,6 +231,8 @@
   when: item.cert_id | default('') | length > 0
   ansible.builtin.file:
     path: "{{ turbopanel_instance_certs_dir }}/uploaded-{{ item.cert_id }}.crt"
+    state: file
+    follow: false
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"
@@ -178,6 +244,8 @@
   when: item.cert_id | default('') | length > 0
   ansible.builtin.file:
     path: "{{ turbopanel_instance_certs_dir }}/uploaded-{{ item.cert_id }}.key"
+    state: file
+    follow: false
     owner: "{{ instance_certs_owner }}"
     group: "{{ turbopanel_group }}"
     mode: "0640"

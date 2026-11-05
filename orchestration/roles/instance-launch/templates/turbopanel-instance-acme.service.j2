@@ -22,6 +22,10 @@ Environment=XDG_CONFIG_HOME={{ turbopanel_state_dir }}/instance-acme
 NoNewPrivileges=true
 AmbientCapabilities=
 CapabilityBoundingSet=
+# install -d runs as root and would follow a link left in place of the
+# folder, so a link (or a file) there stops the start with a plain message.
+# Nothing is moved: the operator looks first.
+ExecStartPre=+/bin/sh -c 'if [ -L "$$0" ] || { [ -e "$$0" ] && [ ! -d "$$0" ]; }; then echo "$$0 is not a real folder (a link or a file); nothing was changed. Look at it, put a folder owned by {{ caddy_user }} back, then start again." >&2; exit 1; fi' {{ turbopanel_state_dir }}/instance-acme
 ExecStartPre=+/usr/bin/install -d -o {{ caddy_user }} -g {{ turbopanel_group }} -m 0750 {{ turbopanel_state_dir }}/instance-acme
 ExecStartPre=+/usr/bin/install -o {{ caddy_user }} -g {{ turbopanel_group }} -m 0640 /dev/null {{ turbopanel_log_dir }}/instance-acme.log
 ExecStart={{ turbopanel_vendor_dir }}/caddy/current/caddy run --config {{ turbopanel_config_dir }}/caddy/instance-acme.json
