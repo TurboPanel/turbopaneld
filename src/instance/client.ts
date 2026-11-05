@@ -960,7 +960,6 @@ export class InstanceClient {
     };
   }
 
-  /** The pinned key's fingerprint while this server is pinned and the key is verified. */
   /**
    * The attach proof for a verified signed hello: the daemon key signs the
    * session id, the control plane key, the server id and its key id. Without
@@ -985,6 +984,7 @@ export class InstanceClient {
     }
   }
 
+  /** The pinned key's fingerprint while this server is pinned and the key is verified. */
   #pinnedPanelFingerprint(): string | undefined {
     return this.#panelPin ? this.#panelKey?.kid : undefined;
   }
@@ -1925,14 +1925,15 @@ export class InstanceClient {
         ws,
         pin: this.#panelPin,
         signing: this.#panelKey,
-        onVerified: (hello) => {
+        onVerified: async (hello) => {
           logInfo("instance", "panel-identity: signed hello verified");
-          void this.#attachProofFor(hello, serverId).then((attachProof) => {
-            if (this.#ws !== ws) return;
-            this.#startSessionWork(ws, attachProof);
-            this.#applySignedHello(hello);
-            commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
-          });
+          // Awaited by the session, so no later frame is handled before the
+          // presence hello (with the attach proof) and the session open.
+          const attachProof = await this.#attachProofFor(hello, serverId);
+          if (this.#ws !== ws) return;
+          this.#startSessionWork(ws, attachProof);
+          this.#applySignedHello(hello);
+          commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
         },
         onFrame: (json) => this.#dispatchRawMessage(json, ws),
         onPong: () => this.#dispatchRawMessage(UNSIGNED_PONG, ws),

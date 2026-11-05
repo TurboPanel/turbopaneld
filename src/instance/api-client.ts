@@ -53,11 +53,6 @@ export interface DaemonApiClientOptions {
    */
   onPlaintextSecretsAnswer?: () => void;
   /**
-   * On a pinned server, checks the signature on answers from signed routes
-   * (`panel-identity-trust.ts` `createPanelResponseVerifier`); throws to
-   * refuse an answer.
-   */
-  /**
    * The `X-TurboPanel-Daemon-Signature` value for one request
    * (`signDaemonRequest`), made with the daemon key; null on a server with
    * no pinned control plane key (no header is sent). Called for each
@@ -69,6 +64,11 @@ export interface DaemonApiClientOptions {
     pathname: string;
     body: string;
   }) => Promise<string | null>;
+  /**
+   * On a pinned server, checks the signature on answers from signed routes
+   * (`panel-identity-trust.ts` `createPanelResponseVerifier`); throws to
+   * refuse an answer.
+   */
   verifyResponse?: {
     covers(path: string): boolean;
     verify(
