@@ -21,6 +21,7 @@ and an action is answered `not_development`.
 | The status tick | `status.ts` |
 | The job (steps, lock, `job.json`, backup command, restart waits) | `job.ts` |
 | Wire answers, the service, `status.json`, the size cap | `wire.ts` |
+| Starting Update and Restart by itself when trunk has new migrations | `auto-migrate.ts` |
 
 ## Owner rules (binding)
 
@@ -51,6 +52,20 @@ and an action is answered `not_development`.
   Every restart is `sudo -n systemctl restart --no-block` through
   `hostSudoArgs`.
 - Restart Only runs the three restart steps and no git command.
+- A merge that adds migrations reaches the dev database by itself (owner
+  decision 2026-11-05, which narrows "nothing pulls on its own" to this one
+  case): after each status tick, `auto-migrate.ts` compares
+  `git show origin/trunk:migrations/manifest.json` (control plane checkout)
+  with `public.migration` (`psql` inside `turbopanel-database`, no password).
+  When trunk has hashes the database lacks and every part is on trunk with no
+  `content` change and no `blockedReason`, it starts the normal `update` job.
+  Otherwise nothing runs and the control plane part's `blockedReason` names
+  the part that holds it back. Each `origin/trunk` plus control plane HEAD
+  pair is tried once, so a failed job is not repeated until one of them moves.
+  A database with a hash trunk does not ship (a branch migration applied by
+  hand) is never migrated automatically. The co-located instance unit also
+  migrates before every start (`orchestration/AGENTS.md`, "instance-launch
+  dev migrate before start").
 
 ## Speed
 
@@ -61,7 +76,9 @@ one `git status` per checkout (plus `git diff --numstat` when a tracked file is
 modified). The newest-source check (control plane and daemon, which do not
 reload on their own) walks `src/` in process and stops at the first newer file;
 once a restart is known to be needed it is not walked again until the unit
-restarts.
+restarts. The migration comparison (one `git show` and one `docker exec psql`)
+runs only when `origin/trunk` or the control plane HEAD moved, or every 10
+minutes, and never while a job runs.
 
 ## Files
 

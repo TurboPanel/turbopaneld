@@ -28,16 +28,24 @@ import {
   devHostEnabled,
   devHostParts,
   type DevHostPaths,
+  partCheckout,
   resolveDevHostPaths,
 } from "./config.ts";
 import {
   type DevHostAction,
   DevHostJobRunner,
+  POSTGRES_CONTAINER,
   type StartResult,
   writeJsonAtomic,
 } from "./job.ts";
 import { DevHostStatusCollector } from "./status.ts";
 import { readInstanceDatabaseUrl } from "./units.ts";
+import {
+  AutoMigrate,
+  readAppliedHashes,
+  readTrunkHashes,
+} from "./auto-migrate.ts";
+import { readHead, readRef, REMOTE_TRUNK_REF } from "./git.ts";
 
 /** Status tick and the longest gap between two status frames. */
 export const DEV_HOST_TICK_MS = 60_000;
@@ -141,6 +149,8 @@ export type DevHostServiceDeps = {
   nowMs?: () => number;
   tickMs?: number;
   writeStatus?: (status: DevHostStatus) => Promise<void>;
+  /** Starts Update and Restart when trunk has migrations the database lacks. */
+  autoMigrate?: Pick<AutoMigrate, "review">;
   /** Test seam for the minute timer. */
   every?: (fn: () => void, ms: number) => () => void;
 };
@@ -191,9 +201,14 @@ export class DevHostService implements DevHostPort {
   tick(): Promise<void> {
     this.#ticking ??= (async () => {
       try {
-        const status = await this.#deps.collector.collect(
+        let status = await this.#deps.collector.collect(
           this.#deps.jobs.current(),
         );
+        if (this.#deps.autoMigrate) {
+          status = await this.#deps.autoMigrate.review(status);
+          // A job started by the review has already been published; keep it.
+          status = { ...status, job: this.#deps.jobs.current() };
+        }
         await this.#publish(status);
       } catch (err) {
         logWarn("dev-host", "status tick failed:", String(err));
@@ -267,6 +282,25 @@ export class DevHostService implements DevHostPort {
   }
 }
 
+/** The migration watch on the real control plane checkout and database. */
+function autoMigrateFor(
+  repo: string,
+  databaseUrl: () => Promise<string | null>,
+  ref: { service?: DevHostService },
+): AutoMigrate {
+  return new AutoMigrate({
+    refsKey: async () => {
+      const remote = await readRef(repo, REMOTE_TRUNK_REF);
+      const head = await readHead(repo);
+      return remote && head?.commit ? `${remote}..${head.commit}` : null;
+    },
+    trunkHashes: () => readTrunkHashes(runCommand, repo),
+    appliedHashes: async () =>
+      readAppliedHashes(runCommand, await databaseUrl(), POSTGRES_CONTAINER),
+    startUpdate: async () => (await ref.service?.start("update"))?.ok === true,
+  });
+}
+
 /**
  * Build and start the development host when this is a development install
  * with `TURBOPANEL_DEV_INSTANCE=1`; null (inert) otherwise.
@@ -288,19 +322,23 @@ export function startDevHostIfEnabled(
     controlPlaneCommit: () => ref.service?.controlPlaneCommit() ?? null,
   });
   const controlPlane = parts.find((p) => p.name === "control-plane");
+  const databaseUrl = () =>
+    readInstanceDatabaseUrl(
+      runCommand,
+      controlPlane?.unit ?? "turbopanel-instance",
+    );
   const jobs = new DevHostJobRunner({
     paths,
     parts,
     run: runCommand,
     collector,
-    databaseUrl: () =>
-      readInstanceDatabaseUrl(
-        runCommand,
-        controlPlane?.unit ?? "turbopanel-instance",
-      ),
+    databaseUrl,
     onChange: (job) => ref.service?.jobChanged(job),
   });
-  const service = new DevHostService({ collector, jobs, paths });
+  const autoMigrate = controlPlane
+    ? autoMigrateFor(partCheckout(paths, controlPlane), databaseUrl, ref)
+    : undefined;
+  const service = new DevHostService({ collector, jobs, paths, autoMigrate });
   ref.service = service;
   void service.run().catch((err) =>
     logWarn("dev-host", "could not start:", String(err))
