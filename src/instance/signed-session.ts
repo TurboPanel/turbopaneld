@@ -7,8 +7,13 @@
  * socket with 4403 and records why, so the connect loop can park with reason
  * `panel-identity`. Silence (no hello in time) is a plain timeout instead:
  * not hearing back is not a failed proof.
+ *
+ * Once the hello verified, `command-outcome` and `fabric-peers-report` are
+ * signed with the daemon key when {@link SignedSessionOptions.reportSigning}
+ * allows it (`report-signing.ts`). Signing is async, so while one is being
+ * signed every later send waits behind it and the frames keep their order.
  */
-import { logWarn } from "../util/logger.ts";
+import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import {
   HELLO_TIMEOUT_MS,
   helloNonceFrame,
@@ -20,6 +25,11 @@ import {
 } from "./panel-identity-frames.ts";
 import type { PanelIdentityPin } from "./panel-identity-pin.ts";
 import { PanelIdentityError } from "./panel-identity-trust.ts";
+import {
+  mayBeSignedReport,
+  type ReportSigningKey,
+  signReportFrame,
+} from "./report-signing.ts";
 
 /** The transport pong (`DAEMON_CELL_PONG` on the control plane), never signed. */
 export const UNSIGNED_PONG = '{"type":"pong"}';
@@ -40,6 +50,15 @@ export interface SignedSessionOptions {
   onFrame: (json: string) => void;
   /** The transport pong. */
   onPong: () => void;
+  /**
+   * Sign reports on this session: `key` is the daemon key (none = unsigned)
+   * and `enabled` says whether the control plane lists `signed-reports-v1`.
+   * Absent = every frame goes out as before.
+   */
+  reportSigning?: {
+    key: () => ReportSigningKey | undefined;
+    enabled: () => boolean;
+  };
   now?: () => number;
   helloTimeoutMs?: number;
   setTimer?: (fn: () => void, ms: number) => number;
@@ -54,6 +73,9 @@ export class SignedPanelSession {
   #timer: number | undefined;
   #failure: Error | undefined;
   #closed = false;
+  /** Sends still waiting behind a report being signed. */
+  #queued = 0;
+  #outbound: Promise<void> = Promise.resolve();
 
   constructor(options: SignedSessionOptions) {
     this.#options = options;
@@ -74,7 +96,7 @@ export class SignedPanelSession {
     const realSend = ws.send.bind(ws);
     realSend(helloNonceFrame(this.#nonce));
     ws.send = (data: SendData) => {
-      if (this.verified && !this.#closed) realSend(data);
+      if (this.verified && !this.#closed) this.#sendVerified(realSend, data);
     };
     const setTimer = this.#options.setTimer ??
       ((fn: () => void, ms: number) => setTimeout(fn, ms) as unknown as number);
@@ -82,6 +104,55 @@ export class SignedPanelSession {
       if (this.verified || this.#closed) return;
       this.#fail(new Error("panel hello timeout"), 1000, "panel hello timeout");
     }, this.#options.helloTimeoutMs ?? HELLO_TIMEOUT_MS);
+  }
+
+  /**
+   * Send now, or queue behind a report being signed. A report that cannot be
+   * signed goes out unsigned (a result is never lost to a signing failure).
+   */
+  #sendVerified(realSend: (data: SendData) => void, data: SendData): void {
+    const signing = this.#reportSigningFor(data);
+    if (signing === undefined && this.#queued === 0) {
+      realSend(data);
+      return;
+    }
+    this.#queued += 1;
+    const ready = signing ?? Promise.resolve(data);
+    this.#outbound = this.#outbound
+      .then(() => ready)
+      .then((frame) => {
+        const { ws } = this.#options;
+        if (!this.#closed && ws.readyState === WebSocket.OPEN) realSend(frame);
+      })
+      .catch((err) => {
+        logWarn("instance", "send failed:", sanitizeForLog(err));
+      })
+      .finally(() => {
+        this.#queued -= 1;
+      });
+  }
+
+  /** The signed frame for a report this session signs; undefined to send `data` as it is. */
+  #reportSigningFor(data: SendData): Promise<string> | undefined {
+    const signer = this.#options.reportSigning;
+    const session = this.#session;
+    if (typeof data !== "string" || !signer || !session) return undefined;
+    if (!mayBeSignedReport(data) || !signer.enabled()) return undefined;
+    const key = signer.key();
+    if (!key) return undefined;
+    const nowMs = (this.#options.now ?? Date.now)();
+    return signReportFrame(data, {
+      sessionId: session.sessionId,
+      key,
+      nowMs,
+    }).catch((err) => {
+      logWarn(
+        "instance",
+        "report signing failed, sending it unsigned:",
+        sanitizeForLog(err),
+      );
+      return data;
+    });
   }
 
   /** Inbound frames are handled one at a time, in arrival order. */

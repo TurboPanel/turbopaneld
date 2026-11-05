@@ -117,6 +117,7 @@ export const DAEMON_WIRE_FEATURES = [
   "hosting-via-header-v1",
   "dev-host-v1",
   "topology-generation-optional-v1",
+  "signed-reports-v1",
 ] as const;
 
 /**
@@ -236,6 +237,14 @@ export const PANEL_SIGNED_FRAMES_FEATURE: DaemonWireFeature =
 
 /** Informational only: a pinned daemon signs in with v2 proofs naming the pinned key. */
 export const SIGNIN_V2_FEATURE: DaemonWireFeature = "signin-v2";
+
+/**
+ * On a signed session, this daemon signs `command-outcome` and
+ * `fabric-peers-report` with its own key (`report-signing.ts`). It signs
+ * them only for a control plane that lists this feature; an older one gets
+ * the same bytes as before.
+ */
+export const SIGNED_REPORTS_FEATURE: DaemonWireFeature = "signed-reports-v1";
 
 /**
  * This daemon holds an X25519 sealing key (registered with the control plane,

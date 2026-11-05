@@ -200,6 +200,21 @@ goes). Fire-and-forget and read-only. It exists because the control plane's
 `relay.metadata.observed` only moved on a reconcile, so healthy tunnels read
 as stale minutes after each apply.
 
+**Signed reports (`signed-reports-v1`).** On a signed session (pinned
+server, control plane hello verified) and only with a control plane that lists
+the feature, `SignedPanelSession` signs every `command-outcome` and
+`fabric-peers-report` with the daemon key at the one place all sends pass
+(`signed-session.ts`, helpers in `report-signing.ts`). Bytes: the message plus
+`{sessionId, iat, kid}` (kid = the daemon key id) is serialized once, signed as
+`"tp-report\n" + type + "\n" + bytes`, and `,"sig":"<base64url>"}` replaces
+the final `}`, the same split rule as the control plane's frames;
+`REPORT_PREFIX` is pinned in both contract-drift scripts. No `seq`: a result
+is idempotent by id. Signing is async, so later sends queue behind it and keep
+their order. No key, no feature, an unsigned session or a signing error: the
+frame goes out as before (a result is never lost). Reports sent before the
+attach frame's feature list arrives go out unsigned; the control plane still
+accepts unsigned reports until a later floor bump.
+
 **Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
 replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded
 opaque text, 4096 chars max) and `fullyApplied` (computed on the daemon from the
