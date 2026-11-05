@@ -360,8 +360,12 @@ function checkExtraHosts(ctx: Ctx, name: string, value: unknown): void {
   }
 }
 
-/** Why a remote host is internal, or `null`. */
-function internalHostReason(rawHost: string): string | null {
+/**
+ * Why a remote host is internal, or `null`. A static check: IP literals,
+ * `localhost`, single-label and reserved-suffix names. A DNS name is not
+ * resolved here. Also used by repository reads (`release/clone-url-guard.ts`).
+ */
+export function internalHostReason(rawHost: string): string | null {
   let host = rawHost.toLowerCase().replace(/^\[|\]$/g, "");
   // A fully qualified name ends in a dot (`localhost.`, `x.internal.`): the
   // resolver treats it as the same host, so the checks below must too.

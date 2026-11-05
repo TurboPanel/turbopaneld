@@ -20,6 +20,10 @@ import {
   gitEnvironment,
   writeCheckoutCredentialFiles,
 } from "./checkout.ts";
+import {
+  assertCloneUrlAllowed,
+  REPO_READ_GIT_PROTOCOLS,
+} from "./clone-url-guard.ts";
 
 /** An operator is waiting on this, unlike a release checkout. */
 export const REPO_READ_TIMEOUT_MS = 30_000;
@@ -53,17 +57,45 @@ export type ReadRemoteFilesResult = {
 
 type RunResult = { success: boolean; stdout: Uint8Array; stderr: string };
 
+/**
+ * Which remotes a read may use and how git is pinned to them. The default
+ * ({@link PUBLIC_REMOTE}) is the only one production uses: https and ssh to a
+ * public host. A test passes a local-path transport to read a fixture
+ * repository with real git.
+ */
+export type RepoReadTransport = {
+  /** git transports allowed (`protocol.<name>.allow=always`, `GIT_ALLOW_PROTOCOL`). */
+  protocols: readonly string[];
+  /** Throws when the clone URL may not be read. */
+  checkUrl: (cloneUrl: string) => void;
+};
+
+export const PUBLIC_REMOTE: RepoReadTransport = {
+  protocols: REPO_READ_GIT_PROTOCOLS,
+  checkUrl: assertCloneUrlAllowed,
+};
+
+/** `-c` options that refuse every transport but the allowed ones. */
+function protocolArgs(protocols: readonly string[]): string[] {
+  return [
+    "-c",
+    "protocol.allow=never",
+    ...protocols.flatMap((name) => ["-c", `protocol.${name}.allow=always`]),
+  ];
+}
+
 async function runGit(
   args: string[],
   cwd: string,
   env: Record<string, string>,
   signal: AbortSignal,
+  protocols: readonly string[],
 ): Promise<RunResult> {
   try {
     const command = new Deno.Command("git", {
-      args,
+      args: [...protocolArgs(protocols), ...args],
       cwd,
-      env,
+      env: { ...env, GIT_ALLOW_PROTOCOL: protocols.join(":") },
       clearEnv: true,
       stdout: "piped",
       stderr: "piped",
@@ -99,7 +131,12 @@ type RepoReadContext = {
   scratchDir: string;
   env: Record<string, string>;
   signal: AbortSignal;
+  protocols: readonly string[];
 };
+
+function gitIn(ctx: RepoReadContext, args: string[]): Promise<RunResult> {
+  return runGit(args, ctx.scratchDir, ctx.env, ctx.signal, ctx.protocols);
+}
 
 /**
  * `--filter=blob:none` needs server-side partial-clone support. The fallback is
@@ -107,19 +144,16 @@ type RepoReadContext = {
  * filter fails the whole read for no good reason.
  */
 async function fetchRef(ctx: RepoReadContext, ref: string): Promise<void> {
-  let fetched = await runGit(
-    ["fetch", "--depth", "1", "--filter=blob:none", "origin", ref],
-    ctx.scratchDir,
-    ctx.env,
-    ctx.signal,
-  );
+  let fetched = await gitIn(ctx, [
+    "fetch",
+    "--depth",
+    "1",
+    "--filter=blob:none",
+    "origin",
+    ref,
+  ]);
   if (!fetched.success) {
-    fetched = await runGit(
-      ["fetch", "--depth", "1", "origin", ref],
-      ctx.scratchDir,
-      ctx.env,
-      ctx.signal,
-    );
+    fetched = await gitIn(ctx, ["fetch", "--depth", "1", "origin", ref]);
   }
   if (!fetched.success) throw new Error(fetched.stderr || "git fetch failed");
 }
@@ -131,12 +165,7 @@ async function readOneFile(
 ): Promise<RemoteFileEntry> {
   if (!isSafeRepoPath(path)) return { path, found: false, reason: "not_found" };
   // Ask for the size first so an oversized blob is never materialized.
-  const size = await runGit(
-    ["cat-file", "-s", `FETCH_HEAD:${path}`],
-    ctx.scratchDir,
-    ctx.env,
-    ctx.signal,
-  );
+  const size = await gitIn(ctx, ["cat-file", "-s", `FETCH_HEAD:${path}`]);
   if (!size.success) return { path, found: false, reason: "not_found" };
   const bytes = Number.parseInt(
     new TextDecoder().decode(size.stdout).trim(),
@@ -145,12 +174,7 @@ async function readOneFile(
   if (Number.isFinite(bytes) && bytes > maxBytes) {
     return { path, found: false, reason: "too_large" };
   }
-  const blob = await runGit(
-    ["cat-file", "-p", `FETCH_HEAD:${path}`],
-    ctx.scratchDir,
-    ctx.env,
-    ctx.signal,
-  );
+  const blob = await gitIn(ctx, ["cat-file", "-p", `FETCH_HEAD:${path}`]);
   if (!blob.success) return { path, found: false, reason: "not_found" };
   if (blob.stdout.includes(0)) return { path, found: false, reason: "binary" };
   return {
@@ -167,12 +191,12 @@ async function listTree(
 ): Promise<RemoteTreeEntry[]> {
   const dir = listPath === "" ? "" : `${listPath}/`;
   if (dir !== "" && !isSafeRepoPath(listPath)) return [];
-  const tree = await runGit(
-    ["ls-tree", "--name-only", "-z", `FETCH_HEAD:${dir}`],
-    ctx.scratchDir,
-    ctx.env,
-    ctx.signal,
-  );
+  const tree = await gitIn(ctx, [
+    "ls-tree",
+    "--name-only",
+    "-z",
+    `FETCH_HEAD:${dir}`,
+  ]);
   if (!tree.success) return [];
   const entries: RemoteTreeEntry[] = [];
   for (const name of new TextDecoder().decode(tree.stdout).split("\0")) {
@@ -221,7 +245,9 @@ const SYMREF_HEAD_RE = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m;
 export async function resolveDefaultBranch(
   cloneUrl: string,
   scratchRoot = "/tmp",
+  transport: RepoReadTransport = PUBLIC_REMOTE,
 ): Promise<ResolveDefaultBranchResult> {
+  transport.checkUrl(cloneUrl);
   const scratchDir = await Deno.makeTempDir({
     dir: scratchRoot,
     prefix: "tp-repo-branch-",
@@ -241,6 +267,7 @@ export async function resolveDefaultBranch(
       scratchDir,
       env,
       controller.signal,
+      transport.protocols,
     );
     if (!result.success) {
       throw new Error(result.stderr || "git ls-remote failed");
@@ -256,7 +283,11 @@ export async function resolveDefaultBranch(
 export async function readRemoteFiles(
   params: ReadRemoteFilesParams,
   scratchRoot = "/tmp",
+  transport: RepoReadTransport = PUBLIC_REMOTE,
 ): Promise<ReadRemoteFilesResult> {
+  // Before the scratch dir and the credential files: a refused address
+  // never gets a credential written for it.
+  transport.checkUrl(params.cloneUrl);
   const scratchDir = await Deno.makeTempDir({
     dir: scratchRoot,
     prefix: "tp-repo-read-",
@@ -284,35 +315,26 @@ export async function readRemoteFiles(
     scratchDir,
     env: gitEnvironment(credentialFiles, scratchDir),
     signal: controller.signal,
+    protocols: transport.protocols,
   };
 
   try {
-    const init = await runGit(
-      ["init", "--bare", "-q"],
-      ctx.scratchDir,
-      ctx.env,
-      ctx.signal,
-    );
+    const init = await gitIn(ctx, ["init", "--bare", "-q"]);
     if (!init.success) throw new Error(init.stderr || "git init failed");
 
-    const remote = await runGit(
-      ["remote", "add", "origin", params.cloneUrl],
-      ctx.scratchDir,
-      ctx.env,
-      ctx.signal,
-    );
+    const remote = await gitIn(ctx, [
+      "remote",
+      "add",
+      "origin",
+      params.cloneUrl,
+    ]);
     if (!remote.success) {
       throw new Error(remote.stderr || "git remote add failed");
     }
 
     await fetchRef(ctx, params.ref);
 
-    const head = await runGit(
-      ["rev-parse", "FETCH_HEAD"],
-      ctx.scratchDir,
-      ctx.env,
-      ctx.signal,
-    );
+    const head = await gitIn(ctx, ["rev-parse", "FETCH_HEAD"]);
     if (!head.success) throw new Error(head.stderr || "git rev-parse failed");
     const commitSha = new TextDecoder().decode(head.stdout).trim();
 

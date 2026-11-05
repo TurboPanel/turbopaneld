@@ -11,6 +11,8 @@ resolves the ref to a commit and mints the clone credential
 (`turbopanel/src/client/environments/deploy-sources.ts`); the daemon never talks
 to the control plane's Git provider itself.
 
+**Repository reads take only https and ssh to a public host (`read-remote-files.ts`, `clone-url-guard.ts`).** `repo-read-request` and `repo-default-branch-request` run `assertCloneUrlAllowed` before any scratch dir or credential file exists: `https://host/...` (no login in the URL), `ssh://[user@]host/...` (no password) or scp-like `user@host:path`; everything else (`file:`, `git:`, `http:`, `ext::`, a bare path, an empty host, a value starting with `-`, a backslash) is refused. The host is held to `internalHostReason` from `compose-build-policy.ts`, the same static rule remote Compose build sources get (loopback, link-local, private and ULA literals, `localhost`, single-label, reserved suffixes, numeric hosts). DNS names are not resolved: a pre-check could be answered differently when git looks the name up, so it would promise more than it holds. Every git spawn of a read also carries `-c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always` and `GIT_ALLOW_PROTOCOL=https:ssh`, so git refuses any other transport too. Tests read fixture repositories through a local `RepoReadTransport` (`protocols: ["file"]`); production never passes one. Release checkouts (`checkout.ts`) are not covered by this guard.
+
 **`cloneUrl` is credential-free by contract** — both wire parsers reject a URL
 carrying inline `user:pass@`. The credential arrives as a `tpdaemon` envelope in
 `credential`, is decrypted through the same `decryptSecrets` seam everything else
