@@ -1,4 +1,5 @@
 import { type BuildInfo, getBuildInfo } from "../build-info.ts";
+import type { AttachProof } from "../crypto/keys.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   resolveUpdateChannelConfig,
@@ -398,6 +399,7 @@ export class IdlePresence {
   #staleReported = false;
   #connectedAtMs = Date.now();
   #maxAgeReported = false;
+  #attachProof: AttachProof | undefined;
 
   constructor(options: IdlePresenceOptions) {
     this.#idleCheckIntervalMs = options.idleCheckIntervalMs ?? IDLE_PRESENCE_MS;
@@ -436,9 +438,14 @@ export class IdlePresence {
     this.#staleReported = false;
   }
 
-  attach(ws: WebSocket): void {
+  /**
+   * Start presence on a new socket. `attachProof` (signed sessions only) rides
+   * on this socket's hello, binding it to the control plane's session.
+   */
+  attach(ws: WebSocket, options: { attachProof?: AttachProof } = {}): void {
     this.detach();
     this.#ws = ws;
+    this.#attachProof = options.attachProof;
     this.#lastActivityAt = Date.now();
     this.#lastInboundAt = Date.now();
     this.#staleReported = false;
@@ -569,6 +576,7 @@ export class IdlePresence {
           : {}),
         features: [...DAEMON_WIRE_FEATURES],
         ...panelPinField(),
+        ...(this.#attachProof ? { attach: this.#attachProof } : {}),
         ...this.#commandsField(false),
       }));
       this.#lastActivityAt = Date.now();

@@ -15,6 +15,9 @@ import {
 } from "./panel-identity-cache.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
+import { DAEMON_SIGNATURE_HEADER } from "../crypto/keys.ts";
+
+const AUTH_SESSION_PATH = "/api/daemon/v1/auth/session";
 
 /**
  * What an authenticated client needs to take sealed `/secrets/decrypt`
@@ -49,6 +52,18 @@ export interface DaemonApiClientOptions {
    * sealing key can be registered again without waiting for a reconnect.
    */
   onPlaintextSecretsAnswer?: () => void;
+  /**
+   * The `X-TurboPanel-Daemon-Signature` value for one request
+   * (`signDaemonRequest`), made with the daemon key; null on a server with
+   * no pinned control plane key (no header is sent). Called for each
+   * attempt, so a retry gets a fresh nonce. Applied to every authenticated
+   * request and to `/auth/session` (where it asks for a key-bound token).
+   */
+  signRequest?: (request: {
+    method: string;
+    pathname: string;
+    body: string;
+  }) => Promise<string | null>;
   /**
    * On a pinned server, checks the signature on answers from signed routes
    * (`panel-identity-trust.ts` `createPanelResponseVerifier`); throws to
@@ -293,7 +308,7 @@ export class DaemonApiClient {
     params: DaemonSessionRequest,
   ): Promise<DaemonSessionResponse> {
     return await this.#requestJson<DaemonSessionResponse>(
-      "/api/daemon/v1/auth/session",
+      AUTH_SESSION_PATH,
       {
         method: "POST",
         body: JSON.stringify(params),
@@ -722,6 +737,7 @@ export class DaemonApiClient {
       const token = await this.#options.getToken();
       headers.set("authorization", `Bearer ${token}`);
     }
+    await this.#signRequest(path, init, headers, options);
 
     let response = await this.#fetch(path, { ...init, headers });
     this.#captureInstanceVersion(response);
@@ -733,10 +749,29 @@ export class DaemonApiClient {
       const retryHeaders = new Headers(init.headers);
       retryHeaders.set("content-type", "application/json");
       retryHeaders.set("authorization", `Bearer ${refreshedToken}`);
+      await this.#signRequest(path, init, retryHeaders, options);
       response = await this.#fetch(path, { ...init, headers: retryHeaders });
       this.#captureInstanceVersion(response);
     }
     return await this.#verifiedResponse(path, response);
+  }
+
+  /** Adds the daemon key signature when one is configured and the route takes it. */
+  async #signRequest(
+    path: string,
+    init: RequestInit,
+    headers: Headers,
+    options: { auth?: boolean },
+  ): Promise<void> {
+    const sign = this.#options.signRequest;
+    const pathname = path.split("?")[0];
+    if (!sign || !(options.auth || pathname === AUTH_SESSION_PATH)) return;
+    const signature = await sign({
+      method: init.method ?? "GET",
+      pathname,
+      body: typeof init.body === "string" ? init.body : "",
+    });
+    if (signature) headers.set(DAEMON_SIGNATURE_HEADER, signature);
   }
 
   /**

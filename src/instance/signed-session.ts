@@ -31,8 +31,11 @@ export interface SignedSessionOptions {
   ws: WebSocket;
   pin: PanelIdentityPin;
   signing: PanelSigningKey;
-  /** Runs once, when the hello verified: start presence, reporters and the rest. */
-  onVerified: (hello: VerifiedHello) => void;
+  /**
+   * Runs once, when the hello verified: start presence, reporters and the
+   * rest. Awaited before the next frame is handled.
+   */
+  onVerified: (hello: VerifiedHello) => void | Promise<void>;
   /** A verified frame, without its envelope, as raw JSON text for the usual parser. */
   onFrame: (json: string) => void;
   /** The transport pong. */
@@ -123,7 +126,7 @@ export class SignedPanelSession {
       if (!hello.ok) return this.#refuse(`hello refused: ${hello.reason}`);
       this.#session = { sessionId: hello.value.sessionId, lastSeq: 0 };
       this.#clearTimer();
-      this.#options.onVerified(hello.value);
+      await this.#options.onVerified(hello.value);
       return;
     }
     const frame = await verifyEnvelopedFrame(raw, {

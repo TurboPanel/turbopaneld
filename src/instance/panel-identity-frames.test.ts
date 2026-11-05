@@ -45,9 +45,10 @@ test("a signed hello that echoes the nonce verifies", async () => {
     iat: NOW_S,
     heartbeatSeconds: 30,
   });
+  const signing = await panel.signing();
   const result = await verifyHello(raw, {
     nonce: NONCE,
-    signing: await panel.signing(),
+    signing,
     pin: panel.pin(),
     nowMs: NOW_MS,
   });
@@ -55,6 +56,7 @@ test("a signed hello that echoes the nonce verifies", async () => {
     ok: true,
     value: {
       sessionId: "sess",
+      kid: signing.kid,
       heartbeatSeconds: 30,
       urls: ["https://panel.example.test"],
     },

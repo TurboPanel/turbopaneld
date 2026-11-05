@@ -43,6 +43,8 @@ export type FrameCheck<T> = { ok: true; value: T } | {
 
 export interface VerifiedHello {
   sessionId: string;
+  /** Fingerprint of the control plane key that signed the hello. */
+  kid: string;
   heartbeatSeconds: number | undefined;
   urls: string[];
 }
@@ -158,6 +160,7 @@ function helloFields(
     ok: true,
     value: {
       sessionId,
+      kid: ctx.signing.kid,
       heartbeatSeconds: typeof heartbeat === "number" ? heartbeat : undefined,
       urls,
     },
