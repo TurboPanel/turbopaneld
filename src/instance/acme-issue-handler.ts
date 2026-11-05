@@ -19,8 +19,10 @@ import {
   sweepTenantAcme,
   type TenantIssueDeps,
 } from "../deploy/tenant-acme-issue.ts";
+import { readHostedSiteNames } from "../deploy/ingress.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
+import { checkNamesHosted } from "./acme-names-guard.ts";
 
 export type AcmeIssueHandlerDeps = {
   layout: LayoutPaths;
@@ -32,6 +34,8 @@ export type AcmeIssueHandlerDeps = {
   issue?: typeof issueTenantCertificates;
   /** Start-up clean-up of issuers and files a restart left behind. */
   sweep?: () => Promise<void>;
+  /** The names this server's tenant sites answer on (test seam). */
+  hostedNames?: () => Promise<ReadonlySet<string>>;
 };
 
 const MAX_REASON_CHARS = 1000;
@@ -93,6 +97,18 @@ export class AcmeIssueHandler {
     if (this.#open.has(message.requestId)) return;
     this.#open.add(message.requestId);
     try {
+      // Only names a tenant site here answers on: nothing is started or
+      // ordered for any other name.
+      const notHosted = await checkNamesHosted(
+        message.names,
+        this.#deps.hostedNames ??
+          (() => readHostedSiteNames(this.#deps.layout)),
+        "no certificate was ordered",
+      );
+      if (notHosted !== null) {
+        this.#event(message.requestId, "failed", { reason: notHosted });
+        return;
+      }
       // A started report the link dropped is not a report: the control plane
       // will ask again (or another server), so nothing is begun here.
       if (!this.#event(message.requestId, "started")) return;

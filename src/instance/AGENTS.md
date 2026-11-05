@@ -54,6 +54,15 @@ the request (nothing is applied, the tunnel is not torn down). The legacy
 plaintext `keyPem` / `token` from an older control plane is still accepted
 until both floors pass the release that ships this; then those fields go.
 
+**Control plane host only.** `tunnel-token` and `public-urls-update` are
+applied only when `isControlPlaneHost()` (`control-plane-host.ts`) holds:
+`/opt/turbopanel/bin/turbopanel` is a root-owned regular file (the fixed path,
+never `TURBOPANEL_BIN_DIR` from `daemon.env`), or this is a development install
+run from its checkout with `TURBOPANEL_DEV_INSTANCE=1`. `tunnel-token` also
+needs socket mode. Anywhere else the result is `ok: false` with
+`TUNNEL_TOKEN_REMOTE_REFUSAL` / `PUBLIC_URLS_REMOTE_REFUSAL` and nothing is
+written. Details: `src/tunnels/AGENTS.md`.
+
 **Topology generation off the wire (`topology-generation-optional-v1`).** A
 control plane that lists it no longer needs the topology generation numbers.
 The daemon then leaves `metadata.topologyGeneration` off metrics samples,

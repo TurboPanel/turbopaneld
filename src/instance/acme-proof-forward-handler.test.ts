@@ -26,12 +26,15 @@ function message(over: Partial<AcmeProofForwardMessage> = {}) {
 function harness(
   listed: Array<{ requestId: string; expiresAtMs: number }> = [],
   startOk = true,
+  hostedNames: readonly string[] = ["example.com"],
 ) {
+  let starts = 0;
   const sent: AcmeProofForwardReportMessage[] = [];
   const timers: Array<{ fn: () => void; ms: number; cancelled: boolean }> = [];
   const withdrawn: unknown[] = [];
   const handler = new ProofForwardHandler({
     layout,
+    hostedNames: () => Promise.resolve(new Set(hostedNames)),
     send: (m) => {
       sent.push(m);
       return true;
@@ -44,17 +47,19 @@ function harness(
         timer.cancelled = true;
       };
     },
-    start: () =>
-      Promise.resolve(
+    start: () => {
+      starts += 1;
+      return Promise.resolve(
         startOk ? { ok: true as const } : { ok: false as const, reason: "no" },
-      ),
+      );
+    },
     list: () => Promise.resolve(listed),
     withdraw: (_layout, match) => {
       withdrawn.push(match);
       return Promise.resolve(1);
     },
   });
-  return { handler, sent, timers, withdrawn };
+  return { handler, sent, timers, withdrawn, starts: () => starts };
 }
 
 test("a started forward is answered ready and withdraws itself at the stated time", async () => {
@@ -103,4 +108,16 @@ test("the start-up sweep withdraws what is past its time and re-arms the rest", 
   await handler.sweepExpired();
   assertEquals(withdrawn, [{ expiredBeforeMs: NOW }]);
   assertEquals(timers.map((t) => t.ms), [60_000]);
+});
+
+test("a forward for a name this server does not host is refused and writes nothing", async () => {
+  const { handler, sent, timers, starts } = harness([], true, ["other.com"]);
+  await handler.handleForward(message({ names: ["example.com"] }));
+  assertEquals(sent.map((m) => m.type), ["acme-proof-forward-failed"]);
+  assertEquals(
+    sent[0].reason,
+    "example.com is not served by this server, so the check is not passed along",
+  );
+  assertEquals(starts(), 0);
+  assertEquals(timers.length, 0);
 });

@@ -76,6 +76,7 @@ import {
   getCheckoutDevSyncApply,
 } from "../dev-sync/runtime.ts";
 import { applyPublicUrls } from "./public-urls-apply.ts";
+import { isControlPlaneHost } from "./control-plane-host.ts";
 import { writeInstanceTunnelToken } from "../tunnels/supervisor.ts";
 import {
   logDebug,
@@ -2972,7 +2973,10 @@ export class InstanceClient {
   ): Promise<void> {
     let ok = false;
     let error: string | undefined;
-    if (this.#isColocatedSocketMode()) {
+    if (
+      this.#isColocatedSocketMode() &&
+      await clientTestHooks.isControlPlaneHost()
+    ) {
       try {
         const token = await this.#resolveTunnelToken(message);
         await clientTestHooks.writeInstanceTunnelToken(token);
@@ -2982,7 +2986,8 @@ export class InstanceClient {
         logError("tunnel-token", "failed:", sanitizeForLog(error));
       }
     } else {
-      // The control plane's own tunnel runs only beside it: a remote server
+      // The control plane's own tunnel runs only beside it: a daemon that
+      // dials a URL, or a host without the root-owned control plane binary,
       // never starts a connector for it, whoever sends the token.
       error = TUNNEL_TOKEN_REMOTE_REFUSAL;
       logWarn(
@@ -3064,6 +3069,21 @@ export class InstanceClient {
   ): Promise<void> {
     let ok = false;
     let error: string | undefined;
+    // The control plane's own public URLs and certificates are applied only on
+    // its host; anywhere else nothing is written, whoever sends them.
+    if (!(await clientTestHooks.isControlPlaneHost())) {
+      logWarn(
+        "public-urls",
+        "refused: this daemon is not on the control plane host",
+      );
+      this.#sendPublicUrlsResult(
+        ws,
+        message.id,
+        false,
+        PUBLIC_URLS_REMOTE_REFUSAL,
+      );
+      return;
+    }
     try {
       const capable = resolveDaemonCapabilities(DAEMON_VERSION)[
         "instance-cert-sources-per-hostname"
@@ -3094,9 +3114,18 @@ export class InstanceClient {
       logError("public-urls", "failed:", sanitizeForLog(error));
     }
 
+    this.#sendPublicUrlsResult(ws, message.id, ok, error);
+  }
+
+  #sendPublicUrlsResult(
+    ws: WebSocket,
+    id: string,
+    ok: boolean,
+    error: string | undefined,
+  ): void {
     const result: DaemonMessage = {
       type: "public-urls-update-result",
-      id: message.id,
+      id,
       ok,
       error,
       at: new Date().toISOString(),
@@ -4356,6 +4385,8 @@ type ClientTestHooks = {
   handleDrivetempEnable?: DrivetempEnableHandler;
   writeInstanceTunnelToken: typeof writeInstanceTunnelToken;
   applyPublicUrls: typeof applyPublicUrls;
+  /** Whether this host is the control plane's own host (root-owned files). */
+  isControlPlaneHost: () => Promise<boolean>;
   rehydrateLocalDeployments: typeof rehydrateLocalDeployments;
   syncHostDockerNetworking: typeof syncHostDockerNetworking;
   runDockerSetup: typeof runDockerSetup;
@@ -4376,6 +4407,7 @@ let clientTestHooks: ClientTestHooks = {
   collectMetricsCapabilities,
   writeInstanceTunnelToken,
   applyPublicUrls,
+  isControlPlaneHost: () => isControlPlaneHost(),
   rehydrateLocalDeployments,
   syncHostDockerNetworking,
   runDockerSetup,
@@ -4411,6 +4443,10 @@ export function fullJitterMs(floor: number, ceiling: number): number {
 /** The answer a remote server gives to a control plane tunnel token. */
 export const TUNNEL_TOKEN_REMOTE_REFUSAL =
   "tunnel-token is accepted only on the control plane host";
+
+/** The answer any other host gives to the control plane's public URLs. */
+export const PUBLIC_URLS_REMOTE_REFUSAL =
+  "public-urls-update is accepted only on the control plane host";
 
 function isColocatedSocketMode(config: InstanceConfig): boolean {
   return config.kind === "socket";
