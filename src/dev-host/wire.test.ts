@@ -17,6 +17,7 @@ import {
   answerDevHostAction,
   boundStatus,
   DevHostService,
+  type DevHostServiceDeps,
   startDevHostIfEnabled,
 } from "./wire.ts";
 
@@ -131,7 +132,10 @@ async function withService(
     tickers: Array<() => void>;
     statusFile: string;
   }) => Promise<void>,
-  options: { writeStatus?: boolean } = {},
+  options: {
+    writeStatus?: boolean;
+    autoMigrate?: DevHostServiceDeps["autoMigrate"];
+  } = {},
 ): Promise<void> {
   const stateDir = await Deno.makeTempDir();
   try {
@@ -154,6 +158,7 @@ async function withService(
       jobs,
       paths,
       nowMs: () => NOW,
+      autoMigrate: options.autoMigrate,
       ...(options.writeStatus === false ? {} : {
         writeStatus: (status) => {
           written.push(status);
@@ -201,6 +206,34 @@ test("status goes out only to a control plane that lists dev-host-v1", async () 
     service.detach();
     await service.tick();
     assertEquals(sent.length, 2);
+  });
+});
+
+test("every tick passes through the migration review before it is published", async () => {
+  const reviewed: DevHostStatus[] = [];
+  await withService(async ({ service, written }) => {
+    await service.run();
+    assertEquals(reviewed.length, 1);
+    assertEquals(written.at(-1)?.lastFetchAt, "reviewed");
+  }, {
+    autoMigrate: {
+      review: (status) => {
+        reviewed.push(status);
+        return Promise.resolve({ ...status, lastFetchAt: "reviewed" });
+      },
+    },
+  });
+});
+
+test("a failing migration review still publishes the collected status", async () => {
+  await withService(async ({ service, written }) => {
+    await service.run();
+    assertEquals(written.length, 1);
+    assertEquals(written[0].parts, []);
+  }, {
+    autoMigrate: {
+      review: () => Promise.reject(new Error("lock folder missing")),
+    },
   });
 });
 

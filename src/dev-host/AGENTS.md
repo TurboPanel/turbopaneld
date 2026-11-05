@@ -21,6 +21,7 @@ and an action is answered `not_development`.
 | The status tick | `status.ts` |
 | The job (steps, lock, `job.json`, backup command, restart waits) | `job.ts` |
 | Wire answers, the service, `status.json`, the size cap | `wire.ts` |
+| Starting Update and Restart by itself when trunk has new migrations | `auto-migrate.ts` |
 
 ## Owner rules (binding)
 
@@ -51,6 +52,24 @@ and an action is answered `not_development`.
   Every restart is `sudo -n systemctl restart --no-block` through
   `hostSudoArgs`.
 - Restart Only runs the three restart steps and no git command.
+- A merge that adds migrations reaches the dev database by itself (owner
+  decision 2026-11-05, which narrows "nothing pulls on its own" to this one
+  case): after each status tick, `auto-migrate.ts` compares
+  `git show origin/trunk:migrations/manifest.json` (control plane checkout)
+  with `public.migration` (`psql` inside `turbopanel-database`, no password).
+  The applied list must be the start of trunk's (the control plane's own
+  rule). When trunk has more, every part is on trunk with no `content` change
+  and no `blockedReason`, and no part's HEAD has commits that are not on
+  `origin/trunk` (`git merge-base --is-ancestor`), it starts the normal
+  `update` job. Otherwise nothing runs and the control plane part's
+  `blockedReason` names the part that holds it back. Each trunk migration
+  list is tried once and remembered in `dev-updates/auto-migrate.json` (it
+  survives the daemon's own restart), so a failed job is not repeated until
+  trunk ships another migration; Update and Restart by hand still works. A
+  database whose migrations are not the start of trunk's (a branch migration
+  applied by hand, or out of order) is never migrated automatically. The co-located instance unit also
+  migrates before every start (`orchestration/AGENTS.md`, "instance-launch
+  dev migrate before start").
 
 ## Speed
 
@@ -61,15 +80,20 @@ one `git status` per checkout (plus `git diff --numstat` when a tracked file is
 modified). The newest-source check (control plane and daemon, which do not
 reload on their own) walks `src/` in process and stops at the first newer file;
 once a restart is known to be needed it is not walked again until the unit
-restarts.
+restarts. The migration comparison (one `git show` and one `docker exec psql`)
+runs only when any checkout's HEAD or `origin/trunk` moved, a job ended, or
+every 10 minutes, and never while a job runs; the ancestor check (one
+`git merge-base` per checkout) only when migrations are pending and nothing
+else holds the job.
 
 ## Files
 
 `/var/lib/turbopanel/dev-updates/` (from `resolveLayout().daemonStateDir`):
 `job.json` (the job, written at every step; a job found `running` at start is
 marked `failed`), `job.lock` (pid; a dead pid's lock is taken over),
-`status.json` (the full status plus `writtenAt`, for the Developer Console)
-and `backups/`. The purge never runs on a development host, and the
+`status.json` (the full status plus `writtenAt`, for the Developer Console),
+`auto-migrate.json` (the trunk migration list the automatic update last
+tried) and `backups/`. The purge never runs on a development host, and the
 development reset removes the whole state tree.
 
 ## Tests
