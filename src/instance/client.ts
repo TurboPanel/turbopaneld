@@ -239,6 +239,7 @@ import {
   MANAGED_HEALTH_REPORT_FEATURE,
   REPO_KEY_REPORT_FEATURE,
   resolveDaemonCapabilities,
+  SIGNED_REPORTS_FEATURE,
   TLS_CAPTURE_FEATURE,
   TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
 } from "./version-wire.ts";
@@ -2186,6 +2187,10 @@ export class InstanceClient {
         },
         onFrame: (json) => this.#dispatchRawMessage(json, ws),
         onPong: () => this.#dispatchRawMessage(UNSIGNED_PONG, ws),
+        reportSigning: {
+          key: () => this.#daemonSigningKey,
+          enabled: () => this.instanceSupports(SIGNED_REPORTS_FEATURE),
+        },
         now,
       })
       : undefined;

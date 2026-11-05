@@ -281,6 +281,7 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
       "HELLO_PREFIX",
       "FRAME_PREFIX",
       "HTTP_PREFIX",
+      "REPORT_PREFIX",
       "SIG_SUFFIX_MARKER",
     ]
   ) {
