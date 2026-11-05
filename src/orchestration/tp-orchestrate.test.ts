@@ -383,6 +383,7 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_pin_field"),
       extractShellFunction(source, "tp_load_update_origin_pin"),
       extractShellFunction(source, "tp_read_update_origin_pin"),
+      extractShellFunction(source, "tp_pinned_host_ok"),
       extractShellFunction(source, "tp_panel_identity_consistent"),
       extractShellFunction(source, "tp_restore_panel_key_line"),
       extractShellFunction(source, "tp_colocated_host"),
@@ -580,6 +581,35 @@ test("tp-orchestrate update refuses without a root-pinned origin", async () => {
   const result = await runUpdateVerb(["--license-stdin", "--no-start"], null);
   assertEquals(result.status, 1);
   assertStringIncludes(result.stderr, "update origin pin missing");
+});
+
+test("tp-orchestrate update accepts any pinned control plane address for --host and nothing else", async () => {
+  const pin =
+    "host=https://panel.example.com\nhosts=https://panel.example.com,https://alt.example.com:8443\ndl_base=\ninstance_ca=\n";
+  const accepted = await runUpdateVerb(
+    ["--license-stdin", "--host", "https://alt.example.com:8443", "--no-start"],
+    pin,
+  );
+  assertEquals(accepted.status, 0, accepted.stderr);
+  assertStringIncludes(
+    accepted.stdout,
+    "RUNSH [--host] [https://alt.example.com:8443] [--no-start]",
+  );
+  for (
+    const host of [
+      "https://alt.example.com",
+      "https://*",
+      "https://alt.example.com:8443,https://evil.example",
+      "https://panel.example.com,https://alt.example.com:8443",
+    ]
+  ) {
+    const refused = await runUpdateVerb(
+      ["--license-stdin", "--host", host, "--no-start"],
+      pin,
+    );
+    assertEquals(refused.status, 1, host);
+    assertStringIncludes(refused.stderr, "enrolled with");
+  }
 });
 
 test("tp-orchestrate update refuses origins that differ from the pin", async () => {

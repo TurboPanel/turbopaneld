@@ -306,6 +306,38 @@ function notRoot(key: string, why: string): CallSite {
 /** tp-host test mode reads an interface's connected subnets from here. */
 const LAN_CONNECTED_FIXTURE = `${P}/tp-test/ip-route-link-eth1`;
 const LAN_CONNECTED_TEXT = "10.0.0.0/24 proto kernel src 10.0.0.11\n"; // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
+/**
+ * A control plane identity document as it is served: public key, body and
+ * the header signature over it (all public values; the private key that made
+ * them was thrown away). The pin names the same key.
+ */
+const PANEL_KID = "Un6wCWtU4Ef5Vj5-fg73kNMl-BFZfY9qazowwGu30Ng";
+const PANEL_DOCUMENT = JSON.stringify({
+  v: 1,
+  keys: [{
+    kid: PANEL_KID,
+    alg: "Ed25519",
+    pub: "8K4q9wbHSCaVRRM2VFGcv8Kf-W7EB3gxK5PDDO6QvdY",
+    role: "current",
+  }],
+  seal: { kid: "s".repeat(43), alg: "X25519", pub: "AAAA" },
+  keyset: 1,
+  urls: ["https://panel.example.com", "https://alt.example.com:8443"],
+  issued: "2026-11-01T00:00:00.000Z",
+  expires: "2999-01-01T00:00:00.000Z",
+});
+const PANEL_DOCUMENT_SIG =
+  "Uqusqn3j0gH5iDtJFek-lbPIaL39mkqUY_8UdzuvWmpS9TQk7kNDXuxO9Ze0i0j4g0FiGySMSEBNBxHHrWKhDg";
+const PANEL_PIN = [
+  `current=${PANEL_KID}`,
+  "next=",
+  "keyset=1",
+  "urls=https://panel.example.com",
+  "pinned_by=install",
+  "updated=2026-11-01T00:00:00Z",
+  "",
+].join("\n");
+
 const file = (path: string, contents = "x\n"): CallSiteSetup => ({
   files: { [path]: contents },
 });
@@ -1198,6 +1230,19 @@ const SITES: CallSite[] = [
       },
     },
   ),
+
+  // --- panel key pin -------------------------------------------------------
+  tpHost('src/instance/panel-pin-write.ts|["-n","panel-identity-write"]', {
+    argv: ["panel-identity-write"],
+    stdin: `${PANEL_KID}:${PANEL_DOCUMENT_SIG}\n${PANEL_DOCUMENT}`,
+    setup: {
+      files: {
+        [`${P}/opt/turbopanel/lib/panel-identity`]: PANEL_PIN,
+        [`${P}/opt/turbopanel/lib/update-origin`]:
+          `host=https://panel.example.com\nhosts=https://panel.example.com\npanel_key=${PANEL_KID}\n`,
+      },
+    },
+  }),
 
   // --- tunnel connectors ----------------------------------------------------
   tpHost(

@@ -30,7 +30,7 @@ export interface TestPanel {
   signing(): Promise<PanelSigningKey>;
   pin(overrides?: Partial<PanelIdentityPin>): PanelIdentityPin;
   identityFetch(
-    opts?: { nowMs: number; keyset?: number },
+    opts?: { nowMs: number; keyset?: number; urls?: string[] },
   ): Promise<PanelIdentityFetch>;
   hello(
     fields: {
@@ -47,6 +47,8 @@ export interface TestPanel {
     envelope: { sessionId: string; seq: number; iat: number; kid?: string },
   ): Promise<string>;
   httpHeader(path: string, body: string): Promise<string>;
+  /** The same answer, signed over its path and exact body. */
+  signedResponse(path: string, response: Response): Promise<Response>;
 }
 
 export async function createTestPanel(keyset = 1): Promise<TestPanel> {
@@ -99,7 +101,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         }],
         seal: { kid: sealKid, alg: "X25519", pub: encodeBase64Url(sealPub) },
         keyset: opts.keyset ?? keyset,
-        urls: [],
+        urls: opts.urls ?? [],
         issued: new Date(opts.nowMs).toISOString(),
         expires: new Date(opts.nowMs + 30 * DAY_MS).toISOString(),
       });
@@ -136,6 +138,15 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
     },
     async httpHeader(path, body) {
       return `${kid}:${await sign(`${HTTP_PREFIX}${path}\n${body}`)}`;
+    },
+    async signedResponse(path, response) {
+      const body = await response.text();
+      const headers = new Headers(response.headers);
+      headers.set(
+        "x-turbopanel-signature",
+        `${kid}:${await sign(`${HTTP_PREFIX}${path}\n${body}`)}`,
+      );
+      return new Response(body, { status: response.status, headers });
     },
   };
 }
