@@ -156,3 +156,54 @@ export function fastForwardTrunk(
     timeoutMs: 120_000,
   });
 }
+
+/**
+ * The commit HEAD pointed at `atMs`, from a HEAD reflog's text: the new
+ * commit of the last entry made at or before that time. Null when the reflog
+ * starts after `atMs` (or is empty), so the caller cannot tell.
+ *
+ * An entry is `<old> <new> <name> <<email>> <unix seconds> <zone>\t<message>`.
+ */
+export function commitAtFromReflog(text: string, atMs: number): string | null {
+  let found: string | null = null;
+  for (const line of text.split("\n")) {
+    const tab = line.indexOf("\t");
+    const head = tab === -1 ? line : line.slice(0, tab);
+    const close = head.lastIndexOf("> ");
+    if (close === -1) continue;
+    const seconds = Number.parseInt(head.slice(close + 2).trim(), 10);
+    const commit = head.slice(41, 81).toLowerCase();
+    if (!Number.isFinite(seconds) || !SHA_RE.test(commit)) continue;
+    if (seconds * 1000 > atMs) break;
+    found = commit;
+  }
+  return found;
+}
+
+/** The HEAD reflog's path, size and modification time, or null when it is missing. */
+export async function statHeadReflog(
+  repo: string,
+): Promise<{ path: string; key: string } | null> {
+  const dirs = await resolveGitDirs(repo);
+  if (!dirs) return null;
+  const path = join(dirs.gitDir, "logs", "HEAD");
+  try {
+    const info = await Deno.stat(path);
+    return { path, key: `${info.size}:${info.mtime?.getTime() ?? 0}` };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The commit a process started at `atMs` was running, from the checkout's
+ * HEAD reflog; null when there is no reflog or it does not reach back that
+ * far.
+ */
+export async function headCommitAt(
+  path: string,
+  atMs: number,
+): Promise<string | null> {
+  const text = await readText(path);
+  return text === null ? null : commitAtFromReflog(text, atMs);
+}

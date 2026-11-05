@@ -29,9 +29,11 @@ import { CLEAN, readDirty } from "./dirty.ts";
 import {
   countBehind,
   fetchTrunk,
+  headCommitAt,
   readHead,
   readRef,
   REMOTE_TRUNK_REF,
+  statHeadReflog,
   TRUNK,
 } from "./git.ts";
 import { readUnits, type UnitState } from "./units.ts";
@@ -65,6 +67,8 @@ type PartMemo = {
   blocked: { reason: string; key: string } | null;
   /** Restart already known to be needed for this unit start. */
   restartForStart: number | null;
+  /** The commit the unit started on, from the HEAD reflog, per start and reflog state. */
+  startedOn: { key: string; commit: string | null } | null;
 };
 
 const SHA_RE = /^[0-9a-f]{40}$/;
@@ -92,6 +96,7 @@ export class DevHostStatusCollector {
         behindBy: 0,
         blocked: null,
         restartForStart: null,
+        startedOn: null,
       };
       this.#memo.set(name, memo);
     }
@@ -149,13 +154,15 @@ export class DevHostStatusCollector {
     const head = await readHead(repo);
     if (!head) return false;
     const units = await readUnits(this.#deps.run, [spec.unit]);
+    const unit = units.get(spec.unit);
+    const memo = this.#memoFor(spec.name);
     return await this.#restartNeeded(
       spec,
       repo,
       head.commit,
-      this.#runningCommit(spec.name),
-      units.get(spec.unit),
-      this.#memoFor(spec.name),
+      await this.#runningCommit(spec.name, repo, unit, memo),
+      unit,
+      memo,
     );
   }
 
@@ -178,7 +185,7 @@ export class DevHostStatusCollector {
         branch: "",
         onTrunk: false,
         headCommit: "",
-        runningCommit: this.#runningCommit(spec.name),
+        runningCommit: this.#reportedCommit(spec.name),
         behindBy: 0,
         dirty: CLEAN,
         restartNeeded: false,
@@ -195,7 +202,12 @@ export class DevHostStatusCollector {
       spec.repo,
       this.#deps.gitEnv,
     );
-    const runningCommit = this.#runningCommit(spec.name);
+    const runningCommit = await this.#runningCommit(
+      spec.name,
+      repo,
+      unit,
+      memo,
+    );
     const onTrunk = head.branch === TRUNK;
     const part: DevHostPart = {
       ...base,
@@ -216,8 +228,8 @@ export class DevHostStatusCollector {
       setupNeeded: await this.#setupNeeded(spec, repo),
     };
     const reason = blockedReasonFor(
-      head.branch,
-      onTrunk,
+      head,
+      behindBy,
       dirty,
       error,
       memo.blocked,
@@ -227,13 +239,42 @@ export class DevHostStatusCollector {
     return part;
   }
 
-  #runningCommit(name: DevHostPartName): string | null {
+  /** The commit the process itself reports (daemon, control plane), else null. */
+  #reportedCommit(name: DevHostPartName): string | null {
     let commit: string | null = null;
     if (name === "daemon") commit = this.#deps.daemonCommit;
     if (name === "control-plane") {
       commit = this.#deps.controlPlaneCommit?.() ?? null;
     }
     return commit && SHA_RE.test(commit) ? commit : null;
+  }
+
+  /**
+   * The commit the unit runs: what the process reports, else what HEAD was
+   * when the unit started (its HEAD reflog). The web interface and website
+   * report nothing, so this is how a pull after their start shows as a
+   * restart. Read again only when the unit restarts or the reflog changes.
+   */
+  async #runningCommit(
+    name: DevHostPartName,
+    repo: string,
+    unit: UnitState | undefined,
+    memo: PartMemo,
+  ): Promise<string | null> {
+    const reported = this.#reportedCommit(name);
+    if (reported) return reported;
+    const startedAtMs = unit?.startedAtMs ?? null;
+    if (startedAtMs === null) return null;
+    const reflog = await statHeadReflog(repo);
+    if (!reflog) return null;
+    const key = `${startedAtMs}|${reflog.key}`;
+    if (memo.startedOn?.key !== key) {
+      memo.startedOn = {
+        key,
+        commit: await headCommitAt(reflog.path, startedAtMs),
+      };
+    }
+    return memo.startedOn.commit;
   }
 
   async #maybeFetch(
@@ -327,21 +368,50 @@ export async function installNeeded(
   return installed === null || lock > installed;
 }
 
-function blockedReasonFor(
-  branch: string | null,
-  onTrunk: boolean,
+/** The most changed paths a reason names before "and N more". */
+export const REASON_PATHS = 3;
+
+/** "a.ts, b.ts and 2 more" for the changes that block a pull. */
+function changedFilesText(dirty: DevHostDirty): string {
+  const paths = dirty.kinds.filter((k) => k.kind === "content").map((k) =>
+    k.path
+  );
+  if (paths.length === 0) return "local changes";
+  const shown = paths.slice(0, REASON_PATHS).join(", ");
+  // `kinds` is capped with blocking entries first: every blocking path is in
+  // it unless it holds nothing else and is shorter than `files`.
+  const complete = paths.length < dirty.kinds.length ||
+    dirty.kinds.length >= dirty.files;
+  const more = paths.length - REASON_PATHS;
+  let tail = "";
+  if (!complete) tail = " and more";
+  else if (more > 0) tail = ` and ${more} more`;
+  return `local changes in ${shown}${tail}`;
+}
+
+/**
+ * Why a part is not pulled, in the exact words the bar shows: "detached at
+ * 4f7b5ed, 19 behind trunk; not pulled", "on branch fix/x, not trunk; not
+ * pulled", "local changes in .gitconfig; not pulled", or git's own line for a
+ * refused fast-forward.
+ */
+export function blockedReasonFor(
+  head: { branch: string | null; commit: string | null },
+  behindBy: number,
   dirty: DevHostDirty,
   dirtyError: string | undefined,
-  blocked: PartMemo["blocked"],
+  blocked: { reason: string; key: string } | null,
   refsKey: string,
 ): string | null {
-  if (!onTrunk) {
-    return branch
-      ? `on branch ${branch}, not trunk; not pulled`
-      : "detached HEAD, not trunk; not pulled";
+  const behind = behindBy > 0 ? `, ${behindBy} behind trunk` : "";
+  if (head.branch !== TRUNK) {
+    const where = head.branch
+      ? `on branch ${head.branch}, not trunk`
+      : `detached at ${(head.commit ?? "unknown").slice(0, 7)}`;
+    return `${where}${behind}; not pulled`;
   }
   if (dirtyError) return `${dirtyError}; not pulled`;
-  if (dirty.blocking) return "has local changes; not pulled";
+  if (dirty.blocking) return `${changedFilesText(dirty)}${behind}; not pulled`;
   if (blocked?.key === refsKey) return blocked.reason;
   return null;
 }

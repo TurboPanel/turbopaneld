@@ -15,7 +15,7 @@ and an action is answered `not_development`.
 | --- | --- |
 | Activation, the four parts, file paths under `<daemonStateDir>/dev-updates` | `config.ts` |
 | The one command runner (tests swap it), bounded log tails | `commands.ts` |
-| HEAD and `origin/trunk` from files (`packed-refs`, worktrees), fetch, `rev-list`, the fast-forward | `git.ts` |
+| HEAD and `origin/trunk` from files (`packed-refs`, worktrees), the commit HEAD held when a unit started (HEAD reflog), fetch, `rev-list`, the fast-forward | `git.ts` |
 | Local change classes (`content` blocks; `mode`, `generated`, `untracked`, `runtime` do not) | `dirty.ts` |
 | `systemctl show` for all units; the control plane unit's database URL | `units.ts` |
 | The status tick | `status.ts` |
@@ -29,6 +29,9 @@ and an action is answered `not_development`.
   `git merge --ff-only origin/trunk`. A checkout on another branch, or with a
   `content` change, is reported and left alone. A refused fast-forward is the
   part's `blockedReason` (git's last line) until HEAD or `origin/trunk` moves.
+  Every other `blockedReason` names the exact cause the bar shows: `detached
+  at 4f7b5ed, 19 behind trunk`, `on branch fix/x, not trunk`, or `local
+  changes in a.ts, b.ts and 2 more` (content changes only, at most three named).
 - Mode-only changes, `website/next-env.d.ts`, untracked files and
   `.config/` / `.local/` / `.cache/` are shown and never block.
 - Migration always runs with a backup first: `pnpm migrate` in the control
@@ -46,8 +49,10 @@ and an action is answered `not_development`.
   before any restart.
 - Restart order: control plane (then wait until it restarted, is active and
   answers `/api/health`; a development control plane reports commit
-  `unknown`, which is accepted), then web interface and website only when
-  their package or config files are newer than the unit start, then this
+  `unknown`, which is accepted; the development entry reports its checkout
+  HEAD), then web interface and website when the checkout moved since the
+  unit started or their package or config files are newer than the unit
+  start, then this
   daemon last, only after the job is written `done` and the lock removed.
   Every restart is `sudo -n systemctl restart --no-block` through
   `hostSudoArgs`.
@@ -71,6 +76,15 @@ and an action is answered `not_development`.
   migrates before every start (`orchestration/AGENTS.md`, "instance-launch
   dev migrate before start").
 
+## Running commit
+
+The daemon reports its own start commit and the control plane its own (attach
+frame). The web interface and website report none, so their `runningCommit`
+is what HEAD held when the unit started: the last HEAD reflog entry
+(`<gitDir>/logs/HEAD`) at or before `ExecMainStartTimestamp`. A pull after the
+start then differs from HEAD and reads as a restart. With no reflog, or one
+that starts after the unit did, it is null and only the file times count.
+
 ## Speed
 
 One `systemctl show` per 60 s tick for all units; `git fetch -q origin trunk`
@@ -80,7 +94,8 @@ one `git status` per checkout (plus `git diff --numstat` when a tracked file is
 modified). The newest-source check (control plane and daemon, which do not
 reload on their own) walks `src/` in process and stops at the first newer file;
 once a restart is known to be needed it is not walked again until the unit
-restarts. The migration comparison (one `git show` and one `docker exec psql`)
+restarts. The HEAD reflog is read only when the unit restarted or the reflog's
+size or time changed. The migration comparison (one `git show` and one `docker exec psql`)
 runs only when any checkout's HEAD or `origin/trunk` moved, a job ended, or
 every 10 minutes, and never while a job runs; the ancestor check (one
 `git merge-base` per checkout) only when migrations are pending and nothing
