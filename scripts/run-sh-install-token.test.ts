@@ -47,6 +47,7 @@ const FUNCTIONS = [
   "tp_pin_file_field",
   "tp_resolve_panel_pin",
   "tp_write_panel_identity_pin",
+  "tp_learn_panel_identity",
 ];
 
 async function lifted(): Promise<string> {
@@ -57,6 +58,7 @@ async function lifted(): Promise<string> {
 const STUBS = `
 tp_print_step() { :; }
 tp_print_ok() { :; }
+tp_print_detail() { :; }
 tp_print_error() { printf '%s\\n' "$1" >&2; }
 `;
 
@@ -415,4 +417,93 @@ test("a legacy install writes no pin file", async () => {
     () => false,
   );
   assertEquals(exists, false);
+});
+
+/** A host installed before panel keys (an update origin, no pin), updated with no TOKEN. */
+async function learnState(
+  panel: Panel | undefined,
+  vars = "",
+): Promise<{ code: number; stdout: string; stderr: string; root: string }> {
+  const root = await Deno.makeTempDir();
+  await Deno.mkdir(join(root, "lib"));
+  await Deno.writeTextFile(
+    join(root, "lib/update-origin"),
+    "host=https://panel.example.test\ndl_base=\ninstance_ca=\n",
+  );
+  const result = await run(
+    [
+      "PANEL_FINGERPRINT=''; PANEL_NEXT_FINGERPRINT=''; PANEL_KEYSET=''; PANEL_URLS=''",
+      "TOKEN_PAYLOAD=''; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://panel.example.test",
+      vars,
+      "tp_resolve_panel_pin || exit 1",
+      'echo "resolved=$PIN_ACTION"',
+      "tp_learn_panel_identity",
+      'echo "action=$PIN_ACTION fp=$PANEL_FINGERPRINT hosts=$PIN_HOSTS"',
+      "tp_write_panel_identity_pin",
+    ].join("\n"),
+    panel,
+    root,
+  );
+  return { ...result, root };
+}
+
+async function pinFile(root: string): Promise<string | null> {
+  return await Deno.readTextFile(join(root, "lib/panel-identity")).catch(
+    () => null,
+  );
+}
+
+test("an update of a host installed before panel keys learns the key with pinned_by=upgrade", async () => {
+  const panel = await makePanel({ keyset: 4 });
+  const state = await learnState(panel);
+  assertEquals(state.code, 0, state.stderr);
+  assertStringIncludes(state.stdout, "resolved=learn");
+  assertStringIncludes(
+    state.stdout,
+    `action=write fp=${panel.fingerprint} hosts=https://panel.example.test`,
+  );
+  const text = await pinFile(state.root);
+  assertStringIncludes(text ?? "", `current=${panel.fingerprint}\n`);
+  assertStringIncludes(text ?? "", "next=\n");
+  assertStringIncludes(text ?? "", "keyset=4\n");
+  assertStringIncludes(text ?? "", "urls=https://panel.example.test\n");
+  assertStringIncludes(text ?? "", "pinned_by=upgrade\n");
+});
+
+test("learning on upgrade pins nothing when the document is missing, forged or not over trusted TLS", async () => {
+  const forged = await makePanel();
+  const cases: Array<[string, Panel | undefined, string]> = [
+    ["no identity document", undefined, ""],
+    [
+      "a body the signature does not cover",
+      { ...forged, body: forged.body.replace("panel.", "evil.") },
+      "",
+    ],
+    [
+      "a header naming another key",
+      { ...forged, header: `${"x".repeat(43)}:${forged.header.split(":")[1]}` },
+      "",
+    ],
+    ["insecure TLS", await makePanel(), "INSECURE_TLS=true"],
+  ];
+  for (const [label, panel, vars] of cases) {
+    const state = await learnState(panel, vars);
+    assertEquals(state.code, 0, `${label}: ${state.stderr}`);
+    assertStringIncludes(state.stdout, "action=none", label);
+    assertEquals(await pinFile(state.root), null, label);
+  }
+});
+
+test("learning on upgrade does not run with a TOKEN or on a fresh install", async () => {
+  // A fresh install with the older license value has no update origin yet.
+  const fresh = await pinState(
+    "",
+    "PANEL_FINGERPRINT=''; TOKEN_PAYLOAD=''; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://p.example",
+  );
+  assertStringIncludes(fresh.stdout, "action=none");
+  const withToken = await pinState(
+    `printf 'host=h\\n' > "$INSTALL_ROOT/lib/update-origin"`,
+    "PANEL_FINGERPRINT=''; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://p.example",
+  );
+  assertStringIncludes(withToken.stdout, "action=none");
 });

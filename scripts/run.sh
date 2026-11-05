@@ -254,7 +254,9 @@ from pathlib import Path
 PATH = "/api/daemon/v1/instance/identity"
 body_path, header, out, expected = sys.argv[1:5]
 out = Path(out)
-tok_sig = (out / "tok.sig.txt").read_text().strip()
+# No tok.sig.txt: a document checked on its own (learning the key on upgrade).
+tok_file = out / "tok.sig.txt"
+tok_sig = tok_file.read_text().strip() if tok_file.exists() else None
 
 def b64d(text):
     try:
@@ -280,7 +282,7 @@ if len(pub) != 32:
 kid = b64e(hashlib.sha256(pub).digest())
 if kid != keys[0].get("kid"):
     raise SystemExit("current kid is not the fingerprint of its key")
-if kid != expected:
+if expected and kid != expected:
     raise SystemExit("the panel's key is not the one this command names")
 if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset < 1:
     raise SystemExit("keyset is not a positive integer")
@@ -294,12 +296,14 @@ head_kid, _, head_sig = header.strip().partition(":")
 if head_kid != kid:
     raise SystemExit("signature header names another key")
 sig = b64d(head_sig)
-tsig = b64d(tok_sig)
+tsig = b64d(tok_sig) if tok_sig is not None else bytes(64)
 if len(sig) != 64 or len(tsig) != 64:
     raise SystemExit("signature is not 64 bytes")
 (out / "doc.msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
 (out / "doc.sig").write_bytes(sig)
-(out / "tok.sig").write_bytes(tsig)
+if tok_sig is not None:
+    (out / "tok.sig").write_bytes(tsig)
+(out / "kid").write_text(kid)
 der = bytes.fromhex("302a300506032b6570032100") + pub
 pem = base64.b64encode(der).decode()
 lines = [pem[i:i + 64] for i in range(0, len(pem), 64)]
@@ -3176,6 +3180,11 @@ tp_pin_file_field() {
 #   refresh the same key again: only urls= and updated= change
 #   keep    a re-run without a TOKEN (managed update): file untouched, and the
 #           stored key stays in update-origin
+#   learn   a re-run without a TOKEN on a host installed before panel keys
+#           (an update origin, no pin): tp_learn_panel_identity fetches the
+#           panel's signed identity document once the trust files are in
+#           place and pins its key with pinned_by=upgrade (or leaves the host
+#           as it was when that fails)
 # A different key is refused: a key change arrives only as a signed rotation
 # from the panel. A TOKEN-less run never loosens a stored pin.
 tp_resolve_panel_pin() {
@@ -3228,8 +3237,51 @@ tp_resolve_panel_pin() {
     PIN_HOSTS="$PANEL_URLS"
   else
     PIN_HOSTS="$_pp_ohosts"
+    # An update origin with no pin is a host installed before panel keys,
+    # updated now; a fresh install with the older license value has none.
+    if [ -z "$TOKEN_PAYLOAD" ] && [ -f "$_pp_origin" ] && [ ! -L "$_pp_origin" ]; then
+      PIN_ACTION=learn
+    fi
   fi
   return 0
+}
+
+# PIN_ACTION=learn: pin the key the control plane signs its identity document
+# with, as far as this host's existing TLS trust vouches for the connection
+# (never over --insecure-tls). The daemon reports the learned key signed with
+# its own key and the control plane alarms when it is not its own. Any failure
+# (no document, a bad signature, a control plane without a key) leaves the
+# host unpinned and the update goes on as before.
+tp_learn_panel_identity() {
+  [ "$PIN_ACTION" = learn ] || return 0
+  PIN_ACTION=none
+  if [ -z "$HOST_URL" ] || [ "${INSECURE_TLS:-false}" = true ]; then
+    return 0
+  fi
+  _lp_dir="$(mktemp -d)"
+  _lp_curl="$(tp_instance_bootstrap_curl)"
+  # shellcheck disable=SC2086
+  if ! $_lp_curl -f -D "$_lp_dir/headers" -o "$_lp_dir/body" "${HOST_URL%/}/api/daemon/v1/instance/identity" 2>/dev/null; then
+    tp_print_detail "No panel key to learn from ${HOST_URL} (no identity document); not pinned"
+    rm -rf "$_lp_dir"
+    return 0
+  fi
+  _lp_header="$(tr -d '\r' < "$_lp_dir/headers" | grep -i '^x-turbopanel-signature:' | tail -n 1 | sed 's/^[^:]*:[[:space:]]*//')"
+  if ! python3 -c "$(tp_identity_material_python)" "$_lp_dir/body" "$_lp_header" "$_lp_dir" "" 2>"$_lp_dir/err" \
+    || ! tp_verify_ed25519 "$_lp_dir/pub.pem" "$_lp_dir/doc.msg" "$_lp_dir/doc.sig"; then
+    tp_print_error "The panel's identity document was refused ($(cat "$_lp_dir/err" 2>/dev/null)); this server stays without a panel key pin."
+    rm -rf "$_lp_dir"
+    return 0
+  fi
+  PANEL_FINGERPRINT="$(cat "$_lp_dir/kid")"
+  PANEL_NEXT_FINGERPRINT=""
+  PANEL_KEYSET="$(cat "$_lp_dir/keyset")"
+  _lp_urls="$(cat "$_lp_dir/urls")"
+  PIN_HOSTS="${_lp_urls:-$HOST_URL}"
+  PIN_ACTION=write
+  PIN_LEARNED=true
+  rm -rf "$_lp_dir"
+  tp_print_ok "Pinned the panel key $PANEL_FINGERPRINT (learned on upgrade)"
 }
 
 # The install command's panel key, checked against the panel's own identity
@@ -3344,6 +3396,7 @@ fi
 tp_write_panel_identity_pin() {
   _wp_file="$INSTALL_ROOT/lib/panel-identity"
   _wp_by=install
+  [ "${PIN_LEARNED:-false}" = true ] && _wp_by=upgrade
   # The flag only matters for a token with no key; a checked key is a real pin.
   [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -z "$PANEL_FINGERPRINT" ] && _wp_by=unsafe
   _wp_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -3426,6 +3479,7 @@ tp_write_colocated_update_origin_pin() {
   rm -f "$_pin_tmp"
 }
 if [ "$INSTANCE_INSTALL" != true ] && [ "$_colocated_daemon_refresh" != true ]; then
+  tp_learn_panel_identity
   tp_write_update_origin_pin
   tp_write_panel_identity_pin
 else
