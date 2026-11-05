@@ -160,7 +160,8 @@ import {
 } from "../metrics/collector/sensors/overrides.ts";
 import type { DrivetempEnableResult } from "../contracts/commands-contracts.ts";
 import { resolveUpdateChannelConfig } from "../update/config.ts";
-import type { UpdateInfo } from "../update/types.ts";
+import type { UpdateChannel, UpdateInfo } from "../update/types.ts";
+import { decideUpdateChannel } from "./update-channel-pin.ts";
 import {
   InsecureOverlayBaseError,
   MalformedManifestError,
@@ -3133,20 +3134,29 @@ export class InstanceClient {
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(result));
   }
 
-  #resolveUpdateConfigForMessage(
-    message: Extract<DaemonMessage, { type: "update" }>,
-  ): ReturnType<typeof resolveUpdateChannelConfig> {
-    const config = resolveUpdateChannelConfig(Deno.env.toObject());
-    const msgChannel = message.channel?.trim();
-    if (!msgChannel) return config;
-
+  /**
+   * The channel an update message runs on. The host channel holds unless the
+   * message came over a verified signed session (`decideUpdateChannel`); a
+   * refused change throws `channel_pinned` before anything runs.
+   */
+  #updateChannelForMessage(
+    message: { channel?: string },
+    env: Record<string, string | undefined>,
+  ): UpdateChannel {
+    const hostChannel = resolveUpdateChannelConfig(env).channel;
     try {
-      return resolveUpdateChannelConfig({
-        ...Deno.env.toObject(),
-        TURBOPANEL_UPDATE_CHANNEL: msgChannel,
+      return decideUpdateChannel({
+        hostChannel,
+        messageChannel: message.channel,
+        signedSession: this.#pinnedHelloApplied,
       });
-    } catch {
-      return config;
+    } catch (err) {
+      logWarn(
+        "update",
+        "refused a channel change from an unsigned message:",
+        sanitizeForLog(err instanceof Error ? err.message : String(err)),
+      );
+      throw err;
     }
   }
 
@@ -3364,10 +3374,13 @@ export class InstanceClient {
     let error: string | undefined;
     let errorCode: string | undefined;
     try {
+      const env = Deno.env.toObject();
+      const config: ReturnType<typeof resolveUpdateChannelConfig> = {
+        app: "daemon",
+        channel: this.#updateChannelForMessage(message, env),
+      };
       await clientTestHooks.assertUpdateDiskPreflight();
 
-      const config = this.#resolveUpdateConfigForMessage(message);
-      const env = Deno.env.toObject();
       const requestedManifest = message.manifestUrl?.trim() || undefined;
       if (requestedManifest) {
         assertReleaseManifestUrl("daemon", requestedManifest, "manifestUrl");
@@ -3552,8 +3565,7 @@ export class InstanceClient {
     let errorCode: string | undefined;
     try {
       const env = Deno.env.toObject();
-      const channel = message.channel?.trim() ||
-        resolveUpdateChannelConfig(env).channel;
+      const channel = this.#updateChannelForMessage(message, env);
       // An env pin holds a package: a panel click must not replace it with
       // the floating channel URL. A message naming one exact build (the
       // control plane's target) wins, so a pin an earlier managed update

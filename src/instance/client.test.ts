@@ -5187,6 +5187,84 @@ it({
 });
 
 it({
+  name:
+    "an unsigned update or instance-update cannot change the host's channel",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "release");
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    let instanceCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("signed-aaa"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      executeInstanceUpdateReconcile: () => {
+        instanceCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-pinned",
+        channel: "canary",
+        at: new Date().toISOString(),
+      });
+      socket.receive({
+        type: "instance-update",
+        id: "iu-pinned",
+        channel: "trunk",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "pinned update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-pinned"
+          ) as { ok?: boolean; errorCode?: string; error?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "channel_pinned");
+      assertEquals(
+        String(result.error).includes("update channel is release"),
+        true,
+      );
+      const instanceResult = await waitFor(
+        "pinned instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((f) =>
+            (f as { id?: string }).id === "iu-pinned"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(instanceResult.ok, false);
+      assertEquals(instanceResult.errorCode, "channel_pinned");
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+      assertEquals(instanceCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
   name: "update reconciles the verified manifest instead of a moving channel",
   permissions: {
     env: true,
@@ -6343,7 +6421,9 @@ it({
         socket.receive({
           type: "update",
           id: "upd-same",
-          channel: "trunk",
+          // The host's own channel (the default): a named channel equal to
+          // the host's passes on an unsigned session.
+          channel: "release",
           at: new Date().toISOString(),
         });
         const same = await waitFor(
