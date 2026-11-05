@@ -16,7 +16,7 @@ import type {
 } from "./commands-contracts.ts";
 import type { HardwareProfile } from "../metrics/collector/types.ts";
 import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
-import type { TopologySnapshot } from "./topology-types.ts";
+import type { TopologyReportSnapshot } from "./topology-types.ts";
 import type { ManagedPermissionsObserved } from "./managed-permissions-observed.ts";
 export {
   OBSERVED_LEVELS,
@@ -945,11 +945,14 @@ export type DaemonMessage =
      * (`./topology-reporter.ts`) so the control plane can persist per-server
      * topology-generation history (`turbopanel/src/client/servers/
      * server-topology-records.ts`).
+     *
+     * `generation` and `bootGeneration` (here and inside the snapshot) are
+     * left out once the control plane lists `topology-generation-optional-v1`.
      */
     type: "topology-report";
-    generation: number;
-    bootGeneration: number;
-    snapshot: TopologySnapshot;
+    generation?: number;
+    bootGeneration?: number;
+    snapshot: TopologyReportSnapshot;
     at: string;
   }
   | {

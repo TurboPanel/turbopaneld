@@ -1,5 +1,8 @@
 import { assertEquals } from "@std/assert";
-import { TopologyReporter } from "./topology-reporter.ts";
+import {
+  TopologyReporter,
+  topologyReportForWire,
+} from "./topology-reporter.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 
 const test = Deno.test.bind(Deno);
@@ -229,4 +232,23 @@ test("topology-reporter never consults the capability plan", () => {
   assertEquals(source.includes("capability-plan"), false);
   assertEquals(source.includes("capabilityPlan"), false);
   assertEquals(source.includes("truncateSample"), false);
+});
+
+test("topologyReportForWire keeps the numbers until the control plane no longer needs them", () => {
+  const report = {
+    generation: 4,
+    bootGeneration: 0,
+    snapshot: fakeSnapshot(4),
+    at: "2026-11-05T00:00:00.000Z",
+  };
+  assertEquals(topologyReportForWire(report, false), report);
+  const wire = topologyReportForWire(report, true);
+  assertEquals("generation" in wire, false);
+  assertEquals("bootGeneration" in wire, false);
+  assertEquals("generation" in wire.snapshot, false);
+  assertEquals("bootGeneration" in wire.snapshot, false);
+  assertEquals(wire.at, report.at);
+  assertEquals(wire.snapshot.networks, []);
+  // The collected report itself is untouched: the reporter still compares generations.
+  assertEquals(report.snapshot.generation, 4);
 });
