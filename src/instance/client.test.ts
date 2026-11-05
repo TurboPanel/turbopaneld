@@ -6421,9 +6421,6 @@ it({
         socket.receive({
           type: "update",
           id: "upd-same",
-          // The host's own channel (the default): a named channel equal to
-          // the host's passes on an unsigned session.
-          channel: "release",
           at: new Date().toISOString(),
         });
         const same = await waitFor(
