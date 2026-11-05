@@ -1687,9 +1687,9 @@ export class InstanceClient {
       panelSealKey: () => panelSealKeys.get(),
       signRequest: (request) =>
         this.#signRequestWithDaemonKey(daemonSigningKey, request),
-      onPlaintextSecretsAnswer: () => {
-        void this.#sealingRegistration?.afterPlaintextAnswer();
-      },
+      onPlaintextSecretsAnswer: () =>
+        this.#sealingRegistration?.afterPlaintextAnswer() ??
+          Promise.resolve(false),
       ...this.#apiClientHooks(),
     });
     const tokenManager = new DaemonTokenManager({
