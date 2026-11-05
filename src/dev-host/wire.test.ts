@@ -36,7 +36,7 @@ test("dev-host-v1 is advertised and moved no floor", () => {
     (DAEMON_WIRE_FEATURES as readonly string[]).includes(DEV_HOST_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("the feature is on only for a development install with TURBOPANEL_DEV_INSTANCE=1", () => {

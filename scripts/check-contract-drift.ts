@@ -159,6 +159,40 @@ function requireEqual(
   if (left !== right || left == null) fail(message);
 }
 
+const PLAIN_SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/;
+
+async function readDenoVersion(root: string): Promise<string | null> {
+  const text = requireText(
+    await readRel(root, "deno.json"),
+    `${root}/deno.json missing`,
+  );
+  const version = (JSON.parse(text) as { version?: unknown }).version;
+  return typeof version === "string" ? version : null;
+}
+
+/** A version floor is a plain X.Y.Z at or below the peer's current version. */
+function requireFloorWithinVersion(
+  floor: string | null,
+  peerVersion: string | null,
+  name: string,
+): void {
+  const f = PLAIN_SEMVER_RE.exec(floor ?? "");
+  const v = PLAIN_SEMVER_RE.exec(peerVersion ?? "");
+  if (!f) fail(`${name} must be a plain X.Y.Z (got ${floor})`);
+  if (!v) {
+    fail(
+      `${name}: the peer deno.json version is not X.Y.Z (got ${peerVersion})`,
+    );
+  }
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(f[i]) - Number(v[i]);
+    if (diff < 0) return;
+    if (diff > 0) {
+      fail(`${name} ${floor} is newer than the peer's version ${peerVersion}`);
+    }
+  }
+}
+
 function requireJoinedEqual(
   left: string[] | null,
   right: string[] | null,
@@ -1137,10 +1171,18 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     extractConst(daemonWire, "INSTANCE_VERSION_HEADER"),
     "INSTANCE_VERSION_HEADER drifted",
   );
-  requireEqual(
-    extractConst(instanceWire, "MIN_SUPPORTED_DAEMON_VERSION"),
+  // The two floors name versions on two separate release lines (the daemon's
+  // and the control plane's), so they are not equal. Each must be a plain
+  // X.Y.Z no newer than the version the peer repo is building.
+  requireFloorWithinVersion(
     extractConst(daemonWire, "MIN_SUPPORTED_INSTANCE_VERSION"),
-    "MIN_SUPPORTED_DAEMON_VERSION and MIN_SUPPORTED_INSTANCE_VERSION must move together",
+    await readDenoVersion(tp),
+    "MIN_SUPPORTED_INSTANCE_VERSION",
+  );
+  requireFloorWithinVersion(
+    extractConst(instanceWire, "MIN_SUPPORTED_DAEMON_VERSION"),
+    await readDenoVersion(td),
+    "MIN_SUPPORTED_DAEMON_VERSION",
   );
   requireEqual(
     extractObjectLiteral(instanceWire, "DAEMON_FEATURE_MIN_VERSIONS"),

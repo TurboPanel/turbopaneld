@@ -904,10 +904,19 @@ test("assertControlPlaneUpdateAllowed refuses only a downgrade below the daemon 
   assertThrows(
     () => assertControlPlaneUpdateAllowed("0.0.1"),
     InstanceUpdateRefusedError,
-    "below this daemon's supported minimum 0.1.0",
+    "below this daemon's supported minimum 0.1.22",
   );
-  assertControlPlaneUpdateAllowed("0.1.0");
-  assertControlPlaneUpdateAllowed("0.1.1");
+  assertThrows(
+    () => assertControlPlaneUpdateAllowed("0.1.21-canary.9"),
+    InstanceUpdateRefusedError,
+    "target version 0.1.21-canary.9 is below",
+  );
+  assertControlPlaneUpdateAllowed("0.1.22");
+  assertControlPlaneUpdateAllowed("0.1.23");
+  // A labelled canary or rc build of the floor's base installs a control
+  // plane that reports the plain base, so it is not below the floor.
+  assertControlPlaneUpdateAllowed("0.1.22-canary.145");
+  assertControlPlaneUpdateAllowed("0.1.22-rc.1");
   assertControlPlaneUpdateAllowed(undefined);
   assertControlPlaneUpdateAllowed(null);
   assertControlPlaneUpdateAllowed("not-a-version");
@@ -971,7 +980,7 @@ test("executeInstanceUpdateReconcile refuses a development checkout", async () =
     () =>
       executeInstanceUpdateReconcile({
         channel: "release",
-        targetVersion: "0.1.1",
+        targetVersion: "0.1.22",
       }),
     InstanceUpdateRefusedError,
     "development host",
