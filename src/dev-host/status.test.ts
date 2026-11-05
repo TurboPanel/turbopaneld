@@ -9,9 +9,15 @@ import {
   unitsActiveSince,
 } from "../testing/dev-host-fixture.ts";
 import { devHostParts, type DevHostPartSpec } from "./config.ts";
-import { readHead, readRef, REMOTE_TRUNK_REF } from "./git.ts";
+import {
+  commitAtFromReflog,
+  readHead,
+  readRef,
+  REMOTE_TRUNK_REF,
+} from "./git.ts";
 import {
   anyFileNewer,
+  blockedReasonFor,
   DevHostStatusCollector,
   FETCH_INTERVAL_MS,
   installNeeded,
@@ -160,8 +166,78 @@ test("local content changes are reported as blocking", async () => {
     });
     const [part] = (await collector.collect(null)).parts;
     assertEquals(part.dirty.blocking, true);
-    assertEquals(part.blockedReason, "has local changes; not pulled");
+    assertEquals(part.blockedReason, "changed files: a.txt; not pulled");
   });
+});
+
+test("blockedReasonFor names detached, behind and the changed files", () => {
+  const sha = "4f7b5ed9".padEnd(40, "0");
+  const clean = { files: 0, blocking: false, kinds: [] };
+  const trunk = { branch: "trunk", commit: sha };
+  assertEquals(
+    blockedReasonFor(
+      { branch: null, commit: sha },
+      19,
+      clean,
+      undefined,
+      null,
+      "",
+    ),
+    "detached at 4f7b5ed, 19 behind trunk; not pulled",
+  );
+  assertEquals(
+    blockedReasonFor(
+      { branch: "fix/x", commit: sha },
+      0,
+      clean,
+      undefined,
+      null,
+      "",
+    ),
+    "on branch fix/x, not trunk; not pulled",
+  );
+  const content = (path: string) => ({ path, kind: "content" as const });
+  const dirty = {
+    files: 6,
+    blocking: true,
+    kinds: [
+      content(".gitconfig"),
+      content("a.ts"),
+      content("b.ts"),
+      content("c.ts"),
+      { path: "next-env.d.ts", kind: "generated" as const },
+      { path: "x.ts", kind: "mode" as const },
+    ],
+  };
+  assertEquals(
+    blockedReasonFor(trunk, 2, dirty, undefined, null, ""),
+    "changed files: .gitconfig, a.ts, b.ts and 1 more, 2 behind trunk; not pulled",
+  );
+  // A capped list of only blocking paths cannot say how many more there are.
+  assertEquals(
+    blockedReasonFor(
+      trunk,
+      0,
+      { files: 40, blocking: true, kinds: [content("a.ts")] },
+      undefined,
+      null,
+      "",
+    ),
+    "changed files: a.ts and more; not pulled",
+  );
+  assertEquals(
+    blockedReasonFor(trunk, 0, clean, "git status failed", null, ""),
+    "git status failed; not pulled",
+  );
+  const refused = { reason: "fatal: Not possible to fast-forward", key: "k" };
+  assertEquals(
+    blockedReasonFor(trunk, 3, clean, undefined, refused, "k"),
+    refused.reason,
+  );
+  assertEquals(
+    blockedReasonFor(trunk, 3, clean, undefined, refused, "moved"),
+    null,
+  );
 });
 
 test("a missing checkout is reported without running git", async () => {
@@ -223,6 +299,84 @@ test("restartNeeded: a different running commit, a newer config file, newer sour
     });
     assertEquals((await collector.collect(null)).parts[0].restartNeeded, true);
     assertEquals(await collector.restartNeeded(spec("daemon")), true);
+  });
+});
+
+function reflogLine(from: string, to: string, seconds: number): string {
+  return `${from} ${to} TurboPanel Test <test@turbopanel.invalid> ${seconds} +0000\tpull: Fast-forward`;
+}
+
+test("commitAtFromReflog names the commit HEAD held at a time", () => {
+  const [a, b, c] = ["a", "b", "c"].map((ch) => ch.repeat(40));
+  const zero = "0".repeat(40);
+  const text = [
+    reflogLine(zero, a, 100),
+    reflogLine(a, b, 200),
+    "not a reflog line",
+    reflogLine(b, c, 300),
+    "",
+  ].join("\n");
+  assertEquals(commitAtFromReflog(text, 99_000), null);
+  assertEquals(commitAtFromReflog(text, 100_000), a);
+  assertEquals(commitAtFromReflog(text, 250_000), b);
+  assertEquals(commitAtFromReflog(text, 300_500), c);
+  assertEquals(commitAtFromReflog("", 1), null);
+});
+
+test("a pull after the web interface started reads as its restart", async () => {
+  await withRoot(
+    { ui: { "package.json": "{}\n", "src/a.ts": "1\n" } },
+    async (fx) => {
+      const repo = join(fx.root, "ui");
+      const started = (await readHead(repo))!.commit!;
+      await fx.origins.ui.write("src/a.ts", "2\n");
+      await fx.origins.ui.commit("two");
+      await fx.git("ui", "pull", "-q", "--ff-only");
+      const pulled = (await readHead(repo))!.commit!;
+      // The checkout was cloned before the unit started and pulled after it.
+      await Deno.writeTextFile(
+        join(repo, ".git", "logs", "HEAD"),
+        [
+          reflogLine("0".repeat(40), started, START_SEC - 100),
+          reflogLine(started, pulled, START_SEC + 100),
+          "",
+        ].join("\n"),
+      );
+      const collector = new DevHostStatusCollector({
+        paths: { devRoot: fx.root },
+        parts: [spec("web-interface")],
+        run: fakeRun([], { answer: unitsAnswer }),
+        daemonCommit: null,
+        mtimeMs: () => Promise.resolve(0),
+        anyNewer: () => Promise.resolve(false),
+      });
+      const [part] = (await collector.collect(null)).parts;
+      assertEquals(part.runningCommit, started);
+      assertEquals(part.headCommit, pulled);
+      assertEquals(part.restartNeeded, true);
+      assertEquals(await collector.restartNeeded(spec("web-interface")), true);
+    },
+  );
+
+  // Started after the pull: nothing to restart.
+  await withRoot({ website: { "package.json": "{}\n" } }, async (fx) => {
+    const repo = join(fx.root, "website");
+    const head = (await readHead(repo))!.commit!;
+    await Deno.writeTextFile(
+      join(repo, ".git", "logs", "HEAD"),
+      `${reflogLine("0".repeat(40), head, START_SEC - 100)}\n`,
+    );
+    const collector = new DevHostStatusCollector({
+      paths: { devRoot: fx.root },
+      parts: [spec("website")],
+      run: fakeRun([], { answer: unitsAnswer }),
+      daemonCommit: null,
+      mtimeMs: () => Promise.resolve(0),
+      anyNewer: () => Promise.resolve(false),
+    });
+    const [part] = (await collector.collect(null)).parts;
+    assertEquals(part.runningCommit, head);
+    assertEquals(part.restartNeeded, false);
   });
 });
 
