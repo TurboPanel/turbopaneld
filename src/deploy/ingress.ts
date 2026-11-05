@@ -8,7 +8,7 @@ import {
   snippetSiteAddresses,
   trimSnippetSites,
 } from "./caddy-snippet.ts";
-import { foldHostname } from "./hostname-fold.ts";
+import { foldHostname, withoutTrailingDots } from "./hostname-fold.ts";
 import { removeUnreferencedTlsFolders } from "./tls-cleanup.ts";
 import {
   dropReservedProofSitesFor,
@@ -2499,6 +2499,56 @@ async function readAcmeHostnamesManifest(
     );
     return [];
   }
+}
+
+/**
+ * The host part of one site address as written in a snippet (`http://a.com`,
+ * `a.com:8443`, `[::1]:80`, `a.com/path`), folded the way names are compared.
+ */
+export function siteAddressHost(address: string): string {
+  let host = address.toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+  host = host.split("/")[0]!;
+  if (host.startsWith("[")) {
+    const close = host.indexOf("]");
+    host = close === -1 ? host : host.slice(0, close + 1);
+  } else {
+    const colon = host.lastIndexOf(":");
+    if (colon !== -1 && /^\d*$/.test(host.slice(colon + 1))) {
+      host = host.slice(0, colon);
+    }
+  }
+  return withoutTrailingDots(foldHostname(host));
+}
+
+/**
+ * Every hostname a tenant site block on this server answers on, read from the
+ * live snippets. The daemon's own reserved sites (the control plane's names,
+ * the tunnel site, proof-forward sites) are not tenant sites and do not count.
+ * A wildcard block lists `*.a.com`, which is not the same name as `x.a.com`.
+ */
+export async function readHostedSiteNames(
+  layout: LayoutPaths,
+): Promise<Set<string>> {
+  const sitesDir = join(layout.configDir, "hosting", "sites");
+  const hosted = new Set<string>();
+  let names: string[];
+  try {
+    names = await liveSnippetNames(sitesDir);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return hosted;
+    throw err;
+  }
+  await forEachSequential(
+    names.filter((name) => !isDaemonReservedHostingSite(name)),
+    async (name) => {
+      const contents = await Deno.readTextFile(join(sitesDir, name));
+      for (const address of snippetSiteAddresses(contents)) {
+        const host = siteAddressHost(address);
+        if (host !== "") hosted.add(host);
+      }
+    },
+  );
+  return hosted;
 }
 
 /**

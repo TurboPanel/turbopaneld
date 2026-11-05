@@ -19,3 +19,10 @@ export function foldHostname(name: string): string {
     return lowered;
   }
 }
+
+/** `name` without trailing dots (`a.com.` is the same host as `a.com`). */
+export function withoutTrailingDots(name: string): string {
+  let end = name.length;
+  while (end > 0 && name[end - 1] === ".") end -= 1;
+  return name.slice(0, end);
+}
