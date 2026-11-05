@@ -1,4 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
+import type { ClassifiedConnectFailure } from "./connect-failure.ts";
 import {
   identityDocumentUrls,
   normalizePanelUrl,
@@ -16,6 +17,10 @@ const test = Deno.test.bind(Deno);
 const A = "https://a.example";
 const B = "https://b.example:8443";
 const C = "https://c.example";
+
+function fail(kind: string, reason = kind): ClassifiedConnectFailure {
+  return { kind: kind as ClassifiedConnectFailure["kind"], reason };
+}
 
 test("normalizePanelUrl keeps https origins and refuses anything with a path or credentials", () => {
   assertEquals(normalizePanelUrl(`${A}/`), A);
@@ -47,6 +52,7 @@ test("identityDocumentUrls returns the exact list, or null for an empty or malfo
     identityDocumentUrls(JSON.stringify({ urls: [A, "https://a/x"] })),
     null,
   );
+  assertEquals(identityDocumentUrls(JSON.stringify({ urls: [A, B, A] })), null);
 });
 
 test("urlListsDiffer counts order", () => {
@@ -65,42 +71,69 @@ test("urlWrapDelayMs is full jitter between 0 and an exponential ceiling capped 
 test("PanelUrlRotation tries each address in order, then wraps to URL 0 with a wait", () => {
   const rotation = new PanelUrlRotation([A, B, C], () => 0.5);
   assertEquals(rotation.active, A);
-  assertEquals(rotation.failOver("transient"), { kind: "next", url: B });
-  assertEquals(rotation.failOver("panel-identity"), { kind: "next", url: C });
-  const wrapped = rotation.failOver("tls-trust");
-  assertEquals(wrapped.kind, "wrapped");
+  assertEquals(rotation.failOver(fail("transient")), { kind: "next", url: B });
+  assertEquals(rotation.failOver(fail("panel-identity")), {
+    kind: "next",
+    url: C,
+  });
+  const wrapped = rotation.failOver(fail("tls-trust"));
   assertEquals(rotation.active, A);
-  if (wrapped.kind === "wrapped") {
-    assertEquals(wrapped.delayMs, Math.floor(0.5 * (URL_WRAP_BASE_MS + 1)));
-  }
+  assertEquals(wrapped, {
+    kind: "wrapped",
+    url: A,
+    delayMs: Math.floor(0.5 * (URL_WRAP_BASE_MS + 1)),
+    // The worst failure of the pass, not the last one.
+    worst: fail("panel-identity"),
+  });
+});
+
+test("PanelUrlRotation reports the worst failure of a pass, then starts the next pass afresh", () => {
+  const rotation = new PanelUrlRotation([A, B], () => 0);
+  rotation.failOver(fail("panel-identity", "bad key at A"));
+  const first = rotation.failOver(fail("transient", "B down"));
+  assertEquals(
+    first.kind === "wrapped" ? first.worst : null,
+    fail("panel-identity", "bad key at A"),
+  );
+  rotation.failOver(fail("transient", "A down"));
+  const second = rotation.failOver(fail("transient", "B down"));
+  assertEquals(
+    second.kind === "wrapped" ? second.worst : null,
+    fail("transient", "B down"),
+  );
 });
 
 test("PanelUrlRotation leaves failures that are not about the address to the caller", () => {
   const rotation = new PanelUrlRotation([A, B]);
   for (const kind of ["permanent", "awaiting-license", "awaiting-seat"]) {
-    assertEquals(rotation.failOver(kind), { kind: "none" });
+    assertEquals(rotation.failOver(fail(kind)), { kind: "none" });
   }
   assertEquals(rotation.active, A);
-  assertEquals(new PanelUrlRotation([A]).failOver("transient"), {
+  assertEquals(new PanelUrlRotation([A]).failOver(fail("transient")), {
     kind: "none",
   });
 });
 
 test("PanelUrlRotation restart goes back to URL 0 and resets the wait", () => {
   const rotation = new PanelUrlRotation([A, B], () => 0.999999);
-  rotation.failOver("transient");
-  rotation.failOver("transient");
-  rotation.failOver("transient");
+  rotation.failOver(fail("transient"));
+  rotation.failOver(fail("transient"));
+  rotation.failOver(fail("transient"));
   rotation.restart();
   assertEquals(rotation.active, A);
-  rotation.failOver("transient");
-  const wrapped = rotation.failOver("transient");
-  assertEquals(wrapped, { kind: "wrapped", url: A, delayMs: URL_WRAP_BASE_MS });
+  rotation.failOver(fail("transient"));
+  const wrapped = rotation.failOver(fail("transient"));
+  assertEquals(wrapped, {
+    kind: "wrapped",
+    url: A,
+    delayMs: URL_WRAP_BASE_MS,
+    worst: fail("transient"),
+  });
 });
 
 test("PanelUrlRotation replace keeps the active address when it is still listed", () => {
   const rotation = new PanelUrlRotation([A, B]);
-  rotation.failOver("transient");
+  rotation.failOver(fail("transient"));
   rotation.replace([C, B]);
   assertEquals(rotation.active, B);
   rotation.replace([C]);

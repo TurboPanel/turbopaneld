@@ -1001,8 +1001,9 @@ With more than one address:
   `/etc/hosts`), so an address that does not resolve or connect is skipped.
 - A `transient`, `tls-trust` or `panel-identity` failure moves to the next
   address at once. When the list is used up the next pass starts at URL 0 after
-  a full-jitter wait (base 5 s, cap 5 min); a full pass that ended in
-  `tls-trust` or `panel-identity` parks as before. Other failures are global.
+  a full-jitter wait (base 5 s, cap 5 min); a pass whose worst failure was
+  `tls-trust` or `panel-identity` parks with that failure, as one address does.
+  A failover is not undone by "a session opened". Other failures are global.
 - Switching address drops the token manager, JWKS and API clients and the
   verified key: each address proves the pinned key (identity document, then the
   signed hello) before anything identifying is sent to it.

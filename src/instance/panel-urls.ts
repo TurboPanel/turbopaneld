@@ -15,6 +15,7 @@
  * skipped quickly. When the whole list has failed, the next pass waits a
  * full-jitter backoff (base 5 s, cap 5 min).
  */
+import type { ClassifiedConnectFailure } from "./connect-failure.ts";
 import { stripTrailingSlashes } from "./sockets.ts";
 
 /** First contact with an address in a list of several: give up after this. */
@@ -66,7 +67,9 @@ export function identityDocumentUrls(body: string): string[] | null {
     if (typeof value !== "string" || normalizePanelUrl(value) !== value) {
       return null;
     }
-    if (!out.includes(value)) out.push(value);
+    // A repeated entry would never compare equal to the pin tp-host writes.
+    if (out.includes(value)) return null;
+    out.push(value);
   }
   return out;
 }
@@ -89,17 +92,25 @@ export function urlWrapDelayMs(
   return Math.floor(random() * (ceiling + 1)); // NOSONAR typescript:S2245 — jitter timing only, not a security context
 }
 
-/** Connect failures that move on to the next address; the others stay global. */
-const FAIL_OVER_KINDS: ReadonlySet<string> = new Set([
+/**
+ * Connect failures that move on to the next address, mildest first; the
+ * others stay global. A pass that ended badly anywhere reports its worst.
+ */
+const FAIL_OVER_KINDS: readonly string[] = [
   "transient",
   "tls-trust",
   "panel-identity",
-]);
+];
 
 /** Where the connect loop goes after a failure on the active address. */
 export type UrlFailover =
   | { kind: "next"; url: string }
-  | { kind: "wrapped"; url: string; delayMs: number }
+  | {
+    kind: "wrapped";
+    url: string;
+    delayMs: number;
+    worst: ClassifiedConnectFailure;
+  }
   | { kind: "none" };
 
 /** The address list and which entry is active. */
@@ -107,6 +118,7 @@ export class PanelUrlRotation {
   #urls: string[];
   #index = 0;
   #passes = 0;
+  #worst: ClassifiedConnectFailure | undefined;
   readonly #random: () => number;
 
   constructor(urls: readonly string[], random: () => number = Math.random) {
@@ -129,20 +141,25 @@ export class PanelUrlRotation {
    * one-address list, or a failure that is not about the address, changes
    * nothing (the caller keeps its own backoff and parking).
    */
-  failOver(kind: string): UrlFailover {
-    if (this.#urls.length < 2 || !FAIL_OVER_KINDS.has(kind)) {
-      return { kind: "none" };
+  failOver(failure: ClassifiedConnectFailure): UrlFailover {
+    const rank = FAIL_OVER_KINDS.indexOf(failure.kind);
+    if (this.#urls.length < 2 || rank < 0) return { kind: "none" };
+    if (!this.#worst || rank >= FAIL_OVER_KINDS.indexOf(this.#worst.kind)) {
+      this.#worst = failure;
     }
     this.#index += 1;
     if (this.#index < this.#urls.length) {
       return { kind: "next", url: this.active };
     }
+    const worst = this.#worst;
     this.#index = 0;
     this.#passes += 1;
+    this.#worst = undefined;
     return {
       kind: "wrapped",
       url: this.active,
       delayMs: urlWrapDelayMs(this.#passes, this.#random),
+      worst,
     };
   }
 
@@ -150,6 +167,7 @@ export class PanelUrlRotation {
   restart(): void {
     this.#index = 0;
     this.#passes = 0;
+    this.#worst = undefined;
   }
 
   /** A new list (the pin changed); the active address stays when it is still listed. */

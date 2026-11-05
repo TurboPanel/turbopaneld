@@ -22,7 +22,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   managed install, `-u` re-execs, tp-orchestrate and engine tests alone. The
   verbs are split in two: `HOST_PROGRAM_VERBS` (real programs: `install`,
   `systemctl`, `iptables`, `useradd`, …) run directly in development, and
-  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `instance-cert-install`, `publish`,
+  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `instance-cert-install`, `panel-identity-write`, `publish`,
   `cert-dates`, …, which no host program provides) run in development through
   the checkout's own `<checkout>/orchestration/scripts/tp-host` with sudo and
   every check it applies on a managed host. `tp_dir_sealed_at` stays
@@ -329,3 +329,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   Root (`run-installer`) and co-located dev run `ansible-playbook` directly.
   Tests: `src/orchestration/tp-orchestrate.test.ts`, `privileged.test.ts`,
   `sudoers-contract.test.ts`.
+
+## Panel key pin and update origin
+
+`lib/panel-identity` and `lib/update-origin` are written by `run.sh` and changed afterwards only by
+`tp-host panel-identity-write` (no generic verb may name them). With no argument it reads the
+`X-TurboPanel-Signature` header line and the exact identity document from stdin, checks the
+signature against the pinned key itself (python3 + `openssl pkeyutl`), refuses an empty address
+list, then rewrites the pin's `urls=` and `update-origin`'s `hosts=` together (the daemon tries
+the pin's addresses in order). `tp-orchestrate update` accepts `--host` equal to `host=` or any
+entry of `hosts=`, matched as a quoted whole value.

@@ -126,6 +126,7 @@ import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import {
+  type ClassifiedConnectFailure,
   classifyConnectFailure,
   permanentRejectionAdvice,
 } from "./connect-failure.ts";
@@ -1173,26 +1174,31 @@ export class InstanceClient {
 
   /**
    * After a connect failure on a list of several addresses: the next one at
-   * once, or, when the list is used up, URL 0 after a jittered wait. A full
-   * pass of identity or trust failures parks as before. False when the list
-   * does not apply and the caller's own handling runs.
+   * once (null: handled), or, when the list is used up, URL 0 after a
+   * jittered wait. A pass whose worst failure was about trust or identity is
+   * returned as that failure, so it parks the way one address does. Any other
+   * failure is returned unchanged for the caller's own handling.
    */
-  #failOverPanelUrl(kind: string): boolean {
-    const step = this.#urls?.failOver(kind);
-    if (!step || step.kind === "none") return false;
-    const from = this.target;
-    this.#switchConfig(urlInstanceConfig(step.url));
+  #failOverPanelUrl(
+    classified: ClassifiedConnectFailure,
+  ): ClassifiedConnectFailure | null {
+    const step = this.#urls?.failOver(classified);
+    if (!step || step.kind === "none") return classified;
+    // An explicit move beats "a session opened": do not restart at URL 0.
+    this.#urlSessionOpened = false;
     if (step.kind === "next") {
       logWarn(
         "instance",
-        `control plane at ${sanitizeForLog(from)} failed (${kind}); trying ${
-          sanitizeForLog(step.url)
-        }`,
+        `control plane at ${
+          sanitizeForLog(this.target)
+        } failed (${classified.kind}); trying ${sanitizeForLog(step.url)}`,
       );
       this.#nextDelayOverrideMs = 0;
-      return true;
+      return null;
     }
-    if (kind !== "transient") return false;
+    if (step.worst.kind !== "transient") {
+      return step.worst;
+    }
     logWarn(
       "instance",
       `every control plane address failed; retrying from ${
@@ -1200,7 +1206,7 @@ export class InstanceClient {
       } in ${Math.round(step.delayMs / 1000)}s`,
     );
     this.#nextDelayOverrideMs = step.delayMs;
-    return true;
+    return null;
   }
 
   async fetchHealth(): Promise<{ ok: boolean }> {
@@ -1491,8 +1497,8 @@ export class InstanceClient {
     this.#backupCopyReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
-    const classified = classifyConnectFailure(err);
-    if (this.#failOverPanelUrl(classified.kind)) return;
+    const classified = this.#failOverPanelUrl(classifyConnectFailure(err));
+    if (classified === null) return;
     if (classified.kind === "permanent") {
       await this.#enterParkedState(classified.reason, "permanent");
     } else if (classified.kind === "tls-trust") {

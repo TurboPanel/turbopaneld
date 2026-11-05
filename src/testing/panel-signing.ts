@@ -47,6 +47,8 @@ export interface TestPanel {
     envelope: { sessionId: string; seq: number; iat: number; kid?: string },
   ): Promise<string>;
   httpHeader(path: string, body: string): Promise<string>;
+  /** The same answer, signed over its path and exact body. */
+  signedResponse(path: string, response: Response): Promise<Response>;
 }
 
 export async function createTestPanel(keyset = 1): Promise<TestPanel> {
@@ -136,6 +138,15 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
     },
     async httpHeader(path, body) {
       return `${kid}:${await sign(`${HTTP_PREFIX}${path}\n${body}`)}`;
+    },
+    async signedResponse(path, response) {
+      const body = await response.text();
+      const headers = new Headers(response.headers);
+      headers.set(
+        "x-turbopanel-signature",
+        `${kid}:${await sign(`${HTTP_PREFIX}${path}\n${body}`)}`,
+      );
+      return new Response(body, { status: response.status, headers });
     },
   };
 }
