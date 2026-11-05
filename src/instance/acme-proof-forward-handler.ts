@@ -23,9 +23,13 @@ import {
   startProofForward,
   withdrawProofForwards,
 } from "../deploy/acme-proof-forward.ts";
-import { withHostingSitesLock } from "../deploy/ingress.ts";
+import {
+  readHostedSiteNames,
+  withHostingSitesLock,
+} from "../deploy/ingress.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
+import { checkNamesHosted } from "./acme-names-guard.ts";
 
 export type ProofForwardHandlerDeps = {
   layout: LayoutPaths;
@@ -37,6 +41,8 @@ export type ProofForwardHandlerDeps = {
   start?: typeof startProofForward;
   withdraw?: typeof withdrawProofForwards;
   list?: typeof listProofForwards;
+  /** The names this server's tenant sites answer on (test seam). */
+  hostedNames?: () => Promise<ReadonlySet<string>>;
 };
 
 /** A timer must not keep the daemon alive, and a delay past 24 days overflows. */
@@ -81,11 +87,23 @@ export class ProofForwardHandler {
       return;
     }
     const start = this.#deps.start ?? startProofForward;
+    const readHosted = this.#deps.hostedNames ??
+      (() => readHostedSiteNames(this.#deps.layout));
     let result;
     try {
-      result = await withHostingSitesLock(() =>
-        start(this.#deps.layout, message)
-      );
+      // Checked under the sites lock, so no deploy changes the sites between
+      // the check and the write. Never a forward for a name not served here.
+      result = await withHostingSitesLock(async () => {
+        const notHosted = await checkNamesHosted(
+          message.names,
+          readHosted,
+          "the check is not passed along",
+        );
+        if (notHosted !== null) {
+          return { ok: false as const, reason: notHosted };
+        }
+        return await start(this.#deps.layout, message);
+      });
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err);
       result = { ok: false as const, reason: text.slice(0, 300) };

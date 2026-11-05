@@ -8,6 +8,8 @@ import { AcmeIssueHandler } from "./acme-issue-handler.ts";
 
 const test = Deno.test.bind(Deno);
 
+const hosted = () => Promise.resolve(new Set(["example.com"]));
+
 function request(over: Partial<AcmeIssueRequestMessage> = {}) {
   return {
     type: "acme-issue-request",
@@ -28,6 +30,7 @@ function harness(outcome: Awaited<ReturnType<typeof issueStub>>) {
   let runs = 0;
   const handler = new AcmeIssueHandler({
     layout: {} as LayoutPaths,
+    hostedNames: hosted,
     send: (m) => {
       sent.push(m);
       return true;
@@ -85,6 +88,7 @@ test("the same request arriving twice at once is one order", async () => {
   let runs = 0;
   const handler = new AcmeIssueHandler({
     layout: {} as LayoutPaths,
+    hostedNames: hosted,
     send: (m) => (sent.push(m), true),
     report: () => Promise.resolve(),
     issue: () => {
@@ -97,6 +101,10 @@ test("the same request arriving twice at once is one order", async () => {
   });
   const first = handler.handleRequest(request());
   await handler.handleRequest(request());
+  // The first is past the hosted-name check once its order has begun.
+  for (let i = 0; runs === 0 && i < 1000; i += 1) {
+    await new Promise((r) => setTimeout(r, 0));
+  }
   release();
   await first;
   assertEquals(runs, 1);
@@ -107,6 +115,7 @@ test("requests wait for the start-up sweep", async () => {
   let finish: () => void = () => {};
   const handler = new AcmeIssueHandler({
     layout: {} as LayoutPaths,
+    hostedNames: hosted,
     send: () => true,
     report: () => Promise.resolve(),
     sweep: () =>
@@ -134,6 +143,7 @@ test("nothing is begun when the started report could not be sent", async () => {
   let runs = 0;
   const handler = new AcmeIssueHandler({
     layout: {} as LayoutPaths,
+    hostedNames: hosted,
     send: () => false,
     report: () => Promise.resolve(),
     issue: () => {
@@ -142,5 +152,47 @@ test("nothing is begun when the started report could not be sent", async () => {
     },
   });
   await handler.handleRequest(request());
+  assertEquals(runs, 0);
+});
+
+test("a name this server does not host is answered failed and never ordered", async () => {
+  const sent: AcmeIssueEventMessage[] = [];
+  let runs = 0;
+  const handler = new AcmeIssueHandler({
+    layout: {} as LayoutPaths,
+    hostedNames: hosted,
+    send: (m) => (sent.push(m), true),
+    report: () => Promise.resolve(),
+    issue: () => {
+      runs += 1;
+      return Promise.resolve({ ok: false, reason: "x" });
+    },
+  });
+  await handler.handleRequest(
+    request({ names: ["example.com", "bank.example.net"] }),
+  );
+  assertEquals(sent.map((m) => m.stage), ["failed"]);
+  assertEquals(
+    sent[0].reason,
+    "bank.example.net is not served by this server, so no certificate was ordered",
+  );
+  assertEquals(runs, 0);
+});
+
+test("an order fails closed when the hosted names cannot be read", async () => {
+  const sent: AcmeIssueEventMessage[] = [];
+  let runs = 0;
+  const handler = new AcmeIssueHandler({
+    layout: {} as LayoutPaths,
+    hostedNames: () => Promise.reject(new Error("denied")),
+    send: (m) => (sent.push(m), true),
+    report: () => Promise.resolve(),
+    issue: () => {
+      runs += 1;
+      return Promise.resolve({ ok: false, reason: "x" });
+    },
+  });
+  await handler.handleRequest(request());
+  assertEquals(sent.map((m) => m.stage), ["failed"]);
   assertEquals(runs, 0);
 });
