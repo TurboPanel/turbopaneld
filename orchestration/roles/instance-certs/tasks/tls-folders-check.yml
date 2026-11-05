@@ -1,0 +1,46 @@
+---
+# Root tasks in this role and in instance-launch write keys into the
+# control-plane TLS folders (<state>/tls, its certs folder, <state>/instance-acme).
+# On a co-located host the state root is still writable by the daemon account,
+# so one of those folders could have been renamed away and replaced by a link
+# or by a folder someone else made. Check each one first and stop with a plain
+# message if it is not what the layout expects. Nothing is moved, renamed or
+# rotated: the operator looks and decides.
+#
+# _tls_folder_checks: a list of {path, owner}. A folder passes when it does not
+# exist yet (the tasks that follow create it), or when it is a real folder (not
+# a link) owned by `owner` or by root.
+- name: Look at the control-plane TLS folders without following links
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    follow: false
+    get_checksum: false
+  loop: "{{ _tls_folder_checks }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: _tls_folder_stat
+
+- name: Stop when a control-plane TLS folder is not the one the layout made
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (item.stat.exists | default(false))
+        or (
+          (item.stat.isdir | default(false))
+          and not (item.stat.islnk | default(false))
+          and (item.stat.pw_name | default('')) in ['root', item.item.owner]
+        )
+    fail_msg: >-
+      {{ item.item.path }} is
+      {% if item.stat.islnk | default(false) %}a symbolic link to
+      {{ item.stat.lnk_source | default('an unknown target') }}{% elif not (item.stat.isdir | default(false)) %}not a folder{% else %}a folder owned by
+      {{ item.stat.pw_name | default('an unknown account') }}{% endif %}.
+      TurboPanel expects a real folder owned by {{ item.item.owner }} (or
+      root) there, so it may have been swapped. Nothing was changed. Look at
+      what is there and who made it (ls -la {{ item.item.path | dirname }}),
+      put the original folder back or remove the stand-in, then run the update
+      again.
+    quiet: true
+  loop: "{{ _tls_folder_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"

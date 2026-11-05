@@ -34,6 +34,14 @@
         set -o pipefail
         dest_crt="${LE_DEST}/letsencrypt-${LE_HOST}.crt"
         dest_key="${LE_DEST}/letsencrypt-${LE_HOST}.key"
+        # Root writes here: never through a link someone left in the certs
+        # folder (it belongs to the instance account).
+        for path in "$LE_DEST" "$dest_crt" "$dest_key"; do
+          if [ -L "$path" ]; then
+            echo "$path is a symbolic link; nothing was changed. Look at it, remove the stand-in, then run the update again." >&2
+            exit 1
+          fi
+        done
         if [ -f "$dest_crt" ] && [ -f "$dest_key" ]; then
           exit 0
         fi
@@ -143,6 +151,7 @@
   ansible.builtin.file:
     path: "{{ turbopanel_instance_certs_dir }}/letsencrypt-{{ item.item }}.key"
     state: file
+    follow: false
     owner: "{{ caddy_user }}"
     mode: "0600"
   loop: "{{ _le_key.results | default([]) }}"

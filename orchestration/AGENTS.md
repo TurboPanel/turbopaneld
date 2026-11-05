@@ -391,7 +391,35 @@ them itself). A failed apply never prunes. `<state>/tls` (the CA folder) is
 `root:tp 0750` from both this role and `daemon-layout`; it is not a daemon
 leaf, and tp-host's generic verbs name nothing in it but `instance-ca-pin` and
 `certs/letsencrypt-<host>.{crt,key}`. Applies are serialised in the daemon, so
-one apply's prune never removes a pair another apply is rendering. `lets-encrypt` names are extra `:8443` sites with
+one apply's prune never removes a pair another apply is rendering.
+
+**Control-plane TLS key modes (owner decision 2026-11-04).** The Platform CA
+key `<state>/tls/ca.key` is `root:root 0600` on a managed host: only the
+certificate generator reads it, and `instance-certs` runs that as root there
+(co-located development keeps it the developer's own, `0640`). The server
+leaf key `<certs>/platform-ca.key` is `tpcaddy:tpcaddy 0600`, like the Let's
+Encrypt keys: control-plane Caddy (`User=tpcaddy`) is its only reader, and
+`caddy validate` runs as root. The leaf certificate stays group `tp` `0640`.
+The generator chmods both keys to `0640` on every run; the role sets them
+back each converge (so those two tasks report a change each time), and since
+neither key's group is `tp` that window never lets the daemon account read
+one. Existing hosts move to these modes on their next converge.
+
+**Folder checks before root writes.** Before root tasks touch `<state>/tls`,
+the certs folder or `<state>/instance-acme`, `instance-certs` and
+`instance-launch` include `instance-certs/tasks/tls-folders-check.yml`: each
+folder must be missing (created next) or a real folder, not a link, owned by
+the expected account (`root` or the developer for `<state>/tls`, the instance
+account for the certs folder, `caddy_user` for `instance-acme`) or by root.
+Anything else stops the play with a message saying what was found and what
+to check; nothing is renamed, set aside or rotated. `instance-certs` also
+refuses `self-signed.{crt,key}` unless each is a regular file or the link it
+makes to `platform-ca.*`, every file and copy task there sets
+`follow: false`, the Let's Encrypt migration script refuses a link, and the
+issuer unit's first `ExecStartPre` refuses a link or file in place of
+`<state>/instance-acme` before its root `install -d`. The certs folder itself
+is still the instance account's (`tpctrl:tp 0750`), so these checks narrow but
+do not close a swap race by that account inside it. `lets-encrypt` names are extra `:8443` sites with
 `tls letsencrypt-<host>.{crt,key}` under `turbopanel_instance_certs_dir`,
 rendered **only when both files exist** (`letsencrypt-files.yml` stats them
 before the template). The daemon installs each certificate as `root:tp`

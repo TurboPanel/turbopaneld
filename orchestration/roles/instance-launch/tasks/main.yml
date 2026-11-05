@@ -100,6 +100,17 @@
   ansible.builtin.set_fact:
     turbopanel_legacy_acme_certificate_root: "{{ turbopanel_caddy_runtime_dir }}/share/caddy/certificates"
 
+- name: Check the control-plane TLS folders before root touches them
+  ansible.builtin.include_tasks: "{{ role_path }}/../instance-certs/tasks/tls-folders-check.yml"
+  vars:
+    _tls_folder_checks:
+      - path: "{{ turbopanel_state_dir }}/tls"
+        owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+      - path: "{{ turbopanel_instance_certs_dir }}"
+        owner: "{{ instance_user }}"
+      - path: "{{ turbopanel_state_dir }}/instance-acme"
+        owner: "{{ caddy_user }}"
+
 - name: Harden Let's Encrypt keys and record hostnames whose files exist
   ansible.builtin.include_tasks: "{{ role_path }}/../instance-certs/tasks/letsencrypt-files.yml"
 
