@@ -32,6 +32,14 @@ export interface DaemonSealingContext {
   markTrustSealed(): Promise<void>;
 }
 
+/** The body of a `/secrets/decrypt` answer, before it is checked. */
+type DecryptAnswer = { ok?: boolean; plaintexts?: unknown; sealed?: unknown };
+
+/** A plaintext answer: no `sealed` field and a `plaintexts` list. */
+function isPlaintextAnswer(body: DecryptAnswer): boolean {
+  return body.sealed === undefined && Array.isArray(body.plaintexts);
+}
+
 export interface DaemonApiClientOptions {
   config: InstanceConfig;
   httpClient?: Deno.HttpClient;
@@ -48,10 +56,15 @@ export interface DaemonApiClientOptions {
   /** The control plane's sealing key, for secrets this daemon sends up; null when unknown. */
   panelSealKey?: () => Promise<PanelSealKey | null>;
   /**
-   * Called (not awaited) after a plaintext decrypt answer is accepted, so the
-   * sealing key can be registered again without waiting for a reconnect.
+   * Called for every plaintext decrypt answer, before it is accepted or
+   * refused: the control plane answers in plaintext only when it has no
+   * sealing key on file for this server, so the key is registered again
+   * without waiting for a reconnect. Resolves true when the key is on file
+   * afterwards. Not awaited for an accepted answer; awaited for one this
+   * server refuses (it has opened a sealed answer before), which is then
+   * asked again once. Must not reject.
    */
-  onPlaintextSecretsAnswer?: () => void;
+  onPlaintextSecretsAnswer?: () => Promise<boolean>;
   /**
    * The `X-TurboPanel-Daemon-Signature` value for one request
    * (`signDaemonRequest`), made with the daemon key; null on a server with
@@ -412,11 +425,27 @@ export class DaemonApiClient {
         );
       }
     }
-    const body = await this.#requestJson<{
-      ok?: boolean;
-      plaintexts?: unknown;
-      sealed?: unknown;
-    }>(
+    let body = await this.#postDecrypt(ciphertexts);
+    if (await this.#refusesPlaintextAnswer(body)) {
+      // The control plane has no sealing key on file for this server (an
+      // administrator cleared it). Register it again and ask once more; the
+      // second answer goes through the same refusal below, so plaintext is
+      // never accepted here, and the request is repeated at most once.
+      const registered = await this.#options.onPlaintextSecretsAnswer?.();
+      if (registered === true) body = await this.#postDecrypt(ciphertexts);
+    } else if (isPlaintextAnswer(body)) {
+      void this.#options.onPlaintextSecretsAnswer?.();
+    }
+    const plaintexts = await this.#plaintextsFromDecryptAnswer(
+      body,
+      ciphertexts.length,
+    );
+    rememberSecretPlaintexts(plaintexts);
+    return plaintexts;
+  }
+
+  #postDecrypt(ciphertexts: string[]): Promise<DecryptAnswer> {
+    return this.#requestJson<DecryptAnswer>(
       "/api/daemon/v1/secrets/decrypt",
       {
         method: "POST",
@@ -424,12 +453,13 @@ export class DaemonApiClient {
       },
       { auth: true },
     );
-    const plaintexts = await this.#plaintextsFromDecryptAnswer(
-      body,
-      ciphertexts.length,
-    );
-    rememberSecretPlaintexts(plaintexts);
-    return plaintexts;
+  }
+
+  /** A plaintext answer this server will refuse: it has opened a sealed one before. */
+  async #refusesPlaintextAnswer(body: DecryptAnswer): Promise<boolean> {
+    const sealing = this.#options.sealing;
+    if (!sealing || !isPlaintextAnswer(body)) return false;
+    return await sealing.isTrustSealed();
   }
 
   /**
@@ -439,7 +469,7 @@ export class DaemonApiClient {
    * opened, a plaintext one is refused for good.
    */
   async #plaintextsFromDecryptAnswer(
-    body: { plaintexts?: unknown; sealed?: unknown },
+    body: DecryptAnswer,
     count: number,
   ): Promise<(string | null)[]> {
     const sealing = this.#options.sealing;
@@ -465,7 +495,6 @@ export class DaemonApiClient {
       );
       throw new DaemonApiError(400, "plaintext secrets refused");
     }
-    this.#options.onPlaintextSecretsAnswer?.();
     return body.plaintexts.map((entry) =>
       typeof entry === "string" ? entry : null
     );

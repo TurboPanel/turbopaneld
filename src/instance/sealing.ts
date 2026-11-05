@@ -89,24 +89,40 @@ export async function registerSealingKey(params: {
 export const SEALING_RETRY_INTERVAL_MS = 10 * 60 * 1000;
 
 /**
+ * After a registration that worked, wait at least this long before a
+ * plaintext answer registers the key again: that bounds the posts something
+ * answering in plaintext over and over can cause.
+ */
+export const SEALING_REREGISTER_INTERVAL_MS = 60 * 1000;
+
+/**
  * When to register the sealing key: at every connect until it is on file, and
- * again (at most every {@link SEALING_RETRY_INTERVAL_MS}) when a decrypt answer
- * arrives in plaintext while it is still not on file. The second case is a
- * control plane upgraded while this socket stayed open: the older one answered
- * the connect-time registration with 404, and without a retry this server
- * would keep getting plaintext until it reconnected. One attempt at a time.
+ * again when a decrypt answer arrives in plaintext. The control plane answers
+ * in plaintext only when it has no key on file for this server, so a
+ * plaintext answer means the key is not there, whatever this process
+ * registered before. Two cases: a control plane upgraded while this socket
+ * stayed open (the older one answered the connect-time registration with
+ * 404), and an administrator who cleared the key (Clear Sealing Key). After a
+ * failed attempt the next one waits {@link SEALING_RETRY_INTERVAL_MS}; after
+ * one that worked, {@link SEALING_REREGISTER_INTERVAL_MS}. One attempt at a
+ * time; a caller that arrives during one waits for it.
+ * `afterPlaintextAnswer` resolves true only when an attempt it started or
+ * joined put the key on file.
  */
 export function createSealingRegistration(params: {
   register: () => Promise<boolean>;
   now?: () => number;
   retryIntervalMs?: number;
+  reregisterIntervalMs?: number;
 }): {
   isRegistered(): boolean;
   atConnect(): Promise<void>;
-  afterPlaintextAnswer(): Promise<void>;
+  afterPlaintextAnswer(): Promise<boolean>;
 } {
   const now = params.now ?? Date.now;
   const retryIntervalMs = params.retryIntervalMs ?? SEALING_RETRY_INTERVAL_MS;
+  const reregisterIntervalMs = params.reregisterIntervalMs ??
+    SEALING_REREGISTER_INTERVAL_MS;
   let registered = false;
   let lastAttemptAt: number | null = null;
   let running: Promise<void> | null = null;
@@ -127,15 +143,23 @@ export function createSealingRegistration(params: {
     });
     return running;
   };
+  const waitedLongEnough = (): boolean => {
+    if (lastAttemptAt === null) return true;
+    const interval = registered ? reregisterIntervalMs : retryIntervalMs;
+    return now() - lastAttemptAt >= interval;
+  };
   return {
     isRegistered: () => registered,
     atConnect: () => registered ? Promise.resolve() : attempt(),
-    afterPlaintextAnswer: () => {
-      if (registered || running !== null) return Promise.resolve();
-      if (lastAttemptAt !== null && now() - lastAttemptAt < retryIntervalMs) {
-        return Promise.resolve();
+    afterPlaintextAnswer: async () => {
+      if (running === null) {
+        if (!waitedLongEnough()) return false;
+        // The answer says the key is not on file: a failed attempt now
+        // leaves the next connect to try again.
+        registered = false;
       }
-      return attempt();
+      await attempt();
+      return registered;
     },
   };
 }
