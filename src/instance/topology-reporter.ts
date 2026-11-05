@@ -15,7 +15,10 @@
  * connect/startup without waiting for a later phase.
  */
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type {
+  TopologyReportSnapshot,
+  TopologySnapshot,
+} from "../contracts/topology-types.ts";
 
 /** Steady recheck cadence — catches organic hardware changes with no operator override push. */
 export const TOPOLOGY_REPORT_INTERVAL_MS = 60_000;
@@ -28,6 +31,32 @@ export type TopologyReport = {
 };
 
 export type TopologyReportSink = (report: TopologyReport) => void;
+
+/** A report as it goes on the wire: the generation numbers are optional there. */
+export type TopologyReportWire = {
+  generation?: number;
+  bootGeneration?: number;
+  snapshot: TopologyReportSnapshot;
+  at: string;
+};
+
+/**
+ * The report to send: as collected, or, once the control plane lists
+ * `topology-generation-optional-v1`, without `generation` and
+ * `bootGeneration` (on the report and inside its snapshot).
+ */
+export function topologyReportForWire(
+  report: TopologyReport,
+  generationOptional: boolean,
+): TopologyReportWire {
+  if (!generationOptional) return report;
+  const {
+    generation: _generation,
+    bootGeneration: _bootGeneration,
+    ...snapshot
+  } = report.snapshot;
+  return { snapshot, at: report.at };
+}
 
 export type TopologyReporterOptions = {
   collectTopology: () => Promise<TopologySnapshot>;

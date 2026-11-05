@@ -54,6 +54,15 @@ the request (nothing is applied, the tunnel is not torn down). The legacy
 plaintext `keyPem` / `token` from an older control plane is still accepted
 until both floors pass the release that ships this; then those fields go.
 
+**Topology generation off the wire (`topology-generation-optional-v1`).** A
+control plane that lists it no longer needs the topology generation numbers.
+The daemon then leaves `metadata.topologyGeneration` off metrics samples,
+`generation` and `bootGeneration` off `topology-report` (and its snapshot),
+and stops sending the `topology_generation_changed` event; it keeps tracking
+the generation itself. The flag is set on attach and cleared on close
+(`setTopologyGenerationOptional`); details in `../metrics/AGENTS.md`. No
+version floor moved: older control planes still get the numbers.
+
 **Deploy cancel (`deploy-cancel-v1`).** The daemon advertises the feature in
 `hello.features`. A control plane that sees it may send `deploy-cancel`
 (`commandId`) and gets `deploy-cancel-result` (`ok`, `outcome`: `cancelling`,

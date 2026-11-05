@@ -38,6 +38,7 @@ import {
 } from "../../contracts/metrics-contract.ts";
 import { truncateSampleToCapabilityPlan } from "../capability-plan-truncate.ts";
 import { backsServiceDevice } from "../topology/block-topology.ts";
+import { topologyGenerationOptional } from "../topology/generation.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -972,7 +973,9 @@ export class LinuxMetricsCollector implements MetricsCollector {
         sampledAt: new Date(nowMs).toISOString(),
         intervalSeconds: seconds,
         sequence,
-        topologyGeneration: snapshot.generation,
+        ...(topologyGenerationOptional()
+          ? {}
+          : { topologyGeneration: snapshot.generation }),
         bootGeneration,
       },
       host: buildHostMetrics({

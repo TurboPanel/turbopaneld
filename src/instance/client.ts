@@ -85,8 +85,10 @@ import {
 } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
 import {
+  setTopologyGenerationOptional,
   setTopologySizesNegotiated,
   sizesFeaturesNegotiated,
+  topologyGenerationOptional,
 } from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { createPanelSealKeySource } from "./panel-identity-cache.ts";
@@ -218,8 +220,12 @@ import {
   REPO_KEY_REPORT_FEATURE,
   resolveDaemonCapabilities,
   TLS_CAPTURE_FEATURE,
+  TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
 } from "./version-wire.ts";
-import { TopologyReporter } from "./topology-reporter.ts";
+import {
+  TopologyReporter,
+  topologyReportForWire,
+} from "./topology-reporter.ts";
 import { answerDevHostAction, type DevHostPort } from "../dev-host/wire.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
@@ -936,6 +942,7 @@ export class InstanceClient {
     if (!Array.isArray(features)) {
       this.#peerFeatures = [];
       setTopologySizesNegotiated(false);
+      setTopologyGenerationOptional(false);
       return;
     }
     const accepted: string[] = [];
@@ -944,6 +951,9 @@ export class InstanceClient {
     }
     this.#peerFeatures = accepted;
     setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
+    setTopologyGenerationOptional(
+      accepted.includes(TOPOLOGY_GENERATION_OPTIONAL_FEATURE),
+    );
     // A change kept for an older control plane goes out once this one lists the feature.
     void this.#repoKeyReporter?.flush();
     this.#devHost?.peerFeaturesChanged();
@@ -1816,7 +1826,10 @@ export class InstanceClient {
     this.#topologyReporter?.attach((report) => {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify(
-        { type: "topology-report", ...report } satisfies DaemonMessage,
+        {
+          type: "topology-report",
+          ...topologyReportForWire(report, topologyGenerationOptional()),
+        } satisfies DaemonMessage,
       ));
     });
     this.#rehydrateDeploymentSecretsAfterConnect();
@@ -1990,6 +2003,7 @@ export class InstanceClient {
       this.#peerFeatures = [];
       this.#peerFeaturesKnown = false;
       setTopologySizesNegotiated(false);
+      setTopologyGenerationOptional(false);
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();

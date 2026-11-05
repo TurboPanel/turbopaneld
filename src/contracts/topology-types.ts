@@ -199,6 +199,14 @@ export type NumaNodeTopology = {
 /** Freshly-discovered topology data, before `generation.ts` stamps a topology generation onto it. */
 export type TopologySnapshotInputs = Omit<TopologySnapshot, "generation">;
 
+/**
+ * A snapshot as `topology-report` carries it: the generation numbers are left
+ * out once the control plane lists `topology-generation-optional-v1`.
+ */
+export type TopologyReportSnapshot =
+  & Omit<TopologySnapshot, "generation" | "bootGeneration">
+  & Partial<Pick<TopologySnapshot, "generation" | "bootGeneration">>;
+
 export type TopologySnapshot = {
   generation: number;
   bootGeneration: number;
