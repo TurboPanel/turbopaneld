@@ -157,7 +157,6 @@ export class PanelUrlRotation {
     if (urls.length === 0) return;
     const active = this.active;
     this.#urls = [...urls];
-    const kept = this.#urls.indexOf(active);
-    this.#index = kept < 0 ? 0 : kept;
+    this.#index = Math.max(0, this.#urls.indexOf(active));
   }
 }
