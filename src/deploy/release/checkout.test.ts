@@ -15,6 +15,10 @@ import {
   removeCheckoutCredentialFiles,
   writeCheckoutCredentialFiles,
 } from "./checkout.ts";
+import {
+  CloneUrlRefusedError,
+  type RepoGitTransport,
+} from "./clone-url-guard.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -23,6 +27,9 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/** Fixture repositories are local paths: git's `file` transport, no URL check. */
+const LOCAL: RepoGitTransport = { protocols: ["file"], checkUrl: () => {} };
 
 const SHA = "a".repeat(40);
 const OTHER_SHA = "b".repeat(40);
@@ -475,6 +482,7 @@ test({
             ref: "main",
             commitSha: SHA,
             scratchDir,
+            transport: LOCAL,
           }),
         Error,
       );
@@ -674,6 +682,7 @@ test({
           ref: "main",
           commitSha: repo.head,
           scratchDir,
+          transport: LOCAL,
           onOutput: (_stream, line) => {
             void line;
           },
@@ -684,6 +693,103 @@ test({
           join(result.workingDir, "README.md"),
         );
         assertEquals(readme.includes("temp git repo"), true);
+      } finally {
+        await Deno.remove(scratchDir, { recursive: true });
+      }
+    });
+  },
+});
+
+for (
+  const cloneUrl of [
+    "/srv/git/app.git",
+    "file:///srv/git/app.git",
+    "http://example.com/o/r.git",
+    "https://10.0.0.5/o/r.git",
+    "https://[::ffff:127.0.0.1]/o/r.git",
+    "git@192.168.1.20:o/r.git",
+    "git@gitserver:o/r.git",
+    "ssh://git@localhost/o/r.git",
+  ]
+) {
+  test(`checkoutRelease refuses ${cloneUrl} before git or a credential file`, async () => {
+    const scratchDir = await Deno.makeTempDir({
+      prefix: "tp-checkout-refuse-",
+    });
+    try {
+      const { run, calls } = scriptedGit([]);
+      const error = await assertRejects(
+        () =>
+          checkoutRelease({
+            cloneUrl,
+            ref: "main",
+            commitSha: SHA,
+            scratchDir,
+            credential: "not-a-real-token",
+            runGit: run,
+          }),
+        CloneUrlRefusedError,
+      );
+      assertStringIncludes(
+        error.message,
+        "repositories must be on a public git host",
+      );
+      assertEquals(calls.length, 0);
+      assertEquals([...Deno.readDirSync(scratchDir)], []);
+    } finally {
+      await Deno.remove(scratchDir, { recursive: true });
+    }
+  });
+}
+
+test("checkoutRelease pins every git call to https and ssh", async () => {
+  const scratchDir = await Deno.makeTempDir({ prefix: "tp-checkout-pin-" });
+  try {
+    const { run, calls } = scriptedGit([
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: OTHER_SHA, stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: SHA, stderr: "" }),
+    ]);
+    await checkoutRelease({
+      cloneUrl: "git@github.com:o/r.git",
+      ref: "main",
+      commitSha: SHA,
+      scratchDir,
+      runGit: run,
+    });
+    assertEquals(calls.length, 5);
+    for (const call of calls) {
+      assertEquals(call.env.GIT_ALLOW_PROTOCOL, "https:ssh");
+    }
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test({
+  name:
+    "checkoutRelease: git refuses a local path when only the URL check is lifted",
+  permissions: { read: true, write: true, run: true, env: true },
+  fn: async () => {
+    await withTempGitRepo(async (repo) => {
+      const scratchDir = await Deno.makeTempDir({
+        prefix: "tp-checkout-pinned-",
+      });
+      try {
+        const error = await assertRejects(
+          () =>
+            checkoutRelease({
+              cloneUrl: repo.path,
+              ref: "main",
+              commitSha: repo.head,
+              scratchDir,
+              transport: { protocols: ["https", "ssh"], checkUrl: () => {} },
+            }),
+          Error,
+        );
+        assertStringIncludes(error.message, "not allowed");
       } finally {
         await Deno.remove(scratchDir, { recursive: true });
       }
