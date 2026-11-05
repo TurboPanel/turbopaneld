@@ -310,6 +310,7 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
   const pairs: ReadonlyArray<[string, string]> = [
     ["src/daemon/authn/request-signature.ts", "REQUEST_PREFIX"],
     ["src/daemon/authn/attach-proof.ts", "ATTACH_PREFIX"],
+    ["src/daemon/authn/pin-report.ts", "PIN_REPORT_PREFIX"],
   ];
   const sources = await Promise.all(pairs.map(([file]) => readRel(tp, file)));
   for (const [index, [file, name]] of pairs.entries()) {

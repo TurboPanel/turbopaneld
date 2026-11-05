@@ -181,6 +181,8 @@ export async function signChallenge(
 export const REQUEST_PREFIX = "tp-request\n";
 /** Prefix of the attach proof on a signed session's hello; pinned like {@link REQUEST_PREFIX}. */
 export const ATTACH_PREFIX = "tp-attach\n";
+/** Prefix of the signed pin report on that hello; pinned like {@link REQUEST_PREFIX}. */
+export const PIN_REPORT_PREFIX = "tp-panel-pin\n";
 /** Header that carries a request signature. */
 export const DAEMON_SIGNATURE_HEADER = "x-turbopanel-daemon-signature";
 
@@ -283,6 +285,68 @@ export async function signAttachProof(
   const input = buildAttachSigningInput({ ...session, keyId: key.keyId, iat });
   return {
     keyId: key.keyId,
+    iat,
+    sig: await signChallenge(key.privateJwk, input),
+  };
+}
+
+/**
+ * The signed pin report on the first hello of a signed session: what this
+ * server's pin file holds, signed with the daemon key and bound to the
+ * session: `"tp-panel-pin\n" + sessionId + "\n" + serverId + "\n" + keyId +
+ * "\n" + pinnedBy + "\n" + current + "\n" + keyset + "\n" + iat`. It does not
+ * name the control plane's key, so a control plane can tell that a server
+ * pinned another key and raise an alarm.
+ */
+export function buildPinReportSigningInput(params: {
+  sessionId: string;
+  serverId: string;
+  keyId: string;
+  pinnedBy: string;
+  current: string;
+  keyset: number;
+  iat: number;
+}): string {
+  return [
+    `${PIN_REPORT_PREFIX}${params.sessionId}`,
+    params.serverId,
+    params.keyId,
+    params.pinnedBy,
+    params.current,
+    String(params.keyset),
+    String(params.iat),
+  ].join("\n");
+}
+
+export interface SignedPinReport {
+  pinnedBy: string;
+  current: string;
+  keyset: number;
+  iat: number;
+  sig: string;
+}
+
+export async function signPinReport(
+  key: { keyId: string; privateJwk: JsonWebKey },
+  report: {
+    sessionId: string;
+    serverId: string;
+    pinnedBy: string;
+    current: string;
+    keyset: number;
+  },
+  nowMs: number = Date.now(),
+): Promise<SignedPinReport> {
+  const iat = Math.floor(nowMs / 1000);
+  const input = buildPinReportSigningInput({
+    ...report,
+    keyId: key.keyId,
+    iat,
+  });
+  return {
+    pinnedBy: report.pinnedBy,
+    current: report.current,
+    keyset: report.keyset,
     iat,
     sig: await signChallenge(key.privateJwk, input),
   };

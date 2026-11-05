@@ -91,6 +91,8 @@ import {
   loadDaemonKeyFile,
   signAttachProof,
   signDaemonRequest,
+  type SignedPinReport,
+  signPinReport,
 } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
 import {
@@ -1022,6 +1024,32 @@ export class InstanceClient {
       });
     } catch (err) {
       logWarn("instance", "attach proof failed:", sanitizeForLog(err));
+      return undefined;
+    }
+  }
+
+  /**
+   * What this server's pin file holds, signed with the daemon key for the
+   * control plane's records (it alarms when the key is not its own). Without
+   * the key or a pin the hello carries the unsigned report, as before.
+   */
+  async #signedPinReportFor(
+    hello: VerifiedHello,
+    serverId: string,
+  ): Promise<SignedPinReport | undefined> {
+    const key = this.#daemonSigningKey;
+    const pin = this.#panelPin;
+    if (!key || !pin) return undefined;
+    try {
+      return await signPinReport(key, {
+        sessionId: hello.sessionId,
+        serverId,
+        pinnedBy: pin.pinnedBy,
+        current: pin.current,
+        keyset: pin.keyset,
+      });
+    } catch (err) {
+      logWarn("instance", "pin report signing failed:", sanitizeForLog(err));
       return undefined;
     }
   }
@@ -1960,8 +1988,12 @@ export class InstanceClient {
   }
 
   /** Presence, observers, reporters and the after-connect pulls, for one session. */
-  #startSessionWork(ws: WebSocket, attachProof?: AttachProof): void {
-    this.#idlePresence?.attach(ws, { attachProof });
+  #startSessionWork(
+    ws: WebSocket,
+    attachProof?: AttachProof,
+    panelPin?: SignedPinReport,
+  ): void {
+    this.#idlePresence?.attach(ws, { attachProof, panelPin });
     this.#ensureHaObserver();
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
@@ -2141,8 +2173,9 @@ export class InstanceClient {
           // Awaited by the session, so no later frame is handled before the
           // presence hello (with the attach proof) and the session open.
           const attachProof = await this.#attachProofFor(hello, serverId);
+          const panelPin = await this.#signedPinReportFor(hello, serverId);
           if (this.#ws !== ws) return;
-          this.#startSessionWork(ws, attachProof);
+          this.#startSessionWork(ws, attachProof, panelPin);
           this.#applySignedHello(hello);
           commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
         },

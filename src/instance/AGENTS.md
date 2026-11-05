@@ -1102,6 +1102,19 @@ On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):
   The control plane holds its outbox until that hello arrives. The prefixes
   are pinned by `deno task check:contract-drift`.
 
+## Signed pin report
+
+On the first presence hello of a signed session the daemon replaces the
+unsigned `panelPin` (`{pinnedBy, current, keyset}`, read from the pin file)
+with the same fields plus `iat` and `sig`: its daemon-key signature over
+`"tp-panel-pin\n" + sessionId + "\n" + serverId + "\n" + keyId + "\n" +
+pinnedBy + "\n" + current + "\n" + keyset + "\n" + iat`
+(`signPinReport`, `src/crypto/keys.ts`; prefix pinned in
+`scripts/check-contract-drift.ts`). The signature does not name the control
+plane's key, so a control plane can verify a report from a server pinned to
+another key and alarm on it. Without the daemon key or a pin the hello keeps
+the unsigned report. An older control plane ignores the two extra fields.
+
 ## Sealed secrets (`daemon-sealed-secrets-v1`)
 
 - The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged and retried on the next connect. Every plaintext decrypt answer also registers the key again without a reconnect, even when this process registered it before, because the control plane answers in plaintext only when no key is on file: a control plane upgraded under an open socket, or a superadmin's Clear Sealing Key (`createSealingRegistration`: one attempt at a time; after a failed attempt the next waits ten minutes, after one that worked a minute). That control plane adds `daemon-sealed-secrets-v1` to the stored features on a verified registration, because the older one dropped the then-unknown feature from the hello. Only the key id is logged.

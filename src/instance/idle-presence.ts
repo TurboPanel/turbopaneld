@@ -1,5 +1,5 @@
 import { type BuildInfo, getBuildInfo } from "../build-info.ts";
-import type { AttachProof } from "../crypto/keys.ts";
+import type { AttachProof, SignedPinReport } from "../crypto/keys.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   resolveUpdateChannelConfig,
@@ -400,6 +400,7 @@ export class IdlePresence {
   #connectedAtMs = Date.now();
   #maxAgeReported = false;
   #attachProof: AttachProof | undefined;
+  #signedPanelPin: SignedPinReport | undefined;
 
   constructor(options: IdlePresenceOptions) {
     this.#idleCheckIntervalMs = options.idleCheckIntervalMs ?? IDLE_PRESENCE_MS;
@@ -440,12 +441,17 @@ export class IdlePresence {
 
   /**
    * Start presence on a new socket. `attachProof` (signed sessions only) rides
-   * on this socket's hello, binding it to the control plane's session.
+   * on this socket's hello, binding it to the control plane's session, and
+   * `panelPin`, when given, replaces the unsigned pin report with the signed one.
    */
-  attach(ws: WebSocket, options: { attachProof?: AttachProof } = {}): void {
+  attach(
+    ws: WebSocket,
+    options: { attachProof?: AttachProof; panelPin?: SignedPinReport } = {},
+  ): void {
     this.detach();
     this.#ws = ws;
     this.#attachProof = options.attachProof;
+    this.#signedPanelPin = options.panelPin;
     this.#lastActivityAt = Date.now();
     this.#lastInboundAt = Date.now();
     this.#staleReported = false;
@@ -575,7 +581,9 @@ export class IdlePresence {
           ? { releaseLinkScan: presence.releaseLinkScan }
           : {}),
         features: [...DAEMON_WIRE_FEATURES],
-        ...panelPinField(),
+        ...(this.#signedPanelPin
+          ? { panelPin: this.#signedPanelPin }
+          : panelPinField()),
         ...(this.#attachProof ? { attach: this.#attachProof } : {}),
         ...this.#commandsField(false),
       }));
