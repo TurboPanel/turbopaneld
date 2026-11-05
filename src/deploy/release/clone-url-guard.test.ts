@@ -68,3 +68,19 @@ test("internal hosts are refused", () => {
     assertThrows(() => assertCloneUrlAllowed(url), CloneUrlRefusedError);
   }
 });
+
+test("a percent-encoded ssh user or host is refused, a path is not", () => {
+  for (
+    const url of [
+      "ssh://git@evil%40127.0.0.1/a",
+      "ssh://%31%32%37.0.0.1/a",
+      "ssh://git@%6c%6f%63%61%6c%68%6f%73%74/a",
+      "ssh://git@%31%30.0.0.1/a",
+      "ssh://git%40x@example.com/a",
+      "ssh://git@example.com:22%30/a",
+    ]
+  ) {
+    assertThrows(() => assertCloneUrlAllowed(url), CloneUrlRefusedError);
+  }
+  assertCloneUrlAllowed("ssh://git@example.com/o/my%20repo.git");
+});

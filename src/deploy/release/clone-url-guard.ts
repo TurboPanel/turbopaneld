@@ -75,9 +75,26 @@ function urlHost(cloneUrl: string, scheme: "https" | "ssh"): string {
   return parsed.hostname;
 }
 
+/** `ssh://user@host:port`: everything between the scheme and the first `/`. */
+function sshAuthority(cloneUrl: string): string {
+  const rest = cloneUrl.slice("ssh://".length);
+  const slash = rest.indexOf("/");
+  return slash === -1 ? rest : rest.slice(0, slash);
+}
+
 function hostOf(cloneUrl: string): string {
   if (cloneUrl.startsWith("https://")) return urlHost(cloneUrl, "https");
-  if (cloneUrl.startsWith("ssh://")) return urlHost(cloneUrl, "ssh");
+  if (cloneUrl.startsWith("ssh://")) {
+    // The URL parser leaves an `ssh:` host percent-encoded, but git decodes
+    // the whole URL before it calls ssh: `ssh://git@x%40127.0.0.1/r` would
+    // pass the host check as `x%40127.0.0.1` and dial 127.0.0.1.
+    if (sshAuthority(cloneUrl).includes("%")) {
+      throw new CloneUrlRefusedError(
+        "an ssh address must not percent-encode its user or host",
+      );
+    }
+    return urlHost(cloneUrl, "ssh");
+  }
   const scp = SCP_LIKE_RE.exec(cloneUrl);
   if (scp === null) {
     throw new CloneUrlRefusedError(
