@@ -33,9 +33,15 @@ export const INSTANCE_VERSION_HEADER = "x-turbopanel-version";
 
 /**
  * Oldest control plane this daemon will treat as supported. A peer below the
- * floor stays connected; the daemon only flags the condition.
+ * floor stays connected; the daemon only flags the condition, and refuses to
+ * install a control plane below it.
+ *
+ * 0.1.22 is a pre-launch hard cutoff: it is the first control plane line
+ * that seals decrypt answers and the reconcile password hash to this
+ * daemon's sealing key. It names the control plane's release line, so it is
+ * not equal to the control plane's `MIN_SUPPORTED_DAEMON_VERSION` (0.1.18).
  */
-export const MIN_SUPPORTED_INSTANCE_VERSION = "0.1.0";
+export const MIN_SUPPORTED_INSTANCE_VERSION = "0.1.22";
 
 /**
  * Panel features that need a daemon at or above a semver (the daemon renders

@@ -890,10 +890,23 @@ logs once, greppable as `instance-version: … flagged — the daemon keeps
 reconnecting`, and does **not** close the socket or stop retrying. It is a
 flag, not a park.
 
-Each floor tolerates every peer semver at or above the constant. Today both
-floors are **`0.1.0`** against package **`0.1.3`**, so a `0.1.x` peer is in
-window and a `0.0.x` peer is not. The window may trail the current release by
-several minor versions. There is no fixed upgrade order. Bump
+Each floor tolerates every peer semver at or above the constant. The two
+floors name versions on two separate release lines, so they are not equal:
+`MIN_SUPPORTED_INSTANCE_VERSION` is **`0.1.22`** (control plane line) and the
+control plane's `MIN_SUPPORTED_DAEMON_VERSION` is **`0.1.18`** (daemon line).
+Both were raised together on 2026-11-05 as a **pre-launch hard cutoff**:
+`0.1.18` is the first daemon that registers a sealing key, opens sealed
+decrypt answers and opens the sealed reconcile password hash, and `0.1.22` is
+the first control plane that seals them. Older daemons get
+`daemon_unsupported` on every command; an older control plane is flagged here
+and refused as an `instance-update` target. Every peer on those two lines is
+let in, including trunk builds from before the sealing work landed; only
+canary and development hosts ran those. The update guard holds only the
+target's base `X.Y.Z` against the floor, because a canary or rc manifest
+labels its version (`0.1.22-canary.145`) while the installed control plane
+reports the plain base. `check:contract-drift` requires each floor to be a
+plain `X.Y.Z` no newer than the peer repo's `deno.json` version. The window
+may trail the current release. There is no fixed upgrade order. Bump
 `MIN_SUPPORTED_DAEMON_VERSION` and `MIN_SUPPORTED_INSTANCE_VERSION` together,
 in the same change, and record why in this section and in
 `../turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor

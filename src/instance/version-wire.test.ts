@@ -1,10 +1,8 @@
 import { assertEquals } from "@std/assert";
-import { DAEMON_VERSION } from "../version.ts";
 import {
   ACME_ISSUE_FEATURE,
   BACKUP_S3_COPY_FEATURE,
   COMMAND_RECOVERY_FEATURE,
-  compareSemver,
   CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
@@ -69,9 +67,11 @@ test("resolveInstanceSupport: at or above the floor is supported, below is unsup
     reported: string | undefined;
     status: "supported" | "unsupported" | "unknown";
   }> = [
-    { reported: "0.1.0", status: "supported" },
+    { reported: "0.1.22", status: "supported" },
     { reported: "0.4.2", status: "supported" },
-    { reported: "0.1.0-rc.1", status: "unsupported" },
+    { reported: "0.1.22-rc.1", status: "unsupported" },
+    { reported: "0.1.21", status: "unsupported" },
+    { reported: "0.1.0", status: "unsupported" },
     { reported: "0.0.9", status: "unsupported" },
     { reported: undefined, status: "unknown" },
     { reported: "unstamped", status: "unknown" },
@@ -95,18 +95,20 @@ test("instanceUnsupportedReason is the greppable flag and does not say parked", 
   const reason = instanceUnsupportedReason(resolveInstanceSupport("0.0.9"));
   assertEquals(
     reason,
-    "instance-version: control plane version 0.0.9 is below the supported minimum 0.1.0; flagged — the daemon keeps reconnecting (update the control plane)",
+    "instance-version: control plane version 0.0.9 is below the supported minimum 0.1.22; flagged — the daemon keeps reconnecting (update the control plane)",
   );
   assertEquals(reason.includes("instance-version:"), true);
 });
 
-test("the instance floor is a semver no newer than this daemon", () => {
+test("the instance floor is a plain semver on the control plane's line", () => {
+  // It names a control plane version, so it is not held against this
+  // daemon's own DAEMON_VERSION; check:contract-drift holds it against the
+  // control plane's deno.json version.
   const floor = parseSemver(MIN_SUPPORTED_INSTANCE_VERSION);
-  const mine = parseSemver(DAEMON_VERSION);
-  if (!floor || !mine) throw new TypeError("unparsable floor");
-  assertEquals(compareSemver(floor, mine) <= 0, true);
+  if (!floor) throw new TypeError("unparsable floor");
+  assertEquals(floor.prerelease, []);
   // Pin. Changing it requires the Versions-on-the-wires note in `src/instance/AGENTS.md` and the control plane's AGENTS.md.
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("capability gates: above and equal open, below and unknown stay closed", () => {
@@ -174,7 +176,7 @@ test("managed-health-v1 is advertised on the wire and raised no floor", () => {
     true,
   );
   // A new wire message is feature-gated; it never moves the version floor.
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-permissions-read-v1 is advertised and raised no floor", () => {
@@ -188,13 +190,13 @@ test("managed-permissions-read-v1 is advertised and raised no floor", () => {
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-owner-role-v1 is advertised and raised no floor", () => {
   assertEquals(MANAGED_OWNER_ROLE_FEATURE, "managed-owner-role-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(MANAGED_OWNER_ROLE_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-data-only-readwrite-v1 is advertised and raised no floor", () => {
@@ -206,7 +208,7 @@ test("managed-data-only-readwrite-v1 is advertised and raised no floor", () => {
     DAEMON_WIRE_FEATURES.includes(MANAGED_DATA_ONLY_READWRITE_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-database-owner-v1 is advertised and raised no floor", () => {
@@ -215,7 +217,7 @@ test("managed-database-owner-v1 is advertised and raised no floor", () => {
     DAEMON_WIRE_FEATURES.includes(MANAGED_DATABASE_OWNER_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-database-convert-v1 is advertised", () => {
@@ -229,13 +231,13 @@ test("managed-database-convert-v1 is advertised", () => {
 test("tls-capture-v1 is advertised and raised no floor", () => {
   assertEquals(TLS_CAPTURE_FEATURE, "tls-capture-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(TLS_CAPTURE_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("acme-issue-v1 is advertised and raised no floor", () => {
   assertEquals(ACME_ISSUE_FEATURE, "acme-issue-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(ACME_ISSUE_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-switchover-final-position-v1 is advertised and raised no floor", () => {
@@ -247,7 +249,7 @@ test("managed-switchover-final-position-v1 is advertised and raised no floor", (
     DAEMON_WIRE_FEATURES.includes(MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("command-recovery-v1 is advertised", () => {
@@ -258,7 +260,7 @@ test("command-recovery-v1 is advertised", () => {
 test("host-capacity-v1 is advertised and raised no floor", () => {
   assertEquals(HOST_CAPACITY_FEATURE, "host-capacity-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(HOST_CAPACITY_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("site-engine-nginx-apache-v1 is advertised on the wire", () => {
@@ -279,7 +281,7 @@ test("managed-ha-instance-v1 is advertised on the wire and raised no floor", () 
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("php-site-modes-v1 is advertised on the wire and raised no floor", () => {
@@ -290,7 +292,7 @@ test("php-site-modes-v1 is advertised on the wire and raised no floor", () => {
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("deploy-cancel-v1 is advertised on the wire and raised no floor", () => {
@@ -301,7 +303,7 @@ test("deploy-cancel-v1 is advertised on the wire and raised no floor", () => {
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("site-db-bindings-v1 is advertised on the wire and raised no floor", () => {
@@ -312,7 +314,7 @@ test("site-db-bindings-v1 is advertised on the wire and raised no floor", () => 
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("custom-node-app-mode-v1 is advertised and raised no floor", () => {
@@ -323,7 +325,7 @@ test("custom-node-app-mode-v1 is advertised and raised no floor", () => {
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("deno-native-apps-v1 is advertised on the wire and raised no floor", () => {
@@ -334,7 +336,7 @@ test("deno-native-apps-v1 is advertised on the wire and raised no floor", () => 
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-ingress-ipv6-v1 is advertised on the wire and raised no floor", () => {
@@ -345,7 +347,7 @@ test("managed-ingress-ipv6-v1 is advertised on the wire and raised no floor", ()
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-login-limits-v1 is advertised on the wire and raised no floor", () => {
@@ -356,7 +358,7 @@ test("managed-login-limits-v1 is advertised on the wire and raised no floor", ()
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("server-network-check-v1 is advertised and raised no floor", () => {
@@ -365,13 +367,13 @@ test("server-network-check-v1 is advertised and raised no floor", () => {
     DAEMON_WIRE_FEATURES.includes(SERVER_NETWORK_CHECK_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("backup-s3-copy-v1 is advertised and raised no floor", () => {
   assertEquals(BACKUP_S3_COPY_FEATURE, "backup-s3-copy-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(BACKUP_S3_COPY_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("deploy-hostings-only-v1 is advertised and raised no floor", () => {
@@ -382,7 +384,7 @@ test("deploy-hostings-only-v1 is advertised and raised no floor", () => {
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("tunnel-forwarding-v1 is advertised and raised no floor", () => {
@@ -393,7 +395,7 @@ test("tunnel-forwarding-v1 is advertised and raised no floor", () => {
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("tunnel-connector-v1 is advertised and raised no floor", () => {
@@ -404,7 +406,7 @@ test("tunnel-connector-v1 is advertised and raised no floor", () => {
     ),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("managed-backup-login-v1 is advertised", () => {
@@ -418,25 +420,25 @@ test("managed-backup-login-v1 is advertised", () => {
 test("fabric-retain-keys-v1 is advertised and raised no floor", () => {
   assertEquals(FABRIC_RETAIN_KEYS_FEATURE, "fabric-retain-keys-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(FABRIC_RETAIN_KEYS_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("fabric-peer-report-v1 is advertised and raised no floor", () => {
   assertEquals(FABRIC_PEER_REPORT_FEATURE, "fabric-peer-report-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(FABRIC_PEER_REPORT_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("fabric-lan-routes-v1 is advertised and raised no floor", () => {
   assertEquals(FABRIC_LAN_ROUTES_FEATURE, "fabric-lan-routes-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(FABRIC_LAN_ROUTES_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("repo-key-report-v1 is advertised and raised no floor", () => {
   assertEquals(REPO_KEY_REPORT_FEATURE, "repo-key-report-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(REPO_KEY_REPORT_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("daemon-sealed-secrets-v1 is advertised and raised no floor", () => {
@@ -445,12 +447,12 @@ test("daemon-sealed-secrets-v1 is advertised and raised no floor", () => {
     DAEMON_WIRE_FEATURES.includes(DAEMON_SEALED_SECRETS_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("instance-edge-trust-v1 is advertised and raised no floor", () => {
   assertEquals(DAEMON_WIRE_FEATURES.includes("instance-edge-trust-v1"), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("instance-hostname-public-port-v1 is advertised and raised no floor", () => {
@@ -462,7 +464,7 @@ test("instance-hostname-public-port-v1 is advertised and raised no floor", () =>
     DAEMON_WIRE_FEATURES.includes(INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("daemon-sealed-principal-reconcile-v1 is advertised and raised no floor", () => {
@@ -474,13 +476,13 @@ test("daemon-sealed-principal-reconcile-v1 is advertised and raised no floor", (
     DAEMON_WIRE_FEATURES.includes(DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("install-token-v2 is advertised and raised no floor", () => {
   assertEquals(INSTALL_TOKEN_V2_FEATURE, "install-token-v2");
   assertEquals(DAEMON_WIRE_FEATURES.includes(INSTALL_TOKEN_V2_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("the signed session features are advertised and raised no floor", () => {
@@ -493,7 +495,7 @@ test("the signed session features are advertised and raised no floor", () => {
   ) {
     assertEquals(DAEMON_WIRE_FEATURES.includes(feature), true);
   }
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("tunnel-status-facts-v1 is advertised and raised no floor", () => {
@@ -502,17 +504,17 @@ test("tunnel-status-facts-v1 is advertised and raised no floor", () => {
     DAEMON_WIRE_FEATURES.includes(TUNNEL_STATUS_FACTS_FEATURE),
     true,
   );
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("tunnel-status-v1 is advertised and raised no floor", () => {
   assertEquals(TUNNEL_STATUS_FEATURE, "tunnel-status-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(TUNNEL_STATUS_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
 test("hosting-via-header-v1 is advertised and raised no floor", () => {
   assertEquals(HOSTING_VIA_HEADER_FEATURE, "hosting-via-header-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(HOSTING_VIA_HEADER_FEATURE), true);
-  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.0");
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

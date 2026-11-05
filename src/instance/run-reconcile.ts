@@ -37,7 +37,7 @@ import {
   resolveUpdateHealthTimeoutMs,
   waitForInstanceHealth,
 } from "./instance-health-check.ts";
-import { resolveInstanceSupport } from "./version-wire.ts";
+import { parseSemver, resolveInstanceSupport } from "./version-wire.ts";
 import { type RetryFetchOptions, retryTransient } from "../util/retry-fetch.ts";
 import {
   fetchWithPlatformCa,
@@ -860,14 +860,22 @@ export class InstanceUpdateRefusedError extends Error {
  * is this one: do not install a control plane the daemon would then flag
  * as unsupported. A missing or non-semver target is `unknown` and is
  * allowed, the same default as {@link resolveInstanceSupport}.
+ *
+ * Only the base `X.Y.Z` of the target is held against the floor. A canary
+ * or rc manifest labels its version (`0.1.22-canary.145`, `0.1.22-rc.1`),
+ * but the control plane it installs reports the plain base (`0.1.22`), so a
+ * labelled build of the floor's own base is not below it.
  */
 export function assertControlPlaneUpdateAllowed(
   targetVersion: string | undefined | null,
 ): void {
-  const support = resolveInstanceSupport(targetVersion);
+  const parsed = parseSemver(targetVersion);
+  const support = resolveInstanceSupport(
+    parsed ? `${parsed.major}.${parsed.minor}.${parsed.patch}` : targetVersion,
+  );
   if (support.status !== "unsupported") return;
   throw new InstanceUpdateRefusedError(
-    `refusing control-plane update: target version ${support.version} is below this daemon's supported minimum ${support.minVersion}`,
+    `refusing control-plane update: target version ${targetVersion?.trim()} is below this daemon's supported minimum ${support.minVersion}`,
   );
 }
 
