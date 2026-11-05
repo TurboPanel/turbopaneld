@@ -136,6 +136,14 @@ test("panel-identity-write refuses what the pin does not allow", async () => {
         "a url with a path",
         await panel.document({ urls: ["https://p.example/x"] }),
       ],
+      [
+        "a url with template or shell characters",
+        await panel.document({ urls: ["https://p{{x}}.example"] }),
+      ],
+      [
+        "a url with a tab",
+        await panel.document({ urls: ["https://p\t.example"] }),
+      ],
       ["no header", "{}"],
     ];
     for (const [label, input] of cases) {
@@ -147,6 +155,64 @@ test("panel-identity-write refuses what the pin does not allow", async () => {
       ["panel-identity-write", "extra"],
       await panel.document(),
     );
+  });
+});
+
+test("panel-identity-write rewrites the update origin's addresses with the pin's", async () => {
+  await withHost(async (host) => {
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    await Deno.writeTextFile(
+      host.path(ORIGIN_PATH),
+      `host=https://old.example\nhosts=https://old.example\npanel_key=${panel.kid}\ndl_base=\n`,
+    );
+    const urls = [
+      "https://panel.example.test",
+      "https://alt.example.test:8443",
+    ];
+    const result = await host.run(
+      ["panel-identity-write"],
+      await panel.document({ keyset: 1, urls }),
+    );
+    assertEquals(result.code, 0, result.stderr);
+    const origin = await Deno.readTextFile(host.path(ORIGIN_PATH));
+    assertEquals(
+      origin.split("\n").filter((line) => line.startsWith("hosts=")),
+      [`hosts=${urls.join(",")}`],
+    );
+    // The installer's host, the key and the rest stay as they were.
+    assertStringIncludes(origin, "host=https://old.example\n");
+    assertStringIncludes(origin, `panel_key=${panel.kid}\n`);
+    assertStringIncludes(origin, "dl_base=\n");
+    assertStringIncludes(
+      await Deno.readTextFile(host.path(PIN_PATH)),
+      `urls=${urls.join(",")}\n`,
+    );
+  });
+});
+
+test("panel-identity-write refuses an empty address list and leaves both files alone", async () => {
+  await withHost(async (host) => {
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    await Deno.writeTextFile(
+      host.path(ORIGIN_PATH),
+      "host=https://old.example\nhosts=https://old.example\n",
+    );
+    const before = [
+      await Deno.readTextFile(host.path(PIN_PATH)),
+      await Deno.readTextFile(host.path(ORIGIN_PATH)),
+    ];
+    const err = await refused(
+      host,
+      ["panel-identity-write"],
+      await panel.document({ urls: [] }),
+    );
+    assertStringIncludes(err, "panel-identity-write");
+    assertEquals([
+      await Deno.readTextFile(host.path(PIN_PATH)),
+      await Deno.readTextFile(host.path(ORIGIN_PATH)),
+    ], before);
   });
 });
 

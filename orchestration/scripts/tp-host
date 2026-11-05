@@ -5497,17 +5497,21 @@ tp_instance_cert_kept() {
 # identity document: stdin is the X-TurboPanel-Signature header value on the
 # first line and the exact response body after it. The document must name the
 # pinned current key, be signed by it, be unexpired and carry a key set no
-# lower than the pinned one. Only next=, keyset=, urls= and updated= change;
-# a change of the current key arrives only as a signed rotation or revoke
-# statement (`panel-identity-write statement`, below).
+# lower than the pinned one. Only next=, keyset=, urls= and updated= change,
+# plus hosts= in lib/update-origin (the addresses tp-orchestrate accepts for
+# --host), which always follows urls=. A change of the current key arrives
+# only as a signed rotation or revoke statement (`panel-identity-write
+# statement`, below).
 
 tp_panel_identity_python() {
   cat <<'PY'
-import base64, binascii, hashlib, json, sys
+import base64, binascii, hashlib, json, re, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 PATH = "/api/daemon/v1/instance/identity"
+# https://host[:port]: a DNS name, IPv4 or bracketed IPv6 literal, nothing else.
+ORIGIN = re.compile(r"https://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
 body_path, header_path, out, pinned, pinned_keyset = sys.argv[1:6]
 out = Path(out)
 
@@ -5546,8 +5550,10 @@ head_kid, _, head_sig = header.partition(":")
 sig = b64d(head_sig)
 if head_kid != kid or len(sig) != 64:
     raise SystemExit("signature header is wrong")
+if not isinstance(urls, list) or not urls:
+    raise SystemExit("url list is empty")
 for url in urls:
-    if not isinstance(url, str) or not url.startswith("https://") or len(url) < 9 or any(c in url[8:] for c in "/?#@\\ ,\n"):
+    if not isinstance(url, str) or not ORIGIN.fullmatch(url):
         raise SystemExit("url list holds a bad entry")
 next_kid = nxt[0].get("kid", "") if nxt else ""
 if next_kid and len(b64d(next_kid)) != 32:
@@ -5713,6 +5719,17 @@ tp_verb_panel_identity_write() {
     printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_pi_file" pinned_by)"
     printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$TP_STAGE/new"
+  # The update origin's address list follows the pin's (written first, so a
+  # failure leaves the pin as it was and the daemon simply tries again).
+  _pi_origin="$INSTALL_ROOT/lib/update-origin"
+  if [ -f "$_pi_origin" ] && [ ! -L "$_pi_origin" ]; then
+    [ "$(stat -c %u "$_pi_origin")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_pi_origin is not root-owned"
+    {
+      grep -v '^hosts=' "$_pi_origin" || true
+      printf 'hosts=%s\n' "$_pi_urls"
+    } > "$TP_STAGE/origin"
+    tp_put_file "$_pi_origin" 600 root root < "$TP_STAGE/origin"
+  fi
   tp_put_file "$_pi_file" 640 root tp < "$TP_STAGE/new"
 }
 
