@@ -268,6 +268,33 @@ export function capOutcomeResult(fields: OutcomeFields): OutcomeFields {
 }
 
 /**
+ * The outcome fields for a finished command: the result only on success, and
+ * {@link capOutcomeResult} applied, with one warn line when it failed the
+ * outcome. The command itself still counts as succeeded on this host.
+ */
+function sizedOutcomeFields(
+  id: string,
+  ok: boolean,
+  result: unknown,
+  error: string | undefined,
+): OutcomeFields {
+  const sized = capOutcomeResult({
+    ok,
+    result: ok ? result : undefined,
+    error,
+  });
+  if (ok && !sized.ok) {
+    logWarn(
+      "commands",
+      `command ${sanitizeForLog(id)} result is over ${
+        MAX_OUTCOME_RESULT_BYTES / 1024
+      } KB; sent as failed: ${sized.error}`,
+    );
+  }
+  return sized;
+}
+
+/**
  * Keep the **tail**: a failed build prints the cause last, and the head is
  * usually progress output. The full transcript stays on the command log
  * endpoint.
@@ -705,19 +732,12 @@ export async function handleCommandDispatch(
         break;
     }
 
-    const sized = capOutcomeResult({
+    const sized = sizedOutcomeFields(
+      message.id,
       ok,
-      result: ok ? result : undefined,
-      error: error ? sanitizeOutcomeError(error, logSink) : undefined,
-    });
-    if (ok && !sized.ok) {
-      logWarn(
-        "commands",
-        `command ${sanitizeForLog(message.id)} result is over ${
-          MAX_OUTCOME_RESULT_BYTES / 1024
-        } KB; sent as failed: ${sized.error}`,
-      );
-    }
+      result,
+      error ? sanitizeOutcomeError(error, logSink) : undefined,
+    );
     commandSucceeded = ok;
     await deliverCommandOutcome(ws, {
       type: "command-outcome",
