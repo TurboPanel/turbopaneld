@@ -110,6 +110,7 @@ export const DAEMON_WIRE_FEATURES = [
   "signin-v2",
   "hosting-via-header-v1",
   "dev-host-v1",
+  "topology-generation-optional-v1",
 ] as const;
 
 /**
@@ -399,6 +400,19 @@ export const METRICS_V8_FEATURE: DaemonWireFeature = "metrics-v8";
  * drop every sample, so the daemon sends the sizes only once this is listed.
  */
 export const METRICS_V8_SIZES_FEATURE: DaemonWireFeature = "metrics-v8-sizes";
+
+/**
+ * The control plane no longer needs this daemon's topology generation numbers:
+ * it matches a sample to the stored topology by the entity ids the sample
+ * names and tells topology reports apart by their content. Once it is listed
+ * the daemon leaves `metadata.topologyGeneration` off its samples,
+ * `generation` and `bootGeneration` off its `topology-report` (and its
+ * snapshot), and stops sending the `topology_generation_changed` event. The
+ * generation is still tracked here: the topology reporter and the event
+ * collector use it to notice a change.
+ */
+export const TOPOLOGY_GENERATION_OPTIONAL_FEATURE: DaemonWireFeature =
+  "topology-generation-optional-v1";
 
 /**
  * This daemon deploys sites with `engine: 'nginx+apache'` (nginx in front of
