@@ -102,6 +102,15 @@ when either list is not empty, and a running deploy repeats its step plan every
 order (retry every 5 s, resync from the `nextSeq` of a `409`; see
 `../logs/sink.ts`).
 
+Outcomes are sized before they are journaled and sent: `error` keeps its
+last 4000 characters (the control plane caps it at 4096), and a successful
+`result` over 64 KB as JSON (`capOutcomeResult`, the control plane's
+`MAX_DAEMON_WS_RESULT_JSON_BYTES`) is sent as a failed outcome without it,
+error "The server's report was too large to store (N KB; limit 64 KB).", with
+one warn line. An older control plane closes the socket on a larger result,
+and the kept outcome was then resent on every attach, forever; a current one
+records the same failure itself.
+
 ## Scope Summary (Former Root Index Entry)
 
 | Subsystem | Read before editing | Covers |
