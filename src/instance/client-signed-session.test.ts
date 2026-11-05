@@ -3,7 +3,13 @@ import { it } from "@std/testing/bdd";
 import { join } from "@std/path";
 import { InstanceClient } from "./client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
-import { generateDaemonKeypair, saveDaemonKeyFile } from "../crypto/keys.ts";
+import {
+  buildAttachSigningInput,
+  DAEMON_SIGNATURE_HEADER,
+  generateDaemonKeypair,
+  saveDaemonKeyFile,
+  verifyChallenge,
+} from "../crypto/keys.ts";
 import {
   challengeResponse,
   createFakeInstanceApi,
@@ -66,6 +72,7 @@ it({
         },
       );
       const sessionBodies: Record<string, unknown>[] = [];
+      const sessionSignatures: (string | null)[] = [];
       const api = createFakeInstanceApi();
       api.script(
         "/api/health",
@@ -96,6 +103,9 @@ it({
           ),
       );
       api.script("/api/daemon/v1/auth/session", async (init) => {
+        sessionSignatures.push(
+          new Headers(init?.headers).get(DAEMON_SIGNATURE_HEADER),
+        );
         sessionBodies.push(
           await parseJsonBody(init) as Record<string, unknown>,
         );
@@ -125,10 +135,8 @@ it({
         );
         Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", stateDir);
         Deno.env.set("TURBOPANEL_LIB_DIR", libDir);
-        await saveDaemonKeyFile(
-          join(stateDir, "server-key.json"),
-          await generateDaemonKeypair(),
-        );
+        const daemonKey = await generateDaemonKeypair();
+        await saveDaemonKeyFile(join(stateDir, "server-key.json"), daemonKey);
         await Deno.writeTextFile(
           join(stateDir, "server.id"),
           `${SERVER.serverId}\n`,
@@ -160,6 +168,20 @@ it({
 
           assertEquals(sessionBodies[0]?.payloadVersion, 2);
           assertEquals(sessionBodies[0]?.panelFingerprint, panel.kid);
+          // The session request and the upgrade are signed by the daemon key.
+          assertEquals(
+            sessionSignatures[0]?.startsWith(`${SERVER.keyId}:`),
+            true,
+          );
+          const upgradeHeaders = (socket.options as {
+            headers: Record<string, string>;
+          }).headers;
+          assertEquals(
+            upgradeHeaders[DAEMON_SIGNATURE_HEADER]?.startsWith(
+              `${SERVER.keyId}:`,
+            ),
+            true,
+          );
 
           socket.receive(
             await panel.hello({
@@ -174,6 +196,24 @@ it({
               socket.sentFrames.some((frame) =>
                 JSON.parse(frame).type === "hello"
               ),
+          );
+          const presence = socket.sentFrames
+            .map((frame) => JSON.parse(frame))
+            .find((frame) => frame.type === "hello");
+          assertEquals(presence.attach.keyId, SERVER.keyId);
+          assertEquals(
+            await verifyChallenge(
+              daemonKey.publicJwk,
+              buildAttachSigningInput({
+                sessionId: "sess-1",
+                panelFingerprint: panel.kid,
+                serverId: SERVER.serverId,
+                keyId: SERVER.keyId,
+                iat: presence.attach.iat,
+              }),
+              presence.attach.sig,
+            ),
+            true,
           );
 
           const closed = new Promise<CloseEvent>((resolve) =>

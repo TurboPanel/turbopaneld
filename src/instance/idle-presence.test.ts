@@ -1341,3 +1341,44 @@ test({
     }
   },
 });
+
+test("IdlePresence hello carries the attach proof of a signed session, and only there", () => {
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+    }),
+  });
+  const presence = new IdlePresence({
+    serverId: "srv-hello-attach",
+    idleCheckIntervalMs: 50,
+  });
+  const proof = { keyId: "key-1", iat: 1_800_000_000, sig: "s".repeat(86) };
+  const signedSocket = openMockSocket();
+  const plainSocket = openMockSocket();
+  try {
+    presence.attach(signedSocket as unknown as WebSocket, {
+      attachProof: proof,
+    });
+    const signedHello = framesOfType(signedSocket, "hello")[0] as Record<
+      string,
+      unknown
+    >;
+    assertEquals(signedHello.attach, proof);
+    presence.attach(plainSocket as unknown as WebSocket);
+    const plainHello = framesOfType(plainSocket, "hello")[0] as Record<
+      string,
+      unknown
+    >;
+    assertEquals("attach" in plainHello, false);
+  } finally {
+    presence.detach();
+    restore();
+  }
+});

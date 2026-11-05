@@ -44,7 +44,9 @@ async function harness(): Promise<Harness> {
     ws: ws as unknown as WebSocket,
     pin: panel.pin(),
     signing: await panel.signing(),
-    onVerified: (hello) => h.verified!.push(hello),
+    onVerified: (hello) => {
+      h.verified!.push(hello);
+    },
     onFrame: (json) => h.frames!.push(json),
     onPong: () => {
       h.pongs += 1;
@@ -144,4 +146,44 @@ test("a 4403 close from the control plane is a panel identity failure", async ()
   const h = await harness();
   h.session.noteClosed(4403, "panel-identity-unavailable");
   assertInstanceOf(h.session.failure, PanelIdentityError);
+});
+
+test("a frame that arrives while the verified-hello work runs waits for it", async () => {
+  const panel = await createTestPanel();
+  const ws = new MockWebSocket("wss://panel.example.test/ws/daemon/v1");
+  ws.open();
+  const order: string[] = [];
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const session = new SignedPanelSession({
+    ws: ws as unknown as WebSocket,
+    pin: panel.pin(),
+    signing: await panel.signing(),
+    onVerified: async () => {
+      await gate;
+      order.push("verified");
+    },
+    onFrame: (json) => order.push(JSON.parse(json).type),
+    onPong: () => {},
+    now: () => NOW_MS,
+    setTimer: () => 1,
+    clearTimer: () => {},
+  });
+  session.start();
+  const nonce = JSON.parse(ws.sentFrames[0]!).nonce;
+  const hello = session.handle(
+    await panel.hello({ nonce, sessionId: "s1", iat: NOW_S }),
+  );
+  const version = session.handle(
+    await panel.frame({ type: "version", features: [] }, {
+      sessionId: "s1",
+      seq: 1,
+      iat: NOW_S,
+    }),
+  );
+  release();
+  await Promise.all([hello, version]);
+  assertEquals(order, ["verified", "version"]);
 });

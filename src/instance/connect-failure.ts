@@ -36,6 +36,9 @@ const PERMANENT_AUTH_ERRORS: readonly StatusMessage[] = [
   // This server once ran a signed session and now sends a v1 proof: its pin
   // file is gone. Retrying cannot fix that; re-running the installer can.
   { status: 403, message: "Signed proof required" },
+  // Same cause one step later: the server once signed its requests with its
+  // key and now sends an unsigned session request (no pin, no signature).
+  { status: 403, message: "Signed request required" },
 ];
 
 /**

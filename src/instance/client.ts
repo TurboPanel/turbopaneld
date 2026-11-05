@@ -75,7 +75,14 @@ import {
   logWarn,
   sanitizeForLog,
 } from "../util/logger.ts";
-import { type DaemonKeyFile, loadDaemonKeyFile } from "../crypto/keys.ts";
+import {
+  type AttachProof,
+  DAEMON_SIGNATURE_HEADER,
+  type DaemonKeyFile,
+  loadDaemonKeyFile,
+  signAttachProof,
+  signDaemonRequest,
+} from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
 import {
   setTopologyGenerationOptional,
@@ -410,6 +417,8 @@ const INSTALL_READINESS_POLL_MS = 5_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
 const INSTANCE_RESTART_WAIT_MS = 120_000;
 
+/** Path of the daemon WebSocket, also the pathname its upgrade signature covers. */
+const DAEMON_WS_PATHNAME = "/ws/daemon/v1";
 const SERVER_ID_FILE = "server.id";
 const SERVER_KEY_FILE = "server-key.json";
 const KEY_ID_FILE = "server-key-id";
@@ -569,6 +578,8 @@ export class InstanceClient {
   #apiClient: DaemonApiClient | undefined;
   #tokenServerId: string | undefined;
   #tokenKeyId: string | undefined;
+  /** The daemon key (enrolled key id + private JWK) that signs requests and the attach proof. */
+  #daemonSigningKey: { keyId: string; privateJwk: JsonWebKey } | undefined;
   #sealingRegistration: ReturnType<typeof createSealingRegistration> | null =
     null;
   #forceEnrollPending = false;
@@ -959,9 +970,47 @@ export class InstanceClient {
     };
   }
 
+  /**
+   * The attach proof for a verified signed hello: the daemon key signs the
+   * session id, the control plane key, the server id and its key id. Without
+   * the key (or if signing fails) the hello goes out without one, as from an
+   * older daemon; a control plane that requires it closes the socket.
+   */
+  async #attachProofFor(
+    hello: VerifiedHello,
+    serverId: string,
+  ): Promise<AttachProof | undefined> {
+    const key = this.#daemonSigningKey;
+    if (!key) return undefined;
+    try {
+      return await signAttachProof(key, {
+        sessionId: hello.sessionId,
+        panelFingerprint: hello.kid,
+        serverId,
+      });
+    } catch (err) {
+      logWarn("instance", "attach proof failed:", sanitizeForLog(err));
+      return undefined;
+    }
+  }
+
   /** The pinned key's fingerprint while this server is pinned and the key is verified. */
   #pinnedPanelFingerprint(): string | undefined {
     return this.#panelPin ? this.#panelKey?.kid : undefined;
+  }
+
+  /**
+   * On a pinned server, every authenticated request (and `/auth/session`, for
+   * a key-bound token) carries a signature by the daemon key naming the
+   * pinned control plane key; null (no header) without a pin.
+   */
+  async #signRequestWithDaemonKey(
+    key: { keyId: string; privateJwk: JsonWebKey },
+    request: { method: string; pathname: string; body: string },
+  ): Promise<string | null> {
+    const panelFingerprint = this.#pinnedPanelFingerprint();
+    if (!panelFingerprint) return null;
+    return await signDaemonRequest(key, { ...request, panelFingerprint });
   }
 
   /**
@@ -1481,14 +1530,18 @@ export class InstanceClient {
     logDebug("instance", message);
   }
 
-  #newWebSocket(jwt: string): WebSocket {
-    const url = instanceWebSocketUrl(this.#config, "/ws/daemon/v1");
-    const options = this.#httpClient
+  #newWebSocket(jwt: string, upgradeSignature: string | null): WebSocket {
+    const url = instanceWebSocketUrl(this.#config, DAEMON_WS_PATHNAME);
+    // On a pinned server the upgrade is signed by the daemon key too.
+    const headers: Record<string, string> = upgradeSignature
       ? {
-        headers: { Authorization: `Bearer ${jwt}` },
-        client: this.#httpClient,
+        Authorization: `Bearer ${jwt}`,
+        [DAEMON_SIGNATURE_HEADER]: upgradeSignature,
       }
-      : { headers: { Authorization: `Bearer ${jwt}` } };
+      : { Authorization: `Bearer ${jwt}` };
+    const options = this.#httpClient
+      ? { headers, client: this.#httpClient }
+      : { headers };
 
     try {
       // Daemon WS auth requires Authorization header at upgrade time.
@@ -1599,6 +1652,8 @@ export class InstanceClient {
       this.#jwksClient = new DaemonJwksClient({ apiClient: jwksApiClient });
     }
 
+    const daemonSigningKey = { keyId, privateJwk: keyFile.privateJwk };
+    this.#daemonSigningKey = daemonSigningKey;
     const tokenManagerRef: { current?: DaemonTokenManager } = {};
     const sealing = createSealingContext({
       stateDir,
@@ -1630,6 +1685,8 @@ export class InstanceClient {
       },
       sealing,
       panelSealKey: () => panelSealKeys.get(),
+      signRequest: (request) =>
+        this.#signRequestWithDaemonKey(daemonSigningKey, request),
       onPlaintextSecretsAnswer: () => {
         void this.#sealingRegistration?.afterPlaintextAnswer();
       },
@@ -1729,8 +1786,8 @@ export class InstanceClient {
   }
 
   /** Presence, observers, reporters and the after-connect pulls, for one session. */
-  #startSessionWork(ws: WebSocket): void {
-    this.#idlePresence?.attach(ws);
+  #startSessionWork(ws: WebSocket, attachProof?: AttachProof): void {
+    this.#idlePresence?.attach(ws, { attachProof });
     this.#ensureHaObserver();
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
@@ -1807,7 +1864,14 @@ export class InstanceClient {
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
-    const ws = this.#newWebSocket(jwt);
+    const upgradeSignature = this.#daemonSigningKey
+      ? await this.#signRequestWithDaemonKey(this.#daemonSigningKey, {
+        method: "GET",
+        pathname: DAEMON_WS_PATHNAME,
+        body: "",
+      })
+      : null;
+    const ws = this.#newWebSocket(jwt, upgradeSignature);
     this.#ws = ws;
     let sessionRegistered = false;
     this.#ensureIdlePresence(serverId);
@@ -1874,9 +1938,13 @@ export class InstanceClient {
         ws,
         pin: this.#panelPin,
         signing: this.#panelKey,
-        onVerified: (hello) => {
+        onVerified: async (hello) => {
           logInfo("instance", "panel-identity: signed hello verified");
-          this.#startSessionWork(ws);
+          // Awaited by the session, so no later frame is handled before the
+          // presence hello (with the attach proof) and the session open.
+          const attachProof = await this.#attachProofFor(hello, serverId);
+          if (this.#ws !== ws) return;
+          this.#startSessionWork(ws, attachProof);
           this.#applySignedHello(hello);
           commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
         },
