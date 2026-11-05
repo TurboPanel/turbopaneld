@@ -3,6 +3,12 @@ Description=TurboPanel instance
 After=network-online.target docker.service turbopanel-system-stack.service
 Wants=network-online.target turbopanel-system-stack.service
 Requires=docker.service
+{% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
+# Co-located dev: a pre-start migration that keeps failing (see ExecStartPre)
+# stops the unit after four tries instead of retrying every RestartSec.
+StartLimitIntervalSec=120
+StartLimitBurst=4
+{% endif %}
 
 [Service]
 Type=simple
@@ -34,6 +40,16 @@ Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 # ../turbopanel src/dev-mode.ts (isExplicitDevelopmentMode) — it honors this
 # flag alone and fails closed without it.
 Environment=TURBOPANEL_DEV_SURFACE=1
+# Bring the dev database up to this checkout before every start, so a restart
+# never runs code against an older schema (the instance refuses to start on
+# one). The control plane's script backs up first (pg_dump in the database
+# container, into the same folder as the Update and Restart job), applies only
+# migrations that are on origin/trunk unchanged, and fails the start with one
+# plain line otherwise. A checkout from before the script skips the step.
+Environment=TURBOPANEL_DEV_MIGRATE_BACKUP_DIR={{ turbopanel_daemon_state_dir }}/dev-updates/backups
+ExecStartPre=/bin/sh -c 'test ! -f {{ turbopanel_instance_dir }}/scripts/dev-migrate-on-start.mjs || exec {{ turbopanel_node }} {{ turbopanel_instance_dir }}/scripts/dev-migrate-on-start.mjs'
+# A backup and migration can take longer than the default start timeout.
+TimeoutStartSec=20min
 {% endif %}
 {% if turbopanel_dev_user | length > 0 %}
 # Docs site (turbopanel-website on WEBSITE_PORT) fetches OpenAPI from Caddy cross-origin.
