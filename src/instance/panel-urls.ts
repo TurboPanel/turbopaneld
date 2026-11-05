@@ -22,9 +22,15 @@ import { stripTrailingSlashes } from "./sockets.ts";
 export const URL_CONNECT_TIMEOUT_MS = 3_000;
 export const URL_WRAP_BASE_MS = 5_000;
 export const URL_WRAP_CAP_MS = 5 * 60_000;
+/** Never retry a used-up list sooner than this. */
+export const URL_WRAP_FLOOR_MS = 1_000;
 
-/** `https://host[:port]`, no path, query, fragment, user info or spaces. */
-const ORIGIN = /^https:\/\/[^/?#@\\\s,]+$/;
+/**
+ * `https://host[:port]`: a DNS name, IPv4 or bracketed IPv6 literal and an
+ * optional port, nothing else (the same allow-list root applies in tp-host).
+ */
+const ORIGIN =
+  /^https:\/\/(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
 
 /** One address as the pin and the identity document carry it, or null. */
 export function normalizePanelUrl(value: unknown): string | null {
@@ -89,7 +95,8 @@ export function urlWrapDelayMs(
 ): number {
   const exponent = Math.max(0, Math.min(passes - 1, 16));
   const ceiling = Math.min(URL_WRAP_CAP_MS, URL_WRAP_BASE_MS * 2 ** exponent);
-  return Math.floor(random() * (ceiling + 1)); // NOSONAR typescript:S2245 — jitter timing only, not a security context
+  return URL_WRAP_FLOOR_MS +
+    Math.floor(random() * (ceiling - URL_WRAP_FLOOR_MS + 1)); // NOSONAR typescript:S2245 — jitter timing only, not a security context
 }
 
 /**
@@ -119,6 +126,8 @@ export class PanelUrlRotation {
   #index = 0;
   #passes = 0;
   #worst: ClassifiedConnectFailure | undefined;
+  /** A failure of this pass that only says the address was unreachable. */
+  #mild: ClassifiedConnectFailure | undefined;
   readonly #random: () => number;
 
   constructor(urls: readonly string[], random: () => number = Math.random) {
@@ -144,17 +153,23 @@ export class PanelUrlRotation {
   failOver(failure: ClassifiedConnectFailure): UrlFailover {
     const rank = FAIL_OVER_KINDS.indexOf(failure.kind);
     if (this.#urls.length < 2 || rank < 0) return { kind: "none" };
-    if (!this.#worst || rank >= FAIL_OVER_KINDS.indexOf(this.#worst.kind)) {
+    if (rank === 0) this.#mild ??= failure;
+    else if (
+      !this.#worst || rank >= FAIL_OVER_KINDS.indexOf(this.#worst.kind)
+    ) {
       this.#worst = failure;
     }
     this.#index += 1;
     if (this.#index < this.#urls.length) {
       return { kind: "next", url: this.active };
     }
-    const worst = this.#worst;
+    // Only a pass in which every address refused trust or identity parks; an
+    // address that was merely unreachable makes it a pass to retry.
+    const worst = this.#mild ?? this.#worst ?? failure;
     this.#index = 0;
     this.#passes += 1;
     this.#worst = undefined;
+    this.#mild = undefined;
     return {
       kind: "wrapped",
       url: this.active,
@@ -168,6 +183,7 @@ export class PanelUrlRotation {
     this.#index = 0;
     this.#passes = 0;
     this.#worst = undefined;
+    this.#mild = undefined;
   }
 
   /** A new list (the pin changed); the active address stays when it is still listed. */

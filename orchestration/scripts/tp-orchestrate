@@ -581,6 +581,7 @@ tp_load_update_origin_pin() {
 # server may reach its control plane at any of them.
 tp_pinned_host_ok() {
   [ -n "$1" ] || return 1
+  case "$1" in *,*) return 1 ;; esac
   [ "${1%/}" = "${_pin_host%/}" ] && return 0
   # Quoted, so a pattern character in the value matches only itself.
   case ",${_pin_hosts}," in

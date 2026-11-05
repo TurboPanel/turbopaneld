@@ -7,6 +7,7 @@ import {
   PanelUrlRotation,
   URL_WRAP_BASE_MS,
   URL_WRAP_CAP_MS,
+  URL_WRAP_FLOOR_MS,
   urlListsDiffer,
   urlWrapDelayMs,
 } from "./panel-urls.ts";
@@ -29,6 +30,15 @@ test("normalizePanelUrl keeps https origins and refuses anything with a path or 
   assertEquals(normalizePanelUrl("https://a.example/x"), null);
   assertEquals(normalizePanelUrl("https://u@a.example"), null);
   assertEquals(normalizePanelUrl("https://a.example,b"), null);
+  assertEquals(
+    normalizePanelUrl("https://[2001:db8::1]:8443"),
+    "https://[2001:db8::1]:8443",
+  );
+  for (
+    const bad of ["https://a\tb", "https://a{{x}}", "https://a$b", "https://-a"]
+  ) {
+    assertEquals(normalizePanelUrl(bad), null, bad);
+  }
   assertEquals(normalizePanelUrl(7), null);
 });
 
@@ -62,7 +72,7 @@ test("urlListsDiffer counts order", () => {
 });
 
 test("urlWrapDelayMs is full jitter between 0 and an exponential ceiling capped at 5 minutes", () => {
-  assertEquals(urlWrapDelayMs(1, () => 0), 0);
+  assertEquals(urlWrapDelayMs(1, () => 0), URL_WRAP_FLOOR_MS);
   assertEquals(urlWrapDelayMs(1, () => 0.999999), URL_WRAP_BASE_MS);
   assertEquals(urlWrapDelayMs(2, () => 0.999999), 2 * URL_WRAP_BASE_MS);
   assertEquals(urlWrapDelayMs(40, () => 0.999999), URL_WRAP_CAP_MS);
@@ -81,25 +91,27 @@ test("PanelUrlRotation tries each address in order, then wraps to URL 0 with a w
   assertEquals(wrapped, {
     kind: "wrapped",
     url: A,
-    delayMs: Math.floor(0.5 * (URL_WRAP_BASE_MS + 1)),
-    // The worst failure of the pass, not the last one.
-    worst: fail("panel-identity"),
+    delayMs: URL_WRAP_FLOOR_MS +
+      Math.floor(0.5 * (URL_WRAP_BASE_MS - URL_WRAP_FLOOR_MS + 1)),
+    // One address was only unreachable: a pass to retry, never a park.
+    worst: fail("transient"),
   });
 });
 
-test("PanelUrlRotation reports the worst failure of a pass, then starts the next pass afresh", () => {
+test("PanelUrlRotation reports a refusal only when every address of the pass refused", () => {
   const rotation = new PanelUrlRotation([A, B], () => 0);
-  rotation.failOver(fail("panel-identity", "bad key at A"));
-  const first = rotation.failOver(fail("transient", "B down"));
+  rotation.failOver(fail("tls-trust", "untrusted at A"));
+  const severe = rotation.failOver(fail("panel-identity", "bad key at B"));
   assertEquals(
-    first.kind === "wrapped" ? first.worst : null,
-    fail("panel-identity", "bad key at A"),
+    severe.kind === "wrapped" ? severe.worst : null,
+    fail("panel-identity", "bad key at B"),
   );
+  // URL 0 briefly down, URL 1 refusing: retried, so a short outage never parks.
   rotation.failOver(fail("transient", "A down"));
-  const second = rotation.failOver(fail("transient", "B down"));
+  const mixed = rotation.failOver(fail("panel-identity", "bad key at B"));
   assertEquals(
-    second.kind === "wrapped" ? second.worst : null,
-    fail("transient", "B down"),
+    mixed.kind === "wrapped" ? mixed.worst : null,
+    fail("transient", "A down"),
   );
 });
 

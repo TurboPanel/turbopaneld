@@ -1001,9 +1001,11 @@ With more than one address:
   `/etc/hosts`), so an address that does not resolve or connect is skipped.
 - A `transient`, `tls-trust` or `panel-identity` failure moves to the next
   address at once. When the list is used up the next pass starts at URL 0 after
-  a full-jitter wait (base 5 s, cap 5 min); a pass whose worst failure was
-  `tls-trust` or `panel-identity` parks with that failure, as one address does.
-  A failover is not undone by "a session opened". Other failures are global.
+  a full-jitter wait (1 s floor, 5 s base, 5 min cap). A pass parks only when
+  every address refused trust or identity (with the worst of those); one merely
+  unreachable address makes it a pass to retry. A `panel-identity` park never
+  forces a re-enroll on unpark. A failover is not undone by "a session opened".
+  Other failures are global.
 - Switching address drops the token manager, JWKS and API clients and the
   verified key: each address proves the pinned key (identity document, then the
   signed hello) before anything identifying is sent to it.
@@ -1012,8 +1014,15 @@ With more than one address:
   verifies it again and rewrites `urls=` and `hosts=`. A signed hello whose
   `urls` differ from the pin triggers one fresh document fetch per socket. A
   higher `keyset` is never followed here (signed key changes only).
+- An identity check whose address changed while it ran (a background re-check
+  outliving its socket) is dropped, so no address skips its own proof.
+- Addresses are allow-listed on both sides (`https://` + DNS name, IPv4 or
+  bracketed IPv6, optional port). A pin whose one address differs from
+  `TURBOPANEL_INSTANCE_URL` is a two-address list.
 - Managed updates pass the active address as `--host`; `tp-orchestrate`
-  accepts `host=` or any entry of `hosts=`.
+  accepts `host=` or any single entry of `hosts=` (never a comma). An update
+  run while on a fallback address moves `host=` and `TURBOPANEL_INSTANCE_URL`
+  to it; the dial order still follows the pin.
 
 ## Signed session (`panel-identity-v1`, `panel-signed-frames-v1`, `signin-v2`)
 

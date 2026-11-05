@@ -1066,8 +1066,9 @@ export class InstanceClient {
     }
     // The old key stays until a verified replacement: while pinned, a missing
     // key refuses everything rather than accepting unsigned answers.
+    const target = this.#config;
     const fetcher = new DaemonApiClient({
-      config: this.#config,
+      config: target,
       httpClient: this.#httpClient,
       getToken: () =>
         Promise.reject(new Error("token unavailable for identity fetch")),
@@ -1090,6 +1091,9 @@ export class InstanceClient {
       throw err;
     }
     const signing = await verifyPanelIdentityDocument(fetched, pin, nowMs);
+    // The address moved on while this ran (a background re-check outliving
+    // its socket): this proof belongs to the old address, never the new one.
+    if (this.#config !== target) return;
     this.#panelKey = { ...signing, fetchedAtMs: nowMs };
     await this.#followDocumentUrls(fetched, pin, signing.keyset);
   }
@@ -1309,11 +1313,11 @@ export class InstanceClient {
 
   /** Full-jitter sleep: random delay in [RECONNECT_FLOOR_MS, backoff ceiling] inclusive. */
   #nextReconnectDelayMs(): number {
+    const wide = this.#wideNextReconnect;
+    this.#wideNextReconnect = false;
     const override = this.#nextDelayOverrideMs;
     this.#nextDelayOverrideMs = undefined;
     if (override !== undefined) return override;
-    const wide = this.#wideNextReconnect;
-    this.#wideNextReconnect = false;
     return fullJitterMs(
       RECONNECT_FLOOR_MS,
       wide
@@ -1672,7 +1676,12 @@ export class InstanceClient {
     if (kind === "awaiting-administrator") {
       this.#forceEnrollPending = this.#unparkForcesEnroll;
       this.#unparkForcesEnroll = false;
-    } else if (kind !== "tls-trust" && kind !== "awaiting-seat") {
+    } else if (
+      kind !== "tls-trust" && kind !== "awaiting-seat" &&
+      kind !== "panel-identity"
+    ) {
+      // An unproven control plane is no reason to change anything here (see
+      // #enterParkedState): the same identity is tried again.
       this.#forceEnrollPending = true;
     }
     if (kind === "awaiting-license") {

@@ -5505,11 +5505,13 @@ tp_instance_cert_kept() {
 
 tp_panel_identity_python() {
   cat <<'PY'
-import base64, binascii, hashlib, json, sys
+import base64, binascii, hashlib, json, re, sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 PATH = "/api/daemon/v1/instance/identity"
+# https://host[:port]: a DNS name, IPv4 or bracketed IPv6 literal, nothing else.
+ORIGIN = re.compile(r"https://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
 body_path, header_path, out, pinned, pinned_keyset = sys.argv[1:6]
 out = Path(out)
 
@@ -5551,7 +5553,7 @@ if head_kid != kid or len(sig) != 64:
 if not isinstance(urls, list) or not urls:
     raise SystemExit("url list is empty")
 for url in urls:
-    if not isinstance(url, str) or not url.startswith("https://") or len(url) < 9 or any(c in url[8:] for c in "/?#@\\ ,\n"):
+    if not isinstance(url, str) or not ORIGIN.fullmatch(url):
         raise SystemExit("url list holds a bad entry")
 next_kid = nxt[0].get("kid", "") if nxt else ""
 if next_kid and len(b64d(next_kid)) != 32:

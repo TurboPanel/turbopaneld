@@ -600,6 +600,7 @@ test("tp-orchestrate update accepts any pinned control plane address for --host 
       "https://alt.example.com",
       "https://*",
       "https://alt.example.com:8443,https://evil.example",
+      "https://panel.example.com,https://alt.example.com:8443",
     ]
   ) {
     const refused = await runUpdateVerb(

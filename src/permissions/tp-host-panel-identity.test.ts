@@ -136,6 +136,14 @@ test("panel-identity-write refuses what the pin does not allow", async () => {
         "a url with a path",
         await panel.document({ urls: ["https://p.example/x"] }),
       ],
+      [
+        "a url with template or shell characters",
+        await panel.document({ urls: ["https://p{{x}}.example"] }),
+      ],
+      [
+        "a url with a tab",
+        await panel.document({ urls: ["https://p\t.example"] }),
+      ],
       ["no header", "{}"],
     ];
     for (const [label, input] of cases) {
