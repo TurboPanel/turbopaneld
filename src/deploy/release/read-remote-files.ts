@@ -21,8 +21,10 @@ import {
   writeCheckoutCredentialFiles,
 } from "./checkout.ts";
 import {
-  assertCloneUrlAllowed,
-  REPO_READ_GIT_PROTOCOLS,
+  gitProtocolArgs,
+  gitProtocolEnv,
+  PUBLIC_REMOTE,
+  type RepoGitTransport,
 } from "./clone-url-guard.ts";
 
 /** An operator is waiting on this, unlike a release checkout. */
@@ -57,32 +59,8 @@ export type ReadRemoteFilesResult = {
 
 type RunResult = { success: boolean; stdout: Uint8Array; stderr: string };
 
-/**
- * Which remotes a read may use and how git is pinned to them. The default
- * ({@link PUBLIC_REMOTE}) is the only one production uses: https and ssh to a
- * public host. A test passes a local-path transport to read a fixture
- * repository with real git.
- */
-export type RepoReadTransport = {
-  /** git transports allowed (`protocol.<name>.allow=always`, `GIT_ALLOW_PROTOCOL`). */
-  protocols: readonly string[];
-  /** Throws when the clone URL may not be read. */
-  checkUrl: (cloneUrl: string) => void;
-};
-
-export const PUBLIC_REMOTE: RepoReadTransport = {
-  protocols: REPO_READ_GIT_PROTOCOLS,
-  checkUrl: assertCloneUrlAllowed,
-};
-
-/** `-c` options that refuse every transport but the allowed ones. */
-function protocolArgs(protocols: readonly string[]): string[] {
-  return [
-    "-c",
-    "protocol.allow=never",
-    ...protocols.flatMap((name) => ["-c", `protocol.${name}.allow=always`]),
-  ];
-}
+/** Kept under its first name for the read tests and callers. */
+export type RepoReadTransport = RepoGitTransport;
 
 async function runGit(
   args: string[],
@@ -93,9 +71,9 @@ async function runGit(
 ): Promise<RunResult> {
   try {
     const command = new Deno.Command("git", {
-      args: [...protocolArgs(protocols), ...args],
+      args: [...gitProtocolArgs(protocols), ...args],
       cwd,
-      env: { ...env, GIT_ALLOW_PROTOCOL: protocols.join(":") },
+      env: { ...env, ...gitProtocolEnv(protocols) },
       clearEnv: true,
       stdout: "piped",
       stderr: "piped",

@@ -1,6 +1,8 @@
 /**
- * Which remotes a repository read may talk to (`repo-read-request`,
- * `repo-default-branch-request`).
+ * Which remotes the daemon may fetch a repository from: repository reads
+ * (`repo-read-request`, `repo-default-branch-request`) and release checkouts
+ * (`checkout.ts`) alike. Repositories must be on a public git host; there is
+ * no setting that lifts this.
  *
  * Only `https://host/...`, `ssh://[user@]host/...` and the scp-like
  * `user@host:path` are read. Everything else is refused before git runs:
@@ -12,15 +14,33 @@
  * DNS name is not resolved: a check before git's own lookup could be answered
  * differently a moment later, so it would promise more than it holds.
  *
- * git itself is also pinned to https and ssh for these reads
- * ({@link REPO_READ_GIT_PROTOCOLS}), so a transport the check missed, or a
- * redirect to another scheme, is refused by git too.
+ * git itself is also pinned to https and ssh ({@link REPO_READ_GIT_PROTOCOLS},
+ * {@link gitProtocolEnv}), so a transport the check missed, or a redirect to
+ * another scheme, is refused by git too. An https redirect to another host on
+ * the same scheme is not stopped here.
  */
 
 import { internalHostReason } from "../compose-build-policy.ts";
 
-/** The transports git may use for a repository read. */
+/** The transports git may use to fetch a repository. */
 export const REPO_READ_GIT_PROTOCOLS = ["https", "ssh"] as const;
+
+/**
+ * Which remotes a fetch may use and how git is pinned to them. The default
+ * ({@link PUBLIC_REMOTE}) is the only one production uses: https and ssh to a
+ * public host. A test passes a local-path transport to fetch a fixture
+ * repository with real git.
+ */
+export type RepoGitTransport = {
+  /** git transports allowed (`protocol.<name>.allow=always`, `GIT_ALLOW_PROTOCOL`). */
+  protocols: readonly string[];
+  /** Throws when the clone URL may not be fetched. */
+  checkUrl: (cloneUrl: string) => void;
+};
+
+/** Leading words of every refusal, so an operator knows what to change. */
+export const PUBLIC_GIT_HOST_REQUIRED =
+  "repositories must be on a public git host";
 
 /** `user@host:path`: the user and the host, before the first colon. */
 const SCP_LIKE_RE = /^([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):(.+)$/;
@@ -30,7 +50,9 @@ const HOST_START_RE = /^[A-Za-z0-9[]/;
 
 export class CloneUrlRefusedError extends Error {
   constructor(reason: string) {
-    super(`this repository address is refused: ${reason}`);
+    super(
+      `this repository address is refused: ${PUBLIC_GIT_HOST_REQUIRED} (${reason})`,
+    );
     this.name = "CloneUrlRefusedError";
   }
 }
@@ -65,7 +87,7 @@ function hostOf(cloneUrl: string): string {
   return scp[2]!;
 }
 
-/** Throws {@link CloneUrlRefusedError} unless a repository read may use `cloneUrl`. */
+/** Throws {@link CloneUrlRefusedError} unless the daemon may fetch from `cloneUrl`. */
 export function assertCloneUrlAllowed(cloneUrl: string): void {
   // A backslash is read as `/` by the URL parser here but not by every git
   // transport, so the host checked could differ from the host git dials.
@@ -85,4 +107,29 @@ export function assertCloneUrlAllowed(cloneUrl: string): void {
   if (internal !== null) {
     throw new CloneUrlRefusedError(`its host ${internal}`);
   }
+}
+
+/** https and ssh to a public host: the transport every production fetch uses. */
+export const PUBLIC_REMOTE: RepoGitTransport = {
+  protocols: REPO_READ_GIT_PROTOCOLS,
+  checkUrl: assertCloneUrlAllowed,
+};
+
+/** `-c` options that refuse every transport but the allowed ones. */
+export function gitProtocolArgs(protocols: readonly string[]): string[] {
+  return [
+    "-c",
+    "protocol.allow=never",
+    ...protocols.flatMap((name) => ["-c", `protocol.${name}.allow=always`]),
+  ];
+}
+
+/**
+ * `GIT_ALLOW_PROTOCOL` for the allowed transports. git reads it before any
+ * `protocol.*` setting, so on its own it refuses every other transport.
+ */
+export function gitProtocolEnv(
+  protocols: readonly string[],
+): Record<string, string> {
+  return { GIT_ALLOW_PROTOCOL: protocols.join(":") };
 }
