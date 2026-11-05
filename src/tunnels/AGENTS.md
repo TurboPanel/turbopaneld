@@ -80,10 +80,16 @@ then fails with the tunnel ids and plain reasons (never a token or an
 envelope) and the control plane sends the list again.
 
 The control plane's own tunnel (`instance`) arrives only as the `tunnel-token`
-message, and only a daemon on the control plane host (the co-located Unix
-socket) accepts it. A daemon that dials a URL answers `tunnel-token-result`
-with `ok: false` and `TUNNEL_TOKEN_REMOTE_REFUSAL` and never writes the token,
-whoever sends it. Provider API tokens (`cfut_`, `cfat_`) never reach a daemon;
+message, and only a daemon on the control plane host accepts it: it must dial
+the co-located Unix socket and `isControlPlaneHost()`
+(`src/instance/control-plane-host.ts`) must hold, which is decided from
+root-owned files only (`/opt/turbopanel/bin/turbopanel` is a root-owned
+regular file, the same test as `tp_colocated_host`; a development install run
+from its checkout with `TURBOPANEL_DEV_INSTANCE=1` counts too). Any other
+daemon answers `tunnel-token-result` with `ok: false` and
+`TUNNEL_TOKEN_REMOTE_REFUSAL` and never writes the token, whoever sends it.
+`public-urls-update` has the same host check and refuses with
+`PUBLIC_URLS_REMOTE_REFUSAL`, nothing written. Provider API tokens (`cfut_`, `cfat_`) never reach a daemon;
 the control plane redacts them in `features/tunnels/scrub.ts`, so the
 transcript redactor here keeps its no-heuristics rule.
 
