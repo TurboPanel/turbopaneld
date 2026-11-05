@@ -168,6 +168,44 @@ test("opted-in Workers HTTPS is not pre-opt-in", () => {
   );
 });
 
+test("opted-in co-located Workers dev never runs the managed boot converge", () => {
+  // The dev host on the Workers runtime dials https://localhost:8443, so its
+  // instance config is a URL like a remote managed server. daemon-converge.yml
+  // would then set the vendored Deno to root:tp 0750 and lock the developer's
+  // own control plane unit out of it.
+  withEnv(
+    {
+      TURBOPANEL_DEV_INSTANCE: "1",
+      TURBOPANEL_INSTANCE_RUNTIME: "workers",
+      TURBOPANEL_INSTANCE_URL: "https://localhost:8443",
+    },
+    () => {
+      assertEquals(shouldRunDaemonConverge(), false);
+      assertEquals(shouldEnableDockerIntegration(), true);
+    },
+  );
+});
+
+test("opted-in co-located socket dev never runs the managed boot converge", () => {
+  withEnv({ TURBOPANEL_DEV_INSTANCE: "1" }, () => {
+    assertEquals(shouldRunDaemonConverge(), false);
+  });
+});
+
+test("a remote URL daemon still runs the managed boot converge", () => {
+  withInstallMode("production", () => {
+    withEnv({ TURBOPANEL_INSTANCE_URL: "https://panel.example.com" }, () => {
+      assertEquals(shouldRunDaemonConverge(), true);
+    });
+  });
+  // A source checkout pointed at a remote control plane is not co-located.
+  withInstallMode("development", () => {
+    withEnv({ TURBOPANEL_INSTANCE_URL: "https://panel.example.com" }, () => {
+      assertEquals(shouldRunDaemonConverge(), true);
+    });
+  });
+});
+
 test("shouldEnableDockerIntegration stays off for opted-in Workers without URL kind fallthrough", () => {
   // DEV_INSTANCE + workers + URL → install-dev true (docker on). Document the
   // remaining false path via skip + remote is already covered; this pins the

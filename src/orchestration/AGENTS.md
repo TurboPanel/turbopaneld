@@ -58,7 +58,13 @@ and `runBootConverge` (`daemon-converge.yml`, about a minute and a half on a new
 host). An enrolled host runs both before it connects, as it always did. A host
 with no `server.id` yet (first start, daemon-only managed server) runs only the
 tools step, connects to the control plane, and converges in the background so
-the panel sees it within seconds. `boot-converge-gate.ts` holds command
+the panel sees it within seconds. The boot converge never runs on a co-located
+development host (`TURBOPANEL_DEV_INSTANCE=1`), on either runtime: on Workers
+that host dials `https://localhost:8443` like a remote server, but
+`daemon-converge.yml` is the managed-server playbook and sets the vendored Deno,
+Caddy and the log folder to `root:tp` / `tp:tp`, which locks the developer's
+own units out. The Developer Console's converge owns that host
+(`shouldRunDaemonConverge` in `setup.ts`). `boot-converge-gate.ts` holds command
 dispatch (after the ack) until that converge has finished, passed or failed, so
 no command runs a playbook on top of it. The fabric, forwarding, PHP and
 background checks that normally precede the connection run after a successful

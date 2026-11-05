@@ -116,9 +116,17 @@ export function shouldEnableDockerIntegration(): boolean {
 /**
  * True daemon-only managed servers (remote URL dial). These still auto-converge
  * on startup outside the dev-console deferred-start install path.
+ *
+ * Never a co-located development host, before or after its opt-in. On the
+ * Workers runtime that host also dials the control plane over HTTPS, but
+ * `daemon-converge.yml` is the managed-server playbook: it sets runtimes and
+ * logs to `root:tp` / `tp:tp`, which locks the developer's own services out of
+ * the vendored Deno and the log folder. The Developer Console's converge
+ * owns that host.
  */
 export function shouldRunDaemonConverge(): boolean {
   if (isPreOptInCoLocatedDev()) return false;
+  if (shouldInstallDevInstance()) return false;
   return resolveInstanceConfig().kind === "url";
 }
 
