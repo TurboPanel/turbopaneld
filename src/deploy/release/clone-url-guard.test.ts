@@ -60,8 +60,8 @@ test("internal hosts are refused", () => {
       "https://[fd00::1]/o/r.git",
       "https://[fe80::1]/o/r.git",
       "git@10.1.2.3:o/r.git",
-      "ssh://git@gitea.internal/o/r.git",
-      "https://gitea/o/r.git",
+      "ssh://git@gitserver.internal/o/r.git",
+      "https://gitserver/o/r.git",
       "https://2130706433/o/r.git",
     ]
   ) {

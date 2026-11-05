@@ -708,7 +708,7 @@ for (
     "https://10.0.0.5/o/r.git",
     "https://[::ffff:127.0.0.1]/o/r.git",
     "git@192.168.1.20:o/r.git",
-    "git@gitea:o/r.git",
+    "git@gitserver:o/r.git",
     "ssh://git@localhost/o/r.git",
   ]
 ) {
