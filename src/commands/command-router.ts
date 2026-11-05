@@ -234,6 +234,40 @@ const MAX_OUTCOME_ERROR_CHARS = 4000;
 const TRUNCATED_MARKER = "[...truncated] ";
 
 /**
+ * Largest `command-outcome.result` the daemon sends, as UTF-8 JSON bytes. The
+ * control plane caps it at 64 KB (`MAX_DAEMON_WS_RESULT_JSON_BYTES`); an older
+ * one refuses a larger result by closing the socket, and the kept outcome was
+ * then sent again on every reconnect.
+ */
+const MAX_OUTCOME_RESULT_BYTES = 64 * 1024;
+
+type OutcomeFields = { ok: boolean; result?: unknown; error?: string };
+
+/**
+ * A successful outcome whose result is over {@link MAX_OUTCOME_RESULT_BYTES}
+ * becomes a failed one without the result, with the same plain error the
+ * control plane records for it. Anything else is returned as it is.
+ */
+export function capOutcomeResult(fields: OutcomeFields): OutcomeFields {
+  if (!fields.ok || fields.result === undefined) return fields;
+  let bytes: number;
+  try {
+    const encoded = JSON.stringify(fields.result);
+    if (encoded === undefined) return fields;
+    bytes = new TextEncoder().encode(encoded).byteLength;
+  } catch {
+    return fields;
+  }
+  if (bytes <= MAX_OUTCOME_RESULT_BYTES) return fields;
+  return {
+    ok: false,
+    error: `The server's report was too large to store (${
+      Math.ceil(bytes / 1024)
+    } KB; limit ${MAX_OUTCOME_RESULT_BYTES / 1024} KB).`,
+  };
+}
+
+/**
  * Keep the **tail**: a failed build prints the cause last, and the head is
  * usually progress output. The full transcript stays on the command log
  * endpoint.
@@ -671,13 +705,24 @@ export async function handleCommandDispatch(
         break;
     }
 
+    const sized = capOutcomeResult({
+      ok,
+      result: ok ? result : undefined,
+      error: error ? sanitizeOutcomeError(error, logSink) : undefined,
+    });
+    if (ok && !sized.ok) {
+      logWarn(
+        "commands",
+        `command ${sanitizeForLog(message.id)} result is over ${
+          MAX_OUTCOME_RESULT_BYTES / 1024
+        } KB; sent as failed: ${sized.error}`,
+      );
+    }
     commandSucceeded = ok;
     await deliverCommandOutcome(ws, {
       type: "command-outcome",
       id: message.id,
-      ok,
-      result: ok ? result : undefined,
-      error: error ? sanitizeOutcomeError(error, logSink) : undefined,
+      ...sized,
       at: daemonRespondedAt,
       daemonReceivedAt,
       daemonRespondedAt,
