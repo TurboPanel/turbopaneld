@@ -382,7 +382,16 @@ test({
     "the co-located dev instance migrates its database (backup first) before every start",
   ignore: !JINJA_PYTHON,
   fn: async () => {
-    const unit = directives(await renderUnit(DEV_SOURCE_VARS));
+    const text = await renderUnit(DEV_SOURCE_VARS);
+    const unit = directives(text);
+    // StartLimit* only works in [Unit]; the rest belong to [Service].
+    const unitSection = text.slice(0, text.indexOf("[Service]"));
+    assert(/^StartLimitBurst=/m.test(unitSection), "StartLimitBurst in [Unit]");
+    assert(
+      /^StartLimitIntervalSec=/m.test(unitSection),
+      "StartLimitIntervalSec in [Unit]",
+    );
+    assert(!/^ExecStartPre=/m.test(unitSection), "ExecStartPre in [Service]");
     assertEquals(
       one(unit, "ExecStartPre"),
       "/bin/sh -c 'test ! -f /home/dev/turbopanel/turbopanel/scripts/dev-migrate-on-start.mjs || exec /opt/turbopanel/vendor/node/current/bin/node /home/dev/turbopanel/turbopanel/scripts/dev-migrate-on-start.mjs'",
@@ -397,8 +406,8 @@ test({
       (unit.get("Environment") ?? []).includes("TURBOPANEL_DEV_SURFACE=1"),
       "the script only acts with the dev surface flag",
     );
-    // A failing pre-start must stop, not retry against the database every 2 s.
-    assertEquals(one(unit, "StartLimitBurst"), "4");
+    // A refused pre-start must stop, not retry against the database every 2 s.
+    assertEquals(one(unit, "StartLimitBurst"), "10");
     assertEquals(one(unit, "StartLimitIntervalSec"), "120");
     assertEquals(one(unit, "TimeoutStartSec"), "20min");
   },

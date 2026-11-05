@@ -698,11 +698,16 @@ itself refuses to start on an older schema). The script backs up first
 (`pg_dump -Fc` in `turbopanel-database` into
 `<daemon state>/dev-updates/backups`, the Update and Restart job's folder),
 applies only migrations that are on `origin/trunk` unchanged, and otherwise
-fails the start with one plain line in `instance.err.log`. A checkout from
-before the script skips the step. `StartLimitBurst=4` in 120 s stops a failing
-pre-start instead of retrying every `RestartSec` (`RestartPreventExitStatus`
-does not cover `ExecStartPre`); `TimeoutStartSec=20min` leaves room for the
-backup. Production, compiled, static-UI and Workers units get none of it
+fails the start with one plain line in `instance.err.log`. A database that is
+still starting is waited for inside the script (up to a minute per try). A
+checkout from before the script skips the step. `StartLimitBurst=10` in 120 s
+stops a refused pre-start (about a second per try) instead of retrying every
+`RestartSec` (`RestartPreventExitStatus` does not cover `ExecStartPre`).
+Manual starts count toward it too; after the unit stops on the limit, fix the
+cause and run `sudo systemctl reset-failed turbopanel-instance`, then start it
+(or wait 120 s). A converge whose restart handler hits a refused migration now
+fails there instead of passing and leaving the instance to refuse later.
+`TimeoutStartSec=20min` leaves room for the backup. Production, compiled, static-UI and Workers units get none of it
 (pinned in `src/orchestration/instance-unit-sandbox.test.ts`).
 
 ### instance-launch secret keyring

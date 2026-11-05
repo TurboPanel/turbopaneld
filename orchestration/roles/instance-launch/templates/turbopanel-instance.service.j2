@@ -4,10 +4,13 @@ After=network-online.target docker.service turbopanel-system-stack.service
 Wants=network-online.target turbopanel-system-stack.service
 Requires=docker.service
 {% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
-# Co-located dev: a pre-start migration that keeps failing (see ExecStartPre)
-# stops the unit after four tries instead of retrying every RestartSec.
+# Co-located dev: a pre-start migration that is refused (see ExecStartPre)
+# fails in about a second, so it stops after ten tries instead of retrying
+# every RestartSec. A database that is still starting is waited for inside
+# the script (up to a minute per try), so it never reaches the limit. Manual
+# starts count too; after a stop: systemctl reset-failed turbopanel-instance.
 StartLimitIntervalSec=120
-StartLimitBurst=4
+StartLimitBurst=10
 {% endif %}
 
 [Service]
