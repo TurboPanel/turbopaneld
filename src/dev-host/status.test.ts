@@ -166,7 +166,7 @@ test("local content changes are reported as blocking", async () => {
     });
     const [part] = (await collector.collect(null)).parts;
     assertEquals(part.dirty.blocking, true);
-    assertEquals(part.blockedReason, "changed files: a.txt; not pulled");
+    assertEquals(part.blockedReason, "local changes in a.txt; not pulled");
   });
 });
 
@@ -211,7 +211,7 @@ test("blockedReasonFor names detached, behind and the changed files", () => {
   };
   assertEquals(
     blockedReasonFor(trunk, 2, dirty, undefined, null, ""),
-    "changed files: .gitconfig, a.ts, b.ts and 1 more, 2 behind trunk; not pulled",
+    "local changes in .gitconfig, a.ts, b.ts and 1 more, 2 behind trunk; not pulled",
   );
   // A capped list of only blocking paths cannot say how many more there are.
   assertEquals(
@@ -223,7 +223,7 @@ test("blockedReasonFor names detached, behind and the changed files", () => {
       null,
       "",
     ),
-    "changed files: a.ts and more; not pulled",
+    "local changes in a.ts and more; not pulled",
   );
   assertEquals(
     blockedReasonFor(trunk, 0, clean, "git status failed", null, ""),

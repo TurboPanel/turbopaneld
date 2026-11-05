@@ -30,8 +30,8 @@ and an action is answered `not_development`.
   `content` change, is reported and left alone. A refused fast-forward is the
   part's `blockedReason` (git's last line) until HEAD or `origin/trunk` moves.
   Every other `blockedReason` names the exact cause the bar shows: `detached
-  at 4f7b5ed, 19 behind trunk`, `on branch fix/x, not trunk`, or `changed
-  files: a.ts, b.ts and 2 more` (content changes only, at most three named).
+  at 4f7b5ed, 19 behind trunk`, `on branch fix/x, not trunk`, or `local
+  changes in a.ts, b.ts and 2 more` (content changes only, at most three named).
 - Mode-only changes, `website/next-env.d.ts`, untracked files and
   `.config/` / `.local/` / `.cache/` are shown and never block.
 - Migration always runs with a backup first: `pnpm migrate` in the control

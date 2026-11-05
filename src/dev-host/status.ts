@@ -386,13 +386,13 @@ function changedFilesText(dirty: DevHostDirty): string {
   let tail = "";
   if (!complete) tail = " and more";
   else if (more > 0) tail = ` and ${more} more`;
-  return `changed files: ${shown}${tail}`;
+  return `local changes in ${shown}${tail}`;
 }
 
 /**
  * Why a part is not pulled, in the exact words the bar shows: "detached at
  * 4f7b5ed, 19 behind trunk; not pulled", "on branch fix/x, not trunk; not
- * pulled", "changed files: .gitconfig; not pulled", or git's own line for a
+ * pulled", "local changes in .gitconfig; not pulled", or git's own line for a
  * refused fast-forward.
  */
 export function blockedReasonFor(
