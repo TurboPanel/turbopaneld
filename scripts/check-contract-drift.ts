@@ -257,9 +257,10 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
     ["src/daemon/authn/request-signature.ts", "REQUEST_PREFIX"],
     ["src/daemon/authn/attach-proof.ts", "ATTACH_PREFIX"],
   ];
-  for (const [file, name] of pairs) {
+  const sources = await Promise.all(pairs.map(([file]) => readRel(tp, file)));
+  for (const [index, [file, name]] of pairs.entries()) {
     const left = requireText(
-      await readRel(tp, file),
+      sources[index],
       `${file} missing on the instance`,
     );
     requireEqual(
