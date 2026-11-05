@@ -47,6 +47,8 @@ const FUNCTIONS = [
   "tp_pin_file_field",
   "tp_resolve_panel_pin",
   "tp_write_panel_identity_pin",
+  "tp_learn_panel_identity",
+  "tp_write_update_origin_pin",
 ];
 
 async function lifted(): Promise<string> {
@@ -57,6 +59,7 @@ async function lifted(): Promise<string> {
 const STUBS = `
 tp_print_step() { :; }
 tp_print_ok() { :; }
+tp_print_detail() { :; }
 tp_print_error() { printf '%s\\n' "$1" >&2; }
 `;
 
@@ -68,7 +71,7 @@ type Panel = {
 };
 
 async function makePanel(
-  options: { expires?: string; keyset?: number } = {},
+  options: { expires?: string; keyset?: number; urls?: unknown[] } = {},
 ): Promise<Panel> {
   const pair = await crypto.subtle.generateKey("Ed25519", true, [
     "sign",
@@ -97,7 +100,7 @@ async function makePanel(
     ],
     seal: { kid: "s".repeat(43), alg: "X25519", pub: "AAAA" },
     keyset: options.keyset ?? 1,
-    urls: ["https://panel.example.test"],
+    urls: options.urls ?? ["https://panel.example.test"],
     issued: "2026-11-01T00:00:00.000Z",
     expires: options.expires ?? "2999-01-01T00:00:00.000Z",
   });
@@ -146,6 +149,7 @@ async function run(body: string, panel?: Panel, root?: string) {
     // The fake curl copies the fixtures to the -D and -o targets.
     `tp_instance_bootstrap_curl() { printf 'fakecurl'; }
 fakecurl() {
+  [ -f ${quote(join(dir, "body"))} ] || return 22
   while [ $# -gt 0 ]; do
     case "$1" in
       -D) cp ${quote(join(dir, "headers"))} "$2"; shift 2 ;;
@@ -415,4 +419,141 @@ test("a legacy install writes no pin file", async () => {
     () => false,
   );
   assertEquals(exists, false);
+});
+
+/** A host installed before panel keys (an update origin, no pin), updated with no TOKEN. */
+async function learnState(
+  panel: Panel | undefined,
+  vars = "",
+  originHost = "https://panel.example.test",
+): Promise<{ code: number; stdout: string; stderr: string; root: string }> {
+  const root = await Deno.makeTempDir();
+  await Deno.mkdir(join(root, "lib"));
+  await Deno.writeTextFile(
+    join(root, "lib/update-origin"),
+    `host=${originHost}\ndl_base=\ninstance_ca=\n`,
+  );
+  const result = await run(
+    [
+      "PANEL_FINGERPRINT=''; PANEL_NEXT_FINGERPRINT=''; PANEL_KEYSET=''; PANEL_URLS=''",
+      "TOKEN_PAYLOAD=''; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://panel.example.test",
+      vars,
+      "tp_resolve_panel_pin || exit 1",
+      'echo "resolved=$PIN_ACTION"',
+      "tp_learn_panel_identity",
+      'echo "action=$PIN_ACTION fp=$PANEL_FINGERPRINT hosts=$PIN_HOSTS"',
+      "DL_BASE=''; CA_PATH=/nonexistent; UPLOADED_TRUST_PATH=/nonexistent",
+      // Not root here: keep the mode, drop the owner and group.
+      `install() {
+  _a=""
+  while [ $# -gt 0 ]; do
+    case "$1" in -o|-g) shift 2 ;; *) _a="$_a $1"; shift ;; esac
+  done
+  # shellcheck disable=SC2086
+  command install $_a
+}`,
+      "tp_write_update_origin_pin",
+      "tp_write_panel_identity_pin",
+    ].join("\n"),
+    panel,
+    root,
+  );
+  return { ...result, root };
+}
+
+async function pinFile(root: string): Promise<string | null> {
+  return await Deno.readTextFile(join(root, "lib/panel-identity")).catch(
+    () => null,
+  );
+}
+
+test("an update of a host installed before panel keys learns the key with pinned_by=upgrade", async () => {
+  const panel = await makePanel({ keyset: 4 });
+  const state = await learnState(panel);
+  assertEquals(state.code, 0, state.stderr);
+  assertStringIncludes(state.stdout, "resolved=learn");
+  assertStringIncludes(
+    state.stdout,
+    `action=write fp=${panel.fingerprint} hosts=https://panel.example.test`,
+  );
+  const text = await pinFile(state.root);
+  assertStringIncludes(text ?? "", `current=${panel.fingerprint}\n`);
+  assertStringIncludes(text ?? "", "next=\n");
+  assertStringIncludes(text ?? "", "keyset=4\n");
+  assertStringIncludes(text ?? "", "urls=https://panel.example.test\n");
+  assertStringIncludes(text ?? "", "pinned_by=upgrade\n");
+  // The update origin names the same key, so the next update's checks agree.
+  const origin = await Deno.readTextFile(join(state.root, "lib/update-origin"));
+  assertStringIncludes(origin, `panel_key=${panel.fingerprint}\n`);
+  assertStringIncludes(origin, "hosts=https://panel.example.test\n");
+});
+
+test("learning on upgrade pins nothing when the document is missing, forged or not over trusted TLS", async () => {
+  const forged = await makePanel();
+  const cases: Array<[string, Panel | undefined, string]> = [
+    ["no identity document", undefined, ""],
+    [
+      "a body the signature does not cover",
+      { ...forged, body: forged.body.replace("panel.", "evil.") },
+      "",
+    ],
+    [
+      "a header naming another key",
+      { ...forged, header: `${"x".repeat(43)}:${forged.header.split(":")[1]}` },
+      "",
+    ],
+    ["insecure TLS", await makePanel(), "INSECURE_TLS=true"],
+    [
+      "an address with a newline",
+      await makePanel({
+        urls: ["https://p.example\ndl_base=https://p.example"],
+      }),
+      "",
+    ],
+    [
+      "an address with a comma",
+      await makePanel({ urls: ["https://p.example,https://q.example"] }),
+      "",
+    ],
+    [
+      "an address with a path",
+      await makePanel({ urls: ["https://p.example/run.sh"] }),
+      "",
+    ],
+    [
+      "another control plane than the enrolled one",
+      await makePanel(),
+      "HOST_URL=https://other.example.test",
+    ],
+  ];
+  for (const [label, panel, vars] of cases) {
+    const state = await learnState(panel, vars);
+    assertEquals(state.code, 0, `${label}: ${state.stderr}`);
+    assertStringIncludes(state.stdout, "action=none", label);
+    assertEquals(await pinFile(state.root), null, label);
+    const origin = await Deno.readTextFile(
+      join(state.root, "lib/update-origin"),
+    );
+    assertEquals(origin.includes("dl_base=https://p.example"), false, label);
+    assertStringIncludes(origin, "panel_key=\n", label);
+  }
+});
+
+test("learning on upgrade does not run with a TOKEN or on a fresh install", async () => {
+  // A fresh install with the older license value has no update origin yet.
+  const fresh = await pinState(
+    "",
+    "PANEL_FINGERPRINT=''; TOKEN_PAYLOAD=''; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://p.example",
+  );
+  assertStringIncludes(fresh.stdout, "action=none");
+  // A TOKEN with a key on a host with an update origin is a checked pin.
+  const withToken = await pinState(
+    `printf 'host=h\\n' > "$INSTALL_ROOT/lib/update-origin"`,
+    `PANEL_FINGERPRINT=${FP_A}; PANEL_NEXT_FINGERPRINT=''; PANEL_KEYSET=1; PANEL_URLS=https://p.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://p.example`,
+  );
+  assertStringIncludes(withToken.stdout, "action=write");
+  assertStringIncludes(
+    (await pinFile(withToken.root)) ?? "",
+    "pinned_by=install\n",
+  );
 });

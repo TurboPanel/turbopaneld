@@ -960,7 +960,7 @@ token's `panelFingerprint`, the document's `X-TurboPanel-Signature` header
 verifies, and the token's own signature verifies with that key. All of that
 happens before the first request to the panel. The older
 `TURBOPANEL_LICENSE` + `TURBOPANEL_HOST` + `TURBOPANEL_INSTANCE_CA_FINGERPRINT`
-form still works, pins nothing and writes no pin file.
+form still works and, on a fresh install, pins nothing and writes no pin file.
 
 - `/opt/turbopanel/lib/panel-identity` (`current`, `next`, `keyset`, `urls`,
   `pinned_by`, `updated`; root:tp 0640) is written by `run.sh` after the tp
@@ -981,6 +981,21 @@ form still works, pins nothing and writes no pin file.
   must hash to the fingerprint pinned for its role (old current, offline next),
   `keyset` must rise and the new current key must be the pinned next key. A
   rotation also rewrites `panel_key=` in `lib/update-origin`.
+- A host installed before panel keys (an update origin, no pin file) learns
+  the key on its first managed update with no TOKEN: once the trust files are
+  in place, `tp_learn_panel_identity` fetches the identity document from
+  `HOST_URL` with the host's existing TLS trust (never `--insecure-tls`, and
+  only when `HOST_URL` is the update origin's `host=`), checks its header
+  signature with the key it names, and pins that key with `pinned_by=upgrade`,
+  the document's key set and address list. Every address must be exactly
+  `https://host[:port]` (they become pin and update-origin lines). A missing,
+  forged or keyless document, or a bad address, leaves the host unpinned and
+  the update goes on. TLS is what vouches for the learned key (the design
+  learned it over the daemon session; same trust). A host installed with
+  `--unsafe-no-panel-key` keeps its pin file and never learns; reinstalling it
+  with a fresh command pins it.
+  A fresh install with the older license value has no update origin and
+  still pins nothing.
 - `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
   contains that flag; after an older installer ran it restores the `panel_key=`
   line it dropped, so a move back to an older release does not break the pin.
