@@ -20,7 +20,16 @@ import {
   resolveInstanceConfig,
   resolveInstanceUploadedTrustPath,
   resolveServerIdentityDir,
+  urlInstanceConfig,
 } from "./sockets.ts";
+import {
+  identityDocumentUrls,
+  panelUrlCandidates,
+  PanelUrlRotation,
+  URL_CONNECT_TIMEOUT_MS,
+  urlListsDiffer,
+} from "./panel-urls.ts";
+import { writePanelPinFromDocument } from "./panel-pin-write.ts";
 import { caPinMismatch, CaPinMismatchError } from "./ca-pin.ts";
 import {
   type PanelIdentityPin,
@@ -91,7 +100,10 @@ import {
   topologyGenerationOptional,
 } from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
-import { createPanelSealKeySource } from "./panel-identity-cache.ts";
+import {
+  createPanelSealKeySource,
+  type PanelIdentityFetch,
+} from "./panel-identity-cache.ts";
 import {
   createSealingContext,
   createSealingRegistration,
@@ -114,6 +126,7 @@ import { runDockerSetup } from "../orchestration/ansible.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { sweepOrphanCommandLogs } from "../logs/orphan-sweep.ts";
 import {
+  type ClassifiedConnectFailure,
   classifyConnectFailure,
   permanentRejectionAdvice,
 } from "./connect-failure.ts";
@@ -334,6 +347,11 @@ export function registerCommandPorts(ports: CommandPorts): () => void {
 export interface InstanceClientOptions {
   config?: InstanceConfig;
   httpClient?: Deno.HttpClient;
+  /**
+   * Hand a verified identity document to root to rewrite the pin's address
+   * list (`tp-host panel-identity-write`). Tests replace it.
+   */
+  writePanelPin?: (fetched: PanelIdentityFetch) => Promise<void>;
   /** Initial reconnect delay; clamped to [DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS]. */
   reconnectDelayMs?: number;
   onMessage?: (message: DaemonMessage) => void;
@@ -557,7 +575,19 @@ type ParkedKind =
   | "panel-identity";
 
 export class InstanceClient {
-  readonly #config: InstanceConfig;
+  /** The active target: the installer's address, or the active entry of {@link #urls}. */
+  #config: InstanceConfig;
+  /** The target the process was configured with (`TURBOPANEL_INSTANCE_URL` or the socket). */
+  readonly #baseConfig: InstanceConfig;
+  /** A pinned server's address list when it holds more than one; else undefined. */
+  #urls: PanelUrlRotation | undefined;
+  /** A session opened since the last connect: start again at URL 0. */
+  #urlSessionOpened = false;
+  /** Wait before the next connect set by the address list (0 = at once); else the backoff. */
+  #nextDelayOverrideMs: number | undefined;
+  /** The signed hello's address list was compared with the pin on this socket. */
+  #helloUrlsChecked = false;
+  readonly #writePanelPin: (fetched: PanelIdentityFetch) => Promise<void>;
   #httpClient: Deno.HttpClient | undefined;
   readonly #httpClientPinned: boolean;
   readonly #initialBackoffMs: number;
@@ -685,6 +715,8 @@ export class InstanceClient {
 
   constructor(options: InstanceClientOptions = {}) {
     this.#config = options.config ?? resolveInstanceConfig();
+    this.#baseConfig = this.#config;
+    this.#writePanelPin = options.writePanelPin ?? writePanelPinFromDocument;
     this.#httpClient = options.httpClient;
     this.#httpClientPinned = options.httpClient !== undefined;
     this.#applyDevSyncTarball = Object.hasOwn(options, "applyDevSyncTarball")
@@ -1016,21 +1048,27 @@ export class InstanceClient {
   /**
    * On a pinned server: before anything is sent to the control plane, its
    * identity document must verify against the pin. Re-checked at most daily
-   * per HTTP client; a document that fails is a `PanelIdentityError`.
+   * per address (`force` skips that); a document that fails is a
+   * `PanelIdentityError`. A verified document whose address list differs
+   * from the pin's is followed into the pin file.
    */
-  async #verifyPanelIdentity(pin: PanelIdentityPin): Promise<void> {
+  async #verifyPanelIdentity(
+    pin: PanelIdentityPin,
+    force = false,
+  ): Promise<void> {
     const nowMs = now();
     const cached = this.#panelKey;
     if (
-      cached && nowMs - cached.fetchedAtMs < PANEL_KEY_REFRESH_MS &&
+      !force && cached && nowMs - cached.fetchedAtMs < PANEL_KEY_REFRESH_MS &&
       pinAccepts(pin, cached.kid) && cached.keyset >= pin.keyset
     ) {
       return;
     }
     // The old key stays until a verified replacement: while pinned, a missing
     // key refuses everything rather than accepting unsigned answers.
+    const target = this.#config;
     const fetcher = new DaemonApiClient({
-      config: this.#config,
+      config: target,
       httpClient: this.#httpClient,
       getToken: () =>
         Promise.reject(new Error("token unavailable for identity fetch")),
@@ -1053,13 +1091,138 @@ export class InstanceClient {
       throw err;
     }
     const signing = await verifyPanelIdentityDocument(fetched, pin, nowMs);
+    // The address moved on while this ran (a background re-check outliving
+    // its socket): this proof belongs to the old address, never the new one.
+    if (this.#config !== target) return;
     this.#panelKey = { ...signing, fetchedAtMs: nowMs };
+    await this.#followDocumentUrls(fetched, pin, signing.keyset);
+  }
+
+  /**
+   * Rewrite the pin's address list from a document that just verified. Root
+   * checks the signature again (`tp-host panel-identity-write`); a higher key
+   * set arrives only with a signed key change, never here. A refusal is
+   * logged and changes nothing: the old list keeps working.
+   */
+  async #followDocumentUrls(
+    fetched: PanelIdentityFetch,
+    pin: PanelIdentityPin,
+    keyset: number,
+  ): Promise<void> {
+    const urls = identityDocumentUrls(fetched.body);
+    if (!urls || keyset !== pin.keyset || !urlListsDiffer(urls, pin.urls)) {
+      return;
+    }
+    try {
+      await this.#writePanelPin(fetched);
+      const updated = await readEnforcedPin();
+      if (updated) {
+        this.#panelPin = updated;
+        this.#urls?.replace(this.#urlCandidates(updated));
+      }
+      logInfo(
+        "instance",
+        `panel-identity: control plane addresses updated to ${
+          sanitizeForLog(urls.join(","))
+        }`,
+      );
+    } catch (err) {
+      logWarn(
+        "instance",
+        "panel-identity: could not update the control plane addresses:",
+        sanitizeForLog(err),
+      );
+    }
+  }
+
+  /** The addresses a pinned server may dial, or none outside URL mode. */
+  #urlCandidates(pin: PanelIdentityPin | null): string[] {
+    const base = this.#baseConfig;
+    return pin && base.kind === "url"
+      ? panelUrlCandidates(pin.urls, base.baseUrl)
+      : [];
+  }
+
+  /**
+   * Point the connect attempt at the right address: the installer's one, or
+   * on a pinned server with several, the active entry of the list (URL 0
+   * again after a session that opened).
+   */
+  #selectPanelUrl(pin: PanelIdentityPin | null): void {
+    const candidates = this.#urlCandidates(pin);
+    if (candidates.length < 2) {
+      this.#urls = undefined;
+      this.#switchConfig(this.#baseConfig);
+      return;
+    }
+    if (this.#urls) this.#urls.replace(candidates);
+    else this.#urls = new PanelUrlRotation(candidates);
+    if (this.#urlSessionOpened) this.#urls.restart();
+    this.#urlSessionOpened = false;
+    this.#switchConfig(urlInstanceConfig(this.#urls.active));
+  }
+
+  /** Clients and the verified key belong to one address: the next proves itself afresh. */
+  #switchConfig(next: InstanceConfig): void {
+    if (describeInstance(next) === describeInstance(this.#config)) return;
+    this.#config = next;
+    this.#tokenManager = undefined;
+    this.#jwksClient = undefined;
+    this.#apiClient = undefined;
+    this.#panelKey = undefined;
+    logInfo(
+      "instance",
+      `control plane address: ${sanitizeForLog(this.target)}`,
+    );
+  }
+
+  /**
+   * After a connect failure on a list of several addresses: the next one at
+   * once (null: handled), or, when the list is used up, URL 0 after a
+   * jittered wait. A pass whose worst failure was about trust or identity is
+   * returned as that failure, so it parks the way one address does. Any other
+   * failure is returned unchanged for the caller's own handling.
+   */
+  #failOverPanelUrl(
+    classified: ClassifiedConnectFailure,
+  ): ClassifiedConnectFailure | null {
+    const step = this.#urls?.failOver(classified);
+    if (!step || step.kind === "none") return classified;
+    // An explicit move beats "a session opened": do not restart at URL 0.
+    this.#urlSessionOpened = false;
+    if (step.kind === "next") {
+      logWarn(
+        "instance",
+        `control plane at ${
+          sanitizeForLog(this.target)
+        } failed (${classified.kind}); trying ${sanitizeForLog(step.url)}`,
+      );
+      this.#nextDelayOverrideMs = 0;
+      return null;
+    }
+    if (step.worst.kind !== "transient") {
+      return step.worst;
+    }
+    logWarn(
+      "instance",
+      `every control plane address failed; retrying from ${
+        sanitizeForLog(step.url)
+      } in ${Math.round(step.delayMs / 1000)}s`,
+    );
+    this.#nextDelayOverrideMs = step.delayMs;
+    return null;
   }
 
   async fetchHealth(): Promise<{ ok: boolean }> {
+    // First contact with an address in a list: a name that does not resolve
+    // or connect through the system resolver is skipped after a short wait.
     const response = await fetch(
       instanceUrl(this.#config, "/api/health"),
-      this.#fetchInit(),
+      this.#fetchInit(
+        this.#urls
+          ? { signal: AbortSignal.timeout(URL_CONNECT_TIMEOUT_MS) }
+          : {},
+      ),
     );
     this.#noteInstanceVersionHeader(response);
     if (!response.ok) {
@@ -1152,6 +1315,9 @@ export class InstanceClient {
   #nextReconnectDelayMs(): number {
     const wide = this.#wideNextReconnect;
     this.#wideNextReconnect = false;
+    const override = this.#nextDelayOverrideMs;
+    this.#nextDelayOverrideMs = undefined;
+    if (override !== undefined) return override;
     return fullJitterMs(
       RECONNECT_FLOOR_MS,
       wide
@@ -1335,7 +1501,8 @@ export class InstanceClient {
     this.#backupCopyReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
-    const classified = classifyConnectFailure(err);
+    const classified = this.#failOverPanelUrl(classifyConnectFailure(err));
+    if (classified === null) return;
     if (classified.kind === "permanent") {
       await this.#enterParkedState(classified.reason, "permanent");
     } else if (classified.kind === "tls-trust") {
@@ -1509,7 +1676,12 @@ export class InstanceClient {
     if (kind === "awaiting-administrator") {
       this.#forceEnrollPending = this.#unparkForcesEnroll;
       this.#unparkForcesEnroll = false;
-    } else if (kind !== "tls-trust" && kind !== "awaiting-seat") {
+    } else if (
+      kind !== "tls-trust" && kind !== "awaiting-seat" &&
+      kind !== "panel-identity"
+    ) {
+      // An unproven control plane is no reason to change anything here (see
+      // #enterParkedState): the same identity is tried again.
       this.#forceEnrollPending = true;
     }
     if (kind === "awaiting-license") {
@@ -1728,10 +1900,12 @@ export class InstanceClient {
       // reached through a CA this server was not told to trust.
       throw new CaPinMismatchError(this.#caPinMismatch);
     }
-    await this.#waitForConnectPreconditions();
-    // The pin file, never the feature list, turns the signed session on.
-    // Pinned: the control plane proves its key before anything is sent to it.
+    // The pin file, never the feature list, turns the signed session on. It
+    // also names the addresses a pinned server may try.
     this.#panelPin = await readEnforcedPin();
+    this.#selectPanelUrl(this.#panelPin);
+    await this.#waitForConnectPreconditions();
+    // Pinned: the control plane proves its key before anything is sent to it.
     if (this.#panelPin) await this.#verifyPanelIdentity(this.#panelPin);
 
     // Do not close the active socket here: by the time #connectOnce() is called
@@ -1851,6 +2025,7 @@ export class InstanceClient {
   /** A verified hello sets the heartbeat; the unsigned `version` advice is ignored after it. */
   #applySignedHello(hello: VerifiedHello): void {
     this.#pinnedHelloApplied = true;
+    this.#checkHelloUrls(hello);
     const seconds = clampHeartbeatSeconds(hello.heartbeatSeconds);
     this.#idlePresence?.setIdleThresholdMs(
       seconds === null ? IDLE_PRESENCE_MS : seconds * 1000,
@@ -1861,6 +2036,27 @@ export class InstanceClient {
         ? "heartbeat 60s (default)"
         : `heartbeat ${seconds}s (signed hello)`,
     );
+  }
+
+  /**
+   * The signed hello names the control plane's addresses. When they differ
+   * from the pin's, fetch the identity document again (once per socket) and
+   * follow it: only a document root can verify changes the pin.
+   */
+  #checkHelloUrls(hello: VerifiedHello): void {
+    const pin = this.#panelPin;
+    if (this.#helloUrlsChecked || !pin) return;
+    this.#helloUrlsChecked = true;
+    if (hello.urls.length === 0 || !urlListsDiffer(hello.urls, pin.urls)) {
+      return;
+    }
+    this.#verifyPanelIdentity(pin, true).catch((err) => {
+      logWarn(
+        "instance",
+        "panel-identity: could not re-check the control plane addresses:",
+        sanitizeForLog(err),
+      );
+    });
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
@@ -1925,6 +2121,8 @@ export class InstanceClient {
     );
 
     sessionRegistered = true;
+    this.#urlSessionOpened = true;
+    this.#helloUrlsChecked = false;
     this.#hadStableSession = true;
     // The feature list arrives with this socket's attach frame, after the
     // observers below attach: until then nothing may read it as "unsupported".
@@ -2938,7 +3136,11 @@ export class InstanceClient {
       );
     }
 
-    const instanceUrl = env.TURBOPANEL_INSTANCE_URL?.trim();
+    // On a list of addresses, the one this server reaches now: root accepts
+    // any address in the update origin's `hosts=`.
+    const instanceUrl = this.#urls && this.#config.kind === "url"
+      ? this.#config.baseUrl
+      : env.TURBOPANEL_INSTANCE_URL?.trim();
     const instanceCaPath = resolveInstanceCaPath(env);
     const uploadedTrustPath = resolveInstanceUploadedTrustPath(env);
     const dlBase = env.TURBOPANEL_DL_BASE?.trim();

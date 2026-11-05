@@ -22,23 +22,11 @@ import {
   withTempLayout,
 } from "../testing/index.ts";
 import { waitFor } from "../testing/wait-for.ts";
-import { createTestPanel, type TestPanel } from "../testing/panel-signing.ts";
+import { createTestPanel } from "../testing/panel-signing.ts";
 
 wireCommandPorts();
 
 const SERVER = { serverId: "srv-pinned", keyId: "kid-pinned" };
-
-/** The same answer, signed by the test control plane over its path and exact body. */
-async function signed(
-  panel: TestPanel,
-  path: string,
-  response: Response,
-): Promise<Response> {
-  const body = await response.text();
-  const headers = new Headers(response.headers);
-  headers.set("x-turbopanel-signature", await panel.httpHeader(path, body));
-  return new Response(body, { status: response.status, headers });
-}
 
 function setOptionalEnv(key: string, value: string | undefined): void {
   if (value === undefined) Deno.env.delete(key);
@@ -91,13 +79,15 @@ it({
       api.script(
         "/api/daemon/v1/jwks.json",
         () =>
-          signed(panel, "/api/daemon/v1/jwks.json", jwksResponse(jwtSigning)),
+          panel.signedResponse(
+            "/api/daemon/v1/jwks.json",
+            jwksResponse(jwtSigning),
+          ),
       );
       api.script(
         "/api/daemon/v1/auth/challenge",
         () =>
-          signed(
-            panel,
+          panel.signedResponse(
             "/api/daemon/v1/auth/challenge",
             challengeResponse({ challengeId: "c1", nonce: "n1" }),
           ),
@@ -109,8 +99,7 @@ it({
         sessionBodies.push(
           await parseJsonBody(init) as Record<string, unknown>,
         );
-        return signed(
-          panel,
+        return panel.signedResponse(
           "/api/daemon/v1/auth/session",
           sessionResponse({ token }),
         );

@@ -84,6 +84,7 @@ export const TP_HOST_ONLY_VERBS: ReadonlySet<string> = new Set([
   "app-env-remove",
   "tunnel-env-install",
   "tunnel-env-remove",
+  "panel-identity-write",
   "instance-cert-install",
   "instance-cert-prune",
 ]);
