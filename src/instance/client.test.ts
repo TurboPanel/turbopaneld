@@ -21,6 +21,7 @@ import {
   InstanceClient,
   normalizeReconnectDelayMs,
   PARKED_BACKOFF_MIN_MS,
+  PUBLIC_URLS_REMOTE_REFUSAL,
   readKeyId,
   RECONNECT_FIRST_WINDOW_MS,
   RECONNECT_FLOOR_MS,
@@ -6081,6 +6082,11 @@ async function startConnectedClient(
     decrypt?: (ciphertexts: string[]) => (string | null)[];
     /** Dial the co-located instance socket (a self-hosted control-plane host). */
     socketMode?: boolean;
+    /**
+     * What the root-owned control plane binary check answers (default: this
+     * is the control plane host).
+     */
+    controlPlaneHost?: boolean;
   } = {},
 ): Promise<{
   client: InstanceClient;
@@ -6151,6 +6157,7 @@ async function startConnectedClient(
 
   const restoreDisk = installClientTestHooks({
     assertUpdateDiskPreflight: () => Promise.resolve(),
+    isControlPlaneHost: () => Promise.resolve(options.controlPlaneHost ?? true),
   });
   const client = new InstanceClient(clientOpts);
   client.start();
@@ -8119,6 +8126,78 @@ it({
       restoreClientTime();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name:
+    "a socket-mode daemon without the root-owned control plane binary refuses the tunnel token and public URLs",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const written: string[] = [];
+    let applyCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      writeInstanceTunnelToken: (token) => {
+        written.push(token);
+        return Promise.resolve();
+      },
+      applyPublicUrls: () => {
+        applyCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient({
+      decrypt: openSealedFixtures,
+      socketMode: true,
+      controlPlaneHost: false,
+    });
+    try {
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-not-host",
+        tokenEnvelope: SEALED_TUNNEL_ENVELOPE,
+        at: new Date().toISOString(),
+      });
+      const tunnel = await waitFor(
+        "refused tunnel-token-result",
+        () =>
+          framesOfType(socket, "tunnel-token-result").find((f) =>
+            (f as { id?: string }).id === "tun-not-host"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(tunnel.ok, false);
+      assertEquals(tunnel.error, TUNNEL_TOKEN_REMOTE_REFUSAL);
+
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-not-host",
+        urls: ["https://panel.example.test"],
+        hostnames: [{ host: "panel.example.test", source: "platform-ca" }],
+        at: new Date().toISOString(),
+      });
+      const urls = await waitFor(
+        "refused public-urls-update-result",
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === "urls-not-host"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(urls.ok, false);
+      assertEquals(urls.error, PUBLIC_URLS_REMOTE_REFUSAL);
+
+      assertEquals(written, []);
+      assertEquals(applyCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
     }
   },
 });
