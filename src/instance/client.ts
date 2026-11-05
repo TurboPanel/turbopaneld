@@ -159,9 +159,12 @@ import {
   writeHardwareProfile,
 } from "../metrics/collector/sensors/overrides.ts";
 import type { DrivetempEnableResult } from "../contracts/commands-contracts.ts";
-import { resolveUpdateChannelConfig } from "../update/config.ts";
+import type { UpdateChannelConfig } from "../update/config.ts";
 import type { UpdateChannel, UpdateInfo } from "../update/types.ts";
-import { decideUpdateChannel } from "./update-channel-pin.ts";
+import {
+  decideUpdateChannel,
+  hostUpdateChannel,
+} from "./update-channel-pin.ts";
 import {
   InsecureOverlayBaseError,
   MalformedManifestError,
@@ -3143,7 +3146,7 @@ export class InstanceClient {
     message: { channel?: string },
     env: Record<string, string | undefined>,
   ): UpdateChannel {
-    const hostChannel = resolveUpdateChannelConfig(env).channel;
+    const hostChannel = hostUpdateChannel(env);
     try {
       return decideUpdateChannel({
         hostChannel,
@@ -3161,7 +3164,7 @@ export class InstanceClient {
   }
 
   async #reconcileToLatestUpdate(
-    config: ReturnType<typeof resolveUpdateChannelConfig>,
+    config: UpdateChannelConfig,
     options: {
       verified: UpdateInfo;
       manifestUrl?: string;
@@ -3375,7 +3378,7 @@ export class InstanceClient {
     let errorCode: string | undefined;
     try {
       const env = Deno.env.toObject();
-      const config: ReturnType<typeof resolveUpdateChannelConfig> = {
+      const config: UpdateChannelConfig = {
         app: "daemon",
         channel: this.#updateChannelForMessage(message, env),
       };

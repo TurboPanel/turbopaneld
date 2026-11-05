@@ -35,6 +35,18 @@ function setOptionalEnv(key: string, value: string | undefined): void {
   else Deno.env.set(key, value);
 }
 
+/** The layout keys `withTempLayout` points at its temp dirs. */
+const LAYOUT_ENV_KEYS = [
+  "TURBOPANEL_CONFIG_DIR",
+  "TURBOPANEL_STATE_DIR",
+  "TURBOPANEL_LOG_DIR",
+  "TURBOPANEL_BACKUP_DIR",
+  "TURBOPANEL_RUN_DIR",
+  "TURBOPANEL_DAEMON_STATE_DIR",
+  "TURBOPANEL_RUNTIMES_DIR",
+  "TURBOPANEL_HOME",
+];
+
 type PinnedSession = {
   socket: MockWebSocket;
   panel: TestPanel;
@@ -53,7 +65,7 @@ type PinnedSession = {
 async function withPinnedClient(
   fn: (session: PinnedSession) => Promise<void>,
 ): Promise<void> {
-  const saved = ["TURBOPANEL_DAEMON_STATE_DIR", "TURBOPANEL_LIB_DIR"].map(
+  const saved = [...LAYOUT_ENV_KEYS, "TURBOPANEL_LIB_DIR"].map(
     (key) => [key, Deno.env.get(key)] as const,
   );
   const { sockets, restore: restoreWebSocket } = installTrackingWebSocket();
@@ -132,7 +144,11 @@ async function withPinnedClient(
           "",
         ].join("\n"),
       );
-      Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", stateDir);
+      // Every layout dir, not just the identity dir: an update writes its
+      // progress queue and active context under the layout's state dir.
+      for (const [key, value] of Object.entries(fixture.env)) {
+        Deno.env.set(key, value);
+      }
       Deno.env.set("TURBOPANEL_LIB_DIR", libDir);
       const daemonKey = await generateDaemonKeypair();
       await saveDaemonKeyFile(join(stateDir, "server-key.json"), daemonKey);

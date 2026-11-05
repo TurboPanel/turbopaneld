@@ -2,6 +2,7 @@ import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import {
   CHANNEL_PINNED_CODE,
   decideUpdateChannel,
+  hostUpdateChannel,
 } from "./update-channel-pin.ts";
 import { UpdatePreflightError } from "./run-reconcile.ts";
 
@@ -77,4 +78,22 @@ test("an unknown message channel falls back to the host channel", () => {
       "rc",
     );
   }
+});
+
+test("the host channel comes from daemon.env, release by default", () => {
+  assertEquals(hostUpdateChannel({}), "release");
+  assertEquals(
+    hostUpdateChannel({ TURBOPANEL_UPDATE_CHANNEL: "canary" }),
+    "canary",
+  );
+});
+
+test("an invalid daemon.env channel is refused as preflight_manifest", () => {
+  const err = assertThrows(
+    () => hostUpdateChannel({ TURBOPANEL_UPDATE_CHANNEL: "nightly" }),
+    UpdatePreflightError,
+  );
+  assertEquals(err.code, "preflight_manifest");
+  assertStringIncludes(err.message, "Invalid TURBOPANEL_UPDATE_CHANNEL");
+  assertStringIncludes(err.message, "re-run the installer on the host");
 });

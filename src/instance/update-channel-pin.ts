@@ -11,11 +11,34 @@
  * to change it is re-running the installer with `TURBOPANEL_UPDATE_CHANNEL`.
  */
 import type { UpdateChannel } from "../update/types.ts";
-import { isUpdateChannel } from "../update/config.ts";
+import {
+  isUpdateChannel,
+  resolveUpdateChannelConfig,
+} from "../update/config.ts";
 import { UpdatePreflightError } from "./run-reconcile.ts";
 
 /** `errorCode` on the update result when a message channel is refused. */
 export const CHANNEL_PINNED_CODE = "channel_pinned";
+
+/**
+ * The host channel from daemon.env. An invalid value is refused as
+ * `preflight_manifest` (the code missing-channel errors already use) instead
+ * of a bare error, so the control plane shows why nothing ran.
+ */
+export function hostUpdateChannel(
+  env: Record<string, string | undefined>,
+): UpdateChannel {
+  try {
+    return resolveUpdateChannelConfig(env).channel;
+  } catch (err) {
+    throw new UpdatePreflightError(
+      "preflight_manifest",
+      `${
+        err instanceof Error ? err.message : String(err)
+      }; re-run the installer on the host with a valid TURBOPANEL_UPDATE_CHANNEL`,
+    );
+  }
+}
 
 export type UpdateChannelDecisionInput = {
   /** The host channel (`resolveUpdateChannelConfig(env).channel`). */
