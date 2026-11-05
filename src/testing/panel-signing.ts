@@ -30,7 +30,7 @@ export interface TestPanel {
   signing(): Promise<PanelSigningKey>;
   pin(overrides?: Partial<PanelIdentityPin>): PanelIdentityPin;
   identityFetch(
-    opts?: { nowMs: number; keyset?: number },
+    opts?: { nowMs: number; keyset?: number; urls?: string[] },
   ): Promise<PanelIdentityFetch>;
   hello(
     fields: {
@@ -99,7 +99,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         }],
         seal: { kid: sealKid, alg: "X25519", pub: encodeBase64Url(sealPub) },
         keyset: opts.keyset ?? keyset,
-        urls: [],
+        urls: opts.urls ?? [],
         issued: new Date(opts.nowMs).toISOString(),
         expires: new Date(opts.nowMs + 30 * DAY_MS).toISOString(),
       });

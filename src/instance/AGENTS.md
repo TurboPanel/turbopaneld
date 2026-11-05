@@ -974,7 +974,9 @@ form still works, pins nothing and writes no pin file.
   panel can show it on the server row.
 - Only `tp-host panel-identity-write` changes the file afterwards. With no
   argument, stdin is the signature header line then the exact identity body; it
-  follows the pinned current key only (urls, next, keyset). With `statement`,
+  follows the pinned current key only (urls, next, keyset) and rewrites
+  `hosts=` in `lib/update-origin` to the same list (an empty list is refused).
+  With `statement`,
   stdin is a rotation or revoke statement carrying `signers` (public keys); each
   must hash to the fingerprint pinned for its role (old current, offline next),
   `keyset` must rise and the new current key must be the pinned next key. A
@@ -986,6 +988,31 @@ form still works, pins nothing and writes no pin file.
   presence (with a non-empty `current`) turns the signed session on; the
   unsigned feature list never does (`readEnforcedPin`, a pin file that exists
   but cannot be read parks `panel-identity`, never falls back).
+
+## Control plane address list (`src/instance/panel-urls.ts`)
+
+A pinned server dials the pin's `urls=` in order, then `TURBOPANEL_INSTANCE_URL`
+if the list lacks it; an unpinned one dials `TURBOPANEL_INSTANCE_URL` alone.
+With more than one address:
+
+- URL 0 first, and again after any session that opened. The first contact
+  (`/api/health`, no credentials) has a 3 s timeout through the system
+  resolver (a plain `fetch`, never `Deno.resolveDns`, which skips
+  `/etc/hosts`), so an address that does not resolve or connect is skipped.
+- A `transient`, `tls-trust` or `panel-identity` failure moves to the next
+  address at once. When the list is used up the next pass starts at URL 0 after
+  a full-jitter wait (base 5 s, cap 5 min); a full pass that ended in
+  `tls-trust` or `panel-identity` parks as before. Other failures are global.
+- Switching address drops the token manager, JWKS and API clients and the
+  verified key: each address proves the pinned key (identity document, then the
+  signed hello) before anything identifying is sent to it.
+- A verified identity document with the pinned `keyset` and a different `urls`
+  list is handed to `tp-host panel-identity-write` (`panel-pin-write.ts`), which
+  verifies it again and rewrites `urls=` and `hosts=`. A signed hello whose
+  `urls` differ from the pin triggers one fresh document fetch per socket. A
+  higher `keyset` is never followed here (signed key changes only).
+- Managed updates pass the active address as `--host`; `tp-orchestrate`
+  accepts `host=` or any entry of `hosts=`.
 
 ## Signed session (`panel-identity-v1`, `panel-signed-frames-v1`, `signin-v2`)
 

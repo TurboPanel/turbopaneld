@@ -573,6 +573,20 @@ tp_load_update_origin_pin() {
   _pin_uploaded="$(tp_pin_field uploaded_trust)"
   _pin_colocated="$(tp_pin_field colocated)"
   _pin_panel_key="$(tp_pin_field panel_key)"
+  _pin_hosts="$(tp_pin_field hosts)"
+}
+
+# True when $1 is the pinned host or one of the pinned control plane addresses
+# (hosts=, kept equal to the panel key pin's urls= by tp-host). A pinned
+# server may reach its control plane at any of them.
+tp_pinned_host_ok() {
+  [ -n "$1" ] || return 1
+  [ "${1%/}" = "${_pin_host%/}" ] && return 0
+  # Quoted, so a pattern character in the value matches only itself.
+  case ",${_pin_hosts}," in
+    *,"${1%/}",*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # After a run by an installer that predates the pin: its update origin has no
@@ -782,7 +796,7 @@ tp_verb_update() {
         ;;
       --host)
         [ $# -ge 2 ] || tp_die "--host requires a value"
-        [ "${2%/}" = "${_pin_host%/}" ] || tp_die "refusing --host $2: this host enrolled with $_pin_host"
+        tp_pinned_host_ok "$2" || tp_die "refusing --host $2: this host enrolled with $_pin_host"
         _host="$2"
         shift 2
         ;;
