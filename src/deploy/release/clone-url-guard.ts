@@ -75,24 +75,38 @@ function urlHost(cloneUrl: string, scheme: "https" | "ssh"): string {
   return parsed.hostname;
 }
 
-/** `ssh://user@host:port`: everything between the scheme and the first `/`. */
-function sshAuthority(cloneUrl: string): string {
-  const rest = cloneUrl.slice("ssh://".length);
+/**
+ * The only authority shape (`[user@]host[:port]`, between `scheme://` and the
+ * first `/`) a fetch may use: a plain user, a host name, IPv4 or bracketed
+ * IPv6 literal, and a numeric port. git hands everything before the first `/`
+ * to ssh as `user@host` and decodes it first, while the URL parser stops the
+ * host at `#` or `?` and leaves an `ssh:` host percent-encoded, so
+ * `ssh://git@github.com#@127.0.0.1/r` or `ssh://git@x%40127.0.0.1/r` would
+ * pass a check on the parsed host and dial 127.0.0.1. Allowing only this
+ * shape rules out `%`, `#`, `?`, a second `@` and anything else the two read
+ * differently.
+ */
+const AUTHORITY_RE =
+  /^(?:[A-Za-z0-9._-]+@)?(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
+
+function assertPlainAuthority(cloneUrl: string, scheme: "https" | "ssh") {
+  const rest = cloneUrl.slice(`${scheme}://`.length);
   const slash = rest.indexOf("/");
-  return slash === -1 ? rest : rest.slice(0, slash);
+  const authority = slash === -1 ? rest : rest.slice(0, slash);
+  if (!AUTHORITY_RE.test(authority)) {
+    throw new CloneUrlRefusedError(
+      "its user, host or port is not a plain name, address or number",
+    );
+  }
 }
 
 function hostOf(cloneUrl: string): string {
-  if (cloneUrl.startsWith("https://")) return urlHost(cloneUrl, "https");
+  if (cloneUrl.startsWith("https://")) {
+    assertPlainAuthority(cloneUrl, "https");
+    return urlHost(cloneUrl, "https");
+  }
   if (cloneUrl.startsWith("ssh://")) {
-    // The URL parser leaves an `ssh:` host percent-encoded, but git decodes
-    // the whole URL before it calls ssh: `ssh://git@x%40127.0.0.1/r` would
-    // pass the host check as `x%40127.0.0.1` and dial 127.0.0.1.
-    if (sshAuthority(cloneUrl).includes("%")) {
-      throw new CloneUrlRefusedError(
-        "an ssh address must not percent-encode its user or host",
-      );
-    }
+    assertPlainAuthority(cloneUrl, "ssh");
     return urlHost(cloneUrl, "ssh");
   }
   const scp = SCP_LIKE_RE.exec(cloneUrl);
