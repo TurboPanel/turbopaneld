@@ -688,6 +688,28 @@ converge (`instance-launch`); no data is touched.
 `src/orchestration/instance-unit-sandbox.test.ts` renders the unit and pins all
 of it. `scripts/canary-instance-sandbox-proof.sh` is the on-host proof.
 
+### instance-launch dev migrate before start
+
+On a co-located dev source install (the same condition that sets
+`TURBOPANEL_DEV_SURFACE=1`) the instance unit runs the control plane's
+`scripts/dev-migrate-on-start.mjs` as `ExecStartPre`, so every restart brings
+the dev database up to the checkout (owner decision 2026-11-05; the instance
+itself refuses to start on an older schema). The script backs up first
+(`pg_dump -Fc` in `turbopanel-database` into
+`<daemon state>/dev-updates/backups`, the Update and Restart job's folder),
+applies only migrations that are on `origin/trunk` unchanged, and otherwise
+fails the start with one plain line in `instance.err.log`. A database that is
+still starting is waited for inside the script (up to a minute per try). A
+checkout from before the script skips the step. `StartLimitBurst=10` in 120 s
+stops a refused pre-start (about a second per try) instead of retrying every
+`RestartSec` (`RestartPreventExitStatus` does not cover `ExecStartPre`).
+Manual starts count toward it too; after the unit stops on the limit, fix the
+cause and run `sudo systemctl reset-failed turbopanel-instance`, then start it
+(or wait 120 s). A converge whose restart handler hits a refused migration now
+fails there instead of passing and leaving the instance to refuse later.
+`TimeoutStartSec=20min` leaves room for the backup. Production, compiled, static-UI and Workers units get none of it
+(pinned in `src/orchestration/instance-unit-sandbox.test.ts`).
+
 ### instance-launch secret keyring
 
 The `instance-launch` role persists the control-plane root secret keyring under
