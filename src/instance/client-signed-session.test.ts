@@ -5,6 +5,7 @@ import { InstanceClient } from "./client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
   buildAttachSigningInput,
+  buildPinReportSigningInput,
   DAEMON_SIGNATURE_HEADER,
   generateDaemonKeypair,
   saveDaemonKeyFile,
@@ -212,6 +213,32 @@ it({
                 iat: presence.attach.iat,
               }),
               presence.attach.sig,
+            ),
+            true,
+          );
+
+          // The pin report on the same hello is signed with the daemon key.
+          assertEquals(
+            {
+              pinnedBy: presence.panelPin.pinnedBy,
+              current: presence.panelPin.current,
+              keyset: presence.panelPin.keyset,
+            },
+            { pinnedBy: "install", current: panel.kid, keyset: 1 },
+          );
+          assertEquals(
+            await verifyChallenge(
+              daemonKey.publicJwk,
+              buildPinReportSigningInput({
+                sessionId: "sess-1",
+                serverId: SERVER.serverId,
+                keyId: SERVER.keyId,
+                pinnedBy: "install",
+                current: panel.kid,
+                keyset: 1,
+                iat: presence.panelPin.iat,
+              }),
+              presence.panelPin.sig,
             ),
             true,
           );
