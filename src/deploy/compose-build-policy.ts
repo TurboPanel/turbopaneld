@@ -17,7 +17,7 @@
  *   link-local, unspecified, multicast or cloud-metadata address;
  * - a remote `build.context` / `additional_contexts` on an internal host (a
  *   non-public IP literal, a numeric host, `localhost`, a single-label or
- *   reserved name).
+ *   reserved name, or a local network ending such as `.lan`).
  *
  * Context, Dockerfile, additional-context and SSH key *paths* are confined by
  * `compose-host-paths.ts`, which resolves them on the host and refuses build
@@ -63,8 +63,22 @@ const REMOTE_OPT_IN =
 
 const ALLOWED_BUILD_NETWORKS = new Set(["default", "none"]);
 
-/** Names that never point at a public host. */
-const RESERVED_SUFFIXES = [".localhost", ".local", ".internal", ".arpa"];
+/**
+ * Names that never point at a public host: special-use suffixes, and the
+ * endings home and office networks use for their own hosts (owner decision
+ * 2026-11-05). The control plane refuses the same (`src/lib/internal-host.ts`).
+ */
+const RESERVED_SUFFIXES = [
+  ".localhost",
+  ".local",
+  ".internal",
+  ".arpa",
+  ".lan",
+  ".corp",
+  ".intranet",
+  ".private",
+  ".home",
+];
 
 /** A host label spelled the way `inet_aton` reads a number. */
 const NUMERIC_LABEL_RE = /^(?:0x[0-9a-f]*|\d+)$/i;
@@ -135,18 +149,37 @@ export function ipBytes(raw: string): number[] | null {
   return value.includes(":") ? ipv6Bytes(value) : ipv4Bytes(value);
 }
 
-/** The IPv4 address an IPv6 one delivers to (mapped, NAT64), or `null`. */
-function embeddedIpv4(b: number[]): number[] | null {
+type Scope = "internal" | "private" | "public";
+
+/**
+ * The IPv4 addresses an IPv6 one delivers to: mapped (`::ffff:a.b.c.d`), the
+ * old IPv4-compatible form (`::a.b.c.d`), NAT64 (`64:ff9b::/96`), 6to4
+ * (`2002::/16`, bytes 2 to 5) and Teredo (`2001::/32`, the server in bytes 4
+ * to 7 and the client, inverted, in the last four). Empty when there is none.
+ * Same set as the control plane's `embeddedIpv4` in `src/lib/ip-address.ts`.
+ */
+function embeddedIpv4(b: number[]): number[][] {
   const zeros = (from: number, to: number) =>
     b.slice(from, to).every((x) => x === 0);
-  if (zeros(0, 10) && b[10] === 0xff && b[11] === 0xff) return b.slice(12);
+  if (zeros(0, 10) && b[10] === 0xff && b[11] === 0xff) return [b.slice(12)];
+  // `::` and `::1` land here as 0.0.0.0 and 0.0.0.1, which are internal too.
+  if (zeros(0, 12)) return [b.slice(12)];
   if (b[0] === 0 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
-    return zeros(4, 12) ? b.slice(12) : null;
+    return zeros(4, 12) ? [b.slice(12)] : [];
   }
-  return null;
+  if (b[0] === 0x20 && b[1] === 0x02) return [b.slice(2, 6)];
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0 && b[3] === 0) {
+    return [b.slice(4, 8), b.slice(12).map((x) => x ^ 0xff)];
+  }
+  return [];
 }
 
-type Scope = "internal" | "private" | "public";
+/** How far a scope is from public: the least public embedded address wins. */
+const SCOPE_RANK: Record<Scope, number> = {
+  public: 0,
+  private: 1,
+  internal: 2,
+};
 
 /** AWS's IPv6 metadata endpoint, `fd00:ec2::254`, as bytes. */
 const AWS_V6_METADATA = [
@@ -171,10 +204,19 @@ function ipv4Scope([a, b, c, d]: number[]): Scope {
   return "public";
 }
 
+/** `64:ff9b:1::/48` is local-use NAT64 (RFC 8215): never public. */
+function isLocalNat64(b: number[]): boolean {
+  return b[0] === 0 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b &&
+    b[4] === 0 && b[5] === 1;
+}
+
 function ipv6Scope(b: number[]): Scope {
-  const v4 = embeddedIpv4(b);
-  if (v4 !== null) return ipv4Scope(v4);
-  if (b.slice(0, 15).every((x) => x === 0) && b[15] <= 1) return "internal";
+  const embedded = embeddedIpv4(b).map(ipv4Scope).reduce<Scope>(
+    (worst, scope) => SCOPE_RANK[scope] > SCOPE_RANK[worst] ? scope : worst,
+    "public",
+  );
+  if (embedded !== "public") return embedded;
+  if (isLocalNat64(b)) return "private";
   if (b[0] === 0xff || (b[0] === 0xfe && (b[1] & 0xc0) === 0x80)) {
     return "internal";
   }
@@ -362,8 +404,9 @@ function checkExtraHosts(ctx: Ctx, name: string, value: unknown): void {
 
 /**
  * Why a remote host is internal, or `null`. A static check: IP literals,
- * `localhost`, single-label and reserved-suffix names. A DNS name is not
- * resolved here. Also used by repository reads (`release/clone-url-guard.ts`).
+ * `localhost`, single-label names and reserved suffixes (local network
+ * endings such as `.lan` and `.home` included). A DNS name is not resolved
+ * here. Also used by repository reads (`release/clone-url-guard.ts`).
  */
 export function internalHostReason(rawHost: string): string | null {
   let host = rawHost.toLowerCase().replace(/^\[|\]$/g, "");

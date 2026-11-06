@@ -507,7 +507,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `secrets` whose top-level `file` is outside the dir (daemon-rewritten
   secrets pass), `extra_hosts` to `host-gateway`, loopback, link-local,
   unspecified, multicast or metadata addresses, and remote contexts on a
-  non-public IP, numeric, single-label or reserved host. A `RUN` step is root
+  non-public IP, numeric, single-label or reserved host (local network
+  endings such as `.lan` included). A `RUN` step is root
   on the engine until builds leave it (unprivileged-builds phase 2), and anyone
   who can deploy may define one. The control plane runs the same rules
   (`src/features/compose/build-policy.ts`).
