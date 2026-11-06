@@ -36,8 +36,12 @@ import {
 } from "./report-signing.ts";
 
 /**
- * Reports held while the feature list is unknown. The journaled outcomes are
- * sent again on the attach frame, so one past the bound is not lost.
+ * Reports held while the feature list is unknown. One past the bound is
+ * dropped with a warning and is not sent again on the attach frame (the
+ * outbox already counts it as sent on this socket): a control plane that
+ * confirms results gets it on the next resend, an older one never does. A
+ * session open sends at most `OUTCOME_BURST_MAX` (20) results, so the bound
+ * is not reached in practice.
  */
 export const MAX_HELD_REPORTS = 64;
 

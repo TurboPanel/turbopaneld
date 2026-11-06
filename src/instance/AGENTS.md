@@ -214,8 +214,9 @@ their order. No key, no feature, an unsigned session or a signing error: the
 frame goes out as before (a result is never lost). A report sent before this
 socket's attach frame (with the feature list) arrives is held, not sent
 unsigned, and goes out signed or as it is once the list is known
-(`peerFeaturesKnown`, called from `#notePeerFeatures`; at most 64 wait, the
-journal resends outcomes anyway). The reason: once a control plane has
+(`peerFeaturesKnown`, called from `#notePeerFeatures`). At most 64 wait;
+one past that is dropped and only comes back on the 30 s resend, but a
+session open sends at most 20 results, so the bound is not reached. The reason: once a control plane has
 verified one signed report from a server it records that the server signs,
 and from then on refuses its unsigned reports on signed sessions exactly like
 a bad signature (a refused result is acked as failed with `signature_invalid`
