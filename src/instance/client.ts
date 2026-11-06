@@ -641,6 +641,8 @@ export class InstanceClient {
   #peerFeatures: readonly string[] = [];
   /** The attach frame (which carries the feature list) has arrived on this socket. */
   #peerFeaturesKnown = false;
+  /** The current socket's signed session, when it is pinned. */
+  #signedSession: SignedPanelSession | undefined;
   /** Last unsupported version we already logged, so reconnects do not repeat it. */
   #loggedUnsupportedInstanceVersion: string | undefined;
   /** Why the trust files do not match the pinned CA list; null when they do. */
@@ -983,6 +985,7 @@ export class InstanceClient {
       this.#peerFeatures = [];
       setTopologySizesNegotiated(false);
       setTopologyGenerationOptional(false);
+      this.#releaseHeldReports();
       return;
     }
     const accepted: string[] = [];
@@ -997,6 +1000,12 @@ export class InstanceClient {
     // A change kept for an older control plane goes out once this one lists the feature.
     void this.#repoKeyReporter?.flush();
     this.#devHost?.peerFeaturesChanged();
+    this.#releaseHeldReports();
+  }
+
+  /** Reports held for the feature list go out now that it is known. */
+  #releaseHeldReports(): void {
+    this.#signedSession?.peerFeaturesKnown();
   }
 
   /** Hooks every `DaemonApiClient` this client builds gets: version notes and, when pinned, signed answers. */
@@ -2190,10 +2199,12 @@ export class InstanceClient {
         reportSigning: {
           key: () => this.#daemonSigningKey,
           enabled: () => this.instanceSupports(SIGNED_REPORTS_FEATURE),
+          known: () => this.#peerFeaturesKnown,
         },
         now,
       })
       : undefined;
+    this.#signedSession = signed;
     if (signed) signed.start();
     else this.#startSessionWork(ws);
 

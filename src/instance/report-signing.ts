@@ -3,9 +3,12 @@
  * `command-outcome` (a fabric reconcile result carries this host's
  * TurboFabric public key, which it hands to other servers) and on a
  * `fabric-peers-report` (peer health it reads as liveness), so on a signed
- * session these two are signed with the daemon key: a proxy or tunnel that
- * ends TLS between this server and the control plane cannot forge or alter
- * them.
+ * session these two are signed with the daemon key. A proxy or tunnel that
+ * ends TLS between this server and the control plane can still strip the
+ * signature, but a forged or altered signed report is detected, and once the
+ * control plane has seen this server sign it refuses unsigned reports. So a
+ * report is never sent unsigned just because the attach frame's feature list
+ * has not arrived yet (`signed-session.ts` holds it).
  *
  * Same byte rules as the control plane's signed frames
  * (`panel-identity-frames.ts`): the message gets the envelope members

@@ -10,7 +10,7 @@ import {
   type ReportSigningKey,
   signReportFrame,
 } from "./report-signing.ts";
-import { SignedPanelSession } from "./signed-session.ts";
+import { MAX_HELD_REPORTS, SignedPanelSession } from "./signed-session.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -107,15 +107,29 @@ test("a report that already uses an envelope member is not signed", async () => 
 
 type SessionHarness = {
   ws: MockWebSocket;
+  session: SignedPanelSession;
   sent: () => string[];
 };
+
+/** Records every send, even on a closed socket, so a missing state check shows. */
+class RecordingSocket extends MockWebSocket {
+  override send(data: string): void {
+    this.sentFrames.push(data);
+  }
+}
 
 async function verifiedSession(options: {
   key: ReportSigningKey | undefined;
   enabled: boolean;
+  /** Whether the attach frame's feature list has arrived; absent = no hold. */
+  known?: () => boolean;
+  recording?: boolean;
 }): Promise<SessionHarness> {
   const panel = await createTestPanel();
-  const ws = new MockWebSocket("wss://panel.example.test/ws/daemon/v1");
+  const url = "wss://panel.example.test/ws/daemon/v1";
+  const ws = options.recording
+    ? new RecordingSocket(url)
+    : new MockWebSocket(url);
   ws.open();
   const session = new SignedPanelSession({
     ws: ws as unknown as WebSocket,
@@ -127,6 +141,7 @@ async function verifiedSession(options: {
     reportSigning: {
       key: () => options.key,
       enabled: () => options.enabled,
+      ...(options.known ? { known: options.known } : {}),
     },
     now: () => NOW_MS,
     setTimer: () => 1,
@@ -137,7 +152,7 @@ async function verifiedSession(options: {
   await session.handle(
     await panel.hello({ nonce, sessionId: "s1", iat: NOW_S }),
   );
-  return { ws, sent: () => ws.sentFrames.slice(1) };
+  return { ws, session, sent: () => ws.sentFrames.slice(1) };
 }
 
 test("on a signed session with the feature, reports are signed and frames keep their order", async () => {
@@ -181,11 +196,67 @@ test("a report that cannot be signed still goes out, unsigned", async () => {
   assertEquals(h.sent(), [OUTCOME]);
 });
 
-test("a report queued when the socket closes is dropped, not thrown", async () => {
+test("a report queued when the socket closes is dropped, not sent", async () => {
   const key = await generateDaemonKeypair();
-  const h = await verifiedSession({ key, enabled: true });
+  const h = await verifiedSession({ key, enabled: true, recording: true });
   (h.ws as unknown as WebSocket).send(OUTCOME);
   h.ws.close();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await h.session.settled();
   assertEquals(h.sent(), []);
+});
+
+test("before the feature list arrives a report is held, then sent signed", async () => {
+  const key = await generateDaemonKeypair();
+  let known = false;
+  const h = await verifiedSession({ key, enabled: true, known: () => known });
+  const socket = h.ws as unknown as WebSocket;
+  socket.send(OUTCOME);
+  socket.send('{"type":"heartbeat"}');
+  // The heartbeat is not held behind the report.
+  assertEquals(h.sent(), ['{"type":"heartbeat"}']);
+  known = true;
+  h.session.peerFeaturesKnown();
+  await h.session.settled();
+  assertEquals(h.sent().length, 2);
+  assertEquals(await verifies(key.publicJwk, h.sent()[1]!), true);
+});
+
+test("a held report goes out as it is when the control plane does not list the feature", async () => {
+  const key = await generateDaemonKeypair();
+  let known = false;
+  const h = await verifiedSession({ key, enabled: false, known: () => known });
+  (h.ws as unknown as WebSocket).send(PEERS);
+  assertEquals(h.sent(), []);
+  known = true;
+  h.session.peerFeaturesKnown();
+  await h.session.settled();
+  assertEquals(h.sent(), [PEERS]);
+});
+
+test("a held report is dropped when the socket closes first", async () => {
+  const key = await generateDaemonKeypair();
+  const h = await verifiedSession({
+    key,
+    enabled: true,
+    known: () => false,
+    recording: true,
+  });
+  (h.ws as unknown as WebSocket).send(OUTCOME);
+  h.ws.close();
+  h.session.noteClosed(1000, "");
+  h.session.peerFeaturesKnown();
+  await h.session.settled();
+  assertEquals(h.sent(), []);
+});
+
+test("held reports past the bound are dropped", async () => {
+  const key = await generateDaemonKeypair();
+  let known = false;
+  const h = await verifiedSession({ key, enabled: false, known: () => known });
+  const socket = h.ws as unknown as WebSocket;
+  for (let i = 0; i < MAX_HELD_REPORTS + 3; i++) socket.send(OUTCOME);
+  known = true;
+  h.session.peerFeaturesKnown();
+  await h.session.settled();
+  assertEquals(h.sent().length, MAX_HELD_REPORTS);
 });
