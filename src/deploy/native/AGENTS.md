@@ -68,7 +68,7 @@ the unit starts. Per app:
 **Check before the switch.** Steps, as the transcript and the step rail name
 them:
 
-1. *Start the new release* (`start-release`). Publishing did not move
+1. *Start the New Release* (`start-release`). Publishing did not move
    `current`: for an app that is switched on and whose unit is active,
    `applySourceReleases` publishes with tp-host `publish-keep`
    (`promoteRelease`'s `keepCurrent`, asked through `nativeAppIsServing`), so a
@@ -94,19 +94,23 @@ them:
    before the copy's variables, so an interrupted deploy always leaves the
    marker its cleanup looks for. The app's own unit, variables file and
    `current` are not touched.
-2. *Check it answers* (`health`): the same probe as a first start, on the
-   spare port. When the copy does not start or does not answer, its journal
+2. *Check Service Health* (`health`): the same probe as a first start, on the
+   spare port. The probe is an HTTP request to the loopback port and any
+   status code counts as an answer, so the step ends as *Service Is Reachable*
+   ("Answered HTTP on 127.0.0.1:PORT after N s") and never claims healthy; a
+   silent app ends it as *Service Did Not Answer*. Only the first start and
+   the check beside the serving release report; a rollback's probe does not. When the copy does not start or does not answer, its journal
    goes to the transcript, the copy is stopped and removed, and the deploy
    fails saying the new release never took traffic and the release that was
    serving keeps serving. Nothing to roll back: nothing switched.
-3. *Switch traffic* (`switch-traffic`): the app's own variables file and unit
+3. *Switch Traffic* (`switch-traffic`): the app's own variables file and unit
    are written for the new release (reload only if the unit changed), the
    check copy is stopped (it shares the account's ceilings), `current` moves,
    and the app's own unit restarts on its own port — that is where the old
    release's process stops — and is probed again; only that answer marks the
    release healthy. A unit that does not restart or does not answer rolls
    back to the previous release when it once answered.
-4. *Stop the old release* (`stop-old-release`): the check copy's unit,
+4. *Stop the Old Release* (`stop-old-release`): the check copy's unit,
    variables copy and staged file are removed; the previous release stays on
    disk for a rollback (retention keeps five).
 
@@ -371,7 +375,7 @@ points to). Rules that are not obvious:
   `turbopanel-app-<id>.service`, only equal to the root copy's path for the same
   `<id>`, and only `app-env-install` / `app-env-remove` (a service id, never a
   path) touch that folder; no generic verb accepts a path in it (see the
-  `tp-host` bullet in `../../../AGENTS.md`). A new `tp-host` is needed before the
+  `tp-host` bullet in `../../../orchestration/scripts/AGENTS.md`). A new `tp-host` is needed before the
   daemon that calls the verbs (the update playbooks install it first).
 - Unlike the compose secret files (tmpfs `/run`, rehydrated after a reboot),
   the copy lives on disk under `/etc` so the unit can start at boot before the

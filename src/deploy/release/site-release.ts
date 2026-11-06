@@ -3,9 +3,10 @@
  * on, and which folder of the release the site serves.
  */
 
-import type {
-  EnvironmentDeployPayload,
-  EnvironmentDeploySite,
+import {
+  type EnvironmentDeployPayload,
+  type EnvironmentDeploySite,
+  isImageBuildKind,
 } from "../../contracts/commands-contracts.ts";
 import type { RuntimeChoice } from "../native/apply-native-apps.ts";
 
@@ -66,7 +67,7 @@ export function siteBuildRuntimes(
 ): RuntimeChoice[] {
   return (payload.sourceMaterial ?? [])
     .filter((entry) => siteForSource(payload, entry.composeServiceName))
-    .filter((entry) => entry.build.kind !== "railpack")
+    .filter((entry) => !isImageBuildKind(entry.build.kind))
     .map(() => ({}));
 }
 

@@ -94,6 +94,23 @@ export function setTopologySizesNegotiated(value: boolean): void {
   sizesNegotiated = value;
 }
 
+let generationOptional = false;
+
+/**
+ * Set from the control-plane attach (and cleared on close): `true` once it
+ * lists `topology-generation-optional-v1`. The generation is still tracked;
+ * it just stays off the wire (samples, `topology-report`, the
+ * `topology_generation_changed` event).
+ */
+export function setTopologyGenerationOptional(value: boolean): void {
+  generationOptional = value;
+}
+
+/** `true` while the attached control plane no longer needs the generation numbers. */
+export function topologyGenerationOptional(): boolean {
+  return generationOptional;
+}
+
 export type TopologyGenerationState = {
   generation: number;
   appliedAt: string;

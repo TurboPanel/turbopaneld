@@ -5,8 +5,11 @@ import {
   DockerMonitor,
 } from "../docker/index.ts";
 import { connectInstance, hasEnrolledServerId } from "../instance/client.ts";
+import { startDevHostIfEnabled } from "../dev-host/wire.ts";
+import type { DevHostPort } from "../dev-host/wire.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
+  armFabricPeerRefresh,
   reinstallFabricForwardingIfEnabled,
   restoreFabricFromPersistedState,
 } from "../commands/fabric.ts";
@@ -44,8 +47,14 @@ import {
   shouldConnectToInstance,
   shouldEnableDockerIntegration,
   shouldRunDaemonConverge,
+  shouldSkipOrchestration,
 } from "../orchestration/setup.ts";
 import { trackBootConverge } from "../orchestration/boot-converge-gate.ts";
+import {
+  abortableSleep,
+  markRuntimeUnverified,
+  retryBootConverge,
+} from "../orchestration/boot-converge-retry.ts";
 import {
   createMetricsCollector,
   stopHostStorageSamplers,
@@ -97,6 +106,18 @@ export type DaemonRunIo = {
   bootstrapOrchestration?: () => Promise<boolean>;
   /** The slow boot converge used on the connect-first path. */
   runBootConverge?: () => Promise<boolean>;
+  /**
+   * Background retry after a failed boot converge; defaults to
+   * {@link retryBootConverge} with the real timer. Receives the attempt and
+   * the steps to run once an attempt works.
+   */
+  retryBootConverge?: (
+    attempt: () => Promise<boolean>,
+    onRecovered: () => Promise<void>,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
+  /** Defaults to {@link shouldSkipOrchestration}. */
+  shouldSkipOrchestration?: () => boolean;
   restoreFabricFromPersistedState?: () => Promise<void>;
   /** Boot-time live-release link scan; defaults to {@link scanLiveReleases}. */
   scanLiveReleases?: () => Promise<void>;
@@ -127,7 +148,14 @@ export type DaemonRunIo = {
   connectInstance?: (opts: {
     metricsCollectorFactory: () => unknown;
     collectTopologyFn: () => unknown;
+    devHost?: DevHostPort;
   }) => Promise<{ stop(): void }>;
+  /**
+   * Start the co-located development host (`dev-host-v1`); null when this is
+   * not a development install with `TURBOPANEL_DEV_INSTANCE=1`. Defaults to
+   * {@link startDevHostIfEnabled}.
+   */
+  startDevHost?: () => (DevHostPort & { stop(): void }) | null;
   /**
    * Register the command result keeping (resend on attach, the result ack,
    * repeated dispatches, the hello report) with the client; returns the undo.
@@ -165,11 +193,15 @@ function closeDockerClient(client: DockerClientLike | undefined): void {
  */
 async function connectControlPlane(
   io: DaemonRunIo,
+  devHost?: DevHostPort,
 ): Promise<{ stop(): void }> {
+  // Also armed here: a host whose boot converge failed skips the boot
+  // restore but can still bring tp0 up through a reconcile.
+  if (!io.wireCommandPorts) armFabricPeerRefresh();
   const unwire = (io.wireCommandPorts ?? wireCommandPorts)();
   let instance: { stop(): void };
   try {
-    instance = await openControlPlane(io);
+    instance = await openControlPlane(io, devHost);
   } catch (err) {
     unwire();
     throw err;
@@ -184,6 +216,7 @@ async function connectControlPlane(
 
 async function openControlPlane(
   io: DaemonRunIo,
+  devHost?: DevHostPort,
 ): Promise<{ stop(): void }> {
   const connect = io.connectInstance;
   if (connect) {
@@ -191,11 +224,13 @@ async function openControlPlane(
       metricsCollectorFactory: () =>
         io.createMetricsCollector?.() ?? createMetricsCollector(),
       collectTopologyFn: () => io.collectTopology?.() ?? collectTopology(),
+      ...(devHost ? { devHost } : {}),
     });
   }
   return await connectInstance({
     metricsCollectorFactory: () => createMetricsCollector(),
     collectTopologyFn: () => collectTopology(),
+    ...(devHost ? { devHost } : {}),
   });
 }
 
@@ -389,6 +424,42 @@ async function bestEffort(
 }
 
 /**
+ * A failed boot converge is retried in the background (bounded, growing
+ * pauses) instead of leaving the daemon unverified until its next restart.
+ * Not when orchestration is switched off on purpose. A late success runs the
+ * steps that need a converged host; the Docker monitor is wired into the
+ * sentinel when it is created, so it still waits for the next restart.
+ */
+function scheduleBootRetry(
+  io: DaemonRunIo,
+  reinstallForwardingJumps: () => Promise<void>,
+  signal: AbortSignal,
+): void {
+  if ((io.shouldSkipOrchestration ?? shouldSkipOrchestration)()) return;
+  markRuntimeUnverified();
+  const attempt = async () =>
+    (await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)()) &&
+    (await (io.runBootConverge ?? runBootConverge)());
+  const onRecovered = () => afterOrchestration(io, reinstallForwardingJumps);
+  const run = io.retryBootConverge ??
+    ((a, r, s) =>
+      retryBootConverge({
+        attempt: a,
+        onRecovered: r,
+        signal: s,
+        sleep: abortableSleep,
+        log: (message) => (io.logWarn ?? logWarn)("orchestration", message),
+      }));
+  void run(attempt, onRecovered, signal).catch((err) => {
+    (io.logWarn ?? logWarn)(
+      "orchestration",
+      "boot converge retry stopped:",
+      err instanceof Error ? err.message : String(err),
+    );
+  });
+}
+
+/**
  * What a host does once its orchestration runtime is ready: put back its
  * fabric and forwarding rules, start site PHP runtimes, and kick off the
  * background checks. Runs before the connection on an enrolled host, and after
@@ -398,6 +469,9 @@ async function afterOrchestration(
   io: DaemonRunIo,
   reinstallForwardingJumps: () => Promise<void>,
 ): Promise<void> {
+  // The real host keeps tp0 peer readings fresh every 60 s; a test that
+  // stands in its own restore never starts that timer.
+  if (!io.restoreFabricFromPersistedState) armFabricPeerRefresh();
   await (io.restoreFabricFromPersistedState ??
     restoreFabricFromPersistedState)();
   await reinstallForwardingJumps();
@@ -512,11 +586,17 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     orchestrationReady =
       await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)();
 
-    if (orchestrationReady) {
+    if (!orchestrationReady) {
+      scheduleBootRetry(io, reinstallForwardingJumps, abort.signal);
+    } else {
       const converge = (io.runBootConverge ?? runBootConverge)();
       trackBootConverge(converge);
       void converge.then(async (ok) => {
-        if (!ok || abort.signal.aborted) return;
+        if (abort.signal.aborted) return;
+        if (!ok) {
+          scheduleBootRetry(io, reinstallForwardingJumps, abort.signal);
+          return;
+        }
         try {
           await afterOrchestration(io, reinstallForwardingJumps);
         } catch (err) {
@@ -532,6 +612,8 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     orchestrationReady = await (io.initOrchestration ?? initOrchestration)();
     if (orchestrationReady) {
       await afterOrchestration(io, reinstallForwardingJumps);
+    } else {
+      scheduleBootRetry(io, reinstallForwardingJumps, abort.signal);
     }
   }
 
@@ -560,9 +642,12 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
 
   const instanceHandle = { stop() {} };
   let instance: { stop(): void } = instanceHandle;
+  // Started before the connection so status.json is written even while the
+  // control plane is down (the Developer Console reads it).
+  const devHost = (io.startDevHost ?? startDevHostIfEnabled)();
 
   if ((io.shouldConnectToInstance ?? shouldConnectToInstance)()) {
-    instance = await connectControlPlane(io);
+    instance = await connectControlPlane(io, devHost ?? undefined);
   } else {
     info(
       "instance",
@@ -576,6 +661,7 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
       shuttingDown = true;
       info("daemon", "shutting down");
       instance.stop();
+      devHost?.stop();
       sentinel.stop();
       setServiceRunStateSource(undefined);
       (io.stopHostStorageSamplers ?? stopHostStorageSamplers)();

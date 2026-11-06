@@ -9,7 +9,6 @@ import {
 } from "../testing/fake-instance-api.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
-import { clearDaemonKeyState } from "./client.ts";
 import { enrollDaemon } from "./enroll.ts";
 
 /**
@@ -171,37 +170,6 @@ test({
       } finally {
         restore();
       }
-    });
-  },
-});
-
-test({
-  name: "clearDaemonKeyState removes key files but keeps server.id",
-  permissions: { read: true, write: true },
-  fn: async () => {
-    await withTempLayout(async (fixture) => {
-      const stateDir = fixture.dirs.stateDir;
-      await Deno.writeTextFile(join(stateDir, "server.id"), "srv-keep\n");
-      await Deno.writeTextFile(
-        join(stateDir, "server-key.json"),
-        JSON.stringify({ algorithm: "Ed25519" }),
-      );
-      await Deno.writeTextFile(join(stateDir, "server-key-id"), "kid-1\n");
-
-      await clearDaemonKeyState(stateDir);
-
-      assertEquals(
-        (await Deno.readTextFile(join(stateDir, "server.id"))).trim(),
-        "srv-keep",
-      );
-      await assertRejects(
-        () => Deno.stat(join(stateDir, "server-key.json")),
-        Deno.errors.NotFound,
-      );
-      await assertRejects(
-        () => Deno.stat(join(stateDir, "server-key-id")),
-        Deno.errors.NotFound,
-      );
     });
   },
 });

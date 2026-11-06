@@ -5,13 +5,28 @@ This file is generated from the resolved dependency graph. Do not edit it by han
 Third-party components remain under their own copyright and license terms and are not relicensed by TurboPanel Daemon's repository license (AGPL-3.0-only).
 
 <!-- lockfiles
-deno.lock sha256:b4e413d18b6b68272808cee6d903a05eaf4bbfbb61941e80b211a1a8f81020a8
+deno.lock sha256:bea90932721d7bb9b1c3f28ff7c2f27c8ab87b4e4d0e780563dd2937f2c94b13
 orchestration/requirements.lock.txt sha256:de1763b7773fd0d8686e715a7750d707b7cfcf341d79fab7dd01aa2358c3b69d
 orchestration/requirements.txt sha256:bcd5495ade36b7203ef5411fe77be58d740df3437810a00332203a1bbc162162
 orchestration/requirements.yml sha256:23a8d5078fc5e56246e822a0e30e88a10d58c0f252d708b034651274bee039f0
 -->
 
 ## Production dependencies
+
+### @hpke/chacha20poly1305@1.8.0
+
+- License: MIT
+- Source: deno.lock (npm)
+
+### @hpke/common@1.10.1
+
+- License: MIT
+- Source: deno.lock (npm)
+
+### @hpke/core@1.9.0
+
+- License: MIT
+- Source: deno.lock (npm)
 
 ### @std/internal@1.0.14
 

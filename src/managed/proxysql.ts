@@ -1124,6 +1124,19 @@ export function userUsesFastForward(
     user.role === "user" && !isSourceLimitedUser(user);
 }
 
+/**
+ * Whether a login's user row says `transaction_persistent=1` out loud: every
+ * tool login (the Database admin login and the backup login). A dump in one
+ * transaction (`--single-transaction`, `pg_dump`'s snapshot) must stay on one
+ * backend from its first statement to its last. ProxySQL's own default is
+ * the same; writing it keeps that true whatever the default becomes.
+ */
+export function userKeepsTransactionOnOneBackend(
+  user: ProxySqlUserDesired,
+): boolean {
+  return user.tool === true;
+}
+
 const warnedStraightThrough = new Set<string>();
 
 /** Logs once per login when `straightThrough` is sent for a login that cannot have it. */
@@ -1160,7 +1173,10 @@ function renderUserRow(
   const password = escapeProxySqlConfigString(user.password);
   const hostgroup = userDefaultHostgroup(cluster, user);
   const ssl = cluster.requireTls ? 1 : 0;
-  return `    { username="${name}" password="${password}" default_hostgroup=${hostgroup} active=1 use_ssl=${ssl}${fastForward}${defaultSchema} }`;
+  const persistent = userKeepsTransactionOnOneBackend(user)
+    ? " transaction_persistent=1"
+    : "";
+  return `    { username="${name}" password="${password}" default_hostgroup=${hostgroup} active=1 use_ssl=${ssl}${persistent}${fastForward}${defaultSchema} }`;
 }
 
 function renderUserRows(
@@ -1533,6 +1549,10 @@ function renderAdminUserInsert(
   if (user.maxConnections !== undefined) {
     columns += ",max_connections";
     values += `,${Math.trunc(user.maxConnections)}`;
+  }
+  if (userKeepsTransactionOnOneBackend(user)) {
+    columns += ",transaction_persistent";
+    values += ",1";
   }
   warnIgnoredStraightThrough(family, user);
   if (userUsesFastForward(family, user)) {

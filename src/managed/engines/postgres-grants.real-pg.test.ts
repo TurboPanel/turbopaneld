@@ -118,6 +118,58 @@ function sessionFor(name: string): Session {
   return { as, value };
 }
 
+/** What a test gets from {@link withRealPostgres}. */
+type RealPostgres = {
+  name: string;
+  session: Session;
+  ctx: ManagedEngineContext;
+};
+
+/**
+ * Start a throwaway `postgres:<series>` container, run `fn` against it and
+ * remove it. A container that does not become ready skips the test (or fails
+ * it under `TURBOPANEL_REQUIRE_REAL_POSTGRES=1`).
+ */
+async function withRealPostgres(
+  series: string,
+  prefix: string,
+  fn: (pg: RealPostgres) => Promise<void>,
+): Promise<void> {
+  const name = `${prefix}-pg${series}-${crypto.randomUUID().slice(0, 8)}`;
+  const started = await docker([
+    "run",
+    "-d",
+    "--rm",
+    "--name",
+    name,
+    "-e",
+    "POSTGRES_HOST_AUTH_METHOD=trust",
+    `postgres:${series}`,
+  ]);
+  try {
+    if (!started.success || !(await waitReady(name, 60))) {
+      if (REQUIRE) {
+        throw new Error(`postgres:${series} did not start: ${started.stderr}`);
+      }
+      console.warn(`skipping real Postgres ${series}: container not ready`);
+      return;
+    }
+    await fn({
+      name,
+      session: sessionFor(name),
+      ctx: {
+        containerId: name,
+        composeServiceName: "postgres",
+        rootUsername: "postgres",
+        defaultDatabase: "postgres",
+        exec: (argv, input) => docker(["exec", "-i", name, ...argv], input),
+      },
+    });
+  } finally {
+    await docker(["rm", "-f", name]);
+  }
+}
+
 function credential(
   username: string,
   databases: string[],
@@ -610,35 +662,7 @@ for (const series of SERIES) {
     sanitizeOps: false,
     sanitizeResources: false,
     fn: async () => {
-      const name = `tp-grants-pg${series}-${crypto.randomUUID().slice(0, 8)}`;
-      const started = await docker([
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        name,
-        "-e",
-        "POSTGRES_HOST_AUTH_METHOD=trust",
-        `postgres:${series}`,
-      ]);
-      try {
-        if (!started.success || !(await waitReady(name, 60))) {
-          if (REQUIRE) {
-            throw new Error(
-              `postgres:${series} did not start: ${started.stderr}`,
-            );
-          }
-          console.warn(`skipping real Postgres ${series}: container not ready`);
-          return;
-        }
-        const session = sessionFor(name);
-        const ctx: ManagedEngineContext = {
-          containerId: name,
-          composeServiceName: "postgres",
-          rootUsername: "postgres",
-          defaultDatabase: "postgres",
-          exec: (argv, input) => docker(["exec", "-i", name, ...argv], input),
-        };
+      await withRealPostgres(series, "tp-grants", async ({ session, ctx }) => {
         const applyAgain = async () => {
           await postgresManagedEngineRuntime.applyCredentials(ctx, CREDENTIALS);
         };
@@ -661,9 +685,7 @@ for (const series of SERIES) {
         assertEquals(await snapshot(session), before);
 
         await proveOldClusterIsCorrected(session, applyAgain);
-      } finally {
-        await docker(["rm", "-f", name]);
-      }
+      });
     },
   });
 }
@@ -682,163 +704,272 @@ for (const series of SERIES) {
     sanitizeOps: false,
     sanitizeResources: false,
     fn: async () => {
-      const name = `tp-ownerrole-pg${series}-${
-        crypto.randomUUID().slice(0, 8)
-      }`;
-      const started = await docker([
-        "run",
-        "-d",
-        "--rm",
-        "--name",
-        name,
-        "-e",
-        "POSTGRES_HOST_AUTH_METHOD=trust",
-        `postgres:${series}`,
-      ]);
-      try {
-        if (!started.success || !(await waitReady(name, 60))) {
-          if (REQUIRE) {
-            throw new Error(
-              `postgres:${series} did not start: ${started.stderr}`,
-            );
-          }
-          console.warn(`skipping real Postgres ${series}: container not ready`);
-          return;
-        }
-        const session = sessionFor(name);
-        const ctx: ManagedEngineContext = {
-          containerId: name,
-          composeServiceName: "postgres",
-          rootUsername: "postgres",
-          defaultDatabase: "postgres",
-          exec: (argv, input) => docker(["exec", "-i", name, ...argv], input),
-        };
-        const credentials = [
-          credential("migrate", ["shop"], ["owner"]),
-          credential("app", ["shop"], ["read-write"]),
-          credential("viewer", ["shop"], ["read-only"]),
-        ];
-        const apply = () =>
-          postgresManagedEngineRuntime.applyCredentials(ctx, credentials, {
-            ownerRoleDatabases: ["shop"],
-          });
-        await session.value(ensureOwnerRolesSql("shop"));
-        await session.value(
-          `CREATE DATABASE shop OWNER tp_shop_owner;`,
-        );
-        await apply();
+      await withRealPostgres(
+        series,
+        "tp-ownerrole",
+        async ({ session, ctx }) => {
+          const credentials = [
+            credential("migrate", ["shop"], ["owner"]),
+            credential("app", ["shop"], ["read-write"]),
+            credential("viewer", ["shop"], ["read-only"]),
+          ];
+          const apply = () =>
+            postgresManagedEngineRuntime.applyCredentials(ctx, credentials, {
+              ownerRoleDatabases: ["shop"],
+            });
+          await session.value(ensureOwnerRolesSql("shop"));
+          await session.value(
+            `CREATE DATABASE shop OWNER tp_shop_owner;`,
+          );
+          await apply();
 
-        await expectAllowed(
-          session,
-          "migrate",
-          "shop",
-          `CREATE TABLE public.parent (id int PRIMARY KEY);
+          await expectAllowed(
+            session,
+            "migrate",
+            "shop",
+            `CREATE TABLE public.parent (id int PRIMARY KEY);
            CREATE TABLE public.child (p int REFERENCES public.parent (id));
            INSERT INTO public.parent VALUES (1);`,
-        );
-        // Tables that existed before the next apply are covered by the same rules.
-        await apply();
-        await expectAllowed(
-          session,
-          "app",
-          "shop",
-          `INSERT INTO public.parent VALUES (2);
+          );
+          // Tables that existed before the next apply are covered by the same rules.
+          await apply();
+          await expectAllowed(
+            session,
+            "app",
+            "shop",
+            `INSERT INTO public.parent VALUES (2);
            UPDATE public.parent SET id = 3 WHERE id = 2;
            DELETE FROM public.parent WHERE id = 3;`,
-        );
-        await expectRefused(
-          session,
-          "app",
-          "shop",
-          `TRUNCATE public.parent;`,
-          "permission denied for table parent",
-        );
-        await expectRefused(
-          session,
-          "viewer",
-          "shop",
-          `SET default_transaction_read_only = off;\nTRUNCATE public.parent;`,
-          DENIED,
-        );
-        assertEquals(
-          await session.value(
-            `SELECT has_table_privilege('tp_shop_rw', 'public.parent', 'TRUNCATE') OR has_table_privilege('tp_shop_rw', 'public.parent', 'REFERENCES')`,
+          );
+          await expectRefused(
+            session,
+            "app",
             "shop",
-          ),
-          "f",
-        );
-        // The migration login still empties tables and adds foreign keys.
-        await expectAllowed(
-          session,
-          "migrate",
-          "shop",
-          `TRUNCATE public.child; CREATE TABLE public.second (p int REFERENCES public.parent (id));`,
-        );
-        // Tables made after the apply follow the same rules.
-        await expectAllowed(
-          session,
-          "migrate",
-          "shop",
-          `CREATE TABLE public.later (id int);`,
-        );
-        await apply();
-        await expectRefused(
-          session,
-          "app",
-          "shop",
-          `TRUNCATE public.later;`,
-          "permission denied for table later",
-        );
+            `TRUNCATE public.parent;`,
+            "permission denied for table parent",
+          );
+          await expectRefused(
+            session,
+            "viewer",
+            "shop",
+            `SET default_transaction_read_only = off;\nTRUNCATE public.parent;`,
+            DENIED,
+          );
+          assertEquals(
+            await session.value(
+              `SELECT has_table_privilege('tp_shop_rw', 'public.parent', 'TRUNCATE') OR has_table_privilege('tp_shop_rw', 'public.parent', 'REFERENCES')`,
+              "shop",
+            ),
+            "f",
+          );
+          // The migration login still empties tables and adds foreign keys.
+          await expectAllowed(
+            session,
+            "migrate",
+            "shop",
+            `TRUNCATE public.child; CREATE TABLE public.second (p int REFERENCES public.parent (id));`,
+          );
+          // Tables made after the apply follow the same rules.
+          await expectAllowed(
+            session,
+            "migrate",
+            "shop",
+            `CREATE TABLE public.later (id int);`,
+          );
+          await apply();
+          await expectRefused(
+            session,
+            "app",
+            "shop",
+            `TRUNCATE public.later;`,
+            "permission denied for table later",
+          );
 
-        // What an earlier release left: the group holds both, now and as a default.
-        await session.value(
-          `GRANT TRUNCATE, REFERENCES ON ALL TABLES IN SCHEMA public TO tp_shop_rw;
+          // What an earlier release left: the group holds both, now and as a default.
+          await session.value(
+            `GRANT TRUNCATE, REFERENCES ON ALL TABLES IN SCHEMA public TO tp_shop_rw;
            ALTER DEFAULT PRIVILEGES FOR ROLE tp_shop_owner GRANT TRUNCATE, REFERENCES ON TABLES TO tp_shop_rw;`,
-          "shop",
-        );
-        await expectAllowed(
-          session,
-          "app",
-          "shop",
-          `TRUNCATE public.later;`,
-        );
-        await apply();
-        await expectRefused(
-          session,
-          "app",
-          "shop",
-          `TRUNCATE public.later;`,
-          "permission denied for table later",
-        );
-        await expectAllowed(
-          session,
-          "migrate",
-          "shop",
-          `CREATE TABLE public.after_fix (id int);`,
-        );
-        assertEquals(
-          await session.value(
-            `SELECT has_table_privilege('tp_shop_rw', 'public.after_fix', 'INSERT'), has_table_privilege('tp_shop_rw', 'public.after_fix', 'TRUNCATE'), has_table_privilege('tp_shop_rw', 'public.after_fix', 'REFERENCES')`,
-            "shop",
-          ),
-          "t|f|f",
-        );
-
-        // A repeated apply rewrites no ACL.
-        const aclRows = () =>
-          session.value(
-            `SELECT (SELECT string_agg(xmin::text, ',' ORDER BY relname) FROM pg_class
-              WHERE relname IN ('parent', 'child', 'second', 'later', 'after_fix')) || '/' ||
-             (SELECT COALESCE(string_agg(defaclobjtype::text || defaclacl::text, ';' ORDER BY oid), '') FROM pg_default_acl)`,
             "shop",
           );
-        await apply();
-        const before = await aclRows();
-        await apply();
-        assertEquals(await aclRows(), before);
-      } finally {
-        await docker(["rm", "-f", name]);
-      }
+          await expectAllowed(
+            session,
+            "app",
+            "shop",
+            `TRUNCATE public.later;`,
+          );
+          await apply();
+          await expectRefused(
+            session,
+            "app",
+            "shop",
+            `TRUNCATE public.later;`,
+            "permission denied for table later",
+          );
+          await expectAllowed(
+            session,
+            "migrate",
+            "shop",
+            `CREATE TABLE public.after_fix (id int);`,
+          );
+          assertEquals(
+            await session.value(
+              `SELECT has_table_privilege('tp_shop_rw', 'public.after_fix', 'INSERT'), has_table_privilege('tp_shop_rw', 'public.after_fix', 'TRUNCATE'), has_table_privilege('tp_shop_rw', 'public.after_fix', 'REFERENCES')`,
+              "shop",
+            ),
+            "t|f|f",
+          );
+
+          // A repeated apply rewrites no ACL.
+          const aclRows = () =>
+            session.value(
+              `SELECT (SELECT string_agg(xmin::text, ',' ORDER BY relname) FROM pg_class
+              WHERE relname IN ('parent', 'child', 'second', 'later', 'after_fix')) || '/' ||
+             (SELECT COALESCE(string_agg(defaclobjtype::text || defaclacl::text, ';' ORDER BY oid), '') FROM pg_default_acl)`,
+              "shop",
+            );
+          await apply();
+          const before = await aclRows();
+          await apply();
+          assertEquals(await aclRows(), before);
+        },
+      );
+    },
+  });
+}
+
+/**
+ * The backup login (`kind: "backup"`): reads every row of every listed
+ * database, past row-level security, writes nothing, and `pg_dump` /
+ * `pg_dumpall --globals-only --no-role-passwords` run as it without a
+ * superuser. A database it is not listed on stays closed.
+ */
+for (const series of SERIES) {
+  test({
+    name:
+      `real Postgres ${series}: the backup login dumps every listed database and writes nothing`,
+    ignore: !dockerUp,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: async () => {
+      await withRealPostgres(
+        series,
+        "tp-backup",
+        async ({ session, ctx, name }) => {
+          await session.value(createDatabaseSql("appdb"));
+          await session.value(createDatabaseSql("shop"));
+          await session.value(createDatabaseSql("closed"));
+          const backup: ManagedApplyCredential = {
+            ...credential("nightly", ["appdb", "shop"], []),
+            kind: "backup",
+          };
+          const credentials = [
+            credential("own", ["appdb", "shop"], ["owner"]),
+            backup,
+          ];
+          await postgresManagedEngineRuntime.applyCredentials(ctx, credentials);
+
+          // Data the owner made, with row-level security forced on one table.
+          await expectAllowed(
+            session,
+            "own",
+            "appdb",
+            `CREATE TABLE public.secrets (id int, owner_name text);
+           INSERT INTO public.secrets VALUES (1, 'a'), (2, 'b');
+           ALTER TABLE public.secrets ENABLE ROW LEVEL SECURITY;
+           ALTER TABLE public.secrets FORCE ROW LEVEL SECURITY;
+           CREATE POLICY only_a ON public.secrets USING (owner_name = 'a');
+           CREATE SCHEMA app;
+           CREATE TABLE app.orders (id serial PRIMARY KEY);
+           INSERT INTO app.orders DEFAULT VALUES;
+           CREATE VIEW app.order_count AS SELECT count(*) FROM app.orders;`,
+          );
+          await expectAllowed(
+            session,
+            "own",
+            "shop",
+            `CREATE TABLE public.items (id int); INSERT INTO public.items VALUES (7);`,
+          );
+          // A repeated apply keeps the rights.
+          await postgresManagedEngineRuntime.applyCredentials(ctx, credentials);
+
+          assertEquals(
+            (await session.as(
+              "nightly",
+              "appdb",
+              `SELECT count(*) FROM public.secrets;`,
+            ))
+              .stdout.trim(),
+            "2",
+            "the backup login sees every row past row-level security",
+          );
+          await expectAllowed(
+            session,
+            "nightly",
+            "appdb",
+            `SELECT * FROM app.orders; SELECT * FROM app.order_count;`,
+          );
+          await expectAllowed(
+            session,
+            "nightly",
+            "shop",
+            `SELECT * FROM public.items;`,
+          );
+          await expectRefused(
+            session,
+            "nightly",
+            "appdb",
+            `INSERT INTO app.orders DEFAULT VALUES;`,
+            DENIED,
+          );
+          await expectRefused(
+            session,
+            "nightly",
+            "appdb",
+            `CREATE TABLE public.mine (id int);`,
+            DENIED,
+          );
+          await expectRefused(
+            session,
+            "nightly",
+            "closed",
+            `SELECT 1;`,
+            NO_DATABASE_ACCESS,
+          );
+          assertEquals(
+            await session.value(
+              `SELECT rolsuper::text || rolcreatedb::text || rolcreaterole::text || rolreplication::text || rolbypassrls::text FROM pg_roles WHERE rolname = 'nightly';`,
+            ),
+            "falsefalsefalsefalsetrue",
+          );
+
+          const dump = await docker([
+            "exec",
+            name,
+            "pg_dump",
+            "-U",
+            "nightly",
+            "-d",
+            "appdb",
+          ]);
+          assertEquals(dump.success, true, dump.stderr);
+          assertStringIncludes(dump.stdout, "CREATE TABLE public.secrets");
+          assertStringIncludes(dump.stdout, "CREATE VIEW app.order_count");
+          assertStringIncludes(dump.stdout, "CREATE POLICY only_a");
+          const globals = await docker([
+            "exec",
+            name,
+            "pg_dumpall",
+            "-U",
+            "nightly",
+            "-l",
+            "appdb",
+            "--globals-only",
+            "--no-role-passwords",
+          ]);
+          assertEquals(globals.success, true, globals.stderr);
+          assertStringIncludes(globals.stdout, "CREATE ROLE nightly");
+        },
+      );
     },
   });
 }

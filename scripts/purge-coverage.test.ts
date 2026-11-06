@@ -569,3 +569,462 @@ test("the purge selects every package a role holds when dpkg reports it held", a
     new TextDecoder().decode(out.stderr),
   );
 });
+
+// Host drop-in folders the install side or the running daemon writes into
+// (kernel, module, device, boot-time file, sudo, WireGuard and SSH settings).
+// The daemon writes some of them itself through the host wrapper (the fabric's
+// sysctl drop-in and tp0.conf, the drive temperature module load), so its own
+// source is scanned too, not only the roles and the installer.
+const DROPIN_DIRS = [
+  "etc/sysctl.d",
+  "etc/modules-load.d",
+  "etc/modprobe.d",
+  "etc/udev/rules.d",
+  "etc/tmpfiles.d",
+  "etc/sudoers.d",
+  "etc/wireguard",
+  "etc/ssh/sshd_config.d",
+  "etc/cron.d",
+  "etc/logrotate.d",
+  "etc/profile.d",
+  "etc/security/limits.d",
+];
+const DROPIN_RE = new RegExp(
+  `/(?:${
+    DROPIN_DIRS.map((d) => d.replace(/[./]/g, "\\$&")).join("|")
+  })/[A-Za-z0-9_.@+*{}$-]+`,
+  "g",
+);
+
+/**
+ * Drops `//` and block comments from TypeScript. String and template text is
+ * kept as is, so a `/*` or `//` inside a string (a glob, a URL) is not taken
+ * for a comment.
+ */
+function stripTsComments(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c) {
+        if (text[j] === "\\") j++;
+        if (c !== "`" && text[j] === "\n") break;
+        j++;
+      }
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+/** The daemon's own non-test source files. */
+async function daemonSourceFiles(): Promise<string[]> {
+  const files: string[] = [];
+  await walk(join(repo, "src"), files);
+  return files
+    .filter((f) => f.endsWith(".ts") && !/[._]test\.ts$/.test(f))
+    .filter((f) => !/\/(testdata|fixtures)\//.test(f))
+    .sort();
+}
+
+/**
+ * `const NAME = "literal"` and `` const NAME = `template` `` values, to expand
+ * `${NAME}` in a path. A template is expanded through the others, a few
+ * rounds deep, and kept only once it is fully literal.
+ */
+function stringConstants(texts: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const templates = new Map<string, string>();
+  for (const text of texts) {
+    for (
+      const m of text.matchAll(
+        /\bconst\s+([A-Z][A-Z0-9_]*)\s*=\s*(?:"([^"\n]*)"|`([^`\n]*)`)/g,
+      )
+    ) {
+      if (m[2] !== undefined) out.set(m[1], m[2]);
+      else templates.set(m[1], m[3]);
+    }
+  }
+  for (let round = 0; round < 4; round++) {
+    for (const [name, tmpl] of templates) {
+      const value = expandTemplate(tmpl, out);
+      if (value !== null) {
+        out.set(name, value);
+        templates.delete(name);
+      }
+    }
+  }
+  return out;
+}
+
+/** Shell `NAME="$P/etc/..."` / `NAME=/etc/...` folder variables (tp-host's R_*). */
+function shellFolderVars(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (
+    const m of stripComments(text).matchAll(
+      /^([A-Z][A-Z0-9_]*)="?(?:\$P|\$\{P\})?(\/[A-Za-z0-9_./-]+)"?\s*$/gm,
+    )
+  ) {
+    out.set(m[1], m[2]);
+  }
+  return out;
+}
+
+/** The names whose value is one of the drop-in folders. */
+function dropinFolders(values: Map<string, string>): Map<string, string> {
+  const dirs = new Set(DROPIN_DIRS.map((d) => `/${d}`));
+  return new Map([...values].filter(([, v]) => dirs.has(v.replace(/\/$/, ""))));
+}
+
+/**
+ * Paths built from a drop-in folder variable: `${NAME}/file` in TypeScript,
+ * `$NAME/file` or `${NAME}/file` in shell.
+ */
+function folderVarPaths(
+  clean: string,
+  folders: Map<string, string>,
+  ts: boolean,
+): string[] {
+  const out: string[] = [];
+  const re = ts
+    ? /\$\{([A-Z][A-Z0-9_]*)\}(\/[A-Za-z0-9_.@+*{}$-]+)/g
+    : /\$\{?([A-Z][A-Z0-9_]*)\}?(\/[A-Za-z0-9_.@+*-]+)/g;
+  for (const m of clean.matchAll(re)) {
+    const dir = folders.get(m[1]);
+    if (dir !== undefined) out.push(`${dir}${m[2]}`);
+  }
+  return out;
+}
+
+/**
+ * File names the host wrapper lets the daemon write into a drop-in folder:
+ * the `case "$_pc_name" in` patterns under each
+ * `[ "$_pc_parent" = "$R_X" ]` test. The wrapper is the only way the daemon
+ * reaches these folders as root, so a name it admits is a name to purge.
+ */
+function wrapperAdmittedPaths(
+  clean: string,
+  folders: Map<string, string>,
+): string[] {
+  const out: string[] = [];
+  const re =
+    /"\$_pc_parent" = "\$([A-Z][A-Z0-9_]*)" \]; then\s*\n\s*case "\$_pc_name" in\s*\n\s*([^)\n]+)\)/g;
+  for (const m of clean.matchAll(re)) {
+    const dir = folders.get(m[1]);
+    if (dir === undefined) continue;
+    for (const name of m[2].split("|")) out.push(`${dir}/${name.trim()}`);
+  }
+  return out;
+}
+
+/** Expands `${NAME}` through the constants; null when one is unknown. */
+function expandTemplate(
+  path: string,
+  constants: Map<string, string>,
+): string | null {
+  let unknown = false;
+  const out = path.replace(/\$\{([A-Za-z_]\w*)\}/g, (_, name: string) => {
+    const value = constants.get(name);
+    if (value === undefined) unknown = true;
+    return value ?? "";
+  });
+  return unknown || /[{}$]/.test(out) ? null : out;
+}
+
+/** Drop-in paths in one file, comments removed. */
+function dropinPaths(text: string, ts: boolean): string[] {
+  const clean = ts ? stripTsComments(text) : stripComments(text);
+  return [...new Set([...clean.matchAll(DROPIN_RE)].map((m) => m[0]))].sort();
+}
+
+/**
+ * What the purge removes under the drop-in folders: the literal paths and
+ * globs named inside its `tp_remove_*` functions (an inventory listing alone
+ * does not count).
+ */
+function purgeRemovals(
+  code: string,
+): { literals: Set<string>; globs: RegExp[] } {
+  const literals = new Set<string>();
+  const globs: RegExp[] = [];
+  const bodies = code.match(/^tp_remove_\w+\(\) \{[\s\S]*?^\}$/gm) ?? [];
+  for (const body of bodies) {
+    for (const m of body.matchAll(DROPIN_RE)) {
+      const path = m[0].replace(/[.]+$/, "");
+      if (path.includes("*")) {
+        const escaped = path.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+        globs.push(new RegExp(`^${escaped.replace(/\*/g, "[^/]*")}$`));
+      } else {
+        literals.add(path);
+      }
+    }
+  }
+  return { literals, globs };
+}
+
+// Drop-in paths a file names that are not files TurboPanel writes. Each needs
+// a reason.
+const DROPIN_NOT_INSTALLED: Record<string, string> = {
+  // The kernel-features tool describes a backend no feature uses yet.
+  "/etc/modules-load.d/turbopanel-": "a name prefix in a usage note",
+  // The sshd check reads every drop-in to find the administrator's settings.
+  "/etc/ssh/sshd_config.d/*.conf": "read, never written",
+  "/etc/ssh/sshd_config.d/*": "read, never written",
+};
+
+/** A drop-in path is removed by name or by a purge glob; a glob path by the same glob. */
+function dropinRemoved(
+  path: string,
+  removals: { literals: Set<string>; globs: RegExp[] },
+): boolean {
+  if (removals.literals.has(path)) return true;
+  const sample = path.replace(/\*/g, "sample");
+  return removals.globs.some((g) => g.test(sample));
+}
+
+/** The gaps in a set of files (path -> text) against the purge code. */
+function dropinGaps(
+  texts: Map<string, string>,
+  purge: string,
+): { gaps: Gap[]; seen: string[] } {
+  const removals = purgeRemovals(stripComments(purge));
+  const ts = [...texts].filter(([f]) => f.endsWith(".ts"));
+  const constants = stringConstants(ts.map(([, t]) => stripTsComments(t)));
+  const shellVars = new Map<string, string>();
+  for (const [f, t] of texts) {
+    if (!f.endsWith(".ts")) {
+      for (const [k, v] of shellFolderVars(t)) shellVars.set(k, v);
+    }
+  }
+  const tsFolders = dropinFolders(constants);
+  const shFolders = dropinFolders(shellVars);
+  const gaps: Gap[] = [];
+  const seen = new Set<string>();
+  for (const [file, text] of texts) {
+    const rel = relative(repo, file);
+    const isTs = file.endsWith(".ts");
+    const clean = isTs ? stripTsComments(text) : stripComments(text);
+    const raws = new Set([
+      ...dropinPaths(text, isTs),
+      ...folderVarPaths(clean, isTs ? tsFolders : shFolders, isTs),
+      ...(isTs ? [] : wrapperAdmittedPaths(clean, shFolders)),
+    ]);
+    for (const raw of [...raws].sort()) {
+      if (raw in DROPIN_NOT_INSTALLED) continue;
+      const path = raw.includes("${") ? expandTemplate(raw, constants) : raw;
+      if (path === null || path.includes("{{")) {
+        gaps.push({
+          file: rel,
+          path: raw,
+          why: "templated drop-in path; name it in full",
+        });
+        continue;
+      }
+      if (path in DROPIN_NOT_INSTALLED) continue;
+      seen.add(path);
+      if (dropinRemoved(path, removals)) continue;
+      gaps.push({ file: rel, path, why: "drop-in purge.sh does not remove" });
+    }
+  }
+  return { gaps, seen: [...seen].sort() };
+}
+
+async function scannedTexts(): Promise<Map<string, string>> {
+  const texts = new Map<string, string>();
+  for (const file of [...await installFiles(), ...await daemonSourceFiles()]) {
+    texts.set(file, await Deno.readTextFile(file));
+  }
+  return texts;
+}
+
+async function findDropinGaps(): Promise<{ gaps: Gap[]; seen: string[] }> {
+  return dropinGaps(await scannedTexts(), await Deno.readTextFile(purgePath));
+}
+
+test("the drop-in scan reads the daemon's own host writes and skips comments", async () => {
+  const { seen } = await findDropinGaps();
+  // If these vanish the scan stopped reading the daemon or the roles.
+  for (
+    const expected of [
+      "/etc/sysctl.d/99-turbopanel-fabric.conf",
+      "/etc/wireguard/tp0.conf",
+      "/etc/modules-load.d/turbopanel-drivetemp.conf",
+      "/etc/sysctl.d/99-turbopanel-redis.conf",
+      "/etc/sudoers.d/tp",
+      "/etc/ssh/sshd_config.d/60-turbopanel.conf",
+      "/etc/ssh/sshd_config.d/60-turbopanel.conf.tpprev",
+      "/etc/sysctl.d/99-turbopanel-*.conf",
+    ]
+  ) {
+    assert(seen.includes(expected), `the scan no longer finds ${expected}`);
+  }
+  assertEquals(
+    dropinPaths(
+      [
+        "// writes /etc/sysctl.d/commented.conf",
+        "/* and /etc/cron.d/block-comment */",
+        'const P = "/etc/cron.d/turbopanel-x";',
+        'const G = "/etc/sysctl.d/*"; const Q = "/etc/cron.d/turbopanel-y";',
+      ].join("\n"),
+      true,
+    ),
+    ["/etc/cron.d/turbopanel-x", "/etc/cron.d/turbopanel-y", "/etc/sysctl.d/*"],
+  );
+  assertEquals(
+    expandTemplate(
+      "/etc/wireguard/${IFACE}.conf",
+      new Map([["IFACE", "tp0"]]),
+    ),
+    "/etc/wireguard/tp0.conf",
+  );
+  assertEquals(expandTemplate("/etc/wireguard/${X}.conf", new Map()), null);
+});
+
+test("every drop-in the install or the daemon writes is removed by purge.sh", async () => {
+  const { gaps } = await findDropinGaps();
+  assertEquals(
+    gaps.map((g) => `${g.file}: ${g.path} (${g.why})`),
+    [],
+    "remove the file in a tp_remove_* function of purge.sh (by name or by a " +
+      "turbopanel glob) and list it in the inventory",
+  );
+});
+
+// Builtin and Docker chains the daemon only adds jumps to; purge.sh deletes
+// the TP-* jumps from these.
+const PARENT_CHAINS = ["INPUT", "FORWARD", "DOCKER-USER"];
+
+test("every firewall chain the daemon or a role names is a TP-* chain or a parent purge.sh cleans", async () => {
+  const code = stripComments(await Deno.readTextFile(purgePath));
+  const parents = code.match(
+    /for _ff_chain in ([A-Z -]+); do\n\s*tp_firewall_delete_jumps/,
+  );
+  assert(parents, "the purge's jump cleanup loop is missing");
+  assertEquals(
+    parents[1].trim().split(/\s+/).sort(),
+    [...PARENT_CHAINS].sort(),
+  );
+  const bad: string[] = [];
+  for (const file of await daemonSourceFiles()) {
+    const text = stripTsComments(await Deno.readTextFile(file));
+    for (
+      const m of text.matchAll(
+        /\bconst\s+(?:[A-Z0-9]+_)*CHAIN(?:_[A-Z0-9]+)*\s*=\s*"([^"]+)"/g,
+      )
+    ) {
+      const chain = m[1];
+      if (/^TP-[A-Za-z0-9_-]+$/.test(chain) || PARENT_CHAINS.includes(chain)) {
+        continue;
+      }
+      bad.push(`${relative(repo, file)}: ${chain}`);
+    }
+  }
+  for (const file of await installFiles()) {
+    const text = stripComments(await Deno.readTextFile(file));
+    for (
+      const m of text.matchAll(/(?:iptables|ip6tables)\b[^\n]*\s-N\s+(\S+)/g)
+    ) {
+      if (!/^"?TP-/.test(m[1])) bad.push(`${relative(repo, file)}: ${m[1]}`);
+    }
+  }
+  assertEquals(
+    bad,
+    [],
+    "name new chains TP-* (purge.sh flushes and deletes every TP-* chain) " +
+      "or teach purge.sh to remove them",
+  );
+});
+
+// Every nftables table the install loads must be one purge.sh deletes by name
+// (TP_NFT_TABLES). A table nobody removes keeps filtering after the purge.
+const NFT_TABLE_RE =
+  /\btable\s+(?:inet|ip6?|arp|bridge|netdev)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+
+async function nftTablesNamed(): Promise<Map<string, string[]>> {
+  const found = new Map<string, string[]>();
+  const files = [...await installFiles(), ...await daemonSourceFiles()];
+  for (const file of files) {
+    const text = file.endsWith(".ts")
+      ? stripTsComments(await Deno.readTextFile(file))
+      : stripComments(await Deno.readTextFile(file));
+    for (const m of text.matchAll(NFT_TABLE_RE)) {
+      found.set(m[1], [...(found.get(m[1]) ?? []), relative(repo, file)]);
+    }
+  }
+  return found;
+}
+
+test("every nft table the install or the daemon loads is deleted by purge.sh", async () => {
+  const listed = shellList(await purgeCode(), "TP_NFT_TABLES");
+  const named = await nftTablesNamed();
+  for (
+    const expected of [
+      "turbopanel_ingress_guard",
+      "turbopanel_build",
+      "turbopanel_php",
+    ]
+  ) {
+    assert(named.has(expected), `the scan no longer sees ${expected}`);
+  }
+  const missing = [...named].filter(([name]) => !listed.includes(name)).map((
+    [name, files],
+  ) => `${name} (${[...new Set(files)].join(", ")})`);
+  assertEquals(
+    missing,
+    [],
+    "add the table's exact name to TP_NFT_TABLES in purge.sh",
+  );
+});
+
+test("a drop-in built from a folder constant or variable is guarded too", async () => {
+  const texts = await scannedTexts();
+  const purge = await Deno.readTextFile(purgePath);
+  assertEquals(dropinGaps(texts, purge).gaps, []);
+  const ts = join(repo, "src", "deploy", "ssh", "new-dropin.ts");
+  texts.set(
+    ts,
+    'import { SSHD_DROPIN_DIR } from "./sshd-config.ts";\n' +
+      "export const NEW_DROPIN = `${SSHD_DROPIN_DIR}/70-x.conf`;\n",
+  );
+  const sh = join(repo, "orchestration", "scripts", "new-helper");
+  texts.set(sh, 'cp "$src" "$R_SYSCTL/50-other.conf"\n');
+  assertEquals(
+    dropinGaps(texts, purge).gaps.map((g) => `${g.file}: ${g.path}`).sort(),
+    [
+      "orchestration/scripts/new-helper: /etc/sysctl.d/50-other.conf",
+      "src/deploy/ssh/new-dropin.ts: /etc/ssh/sshd_config.d/70-x.conf",
+    ],
+  );
+});
+
+test("a file name the host wrapper admits into a drop-in folder is guarded", async () => {
+  const texts = await scannedTexts();
+  const wrapper = join(repo, "orchestration", "scripts", "tp-host");
+  const text = texts.get(wrapper) ?? "";
+  assert(text.includes("60-turbopanel.conf|60-turbopanel.conf.tpprev)"));
+  texts.set(
+    wrapper,
+    text.replace(
+      "60-turbopanel.conf|60-turbopanel.conf.tpprev)",
+      "60-turbopanel.conf|60-turbopanel.conf.tpprev|61-new.conf)",
+    ),
+  );
+  assertEquals(
+    dropinGaps(texts, await Deno.readTextFile(purgePath)).gaps.map((g) =>
+      g.path
+    ),
+    ["/etc/ssh/sshd_config.d/61-new.conf"],
+  );
+});

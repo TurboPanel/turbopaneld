@@ -3,9 +3,12 @@ import { DAEMON_VERSION } from "../version.ts";
 import type { HostHelloIdentity } from "../host/os-release.ts";
 import type { HostTimeSync } from "../host/time-sync.ts";
 import type { ServerReportedIp } from "../host/server-addresses.ts";
+import { waitFor } from "../testing/wait-for.ts";
 import { framesOfType, MockWebSocket } from "../testing/fake-websocket.ts";
 import type { HostResources } from "../host/host-inventory.ts";
 import {
+  advisedHeartbeatMs,
+  clampHeartbeatSeconds,
   hostCapacityMoved,
   IdlePresence,
   installIdlePresenceProviders,
@@ -1274,4 +1277,108 @@ test("IdlePresence heartbeat carries the command report only for a control plane
   assertEquals(supported.commands, REPORT);
   const older = await heartbeatAfterBuildChange(false);
   assertEquals("commands" in older, false);
+});
+
+test("clampHeartbeatSeconds accepts 15..120 and rejects the rest", () => {
+  assertEquals(clampHeartbeatSeconds(25), 25);
+  assertEquals(clampHeartbeatSeconds(15), 15);
+  assertEquals(clampHeartbeatSeconds(120), 120);
+  assertEquals(clampHeartbeatSeconds(24.6), 25);
+  assertEquals(clampHeartbeatSeconds(5), null);
+  assertEquals(clampHeartbeatSeconds(1), null);
+  assertEquals(clampHeartbeatSeconds(500), null);
+  assertEquals(clampHeartbeatSeconds("25"), null);
+  assertEquals(clampHeartbeatSeconds(Number.NaN), null);
+  assertEquals(clampHeartbeatSeconds(undefined), null);
+});
+
+test("advisedHeartbeatMs ignores the advice once a signed hello applied", () => {
+  assertEquals(advisedHeartbeatMs(25, false), 25_000);
+  assertEquals(advisedHeartbeatMs(1, false), null);
+  assertEquals(advisedHeartbeatMs(undefined, false), null);
+  assertEquals(advisedHeartbeatMs(25, true), null);
+});
+
+test({
+  name:
+    "IdlePresence setIdleThresholdMs re-arms the ping timer and stale limit",
+  fn: async () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const socket = openMockSocket();
+    let stale = 0;
+    // Default 60 s cadence: nothing would fire inside this test.
+    const presence = new IdlePresence({
+      serverId: "srv-advised",
+      onStaleConnection: () => stale++,
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      assert(!socket.sentFrames.includes('{"type":"ping"}'));
+      presence.setIdleThresholdMs(50);
+      await waitFor(
+        "a ping at the advised cadence",
+        () => socket.sentFrames.includes('{"type":"ping"}'),
+        { timeoutMs: 10_000 },
+      );
+      // Stale limit is 3x the cadence (150 ms) with no inbound traffic.
+      await waitFor("the stale limit to fire", () => stale >= 1, {
+        timeoutMs: 10_000,
+      });
+    } finally {
+      presence.detach();
+      restore();
+    }
+  },
+});
+
+test("IdlePresence hello carries the attach proof of a signed session, and only there", () => {
+  const restore = installIdlePresenceProviders({
+    getBuildInfo: () => makeDaemonBuild("abc1234"),
+    resolveUpdateChannelConfig: () => ({
+      app: "daemon" as const,
+      channel: "trunk" as const,
+    }),
+    getHostHelloIdentity: () => EMPTY_HOST,
+    collectPresenceSnapshot: () => ({
+      timeSync: makeTimeSync("UTC"),
+      ips: makeIps("203.0.113.10"),
+    }),
+  });
+  const presence = new IdlePresence({
+    serverId: "srv-hello-attach",
+    idleCheckIntervalMs: 50,
+  });
+  const proof = { keyId: "key-1", iat: 1_800_000_000, sig: "s".repeat(86) };
+  const signedSocket = openMockSocket();
+  const plainSocket = openMockSocket();
+  try {
+    presence.attach(signedSocket as unknown as WebSocket, {
+      attachProof: proof,
+    });
+    const signedHello = framesOfType(signedSocket, "hello")[0] as Record<
+      string,
+      unknown
+    >;
+    assertEquals(signedHello.attach, proof);
+    presence.attach(plainSocket as unknown as WebSocket);
+    const plainHello = framesOfType(plainSocket, "hello")[0] as Record<
+      string,
+      unknown
+    >;
+    assertEquals("attach" in plainHello, false);
+  } finally {
+    presence.detach();
+    restore();
+  }
 });

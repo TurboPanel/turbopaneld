@@ -24,8 +24,8 @@
 #   as the principal with no capabilities, and nothing gets a `+`/`!` exec
 #   prefix.
 #
-# What this does not contain (see AGENTS.md → Managed-host privilege
-# boundary): Docker (the daemon account is in the `docker` group) and root
+# What this does not contain (see src/permissions/AGENTS.md → Managed-host
+# privilege boundary): Docker (the daemon account is in the `docker` group) and root
 # engine config validation.
 set -eu
 umask 077
@@ -63,6 +63,11 @@ fi
 
 _self_dir="$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_ROOT="$(CDPATH='' cd -P -- "$_self_dir/.." && pwd -P)"
+# The account that owns this script and the script's mode, for one check only
+# (tp_config_root_self_sealed). Empty when unreadable, which fails that check.
+_self_meta="$(stat -L -c '%u %a' -- "$_self_dir/${0##*/}" 2>/dev/null)" || _self_meta=""
+SELF_UID="${_self_meta%% *}"
+SELF_MODE="${_self_meta#* }"
 
 R_CONFIG="$P/etc/turbopanel"
 R_STATE="$P/var/lib/turbopanel"
@@ -78,10 +83,35 @@ R_APPENV="$R_CONFIG/node-app-env"
 # Largest variables file tp-host will copy (NATIVE_APP_ENV_MAX_BYTES in
 # src/deploy/native/variables-runtime.ts; a test keeps the two equal).
 TP_APPENV_MAX=1048576
+# A tunnel connector's token as systemd reads it (EnvironmentFile=): the same
+# arrangement as the variables above, in a folder of its own. The daemon stages
+# <state>/cloudflared/tunnels/<id>.env; tunnel-env-install checks and copies it.
+R_TUNNELENV="$R_CONFIG/tunnel-env"
+R_TUNNEL_STAGE="$R_STATE/cloudflared/tunnels"
+# Longest run token tunnel-env-install accepts (TUNNEL_TOKEN_RE in
+# src/tunnels/connector-unit.ts; a test keeps the two equal).
+TP_TUNNEL_TOKEN_MAX=2048
+# The loopback band a connector's metrics address may use
+# (TUNNEL_METRICS_PORT_MIN/MAX in src/tunnels/connector-unit.ts; kept equal by
+# a test).
+TP_TUNNEL_PORT_MIN=20300
+TP_TUNNEL_PORT_MAX=20899
+# A control-plane hostname's uploaded certificate pair: the daemon's staging
+# folder, the certs folder Caddy reads, and the size and chain-length caps
+# (INSTANCE_CERT_* in src/instance/public-urls-apply.ts; a test keeps them
+# equal). See tp_verb_instance_cert_install.
+R_INSTANCE_CERT_STAGE="$R_STATE/system/instance-certs"
+R_INSTANCE_CERTS="$R_STATE/tls/certs"
+TP_INSTANCE_CERT_MAX=65536
+TP_INSTANCE_KEY_MAX=16384
+TP_INSTANCE_CERT_BLOCKS_MAX=10
 R_UNITS="$P/etc/systemd/system"
 R_SSHD_DROPINS="$P/etc/ssh/sshd_config.d"
 R_WG="$P/etc/wireguard"
 R_SYSCTL="$P/etc/sysctl.d"
+# systemd keeps one stamp file per persistent timer here; `rm` may remove only
+# TurboPanel's own (stamp-turbopanel-*.timer), so a deleted timer leaves none.
+R_TIMER_STAMPS="$P/var/lib/systemd/timers"
 # A principal home root the operator moved is recorded root-side, next to this
 # script — never taken from the daemon's own environment.
 if [ -f "$_self_dir/tp-host.conf" ] && [ ! -L "$_self_dir/tp-host.conf" ]; then
@@ -178,6 +208,24 @@ tp_under() {
   return 1
 }
 
+# False for a path in <state>/tls that no generic verb may name (see
+# tp_path_class); true for every other path.
+tp_instance_tls_path_ok() {
+  case "$1" in
+    "$R_STATE"/tls/instance-ca-pin) return 0 ;;
+    "$R_INSTANCE_CERTS"/letsencrypt-*.crt|"$R_INSTANCE_CERTS"/letsencrypt-*.key)
+      _it_host="${1#"$R_INSTANCE_CERTS"/letsencrypt-}"
+      _it_host="${_it_host%.*}"
+      case "$_it_host" in
+        ''|*[!A-Za-z0-9.-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    "$R_STATE"/tls|"$R_STATE"/tls/*) return 1 ;;
+  esac
+  return 0
+}
+
 # Which managed place a path is. Prints the class, or fails.
 tp_path_class() {
   _pc="$1"
@@ -198,6 +246,7 @@ tp_path_class() {
   # them, so no generic verb may name this folder or anything in it.
   case "$_pc" in
     "$R_APPENV"|"$R_APPENV"/*) return 1 ;;
+    "$R_TUNNELENV"|"$R_TUNNELENV"/*) return 1 ;;
   esac
   # State that belongs to an engine account or to a root service, though it sits
   # in the state tree: the hosting Caddy's store (tpedge) and the Docker gate's
@@ -206,6 +255,12 @@ tp_path_class() {
     "$R_STATE"/hosting-caddy|"$R_STATE"/hosting-caddy/*) return 1 ;;
     "$R_STATE"/docker-gate|"$R_STATE"/docker-gate/*) return 1 ;;
   esac
+  # The control plane's TLS folder: its Platform CA (ca.key) and the certs
+  # folder its Caddy reads. Uploaded pairs reach it only through
+  # instance-cert-install and instance-cert-prune. A generic verb may name only
+  # the daemon's CA pin file and the Let's Encrypt pairs the daemon installs
+  # there (letsencrypt-<host>.crt|.key, the host as the daemon checks it).
+  tp_instance_tls_path_ok "$_pc" || return 1
   # The SFTP jail switch sits in the SSH folder beside the key files but is
   # written only by `sftp-chroot on` (after its check) and `off`.
   case "$_pc" in
@@ -240,6 +295,12 @@ tp_path_class() {
   if [ "$_pc" = "$R_WG" ] || [ "$_pc" = "$R_WG/tp0.conf" ]; then
     echo wireguard
     return 0
+  fi
+  if [ "$_pc_parent" = "$R_TIMER_STAMPS" ]; then
+    case "$_pc_name" in
+      stamp-turbopanel-*.timer) tp_unit_name_ok "${_pc_name#stamp-}" && { echo timerstamp; return 0; } ;;
+    esac
+    return 1
   fi
   if [ "$_pc_parent" = "$R_SYSCTL" ]; then
     case "$_pc_name" in
@@ -293,7 +354,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tls|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
   esac
   return 1
 }
@@ -302,6 +363,7 @@ tp_daemon_loose_file_name() {
   case "$1" in
     "$R_CONFIG"/instance-ca.pem|"$R_CONFIG"/firewall.v4|"$R_CONFIG"/firewall.v6|"$R_CONFIG"/firewall.pending.v4|"$R_CONFIG"/firewall.pending.v6) return 0 ;;
     "$R_STATE"/server.id|"$R_STATE"/server-key.json|"$R_STATE"/server-key-id|"$R_STATE"/update-guard-disarm.json|"$R_STATE"/release-link-scan.json) return 0 ;;
+    "$R_STATE"/sealing-key.json|"$R_STATE"/trust-level) return 0 ;;
   esac
   return 1
 }
@@ -410,25 +472,37 @@ tp_put_file() {
     esac
   fi
   tp_pin_parent "$_pf_path" || tp_die "no such directory for $_pf_path"
-  _pf_real="$(pwd -P)"
-  _pf_priv="$(mktemp -d "./.tp-host.XXXXXX")"
-  _pf_priv="${_pf_priv#./}"
-  CDPATH='' cd -P -- "$_pf_priv"
-  if [ "$(pwd -P)" != "$_pf_real/$_pf_priv" ] || {
-      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
-      [ ! -O . ]
-    } ||
-    [ "$(stat -c '%a' .)" != "700" ]; then
-    tp_die "scratch directory for $_pf_path moved; not writing"
-  fi
+  tp_scratch_enter "$_pf_path"
   cat > ./f
   chmod "$_pf_mode" ./f
   if [ -n "$_pf_owner$_pf_group" ]; then
     tp_run chown -h -- "${_pf_owner}${_pf_group:+:$_pf_group}" ./f
   fi
   mv -T -f -- ./f "../$PIN_NAME"
+  tp_scratch_leave
+}
+
+# From inside a pinned directory, make a root-only 0700 scratch folder in it
+# and cd there (SCRATCH_NAME is its name); LABEL names what is being written.
+# A file finished there reaches the pinned directory with one `mv -T`.
+tp_scratch_enter() {
+  _se_real="$(pwd -P)"
+  SCRATCH_NAME="$(mktemp -d "./.tp-host.XXXXXX")"
+  SCRATCH_NAME="${SCRATCH_NAME#./}"
+  CDPATH='' cd -P -- "$SCRATCH_NAME"
+  if [ "$(pwd -P)" != "$_se_real/$SCRATCH_NAME" ] || {
+      # shellcheck disable=SC3067 # dash (Debian's /bin/sh) implements -O
+      [ ! -O . ]
+    } ||
+    [ "$(stat -c '%a' .)" != "700" ]; then
+    tp_die "scratch directory for $1 moved; not writing"
+  fi
+}
+
+# Back to the pinned directory, removing the (empty) scratch folder.
+tp_scratch_leave() {
   cd ..
-  rmdir -- "$_pf_priv" 2>/dev/null || true
+  rmdir -- "$SCRATCH_NAME" 2>/dev/null || true
 }
 
 # A root-only scratch directory for this run (never a guessable name in /tmp).
@@ -635,14 +709,26 @@ tp_folder_name_ok() {
   [ "${#1}" -le 63 ]
 }
 
-# A lowercase canonical UUID: every id that forms a path, a lock or a staging name.
+# A lowercase canonical UUID: every id that forms a path, a lock or a staging
+# name. Exactly one value and nothing else: shell patterns only (a line-based
+# matcher accepts a value of which any one line matches), and the length check
+# rules out a second line or a trailing newline before the pattern is tried.
 tp_uuid_ok() {
+  [ "${#1}" -eq 36 ] || return 1
+  _uu_h='[0-9a-f]'
+  _uu_4="$_uu_h$_uu_h$_uu_h$_uu_h"
+  # A bracket range follows the locale's collation; the C locale keeps
+  # [0-9a-f] to exactly those sixteen characters.
+  _uu_lc="${LC_ALL-}"
+  LC_ALL=C
+  _uu_ok=1
+  # shellcheck disable=SC2254 # the expansions are the pattern
   case "$1" in
-    ????????-????-????-????-????????????) ;;
-    *) return 1 ;;
+    $_uu_4$_uu_4-$_uu_4-$_uu_4-$_uu_4-$_uu_4$_uu_4$_uu_4) _uu_ok=0 ;;
   esac
-  printf '%s\n' "$1" |
-    LC_ALL=C grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  LC_ALL="$_uu_lc"
+  [ -n "$_uu_lc" ] || unset LC_ALL
+  return "$_uu_ok"
 }
 
 # The folder a path below a scope names, split. REL is the path relative to the
@@ -1096,6 +1182,10 @@ tp_unit_ok() {
     turbopanel-backup-*)
       _uk_backup="$(tp_backup_unit_id "$_uk_name")" || return 1
       ;;
+    turbopanel-tunnel-*)
+      tp_tunnel_unit_ok "$_uk_file" "$_uk_name"
+      return
+      ;;
     *) ;;
   esac
   _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v hostcap="$HOSTING_CADDY_CAP" '
@@ -1216,6 +1306,126 @@ tp_unit_ok() {
   [ "$_uk_nnp" = "yes" ] || return 1
   [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
   return 0
+}
+
+# A Cloudflare tunnel connector's id: a lower-case UUID, or one of the two
+# names the daemon has always used for the instance's own tunnel (`instance`,
+# and `default` from the installer's --tunnel-token). Kept equal to
+# isTunnelId in src/tunnels/connector-unit.ts.
+tp_tunnel_id_ok() {
+  case "$1" in
+    instance|default) return 0 ;;
+  esac
+  tp_uuid_ok "$1"
+}
+
+# The expected text of the connector unit for ID, VERSION, PORT and SLOT suffix
+# ("" for the first unit, "-b" for the second one that runs beside it during a
+# connector update; renderTunnelUnit's slot), exactly as
+# renderTunnelUnit in src/tunnels/connector-unit.ts writes it. A unit is not
+# checked line by line against an allowlist: it must BE this text, so nothing
+# else (another ExecStart, User=, a capability, a different EnvironmentFile=)
+# can ride along. A test installs the daemon's own rendering through this and
+# refuses every one-line change to it.
+tp_tunnel_unit_text() {
+  _tt_id="$1"
+  _tt_ver="$2"
+  _tt_port="$3"
+  _tt_suffix="$4"
+  printf '%s\n' \
+    '[Unit]' \
+    "Description=TurboPanel tunnel connector $_tt_id" \
+    'After=network-online.target' \
+    'Wants=network-online.target' \
+    'StartLimitIntervalSec=0' \
+    '' \
+    '[Service]' \
+    'Type=simple' \
+    'DynamicUser=yes' \
+    "EnvironmentFile=$R_TUNNELENV/$_tt_id.env" \
+    "ExecStart=$INSTALL_ROOT/vendor/cloudflared/$_tt_ver/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:$_tt_port run" \
+    'Restart=always' \
+    'RestartSec=5' \
+    'NoNewPrivileges=yes' \
+    'PrivateTmp=yes' \
+    'ProtectSystem=strict' \
+    'ProtectHome=yes' \
+    'ProtectKernelTunables=yes' \
+    'ProtectKernelModules=yes' \
+    'ProtectControlGroups=yes' \
+    'RestrictSUIDSGID=yes' \
+    'RestrictRealtime=yes' \
+    'LockPersonality=yes' \
+    'UMask=0077' \
+    'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK' \
+    'PrivateDevices=yes' \
+    'ProtectKernelLogs=yes' \
+    'ProtectClock=yes' \
+    'ProtectHostname=yes' \
+    'SystemCallArchitectures=native' \
+    'CapabilityBoundingSet=' \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
+    "SyslogIdentifier=turbopanel-tunnel-$_tt_id$_tt_suffix" \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target'
+}
+
+# turbopanel-tunnel-<id>.service or turbopanel-tunnel-<id>-b.service (the second
+# unit of a tunnel during a connector update; an id never ends in "-b", so the
+# suffix is unambiguous). The id comes from the name; the connector
+# version and metrics port from the one ExecStart line (version digits and dots,
+# port inside the band); the rest must match tp_tunnel_unit_text exactly. The
+# unit runs as a throwaway systemd account (DynamicUser=), never as the daemon's
+# or the hosting Caddy's, with no capability, and reads its token from a copy
+# only root can write.
+tp_tunnel_unit_ok() {
+  _tu_file="$1"
+  _tu_name="$2"
+  _tu_id="${_tu_name#turbopanel-tunnel-}"
+  [ "$_tu_id" != "$_tu_name" ] || return 1
+  _tu_id="${_tu_id%.service}"
+  [ "$_tu_id.service" = "${_tu_name#turbopanel-tunnel-}" ] || return 1
+  _tu_suffix=""
+  if tp_tunnel_id_ok "$_tu_id"; then
+    :
+  elif [ "${_tu_id%-b}" != "$_tu_id" ] && tp_tunnel_id_ok "${_tu_id%-b}"; then
+    _tu_id="${_tu_id%-b}"
+    _tu_suffix="-b"
+  else
+    return 1
+  fi
+  _tu_exec=""
+  _tu_n=0
+  while IFS= read -r _tu_line || [ -n "$_tu_line" ]; do
+    case "$_tu_line" in
+      ExecStart=*) _tu_exec="$_tu_line"; _tu_n=$((_tu_n + 1)) ;;
+    esac
+  done < "$_tu_file"
+  [ "$_tu_n" -eq 1 ] || return 1
+  _tu_rest="${_tu_exec#ExecStart=$INSTALL_ROOT/vendor/cloudflared/}"
+  [ "$_tu_rest" != "$_tu_exec" ] || return 1
+  _tu_ver="${_tu_rest%%/*}"
+  case "$_tu_ver" in
+    ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+  esac
+  _tu_port="${_tu_rest#"$_tu_ver"/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:}"
+  [ "$_tu_port" != "$_tu_rest" ] || return 1
+  # The command ends in " run": the port is what is left before it.
+  _tu_run="${_tu_port% run}"
+  [ "$_tu_run" != "$_tu_port" ] || return 1
+  _tu_port="$_tu_run"
+  case "$_tu_port" in
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  [ "${#_tu_port}" -le 5 ] || return 1
+  [ "$_tu_port" -ge "$TP_TUNNEL_PORT_MIN" ] && [ "$_tu_port" -le "$TP_TUNNEL_PORT_MAX" ] || return 1
+  # The trailing "x" keeps command substitution from eating the last newline,
+  # so a file with extra blank lines at the end differs too.
+  _tu_have="$(cat -- "$_tu_file"; printf x)"
+  _tu_want="$(tp_tunnel_unit_text "$_tu_id" "$_tu_ver" "$_tu_port" "$_tu_suffix"; printf x)"
+  [ "$_tu_have" = "$_tu_want" ]
 }
 
 # A native app unit's one allowed EnvironmentFile=: its own variables copy,
@@ -2225,7 +2435,7 @@ tp_verb_rm() {
   [ $# -eq 1 ] || tp_die "rm takes one path"
   _rm_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
   case "$_rm_class" in
-    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir) ;;
+    tree|principal|unit|sshd|sysctl|phpconf|phpconfdir|timerstamp) ;;
     # TurboFabric teardown removes the tp0 config, never the directory.
     wireguard) [ "$1" = "$R_WG/tp0.conf" ] || tp_die "refusing path $1" ;;
     *) tp_die "refusing path $1" ;;
@@ -2463,13 +2673,28 @@ tp_verb_chmod() {
   fi
 }
 
-# The control plane's HTTP-01 issuer socket. Hosting Caddy (not in group tp)
+# The control plane's HTTP-01 issuer socket (and, one per request, a certificate
+# order's issuer socket for a hosted name). Hosting Caddy (not in group tp)
 # proxies challenges to it; whoever binds it (the daemon's preflight listener,
 # or the issuer Caddy as tpcaddy) cannot name another user in an ACL, so root
 # adds exactly this one entry. The issuer binds shortly after systemd reports
 # it started, hence the bounded wait. -P never follows a swapped-in symlink.
 tp_setfacl_acme_socket() {
-  [ "$1" = "$R_RUN/instance-acme.sock" ] || tp_die "setfacl: only the instance ACME socket"
+  case "$1" in
+    "$R_RUN/instance-acme.sock") ;;
+    # One certificate order's issuer socket: tenant-acme-<request id>.sock, the
+    # id being the control plane's request id (letters, digits, - and _, 64 at
+    # most), so no other name or sub-path ever matches.
+    "$R_RUN"/tenant-acme-?*.sock)
+      _sa_id="${1#"$R_RUN"/tenant-acme-}"
+      _sa_id="${_sa_id%.sock}"
+      case "$_sa_id" in
+        ''|*[!A-Za-z0-9_-]*) tp_die "setfacl: refusing issuer socket $1" ;;
+      esac
+      [ "${#_sa_id}" -le 64 ] || tp_die "setfacl: refusing issuer socket $1"
+      ;;
+    *) tp_die "setfacl: only the instance ACME socket or a certificate issuer socket" ;;
+  esac
   tp_pin_parent "$1" || tp_die "no such directory ${1%/*}"
   _sa_wait=0
   until [ -S "$PIN_NAME" ] && [ ! -L "$PIN_NAME" ]; do
@@ -3011,14 +3236,250 @@ tp_verb_xtables() {
   tp_exec "$_xt_bin" "$@"
 }
 
-# Only the fabric interface, only these shapes.
+# One IPv4 octet: 1-3 digits, no leading zero, at most 255.
+tp_ipv4_octet_ok() {
+  case "$1" in
+    ''|*[!0-9]*|0?*) [ "$1" = "0" ] ;;
+    ????*) return 1 ;;
+    *) [ "$1" -le 255 ] ;;
+  esac
+}
+
+# A fabric IPv4 route stays inside a private block (first octet $1, second
+# $2, prefix $3): RFC 1918 10/8, 172.16/12, 192.168/16 and RFC 6598
+# 100.64/10, the same blocks as the daemon's AllowedIPs policy.
+tp_fabric_route_v4_private() {
+  case "$1" in
+    10) return 0 ;;
+    172) [ "$2" -ge 16 ] && [ "$2" -le 31 ] && [ "$3" -ge 12 ] ;;
+    192) [ "$2" -eq 168 ] && [ "$3" -ge 16 ] ;;
+    100) [ "$2" -ge 64 ] && [ "$2" -le 127 ] && [ "$3" -ge 10 ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# A fabric route: IPv4 a.b.c.d/8-32 inside a private block or IPv6 ULA
+# (fc00::/7, the first group written in full) /48-128 (the daemon's
+# AllowedIPs policy refuses anything broader or public), always with a prefix.
+tp_fabric_route_cidr_ok() {
+  case "$1" in */*/*) return 1 ;; */*) ;; *) return 1 ;; esac
+  _frc_addr="${1%/*}"
+  _frc_bits="${1#*/}"
+  case "$_frc_bits" in ''|*[!0-9]*|0?*|????*) return 1 ;; esac
+  case "$_frc_addr" in
+    *:*)
+      case "$_frc_addr" in *[!0-9A-Fa-f:]*|*:::*|*::*::*) return 1 ;; esac
+      [ "${#_frc_addr}" -le 39 ] || return 1
+      case "${_frc_addr%%:*}" in [Ff][CcDd][0-9A-Fa-f][0-9A-Fa-f]) ;; *) return 1 ;; esac
+      [ "$_frc_bits" -ge 48 ] && [ "$_frc_bits" -le 128 ]
+      ;;
+    *)
+      case "$_frc_addr" in *[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+      _frc_rest="$_frc_addr"
+      _frc_n=0
+      while [ -n "$_frc_rest" ]; do
+        _frc_oct="${_frc_rest%%.*}"
+        tp_ipv4_octet_ok "$_frc_oct" || return 1
+        case "$_frc_n" in 0) _frc_o1="$_frc_oct" ;; 1) _frc_o2="$_frc_oct" ;; esac
+        _frc_n=$((_frc_n + 1))
+        case "$_frc_rest" in *.*) _frc_rest="${_frc_rest#*.}" ;; *) _frc_rest="" ;; esac
+      done
+      [ "$_frc_n" -eq 4 ] || return 1
+      [ "$_frc_bits" -ge 8 ] && [ "$_frc_bits" -le 32 ] || return 1
+      tp_fabric_route_v4_private "$_frc_o1" "$_frc_o2" "$_frc_bits"
+      ;;
+  esac
+}
+
+# A plain IPv4 literal: four octets, no leading zeros, nothing else.
+tp_ipv4_literal_ok() {
+  case "$1" in *[!0-9.]*|.*|*.|*..*|'') return 1 ;; esac
+  _ilo_rest="$1"
+  _ilo_n=0
+  while [ -n "$_ilo_rest" ]; do
+    tp_ipv4_octet_ok "${_ilo_rest%%.*}" || return 1
+    _ilo_n=$((_ilo_n + 1))
+    case "$_ilo_rest" in *.*) _ilo_rest="${_ilo_rest#*.}" ;; *) _ilo_rest="" ;; esac
+  done
+  [ "$_ilo_n" -eq 4 ]
+}
+
+# A checked IPv4 literal as one integer.
+tp_ipv4_int() {
+  _iin_rest="$1"
+  _iin_val=0
+  while [ -n "$_iin_rest" ]; do
+    _iin_val=$((_iin_val * 256 + ${_iin_rest%%.*}))
+    case "$_iin_rest" in *.*) _iin_rest="${_iin_rest#*.}" ;; *) _iin_rest="" ;; esac
+  done
+  printf '%s\n' "$_iin_val"
+}
+
+# A LAN interface name: what the kernel takes (1-15 of letters, digits, `.`,
+# `-`, `_`), never the fabric interface, loopback or a container-side link.
+tp_lan_nic_ok() {
+  case "$1" in ''|*[!A-Za-z0-9._-]*|-*|.|..) return 1 ;; esac
+  [ "${#1}" -le 15 ] || return 1
+  case "$1" in tp0|lo|docker*|br-*|veth*|tpn*) return 1 ;; esac
+}
+
+# A connected network is a device route without a next hop that says `scope
+# link`, whoever made it: the kernel (`proto kernel`), a DHCP client, a static
+# config. Output lines on stdin; keep the ones with no `via` token.
+tp_lan_no_via() {
+  awk '{ for (i = 2; i <= NF; i++) if ($i == "via") next; print }'
+}
+
+# The connected IPv4 networks on one interface (`scope link` routes with no
+# next hop, any `proto`). Test mode reads a fixture file instead of the host.
+tp_lan_connected_routes() {
+  if [ -n "$TP_TEST" ]; then
+    { cat "$P/tp-test/ip-route-link-$1" 2>/dev/null || true; } | tp_lan_no_via
+    return 0
+  fi
+  { ip -4 route show dev "$1" scope link 2>/dev/null || true; } | tp_lan_no_via
+}
+
+# Every connected IPv4 network on any interface: what the kernel made (`proto
+# kernel`, `tp0`'s own subnet included) plus `scope link` routes with no next
+# hop and any `proto`, except `dev tp0` (the routes this host puts there are
+# `scope link` too). Test mode reads a fixture file instead of the host.
+tp_kernel_routes() {
+  if [ -n "$TP_TEST" ]; then
+    _tkr_all=$(cat "$P/tp-test/ip-route-kernel" 2>/dev/null || true)
+  else
+    _tkr_all=$(ip -4 route show 2>/dev/null || true)
+  fi
+  printf '%s\n' "$_tkr_all" | tp_lan_no_via | awk '
+    { kernel = 0; link = 0; tp0 = 0
+      for (i = 2; i <= NF; i++) {
+        if ($i == "proto" && $(i + 1) == "kernel") kernel = 1
+        if ($i == "scope" && $(i + 1) == "link") link = 1
+        if ($i == "dev" && $(i + 1) == "tp0") tp0 = 1
+      }
+      if (kernel || (link && !tp0)) print }'
+}
+
+# A route destination as `ip route` prints it (a bare address is a /32), split
+# into `_dst_net` and `_dst_bits`; fails unless it is a plain IPv4 range.
+tp_ipv4_dst_split() {
+  _dst_in=$1
+  case "$_dst_in" in
+    */*) _dst_net="${_dst_in%/*}"; _dst_bits="${_dst_in#*/}" ;;
+    *) _dst_net="$_dst_in"; _dst_bits=32 ;;
+  esac
+  tp_ipv4_literal_ok "$_dst_net" || return 1
+  case "$_dst_bits" in ''|*[!0-9]*|0?*) return 1 ;; *) ;; esac
+  [ "$_dst_bits" -ge 1 ] && [ "$_dst_bits" -le 32 ]
+}
+
+# Two IPv4 ranges (checked literals and prefix lengths) share addresses: one
+# equals, contains or sits inside the other. Compared on the shorter prefix.
+tp_ipv4_ranges_overlap() {
+  _iro_anet=$1
+  _iro_abits=$2
+  _iro_bnet=$3
+  _iro_bbits=$4
+  _iro_a=$(tp_ipv4_int "$_iro_anet")
+  _iro_b=$(tp_ipv4_int "$_iro_bnet")
+  _iro_bits=$_iro_abits
+  if [ "$_iro_bbits" -lt "$_iro_bits" ]; then _iro_bits=$_iro_bbits; fi
+  _iro_shift=$((32 - _iro_bits))
+  [ $((_iro_a >> _iro_shift)) -eq $((_iro_b >> _iro_shift)) ]
+}
+
+# ADDR (a checked IPv4 literal) is a usable host inside a connected subnet of
+# NIC: never the subnet's own network or broadcast address (a /31 or /32 has
+# neither).
+tp_lan_via_connected() {
+  _lvc_via=$1
+  _lvc_nic=$2
+  _lvc_addr=$(tp_ipv4_int "$_lvc_via")
+  _lvc_routes=$(tp_lan_connected_routes "$_lvc_nic")
+  for _lvc_dst in $(printf '%s\n' "$_lvc_routes" | awk '{ print $1 }'); do
+    tp_ipv4_dst_split "$_lvc_dst" || continue
+    tp_ipv4_ranges_overlap "$_lvc_via" 32 "$_dst_net" "$_dst_bits" || continue
+    [ "$_dst_bits" -ge 31 ] && return 0
+    _lvc_host=$((_lvc_addr & ((1 << (32 - _dst_bits)) - 1)))
+    if [ "$_lvc_host" -ne 0 ] && [ "$_lvc_host" -ne $(((1 << (32 - _dst_bits)) - 1)) ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# CIDR (a checked private IPv4 range) shares addresses with a connected subnet
+# the kernel made on an interface other than SKIP (an empty SKIP checks them
+# all). Replacing such a route would hijack the subnet, e.g. the LAN's own or
+# docker0's.
+tp_route_hits_kernel() {
+  _rhk_cidr=$1
+  _rhk_skip=$2
+  _rhk_pairs=$(tp_kernel_routes |
+    awk '{ for (i = 2; i < NF; i++) if ($i == "dev") { print $1 "@" $(i + 1); next } }')
+  for _rhk_pair in $_rhk_pairs; do
+    if [ -n "$_rhk_skip" ] && [ "${_rhk_pair#*@}" = "$_rhk_skip" ]; then continue; fi
+    tp_ipv4_dst_split "${_rhk_pair%@*}" || continue
+    tp_ipv4_ranges_overlap "${_rhk_cidr%/*}" "${_rhk_cidr#*/}" "$_dst_net" "$_dst_bits" && return 0
+  done
+  return 1
+}
+
+# `route replace|del CIDR via ADDR dev NIC`: a member's container subnet over a
+# shared LAN. IPv4 only (container forwarding is IPv4), the CIDR in the same
+# private blocks and prefix limits as a tp0 route, ADDR a host inside a connected
+# network of NIC (`scope link`, no next hop, any proto), NIC a plain interface that is not tp0 or
+# lo. A replace is refused when the CIDR overlaps any connected subnet; a del
+# is not, so a route the daemon installed can still be removed.
+tp_lan_route_ok() {
+  _lro_action=$1
+  _lro_cidr=$2
+  _lro_via=$3
+  _lro_nic=$4
+  case "$_lro_cidr" in *:*) tp_die "ip: LAN routes are IPv4 only" ;; *) ;; esac
+  tp_fabric_route_cidr_ok "$_lro_cidr" || tp_die "ip: bad route $_lro_cidr"
+  tp_ipv4_literal_ok "$_lro_via" || tp_die "ip: bad next hop $_lro_via"
+  tp_lan_nic_ok "$_lro_nic" || tp_die "ip: bad interface $_lro_nic"
+  tp_lan_via_connected "$_lro_via" "$_lro_nic" ||
+    tp_die "ip: $_lro_via is not a host on a connected subnet of $_lro_nic"
+  if [ "$_lro_action" = "replace" ] && tp_route_hits_kernel "$_lro_cidr" ""; then
+    tp_die "ip: $_lro_cidr overlaps a connected subnet"
+  fi
+}
+
+# `route replace|del CIDR dev tp0`. A replace of an IPv4 CIDR that overlaps a
+# connected subnet on another interface is refused (tp0's own subnet is fine).
+tp_tp0_route_ok() {
+  _tro_action=$1
+  _tro_cidr=$2
+  tp_fabric_route_cidr_ok "$_tro_cidr" || tp_die "ip: bad route $_tro_cidr"
+  case "$_tro_cidr" in *:*) return 0 ;; *) ;; esac
+  if [ "$_tro_action" = "replace" ] && tp_route_hits_kernel "$_tro_cidr" tp0; then
+    tp_die "ip: $_tro_cidr overlaps a connected subnet"
+  fi
+}
+
+# Only the fabric interface, only these shapes, plus LAN routes to members'
+# container subnets. Route reads cover the whole main table (read-only) so the
+# daemon can see ranges other interfaces route.
 tp_verb_ip() {
   case "$*" in
     "link add dev tp0 type wireguard"|"link set dev tp0 up"|\
-"-o -4 addr show dev tp0"|"-o link show dev tp0"|"link delete tp0")
+"-o -4 addr show dev tp0"|"-o link show dev tp0"|"link delete tp0"|\
+"-4 route show"|"-6 route show"|"-4 route show dev tp0"|"-6 route show dev tp0")
       tp_exec ip "$@"
       ;;
   esac
+  if [ "$#" -eq 5 ] && [ "$4 $5" = "dev tp0" ] && [ "$1" = "route" ]; then
+    case "$2" in replace|del) ;; *) tp_die "ip: unsupported command" ;; esac
+    tp_tp0_route_ok "$2" "$3"
+    tp_exec ip "$@"
+  fi
+  if [ "$#" -eq 7 ] && [ "$1" = "route" ] && [ "$4" = "via" ] && [ "$6" = "dev" ]; then
+    case "$2" in replace|del) ;; *) tp_die "ip: unsupported command" ;; esac
+    tp_lan_route_ok "$2" "$3" "$5" "$7"
+    tp_exec ip "$@"
+  fi
   if [ "$#" -eq 6 ] && [ "$1 $2 $3 $4" = "link set dev tp0" ] && [ "$5" = "mtu" ]; then
     case "$6" in ''|*[!0-9]*) tp_die "ip: bad mtu" ;; esac
     tp_exec ip "$@"
@@ -4689,31 +5150,77 @@ tp_appenv_id_ok() {
   [ "${#1}" -le 128 ]
 }
 
-# Enter the root-owned variables folder, creating it (root:root 0700) when
-# absent, and refuse unless it and its parent are what the checks assume.
+# Enter a root-owned variables folder (DIR, default the native apps' one),
+# creating it (root:root 0700) when absent, and refuse unless it and its parent
+# are what the checks assume.
 tp_appenv_enter() {
-  tp_mkdir_pinned "$R_APPENV" 0700
+  _ae_dir="${1:-$R_APPENV}"
+  tp_mkdir_pinned "$_ae_dir" 0700
   [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
-    tp_die "refusing $R_APPENV: not a root-owned 0700 directory"
-  tp_dir_sealed_at .. ||
-    tp_die "refusing $R_APPENV: its parent is not sealed (root-owned, not group- or world-writable)"
+    tp_die "refusing $_ae_dir: not a root-owned 0700 directory"
+  tp_dir_sealed_at .. || tp_config_root_self_sealed .. ||
+    tp_die "refusing $_ae_dir: its parent is not sealed (root-owned, not group- or world-writable)"
+}
+
+# A development checkout: the co-located layout keeps the config root owned by
+# the developer (daemon-seal, turbopanel_seal_config_root false), and that
+# account also owns the tp-host sudo is running, so it already decides what
+# root runs here. Only the variables and token folders' parent may pass this
+# way (tp_appenv_enter); every other sealed check stays root-only.
+tp_config_root_self_sealed() {
+  _cs_real="$(CDPATH='' cd -P -- "$1" && pwd -P)" || return 1
+  _cs_meta="$(stat -c '%u %a' -- "$1")" || return 1
+  tp_self_sealed_ok "$_cs_real" "${_cs_meta%% *}" "${_cs_meta#* }"
+}
+
+# REAL OWNER MODE of a directory: it is the config root itself (physical path),
+# owned by the script's owner, that owner is not root, the directory is neither
+# group- nor world-writable, and the script file is owner-writable (an owner
+# that cannot change the script, such as a read-only image's build account, is
+# refused). Fails closed when SELF_UID or SELF_MODE could not be read.
+tp_self_sealed_ok() {
+  [ "$1" = "$R_CONFIG" ] || return 1
+  case "$SELF_UID" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$SELF_UID" != "$ROOT_UID" ] || return 1
+  [ "$2" = "$SELF_UID" ] || return 1
+  case "$3" in
+    ''|*[!0-7]*|*[2367]?|*[2367]) return 1 ;;
+  esac
+  case "$SELF_MODE" in
+    *[!0-7]*) return 1 ;;
+    *[2367]??) return 0 ;;
+  esac
+  return 1
 }
 
 # Copy the daemon's staged variables file for service ID to $TP_STAGE/envsrc.
-# The inner script runs as the daemon account (the same trust the other
-# daemon-staged sources get) under a timeout, so a FIFO swapped in at the path
-# can stall neither root nor the verb.
 tp_appenv_read_staged() {
+  tp_read_staged "$1" "$1.env" "${2:-$R_CONFIG/node-apps/envs}" \
+    "${3:-$TP_APPENV_MAX}" "$TP_STAGE/envsrc" "variables file"
+}
+
+# Copy the daemon's staged file NAME in STAGE (a folder the calling account
+# owns) to OUT, refusing more than MAX bytes; ID and LABEL only name it in
+# errors. The inner script runs as the daemon account (the same trust the other
+# daemon-staged sources get) under a timeout, so a FIFO swapped in at the path
+# can stall neither root nor the verb. The file actually opened must be NAME in
+# STAGE (no link), a regular file the caller owns with exactly one link.
+tp_read_staged() {
   _ar_id="$1"
-  tp_pin_dir "$R_CONFIG/node-apps/envs" ||
-    tp_die "app-env-install: no staging directory $R_CONFIG/node-apps/envs"
+  _ar_name="$2"
+  _ar_stage="$3"
+  _ar_max="$4"
+  _ar_out="$5"
+  _ar_label="$6"
+  tp_pin_dir "$_ar_stage" ||
+    tp_die "no staging directory $_ar_stage"
   [ "$(stat -c '%u' .)" = "$CALLER_UID" ] ||
-    tp_die "refusing $R_CONFIG/node-apps/envs: not owned by the calling account"
+    tp_die "refusing $_ar_stage: not owned by the calling account"
   _ar_real="$(pwd -P)"
   tp_as "$CALLER_UID" "$CALLER_GID" timeout 10 sh -c '
-    exec 3< "./$1.env" || { echo "tp-host: cannot open the staged file" >&2; exit 1; }
+    exec 3< "./$1" || { echo "tp-host: cannot open the staged file" >&2; exit 1; }
     real="$(readlink /proc/self/fd/3)"
-    if [ "$real" != "$2/$1.env" ]; then
+    if [ "$real" != "$2/$1" ]; then
       echo "tp-host: refusing the staged file: it resolves to $real" >&2
       exit 1
     fi
@@ -4723,10 +5230,10 @@ tp_appenv_read_staged() {
       *) echo "tp-host: refusing the staged file: owner, links or type ($meta)" >&2; exit 1 ;;
     esac
     head -c "$4" <&3
-  ' sh "$_ar_id" "$_ar_real" "$CALLER_UID" "$((TP_APPENV_MAX + 1))" > "$TP_STAGE/envsrc" ||
-    tp_die "refusing the staged variables file for $_ar_id"
-  [ "$(wc -c < "$TP_STAGE/envsrc")" -le "$TP_APPENV_MAX" ] ||
-    tp_die "refusing the variables file for $_ar_id: over $TP_APPENV_MAX bytes"
+  ' sh "$_ar_name" "$_ar_real" "$CALLER_UID" "$((_ar_max + 1))" > "$_ar_out" ||
+    tp_die "refusing the staged $_ar_label for $_ar_id"
+  [ "$(wc -c < "$_ar_out")" -le "$_ar_max" ] ||
+    tp_die "refusing the $_ar_label for $_ar_id: over $_ar_max bytes"
 }
 
 # The file holds exactly what the daemon renders: blank lines, `#`/`;` comment
@@ -4805,6 +5312,427 @@ tp_verb_app_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# --- tunnel connector token (EnvironmentFile=) --------------------------------
+# A tunnel's run token reaches its connector the way a native app's variables
+# reach the app (see above): the daemon stages <state>/cloudflared/tunnels/<id>.env
+# (0600, its own), and tunnel-env-install checks it and copies it to
+# <config>/tunnel-env/<id>.env (root:root 0600, in a root:root 0700 folder) for
+# the unit to name. The connector runs as a throwaway account that cannot read
+# the copy: systemd reads it as root. The file holds exactly one line,
+# TUNNEL_TOKEN='<token>', with the token in base64 or its URL-safe form.
+
+tp_tunnel_env_content_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk -v max="$TP_TUNNEL_TOKEN_MAX" '
+    function fail(msg) {
+      print "tp-host: token file: " msg > "/dev/stderr"
+      bad = 1; exit 1
+    }
+    {
+      if (NR > 1) fail("more than one line")
+      if ($0 !~ /^TUNNEL_TOKEN=\047[A-Za-z0-9+\/=_-]+\047$/) fail("not TUNNEL_TOKEN=<token>")
+      if (length($0) > max + 15) fail("token too long")
+    }
+    END { if (!bad && NR != 1) { print "tp-host: token file: empty" > "/dev/stderr"; exit 1 } }
+  ' "$1"
+}
+
+tp_verb_tunnel_env_install() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-install: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-install: refusing tunnel id $1"
+  tp_stage_dir
+  tp_appenv_read_staged "$1" "$R_TUNNEL_STAGE" "$((TP_TUNNEL_TOKEN_MAX + 64))"
+  tp_tunnel_env_content_ok "$TP_STAGE/envsrc" ||
+    tp_die "refusing the token file for $1: content outside the allowed shape"
+  tp_appenv_enter "$R_TUNNELENV"
+  tp_put_file "$R_TUNNELENV/$1.env" 600 < "$TP_STAGE/envsrc"
+}
+
+tp_verb_tunnel_env_remove() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-remove: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-remove: refusing tunnel id $1"
+  # No folder yet: no tunnel has had a token, nothing to remove.
+  tp_pin_dir "$R_TUNNELENV" || return 0
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
+    tp_die "refusing $R_TUNNELENV: not a root-owned 0700 directory"
+  rm -f -- "./$1.env"
+}
+
+# --- control-plane uploaded certificates ------------------------------------
+# A certificate pair for one of the control plane's own hostnames (uploaded by
+# an administrator, or issued by the control plane over DNS-01) reaches the
+# control-plane Caddy as <state>/tls/certs/uploaded-<id>.{crt,key}. That folder
+# is the instance-certs role's (root or the instance account, group tp, 0750),
+# so the daemon cannot write it: it stages the pair as
+# <state>/system/instance-certs/<id>.{crt,key} (0600, its own, in a 0700
+# folder it owns) and instance-cert-install checks both and places them
+# root:tp 0640 (Caddy reads them through group tp). <id> is the control
+# plane's certificate id, a lower-case UUID.
+
+tp_instance_cert_id_ok() {
+  tp_uuid_ok "$1"
+}
+
+# FILE is PEM blocks and nothing else: each block a BEGIN line, base64 lines
+# and the matching END line, blank lines only between blocks. MODE "chain"
+# takes 1 to TP_INSTANCE_CERT_BLOCKS_MAX CERTIFICATE blocks; "key" exactly one
+# unencrypted PRIVATE KEY, RSA PRIVATE KEY or EC PRIVATE KEY block.
+tp_instance_pem_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk -v mode="$2" -v maxblocks="$TP_INSTANCE_CERT_BLOCKS_MAX" '
+    function fail(msg) {
+      print "tp-host: " (mode == "key" ? "private key" : "certificate chain") ": line " NR ": " msg > "/dev/stderr"
+      bad = 1; exit 1
+    }
+    function label_ok(l) {
+      if (mode == "key") return l == "PRIVATE KEY" || l == "RSA PRIVATE KEY" || l == "EC PRIVATE KEY"
+      return l == "CERTIFICATE"
+    }
+    BEGIN { label = ""; blocks = 0 }
+    {
+      if (label == "") {
+        if ($0 == "") next
+        if ($0 !~ /^-----BEGIN [A-Z ]+-----$/) fail("not a PEM BEGIN line")
+        label = substr($0, 12, length($0) - 16)
+        if (!label_ok(label)) fail("a " label " block is not allowed here")
+        blocks++
+        lines = 0
+        next
+      }
+      if ($0 == "-----END " label "-----") {
+        if (lines == 0) fail("an empty block")
+        label = ""
+        next
+      }
+      if ($0 !~ /^[A-Za-z0-9+\/=]+$/ || length($0) > 128) fail("not a base64 line")
+      lines++
+    }
+    END {
+      if (bad) exit 1
+      if (label != "") { print "tp-host: PEM block without an END line" > "/dev/stderr"; exit 1 }
+      if (mode == "key" && blocks != 1) { print "tp-host: private key: exactly one key block is required" > "/dev/stderr"; exit 1 }
+      if (mode != "key" && (blocks < 1 || blocks > maxblocks)) { print "tp-host: certificate chain: 1 to " maxblocks " certificates are required" > "/dev/stderr"; exit 1 }
+    }
+  ' "$1"
+}
+
+tp_verb_instance_cert_install() {
+  [ $# -eq 1 ] || tp_die "instance-cert-install: takes one certificate id"
+  tp_instance_cert_id_ok "$1" || tp_die "instance-cert-install: refusing certificate id $1"
+  tp_stage_dir
+  tp_read_staged "$1" "$1.crt" "$R_INSTANCE_CERT_STAGE" "$TP_INSTANCE_CERT_MAX" \
+    "$TP_STAGE/crt" "certificate chain"
+  tp_read_staged "$1" "$1.key" "$R_INSTANCE_CERT_STAGE" "$TP_INSTANCE_KEY_MAX" \
+    "$TP_STAGE/key" "private key"
+  tp_instance_pem_ok "$TP_STAGE/crt" chain ||
+    tp_die "refusing the certificate chain for $1: not PEM certificates only"
+  tp_instance_pem_ok "$TP_STAGE/key" key ||
+    tp_die "refusing the private key for $1: not one PEM private key"
+  tp_mkdir_pinned "$R_INSTANCE_CERTS" 0750
+  case "$(stat -c '%a' .)" in
+    *[2367]?|*[2367]) tp_die "refusing $R_INSTANCE_CERTS: group- or world-writable" ;;
+  esac
+  # Both are checked, then both are written, moded and owned in one scratch
+  # folder before either is renamed into place, the key first. A failed write
+  # leaves the old pair as it was, so Caddy never reads a new chain beside an
+  # old key; only a crash between the two renames (same folder, no data left
+  # to write) could leave the new key beside the old chain.
+  tp_scratch_enter "$R_INSTANCE_CERTS/uploaded-$1"
+  cat > ./key < "$TP_STAGE/key"
+  cat > ./crt < "$TP_STAGE/crt"
+  chmod 640 ./key ./crt
+  tp_run chown -h -- "root:$DAEMON_ACCOUNT" ./key ./crt
+  mv -T -f -- ./key "../uploaded-$1.key"
+  mv -T -f -- ./crt "../uploaded-$1.crt"
+  tp_scratch_leave
+}
+
+# Every DNS-01 renewal brings a new certificate id, so the pairs of ids no
+# hostname uses any more would pile up (keys included). instance-cert-prune
+# [<id>...] removes uploaded-<id>.{crt,key} from the certs folder for every id
+# it is not given: the daemon names every id its hostnames still use, after
+# the control-plane Caddy has taken the config that names only those. Only an
+# entry directly in the pinned folder whose name is exactly
+# uploaded-<lower-case uuid>.crt or .key is touched, never a folder, and rm
+# removes a link itself, never what it points to. The legacy uploaded.{crt,key}
+# and every other file stay.
+TP_INSTANCE_CERT_KEEP_MAX=64
+
+tp_verb_instance_cert_prune() {
+  [ $# -le "$TP_INSTANCE_CERT_KEEP_MAX" ] ||
+    tp_die "instance-cert-prune: at most $TP_INSTANCE_CERT_KEEP_MAX certificate ids"
+  for _ip_keep in "$@"; do
+    tp_instance_cert_id_ok "$_ip_keep" ||
+      tp_die "instance-cert-prune: refusing certificate id $_ip_keep"
+  done
+  # No folder yet: nothing was ever installed, nothing to remove.
+  tp_pin_dir "$R_INSTANCE_CERTS" || return 0
+  case "$(stat -c '%a' .)" in
+    *[2367]?|*[2367]) tp_die "refusing $R_INSTANCE_CERTS: group- or world-writable" ;;
+  esac
+  for _ip_file in uploaded-*.crt uploaded-*.key; do
+    [ -L "$_ip_file" ] || [ -f "$_ip_file" ] || continue
+    _ip_id="${_ip_file#uploaded-}"
+    _ip_id="${_ip_id%.*}"
+    tp_instance_cert_id_ok "$_ip_id" || continue
+    tp_instance_cert_kept "$_ip_id" "$@" && continue
+    rm -f -- "./$_ip_file"
+  done
+}
+
+# True when ID (the first argument) is one of the ids after it.
+tp_instance_cert_kept() {
+  _ik_id="$1"
+  shift
+  for _ik_keep in "$@"; do
+    [ "$_ik_keep" = "$_ik_id" ] && return 0
+  done
+  return 1
+}
+
+# --- panel key pin (lib/panel-identity) ---------------------------------------
+# run.sh writes the pin file at install, root-owned, and no generic verb may
+# name it (it sits outside every managed tree). This verb is the one way the
+# daemon updates it afterwards, and only to follow the panel's own signed
+# identity document: stdin is the X-TurboPanel-Signature header value on the
+# first line and the exact response body after it. The document must name the
+# pinned current key, be signed by it, be unexpired and carry a key set no
+# lower than the pinned one. Only next=, keyset=, urls= and updated= change,
+# plus hosts= in lib/update-origin (the addresses tp-orchestrate accepts for
+# --host), which always follows urls=. A change of the current key arrives
+# only as a signed rotation or revoke statement (`panel-identity-write
+# statement`, below).
+
+tp_panel_identity_python() {
+  cat <<'PY'
+import base64, binascii, hashlib, json, re, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+PATH = "/api/daemon/v1/instance/identity"
+# https://host[:port]: a DNS name, IPv4 or bracketed IPv6 literal, nothing else.
+ORIGIN = re.compile(r"https://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
+body_path, header_path, out, pinned, pinned_keyset = sys.argv[1:6]
+out = Path(out)
+
+def b64d(text):
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        raise SystemExit("not base64url")
+
+raw = Path(body_path).read_bytes()
+header = Path(header_path).read_text().strip()
+try:
+    doc = json.loads(raw)
+    current = [k for k in doc["keys"] if k.get("role") == "current"]
+    nxt = [k for k in doc["keys"] if k.get("role") == "next"]
+    keyset, expires, urls = doc["keyset"], doc["expires"], doc["urls"]
+except (ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("identity document is malformed")
+if len(current) != 1 or len(nxt) > 1:
+    raise SystemExit("identity document needs one current key and at most one next")
+pub = b64d(current[0].get("pub", ""))
+kid = base64.urlsafe_b64encode(hashlib.sha256(pub).digest()).rstrip(b"=").decode()
+if len(pub) != 32 or kid != current[0].get("kid"):
+    raise SystemExit("current key does not match its fingerprint")
+if kid != pinned:
+    raise SystemExit("the document names a different current key than the pin")
+if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset < int(pinned_keyset):
+    raise SystemExit("keyset is lower than the pinned one")
+try:
+    when = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+except (ValueError, AttributeError):
+    raise SystemExit("expires is not a timestamp")
+if when <= datetime.now(timezone.utc):
+    raise SystemExit("identity document has expired")
+head_kid, _, head_sig = header.partition(":")
+sig = b64d(head_sig)
+if head_kid != kid or len(sig) != 64:
+    raise SystemExit("signature header is wrong")
+if not isinstance(urls, list) or not urls:
+    raise SystemExit("url list is empty")
+for url in urls:
+    if not isinstance(url, str) or not ORIGIN.fullmatch(url):
+        raise SystemExit("url list holds a bad entry")
+next_kid = nxt[0].get("kid", "") if nxt else ""
+if next_kid and len(b64d(next_kid)) != 32:
+    raise SystemExit("next fingerprint is malformed")
+(out / "msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
+(out / "sig").write_bytes(sig)
+der = bytes.fromhex("302a300506032b6570032100") + pub
+pem = base64.b64encode(der).decode()
+(out / "pub.pem").write_text("-----BEGIN PUBLIC KEY-----\n" + "\n".join(pem[i:i + 64] for i in range(0, len(pem), 64)) + "\n-----END PUBLIC KEY-----\n")
+(out / "fields").write_text("%s\n%d\n%s\n" % (next_kid, keyset, ",".join(urls)))
+PY
+}
+
+# Python for a rotation or revoke statement (contract 10b.4). The statement is
+# the exact JSON the panel signed with the signature fields appended in place of
+# the final "}": `,"sigCurrent":"…","sigNext":"…"}` for a rotation, `,"sigNext":"…"}`
+# for a revoke. The signing input is "tp-rotation\n" plus the bytes before the
+# appended fields and a closing "}". Each signer's public key rides in `signers`
+# and must hash to the fingerprint this host pinned for that role (the old
+# current key and the offline next key); nothing in the statement is believed
+# before that. The statement's keyset must be strictly higher, and its new
+# current key must be the pinned next key.
+tp_panel_statement_python() {
+  cat <<'PY'
+import base64, binascii, hashlib, json, re, sys
+from pathlib import Path
+
+stmt_path, out, pin_cur, pin_next, pin_keyset = sys.argv[1:6]
+out = Path(out)
+
+def b64d(text):
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (binascii.Error, ValueError):
+        raise SystemExit("not base64url")
+
+def pem(raw):
+    der = bytes.fromhex("302a300506032b6570032100") + raw
+    body = base64.b64encode(der).decode()
+    return "-----BEGIN PUBLIC KEY-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64)) + "\n-----END PUBLIC KEY-----\n"
+
+def signer(signers, fp):
+    pub = b64d(signers.get(fp, ""))
+    if len(pub) != 32 or base64.urlsafe_b64encode(hashlib.sha256(pub).digest()).rstrip(b"=").decode() != fp:
+        raise SystemExit("a signer key does not hash to the pinned fingerprint")
+    return pub
+
+raw = Path(stmt_path).read_text()
+if not pin_next:
+    raise SystemExit("no next key is pinned")
+tail = re.search(r',"sigCurrent":"([A-Za-z0-9_-]{86})","sigNext":"([A-Za-z0-9_-]{86})"\}$', raw)
+kind = "rotation"
+if tail is None:
+    tail = re.search(r',"sigNext":"([A-Za-z0-9_-]{86})"\}$', raw)
+    kind = "revoke"
+if tail is None:
+    raise SystemExit("statement signatures are missing or malformed")
+body = raw[:tail.start()] + "}"
+try:
+    doc = json.loads(body)
+    keyset, new_cur, new_next, signers = doc["keyset"], doc["current"], doc.get("next", ""), doc["signers"]
+    name = doc.get("type", doc.get("t"))
+except (ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("statement is malformed")
+if name != kind or not isinstance(signers, dict):
+    raise SystemExit("statement type does not match its signatures")
+if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset <= int(pin_keyset):
+    raise SystemExit("keyset does not increase")
+if new_cur != pin_next:
+    raise SystemExit("the new current key is not the pinned next key")
+if new_next != "" and (not isinstance(new_next, str) or len(b64d(new_next)) != 32):
+    raise SystemExit("next fingerprint is malformed")
+if kind == "revoke" and doc.get("revoked") != pin_cur:
+    raise SystemExit("the revoked key is not the pinned current key")
+(out / "msg").write_bytes(b"tp-rotation\n" + body.encode())
+(out / "pubn.pem").write_text(pem(signer(signers, pin_next)))
+(out / "sign").write_bytes(b64d(tail.group(tail.lastindex)))
+if kind == "rotation":
+    (out / "pubc.pem").write_text(pem(signer(signers, pin_cur)))
+    (out / "sigc").write_bytes(b64d(tail.group(1)))
+(out / "fields").write_text("%s\n%s\n%d\n%s\n" % (kind, new_cur, keyset, new_next))
+PY
+}
+
+tp_verb_panel_identity_statement() {
+  _ps_file="$INSTALL_ROOT/lib/panel-identity"
+  _ps_origin="$INSTALL_ROOT/lib/update-origin"
+  [ -f "$_ps_file" ] && [ ! -L "$_ps_file" ] || tp_die "panel-identity-write: no panel key is pinned on this host"
+  [ "$(stat -c %u "$_ps_file")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_ps_file is not root-owned"
+  _ps_cur="$(tp_pin_field_of "$_ps_file" current)"
+  _ps_next="$(tp_pin_field_of "$_ps_file" next)"
+  _ps_keyset="$(tp_pin_field_of "$_ps_file" keyset)"
+  [ -n "$_ps_cur" ] || tp_die "panel-identity-write: this host was installed without a panel key"
+  case "$_ps_keyset" in ''|*[!0-9]*) tp_die "panel-identity-write: the pin file has no valid keyset" ;; esac
+  tp_stage_dir
+  head -c 8193 > "$TP_STAGE/statement"
+  [ "$(wc -c < "$TP_STAGE/statement")" -le 8192 ] || tp_die "panel-identity-write: statement too large"
+  mkdir "$TP_STAGE/v"
+  python3 -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_next" "$_ps_keyset" ||
+    tp_die "panel-identity-write: refusing the statement"
+  openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pubn.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sign" >/dev/null 2>&1 ||
+    tp_die "panel-identity-write: the next key's signature is invalid"
+  if [ "$(sed -n '1p' "$TP_STAGE/v/fields")" = rotation ]; then
+    openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pubc.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sigc" >/dev/null 2>&1 ||
+      tp_die "panel-identity-write: the current key's signature is invalid"
+  fi
+  _ps_new_cur="$(sed -n '2p' "$TP_STAGE/v/fields")"
+  _ps_new_keyset="$(sed -n '3p' "$TP_STAGE/v/fields")"
+  _ps_new_next="$(sed -n '4p' "$TP_STAGE/v/fields")"
+  {
+    printf 'current=%s\n' "$_ps_new_cur"
+    printf 'next=%s\n' "$_ps_new_next"
+    printf 'keyset=%s\n' "$_ps_new_keyset"
+    printf 'urls=%s\n' "$(tp_pin_field_of "$_ps_file" urls)"
+    printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_ps_file" pinned_by)"
+    printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$TP_STAGE/new"
+  # The update origin names the pinned key too; both change together.
+  if [ -f "$_ps_origin" ] && [ ! -L "$_ps_origin" ]; then
+    sed "s|^panel_key=.*|panel_key=$_ps_new_cur|" "$_ps_origin" > "$TP_STAGE/origin"
+    tp_put_file "$_ps_origin" 600 root root < "$TP_STAGE/origin"
+  fi
+  tp_put_file "$_ps_file" 640 root tp < "$TP_STAGE/new"
+}
+
+tp_pin_field_of() {
+  sed -n "s/^$2=//p" "$1" | head -n 1
+}
+
+tp_verb_panel_identity_write() {
+  if [ $# -eq 1 ] && [ "$1" = statement ]; then
+    tp_verb_panel_identity_statement
+    return
+  fi
+  [ $# -eq 0 ] || tp_die "panel-identity-write: takes no arguments, or \"statement\""
+  _pi_file="$INSTALL_ROOT/lib/panel-identity"
+  [ -f "$_pi_file" ] && [ ! -L "$_pi_file" ] || tp_die "panel-identity-write: no panel key is pinned on this host"
+  [ "$(stat -c %u "$_pi_file")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_pi_file is not root-owned"
+  _pi_cur="$(tp_pin_field_of "$_pi_file" current)"
+  [ -n "$_pi_cur" ] || tp_die "panel-identity-write: this host was installed without a panel key"
+  _pi_keyset="$(tp_pin_field_of "$_pi_file" keyset)"
+  case "$_pi_keyset" in ''|*[!0-9]*) tp_die "panel-identity-write: the pin file has no valid keyset" ;; esac
+  tp_stage_dir
+  head -c 65537 > "$TP_STAGE/in"
+  [ "$(wc -c < "$TP_STAGE/in")" -le 65536 ] || tp_die "panel-identity-write: input too large"
+  sed -n '1p' "$TP_STAGE/in" > "$TP_STAGE/header"
+  sed '1d' "$TP_STAGE/in" > "$TP_STAGE/body"
+  # The body is signed byte for byte; sed adds nothing but a missing final newline.
+  [ "$(tail -c 1 "$TP_STAGE/in" | wc -l)" -eq 0 ] || tp_die "panel-identity-write: the body must not end in a newline"
+  mkdir "$TP_STAGE/v"
+  python3 -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" ||
+    tp_die "panel-identity-write: refusing the identity document"
+  openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pub.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sig" >/dev/null 2>&1 ||
+    tp_die "panel-identity-write: the identity document signature is invalid"
+  _pi_next="$(sed -n '1p' "$TP_STAGE/v/fields")"
+  _pi_new_keyset="$(sed -n '2p' "$TP_STAGE/v/fields")"
+  _pi_urls="$(sed -n '3p' "$TP_STAGE/v/fields")"
+  {
+    printf 'current=%s\n' "$_pi_cur"
+    printf 'next=%s\n' "$_pi_next"
+    printf 'keyset=%s\n' "$_pi_new_keyset"
+    printf 'urls=%s\n' "$_pi_urls"
+    printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_pi_file" pinned_by)"
+    printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$TP_STAGE/new"
+  # The update origin's address list follows the pin's (written first, so a
+  # failure leaves the pin as it was and the daemon simply tries again).
+  _pi_origin="$INSTALL_ROOT/lib/update-origin"
+  if [ -f "$_pi_origin" ] && [ ! -L "$_pi_origin" ]; then
+    [ "$(stat -c %u "$_pi_origin")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_pi_origin is not root-owned"
+    {
+      grep -v '^hosts=' "$_pi_origin" || true
+      printf 'hosts=%s\n' "$_pi_urls"
+    } > "$TP_STAGE/origin"
+    tp_put_file "$_pi_origin" 600 root root < "$TP_STAGE/origin"
+  fi
+  tp_put_file "$_pi_file" 640 root tp < "$TP_STAGE/new"
+}
+
 # --- dispatch ----------------------------------------------------------------
 
 [ $# -ge 1 ] || tp_die "usage: tp-host <verb> [args…]"
@@ -4869,5 +5797,10 @@ case "$_verb" in
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   app-env-install) tp_verb_app_env_install "$@" ;;
   app-env-remove) tp_verb_app_env_remove "$@" ;;
+  tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
+  tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  instance-cert-install) tp_verb_instance_cert_install "$@" ;;
+  instance-cert-prune) tp_verb_instance_cert_prune "$@" ;;
+  panel-identity-write) tp_verb_panel_identity_write "$@" ;;
   *) tp_die "refusing verb $_verb" ;;
 esac

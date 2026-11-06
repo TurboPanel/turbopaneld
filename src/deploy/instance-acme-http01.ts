@@ -10,6 +10,7 @@
  */
 
 import { dirname, join } from "@std/path";
+import { TUNNEL_SITE_FILE } from "./tunnel-caddy.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import type { InstanceAcmeWireSettings } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -38,6 +39,12 @@ import {
 } from "./instance-acme-issuer.ts";
 
 export const INSTANCE_ACME_HTTP01_SITE = "00-instance-acme-http01.caddy";
+
+/**
+ * Reserved sites written for a central certificate request, for a name that has
+ * no site block of its own yet. One file per request id.
+ */
+export const TENANT_PROOF_SITE_PREFIX = "00-tenant-acme-proof-";
 
 /** Control-plane Caddy unit. `ExecReload` already passes `--force`. */
 export const CONTROL_PLANE_CADDY_SERVICE = "turbopanel-caddy.service";
@@ -112,6 +119,7 @@ export const DAEMON_RESERVED_HOSTING_SITES = new Set([
   "00-empty.caddy",
   HOSTING_FALLBACK_SITE,
   INSTANCE_ACME_HTTP01_SITE,
+  TUNNEL_SITE_FILE,
 ]);
 
 export const INSTANCE_ACME_HTTP01_PREFLIGHT_PREFIX =
@@ -131,7 +139,8 @@ const HOSTING_CADDY_READY_ATTEMPTS = 20;
 const HOSTING_CADDY_READY_INTERVAL_MS = 50;
 
 export function isDaemonReservedHostingSite(name: string): boolean {
-  return DAEMON_RESERVED_HOSTING_SITES.has(name);
+  return DAEMON_RESERVED_HOSTING_SITES.has(name) ||
+    name.startsWith(TENANT_PROOF_SITE_PREFIX);
 }
 
 const HOLDER_NAME_MAX = 32;
@@ -214,7 +223,7 @@ export type InstanceAcmeCommand = (
   stdin?: string,
 ) => Promise<CommandResult>;
 
-async function defaultCommand(
+export async function defaultCommand(
   program: string,
   args: readonly string[],
   stdin?: string,
@@ -242,7 +251,9 @@ async function defaultCommand(
   };
 }
 
-async function inspectPort80(run: InstanceAcmeCommand): Promise<Port80Holder> {
+export async function inspectPort80(
+  run: InstanceAcmeCommand,
+): Promise<Port80Holder> {
   const sudo = await run(
     "sudo",
     hostSudoArgs(["-n", "ss", "-H", "-ltnp", "sport = :80"]),
@@ -272,7 +283,7 @@ function hostingPid(text: string): number | null {
   return pid;
 }
 
-function hostingSitesDir(layout: LayoutPaths): string {
+export function hostingSitesDir(layout: LayoutPaths): string {
   return join(layout.configDir, "hosting", "sites");
 }
 
@@ -355,7 +366,7 @@ export async function openInstanceAcmeWindow(
   }
 }
 
-async function activateHostingCaddyForWindow(
+export async function activateHostingCaddyForWindow(
   holder: Port80Holder,
   layout: LayoutPaths,
   ensure: (layout: LayoutPaths) => Promise<void>,
@@ -385,7 +396,7 @@ async function hostingCaddyIsActive(
   return state.ok && ACTIVE_UNIT_STATES.has(state.stdout.trim());
 }
 
-async function waitForHostingCaddyOn80(
+export async function waitForHostingCaddyOn80(
   inspect: () => Promise<Port80Holder>,
   sleepFn: (ms: number) => Promise<void>,
   attempt = 0,
@@ -453,14 +464,18 @@ export async function closeInstanceAcmeWindow(
   await reloadHostingCaddy(run);
 }
 
-async function sitesHoldOnlyReserved(dir: string): Promise<boolean> {
+export async function sitesHoldOnlyReserved(dir: string): Promise<boolean> {
   for await (const entry of Deno.readDir(dir)) {
+    // A pending central certificate request still needs hosting Caddy up.
+    if (entry.name.startsWith(TENANT_PROOF_SITE_PREFIX)) return false;
     if (!isDaemonReservedHostingSite(entry.name)) return false;
   }
   return true;
 }
 
-async function reloadHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
+export async function reloadHostingCaddy(
+  run: InstanceAcmeCommand,
+): Promise<void> {
   const result = await run(
     "sudo",
     hostSudoArgs([
@@ -475,7 +490,9 @@ async function reloadHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
   }
 }
 
-async function enableHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
+export async function enableHostingCaddy(
+  run: InstanceAcmeCommand,
+): Promise<void> {
   const result = await run(
     "sudo",
     hostSudoArgs([
@@ -491,7 +508,9 @@ async function enableHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
   }
 }
 
-async function disableHostingCaddy(run: InstanceAcmeCommand): Promise<void> {
+export async function disableHostingCaddy(
+  run: InstanceAcmeCommand,
+): Promise<void> {
   const result = await run(
     "sudo",
     hostSudoArgs([
@@ -646,7 +665,7 @@ export async function grantInstanceAcmeSocket(
   }
 }
 
-async function withPreflightServer(
+export async function withPreflightServer(
   socketPath: string,
   nonce: string,
   run: InstanceAcmeCommand,
@@ -779,6 +798,7 @@ export async function issueInstanceLetsEncryptCertificates(
   const now = deps.now ?? Date.now;
   const issuerKey = instanceAcmeIssuerKey(instanceAcme);
   const had = await snapshotIssued(layout, hosts, now(), issuerKey, run);
+  await removeLeftoverPreflightSocket(instanceAcmeSocketPath(layout));
   await startIssuer(run);
   let failed = true;
   let stopError: Error | null = null;
@@ -895,7 +915,7 @@ async function everyHostSettled(
   return true;
 }
 
-function delay(ms: number): Promise<void> {
+export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -1255,7 +1275,7 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return true;
 }
 
-async function readFilePrivileged(
+export async function readFilePrivileged(
   path: string,
   run: InstanceAcmeCommand,
 ): Promise<Uint8Array> {
@@ -1324,7 +1344,7 @@ async function sudoBytes(args: readonly string[]): Promise<Uint8Array | null> {
   }
 }
 
-async function writeTextPrivileged(
+export async function writeTextPrivileged(
   path: string,
   text: string,
   run: InstanceAcmeCommand,
@@ -1366,7 +1386,7 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-async function directoryExists(path: string): Promise<boolean> {
+export async function directoryExists(path: string): Promise<boolean> {
   try {
     return (await Deno.stat(path)).isDirectory;
   } catch (err) {
@@ -1375,7 +1395,29 @@ async function directoryExists(path: string): Promise<boolean> {
   }
 }
 
-async function removeSite(dest: string): Promise<boolean> {
+/**
+ * The run folder is sticky, so the issuer (its own account) cannot replace a
+ * socket the daemon left behind when it stopped mid-preflight. A socket owned
+ * by the folder's owner (the daemon) is that leftover: remove it. One owned by
+ * anyone else is the issuer's and stays.
+ */
+export async function removeLeftoverPreflightSocket(
+  socketPath: string,
+): Promise<void> {
+  let socketUid: number | null;
+  try {
+    socketUid = (await Deno.lstat(socketPath)).uid;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    throw err;
+  }
+  const folderUid = (await Deno.stat(dirname(socketPath))).uid;
+  if (socketUid !== null && socketUid === folderUid) {
+    await removeSite(socketPath);
+  }
+}
+
+export async function removeSite(dest: string): Promise<boolean> {
   try {
     await Deno.remove(dest);
     return true;

@@ -44,6 +44,9 @@ import {
   parseSystemReconcilePayload,
   parseTimezoneSetPayload,
   parseTlsTrustReconcilePayload,
+  parseTunnelConnectorsPayload,
+  parseTunnelRoutesPayload,
+  parseTunnelStatusPayload,
 } from "../contracts/commands-contracts.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
@@ -78,6 +81,9 @@ import { handleReboot } from "./reboot.ts";
 import { handleTimezone } from "./timezone.ts";
 import { handlePrincipalsReconcile } from "./principals-reconcile.ts";
 import { handleFoldersRemove } from "./remove-folders.ts";
+import { handleTunnelConnectors } from "./tunnel-connectors.ts";
+import { handleTunnelRoutes } from "./tunnel-routes.ts";
+import { handleTunnelStatus } from "./tunnel-status.ts";
 import { handleFirewallReconcile } from "./firewall-reconcile.ts";
 import { handleFirewallConfirm } from "./firewall-confirm.ts";
 import { handleBackupsReconcile } from "../backups/reconcile.ts";
@@ -133,6 +139,9 @@ export type CommandRouterHandlerOverrides = {
   handleBackupsReconcile?: typeof handleBackupsReconcile;
   handleBackupTargetTest?: typeof handleBackupTargetTest;
   handleFoldersRemove?: typeof handleFoldersRemove;
+  handleTunnelRoutes?: typeof handleTunnelRoutes;
+  handleTunnelConnectors?: typeof handleTunnelConnectors;
+  handleTunnelStatus?: typeof handleTunnelStatus;
   handleManagedApply?: typeof handleManagedApply;
   handleManagedLifecycle?: typeof handleManagedLifecycle;
   handleManagedDestroy?: typeof handleManagedDestroy;
@@ -168,6 +177,35 @@ function pickCommandRouterHandler<
 }
 
 /**
+ * The two tunnel connector commands share one switch case (the switch is at its
+ * size limit), so each one's parse-and-run lives here.
+ */
+async function runTunnelConnectors(
+  rawPayload: unknown,
+  daemonReceivedAt: string,
+  decryptSecrets:
+    | ((ciphertexts: string[]) => Promise<(string | null)[]>)
+    | undefined,
+): Promise<unknown> {
+  const payload = parseTunnelConnectorsPayload(rawPayload);
+  return await pickCommandRouterHandler(
+    "handleTunnelConnectors",
+    handleTunnelConnectors,
+  )(payload, daemonReceivedAt, { decryptSecrets });
+}
+
+async function runTunnelStatus(
+  rawPayload: unknown,
+  daemonReceivedAt: string,
+): Promise<unknown> {
+  parseTunnelStatusPayload(rawPayload);
+  return await pickCommandRouterHandler(
+    "handleTunnelStatus",
+    handleTunnelStatus,
+  )(daemonReceivedAt);
+}
+
+/**
  * Build the per-command transcript sink. One sink per command execution, keyed
  * on the dispatch envelope's own command id; `finalize()` runs in the `finally`
  * beside the WS `command-outcome` send so an upload failure can never affect
@@ -194,6 +232,67 @@ function createDispatchLogSink(
  */
 const MAX_OUTCOME_ERROR_CHARS = 4000;
 const TRUNCATED_MARKER = "[...truncated] ";
+
+/**
+ * Largest `command-outcome.result` the daemon sends, as UTF-8 JSON bytes. The
+ * control plane caps it at 64 KB (`MAX_DAEMON_WS_RESULT_JSON_BYTES`); an older
+ * one refuses a larger result by closing the socket, and the kept outcome was
+ * then sent again on every reconnect.
+ */
+const MAX_OUTCOME_RESULT_BYTES = 64 * 1024;
+
+type OutcomeFields = { ok: boolean; result?: unknown; error?: string };
+
+/**
+ * A successful outcome whose result is over {@link MAX_OUTCOME_RESULT_BYTES}
+ * becomes a failed one without the result, with the same plain error the
+ * control plane records for it. Anything else is returned as it is.
+ */
+export function capOutcomeResult(fields: OutcomeFields): OutcomeFields {
+  if (!fields.ok || fields.result === undefined) return fields;
+  let bytes: number;
+  try {
+    const encoded = JSON.stringify(fields.result);
+    if (encoded === undefined) return fields;
+    bytes = new TextEncoder().encode(encoded).byteLength;
+  } catch {
+    return fields;
+  }
+  if (bytes <= MAX_OUTCOME_RESULT_BYTES) return fields;
+  return {
+    ok: false,
+    error: `The server's report was too large to store (${
+      Math.ceil(bytes / 1024)
+    } KB; limit ${MAX_OUTCOME_RESULT_BYTES / 1024} KB).`,
+  };
+}
+
+/**
+ * The outcome fields for a finished command: the result only on success, and
+ * {@link capOutcomeResult} applied, with one warn line when it failed the
+ * outcome. The command itself still counts as succeeded on this host.
+ */
+function sizedOutcomeFields(
+  id: string,
+  ok: boolean,
+  result: unknown,
+  error: string | undefined,
+): OutcomeFields {
+  const sized = capOutcomeResult({
+    ok,
+    result: ok ? result : undefined,
+    error,
+  });
+  if (ok && !sized.ok) {
+    logWarn(
+      "commands",
+      `command ${sanitizeForLog(id)} result is over ${
+        MAX_OUTCOME_RESULT_BYTES / 1024
+      } KB; sent as failed: ${sized.error}`,
+    );
+  }
+  return sized;
+}
 
 /**
  * Keep the **tail**: a failed build prints the cause last, and the head is
@@ -327,7 +426,7 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handlePrincipalsReconcile",
           handlePrincipalsReconcile,
-        )(payload, daemonReceivedAt);
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -380,6 +479,29 @@ export async function handleCommandDispatch(
           "handleFoldersRemove",
           handleFoldersRemove,
         )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.tunnel.routes": {
+        const payload = parseTunnelRoutesPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleTunnelRoutes",
+          handleTunnelRoutes,
+        )(payload, daemonReceivedAt, { decryptSecrets: deps?.decryptSecrets });
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "server.tunnel.connectors":
+      case "server.tunnel.status": {
+        result = message.commandType === "server.tunnel.status"
+          ? await runTunnelStatus(message.payload, daemonReceivedAt)
+          : await runTunnelConnectors(
+            message.payload,
+            daemonReceivedAt,
+            deps?.decryptSecrets,
+          );
         ok = true;
         daemonRespondedAt = new Date().toISOString();
         break;
@@ -610,13 +732,17 @@ export async function handleCommandDispatch(
         break;
     }
 
+    const sized = sizedOutcomeFields(
+      message.id,
+      ok,
+      result,
+      error ? sanitizeOutcomeError(error, logSink) : undefined,
+    );
     commandSucceeded = ok;
     await deliverCommandOutcome(ws, {
       type: "command-outcome",
       id: message.id,
-      ok,
-      result: ok ? result : undefined,
-      error: error ? sanitizeOutcomeError(error, logSink) : undefined,
+      ...sized,
       at: daemonRespondedAt,
       daemonReceivedAt,
       daemonRespondedAt,

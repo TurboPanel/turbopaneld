@@ -2,7 +2,7 @@
 
 The daemon's authenticated link to the control plane (`src/instance/client.ts`): WSS or co-located Unix socket to `/ws/daemon/v1`, idle presence + heartbeats, reconnect / parked backoff, JWKS-based JWT verification, and the daemon-side TLS trust model.
 
-Root context: `../../AGENTS.md` (Filesystem layout & path model). Host metrics scheduler: `../metrics/AGENTS.md`. Cross-repo `../<repo>/AGENTS.md` links are relative to the repo root (sibling repos under `$HOME`).
+Root context: `../../AGENTS.md`; path model in `../paths/AGENTS.md`. Host metrics scheduler: `../metrics/AGENTS.md`. Cross-repo `../<repo>/AGENTS.md` links are relative to the repo root (sibling repos under `$HOME`).
 
 ## Instance client (`src/instance/client.ts`)
 
@@ -53,6 +53,24 @@ the same path every deploy secret uses. An envelope that cannot be opened fails
 the request (nothing is applied, the tunnel is not torn down). The legacy
 plaintext `keyPem` / `token` from an older control plane is still accepted
 until both floors pass the release that ships this; then those fields go.
+
+**Control plane host only.** `tunnel-token` and `public-urls-update` are
+applied only when `isControlPlaneHost()` (`control-plane-host.ts`) holds:
+`/opt/turbopanel/bin/turbopanel` is a root-owned regular file (the fixed path,
+never `TURBOPANEL_BIN_DIR` from `daemon.env`), or this is a development install
+run from its checkout with `TURBOPANEL_DEV_INSTANCE=1`. `tunnel-token` also
+needs socket mode. Anywhere else the result is `ok: false` with
+`TUNNEL_TOKEN_REMOTE_REFUSAL` / `PUBLIC_URLS_REMOTE_REFUSAL` and nothing is
+written. Details: `src/tunnels/AGENTS.md`.
+
+**Topology generation off the wire (`topology-generation-optional-v1`).** A
+control plane that lists it no longer needs the topology generation numbers.
+The daemon then leaves `metadata.topologyGeneration` off metrics samples,
+`generation` and `bootGeneration` off `topology-report` (and its snapshot),
+and stops sending the `topology_generation_changed` event; it keeps tracking
+the generation itself. The flag is set on attach and cleared on close
+(`setTopologyGenerationOptional`); details in `../metrics/AGENTS.md`. No
+version floor moved: older control planes still get the numbers.
 
 **Deploy cancel (`deploy-cancel-v1`).** The daemon advertises the feature in
 `hello.features`. A control plane that sees it may send `deploy-cancel`
@@ -132,6 +150,32 @@ and closes a connection (`src/host/network-check.ts`), at most 3 s per target,
 and refuses loopback, link-local and public addresses. Nothing is sent on the
 connection, nothing is stored, no command row.
 
+**Development host (`dev-host-v1`).** Only a development install with
+`TURBOPANEL_DEV_INSTANCE=1` has one (`src/dev-host/`, started by
+`entry/run.ts` before the connection and passed in as
+`InstanceClientOptions.devHost`). It sends fire-and-forget
+`dev-host-status` (`status`: `parts[]`, `lastFetchAt`, `job`) on attach, when
+the attach frame's features arrive, whenever the job changes and after each
+60 s tick, only to a control plane that lists the feature. A control plane
+that lists it may send `dev-host-action` (`id`, `action`: `update` or
+`restart`) and gets `dev-host-action-result` (`ok`, `jobId` or `error`:
+`job_running`, `not_development`, `start_failed`) on the same id; a frame whose action is
+neither is logged and dropped. The action enum is the only wire input: no
+path, branch or command comes from the control plane. The attach frame's
+`commit` is kept as the control plane's running commit when it is a full
+sha. The status is capped under the control plane's 64 KB limit (dirty lists
+shrink first). Additive; no floor moved. Rules: `../dev-host/AGENTS.md`.
+
+**Changed package signing keys (`repo-key-report-v1`).** The playbook runner
+(`orchestration/repo-key-changes.ts`) keeps each structured key change in
+`<daemonStateDir>/spool/repo-key-reports.json` as pending, once per key name and
+fingerprint. `RepoKeyReporter` (`repo-key-reporter.ts`) sends one fire-and-forget
+`repo-key-changed` frame per pending change, only to a control plane listing the
+feature, and marks it sent only after the frame went out on an open socket (so a
+converge that ran before the socket was up, or against an older control plane,
+is not lost). It flushes on attach, on a new pending change and when the attach
+frame's features arrive.
+
 **Pushed managed health (`managed-health-report-v1`).** `ManagedHealthReporter`
 (`managed-health-reporter.ts`) reads every replica recorded in `ha-member.json`
 (all engines) every 30 s, through the same `probeManagedMemberHealth`, and sends
@@ -142,6 +186,42 @@ control plane lets the old reading age out. Fire-and-forget and read-only. It
 exists because health was only read when someone asked: a quiet cluster aged
 past the control plane's freshness window and a stopped replica kept its last
 `streaming` line.
+
+**Pushed TurboFabric peers (`fabric-peer-report-v1`).** While `tp0` exists,
+`commands/fabric-peer-refresh.ts` re-reads `wg show tp0 dump` every 60 s (one
+timer, armed at boot by `entry/run.ts`, stopped when a read finds no `tp0` or
+on pause/teardown; no timer with fabric off). `FabricPeerReporter`
+(`fabric-peer-reporter.ts`) hears each reading through the
+`subscribeFabricPeers` command port and sends one `fabric-peers-report`
+frame (`peers[]`, at most 256, plus `observedAt`) to a control plane that lists
+the feature, only when a peer's health class changed or 5 minutes passed since
+the last frame on this connection (the first reading after a connect always
+goes). Fire-and-forget and read-only. It exists because the control plane's
+`relay.metadata.observed` only moved on a reconcile, so healthy tunnels read
+as stale minutes after each apply.
+
+**Signed reports (`signed-reports-v1`).** On a signed session (pinned
+server, control plane hello verified) and only with a control plane that lists
+the feature, `SignedPanelSession` signs every `command-outcome` and
+`fabric-peers-report` with the daemon key at the one place all sends pass
+(`signed-session.ts`, helpers in `report-signing.ts`). Bytes: the message plus
+`{sessionId, iat, kid}` (kid = the daemon key id) is serialized once, signed as
+`"tp-report\n" + type + "\n" + bytes`, and `,"sig":"<base64url>"}` replaces
+the final `}`, the same split rule as the control plane's frames;
+`REPORT_PREFIX` is pinned in both contract-drift scripts. No `seq`: a result
+is idempotent by id. Signing is async, so later sends queue behind it and keep
+their order. No key, no feature, an unsigned session or a signing error: the
+frame goes out as before (a result is never lost). A report sent before this
+socket's attach frame (with the feature list) arrives is held, not sent
+unsigned, and goes out signed or as it is once the list is known
+(`peerFeaturesKnown`, called from `#notePeerFeatures`). At most 64 wait;
+one past that is dropped and only comes back on the 30 s resend, but a
+session open sends at most 20 results, so the bound is not reached. The reason: once a control plane has
+verified one signed report from a server it records that the server signs,
+and from then on refuses its unsigned reports on signed sessions exactly like
+a bad signature (a refused result is acked as failed with `signature_invalid`
+and never sent again). A signing error still sends the report unsigned, so on
+such a server that result is recorded as failed.
 
 **Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
 replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded
@@ -177,7 +257,9 @@ policy sits in `util/retry-fetch.ts` options.
 leaves. It starts from `InstanceClient.start()` and keeps running across
 socket reconnects; events queued while the socket is down flush on the next
 attach. It does not probe public `:443` — that port is tenant hosting. The
-hostname list is `instance-hostnames.json` (`readInstanceLetsEncryptHostnames`).
+hostname list is `instance-hostnames.json` (`readInstanceLetsEncryptHostnames`). Beside it, `instance-edge-trust.json` holds the Cloudflare and Bunny edge
+ranges from `public-urls-update` `edgeTrust` (`instance-edge-trust-v1`); a message
+without the field leaves it as it is.
 Each leaf is `letsencrypt-<host>.crt` in the instance certs directory. A name
 is due when that file is missing, not a certificate, or inside the issuer
 window (`INSTANCE_ACME_RENEWAL_WINDOW_RATIO`, the same `renewal_window_ratio`
@@ -319,16 +401,28 @@ waits on that correlated round trip.
 in `[initialBackoffMs, currentBackoffMs]` (defaults 2 s → 30 s cap, doubling on
 auth failures). A benign close after a stable session (`STABLE_SESSION_MS`, 5 s)
 resets backoff to the initial floor so fleet-wide restarts do not align into a
-thundering herd.
+thundering herd. An edge restart drops every daemon at once; the full-jitter
+window (first window 8 s, then doubling to the cap) is what keeps the panel from
+a token-mint burst. Do not replace it with a fixed delay.
+
+**Advised heartbeat:** the unsigned `version` frame may carry `heartbeatSeconds`.
+The daemon accepts whole seconds in [15, 120] (`clampHeartbeatSeconds`), applies
+them to the ping cadence and the stale limit (3x), and keeps 60 s otherwise. A
+verified signed hello wins over this field (`#pinnedHelloApplied`).
 
 **Parked state:** `classifyConnectFailure` (`src/instance/connect-failure.ts`)
 maps enroll/session failures to `transient` (network, `>=500`, `429`,
 `400 Invalid or expired challenge` → normal full-jitter reconnect),
 `temporary-auth` (reserved — close-code / stale-JWT refresh path, e.g. `4401` →
 refresh, no identity clear), `stale-identity` (`404 Server key not found`,
-`400 Server key mismatch` → recover + re-enroll), `tls-trust`
+`400 Server key mismatch`, `409 Server key already registered` → **park** as
+`awaiting-administrator`: key files are kept, nothing re-enrolls, the check
+repeats on the parked backoff; a real re-key is an owner action), `tls-trust`
 (Deno/rustls chain/SAN/expiry: `invalid peer certificate`, `UnknownIssuer`,
 `NotValidForName`, `CertExpired` — **park**, not a silent 30 s loop),
+`panel-identity` (a pinned server's control plane did not prove its key: a
+`PanelIdentityError` or `403 Panel fingerprint mismatch` → **park**, timer
+backoff, keys kept; see "Signed session" below),
 `awaiting-seat` (`400 License tier below required`,
 `400 License tier not assigned` — no purchased size is free for this server;
 **park** on a fixed `AWAITING_SEAT_POLL_MS` 15 min re-check that retries the
@@ -337,22 +431,31 @@ panels only send these from enroll, older ones also from session), or
 `permanent`
 (`401 Invalid license`, `400 License already consumed or invalid`,
 `400 License is inactive`, `400 Server key is inactive`,
-`403 Invalid signature`, `409 Fingerprint already exists`, and the local
-`missing license credentials for enrollment` → **park**). On `permanent` or
+`403 Invalid signature`, `403 Signed proof required`, `409 Fingerprint already exists`, and the local
+`missing license credentials for enrollment` → **park**). `401 Invalid license` is what a used install key gets (the panel erases a key's token when its server binds, and a join ticket works once for an hour): the park log then names the way out, an owner issuing a re-enroll token on the server's page and the installer re-run with it (`permanentRejectionAdvice`). The restaged license files change the stamp, which unparks and force-enrolls with the persisted server id; the daemon keeps its staged license files (managed updates pass them to the installer). On `permanent` or
 `tls-trust`,
 `InstanceClient` enters `#enterParkedState` instead of `#increaseBackoff` —
 full-jitter backoff in `[PARKED_BACKOFF_MIN_MS, PARKED_BACKOFF_MAX_MS]`
 (**5 min → 1 h**, vs the transient `DEFAULT_MAX_BACKOFF_MS` 30 s ceiling) with
 **no** enroll/challenge/session network traffic while parked. This parked
 state — not the instance rate limiter — is the primary storm protection.
-`#recoverFromStaleIdentity` calls `clearDaemonKeyState` (removes only
-`server-key.json` + `server-key-id`, **keeps** `server.id`) so `enrollDaemon`
-can re-present the persisted `serverId` for an already-latched license; a
-permanent enroll failure on that path then parks rather than re-clearing every
-cycle. Unpark triggers while the process stays up: license-file change
+The daemon never deletes its key files on an unauthenticated
+error: the panel saying a key is unknown is not proof, and re-enrolling would resend
+the license token. Greppable park log: `panel says this server's key is unknown;
+waiting for an administrator`. A daemon that enrolls with a fresh key (key files
+missing, or `TURBOPANEL_FORCE_ENROLL`) is refused with `409` by a panel that already
+holds a key for the server. `awaiting-administrator` retries on the parked backoff with the
+same key; a license-file change or `TURBOPANEL_FORCE_ENROLL` (an action on the host) makes
+the next attempt enroll afresh. Unpark triggers for permanent parks while the process stays up: license-file change
 (SHA-256 stamp of `license.id` + `license.token` differs) or
 `TURBOPANEL_FORCE_ENROLL` truthy — both reset backoff and force re-enroll on
-the next cycle. Daemon restart clears the in-memory parked backoff and retries
+the next cycle. The stamp is the license the last attempt tried: it is read
+before an attempt that does not come out of a park, or taken from the
+credentials an enrollment used, and parking never re-reads it, so a license
+written while a retry is in flight is not mistaken for one already tried.
+An empty or incomplete read of the pair (the installer mid-replace) is "no
+change": it is logged once and the next re-check reads the finished files.
+Daemon restart clears the in-memory parked backoff and retries
 the normal identity path; forced re-enroll after restart still requires
 `TURBOPANEL_FORCE_ENROLL` or missing/cleared key files. Greppable park
 log: `daemon control-plane permanently rejected enrollment (<reason>); parked —
@@ -370,7 +473,7 @@ table).
 **Instance version floor** (`src/instance/version-wire.ts`):
 `MIN_SUPPORTED_INSTANCE_VERSION` is the mirror of the control plane's
 `MIN_SUPPORTED_DAEMON_VERSION`. Bump them together and say why in both
-Versions-on-the-wires notes (root `AGENTS.md` and
+Versions-on-the-wires notes (this file and
 `../turbopanel/AGENTS.md`). The daemon learns the peer from
 `x-turbopanel-version` on every `DaemonApiClient` response (including non-OK
 and the 401 before a refresh) and from `instanceVersion` on the cell attach
@@ -462,7 +565,8 @@ published channel.json — the product meaning is “alternate runtime,” not
 install/update, but Deno is still vendored on every host — `daemon-install.yml`
 and `daemon-converge.yml` run `deno-runtime` unconditionally, because co-located
 instance/mailer units resolve their ExecStart through `vendor/deno/current` even
-when the daemon itself runs the native binary. Config lives in
+when the daemon itself runs the native binary. (`daemon-converge.yml` never runs on a
+co-located development host; see `../orchestration/AGENTS.md`, Boot converge.) Config lives in
 `/etc/turbopanel` (`daemon.env`, `instance-ca.pem`); persistent identity in
 `/var/lib/turbopanel` (license, `server.id`, keys); runtime files in
 `/run/turbopanel`. Co-located dev keeps `deno run main.ts` from the home
@@ -470,7 +574,7 @@ checkout via `daemon-systemd-setup.yml` and logs to `/var/log/turbopanel`.
 
 **Managed updates:** the running daemon reconciles in-place via `run.sh`
 when triggered from the control-plane UI or manually with the same piped
-installer (`curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
+installer (`curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=… sh`; optional
 `TURBOPANEL_HOST` / `TURBOPANEL_INSECURE_TLS=1`). On a **managed host** the
 daemon does not download or pipe the script itself: it resolves the trust
 regime (`resolveAutomaticUpdateTrust` — public TLS or the
@@ -713,15 +817,16 @@ The daemon validates the instance server cert on **every HTTPS connect** — bot
 chain trust **and** hostname (SAN). There is **no** insecure/skip-verification
 mode at runtime (`run.sh --insecure-tls` only affects bootstrap `curl -k`
 downloads over HTTPS, including the first fetch of a private uploaded issuer).
-The control plane is HTTPS on `:8443`. Four valid
+A self-hosted control plane is HTTPS on `:8443`; High Availability answers on
+443 with no port in the URL. Four valid
 configurations:
 
 | Path                                 | CA trust                                                                                                                                                                                     | SAN requirement                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Self-signed (self-hosted)**        | Daemon trusts the downloaded **platform CA bundle** (`TURBOPANEL_INSTANCE_CA` → `/etc/turbopanel/instance-ca.pem`, fetched from `GET /api/daemon/v1/instance/ca`). The instance stores the current root plus retired overlap PEMs under `/var/lib/turbopanel/tls/` (`ca.crt`, `ca.key`, `ca-bundle.pem`) — not the replaceable checkout. Distinct from the org TLS library. | The leaf cert **must** include the hostname the daemon dials. SANs are derived from the configured public URL(s) — `TURBOPANEL_PUBLIC_URL` / `TURBOPANEL_BASE_URL` / `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_TLS_EXTRA_SANS` (see `../turbopanel/scripts/generate-self-signed-cert.mjs`). Never hardcode the hostname.                                                                                                        |
+| **Self-signed (self-hosted)**        | Daemon trusts the downloaded **platform CA bundle** (`TURBOPANEL_INSTANCE_CA` → `/etc/turbopanel/instance-ca.pem`, fetched from `GET /api/daemon/v1/instance/ca`). The instance stores the current root plus retired overlap PEMs under `/var/lib/turbopanel/tls/` (`ca.crt`, `ca.key`, `ca-bundle.pem`) — not the replaceable checkout. Distinct from the org TLS library. | The leaf cert **must** include the hostname the daemon dials. SANs come from the hostnames on Admin › Access › Hostnames, which the daemon copies into `TURBOPANEL_PUBLIC_URLS` before regenerating the leaf (`../turbopanel/scripts/generate-self-signed-cert.mjs` also reads `TURBOPANEL_PUBLIC_URL` / `TURBOPANEL_BASE_URL` / `TURBOPANEL_INSTANCE_URL` and `TURBOPANEL_TLS_EXTRA_SANS`). Never hardcode the hostname.                                                                                                        |
 | **Let's Encrypt**                    | Publicly-valid → daemon uses the **system trust store** (ship **no** `TURBOPANEL_INSTANCE_CA`)                                                                                               | The real cert already covers the public hostname.                                                                                                                                                                                                                                                                                                                                                                             |
 | **Private uploaded certificate**     | Hostname-specific issuer at `TURBOPANEL_INSTANCE_UPLOADED_TRUST` → `/etc/turbopanel/instance-uploaded-trust.pem`, from `GET /api/daemon/v1/instance/uploaded-trust`. The installer stores it only after an issuer in that PEM signs the presented leaf and the leaf's SAN is the dialed name. It is not copied onto `instance-ca.pem`. A publicly trusted upload does not use this file. An insecure reinstall rechecks an existing file against the leaf `HOST_URL` presents; a non-404 fetch that keeps the previous issuer does not anchor bootstrap unless that issuer still verifies the active leaf. | Runtime still verifies the chain and the hostname. Bootstrap `curl -k` is not stored. A private upload whose PEM has no covering issuer is refused before an install command is emitted. |
-| **Cloudflare tunnel / proxy**        | Cloudflare's edge cert is publicly-valid → **system trust**                                                                                                                                  | Daemon dials the public Cloudflare hostname, which the edge cert already covers. **Caveat:** behind a tunnel the instance cannot auto-discover its own public hostname (cloudflared dials out), so the reachable URL(s) must be **declared by the operator** (admin surface / `TURBOPANEL_PUBLIC_URL`), not auto-detected. The self-signed origin leg (cloudflared → local Caddy) is separate from what the daemon validates. |
+| **Cloudflare tunnel / proxy**        | Cloudflare's edge cert is publicly-valid → **system trust**                                                                                                                                  | Daemon dials the public Cloudflare hostname, which the edge cert already covers. **Caveat:** behind a tunnel the instance cannot auto-discover its own public hostname (cloudflared dials out), so the reachable URL(s) must be **added by the operator** on Admin › Access › Hostnames, not auto-detected. On self-hosted that screen is the only source; `TURBOPANEL_PUBLIC_URLS` in `runtime.env` is the copy the daemon writes on apply and overwrites, never configuration. High Availability takes its hostnames only from the platform environment (`TURBOPANEL_BASE_URL` / `TURBOPANEL_PUBLIC_URLS`). The self-signed origin leg (cloudflared → local Caddy) is separate from what the daemon validates. |
 
 `TURBOPANEL_INSTANCE_URL` must be `https://`. `daemon-config` `dotenv.j2`
 writes that URL and the Platform CA path. Remote **Add Server** installs
@@ -764,6 +869,289 @@ control plane keeps the existing CA and the install continues (the daemon
 adds that file to the system roots, so nothing is lost), and a co-located
 daemon refresh skips the fetch entirely (`HOST_URL` is empty there). Before
 2026-09-28 the unverified case was `exit 1`, which is how canary's
-co-located refresh failed after its Let's Encrypt switch. `TURBOPANEL_INSTANCE_CA_FINGERPRINT` in `daemon.env`
-is the expected first-cert fingerprint for startup mismatch logs.
+co-located refresh failed after its Let's Encrypt switch.
 
+**CA fingerprint pin.** A self-hosted install command that bootstraps
+insecure TLS carries `TURBOPANEL_INSTANCE_CA_FINGERPRINT` (SHA-256 of each
+certificate's DER, lowercase hex, comma-separated; `run.sh` also takes
+`--instance-ca-fingerprint` and passes it across the sudo re-exec). Every
+Platform CA or private issuer `run.sh` is about to install — over `-k`, the
+pinned leg, or the system-roots refetch — must have every certificate in that
+list, or the install stops and nothing is written (`tp_check_fetched_trust`).
+A host that already carries a list (`daemon.env` plus
+`<state>/tls/instance-ca-pin`) keeps it when a run brings none: downloads over
+the `-k` leg must match it, so re-running an old command cannot downgrade a
+pinned host; verified legs are authenticated by that trust already. An
+operator's `--instance-ca` must match a fingerprint the command gave. With no
+list anywhere the old behaviour stays and a `-k` download prints one
+"trusted on first use" line. `run.sh` then writes the fingerprints of every
+certificate in `instance-ca.pem` and `instance-uploaded-trust.pem` into
+`daemon.env` (0600, daemon account). At runtime (`ca-pin.ts`) a trust file
+holding any certificate outside that list, or one that cannot be decoded,
+is a hard failure: the connect
+attempt throws `CaPinMismatchError` before any credential is sent and the
+client parks as `tls-trust`. No list means no check. The only other writer of
+the list is `server.tls.trust.reconcile` (`src/commands/tls-trust.ts`), which
+arrives over a session already verified against the pinned CA and
+authenticated with this server's key; it records the new bundle plus the
+stored issuer in `<state>/tls/instance-ca-pin` (first together with the old
+bundle, then the CA file, then narrowed, so no failure leaves an unlisted CA
+on disk), which the check accepts
+alongside `daemon.env` (the config root is root-owned and `daemon.env` is the
+installer's, so the daemon does not rewrite it). A host with no list never
+gets one from a reconcile. Upgrades re-run `run.sh`, which
+rewrites the list from the files on disk, so hosts installed with the older
+single first-certificate value are healed before the new binary starts.
+
+## Versions on the wires
+
+Two-way peer support. The control plane holds `daemonBuild.version` against
+`MIN_SUPPORTED_DAEMON_VERSION` (`turbopanel/src/lib/version-wire.ts`) and keeps
+an unsupported daemon connected while refusing its command dispatches. This
+daemon holds the control plane's version against
+`MIN_SUPPORTED_INSTANCE_VERSION` in `src/instance/version-wire.ts`.
+
+Capture points: `x-turbopanel-version` on every `DaemonApiClient` response,
+including non-OK responses and the 401 that precedes a session refresh
+(enrollment, session, JWKS, and later calls — before cell traffic), and the
+attach acknowledgement `{ type: "version", instanceVersion }` on
+`/ws/daemon/v1` for a socket-only session. A response or attach frame that
+omits the version is the current peer: the daemon clears the last observation
+back to `unknown`. `InstanceClient.connectionState` exposes the resolved
+status. `unknown` (no header and no field) passes silently. `unsupported`
+logs once, greppable as `instance-version: … flagged — the daemon keeps
+reconnecting`, and does **not** close the socket or stop retrying. It is a
+flag, not a park.
+
+Each floor tolerates every peer semver at or above the constant. The two
+floors name versions on two separate release lines, so they are not equal:
+`MIN_SUPPORTED_INSTANCE_VERSION` is **`0.1.22`** (control plane line) and the
+control plane's `MIN_SUPPORTED_DAEMON_VERSION` is **`0.1.18`** (daemon line).
+Both were raised together on 2026-11-05 as a **pre-launch hard cutoff**:
+`0.1.18` is the first daemon that registers a sealing key, opens sealed
+decrypt answers and opens the sealed reconcile password hash, and `0.1.22` is
+the first control plane that seals them. Older daemons get
+`daemon_unsupported` on every command; an older control plane is flagged here
+and refused as an `instance-update` target. Every peer on those two lines is
+let in, including trunk builds from before the sealing work landed; only
+canary and development hosts ran those. The update guard holds only the
+target's base `X.Y.Z` against the floor, because a canary or rc manifest
+labels its version (`0.1.22-canary.145`) while the installed control plane
+reports the plain base. `check:contract-drift` requires each floor to be a
+plain `X.Y.Z` no newer than the peer repo's `deno.json` version. The window
+may trail the current release. There is no fixed upgrade order. Bump
+`MIN_SUPPORTED_DAEMON_VERSION` and `MIN_SUPPORTED_INSTANCE_VERSION` together,
+in the same change, and record why in this section and in
+`../turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
+silently. A release that introduces a new wire message leaves both floors
+where they are. Each new message is feature-gated: the peer advertises
+support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
+`version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
+before treating the peer as able to speak it. `update-progress`
+(`update-progress-v1`) is the worked example — fire-and-forget progress,
+ignored by a peer that does not list the feature. `command-progress` (the
+deploy step plan, `src/commands/deploy-progress.ts`) is fire-and-forget too
+but carries no feature of its own: both control-plane inbound paths drop an
+unknown message type, so an older peer just never draws the step rail. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
+`php.mode` (FastCGI or php-fpm on nginx and Apache); the control plane refuses to
+deploy any mode but php-fpm to a daemon without it. OpenLiteSpeed and Caddy sites
+still ignore `php.mode` (the lsphp work is turbopaneld#250). `managed-health-v1` is the
+worked example of a control-plane-initiated correlated request
+(`managed-health-request` / `managed-health-result`): this daemon advertises it
+in `DAEMON_WIRE_FEATURES`, and the control plane sends the request only to a
+daemon whose `hello.features` lists it, falling back to its stored observation
+otherwise. `managed-permissions-read-v1` follows the same pattern for
+`managed-permissions-request` / `managed-permissions-result` (a login's current
+permissions, read only). A control-plane update the daemon is about to install is refused
+when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
+daemon's own self-update does not consult that floor, and the control plane
+does not gate `instance-update` on the daemon version.
+
+`DAEMON_FEATURE_MIN_VERSIONS` (kept equal in both `version-wire.ts` files) is
+the peer-version feature gate — not the metrics hardware-profile capability
+plan. A panel-visible admin feature that depends on a daemon-rendered artifact
+adds an entry here. The UI phase calls `resolveDaemonCapabilities` and does
+not re-implement semver comparison. An unknown peer version is not supported
+for a feature. The first entry is `instance-cert-sources-per-hostname` at
+daemon **`0.1.1`**, the release that renders per-hostname certificate sources
+in `orchestration/roles/instance-launch/templates/Caddyfile.j2`. Operational detail:
+the rest of this file.
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Instance client** | `src/instance/AGENTS.md` | WSS / Unix-socket connection, idle presence + heartbeats (`timeSync`/`ips`/`docker`), reconnect / parked backoff, JWKS JWT verification, daemon TLS trust model |
+
+## Install TOKEN and the panel key pin
+
+The install command carries one value, `TOKEN=<payload>.<sig>` (grammar: the
+panel's `daemon-install-command.ts`). `scripts/run.sh` reads it once and
+unsets it, fetches the panel's identity document from the first URL in the
+token, and refuses to continue unless the current key's fingerprint equals the
+token's `panelFingerprint`, the document's `X-TurboPanel-Signature` header
+verifies, and the token's own signature verifies with that key. All of that
+happens before the first request to the panel. The older
+`TURBOPANEL_LICENSE` + `TURBOPANEL_HOST` + `TURBOPANEL_INSTANCE_CA_FINGERPRINT`
+form still works and, on a fresh install, pins nothing and writes no pin file.
+
+- `/opt/turbopanel/lib/panel-identity` (`current`, `next`, `keyset`, `urls`,
+  `pinned_by`, `updated`; root:tp 0640) is written by `run.sh` after the tp
+  group exists. `lib/update-origin` gains `hosts=` (host= stays for older
+  readers) and `panel_key=`. `tp-orchestrate update` passes `--panel-key` and
+  refuses another value; `run.sh` refuses a different key, an unsafe re-run on
+  a pinned host, and a pin file that disagrees with `panel_key=`.
+- `--unsafe-no-panel-key` is the only way to install from a token with an empty
+  fingerprint. It writes `pinned_by=unsafe` and an empty `current=`; enforcement
+  must treat that as "nothing pinned". The hello reports `panelPin` so the
+  panel can show it on the server row.
+- Only `tp-host panel-identity-write` changes the file afterwards. With no
+  argument, stdin is the signature header line then the exact identity body; it
+  follows the pinned current key only (urls, next, keyset) and rewrites
+  `hosts=` in `lib/update-origin` to the same list (an empty list is refused).
+  With `statement`,
+  stdin is a rotation or revoke statement carrying `signers` (public keys); each
+  must hash to the fingerprint pinned for its role (old current, offline next),
+  `keyset` must rise and the new current key must be the pinned next key. A
+  rotation also rewrites `panel_key=` in `lib/update-origin`.
+- A host installed before panel keys (an update origin, no pin file) learns
+  the key on its first managed update with no TOKEN: once the trust files are
+  in place, `tp_learn_panel_identity` fetches the identity document from
+  `HOST_URL` with the host's existing TLS trust (never `--insecure-tls`, and
+  only when `HOST_URL` is the update origin's `host=`), checks its header
+  signature with the key it names, and pins that key with `pinned_by=upgrade`,
+  the document's key set and address list. Every address must be exactly
+  `https://host[:port]` (they become pin and update-origin lines). A missing,
+  forged or keyless document, or a bad address, leaves the host unpinned and
+  the update goes on. TLS is what vouches for the learned key (the design
+  learned it over the daemon session; same trust). A host installed with
+  `--unsafe-no-panel-key` keeps its pin file and never learns; reinstalling it
+  with a fresh command pins it.
+  A fresh install with the older license value has no update origin and
+  still pins nothing.
+- `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
+  contains that flag; after an older installer ran it restores the `panel_key=`
+  line it dropped, so a move back to an older release does not break the pin.
+- `src/instance/panel-identity-pin.ts` reads and parses the file. Its
+  presence (with a non-empty `current`) turns the signed session on; the
+  unsigned feature list never does (`readEnforcedPin`, a pin file that exists
+  but cannot be read parks `panel-identity`, never falls back).
+
+## Control plane address list (`src/instance/panel-urls.ts`)
+
+A pinned server dials the pin's `urls=` in order, then `TURBOPANEL_INSTANCE_URL`
+if the list lacks it; an unpinned one dials `TURBOPANEL_INSTANCE_URL` alone.
+With more than one address:
+
+- URL 0 first, and again after any session that opened. The first contact
+  (`/api/health`, no credentials) has a 3 s timeout through the system
+  resolver (a plain `fetch`, never `Deno.resolveDns`, which skips
+  `/etc/hosts`), so an address that does not resolve or connect is skipped.
+- A `transient`, `tls-trust` or `panel-identity` failure moves to the next
+  address at once. When the list is used up the next pass starts at URL 0 after
+  a full-jitter wait (1 s floor, 5 s base, 5 min cap). A pass parks only when
+  every address refused trust or identity (with the worst of those); one merely
+  unreachable address makes it a pass to retry. A `panel-identity` park never
+  forces a re-enroll on unpark. A failover is not undone by "a session opened".
+  Other failures are global.
+- Switching address drops the token manager, JWKS and API clients and the
+  verified key: each address proves the pinned key (identity document, then the
+  signed hello) before anything identifying is sent to it.
+- A verified identity document with the pinned `keyset` and a different `urls`
+  list is handed to `tp-host panel-identity-write` (`panel-pin-write.ts`), which
+  verifies it again and rewrites `urls=` and `hosts=`. A signed hello whose
+  `urls` differ from the pin triggers one fresh document fetch per socket. A
+  higher `keyset` is never followed here (signed key changes only).
+- An identity check whose address changed while it ran (a background re-check
+  outliving its socket) is dropped, so no address skips its own proof.
+- Addresses are allow-listed on both sides (`https://` + DNS name, IPv4 or
+  bracketed IPv6, optional port). A pin whose one address differs from
+  `TURBOPANEL_INSTANCE_URL` is a two-address list.
+- Managed updates pass the active address as `--host`; `tp-orchestrate`
+  accepts `host=` or any single entry of `hosts=` (never a comma). An update
+  run while on a fallback address moves `host=` and `TURBOPANEL_INSTANCE_URL`
+  to it; the dial order still follows the pin.
+
+## Signed session (`panel-identity-v1`, `panel-signed-frames-v1`, `signin-v2`)
+
+On a pinned server, every connect attempt:
+
+1. fetches `GET /api/daemon/v1/instance/identity` and requires its `current`
+   key to be pinned, its header signature to verify and its `keyset` not to be
+   lower than the pin (`verifyPanelIdentityDocument`, cached a day) before any
+   authenticated call;
+2. checks `X-TurboPanel-Signature` on every answer from
+   `SIGNED_RESPONSE_ROUTES` (`panel-identity-trust.ts`, the control plane keeps
+   the same list). A bad signature, or an unsigned success, is a
+   `PanelIdentityError`; an unsigned error answer is
+   `unsigned control-plane error`, classified transient, so an unsigned
+   `404 Server key not found` never parks `awaiting-administrator`;
+3. signs in with v2 proofs (`buildEnrollmentPayloadV2`, `buildAuthPayloadV2`:
+   pinned fingerprint, method, path, `iat`) and never uses a token without a
+   verified JWKS (a forged key set parks, an unreachable one is retried);
+4. opens the socket and sends only `{"type":"hello-nonce","nonce":...}`
+   (`signed-session.ts`). Every other send on that socket is dropped until the
+   control plane's hello, signed over `"tp-hello\n" + exact JSON`, echoes the
+   nonce with a pinned `kid`, `|iat - now| <= 300 s` and `keyset >= pin`. Only
+   then do presence, reporters, metrics, rehydrate, docker sync and held
+   results start. After it each frame must be an envelope with `seq` exactly
+   last+1, the same `sessionId`, a pinned `kid` and a fresh `iat`
+   (`panel-identity-frames.ts`); the transport pong is the only unsigned frame.
+
+While a server is pinned but holds no verified key (an identity refresh, or after a park), every
+answer on a signed route is refused and the token manager makes no call, as retryable errors: pinned
+never depends on the key being present. A control plane that does not know `hello-nonce` answers with
+its unsigned `version` frame, which a pinned daemon refuses and parks on; one that stays silent hits the
+30 s hello timeout instead (transient). The `4401 server row missing` close is honoured before the hello
+too (it only parks `awaiting-administrator`; nothing is cleared). Only 401, 403, 404 and 410 on the
+identity document park `panel-identity`; other statuses are retried.
+
+Any failure closes 4403 and parks with reason `panel-identity` (timer backoff,
+key files kept, never re-enrolls). No hello within 30 s is a plain timeout.
+The hello's `heartbeatSeconds` wins over the unsigned `version` advice.
+An unpinned server keeps the unsigned session exactly as before.
+
+## Daemon-signed requests and the attach proof
+
+On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):
+
+- **Requests.** Every authenticated call and `/auth/session` carry
+  `X-TurboPanel-Daemon-Signature: <keyId>:<nonce>:<iat>:<sig>` over
+  `"tp-request\n" + METHOD + "\n" + pathname + "\n" + panelFingerprint + "\n" +
+  nonce + "\n" + base64url(SHA-256(body)) + "\n" + iat` (`signDaemonRequest`,
+  wired as `signRequest` on the authenticated `DaemonApiClient`; a 401 retry
+  signs again with a fresh nonce). `keyId` is the enrolled key id (the token's
+  `kid`); `panelFingerprint` is the pinned key that signed the identity
+  document. The `/ws/daemon/v1` upgrade carries the same header (GET, empty
+  body). Without a pin nothing is signed. A signed `/auth/session` gets a token
+  bound to the daemon key (`cnf`) and raises the server to `trust_level` 2;
+  after that the control plane refuses any unsigned request, and `403 Signed
+  request required` on a session is permanent (the pin is gone). `400 Request
+  clock skew` is transient.
+- **Attach proof.** After the signed hello verifies, the first presence `hello`
+  carries `attach: {keyId, iat, sig}` over `"tp-attach\n" + sessionId + "\n" +
+  panelFingerprint + "\n" + serverId + "\n" + keyId + "\n" + iat`
+  (`signAttachProof`; the session id and key are the control plane hello's).
+  The control plane holds its outbox until that hello arrives. The prefixes
+  are pinned by `deno task check:contract-drift`.
+
+## Signed pin report
+
+On the first presence hello of a signed session the daemon replaces the
+unsigned `panelPin` (`{pinnedBy, current, keyset}`, read from the pin file)
+with the same fields plus `iat` and `sig`: its daemon-key signature over
+`"tp-panel-pin\n" + sessionId + "\n" + serverId + "\n" + keyId + "\n" +
+pinnedBy + "\n" + current + "\n" + keyset + "\n" + iat`
+(`signPinReport`, `src/crypto/keys.ts`; prefix pinned in
+`scripts/check-contract-drift.ts`). The signature does not name the control
+plane's key, so a control plane can verify a report from a server pinned to
+another key and alarm on it. Without the daemon key or a pin the hello keeps
+the unsigned report. An older control plane ignores the two extra fields.
+
+## Sealed secrets (`daemon-sealed-secrets-v1`)
+
+- The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged and retried on the next connect. Every plaintext decrypt answer also registers the key again without a reconnect, even when this process registered it before, because the control plane answers in plaintext only when no key is on file: a control plane upgraded under an open socket, or a superadmin's Clear Sealing Key (`createSealingRegistration`: one attempt at a time; after a failed attempt the next waits ten minutes, after one that worked a minute). That control plane adds `daemon-sealed-secrets-v1` to the stored features on a verified registration, because the older one dropped the then-unknown feature from the hello. Only the key id is logged.
+- `decryptSecrets` takes `{ sealed }` (HPKE envelopes, `aad` = server id, opened locally, then added to the redaction deny-set) or `{ plaintexts }`, never both. After the first sealed answer is opened the daemon writes `<state>/trust-level` = `sealed` and refuses any later plaintext answer (`plaintext secrets refused`). A refused plaintext answer still registers the key again (awaited), and when that worked the decrypt is asked once more; that second answer goes through the same refusal, so a sealed server never takes plaintext and never asks a third time. The daemon never lowers the mark; after a deliberate control plane rollback an operator removes the file by hand.
+- The Hosting Account password hash may arrive as `passwordHashEnvelope`; `openPrincipalPasswordEnvelopes` opens it through `decryptSecrets` before the account is touched. `server.principals.reconcile` opens it the same way (`daemon-sealed-principal-reconcile-v1`; the control plane sends the envelope there only to a daemon that lists it), and an envelope that cannot be opened fails the whole command rather than lock the account.
+- `scripts/scan-secrets.patterns` (`daemon-identity-file`) does not name `sealing-key.json`; it is byte-identical across five repos, so it is a follow-up for all five together.
+- **Keys sent up.** `reportIssuedCertificate` seals the private key to the control plane's sealing key (`privateKeyEnvelope`, aad = the control plane's signing key fingerprint) when `panel-identity-cache.ts` has one, and sends plain PEM otherwise, except that a server that has ever received a sealed secret (`trust-level`) fails the report with 503 instead. The sealing key comes from the signed identity document (signature checked against its own `current` key, cached a day, a lower `keyset` ignored). On a pinned server `isTrustedSigningKey` accepts only a pinned key; without a pin the document is trusted as far as TLS.

@@ -2459,6 +2459,52 @@ test("a tool login goes to the primary and gets no read split rule, even with a 
   assertStringIncludes(admin, "'gui','p3',0,");
 });
 
+test("a tool login (such as the backup login) keeps a transaction on one backend on both engines", () => {
+  for (const engine of ["postgres", "mysql"] as const) {
+    const input = {
+      bindAddresses: ["0.0.0.0"],
+      clusters: [
+        clusterDesired({
+          engine,
+          backends: PRIMARY_AND_READER_BACKENDS,
+          users: [
+            { username: "app", role: "user" as const, password: "p1" },
+            {
+              username: "backup",
+              role: "user" as const,
+              password: "p2",
+              tool: true,
+              allowedSources: ["10.0.0.5"],
+            },
+          ],
+        }),
+      ],
+    };
+    const cnf = renderProxySqlConfig(input);
+    assertStringIncludes(
+      cnf,
+      'username="backup" password="p2" default_hostgroup=0 active=1 use_ssl=0 transaction_persistent=1',
+    );
+    assertEquals(
+      cnf.includes(
+        'username="app" password="p1" default_hostgroup=0 active=1 use_ssl=0 transaction_persistent',
+      ),
+      false,
+    );
+    const admin = buildProxySqlAdminStatements(input).join("\n");
+    assertStringIncludes(
+      admin,
+      "(username,password,default_hostgroup,active,use_ssl,transaction_persistent) VALUES ('backup','p2',0,1,0,1)",
+    );
+    assertEquals(admin.includes("VALUES ('app','p1',0,1,0,1)"), false);
+    // No read split rule for it: a dump never leaves the primary.
+    assertEquals(
+      cnf.includes('username="backup" match_pattern="^SELECT'),
+      false,
+    );
+  }
+});
+
 test("a tool flag of false changes nothing", () => {
   const base = {
     bindAddresses: ["0.0.0.0"],

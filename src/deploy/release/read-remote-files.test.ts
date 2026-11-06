@@ -2,10 +2,24 @@ import { assertEquals, assertRejects } from "@std/assert";
 import {
   _internal,
   readRemoteFiles,
+  type ReadRemoteFilesParams,
+  type RepoReadTransport,
   resolveDefaultBranch,
 } from "./read-remote-files.ts";
+import { CloneUrlRefusedError } from "./clone-url-guard.ts";
 
 const test = Deno.test.bind(Deno);
+
+/** Fixture repositories are local paths: git's `file` transport, no URL check. */
+const LOCAL: RepoReadTransport = { protocols: ["file"], checkUrl: () => {} };
+
+function readLocal(params: ReadRemoteFilesParams, scratchRoot?: string) {
+  return readRemoteFiles(params, scratchRoot, LOCAL);
+}
+
+function resolveLocal(cloneUrl: string, scratchRoot?: string) {
+  return resolveDefaultBranch(cloneUrl, scratchRoot, LOCAL);
+}
 
 async function git(args: string[], cwd: string): Promise<void> {
   const { code, stderr } = await new Deno.Command("git", {
@@ -48,7 +62,7 @@ async function makeRepo(): Promise<
 test("readRemoteFiles returns content at a pinned commit", async () => {
   const repo = await makeRepo();
   try {
-    const result = await readRemoteFiles({
+    const result = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: ["docker-compose.yml", "public/index.html", "missing.yml"],
@@ -74,7 +88,7 @@ test("readRemoteFiles returns content at a pinned commit", async () => {
 test("readRemoteFiles refuses binary and oversized blobs", async () => {
   const repo = await makeRepo();
   try {
-    const result = await readRemoteFiles({
+    const result = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: ["logo.png", "README.md"],
@@ -97,7 +111,7 @@ test("readRemoteFiles refuses binary and oversized blobs", async () => {
 test("readRemoteFiles reports a NUL-bearing blob as binary", async () => {
   const repo = await makeRepo();
   try {
-    const result = await readRemoteFiles({
+    const result = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: ["logo.png"],
@@ -113,7 +127,7 @@ test("readRemoteFiles reports a NUL-bearing blob as binary", async () => {
 test("readRemoteFiles refuses a path that could escape the repository", async () => {
   const repo = await makeRepo();
   try {
-    const result = await readRemoteFiles({
+    const result = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       // `:` would separate rev from path in `rev:path`; `..` walks out.
@@ -129,7 +143,7 @@ test("readRemoteFiles refuses a path that could escape the repository", async ()
 test("readRemoteFiles lists a directory", async () => {
   const repo = await makeRepo();
   try {
-    const result = await readRemoteFiles({
+    const result = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: [],
@@ -148,7 +162,7 @@ test("readRemoteFiles fails loudly on an unreachable remote", async () => {
   const dir = await Deno.makeTempDir();
   try {
     await assertRejects(() =>
-      readRemoteFiles({
+      readLocal({
         cloneUrl: `${dir}/does-not-exist`,
         ref: "main",
         paths: ["x.yml"],
@@ -164,7 +178,7 @@ test("readRemoteFiles leaves no scratch or credential material behind", async ()
   const repo = await makeRepo();
   const scratchRoot = await Deno.makeTempDir({ prefix: "tp-scratch-root-" });
   try {
-    await readRemoteFiles({
+    await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: ["README.md"],
@@ -188,7 +202,7 @@ test("readRemoteFiles cleans up even when the read throws", async () => {
   const scratchRoot = await Deno.makeTempDir({ prefix: "tp-scratch-root-" });
   try {
     await assertRejects(() =>
-      readRemoteFiles({
+      readLocal({
         cloneUrl: `${scratchRoot}/nope`,
         ref: "main",
         paths: ["x"],
@@ -206,7 +220,7 @@ test("readRemoteFiles cleans up even when the read throws", async () => {
 test("resolveDefaultBranch reports the remote's HEAD branch", async () => {
   const repo = await makeRepo();
   try {
-    const result = await resolveDefaultBranch(repo.path);
+    const result = await resolveLocal(repo.path);
     assertEquals(result.defaultBranch, "main");
   } finally {
     await repo.cleanup();
@@ -223,7 +237,7 @@ test('resolveDefaultBranch is not hardcoded to "main"', async () => {
     await git(["add", "-A"], path);
     await git(["commit", "-qm", "init"], path);
 
-    const result = await resolveDefaultBranch(path);
+    const result = await resolveLocal(path);
     assertEquals(result.defaultBranch, "trunk");
   } finally {
     await Deno.remove(path, { recursive: true });
@@ -233,7 +247,7 @@ test('resolveDefaultBranch is not hardcoded to "main"', async () => {
 test("resolveDefaultBranch fails loudly on an unreachable remote", async () => {
   const dir = await Deno.makeTempDir();
   try {
-    await assertRejects(() => resolveDefaultBranch(`${dir}/does-not-exist`));
+    await assertRejects(() => resolveLocal(`${dir}/does-not-exist`));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -243,7 +257,7 @@ test("resolveDefaultBranch leaves no scratch directory behind", async () => {
   const repo = await makeRepo();
   const scratchRoot = await Deno.makeTempDir({ prefix: "tp-scratch-root-" });
   try {
-    await resolveDefaultBranch(repo.path, scratchRoot);
+    await resolveLocal(repo.path, scratchRoot);
     assertEquals([...Deno.readDirSync(scratchRoot)], []);
   } finally {
     await Deno.remove(scratchRoot, { recursive: true });
@@ -264,7 +278,7 @@ test("isSafeRepoPath rejects empty, oversized, and escape-prone paths", () => {
 test("readRemoteFiles lists a nested directory and ignores an unsafe listPath", async () => {
   const repo = await makeRepo();
   try {
-    const nested = await readRemoteFiles({
+    const nested = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: [],
@@ -276,7 +290,7 @@ test("readRemoteFiles lists a nested directory and ignores an unsafe listPath", 
       true,
     );
 
-    const unsafe = await readRemoteFiles({
+    const unsafe = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: [],
@@ -301,7 +315,7 @@ test("resolveDefaultBranch returns null when HEAD is not a branch", async () => 
     await git(["checkout", "--detach", "HEAD"], path);
     await git(["branch", "-D", "main"], path);
 
-    const result = await resolveDefaultBranch(path);
+    const result = await resolveLocal(path);
     assertEquals(result.defaultBranch, null);
   } finally {
     await Deno.remove(path, { recursive: true });
@@ -311,7 +325,7 @@ test("resolveDefaultBranch returns null when HEAD is not a branch", async () => 
 test("readRemoteFiles lists an empty tree when ls-tree cannot read the path", async () => {
   const repo = await makeRepo();
   try {
-    const result = await readRemoteFiles({
+    const result = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: [],
@@ -446,7 +460,7 @@ test("readRemoteFiles swallows scratch cleanup errors", async () => {
   const originalRemove = Deno.remove;
   Deno.remove = () => Promise.reject(new TypeError("busy"));
   try {
-    const result = await readRemoteFiles({
+    const result = await readLocal({
       cloneUrl: repo.path,
       ref: "main",
       paths: ["README.md"],
@@ -458,5 +472,118 @@ test("readRemoteFiles swallows scratch cleanup errors", async () => {
   } finally {
     Deno.remove = originalRemove;
     await repo.cleanup();
+  }
+});
+
+test("readRemoteFiles refuses a local path by default and writes nothing", async () => {
+  const repo = await makeRepo();
+  const scratchRoot = await Deno.makeTempDir({ prefix: "tp-scratch-root-" });
+  try {
+    await assertRejects(
+      () =>
+        readRemoteFiles({
+          cloneUrl: repo.path,
+          ref: "main",
+          paths: ["README.md"],
+          maxBytesPerFile: 1024,
+          credential: "ghp_exampletoken",
+          credentialKind: "token",
+        }, scratchRoot),
+      CloneUrlRefusedError,
+    );
+    assertEquals([...Deno.readDirSync(scratchRoot)], []);
+  } finally {
+    await Deno.remove(scratchRoot, { recursive: true });
+    await repo.cleanup();
+  }
+});
+
+test("resolveDefaultBranch refuses a file URL by default", async () => {
+  await assertRejects(
+    () => resolveDefaultBranch("file:///etc"),
+    CloneUrlRefusedError,
+  );
+});
+
+/** The URL check off, git's own transport pin on: git must refuse a local path. */
+const PINNED_ONLY: RepoReadTransport = {
+  protocols: ["https", "ssh"],
+  checkUrl: () => {},
+};
+
+test("git itself refuses the file transport on a read", async () => {
+  const repo = await makeRepo();
+  try {
+    await assertRejects(
+      () =>
+        readRemoteFiles(
+          {
+            cloneUrl: repo.path,
+            ref: "main",
+            paths: ["README.md"],
+            maxBytesPerFile: 1024,
+          },
+          undefined,
+          PINNED_ONLY,
+        ),
+      Error,
+      "not allowed",
+    );
+    await assertRejects(
+      () => resolveDefaultBranch(repo.path, undefined, PINNED_ONLY),
+      Error,
+      "not allowed",
+    );
+  } finally {
+    await repo.cleanup();
+  }
+});
+
+test("every git spawn of a read is pinned to https and ssh", async () => {
+  const original = Deno.Command;
+  const seen: Array<{ args: string[]; env: Record<string, string> }> = [];
+  Deno.Command = class {
+    constructor(
+      _cmd: string,
+      options: { args: string[]; env: Record<string, string> },
+    ) {
+      seen.push({ args: options.args, env: options.env });
+    }
+    output() {
+      return Promise.resolve({
+        code: 1,
+        success: false,
+        stdout: new Uint8Array(),
+        stderr: new TextEncoder().encode("stop"),
+        signal: null,
+      });
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await assertRejects(() =>
+      readRemoteFiles({
+        cloneUrl: "git@example.com:o/r.git",
+        ref: "main",
+        paths: ["README.md"],
+        maxBytesPerFile: 1024,
+      })
+    );
+    await assertRejects(() =>
+      resolveDefaultBranch("https://example.com/o/r.git")
+    );
+  } finally {
+    Deno.Command = original;
+  }
+  assertEquals(seen.length, 2);
+  for (const { args, env } of seen) {
+    assertEquals(args.slice(0, 6), [
+      "-c",
+      "protocol.allow=never",
+      "-c",
+      "protocol.https.allow=always",
+      "-c",
+      "protocol.ssh.allow=always",
+    ]);
+    assertEquals(env.GIT_ALLOW_PROTOCOL, "https:ssh");
   }
 });

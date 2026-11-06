@@ -86,6 +86,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       if (signal === "SIGTERM") queueMicrotask(handler);
     },
     initOrchestration: () => Promise.resolve(false),
+    // No test waits on a real retry timer; the retry tests turn this off.
+    shouldSkipOrchestration: () => true,
     applyManagedBootHold: () => Promise.resolve(),
     markCleanShutdown: () => Promise.resolve(),
     scanLiveReleases: () => Promise.resolve(),
@@ -892,4 +894,93 @@ test("runDaemon restores the connection point and watcher every time Docker beco
   });
   await runDaemon(stub.io);
   assertEquals(stub.stackHeals, 1);
+});
+
+test("a failed boot converge on an enrolled host is retried in the background, with the recovery steps", async () => {
+  const calls: string[] = [];
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(false),
+    initOrchestration: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => false,
+    retryBootConverge: async (attempt, onRecovered) => {
+      calls.push("retry scheduled");
+      calls.push(`attempt=${await attempt()}`);
+      await onRecovered();
+      return true;
+    },
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => {
+      calls.push("converge");
+      return Promise.resolve(true);
+    },
+    restoreFabricFromPersistedState: () => {
+      calls.push("restore fabric");
+      return Promise.resolve();
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(calls, [
+    "retry scheduled",
+    "converge",
+    "attempt=true",
+    "restore fabric",
+  ]);
+  stop();
+  await done;
+});
+
+test("a failed boot converge on the connect-first path is retried too", async () => {
+  let scheduled = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => false,
+    retryBootConverge: () => {
+      scheduled += 1;
+      return Promise.resolve(false);
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(scheduled, 1);
+  stop();
+  await done;
+});
+
+test("no retry is scheduled when orchestration is switched off", async () => {
+  let scheduled = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(false),
+    initOrchestration: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => true,
+    retryBootConverge: () => {
+      scheduled += 1;
+      return Promise.resolve(false);
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(scheduled, 0);
+  stop();
+  await done;
+});
+
+test("a failed tools bootstrap on the connect-first path is retried too", async () => {
+  let scheduled = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    bootstrapOrchestration: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => false,
+    retryBootConverge: () => {
+      scheduled += 1;
+      return Promise.resolve(false);
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(scheduled, 1);
+  stop();
+  await done;
 });

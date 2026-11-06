@@ -1,6 +1,7 @@
 import { decodeBase64Url } from "@std/encoding/base64url";
 import {
   buildAuthPayload,
+  buildAuthPayloadV2,
   type DaemonKeyFile,
   signChallenge,
 } from "../crypto/keys.ts";
@@ -8,6 +9,10 @@ import { logWarn } from "../util/logger.ts";
 import type { DaemonApiClient } from "./api-client.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import type { VerifyInstanceJwtResult } from "./jwks-client.ts";
+import {
+  CONTROL_PLANE_KEY_NOT_VERIFIED,
+  PanelIdentityError,
+} from "./panel-identity-trust.ts";
 
 export type VerifyResult = VerifyInstanceJwtResult;
 
@@ -20,6 +25,15 @@ export interface TokenManagerOptions {
   apiClient: Pick<DaemonApiClient, "getAuthChallenge" | "createSession">;
   refreshEarlyMs?: number;
   verifyToken?: (token: string) => Promise<VerifyResult>;
+  /**
+   * The fingerprint of the control plane key this server pinned, once the
+   * identity document verified; undefined on a server with no pin. When set
+   * the session proof is v2 (it names the key) and a token is never used
+   * without a verified JWKS.
+   */
+  panelFingerprint?: () => string | undefined;
+  /** True while this server is pinned, even when no verified key is held right now. */
+  isPinned?: () => boolean;
 }
 
 const DEFAULT_REFRESH_EARLY_MS = 60_000;
@@ -77,6 +91,7 @@ export class DaemonTokenManager {
       const kind = classifyConnectFailure(firstError).kind;
       if (
         kind === "permanent" || kind === "awaiting-seat" ||
+        kind === "stale-identity" || kind === "panel-identity" ||
         isJwksTrustFailure(firstError)
       ) {
         throw firstError;
@@ -92,20 +107,67 @@ export class DaemonTokenManager {
     }
   }
 
+  /**
+   * The expiry to use for a fresh token, after checking it against the JWKS
+   * when a verifier is set. A pinned server never falls back to an unverified
+   * token: a forged key set parks (`panel-identity`), an unreachable one is
+   * retried.
+   */
+  async #acceptedExpiryMs(token: string, pinned: boolean): Promise<number> {
+    if (!this.#options.verifyToken) return parseJwtExpiryMs(token);
+    const verification = await this.#options.verifyToken(token);
+    if (verification.ok) {
+      const { claims } = verification;
+      if (
+        claims.sub !== this.#options.serverId ||
+        claims.kid !== this.#options.keyId
+      ) {
+        throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
+      }
+      return claims.exp * 1000;
+    }
+    if (verification.reason === "invalid") {
+      throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
+    }
+    if (pinned) {
+      if (verification.cause instanceof PanelIdentityError) {
+        throw verification.cause;
+      }
+      throw new Error("JWKS unavailable; the token is not used");
+    }
+    logWarn(
+      "instance",
+      "JWKS verification unavailable; using instance-issued token",
+    );
+    return parseJwtExpiryMs(token);
+  }
+
   async #doRefresh(): Promise<void> {
+    const panelFingerprint = this.#options.panelFingerprint?.();
+    const pinned = this.#options.isPinned?.() ?? panelFingerprint !== undefined;
+    // Pinned without a verified key: no v1 proof and no unverified token.
+    if (pinned && panelFingerprint === undefined) {
+      throw new Error(CONTROL_PLANE_KEY_NOT_VERIFIED);
+    }
     const challenge = await this.#options.apiClient.getAuthChallenge({
       serverId: this.#options.serverId,
       keyId: this.#options.keyId,
     });
 
-    const payload = buildAuthPayload({
+    const fields = {
       challengeId: challenge.challengeId,
       nonce: challenge.nonce,
       serverId: this.#options.serverId,
       keyId: this.#options.keyId,
       machineKey: this.#options.machineKey ?? "",
       hostname: this.#options.hostname,
-    });
+    };
+    const v2 = panelFingerprint
+      ? { panelFingerprint, iat: Math.floor(now() / 1000) }
+      : undefined;
+    const payload = v2
+      ? buildAuthPayloadV2({ ...fields, ...v2 })
+      : buildAuthPayload(fields);
 
     const signature = await signChallenge(
       this.#options.keyFile.privateJwk,
@@ -119,30 +181,13 @@ export class DaemonTokenManager {
       machineKey: this.#options.machineKey,
       hostname: this.#options.hostname,
       at: new Date().toISOString(),
+      ...(v2 ? { payloadVersion: 2 as const, ...v2 } : {}),
     });
 
-    if (this.#options.verifyToken) {
-      const verification = await this.#options.verifyToken(session.token);
-      if (!verification.ok) {
-        if (verification.reason === "invalid") {
-          throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
-        }
-        logWarn(
-          "instance",
-          "JWKS verification unavailable; using instance-issued token",
-        );
-        this.#expiresAtMs = parseJwtExpiryMs(session.token);
-      } else if (
-        verification.claims.sub !== this.#options.serverId ||
-        verification.claims.kid !== this.#options.keyId
-      ) {
-        throw new Error(JWKS_TRUST_FAILURE_MESSAGE);
-      } else {
-        this.#expiresAtMs = verification.claims.exp * 1000;
-      }
-    } else {
-      this.#expiresAtMs = parseJwtExpiryMs(session.token);
-    }
+    this.#expiresAtMs = await this.#acceptedExpiryMs(
+      session.token,
+      pinned,
+    );
 
     this.#token = session.token;
   }

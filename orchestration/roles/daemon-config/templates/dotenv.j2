@@ -13,9 +13,12 @@ TURBOPANEL_DAEMON_STATE_DIR={{ turbopanel_daemon_state_dir }}
 TURBOPANEL_SERVICE_NAME={{ turbopanel_service_name | default('turbopaneld') }}
 {% if turbopanel_instance_ca | length > 0 %}
 TURBOPANEL_INSTANCE_CA={{ turbopanel_instance_ca }}
+{% endif %}
+{# Every CA certificate the daemon trusts for the control plane (Platform CA
+   and private uploaded issuer), comma-separated. A trust file holding any
+   other certificate makes the daemon refuse to connect. #}
 {% if turbopanel_instance_ca_fingerprint | default('') | length > 0 %}
 TURBOPANEL_INSTANCE_CA_FINGERPRINT={{ turbopanel_instance_ca_fingerprint }}
-{% endif %}
 {% endif %}
 TURBOPANEL_UPDATE_CHANNEL={{ turbopanel_update_channel | default('release') }}
 {% if turbopanel_dl_base | default('') | length > 0 %}

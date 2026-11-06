@@ -38,6 +38,10 @@ docker_gate_ingress_socket: true
 docker_gate_mode: observe
 docker_gate_ingress_switch_file: "{{ docker_gate_dir }}/ingress-socket.on"
 docker_gate_upstream_socket: /var/run/docker.sock
+# How long a deploy waits for dockerd itself (retries x delay seconds) before
+# it swaps the gate; the gate's own probe cannot pass while the engine is down.
+docker_gate_engine_wait_retries: 45
+docker_gate_engine_wait_delay: 2
 docker_gate_cache_dir: /var/cache/turbopanel/docker-gate
 docker_gate_summary_seconds: 300
 # Host trees a tenant bind mount may resolve under; everything else is what the
@@ -51,7 +55,7 @@ docker_gate_deny_prefixes_extra:
   - "{{ turbopanel_install_root }}"
 # Trees the platform's own containers (ProxySQL, orchestrator, managed engines)
 # may bind: config trees read-only, state trees any mode. A false-positive
-# remover for observe mode, not a boundary (see AGENTS.md).
+# remover for observe mode, not a boundary (see roles/docker-gate/AGENTS.md).
 docker_gate_platform_ro_roots:
   - "{{ turbopanel_config_dir }}/proxysql"
   - "{{ turbopanel_config_dir }}/orchestrator"

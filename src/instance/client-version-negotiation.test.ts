@@ -77,6 +77,10 @@ function scriptApi(
     () => stamp(sessionResponse({ token: authToken })),
   );
   api.script(
+    "/api/daemon/v1/servers/self/sealing-key",
+    () => stamp(new Response(JSON.stringify({ ok: true }), { status: 200 })),
+  );
+  api.script(
     "/api/daemon/v1/metrics",
     () => stamp(new Response("{}", { status: 202 })),
   );
@@ -226,10 +230,10 @@ test({
         commit: "abc",
         branch: "trunk",
         at: new Date().toISOString(),
-        instanceVersion: "0.1.1",
+        instanceVersion: "0.1.22",
       });
       assertEquals(client.connectionState.instanceSupport, "supported");
-      assertEquals(client.connectionState.instanceVersion, "0.1.1");
+      assertEquals(client.connectionState.instanceVersion, "0.1.22");
       assertEquals(socket.readyState, OPEN);
     });
   },
@@ -310,7 +314,7 @@ test({
     sys: ["hostname", "networkInterfaces"],
   },
   fn: async () => {
-    const log = await withClient("0.1.1", async (client, socket) => {
+    const log = await withClient("0.1.22", async (client, socket) => {
       await settleConnect();
       assertEquals(client.connectionState.instanceSupport, "supported");
       socket.receive(versionFrame());

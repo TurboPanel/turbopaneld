@@ -89,6 +89,8 @@
   roles:
     - role: daemon-layout
     - role: principal-access
+    # Debian security updates on their own; never restarts the server.
+    - role: os-security-updates
     # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds
     # (and the retired shared tpbuild account removed).
     - role: build-user

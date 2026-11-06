@@ -39,7 +39,7 @@ daemon_log_dir: /var/log/turbopanel
 runtime_socket_dir: /run/turbopanel
 runtime_socket_owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
 runtime_socket_group: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'tp' }}"
-runtime_socket_mode: "2770"
+runtime_socket_mode: "3770"
 turbopanel_update_guard_script: "{{ turbopanel_orchestration_dir }}/scripts/tp-update-guard"
 # Outside the replaceable orchestration tree so a rollback to an older daemon
 # package cannot delete the only copy the timer can exec.

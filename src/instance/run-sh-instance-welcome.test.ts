@@ -106,7 +106,7 @@ test({
     );
     assertStringIncludes(
       result.stdout,
-      "Supported release:  curl -fsSL turbopanel.sh | sh",
+      "Supported release:  curl -fsSL https://turbopanel.sh | sh",
     );
   },
 });

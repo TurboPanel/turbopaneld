@@ -904,10 +904,19 @@ test("assertControlPlaneUpdateAllowed refuses only a downgrade below the daemon 
   assertThrows(
     () => assertControlPlaneUpdateAllowed("0.0.1"),
     InstanceUpdateRefusedError,
-    "below this daemon's supported minimum 0.1.0",
+    "below this daemon's supported minimum 0.1.22",
   );
-  assertControlPlaneUpdateAllowed("0.1.0");
-  assertControlPlaneUpdateAllowed("0.1.1");
+  assertThrows(
+    () => assertControlPlaneUpdateAllowed("0.1.21-canary.9"),
+    InstanceUpdateRefusedError,
+    "target version 0.1.21-canary.9 is below",
+  );
+  assertControlPlaneUpdateAllowed("0.1.22");
+  assertControlPlaneUpdateAllowed("0.1.23");
+  // A labelled canary or rc build of the floor's base installs a control
+  // plane that reports the plain base, so it is not below the floor.
+  assertControlPlaneUpdateAllowed("0.1.22-canary.145");
+  assertControlPlaneUpdateAllowed("0.1.22-rc.1");
   assertControlPlaneUpdateAllowed(undefined);
   assertControlPlaneUpdateAllowed(null);
   assertControlPlaneUpdateAllowed("not-a-version");
@@ -971,7 +980,7 @@ test("executeInstanceUpdateReconcile refuses a development checkout", async () =
     () =>
       executeInstanceUpdateReconcile({
         channel: "release",
-        targetVersion: "0.1.1",
+        targetVersion: "0.1.22",
       }),
     InstanceUpdateRefusedError,
     "development host",
@@ -1161,6 +1170,17 @@ function instanceManifestBody(): string {
   return SIGNED_INSTANCE_MANIFEST_BODY;
 }
 
+/** The markers caddyNeedsRefresh looks for in a current Caddyfile. */
+const CURRENT_CADDYFILE = [
+  "handle_errors {",
+  "        header -Server",
+  "updating.html",
+  "@ui_hashed path",
+  "        -Server",
+  "        -Via",
+  "",
+].join("\n");
+
 function managedUpdateHooks(
   calls: Array<{ bin: string; args: string[] }>,
   overrides: Partial<InstanceUpdateHooks> = {},
@@ -1172,8 +1192,7 @@ function managedUpdateHooks(
     statfsProbe: PLENTY_STATFS,
     fetchText: () =>
       Promise.resolve({ ok: true, status: 200, body: instanceManifestBody() }),
-    readCaddyfile: () =>
-      Promise.resolve("handle_errors\nupdating.html\n@ui_hashed path\n"),
+    readCaddyfile: () => Promise.resolve(CURRENT_CADDYFILE),
     restartUnits: () => Promise.resolve(true),
     ensureWebServer: () => Promise.resolve(true),
     migrate: () =>
@@ -1586,6 +1605,35 @@ test("executeInstanceUpdateReconcile refreshes Caddy when the UI cache rules are
   });
   const names = calls.map((call) => call.args.at(-1));
   assertEquals(names.includes("instance-launch-only.yml"), true);
+});
+
+test("executeInstanceUpdateReconcile refreshes Caddy when the Server and Via deletions are absent", async () => {
+  for (
+    const stale of [
+      CURRENT_CADDYFILE.replace("        -Via\n", ""),
+      CURRENT_CADDYFILE.replace("        header -Server\n", ""),
+    ]
+  ) {
+    const calls: Array<{ bin: string; args: string[] }> = [];
+    await executeInstanceUpdateReconcile({
+      channel: "release",
+      hooks: managedUpdateHooks(calls, {
+        readCaddyfile: () => Promise.resolve(stale),
+      }),
+    });
+    const names = calls.map((call) => call.args.at(-1));
+    assertEquals(names.includes("instance-launch-only.yml"), true);
+  }
+});
+
+test("executeInstanceUpdateReconcile leaves a current Caddyfile alone", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: managedUpdateHooks(calls),
+  });
+  const names = calls.map((call) => call.args.at(-1));
+  assertEquals(names.includes("instance-launch-only.yml"), false);
 });
 
 test("executeInstanceUpdateReconcile refreshes the broker config once, after the new build is healthy", async () => {

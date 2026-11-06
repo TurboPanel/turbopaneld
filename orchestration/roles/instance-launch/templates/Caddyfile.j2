@@ -25,6 +25,23 @@
 {% elif ns.acme %}{% set mode.name = 'lets_encrypt' %}
 {% endif %}
 {% set _certs_dir = turbopanel_instance_certs_dir %}
+{#
+  Edge port redirect targets: every listed DNS name whose entry carries the
+  public_port the control plane sent (the port visitors use). A name without
+  one gets no redirect: the port in its URL is the origin's, not the
+  visitors'. Names that are not plain DNS names (IPv6 literals, anything a
+  Caddyfile could misread) and ports that are not 1-5 digits are left out.
+#}
+{% set edge = namespace(items=[], names=[]) %}
+{% for h in turbopanel_hostnames | default([]) %}
+{% set _edge_name = (h.host | default('') | string | lower) | regex_replace('^https?://', '') | regex_replace('/.*$', '') | regex_replace(':[0-9]*$', '') | regex_replace('\.$', '') %}
+{% set _edge_port = h.public_port | default('', true) | string %}
+{% if _edge_name is match('^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$') and _edge_port is match('^[0-9]{1,5}$') and _edge_name not in edge.names %}
+{% set edge.names = edge.names + [_edge_name] %}
+{% set edge.items = edge.items + [{'name': _edge_name, 'port': _edge_port}] %}
+{% endif %}
+{% endfor %}
+{% set _edge_redirects = edge.items %}
 # TurboPanel reverse proxy (managed install, tls mode: {{ mode.name }}).
 # Rendered by the turbopaneld instance-launch role from
 # roles/instance-launch/templates/Caddyfile.j2 — do not edit in place.
@@ -50,9 +67,14 @@
         # Hosting Caddy (and cloudflared) dial this process from loopback and
         # set X-Forwarded-For. {client_ip} then keeps the original client on
         # X-Real-IP. A direct peer has that header stripped above, so
-        # {client_ip} is the peer itself.
+        # {client_ip} is the peer itself. Strict mode reads X-Forwarded-For from
+        # the right and takes the first untrusted address: a local proxy appends
+        # the real client to whatever list the client sent, so the leftmost entry
+        # can be forged.
         servers {
-                trusted_proxies static 127.0.0.0/8 ::1
+                trusted_proxies static 127.0.0.0/8 ::1{% for c in turbopanel_edge_cidrs | default([]) %} {{ c }}{% endfor %}
+
+                trusted_proxies_strict
         }
 }
 
@@ -63,21 +85,38 @@
         # cannot declare its own address; the instance reads CF-Connecting-IP /
         # X-Forwarded-For only when its immediate peer is loopback
         # (TURBOPANEL_TRUSTED_PROXY_CIDRS widens that set).
-        @remote_peer not remote_ip 127.0.0.0/8 ::1
-        request_header @remote_peer -CF-Connecting-IP
-        request_header @remote_peer -True-Client-IP
-        request_header @remote_peer -X-Forwarded-For
+        # Peers inside a published edge range (Cloudflare proxy, Bunny pull
+        # zone) are the one exception: Caddy trusts them in `servers` above and
+        # reads the visitor from X-Forwarded-For, so their headers survive;
+        # the Cloudflare headers survive for Cloudflare ranges only.
+        @not_cloudflare_peer not remote_ip 127.0.0.0/8 ::1{% for c in turbopanel_edge_cf_cidrs | default([]) %} {{ c }}{% endfor %}
 
+        @not_edge_peer not remote_ip 127.0.0.0/8 ::1{% for c in turbopanel_edge_cidrs | default([]) %} {{ c }}{% endfor %}
+
+        request_header @not_cloudflare_peer -CF-Connecting-IP
+        request_header @not_cloudflare_peer -True-Client-IP
+        request_header @not_edge_peer -X-Forwarded-For
+
+{% include 'Caddyfile-edge-port-redirect.j2' %}
         # Baseline response headers. HSTS is safe even on the self-signed
         # default: a browser that already trusts the leaf (Organization CA, or a
         # manually-imported cert) should not be downgraded to plaintext on a later
         # visit, and a real browser will remember and enforce it.
         # This never applies to tenant hosting sites — those are a separate,
         # per-server Caddy config the daemon generates, not this file.
+        # The proxy does not name itself: Caddy sets `Server: Caddy` on every
+        # response and `Via: 1.1 Caddy` on proxied ones. A deletion here is
+        # applied when the response is written, so it also covers what
+        # reverse_proxy adds. Error responses (the error routes at the end of
+        # this snippet) bypass this block and delete Server themselves.
+        # Existing hosts get the two deletions from
+        # tasks/caddyfile-server-headers.yml; keep the two identical.
         header {
                 Strict-Transport-Security "max-age=31536000; includeSubDomains"
                 X-Content-Type-Options "nosniff"
                 X-Frame-Options "DENY"
+                -Server
+                -Via
         }
 
         @api path /api/*
@@ -169,6 +208,8 @@
         # Reusing @api/@ws/@webhook here makes Caddy refuse to start
         # ("matcher is defined more than once").
         handle_errors {
+                # The header block above does not reach error responses.
+                header -Server
                 @updating `{http.error.status_code} in [502, 503, 504]`
                 handle @updating {
                         @updating_api path /api/*
@@ -209,23 +250,4 @@
         import turbopanel_app
 }
 
-{% for h in turbopanel_hostnames | default([]) %}
-{% if h.source == 'lets-encrypt' or h.source == 'uploaded' %}
-{% set _site = h.host | regex_replace('^https?://', '') | regex_replace('/.*$', '') | regex_replace(':.*$', '') %}
-{% if _site | length > 0 %}
-{% if h.source == 'uploaded' %}
-{% set _id = h.cert_id | default('') %}
-{% set _leaf = ('uploaded-' ~ _id) if (_id | length > 0) else 'uploaded' %}
-{{ _site }}:8443 {
-        tls {{ _certs_dir }}/{{ _leaf }}.crt {{ _certs_dir }}/{{ _leaf }}.key
-        import turbopanel_app
-}
-{% elif _site in (turbopanel_letsencrypt_ready | default([])) %}
-{{ _site }}:8443 {
-        tls {{ _certs_dir }}/letsencrypt-{{ _site }}.crt {{ _certs_dir }}/letsencrypt-{{ _site }}.key
-        import turbopanel_app
-}
-{% endif %}
-{% endif %}
-{% endif %}
-{% endfor %}
+{% include 'Caddyfile-hostname-sites.j2' %}

@@ -68,7 +68,7 @@ test("scanLiveReleaseLinks reports only live releases with escaping links", asyn
     const homes = layout.principalHomeRoot;
     await site(homes, "alice", "wp", { "public/uploads": "../shared/uploads" });
     await site(homes, "bob", "app", { "public/build": "../dist" });
-    // Unpublished (a Railpack service, a daemon-owned web root): skipped.
+    // Unpublished (an image-build service, a daemon-owned web root): skipped.
     await site(homes, "carol", "rp", { "public/x": "../shared/x" }, null);
     await Deno.mkdir(join(homes, "dave"));
 

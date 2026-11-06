@@ -41,6 +41,8 @@ const EXEMPT: Record<string, string> = {
   "config/php": "root role (php-fpm)",
   "config/node-app-env":
     "root-owned: tp-host app-env-install makes it and its files; the unit's EnvironmentFile= names it, the daemon never writes it",
+  "config/tunnel-env":
+    "root-owned: tp-host tunnel-env-install makes it and its files; the connector unit's EnvironmentFile= names it, the daemon never writes it",
   "config/system": "root role (system stack)",
   "config/instance": "control plane (state root not sealed co-located)",
   "state/instance": "control plane (state root not sealed co-located)",
@@ -56,6 +58,16 @@ const EXEMPT: Record<string, string> = {
   // user (2770) and daemon-layout leaves it alone.
   "state/metrics":
     "conditional leaf (daemon-only) / instance-launch (co-located)",
+  // Development installs only (src/dev-host/): there the state root belongs to
+  // the dev user and is never sealed; a managed host never creates it.
+  "state/dev-updates":
+    "development only (dev-host): dev-user owned state root, never sealed",
+  // The control plane's TLS folder: root:tp from daemon-layout and
+  // instance-certs. The daemon reads it, writes its CA pin there through
+  // writeDaemonFile (tp-host install), and installs certificates only through
+  // tp-host.
+  "state/tls":
+    "root-owned (daemon-layout, instance-certs): the daemon writes it only through tp-host",
   // Written by the root guard script, only read or removed by the daemon.
   "state/firewall-rollback.json": "written by the root guard",
 };

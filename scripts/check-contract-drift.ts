@@ -159,6 +159,60 @@ function requireEqual(
   if (left !== right || left == null) fail(message);
 }
 
+const PLAIN_SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/;
+
+/**
+ * A version floor is a plain X.Y.Z at or below the peer's current version.
+ * Returns why it is not, or null when it is.
+ */
+export function floorWithinVersionDrift(
+  floor: string | null,
+  peerVersion: string | null,
+  name: string,
+): string | null {
+  const f = PLAIN_SEMVER_RE.exec(floor ?? "");
+  const v = PLAIN_SEMVER_RE.exec(peerVersion ?? "");
+  if (!f) return `${name} must be a plain X.Y.Z (got ${floor})`;
+  if (!v) {
+    return `${name}: the peer deno.json version is not X.Y.Z (got ${peerVersion})`;
+  }
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(f[i]) - Number(v[i]);
+    if (diff < 0) return null;
+    if (diff > 0) {
+      return `${name} ${floor} is newer than the peer's version ${peerVersion}`;
+    }
+  }
+  return null;
+}
+
+function denoJsonVersion(denoJson: string): string | null {
+  const version = (JSON.parse(denoJson) as { version?: unknown }).version;
+  return typeof version === "string" ? version : null;
+}
+
+/**
+ * The two floors name versions on two separate release lines (the daemon's
+ * and the control plane's), so they are not equal. Each must be a plain
+ * X.Y.Z no newer than the version the peer repo is building.
+ */
+export function versionFloorsDrift(
+  instanceWire: string,
+  daemonWire: string,
+  instanceDenoJson: string,
+  daemonDenoJson: string,
+): string | null {
+  return floorWithinVersionDrift(
+    extractConst(daemonWire, "MIN_SUPPORTED_INSTANCE_VERSION"),
+    denoJsonVersion(instanceDenoJson),
+    "MIN_SUPPORTED_INSTANCE_VERSION",
+  ) ?? floorWithinVersionDrift(
+    extractConst(instanceWire, "MIN_SUPPORTED_DAEMON_VERSION"),
+    denoJsonVersion(daemonDenoJson),
+    "MIN_SUPPORTED_DAEMON_VERSION",
+  );
+}
+
 function requireJoinedEqual(
   left: string[] | null,
   right: string[] | null,
@@ -210,6 +264,67 @@ async function checkHostname(tp: string, td: string): Promise<void> {
     extractConst(hostnameRight, "HOSTNAME_MAX_LENGTH"),
     "HOSTNAME_MAX_LENGTH drifted",
   );
+}
+
+/** The signed-session byte rules and the v2 sign-in proof tags must be identical on both sides. */
+async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
+  const envelopeLeft = requireText(
+    await readRel(tp, "src/lib/panel-identity/frame-envelope.ts"),
+    "frame-envelope.ts missing on the instance",
+  );
+  const envelopeRight = requireText(
+    await readRel(td, "src/instance/panel-identity-frames.ts"),
+    "panel-identity-frames.ts missing on the daemon",
+  );
+  for (
+    const name of [
+      "HELLO_PREFIX",
+      "FRAME_PREFIX",
+      "HTTP_PREFIX",
+      "REPORT_PREFIX",
+      "SIG_SUFFIX_MARKER",
+    ]
+  ) {
+    requireEqual(
+      extractConst(envelopeLeft, name),
+      extractConst(envelopeRight, name),
+      `${name} drifted`,
+    );
+  }
+  const proofLeft = requireText(
+    await readRel(tp, "src/daemon/authn/proof-version.ts"),
+    "proof-version.ts missing on the instance",
+  );
+  const proofRight = requireText(
+    await readRel(td, "src/crypto/keys.ts"),
+    "keys.ts missing on the daemon",
+  );
+  for (const name of ["ENROLL_PROOF_V2_TAG", "AUTH_PROOF_V2_TAG"]) {
+    requireEqual(
+      extractConst(proofLeft, name),
+      extractConst(proofRight, name),
+      `${name} drifted`,
+    );
+  }
+  // Daemon-signed requests and the attach proof (pinned here only: the
+  // control plane ships first, so its drift check cannot require them yet).
+  const pairs: ReadonlyArray<[string, string]> = [
+    ["src/daemon/authn/request-signature.ts", "REQUEST_PREFIX"],
+    ["src/daemon/authn/attach-proof.ts", "ATTACH_PREFIX"],
+    ["src/daemon/authn/pin-report.ts", "PIN_REPORT_PREFIX"],
+  ];
+  const sources = await Promise.all(pairs.map(([file]) => readRel(tp, file)));
+  for (const [index, [file, name]] of pairs.entries()) {
+    const left = requireText(
+      sources[index],
+      `${file} missing on the instance`,
+    );
+    requireEqual(
+      extractConst(left, name),
+      extractConst(proofRight, name),
+      `${name} drifted`,
+    );
+  }
 }
 
 async function checkMachineKey(tp: string, td: string): Promise<void> {
@@ -1096,11 +1211,13 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     extractConst(daemonWire, "INSTANCE_VERSION_HEADER"),
     "INSTANCE_VERSION_HEADER drifted",
   );
-  requireEqual(
-    extractConst(instanceWire, "MIN_SUPPORTED_DAEMON_VERSION"),
-    extractConst(daemonWire, "MIN_SUPPORTED_INSTANCE_VERSION"),
-    "MIN_SUPPORTED_DAEMON_VERSION and MIN_SUPPORTED_INSTANCE_VERSION must move together",
+  const floors = versionFloorsDrift(
+    instanceWire,
+    daemonWire,
+    requireText(await readRel(tp, "deno.json"), "instance deno.json missing"),
+    requireText(await readRel(td, "deno.json"), "daemon deno.json missing"),
   );
+  if (floors) fail(floors);
   requireEqual(
     extractObjectLiteral(instanceWire, "DAEMON_FEATURE_MIN_VERSIONS"),
     extractObjectLiteral(daemonWire, "DAEMON_FEATURE_MIN_VERSIONS"),
@@ -1158,10 +1275,11 @@ export async function runContractDriftCheck(
   await checkReportedIp(tp, td);
   await checkSlotMapping(tp, td);
   await checkLayoutVectors(tp, td);
+  await checkPanelIdentityBytes(tp, td);
   await checkExpandOnly(tp, td);
 
   console.log(
-    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, folder name vectors, expand-only fields agree.",
+    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, folder name vectors, signed-session bytes, expand-only fields agree.",
   );
   return "ok";
 }

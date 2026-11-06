@@ -49,7 +49,7 @@
 
 # A co-located control plane on Let's Encrypt has hosting Caddy proxy HTTP-01
 # challenges to <run dir>/instance-acme.sock. Traverse only (no listing) on the
-# tp:tp 2770 run directory; the socket is re-created on every bind, so its one
+# tp:tp 3770 run directory; the socket is re-created on every bind, so its one
 # ACL entry (u:tpedge:rw) comes from tp-host right after the daemon or the
 # issuer binds it. Never group tp. /run is tmpfs: the tmpfiles.d line puts the
 # entry back on every boot, after runtime-sockets' line creates the directory.
@@ -178,6 +178,24 @@
     group: root
     mode: "0640"
   register: _ingress_guard_dropin
+
+# The one-shot issuer for a hosted name's certificate order. A template unit
+# (turbopanel-tenant-acme@<request id>.service): the daemon starts and stops one
+# instance per order and never enables it. See the unit file for why it runs as
+# the daemon's own account.
+- name: Install the certificate issuer template unit
+  ansible.builtin.template:
+    src: turbopanel-tenant-acme@.service.j2
+    dest: /etc/systemd/system/turbopanel-tenant-acme@.service
+    owner: root
+    group: root
+    mode: "0640"
+  register: _tenant_acme_unit
+
+- name: Reload systemd after the certificate issuer unit changed
+  when: _tenant_acme_unit.changed
+  ansible.builtin.systemd:
+    daemon_reload: true
 
 - name: Enable and start the ingress guard
   ansible.builtin.systemd:

@@ -112,3 +112,32 @@ export function grantableDatabases(credential: {
     ? credential.databases
     : [];
 }
+
+/** The cluster's backup login: an ordinary `user` credential sent with `kind: "backup"`. */
+export function isBackupCredential(credential: {
+  role: string;
+  kind?: string;
+}): boolean {
+  return credential.role === "user" && credential.kind === "backup";
+}
+
+/**
+ * The backup login's rights on MySQL and MariaDB: the dialect's read and dump
+ * set at global level, for the wildcard account and every client source host,
+ * in one statement batch. Global, not per database, so a database made with
+ * plain SQL is covered too; the credential's `databases`, `privileges` and
+ * `grantMode` play no part. Database-level grants an older daemon wrote are a
+ * subset of it and stay.
+ */
+export function grantBackupPrivileges(options: {
+  username: string;
+  hosts: readonly string[];
+  grantSql: (username: string, host?: string) => string;
+  run: (sql: string) => Promise<unknown>;
+}): Promise<unknown> {
+  const { username, hosts, grantSql, run } = options;
+  return run(
+    [grantSql(username), ...hosts.map((host) => grantSql(username, host))]
+      .join("\n"),
+  );
+}

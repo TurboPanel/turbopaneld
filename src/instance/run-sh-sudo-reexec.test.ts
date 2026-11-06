@@ -26,6 +26,7 @@ echo "exit 0"
  */
 async function reexec(
   args: string[],
+  extraEnv: Record<string, string> = {},
 ): Promise<{ status: number; argv: string; env: string; stderr: string }> {
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-reexec-" });
   try {
@@ -33,7 +34,7 @@ async function reexec(
     await Deno.writeTextFile(join(dir, "curl"), CURL_STUB, { mode: 0o755 });
     const out = await new Deno.Command("sh", {
       args: [runShPath, ...args],
-      env: { PATH: `${dir}:/usr/bin:/bin`, STUB_OUT: dir },
+      env: { PATH: `${dir}:/usr/bin:/bin`, STUB_OUT: dir, ...extraEnv },
       clearEnv: true,
       stdin: "null",
       stdout: "piped",
@@ -107,4 +108,35 @@ test("run.sh reads the tunnel token from TURBOPANEL_TUNNEL_TOKEN on the root sid
   );
   assertEquals(source.includes('--tunnel-token "$TUNNEL_TOKEN"'), false);
   assertEquals(source.includes('--license "$LICENSE"'), false);
+});
+
+test("the expected CA fingerprint survives the sudo re-exec, normalised", async () => {
+  if (Deno.uid() === 0) return;
+  const colon = Array.from({ length: 32 }, () => "AB").join(":");
+  const result = await reexec(
+    ["--license", LICENSE, "--host", "https://cp.example.com:8443"],
+    {
+      TURBOPANEL_INSECURE_TLS: "1",
+      TURBOPANEL_INSTANCE_CA_FINGERPRINT: `${colon},${"cd".repeat(32)}`,
+    },
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(
+    result.argv,
+    `--instance-ca-fingerprint\n${"ab".repeat(32)},${"cd".repeat(32)}\n`,
+  );
+  assertStringIncludes(result.argv, "--insecure-tls\n");
+});
+
+test("a malformed CA fingerprint stops the install before the sudo re-exec", async () => {
+  if (Deno.uid() === 0) return;
+  const result = await reexec(["--license", LICENSE], {
+    TURBOPANEL_INSTANCE_CA_FINGERPRINT: "deadbeef",
+  });
+  assertEquals(result.status === 0, false);
+  assertEquals(result.argv, "");
+  assertStringIncludes(
+    result.stderr,
+    "TURBOPANEL_INSTANCE_CA_FINGERPRINT must be one or more SHA-256 fingerprints",
+  );
 });

@@ -6,6 +6,13 @@
  * (env override when that file exists, else the canonical layout path), then
  * invalidates the cached HTTP client so the next reconnect trusts the new
  * (possibly overlapping) bundle.
+ *
+ * When this host carries a pinned CA list (`TURBOPANEL_INSTANCE_CA_FINGERPRINT`),
+ * the new bundle is recorded as expected in the same step
+ * (`<state>/tls/instance-ca-pin`, see `instance/ca-pin.ts`). That is allowed here
+ * because the payload arrived over a session already verified against the
+ * pinned CA and authenticated with this server's key; nothing unauthenticated
+ * can change the list.
  */
 
 import { resolveLayout } from "../paths/layout.ts";
@@ -22,6 +29,7 @@ import type {
   TlsTrustReconcileResult,
 } from "../contracts/commands-contracts.ts";
 import { parseTlsTrustReconcilePayload } from "../contracts/commands-contracts.ts";
+import { repinAfterReconcile } from "../instance/ca-pin.ts";
 
 const CA_FILE_MODE = 0o640;
 
@@ -30,6 +38,8 @@ export type TlsTrustHandlerDeps = {
   readTextFile?: (path: string) => Promise<string>;
   writeAtomic?: (path: string, contents: string) => Promise<void>;
   invalidate?: () => void;
+  /** Record `bundlePem` (plus `keepPem`, when given) as expected CA certificates. */
+  repin?: (bundlePem: string, keepPem?: string) => Promise<unknown>;
 };
 
 async function defaultReadTextFile(path: string): Promise<string> {
@@ -56,15 +66,14 @@ async function fingerprintsInPem(pem: string): Promise<string[]> {
   );
 }
 
-async function currentAnchorFingerprints(
+async function readCurrentBundle(
   caPath: string,
   readTextFile: (path: string) => Promise<string>,
-): Promise<string[]> {
+): Promise<string | null> {
   try {
-    const pem = await readTextFile(caPath);
-    return await fingerprintsInPem(pem);
+    return await readTextFile(caPath);
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return [];
+    if (err instanceof Deno.errors.NotFound) return null;
     throw err;
   }
 }
@@ -92,7 +101,10 @@ export async function handleTlsTrust(
     resolveInstanceCaPath(Deno.env.toObject()) ??
     resolveLayout().instanceCaPath;
   const readTextFile = deps.readTextFile ?? defaultReadTextFile;
-  const current = await currentAnchorFingerprints(caPath, readTextFile);
+  const currentPem = await readCurrentBundle(caPath, readTextFile);
+  const current = currentPem === null
+    ? []
+    : await fingerprintsInPem(currentPem);
   const currentAnchor = current[0];
   if (
     currentAnchor &&
@@ -105,7 +117,16 @@ export async function handleTlsTrust(
   }
 
   const writeAtomic = deps.writeAtomic ?? atomicWritePem;
+  const repin = deps.repin ??
+    ((bundlePem: string, keepPem?: string) =>
+      repinAfterReconcile(bundlePem, {}, keepPem));
+  // The expected list moves first and covers both the old and the new file,
+  // so a failure at any step never leaves a CA on disk that the list does
+  // not name (which would park the daemon). If this throws, nothing changed.
+  await repin(payload.bundlePem, currentPem ?? undefined);
   await writeAtomic(caPath, payload.bundlePem);
+  // Narrow to the new bundle; if this fails the list is only wider.
+  await repin(payload.bundlePem);
 
   const invalidate = deps.invalidate ?? invalidatePlatformCaHttpClient;
   invalidate();

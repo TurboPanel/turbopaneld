@@ -1,6 +1,6 @@
 /**
  * Tenant values that reach a config file a root-run or root-loaded engine
- * parses (see "Tenant values in root-loaded configs" in `AGENTS.md`).
+ * parses (see "Tenant values in root-loaded configs" in `src/deploy/AGENTS.md`).
  *
  * 1. Goldens: valid input renders byte-for-byte what trunk rendered before the
  *    validators landed (`testdata/config-goldens/`). Never regenerate one to

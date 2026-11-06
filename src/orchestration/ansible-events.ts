@@ -1,6 +1,7 @@
 import { logDebug, logError, logInfo } from "../util/logger.ts";
 import { logComponent, presentStatusLine } from "./presentation.ts";
 import { runStreamingLines } from "./exec.ts";
+import { noteRepoKeyChanges, type RepoKeyLedger } from "./repo-key-changes.ts";
 import { privilegedPlaybookInvocation } from "./privileged.ts";
 import {
   ansibleFailureLine,
@@ -123,20 +124,30 @@ export function parseAnsibleJsonlLine(line: string): AnsibleEvent | null {
 
 export const ANSIBLE_SUMMARY_MAX_LENGTH = 500;
 
+/**
+ * One recap line. Ansible's stats events name the failed count `failures`
+ * (reading `failed` always gave 0); `failed` is kept as a fallback for older
+ * fixtures. A task that failed inside a block and was rescued is counted
+ * separately and only shown when there was one.
+ */
 export function formatPlaybookRecap(stats: AnsiblePlaybookStats): string {
   let ok = 0;
   let changed = 0;
   let failed = 0;
   let unreachable = 0;
+  let rescued = 0;
 
   for (const hostStats of Object.values(stats)) {
     ok += hostStats.ok ?? 0;
     changed += hostStats.changed ?? 0;
-    failed += hostStats.failed ?? 0;
+    failed += hostStats.failures ?? hostStats.failed ?? 0;
     unreachable += hostStats.unreachable ?? 0;
+    rescued += hostStats.rescued ?? 0;
   }
 
-  return `ok=${ok} changed=${changed} failed=${failed} unreachable=${unreachable}`;
+  const base =
+    `ok=${ok} changed=${changed} failed=${failed} unreachable=${unreachable}`;
+  return rescued > 0 ? `${base} rescued=${rescued}` : base;
 }
 
 /** Strip control characters and cap length for safe command-outcome relay. */
@@ -176,9 +187,24 @@ export class AnsibleRunSummaryCollector {
     }
   }
 
-  build(): string {
+  /**
+   * `runFailed`: the playbook process exited non-zero. A recap that still
+   * counts no failure and no unreachable host is then not trusted as it
+   * stands: the line says the run failed instead of implying success.
+   */
+  build(opts: { runFailed?: boolean } = {}): string {
     const parts: string[] = [];
-    if (this.#recap) parts.push(this.#recap);
+    if (this.#recap) {
+      const contradicts = opts.runFailed === true &&
+        / failed=0 unreachable=0(?: |$)/.test(this.#recap);
+      parts.push(
+        contradicts
+          ? `${this.#recap} (playbook exited with an error)`
+          : this.#recap,
+      );
+    } else if (opts.runFailed && !this.#firstFailure) {
+      parts.push("playbook exited with an error before a recap");
+    }
     if (this.#firstFailure) parts.push(this.#firstFailure);
     return sanitizeAnsibleSummaryText(parts.join("; "));
   }
@@ -294,6 +320,8 @@ export interface PlaybookStreamingOptions {
    * installer presenters instead of being dropped.
    */
   onRawLine?: (stream: AnsibleRawLineStream, line: string) => void;
+  /** Test seam: where repository key changes seen in task results are remembered. */
+  repoKeyLedger?: () => RepoKeyLedger;
 }
 
 /**
@@ -319,6 +347,9 @@ export async function runPlaybookStreaming(
       const event = parseAnsibleJsonlLine(line);
       if (event) {
         failure.handleEvent(event);
+        // Structured warnings (a changed package signing key) are kept for the
+        // control plane whether or not the run is quiet.
+        void noteRepoKeyChanges(event, options.repoKeyLedger);
         if (!quiet) logAnsibleEvent(event);
         if (options.onEvent) options.onEvent(event);
         return;

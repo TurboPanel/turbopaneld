@@ -77,6 +77,8 @@ Orchestrator self-heal: `restart: always` does not bring back a container that w
 
 Backup restore skips per-login schemas on an owner-role database; a restored table is handed to the owner role in the same transaction.
 
+**Backup login (`credentials[].kind: "backup"`, feature `managed-backup-login-v1`).** The control plane sends the cluster's backup login as `role: "user"` with `kind: "backup"`, every database of the cluster and no privileges; an unknown `kind` is ignored (an ordinary login). Its rights are fixed whatever `privileges` or `grantMode` say: PostgreSQL `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS` + `GRANT pg_read_all_data` + `CONNECT` on exactly the listed databases (it is kept out of the per-level reconcile, so no table grants, owner-role rights or schema of its own); MySQL `SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE, FLUSH_TABLES` and MariaDB `SELECT, SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, SHOW CREATE ROUTINE`, both **global** (`ON *.*`, one `GRANT` per account host). Global because a database made with plain `CREATE DATABASE` is never in `databases`, and a per-database grant left the dump refused on it (1044). The listed `databases` are ignored on these engines, so older control planes keep working unchanged; database-level grants an older daemon wrote are a subset and stay. The scope includes the system schemas: `mysql` (account rows with password hashes, which a full restore needs), `sys` and `performance_schema`. Neither engine can exclude one schema from a global grant (MySQL only with `partial_revokes`, a server-wide switch; MariaDB not at all), and a wildcard database grant (`` `%`.* ``) matches `mysql` too. `TRIGGER` and `EVENT` also let the login create and drop triggers and events, now in every database: the engines check the same rights for reading their definitions, so a dump needs them; such objects run as the backup login, which can only read. No write, DDL (tables, databases) or account right. The one administrative right is MySQL `FLUSH_TABLES` (dynamic, global only): on a server with GTIDs on, which every managed MySQL server is, `mysqldump --single-transaction` takes `FLUSH TABLES WITH READ LOCK` around the start of its snapshot, then `UNLOCK TABLES`, and stops with 1227 without the right (only `--set-gtid-purged=OFF` got past). Each dump holds that lock for a moment, after waiting for running statements to finish, so one long query holds writers up for that long. The right also lets the login take the global read lock by hand, which blocks every write on the server until it unlocks or disconnects, so treat the backup password like an admin password. The grant is written on every apply, so an existing backup login gets it on the next apply of its cluster, not when the daemon is updated. `mysqldump` without `PROCESS` needs `--no-tablespaces` to skip a tablespace warning. No `RELOAD` (it would also flush logs, hosts and privileges) / `REPLICATION CLIENT` (binlog position) and no PostgreSQL large-object grants yet. On ProxySQL it is a tool login (writer hostgroup, no split rules) and every tool login's user row says `transaction_persistent=1`, so a dump in one transaction stays on one backend. `backup-login-sql.test.ts` pins the SQL; `backup-login.docker.test.ts` (MySQL 8.4 with GTIDs on and the standard dump flags, MariaDB 11.8; it also pins `SHOW GRANTS`, the `mysql.user` read and that every refusal says denied) and `postgres-grants.real-pg.test.ts` (Postgres 16 and 18) dump through the real engines as that login.
+
 ## State tree
 
 ```
@@ -234,7 +236,7 @@ side, so the daemon must treat them as data:
   `contracts.ts`): `1024`–`65535`, not `6032` / `6132`, not `45000`–`45999`. A
   looser daemon check would accept a payload the control plane considers
   invalid, which is how a half-configured ingress happens. Canonical rules:
-  `turbopanel/src/features/managed/AGENTS.md` → **Client listener ports**.
+  `../turbopanel/src/features/managed/AGENTS.md` → **Client listener ports**.
 
 ### Real client addresses (IPv6 network)
 
@@ -278,6 +280,13 @@ on canary with ProxySQL 3.0.9 / Docker 29.8). `proxysql-ipv6.ts`:
   bind worked; a failed probe fails the reconcile. Staging uses no admin
   connect retries, so a missing or stuck container costs nothing. The same path also applies a
   changed listener port on a host whose `proxysql.db` predates it.
+- **Teardown removes the data volume.** When the last cluster goes
+  (`managed.ingress.reconcile` with no clusters), `compose down` keeps the
+  named `proxysql-data` volume, so the handler then removes
+  `<serviceId>_proxysql-data` itself, best effort (in use or already gone is
+  logged, never a failure). The project comes from the saved descriptor, so a
+  host torn down by an older build is cleaned up on the next empty reconcile.
+  The next provision rebuilds `proxysql.db` from the desired state.
 - **Upgrade path.** The next `managed.ingress.reconcile` on a server publishing
   `::` re-renders compose and recreates the container onto the new network
   (data volume kept) with the IPv6 listeners already saved: one short listener
@@ -384,13 +393,13 @@ Frontend `default_hostgroup` comes from each user's `connectionRole`
 (`sortedReadSplitUsernames`) — read-only logins already default to the reader
 hostgroup. Do not reintroduce automatic read-split from `readEligible` alone; a
 blanket regex breaks read-after-write and locking reads for applications that
-never opted in. Canonical policy: `turbopanel/src/features/managed/AGENTS.md` →
+never opted in. Canonical policy: `../turbopanel/src/features/managed/AGENTS.md` →
 **Client routing**.
 
 Username frontend namespace is **server-wide** across every cluster hosted on that
 org's servers: `ManagedFrontendUserConflictError` when the same login would map
 to two managed ids. The instance enforces the same org-owner login uniqueness
-before enqueue (see `turbopanel/src/features/managed/AGENTS.md` → Login namespace).
+before enqueue (see `../turbopanel/src/features/managed/AGENTS.md` → Login namespace).
 
 ### Frontend TLS enforcement
 
@@ -413,7 +422,7 @@ The daemon does **not** know about SSL modes. The instance resolves the
 only the boolean; certificate *verification* (`verify-ca` / `verify-full`) is a
 client-side behavior the instance renders into DSNs, and there is nothing for
 ProxySQL to enforce. Canonical policy:
-`turbopanel/src/features/managed/AGENTS.md` → **Client TLS (SSL mode)**.
+`../turbopanel/src/features/managed/AGENTS.md` → **Client TLS (SSL mode)**.
 
 ## Rules
 
@@ -426,7 +435,7 @@ ProxySQL to enforce. Canonical policy:
    compose project (the `managed-ingress` `serviceId`) plus the `managed-ingress`
    system-component label. Distinct from engine ordinal names. Allocation still
    uses the `managed-ingress` system component, not engine ordinal slots.
-   Suffix contract: `turbopanel/AGENTS.md` → **Container name suffix contract**.
+   Suffix contract: `../turbopanel/AGENTS.md` → **Container name suffix contract**.
    `assertSafeManagedIdentifiers` guards Docker names with the
    hyphen-permitting regex (do not reuse `SAFE_VOLUME_NAME_RE`). Container
    resolution (`containers.ts`) still keys off `Service` / `State`, never
@@ -496,7 +505,7 @@ ProxySQL to enforce. Canonical policy:
    `MANAGED_ALLOWED_IMAGES_BY_ENGINE` in
    `../contracts/commands-contracts.ts` is the last stop before Docker runs a
    `managed.apply` image, so it must stay byte-identical to the instance release
-   catalog (`../../turbopanel/src/features/managed/releases.ts`) — including its
+   catalog (`../turbopanel/src/features/managed/releases.ts`) — including its
    ordering (default series first, default variant first). Adding or retiring a
    series is a three-repo change (instance catalog, this mirror, UI
    `ui/src/lib/managed-releases.ts`); `command-types-parity.test.ts` pins this
@@ -526,7 +535,7 @@ ProxySQL to enforce. Canonical policy:
    (a separate SUPERUSER/grant, not a rename of the connection identity).
    Never assume the payload's root credential username equals
    `ctx.rootUsername`. Canonical contract:
-   `../../turbopanel/src/features/managed/AGENTS.md` → "Login namespace".
+   `../turbopanel/src/features/managed/AGENTS.md` → "Login namespace".
 10. **Backup/restore (`backup.ts`).** Optional per engine via
    `ManagedEngineRuntime.backup` (`ManagedBackupNotSupportedError` when absent).
    - **Stream, never buffer.** Dump stdout pipes to a `<backupId>.<ext>.part`
@@ -633,7 +642,7 @@ Orchestrator's image only has the MySQL driver, so it never sees Postgres and
 `managed-ha-event`, plus `sourceMemberId`, `detector: 'postgres-probe'` and
 bounded `evidence`. What the control plane then checks (same-org member
 reporter, current primary, cooldown, lag gate, fence, promote) is listed in
-`turbopanel/src/features/managed/AGENTS.md` → **Dead-primary detectors**;
+`../turbopanel/src/features/managed/AGENTS.md` → **Dead-primary detectors**;
 there is no raft-leader check on that path.
 
 - **Scope** (`DEAD_PRIMARY_DETECTION_SCOPE = 'engine-dead-host-alive'`): the
@@ -812,3 +821,9 @@ Tests: `demoted-marker.test.ts`, `demoted-fence-volume.test.ts`,
 `promote.test.ts`.
 
 **Planned Postgres switchover: final position and the stale-wipe refusal (`managed-switchover-final-position-v1`).** The fence stop (`managed.lifecycle` stop with `switchoverRecoveryId` and `primaryEpoch`, both optional and only together) reads the old primary's final write position after `compose stop` and returns `oldPrimaryFinalLsn` / `oldPrimaryFinalTimeline`; `managed.promote` returns `newPrimaryReplayLsn` / `newPrimaryTimeline`, the standby's `pg_last_wal_replay_lsn()` read AFTER recovery ended (it is static then; a reading taken before the promote can undercount because the promote still replays the WAL it already received) and the timeline from `pg_walfile_name(pg_current_wal_lsn())`. Neither fails the command: an unreadable position is simply left out and the control plane then does not re-seed. Which value is the final position: `pg_controldata` "Latest checkpoint location" and "REDO location" are equal after a clean shutdown but are where the shutdown checkpoint record STARTS; a caught-up standby reports where it ENDS (measured on postgres:18.6 under write load: 0/7257FC0 against 0/7258050, a 114-byte record that crosses the 0/7258000 page boundary). `engines/postgres-wal.ts` therefore reads `pg_controldata` (state must be exactly `shut down`, checkpoint equals REDO) and `pg_waldump -n 1` at that location (must be `CHECKPOINT_SHUTDOWN`), then walks the record's length across page boundaries (24-byte page header, 40 at a segment start) and rounds up to 8 bytes. It runs in a throwaway container on the stopped data volume (`readStoppedPrimaryFinalPosition`), and any unexpected input gives no position (fail closed). `postgres-final-position.docker.test.ts` proves it on a real container (skipped without Docker): the computed end equals the standby's replay position once caught up, the checkpoint location does not, a paused standby stays behind, and the promote reports the same position and the next timeline. The fence stop also writes `switchover-final-position.json` (recovery id, epoch, position) in the managed state folder (`switchover-final-position.ts`). A `managed.apply` that carries `switchoverReseed` together with `forceResync` is checked against it BEFORE anything is touched (before docker, before the data directory): the recovery id must be the one recorded, the epoch exactly one past the recorded one (one promote: any other primary change in between makes it stale), and the member still fenced (demoted marker). A refusal throws `managed.apply switchover re-seed refused: ...`. An operator Resync carries no `switchoverReseed` and is never checked. The record is removed after the re-seed is applied and when this host is promoted.
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Managed engines (daemon runtime)** | `src/managed/AGENTS.md` | `managed.apply` / `.lifecycle` / `.destroy`, `managed.ingress.reconcile` (shared ProxySQL — compose project = the `managed-ingress` `serviceId` — on the organization's managed network, a bare-UUID name carried as `managedNetwork` on the command), engine registry (Postgres first); separate from tenant deploy. On-demand tails ride the same correlated cell round trip as `managed-logs-request` / `managed-logs-result`: engine `compose logs`, and running-container `docker container logs`. Neither is stored or collected; presence does not carry `containerLogsEnabled`. |

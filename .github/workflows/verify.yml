@@ -106,6 +106,9 @@ jobs:
       - name: Check vocabulary (no daemon-as-agent phrasing)
         run: deno task check:vocabulary
 
+      - name: Check contributor guide references
+        run: deno task check:guide-references
+
       - name: Shellcheck the uninstall script and the root helpers
         run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-php-loopback orchestration/scripts/tp-build-runner orchestration/scripts/tp-update-guard orchestration/scripts/tp-firewall-guard
 
@@ -146,7 +149,7 @@ jobs:
       # Install from the hash lock (githubactions:S8544 / S8541), not the
       # range-pinned constraints file.
       - name: Set up Python for Ansible
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # Matches the vendored daemon pin (PYTHON_VERSION in
           # src/orchestration/assets.ts) and orchestration/requirements.txt.
@@ -201,11 +204,23 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: scripts/download-caddy.mjs
 
+      - name: Seed the daemon state sentinel
+        # The default daemon state dir, writable by the runner and filled with
+        # fixed stand-in files, so a test that wrote it would land and the
+        # check after the tests would fail.
+        run: |
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/turbopanel
+          deno run --allow-read --allow-write=/var/lib/turbopanel --allow-env=GITHUB_ACTIONS scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel
+
       - name: Test with coverage
         env:
           # The real-Postgres suites must run here, never skip on a Docker hiccup.
           TURBOPANEL_REQUIRE_REAL_POSTGRES: "1"
         run: deno task test:coverage
+
+      - name: Check no test wrote the daemon state dir
+        if: ${{ !cancelled() }}
+        run: deno run --allow-read scripts/daemon-state-sentinel.ts verify /var/lib/turbopanel
 
       # `deno task test:coverage` already normalizes; re-running here is
       # idempotent and keeps the assertions (nothing absolute, at least one
@@ -242,12 +257,22 @@ jobs:
           && github.event_name == 'pull_request'
           && github.base_ref != 'staging'
           && github.base_ref != 'live'
-        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: >
             -Dsonar.qualitygate.wait=true
+
+      # A pull request from a fork (or from Dependabot) gets no repository
+      # secrets, so the code scan above is skipped. Say so in the run rather
+      # than staying silent; every other check in this run still gates ci-ok.
+      - name: Note a skipped code scan
+        if: github.event_name == 'pull_request' && env.SONAR_TOKEN == ''
+        run: |
+          msg="The code scanner did not run: pull requests from forks get no repository secrets, so the scan is skipped. Formatting, the vocabulary check, the secret scan and the tests run as usual. If a scan is needed, a maintainer will push this branch to the TurboPanel repository, where the scan runs."
+          echo "::notice title=Code scan skipped::${msg}"
+          printf '### Code scan skipped\n\n%s\n' "$msg" >> "$GITHUB_STEP_SUMMARY"
 
       # The Sonar way gate fails only on ratings, so one new code smell passes
       # it; this fails the PR on any new issue (owner rule, 2026-09-30). Runs
@@ -280,39 +305,6 @@ jobs:
           path: turbopaneld
           persist-credentials: false
 
-      - name: Resolve turbopanel checkout ref
-        id: instance-ref
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          REF="$HEAD_REF"
-          # Never staging/live: not as the head (a staging → trunk PR), not as
-          # the base (the promotion PRs), not as the pushed branch.
-          case "$REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          case "$BASE_REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
-            echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=trunk" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check out turbopanel (contract twins)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: TurboPanel/turbopanel
-          ref: ${{ steps.instance-ref.outputs.ref }}
-          path: turbopanel
-          fetch-depth: 1
-          persist-credentials: false
-
       # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
       # a transient GitHub 5xx on the download must not turn the run red.
       - name: Install Deno
@@ -339,6 +331,57 @@ jobs:
         uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: "2.9.8"
+
+      - name: Resolve turbopanel checkout ref
+        id: instance-ref
+        working-directory: turbopaneld
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_BODY: ${{ github.event.pull_request.body }}
+          SIBLING_REPO: TurboPanel/turbopanel
+        run: |
+          # The same-named branch, else trunk. Never staging/live: not as the
+          # head (a staging → trunk PR), not as the base (the promotion PRs),
+          # not as the pushed branch. A pull request may name the sibling
+          # branch instead with a `Sibling-Branch: <branch>` line in its
+          # description (a fork PR, or a twin with another name); the branch
+          # must exist in the org repo. The description is read fresh so an
+          # edit counts on a re-run, and it only reaches the resolver through
+          # the environment.
+          PR_BODY="$EVENT_BODY"
+          if [ -n "$PR_NUMBER" ]; then
+            PR_BODY="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""')" || PR_BODY="$EVENT_BODY"
+          fi
+          export PR_BODY
+          resolver() {
+            deno run --no-prompt --no-lock --allow-env=HEAD_REF,BASE_REF,PR_BODY,SIBLING_REPO,REF,SOURCE scripts/resolve-sibling-ref.ts "$@"
+          }
+          resolved="$(resolver)" || { printf '%s\n' "$resolved"; exit 1; }
+          CANDIDATE="$(printf '%s\n' "$resolved" | sed -n 's/^candidate=//p')"
+          SOURCE="$(printf '%s\n' "$resolved" | sed -n 's/^source=//p')"
+          if gh api "repos/${SIBLING_REPO}/branches/${CANDIDATE}" --silent; then
+            REF="$CANDIDATE"
+          elif [ "$SOURCE" = override ]; then
+            echo "::error title=Sibling-Branch::the branch named in the description does not exist in ${SIBLING_REPO}; a maintainer has to push it there first"
+            exit 1
+          else
+            REF=trunk
+            SOURCE=trunk-fallback
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          REF="$REF" SOURCE="$SOURCE" resolver summary >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out turbopanel (contract twins)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TurboPanel/turbopanel
+          ref: ${{ steps.instance-ref.outputs.ref }}
+          path: turbopanel
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Check contract drift against turbopanel
         working-directory: turbopaneld
@@ -385,6 +428,13 @@ jobs:
           deno-version: "2.9.8"
           cache: true
 
+      # The same stand-in state dir as in `verify`: these runs (one as root)
+      # are checked for writes to it too.
+      - name: Seed the daemon state sentinel
+        run: |
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/turbopanel
+          deno run --allow-read --allow-write=/var/lib/turbopanel --allow-env=GITHUB_ACTIONS scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel
+
       - name: Sealed-release copy as root (hard link to a root-owned file)
         run: >-
           sudo env "PATH=$PATH" DENO_DIR=/tmp/deno-root-cache
@@ -395,6 +445,10 @@ jobs:
         env:
           DOCKER_GATE_GO_DIFF: "1"
         run: deno test -A --no-check src/docker-gate/parser-differential.test.ts
+
+      - name: Check no test wrote the daemon state dir
+        if: ${{ !cancelled() }}
+        run: deno run --allow-read scripts/daemon-state-sentinel.ts verify /var/lib/turbopanel
 
   ci-ok:
     name: ci-ok

@@ -38,6 +38,7 @@ import {
   setIngressHostCommandForTest,
 } from "../deploy/ingress.ts";
 import "../testing/stub-hosting-caddy-host.ts";
+import { instantlyHealthy } from "../testing/instant-health-gate.ts";
 
 /**
  * Shared hosting-ingress Docker network — the `hosting-ingress` system
@@ -61,6 +62,7 @@ const test = Deno.test.bind(Deno);
 
 const hermeticDeployDeps = {
   ensureDocker: () => Promise.resolve(),
+  waitForHealth: instantlyHealthy,
   ensureExternalDockerNetworks: () => Promise.resolve(),
   ensureFabricDockerNetworks: () => Promise.resolve(),
 };

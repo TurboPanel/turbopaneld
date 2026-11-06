@@ -41,6 +41,7 @@ import {
   principalSliceContent,
   principalSlicePath,
 } from "./unit.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test} — Sonar typescript:S2187 only
@@ -116,7 +117,8 @@ function createRunMock(layout?: LayoutPaths): RunMock {
   const calls: Array<{ command: string; args: string[] }> = [];
   const activeUnits = new Set<string>();
   const envCopies = new Map<string, string>();
-  const run: RunFn = async (command, args) => {
+  const run: RunFn = async (command, given) => {
+    const args = bareSudoArgs(given);
     calls.push({ command, args: [...args] });
     if (command !== "sudo") return ok();
 
@@ -354,6 +356,67 @@ test("applyNativeAppServices installs the unit, reloads, and enables it", async 
     assertEquals(mock.systemctl("enable"), [
       nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
     ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+/** A health step report that keeps what it was told. */
+function healthRecorder() {
+  const events: string[] = [];
+  return {
+    events,
+    health: {
+      waiting: (text: string) => events.push(`waiting: ${text}`),
+      done: (title: string, note: string) =>
+        events.push(`done: ${title} | ${note}`),
+      failed: (title: string, note: string) =>
+        events.push(`failed: ${title} | ${note}`),
+      ended: () => events.some((e) => !e.startsWith("waiting")),
+      active: () => true,
+    },
+  };
+}
+
+test("a native app that answers ends the health step as reachable, not healthy", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const { events, health } = healthRecorder();
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...applyOpts(host, mock),
+      health,
+    });
+    assertEquals(events.length, 1);
+    assertStringIncludes(
+      events[0] ?? "",
+      "done: Service Is Reachable | Answered HTTP on 127.0.0.1:18100 after ",
+    );
+    assertStringIncludes(events[0] ?? "", "any status code counts");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a native app that never answers ends the health step with the address and the wait", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const { events, health } = healthRecorder();
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          health,
+        }),
+      Error,
+    );
+    const ticks = events.filter((e) => e.startsWith("waiting: Attempt 1 of "));
+    assertEquals(ticks.length, 1);
+    assertEquals(
+      events.filter((e) => e.startsWith("failed:")),
+      ["failed: Service Did Not Answer | Did not answer HTTP on 127.0.0.1:18100 within 30 s"],
+    );
   } finally {
     await host.cleanup();
   }

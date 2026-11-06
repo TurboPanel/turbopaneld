@@ -28,6 +28,11 @@ export type GrantQuoting = {
   accountAt: (username: string, host: string) => string;
   /** Database-level privileges only this dialect has: [name, `mysql.db` column]. */
   extraPrivileges?: ReadonlyArray<readonly [string, string]>;
+  /**
+   * What the backup login holds on every database (`*.*`) in this dialect: a
+   * logical dump of rows, views, triggers, events and routine definitions.
+   */
+  backupPrivileges: readonly string[];
 };
 
 /** The database name as a schema in a grant: exact, wildcards escaped. */
@@ -229,21 +234,8 @@ export function grantOnDatabaseSql(
   const account = quoting.accountAt(username, host);
   // The name as `mysql.db` stores it: wildcards escaped, no backticks.
   const schema = db.slice(1, -1);
-  const revokeFrom = (
-    held: readonly string[],
-  ) =>
-    revokeExcessSql(
-      quoting,
-      schema,
-      database,
-      username,
-      host,
-      [
-        ...DATABASE_PRIVILEGES,
-        ...(quoting.extraPrivileges ?? []),
-      ].filter(([name]) => !held.includes(name)),
-      true,
-    );
+  const revokeFrom = (held: readonly string[]) =>
+    revokeAllButSql(quoting, schema, database, username, host, held);
   switch (privilege) {
     case "admin":
       return `GRANT ALL PRIVILEGES ON ${db}.* TO ${account} WITH GRANT OPTION;`;
@@ -267,6 +259,46 @@ export function grantOnDatabaseSql(
   }
 }
 
+/** Revokes every database-level privilege but `held` (and `GRANT OPTION`). */
+function revokeAllButSql(
+  quoting: GrantQuoting,
+  schema: string,
+  database: string,
+  username: string,
+  host: string,
+  held: readonly string[],
+): string {
+  return revokeExcessSql(
+    quoting,
+    schema,
+    database,
+    username,
+    host,
+    [
+      ...DATABASE_PRIVILEGES,
+      ...(quoting.extraPrivileges ?? []),
+    ].filter(([name]) => !held.includes(name)),
+    true,
+  );
+}
+
+/**
+ * The backup login's one `GRANT` for one account: the dialect's
+ * {@link GrantQuoting.backupPrivileges} at global level (`*.*`), so it reads
+ * every database, including one made later with plain `CREATE DATABASE`. It
+ * holds no write, DDL or account right anywhere; the only administrative right
+ * is MySQL's `FLUSH_TABLES`, which a consistent `mysqldump` needs.
+ */
+export function grantBackupOnAllSql(
+  quoting: GrantQuoting,
+  username: string,
+  host: string,
+): string {
+  return `GRANT ${quoting.backupPrivileges.join(", ")} ON *.* TO ${
+    quoting.accountAt(username, host)
+  };`;
+}
+
 /** Both grant builders bound to one dialect's quoting and default host. */
 export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
   grantDatabaseSql: (
@@ -280,8 +312,11 @@ export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
     username: string,
     host?: string,
   ) => string;
+  grantBackupSql: (username: string, host?: string) => string;
 } {
   return {
+    grantBackupSql: (username, host = defaultHost) =>
+      grantBackupOnAllSql(quoting, username, host),
     grantDatabaseSql: (database, username, privilege, host = defaultHost) =>
       grantOnDatabaseSql(quoting, database, username, privilege, host),
     revokePlainDatabaseGrantSql: (database, username, host = defaultHost) =>

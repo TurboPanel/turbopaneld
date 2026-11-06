@@ -180,6 +180,7 @@
       { "name": "host", "required": true, "type": "string" },
       { "name": "keyEnvelope", "required": false, "type": "string" },
       { "name": "keyPem", "required": false, "type": "string" },
+      { "name": "publicPort", "required": false, "type": "number" },
       {
         "name": "source",
         "required": true,
@@ -418,6 +419,110 @@
         "required": true,
         "type": "'server-network-check-result'"
       }
+    ]
+  },
+  "DevHostPart": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "active", "required": true, "type": "boolean" },
+      { "name": "behindBy", "required": true, "type": "number" },
+      { "name": "blockedReason", "required": false, "type": "string" },
+      { "name": "branch", "required": true, "type": "string" },
+      {
+        "name": "dirty",
+        "required": true,
+        "type": "{ blocking: boolean; files: number; kinds: Array<{ kind: 'content' | 'generated' | 'mode' | 'runtime' | 'untracked'; path: string }> }"
+      },
+      { "name": "headCommit", "required": true, "type": "string" },
+      {
+        "name": "name",
+        "required": true,
+        "type": "'control-plane' | 'daemon' | 'web-interface' | 'website'"
+      },
+      { "name": "onTrunk", "required": true, "type": "boolean" },
+      { "name": "restartNeeded", "required": true, "type": "boolean" },
+      { "name": "runningCommit", "required": true, "type": "null | string" },
+      {
+        "name": "setupNeeded",
+        "required": true,
+        "type": "{ install?: boolean; migrate?: { pending: number } }"
+      },
+      { "name": "unit", "required": true, "type": "string" }
+    ]
+  },
+  "DevHostJob": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "action", "required": true, "type": "'restart' | 'update'" },
+      { "name": "endedAt", "required": true, "type": "null | string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "logTail", "required": true, "type": "Array<string>" },
+      { "name": "startedAt", "required": true, "type": "string" },
+      {
+        "name": "state",
+        "required": true,
+        "type": "'done' | 'failed' | 'running'"
+      },
+      { "name": "step", "required": true, "type": "string" },
+      {
+        "name": "steps",
+        "required": true,
+        "type": "Array<{ detail?: string; name: string; state: 'done' | 'failed' | 'pending' | 'running' | 'skipped' }>"
+      }
+    ]
+  },
+  "DevHostStatus": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      {
+        "name": "job",
+        "required": true,
+        "type": "{ action: 'restart' | 'update'; endedAt: null | string; id: string; logTail: Array<string>; startedAt: string; state: 'done' | 'failed' | 'running'; step: string; steps: Array<{ detail?: string; name: string; state: 'done' | 'failed' | 'pending' | 'running' | 'skipped' }> } | null"
+      },
+      { "name": "lastFetchAt", "required": true, "type": "null | string" },
+      {
+        "name": "parts",
+        "required": true,
+        "type": "Array<{ active: boolean; behindBy: number; blockedReason?: string; branch: string; dirty: { blocking: boolean; files: number; kinds: Array<{ kind: 'content' | 'generated' | 'mode' | 'runtime' | 'untracked'; path: string }> }; headCommit: string; name: 'control-plane' | 'daemon' | 'web-interface' | 'website'; onTrunk: boolean; restartNeeded: boolean; runningCommit: null | string; setupNeeded: { install?: boolean; migrate?: { pending: number } }; unit: string }>"
+      }
+    ]
+  },
+  "DevHostStatusMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      {
+        "name": "status",
+        "required": true,
+        "type": "{ job: { action: 'restart' | 'update'; endedAt: null | string; id: string; logTail: Array<string>; startedAt: string; state: 'done' | 'failed' | 'running'; step: string; steps: Array<{ detail?: string; name: string; state: 'done' | 'failed' | 'pending' | 'running' | 'skipped' }> } | null; lastFetchAt: null | string; parts: Array<{ active: boolean; behindBy: number; blockedReason?: string; branch: string; dirty: { blocking: boolean; files: number; kinds: Array<{ kind: 'content' | 'generated' | 'mode' | 'runtime' | 'untracked'; path: string }> }; headCommit: string; name: 'control-plane' | 'daemon' | 'web-interface' | 'website'; onTrunk: boolean; restartNeeded: boolean; runningCommit: null | string; setupNeeded: { install?: boolean; migrate?: { pending: number } }; unit: string }> }"
+      },
+      { "name": "type", "required": true, "type": "'dev-host-status'" }
+    ]
+  },
+  "DevHostActionMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "action", "required": true, "type": "'restart' | 'update'" },
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "type", "required": true, "type": "'dev-host-action'" }
+    ]
+  },
+  "DevHostActionResultMessage": {
+    "instance": "src/contracts/cell-protocol.ts",
+    "daemon": "src/contracts/cell-messages.ts",
+    "fields": [
+      { "name": "at", "required": true, "type": "string" },
+      { "name": "error", "required": false, "type": "string" },
+      { "name": "id", "required": true, "type": "string" },
+      { "name": "jobId", "required": false, "type": "string" },
+      { "name": "ok", "required": true, "type": "boolean" },
+      { "name": "type", "required": true, "type": "'dev-host-action-result'" }
     ]
   }
 }

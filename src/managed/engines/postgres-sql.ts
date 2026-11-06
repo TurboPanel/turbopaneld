@@ -392,6 +392,21 @@ export function grantDatabaseSql(
 }
 
 /**
+ * The backup login's attributes and role: reads every table, view and
+ * sequence in every database (`pg_read_all_data`, which also gives USAGE on
+ * every schema) and sees every row past row-level security (`BYPASSRLS`, which
+ * a dump needs: it turns row security off). Nothing that writes, creates or
+ * administers. `CONNECT` on each database is granted per database.
+ */
+export function backupLoginAttributesSql(username: string): string {
+  const role = quoteIdentifier(username);
+  return [
+    `ALTER ROLE ${role} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;`,
+    `GRANT pg_read_all_data TO ${role};`,
+  ].join("\n");
+}
+
+/**
  * The only database-level right the panel keeps for a login the site owner
  * manages by hand: the right to connect. It adds that one right and never
  * revokes anything, so grants made by hand stay as they are.

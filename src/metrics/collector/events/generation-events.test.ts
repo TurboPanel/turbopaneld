@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { GenerationEventCollector } from "./generation-events.ts";
+import { setTopologyGenerationOptional } from "../../topology/generation.ts";
 import type { EventDetectContext } from "./types.ts";
 import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
 
@@ -86,4 +87,30 @@ test("GenerationEventCollector: unchanged generations fire nothing", () => {
     ctx({ snapshot: snapshot(4, 2), nowMs: 2_000 }),
   );
   assertEquals(events, []);
+});
+
+test("GenerationEventCollector: no topology event while the control plane does not need generations", () => {
+  const collector = new GenerationEventCollector();
+  setTopologyGenerationOptional(true);
+  try {
+    collector.detect(ctx({ snapshot: snapshot(1, 1) }));
+    assertEquals(
+      collector.detect(ctx({ snapshot: snapshot(2, 1), nowMs: 2_000 })),
+      [],
+    );
+    // The boot event is unaffected.
+    const events = collector.detect(
+      ctx({ snapshot: snapshot(2, 2), nowMs: 3_000 }),
+    );
+    assertEquals(events.map((event) => event.kind), [
+      "boot_generation_changed",
+    ]);
+  } finally {
+    setTopologyGenerationOptional(false);
+  }
+  // The baseline kept moving, so switching back fabricates nothing.
+  assertEquals(
+    collector.detect(ctx({ snapshot: snapshot(2, 2), nowMs: 4_000 })),
+    [],
+  );
 });

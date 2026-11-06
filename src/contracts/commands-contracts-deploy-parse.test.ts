@@ -386,6 +386,34 @@ test("parsePrincipalsReconcilePayload round-trips a password hash", () => {
   assertEquals(payload.principals[0].passwordHash, passwordHash);
 });
 
+test("parsePrincipalsReconcilePayload accepts a sealed password hash envelope, never beside the plain hash", () => {
+  const passwordHashEnvelope = "tpdaemon.v1.srv.key.payload";
+  const parse = (extra: Record<string, unknown>) =>
+    parsePrincipalsReconcilePayload({
+      principals: [{
+        principalId: PRINCIPAL_ID,
+        username: "deploy_user",
+        ...extra,
+      }],
+    });
+  assertEquals(
+    parse({ passwordHashEnvelope }).principals[0].passwordHashEnvelope,
+    passwordHashEnvelope,
+  );
+  for (
+    const bad of [
+      { passwordHashEnvelope: "plain-text" },
+      { passwordHashEnvelope: 7 },
+      {
+        passwordHashEnvelope,
+        passwordHash: `$6$saltstring$${"a".repeat(86)}`,
+      },
+    ]
+  ) {
+    assertThrows(() => parse(bad));
+  }
+});
+
 test("parseEnvironmentDeployPayload trims a site document root", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
@@ -907,6 +935,7 @@ test("parseEnvironmentDeployPayload rejects optional array/boolean/network field
     { hideWebServerNames: "yes" },
     "hideWebServerNames must be a boolean",
   );
+  rejectDeploy({ sendViaHeader: "yes" }, "sendViaHeader must be a boolean");
   rejectDeploy(
     { dockerExternalNetworks: "org-net" },
     "dockerExternalNetworks must be an array",
@@ -1074,6 +1103,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
     noCache: true,
     hostingsOnly: true,
     hideWebServerNames: true,
+    sendViaHeader: false,
     dockerExternalNetworks: ["org_net_b", "org_net_a"],
     fabricNetworks: [{
       name: "tpn_mesh01",
@@ -1092,6 +1122,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
   assertEquals(payload.noCache, true);
   assertEquals(payload.hostingsOnly, true);
   assertEquals(payload.hideWebServerNames, true);
+  assertEquals(payload.sendViaHeader, false);
   assertEquals(payload.dockerExternalNetworks, ["org_net_a", "org_net_b"]);
   assertEquals(payload.fabricNetworks?.[0]?.gateway, "203.0.113.1");
   assertEquals(payload.hostingIngress?.composeServiceName, "traefik");

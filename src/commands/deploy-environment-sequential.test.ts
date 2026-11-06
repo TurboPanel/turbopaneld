@@ -121,11 +121,11 @@ const verbOf = (argv: string[]) =>
 
 test({
   name:
-    "inplace (no strategy) never stops, builds or gates: unchanged behaviour",
+    "inplace (no strategy) never stops, builds or pulls, and waits for health",
   permissions: { env: true, read: true, write: true, run: true },
   fn: () =>
     withState(async () => {
-      const docker = fakeDocker([UNHEALTHY]);
+      const docker = fakeDocker([HEALTHY]);
       await deploy(payload("nginx:1"), docker.run);
       await deploy(payload("nginx:2"), docker.run);
       const verbs = docker.calls.map(verbOf);
@@ -133,6 +133,45 @@ test({
       assertEquals(verbs.includes("build"), false);
       assertEquals(verbs.includes("pull"), false);
       assertEquals(verbs.filter((v) => v === "up").length, 2);
+      assert(verbs.filter((v) => v === "ps").length >= 2);
+    }),
+});
+
+test({
+  name:
+    "inplace: a stack with no enabled services is not waited on and ends as not checked",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withState(async () => {
+      const docker = fakeDocker([UNHEALTHY], "");
+      await deploy(payload("nginx:1"), docker.run);
+      // The gate never polled: nothing to wait for.
+      assertEquals(
+        docker.calls.filter((c) => c.includes("ps")).length <= 1,
+        true,
+      );
+    }),
+});
+
+test({
+  name:
+    "inplace: a service that is unhealthy fails the deploy and nothing is rolled back",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withState(async (dir) => {
+      const docker = fakeDocker([UNHEALTHY]);
+      const err = await assertRejects(
+        () => deploy(payload("nginx:1"), docker.run),
+        Error,
+      );
+      assert(err.message.startsWith("The containers started but "));
+      assert(err.message.includes("failed its health check"));
+      assert(err.message.includes("Nothing was stopped or rolled back"));
+      assert(!(err instanceof SequentialDeployError));
+      // The new containers stay up and the new compose file stays live.
+      const live = await Deno.readTextFile(join(dir, RUNTIME_COMPOSE_FILENAME));
+      assert(live.includes("nginx:1"));
+      assertEquals(docker.calls.map(verbOf).includes("stop"), false);
     }),
 });
 

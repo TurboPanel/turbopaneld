@@ -28,8 +28,8 @@
  * never logged; only names are.
  */
 
-import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { writePrivateFileAtomic } from "../../permissions/host-unit-files.ts";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployVariableMaterial,
@@ -249,18 +249,7 @@ export async function stageNativeAppEnvFile(
   const dir = nativeAppEnvStageDir(layout);
   await Deno.mkdir(dir, { recursive: true, mode: NATIVE_APP_ENV_DIR_MODE });
   await Deno.chmod(dir, NATIVE_APP_ENV_DIR_MODE);
-  const path = nativeAppEnvStagePath(layout, serviceId);
-  const tmp = join(dir, `.${serviceId}.env.${crypto.randomUUID()}.tmp`);
-  try {
-    await Deno.writeTextFile(tmp, text, {
-      mode: NATIVE_APP_ENV_FILE_MODE,
-      createNew: true,
-    });
-    await Deno.rename(tmp, path);
-  } catch (err) {
-    await Deno.remove(tmp).catch(() => undefined);
-    throw err;
-  }
+  await writePrivateFileAtomic(dir, `${serviceId}.env`, text);
 }
 
 /** Remove the staged file. Absent is fine: nothing to clean. */

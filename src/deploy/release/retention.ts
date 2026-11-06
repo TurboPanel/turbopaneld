@@ -13,7 +13,7 @@
  * `releases[]` rows in the environment's own `deployment.json`, which is the
  * host's durable record of what it published last time.
  *
- * **A Railpack release prunes to nothing but its manifest.** That lane publishes
+ * **An image-build release prunes to nothing but its manifest.** That lane publishes
  * an OCI image, so its release directory holds only `.turbopanel/release.json`
  * and there is no `current` symlink protecting anything. Removing one therefore
  * removes a *record*, not a running container — the container keeps running

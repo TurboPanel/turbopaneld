@@ -2,6 +2,12 @@ import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
+  COMPOSE_ENV_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
+  COMPOSE_STAGE_DIRNAME,
+  DEPLOYMENT_MANIFEST_FILENAME,
+  publishStagedRuntimeCompose,
+  resolveDeployedComposePaths,
   RUNTIME_COMPOSE_FILENAME,
   writeComposeFileSecure,
   writeDeploymentManifest,
@@ -159,7 +165,7 @@ test({
 
 test({
   name:
-    "handleEnvironmentStop downs compose.yaml with --remove-orphans --volumes and deletes deployment dir",
+    "handleEnvironmentStop downs compose.yaml with --remove-orphans --volumes and a delete removes the deployment dir",
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-stop-runtime-" });
@@ -190,6 +196,7 @@ test({
           environmentId,
           projectId: "proj-1",
           projectName,
+          removeDeploymentDir: true,
         },
         new Date().toISOString(),
         {
@@ -260,6 +267,7 @@ test({
           environmentId: "envstop01",
           projectId: "proj-1",
           projectName: "tp-demo-envstop1",
+          removeDeploymentDir: true,
         },
         new Date().toISOString(),
         {
@@ -275,6 +283,144 @@ test({
         else Deno.env.set(k, v);
       }
       await Deno.remove(root, { recursive: true }).catch(() => undefined);
+    }
+  },
+});
+
+const KEEP_MANIFEST = {
+  version: 3,
+  projectId: "proj-1",
+  environmentId: "envkeep01",
+  serverId: "srv-1",
+  generation: 1,
+  projectName: "tp-demo-keep",
+  composeSha256: "a".repeat(64),
+  services: {},
+} as const;
+
+test({
+  name:
+    "handleEnvironmentStop keeps what a relative bind wrote through a stop and a redeploy; a delete removes it",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-keep-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    const deploymentDir = join(stateDir, "deployments", "proj-1", "envkeep01");
+    const dataFile = join(deploymentDir, "data", "notes.txt");
+    const payload = {
+      environmentId: "envkeep01",
+      projectId: "proj-1",
+      projectName: "tp-demo-keep",
+    };
+    const deps = {
+      runDocker: (): Promise<DockerCliResult> =>
+        Promise.resolve({ success: true, stdout: "[]", stderr: "", code: 0 }),
+    };
+    try {
+      // A deployed stack whose service wrote `./data/notes.txt`.
+      await Deno.mkdir(join(deploymentDir, "data"), { recursive: true });
+      await writeComposeFileSecure(
+        join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+        "services: {}\n",
+      );
+      await writeDeploymentManifest(deploymentDir, KEEP_MANIFEST);
+      await Deno.writeTextFile(
+        join(deploymentDir, COMPOSE_ENV_FILENAME),
+        "A=1\n",
+      );
+      await Deno.mkdir(join(deploymentDir, COMPOSE_PREVIOUS_DIRNAME));
+      await Deno.mkdir(join(deploymentDir, COMPOSE_STAGE_DIRNAME));
+      await Deno.writeTextFile(dataFile, "kept");
+
+      await handleEnvironmentStop(payload, new Date().toISOString(), deps);
+
+      assertEquals(await Deno.readTextFile(dataFile), "kept");
+      // The daemon's own files go, so a reboot never starts the stack again.
+      assertEquals(await resolveDeployedComposePaths(deploymentDir), null);
+      for (
+        const name of [
+          DEPLOYMENT_MANIFEST_FILENAME,
+          COMPOSE_ENV_FILENAME,
+          COMPOSE_PREVIOUS_DIRNAME,
+          COMPOSE_STAGE_DIRNAME,
+        ]
+      ) {
+        await assertRejects(
+          () => Deno.stat(join(deploymentDir, name)),
+          Deno.errors.NotFound,
+        );
+      }
+
+      // The next deploy publishes into the same dir and finds the data.
+      const stageDir = join(deploymentDir, COMPOSE_STAGE_DIRNAME);
+      await Deno.mkdir(stageDir);
+      await Deno.writeTextFile(
+        join(stageDir, RUNTIME_COMPOSE_FILENAME),
+        "services: {}\n",
+      );
+      await publishStagedRuntimeCompose(deploymentDir, stageDir, KEEP_MANIFEST);
+      assertEquals(await Deno.readTextFile(dataFile), "kept");
+
+      // A delete takes the whole dir, data included.
+      await handleEnvironmentStop(
+        { ...payload, removeDeploymentDir: true },
+        new Date().toISOString(),
+        deps,
+      );
+      await assertRejects(() => Deno.stat(deploymentDir), Deno.errors.NotFound);
+    } finally {
+      for (const [k, v] of Object.entries(previous)) {
+        if (v === undefined) Deno.env.delete(k);
+        else Deno.env.set(k, v);
+      }
+      await Deno.remove(root, { recursive: true }).catch(() => undefined);
+    }
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentStop without a delete leaves a symlinked deployment dir and its target alone",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-keep-link-" });
+    const previous = Deno.env.get("TURBOPANEL_STATE_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    const target = join(root, "elsewhere");
+    await Deno.mkdir(target);
+    await Deno.writeTextFile(join(target, RUNTIME_COMPOSE_FILENAME), "x");
+    await Deno.mkdir(join(root, "state", "deployments", "proj-1"), {
+      recursive: true,
+    });
+    const link = join(root, "state", "deployments", "proj-1", "envkl0001");
+    await Deno.symlink(target, link);
+    try {
+      await handleEnvironmentStop(
+        {
+          environmentId: "envkl0001",
+          projectId: "proj-1",
+          projectName: "tp-demo-kl",
+        },
+        new Date().toISOString(),
+        {
+          runDocker: (): Promise<DockerCliResult> =>
+            Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 }),
+        },
+      );
+      assertEquals(
+        await Deno.readTextFile(join(target, RUNTIME_COMPOSE_FILENAME)),
+        "x",
+      );
+    } finally {
+      if (previous === undefined) Deno.env.delete("TURBOPANEL_STATE_DIR");
+      else Deno.env.set("TURBOPANEL_STATE_DIR", previous);
+      await Deno.remove(root, { recursive: true });
     }
   },
 });
@@ -792,6 +938,7 @@ test({
           environmentId: "envrd0001",
           projectId: "proj-1",
           projectName: "tp-demo-rd",
+          removeDeploymentDir: true,
         },
         new Date().toISOString(),
         {
@@ -840,6 +987,7 @@ test({
           environmentId: "envsl0001",
           projectId: "proj-1",
           projectName: "tp-demo-sl",
+          removeDeploymentDir: true,
         },
         new Date().toISOString(),
         {

@@ -42,20 +42,33 @@ export type RehydrateDeploymentResult = {
   variableMaterial: EnvironmentDeployVariableMaterial[];
 };
 
+/**
+ * What the control plane answers for a rehydrate request. `gone` names the
+ * requested deployments whose environment no longer exists there (a deleted
+ * project or environment); absent from older control planes.
+ */
+export type RehydrateDeploymentList = RehydrateDeploymentResult[] & {
+  gone?: ReadonlyArray<{ projectId: string; environmentId: string }>;
+};
+
 export type RehydrateDeploymentSecretsFn = (
   deployments: readonly RehydrateDeploymentRef[],
-) => Promise<RehydrateDeploymentResult[]>;
+) => Promise<RehydrateDeploymentList>;
 
 export function parseRehydrateDeploymentResults(
-  rows: ReadonlyArray<{
-    projectId: string;
-    environmentId: string;
-    generation: number;
-    secretPlan: unknown;
-    variableMaterial: unknown;
-  }>,
-): RehydrateDeploymentResult[] {
-  const out: RehydrateDeploymentResult[] = [];
+  rows:
+    & ReadonlyArray<{
+      projectId: string;
+      environmentId: string;
+      generation: number;
+      secretPlan: unknown;
+      variableMaterial: unknown;
+    }>
+    & { gone?: unknown },
+): RehydrateDeploymentList {
+  const out: RehydrateDeploymentList = [];
+  const gone = parseGoneDeployments(rows.gone);
+  if (gone.length > 0) out.gone = gone;
   for (const row of rows) {
     try {
       const parsed = parseEnvironmentDeployPayload({
@@ -86,6 +99,21 @@ export function parseRehydrateDeploymentResults(
   return out;
 }
 
+function parseGoneDeployments(
+  value: unknown,
+): Array<{ projectId: string; environmentId: string }> {
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ projectId: string; environmentId: string }> = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { projectId, environmentId } = entry as Record<string, unknown>;
+    if (typeof projectId === "string" && typeof environmentId === "string") {
+      out.push({ projectId, environmentId });
+    }
+  }
+  return out;
+}
+
 type RunDockerFn = (
   args: string[],
   options?: RunDockerOptions,
@@ -93,6 +121,10 @@ type RunDockerFn = (
 
 function deploymentKey(projectId: string, environmentId: string): string {
   return `${projectId}/${environmentId}`;
+}
+
+function localKey(local: LocalDeploymentManifest): string {
+  return deploymentKey(local.manifest.projectId, local.manifest.environmentId);
 }
 
 function remoteMatchesLocalGeneration(
@@ -249,7 +281,6 @@ function rehydrateRefsFor(
   targets: readonly LocalDeploymentManifest[],
 ): RehydrateDeploymentRef[] {
   return targets
-    .filter((local) => manifestSecretPlan(local).length > 0)
     .map((local) => ({
       projectId: local.manifest.projectId,
       environmentId: local.manifest.environmentId,
@@ -257,25 +288,44 @@ function rehydrateRefsFor(
     }));
 }
 
-async function fetchRehydrateByKey(
+type RehydrateLookup = {
+  byKey: Map<string, RehydrateDeploymentResult>;
+  /** Keys of deployments the control plane no longer has an environment for. */
+  gone: Set<string>;
+};
+
+/**
+ * Every local deployment is asked about (a plain stack has no secrets but can
+ * still belong to a deleted project); only those with a secret plan take
+ * material from the answer. A failed request leaves both empty, so stacks start
+ * exactly as they did before the lookup existed.
+ */
+async function fetchRehydrate(
   refs: readonly RehydrateDeploymentRef[],
+  withSecrets: ReadonlySet<string>,
   rehydrate: RehydrateDeploymentSecretsFn,
-): Promise<Map<string, RehydrateDeploymentResult>> {
-  if (refs.length === 0) return new Map();
+): Promise<RehydrateLookup> {
+  const empty: RehydrateLookup = { byKey: new Map(), gone: new Set() };
+  if (refs.length === 0) return empty;
   try {
     const results = await rehydrate(refs);
-    return new Map(
-      results.map((row) => [
-        deploymentKey(row.projectId, row.environmentId),
-        row,
-      ]),
+    const byKey = new Map<string, RehydrateDeploymentResult>();
+    for (const row of results) {
+      const key = deploymentKey(row.projectId, row.environmentId);
+      if (withSecrets.has(key)) byKey.set(key, row);
+    }
+    const gone = new Set(
+      (results.gone ?? []).map((row) =>
+        deploymentKey(row.projectId, row.environmentId)
+      ),
     );
+    return { byKey, gone };
   } catch (err) {
     logWarn(
       "deploy",
       `deployment secret rehydrate request failed: ${sanitizeForLog(err)}`,
     );
-    return new Map();
+    return empty;
   }
 }
 
@@ -389,20 +439,31 @@ export async function rehydrateLocalDeployments(params: {
   }
 
   const targets = params.composeUp === "if-missing" ? needingFiles : locals;
-  const byKey = await fetchRehydrateByKey(
+  const withSecrets = new Set(
+    targets.filter((local) => manifestSecretPlan(local).length > 0).map((
+      local,
+    ) => localKey(local)),
+  );
+  const { byKey, gone } = await fetchRehydrate(
     rehydrateRefsFor(targets),
+    withSecrets,
     params.rehydrate,
   );
   // Secret writes and `compose up` per deployment stay ordered.
-  await forEachSequential(targets, (local) =>
-    rehydrateOneLocalDeployment(
+  await forEachSequential(targets, (local) => {
+    if (gone.has(localKey(local))) {
+      // The project or environment was deleted. Nothing is removed on this
+      // signal (the folder and its data stay); the stack is just not started.
+      logWarn(
+        "deploy",
+        `rehydrate skipped env=${local.manifest.environmentId}: the control plane no longer has this environment`,
+      );
+      return Promise.resolve();
+    }
+    return rehydrateOneLocalDeployment(
       params,
       local,
-      byKey.get(
-        deploymentKey(
-          local.manifest.projectId,
-          local.manifest.environmentId,
-        ),
-      ),
-    ));
+      byKey.get(localKey(local)),
+    );
+  });
 }
