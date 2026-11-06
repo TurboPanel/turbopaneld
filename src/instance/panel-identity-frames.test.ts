@@ -92,6 +92,39 @@ test("a hello is refused for a wrong nonce, skew, lower keyset, unpinned key or 
   assertEquals(unpinned.ok, false);
 });
 
+test("a pin with rotation passkeys does not compare the hello's key set, only its key", async () => {
+  const panel = await createTestPanel(2);
+  const other = await createTestPanel(2);
+  const pin = panel.pin({
+    keyset: 7,
+    rpId: "cp.example.test",
+    passkeys: [{ id: "c".repeat(43), alg: "EdDSA", pub: "E".repeat(43) }],
+  });
+  const ctx = {
+    nonce: NONCE,
+    signing: await panel.signing(),
+    pin,
+    nowMs: NOW_MS,
+  };
+  const lowKeyset = await panel.hello({
+    nonce: NONCE,
+    sessionId: "s",
+    iat: NOW_S,
+    keyset: 1,
+  });
+  assertEquals((await verifyHello(lowKeyset, ctx)).ok, true);
+  const otherKey = await other.hello({
+    nonce: NONCE,
+    sessionId: "s",
+    iat: NOW_S,
+  });
+  assertEquals(
+    (await verifyHello(otherKey, { ...ctx, signing: await other.signing() }))
+      .ok,
+    false,
+  );
+});
+
 test("an enveloped frame verifies once, in order, and comes back without its envelope", async () => {
   const panel = await createTestPanel();
   const ctx = {

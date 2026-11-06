@@ -47,7 +47,12 @@ type Harness = {
  * control plane, whose identity document lists `documentUrls`.
  */
 async function withPinnedClient(
-  opts: { pinUrls: string[]; baseUrl: string; documentUrls: string[] },
+  opts: {
+    pinUrls: string[];
+    baseUrl: string;
+    documentUrls: string[];
+    rotation?: unknown;
+  },
   body: (h: Harness) => Promise<void>,
 ): Promise<void> {
   const saved = ["TURBOPANEL_DAEMON_STATE_DIR", "TURBOPANEL_LIB_DIR"].map(
@@ -74,6 +79,7 @@ async function withPinnedClient(
       const doc = await panel.identityFetch({
         nowMs: Date.now(),
         urls: opts.documentUrls,
+        ...(opts.rotation === undefined ? {} : { rotation: opts.rotation }),
       });
       return new Response(doc.body, {
         status: 200,
@@ -211,6 +217,29 @@ it({
         assertEquals(sockets[1]!.url, "wss://two.test/ws/daemon/v1");
         // The document matches the pin: nothing to rewrite.
         assertEquals(written.length, 0);
+      },
+    ),
+});
+
+it({
+  name:
+    "a pin without rotation passkeys hands root a document that names them, even with the same addresses",
+  permissions: PERMISSIONS,
+  fn: () =>
+    withPinnedClient(
+      {
+        pinUrls: [ALIVE],
+        baseUrl: ALIVE,
+        documentUrls: [ALIVE],
+        rotation: {
+          rpId: "alive.test",
+          passkeys: [{ id: "c".repeat(43), alg: "EdDSA", pub: "E".repeat(43) }],
+        },
+      },
+      async ({ sockets, written }) => {
+        await waitFor("socket", () => sockets.length > 0);
+        await waitFor("pin write", () => written.length > 0);
+        assertEquals(JSON.parse(written[0]!.body).rotation.rpId, "alive.test");
       },
     ),
 });

@@ -5499,9 +5499,11 @@ tp_instance_cert_kept() {
 # pinned current key, be signed by it, be unexpired and carry a key set no
 # lower than the pinned one. Only next=, keyset=, urls= and updated= change,
 # plus hosts= in lib/update-origin (the addresses tp-orchestrate accepts for
-# --host), which always follows urls=. A change of the current key arrives
-# only as a signed rotation or revoke statement (`panel-identity-write
-# statement`, below).
+# --host), which always follows urls=. While no rotation passkey is pinned, a
+# document's `rotation` block fills rp_id= and passkeys= once (with its key
+# set); after that the document must carry exactly the pinned key set. A change
+# of the current key, the key set or the passkeys then arrives only as a
+# passkey-approved statement (`panel-identity-write statement`, below).
 
 tp_panel_identity_python() {
   cat <<'PY'
@@ -5512,7 +5514,10 @@ from pathlib import Path
 PATH = "/api/daemon/v1/instance/identity"
 # https://host[:port]: a DNS name, IPv4 or bracketed IPv6 literal, nothing else.
 ORIGIN = re.compile(r"https://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?")
-body_path, header_path, out, pinned, pinned_keyset = sys.argv[1:6]
+RP_ID = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+ID = re.compile(r"[A-Za-z0-9_-]{43}")
+B64URL = re.compile(r"[A-Za-z0-9_-]+")
+body_path, header_path, out, pinned, pinned_keyset, pinned_passkeys = sys.argv[1:7]
 out = Path(out)
 
 def b64d(text):
@@ -5540,6 +5545,38 @@ if kid != pinned:
     raise SystemExit("the document names a different current key than the pin")
 if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset < int(pinned_keyset):
     raise SystemExit("keyset is lower than the pinned one")
+# Once rotation passkeys are pinned, only an approved statement moves the key
+# set: a document must carry exactly the pinned one.
+if pinned_passkeys and keyset != int(pinned_keyset):
+    raise SystemExit("keyset differs from the pinned one; follow the statement chain")
+rp_id, passkeys_line = "", ""
+rotation = doc.get("rotation")
+if not pinned_passkeys and rotation is not None:
+    # First fill: the document's rotation passkeys, once, with its key set.
+    try:
+        rp_id, entries = rotation["rpId"], rotation["passkeys"]
+    except (KeyError, TypeError):
+        raise SystemExit("rotation block is malformed")
+    if not isinstance(rp_id, str) or not RP_ID.fullmatch(rp_id) or not isinstance(entries, list) or not 1 <= len(entries) <= 5:
+        raise SystemExit("rotation block is malformed")
+    parts = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"id", "alg", "pub"}:
+            raise SystemExit("rotation passkey is malformed")
+        pk_id, alg, pk_pub = entry["id"], entry["alg"], entry["pub"]
+        raw_pub = b64d(pk_pub) if isinstance(pk_pub, str) and B64URL.fullmatch(pk_pub) else b""
+        if not isinstance(pk_id, str) or not ID.fullmatch(pk_id):
+            raise SystemExit("rotation passkey id is malformed")
+        if alg == "ES256" and len(raw_pub) == 65 and raw_pub[0] == 4:
+            parts.append((pk_id, "%s.es256.%s" % (pk_id, pk_pub)))
+        elif alg == "EdDSA" and len(raw_pub) == 32:
+            parts.append((pk_id, "%s.eddsa.%s" % (pk_id, pk_pub)))
+        else:
+            raise SystemExit("rotation passkey key is malformed")
+    parts.sort()
+    if len({p[0] for p in parts}) != len(parts):
+        raise SystemExit("rotation passkeys repeat")
+    passkeys_line = ",".join(p[1] for p in parts)
 try:
     when = datetime.fromisoformat(expires.replace("Z", "+00:00"))
 except (ValueError, AttributeError):
@@ -5563,78 +5600,194 @@ if next_kid and len(b64d(next_kid)) != 32:
 der = bytes.fromhex("302a300506032b6570032100") + pub
 pem = base64.b64encode(der).decode()
 (out / "pub.pem").write_text("-----BEGIN PUBLIC KEY-----\n" + "\n".join(pem[i:i + 64] for i in range(0, len(pem), 64)) + "\n-----END PUBLIC KEY-----\n")
-(out / "fields").write_text("%s\n%d\n%s\n" % (next_kid, keyset, ",".join(urls)))
+(out / "fields").write_text("%s\n%d\n%s\n%s\n%s\n" % (next_kid, keyset, ",".join(urls), rp_id, passkeys_line))
 PY
 }
 
-# Python for a rotation or revoke statement (contract 10b.4). The statement is
-# the exact JSON the panel signed with the signature fields appended in place of
-# the final "}": `,"sigCurrent":"…","sigNext":"…"}` for a rotation, `,"sigNext":"…"}`
-# for a revoke. The signing input is "tp-rotation\n" plus the bytes before the
-# appended fields and a closing "}". Each signer's public key rides in `signers`
-# and must hash to the fingerprint this host pinned for that role (the old
-# current key and the offline next key); nothing in the statement is believed
-# before that. The statement's keyset must be strictly higher, and its new
-# current key must be the pinned next key.
+# Python for a key-set statement: the only way the pinned key, key set or
+# rotation passkeys change. stdin is the envelope the control plane serves,
+# `{"statement":"<base64url exact bytes>","approvals":[{id, authenticatorData,
+# clientDataJSON, signature}]}`. Every approval is a WebAuthn assertion over
+# challenge = base64url(SHA-256(statement bytes)): rpIdHash, UP and UV flags,
+# type webauthn.get, origin under the rp id, crossOrigin not true. An id the
+# pin holds is checked with the pinned key under the pinned rp id; any other
+# id must be a passkey of the statement proving possession under its rpId.
+# Rules: prev = pinned current, keyset above the pinned one, iat at most 300 s
+# ahead; at least one pinned approval; a removal needs a pinned approval from
+# a passkey that stays; every added passkey (or, for an rp id move, every new
+# one) proves possession. Python writes one message, signature and key per
+# approval; openssl checks every signature (ES256 DER with dgst, EdDSA raw
+# with pkeyutl) and any failure refuses the whole statement. The control
+# plane's twin is src/lib/panel-identity/keyset-statement.ts; both run the
+# shared vectors (src/testing/keyset-statement-vectors.json).
 tp_panel_statement_python() {
   cat <<'PY'
-import base64, binascii, hashlib, json, re, sys
+import base64, binascii, hashlib, json, re, sys, time
 from pathlib import Path
 
-stmt_path, out, pin_cur, pin_next, pin_keyset = sys.argv[1:6]
+env_path, out, pin_cur, pin_keyset, pin_rp_id, pin_passkeys = sys.argv[1:7]
 out = Path(out)
+B64URL = re.compile(r"[A-Za-z0-9_-]+")
+ID = re.compile(r"[A-Za-z0-9_-]{43}")
+RP_ID = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+ORIGIN = re.compile(r"https://([a-z0-9.-]+)(?::[0-9]{1,5})?")
+KEYS = ["type", "v", "keyset", "prev", "kind", "rpId", "current", "passkeys", "iat"]
+P256 = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+ED25519 = bytes.fromhex("302a300506032b6570032100")
+
+def refuse(why):
+    raise SystemExit(why)
 
 def b64d(text):
+    if not isinstance(text, str) or not B64URL.fullmatch(text):
+        refuse("not base64url")
     try:
         return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
     except (binascii.Error, ValueError):
-        raise SystemExit("not base64url")
+        refuse("not base64url")
 
-def pem(raw):
-    der = bytes.fromhex("302a300506032b6570032100") + raw
-    body = base64.b64encode(der).decode()
+def b64e(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+def pem(prefix, raw):
+    body = base64.b64encode(prefix + raw).decode()
     return "-----BEGIN PUBLIC KEY-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64)) + "\n-----END PUBLIC KEY-----\n"
 
-def signer(signers, fp):
-    pub = b64d(signers.get(fp, ""))
-    if len(pub) != 32 or base64.urlsafe_b64encode(hashlib.sha256(pub).digest()).rstrip(b"=").decode() != fp:
-        raise SystemExit("a signer key does not hash to the pinned fingerprint")
-    return pub
+def der_int(der, at):
+    if at + 2 > len(der) or der[at] != 2 or der[at + 1] > 33 or der[at + 1] < 1:
+        refuse("signature is not strict DER")
+    value = der[at + 2:at + 2 + der[at + 1]]
+    if len(value) != der[at + 1] or value[0] & 0x80 or (value[0] == 0 and len(value) > 1 and not value[1] & 0x80):
+        refuse("signature is not strict DER")
+    return at + 2 + len(value)
 
-raw = Path(stmt_path).read_text()
-if not pin_next:
-    raise SystemExit("no next key is pinned")
-tail = re.search(r',"sigCurrent":"([A-Za-z0-9_-]{86})","sigNext":"([A-Za-z0-9_-]{86})"\}$', raw)
-kind = "rotation"
-if tail is None:
-    tail = re.search(r',"sigNext":"([A-Za-z0-9_-]{86})"\}$', raw)
-    kind = "revoke"
-if tail is None:
-    raise SystemExit("statement signatures are missing or malformed")
-body = raw[:tail.start()] + "}"
+def strict_der(der):
+    if len(der) < 8 or der[0] != 0x30 or der[1] >= 0x80 or der[1] + 2 != len(der):
+        refuse("signature is not strict DER")
+    if der_int(der, der_int(der, 2)) != len(der):
+        refuse("signature is not strict DER")
+
+def passkeys_of(line):
+    found = []
+    for entry in line.split(",") if line else []:
+        pk_id, alg, pub = entry.split(".")
+        found.append({"id": pk_id, "alg": "ES256" if alg == "es256" else "EdDSA", "pub": pub})
+    return found
+
+def same(a, b):
+    return a["id"] == b["id"] and a["alg"] == b["alg"] and a["pub"] == b["pub"]
+
+pinned = passkeys_of(pin_passkeys)
+if not pinned or not pin_rp_id:
+    refuse("no rotation passkey is pinned on this host")
 try:
-    doc = json.loads(body)
-    keyset, new_cur, new_next, signers = doc["keyset"], doc["current"], doc.get("next", ""), doc["signers"]
-    name = doc.get("type", doc.get("t"))
-except (ValueError, KeyError, TypeError, AttributeError):
-    raise SystemExit("statement is malformed")
-if name != kind or not isinstance(signers, dict):
-    raise SystemExit("statement type does not match its signatures")
-if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset <= int(pin_keyset):
-    raise SystemExit("keyset does not increase")
-if new_cur != pin_next:
-    raise SystemExit("the new current key is not the pinned next key")
-if new_next != "" and (not isinstance(new_next, str) or len(b64d(new_next)) != 32):
-    raise SystemExit("next fingerprint is malformed")
-if kind == "revoke" and doc.get("revoked") != pin_cur:
-    raise SystemExit("the revoked key is not the pinned current key")
-(out / "msg").write_bytes(b"tp-rotation\n" + body.encode())
-(out / "pubn.pem").write_text(pem(signer(signers, pin_next)))
-(out / "sign").write_bytes(b64d(tail.group(tail.lastindex)))
-if kind == "rotation":
-    (out / "pubc.pem").write_text(pem(signer(signers, pin_cur)))
-    (out / "sigc").write_bytes(b64d(tail.group(1)))
-(out / "fields").write_text("%s\n%s\n%d\n%s\n" % (kind, new_cur, keyset, new_next))
+    envelope = json.loads(Path(env_path).read_bytes())
+    stmt_b64, approvals = envelope["statement"], envelope["approvals"]
+except (ValueError, KeyError, TypeError):
+    refuse("envelope is malformed")
+if not isinstance(approvals, list) or len(approvals) > 10:
+    refuse("envelope is malformed")
+raw = b64d(stmt_b64)
+try:
+    doc = json.loads(raw.decode("utf-8"))
+except (ValueError, UnicodeDecodeError):
+    refuse("statement is malformed")
+if not isinstance(doc, dict) or list(doc) != KEYS or doc["type"] != "tp-keyset" or doc["v"] != 1:
+    refuse("statement is malformed")
+keyset, prev, kind, rp_id, current, new_set, iat = (doc[k] for k in KEYS[2:])
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+if not is_int(keyset) or not is_int(iat) or keyset < 2 or iat < 0:
+    refuse("statement is malformed")
+if kind not in ("rotate", "revoke", "passkeys") or not isinstance(rp_id, str) or not RP_ID.fullmatch(rp_id):
+    refuse("statement is malformed")
+if not isinstance(prev, str) or not ID.fullmatch(prev):
+    refuse("statement is malformed")
+if not isinstance(current, dict) or list(current) != ["kid", "pub"]:
+    refuse("statement is malformed")
+cur_pub = b64d(current["pub"])
+if len(cur_pub) != 32 or b64e(hashlib.sha256(cur_pub).digest()) != current["kid"]:
+    refuse("current kid is not the fingerprint of its key")
+if not isinstance(new_set, list) or not 1 <= len(new_set) <= 5:
+    refuse("statement is malformed")
+last = ""
+for entry in new_set:
+    if not isinstance(entry, dict) or list(entry) != ["id", "alg", "pub"]:
+        refuse("statement passkey is malformed")
+    if not isinstance(entry["id"], str) or not ID.fullmatch(entry["id"]) or entry["id"] <= last:
+        refuse("statement passkeys are not sorted and unique")
+    last = entry["id"]
+    key = b64d(entry["pub"])
+    if not ((entry["alg"] == "ES256" and len(key) == 65 and key[0] == 4) or (entry["alg"] == "EdDSA" and len(key) == 32)):
+        refuse("statement passkey key is malformed")
+if prev != pin_cur:
+    refuse("prev is not the pinned key")
+if keyset <= int(pin_keyset):
+    refuse("keyset is not above the pinned one")
+if iat > int(time.time()) + 300:
+    refuse("iat is in the future")
+if (kind == "passkeys") != (current["kid"] == prev):
+    refuse("kind does not match whether the key changes")
+
+challenge = b64e(hashlib.sha256(raw).digest())
+pinned_ok, possession_ok, seen, checks = set(), set(), set(), []
+for index, approval in enumerate(approvals):
+    if not isinstance(approval, dict):
+        refuse("approval is malformed")
+    pk_id = approval.get("id")
+    if pk_id in seen:
+        refuse("an approval is repeated")
+    seen.add(pk_id)
+    pin_key = next((p for p in pinned if p["id"] == pk_id), None)
+    new_key = next((p for p in new_set if p["id"] == pk_id), None)
+    key, rp, role = (pin_key, pin_rp_id, "pinned") if pin_key else (new_key, rp_id, "possession")
+    if key is None:
+        refuse("an approval does not verify")
+    auth = b64d(approval.get("authenticatorData"))
+    client = b64d(approval.get("clientDataJSON"))
+    sig = b64d(approval.get("signature"))
+    if len(auth) < 37 or auth[:32] != hashlib.sha256(rp.encode()).digest():
+        refuse("an approval does not verify")
+    if auth[32] & 0x05 != 0x05:
+        refuse("an approval does not verify")
+    try:
+        cd = json.loads(client.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        refuse("an approval does not verify")
+    if not isinstance(cd, dict) or cd.get("type") != "webauthn.get" or cd.get("challenge") != challenge or cd.get("crossOrigin") is True:
+        refuse("an approval does not verify")
+    origin = ORIGIN.fullmatch(cd.get("origin") if isinstance(cd.get("origin"), str) else "")
+    if not origin or not (origin.group(1) == rp or origin.group(1).endswith("." + rp)):
+        refuse("an approval does not verify")
+    pub = b64d(key["pub"])
+    if key["alg"] == "ES256":
+        strict_der(sig)
+        (out / ("%d.pem" % index)).write_text(pem(P256, pub))
+    else:
+        if len(sig) != 64:
+            refuse("an approval does not verify")
+        (out / ("%d.pem" % index)).write_text(pem(ED25519, pub))
+    (out / ("%d.msg" % index)).write_bytes(auth + hashlib.sha256(client).digest())
+    (out / ("%d.sig" % index)).write_bytes(sig)
+    checks.append("%d %s" % (index, "es256" if key["alg"] == "ES256" else "eddsa"))
+    (pinned_ok if role == "pinned" else possession_ok).add(pk_id)
+
+if not pinned_ok:
+    refuse("no pinned passkey approved")
+if rp_id != pin_rp_id:
+    if not all(p["id"] in possession_ok for p in new_set):
+        refuse("every passkey under the new rpId must prove possession")
+else:
+    removed = [p for p in pinned if not any(same(p, q) for q in new_set)]
+    added = [p for p in new_set if not any(same(p, q) for q in pinned)]
+    removed_ids = {p["id"] for p in removed}
+    if removed and not any(i not in removed_ids for i in pinned_ok):
+        refuse("a removal needs a passkey that stays")
+    if not all(p["id"] in possession_ok for p in added):
+        refuse("an added passkey must prove possession")
+line = ",".join("%s.%s.%s" % (p["id"], "es256" if p["alg"] == "ES256" else "eddsa", p["pub"]) for p in new_set)
+(out / "checks").write_text("".join(c + "\n" for c in checks))
+(out / "fields").write_text("%s\n%s\n%d\n%s\n%s\n" % (kind, current["kid"], keyset, rp_id, line))
 PY
 }
 
@@ -5644,35 +5797,42 @@ tp_verb_panel_identity_statement() {
   [ -f "$_ps_file" ] && [ ! -L "$_ps_file" ] || tp_die "panel-identity-write: no panel key is pinned on this host"
   [ "$(stat -c %u "$_ps_file")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_ps_file is not root-owned"
   _ps_cur="$(tp_pin_field_of "$_ps_file" current)"
-  _ps_next="$(tp_pin_field_of "$_ps_file" next)"
   _ps_keyset="$(tp_pin_field_of "$_ps_file" keyset)"
   [ -n "$_ps_cur" ] || tp_die "panel-identity-write: this host was installed without a panel key"
   case "$_ps_keyset" in ''|*[!0-9]*) tp_die "panel-identity-write: the pin file has no valid keyset" ;; esac
   tp_stage_dir
-  head -c 8193 > "$TP_STAGE/statement"
-  [ "$(wc -c < "$TP_STAGE/statement")" -le 8192 ] || tp_die "panel-identity-write: statement too large"
+  head -c 16385 > "$TP_STAGE/statement"
+  [ "$(wc -c < "$TP_STAGE/statement")" -le 16384 ] || tp_die "panel-identity-write: statement too large"
   mkdir "$TP_STAGE/v"
-  python3 -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_next" "$_ps_keyset" ||
+  python3 -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_keyset" \
+    "$(tp_pin_field_of "$_ps_file" rp_id)" "$(tp_pin_field_of "$_ps_file" passkeys)" ||
     tp_die "panel-identity-write: refusing the statement"
-  openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pubn.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sign" >/dev/null 2>&1 ||
-    tp_die "panel-identity-write: the next key's signature is invalid"
-  if [ "$(sed -n '1p' "$TP_STAGE/v/fields")" = rotation ]; then
-    openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pubc.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sigc" >/dev/null 2>&1 ||
-      tp_die "panel-identity-write: the current key's signature is invalid"
-  fi
+  while read -r _ps_i _ps_alg; do
+    if [ "$_ps_alg" = es256 ]; then
+      openssl dgst -sha256 -verify "$TP_STAGE/v/$_ps_i.pem" -signature "$TP_STAGE/v/$_ps_i.sig" "$TP_STAGE/v/$_ps_i.msg" >/dev/null 2>&1 ||
+        tp_die "panel-identity-write: an approval signature is invalid"
+    else
+      openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/$_ps_i.pem" -rawin -in "$TP_STAGE/v/$_ps_i.msg" -sigfile "$TP_STAGE/v/$_ps_i.sig" >/dev/null 2>&1 ||
+        tp_die "panel-identity-write: an approval signature is invalid"
+    fi
+  done < "$TP_STAGE/v/checks"
   _ps_new_cur="$(sed -n '2p' "$TP_STAGE/v/fields")"
   _ps_new_keyset="$(sed -n '3p' "$TP_STAGE/v/fields")"
-  _ps_new_next="$(sed -n '4p' "$TP_STAGE/v/fields")"
+  _ps_new_rp_id="$(sed -n '4p' "$TP_STAGE/v/fields")"
+  _ps_new_passkeys="$(sed -n '5p' "$TP_STAGE/v/fields")"
   {
     printf 'current=%s\n' "$_ps_new_cur"
-    printf 'next=%s\n' "$_ps_new_next"
+    printf 'next=\n'
     printf 'keyset=%s\n' "$_ps_new_keyset"
     printf 'urls=%s\n' "$(tp_pin_field_of "$_ps_file" urls)"
     printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_ps_file" pinned_by)"
     printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'rp_id=%s\n' "$_ps_new_rp_id"
+    printf 'passkeys=%s\n' "$_ps_new_passkeys"
   } > "$TP_STAGE/new"
   # The update origin names the pinned key too; both change together.
   if [ -f "$_ps_origin" ] && [ ! -L "$_ps_origin" ]; then
+    [ "$(stat -c %u "$_ps_origin")" = "$ROOT_UID" ] || tp_die "panel-identity-write: $_ps_origin is not root-owned"
     sed "s|^panel_key=.*|panel_key=$_ps_new_cur|" "$_ps_origin" > "$TP_STAGE/origin"
     tp_put_file "$_ps_origin" 600 root root < "$TP_STAGE/origin"
   fi
@@ -5704,13 +5864,21 @@ tp_verb_panel_identity_write() {
   # The body is signed byte for byte; sed adds nothing but a missing final newline.
   [ "$(tail -c 1 "$TP_STAGE/in" | wc -l)" -eq 0 ] || tp_die "panel-identity-write: the body must not end in a newline"
   mkdir "$TP_STAGE/v"
-  python3 -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" ||
+  _pi_passkeys="$(tp_pin_field_of "$_pi_file" passkeys)"
+  _pi_rp_id="$(tp_pin_field_of "$_pi_file" rp_id)"
+  python3 -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" "$_pi_passkeys" ||
     tp_die "panel-identity-write: refusing the identity document"
   openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pub.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sig" >/dev/null 2>&1 ||
     tp_die "panel-identity-write: the identity document signature is invalid"
   _pi_next="$(sed -n '1p' "$TP_STAGE/v/fields")"
   _pi_new_keyset="$(sed -n '2p' "$TP_STAGE/v/fields")"
   _pi_urls="$(sed -n '3p' "$TP_STAGE/v/fields")"
+  # The first fill takes the document's rotation passkeys; after that the
+  # pinned ones stay until a statement changes them.
+  if [ -z "$_pi_passkeys" ]; then
+    _pi_rp_id="$(sed -n '4p' "$TP_STAGE/v/fields")"
+    _pi_passkeys="$(sed -n '5p' "$TP_STAGE/v/fields")"
+  fi
   {
     printf 'current=%s\n' "$_pi_cur"
     printf 'next=%s\n' "$_pi_next"
@@ -5718,6 +5886,10 @@ tp_verb_panel_identity_write() {
     printf 'urls=%s\n' "$_pi_urls"
     printf 'pinned_by=%s\n' "$(tp_pin_field_of "$_pi_file" pinned_by)"
     printf 'updated=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ -n "$_pi_passkeys" ]; then
+      printf 'rp_id=%s\n' "$_pi_rp_id"
+      printf 'passkeys=%s\n' "$_pi_passkeys"
+    fi
   } > "$TP_STAGE/new"
   # The update origin's address list follows the pin's (written first, so a
   # failure leaves the pin as it was and the daemon simply tries again).

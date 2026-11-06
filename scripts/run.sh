@@ -317,6 +317,40 @@ if not expected:
     if not isinstance(urls, list) or not all(isinstance(u, str) and origin.fullmatch(u) for u in urls):
         raise SystemExit("url list holds a bad entry")
 (out / "urls").write_text(",".join(u for u in urls if isinstance(u, str)))
+# Rotation passkeys (pinned once with the key set; later only approved
+# statements change them). A malformed block is refused like the rest.
+rp_id, line = "", ""
+rotation = doc.get("rotation")
+if rotation is not None:
+    rp_re = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+    id_re = re.compile(r"[A-Za-z0-9_-]{43}")
+    b64_re = re.compile(r"[A-Za-z0-9_-]+")
+    try:
+        rp_id, entries = rotation["rpId"], rotation["passkeys"]
+    except (KeyError, TypeError):
+        raise SystemExit("rotation block is malformed")
+    if not isinstance(rp_id, str) or not rp_re.fullmatch(rp_id) or not isinstance(entries, list) or not 1 <= len(entries) <= 5:
+        raise SystemExit("rotation block is malformed")
+    parts = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"id", "alg", "pub"}:
+            raise SystemExit("rotation passkey is malformed")
+        pk_id, alg, pk_pub = entry["id"], entry["alg"], entry["pub"]
+        if not isinstance(pk_id, str) or not id_re.fullmatch(pk_id) or not isinstance(pk_pub, str) or not b64_re.fullmatch(pk_pub):
+            raise SystemExit("rotation passkey is malformed")
+        raw_pub = b64d(pk_pub)
+        if alg == "ES256" and len(raw_pub) == 65 and raw_pub[0] == 4:
+            parts.append((pk_id, "%s.es256.%s" % (pk_id, pk_pub)))
+        elif alg == "EdDSA" and len(raw_pub) == 32:
+            parts.append((pk_id, "%s.eddsa.%s" % (pk_id, pk_pub)))
+        else:
+            raise SystemExit("rotation passkey key is malformed")
+    parts.sort()
+    if len({p[0] for p in parts}) != len(parts):
+        raise SystemExit("rotation passkeys repeat")
+    line = ",".join(p[1] for p in parts)
+(out / "rp_id").write_text(rp_id)
+(out / "passkeys").write_text(line)
 PY
 }
 
@@ -364,6 +398,8 @@ tp_verify_install_token() {
     return 1
   fi
   PANEL_KEYSET="$(cat "$_vt_dir/keyset")"
+  PANEL_RP_ID="$(cat "$_vt_dir/rp_id")"
+  PANEL_PASSKEYS="$(cat "$_vt_dir/passkeys")"
   rm -rf "$_vt_dir"
 }
 
@@ -2707,6 +2743,8 @@ PANEL_URLS=""
 PANEL_FINGERPRINT=""
 PANEL_NEXT_FINGERPRINT=""
 PANEL_KEYSET=""
+PANEL_RP_ID=""
+PANEL_PASSKEYS=""
 UNSAFE_NO_PANEL_KEY=false
 
 while [ $# -gt 0 ]; do
@@ -3288,6 +3326,8 @@ tp_learn_panel_identity() {
   PANEL_FINGERPRINT="$(cat "$_lp_dir/kid")"
   PANEL_NEXT_FINGERPRINT=""
   PANEL_KEYSET="$(cat "$_lp_dir/keyset")"
+  PANEL_RP_ID="$(cat "$_lp_dir/rp_id")"
+  PANEL_PASSKEYS="$(cat "$_lp_dir/passkeys")"
   _lp_urls="$(cat "$_lp_dir/urls")"
   PIN_HOSTS="${_lp_urls:-$HOST_URL}"
   PIN_ACTION=write
@@ -3401,7 +3441,8 @@ if [ "$INSTANCE_INSTALL" != true ] && [ -n "$HOST_URL" ]; then
 fi
 
 # Write lib/panel-identity (see tp_resolve_panel_pin for PIN_ACTION). Contents,
-# one key=value per line: current, next, keyset, urls, pinned_by, updated.
+# one key=value per line: current, next, keyset, urls, pinned_by, updated, and
+# rp_id + passkeys once the control plane has marked rotation passkeys.
 # It is created 0644 here (this script runs as root) because the tp group does not exist until
 # the installer role has run; tp_finish_panel_identity_pin narrows it to
 # root:tp 0640. The values are public key fingerprints.
@@ -3417,12 +3458,17 @@ tp_write_panel_identity_pin() {
       _wp_cur="$PANEL_FINGERPRINT"
       _wp_next="$PANEL_NEXT_FINGERPRINT"
       _wp_keyset="${PANEL_KEYSET:-0}"
+      _wp_rp_id="${PANEL_RP_ID:-}"
+      _wp_passkeys="${PANEL_PASSKEYS:-}"
       ;;
     refresh)
+      # A reinstall keeps what statements moved: key, key set and passkeys.
       _wp_cur="$(tp_pin_file_field "$_wp_file" current)"
       _wp_next="$(tp_pin_file_field "$_wp_file" next)"
       _wp_keyset="$(tp_pin_file_field "$_wp_file" keyset)"
       _wp_by="$(tp_pin_file_field "$_wp_file" pinned_by)"
+      _wp_rp_id="$(tp_pin_file_field "$_wp_file" rp_id)"
+      _wp_passkeys="$(tp_pin_file_field "$_wp_file" passkeys)"
       ;;
     *) return 0 ;;
   esac
@@ -3434,6 +3480,10 @@ tp_write_panel_identity_pin() {
     printf 'urls=%s\n' "$PIN_HOSTS"
     printf 'pinned_by=%s\n' "$_wp_by"
     printf 'updated=%s\n' "$_wp_now"
+    if [ -n "$_wp_passkeys" ]; then
+      printf 'rp_id=%s\n' "$_wp_rp_id"
+      printf 'passkeys=%s\n' "$_wp_passkeys"
+    fi
   } > "$_wp_tmp"
   install -m 0644 "$_wp_tmp" "$_wp_file"
   rm -f "$_wp_tmp"

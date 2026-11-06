@@ -10,6 +10,7 @@
  */
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { writeChildStdin } from "../util/write-child-stdin.ts";
+import type { KeysetEnvelope } from "./keyset-chain.ts";
 import type { PanelIdentityFetch } from "./panel-identity-cache.ts";
 
 export type PinWriteRun = (
@@ -47,5 +48,19 @@ export async function writePanelPinFromDocument(
   );
   if (!result.success) {
     throw new Error(result.stderr || "tp-host refused the identity document");
+  }
+}
+
+/** Hand one key-set statement to tp-host, which verifies its passkey approvals; throws with the refusal. */
+export async function writeKeysetStatement(
+  envelope: KeysetEnvelope,
+  run: PinWriteRun = runSudo,
+): Promise<void> {
+  const result = await run(
+    hostSudoArgs(["-n", "panel-identity-write", "statement"]),
+    JSON.stringify(envelope),
+  );
+  if (!result.success) {
+    throw new Error(result.stderr || "tp-host refused the key-set statement");
   }
 }

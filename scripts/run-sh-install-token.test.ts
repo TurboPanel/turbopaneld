@@ -71,7 +71,12 @@ type Panel = {
 };
 
 async function makePanel(
-  options: { expires?: string; keyset?: number; urls?: unknown[] } = {},
+  options: {
+    expires?: string;
+    keyset?: number;
+    urls?: unknown[];
+    rotation?: unknown;
+  } = {},
 ): Promise<Panel> {
   const pair = await crypto.subtle.generateKey("Ed25519", true, [
     "sign",
@@ -100,6 +105,7 @@ async function makePanel(
     ],
     seal: { kid: "s".repeat(43), alg: "X25519", pub: "AAAA" },
     keyset: options.keyset ?? 1,
+    ...(options.rotation === undefined ? {} : { rotation: options.rotation }),
     urls: options.urls ?? ["https://panel.example.test"],
     issued: "2026-11-01T00:00:00.000Z",
     expires: options.expires ?? "2999-01-01T00:00:00.000Z",
@@ -556,4 +562,56 @@ test("learning on upgrade does not run with a TOKEN or on a fresh install", asyn
     (await pinFile(withToken.root)) ?? "",
     "pinned_by=install\n",
   );
+});
+
+const PK_ES = { id: "c".repeat(43), alg: "ES256", pub: `BA${"A".repeat(85)}` };
+const PK_ED = { id: "d".repeat(43), alg: "EdDSA", pub: "E".repeat(43) };
+const PK_LINE = `${PK_ES.id}.es256.${PK_ES.pub},${PK_ED.id}.eddsa.${PK_ED.pub}`;
+
+test("an install takes the document's rotation passkeys, sorted; a bad block is refused", async () => {
+  const panel = await makePanel({
+    keyset: 3,
+    rotation: { rpId: "cp.example.test", passkeys: [PK_ED, PK_ES] },
+  });
+  const token = await makeToken(panel);
+  const ok = await run(
+    `${
+      verifyScript(token, panel.fingerprint)
+    }\necho "rp=$PANEL_RP_ID"; echo "pk=$PANEL_PASSKEYS"`,
+    panel,
+  );
+  assertEquals(ok.code, 0, ok.stderr);
+  assertStringIncludes(ok.stdout, "rp=cp.example.test");
+  assertStringIncludes(ok.stdout, `pk=${PK_LINE}`);
+  const bad = await makePanel({
+    rotation: {
+      rpId: "cp.example.test",
+      passkeys: [{ ...PK_ES, alg: "RS256" }],
+    },
+  });
+  const refused = await run(
+    verifyScript(await makeToken(bad), bad.fingerprint),
+    bad,
+  );
+  assert(refused.code !== 0);
+});
+
+test("a first install pins rotation passkeys; a reinstall keeps them", async () => {
+  const state = await pinState(
+    "",
+    `PANEL_FINGERPRINT=${FP_A}; PANEL_NEXT_FINGERPRINT=''; PANEL_KEYSET=3; PANEL_RP_ID=cp.example.test; PANEL_PASSKEYS=${PK_LINE}; PANEL_URLS=https://p.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://p.example`,
+  );
+  assertEquals(state.code, 0, state.stderr);
+  const text = await Deno.readTextFile(join(state.root, "lib/panel-identity"));
+  assertStringIncludes(text, "rp_id=cp.example.test\n");
+  assertStringIncludes(text, `passkeys=${PK_LINE}\n`);
+  const again = await pinState(
+    `${EXISTING(FP_A)}
+printf 'rp_id=cp.example.test\\npasskeys=${PK_LINE}\\n' >> "$INSTALL_ROOT/lib/panel-identity"`,
+    `PANEL_FINGERPRINT=${FP_A}; PANEL_KEYSET=3; PANEL_RP_ID=''; PANEL_PASSKEYS=''; PANEL_URLS=https://new.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false`,
+  );
+  assertEquals(again.code, 0, again.stderr);
+  const kept = await Deno.readTextFile(join(again.root, "lib/panel-identity"));
+  assertStringIncludes(kept, "urls=https://new.example");
+  assertStringIncludes(kept, `passkeys=${PK_LINE}\n`);
 });

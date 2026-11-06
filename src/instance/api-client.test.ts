@@ -1209,3 +1209,38 @@ test({
     }
   },
 });
+
+test({
+  name: "the key-set chain is fetched without a token and parsed strictly",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    const captures: Captured[] = [];
+    try {
+      const path = "/api/daemon/v1/instance/identity/statements?after=2";
+      api.script(
+        path,
+        captureInit(path, captures, () =>
+          new Response(
+            JSON.stringify({
+              statements: [{ statement: "AA", approvals: [] }, { nope: 1 }],
+            }),
+            { status: 200 },
+          )),
+      );
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.reject(new Error("no token here")),
+      });
+      assertEquals(await client.getKeysetStatements(2), [
+        { statement: "AA", approvals: [] },
+      ]);
+      assertEquals(captures.map((c) => [c.method, c.authorization]), [
+        ["GET", null],
+      ]);
+    } finally {
+      restore();
+    }
+  },
+});
