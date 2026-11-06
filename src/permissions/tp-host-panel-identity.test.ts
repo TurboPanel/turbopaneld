@@ -1,9 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { encodeBase64Url } from "@std/encoding/base64url";
 import { type Host, refused, withHost } from "../testing/tp-host-fixture.ts";
-import vectors from "../testing/keyset-statement-vectors.json" with {
-  type: "json",
-};
+import { keysetVectors as vectors } from "../testing/keyset-vectors.ts";
 
 /** Alias so Sonar sees real tests (see src/AGENTS.md). */
 const test = Deno.test.bind(Deno);

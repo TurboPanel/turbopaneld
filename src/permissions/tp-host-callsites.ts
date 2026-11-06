@@ -51,9 +51,7 @@ import {
   sitePhpUnitLimits,
 } from "../deploy/site/php-runtime.ts";
 import { PROD_RUNTIME_DIR_DEFAULT, resolveLayout } from "../paths/layout.ts";
-import keysetVectors from "../testing/keyset-statement-vectors.json" with {
-  type: "json",
-};
+import { keysetVectors } from "../testing/keyset-vectors.ts";
 
 /** A path tp-host's test harness must create before the sample runs. */
 export type CallSiteSetup = {

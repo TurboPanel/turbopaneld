@@ -1,7 +1,5 @@
 import { assertEquals } from "@std/assert";
-import vectors from "../testing/keyset-statement-vectors.json" with {
-  type: "json",
-};
+import { keysetVectors as vectors } from "../testing/keyset-vectors.ts";
 import {
   createKeysetChainGate,
   followKeysetChain,
