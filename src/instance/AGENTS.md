@@ -211,9 +211,16 @@ the final `}`, the same split rule as the control plane's frames;
 `REPORT_PREFIX` is pinned in both contract-drift scripts. No `seq`: a result
 is idempotent by id. Signing is async, so later sends queue behind it and keep
 their order. No key, no feature, an unsigned session or a signing error: the
-frame goes out as before (a result is never lost). Reports sent before the
-attach frame's feature list arrives go out unsigned; the control plane still
-accepts unsigned reports until a later floor bump.
+frame goes out as before (a result is never lost). A report sent before this
+socket's attach frame (with the feature list) arrives is held, not sent
+unsigned, and goes out signed or as it is once the list is known
+(`peerFeaturesKnown`, called from `#notePeerFeatures`; at most 64 wait, the
+journal resends outcomes anyway). The reason: once a control plane has
+verified one signed report from a server it records that the server signs,
+and from then on refuses its unsigned reports on signed sessions exactly like
+a bad signature (a refused result is acked as failed with `signature_invalid`
+and never sent again). A signing error still sends the report unsigned, so on
+such a server that result is recorded as failed.
 
 **Replica freshness (`managed-replica-freshness-v1`).** A MySQL / MariaDB
 replica's `replication` also carries `receivedGtid`, `executedGtid` (bounded

@@ -12,6 +12,10 @@
  * signed with the daemon key when {@link SignedSessionOptions.reportSigning}
  * allows it (`report-signing.ts`). Signing is async, so while one is being
  * signed every later send waits behind it and the frames keep their order.
+ * A report sent before the attach frame says what the control plane supports
+ * is held, not sent unsigned: a control plane that has seen this server sign
+ * refuses an unsigned report. {@link SignedPanelSession.peerFeaturesKnown}
+ * sends the held ones once the feature list is known.
  */
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import {
@@ -30,6 +34,12 @@ import {
   type ReportSigningKey,
   signReportFrame,
 } from "./report-signing.ts";
+
+/**
+ * Reports held while the feature list is unknown. The journaled outcomes are
+ * sent again on the attach frame, so one past the bound is not lost.
+ */
+export const MAX_HELD_REPORTS = 64;
 
 /** The transport pong (`DAEMON_CELL_PONG` on the control plane), never signed. */
 export const UNSIGNED_PONG = '{"type":"pong"}';
@@ -53,11 +63,13 @@ export interface SignedSessionOptions {
   /**
    * Sign reports on this session: `key` is the daemon key (none = unsigned)
    * and `enabled` says whether the control plane lists `signed-reports-v1`.
-   * Absent = every frame goes out as before.
+   * `known` is false until this socket's attach frame (with the feature list)
+   * arrived; reports wait for it. Absent = every frame goes out as before.
    */
   reportSigning?: {
     key: () => ReportSigningKey | undefined;
     enabled: () => boolean;
+    known?: () => boolean;
   };
   now?: () => number;
   helloTimeoutMs?: number;
@@ -76,6 +88,9 @@ export class SignedPanelSession {
   /** Sends still waiting behind a report being signed. */
   #queued = 0;
   #outbound: Promise<void> = Promise.resolve();
+  /** Reports waiting for the feature list. */
+  #held: string[] = [];
+  #realSend: ((data: SendData) => void) | undefined;
 
   constructor(options: SignedSessionOptions) {
     this.#options = options;
@@ -94,6 +109,7 @@ export class SignedPanelSession {
   start(): void {
     const { ws } = this.#options;
     const realSend = ws.send.bind(ws);
+    this.#realSend = realSend;
     realSend(helloNonceFrame(this.#nonce));
     ws.send = (data: SendData) => {
       if (this.verified && !this.#closed) this.#sendVerified(realSend, data);
@@ -111,6 +127,10 @@ export class SignedPanelSession {
    * signed goes out unsigned (a result is never lost to a signing failure).
    */
   #sendVerified(realSend: (data: SendData) => void, data: SendData): void {
+    if (this.#holdsReport(data)) {
+      this.#hold(data as string);
+      return;
+    }
     const signing = this.#reportSigningFor(data);
     if (signing === undefined && this.#queued === 0) {
       realSend(data);
@@ -130,6 +150,47 @@ export class SignedPanelSession {
       .finally(() => {
         this.#queued -= 1;
       });
+  }
+
+  /**
+   * True for a report this session would sign once the feature list is
+   * known, while it is not known yet.
+   */
+  #holdsReport(data: SendData): boolean {
+    const signer = this.#options.reportSigning;
+    if (typeof data !== "string" || !signer?.known || !this.#session) {
+      return false;
+    }
+    return !signer.known() && mayBeSignedReport(data) &&
+      signer.key() !== undefined;
+  }
+
+  #hold(data: string): void {
+    if (this.#held.length >= MAX_HELD_REPORTS) {
+      logWarn(
+        "instance",
+        "dropping a report sent before the attach frame: too many waiting",
+      );
+      return;
+    }
+    this.#held.push(data);
+  }
+
+  /**
+   * The attach frame's feature list arrived: send the held reports, signed
+   * when the control plane lists `signed-reports-v1`.
+   */
+  peerFeaturesKnown(): void {
+    const held = this.#held;
+    this.#held = [];
+    const realSend = this.#realSend;
+    if (!realSend || this.#closed || !this.verified) return;
+    for (const data of held) this.#sendVerified(realSend, data);
+  }
+
+  /** Resolves once every send queued so far has gone out or been dropped. */
+  settled(): Promise<void> {
+    return this.#outbound;
   }
 
   /** The signed frame for a report this session signs; undefined to send `data` as it is. */
@@ -165,6 +226,7 @@ export class SignedPanelSession {
   /** The control plane closed the socket. A 4403 before the hello is a refused proof. */
   noteClosed(code: number, reason: string): void {
     this.#closed = true;
+    this.#held = [];
     this.#clearTimer();
     if (this.#failure) return;
     if (code === PANEL_IDENTITY_CLOSE_CODE) {
@@ -223,6 +285,7 @@ export class SignedPanelSession {
   #fail(err: Error, code: number, reason: string): void {
     this.#failure = err;
     this.#closed = true;
+    this.#held = [];
     this.#clearTimer();
     try {
       this.#options.ws.close(code, reason);
