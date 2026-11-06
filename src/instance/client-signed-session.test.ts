@@ -25,6 +25,8 @@ import {
 } from "../testing/index.ts";
 import { waitFor } from "../testing/wait-for.ts";
 import { createTestPanel, type TestPanel } from "../testing/panel-signing.ts";
+import { splitSignature } from "./panel-identity-frames.ts";
+import { reportSigningInput } from "./report-signing.ts";
 
 wireCommandPorts();
 
@@ -368,4 +370,58 @@ it({
       setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
     }
   },
+});
+
+it({
+  name:
+    "a result sent before the attach frame is held, then goes out signed once the control plane lists the feature",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: () =>
+    withPinnedClient(async ({ socket, panel, nonce, daemonKey }) => {
+      const iat = () => Math.floor(Date.now() / 1000);
+      socket.receive(
+        await panel.hello({ nonce, sessionId: "sess-1", iat: iat() }),
+      );
+      await waitFor(
+        "presence hello after the verified hello",
+        () => sentFrames(socket).some((frame) => frame.type === "hello"),
+      );
+      // The way a journaled result goes out when the session opens: before
+      // the attach frame says what the control plane supports.
+      (socket as unknown as WebSocket).send(JSON.stringify({
+        type: "command-outcome",
+        id: "cmd-held",
+        ok: true,
+        at: new Date().toISOString(),
+      }));
+      const outcomes = () =>
+        socket.sentFrames.filter((frame) =>
+          frame.includes('"type":"command-outcome"') &&
+          frame.includes("cmd-held")
+        );
+      assertEquals(outcomes(), []);
+      socket.receive(
+        await panel.frame({
+          type: "version",
+          features: ["signed-reports-v1"],
+          at: new Date().toISOString(),
+        }, { sessionId: "sess-1", seq: 1, iat: iat() }),
+      );
+      await waitFor("the held result", () => outcomes().length > 0);
+      const split = splitSignature(outcomes()[0]!)!;
+      assertEquals(JSON.parse(split.unsigned).sessionId, "sess-1");
+      assertEquals(
+        await verifyChallenge(
+          daemonKey.publicJwk,
+          reportSigningInput("command-outcome", split.unsigned),
+          split.sig,
+        ),
+        true,
+      );
+    }),
 });
