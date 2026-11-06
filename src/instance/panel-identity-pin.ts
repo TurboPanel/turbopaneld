@@ -109,12 +109,18 @@ export function parseRotationPasskeys(line: string): RotationPasskey[] {
   return entries;
 }
 
+/** Code-unit order, the same order the control plane and tp-host sort by. */
+function byCodeUnits(a: RotationPasskey, b: RotationPasskey): number {
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -1 : 1;
+}
+
 /** The `passkeys=` line for a set, sorted by id (what the pin report hashes). */
 export function rotationPasskeysLine(
   passkeys: readonly RotationPasskey[],
 ): string {
   return [...passkeys]
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .sort(byCodeUnits)
     .map((p) => `${p.id}.${p.alg === "ES256" ? "es256" : "eddsa"}.${p.pub}`)
     .join(",");
 }
