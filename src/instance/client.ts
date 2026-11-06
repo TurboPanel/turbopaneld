@@ -23,13 +23,23 @@ import {
   urlInstanceConfig,
 } from "./sockets.ts";
 import {
+  identityDocumentHasRotation,
   identityDocumentUrls,
   panelUrlCandidates,
   PanelUrlRotation,
   URL_CONNECT_TIMEOUT_MS,
   urlListsDiffer,
 } from "./panel-urls.ts";
-import { writePanelPinFromDocument } from "./panel-pin-write.ts";
+import {
+  writeKeysetStatement,
+  writePanelPinFromDocument,
+} from "./panel-pin-write.ts";
+import {
+  createKeysetChainGate,
+  followKeysetChain,
+  type KeysetEnvelope,
+  rotationPasskeysHash,
+} from "./keyset-chain.ts";
 import { caPinMismatch, CaPinMismatchError } from "./ca-pin.ts";
 import {
   type PanelIdentityPin,
@@ -360,6 +370,10 @@ export interface InstanceClientOptions {
    * list (`tp-host panel-identity-write`). Tests replace it.
    */
   writePanelPin?: (fetched: PanelIdentityFetch) => Promise<void>;
+  /** Hand one key-set statement to root (`tp-host panel-identity-write statement`). Tests replace it. */
+  writeKeysetStatement?: (envelope: KeysetEnvelope) => Promise<void>;
+  /** Re-read the pin after root rewrote it. Tests replace it. */
+  readPin?: () => Promise<PanelIdentityPin | null>;
   /** Initial reconnect delay; clamped to [DEFAULT_INITIAL_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS]. */
   reconnectDelayMs?: number;
   onMessage?: (message: DaemonMessage) => void;
@@ -596,6 +610,9 @@ export class InstanceClient {
   /** The signed hello's address list was compared with the pin on this socket. */
   #helloUrlsChecked = false;
   readonly #writePanelPin: (fetched: PanelIdentityFetch) => Promise<void>;
+  readonly #writeKeysetStatement: (envelope: KeysetEnvelope) => Promise<void>;
+  readonly #readPin: () => Promise<PanelIdentityPin | null>;
+  readonly #keysetChainGate = createKeysetChainGate();
   #httpClient: Deno.HttpClient | undefined;
   readonly #httpClientPinned: boolean;
   readonly #initialBackoffMs: number;
@@ -727,6 +744,9 @@ export class InstanceClient {
     this.#config = options.config ?? resolveInstanceConfig();
     this.#baseConfig = this.#config;
     this.#writePanelPin = options.writePanelPin ?? writePanelPinFromDocument;
+    this.#writeKeysetStatement = options.writeKeysetStatement ??
+      writeKeysetStatement;
+    this.#readPin = options.readPin ?? (() => readEnforcedPin());
     this.#httpClient = options.httpClient;
     this.#httpClientPinned = options.httpClient !== undefined;
     this.#applyDevSyncTarball = Object.hasOwn(options, "applyDevSyncTarball")
@@ -1062,6 +1082,7 @@ export class InstanceClient {
         pinnedBy: pin.pinnedBy,
         current: pin.current,
         keyset: pin.keyset,
+        passkeys: await rotationPasskeysHash(pin.passkeys),
       });
     } catch (err) {
       logWarn("instance", "pin report signing failed:", sanitizeForLog(err));
@@ -1153,12 +1174,24 @@ export class InstanceClient {
     keyset: number,
   ): Promise<void> {
     const urls = identityDocumentUrls(fetched.body);
-    if (!urls || keyset !== pin.keyset || !urlListsDiffer(urls, pin.urls)) {
+    if (pin.passkeys.length > 0 && keyset > pin.keyset) {
+      // A newer key set (a passkey change) comes only through the chain.
+      await this.#catchUpKeyset();
+      return;
+    }
+    // While no rotation passkey is pinned, a document that names them fills
+    // the pin once (tp-host checks it again and takes its key set too).
+    const fills = pin.passkeys.length === 0 &&
+      identityDocumentHasRotation(fetched.body);
+    if (
+      !urls ||
+      (!fills && (keyset !== pin.keyset || !urlListsDiffer(urls, pin.urls)))
+    ) {
       return;
     }
     try {
       await this.#writePanelPin(fetched);
-      const updated = await readEnforcedPin();
+      const updated = await this.#readPin();
       if (updated) {
         this.#panelPin = updated;
         this.#urls?.replace(this.#urlCandidates(updated));
@@ -1175,6 +1208,45 @@ export class InstanceClient {
         "panel-identity: could not update the control plane addresses:",
         sanitizeForLog(err),
       );
+    }
+  }
+
+  /**
+   * Follow the key-set chain from the address in use (at most once a minute
+   * per address). True when root applied at least one statement: the pin moved
+   * on, so the caller retries at once with the new key.
+   */
+  async #catchUpKeyset(): Promise<boolean> {
+    const pin = this.#panelPin;
+    if (!pin || pin.passkeys.length === 0) return false;
+    const target = this.#config;
+    const address = target.kind === "url" ? target.baseUrl : target.socketPath;
+    if (!this.#keysetChainGate.tryEnter(address)) return false;
+    const fetcher = new DaemonApiClient({
+      config: target,
+      httpClient: this.#httpClient,
+      getToken: () =>
+        Promise.reject(new Error("token unavailable for key-set fetch")),
+    });
+    try {
+      const applied = await followKeysetChain(pin, {
+        fetchStatements: (after) => fetcher.getKeysetStatements(after),
+        apply: this.#writeKeysetStatement,
+        readPin: this.#readPin,
+        log: (line) => logInfo("instance", sanitizeForLog(line)),
+      });
+      if (applied === 0) return false;
+      const updated = await this.#readPin();
+      if (updated) this.#panelPin = updated;
+      this.#panelKey = undefined;
+      return true;
+    } catch (err) {
+      logWarn(
+        "instance",
+        "panel-identity: could not follow the key-set chain:",
+        sanitizeForLog(err),
+      );
+      return false;
     }
   }
 
@@ -1544,7 +1616,14 @@ export class InstanceClient {
     this.#backupCopyReporter?.detach();
     this.#acmeObserver?.detach();
     this.#metricsScheduler?.detach();
-    const classified = this.#failOverPanelUrl(classifyConnectFailure(err));
+    const raw = classifyConnectFailure(err);
+    // A key this server does not hold may be a rotation it has not seen yet:
+    // follow the chain from this address before trying any other.
+    if (raw.kind === "panel-identity" && await this.#catchUpKeyset()) {
+      this.#resetBackoff();
+      return;
+    }
+    const classified = this.#failOverPanelUrl(raw);
     if (classified === null) return;
     if (classified.kind === "permanent") {
       await this.#enterParkedState(classified.reason, "permanent");

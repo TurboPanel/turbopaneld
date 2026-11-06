@@ -1,0 +1,661 @@
+{
+  "comment": "Fixed key-set statement vectors shared by the control plane (TypeScript) and the daemon (tp-host python and openssl). Public data only; regenerate both copies together.",
+  "rpId": "cp.example.test",
+  "now": 1793000600,
+  "pin": {
+    "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+    "keyset": 2,
+    "rpId": "cp.example.test",
+    "passkeys": [
+      {
+        "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+        "alg": "ES256",
+        "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+      },
+      {
+        "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+        "alg": "EdDSA",
+        "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+      }
+    ]
+  },
+  "chain": [
+    {
+      "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJwYXNza2V5cyIsInJwSWQiOiJjcC5leGFtcGxlLnRlc3QiLCJjdXJyZW50Ijp7ImtpZCI6InFJV18xV3JQbzk0Ri1IQU9xZ0NnaHhYY2dicDhZeHpCeklmV01adEtGTUUiLCJwdWIiOiI3SUdjTUJGYWpranFuSmctMkhnXzNCc29KNUVFb19DN09DSWlTcmo5ODM0In0sInBhc3NrZXlzIjpbeyJpZCI6IjhnMGttb0NyNGZIS1U1YjNCRWlRRW1BbEVfZjVGY2FjV1UtOURmaDEwMHciLCJhbGciOiJFUzI1NiIsInB1YiI6IkJFbnFOVXUzMVRQRnRTN0FxVHN0QXNMNGRHRC0yeXlWMUNkT2dDaFdvSDA4a0x5T3UzbXVoMjdaVmtOV3VZU1B3V1hfQzZXVC1zejB4cnBxMXdaWHNPMCJ9LHsiaWQiOiJCRlJHQW9XZDdjaFV4NGhrRndwWHNkNE5hNGJlVFRPUUVwU0c0OUY4U05jIiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCQU91cXpxQkFMOEtxWE41MTVWYUxHTE9UUWg1d2NSdGRLWEJYWHZPalBWQi16Qjh4ZTh5NFg2Z29MVWVPWFd0RmV6Wmo2UmEyQXFHaUNReUJLdk9oRDgifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+      "approvals": [
+        {
+          "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+          "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiU2dwNGlTYTRxYVBLcjYwbzdjejlVbHgyTURUenE5dEhsUWtwRjFYcFY4RSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+          "signature": "MEUCIQDwK3iJn3RqgReBtmLUvz4UzHF8gFMrCsfev5XIAQJTewIgFeE9oGZzDdKlxIojkkCMBo68UXn0nok7O3pkIkuISqk"
+        },
+        {
+          "id": "BFRGAoWd7chUx4hkFwpXsd4Na4beTTOQEpSG49F8SNc",
+          "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiU2dwNGlTYTRxYVBLcjYwbzdjejlVbHgyTURUenE5dEhsUWtwRjFYcFY4RSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+          "signature": "MEUCIQDMBxWcV6lkeIVKKSEVWbS5eMaVlUmWL24fve0QMMzo5QIgHOJn7ILz7hC2w33TyEzD0kVXa_rq9f05wqnZU78U9h4"
+        }
+      ]
+    },
+    {
+      "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0Ijo0LCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoiQkZSR0FvV2Q3Y2hVeDRoa0Z3cFhzZDROYTRiZVRUT1FFcFNHNDlGOFNOYyIsImFsZyI6IkVTMjU2IiwicHViIjoiQkFPdXF6cUJBTDhLcVhONTE1VmFMR0xPVFFoNXdjUnRkS1hCWFh2T2pQVkItekI4eGU4eTRYNmdvTFVlT1hXdEZlelpqNlJhMkFxR2lDUXlCS3ZPaEQ4In0seyJpZCI6ImtwRWs2T2loZ2pZRHBINlBrLWx6cHd2OFVmNS00aVU2aGwyQzA2UHc2Q2MiLCJhbGciOiJFZERTQSIsInB1YiI6Ijg1WEFQTGJUZ1JfRG5HbFhicUh1ekJVTWFkLTA4dlc1a0g0SDFYcGNKUHcifV0sImlhdCI6MTc5MzAwMDAwMH0",
+      "approvals": [
+        {
+          "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+          "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiT2ZOQ2p3dmtkSkFtQ3FjMC1hREI2dTctWTdHUFFoZW1QYWZMQ24tZzVJTSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+          "signature": "HA-b2dXfSasyy9WUqXmGcgPaoj6YfJ26nq_CMB9Iu11GhXA6UENAGRo985Zo8nODEcOfW-TWPb5316mtZhG6Bg"
+        }
+      ]
+    },
+    {
+      "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0Ijo1LCJwcmV2IjoiOEdRRjJrTXJtWjJFaklEN0RqS0Y1V0FsN0ZWS3dfdVhqcXppd2FGTVZZayIsImtpbmQiOiJyZXZva2UiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiJ5QmFWbVdsN05XV3NNOHlla3cwUUJWRzNRVFpzcV9FejdxVXlab09OSUVVIiwicHViIjoiS09Rd2NVdE9xT2VLbnJFc1U0SzFvOHVOUUtRcWViTFB4Wm9OZUlURG1SZyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoiQkZSR0FvV2Q3Y2hVeDRoa0Z3cFhzZDROYTRiZVRUT1FFcFNHNDlGOFNOYyIsImFsZyI6IkVTMjU2IiwicHViIjoiQkFPdXF6cUJBTDhLcVhONTE1VmFMR0xPVFFoNXdjUnRkS1hCWFh2T2pQVkItekI4eGU4eTRYNmdvTFVlT1hXdEZlelpqNlJhMkFxR2lDUXlCS3ZPaEQ4In0seyJpZCI6ImtwRWs2T2loZ2pZRHBINlBrLWx6cHd2OFVmNS00aVU2aGwyQzA2UHc2Q2MiLCJhbGciOiJFZERTQSIsInB1YiI6Ijg1WEFQTGJUZ1JfRG5HbFhicUh1ekJVTWFkLTA4dlc1a0g0SDFYcGNKUHcifV0sImlhdCI6MTc5MzAwMDAwMH0",
+      "approvals": [
+        {
+          "id": "BFRGAoWd7chUx4hkFwpXsd4Na4beTTOQEpSG49F8SNc",
+          "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidDVOSG9EZ1RhZmxBQWF5X2ptZGhEM3FfSGZUUllBWmYxMVRjb1NtMU4tQSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+          "signature": "MEUCIEsAeyX06jdYT6Gg3_D_LamDfg52zj-0mpkeH4hTe-7mAiEA5M_-bqriAtK2XSo3Qbvcdxoo2KvVHGjZHu6AJ5bsfus"
+        }
+      ]
+    }
+  ],
+  "pinAfterChain": {
+    "current": "yBaVmWl7NWWsM8yekw0QBVG3QTZsq_Ez7qUyZoONIEU",
+    "keyset": 5,
+    "rpId": "cp.example.test",
+    "passkeys": [
+      {
+        "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+        "alg": "ES256",
+        "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+      },
+      {
+        "id": "BFRGAoWd7chUx4hkFwpXsd4Na4beTTOQEpSG49F8SNc",
+        "alg": "ES256",
+        "pub": "BAOuqzqBAL8KqXN515VaLGLOTQh5wcRtdKXBXXvOjPVB-zB8xe8y4X6goLUeOXWtFezZj6Ra2AqGiCQyBKvOhD8"
+      },
+      {
+        "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+        "alg": "EdDSA",
+        "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+      }
+    ]
+  },
+  "refused": [
+    {
+      "name": "no approvals",
+      "reason": "no pinned passkey approved",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": []
+      }
+    },
+    {
+      "name": "approval by a passkey that is not pinned",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "TgABgi3U7dpcFdv57Rb-QZB930EF_SGPZRq3Atv9FXc",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "1SiLvdVf6odKLzEfgwruND_5zZqCQXkcxdGzJ9pUFXB6ggg7N_TNl3IIF2Cu1GBVFJbkhtU6H-RL7q147urNCA"
+          }
+        ]
+      }
+    },
+    {
+      "name": "approval under a pinned id signed by another key",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "1SiLvdVf6odKLzEfgwruND_5zZqCQXkcxdGzJ9pUFXB6ggg7N_TNl3IIF2Cu1GBVFJbkhtU6H-RL7q147urNCA"
+          }
+        ]
+      }
+    },
+    {
+      "name": "assertion replayed onto another statement",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiJ5QmFWbVdsN05XV3NNOHlla3cwUUJWRzNRVFpzcV9FejdxVXlab09OSUVVIiwicHViIjoiS09Rd2NVdE9xT2VLbnJFc1U0SzFvOHVOUUtRcWViTFB4Wm9OZUlURG1SZyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEQCIBrsNsZLS9wXhHhrn9xQRuqO-zzFViJh1Yb5VxfZqHM9AiBYMEI7mglRZC07y5teVr_35iKKOV_Oz6HdDWQU7Q1FgA"
+          }
+        ]
+      }
+    },
+    {
+      "name": "applied statement replayed",
+      "reason": "prev is not the pinned key",
+      "pin": {
+        "current": "8GQF2kMrmZ2EjID7DjKF5WAl7FVKw_uXjqziwaFMVYk",
+        "keyset": 4,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "BFRGAoWd7chUx4hkFwpXsd4Na4beTTOQEpSG49F8SNc",
+            "alg": "ES256",
+            "pub": "BAOuqzqBAL8KqXN515VaLGLOTQh5wcRtdKXBXXvOjPVB-zB8xe8y4X6goLUeOXWtFezZj6Ra2AqGiCQyBKvOhD8"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0Ijo0LCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoiQkZSR0FvV2Q3Y2hVeDRoa0Z3cFhzZDROYTRiZVRUT1FFcFNHNDlGOFNOYyIsImFsZyI6IkVTMjU2IiwicHViIjoiQkFPdXF6cUJBTDhLcVhONTE1VmFMR0xPVFFoNXdjUnRkS1hCWFh2T2pQVkItekI4eGU4eTRYNmdvTFVlT1hXdEZlelpqNlJhMkFxR2lDUXlCS3ZPaEQ4In0seyJpZCI6ImtwRWs2T2loZ2pZRHBINlBrLWx6cHd2OFVmNS00aVU2aGwyQzA2UHc2Q2MiLCJhbGciOiJFZERTQSIsInB1YiI6Ijg1WEFQTGJUZ1JfRG5HbFhicUh1ekJVTWFkLTA4dlc1a0g0SDFYcGNKUHcifV0sImlhdCI6MTc5MzAwMDAwMH0",
+        "approvals": [
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiT2ZOQ2p3dmtkSkFtQ3FjMC1hREI2dTctWTdHUFFoZW1QYWZMQ24tZzVJTSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "HA-b2dXfSasyy9WUqXmGcgPaoj6YfJ26nq_CMB9Iu11GhXA6UENAGRo985Zo8nODEcOfW-TWPb5316mtZhG6Bg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "keyset not above the pinned one",
+      "reason": "keyset is not above the pinned one",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjoyLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiODN6UjZHMlAzbDYwejYyTEhGb2tQdEZTcDd1dUs2QlZTajBiU1ZFd2pUUSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEUCIQDB43kNBhCfZvimR29BBi6UViXWfraDihfTVY4gma-aFgIgRgrrDzFDUxg_1ho9Mb4QV9NRR8HY0uAHM0QyJ6ddKeo"
+          }
+        ]
+      }
+    },
+    {
+      "name": "prev is not the pinned key",
+      "reason": "prev is not the pinned key",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoieUJhVm1XbDdOV1dzTTh5ZWt3MFFCVkczUVRac3FfRXo3cVV5Wm9PTklFVSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoieTVkYWNJRXp2eE5ybm5QMURZUTFPd1cyZ1phVXRIOXl4ZldvWENYRTNrayIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEUCIAOETQ0BluYzlspzKM3CrSEQ18t9zaX7Ne3q29-z8a7gAiEAr6q-sOVW3gcNxRIPY7JeRTOTdWlxNfi1AnWhAhtckhE"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rpIdHash for another host",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "2UQj1qG2EDfEZSCCierQaYsa_1EUA3pkpHj-DzYAUi4FAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEUCIAm9GbC7ola0inuDXmUklgqYsRxNnuZ-vyaSMrsPbL_UAiEAq92E-x8pkgS1R2yTIIn2RJCszbhUyZ4OKgiru-mp6iE"
+          }
+        ]
+      }
+    },
+    {
+      "name": "origin outside the rp id",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0LmV2aWwudGVzdCJ9",
+            "signature": "MEYCIQC8vbinCw1rwBcJClCQHCOZZx9UpEjp0RvkFl0ml-gq2AIhAOX8shswQluaruRN60Gy3nmlSHlP1hWg6JWRcRqiQLdn"
+          }
+        ]
+      }
+    },
+    {
+      "name": "user presence flag missing",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUEAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEYCIQCv0LRA8tOyA6cq06DOOuZHYOR7ss2kG3DQzquvyHdYKQIhAMx608ufbmK2p9OFFCeK_B2t7knIU3KVV4Nije-IVx3G"
+          }
+        ]
+      }
+    },
+    {
+      "name": "user verification flag missing",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUBAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "b74Mt7XMGvfE-AIbIMGwzmsA1TSzERxElr2rKVDOQUvYzWGKAs5CDxEfXig9u2WW9ytWTjCD4nvrMV8DDG15CA"
+          }
+        ]
+      }
+    },
+    {
+      "name": "type webauthn.create",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEQCIFNzqDM3Onvv-bm7k95aD5vj1HPPjgmM0Z8_Gu6F92JNAiBDClH-ZMY1GMVkwaP97HIgRdxmPTvpe2HlH1pguTRsdw"
+          }
+        ]
+      }
+    },
+    {
+      "name": "cross-origin assertion",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0IiwiY3Jvc3NPcmlnaW4iOnRydWV9",
+            "signature": "Hft00f4oANvPiwrWE6f8Mx33qHptmNIFM8iiHk1P23QQvYYD5z5TnvT3x7iZBC1oJ5nu3_gU_cq8ViixWUYSDg"
+          }
+        ]
+      }
+    },
+    {
+      "name": "one flipped signature byte",
+      "reason": "an approval does not verify",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZV9oTUpYeHY3SGxUMjRMVnZDejRJVlRvT20zbDBNbk5JRmU3NU9VR0lfdyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "Mmut05gKF-tKnK7OXzMjM4IRi_Zn-YvExSOn9l1rHysA4KQtepd1LR12J81ICsEtuet_eU9qImu9VXT5GnajDA"
+          }
+        ]
+      }
+    },
+    {
+      "name": "removal approved only by the removed passkey",
+      "reason": "a removal needs a passkey that stays",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJwYXNza2V5cyIsInJwSWQiOiJjcC5leGFtcGxlLnRlc3QiLCJjdXJyZW50Ijp7ImtpZCI6InFJV18xV3JQbzk0Ri1IQU9xZ0NnaHhYY2dicDhZeHpCeklmV01adEtGTUUiLCJwdWIiOiI3SUdjTUJGYWpranFuSmctMkhnXzNCc29KNUVFb19DN09DSWlTcmo5ODM0In0sInBhc3NrZXlzIjpbeyJpZCI6ImtwRWs2T2loZ2pZRHBINlBrLWx6cHd2OFVmNS00aVU2aGwyQzA2UHc2Q2MiLCJhbGciOiJFZERTQSIsInB1YiI6Ijg1WEFQTGJUZ1JfRG5HbFhicUh1ekJVTWFkLTA4dlc1a0g0SDFYcGNKUHcifV0sImlhdCI6MTc5MzAwMDAwMH0",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiS09RVUJfeGhPVEx0SG12aUM3Z0V3ZlJiWmkxSzZoS0k2ejBlZHczSmRiayIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEQCIGn4fEnve6oq5OdHjlgyp1wauvEMu9Df-v7VatYjRN1aAiB3FvtdN5II74KV4UKbdXQG_rsRA3uy1N_nYn475XQ7dw"
+          }
+        ]
+      }
+    },
+    {
+      "name": "addition without proof of possession",
+      "reason": "an added passkey must prove possession",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJwYXNza2V5cyIsInJwSWQiOiJjcC5leGFtcGxlLnRlc3QiLCJjdXJyZW50Ijp7ImtpZCI6InFJV18xV3JQbzk0Ri1IQU9xZ0NnaHhYY2dicDhZeHpCeklmV01adEtGTUUiLCJwdWIiOiI3SUdjTUJGYWpranFuSmctMkhnXzNCc29KNUVFb19DN09DSWlTcmo5ODM0In0sInBhc3NrZXlzIjpbeyJpZCI6IjhnMGttb0NyNGZIS1U1YjNCRWlRRW1BbEVfZjVGY2FjV1UtOURmaDEwMHciLCJhbGciOiJFUzI1NiIsInB1YiI6IkJFbnFOVXUzMVRQRnRTN0FxVHN0QXNMNGRHRC0yeXlWMUNkT2dDaFdvSDA4a0x5T3UzbXVoMjdaVmtOV3VZU1B3V1hfQzZXVC1zejB4cnBxMXdaWHNPMCJ9LHsiaWQiOiJCRlJHQW9XZDdjaFV4NGhrRndwWHNkNE5hNGJlVFRPUUVwU0c0OUY4U05jIiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCQU91cXpxQkFMOEtxWE41MTVWYUxHTE9UUWg1d2NSdGRLWEJYWHZPalBWQi16Qjh4ZTh5NFg2Z29MVWVPWFd0RmV6Wmo2UmEyQXFHaUNReUJLdk9oRDgifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDAwMDAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiU2dwNGlTYTRxYVBLcjYwbzdjejlVbHgyTURUenE5dEhsUWtwRjFYcFY4RSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEUCIQDwK3iJn3RqgReBtmLUvz4UzHF8gFMrCsfev5XIAQJTewIgFeE9oGZzDdKlxIojkkCMBo68UXn0nok7O3pkIkuISqk"
+          }
+        ]
+      }
+    },
+    {
+      "name": "passkeys kind that changes the key",
+      "reason": "kind does not match whether the key changes",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJwYXNza2V5cyIsInJwSWQiOiJjcC5leGFtcGxlLnRlc3QiLCJjdXJyZW50Ijp7ImtpZCI6IjhHUUYya01ybVoyRWpJRDdEaktGNVdBbDdGVkt3X3VYanF6aXdhRk1WWWsiLCJwdWIiOiJza3hNbVZ5UE9nMmtCNjB6NWlKeGgwWlFyZWxjd2pUR3RSODNiS3A4N2ljIn0sInBhc3NrZXlzIjpbeyJpZCI6IjhnMGttb0NyNGZIS1U1YjNCRWlRRW1BbEVfZjVGY2FjV1UtOURmaDEwMHciLCJhbGciOiJFUzI1NiIsInB1YiI6IkJFbnFOVXUzMVRQRnRTN0FxVHN0QXNMNGRHRC0yeXlWMUNkT2dDaFdvSDA4a0x5T3UzbXVoMjdaVmtOV3VZU1B3V1hfQzZXVC1zejB4cnBxMXdaWHNPMCJ9LHsiaWQiOiJrcEVrNk9paGdqWURwSDZQay1senB3djhVZjUtNGlVNmhsMkMwNlB3NkNjIiwiYWxnIjoiRWREU0EiLCJwdWIiOiI4NVhBUExiVGdSX0RuR2xYYnFIdXpCVU1hZC0wOHZXNWtINEgxWHBjSlB3In1dLCJpYXQiOjE3OTMwMDAwMDB9",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiVXEzN3hqd0RFOUtLVWNkZDA5YktMU0dWdVYyODZvaEVQdlJBUjloYnFpZyIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEQCIEYUqyuliRNf7zkUIetofNlSJdcPQbfSU3wad8a8wr7EAiBsJCXWym1HQ4WrJ65ZWtGAyFZnNHjQ_Tdgqe5Za49Mow"
+          }
+        ]
+      }
+    },
+    {
+      "name": "iat too far in the future",
+      "reason": "iat is in the future",
+      "pin": {
+        "current": "qIW_1WrPo94F-HAOqgCghxXcgbp8YxzBzIfWMZtKFME",
+        "keyset": 2,
+        "rpId": "cp.example.test",
+        "passkeys": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "alg": "ES256",
+            "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+          },
+          {
+            "id": "kpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+            "alg": "EdDSA",
+            "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+          }
+        ]
+      },
+      "envelope": {
+        "statement": "eyJ0eXBlIjoidHAta2V5c2V0IiwidiI6MSwia2V5c2V0IjozLCJwcmV2IjoicUlXXzFXclBvOTRGLUhBT3FnQ2doeFhjZ2JwOFl4ekJ6SWZXTVp0S0ZNRSIsImtpbmQiOiJyb3RhdGUiLCJycElkIjoiY3AuZXhhbXBsZS50ZXN0IiwiY3VycmVudCI6eyJraWQiOiI4R1FGMmtNcm1aMkVqSUQ3RGpLRjVXQWw3RlZLd191WGpxeml3YUZNVllrIiwicHViIjoic2t4TW1WeVBPZzJrQjYwejVpSnhoMFpRcmVsY3dqVEd0UjgzYktwODdpYyJ9LCJwYXNza2V5cyI6W3siaWQiOiI4ZzBrbW9DcjRmSEtVNWIzQkVpUUVtQWxFX2Y1RmNhY1dVLTlEZmgxMDB3IiwiYWxnIjoiRVMyNTYiLCJwdWIiOiJCRW5xTlV1MzFUUEZ0UzdBcVRzdEFzTDRkR0QtMnl5VjFDZE9nQ2hXb0gwOGtMeU91M211aDI3WlZrTld1WVNQd1dYX0M2V1Qtc3oweHJwcTF3WlhzTzAifSx7ImlkIjoia3BFazZPaWhnallEcEg2UGstbHpwd3Y4VWY1LTRpVTZobDJDMDZQdzZDYyIsImFsZyI6IkVkRFNBIiwicHViIjoiODVYQVBMYlRnUl9EbkdsWGJxSHV6QlVNYWQtMDh2VzVrSDRIMVhwY0pQdyJ9XSwiaWF0IjoxNzkzMDA0MjAwfQ",
+        "approvals": [
+          {
+            "id": "8g0kmoCr4fHKU5b3BEiQEmAlE_f5FcacWU-9Dfh100w",
+            "authenticatorData": "vVPRcy4RIBe7cSQMTmcWBTcOwgwpMd9_xEoQKxa0aqUFAAAAAA",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiV2lvR0d5RHppY3RHVUgzQ2xlNkRlWWJ4YnNWeTU1VkVzNmU5Vy1URG9IUSIsIm9yaWdpbiI6Imh0dHBzOi8vY3AuZXhhbXBsZS50ZXN0In0",
+            "signature": "MEYCIQDYWTtYn9rs-L7ii4VF8ZC4dVEJ7gbB6GP54Y-8_Sro6wIhAOOaRLH7B_Nz7llmTu9cIb2F5JdITrh17YZeBN5zzJvZ"
+          }
+        ]
+      }
+    }
+  ]
+}

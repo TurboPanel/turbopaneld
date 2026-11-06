@@ -1,6 +1,9 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { encodeBase64Url } from "@std/encoding/base64url";
 import { type Host, refused, withHost } from "../testing/tp-host-fixture.ts";
+import vectors from "../testing/keyset-statement-vectors.json" with {
+  type: "json",
+};
 
 /** Alias so Sonar sees real tests (see src/AGENTS.md). */
 const test = Deno.test.bind(Deno);
@@ -11,6 +14,7 @@ const ORIGIN_PATH = "opt/turbopanel/lib/update-origin";
 
 type Panel = {
   kid: string;
+  pub: string;
   document: (options?: DocOptions) => Promise<string>;
 };
 type DocOptions = {
@@ -19,6 +23,7 @@ type DocOptions = {
   urls?: string[];
   next?: string;
   tamper?: boolean;
+  rotation?: unknown;
 };
 
 async function makePanel(): Promise<Panel> {
@@ -34,6 +39,7 @@ async function makePanel(): Promise<Panel> {
   );
   return {
     kid,
+    pub: encodeBase64Url(raw),
     document: async (options = {}) => {
       const keys: unknown[] = [
         { kid, alg: "Ed25519", pub: encodeBase64Url(raw), role: "current" },
@@ -46,6 +52,9 @@ async function makePanel(): Promise<Panel> {
         keys,
         seal: { kid: "s".repeat(43), alg: "X25519", pub: "AAAA" },
         keyset: options.keyset ?? 2,
+        ...(options.rotation === undefined
+          ? {}
+          : { rotation: options.rotation }),
         urls: options.urls ?? ["https://panel.example.test"],
         issued: "2026-11-01T00:00:00.000Z",
         expires: options.expires ?? "2999-01-01T00:00:00.000Z",
@@ -265,144 +274,266 @@ test("no generic verb can touch the pin file or the update origin", async () => 
   });
 });
 
-type KeyPair = {
-  kid: string;
-  pub: string;
-  sign: (text: string) => Promise<string>;
+type Passkey = { id: string; alg: string; pub: string };
+type Pin = {
+  current: string;
+  keyset: number;
+  rpId: string;
+  passkeys: Passkey[];
 };
 
-async function makeKey(): Promise<KeyPair> {
+function passkeysLine(passkeys: Passkey[]): string {
+  return passkeys.map((p) =>
+    `${p.id}.${p.alg === "ES256" ? "es256" : "eddsa"}.${p.pub}`
+  ).join(",");
+}
+
+async function writeRotationPin(host: Host, pin: Pin): Promise<void> {
+  await Deno.writeTextFile(
+    host.path(PIN_PATH),
+    `current=${pin.current}\nnext=\nkeyset=${pin.keyset}\nurls=https://old.example\npinned_by=install\nupdated=x\nrp_id=${pin.rpId}\npasskeys=${
+      passkeysLine(pin.passkeys)
+    }\n`,
+  );
+  await Deno.writeTextFile(
+    host.path(ORIGIN_PATH),
+    `host=https://old.example\npanel_key=${pin.current}\n`,
+  );
+}
+
+function applyStatement(host: Host, envelope: unknown) {
+  return host.run(
+    ["panel-identity-write", "statement"],
+    JSON.stringify(envelope),
+  );
+}
+
+// Fixed iat values in the shared vectors are in the past here, so the
+// "iat in the future" vector is checked with a fresh statement below.
+const CLOCK_VECTORS = new Set(["iat too far in the future"]);
+
+test("every forged statement in the shared vectors is refused and changes nothing", async () => {
+  await withHost(async (host) => {
+    for (const vector of vectors.refused) {
+      if (CLOCK_VECTORS.has(vector.name)) continue;
+      await writeRotationPin(host, vector.pin);
+      const before = await Deno.readTextFile(host.path(PIN_PATH));
+      const result = await applyStatement(host, vector.envelope);
+      assert(result.code !== 0, vector.name);
+      assertStringIncludes(result.stderr, "panel-identity-write", vector.name);
+      assertEquals(
+        await Deno.readTextFile(host.path(PIN_PATH)),
+        before,
+        vector.name,
+      );
+    }
+  });
+});
+
+test("an offline server applies the whole chain in order, then refuses a replay", async () => {
+  await withHost(async (host) => {
+    await writeRotationPin(host, vectors.pin);
+    for (const envelope of vectors.chain) {
+      const result = await applyStatement(host, envelope);
+      assertEquals(result.code, 0, result.stderr);
+    }
+    const pin = await Deno.readTextFile(host.path(PIN_PATH));
+    const after = vectors.pinAfterChain;
+    assertStringIncludes(pin, `current=${after.current}\n`);
+    assertStringIncludes(pin, `keyset=${after.keyset}\n`);
+    assertStringIncludes(pin, `rp_id=${after.rpId}\n`);
+    assertStringIncludes(pin, `passkeys=${passkeysLine(after.passkeys)}\n`);
+    assertStringIncludes(pin, "next=\n");
+    assertStringIncludes(pin, "urls=https://old.example\n");
+    assertStringIncludes(
+      await Deno.readTextFile(host.path(ORIGIN_PATH)),
+      `panel_key=${after.current}\n`,
+    );
+    const replay = await applyStatement(host, vectors.chain[0]);
+    assert(replay.code !== 0);
+    assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), pin);
+  });
+});
+
+test("a statement out of order, oversized or without pinned passkeys is refused", async () => {
+  await withHost(async (host) => {
+    await writeRotationPin(host, vectors.pin);
+    // The second statement names a key the pin does not hold yet.
+    assert((await applyStatement(host, vectors.chain[1])).code !== 0);
+    const big = { statement: "A".repeat(17000), approvals: [] };
+    assertStringIncludes(
+      await refused(
+        host,
+        ["panel-identity-write", "statement"],
+        JSON.stringify(big),
+      ),
+      "too large",
+    );
+    await writePin(host, vectors.pin.current);
+    assertStringIncludes(
+      await refused(
+        host,
+        ["panel-identity-write", "statement"],
+        JSON.stringify(vectors.chain[0]),
+      ),
+      "refusing the statement",
+    );
+  });
+});
+
+/** A fresh EdDSA rotation passkey and a statement it approves (for clock-relative checks). */
+async function freshRotation(iat: number) {
   const pair = await crypto.subtle.generateKey("Ed25519", true, [
     "sign",
     "verify",
   ]) as CryptoKeyPair;
-  const raw = new Uint8Array(
-    await crypto.subtle.exportKey("raw", pair.publicKey),
+  const pub = encodeBase64Url(
+    new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey)),
+  );
+  const id = "p".repeat(43);
+  const panel = await makePanel();
+  const next = await makePanel();
+  const rpId = "cp.example.test";
+  const passkeys = [{ id, alg: "EdDSA", pub }];
+  const statement = JSON.stringify({
+    type: "tp-keyset",
+    v: 1,
+    keyset: 3,
+    prev: panel.kid,
+    kind: "rotate",
+    rpId,
+    current: { kid: next.kid, pub: next.pub },
+    passkeys,
+    iat,
+  });
+  const sha = async (bytes: Uint8Array) =>
+    new Uint8Array(
+      await crypto.subtle.digest("SHA-256", bytes as BufferSource),
+    );
+  const challenge = encodeBase64Url(await sha(encoder.encode(statement)));
+  const authData = new Uint8Array(37);
+  authData.set(await sha(encoder.encode(rpId)), 0);
+  authData[32] = 0x05;
+  const clientData = encoder.encode(
+    JSON.stringify({
+      type: "webauthn.get",
+      challenge,
+      origin: `https://${rpId}`,
+    }),
+  );
+  const signed = new Uint8Array([...authData, ...(await sha(clientData))]);
+  const signature = new Uint8Array(
+    await crypto.subtle.sign("Ed25519", pair.privateKey, signed),
   );
   return {
-    kid: encodeBase64Url(
-      new Uint8Array(await crypto.subtle.digest("SHA-256", raw)),
-    ),
-    pub: encodeBase64Url(raw),
-    sign: async (text) =>
-      encodeBase64Url(
-        new Uint8Array(
-          await crypto.subtle.sign(
-            "Ed25519",
-            pair.privateKey,
-            encoder.encode(`tp-rotation\n${text}`),
-          ),
-        ),
-      ),
+    pin: { current: panel.kid, keyset: 2, rpId, passkeys },
+    envelope: {
+      statement: encodeBase64Url(encoder.encode(statement)),
+      approvals: [{
+        id,
+        authenticatorData: encodeBase64Url(authData),
+        clientDataJSON: encodeBase64Url(clientData),
+        signature: encodeBase64Url(signature),
+      }],
+    },
+    next: next.kid,
   };
 }
 
-async function statement(
-  kind: "rotation" | "revoke",
-  keys: { current: KeyPair; next: KeyPair },
-  overrides: {
-    keyset?: number;
-    signers?: Record<string, string>;
-    signNext?: KeyPair;
-  } = {},
-  after = "z".repeat(43),
-): Promise<string> {
-  const signers = overrides.signers ??
-    { [keys.current.kid]: keys.current.pub, [keys.next.kid]: keys.next.pub };
-  const body = JSON.stringify({
-    type: kind,
-    keyset: overrides.keyset ?? 2,
-    ...(kind === "revoke" ? { revoked: keys.current.kid } : {}),
-    current: keys.next.kid,
-    next: after,
-    signers,
-    iat: 1793000000,
-  });
-  const sigNext = await (overrides.signNext ?? keys.next).sign(body);
-  if (kind === "revoke") return `${body.slice(0, -1)},"sigNext":"${sigNext}"}`;
-  const sigCurrent = await keys.current.sign(body);
-  return `${
-    body.slice(0, -1)
-  },"sigCurrent":"${sigCurrent}","sigNext":"${sigNext}"}`;
-}
-
-async function pinWithNext(
-  host: Host,
-  keys: { current: KeyPair; next: KeyPair },
-) {
-  await Deno.writeTextFile(
-    host.path(PIN_PATH),
-    `current=${keys.current.kid}\nnext=${keys.next.kid}\nkeyset=1\nurls=https://old.example\npinned_by=install\nupdated=x\n`,
-  );
-  await Deno.writeTextFile(
-    host.path(ORIGIN_PATH),
-    `host=https://old.example\npanel_key=${keys.current.kid}\n`,
-  );
-}
-
-test("a valid rotation moves the pin and the update origin to the next key", async () => {
+test("a statement more than five minutes ahead is refused; one from now applies", async () => {
   await withHost(async (host) => {
-    const keys = { current: await makeKey(), next: await makeKey() };
-    await pinWithNext(host, keys);
-    const after = "z".repeat(43);
-    const result = await host.run(
-      ["panel-identity-write", "statement"],
-      await statement("rotation", keys, {}, after),
-    );
-    assertEquals(result.code, 0, result.stderr);
-    const pin = await Deno.readTextFile(host.path(PIN_PATH));
-    assertStringIncludes(pin, `current=${keys.next.kid}\n`);
-    assertStringIncludes(pin, `next=${after}\n`);
-    assertStringIncludes(pin, "keyset=2\n");
+    const now = Math.floor(Date.now() / 1000);
+    const ahead = await freshRotation(now + 3600);
+    await writeRotationPin(host, ahead.pin);
     assertStringIncludes(
-      await Deno.readTextFile(host.path(ORIGIN_PATH)),
-      `panel_key=${keys.next.kid}\n`,
+      await refused(
+        host,
+        ["panel-identity-write", "statement"],
+        JSON.stringify(ahead.envelope),
+      ),
+      "refusing the statement",
     );
-  });
-});
-
-test("a valid revoke needs only the next key's signature", async () => {
-  await withHost(async (host) => {
-    const keys = { current: await makeKey(), next: await makeKey() };
-    await pinWithNext(host, keys);
-    const result = await host.run(
-      ["panel-identity-write", "statement"],
-      await statement("revoke", keys, {
-        signers: { [keys.next.kid]: keys.next.pub },
-      }),
-    );
+    const fresh = await freshRotation(now);
+    await writeRotationPin(host, fresh.pin);
+    const result = await applyStatement(host, fresh.envelope);
     assertEquals(result.code, 0, result.stderr);
     assertStringIncludes(
       await Deno.readTextFile(host.path(PIN_PATH)),
-      `current=${keys.next.kid}\n`,
+      `current=${fresh.next}\n`,
     );
   });
 });
 
-test("a forged rotation, a mismatched signer key and a stale key set are refused", async () => {
+test("a document fills the rotation passkeys once, then only statements move the key set", async () => {
   await withHost(async (host) => {
-    const keys = { current: await makeKey(), next: await makeKey() };
-    const attacker = await makeKey();
-    await pinWithNext(host, keys);
-    const before = await Deno.readTextFile(host.path(PIN_PATH));
-
-    // Signed by the current key only: the next signature is the attacker's.
-    const forged = await statement("rotation", keys, { signNext: attacker });
-    // A signer pub that does not hash to the pinned fingerprint.
-    const wrongPub = await statement("rotation", keys, {
-      signers: {
-        [keys.current.kid]: keys.current.pub,
-        [keys.next.kid]: attacker.pub,
-      },
-    });
-    const stale = await statement("rotation", keys, { keyset: 1 });
-    for (const input of [forged, wrongPub, stale, "{}"]) {
-      const err = await refused(
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    const rotation = {
+      rpId: vectors.pin.rpId,
+      passkeys: [...vectors.pin.passkeys].reverse(),
+    };
+    const filled = await host.run(
+      ["panel-identity-write"],
+      await panel.document({ keyset: 4, rotation }),
+    );
+    assertEquals(filled.code, 0, filled.stderr);
+    const pin = await Deno.readTextFile(host.path(PIN_PATH));
+    assertStringIncludes(pin, "keyset=4\n");
+    assertStringIncludes(pin, `rp_id=${vectors.pin.rpId}\n`);
+    assertStringIncludes(
+      pin,
+      `passkeys=${passkeysLine(vectors.pin.passkeys)}\n`,
+    );
+    // Another set in a later document is ignored; the pinned one stays.
+    const other = {
+      rpId: "evil.example.test",
+      passkeys: [rotation.passkeys[0]],
+    };
+    const again = await host.run(
+      ["panel-identity-write"],
+      await panel.document({
+        keyset: 4,
+        rotation: other,
+        urls: ["https://new.example.test"],
+      }),
+    );
+    assertEquals(again.code, 0, again.stderr);
+    const kept = await Deno.readTextFile(host.path(PIN_PATH));
+    assertStringIncludes(kept, `rp_id=${vectors.pin.rpId}\n`);
+    assertStringIncludes(kept, "urls=https://new.example.test\n");
+    // A higher key set never comes from a document once passkeys are pinned.
+    assertStringIncludes(
+      await refused(
         host,
-        ["panel-identity-write", "statement"],
-        input,
+        ["panel-identity-write"],
+        await panel.document({ keyset: 5, rotation }),
+      ),
+      "refusing the identity document",
+    );
+    assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), kept);
+  });
+});
+
+test("a malformed rotation block is refused before anything is pinned", async () => {
+  await withHost(async (host) => {
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    const before = await Deno.readTextFile(host.path(PIN_PATH));
+    const good = vectors.pin.passkeys[0]!;
+    for (
+      const rotation of [
+        { rpId: "CP.example", passkeys: [good] },
+        { rpId: "cp.example.test", passkeys: [] },
+        { rpId: "cp.example.test", passkeys: [{ ...good, alg: "RS256" }] },
+        { rpId: "cp.example.test", passkeys: [{ ...good, pub: "AA" }] },
+        { rpId: "cp.example.test", passkeys: [good, good] },
+      ]
+    ) {
+      await refused(
+        host,
+        ["panel-identity-write"],
+        await panel.document({ rotation }),
       );
-      assertStringIncludes(err, "panel-identity-write");
     }
     assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), before);
   });

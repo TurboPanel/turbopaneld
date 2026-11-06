@@ -118,6 +118,7 @@ export const DAEMON_WIRE_FEATURES = [
   "dev-host-v1",
   "topology-generation-optional-v1",
   "signed-reports-v1",
+  "panel-keyset-statements-v1",
 ] as const;
 
 /**
@@ -245,6 +246,15 @@ export const SIGNIN_V2_FEATURE: DaemonWireFeature = "signin-v2";
  * the same bytes as before.
  */
 export const SIGNED_REPORTS_FEATURE: DaemonWireFeature = "signed-reports-v1";
+
+/**
+ * Passkey-approved key changes: this daemon pins rotation passkeys from the
+ * identity document once, follows the control plane's key-set chain
+ * (`keyset-chain.ts`) and signs a passkeys hash into its pin report. Nothing
+ * waits on the peer's list (expand-only).
+ */
+export const PANEL_KEYSET_STATEMENTS_FEATURE: DaemonWireFeature =
+  "panel-keyset-statements-v1";
 
 /**
  * This daemon holds an X25519 sealing key (registered with the control plane,

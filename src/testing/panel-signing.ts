@@ -30,7 +30,12 @@ export interface TestPanel {
   signing(): Promise<PanelSigningKey>;
   pin(overrides?: Partial<PanelIdentityPin>): PanelIdentityPin;
   identityFetch(
-    opts?: { nowMs: number; keyset?: number; urls?: string[] },
+    opts?: {
+      nowMs: number;
+      keyset?: number;
+      urls?: string[];
+      rotation?: unknown;
+    },
   ): Promise<PanelIdentityFetch>;
   hello(
     fields: {
@@ -88,6 +93,8 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
       urls: ["https://panel.example.test"],
       pinnedBy: "install",
       updated: "2026-11-01T00:00:00Z",
+      rpId: "",
+      passkeys: [],
       ...overrides,
     }),
     async identityFetch(opts = { nowMs: Date.now() }) {
@@ -101,6 +108,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         }],
         seal: { kid: sealKid, alg: "X25519", pub: encodeBase64Url(sealPub) },
         keyset: opts.keyset ?? keyset,
+        ...(opts.rotation === undefined ? {} : { rotation: opts.rotation }),
         urls: opts.urls ?? [],
         issued: new Date(opts.nowMs).toISOString(),
         expires: new Date(opts.nowMs + 30 * DAY_MS).toISOString(),

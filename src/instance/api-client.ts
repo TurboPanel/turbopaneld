@@ -13,6 +13,11 @@ import {
   type PanelIdentityFetch,
   type PanelSealKey,
 } from "./panel-identity-cache.ts";
+import {
+  KEYSET_STATEMENTS_PATH,
+  type KeysetEnvelope,
+  parseKeysetStatements,
+} from "./keyset-chain.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
 import { DAEMON_SIGNATURE_HEADER } from "../crypto/keys.ts";
@@ -609,6 +614,15 @@ export class DaemonApiClient {
       body: await response.text(),
       signature: response.headers.get("x-turbopanel-signature"),
     };
+  }
+
+  /** The control plane's key-set chain above `after` (public, self-authenticating). */
+  async getKeysetStatements(after: number): Promise<KeysetEnvelope[]> {
+    const response = await this.#request(
+      `${KEYSET_STATEMENTS_PATH}?after=${after}`,
+      { method: "GET" },
+    );
+    return parseKeysetStatements(await response.text());
   }
 
   /**

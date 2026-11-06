@@ -144,7 +144,13 @@ function helloFields(
     return fail("key is not pinned");
   }
   if (!iatFresh(hello.iat, nowMs)) return fail("iat out of range");
-  if (typeof hello.keyset !== "number" || hello.keyset < ctx.pin.keyset) {
+  // Once rotation passkeys are pinned, approved statements own the key set (a
+  // High Availability hello carries its secret's number); the key must still
+  // be the pinned one.
+  if (
+    typeof hello.keyset !== "number" ||
+    (ctx.pin.passkeys.length === 0 && hello.keyset < ctx.pin.keyset)
+  ) {
     return fail("keyset lower than pinned");
   }
   const sessionId = hello.sessionId;

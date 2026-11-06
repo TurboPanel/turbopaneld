@@ -339,3 +339,18 @@ signature against the pinned key itself (python3 + `openssl pkeyutl`), refuses a
 list, then rewrites the pin's `urls=` and `update-origin`'s `hosts=` together (the daemon tries
 the pin's addresses in order). `tp-orchestrate update` accepts `--host` equal to `host=` or any
 entry of `hosts=`, matched as a quoted whole value.
+
+While no rotation passkey is pinned, a verified document's `rotation` block fills `rp_id=` and
+`passkeys=` (`<pkid>.<es256|eddsa>.<base64url raw key>`, sorted) once, with its key set; after
+that a document must carry exactly the pinned key set. `panel-identity-write statement` takes a
+key-set envelope (`{statement, approvals}`, at most 16 KiB) and is the only way the key, key set
+or passkeys move afterwards: python3 checks the statement and every WebAuthn assertion
+(`rpIdHash`, UP+UV, `webauthn.get`, challenge = SHA-256 of the statement bytes, origin under the
+rp id, strict DER for ES256) and the approval rules (prev = pinned key, key set above the pinned
+one, `iat` at most 300 s ahead, a pinned approval, removals approved by a passkey that stays,
+additions or an rp id move proving possession); openssl verifies every signature (`dgst -sha256`
+for ES256, `pkeyutl -rawin` for EdDSA) and any failure refuses the whole statement. It rewrites
+`current=`, `keyset=`, `rp_id=`, `passkeys=`, empties `next=`, and moves `panel_key=` in
+`update-origin`. The shared vectors (`src/testing/keyset-statement-vectors.json`) are
+byte-identical to the control plane's and pinned by `check:contract-drift`. Root can hand-apply
+a downloaded statement: `sudo tp-host panel-identity-write statement < key-set-N.json`.

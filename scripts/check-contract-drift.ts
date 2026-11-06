@@ -312,6 +312,7 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
     ["src/daemon/authn/request-signature.ts", "REQUEST_PREFIX"],
     ["src/daemon/authn/attach-proof.ts", "ATTACH_PREFIX"],
     ["src/daemon/authn/pin-report.ts", "PIN_REPORT_PREFIX"],
+    ["src/daemon/authn/pin-report.ts", "PIN_PASSKEYS_REPORT_PREFIX"],
   ];
   const sources = await Promise.all(pairs.map(([file]) => readRel(tp, file)));
   for (const [index, [file, name]] of pairs.entries()) {
@@ -325,6 +326,21 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
       `${name} drifted`,
     );
   }
+}
+
+/** The key-set vectors are one file in both repos: the TypeScript and tp-host verifiers must agree. */
+async function checkKeysetVectors(tp: string, td: string): Promise<void> {
+  requireEqual(
+    requireText(
+      await readRel(tp, "src/test-fixtures/keyset-statement-vectors.json"),
+      "keyset-statement-vectors.json missing on the instance",
+    ),
+    requireText(
+      await readRel(td, "src/testing/keyset-statement-vectors.json"),
+      "keyset-statement-vectors.json missing on the daemon",
+    ),
+    "keyset-statement-vectors.json drifted",
+  );
 }
 
 async function checkMachineKey(tp: string, td: string): Promise<void> {
@@ -1271,6 +1287,7 @@ export async function runContractDriftCheck(
   await checkMetrics(tp, td);
   await checkHostname(tp, td);
   await checkMachineKey(tp, td);
+  await checkKeysetVectors(tp, td);
   await checkUpdateChannels(tp, td);
   await checkReportedIp(tp, td);
   await checkSlotMapping(tp, td);
