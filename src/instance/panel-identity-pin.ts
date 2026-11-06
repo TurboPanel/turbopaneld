@@ -56,7 +56,7 @@ const KEYS = [
 ] as const;
 /** Lines a pin from before rotation passkeys does not have; absent reads as empty. */
 const OPTIONAL_KEYS = ["rp_id", "passkeys"] as const;
-const ALL_KEYS: readonly string[] = [...KEYS, ...OPTIONAL_KEYS];
+const ALL_KEYS: ReadonlySet<string> = new Set([...KEYS, ...OPTIONAL_KEYS]);
 const RP_ID = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 const PASSKEY_ENTRY = /^([A-Za-z0-9_-]{43})\.(es256|eddsa)\.([A-Za-z0-9_-]+)$/;
 
@@ -71,7 +71,7 @@ function fields(text: string): PinFields {
     const at = line.indexOf("=");
     if (at < 1) throw new TypeError(`panel-identity: bad line "${line}"`);
     const key = line.slice(0, at);
-    if (!ALL_KEYS.includes(key) || map.has(key)) {
+    if (!ALL_KEYS.has(key) || map.has(key)) {
       throw new TypeError(`panel-identity: unexpected key "${key}"`);
     }
     map.set(key, line.slice(at + 1));
