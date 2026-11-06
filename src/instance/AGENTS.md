@@ -557,7 +557,8 @@ published channel.json — the product meaning is “alternate runtime,” not
 install/update, but Deno is still vendored on every host — `daemon-install.yml`
 and `daemon-converge.yml` run `deno-runtime` unconditionally, because co-located
 instance/mailer units resolve their ExecStart through `vendor/deno/current` even
-when the daemon itself runs the native binary. Config lives in
+when the daemon itself runs the native binary. (`daemon-converge.yml` never runs on a
+co-located development host; see `../orchestration/AGENTS.md`, Boot converge.) Config lives in
 `/etc/turbopanel` (`daemon.env`, `instance-ca.pem`); persistent identity in
 `/var/lib/turbopanel` (license, `server.id`, keys); runtime files in
 `/run/turbopanel`. Co-located dev keeps `deno run main.ts` from the home
