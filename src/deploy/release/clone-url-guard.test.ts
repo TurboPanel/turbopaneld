@@ -69,6 +69,60 @@ test("internal hosts are refused", () => {
   }
 });
 
+test("hosts with a local network ending are refused", () => {
+  for (
+    const url of [
+      "https://git.lan/o/r.git",
+      "https://GIT.LAN./o/r.git",
+      "https://git.example.corp/o/r.git",
+      "https://code.intranet/o/r.git",
+      "https://git.private/o/r.git",
+      "https://nas.home/o/r.git",
+      "ssh://git@git.lan:2222/o/r.git",
+      "git@git.corp:o/r.git",
+    ]
+  ) {
+    assertThrows(
+      () => assertCloneUrlAllowed(url),
+      CloneUrlRefusedError,
+      "repositories must be on a public git host",
+      url,
+    );
+  }
+  // Only the last label counts: these end in a public suffix.
+  for (
+    const url of [
+      "https://git.lan.example.com/o/r.git",
+      "https://git.home.example.org/o/r.git",
+      "https://git.example.homes/o/r.git",
+      "git@corp.example.com:o/r.git",
+    ]
+  ) {
+    assertCloneUrlAllowed(url);
+  }
+});
+
+test("IPv6 addresses that deliver to a private IPv4 address are refused", () => {
+  for (
+    const url of [
+      "https://[2002:7f00:1::1]/o/r.git",
+      "https://[2002:c0a8:101::1]/o/r.git",
+      "https://[::127.0.0.1]/o/r.git",
+      "https://[::10.0.0.5]/o/r.git",
+      "https://[2001:0:a00:5::1]/o/r.git",
+      "https://[64:ff9b:1::808:808]/o/r.git",
+    ]
+  ) {
+    assertThrows(
+      () => assertCloneUrlAllowed(url),
+      CloneUrlRefusedError,
+      "public git host",
+      url,
+    );
+  }
+  assertCloneUrlAllowed("https://[2002:808:808::1]/o/r.git");
+});
+
 test("a user, host or port that git and the URL parser read differently is refused", () => {
   for (
     const url of [

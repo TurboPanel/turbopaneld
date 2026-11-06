@@ -10,9 +10,11 @@
  * an empty host, a value git could take as an option, credentials in an https
  * URL, and a host that is internal by the same static rule a remote Compose
  * build source is held to (`internalHostReason`: loopback, link-local,
- * private and ULA literals, `localhost`, single-label and reserved names). A
- * DNS name is not resolved: a check before git's own lookup could be answered
- * differently a moment later, so it would promise more than it holds.
+ * private and ULA literals, `localhost`, single-label and reserved names,
+ * and local network endings: `.lan`, `.corp`, `.intranet`, `.private` and
+ * `.home`). A DNS name is not resolved: a check before git's own lookup
+ * could be answered differently a moment later, so it would promise more than
+ * it holds.
  *
  * git itself is also pinned to https and ssh ({@link REPO_READ_GIT_PROTOCOLS},
  * {@link gitProtocolEnv}), so a transport the check missed, or a redirect to
