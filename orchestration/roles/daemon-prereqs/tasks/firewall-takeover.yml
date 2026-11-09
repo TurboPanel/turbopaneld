@@ -60,6 +60,7 @@
 
 - name: Purge the distribution firewall front-ends — TurboPanel owns the host firewall
   ansible.builtin.apt:
+    lock_timeout: 300
     name:
       - ufw
       - firewalld

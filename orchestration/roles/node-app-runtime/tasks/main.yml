@@ -36,6 +36,7 @@
 # This role is Debian-family only (apt), so no other package manager applies.
 - name: Ensure ACL tooling and Node's libatomic are present
   ansible.builtin.apt:
+    lock_timeout: 300
     name:
       - acl
       - libatomic1
