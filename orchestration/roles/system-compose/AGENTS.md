@@ -40,8 +40,34 @@ same play and:
 6. Restarts (targeted `docker restart`, not `--force-recreate`) just the
    `queue` container when the `rabbitmq` role's config `template` task
    reported `changed` earlier in the play (`docker compose up -d` alone does
-   not notice a bind-mounted file's *content* changing), then re-waits for
-   readiness on that container.
+   not notice a bind-mounted file's *content* changing) **and the container
+   already existed before this converge** (`_system_compose_queue_existing`,
+   looked up before the stack is brought up). A container created in the same
+   converge already mounted the new file. The restart first waits for
+   `rabbitmq-diagnostics -q check_running`.
+7. Every converge, includes `tasks/queue-access.yml`: waits for
+   `check_running`, then makes sure the broker's application user exists with
+   the generated password, the `administrator` tag and full permissions on its
+   virtual host, and confirms it. Nothing changes on a healthy broker.
+   `playbooks/queue-config-refresh.yml` includes the same file by path after
+   every control-plane update, which is where a host installed in the broken
+   state heals (an update never runs this role).
+
+**Why steps 6 and 7 are written this way (fresh installs, 2026-11-09).** The
+broker image creates its application user and grants it the virtual host only
+while seeding a brand-new data directory, and it never seeds twice. The role
+used to restart the queue container whenever the broker config was written,
+which is always true on a first install, and `rabbitmq-diagnostics -q ping`
+(the check `wait-ready.sh` runs) answers a couple of seconds **before** the
+seed. The restart therefore landed between "created user" and "set
+permissions"; the user stayed without permissions, every connection was
+refused (`access to vhost '/' refused`) and every command answered "Command
+queue unavailable" until someone ran `rabbitmqctl set_permissions` by hand.
+`ping` is not a readiness check for anything that needs the broker
+application: use `check_running`. The password reaches `rabbitmqctl` on
+standard input only (`no_log` on that task); the listing and confirmation
+tasks carry no secret and stay readable.
+`src/orchestration/queue-first-boot.test.ts` pins all of this.
 
 **Labels:** every service in the Compose file carries **only**
 `com.turbopanel.system.component: <database|queue>` and

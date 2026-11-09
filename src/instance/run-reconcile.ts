@@ -1583,6 +1583,11 @@ async function refreshCaddyIfNeeded(
  * WebSocket, not through the broker, so the restart cannot drop it; the
  * panel's consumers reconnect. Running last means a failed or rolled-back
  * update never restarts the broker. Never blocks: a failure is a warning.
+ *
+ * The same play makes sure the broker's application user still has its
+ * password and its access to the virtual host, config change or not: a host
+ * whose first broker boot was interrupted has that user without permissions
+ * ("Command queue unavailable" on every command) and heals here.
  */
 async function refreshBrokerConfig(
   run: NonNullable<InstanceUpdateHooks["run"]>,

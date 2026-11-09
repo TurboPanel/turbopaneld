@@ -9,8 +9,10 @@
 # turbopanel-system Compose project once this role has generated the
 # secret/config below — see ../system-compose/tasks/main.yml. This role is
 # config-only and never invokes `docker`. `rabbitmq_conf_written` (registered
-# below) is read by system-compose to decide whether the queue container
-# needs a targeted restart to pick up broker config changes.
+# below) is read by system-compose to decide whether a queue container that
+# already existed needs a targeted restart to pick up broker config changes.
+# The broker's application user (created by the image on first boot, repaired
+# when that boot was cut short) is system-compose's too: tasks/queue-access.yml.
 
 
 - name: Ensure turbopanel group exists
