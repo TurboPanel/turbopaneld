@@ -133,6 +133,11 @@ test("the chain answer is parsed strictly and the gate allows one fetch a minute
   assertEquals(gate.tryEnter("https://b"), true);
   now = 60_000;
   assertEquals(gate.tryEnter("https://a"), true);
+  // After a fetch that applied a statement the address may be asked again at once.
+  assertEquals(gate.tryEnter("https://a"), false);
+  gate.release("https://a");
+  assertEquals(gate.tryEnter("https://a"), true);
+  assertEquals(gate.tryEnter("https://a"), false);
 });
 
 test("the passkeys hash is empty with none and order independent otherwise", async () => {

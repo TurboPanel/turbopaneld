@@ -6,6 +6,7 @@ import { classifyConnectFailure } from "./connect-failure.ts";
 import {
   createPanelResponseVerifier,
   PanelIdentityError,
+  pinnedSessionKey,
   readEnforcedPin,
   UNSIGNED_CONTROL_PLANE_ERROR,
   verifyPanelIdentityDocument,
@@ -148,4 +149,30 @@ test("pinned with no verified key held refuses every covered answer, as a retrya
   const err = await verifier.verify(path, 200, null, "{}").catch((e) => e);
   assertEquals(err instanceof PanelIdentityError, false);
   assertEquals(classifyConnectFailure(err).kind, "transient");
+});
+
+test("a session key: none without a pin, the verified key when pinned, and never a pinned session without one", async () => {
+  const panel = await createTestPanel();
+  const other = await createTestPanel();
+  const pin = panel.pin();
+  const key = await panel.signing();
+  // No pin: the plain session, whatever key is around.
+  assertEquals(pinnedSessionKey(null, undefined), null);
+  assertEquals(pinnedSessionKey(null, key), null);
+  assertEquals(pinnedSessionKey(pin, key), { pin, signing: key });
+  // Pinned with no verified key, or one the pin does not hold: no session at
+  // all. Retried like a network failure (the next connect verifies afresh),
+  // never parked as a wrong key.
+  for (const missing of [undefined, await other.signing()]) {
+    let thrown: unknown;
+    try {
+      pinnedSessionKey(pin, missing);
+    } catch (err) {
+      thrown = err;
+    }
+    assertInstanceOf(thrown, Error);
+    assertEquals(thrown instanceof PanelIdentityError, false);
+    assertEquals(thrown.message.includes("holds no verified key"), true);
+    assertEquals(classifyConnectFailure(thrown).kind, "transient");
+  }
 });

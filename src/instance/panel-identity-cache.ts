@@ -3,6 +3,12 @@ import { sealingKid } from "../crypto/hpke.ts";
 
 /** The control plane's identity document route; also the path its signature covers. */
 export const IDENTITY_DOCUMENT_PATH = "/api/daemon/v1/instance/identity";
+/**
+ * Largest identity document read: root takes at most 64 KiB (signature line
+ * and body together, `tp-host panel-identity-write`), so nothing larger could
+ * ever be followed.
+ */
+export const IDENTITY_DOCUMENT_MAX_BYTES = 64 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const KID_RE = /^[A-Za-z0-9_-]{43}$/;
 const textEncoder = new TextEncoder();

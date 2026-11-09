@@ -54,6 +54,7 @@ import {
   createPanelResponseVerifier,
   PanelIdentityError,
   type PanelResponseVerifier,
+  pinnedSessionKey,
   readEnforcedPin,
   verifyPanelIdentityDocument,
 } from "./panel-identity-trust.ts";
@@ -612,7 +613,7 @@ export class InstanceClient {
   readonly #writePanelPin: (fetched: PanelIdentityFetch) => Promise<void>;
   readonly #writeKeysetStatement: (envelope: KeysetEnvelope) => Promise<void>;
   readonly #readPin: () => Promise<PanelIdentityPin | null>;
-  readonly #keysetChainGate = createKeysetChainGate();
+  readonly #keysetChainGate = createKeysetChainGate(now);
   #httpClient: Deno.HttpClient | undefined;
   readonly #httpClientPinned: boolean;
   readonly #initialBackoffMs: number;
@@ -1120,13 +1121,30 @@ export class InstanceClient {
     pin: PanelIdentityPin,
     force = false,
   ): Promise<void> {
+    const followed = await this.#verifyPanelIdentityOnce(pin, force, true);
+    // The key-set chain moved the pin: the document is fetched and proven
+    // again under the new pin (no second catch-up), so a pinned server never
+    // leaves here without a key verified against the pin it now holds.
+    if (followed) await this.#verifyPanelIdentityOnce(followed, true, false);
+  }
+
+  /**
+   * One fetch-and-verify of the identity document against `pin`. Resolves to
+   * the new pin when the document led to a key-set catch-up that applied
+   * (`mayCatchUp`), else null.
+   */
+  async #verifyPanelIdentityOnce(
+    pin: PanelIdentityPin,
+    force: boolean,
+    mayCatchUp: boolean,
+  ): Promise<PanelIdentityPin | null> {
     const nowMs = now();
     const cached = this.#panelKey;
     if (
       !force && cached && nowMs - cached.fetchedAtMs < PANEL_KEY_REFRESH_MS &&
       pinAccepts(pin, cached.kid) && cached.keyset >= pin.keyset
     ) {
-      return;
+      return null;
     }
     // The old key stays until a verified replacement: while pinned, a missing
     // key refuses everything rather than accepting unsigned answers.
@@ -1157,27 +1175,51 @@ export class InstanceClient {
     const signing = await verifyPanelIdentityDocument(fetched, pin, nowMs);
     // The address moved on while this ran (a background re-check outliving
     // its socket): this proof belongs to the old address, never the new one.
-    if (this.#config !== target) return;
+    if (this.#config !== target) return null;
     this.#panelKey = { ...signing, fetchedAtMs: nowMs };
-    await this.#followDocumentUrls(fetched, pin, signing.keyset);
+    return await this.#followDocument(
+      fetched,
+      pin,
+      signing.keyset,
+      mayCatchUp,
+    );
   }
 
   /**
-   * Rewrite the pin's address list from a document that just verified. Root
-   * checks the signature again (`tp-host panel-identity-write`); a higher key
-   * set arrives only with a signed key change, never here. A refusal is
-   * logged and changes nothing: the old list keeps working.
+   * Follow a document that just verified. With rotation passkeys pinned, a
+   * higher key set starts a key-set catch-up (`mayCatchUp`); when one applied
+   * this resolves to the new pin and the caller proves the document again
+   * under it. Otherwise the pin's address list is rewritten from the
+   * document: root checks the signature again (`tp-host
+   * panel-identity-write`), and a refusal is logged and changes nothing (the
+   * old list keeps working). Resolves to null whenever no catch-up applied.
    */
-  async #followDocumentUrls(
+  async #followDocument(
     fetched: PanelIdentityFetch,
     pin: PanelIdentityPin,
     keyset: number,
-  ): Promise<void> {
+    mayCatchUp: boolean,
+  ): Promise<PanelIdentityPin | null> {
     const urls = identityDocumentUrls(fetched.body);
     if (pin.passkeys.length > 0 && keyset > pin.keyset) {
       // A newer key set (a passkey change) comes only through the chain.
-      await this.#catchUpKeyset();
-      return;
+      const followed = mayCatchUp ? await this.#catchUpKeyset() : null;
+      if (followed) return followed;
+      // Not followed (asked within the last minute, nothing applied, or the
+      // chain stopped short): root takes addresses only from a document at
+      // the pinned key set, so a new list waits for the chain. The next
+      // document check tries again.
+      logWarn(
+        "instance",
+        `panel-identity: the identity document is at key set ${keyset}, this server at ${pin.keyset}, and the chain was not followed this time${
+          urls && urlListsDiffer(urls, pin.urls)
+            ? `; its address list (${
+              sanitizeForLog(urls.join(","))
+            }) is not followed until it is`
+            : ""
+        }`,
+      );
+      return null;
     }
     // While no rotation passkey is pinned, a document that names them fills
     // the pin once (tp-host checks it again and takes its key set too).
@@ -1187,7 +1229,7 @@ export class InstanceClient {
       !urls ||
       (!fills && (keyset !== pin.keyset || !urlListsDiffer(urls, pin.urls)))
     ) {
-      return;
+      return null;
     }
     try {
       await this.#writePanelPin(fetched);
@@ -1209,19 +1251,22 @@ export class InstanceClient {
         sanitizeForLog(err),
       );
     }
+    return null;
   }
 
   /**
    * Follow the key-set chain from the address in use (at most once a minute
-   * per address). True when root applied at least one statement: the pin moved
-   * on, so the caller retries at once with the new key.
+   * per address, unless the last try applied something). Resolves to the new
+   * pin when root applied at least one statement, else null. The verified key
+   * is left alone: the caller proves the control plane again under the new
+   * pin (the document path at once, the connect-failure path on its retry).
    */
-  async #catchUpKeyset(): Promise<boolean> {
+  async #catchUpKeyset(): Promise<PanelIdentityPin | null> {
     const pin = this.#panelPin;
-    if (!pin || pin.passkeys.length === 0) return false;
+    if (!pin || pin.passkeys.length === 0) return null;
     const target = this.#config;
     const address = target.kind === "url" ? target.baseUrl : target.socketPath;
-    if (!this.#keysetChainGate.tryEnter(address)) return false;
+    if (!this.#keysetChainGate.tryEnter(address)) return null;
     const fetcher = new DaemonApiClient({
       config: target,
       httpClient: this.#httpClient,
@@ -1235,18 +1280,20 @@ export class InstanceClient {
         readPin: this.#readPin,
         log: (line) => logInfo("instance", sanitizeForLog(line)),
       });
-      if (applied === 0) return false;
-      const updated = await this.#readPin();
-      if (updated) this.#panelPin = updated;
-      this.#panelKey = undefined;
-      return true;
+      if (applied === 0) return null;
+      // Progress: a longer chain, or a check that follows at once, may ask
+      // again without waiting out the minute.
+      this.#keysetChainGate.release(address);
+      const updated = await this.#readPin() ?? pin;
+      this.#panelPin = updated;
+      return updated;
     } catch (err) {
       logWarn(
         "instance",
         "panel-identity: could not follow the key-set chain:",
         sanitizeForLog(err),
       );
-      return false;
+      return null;
     }
   }
 
@@ -1620,6 +1667,8 @@ export class InstanceClient {
     // A key this server does not hold may be a rotation it has not seen yet:
     // follow the chain from this address before trying any other.
     if (raw.kind === "panel-identity" && await this.#catchUpKeyset()) {
+      // The retry proves the control plane afresh under the new pin.
+      this.#panelKey = undefined;
       this.#resetBackoff();
       return;
     }
@@ -2029,6 +2078,8 @@ export class InstanceClient {
     await this.#waitForConnectPreconditions();
     // Pinned: the control plane proves its key before anything is sent to it.
     if (this.#panelPin) await this.#verifyPanelIdentity(this.#panelPin);
+    // Fail closed: pinned without a verified key, nothing more is sent.
+    pinnedSessionKey(this.#panelPin, this.#panelKey);
 
     // Do not close the active socket here: by the time #connectOnce() is called
     // from #runConnectLoop(), the previous socket has already closed naturally
@@ -2186,6 +2237,9 @@ export class InstanceClient {
   }
 
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
+    // Pinned without a verified key throws here: the upgrade would go out
+    // without the daemon signature and the session would run unchecked.
+    const pinned = pinnedSessionKey(this.#panelPin, this.#panelKey);
     const upgradeSignature = this.#daemonSigningKey
       ? await this.#signRequestWithDaemonKey(this.#daemonSigningKey, {
         method: "GET",
@@ -2257,11 +2311,11 @@ export class InstanceClient {
     this.#pinnedHelloApplied = false;
     // Pinned: only the hello-nonce goes out until the control plane's signed
     // hello verifies; presence, reporters and held results start after it.
-    const signed = this.#panelPin && this.#panelKey
+    const signed = pinned
       ? new SignedPanelSession({
         ws,
-        pin: this.#panelPin,
-        signing: this.#panelKey,
+        pin: pinned.pin,
+        signing: pinned.signing,
         onVerified: async (hello) => {
           logInfo("instance", "panel-identity: signed hello verified");
           // Awaited by the session, so no later frame is handled before the

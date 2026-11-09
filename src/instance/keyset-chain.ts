@@ -23,8 +23,13 @@ export const KEYSET_STATEMENTS_PATH =
   "/api/daemon/v1/instance/identity/statements";
 /** At most one chain fetch per address in this window. */
 export const KEYSET_CHAIN_MIN_INTERVAL_MS = 60_000;
-/** Most statements applied in one catch-up; the next catch-up continues. */
-const MAX_STATEMENTS_PER_PASS = 100;
+/** Most statements in one answer and applied in one catch-up; the next catch-up continues. */
+export const MAX_STATEMENTS_PER_PASS = 100;
+/** Largest envelope root accepts (`tp-host panel-identity-write statement`). */
+export const KEYSET_ENVELOPE_MAX_BYTES = 16 * 1024;
+/** Largest honest chain answer: a full page of full envelopes plus the JSON around them. */
+export const KEYSET_CHAIN_MAX_BYTES = MAX_STATEMENTS_PER_PASS *
+    KEYSET_ENVELOPE_MAX_BYTES + 1024;
 
 export type KeysetEnvelope = {
   statement: string;
@@ -120,10 +125,18 @@ export async function followKeysetChain(
   return applied;
 }
 
-/** Once-a-minute gate per address, so a control plane that keeps failing is not hammered. */
+/**
+ * Once-a-minute gate per address, so a control plane that keeps failing is not
+ * hammered. `release` reopens it after a fetch that applied a statement: each
+ * one is approved by pinned passkeys and raises the key set, so progress
+ * cannot loop.
+ */
 export function createKeysetChainGate(now: () => number = Date.now) {
   const last = new Map<string, number>();
   return {
+    release(address: string): void {
+      last.delete(address);
+    },
     tryEnter(address: string): boolean {
       const at = now();
       const before = last.get(address);

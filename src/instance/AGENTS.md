@@ -1150,12 +1150,37 @@ On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):
 - Catch-up (`keyset-chain.ts`): on a `panel-identity` connect failure (a hello,
   document or signed answer under a key this server does not hold), or a
   document with a higher key set, the daemon fetches the chain from the address
-  in use (at most once a minute per address), hands each statement whose `prev`
-  is its pinned key to `tp-host panel-identity-write statement` in order,
-  re-reads the pin after each, and reconnects at once when one applied. Nothing
-  applied: the old failover and park rules. A server offline for weeks
-  catches up the same way; one that never learned the passkeys cannot follow a
-  rotation and needs a fresh install command.
+  in use (at most once a minute per address, unless the last fetch applied a
+  statement), hands each statement whose `prev` is its pinned key to
+  `tp-host panel-identity-write statement` in order and re-reads the pin after
+  each. A server offline for weeks catches up the same way; one that never
+  learned the passkeys cannot follow a rotation and needs a fresh install
+  command. What follows a catch-up that applied something depends on where it
+  started:
+  - From a connect failure: the verified key is dropped, the backoff is reset
+    and the next attempt comes after the ordinary reconnect wait (jittered,
+    250 ms up to the initial backoff). It proves the identity document afresh
+    under the new pin before anything else is sent. Nothing applied: the old
+    failover and park rules.
+  - From a document (the connect path, or the background re-check a signed
+    hello starts): the document is fetched and verified again under the new
+    pin inside the same check, with no second catch-up, so the check never
+    ends pinned without a verified key. Once the document is at the pinned key
+    set, its address list is followed as usual. A failure of that second
+    fetch fails the check like any other document failure.
+  - A higher key set that was not followed (asked within the last minute, or
+    nothing applied) is logged. The key just verified under the pin stays in
+    use, and the document's address list waits: root takes addresses only
+    from a document at the pinned key set. The next document check tries again.
+- A pinned server never opens a socket without a control plane key verified
+  against its pin (`pinnedSessionKey`, checked after the identity check and
+  again before the upgrade request). The attempt fails as a plain retryable
+  error; there is no fallback to the unsigned session.
+- The identity document and the chain are fetched without a token, so both are
+  bounded: `PUBLIC_GET_TIMEOUT_MS` (15 s for headers and body together) and a
+  size cap, past which the body is dropped unread (`IDENTITY_DOCUMENT_MAX_BYTES`,
+  the 64 KiB root accepts; `KEYSET_CHAIN_MAX_BYTES`, one page of 100 statements
+  of 16 KiB).
 - With passkeys pinned the signed hello's `keyset` is not compared (the High
   Availability hello carries its secret's number); its `kid` must still be the
   pinned key.
