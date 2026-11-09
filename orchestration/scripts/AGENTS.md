@@ -335,7 +335,8 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
 `lib/panel-identity` and `lib/update-origin` are written by `run.sh` and changed afterwards only by
 `tp-host panel-identity-write` (no generic verb may name them). With no argument it reads the
 `X-TurboPanel-Signature` header line and the exact identity document from stdin, checks the
-signature against the pinned key itself (python3 + `openssl pkeyutl`), refuses an empty address
+signature against the pinned key itself (python3 through `tp_python`, which runs `python3 -I -S` from `/` so
+nothing in the caller's directory is imported as root, + `openssl pkeyutl`), refuses an empty address
 list, then rewrites the pin's `urls=` and `update-origin`'s `hosts=` together (the daemon tries
 the pin's addresses in order). `tp-orchestrate update` accepts `--host` equal to `host=` or any
 entry of `hosts=`, matched as a quoted whole value.

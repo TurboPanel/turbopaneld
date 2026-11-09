@@ -23,6 +23,7 @@
 # setfacl, for the traverse-only grants below; unzip, for the release archive.
 - name: Ensure ACL tooling and unzip are present
   ansible.builtin.apt:
+    lock_timeout: 300
     name:
       - acl
       - unzip

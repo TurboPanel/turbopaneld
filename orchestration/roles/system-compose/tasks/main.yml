@@ -135,6 +135,18 @@
         - item.active | bool
       changed_when: true
 
+    # Whether the queue container was there before this converge brings the
+    # stack up. Asked after the migration removal above, so a container that
+    # step just removed counts as absent. The config-change restart further
+    # down only applies to a container that pre-dates this converge.
+    - name: Check whether the queue container already exists
+      ansible.builtin.command:
+        argv: [docker, ps, -a, -q, --filter, "name=^{{ rabbitmq_container_name }}$"]
+      register: _system_compose_queue_existing
+      changed_when: false
+      failed_when: false
+      when: _system_compose_queue_active | bool
+
     # Adding a digest to an image string makes Compose recreate the container,
     # so a stack already running on the bare tag keeps it; the digest applies on
     # first create or when the stored file already carries one.
@@ -226,6 +238,29 @@
     # because a bind-mounted config file's *content* changed (only container
     # recreation picks that up) — replicate the targeted restart-on-change the
     # trimmed rabbitmq role used to do via its own docker-run path.
+    #
+    # Only for a container that existed before this converge. One created
+    # above already mounted the new file, so a restart would gain nothing, and
+    # on a first boot it is harmful: it stops the broker while it seeds its
+    # data directory, between creating the application user and granting it
+    # the virtual host. The broker never seeds again, the user stays without
+    # permissions, and every command answers "Command queue unavailable"
+    # (fresh installs, 2026-11-09). The wait before the restart covers a
+    # container that pre-dates this converge but is still starting.
+    - name: Wait for the queue broker before a config-triggered restart
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmq-diagnostics, -q, check_running]
+      register: _system_compose_queue_prerestart
+      until: _system_compose_queue_prerestart.rc == 0
+      retries: 60
+      delay: 2
+      changed_when: false
+      when:
+        - _system_compose_queue_active | bool
+        - rabbitmq_conf_written is defined
+        - rabbitmq_conf_written is changed
+        - _system_compose_queue_existing.stdout | default('') | trim | length > 0
+
     - name: Restart queue container when broker config changed
       ansible.builtin.command:
         argv: [docker, restart, "{{ rabbitmq_container_name }}"]
@@ -233,20 +268,15 @@
         - _system_compose_queue_active | bool
         - rabbitmq_conf_written is defined
         - rabbitmq_conf_written is changed
+        - _system_compose_queue_existing.stdout | default('') | trim | length > 0
       changed_when: true
 
-    - name: Wait for queue readiness after config-triggered restart
-      ansible.builtin.command:
-        argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmq-diagnostics, -q, ping]
-      register: _system_compose_queue_recheck
-      until: _system_compose_queue_recheck.rc == 0
-      retries: 30
-      delay: 2
-      changed_when: false
-      when:
-        - _system_compose_queue_active | bool
-        - rabbitmq_conf_written is defined
-        - rabbitmq_conf_written is changed
+    # Every converge: wait until the broker has really started (first boot or
+    # after the restart above), then make sure its application user exists
+    # with the generated password and full access to its virtual host.
+    - name: Ensure the queue application user can use the broker
+      ansible.builtin.include_tasks: queue-access.yml
+      when: _system_compose_queue_active | bool
 
     - name: Install Postgres backup script
       ansible.builtin.template:

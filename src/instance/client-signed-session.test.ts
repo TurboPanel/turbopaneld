@@ -375,6 +375,76 @@ it({
 
 it({
   name:
+    "a signed update may name any build on the rail, not only the channel head",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "canary");
+    const other =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
+    let headFetches = 0;
+    const resolvedFrom: (string | undefined)[] = [];
+    const restoreHooks = installClientTestHooks({
+      assertUpdateDiskPreflight: () => Promise.resolve(),
+      fetchChannelHeadVersion: () => {
+        headFetches += 1;
+        return Promise.resolve("0.1.1-canary.20260927-193059-fc561fc");
+      },
+      resolveUpdate: (_config, env) => {
+        resolvedFrom.push(env?.TURBOPANEL_MANIFEST_URL);
+        return Promise.reject(new Error("manifest unavailable in this test"));
+      },
+    });
+    try {
+      await withPinnedClient(async ({ socket, panel, nonce }) => {
+        socket.receive(
+          await panel.hello({
+            nonce,
+            sessionId: "sess-1",
+            iat: Math.floor(Date.now() / 1000),
+          }),
+        );
+        await waitFor(
+          "presence hello after the verified hello",
+          () => sentFrames(socket).some((frame) => frame.type === "hello"),
+        );
+        socket.receive(
+          await panel.frame({
+            type: "update",
+            id: "upd-signed-build",
+            manifestUrl: other,
+            at: new Date().toISOString(),
+          }, {
+            sessionId: "sess-1",
+            seq: 1,
+            iat: Math.floor(Date.now() / 1000),
+          }),
+        );
+        const findResult = () =>
+          sentFrames(socket).find((frame) =>
+            frame.type === "update-result" && frame.id === "upd-signed-build"
+          );
+        await waitFor("signed update-result", () => findResult() !== undefined);
+        assertEquals(findResult()!.errorCode === "manifest_pinned", false);
+        assertEquals(headFetches, 0);
+        assertEquals(resolvedFrom, [other]);
+      });
+    } finally {
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
+  name:
     "a result sent before the attach frame is held, then goes out signed once the control plane lists the feature",
   permissions: {
     env: true,

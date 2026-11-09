@@ -212,6 +212,29 @@ jobs:
           sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/turbopanel
           deno run --allow-read --allow-write=/var/lib/turbopanel --allow-env=GITHUB_ACTIONS scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel
 
+      # The tests that serve the real control plane template with the pinned
+      # Caddy (headers, error pages, redirects, grace period, in-place edits)
+      # skip without it. Same version and SHA-256 as the caddy role; a missing
+      # or wrong binary fails here instead of the tests skipping quietly.
+      - name: Download the pinned Caddy for the template tests
+        run: |
+          set -eu
+          defaults=orchestration/roles/caddy/defaults/main.yml
+          version="$(sed -n 's/^caddy_version: "\(.*\)"$/\1/p' "$defaults")"
+          sha="$(awk -v v="\"${version}\":" '$1 == v { found = 1; next } found && $1 == "x86_64:" { gsub(/"/, "", $2); print $2; exit }' "$defaults")"
+          if [ -z "$version" ] || [ -z "$sha" ]; then
+            echo "::error::no Caddy pin or x86_64 digest in $defaults"
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/pinned-caddy"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/caddy.tar.gz" \
+            "https://github.com/caddyserver/caddy/releases/download/v${version}/caddy_${version}_linux_amd64.tar.gz"
+          echo "${sha}  $dir/caddy.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/caddy.tar.gz" -C "$dir" caddy
+          "$dir/caddy" version | grep -q "^v${version} "
+          echo "TURBOPANEL_TEST_CADDY=$dir/caddy" >> "$GITHUB_ENV"
+
       - name: Test with coverage
         env:
           # The real-Postgres suites must run here, never skip on a Docker hiccup.

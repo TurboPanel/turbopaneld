@@ -1830,9 +1830,14 @@ tp_url_host() {
   printf '%s' "$_uh"
 }
 
+# TurboPanel High Availability answers on these exact names only (the control
+# plane's own deploy routes: live, staging, testing). Every other name is a
+# self-hosted control plane, including other names under turbopanel.dev: the
+# canary host canary.turbopanel.dev is a self-hosted install, and a wildcard
+# here labelled every server enrolled with it as High Availability.
 tp_host_is_ha() {
   case $1 in
-    turbopanel.app|*.turbopanel.dev) return 0 ;;
+    turbopanel.app|staging.turbopanel.dev|testing.turbopanel.dev) return 0 ;;
     *) return 1 ;;
   esac
 }

@@ -5652,7 +5652,7 @@ tp_verb_panel_identity_statement() {
   head -c 8193 > "$TP_STAGE/statement"
   [ "$(wc -c < "$TP_STAGE/statement")" -le 8192 ] || tp_die "panel-identity-write: statement too large"
   mkdir "$TP_STAGE/v"
-  python3 -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_next" "$_ps_keyset" ||
+  tp_python -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_next" "$_ps_keyset" ||
     tp_die "panel-identity-write: refusing the statement"
   openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pubn.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sign" >/dev/null 2>&1 ||
     tp_die "panel-identity-write: the next key's signature is invalid"
@@ -5677,6 +5677,15 @@ tp_verb_panel_identity_statement() {
     tp_put_file "$_ps_origin" 600 root root < "$TP_STAGE/origin"
   fi
   tp_put_file "$_ps_file" 640 root tp < "$TP_STAGE/new"
+}
+
+# Root's python3, run from / in isolated mode: -I drops the script and current
+# directories from sys.path and ignores PYTHON* variables and the user site,
+# -S skips the site module. sudo keeps the caller's directory, so without this
+# a module the daemon account left there (base64.py, json.py, ...) would be
+# imported as root before any signature check. Every path passed is absolute.
+tp_python() {
+  (cd / && python3 -I -S "$@")
 }
 
 tp_pin_field_of() {
@@ -5704,7 +5713,7 @@ tp_verb_panel_identity_write() {
   # The body is signed byte for byte; sed adds nothing but a missing final newline.
   [ "$(tail -c 1 "$TP_STAGE/in" | wc -l)" -eq 0 ] || tp_die "panel-identity-write: the body must not end in a newline"
   mkdir "$TP_STAGE/v"
-  python3 -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" ||
+  tp_python -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" ||
     tp_die "panel-identity-write: refusing the identity document"
   openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pub.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sig" >/dev/null 2>&1 ||
     tp_die "panel-identity-write: the identity document signature is invalid"
