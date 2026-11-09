@@ -62,9 +62,14 @@ import {
   type EnvironmentStopFolderState,
   type EnvironmentStopPayload,
   type EnvironmentStopResult,
+  type EnvironmentStopVolumeState,
   parseEnvironmentStopPayload,
   type StopSiteRelease,
 } from "../contracts/commands-contracts.ts";
+import {
+  removeStopVolumes,
+  volumeSummary,
+} from "./stop-environment-volumes.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -412,8 +417,12 @@ async function removeEarlierNamedContainers(
 
 /**
  * Tear down a deployed environment stack (compose down + volumes + hosting site
- * + per-service release trees). The deployment dir keeps everything a service
- * wrote there unless the payload sets `removeDeploymentDir` (a delete).
+ * + per-service release trees). `compose down --volumes` removes only volumes
+ * Compose created itself (anonymous ones, or ones whose compose entry sets its
+ * own `name:`); every registered volume is mounted `external: true` and stays
+ * unless the payload names it in `removeVolumes`. The deployment dir keeps
+ * everything a service wrote there unless the payload sets
+ * `removeDeploymentDir` (a delete).
  * Idempotent when the compose file is already gone.
  */
 export async function handleEnvironmentStop(
@@ -477,6 +486,17 @@ async function stopEnvironmentLocked(
   if (dockerPresent) {
     await removeEarlierNamedContainers(parsedPayload, deploymentDir, run);
   }
+
+  // Only when the Destroy asked to delete data. Runs on the "already stopped"
+  // path too, so data kept by an earlier Destroy can still be deleted.
+  const volumes = parsedPayload.removeVolumes === undefined
+    ? undefined
+    : await removeStopVolumes(parsedPayload.removeVolumes, {
+      environmentId: parsedPayload.environmentId,
+      dockerPresent,
+      run,
+      logSink,
+    });
 
   // The containers are down, so the manifest must go now: a later step that
   // throws would otherwise leave a stopped stack that the next daemon start
@@ -559,24 +579,32 @@ async function stopEnvironmentLocked(
   const stopped = hasCompose
     ? `Stopped environment ${parsedPayload.environmentId}`
     : `Environment ${parsedPayload.environmentId} already stopped`;
-  const summary = retirementSummary(stopped, retirement);
+  const volumesLine = volumes === undefined ? null : volumeSummary(volumes);
+  const summary = [retirementSummary(stopped, retirement), volumesLine]
+    .filter((part): part is string => part !== null)
+    .join("; ");
   logInfo(
     "commands",
     `environment.stop completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
-  return stopResult(parsedPayload.projectName, summary, folders);
+  return stopResult(parsedPayload.projectName, summary, folders, volumes);
 }
 
-/** The stop result; `folders` is present only when folders were named. */
+/**
+ * The stop result; `folders` is present only when folders were named, and
+ * `volumes` only when the payload named volumes to remove.
+ */
 function stopResult(
   projectName: string,
   summary: string,
   folders: EnvironmentStopFolderState[],
+  volumes: EnvironmentStopVolumeState[] | undefined,
 ): EnvironmentStopResult {
   return {
     projectName,
     summary,
     containers: [],
     ...(folders.length > 0 ? { folders } : {}),
+    ...(volumes === undefined ? {} : { volumes }),
   };
 }

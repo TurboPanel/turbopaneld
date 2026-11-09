@@ -118,6 +118,7 @@ export const DAEMON_WIRE_FEATURES = [
   "dev-host-v1",
   "topology-generation-optional-v1",
   "signed-reports-v1",
+  "environment-stop-remove-volumes-v1",
 ] as const;
 
 /**
@@ -139,6 +140,16 @@ export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
  */
 export const DEPLOY_HOSTINGS_ONLY_FEATURE: DaemonWireFeature =
   "deploy-hostings-only-v1";
+
+/**
+ * This daemon honours `removeVolumes` on `environment.stop`: after the stack
+ * is down it removes each named registered Docker volume and reports what it
+ * did per volume. The control plane refuses a Destroy that deletes data unless
+ * the daemon of every server the stop goes to lists this feature; an older
+ * daemon would ignore the field and keep the data without saying so.
+ */
+export const STOP_REMOVE_VOLUMES_FEATURE: DaemonWireFeature =
+  "environment-stop-remove-volumes-v1";
 
 /**
  * This daemon honours `sendViaHeader` on `environment.deploy`: the hosting web

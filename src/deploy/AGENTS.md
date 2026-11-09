@@ -683,7 +683,21 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 
 1. `docker compose -p <projectName> -f compose.yaml down --remove-orphans --volumes`
    against `resolveDeployedComposePaths` (the compiled `compose.yaml`, and nothing
-   else) — idempotent no-op when no compose file exists.
+   else) — idempotent no-op when no compose file exists. `--volumes` removes
+   only volumes Compose made itself (anonymous ones, or ones whose compose entry
+   sets its own `name:`). Every registered volume is mounted `external: true`
+   by the overlay (`buildStorageVolumesFragment`), so it stays.
+   - Only when the payload carries `removeVolumes` (the Destroy dialog's
+     "Also Delete the Data Volumes", wire feature
+     `environment-stop-remove-volumes-v1`): after the stack and any containers
+     under an earlier project name are down, each named volume is removed by
+     its exact name (`src/commands/stop-environment-volumes.ts`). Names are
+     storage ids (the parser refuses anything else); a volume any container
+     still uses is kept, removal is `docker volume rm` without `-f`, and
+     nothing throws. Each volume comes back in `volumes[]` as `removed`,
+     `absent`, `kept` or `failed` (with a reason), and in the transcript. It
+     also runs when the compose file is already gone, so data an earlier
+     Destroy kept can still be deleted.
 2. Best-effort `docker network rm` for payload `fabricNetworks[]` (`tpn_*`)
    then prune those names from `state.json` so boot re-reconcile does not
    recreate them. Missing / active-endpoint errors must not fail the stop.

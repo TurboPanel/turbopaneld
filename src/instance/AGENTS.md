@@ -131,6 +131,13 @@ and all) is handed to its owner role, ownership only: the objects in one
 transaction with a 5 s lock timeout, then the database itself. The
 control plane sends it only to a primary that lists it.
 
+**Destroy deletes data (`environment-stop-remove-volumes-v1`).** No message:
+it says this daemon honours `removeVolumes` on `environment.stop` and reports
+`volumes[]` in the result (see `../deploy/AGENTS.md`, `environment.stop`). The
+control plane refuses a Destroy that deletes data (409) unless every server
+the stop goes to lists it, because an older daemon would ignore the field and
+keep the data without saying so. A plain Destroy is unchanged.
+
 **Managed permissions read (`managed-permissions-read-v1`).** Same shape as
 on-demand health: a control plane that sees the feature may send
 `managed-permissions-request` (`managedId`, `engine`, `logins` up to 50,
