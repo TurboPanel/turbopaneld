@@ -354,6 +354,24 @@ describe("host-inventory", () => {
     });
   });
 
+  it("hostResourcesFromProc names a Raspberry Pi 5's four Cortex-A76 cores", () => {
+    const cpuinfo = Deno.readTextFileSync(
+      new URL("./testdata/raspberry-pi-5-cpuinfo.txt", import.meta.url),
+    );
+    const resources = hostResourcesFromProc(
+      "cpu  0\ncpu0 0\ncpu1 0\ncpu2 0\ncpu3 0\n",
+      undefined,
+      cpuinfo,
+      "aarch64",
+    );
+    assertEquals(resources?.cpus?.length, 1);
+    const cpu = resources?.cpus?.[0];
+    assertEquals(cpu?.name, "Cortex-A76");
+    assertEquals(cpu?.vendorId, "0x41");
+    assertEquals(cpu?.cores?.total, 4);
+    assertEquals(cpu?.threads?.total, 4);
+  });
+
   it("hostResourcesFromProc lists two sockets in physical-id order", () => {
     const cpuinfo = [
       "processor\t: 0",

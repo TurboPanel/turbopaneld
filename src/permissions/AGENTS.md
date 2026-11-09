@@ -109,7 +109,15 @@ it regresses:
 - **Install root ownership** — `/opt/turbopanel`, `bin/`, `lib/`, `share/`,
   `share/orchestration` and every vendored runtime are `root:tp 0750`
   (`turbopanel-user`, `daemon-layout`); `daemon-install.yml` no longer chowns
-  the vendor or orchestration trees to `tp`. The daemon can write only
+  the vendor or orchestration trees to `tp`. Two exceptions let other accounts
+  traverse without listing (an `other:x` ACL, like `vendor/` itself):
+  `vendor/cloudflared` and the Caddy folders `vendor/caddy` and
+  `vendor/caddy/<version>` (`caddy` role), because the hosting Caddy account
+  is deliberately not in group `tp`. uv makes its `.lock` files `0666` and
+  keeps an existing file's mode, so `turbopanel-user` sets the interpreter and
+  Ansible tree locks to `0640` under the install owner and
+  `vendor/uv/cache/.lock` to `0640` under the daemon account, which owns that
+  cache (`src/orchestration/vendor-runtime-modes.test.ts`). The daemon can write only
   `DAEMON_WRITABLE_VENDOR_DIRS` (`vendor/uv/cache`, `vendor/cloudflared`) plus
   the FHS state/config/log/run/backup trees — ownership, not the Deno grant,
   is the boundary here (the grant also names `INSTALLER_VENDOR_DIRS` for the
