@@ -55,10 +55,10 @@
   when: >-
     (_server_headers_inserted is not skipped
      and _server_headers_inserted.msg is defined
-     and _server_headers_inserted.msg is search('validation'))
+     and _server_headers_inserted.msg is search('failed to validate'))
     or (_server_headers_errors_inserted is not skipped
      and _server_headers_errors_inserted.msg is defined
-     and _server_headers_errors_inserted.msg is search('validation'))
+     and _server_headers_errors_inserted.msg is search('failed to validate'))
   ansible.builtin.debug:
     msg: >-
       WARNING: could not remove the Server and Via headers in
