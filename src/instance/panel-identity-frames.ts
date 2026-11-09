@@ -51,9 +51,15 @@ export interface VerifiedHello {
   urls: string[];
 }
 
-/** True when `kid` is one of the fingerprints this server pinned. */
+/**
+ * True when `kid` is one of the fingerprints this server pinned. Once rotation
+ * passkeys are pinned only the current key counts: a key moves only by an
+ * approved statement, never by a `next=` a document named.
+ */
 export function pinAccepts(pin: PanelIdentityPin, kid: string): boolean {
-  return kid !== "" && (kid === pin.current || kid === pin.next);
+  if (kid === "") return false;
+  if (kid === pin.current) return true;
+  return pin.passkeys.length === 0 && kid === pin.next;
 }
 
 /** 32 random bytes, base64url: the challenge the control plane's hello must echo. */

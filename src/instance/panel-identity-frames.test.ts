@@ -37,6 +37,23 @@ test("an unsafe pin (empty current) accepts no key", async () => {
   );
 });
 
+test("once rotation passkeys are pinned the next key is not accepted, only the current one", async () => {
+  const panel = await createTestPanel();
+  const passkeys = [{
+    id: "c".repeat(43),
+    alg: "EdDSA" as const,
+    pub: "E".repeat(43),
+  }];
+  const pin = panel.pin({
+    current: "x".repeat(43),
+    next: panel.kid,
+    rpId: "cp.example.test",
+    passkeys,
+  });
+  assertEquals(pinAccepts(pin, panel.kid), false);
+  assertEquals(pinAccepts(pin, "x".repeat(43)), true);
+});
+
 test("a signed hello that echoes the nonce verifies", async () => {
   const panel = await createTestPanel();
   const raw = await panel.hello({

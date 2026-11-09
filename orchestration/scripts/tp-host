@@ -5501,9 +5501,10 @@ tp_instance_cert_kept() {
 # plus hosts= in lib/update-origin (the addresses tp-orchestrate accepts for
 # --host), which always follows urls=. While no rotation passkey is pinned, a
 # document's `rotation` block fills rp_id= and passkeys= once (with its key
-# set); after that the document must carry exactly the pinned key set. A change
-# of the current key, the key set or the passkeys then arrives only as a
-# passkey-approved statement (`panel-identity-write statement`, below).
+# set); after that the document must carry exactly the pinned key set, its
+# next key is never pinned (next= stays empty), and a change of the current
+# key, the key set or the passkeys arrives only as a passkey-approved
+# statement (`panel-identity-write statement`, below).
 
 tp_panel_identity_python() {
   cat <<'PY'
@@ -5599,6 +5600,10 @@ for url in urls:
 next_kid = nxt[0].get("kid", "") if nxt else ""
 if next_kid and len(b64d(next_kid)) != 32:
     raise SystemExit("next fingerprint is malformed")
+# Once rotation passkeys are pinned (or this document fills them) only an
+# approved statement moves the key: a document's next key is never pinned.
+if pinned_passkeys or passkeys_line:
+    next_kid = ""
 (out / "msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
 (out / "sig").write_bytes(sig)
 der = bytes.fromhex("302a300506032b6570032100") + pub

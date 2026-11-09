@@ -573,6 +573,39 @@ test("a document fills the rotation passkeys once, then only statements move the
   });
 });
 
+test("once rotation passkeys are pinned a document's next key is never pinned", async () => {
+  await withHost(async (host) => {
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    const rotation = { rpId: vectors.pin.rpId, passkeys: vectors.pin.passkeys };
+    const next = "n".repeat(43);
+    // The first fill already takes the passkeys, so its next key is dropped.
+    const filled = await host.run(
+      ["panel-identity-write"],
+      await panel.document({ keyset: 4, rotation, next }),
+    );
+    assertEquals(filled.code, 0, filled.stderr);
+    assertStringIncludes(
+      await Deno.readTextFile(host.path(PIN_PATH)),
+      "next=\n",
+    );
+    // A later document naming a next key changes its addresses, never next=.
+    const later = await host.run(
+      ["panel-identity-write"],
+      await panel.document({
+        keyset: 4,
+        next,
+        urls: ["https://new.example.test"],
+      }),
+    );
+    assertEquals(later.code, 0, later.stderr);
+    const pin = await Deno.readTextFile(host.path(PIN_PATH));
+    assertStringIncludes(pin, "urls=https://new.example.test\n");
+    assertStringIncludes(pin, "next=\n");
+    assertEquals(pin.includes(next), false);
+  });
+});
+
 test("a malformed rotation block is refused before anything is pinned", async () => {
   await withHost(async (host) => {
     const panel = await makePanel();

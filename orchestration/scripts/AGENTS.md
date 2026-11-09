@@ -343,7 +343,9 @@ entry of `hosts=`, matched as a quoted whole value.
 
 While no rotation passkey is pinned, a verified document's `rotation` block fills `rp_id=` and
 `passkeys=` (`<pkid>.<es256|eddsa>.<base64url raw key>`, sorted) once, with its key set; after
-that a document must carry exactly the pinned key set. `panel-identity-write statement` takes a
+that a document must carry exactly the pinned key set and its next key is never pinned (`next=`
+stays empty; the daemon's `pinAccepts` also ignores `next=` once passkeys are pinned).
+`panel-identity-write statement` takes a
 key-set envelope (`{statement, approvals}`, at most 16 KiB) and is the only way the key, key set
 or passkeys move afterwards: python3 checks the statement and every WebAuthn assertion
 (`rpIdHash`, UP+UV, `webauthn.get`, challenge = SHA-256 of the statement bytes, origin under the
