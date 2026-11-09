@@ -14,6 +14,7 @@ import {
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { enrollDaemon, enrollSealAad } from "./enroll.ts";
+import type { PanelSealKey } from "./panel-identity-cache.ts";
 import { PanelIdentityError } from "./panel-identity-trust.ts";
 
 /**
@@ -383,7 +384,7 @@ function echoingChallenge(
     nonce: "nonce-1",
     at: new Date(now).toISOString(),
     expiresAt: new Date(now + 60_000).toISOString(),
-    ...(mode === "current" ? { sealedLicense: 1 } : {}),
+    ...(mode === "current" ? { kind: "enroll", sealedLicense: 1 } : {}),
     ...(echo && asked.clientNonce ? { clientNonce: asked.clientNonce } : {}),
   }));
 }
@@ -613,6 +614,7 @@ test({
             nonce: "nonce-1",
             at: new Date(now).toISOString(),
             expiresAt: new Date(now + 60_000).toISOString(),
+            kind: "enroll",
             sealedLicense: 1,
             ...(behaviour === "other"
               ? { clientNonce: "OTHEROTHEROTHEROTHEROTHER" }
@@ -643,6 +645,71 @@ test({
             PanelIdentityError,
           );
         }
+        assertEquals(enrolled, false, "the license was never sent");
+      } finally {
+        restore();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "a relayed auth answer, or an unmarked answer when the document advertises sealing, never gets the license in clear",
+  permissions: SEAL_PERMISSIONS,
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let enrolled = false;
+      let answer: Record<string, unknown> = {};
+      try {
+        const { key } = await sealKeyFor(fixture.dirs.stateDir);
+        api.script("/api/daemon/v1/auth/challenge", () => {
+          const now = Date.now();
+          return new Response(JSON.stringify({
+            challengeId: "challenge-1",
+            nonce: "nonce-1",
+            at: new Date(now).toISOString(),
+            expiresAt: new Date(now + 60_000).toISOString(),
+            ...answer,
+          }));
+        });
+        api.script("/api/daemon/v1/enroll", () => {
+          enrolled = true;
+          return enrollResponse();
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        const attempt = (seal: PanelSealKey | null) =>
+          enrollDaemon({
+            apiClient: client,
+            machineKey: "mk",
+            hostname: "host-1",
+            licenseId: "lic-1",
+            licenseToken: "secret-license-token",
+            stateDir: fixture.dirs.stateDir,
+            panelFingerprint: "P".repeat(43),
+            panelSealKey: () => Promise.resolve(seal),
+          });
+        // An auth answer relayed (fresh, genuinely signed), with and without the marker.
+        for (
+          answer of [{ kind: "auth" }, { kind: "auth", sealedLicense: 1 }]
+        ) {
+          await assertRejects(() => attempt(null), PanelIdentityError);
+          await assertRejects(() => attempt(key), PanelIdentityError);
+        }
+        // A fresh answer with nothing on it, but the pin-verified document says sealing is on.
+        answer = {};
+        await assertRejects(
+          () => attempt({ ...key, sealedLicense: true }),
+          PanelIdentityError,
+        );
+        // Marker without a kind is not a current answer either.
+        answer = { sealedLicense: 1 };
+        await assertRejects(() => attempt(key), PanelIdentityError);
         assertEquals(enrolled, false, "the license was never sent");
       } finally {
         restore();

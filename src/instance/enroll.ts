@@ -105,16 +105,17 @@ async function persistServerId(
 async function licenseFieldFor(
   params: {
     licenseToken: string;
-    panelSealKey?: () => Promise<PanelSealKey | null>;
     nowMs?: () => number;
   },
   bound: {
     clientNonce: string | undefined;
+    seal: PanelSealKey | null;
     challenge: {
       challengeId: string;
       nonce: string;
       at: string;
       expiresAt: string;
+      kind?: string;
       sealedLicense?: number;
       clientNonce?: string;
     };
@@ -124,10 +125,20 @@ async function licenseFieldFor(
   | { licenseToken: string }
   | { sealedLicenseToken: HpkeEnvelope; clientNonce: string }
 > {
-  const { clientNonce, challenge } = bound;
+  const { clientNonce, challenge, seal } = bound;
   if (clientNonce === undefined) return { licenseToken: params.licenseToken };
-  if (challenge.sealedLicense === undefined) {
-    // No marker: an older control plane, which never answers with one.
+  // An auth answer (or any other kind) relayed in place of an enrollment one.
+  if (challenge.kind !== undefined && challenge.kind !== "enroll") {
+    throw new PanelIdentityError(
+      "/api/daemon/v1/auth/challenge",
+      "the challenge answer is not an enrollment answer",
+    );
+  }
+  // Sealing is required when the pin-verified document advertises it, or the
+  // answer says so in any way: only a control plane too old to know sends none.
+  const mustSeal = seal?.sealedLicense === true ||
+    challenge.sealedLicense !== undefined || challenge.kind !== undefined;
+  if (!mustSeal) {
     if (!challengeIsFresh(challenge, (params.nowMs ?? Date.now)())) {
       logWarn(
         "instance",
@@ -140,16 +151,17 @@ async function licenseFieldFor(
     }
     return { licenseToken: params.licenseToken };
   }
-  // A marked answer is from a control plane that takes the license sealed: the
-  // license is never sent in clear, and the echo must be this request's nonce
-  // (a stripped or replaced nonce is refused).
-  if (challenge.clientNonce !== clientNonce) {
+  // The license is never sent in clear from here: the answer must be this
+  // request's enrollment answer (marker, kind and the echo of its own nonce).
+  if (
+    challenge.sealedLicense !== 1 || challenge.kind !== "enroll" ||
+    challenge.clientNonce !== clientNonce
+  ) {
     throw new PanelIdentityError(
       "/api/daemon/v1/auth/challenge",
-      "the enrollment challenge does not echo this request's nonce",
+      "the enrollment challenge is not marked as taking a sealed license for this request",
     );
   }
-  const seal = await params.panelSealKey?.();
   if (!seal) {
     throw new PanelIdentityError(
       "/api/daemon/v1/instance/identity",
@@ -192,6 +204,8 @@ export async function enrollDaemon(params: {
 }): Promise<{ keyFile: DaemonKeyFile; serverId: string; keyId: string }> {
   const pinned = params.panelFingerprint !== undefined;
   const clientNonce = pinned ? newClientNonce() : undefined;
+  // The pin-verified document first: it says whether sealing is required.
+  const seal = pinned ? await params.panelSealKey?.() ?? null : null;
   const challenge = await params.apiClient.getEnrollmentChallenge(clientNonce);
   const enrollmentKeyFile = await generateDaemonKeypair();
   const fingerprint = await computePublicKeyFingerprint(
@@ -218,6 +232,7 @@ export async function enrollDaemon(params: {
   const persistedServerId = await readPersistedServerId(params.stateDir);
   const licenseField = await licenseFieldFor(params, {
     clientNonce,
+    seal,
     challenge,
     publicKeyFingerprint: fingerprint,
   });

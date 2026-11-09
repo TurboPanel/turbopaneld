@@ -171,6 +171,8 @@ export interface DaemonChallengeResponse {
   nonce: string;
   at: string;
   expiresAt: string;
+  /** `enroll` or `auth`, in every answer of a current control plane: an auth answer is not an enrollment one. */
+  kind?: string;
   /** `1` in every answer of a control plane that takes a sealed license, whatever the request carried. */
   sealedLicense?: number;
   /** Echo of the `clientNonce` the request carried. */
