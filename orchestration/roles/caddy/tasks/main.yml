@@ -76,6 +76,34 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
+# The folders are root:tp like every vendored runtime, but traversable by
+# every account (no listing): the hosting Caddy's account is deliberately not
+# in group tp (hosting-caddy role) and reaches the binary through them. Owner
+# and group bits only in the mode, so the `other:x` ACL below survives every
+# run, the same pattern as the vendor directory itself (turbopanel-user).
+# `install -d` above makes them root:root 0755; this repairs existing hosts.
+- name: Ensure the Caddy runtime directories are root-owned and group-readable
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "u=rwx,g=rx"
+    follow: false
+  loop:
+    - "{{ turbopanel_vendor_dir }}/caddy"
+    - "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}"
+
+- name: Let every account traverse the Caddy runtime directories
+  ansible.posix.acl:
+    path: "{{ item }}"
+    etype: other
+    permissions: x
+    state: present
+  loop:
+    - "{{ turbopanel_vendor_dir }}/caddy"
+    - "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}"
+
 - name: Point Caddy current symlink at pinned version
   ansible.builtin.file:
     src: "{{ turbopanel_vendor_dir }}/caddy/{{ caddy_version }}"
