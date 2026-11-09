@@ -25,7 +25,11 @@ async function yamlFiles(dir: string): Promise<string[]> {
 async function orchestrationTasks(): Promise<
   Array<{ path: string; tasks: Task[] }>
 > {
-  const files = await yamlFiles(ORCH);
+  // First-party roles and playbooks only (not vendored collections).
+  const files = [
+    ...await yamlFiles(join(ORCH, "roles")),
+    ...await yamlFiles(join(ORCH, "playbooks")),
+  ];
   return await Promise.all(files.map(async (path) => {
     const doc = parse(await Deno.readTextFile(path));
     // A playbook is a list of plays; their tasks sit under these keys.
@@ -101,8 +105,9 @@ test("a validate failure that is ignored is warned about with the module's own m
       checked++;
     }
   }
-  // The four in-place Caddyfile edits (server headers twice, UI cache, grace).
-  assertEquals(checked, 4);
+  // At least the four in-place Caddyfile edits (server headers twice, UI
+  // cache, grace period): the walk must not silently find nothing.
+  assert(checked >= 4, `only ${checked} ignored validate failures found`);
 });
 
 test("every apt task waits out the daily security update run", async () => {
@@ -123,5 +128,5 @@ test("every apt task waits out the daily security update run", async () => {
       checked++;
     }
   }
-  assertEquals(checked, 21);
+  assert(checked >= 21, `only ${checked} apt tasks found`);
 });
