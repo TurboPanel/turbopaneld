@@ -407,3 +407,44 @@ test("a forged rotation, a mismatched signer key and a stale key set are refused
     assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), before);
   });
 });
+
+test("both pin writers ignore Python modules in the caller's directory", async () => {
+  await withHost(async (host) => {
+    // sudo keeps the caller's directory and root runs python3 there: a module
+    // planted next to it must never be imported.
+    const planted = host.path("outside/planted");
+    const marker = host.path("outside/imported");
+    await Deno.mkdir(planted);
+    for (const name of ["base64", "json", "re", "hashlib", "sitecustomize"]) {
+      await Deno.writeTextFile(
+        `${planted}/${name}.py`,
+        `open(${JSON.stringify(marker)}, "w").write("${name}")\n` +
+          'raise SystemExit("planted module imported")\n',
+      );
+    }
+    const env = { PYTHONPATH: planted };
+
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    const doc = await host.run(
+      ["panel-identity-write"],
+      await panel.document(),
+      env,
+      planted,
+    );
+    assertEquals(doc.code, 0, doc.stderr);
+
+    const keys = { current: await makeKey(), next: await makeKey() };
+    await pinWithNext(host, keys);
+    const rotation = await host.run(
+      ["panel-identity-write", "statement"],
+      await statement("rotation", keys, {}),
+      env,
+      planted,
+    );
+    assertEquals(rotation.code, 0, rotation.stderr);
+
+    const imported = await Deno.stat(marker).then(() => true, () => false);
+    assertEquals(imported, false);
+  });
+});

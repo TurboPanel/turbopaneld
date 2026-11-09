@@ -43,6 +43,7 @@
 # needs them, and lsphp fails to start (not merely an extension) without them.
 - name: Ensure lsphp runtime libraries ({{ lsphp_series }})
   ansible.builtin.apt:
+    lock_timeout: 300
     name: "{{ openlitespeed_lsphp_runtime_packages[_lsphp_suite] }}"
     state: present
     update_cache: true

@@ -1,6 +1,10 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { substitutePanelCaddyfile } from "../testing/panel-caddy.ts";
 import { caddyfile, caddyUnit, HOSTING_CADDY_GRACE_PERIOD } from "./ingress.ts";
+
+/** Sonar typescript:S2187 only recognizes `test()`; see src/AGENTS.md. */
+const test = Deno.test.bind(Deno);
 
 /**
  * Caddy waits forever for open connections after SIGTERM unless `grace_period`
@@ -76,7 +80,7 @@ async function validate(
   }
 }
 
-Deno.test("control-plane Caddy sets a grace period and its unit waits longer", async () => {
+test("control-plane Caddy sets a grace period and its unit waits longer", async () => {
   const caddyfileText = await readRole(
     "instance-launch/templates/Caddyfile.j2",
   );
@@ -93,7 +97,7 @@ Deno.test("control-plane Caddy sets a grace period and its unit waits longer", a
   assertStringIncludes(unit, "Restart=always");
 });
 
-Deno.test("site Caddy sets a grace period and its unit waits longer", async () => {
+test("site Caddy sets a grace period and its unit waits longer", async () => {
   const caddyfileText = await readRole("site-caddy/templates/Caddyfile.j2");
   assertStringIncludes(
     globalOptions(caddyfileText),
@@ -105,7 +109,7 @@ Deno.test("site Caddy sets a grace period and its unit waits longer", async () =
   assert(timeoutStopSeconds(unit) >= GRACE_SECONDS + MARGIN_SECONDS);
 });
 
-Deno.test("hosting Caddy sets a grace period and its unit waits longer", () => {
+test("hosting Caddy sets a grace period and its unit waits longer", () => {
   assertEquals(HOSTING_CADDY_GRACE_PERIOD, `${GRACE_SECONDS}s`);
   const config = caddyfile("/etc/turbopanel");
   assertStringIncludes(globalOptions(config), `grace_period ${GRACE_SECONDS}s`);
@@ -119,7 +123,7 @@ Deno.test("hosting Caddy sets a grace period and its unit waits longer", () => {
   assert(timeoutStopSeconds(unit) >= GRACE_SECONDS + MARGIN_SECONDS);
 });
 
-Deno.test("the pinned Caddy accepts the grace period in every global block", async (t) => {
+test("the pinned Caddy accepts the grace period in every global block", async (t) => {
   const caddy = await pinnedCaddy();
   if (!caddy) {
     console.warn(
@@ -128,14 +132,21 @@ Deno.test("the pinned Caddy accepts the grace period in every global block", asy
     return;
   }
   await t.step("control plane", async () => {
-    const text = globalOptions(
-      (await readRole("instance-launch/templates/Caddyfile.j2")).replaceAll(
-        "{{ turbopanel_caddy_admin_socket }}",
-        "/tmp/tp-grace-test-admin.sock",
-      ),
-    );
-    const result = await validate(caddy, text + MINIMAL_SITE);
-    assert(result.ok, result.output);
+    // The template's Jinja (the edge range loop among the trusted proxies)
+    // renders as if no edge range were listed.
+    const dir = await Deno.makeTempDir();
+    try {
+      const text = globalOptions(
+        substitutePanelCaddyfile(
+          await readRole("instance-launch/templates/Caddyfile.j2"),
+          dir,
+        ),
+      );
+      const result = await validate(caddy, text + MINIMAL_SITE);
+      assert(result.ok, result.output);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
   });
   await t.step("site", async () => {
     const text = globalOptions(
@@ -167,7 +178,7 @@ Deno.test("the pinned Caddy accepts the grace period in every global block", asy
   });
 });
 
-Deno.test("existing hosts get grace_period added in place, safely", async () => {
+test("existing hosts get grace_period added in place, safely", async () => {
   const tasks = await readRole("instance-launch/tasks/caddyfile-grace.yml");
   // One line, only when missing, after the global auto_https line, backed up,
   // and refused unless the vendored Caddy still adapts the result.

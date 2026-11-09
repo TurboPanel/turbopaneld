@@ -53,6 +53,7 @@
 
 - name: Purge this series' packages ({{ php_prune_series }})
   ansible.builtin.apt:
+    lock_timeout: 300
     name: "{{ _php_prune_packages }}"
     state: absent
     purge: true

@@ -41,6 +41,7 @@ import {
   type VerifiedHello,
 } from "./panel-identity-frames.ts";
 import {
+  CONTROL_PLANE_KEY_NOT_VERIFIED,
   createPanelResponseVerifier,
   PanelIdentityError,
   type PanelResponseVerifier,
@@ -106,6 +107,7 @@ import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import {
   createPanelSealKeySource,
   type PanelIdentityFetch,
+  parsePanelIdentity,
 } from "./panel-identity-cache.ts";
 import {
   createSealingContext,
@@ -1822,6 +1824,11 @@ export class InstanceClient {
         Promise.reject(new Error("token unavailable before enrollment")),
       ...this.#apiClientHooks(),
     });
+    const pinnedFingerprint = this.#pinnedPanelFingerprint();
+    if (this.#panelPin && !pinnedFingerprint) {
+      // Never enroll a pinned server (the license goes out) with no verified key.
+      throw new Error(CONTROL_PLANE_KEY_NOT_VERIFIED);
+    }
     const enrollment = await enrollDaemon({
       apiClient: enrollClient,
       machineKey,
@@ -1829,7 +1836,19 @@ export class InstanceClient {
       licenseId: licenseCredentials.licenseId,
       licenseToken: licenseCredentials.licenseToken,
       stateDir,
-      panelFingerprint: this.#pinnedPanelFingerprint(),
+      panelFingerprint: pinnedFingerprint,
+      panelSealKey: async () => {
+        const pin = this.#panelPin;
+        if (!pin) return null;
+        const fetched = await enrollClient.getPanelIdentityDocument();
+        // Same checks as the connect-time document, including the keyset floor.
+        await verifyPanelIdentityDocument(fetched, pin, Date.now());
+        return (await parsePanelIdentity(
+          fetched,
+          Date.now(),
+          (kid) => pinAccepts(pin, kid),
+        ))?.key ?? null;
+      },
     });
     keyFile = enrollment.keyFile;
     serverId = enrollment.serverId;

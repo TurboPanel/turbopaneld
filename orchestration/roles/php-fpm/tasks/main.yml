@@ -26,6 +26,7 @@
 
 - name: Install apt transport prerequisites for the sury repo
   ansible.builtin.apt:
+    lock_timeout: 300
     name:
       - apt-transport-https
       - ca-certificates
@@ -82,6 +83,7 @@
 
 - name: Refresh apt cache after sury repo or key change
   ansible.builtin.apt:
+    lock_timeout: 300
     update_cache: true
   when: >- # noqa: no-handler
     _sury_repo.changed
