@@ -7,10 +7,10 @@
 #       (read from the tags) is published and staging is
 #       exactly its content.
 #
-# While what a merge would publish is still being built, the check stays
-# running (not red) and says what it is waiting for; a superseded PR head's
-# still-running check is cancelled below rather than left to finish stale.
-# promote-ok-recheck.yml stays wired up as a fallback. The logic is
+# The check looks once and ends in seconds; it never waits on a runner. While
+# what a merge would publish is still being built, it is red and says what it
+# waits for, and promote-ok-recheck.yml re-runs it when the trunk CI, the
+# canary build or Publish Release Candidate finishes. The logic is
 # TurboPanel/dev gh-promote-ok.yml (scripts/promote/promote-ok.sh).
 #
 # The required check is the `promote-ok` job below (a job inside a reusable
@@ -33,23 +33,23 @@ on:
 permissions:
   contents: read
 
-# The evaluation can now run for up to an hour (it waits, not fails-and-retries
-# — see gh-promote-ok.yml). The two promotion PRs have head trunk or staging, and
-# each head commit is a real trunk or staging commit: cancelling the evaluation
-# of a superseded head left a cancelled (red) mark on that commit. So each run has its own group and runs to its own
-# verdict; the newest head's run is the one the required check reads. Any
-# other head keeps the old behaviour: a superseded run is cancelled.
+# One evaluation per PR head. It looks once and ends, so a superseded head's
+# run finishes on its own in seconds (keeping its own verdict, never a
+# cancelled mark on a real trunk or staging commit), and a second run of the
+# same head (a recheck re-run) replaces the first. The group holds the head
+# commit, not just the PR, so a recheck re-run of a head that was just
+# superseded can never cancel the newest head's evaluation.
 concurrency:
-  group: promote-ok-${{ github.event.pull_request.number }}${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && format('-{0}', github.run_id) || '' }}
-  cancel-in-progress: ${{ github.head_ref != 'trunk' && github.head_ref != 'staging' }}
+  group: promote-ok-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
 
 jobs:
   evaluate:
-    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@efe45fb83fc2cef6350e7f7cbdbb65da11003e31 # dev#70
+    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@b37c01c0a7cb28e28d50fd93d40dbe257f034816 # dev#115
     with:
       repo-kind: daemon
       ci-workflow: publish-daemon-trunk.yml
-      dev-ref: efe45fb83fc2cef6350e7f7cbdbb65da11003e31 # dev#70
+      dev-ref: b37c01c0a7cb28e28d50fd93d40dbe257f034816 # dev#115
       base: ${{ github.event.pull_request.base.ref }}
       head-sha: ${{ github.event.pull_request.head.sha }}
     # gh-promote-ok.yml reads the canary release, tags and releases (contents),

@@ -171,10 +171,12 @@ failed to open); nothing is rebuilt, since each repo's canary is refused until
 its PR merges. The release workflows pin TurboPanel/dev twice: the reusable
 promote workflows and their `dev-ref` at one sha, the composite actions and
 `scripts/promote` checkouts at one sha (`scripts/release-workflows.test.ts`).
-The Promote OK check (the `gh-promote-ok.yml` calls in `promote-ok.yml` and
-`promote-ok-recheck.yml`, with their `dev-ref`) is its own pin group, so a fix
-to it can ship without moving the rest of the chain. The plain `promote.yml`
-form below is **break-glass only**.
+The Promote OK check (the `gh-promote-ok.yml` and `gh-promote-ok-recheck.yml`
+calls in `promote-ok.yml` and `promote-ok-recheck.yml`, with their `dev-ref`) is
+its own pin group, so a fix to it can ship without moving the rest of the chain.
+The check looks once and ends in seconds; the recheck re-runs it when the trunk
+build or Publish Release Candidate finishes. The plain `promote.yml` form below
+is **break-glass only**.
 
 **Promotion (`.github/workflows/promote.yml`, break-glass):** one click moves a
 tested build up a channel — `to=rc` turns a canary build (`source` = build id,
