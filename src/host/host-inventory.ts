@@ -1,3 +1,4 @@
+import { armCpuModelFromCpuinfo } from "./arm-cpu-model.ts";
 import { isNoTelemetryDisplay } from "./display-devices.ts";
 import type { ServerReportedIp } from "./server-addresses.ts";
 
@@ -31,7 +32,10 @@ export type HostCpuCache = {
 export type HostCpuSocket = {
   /** cpuinfo `vendor_id` (e.g. GenuineIntel) or ARM `CPU implementer`. */
   vendorId?: string;
-  /** cpuinfo `model name` (or ARM `Hardware` / `Processor`). */
+  /**
+   * cpuinfo `model name`, else the Arm core named from `CPU implementer` /
+   * `CPU part` (`host/arm-cpu-model.ts`), else ARM `Processor` / `Hardware`.
+   */
   name?: string;
   /** e.g. `"x86_64"`, `"aarch64"` from Deno.build.arch. */
   architecture?: string;
@@ -833,6 +837,7 @@ function hostCpusFromProc(
   const arch = architecture?.trim() || undefined;
   const fallbackName = cpuinfoText
     ? readCpuModelName(cpuinfoText) ??
+      armCpuModelFromCpuinfo(cpuinfoText) ??
       firstCpuinfoValue(cpuinfoText, "Processor") ??
       firstCpuinfoValue(cpuinfoText, "Hardware")
     : undefined;

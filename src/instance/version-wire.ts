@@ -4,9 +4,11 @@
  * The two repos cannot share a module across the Deno/Workers boundary, so
  * `parseSemver` / `compareSemver` are duplicated here the same way
  * `DAEMON_CELL_PING` is duplicated in `idle-presence.ts`. Keep the precedence
- * rules identical. `MIN_SUPPORTED_INSTANCE_VERSION` is the mirror of the
- * instance's `MIN_SUPPORTED_DAEMON_VERSION`: bump them together, with a reason
- * in both Versions-on-the-wires notes, never silently.
+ * rules identical. `MIN_SUPPORTED_INSTANCE_VERSION` (the oldest control plane
+ * this daemon accepts) and the control plane's `MIN_SUPPORTED_DAEMON_VERSION`
+ * (the oldest daemon it accepts) name versions on two separate release lines,
+ * so their values differ. Raise them together, in the same change, with a
+ * reason in both Versions-on-the-wires notes, never silently.
  *
  * `unknown` (no version, or one that is not a semver) passes for the floor —
  * an instance older than this field is not refused. Capability gates do the

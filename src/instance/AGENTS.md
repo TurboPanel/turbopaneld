@@ -478,8 +478,10 @@ backoff only (re-read CA on the next attempt — does **not** force re-enroll).
 table).
 
 **Instance version floor** (`src/instance/version-wire.ts`):
-`MIN_SUPPORTED_INSTANCE_VERSION` is the mirror of the control plane's
-`MIN_SUPPORTED_DAEMON_VERSION`. Bump them together and say why in both
+`MIN_SUPPORTED_INSTANCE_VERSION` is the oldest control plane this daemon
+accepts; the control plane's `MIN_SUPPORTED_DAEMON_VERSION` is the oldest
+daemon it accepts. They sit on separate release lines, so their values differ
+(see Versions on the wires below). Raise them together and say why in both
 Versions-on-the-wires notes (this file and
 `../turbopanel/AGENTS.md`). The daemon learns the peer from
 `x-turbopanel-version` on every `DaemonApiClient` response (including non-OK

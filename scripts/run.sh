@@ -3157,10 +3157,13 @@ _tp_host_prereq_fail() {
   rm -f "$_apt_log"
   exit 1
 }
+# A fresh cloud host often runs its first-boot package upgrade (cloud-init,
+# unattended-upgrades) right when this script starts: wait up to 5 minutes
+# for the dpkg lock instead of failing at once.
 _apt_log="$(mktemp)"
 if [ -n "$_tp_host_missing" ] \
-  && { ! apt-get update -qq >>"$_apt_log" 2>&1 \
-    || ! apt-get install -y -qq sudo curl ca-certificates tar python3-minimal zstd openssl >>"$_apt_log" 2>&1; }; then
+  && { ! apt-get -o DPkg::Lock::Timeout=300 update -qq >>"$_apt_log" 2>&1 \
+    || ! apt-get -o DPkg::Lock::Timeout=300 install -y -qq sudo curl ca-certificates tar python3-minimal zstd openssl >>"$_apt_log" 2>&1; }; then
   _tp_host_prereq_fail "host prerequisites failed (need:${_tp_host_missing})"
 fi
 if ! command -v sudo >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
