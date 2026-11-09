@@ -249,6 +249,18 @@ export async function verifyHello(
   return helloFields(hello, ctx, ctx.nowMs);
 }
 
+/** A frame must name this server and key exactly when its session's hello did. */
+function checkFrameBinding(
+  frame: Record<string, unknown>,
+  ctx: { session: { bound?: boolean }; binding?: SessionBinding },
+): FrameCheck<boolean> {
+  const named = checkBinding(frame, ctx.binding);
+  if (named.ok && named.value !== (ctx.session.bound ?? false)) {
+    return fail("binding differs from the hello's");
+  }
+  return named;
+}
+
 /**
  * Check one enveloped frame and return the message without its envelope.
  * The frame is parsed to read its `type` (part of the signed input), then the
@@ -289,11 +301,8 @@ export async function verifyEnvelopedFrame(
     return fail("key is not pinned");
   }
   if (!iatFresh(frame.iat, ctx.nowMs)) return fail("iat out of range");
-  const named = checkBinding(frame, ctx.binding);
-  if (!named.ok) return named;
-  if (named.value !== (ctx.session.bound ?? false)) {
-    return fail("binding differs from the hello's");
-  }
+  const binding = checkFrameBinding(frame, ctx);
+  if (!binding.ok) return binding;
   const message = { ...frame };
   for (const field of ENVELOPE_FIELDS) delete message[field];
   return { ok: true, value: message };
