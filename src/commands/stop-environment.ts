@@ -487,8 +487,15 @@ async function stopEnvironmentLocked(
     await removeEarlierNamedContainers(parsedPayload, deploymentDir, run);
   }
 
-  // Only when the Destroy asked to delete data. Runs on the "already stopped"
-  // path too, so data kept by an earlier Destroy can still be deleted.
+  // The containers are down, so the manifest must go now: a later step that
+  // throws would otherwise leave a stopped stack that the next daemon start
+  // brings back. Only the daemon's own files go; `./data` stays.
+  await removeDaemonDeploymentFiles(deploymentDir);
+
+  // Only when the Destroy asked to delete data, and only once the manifest is
+  // gone: a restart part-way must never bring the stack back without its data.
+  // Runs on the "already stopped" path too, so data kept by an earlier Destroy
+  // can still be deleted.
   const volumes = parsedPayload.removeVolumes === undefined
     ? undefined
     : await removeStopVolumes(parsedPayload.removeVolumes, {
@@ -497,11 +504,6 @@ async function stopEnvironmentLocked(
       run,
       logSink,
     });
-
-  // The containers are down, so the manifest must go now: a later step that
-  // throws would otherwise leave a stopped stack that the next daemon start
-  // brings back. Only the daemon's own files go; `./data` stays.
-  await removeDaemonDeploymentFiles(deploymentDir);
 
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
   if (fabricNetworks.length > 0 && dockerPresent) {
