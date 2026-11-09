@@ -114,7 +114,11 @@ test("every apt task waits out the daily security update run", async () => {
   // apt-daily-upgrade holds the dpkg lock for a few minutes once a day, and
   // its timers are Persistent, so they can fire at boot next to a converge.
   // The module's default 60 s wait then fails a php-fpm, docker or runtime
-  // install. 300 s stays well inside the update guard's 600 s deadline.
+  // install. The 300 s is per task, not a budget for the run: after a daemon
+  // self-update an enrolled host converges before it reconnects, and the
+  // update guard rolls back if it has not reconnected within 600 s
+  // (turbopaneld-update-guard.timer). So one full wait leaves the rest of the
+  // boot converge about half that window, and two full waits use it all.
   let checked = 0;
   for (const entry of await orchestrationTasks()) {
     for (const task of entry.tasks) {
