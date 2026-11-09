@@ -123,6 +123,50 @@
     follow: false
   loop: "{{ turbopanel_daemon_vendor_cache_dirs }}"
 
+# uv makes its lock files 0666 on purpose (it expects caches shared between
+# accounts) and leaves an existing file's mode alone, so they are tightened
+# here once the bootstrap has made them: the interpreter and Ansible tree
+# locks stay with those root-owned trees, the cache lock goes with the
+# daemon-writable cache. Only the owning account ever writes them.
+- name: Find uv lock files in the interpreter and Ansible trees
+  ansible.builtin.find:
+    paths:
+      - "{{ turbopanel_vendor_dir }}/python"
+      - "{{ turbopanel_vendor_dir }}/ansible"
+    patterns: ".lock"
+    hidden: true
+    file_type: file
+    recurse: true
+    # <tree>/<version>/.lock, and nothing deeper.
+    depth: 2
+  register: _vendor_runtime_locks
+
+- name: Keep the interpreter and Ansible tree lock files owner-writable only
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: "{{ turbopanel_install_owner }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+    follow: false
+  loop: "{{ _vendor_runtime_locks.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Check the uv cache lock file
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/uv/cache/.lock"
+    follow: false
+  register: _vendor_uv_cache_lock
+
+- name: Keep the uv cache lock file with the daemon-writable cache
+  when: _vendor_uv_cache_lock.stat.isreg | default(false)
+  ansible.builtin.file:
+    path: "{{ turbopanel_vendor_dir }}/uv/cache/.lock"
+    owner: "{{ turbopanel_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+    follow: false
+
 # The root helpers (tp-host, its conf, and the sudoers file that names it)
 # live in their own task file so every path that replaces the daemon — the
 # full install, the co-located refresh (daemon-colocated-refresh.yml) — ships

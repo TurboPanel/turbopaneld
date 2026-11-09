@@ -1,0 +1,43 @@
+---
+# Drop installed-Caddyfile backups that hold nothing (imported by main.yml
+# after the in-place edits).
+#
+# Each in-place edit (caddyfile-grace.yml, caddyfile-ui-cache.yml,
+# caddyfile-server-headers.yml) keeps a backup, but the module takes it before
+# the vendored Caddy validates the result. When validation fails the file is
+# left as it was, so that backup is byte-identical to it, and because the edit
+# runs again on every update while its lines are missing, those copies pile
+# up. A backup identical to the live file holds nothing the file does not, so
+# only those are removed; a backup that differs (the copy from before an edit
+# that worked) is kept.
+- name: Checksum the installed Caddyfile for the backup cleanup
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.stat:
+    path: "{{ turbopanel_caddyfile }}"
+    checksum_algorithm: sha256
+  register: _caddyfile_live
+
+- name: Find the installed Caddyfile's backups
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _caddyfile_live.stat.exists | default(false)
+    - _caddyfile_live.stat.isreg | default(false)
+  ansible.builtin.find:
+    paths: "{{ turbopanel_caddyfile | dirname }}"
+    # The module names a backup <file>.<pid>.<date>@<time>~
+    patterns: "{{ turbopanel_caddyfile | basename }}.*~"
+    file_type: file
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: _caddyfile_backups
+
+- name: Remove backups identical to the installed Caddyfile
+  when:
+    - _caddyfile_backups.files is defined
+    - item.checksum == _caddyfile_live.stat.checksum
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _caddyfile_backups.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"

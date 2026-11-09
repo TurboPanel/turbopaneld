@@ -201,8 +201,8 @@ test("a pinned enrollment sends a v2 proof naming the pinned key", async () => {
           Promise.resolve({
             challengeId: "c",
             nonce: "n",
-            at: "",
-            expiresAt: "",
+            at: new Date(1_700_000_000_000).toISOString(),
+            expiresAt: new Date(1_700_000_060_000).toISOString(),
           }),
         enroll: (body: Record<string, unknown>) => {
           bodies.push(body);

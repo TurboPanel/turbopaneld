@@ -471,8 +471,10 @@ backoff only (re-read CA on the next attempt — does **not** force re-enroll).
 table).
 
 **Instance version floor** (`src/instance/version-wire.ts`):
-`MIN_SUPPORTED_INSTANCE_VERSION` is the mirror of the control plane's
-`MIN_SUPPORTED_DAEMON_VERSION`. Bump them together and say why in both
+`MIN_SUPPORTED_INSTANCE_VERSION` is the oldest control plane this daemon
+accepts; the control plane's `MIN_SUPPORTED_DAEMON_VERSION` is the oldest
+daemon it accepts. They sit on separate release lines, so their values differ
+(see Versions on the wires below). Raise them together and say why in both
 Versions-on-the-wires notes (this file and
 `../turbopanel/AGENTS.md`). The daemon learns the peer from
 `x-turbopanel-version` on every `DaemonApiClient` response (including non-OK
@@ -1147,6 +1149,10 @@ pinnedBy + "\n" + current + "\n" + keyset + "\n" + iat`
 plane's key, so a control plane can verify a report from a server pinned to
 another key and alarm on it. Without the daemon key or a pin the hello keeps
 the unsigned report. An older control plane ignores the two extra fields.
+
+## Sealed enroll license
+
+A pinned server never sends its license token in clear to a control plane that can take it sealed (`enroll.ts`). The pin-verified identity document is read first (keyset floor included) and may advertise `sealedLicense: 1`. The challenge request carries a random `clientNonce`. A current control plane puts `kind` (`enroll` or `auth`) and `sealedLicense: 1` in every `/auth/challenge` answer, inside the signed body, and echoes the nonce on an enrollment answer. Rules: an answer whose `kind` is present and not `enroll` is refused (a relayed auth answer); sealing is required when the document advertises it or the answer carries a marker or a kind, and then the answer must be `kind: "enroll"` with the marker and the echo of this request's nonce (a stripped or replaced nonce, or an unmarked answer, is a `PanelIdentityError`, never a clear send). Then `/enroll` carries `sealedLicenseToken` (HPKE to the document's sealing key) and `clientNonce` instead of `licenseToken`; `aad` is `"tp-enroll-license\n"` plus the control plane key id, challenge id, challenge nonce, client nonce and the fingerprint of the new key, joined by `\n` (kept equal to the control plane's `sealed-enroll.ts`). No verified sealing key is also a `PanelIdentityError`. Only when the document does not advertise it and the answer has neither marker nor kind (an older control plane) does the license go in clear, and only on an answer whose `at` is within ten minutes and whose `expiresAt` is ahead (a warning is logged when a far-off clock refuses it). Known gap: an identity document from before the control plane upgrade, replayed within its 30 days, does not advertise it. An unpinned server sends nothing new. No version floor moves.
 
 ## Sealed secrets (`daemon-sealed-secrets-v1`)
 
