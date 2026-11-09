@@ -38,6 +38,7 @@ import {
 import {
   type PanelSigningKey,
   pinAccepts,
+  type SessionBinding,
   type VerifiedHello,
 } from "./panel-identity-frames.ts";
 import {
@@ -2106,6 +2107,12 @@ export class InstanceClient {
     });
   }
 
+  /** This server and daemon key for a bound signed session; none without a loaded key. */
+  #sessionBinding(serverId: string): SessionBinding | undefined {
+    const key = this.#daemonSigningKey;
+    return key ? { serverId, keyId: key.keyId } : undefined;
+  }
+
   async #openDaemonWebSocket(jwt: string, serverId: string): Promise<void> {
     const upgradeSignature = this.#daemonSigningKey
       ? await this.#signRequestWithDaemonKey(this.#daemonSigningKey, {
@@ -2183,9 +2190,7 @@ export class InstanceClient {
         ws,
         pin: this.#panelPin,
         signing: this.#panelKey,
-        binding: this.#daemonSigningKey
-          ? { serverId, keyId: this.#daemonSigningKey.keyId }
-          : undefined,
+        binding: this.#sessionBinding(serverId),
         onVerified: async (hello) => {
           logInfo("instance", "panel-identity: signed hello verified");
           // Awaited by the session, so no later frame is handled before the
