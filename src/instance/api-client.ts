@@ -171,7 +171,9 @@ export interface DaemonChallengeResponse {
   nonce: string;
   at: string;
   expiresAt: string;
-  /** Echo of the `clientNonce` the request carried; only a control plane that takes a sealed license sends it. */
+  /** `1` in every answer of a control plane that takes a sealed license, whatever the request carried. */
+  sealedLicense?: number;
+  /** Echo of the `clientNonce` the request carried. */
   clientNonce?: string;
 }
 

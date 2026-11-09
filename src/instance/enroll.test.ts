@@ -369,7 +369,11 @@ async function sealKeyFor(dir: string) {
   };
 }
 
-function echoingChallenge(init: RequestInit | undefined, echo = true) {
+function echoingChallenge(
+  init: RequestInit | undefined,
+  mode: "current" | "older" = "current",
+  echo = true,
+) {
   const asked = JSON.parse(String(init?.body ?? "{}")) as {
     clientNonce?: string;
   };
@@ -379,6 +383,7 @@ function echoingChallenge(init: RequestInit | undefined, echo = true) {
     nonce: "nonce-1",
     at: new Date(now).toISOString(),
     expiresAt: new Date(now + 60_000).toISOString(),
+    ...(mode === "current" ? { sealedLicense: 1 } : {}),
     ...(echo && asked.clientNonce ? { clientNonce: asked.clientNonce } : {}),
   }));
 }
@@ -497,7 +502,7 @@ test({
 
 test({
   name:
-    "a pinned server sends the license in clear to an older control plane only on a fresh unechoed answer",
+    "a pinned server sends the license in clear to an older control plane (no marker) only on a fresh answer",
   permissions: SEAL_PERMISSIONS,
   fn: async () => {
     await withTempLayout(async (fixture) => {
@@ -507,7 +512,7 @@ test({
       let stale = false;
       try {
         api.script("/api/daemon/v1/auth/challenge", (init) => {
-          const response = echoingChallenge(init, false);
+          const response = echoingChallenge(init, "older");
           if (!stale) return response;
           return challengeResponse({
             at: new Date(Date.now() - 3_600_000).toISOString(),
@@ -580,6 +585,65 @@ test({
         assertEquals(challengeBody, {});
         assertEquals(enrollBody.licenseToken, "tok-1");
         assertEquals(enrollBody.clientNonce, undefined);
+      } finally {
+        restore();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "a marked answer that does not echo this request's nonce is refused: stripped nonce, or another one",
+  permissions: SEAL_PERMISSIONS,
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let enrolled = false;
+      let behaviour: "stripped" | "other" = "stripped";
+      try {
+        const { key } = await sealKeyFor(fixture.dirs.stateDir);
+        api.script("/api/daemon/v1/auth/challenge", () => {
+          const now = Date.now();
+          // What a genuine, current control plane answers a request whose
+          // nonce an impostor removed (marker, no echo), or replaced.
+          return new Response(JSON.stringify({
+            challengeId: "challenge-1",
+            nonce: "nonce-1",
+            at: new Date(now).toISOString(),
+            expiresAt: new Date(now + 60_000).toISOString(),
+            sealedLicense: 1,
+            ...(behaviour === "other"
+              ? { clientNonce: "OTHEROTHEROTHEROTHEROTHER" }
+              : {}),
+          }));
+        });
+        api.script("/api/daemon/v1/enroll", () => {
+          enrolled = true;
+          return enrollResponse();
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        for (behaviour of ["stripped", "other"] as const) {
+          await assertRejects(
+            () =>
+              enrollDaemon({
+                apiClient: client,
+                machineKey: "mk",
+                hostname: "host-1",
+                licenseId: "lic-1",
+                licenseToken: "secret-license-token",
+                stateDir: fixture.dirs.stateDir,
+                panelFingerprint: "P".repeat(43),
+                panelSealKey: () => Promise.resolve(key),
+              }),
+            PanelIdentityError,
+          );
+        }
+        assertEquals(enrolled, false, "the license was never sent");
       } finally {
         restore();
       }

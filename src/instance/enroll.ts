@@ -16,6 +16,7 @@ import { type HpkeEnvelope, sealToRecipient } from "../crypto/hpke.ts";
 import { encodeBase64Url } from "@std/encoding/base64url";
 import type { DaemonApiClient } from "./api-client.ts";
 import type { PanelSealKey } from "./panel-identity-cache.ts";
+import { logWarn } from "../util/logger.ts";
 import { PanelIdentityError } from "./panel-identity-trust.ts";
 
 const SERVER_ID_FILE = "server.id";
@@ -94,9 +95,11 @@ async function persistServerId(
 
 /**
  * How the license leaves this server. A pinned server whose challenge answer
- * echoes its nonce (signed, so an impostor cannot strip it) sends the token
- * only sealed to the control plane's key, and never falls back to clear. With
- * no echo the control plane is an older one: clear, but only on a fresh answer.
+ * carries the sealed-license marker (in every answer of a current control
+ * plane, inside the signed body, so stripping the request's nonce changes
+ * nothing) sends the token only sealed to the control plane's key, and never
+ * falls back to clear. With no marker the control plane is an older one:
+ * clear, but only on a fresh answer.
  * An unpinned server sends it in clear as before.
  */
 async function licenseFieldFor(
@@ -112,6 +115,7 @@ async function licenseFieldFor(
       nonce: string;
       at: string;
       expiresAt: string;
+      sealedLicense?: number;
       clientNonce?: string;
     };
     publicKeyFingerprint: string;
@@ -122,19 +126,27 @@ async function licenseFieldFor(
 > {
   const { clientNonce, challenge } = bound;
   if (clientNonce === undefined) return { licenseToken: params.licenseToken };
-  if (challenge.clientNonce === undefined) {
+  if (challenge.sealedLicense === undefined) {
+    // No marker: an older control plane, which never answers with one.
     if (!challengeIsFresh(challenge, (params.nowMs ?? Date.now)())) {
+      logWarn(
+        "instance",
+        "enrollment challenge is not current (is this server's clock right?); not sending the license",
+      );
       throw new PanelIdentityError(
         "/api/daemon/v1/auth/challenge",
-        "the enrollment challenge is stale and carries no nonce echo",
+        "the enrollment challenge is stale and carries no sealed-license marker",
       );
     }
     return { licenseToken: params.licenseToken };
   }
+  // A marked answer is from a control plane that takes the license sealed: the
+  // license is never sent in clear, and the echo must be this request's nonce
+  // (a stripped or replaced nonce is refused).
   if (challenge.clientNonce !== clientNonce) {
     throw new PanelIdentityError(
       "/api/daemon/v1/auth/challenge",
-      "the enrollment challenge echoes another nonce",
+      "the enrollment challenge does not echo this request's nonce",
     );
   }
   const seal = await params.panelSealKey?.();

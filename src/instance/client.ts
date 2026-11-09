@@ -107,6 +107,7 @@ import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import {
   createPanelSealKeySource,
   type PanelIdentityFetch,
+  parsePanelIdentity,
 } from "./panel-identity-cache.ts";
 import {
   createSealingContext,
@@ -1833,12 +1834,18 @@ export class InstanceClient {
       licenseToken: licenseCredentials.licenseToken,
       stateDir,
       panelFingerprint: pinnedFingerprint,
-      panelSealKey: () =>
-        createPanelSealKeySource({
-          fetchDocument: () => enrollClient.getPanelIdentityDocument(),
-          isTrustedSigningKey: (kid) =>
-            this.#panelPin ? pinAccepts(this.#panelPin, kid) : false,
-        }).get(),
+      panelSealKey: async () => {
+        const pin = this.#panelPin;
+        if (!pin) return null;
+        const fetched = await enrollClient.getPanelIdentityDocument();
+        // Same checks as the connect-time document, including the keyset floor.
+        await verifyPanelIdentityDocument(fetched, pin, Date.now());
+        return (await parsePanelIdentity(
+          fetched,
+          Date.now(),
+          (kid) => pinAccepts(pin, kid),
+        ))?.key ?? null;
+      },
     });
     keyFile = enrollment.keyFile;
     serverId = enrollment.serverId;
