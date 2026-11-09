@@ -5503,6 +5503,8 @@ it({
       "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
     const target =
       "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-193059-fc561fc.json";
+    const priorChannel = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "canary");
     const prior = Deno.env.get("TURBOPANEL_MANIFEST_URL");
     Deno.env.set("TURBOPANEL_MANIFEST_URL", stale);
     let resolvedFrom: string | undefined;
@@ -5517,6 +5519,8 @@ it({
         channel: "canary",
         sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/1ade037",
       }),
+      fetchChannelHeadVersion: () =>
+        Promise.resolve("0.1.1-canary.20260927-193059-fc561fc"),
       resolveUpdate: (_config, env) => {
         resolvedFrom = env?.TURBOPANEL_MANIFEST_URL;
         return Promise.resolve(
@@ -5555,6 +5559,7 @@ it({
       await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", priorChannel);
     }
   },
 });
@@ -5574,7 +5579,7 @@ it({
     const tagPin =
       "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json";
     const pointer =
-      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
+      "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json";
     const prior = Deno.env.get("TURBOPANEL_MANIFEST_URL");
     Deno.env.set("TURBOPANEL_MANIFEST_URL", tagPin);
     let resolvedFrom: string | undefined;
@@ -5623,6 +5628,123 @@ it({
       await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "an unsigned update naming another build than the channel head is refused as manifest_pinned",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "canary");
+    const other =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
+    const head = "0.1.1-canary.20260927-193059-fc561fc";
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      assertUpdateDiskPreflight: () => Promise.resolve(),
+      fetchChannelHeadVersion: () => Promise.resolve(head),
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("fc561fc"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-other-build",
+        manifestUrl: other,
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "other-build update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-other-build"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "manifest_pinned");
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "an unsigned update naming the channel's own head manifest is not held back",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "canary");
+    const own =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
+    let resolvedFrom: string | undefined;
+    let headFetches = 0;
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      assertUpdateDiskPreflight: () => Promise.resolve(),
+      fetchChannelHeadVersion: () => {
+        headFetches += 1;
+        return Promise.resolve("unused");
+      },
+      resolveUpdate: (_config, env) => {
+        resolvedFrom = env?.TURBOPANEL_MANIFEST_URL;
+        return Promise.resolve(sampleUpdateInfo("fc561fc", resolvedFrom));
+      },
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: () => Promise.resolve(),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-own-head",
+        manifestUrl: own,
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "own-head update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-own-head"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(headFetches, 0);
+      assertEquals(resolvedFrom, own);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
     }
   },
 });

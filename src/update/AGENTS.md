@@ -104,6 +104,10 @@ update left in `daemon.env` (`selectUpdateManifestUrl`); dropping the message
 URL instead would put that stale pin back in charge and freeze the host. The
 two call sites that read a message manifest URL (`#applyUpdate`,
 `#applyInstanceUpdate` in `src/instance/client.ts`, the control plane and web
-interface pins each against their own rail) must run both checks before the
-URL reaches `selectUpdateManifestUrl`; until they do, only the unit tests
-exercise the rule.
+interface pins each against their own rail) run both checks through
+`#holdMessageManifest` before the URL reaches `selectUpdateManifestUrl`. When
+the decision is `head`, the signed manifest at the channel head is fetched with
+`fetchChannelHeadVersion` (`src/instance/run-reconcile.ts`, always verified as a
+pinned manifest) and its `version` is compared; any refusal is `manifest_pinned`.
+Tests: `src/instance/client.test.ts` (unsigned) and
+`src/instance/client-signed-session.test.ts` (signed).
