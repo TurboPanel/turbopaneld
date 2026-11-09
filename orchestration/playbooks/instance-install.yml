@@ -107,6 +107,7 @@
   pre_tasks:
     - name: Refresh apt cache once per install (Debian)
       ansible.builtin.apt:
+        lock_timeout: 300
         update_cache: true
         cache_valid_time: 3600
       when: ansible_os_family == 'Debian'

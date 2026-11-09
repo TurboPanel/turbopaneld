@@ -104,3 +104,24 @@ test("a validate failure that is ignored is warned about with the module's own m
   // The four in-place Caddyfile edits (server headers twice, UI cache, grace).
   assertEquals(checked, 4);
 });
+
+test("every apt task waits out the daily security update run", async () => {
+  // apt-daily-upgrade holds the dpkg lock for a few minutes once a day, and
+  // its timers are Persistent, so they can fire at boot next to a converge.
+  // The module's default 60 s wait then fails a php-fpm, docker or runtime
+  // install. 300 s stays well inside the update guard's 600 s deadline.
+  let checked = 0;
+  for (const entry of await orchestrationTasks()) {
+    for (const task of entry.tasks) {
+      const args = task["ansible.builtin.apt"];
+      if (args === undefined) continue;
+      assertEquals(
+        (args as Record<string, unknown>).lock_timeout,
+        300,
+        `${entry.path}: ${String(task.name)} sets lock_timeout: 300`,
+      );
+      checked++;
+    }
+  }
+  assertEquals(checked, 21);
+});

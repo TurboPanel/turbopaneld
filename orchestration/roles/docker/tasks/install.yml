@@ -88,6 +88,7 @@
 
 - name: Remove distribution packages that conflict with Docker's
   ansible.builtin.apt:
+    lock_timeout: 300
     name: "{{ _docker_conflicts_installed }}"
     state: absent
   when:
@@ -96,6 +97,7 @@
 
 - name: Install the tools used to fetch the Docker signing key and set up networking
   ansible.builtin.apt:
+    lock_timeout: 300
     name: "{{ ['ca-certificates', 'gnupg', 'python3-apt', 'iptables', 'nftables'] }}"
     state: present
     install_recommends: false
@@ -185,6 +187,7 @@
 
 - name: Refresh the apt cache because the Docker repository changed
   ansible.builtin.apt:
+    lock_timeout: 300
     update_cache: true
   when: >-
     _docker_sources is changed
@@ -228,6 +231,7 @@
   block:
     - name: Install the Docker packages
       ansible.builtin.apt:
+        lock_timeout: 300
         name: >-
           {{ (_docker_versioned_packages
               | map('regex_replace', '$', ('=' ~ turbopanel_docker_version) if turbopanel_docker_version | length > 0 else '')

@@ -24,6 +24,7 @@
 # to install, so they are left out of the apt list.
 - name: Install php-fpm and extensions from sury ({{ php_fpm_series_item }})
   ansible.builtin.apt:
+    lock_timeout: 300
     name: >-
       {{
         (['php' ~ php_fpm_series_item ~ '-fpm', 'php' ~ php_fpm_series_item ~ '-cli',
