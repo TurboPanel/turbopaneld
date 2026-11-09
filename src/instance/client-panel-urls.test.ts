@@ -441,3 +441,47 @@ it({
     );
   },
 });
+
+it({
+  name:
+    "a document at a higher key set that the chain does not explain keeps the session signed, and its address list waits",
+  permissions: PERMISSIONS,
+  fn: async () => {
+    const start = Date.parse("2026-11-08T00:00:00Z");
+    await withPinnedClient(
+      {
+        pinUrls: [ALIVE],
+        baseUrl: ALIVE,
+        documentUrls: [ALIVE],
+        pinLines: ROTATION_PIN_LINES,
+        now: () => start,
+        document: (panel) =>
+          panel.identityFetch({
+            nowMs: start,
+            keyset: 2,
+            urls: [ALIVE, "https://second.test"],
+          }),
+      },
+      async ({ sockets, requested, written, applied, api }) => {
+        api.script(
+          STATEMENTS_URL,
+          () => new Response(JSON.stringify({ statements: [] })),
+        );
+        await waitFor("socket", () => sockets.length > 0);
+        // The chain was asked once and held nothing for this pin.
+        assertEquals(
+          requested.filter((url) => url === STATEMENTS_URL).length,
+          1,
+        );
+        assertEquals(applied.length, 0);
+        // Root takes addresses only from a document at the pinned key set.
+        assertEquals(written.length, 0);
+        // The document's key is the pinned one: the session is still signed.
+        const socket = sockets[0]!;
+        socket.open();
+        await waitFor("hello-nonce", () => socket.sentFrames.length > 0);
+        assertEquals(frameTypes(socket.sentFrames), ["hello-nonce"]);
+      },
+    );
+  },
+});
