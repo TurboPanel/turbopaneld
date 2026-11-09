@@ -64,7 +64,13 @@ that host dials `https://localhost:8443` like a remote server, but
 `daemon-converge.yml` is the managed-server playbook and sets the vendored Deno,
 Caddy and the log folder to `root:tp` / `tp:tp`, which locks the developer's
 own units out. The Developer Console's converge owns that host
-(`shouldRunDaemonConverge` in `setup.ts`). `boot-converge-gate.ts` holds command
+(`shouldRunDaemonConverge` in `setup.ts`). The playbooks a server runs for
+itself (`daemon-converge`, `docker-setup`, `caddy-setup`, `buildkit-setup`)
+take their extra-vars from `serverPlaybookExtraArgs`: nothing on a managed
+host, and only the development ownership vars on a co-located development
+host. They never receive `turbopanel_ui_mode`, `turbopanel_instance_run_mode`
+or `turbopanel_instance_runtime` (no role they apply reads them; those belong
+to `devInstanceExtraArgs` and the build toggle). `boot-converge-gate.ts` holds command
 dispatch (after the ack) until that converge has finished, passed or failed, so
 no command runs a playbook on top of it. The fabric, forwarding, PHP and
 background checks that normally precede the connection run after a successful

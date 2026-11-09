@@ -169,6 +169,24 @@ export function devOwnershipPlaybookExtraArgs(
 }
 
 /**
+ * Extra-vars for the playbooks a server runs for itself: `daemon-converge`,
+ * `docker-setup`, `caddy-setup` and `buildkit-setup`. None of their roles
+ * applies the control plane or the web interface, so the run-mode trio
+ * (`turbopanel_ui_mode`, `turbopanel_instance_run_mode`,
+ * `turbopanel_instance_runtime`) is never passed here: a managed host gets no
+ * extra-vars at all, and a co-located development host gets only the
+ * ownership vars those roles read ({@link devOwnershipPlaybookExtraArgs}).
+ * Passing {@link devInstanceExtraArgs} instead put `turbopanel_ui_mode=dev`
+ * and `turbopanel_instance_run_mode=source` on every production server's
+ * converge command line: unread by these roles, but wrong to read in a log.
+ */
+export function serverPlaybookExtraArgs(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string[] {
+  return devOwnershipPlaybookExtraArgs(env);
+}
+
+/**
  * Dev/runtime extra-vars shared by every co-located playbook. Optional-service
  * toggles come from the structured dev-converge options payload
  * ({@link resolveDevConvergeOptions}) — nothing here reads per-service flags.
@@ -374,7 +392,7 @@ export async function runLocalhostTest(
 export async function runDaemonConverge(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  const args = devInstanceExtraArgs();
+  const args = serverPlaybookExtraArgs();
   logInfo("orchestration", "running daemon-converge playbook");
   await runLocalPlaybook(DAEMON_CONVERGE_PLAYBOOK, args, onEvent);
   logInfo("orchestration", "daemon-converge complete");
@@ -719,7 +737,7 @@ export async function runDockerSetup(
   logInfo("orchestration", "running docker-setup playbook");
   await runLocalPlaybook(
     DOCKER_PLAYBOOK,
-    [...devInstanceExtraArgs(), ...buildDockerSetupExtraArgs(resolved)],
+    [...serverPlaybookExtraArgs(), ...buildDockerSetupExtraArgs(resolved)],
     onEvent,
   );
   logInfo("orchestration", "docker-setup complete");
@@ -730,7 +748,7 @@ export async function runCaddySetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   logInfo("orchestration", "running caddy-setup playbook");
-  await runLocalPlaybook(CADDY_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  await runLocalPlaybook(CADDY_PLAYBOOK, serverPlaybookExtraArgs(), onEvent);
   logInfo("orchestration", "caddy-setup complete");
 }
 
@@ -747,7 +765,7 @@ export async function runBuildkitSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   logInfo("orchestration", "running buildkit-setup playbook");
-  await runLocalPlaybook(BUILDKIT_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  await runLocalPlaybook(BUILDKIT_PLAYBOOK, serverPlaybookExtraArgs(), onEvent);
   logInfo("orchestration", "buildkit-setup complete");
 }
 
