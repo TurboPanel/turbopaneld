@@ -466,6 +466,18 @@ exit 0
     Deno.env.set("TURBOPANEL_INSTANCE_RUNTIME", "workers");
     Deno.env.set("TURBOPANEL_PUBLIC_URLS", "https://203.0.113.10");
     try {
+      const args = ansible.devInstanceExtraArgs();
+      assertEquals(args.includes("turbopanel_ui_mode=static"), true);
+      assertEquals(
+        args.includes("turbopanel_instance_run_mode=compiled"),
+        true,
+      );
+      assertEquals(args.includes("turbopanel_instance_runtime=workers"), true);
+      assertEquals(args.includes("postgres_expose_port=true"), true);
+      assertEquals(
+        args.some((arg) => arg.startsWith("turbopanel_public_urls=")),
+        true,
+      );
       await ansible.runDaemonConverge();
       await ansible.runBuildToggle({
         uiMode: "dev",
