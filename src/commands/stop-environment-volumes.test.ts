@@ -87,7 +87,7 @@ test("removeStopVolumes removes, skips a volume in use and reports each", async 
   assertEquals(lines.length, 4);
   assertEquals(
     volumeSummary(states),
-    "data volumes removed: 2, kept: 1, failed: 1",
+    "data volumes removed: 1, not on this server: 1, kept: 1, failed: 1",
   );
   assertEquals(volumeSummary([]), null);
 });

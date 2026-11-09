@@ -172,7 +172,9 @@ export function volumeSummary(
   if (states.length === 0) return null;
   const count = (state: EnvironmentStopVolumeState["state"]) =>
     states.filter((entry) => entry.state === state).length;
-  const parts = [`data volumes removed: ${count("removed") + count("absent")}`];
+  const parts = [`data volumes removed: ${count("removed")}`];
+  const absent = count("absent");
+  if (absent > 0) parts.push(`not on this server: ${absent}`);
   const kept = count("kept");
   const failed = count("failed");
   if (kept > 0) parts.push(`kept: ${kept}`);
