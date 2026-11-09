@@ -38,7 +38,8 @@ async function realTool(name: string): Promise<string> {
 /**
  * Run the prerequisites block with a PATH holding only `cat`, `rm`, `mktemp`
  * and stubs for the listed commands, so a real `sudo` on the machine running
- * the test cannot leak in. `apt-get` always succeeds without installing.
+ * the test cannot leak in. `apt-get` always succeeds without installing and
+ * records its arguments.
  */
 async function runBlock(present: string[]) {
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-prereqs-" });
@@ -46,11 +47,18 @@ async function runBlock(present: string[]) {
     for (const name of ["cat", "rm", "mktemp"]) {
       await Deno.symlink(await realTool(name), join(dir, name));
     }
-    for (const name of ["apt-get", ...present]) {
+    for (const name of present) {
       await Deno.writeTextFile(join(dir, name), "#!/bin/sh\nexit 0\n", {
         mode: 0o755,
       });
     }
+    // The apt-get stub records each call's arguments, one line per call.
+    const aptCalls = join(dir, "apt-calls");
+    await Deno.writeTextFile(
+      join(dir, "apt-get"),
+      `#!/bin/sh\necho "$*" >> '${aptCalls}'\nexit 0\n`,
+      { mode: 0o755 },
+    );
     const script = [
       'tp_print_error() { printf "ERR %s\\n" "$1" >&2; }',
       "tp_print_ok() { :; }",
@@ -64,10 +72,17 @@ async function runBlock(present: string[]) {
       stdout: "piped",
       stderr: "piped",
     }).output();
+    let aptArgs: string[] = [];
+    try {
+      aptArgs = (await Deno.readTextFile(aptCalls)).trim().split("\n");
+    } catch {
+      // apt-get never ran
+    }
     return {
       status: out.code,
       stdout: new TextDecoder().decode(out.stdout),
       stderr: new TextDecoder().decode(out.stderr),
+      aptArgs,
     };
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -88,4 +103,29 @@ test("host prerequisites pass when every tool including sudo is present", async 
   const res = await runBlock(["sudo", ...OTHERS]);
   assertEquals(res.status, 0, res.stderr);
   assertStringIncludes(res.stdout, "reached-end");
+});
+
+test("host prerequisites wait for the dpkg lock on every apt-get call", async () => {
+  // A fresh cloud host may still be running its first-boot upgrade.
+  const res = await runBlock(OTHERS);
+  assertEquals(res.aptArgs.length, 2, res.stderr);
+  for (const args of res.aptArgs) {
+    assertStringIncludes(args, "-o DPkg::Lock::Timeout=300");
+  }
+});
+
+test("host prerequisites do not call apt-get when every tool is present", async () => {
+  const res = await runBlock(["sudo", ...OTHERS]);
+  assertEquals(res.aptArgs, []);
+});
+
+test("every apt-get call in run.sh waits for the dpkg lock", async () => {
+  const text = await Deno.readTextFile(runShPath);
+  const calls = text.split("\n").filter((line) =>
+    /(^|[^\w-])apt-get\s/.test(line) && !line.trimStart().startsWith("#")
+  );
+  assertEquals(calls.length > 0, true);
+  for (const line of calls) {
+    assertStringIncludes(line, "apt-get -o DPkg::Lock::Timeout=300 ");
+  }
 });

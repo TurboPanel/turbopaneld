@@ -23,6 +23,14 @@ change-detected heartbeats.
   the driver is `virtio_mem`, or present memory is more than 256 MiB above
   MemTotal, or MemTotal moved more than 32 MiB. hv_balloon debugfs needs root
   and is not read.
+- **Arm CPU names** — Arm `/proc/cpuinfo` has no `model name`, no `core id`
+  and (on a Raspberry Pi) a trailing board block (`Revision`, `Serial`,
+  `Model`). `src/host/arm-cpu-model.ts` names the core from `CPU implementer`
+  / `CPU part` (`0x41`/`0xd0b` is `Cortex-A76`; an unknown pair stays unnamed)
+  for both the host inventory's `cpus[].name` and the metrics topology's CPU
+  `model`. The topology counts only blocks with a `processor` key and treats a
+  processor without `core id` as its own core. Fixture:
+  `src/host/testdata/raspberry-pi-5-cpuinfo.txt` (serial zeroed).
 - **Kernel features** — `src/host/kernel-features.ts` is the typed registry mirroring `orchestration/scripts/tp-kernel-features` (`pi-4k-pagesize`); the daemon never calls the helper. Commands printed to a person use the absolute path `/opt/turbopanel/share/orchestration/scripts/tp-orchestrate` (`tp-orchestrate` is not on PATH). The installer reboots only on a first install: it records whether `server.id` existed and when the run began, and a reboot needs fresh enrolment files (`server.id`, `server-key-id`, the saved server key). `undo` only removes a line this tool added (marker in `/var/lib/turbopanel-kernel`).
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`

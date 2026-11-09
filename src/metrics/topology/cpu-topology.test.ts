@@ -82,3 +82,35 @@ test("coreIdForStatKey falls back to cpu${key} when the topology has no entry fo
   const index = buildCpuCoreIdIndex([]);
   assertEquals(coreIdForStatKey(index, "5"), "cpu5");
 });
+
+/** A Raspberry Pi 5's `/proc/cpuinfo` (serial number zeroed). */
+const PI5_CPUINFO = Deno.readTextFileSync(
+  new URL("../../host/testdata/raspberry-pi-5-cpuinfo.txt", import.meta.url),
+);
+
+test("collectCpuTopology: a Raspberry Pi 5 is one socket of four single-thread Cortex-A76 cores", async () => {
+  const topology = await collectCpuTopology({
+    readProcFile: (path) => path === "/proc/cpuinfo" ? PI5_CPUINFO : undefined,
+  });
+  // The trailing board block (Revision, Serial, Model) is not a fifth CPU,
+  // and with no `core id` each processor is its own core.
+  assertEquals(topology.sockets, 1);
+  assertEquals(topology.coresPerSocket, 4);
+  assertEquals(topology.threadsPerSocket, 4);
+  assertEquals(topology.model, "Cortex-A76");
+  assertEquals(topology.cores, [
+    { logicalIndex: 0, coreId: "cpu:p0c0t0" },
+    { logicalIndex: 1, coreId: "cpu:p0c1t0" },
+    { logicalIndex: 2, coreId: "cpu:p0c2t0" },
+    { logicalIndex: 3, coreId: "cpu:p0c3t0" },
+  ]);
+});
+
+test("collectCpuTopology: an Arm part missing from the table leaves the model null", async () => {
+  const unknown = PI5_CPUINFO.replaceAll("0xd0b", "0xfff");
+  const topology = await collectCpuTopology({
+    readProcFile: (path) => path === "/proc/cpuinfo" ? unknown : undefined,
+  });
+  assertEquals(topology.model, null);
+  assertEquals(topology.coresPerSocket, 4);
+});
