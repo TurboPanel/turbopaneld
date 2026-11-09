@@ -299,7 +299,7 @@ test("a bound frame in an unbound session, and an unbound session's frames, beha
   assertEquals(bound.ok, false);
 });
 
-test("a document that advertises bound sessions makes an unbound hello or frame a refusal, offer or not", async () => {
+test("a document that advertises bound sessions makes an unbound hello a refusal, offer or not", async () => {
   const panel = await createTestPanel();
   const advertised = await panel.signing({ boundSessions: true });
   const ctx = { pin: panel.pin(), nowMs: NOW_MS, binding: SERVER_A };

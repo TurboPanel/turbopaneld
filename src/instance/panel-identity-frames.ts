@@ -46,9 +46,10 @@ export interface PanelSigningKey {
   key: CryptoKey;
   keyset: number;
   /**
-   * The verified identity document advertised `boundSessions: 1`: any hello
-   * or frame that does not name this server and key is refused, whether or
-   * not this daemon's offer reached the control plane.
+   * The verified identity document advertised `boundSessions: 1`: a hello
+   * that does not name this server and key is refused, whether or not this
+   * daemon's offer reached the control plane. Frames that name nothing are
+   * still accepted: they carry the hello's session id.
    */
   boundSessions?: boolean;
 }

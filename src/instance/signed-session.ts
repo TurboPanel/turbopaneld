@@ -59,7 +59,9 @@ export interface SignedSessionOptions {
   /**
    * This server and daemon key. When set, the hello-nonce offers the bound
    * session, and a hello or frame signed for another server or key is refused.
-   * Absent: nothing is offered and nothing is checked (an unbound session).
+   * Absent: nothing is offered and no binding can be checked, so a hello that
+   * names a server and key is refused (an older control plane's unbound hello
+   * still verifies).
    */
   binding?: SessionBinding;
   /**
