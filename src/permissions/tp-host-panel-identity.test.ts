@@ -606,6 +606,26 @@ test("once rotation passkeys are pinned a document's next key is never pinned", 
   });
 });
 
+test("the first fill writes the shared canonical passkeys line", async () => {
+  await withHost(async (host) => {
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    const { passkeys, line } = vectors.passkeysLine;
+    const filled = await host.run(
+      ["panel-identity-write"],
+      await panel.document({
+        keyset: 3,
+        rotation: { rpId: vectors.pin.rpId, passkeys },
+      }),
+    );
+    assertEquals(filled.code, 0, filled.stderr);
+    assertStringIncludes(
+      await Deno.readTextFile(host.path(PIN_PATH)),
+      `passkeys=${line}\n`,
+    );
+  });
+});
+
 test("a malformed rotation block is refused before anything is pinned", async () => {
   await withHost(async (host) => {
     const panel = await makePanel();

@@ -8,7 +8,10 @@ import {
   rotationPasskeysHash,
   statementHead,
 } from "./keyset-chain.ts";
-import type { PanelIdentityPin } from "./panel-identity-pin.ts";
+import {
+  type PanelIdentityPin,
+  rotationPasskeysLine,
+} from "./panel-identity-pin.ts";
 
 /** Alias so Sonar sees real tests (see src/AGENTS.md). */
 const test = Deno.test.bind(Deno);
@@ -148,4 +151,15 @@ test("the passkeys hash is empty with none and order independent otherwise", asy
     await rotationPasskeysHash([...pin.passkeys].reverse()),
   );
   assertEquals((await rotationPasskeysHash(pin.passkeys)).length, 43);
+});
+
+test("the shared passkeys line vector: sorted by id in code-unit order, then hashed", async () => {
+  const { passkeys, line, hash } = vectors.passkeysLine;
+  const set = passkeys.map((p) => ({
+    id: p.id,
+    alg: p.alg as "ES256" | "EdDSA",
+    pub: p.pub,
+  }));
+  assertEquals(rotationPasskeysLine(set), line);
+  assertEquals(await rotationPasskeysHash(set), hash);
 });

@@ -657,5 +657,32 @@
         ]
       }
     }
-  ]
+  ],
+  "passkeysLine": {
+    "comment": "The canonical rotation passkey line (the pin file's passkeys= value and what a daemon hashes for its pin report): <id>.<es256|eddsa>.<pub>, comma-joined, sorted by id in code-unit order (so '-' < 'Z' < '_' < 'a'). hash is base64url SHA-256 of line.",
+    "passkeys": [
+      {
+        "id": "apEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+        "alg": "EdDSA",
+        "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+      },
+      {
+        "id": "_pEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+        "alg": "ES256",
+        "pub": "BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0"
+      },
+      {
+        "id": "ZpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+        "alg": "EdDSA",
+        "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+      },
+      {
+        "id": "-pEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc",
+        "alg": "EdDSA",
+        "pub": "85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw"
+      }
+    ],
+    "line": "-pEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc.eddsa.85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw,ZpEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc.eddsa.85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw,_pEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc.es256.BEnqNUu31TPFtS7AqTstAsL4dGD-2yyV1CdOgChWoH08kLyOu3muh27ZVkNWuYSPwWX_C6WT-sz0xrpq1wZXsO0,apEk6OihgjYDpH6Pk-lzpwv8Uf5-4iU6hl2C06Pw6Cc.eddsa.85XAPLbTgR_DnGlXbqHuzBUMad-08vW5kH4H1XpcJPw",
+    "hash": "1oSnz3Hqp5Iw58PKbr8rAmOVbcP2ZRWAr1UNqlVwYHc"
+  }
 }
