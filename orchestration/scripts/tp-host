@@ -5543,7 +5543,11 @@ if len(pub) != 32 or kid != current[0].get("kid"):
     raise SystemExit("current key does not match its fingerprint")
 if kid != pinned:
     raise SystemExit("the document names a different current key than the pin")
-if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset < int(pinned_keyset):
+# A whole number the control plane can read too: never true, nothing at or
+# above 2^53 (a first fill would otherwise pin a key set no one else can match).
+if not isinstance(keyset, int) or isinstance(keyset, bool) or keyset >= 2**53:
+    raise SystemExit("keyset is not a whole number")
+if keyset < int(pinned_keyset):
     raise SystemExit("keyset is lower than the pinned one")
 # Once rotation passkeys are pinned, only an approved statement moves the key
 # set: a document must carry exactly the pinned one.

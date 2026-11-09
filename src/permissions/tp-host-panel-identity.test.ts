@@ -165,6 +165,29 @@ test("panel-identity-write refuses what the pin does not allow", async () => {
   });
 });
 
+test("panel-identity-write refuses a document key set that is not a whole number below 2^53", async () => {
+  await withHost(async (host) => {
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    const before = await Deno.readTextFile(host.path(PIN_PATH));
+    for (const keyset of [2 ** 53, 2 ** 60]) {
+      const err = await refused(
+        host,
+        ["panel-identity-write"],
+        await panel.document({ keyset }),
+      );
+      assertStringIncludes(err, "keyset is not a whole number", `${keyset}`);
+      assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), before);
+    }
+    // The largest safe whole number is still one.
+    const largest = await host.run(
+      ["panel-identity-write"],
+      await panel.document({ keyset: 2 ** 53 - 1 }),
+    );
+    assertEquals(largest.code, 0, largest.stderr);
+  });
+});
+
 test("panel-identity-write rewrites the update origin's addresses with the pin's", async () => {
   await withHost(async (host) => {
     const panel = await makePanel();

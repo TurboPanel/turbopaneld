@@ -1098,7 +1098,10 @@ export class InstanceClient {
 
   /** The pinned key's fingerprint while this server is pinned and the key is verified. */
   #pinnedPanelFingerprint(): string | undefined {
-    return this.#panelPin ? this.#panelKey?.kid : undefined;
+    const pin = this.#panelPin;
+    const kid = this.#panelKey?.kid;
+    // A key verified under an earlier pin (before a key-set catch-up) is not it.
+    return pin && kid && pinAccepts(pin, kid) ? kid : undefined;
   }
 
   /**
