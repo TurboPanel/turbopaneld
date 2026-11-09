@@ -6,6 +6,7 @@ import {
   devOwnershipPlaybookExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
+  serverPlaybookExtraArgs,
 } from "./ansible.ts";
 import {
   DEV_CONVERGE_MANIFEST_FILE,
@@ -1812,6 +1813,43 @@ test("Apache loads mod_remoteip and logs the client address for nginx in front",
   assertEquals(format >= 0 && format < custom, true);
 });
 
+test("a managed server's own playbooks get no extra-vars, whatever the run-mode env says", () => {
+  assertEquals(serverPlaybookExtraArgs({}), []);
+  assertEquals(
+    serverPlaybookExtraArgs({
+      TURBOPANEL_UI_MODE: "dev",
+      TURBOPANEL_INSTANCE_RUN_MODE: "source",
+      TURBOPANEL_INSTANCE_RUNTIME: "workers",
+      TURBOPANEL_PUBLIC_URLS: "https://203.0.113.10",
+    }),
+    [],
+  );
+});
+
+test("a co-located development host's server playbooks get the ownership vars and never the run-mode trio", () => {
+  const args = serverPlaybookExtraArgs({
+    TURBOPANEL_DEV_USER: "dev",
+    TURBOPANEL_DEV_UID: "1000",
+    TURBOPANEL_DEV_GID: "1000",
+    TURBOPANEL_DEV_ROOT: "/home/dev/turbopanel",
+    TURBOPANEL_UI_MODE: "dev",
+    TURBOPANEL_INSTANCE_RUN_MODE: "source",
+  });
+  assertEquals(args.includes("turbopanel_dev_user=dev"), true);
+  assertEquals(args.includes("turbopanel_dev_uid=1000"), true);
+  assertEquals(args.includes("turbopanel_dev_gid=1000"), true);
+  assertEquals(args.includes("turbopanel_dev_root=/home/dev/turbopanel"), true);
+  for (
+    const key of [
+      "turbopanel_ui_mode",
+      "turbopanel_instance_run_mode",
+      "turbopanel_instance_runtime",
+    ]
+  ) {
+    assertEquals(args.some((arg) => arg.startsWith(`${key}=`)), false);
+  }
+});
+
 test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
   assertEquals(
     devOwnershipPlaybookExtraArgs({
@@ -2448,7 +2486,10 @@ test("runDockerSetup passes docker addressing as -e extra-vars", () => {
   const body = source.slice(start, end);
   assertEquals(body.includes("buildDockerSetupExtraArgs(resolved)"), true);
   assertEquals(body.includes("readDockerNetworkingState("), true);
-  assertEquals(body.includes("devInstanceExtraArgs()"), true);
+  // The development ownership vars the docker role reads, and never the
+  // co-located run-mode trio.
+  assertEquals(body.includes("serverPlaybookExtraArgs()"), true);
+  assertEquals(body.includes("devInstanceExtraArgs()"), false);
 });
 
 test(

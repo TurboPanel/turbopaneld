@@ -25,6 +25,13 @@ TurboPanel High Availability, a daemon enrolled with some other control
 plane, or leftovers from an older or partial install) only changes the
 labels and warnings printed before the prompt. Every removal step runs
 either way, so a partial install is cleared by the same path as a full one.
+A daemon counts as enrolled with TurboPanel High Availability only when the
+host of `TURBOPANEL_INSTANCE_URL` is exactly one of its names
+(`tp_host_is_ha`: `turbopanel.app`, `staging.turbopanel.dev`,
+`testing.turbopanel.dev`). Any other name, including another name under
+`turbopanel.dev` such as the self-hosted canary host, is labelled a
+self-hosted control plane at that URL. Add a name there when High
+Availability gains one; never a wildcard.
 
 A development environment is refused before anything is changed:
 `TURBOPANEL_MODE=development`, `TURBOPANEL_DEV_ROOT`, or `TURBOPANEL_DEV_USER`
