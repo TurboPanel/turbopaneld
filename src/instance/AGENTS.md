@@ -1011,6 +1011,9 @@ form still works and, on a fresh install, pins nothing and writes no pin file.
   argument, stdin is the signature header line then the exact identity body; it
   follows the pinned current key only (urls, next, keyset) and rewrites
   `hosts=` in `lib/update-origin` to the same list (an empty list is refused).
+  Once rotation passkeys are pinned (or the document fills them) `next=` stays
+  empty, in `run.sh` too, and `pinAccepts` ignores it: only a statement moves
+  the key.
   With `statement`, stdin is a passkey-approved key-set envelope (see
   **Key rotation** below); it rewrites `current=`, `keyset=`, `rp_id=`,
   `passkeys=` and `panel_key=` in `lib/update-origin`.

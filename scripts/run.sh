@@ -3475,6 +3475,9 @@ tp_write_panel_identity_pin() {
       ;;
     *) return 0 ;;
   esac
+  # With rotation passkeys pinned only an approved statement moves the key:
+  # no next key is pinned (tp-host panel-identity-write keeps it empty too).
+  [ -n "$_wp_passkeys" ] && _wp_next=""
   _wp_tmp="$(mktemp)"
   {
     printf 'current=%s\n' "$_wp_cur"

@@ -599,14 +599,16 @@ test("an install takes the document's rotation passkeys, sorted; a bad block is 
 test("a first install pins rotation passkeys; a reinstall keeps them", async () => {
   const state = await pinState(
     "",
-    `PANEL_FINGERPRINT=${FP_A}; PANEL_NEXT_FINGERPRINT=''; PANEL_KEYSET=3; PANEL_RP_ID=cp.example.test; PANEL_PASSKEYS=${PK_LINE}; PANEL_URLS=https://p.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://p.example`,
+    `PANEL_FINGERPRINT=${FP_A}; PANEL_NEXT_FINGERPRINT=${FP_B}; PANEL_KEYSET=3; PANEL_RP_ID=cp.example.test; PANEL_PASSKEYS=${PK_LINE}; PANEL_URLS=https://p.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false; HOST_URL=https://p.example`,
   );
   assertEquals(state.code, 0, state.stderr);
   const text = await Deno.readTextFile(join(state.root, "lib/panel-identity"));
+  // With passkeys pinned the document's next key is never pinned.
+  assertStringIncludes(text, "next=\n");
   assertStringIncludes(text, "rp_id=cp.example.test\n");
   assertStringIncludes(text, `passkeys=${PK_LINE}\n`);
   const again = await pinState(
-    `${EXISTING(FP_A)}
+    `${EXISTING(FP_A).replace("next=\\n", `next=${FP_B}\\n`)}
 printf 'rp_id=cp.example.test\\npasskeys=${PK_LINE}\\n' >> "$INSTALL_ROOT/lib/panel-identity"`,
     `PANEL_FINGERPRINT=${FP_A}; PANEL_KEYSET=3; PANEL_RP_ID=''; PANEL_PASSKEYS=''; PANEL_URLS=https://new.example; TOKEN_PAYLOAD=x; UNSAFE_NO_PANEL_KEY=false`,
   );
@@ -614,4 +616,6 @@ printf 'rp_id=cp.example.test\\npasskeys=${PK_LINE}\\n' >> "$INSTALL_ROOT/lib/pa
   const kept = await Deno.readTextFile(join(again.root, "lib/panel-identity"));
   assertStringIncludes(kept, "urls=https://new.example");
   assertStringIncludes(kept, `passkeys=${PK_LINE}\n`);
+  // A next key left from before the passkeys is dropped on the reinstall.
+  assertStringIncludes(kept, "next=\n");
 });
