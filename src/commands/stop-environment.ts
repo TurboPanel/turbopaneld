@@ -438,26 +438,22 @@ export async function handleEnvironmentStop(
   );
 }
 
-async function stopEnvironmentLocked(
+/**
+ * `compose down` every generation the deployment owns. Logs and does nothing
+ * when Docker is missing or the compose files are already gone.
+ */
+async function composeDownAll(
   parsedPayload: EnvironmentStopPayload,
-  daemonReceivedAt: string,
-  deps?: EnvironmentStopHandlerDeps,
-): Promise<EnvironmentStopResult> {
-  const dockerPresent = await dockerAvailableForStop(deps);
-  const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
-  const runStreamed = createStreamedRunner(deps?.runDocker);
-  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
-  logSink.setPhase(COMMAND_LOG_PHASES.STOP);
-  const layout = resolveLayout(Deno.env.toObject());
-
-  const deploymentDir = resolveEnvironmentDeploymentDir(
-    layout,
-    parsedPayload.projectId,
-    parsedPayload.environmentId,
-  );
-  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+  deploymentDir: string,
+  composePaths: string[] | null,
+  options: {
+    dockerPresent: boolean;
+    runStreamed: RunDockerStreamedFn;
+    logSink: CommandOutputSink;
+  },
+): Promise<void> {
+  const { dockerPresent, runStreamed, logSink } = options;
   const hasCompose = composePaths !== null;
-
   if (hasCompose && !dockerPresent) {
     logInfo(
       "commands",
@@ -482,6 +478,33 @@ async function stopEnvironmentLocked(
       `environment.stop compose missing project=${parsedPayload.projectName} env=${parsedPayload.environmentId}; no compose files to take down`,
     );
   }
+}
+
+async function stopEnvironmentLocked(
+  parsedPayload: EnvironmentStopPayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<EnvironmentStopResult> {
+  const dockerPresent = await dockerAvailableForStop(deps);
+  const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
+  const runStreamed = createStreamedRunner(deps?.runDocker);
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  logSink.setPhase(COMMAND_LOG_PHASES.STOP);
+  const layout = resolveLayout(Deno.env.toObject());
+
+  const deploymentDir = resolveEnvironmentDeploymentDir(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+  const hasCompose = composePaths !== null;
+
+  await composeDownAll(parsedPayload, deploymentDir, composePaths, {
+    dockerPresent,
+    runStreamed,
+    logSink,
+  });
 
   if (dockerPresent) {
     await removeEarlierNamedContainers(parsedPayload, deploymentDir, run);
