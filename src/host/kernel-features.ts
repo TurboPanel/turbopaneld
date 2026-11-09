@@ -279,6 +279,8 @@ export type PiMemoryCgroupFacts = {
   procCmdline?: string;
   /** `/boot/firmware/cmdline.txt`; `undefined` when it is missing. */
   cmdlineText?: string;
+  /** `/boot/firmware/config.txt`; `undefined` when it is missing. */
+  configText?: string;
 };
 
 /** Words split the way awk splits fields: on spaces, tabs and newlines. */
@@ -286,11 +288,41 @@ function words(line: string): string[] {
   return line.split(/[ \t\n]+/).filter((word) => word !== "");
 }
 
-/** Same as `kf_cmdline_line`: the first line, every CR and LF removed. */
-export function cmdlineFirstLine(text: string): string {
+/** The first line as it is on disk, without its newline. */
+function rawFirstLine(text: string): string {
   const newline = text.indexOf("\n");
-  const first = newline === -1 ? text : text.slice(0, newline);
-  return first.replaceAll("\r", "");
+  return newline === -1 ? text : text.slice(0, newline);
+}
+
+/**
+ * Same as `kf_cmdline_line`: the first line without its newline and without
+ * one CR at its end. Any other CR stays (the state check refuses it).
+ */
+export function cmdlineFirstLine(text: string): string {
+  const first = rawFirstLine(text);
+  return first.endsWith("\r") ? first.slice(0, -1) : first;
+}
+
+/**
+ * Same as `kf_cmdline_bad_bytes`: a control byte in the first line other than
+ * a tab and one trailing CR.
+ */
+export function cmdlineHasControlBytes(text: string): boolean {
+  for (const char of cmdlineFirstLine(text)) {
+    const code = char.codePointAt(0) ?? 0;
+    if ((code < 0x20 && code !== 0x09) || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Same as `kf_bootcfg_moves_cmdline`: an active `cmdline=` or `os_prefix=`. */
+export function bootConfigMovesCmdline(
+  configText: string | undefined,
+): boolean {
+  if (configText === undefined) return false;
+  return configText.split("\n").some((raw) =>
+    /^\s*(cmdline|os_prefix)\s*=/i.test(raw)
+  );
 }
 
 /** Same as `kf_cmdline_extra_lines`: anything but blank lines after line one. */
@@ -354,10 +386,31 @@ export function undoMemoryCgroupLine(
  * for byte, including the first line's own CR and newline (or none).
  */
 export function replaceCmdlineFirstLine(text: string, line: string): string {
+  const cr = rawFirstLine(text).endsWith("\r") ? "\r" : "";
   const newline = text.indexOf("\n");
-  if (newline === -1) return line;
-  const ending = firstLineEndsCrlf(text) ? "\r\n" : "\n";
-  return `${line}${ending}${text.slice(newline + 1)}`;
+  if (newline === -1) return `${line}${cr}`;
+  return `${line}${cr}\n${text.slice(newline + 1)}`;
+}
+
+/** The checks on the boot files that leave cmdline.txt alone, in order. */
+function cmdlineFileBlocked(
+  cmdlineText: string,
+  configText: string | undefined,
+): string | undefined {
+  if (cmdlineHasControlBytes(cmdlineText)) {
+    return "/boot/firmware/cmdline.txt holds control characters, so it is left as it is";
+  }
+  const lineWords = words(cmdlineFirstLine(cmdlineText));
+  if (lineWords.length === 0) {
+    return "/boot/firmware/cmdline.txt is empty, so it is left as it is";
+  }
+  if (!lineWords.some((word) => word.startsWith("root="))) {
+    return "/boot/firmware/cmdline.txt has no root= setting, so it is left as it is";
+  }
+  if (bootConfigMovesCmdline(configText)) {
+    return "config.txt points the firmware at another command line (cmdline= or os_prefix=), so cmdline.txt is left as it is";
+  }
+  return undefined;
 }
 
 /** Same reasons and check order as `kf_pi_memory_cgroup_state`. */
@@ -396,6 +449,8 @@ export function piMemoryCgroupState(
         "/boot/firmware/cmdline.txt has more than one line, so it is left as it is",
     };
   }
+  const blocked = cmdlineFileBlocked(facts.cmdlineText, facts.configText);
+  if (blocked !== undefined) return { state: "blocked", reason: blocked };
   const running = (facts.procCmdline ?? "").replaceAll(/[\0\r\n]/g, " ");
   const runningScan = scanCmdlineMemoryWords(running);
   if (runningScan === "enable") {

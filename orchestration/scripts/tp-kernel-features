@@ -355,10 +355,34 @@ kf_pi_4k_pagesize_undo() {
 
 # --- backend: boot-cmdline -----------------------------------------------------
 
-# The first line of FILE without its line ending. The Raspberry Pi firmware
-# reads only that one line.
+# The first line of FILE without its newline and without one CR right before
+# it (or at the very end of a file with no newline). Any other CR stays: the
+# state check refuses such a file. The Raspberry Pi firmware reads only that
+# one line.
 kf_cmdline_line() {
-  head -n 1 "$1" | tr -d '\r\n'
+  head -n 1 "$1" | awk '{ sub(/\r$/, ""); printf "%s", $0 }'
+}
+
+# True when the first line of FILE ends in CR (before its newline, or at the
+# end of a file with no newline).
+kf_cmdline_trailing_cr() {
+  [ "$(head -n 1 "$1" | tr -d '\n' | tail -c 1 | od -An -tx1 | tr -d ' \n')" = "0d" ]
+}
+
+# True when the first line of FILE holds a control byte other than a tab and
+# that one trailing CR (a CR inside the line would be lost or misread).
+kf_cmdline_bad_bytes() {
+  _bb_n="$(head -n 1 "$1" | tr -d '\n' | LC_ALL=C tr -cd '\000-\010\013-\037\177' | wc -c)"
+  _bb_cr=0
+  if kf_cmdline_trailing_cr "$1"; then _bb_cr=1; fi
+  [ "$_bb_n" -gt "$_bb_cr" ]
+}
+
+# True when config.txt sends the firmware to another command line file
+# (cmdline=) or another folder (os_prefix=), so cmdline.txt may not be read.
+kf_bootcfg_moves_cmdline() {
+  [ -f "$KF_BOOT_DIR/config.txt" ] &&
+    grep -Eiq '^[[:space:]]*(cmdline|os_prefix)[[:space:]]*=' "$KF_BOOT_DIR/config.txt"
 }
 
 # True when FILE holds anything but blank lines after its first line.
@@ -438,8 +462,8 @@ kf_cmdline_undo_line() {
 }
 
 # Replace the first line of FILE with LINE and keep everything after it byte
-# for byte (the first line's own CR and newline too, or none when the file has
-# no line ending). Same steps as the config.txt edits: backup copy, temporary
+# for byte (the first line's own trailing CR and newline too, each only when
+# the file had it). Same steps as the config.txt edits: backup copy, temporary
 # name in the same directory, `mv -T`, read back. Prints the backup path.
 kf_cmdline_write() {
   _cw_file="$1"
@@ -460,7 +484,8 @@ kf_cmdline_write() {
   trap 'rm -f -- "$_cw_new"' EXIT
   cp -- "$_cw_name" "$_cw_backup" || tp_die "cannot save a backup copy of $_cw_file"
   cmp -s -- "$_cw_name" "$_cw_backup" || tp_die "the backup does not match $_cw_file"
-  _cw_cr="$(kf_bootcfg_cr "$_cw_name")"
+  _cw_cr=""
+  if kf_cmdline_trailing_cr "$_cw_name"; then _cw_cr="$(printf '\r')"; fi
   _cw_nl=""
   if [ "$(head -n 1 "$_cw_name" | tail -c 1 | od -An -tx1 | tr -d ' \n')" = "0a" ]; then
     _cw_nl=1
@@ -470,15 +495,15 @@ kf_cmdline_write() {
     : > "$_cw_new"
   ) || tp_die "cannot create a temporary file in $_cw_dir"
   {
-    printf '%s' "$_cw_line"
-    if [ -n "$_cw_nl" ]; then printf '%s\n' "$_cw_cr"; fi
+    printf '%s%s' "$_cw_line" "$_cw_cr"
+    if [ -n "$_cw_nl" ]; then printf '\n'; fi
     tail -n +2 -- "$_cw_name"
   } > "$_cw_new" || tp_die "cannot write the new $_cw_file"
   [ "$(kf_cmdline_line "$_cw_new")" = "$_cw_line" ] ||
     tp_die "the new $_cw_file does not hold the new line"
-  _cw_want=$(($(printf '%s' "$_cw_line" | wc -c) + $(tail -n +2 -- "$_cw_name" | wc -c)))
+  _cw_want=$(($(printf '%s%s' "$_cw_line" "$_cw_cr" | wc -c) + $(tail -n +2 -- "$_cw_name" | wc -c)))
   if [ -n "$_cw_nl" ]; then
-    _cw_want=$((_cw_want + 1 + $(printf '%s' "$_cw_cr" | wc -c)))
+    _cw_want=$((_cw_want + 1))
   fi
   [ "$(wc -c < "$_cw_new")" -eq "$_cw_want" ] ||
     tp_die "the new file does not keep the rest of $_cw_file"
@@ -519,6 +544,23 @@ kf_pi_memory_cgroup_state() {
     printf 'blocked\t/boot/firmware/cmdline.txt has more than one line, so it is left as it is\n'
     return 0
   fi
+  if kf_cmdline_bad_bytes "$_mc_file"; then
+    printf 'blocked\t/boot/firmware/cmdline.txt holds control characters, so it is left as it is\n'
+    return 0
+  fi
+  _mc_line="$(kf_cmdline_line "$_mc_file")"
+  if [ -z "$(printf '%s' "$_mc_line" | tr -d ' \t')" ]; then
+    printf 'blocked\t/boot/firmware/cmdline.txt is empty, so it is left as it is\n'
+    return 0
+  fi
+  if ! printf '%s\n' "$_mc_line" | tr ' \t' '\n\n' | grep -q '^root='; then
+    printf 'blocked\t/boot/firmware/cmdline.txt has no root= setting, so it is left as it is\n'
+    return 0
+  fi
+  if kf_bootcfg_moves_cmdline; then
+    printf 'blocked\tconfig.txt points the firmware at another command line (cmdline= or os_prefix=), so cmdline.txt is left as it is\n'
+    return 0
+  fi
   _mc_running="$(tr '\000\r\n' '   ' 2>/dev/null < "$P/proc/cmdline" || true)"
   case "$(kf_cmdline_mem_scan "$_mc_running")" in
     enable)
@@ -530,7 +572,7 @@ kf_pi_memory_cgroup_state() {
       return 0
       ;;
   esac
-  case "$(kf_cmdline_mem_scan "$(kf_cmdline_line "$_mc_file")")" in
+  case "$(kf_cmdline_mem_scan "$_mc_line")" in
     list)
       printf 'blocked\tcmdline.txt turns off control groups itself, so it is left as it is\n'
       ;;
@@ -578,6 +620,9 @@ kf_pi_memory_cgroup_undo() {
     rm -f -- "$_mu_marker"
     return 0
   fi
+  # Edited since with a stray control byte: leave it (and the marker) for a
+  # person to look at.
+  if kf_cmdline_bad_bytes "$_mu_file"; then return 0; fi
   _mu_current="$(kf_cmdline_line "$_mu_file")"
   _mu_before="$(sed -n 's/^before=//p' "$_mu_marker" | head -n 1)"
   _mu_after="$(sed -n 's/^after=//p' "$_mu_marker" | head -n 1)"
@@ -702,6 +747,38 @@ kf_wait_converged() {
   done
 }
 
+# Reads one command line, one argument per line, and prints "ansible-playbook"
+# or "unattended-upgrades" when it runs one of them. Only the program counts:
+# the first argument's file name, or the second's when the first is an
+# interpreter (python3, sh). So the daemon's own command line, which names
+# ansible-playbook in a permission list, and a person reading those files
+# (tail, less, an editor) never count. unattended-upgrade-shutdown counts
+# unless it is the helper that only waits (--wait-for-signal) for the whole
+# uptime.
+kf_busy_program() {
+  awk '
+    function base(p) { sub(/.*\//, "", p); return p }
+    function pick(p) {
+      if (p == "ansible-playbook" || p ~ /^AnsiballZ_/) what = "ansible-playbook"
+      else if (p == "unattended-upgrade") what = "unattended-upgrades"
+      else if (p == "unattended-upgrade-shutdown") shutdown = 1
+      decided = 1
+    }
+    NR == 1 {
+      p = base($0)
+      if (p ~ /^(python[0-9.]*|sh|dash|bash)$/) next
+      pick(p)
+      next
+    }
+    NR == 2 && !decided { pick(base($0)); next }
+    $0 == "--wait-for-signal" { waiting = 1 }
+    END {
+      if (what != "") print what
+      else if (shutdown && !waiting) print "unattended-upgrades"
+    }
+  '
+}
+
 # Prints the name of the first package tool or setup run that is running and
 # returns 0; returns 1 when none is. A restart must never cut one short.
 kf_busy() {
@@ -709,25 +786,16 @@ kf_busy() {
     [ -d "$_bp" ] || continue
     _bc="$(cat "$_bp/comm" 2>/dev/null || true)"
     case "$_bc" in
-      dpkg|dpkg-deb|dpkg-trigger|apt|apt-get|aptitude|apt.systemd.dai*|ansible-playboo*)
+      dpkg|dpkg-deb|dpkg-trigger|apt|apt-get|aptitude|apt.systemd.dai*)
         printf '%s\n' "$_bc"
         return 0
         ;;
     esac
-    _bl="$(tr '\000' ' ' 2>/dev/null < "$_bp/cmdline" || true)"
-    case "$_bl" in
-      # The unattended-upgrades service keeps this helper waiting for the
-      # whole uptime; it installs nothing.
-      *unattended-upgrade-shutdown*) ;;
-      *unattended-upgrade*)
-        printf 'unattended-upgrades\n'
-        return 0
-        ;;
-      *ansible-playbook*|*AnsiballZ_*)
-        printf 'ansible-playbook\n'
-        return 0
-        ;;
-    esac
+    _bw="$(tr '\000' '\n' 2>/dev/null < "$_bp/cmdline" | kf_busy_program || true)"
+    if [ -n "$_bw" ]; then
+      printf '%s\n' "$_bw"
+      return 0
+    fi
   done
   return 1
 }
@@ -753,14 +821,18 @@ kf_daemon_stop() {
   if [ -n "$TP_TEST" ]; then
     [ "${TP_KERNEL_TEST_DAEMON_ACTIVE:-}" = "1" ] || return 0
     printf 'Stopping the TurboPanel daemon so it starts nothing new before the restart…\n'
+    KF_DAEMON_STOPPED=1
     printf 'stop\n' >> "${TP_KERNEL_TEST_SYSTEMCTL_LOG:-/dev/null}"
+    [ "${TP_KERNEL_TEST_STOP_FAILS:-}" != "1" ] || return 1
   else
     command -v systemctl >/dev/null 2>&1 || return 0
     systemctl is-active --quiet "$KF_DAEMON_UNIT" 2>/dev/null || return 0
     printf 'Stopping the TurboPanel daemon so it starts nothing new before the restart…\n'
+    # Set first: a stop that fails may still have stopped it, so the caller
+    # always tries a start.
+    KF_DAEMON_STOPPED=1
     systemctl stop "$KF_DAEMON_UNIT" || return 1
   fi
-  KF_DAEMON_STOPPED=1
 }
 
 kf_daemon_start_again() {
@@ -796,23 +868,31 @@ kf_reboot_when_safe() {
     kf_manual_reboot_hint
     return 0
   fi
+  # From here on the daemon is started again on every way out except a
+  # restart handed to systemd: an error, Ctrl-C, a hang-up or a kill.
+  trap 'kf_daemon_start_again' EXIT
+  trap 'printf "\n"; printf "Restart cancelled.\n"; kf_daemon_start_again; kf_manual_reboot_hint; exit 130' HUP INT TERM
   if ! kf_daemon_stop; then
     printf 'The TurboPanel daemon could not be stopped, so this server will not restart on its own.\n'
+    kf_daemon_start_again
     kf_manual_reboot_hint
+    trap - EXIT HUP INT TERM
     return 0
   fi
   if _rs_what="$(kf_busy)"; then
     printf '%s started just now, so this server will not restart on its own.\n' "$_rs_what"
     kf_daemon_start_again
     kf_manual_reboot_hint
+    trap - EXIT HUP INT TERM
     return 0
   fi
   kf_countdown_and_reboot "$1"
 }
 
+# The caller (kf_reboot_when_safe) has set the traps that start the daemon
+# again and cancel on Ctrl-C.
 kf_countdown_and_reboot() {
   _cd_total="$1"
-  trap 'printf "\n"; printf "Restart cancelled.\n"; kf_daemon_start_again; kf_manual_reboot_hint; exit 130' INT TERM
   _cd_tty=""
   if [ -t 1 ]; then _cd_tty=1; fi
   _cd_n="$_cd_total"
@@ -827,11 +907,17 @@ kf_countdown_and_reboot() {
   done
   if [ -n "$_cd_tty" ]; then printf '\r%60s\r' ''; fi
   printf 'Restarting now.\n'
-  trap - INT TERM
+  _cd_ok=""
   if [ -n "$TP_TEST" ]; then
     # shellcheck disable=SC2086
-    if sync && ${TP_KERNEL_TEST_REBOOT_CMD:-true}; then return 0; fi
+    if sync && ${TP_KERNEL_TEST_REBOOT_CMD:-true}; then _cd_ok=1; fi
   elif sync && systemctl reboot; then
+    _cd_ok=1
+  fi
+  if [ -n "$_cd_ok" ]; then
+    # systemd has the restart now and stops the daemon itself.
+    KF_DAEMON_STOPPED=""
+    trap - EXIT HUP INT TERM
     return 0
   fi
   # The restart did not start: never leave the daemon stopped.
@@ -1039,9 +1125,15 @@ kf_verb_installer_step() {
   # on to a restart. A failure here ends the script (nonzero, with a message)
   # before any countdown.
   KF_ONE_RESTART_LATER=1
+  # If a later change fails, say that the ones already saved still need a
+  # restart.
+  _saved=""
+  trap 'if [ -n "$_saved" ]; then printf "Already saved: %s. It takes effect after a restart.\n" "$_saved"; kf_manual_reboot_hint; fi' EXIT
   for _id in $_todo; do
     kf_verb_apply "$_id"
+    _saved="${_saved:+$_saved and }$_id"
   done
+  trap - EXIT
   KF_ONE_RESTART_LATER=""
   if [ -f "$P/run/turbopanel/update-guard.json" ]; then
     printf 'An update is still being checked, so this server will not restart on its own.\n'

@@ -1,8 +1,10 @@
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { renderDaemonPermissionFlags } from "../permissions/daemon-permissions.ts";
 import {
   addBootConfigLineTop,
   cmdlineFirstLine,
+  cmdlineHasControlBytes,
   enableMemoryCgroupLine,
   KERNEL_FEATURE_BOOT_LINE,
   KERNEL_FEATURE_IDS,
@@ -510,45 +512,46 @@ const CMDLINE_GOLDENS: CmdlineGolden[] = [
   },
   {
     name: "CRLF line",
-    input: "console=tty1 rootwait\r\n",
+    input: "root=/dev/mmcblk0p2 console=tty1 rootwait\r\n",
     scan: "none",
-    enabled: `console=tty1 rootwait ${ON}\r\n`,
+    enabled: `root=/dev/mmcblk0p2 console=tty1 rootwait ${ON}\r\n`,
   },
   {
     name: "trailing blanks",
-    input: "console=tty1 rootwait  \n",
+    input: "root=/dev/mmcblk0p2 console=tty1 rootwait  \n",
     scan: "none",
-    enabled: `console=tty1 rootwait ${ON}\n`,
+    enabled: `root=/dev/mmcblk0p2 console=tty1 rootwait ${ON}\n`,
   },
   {
     name: "own disable word is removed",
-    input: "console=tty1  cgroup_disable=memory rootwait\n",
+    input: "root=/dev/mmcblk0p2 console=tty1  cgroup_disable=memory rootwait\n",
     scan: "disable",
-    enabled: `console=tty1 rootwait ${ON}\n`,
+    enabled: `root=/dev/mmcblk0p2 console=tty1 rootwait ${ON}\n`,
   },
   {
     name: "disable after enable",
-    input: `console=tty1 ${ON} cgroup_disable=memory\n`,
+    input: `root=/dev/mmcblk0p2 console=tty1 ${ON} cgroup_disable=memory\n`,
     scan: "disable",
-    enabled: `console=tty1 ${ON}\n`,
+    enabled: `root=/dev/mmcblk0p2 console=tty1 ${ON}\n`,
   },
   {
     name: "already on",
-    input: `console=tty1 ${ON} rootwait\n`,
+    input: `root=/dev/mmcblk0p2 console=tty1 ${ON} rootwait\n`,
     scan: "enable",
-    enabled: `console=tty1 ${ON} rootwait\n`,
+    enabled: `root=/dev/mmcblk0p2 console=tty1 ${ON} rootwait\n`,
   },
   {
     name: "a list that names memory",
-    input: "console=tty1 cgroup_disable=cpu,memory\n",
+    input: "root=/dev/mmcblk0p2 console=tty1 cgroup_disable=cpu,memory\n",
     scan: "list",
-    enabled: `console=tty1 cgroup_disable=cpu,memory ${ON}\n`,
+    enabled:
+      `root=/dev/mmcblk0p2 console=tty1 cgroup_disable=cpu,memory ${ON}\n`,
   },
   {
-    name: "empty file",
-    input: "",
+    name: "CR at the very end, no newline",
+    input: "root=/dev/mmcblk0p2 rootwait\r",
     scan: "none",
-    enabled: ON,
+    enabled: `root=/dev/mmcblk0p2 rootwait ${ON}\r`,
   },
 ];
 
@@ -580,6 +583,16 @@ test("cmdline.txt memory word goldens: scan, enable, undo", () => {
   );
   // Gone already: nothing changes.
   assertEquals(undoMemoryCgroupLine("a b", "a b", `a b ${ON}`), "a b");
+  // Only one CR at the end of the first line is a line ending; any other is
+  // kept (and refused), never dropped, so words never run together.
+  assertEquals(
+    cmdlineFirstLine("root=X\rrootwait\rquiet\n"),
+    "root=X\rrootwait\rquiet",
+  );
+  assertEquals(cmdlineHasControlBytes("root=X\rrootwait\rquiet\n"), true);
+  assertEquals(cmdlineHasControlBytes("root=X\trootwait\r\n"), false);
+  assertEquals(cmdlineHasControlBytes("root=X rootwait\r"), false);
+  assertEquals(cmdlineHasControlBytes("root=X\u0007 rootwait\n"), true);
 });
 
 const MEMORY_SWITCHABLE: PiMemoryCgroupFacts = {
@@ -623,8 +636,60 @@ const MEMORY_STATE_CASES: MemoryStateCase[] = [
     reason: "/boot/firmware/cmdline.txt is missing",
   },
   {
+    name: "a CR inside the line",
+    facts: {
+      ...MEMORY_SWITCHABLE,
+      cmdlineText: "root=/dev/mmcblk0p2\rrootwait\rquiet\n",
+    },
+    state: "blocked",
+    reason:
+      "/boot/firmware/cmdline.txt holds control characters, so it is left as it is",
+  },
+  {
+    name: "empty cmdline.txt",
+    facts: { ...MEMORY_SWITCHABLE, cmdlineText: " \n" },
+    state: "blocked",
+    reason: "/boot/firmware/cmdline.txt is empty, so it is left as it is",
+  },
+  {
+    name: "no root= setting",
+    facts: { ...MEMORY_SWITCHABLE, cmdlineText: "console=tty1 rootwait" },
+    state: "blocked",
+    reason:
+      "/boot/firmware/cmdline.txt has no root= setting, so it is left as it is",
+  },
+  {
+    name: "config.txt names another command line",
+    facts: {
+      ...MEMORY_SWITCHABLE,
+      configText: "arm_64bit=1\n[pi5]\ncmdline=cmdline-pi5.txt\n",
+    },
+    state: "blocked",
+    reason:
+      "config.txt points the firmware at another command line (cmdline= or os_prefix=), so cmdline.txt is left as it is",
+  },
+  {
+    name: "config.txt names another boot folder",
+    facts: {
+      ...MEMORY_SWITCHABLE,
+      configText: "# os_prefix=old/\n  OS_PREFIX = next/\n",
+    },
+    state: "blocked",
+    reason:
+      "config.txt points the firmware at another command line (cmdline= or os_prefix=), so cmdline.txt is left as it is",
+  },
+  {
+    name: "a commented-out cmdline= is not a setting",
+    facts: { ...MEMORY_SWITCHABLE, configText: "#cmdline=other.txt\n" },
+    state: "switchable",
+    reason: "this server can turn on memory limits (a restart is needed)",
+  },
+  {
     name: "more than one line",
-    facts: { ...MEMORY_SWITCHABLE, cmdlineText: "console=tty1\nquiet\n" },
+    facts: {
+      ...MEMORY_SWITCHABLE,
+      cmdlineText: "root=/dev/mmcblk0p2\nquiet\n",
+    },
     state: "blocked",
     reason:
       "/boot/firmware/cmdline.txt has more than one line, so it is left as it is",
@@ -695,6 +760,12 @@ async function writeMemoryPrefix(facts: PiMemoryCgroupFacts): Promise<string> {
     await Deno.writeTextFile(
       join(prefix, "boot/firmware/cmdline.txt"),
       facts.cmdlineText,
+    );
+  }
+  if (facts.configText !== undefined) {
+    await Deno.writeTextFile(
+      join(prefix, "boot/firmware/config.txt"),
+      facts.configText,
     );
   }
   if (facts.controllers !== undefined) {
@@ -856,6 +927,18 @@ async function installerStep(
   return { ...out, calls: await Deno.readTextFile(log) };
 }
 
+async function writeProc(
+  prefix: string,
+  pid: number,
+  comm: string,
+  argv: string[],
+): Promise<void> {
+  const dir = join(prefix, `proc/${pid}`);
+  await Deno.mkdir(dir, { recursive: true });
+  await Deno.writeTextFile(join(dir, "comm"), `${comm}\n`);
+  await Deno.writeTextFile(join(dir, "cmdline"), `${argv.join("\0")}\0`);
+}
+
 async function markConvergeDone(prefix: string): Promise<void> {
   await Deno.mkdir(join(prefix, "run/turbopanel"), { recursive: true });
   await Deno.writeTextFile(
@@ -907,6 +990,39 @@ test({
         "/usr/bin/python3\0/usr/share/unattended-upgrades/unattended-upgrade-shutdown\0--wait-for-signal\0",
       );
 
+      // The daemon itself in JS mode (a 16 KiB Pi always runs it so) names
+      // ansible-playbook in its permission list, and so does flock above it.
+      // Neither runs a playbook.
+      const jsMode = [
+        "/opt/turbopanel/vendor/deno/current/deno",
+        "run",
+        "--quiet",
+        ...renderDaemonPermissionFlags(),
+        "/opt/turbopanel/bin/turbopaneld.js",
+      ];
+      assertEquals(jsMode.join(" ").includes("ansible-playbook"), true);
+      await writeProc(prefix, 900, "flock", [
+        "/usr/bin/flock",
+        "-n",
+        "/run/turbopanel/daemon.lock",
+        ...jsMode,
+      ]);
+      await writeProc(prefix, 901, "deno", jsMode);
+      // A person reading the files of those tools does not block either.
+      await writeProc(prefix, 902, "vim", [
+        "vim",
+        "/usr/bin/unattended-upgrade",
+      ]);
+      await writeProc(prefix, 903, "tail", [
+        "tail",
+        "-f",
+        "/var/log/unattended-upgrades/unattended-upgrades.log",
+      ]);
+      await writeProc(prefix, 904, "less", [
+        "less",
+        "/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook",
+      ]);
+
       // A package tool is running: still no restart.
       await markConvergeDone(prefix);
       await Deno.mkdir(join(prefix, "proc/4242"), { recursive: true });
@@ -928,6 +1044,24 @@ test({
       );
       const module = await installerStep(prefix);
       assertEquals(module.stdout.includes("REBOOTED"), false);
+
+      // The shutdown helper doing its real work (not just waiting) blocks it.
+      await writeProc(prefix, 4242, "unattended-upgr", [
+        "/usr/bin/python3",
+        "/usr/share/unattended-upgrades/unattended-upgrade-shutdown",
+      ]);
+      const shuttingDown = await installerStep(prefix);
+      assertEquals(shuttingDown.stdout.includes("REBOOTED"), false);
+
+      // The playbook itself, run by the vendored Python.
+      await writeProc(prefix, 4242, "ansible-playboo", [
+        "/opt/turbopanel/vendor/ansible/2.20/bin/python3.12",
+        "/opt/turbopanel/vendor/ansible/2.20/bin/ansible-playbook",
+        "-i",
+        "localhost,",
+      ]);
+      const playbook = await installerStep(prefix);
+      assertEquals(playbook.stdout.includes("REBOOTED"), false);
 
       // A real unattended-upgrades run does block it.
       await Deno.writeTextFile(
@@ -951,6 +1085,13 @@ test({
       assertEquals(go.code, 0, go.stderr);
       assertEquals(go.stdout.split("REBOOTED").length - 1, 1, go.stdout);
       assertEquals(go.calls, "stop\n");
+
+      // A stop that fails still gets a start, and no restart.
+      const stopFails = await installerStep(prefix, {
+        TP_KERNEL_TEST_STOP_FAILS: "1",
+      });
+      assertEquals(stopFails.stdout.includes("REBOOTED"), false);
+      assertEquals(stopFails.calls, "stop\nstart\n");
 
       // A restart that does not start leaves the daemon running again.
       const failed = await installerStep(prefix, {
