@@ -23,6 +23,7 @@ import {
   helloNonceFrame,
   newHelloNonce,
   type PanelSigningKey,
+  type SessionBinding,
   type VerifiedHello,
   verifyEnvelopedFrame,
   verifyHello,
@@ -56,6 +57,12 @@ export interface SignedSessionOptions {
   pin: PanelIdentityPin;
   signing: PanelSigningKey;
   /**
+   * This server and daemon key. When set, the hello-nonce offers the bound
+   * session, and a hello or frame signed for another server or key is refused.
+   * Absent: nothing is offered and nothing is checked (an unbound session).
+   */
+  binding?: SessionBinding;
+  /**
    * Runs once, when the hello verified: start presence, reporters and the
    * rest. Awaited before the next frame is handled.
    */
@@ -84,7 +91,7 @@ export interface SignedSessionOptions {
 export class SignedPanelSession {
   readonly #options: SignedSessionOptions;
   readonly #nonce = newHelloNonce();
-  #session: { sessionId: string; lastSeq: number } | undefined;
+  #session: { sessionId: string; lastSeq: number; bound: boolean } | undefined;
   #chain: Promise<void> = Promise.resolve();
   #timer: number | undefined;
   #failure: Error | undefined;
@@ -114,7 +121,7 @@ export class SignedPanelSession {
     const { ws } = this.#options;
     const realSend = ws.send.bind(ws);
     this.#realSend = realSend;
-    realSend(helloNonceFrame(this.#nonce));
+    realSend(helloNonceFrame(this.#nonce, this.#options.binding !== undefined));
     ws.send = (data: SendData) => {
       if (this.verified && !this.#closed) this.#sendVerified(realSend, data);
     };
@@ -248,7 +255,7 @@ export class SignedPanelSession {
   async #handleNow(raw: string): Promise<void> {
     if (this.#closed || this.#failure) return;
     const nowMs = (this.#options.now ?? Date.now)();
-    const { pin, signing } = this.#options;
+    const { pin, signing, binding } = this.#options;
     if (raw === UNSIGNED_PONG) {
       this.#options.onPong();
       return;
@@ -259,9 +266,14 @@ export class SignedPanelSession {
         signing,
         pin,
         nowMs,
+        binding,
       });
       if (!hello.ok) return this.#refuse(`hello refused: ${hello.reason}`);
-      this.#session = { sessionId: hello.value.sessionId, lastSeq: 0 };
+      this.#session = {
+        sessionId: hello.value.sessionId,
+        lastSeq: 0,
+        bound: hello.value.bound,
+      };
       this.#clearTimer();
       await this.#options.onVerified(hello.value);
       return;
@@ -271,6 +283,7 @@ export class SignedPanelSession {
       signing,
       pin,
       nowMs,
+      binding,
     });
     if (!frame.ok) return this.#refuse(`refused frame: ${frame.reason}`);
     this.#session.lastSeq += 1;

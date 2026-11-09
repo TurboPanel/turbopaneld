@@ -56,6 +56,7 @@ test("a signed hello that echoes the nonce verifies", async () => {
     ok: true,
     value: {
       sessionId: "sess",
+      bound: false,
       kid: signing.kid,
       heartbeatSeconds: 30,
       urls: ["https://panel.example.test"],
@@ -164,4 +165,136 @@ test("a string member containing the marker still splits at the last one", () =>
   const raw = '{"type":"x","note":",\\"sig\\":\\"y","sig":"abc"}';
   assertEquals(splitSignature(raw)?.sig, "abc");
   assert(splitSignature('{"sig":"abc"}') === null);
+});
+
+const SERVER_A = { serverId: "server-a", keyId: "key-a" };
+const SERVER_V = { serverId: "server-v", keyId: "key-v" };
+
+test("the hello-nonce frame offers the bound session only when asked", () => {
+  const nonce = newHelloNonce();
+  assertEquals(JSON.parse(helloNonceFrame(nonce, true)), {
+    type: "hello-nonce",
+    nonce,
+    features: ["panel-bound-session-v1"],
+  });
+  assertEquals(JSON.parse(helloNonceFrame(nonce, false)).features, undefined);
+});
+
+test("a hello signed for this server and key verifies as bound", async () => {
+  const panel = await createTestPanel();
+  const raw = await panel.hello({
+    nonce: NONCE,
+    sessionId: "sess",
+    iat: NOW_S,
+    bind: SERVER_A,
+  });
+  const result = await verifyHello(raw, {
+    nonce: NONCE,
+    signing: await panel.signing(),
+    pin: panel.pin(),
+    nowMs: NOW_MS,
+    binding: SERVER_A,
+  });
+  assert(result.ok);
+  assertEquals(result.value.bound, true);
+});
+
+test("a hello signed for another server or key is refused", async () => {
+  const panel = await createTestPanel();
+  const ctx = {
+    nonce: NONCE,
+    signing: await panel.signing(),
+    pin: panel.pin(),
+    nowMs: NOW_MS,
+  };
+  const forA = await panel.hello({
+    nonce: NONCE,
+    sessionId: "sess",
+    iat: NOW_S,
+    bind: SERVER_A,
+  });
+  const other = await verifyHello(forA, { ...ctx, binding: SERVER_V });
+  assertEquals(other, { ok: false, reason: "signed for another server" });
+  const sameServerOtherKey = await verifyHello(forA, {
+    ...ctx,
+    binding: { serverId: "server-a", keyId: "key-v" },
+  });
+  assertEquals(sameServerOtherKey, {
+    ok: false,
+    reason: "signed for another daemon key",
+  });
+  // A bound hello is never accepted by a session that has no identity to check it against.
+  assertEquals((await verifyHello(forA, ctx)).ok, false);
+});
+
+test("a hello that names no server is an older control plane's and verifies unbound", async () => {
+  const panel = await createTestPanel();
+  const raw = await panel.hello({
+    nonce: NONCE,
+    sessionId: "sess",
+    iat: NOW_S,
+  });
+  const result = await verifyHello(raw, {
+    nonce: NONCE,
+    signing: await panel.signing(),
+    pin: panel.pin(),
+    nowMs: NOW_MS,
+    binding: SERVER_A,
+  });
+  assert(result.ok);
+  assertEquals(result.value.bound, false);
+});
+
+test("frames of a bound session must name this server and key, and come back without the binding", async () => {
+  const panel = await createTestPanel();
+  const base = {
+    signing: await panel.signing(),
+    pin: panel.pin(),
+    nowMs: NOW_MS,
+    binding: SERVER_A,
+  };
+  const envelope = { sessionId: "s1", seq: 1, iat: NOW_S };
+  const session = { sessionId: "s1", lastSeq: 0, bound: true };
+  const good = await verifyEnvelopedFrame(
+    await panel.frame({ type: "ping-me" }, { ...envelope, bind: SERVER_A }),
+    { ...base, session },
+  );
+  assertEquals(good, { ok: true, value: { type: "ping-me" } });
+
+  const forV = await verifyEnvelopedFrame(
+    await panel.frame({ type: "run" }, { ...envelope, bind: SERVER_V }),
+    { ...base, session },
+  );
+  assertEquals(forV, { ok: false, reason: "signed for another server" });
+
+  const unbound = await verifyEnvelopedFrame(
+    await panel.frame({ type: "run" }, envelope),
+    { ...base, session },
+  );
+  assertEquals(unbound, {
+    ok: false,
+    reason: "binding differs from the hello's",
+  });
+});
+
+test("a bound frame in an unbound session, and an unbound session's frames, behave as before", async () => {
+  const panel = await createTestPanel();
+  const base = {
+    signing: await panel.signing(),
+    pin: panel.pin(),
+    nowMs: NOW_MS,
+    binding: SERVER_A,
+  };
+  const envelope = { sessionId: "s1", seq: 1, iat: NOW_S };
+  const session = { sessionId: "s1", lastSeq: 0, bound: false };
+  const plain = await verifyEnvelopedFrame(
+    await panel.frame({ type: "run" }, envelope),
+    { ...base, session },
+  );
+  assertEquals(plain, { ok: true, value: { type: "run" } });
+  const bound = await verifyEnvelopedFrame(
+    await panel.frame({ type: "run" }, { ...envelope, bind: SERVER_A }),
+    { ...base, session },
+  );
+  assertEquals(bound.ok, false);
 });

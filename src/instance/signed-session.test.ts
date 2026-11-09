@@ -187,3 +187,90 @@ test("a frame that arrives while the verified-hello work runs waits for it", asy
   await Promise.all([hello, version]);
   assertEquals(order, ["verified", "version"]);
 });
+
+test("with a binding the nonce frame offers it, and a session signed for another server never verifies", async () => {
+  const panel = await createTestPanel();
+  const mine = { serverId: "server-v", keyId: "key-v" };
+  const theirs = { serverId: "server-a", keyId: "key-a" };
+
+  async function open(binding?: typeof mine) {
+    const ws = new MockWebSocket("wss://panel.example.test/ws/daemon/v1");
+    ws.open();
+    const verified: unknown[] = [];
+    const frames: string[] = [];
+    const session = new SignedPanelSession({
+      ws: ws as unknown as WebSocket,
+      pin: panel.pin(),
+      signing: await panel.signing(),
+      binding,
+      onVerified: (hello) => {
+        verified.push(hello);
+      },
+      onFrame: (json) => frames.push(json),
+      onPong: () => {},
+      now: () => NOW_MS,
+      setTimer: () => 1,
+      clearTimer: () => {},
+    });
+    session.start();
+    return { ws, session, verified, frames };
+  }
+
+  // Relayed hello and frames signed for server A are refused by server V.
+  const relayed = await open(mine);
+  const nonceFrame = JSON.parse(relayed.ws.sentFrames[0]!);
+  assertEquals(nonceFrame.features, ["panel-bound-session-v1"]);
+  await relayed.session.handle(
+    await panel.hello({
+      nonce: nonceFrame.nonce,
+      sessionId: "s1",
+      iat: NOW_S,
+      bind: theirs,
+    }),
+  );
+  assertEquals(relayed.verified, []);
+  assertEquals(relayed.session.verified, false);
+  assertInstanceOf(relayed.session.failure, PanelIdentityError);
+
+  // The same session signed for server V is accepted, and so are its frames.
+  const right = await open(mine);
+  await right.session.handle(
+    await panel.hello({
+      nonce: JSON.parse(right.ws.sentFrames[0]!).nonce,
+      sessionId: "s1",
+      iat: NOW_S,
+      bind: mine,
+    }),
+  );
+  assertEquals(right.session.verified, true);
+  await right.session.handle(
+    await panel.frame({ type: "version", features: [] }, {
+      sessionId: "s1",
+      seq: 1,
+      iat: NOW_S,
+      bind: mine,
+    }),
+  );
+  assertEquals(right.frames, ['{"type":"version","features":[]}']);
+  await right.session.handle(
+    await panel.frame({ type: "run" }, {
+      sessionId: "s1",
+      seq: 2,
+      iat: NOW_S,
+      bind: theirs,
+    }),
+  );
+  assertEquals(right.frames.length, 1);
+
+  // No binding on this side (nothing offered): an unbound control plane works as today.
+  const plain = await open();
+  assertEquals(JSON.parse(plain.ws.sentFrames[0]!).features, undefined);
+  await plain.session.handle(
+    await panel.hello({
+      nonce: JSON.parse(plain.ws.sentFrames[0]!).nonce,
+      sessionId: "s1",
+      iat: NOW_S,
+    }),
+  );
+  assertEquals(plain.session.verified, true);
+});

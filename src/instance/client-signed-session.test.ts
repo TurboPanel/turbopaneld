@@ -219,7 +219,8 @@ it({
         await new Promise((resolve) => setTimeout(resolve, 50));
         assertEquals(socket.sentFrames.length, 1);
         const nonceFrame = JSON.parse(socket.sentFrames[0]!);
-        assertEquals(Object.keys(nonceFrame), ["type", "nonce"]);
+        assertEquals(Object.keys(nonceFrame), ["type", "nonce", "features"]);
+        assertEquals(nonceFrame.features, ["panel-bound-session-v1"]);
         assertEquals(nonceFrame.type, "hello-nonce");
 
         assertEquals(sessionBodies[0]?.payloadVersion, 2);

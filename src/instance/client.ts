@@ -2183,6 +2183,9 @@ export class InstanceClient {
         ws,
         pin: this.#panelPin,
         signing: this.#panelKey,
+        binding: this.#daemonSigningKey
+          ? { serverId, keyId: this.#daemonSigningKey.keyId }
+          : undefined,
         onVerified: async (hello) => {
           logInfo("instance", "panel-identity: signed hello verified");
           // Awaited by the session, so no later frame is handled before the

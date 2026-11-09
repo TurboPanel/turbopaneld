@@ -24,6 +24,12 @@ async function rawPublic(key: CryptoKey): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.exportKey("raw", key));
 }
 
+function bindMembers(
+  bind: { serverId: string; keyId: string } | undefined,
+): Record<string, string> {
+  return bind ? { forServer: bind.serverId, forKey: bind.keyId } : {};
+}
+
 export interface TestPanel {
   kid: string;
   keyset: number;
@@ -40,11 +46,19 @@ export interface TestPanel {
       keyset?: number;
       kid?: string;
       heartbeatSeconds?: number;
+      /** Name a server and daemon key, as a bound session does. */
+      bind?: { serverId: string; keyId: string };
     },
   ): Promise<string>;
   frame(
     wire: Record<string, unknown> & { type: string },
-    envelope: { sessionId: string; seq: number; iat: number; kid?: string },
+    envelope: {
+      sessionId: string;
+      seq: number;
+      iat: number;
+      kid?: string;
+      bind?: { serverId: string; keyId: string };
+    },
   ): Promise<string>;
   httpHeader(path: string, body: string): Promise<string>;
   /** The same answer, signed over its path and exact body. */
@@ -116,6 +130,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         nonce: fields.nonce,
         sessionId: fields.sessionId,
         kid: fields.kid ?? kid,
+        ...bindMembers(fields.bind),
         keyset: fields.keyset ?? keyset,
         heartbeatSeconds: fields.heartbeatSeconds ?? 60,
         urls: ["https://panel.example.test"],
@@ -130,6 +145,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         seq: envelope.seq,
         iat: envelope.iat,
         kid: envelope.kid ?? kid,
+        ...bindMembers(envelope.bind),
       });
       return appendSig(
         unsigned,

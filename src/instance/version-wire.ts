@@ -118,6 +118,7 @@ export const DAEMON_WIRE_FEATURES = [
   "dev-host-v1",
   "topology-generation-optional-v1",
   "signed-reports-v1",
+  "panel-bound-session-v1",
 ] as const;
 
 /**
@@ -244,6 +245,16 @@ export const SIGNIN_V2_FEATURE: DaemonWireFeature = "signin-v2";
  * them only for a control plane that lists this feature; an older one gets
  * the same bytes as before.
  */
+/**
+ * Offered in the `hello-nonce` frame. The control plane then names this
+ * server and this daemon key inside the signed hello and every signed frame
+ * (`forServer`, `forKey`), and the daemon refuses anything signed for another
+ * server or key. The offer is unsigned: a control plane that does not know the
+ * flag answers as before, and that unbound hello is still accepted.
+ */
+export const PANEL_BOUND_SESSION_FEATURE: DaemonWireFeature =
+  "panel-bound-session-v1";
+
 export const SIGNED_REPORTS_FEATURE: DaemonWireFeature = "signed-reports-v1";
 
 /**
