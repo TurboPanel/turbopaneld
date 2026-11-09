@@ -42,6 +42,7 @@
 # PHP starts, and `tp-host php-loopback-sync` runs it after units change.
 - name: Install nft and flock for tp-php-loopback
   ansible.builtin.apt:
+    lock_timeout: 300
     name:
       - nftables
       - util-linux
