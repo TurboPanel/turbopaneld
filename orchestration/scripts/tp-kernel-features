@@ -709,12 +709,20 @@ kf_busy() {
     [ -d "$_bp" ] || continue
     _bc="$(cat "$_bp/comm" 2>/dev/null || true)"
     case "$_bc" in
-      dpkg|dpkg-deb|dpkg-trigger|apt|apt-get|aptitude|apt.systemd.dai*|unattended-upgr*|ansible-playboo*)
+      dpkg|dpkg-deb|dpkg-trigger|apt|apt-get|aptitude|apt.systemd.dai*|ansible-playboo*)
         printf '%s\n' "$_bc"
         return 0
         ;;
     esac
-    case "$(tr '\000' ' ' 2>/dev/null < "$_bp/cmdline" || true)" in
+    _bl="$(tr '\000' ' ' 2>/dev/null < "$_bp/cmdline" || true)"
+    case "$_bl" in
+      # The unattended-upgrades service keeps this helper waiting for the
+      # whole uptime; it installs nothing.
+      *unattended-upgrade-shutdown*) ;;
+      *unattended-upgrade*)
+        printf 'unattended-upgrades\n'
+        return 0
+        ;;
       *ansible-playbook*|*AnsiballZ_*)
         printf 'ansible-playbook\n'
         return 0
@@ -820,13 +828,15 @@ kf_countdown_and_reboot() {
   if [ -n "$_cd_tty" ]; then printf '\r%60s\r' ''; fi
   printf 'Restarting now.\n'
   trap - INT TERM
-  sync
   if [ -n "$TP_TEST" ]; then
     # shellcheck disable=SC2086
-    ${TP_KERNEL_TEST_REBOOT_CMD:-true}
+    if sync && ${TP_KERNEL_TEST_REBOOT_CMD:-true}; then return 0; fi
+  elif sync && systemctl reboot; then
     return 0
   fi
-  systemctl reboot
+  # The restart did not start: never leave the daemon stopped.
+  kf_daemon_start_again
+  tp_die "the restart could not be started; restart this server yourself with: sudo reboot"
 }
 
 # --- verbs -------------------------------------------------------------------------

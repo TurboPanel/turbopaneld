@@ -895,6 +895,18 @@ test({
         `${PI_CMDLINE} ${ON}`,
       );
 
+      // The unattended-upgrades service's waiting helper runs for the whole
+      // uptime and installs nothing: it never blocks the restart.
+      await Deno.mkdir(join(prefix, "proc/857"), { recursive: true });
+      await Deno.writeTextFile(
+        join(prefix, "proc/857/comm"),
+        "unattended-upgr\n",
+      );
+      await Deno.writeTextFile(
+        join(prefix, "proc/857/cmdline"),
+        "/usr/bin/python3\0/usr/share/unattended-upgrades/unattended-upgrade-shutdown\0--wait-for-signal\0",
+      );
+
       // A package tool is running: still no restart.
       await markConvergeDone(prefix);
       await Deno.mkdir(join(prefix, "proc/4242"), { recursive: true });
@@ -916,6 +928,22 @@ test({
       );
       const module = await installerStep(prefix);
       assertEquals(module.stdout.includes("REBOOTED"), false);
+
+      // A real unattended-upgrades run does block it.
+      await Deno.writeTextFile(
+        join(prefix, "proc/4242/comm"),
+        "unattended-upgr\n",
+      );
+      await Deno.writeTextFile(
+        join(prefix, "proc/4242/cmdline"),
+        "/usr/bin/python3\0/usr/bin/unattended-upgrade\0",
+      );
+      const upgrading = await installerStep(prefix);
+      assertEquals(upgrading.stdout.includes("REBOOTED"), false);
+      assertEquals(
+        upgrading.stdout.includes("Software is still being installed"),
+        true,
+      );
       await Deno.remove(join(prefix, "proc/4242"), { recursive: true });
 
       // All clear: the daemon is stopped, then exactly one restart.
@@ -923,6 +951,18 @@ test({
       assertEquals(go.code, 0, go.stderr);
       assertEquals(go.stdout.split("REBOOTED").length - 1, 1, go.stdout);
       assertEquals(go.calls, "stop\n");
+
+      // A restart that does not start leaves the daemon running again.
+      const failed = await installerStep(prefix, {
+        TP_KERNEL_TEST_REBOOT_CMD: "false",
+      });
+      assertEquals(failed.code, 1);
+      assertEquals(failed.calls, "stop\nstart\n");
+      assertEquals(
+        failed.stderr.includes("the restart could not be started"),
+        true,
+        failed.stderr,
+      );
       assertEquals(
         go.stdout.includes(
           "switch it to the 4 KiB kernel and turn memory limits on, then restart this server once",
