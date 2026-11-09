@@ -274,3 +274,32 @@ test("with a binding the nonce frame offers it, and a session signed for another
   );
   assertEquals(plain.session.verified, true);
 });
+
+test("a stripped offer cannot downgrade a session when the verified document advertises bound sessions", async () => {
+  const panel = await createTestPanel();
+  const ws = new MockWebSocket("wss://panel.example.test/ws/daemon/v1");
+  ws.open();
+  const session = new SignedPanelSession({
+    ws: ws as unknown as WebSocket,
+    pin: panel.pin(),
+    signing: await panel.signing({ boundSessions: true }),
+    binding: { serverId: "server-v", keyId: "key-v" },
+    onVerified: () => {},
+    onFrame: () => {},
+    onPong: () => {},
+    now: () => NOW_MS,
+    setTimer: () => 1,
+    clearTimer: () => {},
+  });
+  session.start();
+  // The control plane never saw the offer, so it answered with an unbound hello.
+  await session.handle(
+    await panel.hello({
+      nonce: JSON.parse(ws.sentFrames[0]!).nonce,
+      sessionId: "s1",
+      iat: NOW_S,
+    }),
+  );
+  assertEquals(session.verified, false);
+  assertInstanceOf(session.failure, PanelIdentityError);
+});

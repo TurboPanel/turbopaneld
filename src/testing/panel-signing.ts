@@ -33,10 +33,17 @@ function bindMembers(
 export interface TestPanel {
   kid: string;
   keyset: number;
-  signing(): Promise<PanelSigningKey>;
+  /** `boundSessions: true` models a verified document that advertises the binding. */
+  signing(opts?: { boundSessions?: boolean }): Promise<PanelSigningKey>;
   pin(overrides?: Partial<PanelIdentityPin>): PanelIdentityPin;
   identityFetch(
-    opts?: { nowMs: number; keyset?: number; urls?: string[] },
+    opts?: {
+      nowMs: number;
+      keyset?: number;
+      urls?: string[];
+      /** Add `boundSessions: 1` to the signed body, as a current control plane does. */
+      boundSessions?: boolean;
+    },
   ): Promise<PanelIdentityFetch>;
   hello(
     fields: {
@@ -94,7 +101,13 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
   return {
     kid,
     keyset,
-    signing: () => Promise.resolve({ kid, key: pair.publicKey, keyset }),
+    signing: (opts = {}) =>
+      Promise.resolve({
+        kid,
+        key: pair.publicKey,
+        keyset,
+        ...(opts.boundSessions ? { boundSessions: true } : {}),
+      }),
     pin: (overrides = {}) => ({
       current: kid,
       next: null,
@@ -118,6 +131,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         urls: opts.urls ?? [],
         issued: new Date(opts.nowMs).toISOString(),
         expires: new Date(opts.nowMs + 30 * DAY_MS).toISOString(),
+        ...(opts.boundSessions ? { boundSessions: 1 } : {}),
       });
       const sig = await sign(
         `${HTTP_PREFIX}${IDENTITY_DOCUMENT_PATH}\n${body}`,

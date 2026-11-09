@@ -1,4 +1,5 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { verifyHello as legacyVerifyHello } from "../testing/legacy-panel-hello.ts";
 import { createTestPanel } from "../testing/panel-signing.ts";
 import {
   helloNonceFrame,
@@ -8,6 +9,7 @@ import {
   verifyEnvelopedFrame,
   verifyHello,
 } from "./panel-identity-frames.ts";
+import { verifyPanelIdentityDocument } from "./panel-identity-trust.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -271,10 +273,8 @@ test("frames of a bound session must name this server and key, and come back wit
     await panel.frame({ type: "run" }, envelope),
     { ...base, session },
   );
-  assertEquals(unbound, {
-    ok: false,
-    reason: "binding differs from the hello's",
-  });
+  // A frame that names nothing carries the bound hello's session id, so it is fine.
+  assertEquals(unbound, { ok: true, value: { type: "run" } });
 });
 
 test("a bound frame in an unbound session, and an unbound session's frames, behave as before", async () => {
@@ -297,4 +297,100 @@ test("a bound frame in an unbound session, and an unbound session's frames, beha
     { ...base, session },
   );
   assertEquals(bound.ok, false);
+});
+
+test("a document that advertises bound sessions makes an unbound hello or frame a refusal, offer or not", async () => {
+  const panel = await createTestPanel();
+  const advertised = await panel.signing({ boundSessions: true });
+  const ctx = { pin: panel.pin(), nowMs: NOW_MS, binding: SERVER_A };
+  const unboundHello = await panel.hello({
+    nonce: NONCE,
+    sessionId: "sess",
+    iat: NOW_S,
+  });
+  assertEquals(
+    await verifyHello(unboundHello, {
+      ...ctx,
+      nonce: NONCE,
+      signing: advertised,
+    }),
+    { ok: false, reason: "control plane requires bound sessions" },
+  );
+  // The same hello verifies when the document (an older control plane's) does not advertise.
+  const older = await panel.signing();
+  assert(
+    (await verifyHello(unboundHello, { ...ctx, nonce: NONCE, signing: older }))
+      .ok,
+  );
+  const boundHello = await panel.hello({
+    nonce: NONCE,
+    sessionId: "sess",
+    iat: NOW_S,
+    bind: SERVER_A,
+  });
+  assert(
+    (await verifyHello(boundHello, {
+      ...ctx,
+      nonce: NONCE,
+      signing: advertised,
+    }))
+      .ok,
+  );
+});
+
+test("the identity document's boundSessions member is read only from a verified document", async () => {
+  const panel = await createTestPanel();
+  const nowMs = NOW_MS;
+  for (const [flag, expected] of [[true, true], [false, false]] as const) {
+    const fetched = await panel.identityFetch({ nowMs, boundSessions: flag });
+    const signing = await verifyPanelIdentityDocument(
+      fetched,
+      panel.pin(),
+      nowMs,
+    );
+    assertEquals(signing.boundSessions, expected);
+  }
+  // Adding the member after signing breaks the signature, so a stripped or injected flag is refused.
+  const fetched = await panel.identityFetch({ nowMs, boundSessions: false });
+  const injected = {
+    ...fetched,
+    body: fetched.body.replace(/}$/, ',"boundSessions":1}'),
+  };
+  await assertRejects(() =>
+    verifyPanelIdentityDocument(injected, panel.pin(), nowMs)
+  );
+});
+
+test("a daemon from before the bound session still verifies a hello that names the server and key", async () => {
+  const panel = await createTestPanel();
+  const ctx = {
+    nonce: NONCE,
+    signing: await panel.signing(),
+    pin: panel.pin(),
+    nowMs: NOW_MS,
+  };
+  const bound = await panel.hello({
+    nonce: NONCE,
+    sessionId: "sess",
+    iat: NOW_S,
+    bind: SERVER_A,
+  });
+  // The control plane's key order: the binding sits between kid and keyset.
+  assertEquals(Object.keys(JSON.parse(bound)).slice(0, 7), [
+    "type",
+    "nonce",
+    "sessionId",
+    "kid",
+    "forServer",
+    "forKey",
+    "keyset",
+  ]);
+  const legacy = await legacyVerifyHello(bound, ctx);
+  assert(legacy.ok);
+  assertEquals(legacy.value.sessionId, "sess");
+  // Exact bytes are signed: changing the bound server's text breaks the old check too.
+  const changed = bound.replace("server-a", "server-v");
+  assertEquals((await legacyVerifyHello(changed, ctx)).ok, false);
+  // And the current check agrees on the same bytes.
+  assert((await verifyHello(bound, { ...ctx, binding: SERVER_A })).ok);
 });

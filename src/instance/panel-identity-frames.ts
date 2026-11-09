@@ -45,6 +45,12 @@ export interface PanelSigningKey {
   kid: string;
   key: CryptoKey;
   keyset: number;
+  /**
+   * The verified identity document advertised `boundSessions: 1`: any hello
+   * or frame that does not name this server and key is refused, whether or
+   * not this daemon's offer reached the control plane.
+   */
+  boundSessions?: boolean;
 }
 
 export type FrameCheck<T> = { ok: true; value: T } | {
@@ -206,6 +212,9 @@ function helloFields(
   }
   const named = checkBinding(hello, ctx.binding);
   if (!named.ok) return named;
+  if (ctx.signing.boundSessions && !named.value) {
+    return fail("control plane requires bound sessions");
+  }
   const heartbeat = hello.heartbeatSeconds;
   const urls = Array.isArray(hello.urls)
     ? hello.urls.filter((u): u is string => typeof u === "string")
@@ -249,13 +258,17 @@ export async function verifyHello(
   return helloFields(hello, ctx, ctx.nowMs);
 }
 
-/** A frame must name this server and key exactly when its session's hello did. */
+/**
+ * A frame that names a server and key must name this one, and only a session
+ * whose hello named them may carry such frames. A frame that names nothing is
+ * fine: it carries the hello's random session id, which only verifies here.
+ */
 function checkFrameBinding(
   frame: Record<string, unknown>,
   ctx: { session: { bound?: boolean }; binding?: SessionBinding },
 ): FrameCheck<boolean> {
   const named = checkBinding(frame, ctx.binding);
-  if (named.ok && named.value !== (ctx.session.bound ?? false)) {
+  if (named.ok && named.value && !(ctx.session.bound ?? false)) {
     return fail("binding differs from the hello's");
   }
   return named;
