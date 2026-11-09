@@ -175,8 +175,9 @@ The Promote OK check (the `gh-promote-ok.yml` and `gh-promote-ok-recheck.yml`
 calls in `promote-ok.yml` and `promote-ok-recheck.yml`, with their `dev-ref`) is
 its own pin group, so a fix to it can ship without moving the rest of the chain.
 The check looks once and ends in seconds; the recheck re-runs it when the trunk
-build or Publish Release Candidate finishes. The plain `promote.yml` form below
-is **break-glass only**.
+build or Publish Release Candidate finishes, one recheck at a time (queued in
+order, none dropped). The plain `promote.yml` form below is **break-glass
+only**.
 
 **Promotion (`.github/workflows/promote.yml`, break-glass):** one click moves a
 tested build up a channel — `to=rc` turns a canary build (`source` = build id,

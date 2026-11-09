@@ -1,8 +1,10 @@
 # Re-runs the red promote-ok check (promote-ok.yml) of the open Release
 # Candidate and Release PRs when what they wait for may now exist: after
-# the daemon trunk build ("Publish Daemon Trunk Build" tests the commit and publishes its canary), and after Publish Release Candidate (a new rc). The re-run
-# reports on the PR's head commit under the same `promote-ok` name, so the
-# ruleset sees the new result. Logic: TurboPanel/dev gh-promote-ok-recheck.yml.
+# the daemon trunk build ("Publish Daemon Trunk Build" tests the commit and
+# publishes its canary), and after Publish Release Candidate (a new rc). The
+# re-run reports on the PR's head commit under the same `promote-ok` name, so
+# the ruleset sees the new result. Logic: TurboPanel/dev
+# gh-promote-ok-recheck.yml.
 #
 # workflow_dispatch:
 #   pr = <number>   dry run: evaluate promote-ok for that PR, read-only (the
@@ -32,6 +34,15 @@ on:
         required: false
         type: boolean
         default: false
+
+# One recheck at a time per repo, none dropped: triggers that land close
+# together queue in order (`queue: max`) instead of re-running the same
+# check twice at once, and a pending one is never replaced by a newer one
+# (each may name a different commit to re-check).
+concurrency:
+  group: promote-ok-recheck
+  cancel-in-progress: false
+  queue: max
 
 # Read-only by default; only the recheck job may re-run runs.
 permissions:

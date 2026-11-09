@@ -6,7 +6,12 @@
  * "chore: start <next patch>" PR, and starting a minor or major is the
  * "Start Next Version" workflow (which opens the same kind of PR).
  */
-import { assert, assertEquals, assertMatch } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 
 /**
@@ -278,6 +283,28 @@ test("the Promote OK jobs pin one TurboPanel/dev commit, and hand it on as dev-r
     pins.add(refs[0][1]);
   }
   assertEquals(pins.size, 1, `Promote OK pins: ${[...pins].join(", ")}`);
+});
+
+test("Promote OK runs one evaluation per PR head and one queued recheck at a time", () => {
+  assertStringIncludes(
+    read("promote-ok.yml"),
+    [
+      "concurrency:",
+      "  group: promote-ok-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}",
+      "  cancel-in-progress: true",
+      "",
+    ].join("\n"),
+  );
+  assertStringIncludes(
+    read("promote-ok-recheck.yml"),
+    [
+      "concurrency:",
+      "  group: promote-ok-recheck",
+      "  cancel-in-progress: false",
+      "  queue: max",
+      "",
+    ].join("\n"),
+  );
 });
 
 test("a release opens the next patch's version PR after it is finalized", () => {
