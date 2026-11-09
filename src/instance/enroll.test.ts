@@ -1,4 +1,8 @@
 import { assertEquals, assertRejects } from "@std/assert";
+import { decodeBase64Url } from "@std/encoding/base64url";
+import { type HpkeEnvelope, openFromSender } from "../crypto/hpke.ts";
+import { computePublicKeyFingerprint } from "../crypto/keys.ts";
+import { loadOrCreateSealingKey } from "../crypto/sealing-key.ts";
 import { join } from "@std/path";
 import {
   challengeResponse,
@@ -9,7 +13,8 @@ import {
 } from "../testing/fake-instance-api.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
-import { enrollDaemon } from "./enroll.ts";
+import { enrollDaemon, enrollSealAad } from "./enroll.ts";
+import { PanelIdentityError } from "./panel-identity-trust.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -343,6 +348,238 @@ test({
           if (entry.name.startsWith("server.id.")) leftovers.push(entry.name);
         }
         assertEquals(leftovers, []);
+      } finally {
+        restore();
+      }
+    });
+  },
+});
+
+const SEAL_PERMISSIONS = { env: true, net: true, read: true, write: true };
+
+async function sealKeyFor(dir: string) {
+  const loaded = await loadOrCreateSealingKey(dir, "panel-key");
+  return {
+    loaded,
+    key: {
+      kid: loaded.kid,
+      pub: decodeBase64Url(loaded.pub),
+      panelFingerprint: "P".repeat(43),
+    },
+  };
+}
+
+function echoingChallenge(init: RequestInit | undefined, echo = true) {
+  const asked = JSON.parse(String(init?.body ?? "{}")) as {
+    clientNonce?: string;
+  };
+  const now = Date.now();
+  return new Response(JSON.stringify({
+    challengeId: "challenge-1",
+    nonce: "nonce-1",
+    at: new Date(now).toISOString(),
+    expiresAt: new Date(now + 60_000).toISOString(),
+    ...(echo && asked.clientNonce ? { clientNonce: asked.clientNonce } : {}),
+  }));
+}
+
+test({
+  name:
+    "a pinned server seals its license to the control plane and never sends it in clear",
+  permissions: SEAL_PERMISSIONS,
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let enrollBody: Record<string, unknown> = {};
+      let challengeBody: Record<string, unknown> = {};
+      try {
+        const { loaded, key } = await sealKeyFor(fixture.dirs.stateDir);
+        api.script("/api/daemon/v1/auth/challenge", async (init) => {
+          challengeBody = await parseJsonBody(init) as Record<string, unknown>;
+          return echoingChallenge(init);
+        });
+        api.script("/api/daemon/v1/enroll", async (init) => {
+          enrollBody = await parseJsonBody(init) as Record<string, unknown>;
+          return enrollResponse({ serverId: "srv-new", keyId: "kid-new" });
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        await enrollDaemon({
+          apiClient: client,
+          machineKey: "mk",
+          hostname: "host-1",
+          licenseId: "lic-1",
+          licenseToken: "secret-license-token",
+          stateDir: fixture.dirs.stateDir,
+          panelFingerprint: "P".repeat(43),
+          panelSealKey: () => Promise.resolve(key),
+        });
+        assertEquals(typeof challengeBody.clientNonce, "string");
+        assertEquals(enrollBody.licenseToken, undefined);
+        assertEquals(
+          JSON.stringify(enrollBody).includes("secret-license-token"),
+          false,
+        );
+        assertEquals(enrollBody.clientNonce, challengeBody.clientNonce);
+        // Only the holder of the sealing key, for this request, opens it.
+        const opened = await openFromSender(
+          loaded.privateRaw,
+          enrollSealAad({
+            panelFingerprint: key.panelFingerprint,
+            challengeId: "challenge-1",
+            challengeNonce: "nonce-1",
+            clientNonce: challengeBody.clientNonce as string,
+            publicKeyFingerprint: await computePublicKeyFingerprint(
+              enrollBody.publicJwk as JsonWebKey,
+            ),
+          }),
+          enrollBody.sealedLicenseToken as HpkeEnvelope,
+        );
+        assertEquals(
+          new TextDecoder().decode(opened),
+          "secret-license-token",
+        );
+      } finally {
+        restore();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "a pinned server with no verified sealing key refuses to send the license in clear",
+  permissions: SEAL_PERMISSIONS,
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let enrolled = false;
+      try {
+        api.script(
+          "/api/daemon/v1/auth/challenge",
+          (init) => echoingChallenge(init),
+        );
+        api.script("/api/daemon/v1/enroll", () => {
+          enrolled = true;
+          return enrollResponse();
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        for (const panelSealKey of [undefined, () => Promise.resolve(null)]) {
+          await assertRejects(
+            () =>
+              enrollDaemon({
+                apiClient: client,
+                machineKey: "mk",
+                hostname: "host-1",
+                licenseId: "lic-1",
+                licenseToken: "secret-license-token",
+                stateDir: fixture.dirs.stateDir,
+                panelFingerprint: "P".repeat(43),
+                panelSealKey,
+              }),
+            PanelIdentityError,
+          );
+        }
+        assertEquals(enrolled, false, "nothing was sent to the control plane");
+      } finally {
+        restore();
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "a pinned server sends the license in clear to an older control plane only on a fresh unechoed answer",
+  permissions: SEAL_PERMISSIONS,
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let enrollBody: Record<string, unknown> = {};
+      let stale = false;
+      try {
+        api.script("/api/daemon/v1/auth/challenge", (init) => {
+          const response = echoingChallenge(init, false);
+          if (!stale) return response;
+          return challengeResponse({
+            at: new Date(Date.now() - 3_600_000).toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          });
+        });
+        api.script("/api/daemon/v1/enroll", async (init) => {
+          enrollBody = await parseJsonBody(init) as Record<string, unknown>;
+          return enrollResponse();
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        const params = {
+          apiClient: client,
+          machineKey: "mk",
+          hostname: "host-1",
+          licenseId: "lic-1",
+          licenseToken: "tok-1",
+          stateDir: fixture.dirs.stateDir,
+          panelFingerprint: "P".repeat(43),
+        };
+        await enrollDaemon(params);
+        assertEquals(enrollBody.licenseToken, "tok-1");
+        assertEquals(enrollBody.sealedLicenseToken, undefined);
+
+        // A stale answer without the echo could be an old one replayed.
+        stale = true;
+        enrollBody = {};
+        await assertRejects(() => enrollDaemon(params), PanelIdentityError);
+        assertEquals(enrollBody, {});
+      } finally {
+        restore();
+      }
+    });
+  },
+});
+
+test({
+  name: "an unpinned server sends the license in clear and no client nonce",
+  permissions: SEAL_PERMISSIONS,
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      const api = createFakeInstanceApi();
+      const restore = api.install();
+      let challengeBody: Record<string, unknown> | undefined;
+      let enrollBody: Record<string, unknown> = {};
+      try {
+        api.script("/api/daemon/v1/auth/challenge", async (init) => {
+          challengeBody = await parseJsonBody(init) as Record<string, unknown>;
+          return challengeResponse();
+        });
+        api.script("/api/daemon/v1/enroll", async (init) => {
+          enrollBody = await parseJsonBody(init) as Record<string, unknown>;
+          return enrollResponse();
+        });
+        const client = new DaemonApiClient({
+          config: INSTANCE_CONFIG,
+          getToken: () => Promise.resolve("unused"),
+        });
+        await enrollDaemon({
+          apiClient: client,
+          machineKey: "mk",
+          hostname: "host-1",
+          licenseId: "lic-1",
+          licenseToken: "tok-1",
+          stateDir: fixture.dirs.stateDir,
+        });
+        assertEquals(challengeBody, {});
+        assertEquals(enrollBody.licenseToken, "tok-1");
+        assertEquals(enrollBody.clientNonce, undefined);
       } finally {
         restore();
       }

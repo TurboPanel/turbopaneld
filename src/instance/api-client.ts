@@ -171,11 +171,18 @@ export interface DaemonChallengeResponse {
   nonce: string;
   at: string;
   expiresAt: string;
+  /** Echo of the `clientNonce` the request carried; only a control plane that takes a sealed license sends it. */
+  clientNonce?: string;
 }
 
 export interface DaemonEnrollRequest {
   licenseId: string;
-  licenseToken: string;
+  /** Sent in clear only to a control plane that cannot take it sealed, or from an unpinned server. */
+  licenseToken?: string;
+  /** The token sealed to the control plane's sealing key; sent instead of `licenseToken`. */
+  sealedLicenseToken?: HpkeEnvelope;
+  /** Pairs with `sealedLicenseToken`: the nonce the challenge request carried. */
+  clientNonce?: string;
   /** Persisted server.id from a prior enroll — required to re-enroll a consumed license. */
   serverId?: string;
   machineKey?: string;
@@ -284,12 +291,14 @@ export class DaemonApiClient {
     return this.#lastKnownInstanceVersion;
   }
 
-  async getEnrollmentChallenge(): Promise<DaemonChallengeResponse> {
+  async getEnrollmentChallenge(
+    clientNonce?: string,
+  ): Promise<DaemonChallengeResponse> {
     return await this.#requestJson<DaemonChallengeResponse>(
       "/api/daemon/v1/auth/challenge",
       {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(clientNonce === undefined ? {} : { clientNonce }),
       },
     );
   }
