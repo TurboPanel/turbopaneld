@@ -5692,11 +5692,13 @@ try:
     doc = json.loads(raw.decode("utf-8"))
 except (ValueError, UnicodeDecodeError):
     refuse("statement is malformed")
-if not isinstance(doc, dict) or list(doc) != KEYS or doc["type"] != "tp-keyset" or doc["v"] != 1:
+# Whole numbers only, as the control plane reads them: never true or 1.0
+# (both equal 1 here), and nothing above 2^53 - 1.
+def is_int(v):
+    return type(v) is int and -(2**53) < v < 2**53
+if not isinstance(doc, dict) or list(doc) != KEYS or doc["type"] != "tp-keyset" or not is_int(doc["v"]) or doc["v"] != 1:
     refuse("statement is malformed")
 keyset, prev, kind, rp_id, current, new_set, iat = (doc[k] for k in KEYS[2:])
-def is_int(v):
-    return isinstance(v, int) and not isinstance(v, bool)
 if not is_int(keyset) or not is_int(iat) or keyset < 2 or iat < 0:
     refuse("statement is malformed")
 if kind not in ("rotate", "revoke", "passkeys") or not isinstance(rp_id, str) or not RP_ID.fullmatch(rp_id):
@@ -5804,7 +5806,7 @@ tp_verb_panel_identity_statement() {
   head -c 16385 > "$TP_STAGE/statement"
   [ "$(wc -c < "$TP_STAGE/statement")" -le 16384 ] || tp_die "panel-identity-write: statement too large"
   mkdir "$TP_STAGE/v"
-  python3 -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_keyset" \
+  python3 -I -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_keyset" \
     "$(tp_pin_field_of "$_ps_file" rp_id)" "$(tp_pin_field_of "$_ps_file" passkeys)" ||
     tp_die "panel-identity-write: refusing the statement"
   while read -r _ps_i _ps_alg; do
@@ -5866,7 +5868,7 @@ tp_verb_panel_identity_write() {
   mkdir "$TP_STAGE/v"
   _pi_passkeys="$(tp_pin_field_of "$_pi_file" passkeys)"
   _pi_rp_id="$(tp_pin_field_of "$_pi_file" rp_id)"
-  python3 -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" "$_pi_passkeys" ||
+  python3 -I -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" "$_pi_passkeys" ||
     tp_die "panel-identity-write: refusing the identity document"
   openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pub.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sig" >/dev/null 2>&1 ||
     tp_die "panel-identity-write: the identity document signature is invalid"

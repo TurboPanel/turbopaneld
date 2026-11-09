@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { encodeBase64Url } from "@std/encoding/base64url";
+import { decodeBase64Url, encodeBase64Url } from "@std/encoding/base64url";
 import { type Host, refused, withHost } from "../testing/tp-host-fixture.ts";
 import { keysetVectors as vectors } from "../testing/keyset-vectors.ts";
 
@@ -299,12 +299,47 @@ async function writeRotationPin(host: Host, pin: Pin): Promise<void> {
   );
 }
 
-function applyStatement(host: Host, envelope: unknown) {
+function applyStatement(
+  host: Host,
+  envelope: unknown,
+  env?: Record<string, string>,
+) {
   return host.run(
     ["panel-identity-write", "statement"],
     JSON.stringify(envelope),
+    env,
   );
 }
+
+/**
+ * What tp-host prints for each forged statement in the shared vectors (the
+ * file is shared with the control plane, so the reasons live here). A vector
+ * this table does not know fails the test: a new one needs its reason.
+ */
+const REFUSAL_REASONS: Record<string, string> = {
+  "no approvals": "no pinned passkey approved",
+  "approval by a passkey that is not pinned": "an approval does not verify",
+  // A 64-byte signature under an id pinned as ES256 is not DER at all.
+  "approval under a pinned id signed by another key":
+    "signature is not strict DER",
+  "assertion replayed onto another statement": "an approval does not verify",
+  "applied statement replayed": "prev is not the pinned key",
+  "keyset not above the pinned one": "keyset is not above the pinned one",
+  "prev is not the pinned key": "prev is not the pinned key",
+  "rpIdHash for another host": "an approval does not verify",
+  "origin outside the rp id": "an approval does not verify",
+  "user presence flag missing": "an approval does not verify",
+  "user verification flag missing": "an approval does not verify",
+  "type webauthn.create": "an approval does not verify",
+  "cross-origin assertion": "an approval does not verify",
+  "one flipped signature byte": "an approval signature is invalid",
+  "removal approved only by the removed passkey":
+    "a removal needs a passkey that stays",
+  "addition without proof of possession":
+    "an added passkey must prove possession",
+  "passkeys kind that changes the key":
+    "kind does not match whether the key changes",
+};
 
 // Fixed iat values in the shared vectors are in the past here, so the
 // "iat in the future" vector is checked with a fresh statement below.
@@ -319,6 +354,9 @@ test("every forged statement in the shared vectors is refused and changes nothin
       const result = await applyStatement(host, vector.envelope);
       assert(result.code !== 0, vector.name);
       assertStringIncludes(result.stderr, "panel-identity-write", vector.name);
+      const reason = REFUSAL_REASONS[vector.name];
+      assert(reason, `no refusal reason listed for "${vector.name}"`);
+      assertStringIncludes(result.stderr, reason, vector.name);
       assertEquals(
         await Deno.readTextFile(host.path(PIN_PATH)),
         before,
@@ -534,5 +572,78 @@ test("a malformed rotation block is refused before anything is pinned", async ()
       );
     }
     assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), before);
+  });
+});
+
+/** The first chain statement with its exact text edited (the approvals no longer match it). */
+function editedStatement(edit: (text: string) => string) {
+  const first = vectors.chain[0]!;
+  const text = new TextDecoder().decode(decodeBase64Url(first.statement));
+  const edited = edit(text);
+  assert(edited !== text, "the edit changed nothing");
+  return {
+    statement: encodeBase64Url(encoder.encode(edited)),
+    approvals: first.approvals,
+  };
+}
+
+test("a statement whose version or numbers are not plain whole numbers is malformed", async () => {
+  await withHost(async (host) => {
+    await writeRotationPin(host, vectors.pin);
+    const before = await Deno.readTextFile(host.path(PIN_PATH));
+    const tooBig = "9007199254740992"; // 2^53
+    const edits: Array<[string, (text: string) => string]> = [
+      ["v true", (t) => t.replace('"v":1,', '"v":true,')],
+      ["v 1.0", (t) => t.replace('"v":1,', '"v":1.0,')],
+      ["v 2", (t) => t.replace('"v":1,', '"v":2,')],
+      ["keyset true", (t) => t.replace(/"keyset":\d+/, '"keyset":true')],
+      ["keyset 2.0", (t) => t.replace(/"keyset":\d+/, '"keyset":2.0')],
+      [
+        "keyset 2^53",
+        (t) => t.replace(/"keyset":\d+/, `"keyset":${tooBig}`),
+      ],
+      ["iat true", (t) => t.replace(/"iat":\d+/, '"iat":true')],
+      ["iat 2^53", (t) => t.replace(/"iat":\d+/, `"iat":${tooBig}`)],
+    ];
+    for (const [name, edit] of edits) {
+      const result = await applyStatement(host, editedStatement(edit));
+      assert(result.code !== 0, name);
+      // Refused for its shape, before any approval is looked at.
+      assertStringIncludes(result.stderr, "statement is malformed", name);
+      assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), before, name);
+    }
+    // The largest whole number still reads as one: refused later, for its date.
+    const largest = await applyStatement(
+      host,
+      editedStatement((t) => t.replace(/"iat":\d+/, '"iat":9007199254740991')),
+    );
+    assertStringIncludes(largest.stderr, "iat is in the future");
+  });
+});
+
+test("the pin checks run python isolated: a module planted on its path is never loaded", async () => {
+  await withHost(async (host) => {
+    const planted = host.path("tmp/planted");
+    await Deno.mkdir(planted);
+    // Stands in for the real module and leaves a mark when it is imported.
+    await Deno.writeTextFile(
+      `${planted}/json.py`,
+      'import pathlib\npathlib.Path(__file__).with_name("loaded").write_text("x")\n',
+    );
+    const env = { PYTHONPATH: planted };
+    await writeRotationPin(host, vectors.pin);
+    const statement = await applyStatement(host, vectors.chain[0], env);
+    assertEquals(statement.code, 0, statement.stderr);
+    const panel = await makePanel();
+    await writePin(host, panel.kid);
+    const document = await host.run(
+      ["panel-identity-write"],
+      await panel.document(),
+      env,
+    );
+    assertEquals(document.code, 0, document.stderr);
+    const names: string[] = [];
+    for await (const entry of Deno.readDir(planted)) names.push(entry.name);
+    assertEquals(names, ["json.py"]);
   });
 });

@@ -351,6 +351,9 @@ one, `iat` at most 300 s ahead, a pinned approval, removals approved by a passke
 additions or an rp id move proving possession); openssl verifies every signature (`dgst -sha256`
 for ES256, `pkeyutl -rawin` for EdDSA) and any failure refuses the whole statement. It rewrites
 `current=`, `keyset=`, `rp_id=`, `passkeys=`, empties `next=`, and moves `panel_key=` in
-`update-origin`. The shared vectors (`src/testing/keyset-statement-vectors.json`) are
+`update-origin`. Both python3 checks run isolated (`python3 -I`: no `PYTHON*` variables, no
+import from the current directory or a user site), and a statement's `v`, `keyset` and `iat`
+must be plain whole numbers (`v` exactly `1`, never `true` or `1.0`; nothing above 2^53 - 1), as
+the control plane reads them. The shared vectors (`src/testing/keyset-statement-vectors.json`) are
 byte-identical to the control plane's and pinned by `check:contract-drift`. Root can hand-apply
 a downloaded statement: `sudo tp-host panel-identity-write statement < key-set-N.json`.
