@@ -162,6 +162,8 @@ import type { DrivetempEnableResult } from "../contracts/commands-contracts.ts";
 import type { UpdateChannelConfig } from "../update/config.ts";
 import type { UpdateChannel, UpdateInfo } from "../update/types.ts";
 import {
+  assertMessageManifestIsChannelHead,
+  decideMessageManifest,
   decideUpdateChannel,
   hostUpdateChannel,
 } from "./update-channel-pin.ts";
@@ -183,6 +185,7 @@ import {
   encodeLicenseArg,
   executeInstanceUpdateReconcile,
   executeRunReconcile,
+  fetchChannelHeadVersion,
   reconcileNeedsRootHelper,
   resolveAutomaticUpdateTrust,
   resolveRunScriptUrl,
@@ -3179,6 +3182,46 @@ export class InstanceClient {
     }
   }
 
+  /**
+   * On an unsigned session a message may only name the channel's own head
+   * build (see `decideMessageManifest`). Throws `manifest_pinned` otherwise.
+   */
+  async #holdMessageManifest(
+    kind: "daemon" | "instance" | "ui",
+    channel: UpdateChannel,
+    messageUrl: string | undefined,
+    env: Record<string, string | undefined>,
+  ): Promise<void> {
+    try {
+      const decision = decideMessageManifest({
+        kind,
+        channel,
+        messageUrl,
+        signedSession: this.#pinnedHelloApplied,
+        overlay: !!env.TURBOPANEL_DL_BASE?.trim(),
+      });
+      if (decision.check === "none" || !messageUrl) return;
+      const headVersion = await clientTestHooks.fetchChannelHeadVersion({
+        kind,
+        headUrl: decision.headUrl,
+        env,
+      });
+      assertMessageManifestIsChannelHead({
+        kind,
+        channel,
+        messageUrl,
+        headVersion,
+      });
+    } catch (err) {
+      logWarn(
+        "update",
+        "refused a build named by an unsigned message:",
+        sanitizeForLog(err instanceof Error ? err.message : String(err)),
+      );
+      throw err;
+    }
+  }
+
   async #reconcileToLatestUpdate(
     config: UpdateChannelConfig,
     options: {
@@ -3404,6 +3447,12 @@ export class InstanceClient {
       if (requestedManifest) {
         assertReleaseManifestUrl("daemon", requestedManifest, "manifestUrl");
       }
+      await this.#holdMessageManifest(
+        "daemon",
+        config.channel,
+        requestedManifest,
+        env,
+      );
       // The build the control plane targeted wins over a pin an earlier
       // managed update left in daemon.env (selectUpdateManifestUrl).
       const messageManifest = selectUpdateManifestUrl(
@@ -3597,6 +3646,13 @@ export class InstanceClient {
       if (messageUiPin) {
         assertReleaseManifestUrl("ui", messageUiPin, "uiManifestUrl");
       }
+      await this.#holdMessageManifest(
+        "instance",
+        channel,
+        messageInstancePin,
+        env,
+      );
+      await this.#holdMessageManifest("ui", channel, messageUiPin, env);
       const instancePin = selectUpdateManifestUrl(
         "instance",
         env,
@@ -4401,6 +4457,7 @@ export function installClientTimeSource(source: {
 type ClientTestHooks = {
   restartDaemonService: typeof restartDaemonService;
   resolveUpdate: typeof resolveUpdate;
+  fetchChannelHeadVersion: typeof fetchChannelHeadVersion;
   getBuildInfo: typeof getBuildInfo;
   downloadRunScript: typeof downloadRunScript;
   executeRunReconcile: typeof executeRunReconcile;
@@ -4428,6 +4485,7 @@ type ClientTestHooks = {
 let clientTestHooks: ClientTestHooks = {
   restartDaemonService,
   resolveUpdate,
+  fetchChannelHeadVersion,
   getBuildInfo,
   downloadRunScript,
   executeRunReconcile,
