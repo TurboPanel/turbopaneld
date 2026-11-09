@@ -5265,6 +5265,167 @@ it({
 });
 
 it({
+  name:
+    "a lone unsigned instance-update naming another channel is refused before anything runs",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "release");
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    let instanceCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("signed-aaa"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      executeInstanceUpdateReconcile: () => {
+        instanceCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      // The control plane advertises progress frames, so a run that got as
+      // far as its first stage would show one.
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "instance-update",
+        id: "iu-alone",
+        channel: "canary",
+        upgradeId: "upg-alone",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "lone instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((f) =>
+            (f as { id?: string }).id === "iu-alone"
+          ) as
+            | { ok?: boolean; errorCode?: string; error?: string }
+            | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "channel_pinned");
+      assertEquals(
+        String(result.error).includes("update channel is release"),
+        true,
+      );
+      assertEquals(instanceCalls, 0);
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+      // Refused before the run was announced: the only progress frame for it
+      // is the failure itself, never a stage of work.
+      const stages = framesOfType(socket, "update-progress")
+        .filter((f) => (f as { id?: string }).id === "iu-alone")
+        .map((f) => (f as { stage?: string }).stage);
+      assertEquals(stages.filter((stage) => stage !== "failed"), []);
+      assertEquals(framesOfType(socket, "update-result").length, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "an update or instance-update naming an unknown channel is refused as channel_unknown",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "release");
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    let instanceCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("signed-aaa"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      executeInstanceUpdateReconcile: () => {
+        instanceCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-unknown",
+        channel: "nightly",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "unknown-channel update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-unknown"
+          ) as
+            | { ok?: boolean; errorCode?: string; error?: string }
+            | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "channel_unknown");
+      assertEquals(String(result.error).includes('"nightly"'), true);
+      socket.receive({
+        type: "instance-update",
+        id: "iu-unknown",
+        channel: "nightly",
+        at: new Date().toISOString(),
+      });
+      const instanceResult = await waitFor(
+        "unknown-channel instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((f) =>
+            (f as { id?: string }).id === "iu-unknown"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(instanceResult.ok, false);
+      assertEquals(instanceResult.errorCode, "channel_unknown");
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+      assertEquals(instanceCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
   name: "update reconciles the verified manifest instead of a moving channel",
   permissions: {
     env: true,
