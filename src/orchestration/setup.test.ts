@@ -296,21 +296,37 @@ test("runBootConverge is skipped with orchestration and a no-op where no converg
 test("runBootConverge runs the converge for a remote daemon and reports a failure as false", async () => {
   const url = Deno.env.get("TURBOPANEL_INSTANCE_URL");
   const original = setupTestHooks.runDaemonConverge;
+  const originalRecord = setupTestHooks.recordBootConvergeDone;
   try {
     Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
     Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://panel.example.com");
     let runs = 0;
+    let recorded = 0;
+    setupTestHooks.recordBootConvergeDone = () => {
+      recorded += 1;
+      return Promise.resolve();
+    };
     setupTestHooks.runDaemonConverge = () => {
       runs += 1;
       return Promise.resolve();
     };
     assertEquals(await runBootConverge(), true);
     assertEquals(runs, 1);
+    // The installer's restart waits for this marker.
+    assertEquals(recorded, 1);
     setupTestHooks.runDaemonConverge = () =>
       Promise.reject(new Error("playbook failed"));
     assertEquals(await runBootConverge(), false);
+    // A failed converge is retried and runs apt again: no marker.
+    assertEquals(recorded, 1);
+    // A marker that cannot be written never fails the converge.
+    setupTestHooks.runDaemonConverge = () => Promise.resolve();
+    setupTestHooks.recordBootConvergeDone = () =>
+      Promise.reject(new Error("read-only"));
+    assertEquals(await runBootConverge(), true);
   } finally {
     setupTestHooks.runDaemonConverge = original;
+    setupTestHooks.recordBootConvergeDone = originalRecord;
     if (url === undefined) Deno.env.delete("TURBOPANEL_INSTANCE_URL");
     else Deno.env.set("TURBOPANEL_INSTANCE_URL", url);
   }

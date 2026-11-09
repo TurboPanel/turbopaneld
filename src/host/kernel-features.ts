@@ -1,9 +1,9 @@
 /**
  * Typed registry for named kernel/boot features. The shell helper
  * `orchestration/scripts/tp-kernel-features` is the host-side source of truth;
- * this module mirrors its `pi-4k-pagesize` transforms and state machine so
- * daemon messages and tests stay in lockstep. The daemon never invokes the
- * helper.
+ * this module mirrors its `pi-4k-pagesize` and `pi-memory-cgroup` transforms
+ * and state machines so daemon messages and tests stay in lockstep. The daemon
+ * never invokes the helper.
  */
 
 export type KernelFeatureState =
@@ -13,7 +13,10 @@ export type KernelFeatureState =
   | "ready"
   | "blocked";
 
-export const KERNEL_FEATURE_IDS = ["pi-4k-pagesize"] as const;
+export const KERNEL_FEATURE_IDS = [
+  "pi-4k-pagesize",
+  "pi-memory-cgroup",
+] as const;
 
 export type KernelFeatureId = (typeof KERNEL_FEATURE_IDS)[number];
 
@@ -43,7 +46,7 @@ export type KernelFeatureStatus = {
 
 /** True for features whose apply only takes effect after a restart. */
 export function needsReboot(id: KernelFeatureId): boolean {
-  return id === "pi-4k-pagesize";
+  return id === "pi-4k-pagesize" || id === "pi-memory-cgroup";
 }
 
 /** Trim spaces and tabs only (not other whitespace), like the shell helper. */
@@ -258,5 +261,174 @@ export function piFourKPagesizeState(
   return {
     state: "switchable",
     reason: "this server can switch to the 4 KiB kernel (a restart is needed)",
+  };
+}
+
+/** The word `pi-memory-cgroup` adds to the Raspberry Pi kernel command line. */
+export const MEMORY_CGROUP_ON_WORD = "cgroup_enable=memory";
+/** The word the Raspberry Pi firmware adds, which turns the controller off. */
+export const MEMORY_CGROUP_OFF_WORD = "cgroup_disable=memory";
+
+export type CmdlineMemoryScan = "list" | "enable" | "disable" | "none";
+
+export type PiMemoryCgroupFacts = {
+  /** `/sys/fs/cgroup/cgroup.controllers`; `undefined` when it is missing. */
+  controllers?: string;
+  model?: string;
+  /** `/proc/cmdline` (NUL bytes allowed); `undefined` when unreadable. */
+  procCmdline?: string;
+  /** `/boot/firmware/cmdline.txt`; `undefined` when it is missing. */
+  cmdlineText?: string;
+};
+
+/** Words split the way awk splits fields: on spaces, tabs and newlines. */
+function words(line: string): string[] {
+  return line.split(/[ \t\n]+/).filter((word) => word !== "");
+}
+
+/** Same as `kf_cmdline_line`: the first line, every CR and LF removed. */
+export function cmdlineFirstLine(text: string): string {
+  const newline = text.indexOf("\n");
+  const first = newline === -1 ? text : text.slice(0, newline);
+  return first.replaceAll("\r", "");
+}
+
+/** Same as `kf_cmdline_extra_lines`: anything but blank lines after line one. */
+export function cmdlineHasExtraLines(text: string): boolean {
+  const newline = text.indexOf("\n");
+  if (newline === -1) return false;
+  return /[^ \t\r\n]/.test(text.slice(newline + 1));
+}
+
+/** Same rules as `kf_cmdline_mem_scan`. */
+export function scanCmdlineMemoryWords(line: string): CmdlineMemoryScan {
+  let last: "enable" | "disable" | undefined;
+  let list = false;
+  for (const word of words(line)) {
+    if (word === MEMORY_CGROUP_ON_WORD) last = "enable";
+    else if (word === MEMORY_CGROUP_OFF_WORD) last = "disable";
+    else if (word.startsWith("cgroup_disable=")) {
+      const names = word.slice("cgroup_disable=".length).split(",");
+      if (names.includes("memory")) list = true;
+    }
+  }
+  if (list) return "list";
+  return last ?? "none";
+}
+
+function trimTrailingBlanks(text: string): string {
+  let to = text.length;
+  while (to > 0 && (text[to - 1] === " " || text[to - 1] === "\t")) to--;
+  return text.slice(0, to);
+}
+
+/** Same as `kf_cmdline_enable_line`. */
+export function enableMemoryCgroupLine(line: string): string {
+  let result = line;
+  if (words(line).includes(MEMORY_CGROUP_OFF_WORD)) {
+    result = words(line).filter((word) => word !== MEMORY_CGROUP_OFF_WORD)
+      .join(" ");
+  }
+  if (result.split(/[ \t]+/).includes(MEMORY_CGROUP_ON_WORD)) return result;
+  const base = trimTrailingBlanks(result);
+  return base === ""
+    ? MEMORY_CGROUP_ON_WORD
+    : `${base} ${MEMORY_CGROUP_ON_WORD}`;
+}
+
+/** Same as `kf_cmdline_undo_line`. */
+export function undoMemoryCgroupLine(
+  current: string,
+  before: string,
+  after: string,
+): string {
+  if (current === after) return before;
+  if (!words(current).includes(MEMORY_CGROUP_ON_WORD)) return current;
+  return words(current).filter((word) => word !== MEMORY_CGROUP_ON_WORD).join(
+    " ",
+  );
+}
+
+/**
+ * Same as `kf_cmdline_write`: replace the first line and keep the rest byte
+ * for byte, including the first line's own CR and newline (or none).
+ */
+export function replaceCmdlineFirstLine(text: string, line: string): string {
+  const newline = text.indexOf("\n");
+  if (newline === -1) return line;
+  const ending = firstLineEndsCrlf(text) ? "\r\n" : "\n";
+  return `${line}${ending}${text.slice(newline + 1)}`;
+}
+
+/** Same reasons and check order as `kf_pi_memory_cgroup_state`. */
+export function piMemoryCgroupState(
+  facts: PiMemoryCgroupFacts,
+): KernelFeatureStatus {
+  if (facts.controllers === undefined) {
+    return {
+      state: "not-applicable",
+      reason:
+        "this server does not use the unified control group hierarchy (cgroup v2)",
+    };
+  }
+  if (words(facts.controllers.replaceAll("\t", " ")).includes("memory")) {
+    return {
+      state: "ready",
+      reason: "the memory controller is on, so memory limits are enforced",
+    };
+  }
+  if (!facts.model?.includes("Raspberry Pi")) {
+    return {
+      state: "not-applicable",
+      reason: "this server is not a Raspberry Pi",
+    };
+  }
+  if (facts.cmdlineText === undefined) {
+    return {
+      state: "blocked",
+      reason: "/boot/firmware/cmdline.txt is missing",
+    };
+  }
+  if (cmdlineHasExtraLines(facts.cmdlineText)) {
+    return {
+      state: "blocked",
+      reason:
+        "/boot/firmware/cmdline.txt has more than one line, so it is left as it is",
+    };
+  }
+  const running = (facts.procCmdline ?? "").replaceAll(/[\0\r\n]/g, " ");
+  const runningScan = scanCmdlineMemoryWords(running);
+  if (runningScan === "enable") {
+    return {
+      state: "blocked",
+      reason:
+        "this kernel was started with cgroup_enable=memory but the memory controller is still missing, so a restart would not turn it on",
+    };
+  }
+  if (runningScan === "none") {
+    return {
+      state: "not-applicable",
+      reason:
+        "the memory controller is missing, but not because of the Raspberry Pi boot setting (cgroup_disable=memory is not on the kernel command line)",
+    };
+  }
+  const saved = scanCmdlineMemoryWords(cmdlineFirstLine(facts.cmdlineText));
+  if (saved === "list") {
+    return {
+      state: "blocked",
+      reason:
+        "cmdline.txt turns off control groups itself, so it is left as it is",
+    };
+  }
+  if (saved === "enable") {
+    return {
+      state: "restart-needed",
+      reason:
+        "memory limits are saved in cmdline.txt; the server needs a restart",
+    };
+  }
+  return {
+    state: "switchable",
+    reason: "this server can turn on memory limits (a restart is needed)",
   };
 }

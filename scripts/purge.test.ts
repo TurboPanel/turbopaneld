@@ -2791,6 +2791,10 @@ async function purgeNotes(
   marker: boolean,
   bootLines: string[] | null,
   forward: string,
+  memory: { marker: boolean; cmdline: string | null } = {
+    marker: false,
+    cmdline: null,
+  },
 ): Promise<string> {
   const root = await Deno.makeTempDir({ prefix: "tp-purge-notes-" });
   const markers = join(root, "kernel");
@@ -2798,8 +2802,15 @@ async function purgeNotes(
   if (marker) {
     await Deno.writeTextFile(join(markers, "pi-4k-pagesize.applied"), "x\n");
   }
+  if (memory.marker) {
+    await Deno.writeTextFile(join(markers, "pi-memory-cgroup.applied"), "x\n");
+  }
   const boot = join(root, "config.txt");
   if (bootLines) await Deno.writeTextFile(boot, bootLines.join("\n") + "\n");
+  const cmdline = join(root, "cmdline.txt");
+  if (memory.cmdline !== null) {
+    await Deno.writeTextFile(cmdline, memory.cmdline);
+  }
   const fwd = join(root, "ip_forward");
   await Deno.writeTextFile(fwd, `${forward}\n`);
   const result = await runPurgeSh(
@@ -2811,7 +2822,9 @@ async function purgeNotes(
     ],
     [
       `TP_KERNEL_MARKER_DIR=${markers}`,
+      `TP_PI_BOOT_DIR=${root}`,
       `TP_PI_BOOT_CONFIG=${boot}`,
+      `TP_PI_BOOT_CMDLINE=${cmdline}`,
       `TP_IP_FORWARD_FILE=${fwd}`,
       "TP_NET_LEFT=false",
       ': > "$TP_TMP/kept-packages"',
@@ -2840,10 +2853,48 @@ test("the Pi page-size boot line is left on purpose and the summary says how to 
   assert(!(await purgeNotes(true, null, "0")).includes("kernel8"));
 });
 
-test("the purge never edits the Pi boot file and keeps the kernel-features marker", async () => {
+test("the Pi memory limits word is left on purpose and the summary says how to undo both by hand", async () => {
+  const on =
+    "console=tty1 root=PARTUUID=c5feafe0-02 rootwait cgroup_enable=memory";
+  const out = await purgeNotes(true, ["kernel=kernel8.img"], "0", {
+    marker: true,
+    cmdline: on,
+  });
+  assertStringIncludes(out, "boot setting kernel=kernel8.img");
+  assertStringIncludes(out, "boot setting cgroup_enable=memory");
+  assertStringIncludes(out, "it turns memory limits on");
+  assertStringIncludes(out, "remove that word from the one line");
+  assertStringIncludes(out, "*.tp-backup-<time>");
+  assertStringIncludes(out, "records what TurboPanel changed");
+  // The backup note is said once, even with both settings left.
+  assertEquals(out.split("*.tp-backup-<time>").length - 1, 1);
+  // Memory limits alone still get the note and the backup line.
+  const alone = await purgeNotes(false, null, "0", {
+    marker: true,
+    cmdline: `${on}\n`,
+  });
+  assertStringIncludes(alone, "boot setting cgroup_enable=memory");
+  assertStringIncludes(alone, "*.tp-backup-<time>");
+  assert(!alone.includes("kernel8"));
+  // Nothing to say without TurboPanel's marker, or once the word is gone.
+  const quiet = [
+    await purgeNotes(false, null, "0", { marker: false, cmdline: on }),
+    await purgeNotes(false, null, "0", {
+      marker: true,
+      cmdline: "console=tty1 rootwait",
+    }),
+    await purgeNotes(false, null, "0", { marker: true, cmdline: null }),
+  ];
+  for (const text of quiet) {
+    assert(!text.includes("cgroup_enable"), text);
+    assert(!text.includes("tp-backup"), text);
+  }
+});
+
+test("the purge never edits the Pi boot files and keeps the kernel-features markers", async () => {
   const source = await Deno.readTextFile(purgePath);
   const code = source.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
-  assert(!/(rm|sed|mv|tee)[^\n]*TP_PI_BOOT_CONFIG/.test(code));
+  assert(!/(rm|sed|mv|tee|cp)[^\n]*TP_PI_BOOT_(CONFIG|CMDLINE|DIR)/.test(code));
   assert(!/(rm|rmdir)[^\n]*TP_KERNEL_MARKER_DIR/.test(code));
   const owned = source.match(/^TP_OWNED_TREES="([^"]*)"/m);
   assert(

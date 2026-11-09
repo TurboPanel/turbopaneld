@@ -72,7 +72,13 @@ host. They never receive `turbopanel_ui_mode`, `turbopanel_instance_run_mode`
 or `turbopanel_instance_runtime` (no role they apply reads them; those belong
 to `devInstanceExtraArgs` and the build toggle). `boot-converge-gate.ts` holds command
 dispatch (after the ack) until that converge has finished, passed or failed, so
-no command runs a playbook on top of it. The fabric, forwarding, PHP and
+no command runs a playbook on top of it. When a boot converge passes (or no
+converge applies) on a production install, `runBootConverge` writes
+`<run>/boot-converge-done` (`boot-converge-done.ts`; the run folder is emptied
+on every boot, nothing is written when it is missing, a write error is only
+logged). The installer's Raspberry Pi restart waits for that file
+(`orchestration/scripts/tp-kernel-features`), so a failed converge, which is
+retried and runs apt again, never counts as finished. The fabric, forwarding, PHP and
 background checks that normally precede the connection run after a successful
 converge on that path.
 
