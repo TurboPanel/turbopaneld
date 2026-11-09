@@ -27,6 +27,7 @@
 # Priority: optional on Debian, so do not rely on the image.
 - name: Ensure ACL tooling is installed
   ansible.builtin.apt:
+    lock_timeout: 300
     name: acl
     state: present
 
@@ -138,6 +139,7 @@
 # boot service stays disabled, see daemon-prereqs firewall-takeover.yml).
 - name: Ensure nft is installed
   ansible.builtin.apt:
+    lock_timeout: 300
     name: nftables
     state: present
 

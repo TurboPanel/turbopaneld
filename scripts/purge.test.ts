@@ -128,6 +128,100 @@ const RC_WITH_TURBOPANEL = [
   "",
 ].join("\n");
 
+const DETECTION_FUNCTIONS = [
+  "tp_env_file_value",
+  "tp_url_host",
+  "tp_host_is_ha",
+  "tp_detect_server_type",
+];
+
+/** The label and kind purge prints for a daemon enrolled at `url`. */
+async function detectedInstall(
+  url: string,
+): Promise<{ kind: string; label: string }> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-detect-" });
+  try {
+    const envFile = join(dir, "daemon.env");
+    await Deno.writeTextFile(
+      envFile,
+      `TURBOPANEL_INSTANCE_URL=${url}\nTURBOPANEL_UPDATE_CHANNEL=canary\n`,
+    );
+    const result = await runPurgeSh(
+      DETECTION_FUNCTIONS,
+      [
+        // No unit lookups against the machine running the tests.
+        "tp_unit_present() { return 1; }",
+        `TP_DAEMON_ENV=${envFile}`,
+        "tp_detect_server_type",
+        `printf '%s\\n%s\\n' "$TP_SERVER_KIND" "$TP_SERVER_LABEL"`,
+      ].join("\n"),
+    );
+    assertEquals(result.code, 0, result.stderr);
+    const [kind = "", label = ""] = result.stdout.split("\n");
+    return { kind, label };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+test("a server enrolled with a self-hosted control plane under turbopanel.dev is not labelled High Availability", async () => {
+  const url = "https://canary.turbopanel.dev:8443";
+  assertEquals(await detectedInstall(url), {
+    kind: "remote-daemon",
+    label: `self-hosted control plane at ${url}`,
+  });
+  // The development host's own name and any other name under the zone.
+  for (
+    const other of [
+      "https://turbopanel.dev:8443",
+      "https://panel.turbopanel.dev",
+      "https://testing.turbopanel.dev.example.com",
+      "https://nottesting.turbopanel.dev",
+    ]
+  ) {
+    assertEquals((await detectedInstall(other)).kind, "remote-daemon", other);
+  }
+});
+
+test("a server enrolled with any other control plane is labelled self-hosted at its URL", async () => {
+  for (
+    const url of [
+      "https://panel.example.com:8443",
+      "https://192.0.2.10:8443",
+      "https://turbopanel.app.example.net",
+    ]
+  ) {
+    assertEquals(await detectedInstall(url), {
+      kind: "remote-daemon",
+      label: `self-hosted control plane at ${url}`,
+    }, url);
+  }
+});
+
+test("only the exact High Availability names are labelled High Availability", async () => {
+  for (
+    const url of [
+      "https://turbopanel.app",
+      "https://staging.turbopanel.dev",
+      "https://testing.turbopanel.dev",
+      "https://testing.turbopanel.dev/",
+      "https://turbopanel.app:443",
+    ]
+  ) {
+    assertEquals(await detectedInstall(url), {
+      kind: "ha-daemon",
+      label: "TurboPanel High Availability",
+    }, url);
+  }
+});
+
+test("the High Availability name list has no wildcard", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const fn = extractFunction(source, "tp_host_is_ha");
+  assert(fn !== null, "tp_host_is_ha is missing from purge.sh");
+  assertEquals(fn.includes("*."), false, fn);
+});
+
 test("a planted .bak symlink is never written through when a startup file is stripped", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tp-rc-" });
   const home = join(dir, "home");

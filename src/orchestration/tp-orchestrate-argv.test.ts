@@ -15,7 +15,7 @@ import {
   buildDockerSetupExtraArgs,
   buildSetHostnameExtraArgs,
   buildTimeSyncApplyExtraArgs,
-  devInstanceExtraArgs,
+  serverPlaybookExtraArgs,
 } from "./ansible.ts";
 import { runInstanceCertsApply } from "../instance/public-urls-apply.ts";
 import { rootHelperPlaybookInvocation } from "../instance/run-reconcile.ts";
@@ -99,7 +99,7 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
   ]);
   captured.push([
     "daemon-converge",
-    extraVarValues(await withManagedHostEnv(() => devInstanceExtraArgs())),
+    extraVarValues(await withManagedHostEnv(() => serverPlaybookExtraArgs())),
   ]);
   captured.push([
     "set-hostname",
@@ -217,6 +217,11 @@ test("tp-orchestrate accepts every extra-var the daemon passes on a managed host
     const all = await daemonExtraVars();
     const values = all.flatMap(([, v]) => v);
     assertEquals(values.length > 20, true, "builders produced too few values");
+    assertEquals(
+      all.find(([label]) => label === "daemon-converge")?.[1],
+      [],
+      "a managed host's converge passes no extra-vars",
+    );
     const verdicts = await checkExtraVars(values, { vendorDir });
     const refused = verdicts.filter((v) => !v.accepted).map((v) => {
       const builder = all.find(([, vs]) => vs.includes(v.value))?.[0];

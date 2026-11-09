@@ -9,6 +9,7 @@
 
 - name: Install unattended-upgrades (no recommends, so no apt-listchanges)
   ansible.builtin.apt:
+    lock_timeout: 300
     name: unattended-upgrades
     state: present
     install_recommends: false

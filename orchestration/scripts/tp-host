@@ -5806,7 +5806,7 @@ tp_verb_panel_identity_statement() {
   head -c 16385 > "$TP_STAGE/statement"
   [ "$(wc -c < "$TP_STAGE/statement")" -le 16384 ] || tp_die "panel-identity-write: statement too large"
   mkdir "$TP_STAGE/v"
-  python3 -I -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_keyset" \
+  tp_python -c "$(tp_panel_statement_python)" "$TP_STAGE/statement" "$TP_STAGE/v" "$_ps_cur" "$_ps_keyset" \
     "$(tp_pin_field_of "$_ps_file" rp_id)" "$(tp_pin_field_of "$_ps_file" passkeys)" ||
     tp_die "panel-identity-write: refusing the statement"
   while read -r _ps_i _ps_alg; do
@@ -5841,6 +5841,15 @@ tp_verb_panel_identity_statement() {
   tp_put_file "$_ps_file" 640 root tp < "$TP_STAGE/new"
 }
 
+# Root's python3, run from / in isolated mode: -I drops the script and current
+# directories from sys.path and ignores PYTHON* variables and the user site,
+# -S skips the site module. sudo keeps the caller's directory, so without this
+# a module the daemon account left there (base64.py, json.py, ...) would be
+# imported as root before any signature check. Every path passed is absolute.
+tp_python() {
+  (cd / && python3 -I -S "$@")
+}
+
 tp_pin_field_of() {
   sed -n "s/^$2=//p" "$1" | head -n 1
 }
@@ -5868,7 +5877,7 @@ tp_verb_panel_identity_write() {
   mkdir "$TP_STAGE/v"
   _pi_passkeys="$(tp_pin_field_of "$_pi_file" passkeys)"
   _pi_rp_id="$(tp_pin_field_of "$_pi_file" rp_id)"
-  python3 -I -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" "$_pi_passkeys" ||
+  tp_python -c "$(tp_panel_identity_python)" "$TP_STAGE/body" "$TP_STAGE/header" "$TP_STAGE/v" "$_pi_cur" "$_pi_keyset" "$_pi_passkeys" ||
     tp_die "panel-identity-write: refusing the identity document"
   openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/pub.pem" -rawin -in "$TP_STAGE/v/msg" -sigfile "$TP_STAGE/v/sig" >/dev/null 2>&1 ||
     tp_die "panel-identity-write: the identity document signature is invalid"

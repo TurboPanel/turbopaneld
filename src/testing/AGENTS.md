@@ -56,6 +56,15 @@ still fire on first-party content (`partial-become`, `parser-error`) are in
 `warn_list` in `.ansible-lint` with the reasoning; the full ansible-lint
 profile is deliberately **not** gated (~360 findings, nearly all style).
 
+**Pinned Caddy suites:** the `src/deploy/caddy-*.test.ts` checks that run the
+real control plane template (headers, error pages, redirects, grace period)
+skip unless `TURBOPANEL_TEST_CADDY` (or `caddy` on PATH) is the pinned
+version, and the in-place edit checks also need `ansible-playbook` on PATH.
+CI downloads the pinned Caddy (version and SHA-256 from the `caddy` role
+defaults) and sets `TURBOPANEL_TEST_CADDY`, so a pin bump that changes how
+Caddy treats the template fails there. Locally:
+`TURBOPANEL_TEST_CADDY=/opt/turbopanel/vendor/caddy/current/caddy`.
+
 **Real-`git` suites:** use `withTempGitRepo` from `src/testing/temp-git-repo.ts`
 rather than running git against the ambient checkout. Ambient-tree suites break
 in a `git worktree` whose `.git` points outside the visible filesystem, in

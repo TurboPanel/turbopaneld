@@ -335,7 +335,8 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
 `lib/panel-identity` and `lib/update-origin` are written by `run.sh` and changed afterwards only by
 `tp-host panel-identity-write` (no generic verb may name them). With no argument it reads the
 `X-TurboPanel-Signature` header line and the exact identity document from stdin, checks the
-signature against the pinned key itself (python3 + `openssl pkeyutl`), refuses an empty address
+signature against the pinned key itself (python3 through `tp_python`, which runs `python3 -I -S` from `/` so
+nothing in the caller's directory is imported as root, + `openssl pkeyutl`), refuses an empty address
 list, then rewrites the pin's `urls=` and `update-origin`'s `hosts=` together (the daemon tries
 the pin's addresses in order). `tp-orchestrate update` accepts `--host` equal to `host=` or any
 entry of `hosts=`, matched as a quoted whole value.
@@ -351,8 +352,8 @@ one, `iat` at most 300 s ahead, a pinned approval, removals approved by a passke
 additions or an rp id move proving possession); openssl verifies every signature (`dgst -sha256`
 for ES256, `pkeyutl -rawin` for EdDSA) and any failure refuses the whole statement. It rewrites
 `current=`, `keyset=`, `rp_id=`, `passkeys=`, empties `next=`, and moves `panel_key=` in
-`update-origin`. Both python3 checks run isolated (`python3 -I`: no `PYTHON*` variables, no
-import from the current directory or a user site), and a statement's `v`, `keyset` and `iat`
+`update-origin`. Both python3 checks run through `tp_python` (`python3 -I -S` from `/`: no
+`PYTHON*` variables, no site module, no import from the caller's directory), and a statement's `v`, `keyset` and `iat`
 must be plain whole numbers (`v` exactly `1`, never `true` or `1.0`; nothing above 2^53 - 1), as
 the control plane reads them. The shared vectors (`src/testing/keyset-statement-vectors.json`) are
 byte-identical to the control plane's and pinned by `check:contract-drift`. Root can hand-apply

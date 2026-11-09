@@ -81,9 +81,33 @@ installer) holds against the control plane's messages. An `update` or
 `instance-update` naming another channel is honoured only when it arrived on a
 verified signed session (pinned server, signed hello applied); on an unsigned
 session it is refused before anything runs with `errorCode` `channel_pinned`
-(`decideUpdateChannel`, `src/instance/update-channel-pin.ts`). An absent,
-equal or unknown message channel keeps the host channel. The host-side way to
+(`decideUpdateChannel`, `src/instance/update-channel-pin.ts`). An absent or
+equal message channel keeps the host channel. A channel name this daemon does
+not know is refused with `errorCode` `channel_unknown` on any session: running
+the host channel in its place would leave the control plane believing the
+named channel ran. The host-side way to
 change it is re-running the installer with `TURBOPANEL_UPDATE_CHANNEL`. Root
 does not compare a requested channel against a stored one (`tp-orchestrate`
 only allowlists the name): root cannot verify a control-plane signature, so
 such a pin would also block the signed path.
+
+The build inside the channel has the same rule, as two pure checks in the same
+file (`decideMessageManifest`, `assertMessageManifestIsChannelHead`, code
+`manifest_pinned`). On an unsigned session a message manifest URL may only be
+the channel's own manifest, or the one exact build that manifest names right
+now (`pinnedChannelManifestUrl` of the head's `version`): the control plane
+targets the channel's current build, so an honest run passes, while another
+channel's manifest, an older build or a release-candidate tag on a release host
+does not. A signed session and a development overlay host keep naming any
+build on the rail. An exact build still wins over a pin an earlier managed
+update left in `daemon.env` (`selectUpdateManifestUrl`); dropping the message
+URL instead would put that stale pin back in charge and freeze the host. The
+two call sites that read a message manifest URL (`#applyUpdate`,
+`#applyInstanceUpdate` in `src/instance/client.ts`, the control plane and web
+interface pins each against their own rail) run both checks through
+`#holdMessageManifest` before the URL reaches `selectUpdateManifestUrl`. When
+the decision is `head`, the signed manifest at the channel head is fetched with
+`fetchChannelHeadVersion` (`src/instance/run-reconcile.ts`, always verified as a
+pinned manifest) and its `version` is compared; any refusal is `manifest_pinned`.
+Tests: `src/instance/client.test.ts` (unsigned) and
+`src/instance/client-signed-session.test.ts` (signed).

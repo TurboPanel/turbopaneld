@@ -19,6 +19,8 @@ export interface PanelSealKey {
   pub: Uint8Array;
   /** Fingerprint of the control plane's signing key: the aad of what is sealed to it. */
   panelFingerprint: string;
+  /** The signed document says this control plane takes the license sealed on enroll. */
+  sealedLicense?: boolean;
 }
 
 export interface PanelIdentityFetch {
@@ -129,6 +131,7 @@ export async function parsePanelIdentity(
       kid: seal.kid as string,
       pub: sealPub,
       panelFingerprint: currentKid,
+      sealedLicense: doc.sealedLicense === 1,
     },
     signing: { kid: currentKid, pub: currentPub },
   };

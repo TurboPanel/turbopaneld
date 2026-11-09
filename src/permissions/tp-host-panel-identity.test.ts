@@ -621,29 +621,42 @@ test("a statement whose version or numbers are not plain whole numbers is malfor
   });
 });
 
-test("the pin checks run python isolated: a module planted on its path is never loaded", async () => {
+test("both pin writers ignore Python modules on PYTHONPATH and in the caller's directory", async () => {
   await withHost(async (host) => {
-    const planted = host.path("tmp/planted");
-    await Deno.mkdir(planted);
-    // Stands in for the real module and leaves a mark when it is imported.
-    await Deno.writeTextFile(
-      `${planted}/json.py`,
-      'import pathlib\npathlib.Path(__file__).with_name("loaded").write_text("x")\n',
-    );
+    // sudo keeps the caller's directory and root runs python3 there: a module
+    // planted next to it or on PYTHONPATH must never be imported.
+    const planted = host.path("outside/planted");
+    const marker = host.path("outside/imported");
+    await Deno.mkdir(planted, { recursive: true });
+    for (const name of ["base64", "json", "re", "hashlib", "sitecustomize"]) {
+      await Deno.writeTextFile(
+        `${planted}/${name}.py`,
+        `open(${JSON.stringify(marker)}, "w").write("${name}")\n` +
+          'raise SystemExit("planted module imported")\n',
+      );
+    }
     const env = { PYTHONPATH: planted };
+
     await writeRotationPin(host, vectors.pin);
-    const statement = await applyStatement(host, vectors.chain[0], env);
+    const statement = await host.run(
+      ["panel-identity-write", "statement"],
+      JSON.stringify(vectors.chain[0]),
+      env,
+      planted,
+    );
     assertEquals(statement.code, 0, statement.stderr);
+
     const panel = await makePanel();
     await writePin(host, panel.kid);
     const document = await host.run(
       ["panel-identity-write"],
       await panel.document(),
       env,
+      planted,
     );
     assertEquals(document.code, 0, document.stderr);
-    const names: string[] = [];
-    for await (const entry of Deno.readDir(planted)) names.push(entry.name);
-    assertEquals(names, ["json.py"]);
+
+    const imported = await Deno.stat(marker).then(() => true, () => false);
+    assertEquals(imported, false);
   });
 });

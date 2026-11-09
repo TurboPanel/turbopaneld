@@ -1227,6 +1227,29 @@ export async function assertControlPlaneManifestPreflight(options: {
   return { url, commit, version };
 }
 
+/**
+ * The `version` of the signed manifest at a channel head URL, or null when
+ * the manifest names none. Always verified as a pinned manifest (a signature
+ * is required); the caller compares it with an unsigned message's URL.
+ */
+export async function fetchChannelHeadVersion(options: {
+  kind: "daemon" | "instance" | "ui";
+  headUrl: string;
+  env?: Record<string, string | undefined>;
+  fetchText?: InstanceUpdateHooks["fetchText"];
+  retry?: RetryFetchOptions;
+  publicKeyHex?: string;
+}): Promise<string | null> {
+  const manifest = await fetchVerifiedManifest(
+    options.headUrl,
+    options.kind,
+    options.fetchText ?? defaultFetchManifestText,
+    manifestSignaturePolicy({ ...options, pinned: true }),
+    options.retry,
+  );
+  return typeof manifest.version === "string" ? manifest.version : null;
+}
+
 /** The database container must already be running before a dump is attempted. */
 export async function assertControlPlaneBackupPreflight(
   run: NonNullable<InstanceUpdateHooks["run"]>,
@@ -1583,6 +1606,11 @@ async function refreshCaddyIfNeeded(
  * WebSocket, not through the broker, so the restart cannot drop it; the
  * panel's consumers reconnect. Running last means a failed or rolled-back
  * update never restarts the broker. Never blocks: a failure is a warning.
+ *
+ * The same play makes sure the broker's application user still has its
+ * password and its access to the virtual host, config change or not: a host
+ * whose first broker boot was interrupted has that user without permissions
+ * ("Command queue unavailable" on every command) and heals here.
  */
 async function refreshBrokerConfig(
   run: NonNullable<InstanceUpdateHooks["run"]>,

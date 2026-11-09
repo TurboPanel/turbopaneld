@@ -4,6 +4,7 @@
 
 - name: Install systemd-timesyncd
   ansible.builtin.apt:
+    lock_timeout: 300
     name: systemd-timesyncd
     state: present
     update_cache: true

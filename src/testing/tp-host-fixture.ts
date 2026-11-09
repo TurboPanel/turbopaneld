@@ -18,6 +18,7 @@ export type Host = {
     args: string[],
     stdin?: string,
     env?: Record<string, string>,
+    cwd?: string,
   ) => Promise<{ code: number; stdout: string; stderr: string }>;
   path: (rel: string) => string;
   cleanup: () => Promise<void>;
@@ -89,9 +90,10 @@ export async function makeHost(): Promise<Host> {
   return {
     prefix,
     path,
-    run: async (args, stdin, extraEnv) => {
+    run: async (args, stdin, extraEnv, cwd) => {
       const child = new Deno.Command("sh", {
         args: [script, ...args],
+        cwd,
         clearEnv: true,
         env: {
           PATH: "/usr/bin:/bin",
