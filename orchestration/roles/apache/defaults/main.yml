@@ -6,7 +6,7 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # on the host, never apt install apache2. The APR versions below are only read
 # by the build script (with the source digests below). PHP is a separate vendor role (`php-fpm`); the build
 # enables shared proxy_fcgi.
-apache_version: "2.4.63"
+apache_version: "2.4.70"
 # The version CI builds and publishes (scripts/build-apache.sh, vendor-apache.yml).
 # Hosts install `apache_version`. A bump sets this first; once the release
 # exists, a second change moves `apache_version` and pins `apache_sha256`.
@@ -36,6 +36,9 @@ apache_sha256:
   "2.4.63":
     amd64: "57492bae04e05ca9856645d63a8d6cb06c7bd1bfccfc62ae22ad862e51148cf1"
     arm64: "6e02237ae9fa9999bbaf8dabf3b756abaebbea3f02204c7047bf9222f853da03"
+  "2.4.70":
+    amd64: "ee781d5ea91ab89aa0ffc2edc3b17c42eab51d92979261b419985c9fe656bdce"
+    arm64: "282e030be411dd6ca22e5a28ec39ab3b999db8d421589c5098baec1edb5dd1cd"
 # OpenSSL 3 runtime package: renamed to libssl3t64 (and libssl3 left only as a
 # virtual name) on Debian 13 and Ubuntu 24.04 and later.
 apache_libssl_package: >-
