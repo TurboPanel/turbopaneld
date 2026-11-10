@@ -15,8 +15,8 @@
  * certificates, and PostgreSQL uses the image's stock self-signed pair.
  *
  * The probe runs the way the real one will: inside a container of the same
- * image (the asked member), with one wall-clock deadline (`timeout -s KILL 5`
- * around the client's own 3 s connect timeout), the password read from stdin
+ * image (the asked member), with one wall-clock deadline (`timeout -s KILL 4`
+ * around the client's own 2 s connect timeout), the password read from stdin
  * into a 0600 temporary file that a trap removes (never on a command line),
  * and `LC_ALL=C` so client messages are fixed text. Each case prints one
  * `PRIMARY-CHECK-CAPTURE` line with the exit code and the client's
@@ -219,12 +219,12 @@ function probeScript(engine: Engine, verify: boolean): string {
   const tls = verify ? verifyArgs(engine.family) : "";
   if (engine.family === "postgres") {
     return SECRET_FILE_HEAD + 'set -a; . "$tmp"; set +a; ' +
-      `timeout -s KILL 5 psql "host=$1 port=$2 dbname=postgres connect_timeout=3 ${tls}" ` +
+      `timeout -s KILL 4 psql "host=$1 port=$2 dbname=postgres connect_timeout=2 ${tls}" ` +
       "-X -A -t -c 'SELECT 1' " + CAPTURE_TAIL;
   }
   return SECRET_FILE_HEAD +
-    `timeout -s KILL 5 ${engine.admin} --defaults-extra-file="$tmp" --no-beep ` +
-    `--connect-timeout=3 --protocol=TCP ${tls}-h "$1" -P "$2" ping ` +
+    `timeout -s KILL 4 ${engine.admin} --defaults-extra-file="$tmp" --no-beep ` +
+    `--connect-timeout=2 --protocol=TCP ${tls}-h "$1" -P "$2" ping ` +
     CAPTURE_TAIL;
 }
 
@@ -388,7 +388,7 @@ class Answers {
     }
   }
 
-  /** A deadline case: answered by the client's own 3 s timeout, never past the 5 s kill. */
+  /** A deadline case: answered by the client's own 2 s timeout, never past the 4 s kill. */
   withinDeadline(kase: string, capture: Capture): void {
     if (capture.elapsedMs >= 8_000) {
       this.problems.push(`${kase}: took ${capture.elapsedMs} ms`);
