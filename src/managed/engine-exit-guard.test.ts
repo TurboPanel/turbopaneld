@@ -7,7 +7,12 @@ import {
   ENGINE_EXIT_GUARD_MAX_START_GAP_MS,
   ManagedEngineExitGuard,
 } from "./engine-exit-guard.ts";
-import { applyBootHold, resetUnsettledBootHoldsForTests } from "./boot-hold.ts";
+import {
+  applyBootHold,
+  bootHoldPath,
+  listActiveBootHolds,
+  resetUnsettledBootHoldsForTests,
+} from "./boot-hold.ts";
 import { writeManagedDemotedMarker } from "./demoted-marker.ts";
 import { writeManagedDestroyedMarker } from "./destroyed-marker.ts";
 import {
@@ -15,6 +20,8 @@ import {
   clearManagedIntent,
   endManagedIntent,
   HOST_WIDE_INTENT_ID,
+  isHeldIntent,
+  lookupManagedIntent,
   managedIntentPath,
   recordManagedIntent,
   resetManagedIntentsForTests,
@@ -43,18 +50,31 @@ const EXITED_PS = JSON.stringify([
   },
 ]);
 
-function memberRecord() {
+/**
+ * A member record. The default is a standalone primary (no peers), which the
+ * guard starts on sight; pass `peers` for a cluster member.
+ */
+function memberRecord(peers = 0) {
   return {
     managedId: MANAGED_ID,
     memberId: MEMBER_ID,
     engine: "postgres" as const,
     role: "primary" as const,
     containerName: "db-1",
-    replicaPeerCount: 1,
-    peerCount: 1,
+    replicaPeerCount: peers,
+    peerCount: peers,
     updatedAt: "2026-10-08T12:00:00.000Z",
   };
 }
+
+const RUNNING_PS = JSON.stringify([
+  {
+    ID: "abc123",
+    Name: "db-1",
+    Service: "db",
+    State: "running",
+  },
+]);
 
 function docker(psStdout = EXITED_PS) {
   const calls: string[][] = [];
@@ -567,7 +587,7 @@ test("a boot hold that could not be finished keeps the engine stopped", async ()
       await applyBootHold("unclean", {
         layout,
         run: failingStop,
-        listMembers: () => Promise.resolve([memberRecord()]),
+        listMembers: () => Promise.resolve([memberRecord(1)]),
       });
       // The held marker could not be written: only the in-process note is left.
       await clearManagedIntent(layout.stateDir, MANAGED_ID, "test");
@@ -575,7 +595,7 @@ test("a boot hold that could not be finished keeps the engine stopped", async ()
       const guard = new ManagedEngineExitGuard({
         layout,
         run: fake.run,
-        listMembers: () => Promise.resolve([memberRecord()]),
+        listMembers: () => Promise.resolve([memberRecord(1)]),
       });
       await guard.tick();
       assertEquals(startCount(fake.calls), 0);
@@ -821,6 +841,341 @@ test("an explicit start after a failed stop lets the guard act again", async () 
       listMembers: () => Promise.resolve([memberRecord()]),
       nowMs: () => Date.now() + 60 * 60_000,
     });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 1);
+  });
+});
+
+/** A `holdPrimary` seam that only counts its calls. */
+function countingHold() {
+  let calls = 0;
+  return {
+    fn: () => {
+      calls += 1;
+      return Promise.resolve();
+    },
+    count: () => calls,
+  };
+}
+
+/** Docker fake whose `compose ps` answer can change between ticks. */
+function switchableDocker(initialPs: string) {
+  const calls: string[][] = [];
+  const state = { ps: initialPs };
+  const run = (args: string[]): Promise<DockerCliResult> => {
+    calls.push(args);
+    const stdout = args[0] === "compose" && args.includes("ps") ? state.ps : "";
+    return Promise.resolve({ success: true, code: 0, stdout, stderr: "" });
+  };
+  return { run, calls, state };
+}
+
+test("a cluster primary found stopped at daemon start is held, not started", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+    // The hold the control plane is asked about: held stop marker + hold file.
+    const holds = await listActiveBootHolds(layout);
+    assertEquals(holds.map((h) => h.managedId), [MANAGED_ID]);
+    const lookup = await lookupManagedIntent(layout.stateDir, MANAGED_ID);
+    assertEquals(isHeldIntent(lookup), true);
+    assertEquals(
+      lookup.status === "found" ? lookup.intent.kind : undefined,
+      "stop",
+    );
+    // Later ticks keep it stopped while the control plane has not answered.
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+  });
+});
+
+test("the guard may start a cluster primary once the control plane released its hold", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+    // A `managed.lifecycle start` from the control plane replaces the held
+    // stop; if the engine still is not up, the guard starts it as before and
+    // does not hold it a second time.
+    await clearManagedIntent(layout.stateDir, MANAGED_ID, "confirmed");
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 1);
+  });
+});
+
+test("a single-member database found stopped at daemon start is started as before", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    const hold = countingHold();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(0)]),
+      holdPrimary: hold.fn,
+    });
+    await guard.tick();
+    assertEquals(hold.count(), 0);
+    assertEquals(startCount(fake.calls), 1);
+    assertEquals(await listActiveBootHolds(layout), []);
+  });
+});
+
+test("a cluster primary seen running that exits later is started as before", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = switchableDocker(RUNNING_PS);
+    const hold = countingHold();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+      holdPrimary: hold.fn,
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+    fake.state.ps = EXITED_PS;
+    await guard.tick();
+    assertEquals(hold.count(), 0);
+    assertEquals(startCount(fake.calls), 1);
+  });
+});
+
+test("a cluster primary left stopped by a command is neither held nor started", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    await recordManagedIntent(layout.stateDir, MANAGED_ID, "stop", {
+      mode: "held",
+    });
+    const fake = docker();
+    const hold = countingHold();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+      holdPrimary: hold.fn,
+    });
+    await guard.tick();
+    assertEquals(hold.count(), 0);
+    assertEquals(startCount(fake.calls), 0);
+    // The operator starts it from the control plane; a later exit is the
+    // ordinary case again.
+    await clearManagedIntent(layout.stateDir, MANAGED_ID, "operator start");
+    await guard.tick();
+    assertEquals(hold.count(), 0);
+    assertEquals(startCount(fake.calls), 1);
+  });
+});
+
+test("a cluster primary whose hold could not be written stays stopped and is held again", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const fake = docker();
+    let tries = 0;
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+      holdPrimary: () => {
+        tries += 1;
+        return tries === 1
+          ? Promise.reject(new Error("disk full"))
+          : Promise.resolve();
+      },
+    });
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 0);
+    await guard.tick();
+    assertEquals(tries, 2);
+    assertEquals(startCount(fake.calls), 0);
+  });
+});
+
+test("an unreadable Docker listing never holds or starts a cluster primary", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const calls: string[][] = [];
+    const run = (args: string[]): Promise<DockerCliResult> => {
+      calls.push(args);
+      return Promise.resolve({
+        success: false,
+        code: 1,
+        stdout: "",
+        stderr: "Cannot connect to the Docker daemon",
+      });
+    };
+    const hold = countingHold();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+      holdPrimary: hold.fn,
+    });
+    await guard.tick();
+    assertEquals(hold.count(), 0);
+    assertEquals(startCount(calls), 0);
+  });
+});
+
+test("a command window that ends by the clock does not vouch for a stopped cluster primary", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    // The window an earlier daemon run left after a finished apply.
+    const token = await beginManagedIntent(
+      layout.stateDir,
+      MANAGED_ID,
+      "apply",
+    );
+    await endManagedIntent(layout.stateDir, token, true);
+    const fake = docker();
+    const hold = countingHold();
+    let now = Date.now();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+      holdPrimary: hold.fn,
+      nowMs: () => now,
+    });
+    await guard.tick();
+    assertEquals(hold.count(), 0);
+    assertEquals(startCount(fake.calls), 0);
+    now += 24 * 60 * 60_000;
+    await guard.tick();
+    assertEquals(hold.count(), 1);
+    assertEquals(startCount(fake.calls), 0);
+  });
+});
+
+for (const engine of ["postgres", "mysql", "mariadb"] as const) {
+  test(`a ${engine} cluster primary found stopped at daemon start is held, a lone one is started`, async () => {
+    await withTempLayout(async ({ env }) => {
+      resetManagedIntentsForTests();
+      const layout = resolveLayout(env);
+      await seedMember(layout);
+      const fake = docker();
+      const hold = countingHold();
+      const guard = new ManagedEngineExitGuard({
+        layout,
+        run: fake.run,
+        listMembers: () =>
+          Promise.resolve([
+            { ...memberRecord(2), engine },
+          ]),
+        holdPrimary: hold.fn,
+      });
+      await guard.tick();
+      assertEquals(hold.count(), 1);
+      assertEquals(startCount(fake.calls), 0);
+
+      const lone = new ManagedEngineExitGuard({
+        layout,
+        run: fake.run,
+        listMembers: () => Promise.resolve([{ ...memberRecord(0), engine }]),
+        holdPrimary: hold.fn,
+      });
+      await lone.tick();
+      assertEquals(hold.count(), 1);
+      assertEquals(startCount(fake.calls), 1);
+    });
+  });
+}
+
+test("a hold whose marker was written but whose hold file failed is finished and reported", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    // A directory where the hold file goes: the marker write succeeds, the
+    // hold file write (rename over it) fails.
+    const holdFile = bootHoldPath(layout, MANAGED_ID);
+    await Deno.mkdir(`${holdFile}/blocker`, { recursive: true });
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+    });
+    await guard.tick();
+    const lookup = await lookupManagedIntent(layout.stateDir, MANAGED_ID);
+    assertEquals(isHeldIntent(lookup), true);
+    assertEquals(await listActiveBootHolds(layout), []);
+    assertEquals(startCount(fake.calls), 0);
+
+    // The held marker alone must not read as settled: the next tick finishes
+    // the hold so the reporter can see it.
+    await Deno.remove(holdFile, { recursive: true });
+    await guard.tick();
+    const holds = await listActiveBootHolds(layout);
+    assertEquals(holds.map((h) => h.managedId), [MANAGED_ID]);
+    assertEquals(startCount(fake.calls), 0);
+  });
+});
+
+test("a half-written hold is dropped, not finished, once a command has the engine running", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const holdFile = bootHoldPath(layout, MANAGED_ID);
+    await Deno.mkdir(`${holdFile}/blocker`, { recursive: true });
+    const fake = switchableDocker(EXITED_PS);
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+    });
+    await guard.tick();
+    await Deno.remove(holdFile, { recursive: true });
+    // An operator start from the control plane released the marker and the
+    // engine runs again before the next tick.
+    await clearManagedIntent(layout.stateDir, MANAGED_ID, "operator start");
+    fake.state.ps = RUNNING_PS;
+    const stopsBefore = fake.calls.filter((args) =>
+      args.at(-1) === "stop"
+    ).length;
+    await guard.tick();
+    assertEquals(
+      fake.calls.filter((args) => args.at(-1) === "stop").length,
+      stopsBefore,
+    );
+    assertEquals(await listActiveBootHolds(layout), []);
+    // It was seen running: a later exit is started as before.
+    fake.state.ps = EXITED_PS;
     await guard.tick();
     assertEquals(startCount(fake.calls), 1);
   });
