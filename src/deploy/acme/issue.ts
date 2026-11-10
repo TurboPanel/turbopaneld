@@ -289,7 +289,11 @@ export async function issueCertificateOverHttp01(
       "deploy",
       `certificate order ${request.requestId} failed (${code}): ${raw}`,
     );
-    if (err instanceof AcmeError && err.code === "account_gone") {
+    // Only the authority's own answer about the account (an HTTP status) forgets it.
+    if (
+      err instanceof AcmeError && err.code === "account_gone" &&
+      err.status !== null
+    ) {
       await forgetAcmeAccount(layout, directoryUrl).catch(() => undefined);
     }
     return { ok: false, ...plainDaemonAcmeFailure(err) };

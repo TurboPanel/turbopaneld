@@ -31,3 +31,13 @@ test("nothing to write calls nothing", async () => {
   }, new Uint8Array());
   assertEquals(calls, 0);
 });
+
+test("a writer that takes nothing is an error, not a hang", async () => {
+  let failed = false;
+  try {
+    await writeAll({ write: () => Promise.resolve(0) }, Uint8Array.of(1));
+  } catch (err) {
+    failed = err instanceof Deno.errors.WriteZero;
+  }
+  assertEquals(failed, true);
+});

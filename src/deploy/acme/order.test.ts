@@ -446,6 +446,8 @@ test("the order's one deadline also bounds putting a hundred answers in place", 
   assert(h.ca.orders[0]!.authz.length === 100);
   assert(h.ca.answers.length === 0, String(h.ca.answers.length));
   assertEquals(h.answers.size, 0);
+  // Its own short budget still gives up what was left pending.
+  assertEquals(h.ca.deactivated.length, 100);
 });
 
 test("a request still running when the time is up is ended, not waited for", async () => {

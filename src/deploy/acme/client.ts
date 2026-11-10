@@ -304,13 +304,17 @@ async function loadDirectory(
   directoryUrl: string,
   send: typeof fetch,
   session: AcmeSession,
+  deadline?: AbortSignal,
 ): Promise<AcmeDirectory> {
   const cached = session.directory(directoryUrl);
   if (cached) return cached;
   const host = new URL(directoryUrl).host;
-  const response = await sendTimed(send, authorityUrl(directoryUrl, host), {
-    method: "GET",
-  });
+  const response = await sendTimed(
+    send,
+    authorityUrl(directoryUrl, host),
+    { method: "GET" },
+    deadline,
+  );
   if (!response.ok) {
     await discard(response);
     throw statusError(response);
@@ -378,7 +382,12 @@ export class AcmeClient {
 
   /** The authority's directory (cached for an hour). */
   directory(): Promise<AcmeDirectory> {
-    return loadDirectory(this.#directoryUrl, this.#fetch, this.#session);
+    return loadDirectory(
+      this.#directoryUrl,
+      this.#fetch,
+      this.#session,
+      this.#signal,
+    );
   }
 
   #request(url: string, init: RequestInit): Promise<Response> {

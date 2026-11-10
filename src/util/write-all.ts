@@ -9,5 +9,7 @@ export async function writeAll(
 ): Promise<void> {
   if (bytes.length === 0) return;
   const written = await writer.write(bytes);
+  // A writer that takes nothing would never finish; that is a broken peer.
+  if (written <= 0) throw new Deno.errors.WriteZero("write took no bytes");
   return await writeAll(writer, bytes.subarray(written));
 }
