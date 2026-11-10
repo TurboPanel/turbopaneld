@@ -300,7 +300,9 @@ root-owned; the role extracts it with `--no-same-owner` and re-asserts root
 ownership and no group/world write. The role refuses to run while a digest is the `UNPINNED` placeholder: run
 the workflow, then pin its checksums. A published release is never overwritten
 (a rebuild changes the digest); to change the build, bump the version or use a
-new release name. A release is never rebuilt on the host as a fallback. Main config is
+new release name. A version bump takes two changes: first `apache_build_version`, its source
+digest and the signer (merge, then wait for the vendor run to publish the
+release); then `apache_version` and `apache_sha256`, which hosts install. A release is never rebuilt on the host as a fallback. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
 and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
 **`turbopanel-apache.service`**, which runs the whole server, master
