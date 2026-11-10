@@ -1248,7 +1248,8 @@ lock as it is. A bound site (`bind` holding loopback) also gets this server's
 own `listenAddresses` added once it has peers, as a deploy would; nothing is
 taken out of a `bind`. `tunnel-apply.ts` judges the changed site files together
 with the forward file in one candidate set and reloads once; a refusal leaves
-every file and the stored table as they were. A table that lists only
+every file and the stored table as they were. When the forward file alone
+would load, the refusal is about the site files, and the error names them. A table that lists only
 `inbound` names is kept, not treated as empty. A deploy takes the stored peers
 for its tunnel names too (`relockWithStoredPeers`), so a deploy prepared before
 a placement change never puts the old peers back; the same table resent after

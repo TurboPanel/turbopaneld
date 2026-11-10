@@ -55,7 +55,7 @@ async function makeTestLayout(): Promise<
 function fakeHost(
   layout: LayoutPaths,
   calls: string[][],
-  refuse: (() => boolean) | undefined,
+  refuse: { tunnel: boolean; siteText?: string } | undefined,
   useReal: boolean,
 ) {
   const sites = join(layout.configDir, "hosting", "sites.next");
@@ -81,8 +81,10 @@ function fakeHost(
     const seen = new Set<string>();
     for (const entry of Deno.readDirSync(sites)) {
       const text = Deno.readTextFileSync(join(sites, entry.name));
-      const refused = refuse?.() && entry.name === TUNNEL_SITE_FILE &&
-        text.trim() !== "";
+      const refused = (refuse?.tunnel === true &&
+        entry.name === TUNNEL_SITE_FILE && text.trim() !== "") ||
+        (refuse?.siteText !== undefined && entry.name !== TUNNEL_SITE_FILE &&
+          text.includes(refuse.siteText));
       if (text.includes("BAD") || refused) {
         return Promise.resolve({
           success: false,
@@ -158,15 +160,15 @@ async function withHost<T>(
     sitesDir: string;
     hostingDir: string;
     calls: string[][];
-    refuse: { tunnel: boolean };
+    refuse: { tunnel: boolean; siteText?: string };
   }) => Promise<T>,
   useReal = false,
 ): Promise<T> {
   const { layout, cleanup } = await makeTestLayout();
   const calls: string[][] = [];
-  const refuse = { tunnel: false };
+  const refuse: { tunnel: boolean; siteText?: string } = { tunnel: false };
   const restore = setIngressHostCommandForTest(
-    fakeHost(layout, calls, () => refuse.tunnel, useReal),
+    fakeHost(layout, calls, refuse, useReal),
   );
   try {
     const hostingDir = join(layout.configDir, "hosting");
@@ -565,6 +567,40 @@ test("a refused set leaves the site's lock, the forward file and the stored tabl
       `${LOCK_LINE} 10.0.0.5\n`,
     );
     assertEquals(await exists(join(sitesDir, TUNNEL_SITE_FILE)), false);
+    assertEquals(await readTunnelState(hostingDir), undefined);
+  });
+});
+
+test("a refusal caused by a relocked site file names that file and changes nothing", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir, refuse }) => {
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    const before = await Deno.readTextFile(join(sitesDir, "env-1.caddy"));
+    // Only the relocked site text holds the new peer; the forward file loads.
+    refuse.siteText = "10.0.0.6";
+    await assertRejects(
+      () =>
+        applyTunnelRoutes(
+          layout,
+          {
+            hash: HASH_2,
+            routes: [],
+            peerAddresses: [],
+            inbound: [{ hostname: "site.example.com", peers: ["10.0.0.6"] }],
+          },
+          { decryptSecrets: decrypt, grantRead: noGrant },
+        ),
+      Error,
+      "tunnel peers for env-1.caddy",
+    );
+    assertEquals(
+      await Deno.readTextFile(join(sitesDir, "env-1.caddy")),
+      before,
+    );
     assertEquals(await readTunnelState(hostingDir), undefined);
   });
 });
