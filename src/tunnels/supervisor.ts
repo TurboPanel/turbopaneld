@@ -5,6 +5,7 @@ import {
   defaultConnectorIo,
   installConnector,
   listConnectorIds,
+  lockMetricsPorts,
   removeConnector,
   updateAllConnectors,
 } from "./connector-service.ts";
@@ -145,6 +146,10 @@ export const CONNECTOR_UPDATES_PAUSED_FILE = "updates.paused";
 export async function runConnectorUpdates(
   io: ConnectorIo = resolveIo(),
 ): Promise<Array<{ id: string; outcome: ConnectorUpdateOutcome }> | null> {
+  // Once per round, paused or not: reloads the metrics port lock at daemon
+  // start (after an update the boot unit's table may be older) and heals a
+  // flushed ruleset within the hour. A host with no tunnel skips it.
+  if ((await listConnectorIds(io)).length > 0) await lockMetricsPorts(io);
   try {
     await Deno.stat(join(resolveTunnelsDir(io), CONNECTOR_UPDATES_PAUSED_FILE));
     logInfo("tunnels", "connector updates are paused on this server");

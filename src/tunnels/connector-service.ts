@@ -288,6 +288,42 @@ async function stageAndInstallEnv(
   }
 }
 
+/**
+ * Reload the nftables table that lets only root and the daemon account reach
+ * the connectors' metrics band on loopback (`tp-host tunnel-loopback-sync`,
+ * `orchestration/scripts/tp-tunnel-loopback`). The connector program can only
+ * listen on TCP, and its readiness, metrics, ingress config and profiling
+ * pages are there, so without the table any local account could read them.
+ *
+ * Never fatal: a failure (no `nft`, a `tp-host` from before this verb, a
+ * development host) is logged and the connector still starts. A tunnel that
+ * visitors use is never taken down over its metrics port. Returns whether the
+ * table was loaded.
+ */
+export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
+  try {
+    const result = await io.run(
+      "sudo",
+      hostSudoArgs(["-n", "tunnel-loopback-sync"]),
+    );
+    if (result.success) return true;
+    logWarn(
+      "tunnels",
+      `connector metrics ports are not locked to the daemon: ${
+        result.stderr || "tp-host refused it"
+      }`,
+    );
+  } catch (err) {
+    logWarn(
+      "tunnels",
+      `connector metrics ports are not locked to the daemon: ${
+        err instanceof Error ? err.message : "failed"
+      }`,
+    );
+  }
+  return false;
+}
+
 async function installConnectorNow(
   io: ConnectorIo,
   id: string,
@@ -330,6 +366,9 @@ async function installConnectorNow(
   }
   if (unitChanged) await mustSystemctl(io, ["daemon-reload"]);
 
+  // Before the connector listens, so its metrics port is never open to
+  // local accounts (the boot unit loads the same table after a reboot).
+  await lockMetricsPorts(io);
   const unit = tunnelUnitName(id, slot);
   await systemctl(io, ["reset-failed", unit]);
   if (previous && !unitChanged && previous.tokenDigest === tokenDigest) {

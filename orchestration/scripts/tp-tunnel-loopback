@@ -1,0 +1,105 @@
+#!/bin/sh
+# tp-tunnel-loopback — lets only root and the daemon account reach the tunnel
+# connectors' metrics ports on loopback (POSIX sh, root:root, installed next to
+# tp-host in lib/).
+#
+# Each tunnel connector (turbopanel-tunnel-<id>.service) listens on
+# 127.0.0.1:<port>, a port in the band 20300-20899 (TUNNEL_METRICS_PORT_* in
+# src/tunnels/connector-unit.ts), for its readiness, metrics, ingress config and
+# profiling pages. The connector program can only listen on TCP. The daemon
+# reads /ready and /config there; nobody else needs to. Without this table any
+# local account (a site owner, their PHP, cron or SSH sessions) could read them.
+#
+# One nftables table, `inet turbopanel_tunnel`, with an output hook (the same
+# hook and priority as tp-php-loopback's and tp-build-loopback's tables): a new
+# TCP connection to 127.0.0.0/8 or ::1 on a port in the band is refused unless
+# the socket belongs to root (uid 0) or to the daemon account (DAEMON_ACCOUNT).
+# Replies (`ct state established,related`) are accepted first, so the
+# connector's answers to the daemon are never refused. The rule set is the same
+# on every host; it holds no per-connector state.
+#
+# The tables are independent: an accept here only ends this table's chain, a
+# reject in any table is final, so this table neither opens nor closes anything
+# tp-php-loopback decides for site PHP.
+#
+# One verb, `sync`: the whole table is replaced in one atomic nft transaction
+# and read back. Two callers:
+#   - turbopanel-loopback-tunnel.service at boot, before the network is up
+#     (the kernel forgets nftables tables on reboot);
+#   - the daemon, through `tp-host tunnel-loopback-sync`, before it starts a
+#     connector and once per connector update round (so a flushed ruleset
+#     heals within the hour).
+# Neither caller stops a connector when this fails: the port band is opened to
+# local users again, never the tunnel taken down.
+#
+# Not covered: a process running as root (including a host-network container
+# running as uid 0) passes the owner match by design.
+#
+# Needs the `nft` and `flock` programs (Ansible installs the nftables and
+# util-linux packages in turbopanel-user/root-helpers.yml).
+set -eu
+umask 077
+
+DAEMON_ACCOUNT=tp
+PORT_MIN=20300
+PORT_MAX=20899
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+tp_die() {
+  printf 'tp-tunnel-loopback: %s\n' "$*" >&2
+  exit 1
+}
+
+if [ "$(id -u)" = "0" ]; then
+  TP_TEST=""
+  P=""
+else
+  [ -n "${TP_HOST_TEST_PREFIX:-}" ] || tp_die "must run as root"
+  TP_TEST=1
+  P="$TP_HOST_TEST_PREFIX"
+fi
+
+[ "$#" -eq 1 ] && [ "$1" = "sync" ] || tp_die "only: sync"
+
+if [ -n "$TP_TEST" ]; then
+  _uid="$(awk -F: -v n="$DAEMON_ACCOUNT" '$1 == n { print $3; exit }' "$P/etc/passwd")"
+else
+  _uid="$(getent passwd "$DAEMON_ACCOUNT" | cut -d: -f3)"
+fi
+[ -n "$_uid" ] || tp_die "no $DAEMON_ACCOUNT account on this host"
+case "$_uid" in *[!0-9]*) tp_die "bad uid for $DAEMON_ACCOUNT" ;; esac
+[ "$_uid" -ne 0 ] || tp_die "$DAEMON_ACCOUNT must not be root"
+
+_rules="$(cat <<RULES
+add table inet turbopanel_tunnel
+delete table inet turbopanel_tunnel
+table inet turbopanel_tunnel {
+  set allowed {
+    type uid
+    elements = { 0, $_uid }
+  }
+  chain output {
+    type filter hook output priority -150; policy accept;
+    ct state established,related accept
+    meta skuid @allowed accept
+    ip daddr 127.0.0.0/8 tcp dport $PORT_MIN-$PORT_MAX reject with tcp reset
+    ip6 daddr ::1 tcp dport $PORT_MIN-$PORT_MAX reject with tcp reset
+  }
+}
+RULES
+)"
+
+if [ -n "$TP_TEST" ]; then
+  printf '%s\n' "$_rules"
+  exit 0
+fi
+
+command -v nft >/dev/null 2>&1 || tp_die "nft is not installed (apt install nftables)"
+command -v flock >/dev/null 2>&1 || tp_die "flock is not installed"
+exec 9>/run/turbopanel-tunnel-loopback.lock
+flock 9
+printf '%s\n' "$_rules" | nft -f - || tp_die "nft refused the ruleset"
+# Read it back: the daemon account must be in the live set.
+_live="$(nft list table inet turbopanel_tunnel)" || tp_die "ruleset not loaded"
+printf '%s\n' "$_live" | grep -Eq "(^|[ ,{])$_uid([ ,}]|\$)" ||
+  tp_die "uid $_uid missing from the loaded set"

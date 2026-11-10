@@ -13,6 +13,7 @@ import {
   hostnamesFromConfig,
   installConnector,
   listConnectorIds,
+  lockMetricsPorts,
   MAX_REPORTED_HOSTNAMES,
   removeConnector,
   reportConnectors,
@@ -217,6 +218,37 @@ test("a bad id or token is refused before anything runs", async () => {
     );
     assertEquals(h.calls, []);
     assertEquals(h.binaryCalls.count, 0);
+  });
+});
+
+test("install locks the metrics port band before the connector starts", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    const unit = `turbopanel-tunnel-${ID_A}.service`;
+    const lock = h.calls.indexOf("tunnel-loopback-sync");
+    assert(lock >= 0, h.calls.join("\n"));
+    assert(lock < h.calls.indexOf(`systemctl restart ${unit}`));
+  });
+});
+
+test("a refused metrics port lock is logged and the connector still starts", async () => {
+  await withHarness(async (h) => {
+    h.state.fail.add("tunnel-loopback-sync");
+    await installConnector(h.io, ID_A, TOKEN);
+    assert(
+      h.calls.includes(`systemctl restart turbopanel-tunnel-${ID_A}.service`),
+    );
+    assertEquals(await listConnectorIds(h.io), [ID_A]);
+    assertEquals(await lockMetricsPorts(h.io), false);
+    h.state.fail.clear();
+    assertEquals(await lockMetricsPorts(h.io), true);
+  });
+});
+
+test("a metrics port lock that throws is not fatal", async () => {
+  await withHarness(async (h) => {
+    h.io.run = () => Promise.reject(new Error("no sudo"));
+    assertEquals(await lockMetricsPorts(h.io), false);
   });
 });
 

@@ -4287,7 +4287,7 @@ TP_DOCKER_DATA_ROOT_DEFAULT=/var/lib/docker
 # TurboPanel's nftables tables, all in family inet. A role, host script or the
 # daemon that loads another table must add its exact name here (a coverage
 # test fails otherwise).
-TP_NFT_TABLES="turbopanel_ingress_guard turbopanel_build turbopanel_php"
+TP_NFT_TABLES="turbopanel_ingress_guard turbopanel_build turbopanel_php turbopanel_tunnel"
 TP_INV_NAMES="units containers networks chains wireguard hostfiles shellrc folders_remove folders_keep accounts groups principals volumes leftalone cpmarkers purge_targets"
 
 # Apt packages this script may purge: Docker's (the list below; a purge of
