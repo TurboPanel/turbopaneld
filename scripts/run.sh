@@ -1695,7 +1695,10 @@ tp_wait_for_enrollment() {
   command -v systemctl >/dev/null 2>&1 || return 0
   _we_file="$RUN_DIR/enroll-status"
   _we_max="${TURBOPANEL_ENROLL_WAIT_SECONDS:-120}"
-  case "$_we_max" in '' | *[!0-9]*) _we_max=120 ;; esac
+  case "$_we_max" in
+    '' | *[!0-9]*) _we_max=120 ;;
+    *) ;;
+  esac
   _we_waited=0
   tp_print_step "▸" "Waiting for the control plane to accept this server…"
   while :; do
@@ -1733,6 +1736,9 @@ tp_wait_for_enrollment() {
             return 0
             ;;
         esac
+        ;;
+      *)
+        # No answer yet (or one this script does not know): keep waiting.
         ;;
     esac
     if [ "$_we_waited" -ge "$_we_max" ]; then
