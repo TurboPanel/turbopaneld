@@ -1,0 +1,22 @@
+[Unit]
+Description=TurboPanel account walls (loopback ports and container networks)
+Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/src/deploy/site/AGENTS.md
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Wants=network-pre.target
+# Before the network, logins and cron, so no account process runs before the
+# table is in place after a reboot.
+Before=network-pre.target systemd-user-sessions.service ssh.service sshd.service cron.service crond.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+# Replaces the nftables table inet turbopanel_php whole (one transaction). It
+# runs before the network, so it sees no routes yet: the daemon's own sync at
+# its start reads them. Nothing Requires= this unit: when it fails, logins and
+# cron still start (each PHP unit still loads the table before it runs).
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ turbopanel_install_root }}/lib/tp-php-loopback sync
+
+[Install]
+WantedBy=multi-user.target

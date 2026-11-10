@@ -1214,6 +1214,8 @@ const TUNNEL_UNITS = [
   "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d-b.service",
   // The boot unit that loads the metrics port lock (tp-tunnel-loopback).
   "turbopanel-loopback-tunnel.service",
+  // The boot unit that loads the account walls (tp-php-loopback).
+  "turbopanel-loopback-php.service",
 ];
 
 test("every tunnel connector service is stopped, disabled and its unit file removed", async () => {

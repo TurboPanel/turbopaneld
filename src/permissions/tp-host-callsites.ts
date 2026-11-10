@@ -1194,6 +1194,9 @@ const SITES: CallSite[] = [
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-app-svc1.service`] },
     { argv: ["rm", "-f", "--", `${UNITS}/${CHECK_UNIT}`] },
   ),
+  tpHost('src/deploy/native/apply-native-apps.ts|["-n","php-loopback-sync"]', {
+    argv: ["php-loopback-sync"],
+  }),
 
   // --- control-plane hostname certificates ---------------------------------
   tpHost(
