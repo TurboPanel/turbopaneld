@@ -1676,23 +1676,56 @@ tp_enroll_status_field() {
   head -c 4096 "$_esf_file" 2>/dev/null | sed -n "s/^${_esf_key}=//p" | head -n 1 | tr -d '\000-\037\177'
 }
 
+# True when the daemon release just installed lists feature $1 in the
+# daemon-features file its orchestration tree ships (same release, same
+# manifest as the binary). Never run the binary to ask: an older build has no
+# such flag and would start a daemon instead. A missing file means a release
+# from before the file, which has none of the listed features.
+tp_daemon_has_feature() {
+  _dhf_file="$ORCHESTRATION_DIR/daemon-features"
+  if [ ! -f "$_dhf_file" ] || [ -L "$_dhf_file" ]; then
+    return 1
+  fi
+  grep -qx "$1" "$_dhf_file" 2>/dev/null
+}
+
+# True once the daemon saved an enrolment during this run: server.id, the key
+# id and the server key file all newer than the install-start marker
+# ($TP_KF_ENROL_REF, written before anything could enrol). The same test as
+# kf_enrol_files_fresh in tp-kernel-features; files from an earlier enrolment
+# do not count, and without the marker nothing does.
+tp_enrol_files_fresh() {
+  if [ -z "${TP_KF_ENROL_REF:-}" ] || [ ! -f "$TP_KF_ENROL_REF" ]; then
+    return 1
+  fi
+  for _eff in "$STATE_DIR/server.id" "$STATE_DIR/server-key-id" "$STATE_DIR"/server-key.j*; do
+    [ -s "$_eff" ] || return 1
+    [ -n "$(find "$_eff" -newer "$TP_KF_ENROL_REF" 2>/dev/null)" ] || return 1
+  done
+}
+
 # After a fresh start, wait for the daemon's first answer from the control
 # plane, which it writes to $RUN_DIR/enroll-status (the file is removed before
 # the daemon starts, so an old answer cannot count). A refusal fails the
 # install with the reason; the parked install stays, and re-running a fresh
 # command restages the license and lets the daemon try again. A wait for a
-# purchased size, a license or an administrator is not a refusal. No answer
-# within TURBOPANEL_ENROLL_WAIT_SECONDS (default 120, the same ceiling as
-# tp-kernel-features' enrolment wait) only prints a note: the panel may be
-# slow or unreachable for now, the release may predate the status file, or an
-# already enrolled server converges before it connects. Only a run that
-# carries a license waits (a re-run without one has nothing to enroll), and
-# --no-start (a managed update) never does: the daemon running this script
-# restarts only after it exits.
+# purchased size, a license or an administrator is not a refusal. Enrolment
+# files saved during this run (tp_enrol_files_fresh) also count as accepted.
+# No answer within TURBOPANEL_ENROLL_WAIT_SECONDS (default 120, the same
+# ceiling as tp-kernel-features' enrolment wait) only prints a note: the panel
+# may be slow or unreachable for now, or an already enrolled server converges
+# before it connects. Nothing is waited for when the installed daemon release
+# does not list `enroll-status` in its daemon-features file (a release from
+# before the status file), on a run without a license (nothing to enroll), or
+# with --no-start (a managed update: the daemon running this script restarts
+# only after it exits).
 tp_wait_for_enrollment() {
   [ "$NO_START" != true ] || return 0
   [ -n "${LICENSE_ID:-}" ] || return 0
   command -v systemctl >/dev/null 2>&1 || return 0
+  # A daemon release that does not write the status file gives nothing to
+  # wait for: skip quietly, as before the wait existed.
+  tp_daemon_has_feature enroll-status || return 0
   _we_file="$RUN_DIR/enroll-status"
   _we_max="${TURBOPANEL_ENROLL_WAIT_SECONDS:-120}"
   case "$_we_max" in
@@ -1738,7 +1771,13 @@ tp_wait_for_enrollment() {
         esac
         ;;
       *)
-        # No answer yet (or one this script does not know): keep waiting.
+        # No answer yet (or one this script does not know): a saved
+        # enrolment from this run already proves the control plane let this
+        # server in.
+        if tp_enrol_files_fresh; then
+          tp_print_ok "The control plane accepted this server"
+          return 0
+        fi
         ;;
     esac
     if [ "$_we_waited" -ge "$_we_max" ]; then
