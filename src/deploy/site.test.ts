@@ -23,6 +23,8 @@ import {
   phpFpmPoolOverrides,
   phpFpmSocketPath,
   phpSeriesForDeploy,
+  planSiteFrameworkAliases,
+  releasePhpOpenBasedir,
   resolveSiteOwnership,
   resolveSitePhpSeries,
   setgidDirectoriesFindArgs,
@@ -1408,4 +1410,151 @@ test("OpenLiteSpeed trusts only loopback for the address and reads HTTPS from th
   );
   // A site without PHP has nothing to tell.
   assertEquals(openlitespeedVhostConfig().includes("X-Forwarded-Proto"), false);
+});
+
+const SHARED_STORAGE = "/srv/users/alice/production/services/web/shared";
+const LARAVEL_ALIAS = [{
+  urlPrefix: "/storage/",
+  dir: `${SHARED_STORAGE}/storage/app/public`,
+}];
+const WP_ALIAS = [{
+  urlPrefix: "/wp-content/uploads/",
+  dir: `${SHARED_STORAGE}/uploads`,
+}];
+
+test("releasePhpOpenBasedir names the release, shared/ and tmp, and the CA file when the site has one", () => {
+  const layout = resolveLayout({}, { forceMode: "production" });
+  const release = {
+    serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+    username: "alice",
+    folder: { owner: "alice", scope: "production", slug: "web" },
+  };
+  const root = `${layout.principalHomeRoot}/alice/production/services/web`;
+  assertEquals(releasePhpOpenBasedir(layout, release), [
+    `${root}/current`,
+    `${root}/shared`,
+    "/tmp",
+  ]);
+  assertEquals(
+    releasePhpOpenBasedir(
+      layout,
+      release,
+      `${root}/.turbopanel-hosting/managed-ca.pem`,
+    ),
+    [
+      `${root}/current`,
+      `${root}/shared`,
+      "/tmp",
+      `${root}/.turbopanel-hosting/managed-ca.pem`,
+    ],
+  );
+});
+
+test("an Apache site with a framework layout serves its shared folder by URL and runs nothing from it", () => {
+  const site = {
+    composeServiceName: "web",
+    engine: "apache",
+    root: "public",
+    listenPort: 18081,
+  } as const;
+  const docroot = "/srv/users/alice/production/services/web/current/public";
+  const plain = apacheSiteConfig(site, docroot);
+  assertEquals(plain.includes("Alias "), false);
+  const conf = apacheSiteConfig(site, docroot, {
+    frameworkAliases: LARAVEL_ALIAS,
+  });
+  assertStringIncludes(
+    conf,
+    `  Alias "/storage/" "${SHARED_STORAGE}/storage/app/public/"
+  <Directory "${SHARED_STORAGE}/storage/app/public">
+    Options SymLinksIfOwnerMatch
+    AllowOverride None
+    Require all granted
+    <FilesMatch "\\.(?i:php[0-9]?|phtml|phar)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>`,
+  );
+  // After the document root's own block, before the vhost closes.
+  assertEquals(
+    conf.indexOf(`<Directory "${docroot}">`) < conf.indexOf("Alias "),
+    true,
+  );
+  assertEquals(conf.trimEnd().endsWith("</VirtualHost>"), true);
+  const wp = apacheSiteConfig(site, docroot, { frameworkAliases: WP_ALIAS });
+  assertStringIncludes(
+    wp,
+    `Alias "/wp-content/uploads/" "${SHARED_STORAGE}/uploads/"`,
+  );
+});
+
+test("nginx serves the shared folder from an alias location and refuses PHP in it, alone or in front of Apache", () => {
+  const site = {
+    composeServiceName: "web",
+    engine: "nginx",
+    root: "public",
+    listenPort: 18080,
+    php: { version: "8.4" },
+  } as const;
+  const docroot = "/srv/users/alice/production/services/web/current/public";
+  const plain = nginxSiteConfig(site, docroot, null, {
+    phpFpmSocket: "/run/turbopanel/php/8.4/tp.sock",
+  });
+  assertEquals(plain.includes("alias "), false);
+  const conf = nginxSiteConfig(site, docroot, null, {
+    phpFpmSocket: "/run/turbopanel/php/8.4/tp.sock",
+    releaseBacked: true,
+    frameworkAliases: LARAVEL_ALIAS,
+  });
+  const location = `  location ^~ /storage/ {
+    alias ${SHARED_STORAGE}/storage/app/public/;
+    disable_symlinks if_not_owner;
+    location ~* \\.(php[0-9]?|phtml|phar)$ {
+      return 403;
+    }
+  }`;
+  assertStringIncludes(conf, location);
+  // Before the PHP location, so it wins for /storage/x.php.
+  assertEquals(
+    conf.indexOf("location ^~ /storage/") <
+      conf.indexOf(String.raw`location ~ \.php$`),
+    true,
+  );
+  const front = nginxSiteConfig(site, docroot, null, {
+    apacheBackendPort: 18500,
+    releaseBacked: true,
+    frameworkAliases: WP_ALIAS,
+  });
+  assertStringIncludes(front, "location ^~ /wp-content/uploads/ {");
+  assertEquals(
+    front.indexOf("location ^~ /wp-content/uploads/") <
+      front.indexOf("proxy_pass"),
+    true,
+  );
+});
+
+test("a layout is warned about on engines that cannot serve it by URL, and on none that can", () => {
+  const base = {
+    composeServiceName: "web",
+    root: "public",
+    listenPort: 18080,
+    frameworkLayout: "laravel",
+  } as const;
+  for (const engine of ["apache", "nginx"] as const) {
+    assertEquals(planSiteFrameworkAliases({ ...base, engine }), []);
+  }
+  for (const engine of ["openlitespeed", "caddy"] as const) {
+    assertEquals(planSiteFrameworkAliases({ ...base, engine }), [
+      "Site web: files under /storage/ are served only on Apache and nginx sites for now.",
+    ]);
+  }
+  assertEquals(
+    planSiteFrameworkAliases({
+      composeServiceName: "web",
+      engine: "caddy",
+      root: "public",
+      listenPort: 18080,
+    }),
+    [],
+  );
 });

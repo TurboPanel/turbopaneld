@@ -22,6 +22,7 @@ import type { FolderRefParts } from "../../contracts/directory-names.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import { type LayoutPaths, publishStagingDir } from "../../paths/layout.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import type { FrameworkLayout } from "./framework-layout.ts";
 
 /** The three UUIDs one publish names. */
 export type FolderPublishIds = {
@@ -35,24 +36,44 @@ export async function runFolderPublishVerb(
   parts: FolderRefParts,
   ids: FolderPublishIds,
   runFn: RunFn,
+  /**
+   * `publish` and `publish-keep` only: the release's framework layout, a
+   * seventh word that has tp-host link the shared folders in.
+   */
+  layout?: FrameworkLayout,
 ): Promise<void> {
   const ref = parseFolderRefParts(parts, "service");
   for (const [label, value] of Object.entries(ids)) {
     if (!isPathId(value)) throw new TypeError(`Invalid ${label}`);
   }
-  const result = await runFn(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      verb,
-      ref.owner,
-      ref.scope,
-      ref.slug,
-      ids.serviceId,
-      ids.releaseId,
-      ids.publishId,
-    ]),
-  );
+  const result = layout === undefined
+    ? await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        verb,
+        ref.owner,
+        ref.scope,
+        ref.slug,
+        ids.serviceId,
+        ids.releaseId,
+        ids.publishId,
+      ]),
+    )
+    : await runFn(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        verb,
+        ref.owner,
+        ref.scope,
+        ref.slug,
+        ids.serviceId,
+        ids.releaseId,
+        ids.publishId,
+        `layout=${layout}`,
+      ]),
+    );
   if (!result.success) {
     throw new Error(
       result.stderr || `tp-host ${verb} failed for release ${ids.releaseId}`,
@@ -78,4 +99,40 @@ export async function publishInFolder(
   runFn: RunFn,
 ): Promise<void> {
   await runFolderPublishVerb("publish", parts, ids, runFn);
+}
+
+/**
+ * Make a layout's folders in the service's `shared/` again for a release that
+ * already exists (after a rollback swap, a folder the owner deleted comes
+ * back). Made by tp-host as the owner, never as root.
+ */
+export async function runReleaseLayoutFolders(
+  parts: FolderRefParts,
+  ids: Pick<FolderPublishIds, "serviceId" | "releaseId">,
+  layout: FrameworkLayout,
+  runFn: RunFn,
+): Promise<void> {
+  const ref = parseFolderRefParts(parts, "service");
+  for (const [label, value] of Object.entries(ids)) {
+    if (!isPathId(value)) throw new TypeError(`Invalid ${label}`);
+  }
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs([
+      "-n",
+      "release-layout-folders",
+      ref.owner,
+      ref.scope,
+      ref.slug,
+      ids.serviceId,
+      ids.releaseId,
+      `layout=${layout}`,
+    ]),
+  );
+  if (!result.success) {
+    throw new Error(
+      result.stderr ||
+        `tp-host release-layout-folders failed for release ${ids.releaseId}`,
+    );
+  }
 }

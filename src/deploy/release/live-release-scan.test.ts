@@ -1,9 +1,12 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import type { RunFn } from "../ensure-principal.ts";
+import { writeReleaseManifest } from "./deployment-json.ts";
+import { PENDING_RECORD_MARKER } from "./release-health.ts";
 import {
   MAX_REPORTED_LINK_FINDINGS,
   readReleaseLinkScanReport,
+  recordedFrameworkLayout,
   RELEASE_LINK_SCAN_FILENAME,
   reportLiveReleaseLinks,
   scanLiveReleaseLinks,
@@ -313,5 +316,75 @@ test("scanLiveReleaseLinks does not walk the staging folder beside the owners", 
       recursive: true,
     });
     assertEquals(await scanLiveReleaseLinks(layout, noRoot), []);
+  });
+});
+
+/** The daemon's own record of release `r1` (`release-records/<service>/<release>`). */
+async function record(
+  layout: { daemonStateDir: string },
+  frameworkLayout: "laravel" | "wordpress" | undefined,
+  pending = false,
+): Promise<void> {
+  const dir = join(layout.daemonStateDir, "release-records", "svc-1", "r1");
+  await Deno.mkdir(dir, { recursive: true });
+  if (pending) await Deno.writeTextFile(join(dir, PENDING_RECORD_MARKER), "");
+  await writeReleaseManifest(dir, {
+    version: 1,
+    serviceId: "svc-1",
+    composeServiceName: "web",
+    releaseId: "r1",
+    sourceId: "src-1",
+    commitSha: "abc123",
+    ref: "main",
+    promotedAt: "2026-11-10T00:00:00.000Z",
+    ...(frameworkLayout === undefined ? {} : { frameworkLayout }),
+  });
+}
+
+test("a live release's recipe links pass only when the daemon's record names the layout", async () => {
+  await withLayout(async (layout) => {
+    await site(layout.principalHomeRoot, "alice", "app", {
+      storage: "shared/storage",
+    });
+    // No record: strict.
+    assertEquals((await scanLiveReleaseLinks(layout, noRoot)).length, 1);
+    await record(layout, "laravel");
+    assertEquals(await scanLiveReleaseLinks(layout, noRoot), []);
+    assertEquals(await recordedFrameworkLayout(layout, "r1"), "laravel");
+  });
+});
+
+test("a record for another layout, or a pending one, excuses nothing", async () => {
+  await withLayout(async (layout) => {
+    await site(layout.principalHomeRoot, "alice", "app", {
+      storage: "shared/storage",
+    });
+    await record(layout, "wordpress");
+    assertEquals((await scanLiveReleaseLinks(layout, noRoot)).length, 1);
+  });
+  await withLayout(async (layout) => {
+    await site(layout.principalHomeRoot, "alice", "app", {
+      storage: "shared/storage",
+    });
+    await record(layout, "laravel", true);
+    assertEquals(await recordedFrameworkLayout(layout, "r1"), undefined);
+    assertEquals((await scanLiveReleaseLinks(layout, noRoot)).length, 1);
+  });
+  await withLayout(async (layout) => {
+    assertEquals(await recordedFrameworkLayout(layout, "r1"), undefined);
+  });
+});
+
+test("a link through a recipe link is still reported for a layout release", async () => {
+  await withLayout(async (layout) => {
+    await site(layout.principalHomeRoot, "alice", "app", {
+      storage: "shared/storage",
+      "public/x": "../storage/app",
+    });
+    await record(layout, "laravel");
+    const [finding] = await scanLiveReleaseLinks(layout, noRoot);
+    assertEquals(finding.links, [
+      "public/x -> ../storage/app (reaches into shared/)",
+    ]);
   });
 });

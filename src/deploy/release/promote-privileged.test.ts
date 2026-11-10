@@ -708,6 +708,7 @@ async function promoteManaged(
   respond: (args: string[]) => SudoResult,
   build: (workingDir: string) => Promise<void> = () => Promise.resolve(),
   keepCurrent?: true,
+  manifest: ReleaseManifestV1 = MANIFEST,
 ): Promise<{ argv: string[][]; paths: ReleasePaths; seen: string[] }> {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
@@ -732,7 +733,7 @@ async function promoteManaged(
       paths,
       workingDir,
       username: "appuser",
-      manifest: MANIFEST,
+      manifest,
       ...(keepCurrent ? { keepCurrent } : {}),
       runFn: async (_command, args) => {
         argv.push(bareSudoArgs(args));
@@ -790,6 +791,40 @@ test("promoteRelease publishes a managed-host release through tp-host only", asy
     ]);
     // The manifest and the payload were staged before publish ran.
     assertEquals(seen, [RELEASE_METADATA_DIRNAME, "index.html"]);
+  });
+});
+
+test("a release with a framework layout is published with it as the seventh word", async () => {
+  for (const keep of [undefined, true] as const) {
+    await withTempRelease(async (root) => {
+      const { argv } = await promoteManaged(
+        root,
+        () => SUDO_OK,
+        undefined,
+        keep,
+        { ...MANIFEST, frameworkLayout: "wordpress" },
+      );
+      const publish = argv.at(-1) ?? [];
+      assertEquals(publish[1], keep ? "publish-keep" : "publish");
+      assertEquals(publish.length, 9);
+      assertEquals(publish.at(-1), "layout=wordpress");
+    });
+  }
+  // publish-open never carries it, and a release without one sends six words.
+  await withTempRelease(async (root) => {
+    const { argv } = await promoteManaged(root, () => SUDO_OK, undefined);
+    assertEquals(argv.at(-1)?.length, 8);
+    assertEquals(argv[0]?.at(-1), PUBLISH_ID);
+  });
+  await withTempRelease(async (root) => {
+    const { argv } = await promoteManaged(
+      root,
+      () => SUDO_OK,
+      undefined,
+      undefined,
+      { ...MANIFEST, frameworkLayout: "laravel" },
+    );
+    assertEquals(argv[0]?.at(-1), PUBLISH_ID);
   });
 });
 

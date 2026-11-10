@@ -590,3 +590,114 @@ test("promoteExistingRelease lists links as root when the release is unreadable"
     assert(calls.some((args) => args.includes("-printf")));
   });
 });
+
+const RELEASE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71";
+
+/** `promoteExistingRelease` with the sudo seam, recording what it asked root. */
+function rollbackWith(
+  paths: ReturnType<typeof resolveReleasePaths>,
+  layout: "laravel" | "wordpress" | undefined,
+  calls: string[][] = [],
+) {
+  const runFn: RunFn = (command, args) => {
+    calls.push([...args]);
+    return runSeam(command, args);
+  };
+  return promoteExistingRelease({
+    paths,
+    releaseId: RELEASE_ID,
+    healthProbe: () => Promise.resolve(),
+    runFn,
+    ...(layout === undefined ? {} : { frameworkLayout: layout }),
+  });
+}
+
+const LARAVEL_RECIPE = { "storage": "shared/storage" };
+
+test("a release whose record names Laravel rolls back with its storage link, and its folders are made again first", async () => {
+  await withSealedRelease(LARAVEL_RECIPE, async (paths) => {
+    const calls: string[][] = [];
+    await rollbackWith(paths, "laravel", calls);
+    assert((await Deno.lstat(paths.currentLink)).isSymlink);
+    const folders = calls.findIndex((args) =>
+      args.includes("release-layout-folders")
+    );
+    assert(folders >= 0, "tp-host was not asked for the shared folders");
+    assertEquals(calls[folders].slice(-3), [
+      "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      RELEASE_ID,
+      "layout=laravel",
+    ]);
+  });
+});
+
+test("the same link is refused when the record names no layout", async () => {
+  await withSealedRelease(LARAVEL_RECIPE, async (paths) => {
+    const err = await assertRejects(() => rollbackWith(paths, undefined));
+    assertStringIncludes(String(err), "storage -> shared/storage");
+    await assertRejects(() => Deno.lstat(paths.currentLink));
+  });
+});
+
+test("the WordPress recipe passes for WordPress and not for Laravel", async () => {
+  const links = { "public/uploads": "../shared/uploads" };
+  await withSealedRelease(links, async (paths) => {
+    // Another layout's recipe is not this one's: the exact path is required.
+    await assertRejects(() => rollbackWith(paths, "laravel"));
+  });
+});
+
+for (
+  const [name, links] of Object.entries({
+    "a link through the storage link": {
+      ...LARAVEL_RECIPE,
+      "public/x": "../storage/app",
+    },
+    "the storage link with other text": { "storage": "shared/other" },
+    "a second link to the same folder": {
+      ...LARAVEL_RECIPE,
+      "public/s": "../shared/storage",
+    },
+    "a chain through the storage link": {
+      ...LARAVEL_RECIPE,
+      "here": ".",
+      "public/x": "../here/storage/logs",
+    },
+  })
+) {
+  test(`with a layout, ${name} is still refused`, async () => {
+    await withSealedRelease(links, async (paths) => {
+      await assertRejects(() => rollbackWith(paths, "laravel"));
+      await assertRejects(() => Deno.lstat(paths.currentLink));
+    });
+  });
+}
+
+test("a recipe folder the owner repointed outside shared/ is refused on rollback", async () => {
+  await withSealedRelease(LARAVEL_RECIPE, async (paths) => {
+    // shared/storage is the owner's: a link there resolves somewhere else.
+    await Deno.symlink("../../elsewhere", join(paths.sharedDir, "storage"));
+    await assertRejects(() => rollbackWith(paths, "laravel"));
+  });
+});
+
+test("linksLeavingReleaseLexically excuses a recipe link only for its layout", () => {
+  const links = [{ path: "storage", text: "shared/storage" }];
+  assertEquals(linksLeavingReleaseLexically(links).length, 1);
+  assertEquals(
+    linksLeavingReleaseLexically(links, undefined, "laravel"),
+    [],
+  );
+  assertEquals(
+    linksLeavingReleaseLexically(links, undefined, "wordpress").length,
+    1,
+  );
+  assertEquals(
+    linksLeavingReleaseLexically(
+      [...links, { path: "public/x", text: "../storage/app" }],
+      undefined,
+      "laravel",
+    ),
+    ["public/x -> ../storage/app (reaches into shared/)"],
+  );
+});

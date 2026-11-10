@@ -71,10 +71,27 @@ Two seams exist only because the interpreter is now packaged:
   extension. **Drop the colon and the interpreter starts with no extensions.**
   That overlay must never re-declare `zend_extension = opcache` — sury's
   `10-opcache.ini` already loads it and a second load aborts startup.
-- **`dpkg-statoverride`**, not a `file:` chmod, restricts
-  `/usr/sbin/php-fpm8.4` and `/usr/bin/php8.4` to `root:tp` `0750`. A plain
-  chmod is reset by every `php8.4-*` upgrade; statoverride survives it. Without
-  this, a tenant principal with a shell could run PHP outside its own FPM pool.
+- **Binaries stay `root:root 0755`.** Every installed PHP series may be run by
+  every site owner's Linux user (owner decision 2026-10-07); the role removes
+  what the older per-version groups and `dpkg-statoverride` entries left
+  (`runtime-access`). A tenant still cannot run PHP outside its own pool or
+  runtime: the walls are the per-site unit, `open_basedir` and the loopback
+  filter, not the file mode.
+
+**PHP package manager.** `tasks/composer.yml` vendors one pinned release under
+`<vendor>/composer/<version>/` (`composer.phar`, a `bin/composer` wrapper that
+runs it through the PHP shell dispatcher so it follows `TURBOPANEL_PHP`),
+checked against the publisher's SHA-256 by `get_url`, fast-pathed when the
+file is there, `current` linked, older versions pruned, the tree opened to every
+account with an `other:x` ACL and `u=rwX,go=rX` like the other runtime trees.
+Bump `php_fpm_composer_version` and `php_fpm_composer_sha256` together. Site
+builds put its `bin` directory on `PATH`; they never download it.
+
+**The PHP shell dispatcher** (`templates/php-dispatcher.sh.j2`) finds the
+installed series on disk each time (`/usr/bin/php<major>.<minor>`, names that
+are not exactly that skipped, `sort -V`), not from the last run's list: a server
+with 8.3 and 8.4 sites still resolves `TURBOPANEL_PHP=8.3` after a deploy that
+only named 8.4.
 
 FHS layout:
 

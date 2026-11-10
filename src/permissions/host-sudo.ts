@@ -79,6 +79,7 @@ export const TP_HOST_ONLY_VERBS: ReadonlySet<string> = new Set([
   "publish-open",
   "publish",
   "publish-keep",
+  "release-layout-folders",
   "php-loopback-sync",
   "app-env-install",
   "app-env-remove",

@@ -362,6 +362,12 @@ const OWNED_PATHS = [
   // root; the purge removes them with the tree.
   "/var/lib/turbopanel/sealing-key.json",
   "/var/lib/turbopanel/trust-level",
+  // A site's variables copies (one 0700 folder per Linux user), the daemon's
+  // staging folder for them, and the vendored PHP package manager.
+  "/etc/turbopanel/site-env",
+  "/etc/turbopanel/site-env/alice/web-0123456789ab.env",
+  "/var/lib/turbopanel/sites/.env-stage",
+  "/opt/turbopanel/vendor/composer/current/bin/composer",
 ];
 
 test("tp_path_is_safe refuses every path outside TurboPanel's own trees", async () => {

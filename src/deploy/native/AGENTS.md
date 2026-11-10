@@ -380,6 +380,11 @@ points to). Rules that are not obvious:
 - Unlike the compose secret files (tmpfs `/run`, rehydrated after a reboot),
   the copy lives on disk under `/etc` so the unit can start at boot before the
   daemon is up. The daemon cannot read it back.
+- **Sites use the same pattern with one more level** (`../site/site-env-file.ts`,
+  `tp-host site-env-install <user> <site id>`, copy at
+  `<config>/site-env/<user>/<site id>.env`): the site's cron units load it, and
+  `tp-host` ties the path to the unit's own `User=`. It reuses this file's
+  renderer, size limit and value normalization.
 
 **Health probe.** Any completed HTTP response counts as started — a 404 or a 500
 is a running app, and this gate answers "did the release come up", not "is the

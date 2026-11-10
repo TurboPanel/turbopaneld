@@ -4185,6 +4185,14 @@ tp_retire_files() {
       rm -rf --one-file-system -- "./$1" || tp_die "principal-remove: could not remove $R_BUILD_CACHE/$1"
     fi
   fi
+  # The account's copies of its sites' variables (site-env-install): a later
+  # owner given the same name must not load them.
+  if tp_pin_dir "$R_SITEENV"; then
+    [ ! -L "./$1" ] || tp_die "principal-remove: $R_SITEENV/$1 is a symlink"
+    if [ -d "./$1" ]; then
+      rm -rf --one-file-system -- "./$1" || tp_die "principal-remove: could not remove $R_SITEENV/$1"
+    fi
+  fi
   tp_run systemctl daemon-reload
 }
 
@@ -5140,12 +5148,28 @@ tp_release_id_ok() {
 }
 
 # Sets PUB_USER, PUB_ID, PUB_NAME, PUB_LEAF, PUB_SITE, PUB_LOCK (the lock file's
-# name) and PUB_CHAIN (the directories to enter, outermost first).
+# name), PUB_CHAIN (the directories to enter, outermost first) and PUB_LAYOUT
+# (empty, laravel or wordpress). `publish` and `publish-keep` take an optional
+# seventh word, layout=laravel or layout=wordpress, after the six-word form.
 tp_publish_args() {
+  PUB_LAYOUT=""
+  if [ $# -eq 7 ]; then
+    _pa_layout="$7"
+    case "$_verb" in
+      publish|publish-keep) ;;
+      *) tp_die "$_verb: takes no layout" ;;
+    esac
+    case "$_pa_layout" in
+      layout=laravel) PUB_LAYOUT=laravel ;;
+      layout=wordpress) PUB_LAYOUT=wordpress ;;
+      *) tp_die "$_verb: refusing layout $_pa_layout" ;;
+    esac
+    set -- "$1" "$2" "$3" "$4" "$5" "$6"
+  fi
   case $# in
     3) tp_publish_args_old "$@" ;;
     6) tp_publish_args_folder "$@" ;;
-    *) tp_die "$_verb: only $_verb PRINCIPAL SERVICE-ID RELEASE-ID or $_verb OWNER SCOPE SLUG SERVICE-ID RELEASE-ID PUBLISH-ID" ;;
+    *) tp_die "$_verb: only $_verb PRINCIPAL SERVICE-ID RELEASE-ID or $_verb OWNER SCOPE SLUG SERVICE-ID RELEASE-ID PUBLISH-ID [layout=laravel|wordpress]" ;;
   esac
   PUB_LEAF="$R_STAGING/$PUB_NAME"
 }
@@ -5263,13 +5287,148 @@ tp_publish_seal() {
 # A loop or unreadable link fails it.
 tp_publish_links() {
   _pl_root="$(pwd -P)"
-  _pl_out="$(find -P . -type l -exec realpath -m -- {} + && echo :ok)" ||
+  # The platform's own layout links (tp_publish_layout) are the one exception:
+  # the exact path with the exact text. Any other link, including one that goes
+  # through them, is resolved like every other.
+  set --
+  if [ -n "$PUB_LAYOUT" ]; then
+    tp_layout_recipe "$PUB_LAYOUT"
+    set -- ! \( -path "./$LAYOUT_PATH" -lname "$LAYOUT_TEXT" \)
+  fi
+  _pl_out="$(find -P . -type l "$@" -exec realpath -m -- {} + && echo :ok)" ||
     tp_die "publish: refusing $PUB_NAME: a symlink cannot be resolved"
   _pl_bad="$(printf '%s\n' "${_pl_out%:ok}" | awk -v r="$_pl_root" \
     'length($0) && ($0 == r "/shared" || index($0, r "/shared/") == 1 ||
       ($0 != r && index($0, r "/") != 1)) { print; exit }')"
   [ -z "$_pl_bad" ] ||
     tp_die "publish: refusing $PUB_NAME: a symlink resolves outside the release ($_pl_bad)"
+}
+
+# --- framework layouts ---------------------------------------------------------
+# A release that is a Laravel or WordPress app keeps its writable state in the
+# site's shared/ folder: storage/ (Laravel) or wp-content/uploads (WordPress)
+# becomes a link there, and nothing else is shared. The recipe is the daemon's
+# platformLayoutLinks (src/deploy/release/framework-layout.ts); a test keeps
+# the two equal. Sets LAYOUT_PATH, LAYOUT_TEXT (the link) and LAYOUT_FOLDERS
+# (folders made in shared/, as the owner).
+tp_layout_recipe() {
+  case "$1" in
+    laravel)
+      LAYOUT_PATH="storage"
+      LAYOUT_TEXT="shared/storage"
+      LAYOUT_FOLDERS="storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs"
+      ;;
+    wordpress)
+      LAYOUT_PATH="wp-content/uploads"
+      LAYOUT_TEXT="../shared/uploads"
+      LAYOUT_FOLDERS="uploads"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# In the pinned, sealed leaf, before the link check: replace the layout's path
+# with its link. The tree is root's and frozen, so removing what the build
+# shipped there is safe (rm does not follow links).
+tp_publish_layout() {
+  [ -n "$PUB_LAYOUT" ] || return 0
+  tp_layout_recipe "$PUB_LAYOUT" || tp_die "publish: refusing layout $PUB_LAYOUT"
+  _ly_parent="${LAYOUT_PATH%/*}"
+  [ "$_ly_parent" != "$LAYOUT_PATH" ] || _ly_parent=""
+  # No component above the link may itself be a link.
+  _ly_walk=""
+  _ly_rest="$_ly_parent"
+  while [ -n "$_ly_rest" ]; do
+    _ly_c="${_ly_rest%%/*}"
+    case "$_ly_rest" in
+      */*) _ly_rest="${_ly_rest#*/}" ;;
+      *) _ly_rest="" ;;
+    esac
+    _ly_walk="${_ly_walk:+$_ly_walk/}$_ly_c"
+    if [ -L "./$_ly_walk" ]; then
+      tp_die "publish: refusing $PUB_NAME: $_ly_walk is a link, so $LAYOUT_PATH cannot be shared"
+    fi
+  done
+  if [ -n "$_ly_parent" ] && [ ! -d "./$_ly_parent" ]; then
+    mkdir -p -- "./$_ly_parent"
+    tp_run chown -h -- "root:$PUB_USER" "./$_ly_parent"
+    chmod 0750 -- "./$_ly_parent"
+  fi
+  rm -rf -- "./$LAYOUT_PATH"
+  ln -s -T -- "$LAYOUT_TEXT" "./$LAYOUT_PATH"
+  tp_run chown -h -- "root:$PUB_USER" "./$LAYOUT_PATH"
+  if [ "$PUB_LAYOUT" = laravel ]; then
+    tp_publish_bootstrap_cache
+  fi
+}
+
+# Laravel: bootstrap/cache stays in the release and becomes the site account's,
+# so a post-deploy command can write the config and route caches there. Only
+# that one folder: a shipped link in its place stays root's and read-only.
+tp_publish_bootstrap_cache() {
+  if [ -L ./bootstrap/cache ] || [ -L ./bootstrap ]; then
+    printf '%s\n' "publish: $PUB_NAME ships bootstrap/cache as a link; it stays read-only" >&2
+    return 0
+  fi
+  [ -d ./bootstrap ] || return 0
+  if [ ! -d ./bootstrap/cache ]; then
+    mkdir -m 0750 -- ./bootstrap/cache
+  fi
+  tp_run chown -R -h -P -- "$PUB_USER:$PUB_USER" ./bootstrap/cache
+  find -P ./bootstrap/cache -type d -exec chmod 0750 -- {} +
+  find -P ./bootstrap/cache -type f -exec chmod 0640 -- {} +
+}
+
+# Make the layout's folders in the site's shared/, as the owner (never as root:
+# a link the owner planted there can then only send writes where the owner could
+# write anyway), 0750 so the web server account, in the owner's group, can read
+# what the site serves. PUB_SITE, PUB_USER and PUB_LAYOUT are set.
+tp_layout_folders() {
+  [ -n "$PUB_LAYOUT" ] || return 0
+  tp_layout_recipe "$PUB_LAYOUT" || tp_die "refusing layout $PUB_LAYOUT"
+  tp_pin_dir "$PUB_SITE/shared" || tp_die "no directory $PUB_SITE/shared"
+  _lf_uid="$(tp_uid_of "$PUB_USER")"
+  _lf_gid="$(tp_gid_of_group "$PUB_USER")"
+  [ -z "$TP_TEST" ] || _lf_uid="$CALLER_UID"
+  [ -z "$TP_TEST" ] || _lf_gid="$CALLER_GID"
+  [ "$(stat -c '%u' .)" = "$_lf_uid" ] ||
+    tp_die "refusing $PUB_SITE/shared: not owned by $PUB_USER"
+  for _lf_dir in $LAYOUT_FOLDERS; do
+    tp_as "$_lf_uid" "$_lf_gid" mkdir -p -- "./$_lf_dir"
+    # Every folder from the first component down, so the parents mkdir -p made
+    # under the owner's umask are readable to the group too.
+    _lf_walk=""
+    _lf_rest="$_lf_dir"
+    while [ -n "$_lf_rest" ]; do
+      _lf_c="${_lf_rest%%/*}"
+      case "$_lf_rest" in
+        */*) _lf_rest="${_lf_rest#*/}" ;;
+        *) _lf_rest="" ;;
+      esac
+      _lf_walk="${_lf_walk:+$_lf_walk/}$_lf_c"
+      [ -d "./$_lf_walk" ] && [ ! -L "./$_lf_walk" ] ||
+        tp_die "refusing $PUB_SITE/shared/$_lf_walk: not a folder"
+      tp_as "$_lf_uid" "$_lf_gid" chmod 0750 -- "./$_lf_walk"
+    done
+  done
+}
+
+# release-layout-folders OWNER SCOPE SLUG SERVICE-ID RELEASE-ID layout=NAME:
+# the same folders for a release that already exists (after a rollback swap, a
+# folder the owner deleted comes back).
+tp_verb_release_layout_folders() {
+  [ $# -eq 6 ] || tp_die "release-layout-folders: takes OWNER SCOPE SLUG SERVICE-ID RELEASE-ID layout=NAME"
+  _rl_layout="$6"
+  tp_publish_args_folder "$1" "$2" "$3" "$4" "$5" "00000000-0000-4000-8000-000000000000"
+  case "$_rl_layout" in
+    layout=laravel) PUB_LAYOUT=laravel ;;
+    layout=wordpress) PUB_LAYOUT=wordpress ;;
+    *) tp_die "release-layout-folders: refusing layout $_rl_layout" ;;
+  esac
+  tp_publish_pin_releases
+  [ -d "./$PUB_ID" ] && [ ! -L "./$PUB_ID" ] ||
+    tp_die "release-layout-folders: no release $PUB_ID in $PUB_SITE/releases"
+  tp_layout_folders
 }
 
 # Enter releases/ through a chain root owns and nobody else can write: the
@@ -5344,9 +5503,12 @@ tp_publish_into_releases() {
     tp_die "publish: refusing $PUB_LEAF: not the caller's open staging directory"
   trap tp_publish_abort EXIT
   tp_publish_seal
+  tp_publish_layout
   tp_publish_links
   tp_publish_place
   trap - EXIT
+  # After the shared link exists: the folders the layout's links point into.
+  tp_layout_folders
 }
 
 tp_verb_publish() {
@@ -6290,6 +6452,7 @@ case "$_verb" in
   publish-open) tp_verb_publish_open "$@" ;;
   publish) tp_verb_publish "$@" ;;
   publish-keep) tp_verb_publish_keep "$@" ;;
+  release-layout-folders) tp_verb_release_layout_folders "$@" ;;
   php-test) tp_verb_php_test "$@" ;;
   cert-dates) tp_verb_cert_dates "$@" ;;
   cert-export) tp_verb_cert_export "$@" ;;

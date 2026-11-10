@@ -1322,10 +1322,13 @@ test("applySites confines a release-backed PHP pool with open_basedir", async ()
       join(layout.configDir, "php", "8.4", "pools", "tp-envphp-phpapp.conf"),
     );
     const documentRoot = join(siteTreeRoot(layout), "current", "public");
+    const currentLink = join(siteTreeRoot(layout), "current");
     const sharedDir = join(siteTreeRoot(layout), "shared");
+    // The whole release (PHP reads vendor/ and config/ too), not only the
+    // folder the web root serves.
     assertStringIncludes(
       poolConf,
-      `php_admin_value[open_basedir] = ${documentRoot}:${sharedDir}:/tmp`,
+      `php_admin_value[open_basedir] = ${currentLink}:${sharedDir}:/tmp`,
     );
     assertStringIncludes(poolConf, `chdir = ${documentRoot}`);
 
@@ -3755,7 +3758,7 @@ test("per-site FastCGI: the runtime is tested and started before the nginx vhost
     assertStringIncludes(ini, "session.save_path = /tmp");
     assertStringIncludes(
       ini,
-      `open_basedir = ${join(siteTreeRoot(h.layout), "current", "public")}:${
+      `open_basedir = ${join(siteTreeRoot(h.layout), "current")}:${
         join(siteTreeRoot(h.layout), "shared")
       }:/tmp`,
     );

@@ -19,6 +19,7 @@ import { buildHostingLabelsFragment } from "./compose-labels.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 import { cronServiceContent, cronTimerContent } from "./cron/unit.ts";
 import { siteSnippet } from "./ingress.ts";
+import { frameworkAliases } from "./release/framework-layout.ts";
 import { nativeAppUnitContent } from "./native/unit.ts";
 import {
   apacheSetEnvLine,
@@ -511,6 +512,11 @@ const SINKS: ReadonlyArray<
     field: "composeServiceName",
     validator: "safeConfigToken",
   },
+  {
+    file: "release/framework-layout.ts",
+    field: "framework alias folder",
+    validator: "safeConfigPath",
+  },
 ];
 
 /** Tenant fields no renderer may interpolate straight into a template. */
@@ -539,6 +545,41 @@ test("renderers route tenant fields through their named validators", () => {
       }`,
     );
   }
+});
+
+test("a framework alias folder refuses a path a vhost could not carry", () => {
+  for (const fragment of HOSTILE_CONFIG_FRAGMENTS) {
+    for (const layoutName of ["laravel", "wordpress"] as const) {
+      assertThrows(
+        () => frameworkAliases(layoutName, `/srv/users/alice/${fragment}`),
+        Error,
+        "framework alias folder",
+      );
+    }
+  }
+  for (
+    const bad of [
+      "relative/shared",
+      "/srv//shared",
+      "/srv/./shared",
+      "/srv/x/",
+      "/srv/a b",
+    ]
+  ) {
+    assertThrows(
+      () => frameworkAliases("laravel", bad),
+      Error,
+      "framework alias folder",
+    );
+  }
+  assertEquals(
+    frameworkAliases(
+      "laravel",
+      "/srv/users/alice/production/services/web.example/shared",
+    )[0]
+      ?.dir,
+    "/srv/users/alice/production/services/web.example/shared/storage/app/public",
+  );
 });
 
 test("www redirect sites render byte-identical configs (acme, pinned with bind)", () => {

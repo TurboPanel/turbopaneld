@@ -1450,6 +1450,71 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
+    'src/deploy/release/folder-publish.ts|["-n",verb,ref.owner,ref.scope,ref.slug,ids.serviceId,ids.releaseId,ids.publishId,`layout=${layout}`]',
+    {
+      argv: [
+        "publish",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        FOLDER_PUBLISH_ID,
+        "layout=laravel",
+      ],
+      setup: {
+        files: {
+          [`${FOLDER_STAGING}/artisan`]: "<?php\n",
+        },
+        dirs: [
+          `${FOLDER_SERVICE}/releases`,
+          `${FOLDER_SERVICE}/shared`,
+        ],
+      },
+    },
+    {
+      argv: [
+        "publish-keep",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        FOLDER_PUBLISH_ID,
+        "layout=wordpress",
+      ],
+      setup: {
+        files: {
+          [`${FOLDER_STAGING}/wp-content/index.php`]: "<?php\n",
+        },
+        dirs: [
+          `${FOLDER_SERVICE}/releases`,
+          `${FOLDER_SERVICE}/shared`,
+        ],
+      },
+    },
+  ),
+  tpHost(
+    'src/deploy/release/folder-publish.ts|["-n","release-layout-folders",ref.owner,ref.scope,ref.slug,ids.serviceId,ids.releaseId,`layout=${layout}`]',
+    {
+      argv: [
+        "release-layout-folders",
+        "alice",
+        "production",
+        "example.com",
+        FOLDER_SERVICE_ID,
+        FOLDER_RELEASE_ID,
+        "layout=laravel",
+      ],
+      setup: {
+        dirs: [
+          `${FOLDER_SERVICE}/releases/${FOLDER_RELEASE_ID}`,
+          `${FOLDER_SERVICE}/shared`,
+        ],
+      },
+    },
+  ),
+  tpHost(
     'src/deploy/unchanged-deploy.ts|["-n","systemctl","is-active","--quiet",unit]',
     {
       argv: [

@@ -21,6 +21,7 @@ import {
   isNativeAppStart,
   type NativeAppStart,
 } from "../native/start-entry.ts";
+import { type FrameworkLayout, isFrameworkLayout } from "./framework-layout.ts";
 
 export const RELEASE_MANIFEST_FILENAME = "release.json";
 
@@ -83,6 +84,15 @@ export type ReleaseManifestV1 = {
    */
   startCommand?: string;
   startupFile?: string;
+  /**
+   * The framework layout detected in a site's built release (`laravel` or
+   * `wordpress`): its `storage/` or uploads folder is a link into `shared/`.
+   * A daemon-only record, never on the wire. Rollback reads it back to put the
+   * shared folders in place again, and every check of this release's links
+   * excuses the recipe's links only because of it. Absent for any other
+   * release.
+   */
+  frameworkLayout?: FrameworkLayout;
   /**
    * image-build lane only: the OCI image this release produced, and the pinned
    * tools that produced it.
@@ -160,6 +170,7 @@ function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
     (field) => typeof field === "boolean",
   ) &&
     optionalFieldsOk(record, ["nativeStart"], isNativeAppStart) &&
+    optionalFieldsOk(record, ["frameworkLayout"], isFrameworkLayout) &&
     optionalFieldsOk(
       record,
       ["runtime"],

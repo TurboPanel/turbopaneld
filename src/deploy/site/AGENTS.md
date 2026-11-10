@@ -394,10 +394,42 @@ root-owned `0550` by design:
   the raw request path and `file_server` cleans it afterwards, so a dot segment
   *inside* `/.well-known/` (`/.well-known/../.env`) has its own refusal.
 - **PHP is confined.** A release-backed nginx/Apache PHP pool gets
-  `php_admin_value[open_basedir] = <documentRoot>:<siteRoot>/shared:/tmp`, so
-  scripts read the release and write through `shared/` — reachable as
-  `current/shared` — and nothing else on the filesystem. Daemon-owned sites
-  (no release binding) stay unrestricted.
+  `php_admin_value[open_basedir] = <siteRoot>/current:<siteRoot>/shared:/tmp`
+  (`releasePhpOpenBasedir`, plus the managed database's CA file when the site
+  has one), so scripts read the **whole release** (`vendor/`, `config/`,
+  `bootstrap/`, not only the folder the web root serves, which stays
+  `current/<root>`) and write through `shared/` — reachable as `current/shared`
+  — and nothing else on the filesystem. Daemon-owned sites (no release binding)
+  stay unrestricted.
+- **Framework layout (Laravel, WordPress).** The built release is checked once
+  (`release/framework-layout.ts`); a Laravel app (`artisan`, `bootstrap/app.php`,
+  `public/index.php`) or WordPress (`wp-settings.php`, `wp-includes/`,
+  `wp-content/`) is recorded in the release manifest and carried on the apply
+  as `SiteApplySpec.frameworkLayout`. The files under `shared/` that the site
+  serves are reached by URL, never by a link: Apache gets an `Alias` and
+  nginx (alone, or in front of Apache) a `location ^~` with its own `alias`
+  for `/storage/` (`shared/storage/app/public`) or `/wp-content/uploads/`
+  (`shared/uploads`), links followed only when link and target share an owner,
+  and `.php`, `.phtml` and `.phar` refused there. The folders are served
+  folders, like the document root: whatever lets an engine read a document root
+  must cover them. OpenLiteSpeed and the site Caddy get no alias yet and a
+  deploy warning says so (`planSiteFrameworkAliases`). The alias paths go
+  through `safeConfigPath`.
+- **One environment file per site for everything that is not a web request.**
+  `deploy/site/site-env-file.ts` stages `<stateDir>/sites/.env-stage/<site
+  id>.env` (`0600` in a `0700` folder) and `tp-host site-env-install <user>
+  <site id>` copies it to `<config>/site-env/<user>/<site id>.env`
+  (`root:root 0600`); a site's cron unit loads it with `EnvironmentFile=`
+  (tp-host pins the path to the unit's own account). The file holds what the
+  web request gets (`webEnv` plus the decrypted secrets, with the CA file path
+  variables), minus the platform's own names (`HOME`, `TMPDIR`, `PATH`,
+  `TURBOPANEL_PHP`, `PHPRC`, `PHP_INI_SCAN_DIR`, `PHP_VALUE`,
+  `PHP_ADMIN_VALUE` in any case and `LD_*`, named in the transcript, never with
+  a value) and names a file cannot carry (not `[A-Za-z_][A-Za-z0-9_]*`). It is
+  made before anything runs a command or applies a site. `hosting.env` in the
+  owner's folder now uses the same quoting, so `set -a; . hosting.env; set +a`
+  loads it in a shell. The web request still gets its values from the vhost; the
+  per-site PHP unit does not load the file.
 - **nginx follows no link below a release-backed document root.** It serves
   one with `disable_symlinks on from=$document_root`, so **every** symlink under
   the root answers 403 — including links that stay inside the release, such as

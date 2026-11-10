@@ -174,6 +174,11 @@ import {
 } from "./site/php-runtime-apply.ts";
 import { SYSTEMD_UNIT_DIR } from "./native/unit.ts";
 import { renderNativeAppEnvFile } from "./native/variables-runtime.ts";
+import {
+  type FrameworkAlias,
+  frameworkAliases,
+  type FrameworkLayout,
+} from "./release/framework-layout.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
@@ -181,6 +186,12 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
 export type SiteApplySpec = EnvironmentDeploySite & {
+  /**
+   * The framework layout of the release this site serves (Laravel or
+   * WordPress): daemon-internal, never on the wire. The vhost then serves the
+   * layout's shared folders by URL (`frameworkAliases`).
+   */
+  frameworkLayout?: FrameworkLayout;
   /**
    * Set by {@link applySites} from the deploy: render the vhost so the engine
    * names neither itself nor its version (error-page footers, `Server`).
@@ -832,6 +843,11 @@ export type NginxSiteConfigOpts = Readonly<{
    * proxy everything else to Apache on this loopback port. No PHP location.
    */
   apacheBackendPort?: number | null;
+  /**
+   * Shared folders the site's framework layout serves by URL (never through a
+   * link): each gets a location that refuses PHP.
+   */
+  frameworkAliases?: readonly FrameworkAlias[];
 }>;
 
 /**
@@ -852,6 +868,50 @@ function nginxServerTokensLine(site: SiteApplySpec): string {
   return site.hideWebServerNames ? "\n  server_tokens off;" : "";
 }
 
+/**
+ * A shared folder served by URL: a prefix location with its own `alias`, links
+ * followed only when link and target share an owner, and no PHP, `.phtml` or
+ * `.phar` from it (a nested location, so it wins over the PHP location below).
+ */
+function nginxAliasLocations(aliases: readonly FrameworkAlias[]): string {
+  return aliases.map((alias) => `
+  location ^~ ${alias.urlPrefix} {
+    alias ${alias.dir}/;
+    disable_symlinks if_not_owner;
+    location ~* \\.(php[0-9]?|phtml|phar)$ {
+      return 403;
+    }
+  }
+`).join("");
+}
+
+/** The same folder in an Apache vhost: an `Alias` that runs and reads nothing. */
+function apacheAliasBlock(aliases: readonly FrameworkAlias[]): string {
+  return aliases.map((alias) => `
+  Alias "${alias.urlPrefix}" "${alias.dir}/"
+  <Directory "${alias.dir}">
+    Options SymLinksIfOwnerMatch
+    AllowOverride None
+    Require all granted
+    <FilesMatch "\\.(?i:php[0-9]?|phtml|phar)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>`).join("");
+}
+
+/**
+ * Deploy warnings for a site whose framework layout this engine cannot serve by
+ * URL: only Apache and nginx sites get the aliases for now.
+ */
+export function planSiteFrameworkAliases(site: SiteApplySpec): string[] {
+  const aliases = frameworkAliases(site.frameworkLayout, "/shared");
+  if (aliases.length === 0) return [];
+  if (site.engine === "apache" || site.engine === "nginx") return [];
+  return aliases.map((alias) =>
+    `Site ${site.composeServiceName}: files under ${alias.urlPrefix} are served only on Apache and nginx sites for now.`
+  );
+}
+
 export function nginxSiteConfig(
   site: SiteApplySpec,
   documentRoot: string,
@@ -868,7 +928,9 @@ export function nginxSiteConfig(
   listen [::1]:${site.listenPort};${dockerListen}
   server_name _;${nginxServerTokensLine(site)}
   root ${documentRoot};
-  ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
+  ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}${
+      nginxAliasLocations(opts?.frameworkAliases ?? [])
+    }
 ${nginxApacheLocations(backendPort)}
 }
 `;
@@ -899,7 +961,7 @@ ${nginxApacheLocations(backendPort)}
 ${nginxForwardedLines().join("\n")}
   index ${indexFiles};
 ${nginxDotfileDenyLines().join("\n")}
-
+${nginxAliasLocations(opts?.frameworkAliases ?? [])}
   location / {
     try_files $uri $uri/ =404;
   }${phpBlock}
@@ -1157,20 +1219,25 @@ export function phpFpmPoolAdminDirectives(
 }
 
 /**
- * `open_basedir` allow-list for a release-backed PHP site: the document root it
- * serves, the site's writable `shared/` state, and a temp dir. Reachable
- * through `current/shared` as well, which is why the release `shared` symlink
- * (`release/promote.ts`) is part of the layout contract.
+ * `open_basedir` allow-list for a release-backed PHP site: the whole release
+ * through the stable `current` link (PHP reads `vendor/`, `bootstrap/` and
+ * `config/` as well as the folder the web root serves, which stays
+ * `current/<root>`), the site's writable `shared/` state, a temp dir, and the
+ * managed database's CA file when the site has one (a PHP file function reads
+ * it; the database driver does not need the entry). `realpath_cache_ttl = 0`
+ * on release-backed pools keeps `current` fresh after a promote.
  */
 export function releasePhpOpenBasedir(
   layout: LayoutPaths,
   release: SiteRelease,
-  documentRoot: string,
+  caFile?: string,
 ): string[] {
+  const tree = serviceTree(layout, release);
   return [
-    documentRoot,
-    serviceTree(layout, release).sharedDir,
+    tree.currentLink,
+    tree.sharedDir,
     PHP_OPEN_BASEDIR_TMP,
+    ...(caFile === undefined ? [] : [caFile]),
   ];
 }
 
@@ -1343,6 +1410,8 @@ export type ApacheSiteConfigOpts = Readonly<{
    * nginx's `X-Forwarded-For`.
    */
   behindNginxPort?: number | null;
+  /** Shared folders the site's framework layout serves by URL. */
+  frameworkAliases?: readonly FrameworkAlias[];
 }>;
 
 /**
@@ -1456,7 +1525,9 @@ export function apacheSiteConfig(
     Options Indexes SymLinksIfOwnerMatch
     AllowOverride AuthConfig FileInfo Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch
     Require all granted
-  </Directory>${phpBlock}${setenvBlock}
+  </Directory>${
+    apacheAliasBlock(opts?.frameworkAliases ?? [])
+  }${phpBlock}${setenvBlock}
 </VirtualHost>
 `;
 }
@@ -3190,13 +3261,17 @@ type ApplySiteResult = {
 function sitePhpAdminOpts(
   layout: LayoutPaths,
   paths: SitePaths,
+  site: Pick<SiteApplySpec, "dbCa">,
 ): PhpFpmPoolAdminOpts | undefined {
   if (paths.release) {
+    const caFile = site.dbCa === undefined
+      ? undefined
+      : join(siteMetadataDir(layout, paths.release), SITE_DB_CA_FILE_NAME);
     return {
       openBasedir: releasePhpOpenBasedir(
         layout,
         paths.release,
-        paths.documentRoot,
+        caFile,
       ),
       releaseSymlinkSwap: true,
     };
@@ -3238,7 +3313,7 @@ async function applyPhpFpmPool(
     site,
     paths.documentRoot,
     socketPath,
-    sitePhpAdminOpts(layout, paths),
+    sitePhpAdminOpts(layout, paths, site),
   );
   return await stageOwnedConfigFile(
     poolPath,
@@ -3385,7 +3460,7 @@ function sitePhpRuntimeFiles(
     webAccount: SITE_PHP_WEB_ACCOUNT[site.engine],
   };
   const values = site.php
-    ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
+    ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths, site))
     : [];
   // The runtime runs as the owner, who cannot enter the daemon's state tree
   // (`tp:tp 0750`), and its limits are locked for scripts under the home.
@@ -3435,6 +3510,19 @@ async function applyCaddySite(
   return { staged: stagedList(staged), ...php.result };
 }
 
+/** The shared folders a release-backed site's layout serves by URL. */
+function siteFrameworkAliases(
+  layout: LayoutPaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
+): FrameworkAlias[] {
+  if (paths.release === undefined) return [];
+  return frameworkAliases(
+    site.frameworkLayout,
+    serviceTree(layout, paths.release).sharedDir,
+  );
+}
+
 async function applyNginxSite(
   layout: LayoutPaths,
   environmentId: string,
@@ -3450,6 +3538,7 @@ async function applyNginxSite(
     phpFpmSocket: php.socket,
     fastcgiParamsPath: nginxFastcgiParamsPath(layout),
     releaseBacked: paths.release !== undefined,
+    frameworkAliases: siteFrameworkAliases(layout, site, paths),
   });
   const staged = await SITE_ENGINE_DRIVERS.nginx
     .stageSiteConfig(run, configPath, contents);
@@ -3471,6 +3560,7 @@ async function applyApacheSite(
   const contents = apacheSiteConfig(site, paths.documentRoot, {
     dockerBindAddress: dockerBind,
     phpFpmSocket: php.socket,
+    frameworkAliases: siteFrameworkAliases(layout, site, paths),
   });
   const staged = await SITE_ENGINE_DRIVERS.apache
     .stageSiteConfig(run, configPath, contents);
@@ -3499,6 +3589,7 @@ async function applyNginxApacheSite(
     apacheSiteConfig(site, paths.documentRoot, {
       phpFpmSocket: php.socket,
       behindNginxPort: backendPort,
+      frameworkAliases: siteFrameworkAliases(layout, site, paths),
     }),
   );
   const front = await SITE_ENGINE_DRIVERS.nginx.stageSiteConfig(
@@ -3507,6 +3598,7 @@ async function applyNginxApacheSite(
     nginxSiteConfig(site, paths.documentRoot, dockerBind, {
       releaseBacked: paths.release !== undefined,
       apacheBackendPort: backendPort,
+      frameworkAliases: siteFrameworkAliases(layout, site, paths),
     }),
   );
   await applySiteTreeOwnership(site, paths);
@@ -3565,7 +3657,7 @@ async function applyOpenLiteSpeedSite(
     site,
     olsName,
     backend.result.phpRuntime,
-    sitePhpAdminOpts(layout, paths),
+    sitePhpAdminOpts(layout, paths, site),
   );
   const vhostStaged = await stageOwnedConfigFile(
     vhConfigPath,
