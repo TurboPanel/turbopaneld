@@ -211,7 +211,8 @@ Docker Compose. The daemon:
    every Hosting Account's PHP, cron, ssh, sftp and `sudo -u` processes,
    whether or not it has a PHP unit), new connections that leave through a
    Docker bridge (`oifname` docker0 or `br-*`, so a network created after the
-   sync is covered), to the addresses on those bridges now (their gateways,
+   sync is covered; a `br-` interface that is not Docker's `br-<12 hex>`,
+   such as a LAN bridge, is left out by name as found at the sync), to the addresses on those bridges now (their gateways,
    which route over lo; from `ip -o addr`), and to Docker's configured ranges
    (`default-address-pools` bases and `bip` in `/etc/docker/daemon.json`,
    which also covers container networks on other servers). One account can
@@ -227,7 +228,9 @@ Docker Compose. The daemon:
    network with its own bridge name (`com.docker.network.bridge.name`,
    host-level approval only) outside the configured pools is not covered; an
    account with no PHP unit is covered from the daemon's boot reconcile (every
-   daemon start runs the sync), not from its own unit start; the loopback port
+   daemon start runs the sync, also when it skips the PHP sweep over an
+   unreadable vhost), not from its own unit start; the script needs `ip`
+   (iproute2, installed beside nftables by `root-helpers.yml`); the loopback port
    filter itself still binds only accounts with a PHP unit. A project's own
    helper containers will be opened as a per-account loopback port in the
    loopback rules (the marked slot in the script), never through this wall.
