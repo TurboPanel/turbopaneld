@@ -93,6 +93,8 @@ export interface ParsedPanelIdentity {
   keyset: number;
   /** The `current` Ed25519 key the document is signed with (raw 32 bytes). */
   signing: { kid: string; pub: Uint8Array };
+  /** The document says `boundSessions: 1`: this control plane binds every session to its server and key. */
+  boundSessions: boolean;
 }
 
 /** Parse and verify a document; null when anything about it is wrong. */
@@ -134,6 +136,7 @@ export async function parsePanelIdentity(
       sealedLicense: doc.sealedLicense === 1,
     },
     signing: { kid: currentKid, pub: currentPub },
+    boundSessions: doc.boundSessions === 1,
   };
 }
 

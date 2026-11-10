@@ -24,10 +24,17 @@ async function rawPublic(key: CryptoKey): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.exportKey("raw", key));
 }
 
+function bindMembers(
+  bind: { serverId: string; keyId: string } | undefined,
+): Record<string, string> {
+  return bind ? { forServer: bind.serverId, forKey: bind.keyId } : {};
+}
+
 export interface TestPanel {
   kid: string;
   keyset: number;
-  signing(): Promise<PanelSigningKey>;
+  /** `boundSessions: true` models a verified document that advertises the binding. */
+  signing(opts?: { boundSessions?: boolean }): Promise<PanelSigningKey>;
   pin(overrides?: Partial<PanelIdentityPin>): PanelIdentityPin;
   identityFetch(
     opts?: {
@@ -35,6 +42,8 @@ export interface TestPanel {
       keyset?: number;
       urls?: string[];
       rotation?: unknown;
+      /** Add `boundSessions: 1` to the signed body, as a current control plane does. */
+      boundSessions?: boolean;
     },
   ): Promise<PanelIdentityFetch>;
   hello(
@@ -45,11 +54,19 @@ export interface TestPanel {
       keyset?: number;
       kid?: string;
       heartbeatSeconds?: number;
+      /** Name a server and daemon key, as a bound session does. */
+      bind?: { serverId: string; keyId: string };
     },
   ): Promise<string>;
   frame(
     wire: Record<string, unknown> & { type: string },
-    envelope: { sessionId: string; seq: number; iat: number; kid?: string },
+    envelope: {
+      sessionId: string;
+      seq: number;
+      iat: number;
+      kid?: string;
+      bind?: { serverId: string; keyId: string };
+    },
   ): Promise<string>;
   httpHeader(path: string, body: string): Promise<string>;
   /** The same answer, signed over its path and exact body. */
@@ -85,7 +102,13 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
   return {
     kid,
     keyset,
-    signing: () => Promise.resolve({ kid, key: pair.publicKey, keyset }),
+    signing: (opts = {}) =>
+      Promise.resolve({
+        kid,
+        key: pair.publicKey,
+        keyset,
+        ...(opts.boundSessions ? { boundSessions: true } : {}),
+      }),
     pin: (overrides = {}) => ({
       current: kid,
       next: null,
@@ -112,6 +135,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         urls: opts.urls ?? [],
         issued: new Date(opts.nowMs).toISOString(),
         expires: new Date(opts.nowMs + 30 * DAY_MS).toISOString(),
+        ...(opts.boundSessions ? { boundSessions: 1 } : {}),
       });
       const sig = await sign(
         `${HTTP_PREFIX}${IDENTITY_DOCUMENT_PATH}\n${body}`,
@@ -124,6 +148,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         nonce: fields.nonce,
         sessionId: fields.sessionId,
         kid: fields.kid ?? kid,
+        ...bindMembers(fields.bind),
         keyset: fields.keyset ?? keyset,
         heartbeatSeconds: fields.heartbeatSeconds ?? 60,
         urls: ["https://panel.example.test"],
@@ -138,6 +163,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         seq: envelope.seq,
         iat: envelope.iat,
         kid: envelope.kid ?? kid,
+        ...bindMembers(envelope.bind),
       });
       return appendSig(
         unsigned,
