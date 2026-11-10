@@ -197,6 +197,9 @@ kf_bootcfg_add_top() {
     tp_die "the new file does not start with $_bt_line"
   tail -n +2 "$_bt_new" | cmp -s - "$_bt_name" ||
     tp_die "the new file does not keep the old content of $_bt_file"
+  # On disk before the rename: a power cut must leave the old or the new
+  # file, never an empty one (the Pi would not boot).
+  sync || tp_die "cannot flush the new $_bt_file to disk"
   mv -T -f -- "$_bt_new" "$_bt_name" || tp_die "cannot replace $_bt_file"
   trap - EXIT
   sync || tp_die "cannot flush $_bt_file to disk"
@@ -248,6 +251,7 @@ kf_bootcfg_remove_top() {
       print raw
     }
   ' "$_br_name" > "$_br_new" || tp_die "cannot write the new $_br_file"
+  sync || tp_die "cannot flush the new $_br_file to disk"
   mv -T -f -- "$_br_new" "$_br_name" || tp_die "cannot replace $_br_file"
   trap - EXIT
   sync || tp_die "cannot flush $_br_file to disk"
@@ -419,9 +423,10 @@ kf_cmdline_mem_scan() {
 }
 
 # LINE with memory limits turned on: every cgroup_disable=memory word removed
-# (the remaining words joined by one space) and cgroup_enable=memory added at
-# the end unless the line already has it. A line with neither word keeps its
-# own spacing and only gets the word appended.
+# (then the remaining words are joined by one space, so runs of blanks become
+# one) and cgroup_enable=memory added at the end unless the line already has
+# it. Blanks at the end of the line are dropped before the word is appended;
+# a line without cgroup_disable=memory keeps its other spacing.
 kf_cmdline_enable_line() {
   printf '%s\n' "$1" | awk -v on="$KF_MEM_WORD" -v off="$KF_MEM_OFF_WORD" '
     {
@@ -507,6 +512,7 @@ kf_cmdline_write() {
   fi
   [ "$(wc -c < "$_cw_new")" -eq "$_cw_want" ] ||
     tp_die "the new file does not keep the rest of $_cw_file"
+  sync || tp_die "cannot flush the new $_cw_file to disk"
   mv -T -f -- "$_cw_new" "$_cw_name" || tp_die "cannot replace $_cw_file"
   trap - EXIT
   sync || tp_die "cannot flush $_cw_file to disk"
@@ -749,8 +755,8 @@ kf_wait_converged() {
 
 # Reads one command line, one argument per line, and prints "ansible-playbook"
 # or "unattended-upgrades" when it runs one of them. Only the program counts:
-# the first argument's file name, or the second's when the first is an
-# interpreter (python3, sh). So the daemon's own command line, which names
+# the file name of the first argument that is not env, an interpreter
+# (python3, sh), an option or a NAME=value. So the daemon's own command line, which names
 # ansible-playbook in a permission list, and a person reading those files
 # (tail, less, an editor) never count. unattended-upgrade-shutdown counts
 # unless it is the helper that only waits (--wait-for-signal) for the whole
@@ -758,19 +764,18 @@ kf_wait_converged() {
 kf_busy_program() {
   awk '
     function base(p) { sub(/.*\//, "", p); return p }
-    function pick(p) {
+    # The program is the first argument that is not env, an interpreter, an
+    # option (-u) or a NAME=value env sets.
+    !decided && NR <= 8 {
+      p = base($0)
+      if (p == "env" || p ~ /^(python[0-9.]*|sh|dash|bash)$/ || $0 ~ /^-/ ||
+        $0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) next
       if (p == "ansible-playbook" || p ~ /^AnsiballZ_/) what = "ansible-playbook"
       else if (p == "unattended-upgrade") what = "unattended-upgrades"
       else if (p == "unattended-upgrade-shutdown") shutdown = 1
       decided = 1
-    }
-    NR == 1 {
-      p = base($0)
-      if (p ~ /^(python[0-9.]*|sh|dash|bash)$/) next
-      pick(p)
       next
     }
-    NR == 2 && !decided { pick(base($0)); next }
     $0 == "--wait-for-signal" { waiting = 1 }
     END {
       if (what != "") print what
@@ -846,7 +851,20 @@ kf_daemon_start_again() {
       return 0
     }
   fi
-  printf 'The TurboPanel daemon is running again.\n'
+  # Output may be gone (a closed pipe, a dropped link): the start above has
+  # already happened, so a failed write changes nothing.
+  printf 'The TurboPanel daemon is running again.\n' 2>/dev/null || true
+}
+
+# Ctrl-C, a hang-up or a kill during the restart steps. The daemon is started
+# again before anything is written, because the output may be gone.
+kf_cancel() {
+  kf_daemon_start_again
+  {
+    printf '\nRestart cancelled.\n'
+    kf_manual_reboot_hint
+  } 2>/dev/null || true
+  exit "$1"
 }
 
 # Every check that has to pass before a restart, then the countdown. Any check
@@ -869,9 +887,25 @@ kf_reboot_when_safe() {
     return 0
   fi
   # From here on the daemon is started again on every way out except a
-  # restart handed to systemd: an error, Ctrl-C, a hang-up or a kill.
+  # restart handed to systemd: an error, Ctrl-C, a hang-up or a kill. SIGPIPE
+  # is ignored so a closed output (`| tee log` and Ctrl-C, a dropped ssh link)
+  # makes a write fail, `set -e` exits and the EXIT trap still runs; killed by
+  # the signal, the shell would skip it.
+  trap '' PIPE
   trap 'kf_daemon_start_again' EXIT
-  trap 'printf "\n"; printf "Restart cancelled.\n"; kf_daemon_start_again; kf_manual_reboot_hint; exit 130' HUP INT TERM
+  trap 'kf_cancel 129' HUP
+  trap 'kf_cancel 130' INT
+  trap 'kf_cancel 143' TERM
+  # Known gap: a playbook or apt run the daemon starts between the idle check
+  # above and the stop below is killed with the daemon's cgroup. Checking once
+  # more right before the stop keeps that window to a few milliseconds, and
+  # the daemon holds commands until its boot converge has finished.
+  if _rs_what="$(kf_busy)"; then
+    printf '%s started just now, so this server will not restart on its own.\n' "$_rs_what"
+    kf_manual_reboot_hint
+    trap - EXIT HUP INT TERM
+    return 0
+  fi
   if ! kf_daemon_stop; then
     printf 'The TurboPanel daemon could not be stopped, so this server will not restart on its own.\n'
     kf_daemon_start_again
@@ -889,6 +923,23 @@ kf_reboot_when_safe() {
   kf_countdown_and_reboot "$1"
 }
 
+# Test mode only (never as root): at the first countdown line, wait until the
+# file TP_KERNEL_TEST_WAIT_FILE exists (the test's reader has closed the
+# pipe), or send this shell TP_KERNEL_TEST_SIGNAL, as a person or a dropped
+# link would.
+kf_test_countdown_hooks() {
+  if [ -n "${TP_KERNEL_TEST_WAIT_FILE:-}" ]; then
+    _th_n=0
+    while [ ! -e "$TP_KERNEL_TEST_WAIT_FILE" ] && [ "$_th_n" -lt 200 ]; do
+      sleep 0.05 2>/dev/null || sleep 1
+      _th_n=$((_th_n + 1))
+    done
+  fi
+  if [ -n "${TP_KERNEL_TEST_SIGNAL:-}" ]; then
+    kill -s "$TP_KERNEL_TEST_SIGNAL" "$$"
+  fi
+}
+
 # The caller (kf_reboot_when_safe) has set the traps that start the daemon
 # again and cancel on Ctrl-C.
 kf_countdown_and_reboot() {
@@ -902,7 +953,11 @@ kf_countdown_and_reboot() {
     else
       printf 'Restarting in %s second(s)…\n' "$_cd_n"
     fi
-    if [ -z "$TP_TEST" ]; then sleep 1; fi
+    if [ -z "$TP_TEST" ]; then
+      sleep 1
+    elif [ "$_cd_n" = "$_cd_total" ]; then
+      kf_test_countdown_hooks
+    fi
     _cd_n=$((_cd_n - 1))
   done
   if [ -n "$_cd_tty" ]; then printf '\r%60s\r' ''; fi

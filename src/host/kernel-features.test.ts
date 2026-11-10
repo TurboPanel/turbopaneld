@@ -1158,3 +1158,131 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "after the daemon is stopped, Ctrl-C, a hang-up, a kill or a closed output always starts it again",
+  ignore: linuxUnprivileged,
+  fn: async () => {
+    if (!await shExists() || !await mvSupportsDashT()) return;
+    for (
+      const [signal, code] of [["INT", 130], ["TERM", 143], ["HUP", 129]] as [
+        string,
+        number,
+      ][]
+    ) {
+      const prefix = await writeBothPrefix();
+      try {
+        await markConvergeDone(prefix);
+        const out = await installerStep(prefix, {
+          TP_KERNEL_TEST_SIGNAL: signal,
+        });
+        assertEquals(out.code, code, `${signal}: ${out.stderr}`);
+        assertEquals(out.stdout.includes("REBOOTED"), false, signal);
+        assertEquals(out.calls, "stop\nstart\n", signal);
+        assertEquals(out.stdout.includes("Restart cancelled."), true, signal);
+      } finally {
+        await Deno.remove(prefix, { recursive: true });
+      }
+    }
+
+    // The output pipe closes during the countdown (`| tee log` and Ctrl-C, a
+    // dropped ssh link): the next write fails and the daemon still starts.
+    const prefix = await writeBothPrefix();
+    try {
+      await markConvergeDone(prefix);
+      const log = join(prefix, "systemctl.log");
+      await Deno.writeTextFile(log, "");
+      const gone = join(prefix, "reader-gone");
+      const out = await new Deno.Command("sh", {
+        args: [
+          "-c",
+          'sh "$1" installer-step | { sed "/Restarting in/q" >/dev/null; : > "$2"; }',
+          "sh",
+          SCRIPT,
+          gone,
+        ],
+        clearEnv: true,
+        env: {
+          PATH: "/usr/bin:/bin",
+          TP_KERNEL_TEST_PREFIX: prefix,
+          TP_KERNEL_TEST_PAGESIZE: "16384",
+          TP_KERNEL_TEST_ENROL_WAIT: "0",
+          TP_KF_FIRST_INSTALL: "1",
+          TP_KF_ENROL_REF: join(prefix, "install-start"),
+          TP_KERNEL_TEST_REBOOT_CMD: "true",
+          TP_KERNEL_TEST_DAEMON_ACTIVE: "1",
+          TP_KERNEL_TEST_SYSTEMCTL_LOG: log,
+          TP_KERNEL_TEST_WAIT_FILE: gone,
+        },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(out.success, true);
+      assertEquals(await Deno.readTextFile(log), "stop\nstart\n");
+    } finally {
+      await Deno.remove(prefix, { recursive: true });
+    }
+  },
+});
+
+test("the busy check finds the program behind env, an interpreter and its options", async () => {
+  if (!await shExists()) return;
+  const cases: [string[], string][] = [
+    [
+      ["/usr/bin/python3", "-u", "/usr/bin/unattended-upgrade"],
+      "unattended-upgrades",
+    ],
+    [
+      ["/usr/bin/env", "python3", "/usr/bin/unattended-upgrade"],
+      "unattended-upgrades",
+    ],
+    [[
+      "/usr/bin/env",
+      "LC_ALL=C",
+      "/opt/a/bin/python3.12",
+      "-B",
+      "/opt/a/bin/ansible-playbook",
+      "x.yml",
+    ], "ansible-playbook"],
+    [[
+      "/usr/bin/python3",
+      "/usr/share/unattended-upgrades/unattended-upgrade-shutdown",
+      "--wait-for-signal",
+    ], ""],
+    [[
+      "/usr/bin/python3",
+      "/usr/share/unattended-upgrades/unattended-upgrade-shutdown",
+    ], "unattended-upgrades"],
+    [["vim", "/usr/bin/unattended-upgrade"], ""],
+    [["/usr/bin/env", "less", "/opt/a/bin/ansible-playbook"], ""],
+  ];
+  for (const [argv, want] of cases) {
+    const prefix = await Deno.makeTempDir({ prefix: "tp-kf-busy-" });
+    try {
+      await writeProc(prefix, 77, "x", argv);
+      await Deno.mkdir(join(prefix, "var/lib/turbopanel"), { recursive: true });
+      const out = await new Deno.Command("sh", {
+        args: [
+          "-c",
+          // Lift the two functions out of the real script and run them.
+          'eval "$(sed -n "/^kf_busy_program() {/,/^}/p;/^kf_busy() {/,/^}/p" "$1")"; P="$2"; kf_busy || true',
+          "sh",
+          SCRIPT,
+          prefix,
+        ],
+        clearEnv: true,
+        env: { PATH: "/usr/bin:/bin" },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(
+        new TextDecoder().decode(out.stdout).trim(),
+        want,
+        argv.join(" "),
+      );
+    } finally {
+      await Deno.remove(prefix, { recursive: true });
+    }
+  }
+});
