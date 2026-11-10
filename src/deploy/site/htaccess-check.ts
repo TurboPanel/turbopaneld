@@ -152,9 +152,11 @@ function findingForLine(
   line: number,
   content: string,
 ): HtaccessFinding | null {
-  const container = /^<\s*\/?\s*([A-Za-z]+)/.exec(content);
-  if (container) {
-    const name = container[1];
+  if (content.startsWith("<")) {
+    // A container tag, opening or closing: `<Name ...>` or `</Name>`.
+    let tag = content.slice(1).trimStart();
+    if (tag.startsWith("/")) tag = tag.slice(1).trimStart();
+    const name = /^[A-Za-z]+/.exec(tag)?.[0] ?? "";
     if (CONTAINERS.has(name.toLowerCase())) return null;
     return {
       line,
@@ -162,13 +164,14 @@ function findingForLine(
       reason: REFUSED.has(name.toLowerCase()) ? "not allowed" : "unknown",
     };
   }
-  const match = /^(\S+)\s*(.*)$/.exec(content);
-  if (!match) return null;
-  const lower = match[1].toLowerCase();
-  const directive = printableName(match[1]);
+  const space = content.search(/\s/);
+  const word = space < 0 ? content : content.slice(0, space);
+  const args = space < 0 ? "" : content.slice(space).trim();
+  const lower = word.toLowerCase();
+  const directive = printableName(word);
   if (REFUSED.has(lower)) return { line, directive, reason: "not allowed" };
   if (lower === "options") {
-    return optionsRefused(match[2])
+    return optionsRefused(args)
       ? { line, directive: "Options", reason: "not allowed" }
       : null;
   }
