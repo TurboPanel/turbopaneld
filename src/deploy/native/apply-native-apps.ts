@@ -1325,6 +1325,8 @@ async function switchTraffic(
     if (!reload.success) {
       throw new Error(reload.stderr || "systemctl daemon-reload failed");
     }
+    // The app's own unit was rewritten (its port may have moved).
+    await syncAccountWalls(io);
   }
   // The copy shares the account's ceilings with the release serving; it has
   // answered, so it goes before the app's own unit starts the same release.

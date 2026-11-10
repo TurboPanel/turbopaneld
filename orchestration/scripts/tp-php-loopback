@@ -44,16 +44,17 @@
 #   - to an address on one of those bridges now (the networks' gateways, which
 #     are the host's own addresses and route over lo), read from `ip -o addr`;
 #   - to Docker's configured address pools and default bridge range
-#     (`default-address-pools` bases and `bip` in /etc/docker/daemon.json),
-#     less every range this host routes somewhere other than a Docker bridge
-#     (`ip route`: its own networks, the private fabric on tp0 and the
-#     private network's services stay reachable even when an operator's pool
-#     is as wide as 10.0.0.0/8). The pools therefore only refuse pool
-#     addresses the host has no route of its own for. The routes are read at
-#     each sync; the boot unit runs before the network is up and sees none
-#     (so a pool is whole until the daemon's boot sync, which runs after it
-#     restores the private fabric), and a route added later stays closed
-#     inside a pool until the next sync.
+#     (`default-address-pools` bases and `bip` in /etc/docker/daemon.json).
+#     An IPv4 pool that overlaps any range this host routes somewhere other
+#     than a Docker bridge (`ip route`: its own network, the private fabric
+#     on tp0, a LAN bridge) is dropped whole with a warning, so even a
+#     10.0.0.0/8 pool cannot close the private network; IPv6 pools keep such
+#     routes open instead. Routes only ever let a pool be used: when the
+#     route listing fails or is empty (the boot unit runs before the
+#     network), no pool is refused, and the daemon's own sync at its start,
+#     after it restores the private fabric, loads them. A pool address the
+#     host reaches only through its default route is refused: a pool must
+#     not hold the private network's other subnets.
 #
 # Everything else stays open: the host's scope addresses and the private
 # network's services (a datacenter database, a VPC service), and the database
@@ -63,9 +64,9 @@
 # (172.31.0.0/16, 192.168.0.0/16), and Docker only hands out ranges that do not
 # collide with the host's routes, so the live bridges and the interface match
 # are exact. Not covered: a network given its own bridge name
-# (`com.docker.network.bridge.name`, host-level approval only) whose range is
-# outside the configured pools, and another server's container network this
-# host has a route for (the far server's forwarding rules decide those).
+# (`com.docker.network.bridge.name`, host-level approval only) unless a pool
+# that is refused holds it, and another server's container network this host
+# has a route for (the far server's forwarding rules decide those).
 #
 # One verb, `sync`: the whole table is rebuilt from what is on disk and in the
 # kernel now (one atomic nft transaction) and read back. Callers:
@@ -249,6 +250,36 @@ routed_ranges() {
   '
 }
 
+# The IPv4 pools on stdin that overlap none of the routes in $1 (both one
+# CIDR per line). A pool that overlaps a range this host routes somewhere
+# other than a Docker bridge (its own network, the private fabric, a LAN
+# bridge) is dropped whole, with a warning: refusing it would close part of
+# the private network, and Docker hands out no network that collides with a
+# route anyway, so the live bridges still cover this host's containers.
+pools_clear_of() {
+  TP_ROUTES="$1" awk '
+    function num(a,   o) { split(a, o, "."); return ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4] }
+    function span(c, r,   p, n) {
+      split(c, p, "/"); n = 2 ^ (32 - p[2])
+      r["s"] = int(num(p[1]) / n) * n; r["e"] = r["s"] + n - 1
+    }
+    BEGIN {
+      nr = split(ENVIRON["TP_ROUTES"], rl, "\n")
+      for (i = 1; i <= nr; i++) if (rl[i] != "") { span(rl[i], x); rs[i] = x["s"]; re[i] = x["e"] }
+    }
+    {
+      span($0, y); hit = ""
+      for (i = 1; i <= nr; i++)
+        if ((i in rs) && rs[i] <= y["e"] && y["s"] <= re[i]) { hit = rl[i]; break }
+      if (hit != "") {
+        printf "tp-php-loopback: not refusing pool %s: this host routes %s outside Docker\n", $0, hit > "/dev/stderr"
+        next
+      }
+      print
+    }
+  '
+}
+
 # A set of one type, or nothing when it would be empty.
 range_set() {
   [ -n "$3" ] || return 0
@@ -272,7 +303,7 @@ refuse() {
 
 BAND="$PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX"
 
-# ruleset OWN_PAIRS DNS4 DNS6 BRIDGE4 BRIDGE6 POOL4 POOL6 KEEP4 KEEP6 FOREIGN_BR
+# ruleset OWN_PAIRS DNS4 DNS6 BRIDGE4 BRIDGE6 POOL4 POOL6 KEEP6 FOREIGN_BR
 ruleset() {
   _own=""
   while IFS= read -r _pair; do
@@ -281,7 +312,7 @@ ruleset() {
 $1
 EOF
   _not=""
-  for _n in ${10}; do _not="${_not:+$_not, }\"$_n\""; done
+  for _n in $9; do _not="${_not:+$_not, }\"$_n\""; done
   [ -z "$_not" ] || _not=" oifname != { $_not }"
   _dns4="$RESOLVED_STUB"
   for _d in $2; do [ "$_d" = "$RESOLVED_STUB" ] || _dns4="$_dns4, $_d"; done
@@ -297,8 +328,7 @@ $(range_set bridge4 ipv4_addr "$4")
 $(range_set bridge6 ipv6_addr "$5")
 $(range_set pool4 ipv4_addr "$6")
 $(range_set pool6 ipv6_addr "$7")
-$(range_set keep4 ipv4_addr "$8")
-$(range_set keep6 ipv6_addr "$9")
+$([ -z "$7" ] || range_set keep6 ipv6_addr "$8")
   chain output {
     type filter hook output priority -150; policy accept;
     meta skuid $BAND ct state established,related accept
@@ -318,8 +348,7 @@ $(refuse 'oifname "docker0"')
 $(refuse "oifname \"br-*\"$_not")
 $([ -z "$4" ] || refuse "ip daddr @bridge4")
 $([ -z "$5" ] || refuse "ip6 daddr @bridge6")
-$([ -z "$8" ] || [ -z "$6" ] || printf '    meta skuid %s ip daddr @keep4 accept\n' "$BAND")
-$([ -z "$9" ] || [ -z "$7" ] || printf '    meta skuid %s ip6 daddr @keep6 accept\n' "$BAND")
+$([ -z "$8" ] || [ -z "$7" ] || printf '    meta skuid %s ip6 daddr @keep6 accept\n' "$BAND")
 $([ -z "$6" ] || refuse "ip daddr @pool4")
 $([ -z "$7" ] || refuse "ip6 daddr @pool6")
   }
@@ -332,8 +361,16 @@ if [ -z "$TP_TEST" ]; then
 fi
 _addr="$(ip_out addr)" || tp_die "ip -o addr show failed"
 _link="$(ip_out link)" || tp_die "ip -o link show failed"
-_route="$(ip_out route)" || tp_die "ip -o -4 route show failed"
-_route6="$(ip_out route6)" || tp_die "ip -o -6 route show failed"
+# Routes only ever let a pool be used: when a listing fails, or is empty (the
+# boot unit runs before the network), no pool is refused at all.
+_route="$(ip_out route)" || {
+  printf 'tp-php-loopback: ip -o -4 route show failed; no address pool is refused\n' >&2
+  _route=""
+}
+_route6="$(ip_out route6)" || {
+  printf 'tp-php-loopback: ip -o -6 route show failed; no address pool is refused\n' >&2
+  _route6=""
+}
 
 _own="$(own_ports)"
 _res="$(loopback_resolvers)"
@@ -342,16 +379,18 @@ _res4="$(printf '%s\n' "$_res" | grep -v ':' | sed 's|$|/32|' | valid_cidrs 4 32
 _res6="$(printf '%s\n' "$_res" | grep -x '::1' || :)"
 _bridges="$(bridge_ranges "$_addr")"
 _pools="$(docker_config_ranges)"
-_routes="$({ routed_ranges "$_route" 32; routed_ranges "$_route6" 128; })"
+_routes4="$(routed_ranges "$_route" 32 | valid_cidrs 4 0)"
+_routes6="$(routed_ranges "$_route6" 128 | valid_cidrs 6 0)"
+_pools4=""
+[ -z "$_routes4" ] ||
+  _pools4="$(printf '%s\n' "$_pools" | valid_cidrs 4 | pools_clear_of "$_routes4")"
+_pools6=""
+[ -z "$_routes6" ] || _pools6="$(printf '%s\n' "$_pools" | valid_cidrs 6)"
 _rules="$(ruleset "$_own" "$_res4" "$_res6" \
   "$(printf '%s\n' "$_bridges" | valid_cidrs 4)" \
   "$(printf '%s\n' "$_bridges" | valid_cidrs 6)" \
-  "$(printf '%s\n' "$_pools" | valid_cidrs 4)" \
-  "$(printf '%s\n' "$_pools" | valid_cidrs 6)" \
-  "$(printf '%s\n' "$_routes" | valid_cidrs 4 0)" \
-  "$(printf '%s\n' "$_routes" | valid_cidrs 6 0)" \
+  "$_pools4" "$_pools6" "$_routes6" \
   "$(foreign_br_links "$_link")")"
-
 _rules="$(printf '%s\n' "$_rules" | grep -v '^[[:space:]]*$')"
 
 if [ -n "$TP_TEST" ]; then

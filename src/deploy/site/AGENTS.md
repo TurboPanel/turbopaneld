@@ -211,10 +211,15 @@ Docker Compose. The daemon:
    name as found at the sync), to the addresses on those bridges now (their
    gateways, which route over lo; from `ip -o addr`), and to Docker's
    configured ranges (`default-address-pools` bases and `bip` in
-   `/etc/docker/daemon.json`) less every range the host routes somewhere
-   other than a Docker bridge (`ip route`: the host's own networks, the
-   private fabric on tp0, a LAN bridge), so even a 10.0.0.0/8 pool does not
-   close the private network. One account can therefore not reach another
+   `/etc/docker/daemon.json`). An IPv4 pool that overlaps any range the
+   host routes somewhere other than a Docker bridge (`ip route`: the host's
+   own networks, the private fabric on tp0, a LAN bridge) is dropped whole
+   with a warning, so even a 10.0.0.0/8 pool cannot close the private
+   network (IPv6 pools keep such routes open instead); with no routes (the
+   boot unit, before the network) or a failed route listing no pool is
+   refused. A pool address reached only through the default route is
+   refused, so a pool must not hold the private network's other subnets.
+   One account can therefore not reach another
    account's containers by bridge address, in either direction. Docker's
    built-in pools are not assumed when none is configured (they overlap
    common private networks; Docker only hands out ranges that miss the host's
@@ -225,8 +230,8 @@ Docker Compose. The daemon:
    pools are dropped, never handed to nft, so a stray `daemon.json` value
    cannot keep PHP down; a native app unit that does not fit is skipped.
    **Who loads it:** `turbopanel-loopback-php.service` at boot, before the
-   network, logins and cron (fails open; it sees no routes yet, so a pool is
-   whole until the daemon's own sync); every PHP unit in `ExecStartPre=+`
+   network, logins and cron (fails open; it sees no routes yet, so no pool
+   is refused until the daemon's own sync); every PHP unit in `ExecStartPre=+`
    (the one root hook tp-host pins; if it fails the unit does not start:
    fail closed); and the daemon through `tp-host php-loopback-sync` at its
    boot reconcile (after the private fabric is restored, also when it skips
@@ -244,10 +249,11 @@ Docker Compose. The daemon:
    an `nft flush ruleset` leaves everything open until the next start, deploy
    or daemon boot; a network with its own bridge name
    (`com.docker.network.bridge.name`, host-level approval only) outside the
-   configured pools is not covered; another server's container network this
-   host routes over tp0 stays open (the far server's forwarding rules decide
-   it); a route added after the last sync stays closed inside a pool until
-   the next sync.
+   configured pools, or inside a dropped pool, is not covered (the
+   interface match still covers `br-<id>` names); another server's container
+   network this host routes over tp0 stays open (the far server's forwarding
+   rules decide it); a route added after the last sync does not drop a pool
+   until the next sync.
    Every installed PHP series may be run by every site owner's Linux user, so
    a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a

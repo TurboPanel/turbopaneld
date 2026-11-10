@@ -305,7 +305,7 @@ test("no native apps is an empty port set, not an error, and the walls still sta
       `meta skuid ${BAND} oifname "br-*" reject`,
     );
     for (
-      const set of ["bridge4", "bridge6", "pool4", "pool6", "keep4", "keep6"]
+      const set of ["bridge4", "bridge6", "pool4", "pool6", "keep6"]
     ) {
       assert(!out.stdout.includes(`set ${set} `), set);
       assert(!out.stdout.includes(`@${set}`), set);
@@ -342,53 +342,91 @@ test("the container wall: Docker's bridges by interface and by address, in both 
   assertEquals(setElements(out.stdout, "bridge6"), ["fd00:dead:0:1::1/64"]);
 });
 
-test("a configured /8 pool does not close the host's own network or the private fabric", async () => {
+test("a configured /8 pool that holds the host's own network is not refused; the others are", async () => {
   const out = await render();
+  // 10.0.0.0/8 holds eth0's network (and tp0's): refusing it would close the
+  // private network, so it is dropped whole, with a warning.
   assertEquals(setElements(out.stdout, "pool4"), [
-    "10.0.0.0/8",
     "172.17.0.1/16",
     "172.24.0.0/13",
   ]);
-  // Every route not through a Docker bridge stays open inside the pools:
-  // eth0's network, tp0's network and peer, the LAN bridge. Not the default
-  // route, not a blackhole, not link-local, not Docker's own bridges.
-  assertEquals(setElements(out.stdout, "keep4"), [
-    "10.10.0.0/24",
-    "10.88.0.0/16",
-    "10.90.0.5/32",
-    "192.168.7.0/24",
-  ]);
+  assertStringIncludes(
+    out.stderr,
+    "not refusing pool 10.0.0.0/8: this host routes 10.10.0.0/24 outside Docker",
+  );
+  // Docker's own bridge routes never drop a pool (bip is docker0's route).
+  assert(!out.stderr.includes("172.17.0.1/16"));
+  // IPv6: the routed range stays open inside the pool instead.
+  assertEquals(setElements(out.stdout, "pool6"), ["fd00:beef::/48"]);
   assertEquals(setElements(out.stdout, "keep6"), ["fd00:beef:1::/64"]);
-  // The exceptions come after the bridge refusals (a local container is
-  // refused whatever routes say) and before the pool refusals.
   const lines = rules(out.stdout);
-  const keep = lines.indexOf(`meta skuid ${BAND} ip daddr @keep4 accept`);
+  const keep = lines.indexOf(`meta skuid ${BAND} ip6 daddr @keep6 accept`);
   const lastBridge = lines.lastIndexOf(
     `meta skuid ${BAND} ip6 daddr @bridge6 reject`,
   );
-  const firstPool = lines.findIndex((l) => l.includes("@pool4"));
+  const firstPool = lines.findIndex((l) => l.includes("@pool"));
   assert(lastBridge < keep && keep < firstPool, lines.join("\n"));
-  assert(
-    lines.indexOf(`meta skuid ${BAND} ip6 daddr @keep6 accept`) < firstPool,
-  );
 });
 
-test("with no routes (the boot unit, before the network) the pools stay whole", async () => {
+test("a pool overlapping a fabric route, a peer or a LAN bridge is dropped; a pool clear of every route stays", async () => {
+  for (
+    const [base, route] of [
+      ["10.88.0.0/16", "10.88.0.0/16"], // the private fabric's network
+      ["10.90.0.0/24", "10.90.0.5/32"], // a fabric peer, inside the pool
+      ["10.64.0.0/10", "10.88.0.0/16"], // a pool wider than the route
+      ["10.88.128.0/17", "10.88.0.0/16"], // a pool inside the route
+      ["192.168.0.0/16", "192.168.7.0/24"], // a LAN bridge (not Docker's)
+    ]
+  ) {
+    await withTree({
+      "etc/docker/daemon.json": JSON.stringify({
+        "default-address-pools": [{ base, size: 24 }, {
+          base: "172.24.0.0/13",
+          size: 24,
+        }],
+      }),
+      "ip-route": IP_ROUTE,
+    }, async (run) => {
+      const out = await run();
+      assertEquals(out.code, 0, out.stderr);
+      assertEquals(setElements(out.stdout, "pool4"), ["172.24.0.0/13"], base);
+      assertStringIncludes(
+        out.stderr,
+        `not refusing pool ${base}: this host routes ${route} outside Docker`,
+      );
+    });
+  }
+});
+
+test("with no routes (the boot unit, before the network) no pool is refused", async () => {
   await withTree({ "etc/docker/daemon.json": DAEMON_JSON }, async (run) => {
     const out = await run();
     assertEquals(out.code, 0, out.stderr);
-    assertEquals(setElements(out.stdout, "pool4").length, 3);
-    assert(!out.stdout.includes("keep4"));
-    assert(!out.stdout.includes("keep6"));
+    for (const set of ["pool4", "pool6", "keep6"]) {
+      assert(!out.stdout.includes(`set ${set} `), set);
+      assert(!out.stdout.includes(`@${set}`), set);
+    }
+    // The interface wall and the loopback rules stand regardless.
+    assertStringIncludes(
+      out.stdout,
+      `meta skuid ${BAND} oifname "docker0" reject`,
+    );
   });
 });
 
-test("routes alone, with no pools, add no exceptions", async () => {
-  await withTree({ "ip-route": IP_ROUTE }, async (run) => {
-    const out = await run();
-    assertEquals(out.code, 0, out.stderr);
-    assert(!out.stdout.includes("@keep4"));
-  });
+test("a failing route listing refuses no pool and does not fail the sync", async () => {
+  const script = await Deno.readTextFile(SCRIPT);
+  assertStringIncludes(
+    script,
+    "ip -o -4 route show failed; no address pool is refused",
+  );
+  assertStringIncludes(
+    script,
+    "ip -o -6 route show failed; no address pool is refused",
+  );
+  // The pools are only computed from a non-empty route listing.
+  assertStringIncludes(script, '[ -z "$_routes4" ] ||');
+  assertStringIncludes(script, '[ -z "$_routes6" ] ||');
 });
 
 test("no default ranges are assumed and the host's other networks are never refused", async () => {
@@ -415,7 +453,10 @@ test("malformed or over-wide Docker ranges are dropped, never handed to nft", as
       { base: "$(reboot)", size: 24 },
     ],
   });
-  await withTree({ "etc/docker/daemon.json": daemonJson }, async (run) => {
+  await withTree({
+    "etc/docker/daemon.json": daemonJson,
+    "ip-route": IP_ROUTE,
+  }, async (run) => {
     const out = await run();
     assertEquals(out.code, 0, out.stderr);
     assertEquals(setElements(out.stdout, "pool4"), ["172.24.0.0/13"]);
@@ -495,8 +536,6 @@ test("missing programs, a failing ip listing or a table that did not load fail t
       "ip is not installed",
       "ip -o addr show failed",
       "ip -o link show failed",
-      "ip -o -4 route show failed",
-      "ip -o -6 route show failed",
     ]
   ) {
     const at = script.indexOf(message);
