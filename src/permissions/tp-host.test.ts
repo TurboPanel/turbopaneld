@@ -4341,6 +4341,19 @@ test("php-loopback-sync runs the installed guard with sync and nothing else", as
   });
 });
 
+test("tunnel-loopback-sync runs the installed port lock with sync and nothing else", async () => {
+  await withHost(async (host) => {
+    const ok = await host.run(["tunnel-loopback-sync"]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(
+      ok.stdout.trim(),
+      `EXEC [${host.path("opt/turbopanel/lib")}/tp-tunnel-loopback] [sync]`,
+    );
+    const extra = await host.run(["tunnel-loopback-sync", "20300"]);
+    assertEquals(extra.code, 1);
+  });
+});
+
 test("the top of the config and state roots is root's: no verb removes, renames, re-owns or writes a root-owned entry there", async () => {
   await withHost(async (host) => {
     const staged = host.path("tmp/staged");

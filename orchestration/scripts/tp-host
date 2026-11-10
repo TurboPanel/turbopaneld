@@ -2347,6 +2347,14 @@ tp_verb_php_loopback_sync() {
   tp_run "$INSTALL_ROOT/lib/tp-php-loopback" sync
 }
 
+# tunnel-loopback-sync: reload the nftables table that lets only root and the
+# daemon account reach the tunnel connectors' metrics ports on loopback
+# (lib/tp-tunnel-loopback). The daemon runs it before it starts a connector.
+tp_verb_tunnel_loopback_sync() {
+  [ $# -eq 0 ] || tp_die "tunnel-loopback-sync: takes no arguments"
+  tp_run "$INSTALL_ROOT/lib/tp-tunnel-loopback" sync
+}
+
 # php-test <siteId>: the site's PHP binary checks its own config, as the site's
 # owner. Mode, series, owner and config paths come from the installed unit
 # (re-checked here), never from the caller. The owner cannot traverse the
@@ -6202,6 +6210,7 @@ case "$_verb" in
   app-env-remove) tp_verb_app_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  tunnel-loopback-sync) tp_verb_tunnel_loopback_sync "$@" ;;
   instance-cert-install) tp_verb_instance_cert_install "$@" ;;
   instance-cert-prune) tp_verb_instance_cert_prune "$@" ;;
   panel-identity-write) tp_verb_panel_identity_write "$@" ;;

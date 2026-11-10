@@ -60,10 +60,46 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   daemon start: the file becomes a service and is deleted once the service is
   enabled and (re)started (not once `/ready` passes; status shows that). If a
   service already exists for that id the stale file is dropped, never installed. Files not named for a tunnel id are left alone with a warning.
-- Purge needs no tunnel-specific code: it stops and removes every `turbopanel*`
-  unit and removes `/etc/turbopanel`, `/var/lib/turbopanel` and
-  `/opt/turbopanel/vendor` whole; `scripts/purge.test.ts` pins that for tunnel
-  units, token copies and the connector folder.
+- Purge needs no tunnel-specific code beyond the port lock's table name: it
+  stops and removes every `turbopanel*` unit (the boot unit below included) and
+  removes `/etc/turbopanel`, `/var/lib/turbopanel` and `/opt/turbopanel` whole,
+  and deletes `inet turbopanel_tunnel` with TurboPanel's other nftables tables
+  (`TP_NFT_TABLES`); `scripts/purge.test.ts` pins that for tunnel units, token
+  copies, the connector folder and the table.
+
+## Metrics port lock (root and the daemon only)
+
+The connector program can listen for its readiness, metrics, ingress config and
+profiling pages on TCP only, so the band 20300-20899 on 127.0.0.1 would be open
+to every local account (site owners, their PHP, cron and SSH sessions). Owner
+decision 2026-10-28: keep the port, but only the daemon and root may reach it.
+
+- `orchestration/scripts/tp-tunnel-loopback sync` (root, `lib/`) replaces the
+  nftables table `inet turbopanel_tunnel` whole: an output hook (priority -150,
+  like the PHP and build tables) that accepts replies first, then sockets owned
+  by uid 0 or the daemon account (`tp`, same name as tp-host's
+  `DAEMON_ACCOUNT`), and resets every other new TCP connection to
+  `127.0.0.0/8` or `::1` on the band. The rule set is static: no per-connector
+  state, so start, update and remove need no change to it.
+- Loaded by `turbopanel-loopback-tunnel.service` (root oneshot, installed and
+  started by `turbopanel-user/root-helpers.yml`, ordered before
+  `network-pre.target`) at every boot, and by the daemon through `tp-host
+  tunnel-loopback-sync` (`lockMetricsPorts`) before `installConnector` starts a
+  unit and once per update round in `runConnectorUpdates` when the host has a
+  tunnel (paused or not), so a flushed ruleset heals within the hour.
+- Fails open on purpose: nothing `Requires=` the boot unit and a refused sync is
+  only logged, so a missing `nft`, an older `tp-host` without the verb or a
+  development host never stops a connector. The connector unit text is
+  unchanged, so this ships without restarting any connector.
+- Independent of `inet turbopanel_php`: an accept ends only its own table's
+  chain and a reject in either table is final, so neither table opens anything
+  the other closes. A process running as root (a host-network container as
+  uid 0 too) passes the owner match by design.
+- Tests: `src/orchestration/tunnel-loopback.test.ts` (rendered rules, band and
+  account pinned to the code, boot unit and role tasks), the tp-host verb in
+  `src/permissions/tp-host.test.ts`, the daemon calls in the two tunnel suites.
+  Canary proof still owed: a site user and `nobody` are refused on a
+  connector's port, the daemon still reads `/ready` 200.
 
 ## Installing and removing connectors (`server.tunnel.connectors`)
 
