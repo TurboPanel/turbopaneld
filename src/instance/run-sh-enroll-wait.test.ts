@@ -206,6 +206,10 @@ async function runWait(options: Options) {
   }
 }
 
+/** What the installer prints when the wait runs out with no answer. */
+const NO_ANSWER =
+  "NOTE The server is installed. It has not shown up as connected yet; check Servers in the panel.";
+
 const REFUSED = formatEnrollStatus({
   state: "parked",
   kind: "permanent",
@@ -289,9 +293,10 @@ test("other waits are not refusals either", async () => {
 });
 
 test("no answer in time only prints a note", async () => {
+  // Exit 0: the install itself is done.
   const res = await runWait({ waitSeconds: "4" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
-  assertStringIncludes(res.stdout, "NOTE No answer from the control plane yet");
+  assertStringIncludes(res.stdout, NO_ANSWER);
   assertEquals(res.sleepCalls, ["2", "2"]);
 });
 
@@ -318,7 +323,7 @@ test("a re-run without a license has nothing to wait for", async () => {
 test("a linked status file is ignored", async () => {
   const res = await runWait({ status: REFUSED, link: true, waitSeconds: "0" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
-  assertStringIncludes(res.stdout, "No answer from the control plane yet");
+  assertStringIncludes(res.stdout, NO_ANSWER);
 });
 
 test("control characters in the reason never reach the terminal", async () => {
@@ -414,13 +419,13 @@ test("a saved enrolment is not cut short by a short wait setting", async () => {
   // shorter total wait the note is printed instead of a false "accepted".
   const res = await runWait({ enrol: "fresh", waitSeconds: "4" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
-  assertStringIncludes(res.stdout, "NOTE No answer from the control plane yet");
+  assertStringIncludes(res.stdout, NO_ANSWER);
 });
 
 test("enrolment files from an earlier enrolment do not count", async () => {
   const res = await runWait({ enrol: "stale", waitSeconds: "4" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
-  assertStringIncludes(res.stdout, "NOTE No answer from the control plane yet");
+  assertStringIncludes(res.stdout, NO_ANSWER);
   assertEquals(res.sleepCalls, ["2", "2"]);
 });
 

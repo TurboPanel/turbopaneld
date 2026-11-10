@@ -1789,7 +1789,8 @@ tp_wait_for_enrollment() {
         ;;
     esac
     if [ "$_we_waited" -ge "$_we_max" ]; then
-      tp_print_detail "No answer from the control plane yet; the daemon keeps trying. Check this server in the panel, or see /var/log/turbopanel/daemon.err.log"
+      tp_print_detail "The server is installed. It has not shown up as connected yet; check Servers in the panel."
+      tp_print_detail "Daemon log: /var/log/turbopanel/daemon.err.log"
       return 0
     fi
     sleep 2

@@ -330,7 +330,9 @@ reason in plain words, before the Raspberry Pi kernel step; the parked
 install stays, and a fresh command re-run unparks it. `awaiting-seat` and the
 other waits are notes, not failures, and so is no answer in time (a slow
 panel, or an enrolled server that converges before it connects, so a
-re-enroll there may only get the note).
+re-enroll there may only get the note). That note says, exit 0, "The server
+is installed. It has not shown up as connected yet; check Servers in the
+panel." with the daemon log path on a second line (owner wording, 2026-11-10).
 
 The installer script can be newer than the daemon it installs (the script
 host serves the branch tip while the binary comes from the channel's last
