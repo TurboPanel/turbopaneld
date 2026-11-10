@@ -29,8 +29,12 @@ controls below do not close:
    not root; `stripPrefix` and the other inputs still need validation.
 3. **php-fpm's config test runs as root** — `php-fpm<x.y> --fpm-config
    /etc/turbopanel/php/<x.y>/php-fpm.conf --test` (`TP_ENGINE_VALIDATE`,
-   pinned to exactly that file). `/etc/turbopanel` is `tp`-owned, so `tp`
-   can replace it, and php-fpm loads extensions while testing. Apache's
+   pinned to exactly that file). On a sealed host the series folder,
+   `php-fpm.conf` and `conf.d` are root's and no tp-host write verb reaches them
+   (only `pools/<file>` does, each pool checked; see the config root
+   allow-list in `orchestration/scripts/AGENTS.md`), but on a host whose
+   `/etc/turbopanel` is still `tp`-owned `tp` can replace them, and php-fpm
+   loads extensions while testing. Apache's
    `httpd -t` no longer does: it runs as `tpapache` (pinned arguments, no
    `env`), and `turbopanel-apache.service` runs its master as `tpapache`.
 4. **Engine-account config tests load configs `tp` writes.** `tp` may run
@@ -109,7 +113,11 @@ it regresses:
 - **Install root ownership** — `/opt/turbopanel`, `bin/`, `lib/`, `share/`,
   `share/orchestration` and every vendored runtime are `root:tp 0750`
   (`turbopanel-user`, `daemon-layout`); `daemon-install.yml` no longer chowns
-  the vendor or orchestration trees to `tp`. Two exceptions let other accounts
+  the vendor or orchestration trees to `tp`. Root keeps its update records in
+  `lib/` for that reason: `installed-build` (the daemon build floor) and
+  `update-guard-armed` (the only record the rollback guard acts on); tp-host
+  refuses `systemctl` verbs other than `is-*` on `turbopaneld-update-guard*`
+  (`src/update/AGENTS.md`, Root build floor). Two exceptions let other accounts
   traverse without listing (an `other:x` ACL, like `vendor/` itself):
   `vendor/cloudflared` and the Caddy folders `vendor/caddy` and
   `vendor/caddy/<version>` (`caddy` role), because the hosting Caddy account

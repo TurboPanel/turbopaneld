@@ -207,11 +207,18 @@ goes). Fire-and-forget and read-only. It exists because the control plane's
 `relay.metadata.observed` only moved on a reconcile, so healthy tunnels read
 as stale minutes after each apply.
 
-**Signed reports (`signed-reports-v1`).** On a signed session (pinned
-server, control plane hello verified) and only with a control plane that lists
-the feature, `SignedPanelSession` signs every `command-outcome` and
-`fabric-peers-report` with the daemon key at the one place all sends pass
-(`signed-session.ts`, helpers in `report-signing.ts`). Bytes: the message plus
+**Signed reports (`signed-reports-v1`, `signed-ha-events-v1`).** On a signed
+session (pinned server, control plane hello verified) and only with a control
+plane that lists the feature, `SignedPanelSession` signs every `command-outcome`
+and `fabric-peers-report` with the daemon key, and every `managed-ha-event`
+(dead-primary and boot-hold reports) when the control plane lists
+`signed-ha-events-v1` (`enabled(type)` in `client.ts`). Such a control plane
+acts on no unsigned `managed-ha-event`, so a server that is not pinned, or a
+daemon older than this, no longer fails over automatically and its held
+primaries are not released after an unclean boot. The event is held until the
+attach frame's feature list is known, like the other reports. Signing happens
+at the one place all sends pass (`signed-session.ts`, helpers in
+`report-signing.ts`). Bytes: the message plus
 `{sessionId, iat, kid}` (kid = the daemon key id) is serialized once, signed as
 `"tp-report\n" + type + "\n" + bytes`, and `,"sig":"<base64url>"}` replaces
 the final `}`, the same split rule as the control plane's frames;
@@ -809,8 +816,11 @@ call can't be caught mid-race and misreported as a failure. Whether the
 restart actually worked is never this call's job to decide — that's what the
 guard/attach flow below is for.
 
-**Self-healing guard:** daemon self-update arms `<runDir>/update-guard.json`
-(target commit + deadline) and starts `turbopaneld-update-guard.timer` (~10
+**Self-healing guard:** daemon self-update arms root's
+`<install>/lib/update-guard-armed` (the only record the guard decides from; see
+`src/update/AGENTS.md`, Root build floor), its daemon-readable copy
+`<runDir>/update-guard.json` (target commit + deadline), and starts
+`turbopaneld-update-guard.timer` (~10
 minutes, one-shot per attempt). `turbopaneld.service` uses `OnFailure=` that
 unit plus a start limit so a crash-looping build can trigger
 `orchestration/scripts/tp-update-guard` (root, no sudoers entry). The guard
@@ -896,9 +906,28 @@ Platform CA or private issuer `run.sh` is about to install — over `-k`, the
 pinned leg, or the system-roots refetch — must have every certificate in that
 list, or the install stops and nothing is written (`tp_check_fetched_trust`).
 A host that already carries a list (`daemon.env` plus
-`<state>/tls/instance-ca-pin`) keeps it when a run brings none: downloads over
-the `-k` leg must match it, so re-running an old command cannot downgrade a
-pinned host; verified legs are authenticated by that trust already. An
+`<state>/tls/instance-ca-pin`) keeps it when a run brings none: only a
+download that this host's own stored trust file verified (the `stored` leg)
+is taken as is; one over the system roots or `-k` must match the list, so
+neither an old command nor anyone with a public certificate for the name can
+replace a pinned CA, and a system-roots answer never deletes a pinned CA or
+issuer. Debian's curl keeps its CA folder next to `--cacert`, so every
+`run.sh` check against a stored trust file also passes
+`--capath $TP_NO_SYSTEM_CAPATH` (a folder that does not exist), and the issuer
+check runs `openssl verify -no-CApath -no-CAstore`; the overlay download
+(`tp_artifact_curl`) is the one deliberate exception (signed manifest). The
+same `--capath` rule holds for the run.sh downloads that run as root
+(`tp-orchestrate` on a dev overlay, `downloadRunScript` on a non-public
+origin). A host with stored trust files but no list is held to the files'
+own fingerprints (`tp_host_ca_pin`), so an honest CA change there needs a
+fresh install command. A control plane behind a
+public edge is handled on purpose: the CA and issuer fetches retry over the
+system roots with the list enforced, the TOKEN check falls back to them (the
+document is checked against the command's key), and `--insecure-tls` counts
+the public roots as an anchor. Learning the panel key on upgrade only uses
+trust the host already had, never trust that arrived or was removed in the
+same run over the system roots or `-k`, and never when the run began with
+stored trust that no longer checks the panel. An
 operator's `--instance-ca` must match a fingerprint the command gave. With no
 list anywhere the old behaviour stays and a `-k` download prints one
 "trusted on first use" line. `run.sh` then writes the fingerprints of every
@@ -962,8 +991,10 @@ in the same change, and record why in this section and in
 `../turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
 silently. A release that introduces a new wire message leaves both floors
 where they are. Each new message is feature-gated: the peer advertises
-support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
-`version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
+support in `features[]` (`DAEMON_WIRE_FEATURES`; this list may be longer than
+the control plane's, never shorter: wire changes merge daemon first, then
+control plane, the contract check fails a control plane that lists a feature
+this daemon lacks, and an older control plane ignores names it does not know) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
 ignored by a peer that does not list the feature. `command-progress` (the
@@ -984,7 +1015,8 @@ when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.
 
-`DAEMON_FEATURE_MIN_VERSIONS` (kept equal in both `version-wire.ts` files) is
+`DAEMON_FEATURE_MIN_VERSIONS` (every control plane entry must be here with the
+same value; this daemon may have more, since it merges first) is
 the peer-version feature gate — not the metrics hardware-profile capability
 plan. A panel-visible admin feature that depends on a daemon-rendered artifact
 adds an entry here. The UI phase calls `resolveDaemonCapabilities` and does

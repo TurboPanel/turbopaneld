@@ -27,6 +27,7 @@ import {
 import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { phpFpmPoolConfig } from "../deploy/site.ts";
+import { isReservedPrincipalUsername } from "../deploy/reserved-principal-names.ts";
 import { allAccessGroups } from "../runtime/registry.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
@@ -1530,6 +1531,7 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
         ["systemctl", "is-enabled", "wg-quick@tp0"],
         ["systemctl", "is-active", "wg-quick@tp0"],
         ["systemctl", "disable", "--now", "wg-quick@tp0"],
+        ["systemctl", "is-active", "turbopaneld-update-guard.timer"],
       ]
     ) {
       const unit = await host.run(args);
@@ -1540,6 +1542,11 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
         ["systemctl", "link", host.path("tmp/evil.service")],
         ["systemctl", "edit", "turbopanel-app-x.service"],
         ["systemctl", "start", "evil.service"],
+        // Root arms and starts the update guard; the daemon may not.
+        ["systemctl", "start", "turbopaneld-update-guard.service"],
+        ["systemctl", "restart", "turbopaneld-update-guard.timer"],
+        ["systemctl", "stop", "turbopaneld-update-guard.timer"],
+        ["systemctl", "start", "turbopaneld-update-guard-retry-1"],
         ["systemctl", "set-environment", "LD_PRELOAD=/tmp/x.so"],
         [
           "journalctl",
@@ -4393,8 +4400,8 @@ test("the top of the config and state roots is root's: no verb removes, renames,
       join(config, "hosting"),
     ]);
 
-    // The daemon's leaves stay its own to rearrange, and root's own folders
-    // are still created (root-owned) by callers that need them.
+    // The daemon's leaves stay its own to rearrange, and the control plane's
+    // config folder is still created (root-owned) by the env file writer.
     await Deno.mkdir(join(config, "hosting"), { recursive: true });
     assertEquals(
       (await host.run(["rm", "-rf", "--", join(config, "hosting")])).code,
@@ -4405,9 +4412,17 @@ test("the top of the config and state roots is root's: no verb removes, renames,
       "-d",
       "-m",
       "0750",
-      join(config, "instance-acme"),
+      join(config, "instance"),
     ]);
     assertEquals(made.code, 0, made.stderr);
+    // Any other root folder there is not the daemon's to make.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      join(config, "instance-acme"),
+    ]);
   });
 });
 
@@ -4605,17 +4620,10 @@ test("the root php-fpm master's own config and conf.d are not the daemon's to wr
       host,
       "extension=/var/lib/turbopanel/spool/x.so\n",
     );
-    // pool.d is still the daemon's.
-    const pool = await host.run([
-      "install",
-      "-m",
-      "0644",
-      staged,
-      host.path("etc/turbopanel/php/8.4/pool.d/svc1.conf"),
-    ]);
-    assertEquals(pool.code, 0, pool.stderr);
     for (
       const dest of [
+        // Only pools/ is the daemon's; a folder of any other name is not.
+        "etc/turbopanel/php/8.4/pool.d/svc1.conf",
         "etc/turbopanel/php/8.4/conf.d/zz.ini",
         "etc/turbopanel/php/conf.d/zz.ini",
         "etc/turbopanel/php/8.4/php-fpm.conf",
@@ -5046,11 +5054,11 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
           },
           principal: {
             principalId: "00000000-0000-4000-8000-000000000099",
-            username: "site_user",
+            username: "alice",
           },
         },
         "/var/lib/turbopanel/sites/env1/phpapp/public",
-        "/run/turbopanel/php/tp-env1-phpapp.sock",
+        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
         {
           openBasedir: ["/var/lib/turbopanel/sites/env1/phpapp/public", "/tmp"],
           releaseSymlinkSwap: true,
@@ -5138,5 +5146,367 @@ test("a directory renamed over a php-fpm series or pools directory is refused", 
       `${php}/8.4/pools/a.conf`,
     ]);
     assertEquals(ok.code, 0, ok.stderr);
+  });
+});
+
+/** Append `/etc/group` lines to a test host. */
+async function addGroups(host: Host, lines: string[]): Promise<void> {
+  await Deno.writeTextFile(host.path("etc/group"), `${lines.join("\n")}\n`, {
+    append: true,
+  });
+}
+
+test("below the config root only the daemon's own places are writable: root-run scripts and root config are refused to every verb", async () => {
+  await withHost(async (host) => {
+    const config = host.path("etc/turbopanel");
+    const staged = host.path("tmp/staged");
+    await Deno.mkdir(join(config, "system"), { recursive: true });
+    await Deno.mkdir(join(config, "instance"), { recursive: true });
+    await Deno.mkdir(join(config, "nginx/sites"), { recursive: true });
+    await Deno.mkdir(join(config, "caddy"), { recursive: true });
+    const script = join(config, "system/postgres-backup.sh");
+    const other = join(config, "instance/secrets.env");
+    for (const path of [script, other]) {
+      await Deno.writeTextFile(path, "#!/bin/sh\n");
+    }
+    for (const path of [script, other, join(config, "system/new.sh")]) {
+      await refused(host, [
+        "install",
+        "-m",
+        "0750",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        staged,
+        path,
+      ]);
+      await refused(host, ["install", "-m", "0640", staged, path]);
+      await refused(host, ["tee", path], "#!/bin/sh\n");
+      await refused(host, ["cp", "-p", "--", script, `${path}.x`]);
+      await refused(host, ["mv", "-f", "--", `${path}.x`, path]);
+      await refused(host, ["rm", "-f", "--", path]);
+      await refused(host, ["chown", "tp:tp", path]);
+      await refused(host, ["chmod", "0750", path]);
+    }
+    for (const dir of [join(config, "system"), join(config, "system/sub")]) {
+      await refused(host, ["install", "-d", "-m", "0750", dir]);
+      await refused(host, ["mkdir", "-p", dir]);
+      await refused(host, ["rm", "-rf", "--", dir]);
+    }
+    await refused(host, ["chmod", "0755", config]);
+    assertEquals(await Deno.readTextFile(script), "#!/bin/sh\n");
+
+    // A symlinked folder on the way into an allowed place is still refused.
+    await Deno.symlink(
+      join(config, "system"),
+      join(config, "nginx/linked"),
+    );
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      staged,
+      join(config, "nginx/linked/postgres-backup.sh"),
+    ]);
+
+    // What the daemon really writes there still works.
+    for (
+      const sub of [
+        "apache/sites",
+        "openlitespeed/sites",
+        "openlitespeed/vhosts/svc1",
+        "site-caddy/sites",
+      ]
+    ) {
+      await Deno.mkdir(join(config, sub), { recursive: true });
+    }
+    for (
+      const path of [
+        join(config, "nginx/sites/svc1.conf"),
+        join(config, "apache/sites/svc1.conf"),
+        join(config, "openlitespeed/sites/svc1.conf"),
+        join(config, "openlitespeed/vhosts/svc1/vhconf.conf"),
+        join(config, "openlitespeed/httpd_config.conf"),
+        join(config, "site-caddy/sites/svc1.caddy"),
+        join(config, "site-caddy/Caddyfile"),
+        join(config, "instance/runtime.env"),
+        join(config, "caddy/instance-acme.json"),
+        join(config, "caddy/instance-acme-settings.json"),
+      ]
+    ) {
+      const ok = await host.run(["install", "-m", "0640", staged, path]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      staged,
+      join(config, "caddy/Caddyfile"),
+    ]);
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      staged,
+      join(config, "nginx/../system/postgres-backup.sh"),
+    ]);
+    // The files the daemon keeps there are never made folders.
+    for (
+      const path of [
+        join(config, "instance/runtime.env"),
+        join(config, "caddy/instance-acme.json"),
+        join(config, "firewall.v4"),
+      ]
+    ) {
+      await Deno.remove(path).catch(() => undefined);
+      await refused(host, ["install", "-d", "-m", "0750", path]);
+      await refused(host, ["mkdir", "-p", path]);
+    }
+    // The control plane's folder is made only root's, 0750.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0755",
+      join(config, "instance"),
+    ]);
+  });
+});
+
+test("a php-fpm series folder and its pools folder stay root's: no verb re-owns, removes or remakes them", async () => {
+  await withHost(async (host) => {
+    await addGroups(host, ["tpapache:x:9991:", "tpols:x:9992:"]);
+    const php = host.path("etc/turbopanel/php");
+    await Deno.mkdir(`${php}/8.4/pools`, { recursive: true });
+    await Deno.mkdir(`${php}/8.4/conf.d`, { recursive: true });
+    const pool = `${php}/8.4/pools/a.conf`;
+    await Deno.writeTextFile(pool, "; x\n");
+    for (const dir of [php, `${php}/8.4`, `${php}/8.4/pools`, `${php}/8.3`]) {
+      await refused(host, ["chown", "tp", dir]);
+      await refused(host, ["chown", "-R", "tp:tp", dir]);
+      await refused(host, ["chmod", "0755", dir]);
+      await refused(host, ["rm", "-rf", "--", dir]);
+      await refused(host, ["install", "-d", "-m", "0750", "-o", "tp", dir]);
+      await refused(host, ["mkdir", "-p", dir]);
+    }
+    // A pools folder takes only the daemon's own shape.
+    for (
+      const spec of [
+        ["-m", "0750", "-o", "tp", "-g", "tpapache"],
+        ["-m", "0750", "-o", "root", "-g", "tp"],
+        ["-m", "0755", "-o", "root", "-g", "tpapache"],
+        ["-m", "0750"],
+      ]
+    ) {
+      await refused(host, ["install", "-d", ...spec, `${php}/8.4/pools`]);
+      await refused(host, ["install", "-d", ...spec, `${php}/8.3/pools`]);
+    }
+    for (const group of ["tpapache", "tpols"]) {
+      const ok = await host.run([
+        "install",
+        "-d",
+        "-m",
+        "0750",
+        "-o",
+        "root",
+        "-g",
+        group,
+        `${php}/8.3/pools`,
+      ]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    // Nothing but files inside pools/.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "tp",
+      `${php}/8.4/pools/x`,
+    ]);
+    await refused(host, ["mkdir", "-p", `${php}/8.4/pools/x`]);
+    // A pool file is root's: never handed to the daemon or anyone else.
+    await refused(host, ["chown", "tp", pool]);
+    await refused(host, ["chown", "tpnginx:tpnginx", pool]);
+    const rendered = phpFpmPoolConfig(
+      "env1",
+      {
+        composeServiceName: "phpapp",
+        engine: "nginx",
+        root: "public",
+        listenPort: 18081,
+        php: { version: "8.4" },
+      },
+      "/srv/root",
+      "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+    );
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "tp",
+      "-g",
+      "tpnginx",
+      await stage(host, rendered),
+      pool,
+    ]);
+    const ok = await host.run([
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "root",
+      "-g",
+      "tpnginx",
+      await stage(host, rendered),
+      pool,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals((await host.run(["chown", "root:tpnginx", pool])).code, 0);
+    assertEquals((await host.run(["rm", "-f", "--", pool])).code, 0);
+  });
+});
+
+test("a shared php-fpm pool runs only as a site owner with its own group or as one web server account", async () => {
+  await withHost(async (host) => {
+    await addGroups(host, ["disk:x:6:", "shadow:x:42:", "adm:x:4:"]);
+    await Deno.mkdir(host.path("etc/turbopanel/php/8.4/pools"), {
+      recursive: true,
+    });
+    const dest = host.path("etc/turbopanel/php/8.4/pools/tp-env1-phpapp.conf");
+    const site = {
+      composeServiceName: "phpapp",
+      engine: "nginx" as const,
+      root: "public",
+      listenPort: 18081,
+      php: { version: "8.4" },
+    };
+    const socket = "/run/turbopanel/php/8.4/tp-env1-phpapp.sock";
+    const engine = phpFpmPoolConfig("env1", site, "/srv/root", socket);
+    const owned = phpFpmPoolConfig(
+      "env1",
+      {
+        ...site,
+        principal: {
+          principalId: "00000000-0000-4000-8000-000000000099",
+          username: "alice",
+        },
+      },
+      "/srv/root",
+      socket,
+    );
+    const install = async (content: string) =>
+      await host.run([
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "tpnginx",
+        await stage(host, content),
+        dest,
+      ]);
+    for (const content of [engine, owned]) {
+      const ok = await install(content);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    const hostile = [
+      ...["disk", "shadow", "docker", "sudo", "adm", "tp", "carol"].map((g) =>
+        owned.replace("group = alice", `group = ${g}`)
+      ),
+      engine.replace("group = tpnginx", "group = disk"),
+      engine.replace("user = tpnginx", "user = tp"),
+      engine.replace(
+        "user = tpnginx\ngroup = tpnginx",
+        "user = tp\ngroup = tp",
+      ),
+      // carol has a group in the band but no account of her own.
+      owned.replace(
+        "user = alice\ngroup = alice",
+        "user = carol\ngroup = carol",
+      ),
+      owned.replace("listen.owner = tpnginx", "listen.owner = tp"),
+      owned.replace(
+        "listen.owner = tpnginx\nlisten.group = tpnginx",
+        "listen.owner = tp\nlisten.group = tp",
+      ),
+      owned.replace("listen.group = tpnginx", "listen.group = alice"),
+      `${engine}user = alice\n`,
+      `${owned}group = disk\n`,
+      engine.replace("user = tpnginx\n", ""),
+      // The socket is the pool's own, in its series folder, mode 0660.
+      ...[
+        "/etc/turbopanel/system/postgres-backup.sh",
+        "/run/turbopanel/php/8.3/tp-env1-phpapp.sock",
+        "/run/turbopanel/php/8.4/tp-env1-other.sock",
+        "/run/turbopanel/php/8.4/../tp-env1-phpapp.sock",
+        "/run/turbopanel/tp-env1-phpapp.sock",
+        "127.0.0.1:9000",
+      ].map((path) => owned.replace(`listen = ${socket}`, `listen = ${path}`)),
+      owned.replace(`listen = ${socket}\n`, ""),
+      `${owned}listen = ${socket}\n`,
+      ...["0666", "0777", "0600", "0661"].map((mode) =>
+        owned.replace("listen.mode = 0660", `listen.mode = ${mode}`)
+      ),
+      // INI words php-fpm turns into uid or gid 1 or an empty value.
+      ...["yes", "on", "true", "no", "off", "none", "false", "null"].flatMap((
+        word,
+      ) => [
+        owned.replace("group = alice", `group = ${word}`),
+        owned.replace("listen.owner = tpnginx", `listen.owner = ${word}`),
+      ]),
+      // A good pool followed by a bad one.
+      `${owned}[second]\nuser = alice\ngroup = disk\nlisten = /run/turbopanel/php/8.4/second.sock\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
+      engine.replace("listen.group = tpnginx\n", ""),
+    ];
+    for (const content of hostile) {
+      assertEquals(content === engine || content === owned, false, content);
+      await refused(host, [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "tpnginx",
+        await stage(host, content),
+        dest,
+      ]);
+      await refused(host, ["tee", dest], content);
+    }
+  });
+});
+
+test("a site owner name is never a word an INI reader turns into 1 or nothing", async () => {
+  await withHost(async (host) => {
+    // The same shape with an ordinary name goes through.
+    const control = await host.run(["groupadd", "-g", "15020", "bob"]);
+    assertEquals(control.code, 0, control.stderr);
+    for (
+      const word of ["yes", "no", "on", "off", "true", "false", "none", "null"]
+    ) {
+      assertEquals(isReservedPrincipalUsername(word), true, word);
+      await refused(host, ["groupadd", "-g", "15021", word]);
+      await refused(host, [
+        "useradd",
+        "-K",
+        "UID_MIN=15001",
+        "-K",
+        "UID_MAX=60000",
+        "-g",
+        word,
+        "-d",
+        host.path(`srv/users/${word}/home`),
+        "-M",
+        "-s",
+        "/bin/bash",
+        word,
+      ]);
+    }
   });
 });

@@ -109,6 +109,16 @@ test("run.sh arms the update guard on the executed installer path", async () => 
     assertStringIncludes(started, "start turbopaneld-update-guard.timer");
     const stat = await Deno.stat(join(runDir, "update-guard.json"));
     assertEquals(stat.mode !== null && (stat.mode & 0o777) === 0o640, true);
+    // The record the guard acts on sits in root's own lib folder.
+    const rootRecord = await Deno.readTextFile(
+      join(installRoot, "lib", "update-guard-armed"),
+    );
+    assertStringIncludes(rootRecord, "targetCommit=newcommit\n");
+    assertStringIncludes(rootRecord, "previousCommit=oldcommit\n");
+    assertStringIncludes(rootRecord, "restartAttempts=0\n");
+    const bootId = (await Deno.readTextFile("/proc/sys/kernel/random/boot_id"))
+      .trim();
+    assertStringIncludes(rootRecord, `bootId=${bootId}\n`);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

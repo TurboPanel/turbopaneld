@@ -484,7 +484,10 @@ export async function downloadRunScript(
   if (opts.insecureTls) {
     curlArgs.push("-k");
   } else if (opts.caPath?.trim()) {
-    curlArgs.push("--cacert", opts.caPath.trim());
+    // --capath at a folder that does not exist: Debian's curl otherwise keeps
+    // its built-in CA folder next to --cacert, and a publicly trusted
+    // certificate for the name would pass for the pinned CA.
+    curlArgs.push("--cacert", opts.caPath.trim(), "--capath", "/nonexistent");
   }
   curlArgs.push(...RUN_SCRIPT_CURL_RETRY_ARGS, runScriptUrl);
   const curl = await new Deno.Command("curl", {

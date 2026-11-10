@@ -123,6 +123,7 @@ export const DAEMON_WIRE_FEATURES = [
   "panel-bound-session-v1",
   "panel-keyset-statements-v1",
   "environment-stop-remove-volumes-v1",
+  "signed-ha-events-v1",
   "panel-keyset-key-signature-v1",
 ] as const;
 
@@ -272,6 +273,16 @@ export const PANEL_BOUND_SESSION_FEATURE: DaemonWireFeature =
  * the same bytes as before.
  */
 export const SIGNED_REPORTS_FEATURE: DaemonWireFeature = "signed-reports-v1";
+
+/**
+ * On a signed session, this daemon also signs every `managed-ha-event` (dead
+ * primary and boot-hold reports) with its own key, held like the other
+ * reports until the attach frame's feature list is known. It signs them only
+ * for a control plane that lists this feature; that control plane acts on no
+ * unsigned `managed-ha-event`. An older one gets the same bytes as before.
+ */
+export const SIGNED_HA_EVENTS_FEATURE: DaemonWireFeature =
+  "signed-ha-events-v1";
 
 /**
  * Passkey-approved key changes: this daemon pins rotation passkeys from the

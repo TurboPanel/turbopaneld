@@ -26,6 +26,9 @@
 #       license (base64url id:token) is read as one line from stdin and
 #       handed to run.sh in TURBOPANEL_LICENSE, never on a command line
 #       (sudo logs argv and any local user can read it from /proc).
+#       run.sh refuses a daemon release older than root's own record of the
+#       installed build; this helper runs only an installer that has that
+#       check and never passes its operator override.
 #
 #   kernel-features list|status [ID]|apply ID [--reboot] [--countdown N]|undo ID
 #       Named kernel/boot features (orchestration/scripts/tp-kernel-features),
@@ -45,6 +48,12 @@ tp_die() {
 }
 
 [ "$(id -u)" = "0" ] || tp_die "must run as root (sudo -n tp-orchestrate …)"
+
+# The daemon build floor's break-glass belongs to an operator running run.sh
+# by hand. Nothing the daemon account starts through this helper may carry
+# it, whatever sudo's environment policy is; --allow-downgrade is refused by
+# every verb's flag list.
+unset TURBOPANEL_ALLOW_DOWNGRADE
 
 ORCH_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 INSTALL_ROOT="$(cd "$ORCH_DIR/../.." && pwd -P)"
@@ -737,7 +746,10 @@ tp_installer_host_for_channel() {
 # Download run.sh into $_script from the root-pinned origin. The caller has
 # already read the pin. TLS is never relaxed: CDN public trust, the pinned
 # Platform CA, or the pinned private uploaded issuer. The issuer is --cacert
-# only and is never passed as --instance-ca.
+# only and is never passed as --instance-ca. --capath at a folder that does
+# not exist: Debian's curl otherwise keeps its built-in CA folder next to
+# --cacert, and any publicly trusted certificate for the overlay host would
+# pass for the pinned one (this download runs as root).
 tp_fetch_pinned_run_script() {
   # The public installer for the channel being installed; an origin-pinned host
   # (dev overlay) replaces it below. `_channel` is set by the calling verb from
@@ -753,11 +765,11 @@ tp_fetch_pinned_run_script() {
         _script_url="${_pin_host%/}/run.sh"
         if [ -n "$_pin_ca" ]; then
           [ -f "$_pin_ca" ] || tp_die "Platform CA missing at $_pin_ca — re-run the installer with --instance-ca"
-          set -- "$@" --cacert "$_pin_ca"
+          set -- "$@" --cacert "$_pin_ca" --capath /nonexistent
         elif [ -n "$_pin_uploaded" ]; then
           [ "$_pin_uploaded" = "$CANONICAL_INSTANCE_UPLOADED_TRUST" ] || tp_die "refusing uploaded trust pin $_pin_uploaded"
           [ -f "$_pin_uploaded" ] || tp_die "private uploaded issuer missing at $_pin_uploaded — re-run the installer"
-          set -- "$@" --cacert "$_pin_uploaded"
+          set -- "$@" --cacert "$_pin_uploaded" --capath /nonexistent
         fi
       fi
       ;;
@@ -770,6 +782,17 @@ tp_fetch_pinned_run_script() {
     tp_die "failed to download $_script_url (TLS is never relaxed for automatic updates)"
   fi
   [ -s "$_script" ] || { rm -f "$_script"; tp_die "empty run.sh from $_script_url"; }
+}
+
+# A daemon package install is run only by an installer that enforces the root
+# build floor (scripts/run.sh tp_check_daemon_build_floor). The installer comes
+# from the channel the caller names, and one from before the floor would
+# install an older signed release without comparing it.
+tp_require_build_floor_installer() {
+  if ! grep -q -e 'tp_check_daemon_build_floor "\$DAEMON_BUILD_FLOOR"' "$_script"; then
+    rm -f "$_script"
+    tp_die "refusing an installer that does not check the installed daemon build (older than this host's helper)"
+  fi
 }
 
 tp_verb_update() {
@@ -864,8 +887,9 @@ tp_verb_update() {
   [ -n "$_dl_base" ] || _dl_base="$_pin_dl_base"
   [ -n "$_ca" ] || _ca="$_pin_ca"
   # An overlay host installs with --dev-allow-unsigned; a --manifest-url pin
-  # (an upgrade or a rollback to one exact release) must always verify against
-  # the release key, so the two never travel together (run.sh agrees).
+  # (one exact release, never older than the installed build) must always
+  # verify against the release key, so the two never travel together (run.sh
+  # agrees).
   if [ -n "$_manifest_url" ] && [ -n "$_dl_base" ]; then
     tp_die "refusing --manifest-url on an overlay host: a pinned manifest must be signed by the release key"
   fi
@@ -876,6 +900,7 @@ tp_verb_update() {
   # After the checks above, absent flags have been filled from the pin, so
   # the host / overlay / CA the installer records are the pinned ones.
   tp_fetch_pinned_run_script
+  tp_require_build_floor_installer
 
   set --
   [ -n "$_host" ] && set -- "$@" --host "$_host"
@@ -1027,6 +1052,7 @@ tp_verb_update_colocated() {
   [ "$_no_start" = true ] || tp_die "update-colocated requires --no-start (the daemon restarts itself)"
   tp_read_control_plane_pin
   tp_fetch_pinned_run_script
+  tp_require_build_floor_installer
 
   set -- --daemon-only --channel "$_channel"
   [ -n "$_manifest_url" ] && set -- "$@" --manifest-url "$_manifest_url"
