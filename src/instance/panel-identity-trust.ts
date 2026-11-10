@@ -114,7 +114,12 @@ export async function verifyPanelIdentityDocument(
     false,
     ["verify"],
   );
-  return { kid: parsed.signing.kid, key, keyset: parsed.keyset };
+  return {
+    kid: parsed.signing.kid,
+    key,
+    keyset: parsed.keyset,
+    boundSessions: parsed.boundSessions,
+  };
 }
 
 /** The `verifyResponse` hook `DaemonApiClient` calls for answers it must check. */

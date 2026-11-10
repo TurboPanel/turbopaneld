@@ -120,6 +120,7 @@ export const DAEMON_WIRE_FEATURES = [
   "dev-host-v1",
   "topology-generation-optional-v1",
   "signed-reports-v1",
+  "panel-bound-session-v1",
 ] as const;
 
 /**
@@ -239,6 +240,17 @@ export const PANEL_SIGNED_FRAMES_FEATURE: DaemonWireFeature =
 
 /** Informational only: a pinned daemon signs in with v2 proofs naming the pinned key. */
 export const SIGNIN_V2_FEATURE: DaemonWireFeature = "signin-v2";
+
+/**
+ * Offered in the `hello-nonce` frame. The control plane's signed hello always
+ * names this server and this daemon key (`forServer`, `forKey`), and the
+ * daemon refuses a hello or frame naming another server or key. With the
+ * offer, every signed frame names them too. The offer is unsigned, but a
+ * stripped offer still gets a bound hello from a current control plane; an
+ * older control plane's unbound hello is accepted.
+ */
+export const PANEL_BOUND_SESSION_FEATURE: DaemonWireFeature =
+  "panel-bound-session-v1";
 
 /**
  * On a signed session, this daemon signs `command-outcome` and
