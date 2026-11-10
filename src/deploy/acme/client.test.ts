@@ -11,6 +11,7 @@ import {
   AcmeClient,
   AcmeError,
   authorityUrl,
+  failureCode,
   fetchRenewalInfo,
   problemCode,
 } from "./client.ts";
@@ -385,9 +386,15 @@ test("the account is kept 0600 in a 0700 folder and a damaged file is replaced",
       fetch: ca.fetch,
     };
     const client = await acmeAccountClient(layout, options);
-    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY);
-    assertEquals(
+    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY, "OPS@example.com");
+    // Named by the directory's host and a hash of the address, never the address.
+    assert(
+      /\/tenant-acme\/account\/ca\.test-[0-9a-f]{16}\.json$/.test(path),
       path,
+    );
+    assert(!path.includes("example.com"), path);
+    assertEquals(
+      acmeAccountPath(layout, FAKE_CA_DIRECTORY),
       join(root, "state", "tenant-acme", "account", "ca.test.json"),
     );
     assertEquals((await Deno.stat(path)).mode! & 0o777, 0o600);
@@ -395,8 +402,8 @@ test("the account is kept 0600 in a 0700 folder and a damaged file is replaced",
     const again = await acmeAccountClient(layout, options);
     assertEquals(again.accountUrl, client.accountUrl);
     // One account at a time, even when two orders ask together.
-    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY);
-    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY);
+    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY, options.contactEmail);
+    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY, options.contactEmail);
     const [x, y] = await Promise.all([
       acmeAccountClient(layout, options),
       acmeAccountClient(layout, options),
@@ -414,6 +421,140 @@ test("the account is kept 0600 in a 0700 folder and a damaged file is replaced",
     const other = await acmeAccountClient(layout, options);
     assert(other.accountUrl);
     assertEquals(ca.accounts.size, 4);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("each contact address gets its own account on the same server", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-contacts-" });
+  try {
+    const layout = layoutUnder(root);
+    const ca = await createFakeCa();
+    const one = await acmeAccountClient(layout, {
+      directoryUrl: FAKE_CA_DIRECTORY,
+      contactEmail: "a@example.com",
+      fetch: ca.fetch,
+    });
+    const two = await acmeAccountClient(layout, {
+      directoryUrl: FAKE_CA_DIRECTORY,
+      contactEmail: "b@example.com",
+      fetch: ca.fetch,
+    });
+    assert(one.accountUrl !== two.accountUrl);
+    assertEquals(ca.accounts.size, 2);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("only an answer about the account itself means the account is gone", () => {
+  const unauthorized = (detail: string) => ({
+    type: "urn:ietf:params:acme:error:unauthorized",
+    detail,
+  });
+  assertEquals(
+    failureCode(
+      403,
+      unauthorized('Account is not valid, has status "deactivated"'),
+    ),
+    "account_gone",
+  );
+  assertEquals(
+    failureCode(400, {
+      type: "urn:ietf:params:acme:error:accountDoesNotExist",
+    }),
+    "account_gone",
+  );
+  assertEquals(
+    failureCode(403, unauthorized("The certificate has been revoked")),
+    "unauthorized",
+  );
+  assertEquals(
+    failureCode(403, unauthorized("Authorization has been deactivated")),
+    "unauthorized",
+  );
+  // A server error the problem does not explain is retried by a poll.
+  assertEquals(failureCode(502, null), "server");
+  assertEquals(failureCode(400, null), "unknown");
+  assertEquals(failureCode(429, null), "rate_limited");
+});
+
+test("an address carrying a user name or password is refused", () => {
+  assertThrows(
+    () => authorityUrl("https://user:pw@ca.test/order", "ca.test"),
+    AcmeError,
+  );
+  assertThrows(
+    () => authorityUrl("https://user@ca.test/order", "ca.test"),
+    AcmeError,
+  );
+});
+
+test("a key that never registered cannot order", async () => {
+  const ca = await createFakeCa();
+  const client = await clientWith(ca.fetch);
+  const err = await assertRejects(
+    () => client.newOrder(["example.com"]),
+    AcmeError,
+  );
+  assertEquals(err.code, "malformed");
+});
+
+test("forgetting the account waits for a registration in flight", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-forget-" });
+  try {
+    const layout = layoutUnder(root);
+    const ca = await createFakeCa();
+    const options = { directoryUrl: FAKE_CA_DIRECTORY, fetch: ca.fetch };
+    const [client] = await Promise.all([
+      acmeAccountClient(layout, options),
+      forgetAcmeAccount(layout, FAKE_CA_DIRECTORY),
+    ]);
+    assert(client.accountUrl);
+    // The forget ran after the save, so nothing half-written is left behind.
+    let left = true;
+    try {
+      await Deno.stat(acmeAccountPath(layout, FAKE_CA_DIRECTORY));
+    } catch {
+      left = false;
+    }
+    assertEquals(left, false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("forgetting a closed account keeps a newer one already registered in its place", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-forget-newer-" });
+  try {
+    const layout = layoutUnder(root);
+    const ca = await createFakeCa();
+    const options = { directoryUrl: FAKE_CA_DIRECTORY, fetch: ca.fetch };
+    const current = await acmeAccountClient(layout, options);
+    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY);
+    // A refusal that names an older account leaves the file alone.
+    await forgetAcmeAccount(
+      layout,
+      FAKE_CA_DIRECTORY,
+      undefined,
+      "https://ca.test/acct/older",
+    );
+    assert((await Deno.readTextFile(path)).includes(current.accountUrl!));
+    // The account that was refused is forgotten.
+    await forgetAcmeAccount(
+      layout,
+      FAKE_CA_DIRECTORY,
+      undefined,
+      current.accountUrl,
+    );
+    let left = true;
+    try {
+      await Deno.stat(path);
+    } catch {
+      left = false;
+    }
+    assertEquals(left, false);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

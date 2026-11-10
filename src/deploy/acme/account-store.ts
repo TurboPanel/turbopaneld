@@ -8,9 +8,11 @@
  * start-up (`requests/`, `caddy/certificates/`), never inside them, so the
  * account survives restarts. `scripts/purge.sh` removes the state tree whole.
  */
+import { createHash } from "node:crypto";
 import { join } from "@std/path";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { withKeyedLock } from "../../util/keyed-lock.ts";
+import { writeAll } from "../../util/write-all.ts";
 import { AcmeClient } from "./client.ts";
 import { generateAccountKeyPem, importAccountKey } from "./jws.ts";
 
@@ -25,13 +27,25 @@ export function acmeAccountDir(layout: Pick<LayoutPaths, "stateDir">): string {
   return join(layout.stateDir, "tenant-acme", "account");
 }
 
-/** The file for one directory, named by its host (`acme-v02.api.letsencrypt.org.json`). */
+/**
+ * The file for one directory and one contact address: one account per server
+ * per organization contact (owner decision 2026-11-04), so one organization's
+ * address never sits on the account that orders for another. Named by the
+ * directory's host and, with a contact, a short hash of the lowercased
+ * address (`acme-v02.api.letsencrypt.org-<hash>.json`), so the address itself
+ * is not in a file name.
+ */
 export function acmeAccountPath(
   layout: Pick<LayoutPaths, "stateDir">,
   directoryUrl: string,
+  contactEmail?: string,
 ): string {
   const host = new URL(directoryUrl).host.replaceAll(/[^A-Za-z0-9.-]/g, "_");
-  return join(acmeAccountDir(layout), `${host}.json`);
+  const contact = contactEmail?.trim().toLowerCase() ?? "";
+  const suffix = contact === ""
+    ? ""
+    : `-${createHash("sha256").update(contact).digest("hex").slice(0, 16)}`;
+  return join(acmeAccountDir(layout), `${host}${suffix}.json`);
 }
 
 function readStored(text: string, directoryUrl: string): StoredAccount | null {
@@ -64,14 +78,33 @@ async function loadStored(
   }
 }
 
+/** Write the file whole and flushed to disk before it replaces the old one. */
 async function saveStored(path: string, value: StoredAccount): Promise<void> {
   const dir = join(path, "..");
   await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
   await Deno.chmod(dir, 0o700);
   const temp = `${path}.tpnew`;
-  await Deno.writeTextFile(temp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  const file = await Deno.open(temp, {
+    write: true,
+    create: true,
+    truncate: true,
+    mode: 0o600,
+  });
+  try {
+    await writeAll(
+      file,
+      new TextEncoder().encode(`${JSON.stringify(value)}\n`),
+    );
+    await file.sync();
+  } finally {
+    file.close();
+  }
   await Deno.chmod(temp, 0o600);
   await Deno.rename(temp, path);
+}
+
+function lockKey(path: string): string {
+  return `acme-account:${path}`;
 }
 
 export type AcmeAccountOptions = {
@@ -91,8 +124,12 @@ export function acmeAccountClient(
   layout: Pick<LayoutPaths, "stateDir">,
   options: AcmeAccountOptions,
 ): Promise<AcmeClient> {
-  const path = acmeAccountPath(layout, options.directoryUrl);
-  return withKeyedLock(`acme-account:${path}`, async () => {
+  const path = acmeAccountPath(
+    layout,
+    options.directoryUrl,
+    options.contactEmail,
+  );
+  return withKeyedLock(lockKey(path), async () => {
     let stored = await loadStored(path, options.directoryUrl);
     if (!stored) {
       stored = {
@@ -119,14 +156,31 @@ export function acmeAccountClient(
   });
 }
 
-/** Forget the account so the next order registers a new one (the authority said it is gone). */
-export async function forgetAcmeAccount(
+/**
+ * Forget the account so the next order registers a new one (the authority said
+ * it is gone).
+ */
+export function forgetAcmeAccount(
   layout: Pick<LayoutPaths, "stateDir">,
   directoryUrl: string,
+  contactEmail?: string,
+  /** Forget only this account: a file that already holds a newer one is kept. */
+  expectedAccountUrl?: string | null,
 ): Promise<void> {
-  try {
-    await Deno.remove(acmeAccountPath(layout, directoryUrl));
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  const path = acmeAccountPath(layout, directoryUrl, contactEmail);
+  // The same lock as loading, so a registration in flight is never undone half
+  // way.
+  return withKeyedLock(lockKey(path), async () => {
+    if (expectedAccountUrl) {
+      const stored = await loadStored(path, directoryUrl);
+      if (stored?.accountUrl && stored.accountUrl !== expectedAccountUrl) {
+        return;
+      }
+    }
+    try {
+      await Deno.remove(path);
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  });
 }

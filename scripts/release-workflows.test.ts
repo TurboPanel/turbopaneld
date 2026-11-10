@@ -317,6 +317,26 @@ test("the Promote OK jobs pin one TurboPanel/dev commit, and hand it on as dev-r
   assertEquals(pins.size, 1, `Promote OK pins: ${[...pins].join(", ")}`);
 });
 
+test("Promote OK has no job named promote-ok, and every call grants checks: write", () => {
+  // promote-ok is the check run the evaluation writes; a job with that name
+  // could end skipped, which passes a required check.
+  for (const file of ["promote-ok.yml", "promote-ok-recheck.yml"]) {
+    const text = read(file);
+    assert(!/^ {2}promote-ok:$/m.test(text), `${file} has a promote-ok job`);
+    assert(
+      !/^ {4}name: promote-ok$/m.test(text),
+      `${file} names a job promote-ok`,
+    );
+  }
+  for (const [file, name] of PROMOTE_OK_JOBS) {
+    assertStringIncludes(
+      jobText(read(file), name),
+      "      checks: write\n",
+      `${file} ${name}`,
+    );
+  }
+});
+
 test("Promote OK runs one evaluation per PR head and one queued recheck at a time", () => {
   assertStringIncludes(
     read("promote-ok.yml"),

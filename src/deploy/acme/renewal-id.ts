@@ -37,7 +37,10 @@ function authorityKeyId(fields: DerNode[]): Uint8Array | null {
   return null;
 }
 
-/** The renewal-information identifier of the first certificate in `pem`, or null. */
+/**
+ * The renewal-information identifier of the first certificate in `pem`, or
+ * null.
+ */
 export function renewalCertId(certificatePem: string): string | null {
   try {
     const der = decodePem(certificatePem, "CERTIFICATE");

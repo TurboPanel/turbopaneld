@@ -98,7 +98,9 @@ export async function keyAuthorization(
   return `${token}.${await accountThumbprint(key)}`;
 }
 
-/** The TXT value for a DNS-01 challenge: base64url(SHA-256(key authorization)). */
+/**
+ * The TXT value for a DNS-01 challenge: base64url(SHA-256(key authorization)).
+ */
 export async function dnsChallengeValue(
   key: AcmeAccountKey,
   token: string,
