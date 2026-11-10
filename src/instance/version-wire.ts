@@ -125,6 +125,7 @@ export const DAEMON_WIRE_FEATURES = [
   "environment-stop-remove-volumes-v1",
   "signed-ha-events-v1",
   "panel-keyset-key-signature-v1",
+  "acme-issue-one-cert-v1",
 ] as const;
 
 /**
@@ -352,6 +353,16 @@ export const TLS_CAPTURE_FEATURE: DaemonWireFeature = "tls-capture-v1";
  * carries the certificate or key.
  */
 export const ACME_ISSUE_FEATURE: DaemonWireFeature = "acme-issue-v1";
+
+/**
+ * This daemon places a server-placed order with its own ACME client and gets
+ * one certificate that covers every name of the request (apex and www, or
+ * several names), reported once per name. The control plane sends a request
+ * with several names only to a daemon that lists this feature; an older one
+ * would get one certificate per name.
+ */
+export const ACME_ISSUE_ONE_CERT_FEATURE: DaemonWireFeature =
+  "acme-issue-one-cert-v1";
 
 /**
  * Planned Postgres switchover: the fence stop reports the old primary's final

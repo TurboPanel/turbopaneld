@@ -242,6 +242,8 @@ export async function issueCertificateOverHttp01(
     daemonAcmeDirectoryUrl(request.directory);
   const serve = deps.serveAnswers ?? withHttp01Answers;
   const fetchOption = deps.fetch ? { fetch: deps.fetch } : {};
+  // The account this order used: only that one is forgotten if it turns out closed.
+  let accountUrl: string | null = null;
   try {
     const chain = await serve(
       socketPath,
@@ -252,6 +254,7 @@ export async function issueCertificateOverHttp01(
           contactEmail: request.contactEmail,
           ...fetchOption,
         });
+        accountUrl = client.accountUrl;
         return await runAcmeOrder(
           client,
           {
@@ -294,7 +297,12 @@ export async function issueCertificateOverHttp01(
       err instanceof AcmeError && err.code === "account_gone" &&
       err.status !== null
     ) {
-      await forgetAcmeAccount(layout, directoryUrl).catch(() => undefined);
+      await forgetAcmeAccount(
+        layout,
+        directoryUrl,
+        request.contactEmail,
+        accountUrl,
+      ).catch(() => undefined);
     }
     return { ok: false, ...plainDaemonAcmeFailure(err) };
   }
