@@ -99,7 +99,9 @@ to the repo root.
   other way: this check is red if the daemon drops a feature, floor or pin the
   control plane still has. A snapshot pin this daemon widens on purpose
   (`expansion: true`, same requiredness, wider type) still covers the control
-  plane's. Tests: `scripts/check-contract-drift.test.ts`.
+  plane's; that is safe only because the control plane parses daemon-sent fields
+  tolerantly (an unknown key or value is dropped, never a reason to refuse the
+  message). Tests: `scripts/check-contract-drift.test.ts`.
   `scripts/scan-secrets.sh`, `scripts/scan-secrets.patterns` and
   `scripts/scan-secrets.selftest.sh` are byte-identical in turbopanel,
   turbopaneld, ui, website and dev: change all five together (each repo keeps a
